@@ -63,6 +63,12 @@ from dispatch_mode_contract import (  # noqa: E402
 )
 from worker_bootstrap import assigned_contract, worker_type_for_kind  # noqa: E402
 from dispatch_degradation import record_degradation  # noqa: E402
+from dispatch_allocation import (  # noqa: E402
+    HARNESSES as ALLOCATION_HARNESSES,
+    STRATEGY as ALLOCATION_STRATEGY,
+    attempt_counts,
+    rank_harnesses,
+)
 
 ORDER = ["same-harness-headless", "cross-harness-headless", "native-subagent", "inline"]
 
@@ -137,6 +143,93 @@ def tuple_key(row: dict) -> str:
     return "/".join(str(row[key]) for key in (
         "parent_harness", "parent_transport", "parent_sandbox", "child_harness", "launch_authority"
     ))
+
+
+def _usage_states(jobs: Path) -> dict[str, str]:
+    result = subprocess.run(
+        [str(ROOT / "utilities/usage-check.sh"), "--harness", "all", "--jobs", str(jobs)],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    states = {}
+    if result.returncode == 0:
+        for line in result.stdout.splitlines():
+            fields = line.split()
+            if len(fields) == 2 and fields[0] in ALLOCATION_HARNESSES:
+                states[fields[0]] = fields[1]
+    return {
+        harness: states.get(harness, "unknown")
+        for harness in ALLOCATION_HARNESSES
+    }
+
+
+def _usage_eligible(state: str) -> bool:
+    return state != "limited" and not state.startswith("limited(")
+
+
+def ordered_fallback_hops(
+    route: dict, node: dict, jobs: Path
+) -> tuple[list[dict], dict | None]:
+    """Rank the checked direct-headless band from the sealed allocation policy."""
+
+    allocation = route.get("dispatch_allocation")
+    if not isinstance(allocation, dict) or allocation.get("strategy") != ALLOCATION_STRATEGY:
+        return list(node["fallback_hops"]), None
+    counts = attempt_counts(jobs, window=int(allocation["window"]))
+    states = _usage_states(jobs)
+    headless: dict[str, tuple[dict, dict]] = {}
+    trailing_rows: list[tuple[dict, dict]] = []
+    tail_hops = []
+    for hop in node["fallback_hops"]:
+        if hop["fallback_hop"] not in {"same-harness-headless", "cross-harness-headless"}:
+            tail_hops.append(hop)
+            continue
+        for row in hop.get("candidates", []):
+            harness = row.get("child_harness")
+            if row.get("status") == "supported" and harness in ALLOCATION_HARNESSES:
+                headless.setdefault(harness, (hop, row))
+            else:
+                trailing_rows.append((hop, row))
+    candidates = list(headless)
+    eligible = [harness for harness in candidates if _usage_eligible(states[harness])]
+    limited = [harness for harness in candidates if harness not in eligible]
+    ranked = rank_harnesses(
+        eligible,
+        counts,
+        declared_order=allocation.get("harness_order") or ALLOCATION_HARNESSES,
+    )
+    affinity = node.get("harness_affinity")
+    if affinity in ranked:
+        ranked = [affinity] + [harness for harness in ranked if harness != affinity]
+    ranked += limited
+    ordered = []
+    for harness in ranked:
+        hop, row = headless[harness]
+        candidate = dict(row)
+        if harness in limited:
+            candidate["_allocation_skip"] = f"usage-{states[harness]}"
+        ordered.append({**hop, "candidates": [candidate]})
+    ordered.extend({**hop, "candidates": [dict(row)]} for hop, row in trailing_rows)
+    ordered.extend(tail_hops)
+    return ordered, {
+        "strategy": allocation["strategy"],
+        "window": allocation["window"],
+        "counts": counts,
+        "states": states,
+        "rank": ranked,
+    }
+
+
+def emit_allocation(context: dict | None) -> None:
+    if context is None:
+        return
+    print(f"allocation_strategy={context['strategy']}")
+    print(f"allocation_window={context['window']}")
+    for harness in ALLOCATION_HARNESSES:
+        print(f"attempt_count.{harness}={context['counts'][harness]}")
+    print("allocation_rank=" + ",".join(context["rank"]))
 
 
 def registry_failures(jobs: Path, route_id: str, node_id: str) -> dict[str, list[str]]:
@@ -882,15 +975,37 @@ def main() -> int:
     failed_tuples = set(args.failed_tuple) | set(prior_failures)
     attempts: list[str] = []
     direct_failures: list[dict[str, str]] = []
-    for hop in node["fallback_hops"]:
+    fallback_hops, allocation_context = ordered_fallback_hops(
+        route, node, args.jobs
+    )
+    recorded_prior_skips = set()
+    for ordered_hop in fallback_hops:
+        if ordered_hop.get("fallback_hop") not in {
+            "same-harness-headless", "cross-harness-headless"
+        }:
+            continue
+        for ordered_row in ordered_hop.get("candidates", []):
+            key = tuple_key(ordered_row)
+            if key in failed_tuples and key not in recorded_prior_skips:
+                attempts.append(
+                    f"{ordered_hop['ordinal']}:{key}:skipped-prior-unchanged-failure"
+                )
+                recorded_prior_skips.add(key)
+    for hop in fallback_hops:
         ordinal = int(hop["ordinal"])
         if hop["fallback_hop"] in {"same-harness-headless", "cross-harness-headless"}:
             for row in hop.get("candidates", []):
                 key = tuple_key(row)
+                if row.get("_allocation_skip"):
+                    attempts.append(
+                        f"{ordinal}:{key}:skipped-{row['_allocation_skip']}"
+                    )
+                    continue
                 unsupported = row.get("status") != "supported" or row.get("launch_authority") != "conductor"
                 if unsupported or key in failed_tuples:
                     reason = "prior-unchanged-failure" if key in failed_tuples else row.get("failure_class") or row.get("status")
-                    attempts.append(f"{ordinal}:{key}:skipped-{reason}")
+                    if key not in recorded_prior_skips:
+                        attempts.append(f"{ordinal}:{key}:skipped-{reason}")
                     continue
                 parent_failure = parent_runtime_failure(args, route, row, parent_identity)
                 if parent_failure and parent_failure not in CANDIDATE_SCOPED_PARENT_FAILURES:
@@ -918,6 +1033,7 @@ def main() -> int:
                     )
                     if retry_state in {"success", "existing"}:
                         print("check=ok")
+                        emit_allocation(allocation_context)
                         print(f"selected_hop={hop['fallback_hop']}")
                         print(f"fallback_ordinal={ordinal}")
                         print(f"child_harness={row['child_harness']}")
@@ -1009,6 +1125,7 @@ def main() -> int:
                                         attempt_trace="|".join(attempts))
                     if early != "capacity":
                         print("check=ok")
+                        emit_allocation(allocation_context)
                         print(f"selected_hop={hop['fallback_hop']}")
                         print(f"fallback_ordinal={ordinal}")
                         print(f"child_harness={row['child_harness']}")
@@ -1031,6 +1148,7 @@ def main() -> int:
                     )
                     if retry_state in {"success", "existing"}:
                         print("check=ok")
+                        emit_allocation(allocation_context)
                         print(f"selected_hop={hop['fallback_hop']}")
                         print(f"fallback_ordinal={ordinal}")
                         print(f"child_harness={row['child_harness']}")

@@ -23,6 +23,7 @@ class DispatchV20ConformanceTest(unittest.TestCase):
         subprocess.run(["git", "init", "-q", str(self.repo)], check=True)
         self.artifact = self.base / ".agent_reports"
         self.artifact.mkdir()
+        (self.artifact / ".runtime" / "routes").mkdir(parents=True)
         self.gate_args = [
             "--tracking", "tracked",
             "--spec-read", "fixture",
@@ -37,7 +38,7 @@ class DispatchV20ConformanceTest(unittest.TestCase):
     def compile_quick(self, evidence):
         evidence_path = self.base / "quick-evidence.json"
         evidence_path.write_text(json.dumps(evidence), encoding="utf-8")
-        output = self.base / "quick-route.json"
+        output = self.artifact / ".runtime" / "routes" / "quick-route.json"
         command = [
             sys.executable, str(ROUTE), "compile",
             "--capability", "autopilot-code",

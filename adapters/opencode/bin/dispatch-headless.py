@@ -36,6 +36,7 @@ from dispatch_contract import (  # noqa: E402
     ensure_global_registry_writable,
     headless_attempt_policy,
     launch_orphan_watch,
+    launch_reap_watch,
     new_attempt_id,
     parent_attempt_binding_is_live,
     parse_registry_metadata,
@@ -1519,6 +1520,32 @@ def main(argv: list[str]) -> int:
                 jobs, args.slug, args.worktree,
                 f"orphan_watch=post-exit,orphan_watch_pid={watcher_pid}",
                 args.attempt_id,
+            )
+        if args.launch_lifecycle == DETACHED:
+            try:
+                reap_watch_pid = launch_reap_watch(
+                    jobs,
+                    args.attempt_id,
+                    proc.pid,
+                    start_ticks or "",
+                    int(launch_metadata.get("pgid", "0")),
+                )
+            except (DispatchContractError, ValueError) as exc:
+                reason = getattr(exc, "reason", "reap-watch-identity-invalid")
+                detail = getattr(exc, "detail", str(exc))
+                try:
+                    os.killpg(proc.pid, signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
+                close_job_row(
+                    jobs, args.slug, args.worktree,
+                    "reap-watch-launch-error", "", args.attempt_id,
+                )
+                return fail(reason, 70, detail=detail, child_spawned="0")
+            annotate_attempt_row(
+                jobs,
+                args.attempt_id,
+                {"reap_watch": "post-exit", "reap_watch_pid": str(reap_watch_pid)},
             )
         args.child_pid = proc.pid
         args.child_pid_start = start_ticks

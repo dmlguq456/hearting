@@ -45,6 +45,20 @@ class DispatchOwnerTests(unittest.TestCase):
         )
         return path
 
+    def balanced_config(self):
+        path = self.home / "dispatch-defaults-v2.yaml"
+        path.write_text(
+            "schema_version: 2\n"
+            "depth1_owner: [claude, codex, opencode]\n"
+            "opencode:\n  relief_only: false\n"
+            "allocation:\n"
+            "  strategy: least-recent-attempts\n"
+            "  window: 30\n"
+            "capabilities:\n",
+            encoding="utf-8",
+        )
+        return path
+
     def run_owner(self, owners="claude", extra=(), config=None):
         log_dir = self.home / "logs"
         args = [
@@ -148,6 +162,31 @@ class DispatchOwnerTests(unittest.TestCase):
         result = self.run_owner("codex")
         self.assert_model_map(result, "codex")
         self.assertNotIn("interactive-inheritance", result.stdout)
+
+    def test_schema_v2_balances_repeated_owner_attempts_across_three_harnesses(self):
+        config = self.balanced_config()
+        selected = []
+        for index in range(6):
+            result = self.run_owner(config=config)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            match = next(
+                line.split("=", 1)[1]
+                for line in result.stdout.splitlines()
+                if line.startswith("adapter=")
+            )
+            selected.append(match)
+            with self.jobs.open("a", encoding="utf-8") as handle:
+                handle.write(
+                    f"2026-08-09T00:00:{index:02d}Z\tdone\t/repo\t/wt\towner\t"
+                    "attempt_schema_version=2,registered_worker=1,"
+                    f"attempt_id=att-balanced-{index:04d},harness={match}\n"
+                )
+            self.assertIn("allocation_strategy=least-recent-attempts", result.stdout)
+            self.assertIn("allocation_window=30", result.stdout)
+        self.assertEqual(
+            selected,
+            ["claude", "codex", "opencode", "claude", "codex", "opencode"],
+        )
 
     def test_caller_runtime_is_distinct_from_selected_owner_adapter(self):
         module = self._load_selector_module()

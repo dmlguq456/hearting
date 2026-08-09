@@ -38,6 +38,10 @@ from dispatch_contract import (  # noqa: E402
 from dispatch_lifecycle import select_launch_lifecycle  # noqa: E402
 from replica_batch_contract import DIGEST, build_manifest  # noqa: E402
 from dispatch_degradation import record_degradation  # noqa: E402
+from dispatch_allocation import (  # noqa: E402
+    STRATEGY as ALLOCATION_STRATEGY,
+    attempt_counts,
+)
 
 NODE_SPEC = importlib.util.spec_from_file_location(
     "dispatch_node", ROOT / "utilities" / "dispatch-node.py"
@@ -156,6 +160,7 @@ def assign_harnesses(
     *,
     allow_degraded: bool,
     parent_identity: dict[str, str] | None = None,
+    jobs: Path | None = None,
 ) -> tuple[list[tuple[dict[str, object], str, str, int]], str]:
     options: list[list[tuple[str, str, int]]] = []
     for node in nodes:
@@ -185,14 +190,33 @@ def assign_harnesses(
     else:
         raise BatchError("parallel-cross-harness-unavailable")
 
-    def score(rows: tuple[tuple[str, str, int], ...]) -> tuple[int, int, tuple[str, ...]]:
+    allocation = route.get("dispatch_allocation")
+    counts = {harness: 0 for harness in SUPPORTED_BATCH_HARNESSES}
+    declared_order = list(SUPPORTED_BATCH_HARNESSES)
+    if (
+        jobs is not None
+        and isinstance(allocation, dict)
+        and allocation.get("strategy") == ALLOCATION_STRATEGY
+    ):
+        counts = attempt_counts(jobs, window=int(allocation["window"]))
+        declared_order = allocation.get("harness_order") or declared_order
+    order = {harness: index for index, harness in enumerate(declared_order)}
+
+    def score(rows: tuple[tuple[str, str, int], ...]) -> tuple:
         affinity_misses = sum(
             1
             for node, row in zip(nodes, rows)
-            if node.get("harness_affinity") not in {None, "", "unspecified", row[0]}
+            if node.get("harness_affinity") not in {
+                None, "", "unspecified", "diverse", row[0]
+            }
         )
-        return (-len({row[0] for row in rows}), affinity_misses,
-                sum(row[2] for row in rows), tuple(row[0] for row in rows))
+        return (
+            -len({row[0] for row in rows}),
+            affinity_misses,
+            sum(counts.get(row[0], 0) for row in rows),
+            sum(row[2] for row in rows),
+            tuple(order.get(row[0], len(order)) for row in rows),
+        )
 
     chosen = min(combinations, key=score)
     return [
@@ -796,16 +820,6 @@ def main(argv: list[str] | None = None) -> int:
         parent_identity = DISPATCH_NODE.current_parent_identity()
         if parent_identity is None:
             raise BatchError("parent-runtime-identity-missing")
-        assignments, independence = assign_harnesses(
-            route,
-            nodes,
-            allow_degraded=args.allow_degraded_independence,
-            parent_identity=parent_identity,
-        )
-        self_slug = os.environ.get("AGENT_DISPATCH_SELF_SLUG", "")
-        parent_attempt = os.environ.get("AGENT_DISPATCH_ATTEMPT_ID", "")
-        if not self_slug or args.parent != self_slug or not parent_attempt:
-            raise BatchError("parent-identity-mismatch", f"parent={args.parent} self={self_slug or '-'}")
         agent_home = resolve_agent_home()
         jobs = resolve_global_registry(
             agent_home,
@@ -813,6 +827,17 @@ def main(argv: list[str] | None = None) -> int:
             2,
             args.action,
         ).path
+        assignments, independence = assign_harnesses(
+            route,
+            nodes,
+            allow_degraded=args.allow_degraded_independence,
+            parent_identity=parent_identity,
+            jobs=jobs,
+        )
+        self_slug = os.environ.get("AGENT_DISPATCH_SELF_SLUG", "")
+        parent_attempt = os.environ.get("AGENT_DISPATCH_ATTEMPT_ID", "")
+        if not self_slug or args.parent != self_slug or not parent_attempt:
+            raise BatchError("parent-identity-mismatch", f"parent={args.parent} self={self_slug or '-'}")
         repo = subprocess.check_output(
             ["git", "-C", str(route["cwd"]), "rev-parse", "--show-toplevel"],
             text=True,

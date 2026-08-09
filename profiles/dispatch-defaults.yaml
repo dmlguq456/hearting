@@ -10,56 +10,62 @@
 # utilities/dispatch-defaults.py — no PyYAML/yq dependency.
 #
 # Schema (narrow subset, parsed by utilities/dispatch-defaults.py):
-#   schema_version: <int>
+#   schema_version: 2
 #   depth1_owner: [<harness>, ...]     # concrete harnesses only, no "diverse"
 #   opencode:
-#     relief_only: true                # OpenCode never a neutral/diverse default
+#     relief_only: false               # OpenCode is a normal checked candidate
+#   allocation:
+#     strategy: least-recent-attempts
+#     window: 30                       # last exact registered attempts
 #   capabilities:
 #     <capability-name>:
 #       <canonical-topology-node-id>: <claude|codex|opencode|diverse>
 #
 # Value vocabulary for a capability/stage cell: claude | codex | opencode |
-# diverse (pick a harness different from the maker) | unspecified (omit the
-# key — orchestrator discretion, current behavior). Harness names only —
+# diverse (rank the checked pool by the sealed allocation policy) |
+# unspecified (omit the key — orchestrator discretion). Harness names only —
 # never a concrete model id or reasoning/effort value; that stays owned by
 # the adapter model-map contract (SD-22 family/role split).
 
-schema_version: 1
+schema_version: 2
 
-# depth-1 owner: Claude is the default long-context capability owner. Codex
-# remains available through an explicit override or a recorded eligibility /
-# capacity deviation, but is not selected from the normal owner candidate set.
-depth1_owner: [claude]
+# All three checked harnesses share the normal owner pool. With equal hard
+# eligibility, the least represented harness in the rolling attempt window is
+# selected; ties follow this declared order.
+depth1_owner: [claude, codex, opencode]
 
-# OpenCode is relief-only: it is never an automatic neutral/diverse
-# candidate. It participates only via an explicit --adapter opencode, an
-# explicit config cell set to "opencode", or another documented
-# user/orchestrator-approved relief path — all still subject to runtime
-# eligibility. Target load share is roughly 1-2% of dispatched work.
+# OpenCode is a normal candidate after registered depth-2 parity. Runtime,
+# account, route-evidence, sandbox, and usage gates still fail closed exactly
+# like the sibling adapters.
 opencode:
-  relief_only: true
+  relief_only: false
+
+# Read-only allocation telemetry counts the last 30 exact registered attempt
+# rows in the selected canonical jobs.log. This balances recent dispatch load;
+# it does not claim provider capacity and never overrides a known limit.
+allocation:
+  strategy: least-recent-attempts
+  window: 30
 
 capabilities:
   # autopilot-code: canonical topology node ids are frame, plan, plan-check,
   # execute, impl-review, test, report (capabilities/topologies.json v5).
   # PRD prose names "exec"/"review"; execute below realizes prose "exec" and
-  # test realizes the final verification stage. Context-bounded maker stages
-  # prefer Codex; checks stay cross-harness and final synthesis stays on Claude.
+  # test realizes the final verification stage. All stages use the balanced
+  # pool. Exact route evidence and task-specific
+  # explicit choices still outrank this soft default.
   # A literal exec/review key fails validation against the topology registry.
   # Parallel leg ids are compile-time expansions, not config keys. The batch
   # places a group across at least two harness families when available; the
   # route independently seals each leg's profile and perspective.
   autopilot-code:
-    # frame: root-cause/direction leg leads on the GPT/Codex family
-    # (root-cause-first practice; SD-82 framing anchor, 2026-07-24). The
-    # alternative/contrarian legs are placed cross-harness-first by contract.
-    frame: codex
-    plan: codex
+    frame: diverse
+    plan: diverse
     plan-check: diverse
-    execute: codex
+    execute: diverse
     impl-review: diverse
     test: diverse
-    report: claude
+    report: diverse
 
   # Coordinate inventory for other registered capabilities. All left
   # commented (parse-neutral scaffold, not empty keys) — no default is

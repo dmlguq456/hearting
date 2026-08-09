@@ -517,7 +517,7 @@ def _realize_conditional_extensions(recipe, effective_intensity):
     return rows
 
 def _seal_dispatch_defaults(nodes, capability):
-    """Return dispatch_defaults_digest and stamp each dispatch-depth-2 node's
+    """Return defaults digest/allocation and stamp each dispatch-depth-2 node's
     harness_affinity, BEFORE route_hash is computed. Absent config -> all
     'unspecified' + digest None. Corrupt config -> fail-loud (reused loader
     validator), surfaced as ValueError so main() exits 64. registry_digest is
@@ -527,7 +527,7 @@ def _seal_dispatch_defaults(nodes, capability):
         for node in nodes:
             if node.get("dispatch_depth") == 2:
                 node["harness_affinity"] = "unspecified"
-        return None
+        return None, None
     try:
         cfg = DEFAULTS.load_and_validate(config_path, DEFAULTS.default_topology_path())
     except DEFAULTS.DefaultsConfigError as exc:
@@ -537,7 +537,10 @@ def _seal_dispatch_defaults(nodes, capability):
             node["harness_affinity"] = DEFAULTS.query_stage_affinity(
                 cfg, capability, node.get("parallel_anchor", node["id"])
             )
-    return "sha256:" + hashlib.sha256(canonical(cfg)).hexdigest()
+    return (
+        "sha256:" + hashlib.sha256(canonical(cfg)).hexdigest(),
+        DEFAULTS.query_allocation(cfg),
+    )
 
 def unit_catalog_digest(units_root=None):
     """Digest of unit frontmatter blocks (machine contracts); unit BODY prose stays un-hashed."""
@@ -663,7 +666,9 @@ def _compile_from_recipe(registry, recipe, capability, capability_mode, requeste
         for node in nodes:
             if node.get("dispatch_depth")==2:
                 node["fallback_hops"]=json.loads(json.dumps(chain))
-    dispatch_defaults_digest=_seal_dispatch_defaults(nodes, capability)
+    dispatch_defaults_digest,dispatch_allocation=_seal_dispatch_defaults(
+        nodes, capability
+    )
     spec_touch=any(_scope_touches_spec(scope) for node in nodes for scope in node["write_scope"])
     payload={
       "schema_version":ROUTE_SCHEMA_VERSION,"capability":capability,"capability_mode":capability_mode,
@@ -676,6 +681,7 @@ def _compile_from_recipe(registry, recipe, capability, capability_mode, requeste
       "cwd":str(cwd),"artifact_root":str(artifact),"source_commit":_git_commit(cwd),
       "registry_digest":TOPO.registry_digest(registry),
       "dispatch_defaults_digest":dispatch_defaults_digest,
+      "dispatch_allocation":dispatch_allocation,
       "selection":{"direct_predicates":predicates,"promotion_signals":[{"signal":s,"source":"caller"} for s in signals],
                    "selection_basis":selection_basis,
                    "escalation_basis":[{"signal":s,"source":"caller"} for s in signals],
@@ -784,6 +790,31 @@ def verify_route(route, expected_cwd=None, *, allow_stale_registry=False):
         raise ValueError("invalid qualified dispatch depth")
     if any(key in route for key in ("depth", "owner_depth", "max_depth")):
         raise ValueError("bare route dispatch-depth fields are forbidden")
+    allocation = route.get("dispatch_allocation")
+    if allocation is not None:
+        if not isinstance(allocation, dict) or set(allocation) != {
+            "strategy", "window", "harness_order"
+        }:
+            raise ValueError("invalid dispatch_allocation shape")
+        if allocation.get("strategy") not in {
+            "config-order", "least-recent-attempts"
+        }:
+            raise ValueError("invalid dispatch_allocation strategy")
+        window = allocation.get("window")
+        if (
+            not isinstance(window, int)
+            or window < 0
+            or (allocation["strategy"] == "least-recent-attempts" and window < 3)
+        ):
+            raise ValueError("invalid dispatch_allocation window")
+        order = allocation.get("harness_order")
+        if (
+            not isinstance(order, list)
+            or not order
+            or len(order) != len(set(order))
+            or any(item not in DEFAULTS.DISPATCHABLE_HARNESSES for item in order)
+        ):
+            raise ValueError("invalid dispatch_allocation harness order")
     observed_dispatch_depths = [route["owner_dispatch_depth"]]
     effective=route.get("effective_intensity")
     expected_owner_profile=(

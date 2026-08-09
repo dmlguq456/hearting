@@ -15,6 +15,16 @@
 root=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0
 [ -f "$root/tools/generate.py" ] || exit 0
 
+# Git exports repository-local variables to push hooks.  A generator that
+# invokes a repo-relative helper with `git -C` must discover the worktree from
+# that helper's path, not inherit the hook's gitdir as an implicit worktree.
+git_local_env=$(git rev-parse --local-env-vars 2>/dev/null || :)
+if [ -n "$git_local_env" ]; then
+    # Intentional field splitting: rev-parse emits one variable name per line.
+    # shellcheck disable=SC2086
+    unset $git_local_env
+fi
+
 command -v python3 >/dev/null 2>&1 || {
     echo "pre-push: python3 not found; skipping the generated-projection check" >&2
     exit 0

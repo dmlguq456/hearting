@@ -1327,8 +1327,9 @@ class DispatchContractTest(unittest.TestCase):
  # the post-processing seam at all. Left where it is rather than duplicated.
 
  # A-N3. An empty scan is only evidence of absence in the namespace that could
- # have seen the process. A reap receipt recorded elsewhere must fail closed
- # rather than manufacture a death.
+ # have seen the process. A reap receipt recorded elsewhere remains unusable in
+ # ordinary liveness queries; only an exact terminal readiness gate may consume
+ # a complete receipt that includes the launcher's tagged-descendant proof.
  def test_empty_scan_from_a_foreign_namespace_is_unverifiable(self):
   pid=str(os.getpid())
   receipt={
@@ -1346,6 +1347,9 @@ class DispatchContractTest(unittest.TestCase):
   verdict=D.attempt_process_quiescence(receipt)
   self.assertEqual((verdict.state,verdict.reason),
                    ("unverifiable","attempt-descendant-unverifiable"))
+  terminal=D.attempt_process_quiescence(receipt,terminal_receipt=True)
+  self.assertEqual((terminal.state,terminal.reason),
+                   ("quiescent","governed-process-group-reaped"))
   # An equivalent receipt observed from its own namespace keeps its verdict, so
   # the seam did not break the ordinary foreground-reap path.
   proc=subprocess.Popen([sys.executable,"-c","import time; time.sleep(30)"],
@@ -1381,7 +1385,8 @@ class DispatchContractTest(unittest.TestCase):
   self.assertFalse(D.attempt_scan_namespace_authority(
    {"pid":"7","pid_scope":"namespace-local"}))
 
- def sibling_gate_case(self,td,note,sibling_metadata,attempt="att-gate-newcomer"):
+ def sibling_gate_case(self,td,note,sibling_metadata,attempt="att-gate-newcomer",
+                       status="done"):
   """Run completion_marker_gate for a node whose only sibling row is `note`."""
   route={"dispatch_contract_version":3,"route_id":"rt-sibling-gate",
          "nodes":[{"id":"execute","depends_on":[]}]}
@@ -1389,7 +1394,7 @@ class DispatchContractTest(unittest.TestCase):
   pipe=",".join(f"{k}={v}" for k,v in {
    **{"route_id":"rt-sibling-gate","route_node":"execute","note":note},
    **sibling_metadata}.items())
-  lines=[f"2026-08-07T00:00:00Z\tdone\t/repo\t/wt\texecute\t{pipe}"]
+  lines=[f"2026-08-07T00:00:00Z\t{status}\t/repo\t/wt\texecute\t{pipe}"]
   # The newcomer's own claimed row is already in the registry when the gate
   # runs at launch, and it has no pid yet -- it must not block itself.
   lines.append(
@@ -1441,6 +1446,69 @@ class DispatchContractTest(unittest.TestCase):
   for note in ("dead-capacity","dead-no-progress","dead-worker-fail"):
    with tempfile.TemporaryDirectory() as td:
     self.sibling_gate_case(td,note,sibling)
+
+ def test_terminal_foreign_namespace_receipt_allows_successor_and_retry(self):
+  pid=str(os.getpid())
+  receipt={
+   "pid":pid,"pgid":pid,"pid_start":D.process_start_ticks(os.getpid()),
+   "pid_ns":"pid:[extinct]","pid_observer_ns":"pid:[extinct]",
+   "launch_lifecycle":"foreground-scoped",
+   "launch_outcome":"governed-process-reaped",
+   "group_reap_proof":D.GROUP_REAP_PROOF,"group_reap_pgid":pid,
+   "attempt_descendant_proof":"attempt-tagged-empty-v1",
+   "attempt_descendant_observer_ns":"pid:[extinct]",
+  }
+  for predecessor_harness,successor_harness in (
+      ("claude","codex"),("codex","claude")):
+   with self.subTest(
+       predecessor=predecessor_harness,successor=successor_harness), \
+       tempfile.TemporaryDirectory() as td:
+    base=Path(td)
+    route_id=f"rt-58b1f678fad8f3f8-{predecessor_harness}-{successor_harness}"
+    predecessor_receipt=dict(receipt)
+    if predecessor_harness == "claude":
+     predecessor_receipt.update(
+      launch_lifecycle="detached",
+      launch_outcome="governed-process-group-drained",
+     )
+    route={
+     "dispatch_contract_version":3,"route_id":route_id,
+     "nodes":[
+      {"id":"plan","depends_on":[],"harness_affinity":predecessor_harness},
+      {"id":"execute","depends_on":["plan"],
+       "harness_affinity":successor_harness},
+     ],
+    }
+    route_path=base/"route.json"
+    route_path.write_text(json.dumps(route),encoding="utf-8")
+    marker_dir=base/".dispatch"/"completion"/route_id
+    marker_dir.mkdir(parents=True)
+    (marker_dir/"plan.json").write_text(json.dumps({
+     "attempt_id":"att-terminal-predecessor","registered_worker":True,
+    }),encoding="utf-8")
+    pipe=",".join(f"{key}={value}" for key,value in {
+     **{"route_id":route_id,"route_node":"plan",
+        "attempt_id":"att-terminal-predecessor","note":"completed-marker",
+        "harness":predecessor_harness},
+     **predecessor_receipt,
+    }.items())
+    rows=[
+     "2026-08-09T00:00:00Z\tdone\t/repo\t/wt\tplan\t"
+     f"{CURRENT},{pipe}"
+    ]
+    with mock.patch.object(D,"completion_marker_is_current",return_value=True):
+     D.completion_marker_gate(
+      str(route_path),"execute","start",base,base/"jobs.log",
+      registry_lines=rows,attempt_id="att-successor-new",
+     )
+
+  sibling=dict(receipt,attempt_id="att-terminal-sibling")
+  with tempfile.TemporaryDirectory() as td:
+   self.sibling_gate_case(td,"completed-marker",sibling)
+  with tempfile.TemporaryDirectory() as td:
+   with self.assertRaises(D.DispatchContractError) as caught:
+    self.sibling_gate_case(td,"completed-marker",sibling,status="open")
+  self.assertEqual(caught.exception.reason,"prior-attempt-unverifiable")
 
  # A row that never recorded a governed process cannot have leaked one, and
  # judging it unverifiable would wedge the node permanently.

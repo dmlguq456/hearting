@@ -71,7 +71,9 @@ class DispatchArtifactRootTests(unittest.TestCase):
             ),
             encoding="utf-8",
         )
-        self.route_file = self.base / "quick-route.json"
+        route_dir = Path(self.canonical) / ".runtime" / "routes"
+        route_dir.mkdir(parents=True)
+        self.route_file = route_dir / "quick-route.json"
         run(
             [
                 sys.executable,

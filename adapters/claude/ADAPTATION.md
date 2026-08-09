@@ -398,7 +398,7 @@ historical v1/v2 broker routes are read-only.
 - **Adapter realization:** the wrapper records the portable sub-session identity,
   phase brief, exact fixed files, expected round trips, ledger, and
   `stage_authority=0`. Edit hooks enforce the ledger/file fence; compact hooks
-  flush and re-read it. The depth-1 owner aggregates all PASS/quiescent attempts
+  flush and re-read it. The dispatch-depth-1 owner aggregates all PASS/quiescent attempts
   into the route node's one marker.
 - **Parity boundary:** a native Claude helper is allowed only inside its parent
   slice, returns a bounded summary, mutates serially, and never owns the stage

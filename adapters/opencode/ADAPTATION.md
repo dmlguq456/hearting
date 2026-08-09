@@ -456,7 +456,7 @@ pre-registration lifecycle recheck for dispatch-depth-1 work: a
 transient scope promotes provisional `detached` to `foreground-scoped`, keeps
 the wrapper alive through child exit, and records requested/effective selection
 plus bounded namespace evidence. At dispatch-depth-2 it additionally resolves
-exactly one open, live depth-1 owner row (`resolve_live_parent_attempt`,
+exactly one open, live dispatch-depth-1 owner row (`resolve_live_parent_attempt`,
 ported from the Claude wrapper) before any registry claim or runtime probe;
 a missing or ambiguous live parent fails closed with `live-parent-not-found`
 or `parent-attempt-not-found` and starts zero children. The shared

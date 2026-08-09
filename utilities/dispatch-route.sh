@@ -37,6 +37,10 @@ repo_root=$(CDPATH= cd -- "$self_dir/.." && pwd)
 defaults_script="$self_dir/dispatch-defaults.py"
 python3 "$defaults_script" validate >/dev/null || { echo 'dispatch-route: invalid dispatch-defaults config' >&2; exit 64; }
 config_affinity=$(python3 "$defaults_script" affinity --capability "$capability" --stage "$stage")
+allocation_info=$(python3 "$defaults_script" allocation)
+allocation_strategy=$(printf '%s\n' "$allocation_info" | awk -F= '$1=="strategy" {print $2}')
+allocation_window=$(printf '%s\n' "$allocation_info" | awk -F= '$1=="window" {print $2}')
+allocation_order=$(printf '%s\n' "$allocation_info" | awk -F= '$1=="harness_order" {print $2}')
 
 case "$stage" in
   plan|planning|architecture|decomposition) default_role='deep maker'; affinity=codex;;
@@ -52,8 +56,17 @@ bias=$(printf '%s\n' "$usage" | awk '$1=="bias" {print $2; exit}')
 # Treat that neutral state as the stable compatibility tie-break, not an
 # adapter name.
 [ "$bias" != auto ] || bias=claude
-family_of() { [ "$1" = codex ] && printf gpt || printf claude; }
+family_of() { case "$1" in codex) printf gpt;; claude) printf claude;; *) printf unknown;; esac; }
 eligible() { s=$(state "$1"); [ "$s" != limited ] && [ "${s#limited(}" = "$s" ]; }
+allocation_jobs=$jobs
+if [ -z "$allocation_jobs" ]; then
+  allocation_home=${AGENT_HOME:-$("$self_dir/agent-home.sh")}
+  allocation_jobs="$allocation_home/.dispatch/jobs.log"
+fi
+allocation_rank() {
+  python3 "$self_dir/dispatch_allocation.py" rank --jobs "$allocation_jobs" \
+    --window "$allocation_window" --candidates "$1" --declared-order "$allocation_order"
+}
 
 # Explicit --adapter opencode always routes here. A config affinity of
 # "opencode" (SD-66) is honored the same way, but only when the caller left
@@ -62,28 +75,41 @@ effective_adapter=$adapter
 if [ -z "$effective_adapter" ] && [ -z "$family" ] && [ "$config_affinity" = opencode ]; then
   effective_adapter=opencode
 fi
-if [ "$effective_adapter" = opencode ] || [ "$family" = unknown ]; then
+if [ "$family" = unknown ]; then
   echo status=unknown; echo adapter=opencode; echo family=unknown; echo "role=$role"; echo exact_model_id=unknown; echo reasoning=unknown
   echo "trace.1=explicit=${adapter:-none};config_affinity=${config_affinity};eligibility=opencode-runtime-inventory-unknown"
   echo unknown=opencode-runtime-model-inventory-unavailable
   exit 0
 fi
 
-choose=$adapter
+choose=$effective_adapter
 [ -n "$choose" ] || case "$family" in gpt) choose=codex;; claude) choose=claude;; esac
 # SD-22 cascade: explicit adapter/family already resolved above; next comes
 # the validated config affinity, then the existing stage-heuristic/bias
-# fallback. Config never yields "opencode" here (handled above) and never
-# introduces opencode into automatic diverse/neutral resolution.
+# fallback. Schema-v2 `diverse` ranks all normal checked harnesses from the
+# rolling exact-attempt counters sealed by the defaults policy.
 if [ -z "$choose" ]; then
   case "$config_affinity" in
     claude|codex) choose=$config_affinity;;
     diverse)
-      case "$maker_family" in
-        claude) choose=codex;;
-        gpt) choose=claude;;
-        *) choose=${bias:-claude};;
-      esac
+      if [ "$allocation_strategy" = least-recent-attempts ]; then
+        pool=
+        old_ifs=$IFS; IFS=,
+        for candidate in $allocation_order; do
+          if eligible "$candidate"; then pool="${pool}${pool:+,}${candidate}"; fi
+        done
+        IFS=$old_ifs
+        if [ -n "$pool" ]; then
+          ranked=$(allocation_rank "$pool")
+          choose=$(printf '%s\n' "$ranked" | awk -F= '$1=="rank" {split($2,a,","); print a[1]}')
+        fi
+      else
+        case "$maker_family" in
+          claude) choose=codex;;
+          gpt) choose=claude;;
+          *) choose=${bias:-claude};;
+        esac
+      fi
       ;;
   esac
 fi
@@ -96,26 +122,58 @@ if [ -z "$choose" ]; then
     neutral:*) choose=${bias:-claude};;
   esac
 fi
-case "$choose" in claude|codex) ;; *) echo 'dispatch-route: no known candidate' >&2; exit 64;; esac
+case "$choose" in claude|codex|opencode) ;; *) echo 'dispatch-route: no known candidate' >&2; exit 64;; esac
 
 rejected=; fallback=
 if ! eligible "$choose"; then
   s=$(state "$choose"); rejected="$choose:usage-$s"
-  other=claude; [ "$choose" = claude ] && other=codex
-  if eligible "$other"; then
+  if [ "$allocation_strategy" = least-recent-attempts ]; then
+    fallback_pool=
+    old_ifs=$IFS; IFS=,
+    for candidate in $allocation_order; do
+      if [ "$candidate" != "$choose" ] && eligible "$candidate"; then
+        fallback_pool="${fallback_pool}${fallback_pool:+,}${candidate}"
+      fi
+    done
+    IFS=$old_ifs
+    other=
+    if [ -n "$fallback_pool" ]; then
+      fallback_ranked=$(allocation_rank "$fallback_pool")
+      other=$(printf '%s\n' "$fallback_ranked" | awk -F= '$1=="rank" {split($2,a,","); print a[1]}')
+    fi
+  else
+    other=claude; [ "$choose" = claude ] && other=codex
+    eligible "$other" || other=
+  fi
+  if [ -n "$other" ]; then
     fallback="$other:known-limit-on-$choose"; choose=$other
   else
-    echo status=unavailable; echo "role=$role"; echo "rejected.1=$rejected"; echo "rejected.2=$other:usage-$(state "$other")"; echo 'fallback.1=none:no-eligible-known-candidate'; exit 1
+    echo status=unavailable; echo "role=$role"; echo "rejected.1=$rejected"
+    reject_n=2
+    old_ifs=$IFS; IFS=,
+    for candidate in $allocation_order; do
+      [ "$candidate" = "${rejected%%:*}" ] && continue
+      echo "rejected.$reject_n=$candidate:usage-$(state "$candidate")"
+      reject_n=$((reject_n + 1))
+    done
+    IFS=$old_ifs
+    echo 'fallback.1=none:no-eligible-known-candidate'; exit 1
   fi
 fi
 case "$choose" in
   codex) map="$repo_root/adapters/codex/bin/model-map.sh";;
   claude) map="$repo_root/adapters/claude/bin/model-map.sh";;
+  opencode) map="$repo_root/adapters/opencode/bin/model-map.sh";;
 esac
 mapped=$($map "$role")
 get() { printf '%s\n' "$mapped" | awk -F= -v k="$1" '$1==k {sub(/^[^=]*=/, ""); print; exit}'; }
-echo status=eligible; echo "adapter=$choose"; echo "family=$(family_of "$choose")"; echo "role=$role"; echo "exact_model_id=$(get exact_model_id)"; echo "reasoning=$(get reasoning)"
+mapped_status=$(get status); [ -n "$mapped_status" ] || mapped_status=eligible
+mapped_family=$(get family); [ -n "$mapped_family" ] || mapped_family=$(family_of "$choose")
+echo "status=$mapped_status"; echo "adapter=$choose"; echo "family=$mapped_family"; echo "role=$role"; echo "exact_model_id=$(get exact_model_id)"; echo "reasoning=$(get reasoning)"
 [ -z "$rejected" ] || echo "rejected.1=$rejected"
 [ -z "$fallback" ] || echo "fallback.1=$fallback"
 echo "trace.1=explicit=${adapter:-none};family=${family:-none};eligibility=usage-$(state "$choose")"
 echo "trace.2=affinity=$affinity;maker_family=${maker_family:-unknown};required=${required:-none};bias=${bias:-unknown}"
+if [ "$allocation_strategy" = least-recent-attempts ]; then
+  allocation_rank "$allocation_order" | sed 's/^rank=/allocation_rank=/'
+fi

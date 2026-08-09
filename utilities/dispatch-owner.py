@@ -22,6 +22,13 @@ if _defaults_spec is None or _defaults_spec.loader is None:
     raise RuntimeError("cannot load dispatch-defaults.py")
 _defaults = importlib.util.module_from_spec(_defaults_spec)
 _defaults_spec.loader.exec_module(_defaults)
+_allocation_spec = importlib.util.spec_from_file_location(
+    "dispatch_allocation", ROOT / "utilities" / "dispatch_allocation.py"
+)
+if _allocation_spec is None or _allocation_spec.loader is None:
+    raise RuntimeError("cannot load dispatch_allocation.py")
+_allocation = importlib.util.module_from_spec(_allocation_spec)
+_allocation_spec.loader.exec_module(_allocation)
 
 _FORBIDDEN = {
     "--worker-mode", "--model", "--reasoning", "--effort", "--variant",
@@ -233,7 +240,10 @@ def _usage(jobs):
     return states
 
 
-def _audit(status, adapter, source, configured, explicit, states, rejected=(), fallback=None, reason="none"):
+def _audit(
+    status, adapter, source, configured, explicit, states, *, allocation=None,
+    counts=None, rejected=(), fallback=None, reason="none"
+):
     lines = [
         f"status={status}", f"adapter={adapter or '-'}", f"selection_source={source}",
         f"configured_candidates={','.join(configured)}",
@@ -241,12 +251,18 @@ def _audit(status, adapter, source, configured, explicit, states, rejected=(), f
     ]
     for harness in sorted(states):
         lines.append(f"eligibility.{harness}={states[harness]}")
+    if allocation:
+        lines.append(f"allocation_strategy={allocation['strategy']}")
+        lines.append(f"allocation_window={allocation['window']}")
+    for harness in _allocation.HARNESSES:
+        if counts is not None:
+            lines.append(f"attempt_count.{harness}={counts.get(harness, 0)}")
     for n, item in enumerate(rejected, 1):
         lines.append(f"rejected.{n}={item}:usage-{states[item]}")
     if fallback:
         lines.append(f"fallback.1={fallback}:configured-candidates-ineligible")
     lines += [
-        "trace.1=cascade=explicit>hard-eligibility>configured-normal",
+        "trace.1=cascade=explicit>hard-eligibility>sealed-affinity>recent-attempt-balance",
         f"trace.2=explicit={explicit or 'none'};authorized={int(bool(explicit and explicit in _defaults.DISPATCHABLE_HARNESSES))}",
         "trace.3=eligibility=" + ",".join(f"{h}:{states[h]}" for h in sorted(states)),
         f"trace.4=configured={','.join(configured)};selected={adapter or '-'};source={source};deviation_reason={reason}",
@@ -266,9 +282,9 @@ def main(argv):
         explicit, values, forwarded, route_evidence = _parse(argv)
         config = _load_defaults()
         configured = list(_defaults.query_owners(config))
-        # DISPATCHABLE (not KNOWN): SD-66 relief-only policy names an explicit
-        # --adapter opencode as a legitimate relief path; opencode stays out of
-        # the configured/last-resort candidate sets below.
+        # Every schema-v2 harness is a normal checked candidate. Schema-v1
+        # compatibility still admits an explicit OpenCode relief request even
+        # though its configured and last-resort pools contain only two harnesses.
         if explicit is not None and explicit not in _defaults.DISPATCHABLE_HARNESSES:
             raise OwnerError("explicit-adapter-unauthorized")
         sealed = _sealed_owner_harnesses(route_evidence) if route_evidence else None
@@ -278,6 +294,23 @@ def main(argv):
             configured = [h for h in configured if h in sealed]
         jobs = values.get("--jobs", os.environ.get("AGENT_DISPATCH_JOBS", ""))
         states = _usage(jobs)
+        allocation = _defaults.query_allocation(config)
+        counts = (
+            _allocation.attempt_counts(jobs, window=allocation["window"])
+            if allocation["strategy"] == _allocation.STRATEGY
+            else {harness: 0 for harness in _allocation.HARNESSES}
+        )
+
+        def ranked(candidates):
+            candidates = list(candidates)
+            if allocation["strategy"] != _allocation.STRATEGY:
+                return candidates
+            return _allocation.rank_harnesses(
+                candidates,
+                counts,
+                declared_order=allocation["harness_order"],
+            )
+
         rejected = [h for h in sorted(states) if not _eligible(states[h])]
         selected = None
         source = "none"
@@ -285,20 +318,37 @@ def main(argv):
         if explicit and _eligible(states[explicit]):
             selected, source = explicit, "explicit"
         if selected is None:
-            for harness in configured:
+            for harness in ranked(configured):
                 if _eligible(states[harness]):
-                    selected, source = harness, "configured-normal"
+                    selected = harness
+                    source = (
+                        "configured-usage-balanced"
+                        if allocation["strategy"] == _allocation.STRATEGY
+                        else "configured-normal"
+                    )
                     break
         if selected is None:
             # A sealed route constrains this last resort too: silently starting
             # an owner whose harness the checked tuples never probed only moves
             # the failure to every dispatch-depth-2 launch.
-            for harness in sorted(sealed if sealed is not None else _defaults.KNOWN_HARNESSES):
+            fallback_pool = (
+                sealed
+                if sealed is not None
+                else (
+                    _defaults.DISPATCHABLE_HARNESSES
+                    if config.get("schema_version") == 2
+                    else _defaults.LEGACY_NORMAL_HARNESSES
+                )
+            )
+            for harness in ranked(fallback_pool):
                 if _eligible(states[harness]):
                     selected, source, reason = harness, "eligibility-fallback", "configured-candidates-ineligible"
                     break
         if selected is None:
-            print("\n".join(_audit("unavailable", None, "none", configured, explicit, states, rejected=rejected)))
+            print("\n".join(_audit(
+                "unavailable", None, "none", configured, explicit, states,
+                allocation=allocation, counts=counts, rejected=rejected,
+            )))
             print("check=failed\nreason=" + (
                 "no-eligible-route-evidence-candidate" if sealed is not None
                 else "no-eligible-candidate"
@@ -307,12 +357,14 @@ def main(argv):
         wrapper = ROOT / "adapters" / selected / "bin" / "dispatch-headless.py"
         if not os.access(wrapper, os.X_OK):
             print("\n".join(_audit("unavailable", selected, source, configured, explicit, states,
+                                      allocation=allocation, counts=counts,
                                       rejected=rejected if source != "explicit" else (),
                                       fallback=selected if source == "eligibility-fallback" else None,
                                       reason=reason)))
             print("check=failed\nreason=wrapper-unavailable\nchild_spawned=0")
             return 65
         print("\n".join(_audit("eligible", selected, source, configured, explicit, states,
+                                  allocation=allocation, counts=counts,
                                   rejected=rejected if source != "explicit" else (),
                                   fallback=selected if source == "eligibility-fallback" else None,
                                   reason=reason)), flush=True)

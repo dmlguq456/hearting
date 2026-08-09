@@ -9,6 +9,14 @@ MANIFEST="$ROOT/harness-manifest.json"
 TARGET="$ROOT/adapters/codex/skills/post-it/SKILL.md"
 cp "$MANIFEST" "$TMP/harness-manifest.json"
 
+# A real pre-push hook inherits GIT_DIR.  The hook must clear that local
+# environment before mode-map helpers use git -C for worktree discovery.
+HOOK_GIT_DIR=$(git -C "$ROOT" rev-parse --absolute-git-dir)
+(
+  cd "$ROOT"
+  GIT_DIR="$HOOK_GIT_DIR" "$ROOT/tools/git-hooks/pre-push" >/dev/null
+)
+
 restore() {
   cp "$TMP/harness-manifest.json" "$MANIFEST"
   python3 "$ROOT/tools/generate.py" >/dev/null 2>&1 || true

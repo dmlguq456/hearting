@@ -202,14 +202,46 @@ class FallbackTest(unittest.TestCase):
   self.assertNotIn("check=ok",dry.stdout)
   self.assertIn("parent-attempt-not-found",dry.stdout)
   self.assertEqual(dry.returncode,79,dry.stdout+dry.stderr)
- def test_matching_parent_runtime_still_selects_the_headless_hop(self):
+ def test_matching_parent_runtime_uses_balanced_checked_headless_band(self):
   path=self.route(same_status="supported")
   right={"AGENT_DISPATCH_CURRENT_HARNESS":"codex",
          "AGENT_DISPATCH_CURRENT_TRANSPORT":"headless",
          "AGENT_DISPATCH_CURRENT_SANDBOX":"workspace-write"}
   dry=self.run_node(path,"plan-check","dry-run",**right)
   self.assertEqual(dry.returncode,0,dry.stdout+dry.stderr)
-  self.assertIn("selected_hop=same-harness-headless",dry.stdout)
+  self.assertIn("selected_hop=cross-harness-headless",dry.stdout)
+  self.assertIn("child_harness=claude",dry.stdout)
+  self.assertIn("attempt_count.codex=1",dry.stdout)
+
+ def test_three_harness_stage_ranking_uses_only_recent_attempt_counts(self):
+  node={
+   "harness_affinity":"diverse",
+   "fallback_hops":[
+    {"ordinal":1,"fallback_hop":"same-harness-headless","candidates":[
+     {"child_harness":"claude","status":"supported"}]},
+    {"ordinal":2,"fallback_hop":"cross-harness-headless","candidates":[
+     {"child_harness":"codex","status":"supported"},
+     {"child_harness":"opencode","status":"supported"}]},
+    {"ordinal":3,"fallback_hop":"native-subagent","candidates":[]},
+    {"ordinal":4,"fallback_hop":"inline","candidates":[]},
+   ],
+  }
+  route={"dispatch_allocation":{
+   "strategy":"least-recent-attempts","window":30,
+   "harness_order":["claude","codex","opencode"],
+  }}
+  self.jobs.write_text(
+   "2026-08-09T00:00:00Z\tdone\t/r\t/w\ta\t"
+   "attempt_schema_version=2,registered_worker=1,attempt_id=att-count-a,harness=claude\n"
+   "2026-08-09T00:00:01Z\tdone\t/r\t/w\tb\t"
+   "attempt_schema_version=2,registered_worker=1,attempt_id=att-count-b,harness=codex\n",
+   encoding="utf-8")
+  with mock.patch.object(F,"_usage_states",return_value={
+      "claude":"ok","codex":"ok","opencode":"ok"}):
+   hops,context=F.ordered_fallback_hops(route,node,self.jobs)
+  selected=[hop["candidates"][0]["child_harness"] for hop in hops[:3]]
+  self.assertEqual(selected,["opencode","claude","codex"])
+  self.assertEqual(context["counts"],{"claude":1,"codex":1,"opencode":0})
  def test_registry_infrastructure_failure_is_not_a_candidate_failure(self):
   # An unwritable registry is a hard stop at --start. Treating it as one more
   # exhausted candidate would descend to inline and recreate the divergence

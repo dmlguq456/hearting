@@ -263,6 +263,36 @@ class DispatchBatchTest(unittest.TestCase):
         self.assertEqual(independence, "cross-harness")
         self.assertEqual([row[1] for row in rows], ["codex", "claude"])
 
+    def test_assignment_uses_recent_counts_to_share_parallel_legs_across_three(self):
+        route = json.loads(json.dumps(self.route))
+        route["dispatch_allocation"] = {
+            "strategy": "least-recent-attempts",
+            "window": 30,
+            "harness_order": ["claude", "codex", "opencode"],
+        }
+        for node in route["nodes"]:
+            node["harness_affinity"] = "diverse"
+            node["fallback_hops"][1]["candidates"].append(
+                {"child_harness": "opencode", "status": "supported"}
+            )
+        self.jobs.write_text(
+            "".join(
+                f"2026-08-09T00:00:0{index}Z\tdone\t/r\t/w\tn{index}\t"
+                "attempt_schema_version=2,registered_worker=1,"
+                f"attempt_id=att-batch-count-{index},harness=codex\n"
+                for index in range(5)
+            ),
+            encoding="utf-8",
+        )
+        with mock.patch.object(
+            BATCH.DISPATCH_NODE, "select_checked_tuple", return_value={"status": "supported"}
+        ):
+            rows, independence = BATCH.assign_harnesses(
+                route, route["nodes"], allow_degraded=False, jobs=self.jobs
+            )
+        self.assertEqual(independence, "cross-harness")
+        self.assertEqual({row[1] for row in rows}, {"claude", "opencode"})
+
     def test_atomic_denial_starts_no_wrapper(self):
         stack, assignments = self.common_patches()
         output = io.StringIO()
@@ -355,6 +385,105 @@ class DispatchBatchTest(unittest.TestCase):
         self.assertEqual(receipt["state"], "launched")
         self.assertEqual([leg["adapter"] for leg in receipt["legs"]], ["codex", "claude"])
         self.assertNotEqual(receipt["legs"][0]["attempt_id"], receipt["legs"][1]["attempt_id"])
+
+    def test_opencode_owner_batch_reserves_spawns_joins_and_receipts(self):
+        route = json.loads(json.dumps(self.route))
+        for node in route["nodes"]:
+            node["harness_affinity"] = "diverse"
+            node["fallback_hops"][1]["candidates"].append(
+                {"child_harness": "opencode", "status": "supported"}
+            )
+        assignments = [
+            (route["nodes"][0], "opencode", "cross-harness-headless", 2),
+            (route["nodes"][1], "claude", "cross-harness-headless", 2),
+        ]
+        output = io.StringIO()
+        created: list[object] = []
+        joined: list[str] = []
+
+        class FakeProcess:
+            def __init__(self, command, **kwargs):
+                self.command = command
+                self.kwargs = kwargs
+                self.pid = 11000 + len(created)
+                self.returncode = 0
+                created.append(self)
+
+            def communicate(self):
+                if len(created) != 2:
+                    raise AssertionError("join began before both OpenCode-owner batch legs spawned")
+                joined.append(self.command[self.command.index("--adapter") + 1])
+                return success_receipt(self.command), ""
+
+            def poll(self):
+                return self.returncode
+
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(mock.patch.object(BATCH, "load_route", return_value=route))
+            stack.enter_context(mock.patch.object(
+                BATCH, "assign_harnesses", return_value=(assignments, "cross-harness")
+            ))
+            stack.enter_context(mock.patch.object(BATCH, "resolve_agent_home", return_value=self.base))
+            stack.enter_context(mock.patch.object(
+                BATCH, "resolve_global_registry", return_value=SimpleNamespace(path=self.jobs)
+            ))
+            stack.enter_context(mock.patch.object(BATCH, "resolve_live_parent_attempt"))
+            stack.enter_context(mock.patch.object(BATCH, "completion_marker_gate"))
+            stack.enter_context(mock.patch.object(
+                BATCH.subprocess, "check_output", return_value=str(self.base)
+            ))
+            reserve = stack.enter_context(mock.patch.object(
+                BATCH, "reserve_batch", return_value=["a" * 32, "b" * 32]
+            ))
+            stack.enter_context(mock.patch.object(BATCH, "cancel_unclaimed"))
+            stack.enter_context(mock.patch.object(
+                BATCH.subprocess, "Popen", side_effect=FakeProcess
+            ))
+            stack.enter_context(mock.patch.dict(os.environ, {
+                "AGENT_DISPATCH_SELF_SLUG": "owner",
+                "AGENT_DISPATCH_ATTEMPT_ID": "att-parent-fixture",
+                "AGENT_DISPATCH_CURRENT_HARNESS": "opencode",
+                "AGENT_DISPATCH_CURRENT_TRANSPORT": "headless",
+                "AGENT_DISPATCH_CURRENT_SANDBOX": "workspace-write",
+            }))
+            with contextlib.redirect_stdout(output):
+                rc = BATCH.main(self.argv())
+
+        self.assertEqual(rc, 0)
+        self.assertEqual(len(created), 2)
+        self.assertEqual(set(joined), {"opencode", "claude"})
+        pending = reserve.call_args.args[2]
+        manifest = reserve.call_args.kwargs["manifest"]
+        self.assertEqual({leg["adapter"] for leg in pending}, {"opencode", "claude"})
+        self.assertEqual(
+            {member["harness"] for member in manifest["members"]},
+            {"opencode", "claude"},
+        )
+        self.assertEqual(
+            reserve.call_args.kwargs["manifest_digest"],
+            BATCH.build_manifest(
+                parallel_group="plan",
+                route_id=route["route_id"],
+                parent_attempt_id="att-parent-fixture",
+                independence="cross-harness",
+                required_independence_axes=[
+                    "cross-harness", "model-profile", "perspective"
+                ],
+                realized_independence_axes=[
+                    "cross-harness", "model-profile", "perspective"
+                ],
+                members=manifest["members"],
+            )[1],
+        )
+        receipt = json.loads(output.getvalue())
+        self.assertEqual(receipt["state"], "launched")
+        self.assertEqual(receipt["concurrent_launch"], 1)
+        self.assertEqual(receipt["newly_started"], 2)
+        self.assertEqual(
+            {leg["adapter"] for leg in receipt["legs"]},
+            {"opencode", "claude"},
+        )
+        self.assertTrue(all(leg["check"] == "ok" for leg in receipt["legs"]))
 
     def test_second_wrapper_spawn_failure_preserves_started_sibling(self):
         stack, assignments = self.common_patches()

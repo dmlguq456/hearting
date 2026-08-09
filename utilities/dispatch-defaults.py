@@ -4,25 +4,22 @@
 Parses a deliberately narrow YAML subset (scalars, inline lists, two-level
 mappings, comments) — no PyYAML/yq dependency. Validates against the
 canonical topology node ids in capabilities/topologies.json and exposes
-affinity/owner/relief queries used by utilities/dispatch-route.sh and its
-fixture tests.
+affinity/owner/allocation queries used by utilities/dispatch-route.sh and its
+fixture tests. Schema v1 remains readable as the former two-harness,
+OpenCode-relief-only compatibility contract.
 """
 import json
 import os
 import sys
 
-KNOWN_HARNESSES = {"claude", "codex"}
-# Relief-only harnesses (SD-66 `opencode.relief_only`): never a configured
-# depth1_owner default, but a legitimate launch target through an explicit
-# --adapter, an explicit config cell, or checked route evidence — the policy
-# text in profiles/dispatch-defaults.yaml and OPERATIONS §5.10 ("its
-# quick/relief surfaces") both name that path. Launch-surface authorization
-# uses DISPATCHABLE_HARNESSES; configured-default validation stays on
-# KNOWN_HARNESSES.
-RELIEF_HARNESSES = {"opencode"}
-DISPATCHABLE_HARNESSES = KNOWN_HARNESSES | RELIEF_HARNESSES
+LEGACY_NORMAL_HARNESSES = {"claude", "codex"}
+DISPATCHABLE_HARNESSES = {"claude", "codex", "opencode"}
+KNOWN_HARNESSES = DISPATCHABLE_HARNESSES
 AFFINITY_VALUES = {"claude", "codex", "opencode", "diverse"}
-TOP_LEVEL_KEYS = {"schema_version", "depth1_owner", "opencode", "capabilities"}
+ALLOCATION_STRATEGIES = {"least-recent-attempts"}
+TOP_LEVEL_KEYS = {
+    "schema_version", "depth1_owner", "opencode", "allocation", "capabilities"
+}
 
 
 class DefaultsConfigError(Exception):
@@ -144,18 +141,24 @@ def validate(config, capmap):
     for key in unknown_top:
         errors.append(f"unknown top-level key: {key!r}")
 
+    version = config.get("schema_version")
     if "schema_version" not in config:
         errors.append("missing required key: schema_version")
-    elif not isinstance(config["schema_version"], int):
-        errors.append(f"schema_version must be an integer, got {config['schema_version']!r}")
+    elif not isinstance(version, int):
+        errors.append(f"schema_version must be an integer, got {version!r}")
+    elif version not in {1, 2}:
+        errors.append(f"unsupported schema_version: {version!r}")
 
     owner = config.get("depth1_owner")
     if not isinstance(owner, list) or not owner:
         errors.append("depth1_owner must be a non-empty list of concrete harnesses")
     else:
         seen = set()
+        allowed_owners = (
+            DISPATCHABLE_HARNESSES if version == 2 else LEGACY_NORMAL_HARNESSES
+        )
         for h in owner:
-            if not isinstance(h, str) or h not in KNOWN_HARNESSES:
+            if not isinstance(h, str) or h not in allowed_owners:
                 errors.append(f"depth1_owner contains an unknown/non-concrete harness: {h!r}")
             elif h in seen:
                 errors.append(f"depth1_owner has a duplicate harness: {h!r}")
@@ -168,8 +171,30 @@ def validate(config, capmap):
         unknown_oc = sorted(set(opencode) - {"relief_only"})
         for key in unknown_oc:
             errors.append(f"unknown opencode key: {key!r}")
-        if opencode.get("relief_only") is not True:
-            errors.append("opencode.relief_only must be exactly true (relief-only policy)")
+        expected_relief = version != 2
+        if opencode.get("relief_only") is not expected_relief:
+            errors.append(
+                "opencode.relief_only must be exactly "
+                f"{str(expected_relief).lower()} for schema v{version}"
+            )
+
+    allocation = config.get("allocation")
+    if version == 2:
+        if not isinstance(allocation, dict):
+            errors.append("allocation must be a mapping for schema v2")
+        else:
+            unknown_allocation = sorted(set(allocation) - {"strategy", "window"})
+            for key in unknown_allocation:
+                errors.append(f"unknown allocation key: {key!r}")
+            if allocation.get("strategy") not in ALLOCATION_STRATEGIES:
+                errors.append(
+                    "allocation.strategy must be least-recent-attempts"
+                )
+            window = allocation.get("window")
+            if not isinstance(window, int) or not 3 <= window <= 300:
+                errors.append("allocation.window must be an integer from 3 to 300")
+    elif allocation is not None:
+        errors.append("allocation requires schema_version 2")
 
     caps = config.get("capabilities", {})
     if not isinstance(caps, dict):
@@ -233,10 +258,27 @@ def query_owners(config):
     return config.get("depth1_owner", [])
 
 
+def query_allocation(config):
+    allocation = config.get("allocation")
+    if config.get("schema_version") == 2 and isinstance(allocation, dict):
+        return {
+            "strategy": allocation["strategy"],
+            "window": allocation["window"],
+            "harness_order": list(query_owners(config)),
+        }
+    return {
+        "strategy": "config-order",
+        "window": 0,
+        "harness_order": list(query_owners(config)),
+    }
+
+
 def query_opencode_policy(config):
     opencode = config.get("opencode", {})
     if isinstance(opencode, dict) and opencode.get("relief_only") is True:
         return "relief-only"
+    if isinstance(opencode, dict) and opencode.get("relief_only") is False:
+        return "normal"
     return "unknown"
 
 
@@ -251,7 +293,7 @@ def _arg(args, flag, default=None):
 
 def main(argv):
     if not argv:
-        print("usage: dispatch-defaults.py <validate|affinity|owners|opencode-policy> [options]", file=sys.stderr)
+        print("usage: dispatch-defaults.py <validate|affinity|owners|allocation|opencode-policy> [options]", file=sys.stderr)
         return 64
 
     op = argv[0]
@@ -275,6 +317,12 @@ def main(argv):
         return 0
     if op == "owners":
         print(",".join(query_owners(config)))
+        return 0
+    if op == "allocation":
+        allocation = query_allocation(config)
+        print(f"strategy={allocation['strategy']}")
+        print(f"window={allocation['window']}")
+        print("harness_order=" + ",".join(allocation["harness_order"]))
         return 0
     if op == "opencode-policy":
         print(query_opencode_policy(config))

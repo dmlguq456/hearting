@@ -82,8 +82,8 @@ rm "$jobs"; : > "$jobs"
 out=$(route --capability autopilot-apply --stage apply); assert "$out" 'status=unknown'; assert "$out" 'adapter=opencode'
 out=$(route --capability autopilot-apply --stage apply --adapter claude); assert "$out" 'adapter=claude'
 
-# OpenCode is never an automatic neutral/diverse candidate: an unconfigured
-# cell never resolves to opencode regardless of maker family/bias.
+# Schema-v1 compatibility keeps OpenCode out of automatic neutral/diverse
+# selection: an unconfigured cell never resolves to opencode.
 out=$(route --capability autopilot-apply --stage verify --maker-family claude); assert_not "$out" 'adapter=opencode'
 out=$(route --capability autopilot-apply --stage verify --maker-family gpt); assert_not "$out" 'adapter=opencode'
 
@@ -94,6 +94,50 @@ owners=$(python3 "$root/utilities/dispatch-defaults.py" owners --config "$cfg")
 # opencode relief-only policy query.
 policy=$(python3 "$root/utilities/dispatch-defaults.py" opencode-policy --config "$cfg")
 [ "$policy" = "relief-only" ]
+
+# ---- SD-66 schema v2: three normal harnesses + recent-attempt balance ----
+cfg_v2="$tmp/dispatch-defaults-v2.yaml"
+cat > "$cfg_v2" <<'EOF'
+schema_version: 2
+depth1_owner: [claude, codex, opencode]
+opencode:
+  relief_only: false
+allocation:
+  strategy: least-recent-attempts
+  window: 30
+capabilities:
+  autopilot-code:
+    execute: diverse
+EOF
+export DISPATCH_DEFAULTS_CONFIG="$cfg_v2"
+: > "$jobs"
+
+# With equal usage the declared order is the deterministic tie-break.
+out=$(route --capability autopilot-code --stage execute)
+assert "$out" 'adapter=claude'; assert "$out" 'allocation_rank=claude,codex,opencode'
+
+# Only exact registered attempt rows count; once Claude and Codex each have
+# one recent attempt, the same route conditions select OpenCode.
+printf '%s\tdone\tx\tx\tx\tharness=claude,attempt_id=att-c,attempt_schema_version=2,registered_worker=1\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$jobs"
+printf '%s\tdone\tx\tx\tx\tharness=codex,attempt_id=att-g,attempt_schema_version=2,registered_worker=1\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$jobs"
+printf '%s\tdone\tx\tx\tx\tharness=opencode,attempt_id=ignored,attempt_schema_version=1,registered_worker=1\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$jobs"
+out=$(route --capability autopilot-code --stage execute)
+assert "$out" 'status=unknown'; assert "$out" 'adapter=opencode'
+assert "$out" 'attempt_count.claude=1'; assert "$out" 'attempt_count.codex=1'; assert "$out" 'attempt_count.opencode=0'
+assert "$out" 'allocation_rank=opencode,claude,codex'
+
+# A current hard usage marker removes the least-used harness and balance
+# continues over the remaining normal pool.
+printf '%s\tdone\tx\tx\tx\tharness=opencode,note=dead-session-limit\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$jobs"
+out=$(route --capability autopilot-code --stage execute)
+assert "$out" 'adapter=claude'; assert_not "$out" 'adapter=opencode'
+
+owners=$(python3 "$root/utilities/dispatch-defaults.py" owners --config "$cfg_v2")
+[ "$owners" = "claude,codex,opencode" ]
+policy=$(python3 "$root/utilities/dispatch-defaults.py" opencode-policy --config "$cfg_v2")
+[ "$policy" = "normal" ]
+: > "$jobs"
+export DISPATCH_DEFAULTS_CONFIG="$cfg"
 
 # ---- malformed config fails loud with useful stderr, for every class ----
 bad_model_like="$tmp/bad-model-like.yaml"

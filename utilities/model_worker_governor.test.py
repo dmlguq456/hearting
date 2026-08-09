@@ -21,7 +21,7 @@ from replica_batch_contract import build_manifest
 
 
 class GovernorTest(unittest.TestCase):
-    def manifest(self):
+    def manifest(self, second_harness="claude"):
         return build_manifest(
             replica_group="plan",
             route_id="rt-governor",
@@ -43,7 +43,7 @@ class GovernorTest(unittest.TestCase):
                     "assignment_sha256": "sha256:" + "a" * 64,
                     "attempt_id": "att-plan-two",
                     "route_node": "plan-replica",
-                    "harness": "claude",
+                    "harness": second_harness,
                     "fallback_hop": "cross-harness-headless",
                     "fallback_ordinal": 2,
                     "model_profile": "light",
@@ -216,6 +216,28 @@ class GovernorTest(unittest.TestCase):
             for key in GOVERNOR.BATCH_RESERVATION_KEYS:
                 if key in first:
                     self.assertEqual(claimed[key], first[key])
+
+    def test_opencode_parallel_manifest_reserves_and_survives_claim(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            manifest, digest, legs = self.manifest(second_harness="opencode")
+            tokens = self.reserve_batch(
+                temp_dir,
+                2,
+                {
+                    "manifest": manifest,
+                    "selected_attempt_ids": ["att-plan-one", "att-plan-two"],
+                },
+            )
+            second = GOVERNOR.reservation_check(temp_dir, tokens[1])
+            self.assertEqual(second["reservation_kind"], "parallel-batch")
+            self.assertEqual(second["batch_harness"], "opencode")
+            self.assertEqual(second["batch_manifest_sha256"], digest)
+            self.assertEqual(second["batch_leg_sha256"], legs["att-plan-two"])
+            GOVERNOR.claim_reservation(temp_dir, tokens[1], "dispatch")
+            claimed = GOVERNOR.reservation_check(temp_dir, tokens[1])
+            self.assertEqual(claimed["state"], "claimed")
+            self.assertEqual(claimed["batch_harness"], "opencode")
+            self.assertEqual(claimed["batch_manifest_sha256"], digest)
 
     def test_bound_replica_partial_recovery_reserves_one_declared_member(self):
         with tempfile.TemporaryDirectory() as temp_dir:

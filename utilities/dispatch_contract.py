@@ -117,6 +117,10 @@ ATTEMPT_MUTABLE_METADATA = {
     "pgid_host",
     "group_reap_proof",
     "group_reap_pgid",
+    "attempt_descendant_proof",
+    "attempt_descendant_observer_ns",
+    "reap_watch",
+    "reap_watch_pid",
     "launch_lifecycle",
     "launch_lifecycle_requested",
     "launch_lifecycle_reselection",
@@ -1013,6 +1017,7 @@ def process_group_members(pgid: int) -> tuple[tuple[int, str, str], ...]:
 
 
 ATTEMPT_DESCENDANT_ENV = "AGENT_DISPATCH_ATTEMPT_ID"
+ATTEMPT_DESCENDANT_PROOF = "attempt-tagged-empty-v1"
 
 # Every reason `completion_marker_gate` raises because some process has not
 # stopped yet. They share one exit code (78) and one meaning for the caller:
@@ -1106,7 +1111,37 @@ def _foreground_reap_receipt(metadata: dict[str, str]) -> bool:
     )
 
 
-def attempt_process_quiescence(metadata: dict[str, str]) -> ProcessQuiescence:
+def _detached_group_drain_receipt(metadata: dict[str, str]) -> bool:
+    raw_pid = metadata.get("pid", "")
+    raw_group = metadata.get("pgid", "")
+    observer_namespace = metadata.get("pid_observer_ns", "")
+    process_namespace = metadata.get("pid_ns", "")
+    return bool(
+        raw_pid.isdigit()
+        and metadata.get("pid_start")
+        and raw_group == raw_pid
+        and observer_namespace
+        and process_namespace == observer_namespace
+        and metadata.get("launch_lifecycle") == "detached"
+        and metadata.get("launch_outcome") == "governed-process-group-drained"
+        and metadata.get("group_reap_proof") == GROUP_REAP_PROOF
+        and metadata.get("group_reap_pgid") == raw_group
+        and metadata.get("attempt_descendant_proof") == ATTEMPT_DESCENDANT_PROOF
+        and metadata.get("attempt_descendant_observer_ns") == observer_namespace
+    )
+
+
+def _post_exit_receipt_reason(metadata: dict[str, str]) -> str:
+    if _foreground_reap_receipt(metadata):
+        return "governed-process-group-reaped"
+    if _detached_group_drain_receipt(metadata):
+        return "governed-process-group-drained"
+    return ""
+
+
+def attempt_process_quiescence(
+    metadata: dict[str, str], *, terminal_receipt: bool = False
+) -> ProcessQuiescence:
     """Classify the exact governed process, then prove no tagged descendant survives.
 
     The leader/process-group verdict below is left exactly as it was; it is only
@@ -1132,6 +1167,17 @@ def attempt_process_quiescence(metadata: dict[str, str]) -> ProcessQuiescence:
             "live", "attempt-descendant-live", probe.members[0][0]
         )
     if probe.state == "unverifiable":
+        # SD-79/80/89: the observer that produced a complete post-exit receipt
+        # may itself have disappeared before a successor or retry is launched.
+        # Consume that receipt only at an exact terminal gate, and only for the
+        # one unavailability it can explain. A visible tagged process already
+        # returned above, while incomplete scans remain fail-closed.
+        if (
+            terminal_receipt
+            and probe.reason == "observer-namespace-mismatch"
+            and _post_exit_receipt_reason(metadata)
+        ):
+            return result
         return ProcessQuiescence("unverifiable", "attempt-descendant-unverifiable")
     return result
 
@@ -1159,11 +1205,11 @@ def _attempt_process_quiescence_impl(metadata: dict[str, str]) -> ProcessQuiesce
         return ProcessQuiescence("unverifiable", "process-identity-invalid")
 
     candidates = authoritative_process_identities(metadata)
-    reap_receipt = _foreground_reap_receipt(metadata)
+    receipt_reason = _post_exit_receipt_reason(metadata)
 
     if not candidates:
-        if reap_receipt:
-            return ProcessQuiescence("quiescent", "governed-process-group-reaped")
+        if receipt_reason:
+            return ProcessQuiescence("quiescent", receipt_reason)
         return ProcessQuiescence("unverifiable", "process-namespace-unverifiable")
 
     terminal: list[ProcessQuiescence] = []
@@ -1199,8 +1245,8 @@ def _attempt_process_quiescence_impl(metadata: dict[str, str]) -> ProcessQuiesce
                 unresolved.append(f"{source}-process-group-unverifiable")
                 continue
             terminal_reason = f"{source}-pid-gone"
-            if reap_receipt:
-                terminal_reason = "governed-process-group-reaped"
+            if receipt_reason:
+                terminal_reason = receipt_reason
             terminal.append(
                 ProcessQuiescence("quiescent", terminal_reason, pid, candidate)
             )
@@ -1239,8 +1285,8 @@ def _attempt_process_quiescence_impl(metadata: dict[str, str]) -> ProcessQuiesce
             )
             continue
         return ProcessQuiescence("live", f"{source}-pid-live", pid, candidate)
-    if reap_receipt:
-        return ProcessQuiescence("quiescent", "governed-process-group-reaped")
+    if receipt_reason:
+        return ProcessQuiescence("quiescent", receipt_reason)
     if unresolved:
         return ProcessQuiescence("unverifiable", unresolved[0])
     if terminal:
@@ -2810,7 +2856,7 @@ def _sibling_attempt_gate(
             return
     else:
         lines = registry_lines
-    sibling: dict[str, str] | None = None
+    sibling: tuple[str, dict[str, str]] | None = None
     for line in lines:
         fields = line.split("\t")
         if len(fields) != 6:
@@ -2830,10 +2876,14 @@ def _sibling_attempt_gate(
             continue
         # Only the most recent sibling by registry order is authoritative; older
         # rows are its lineage, not independent claimants.
-        sibling = metadata
+        sibling = (fields[1], metadata)
     if sibling is None:
         return
-    process = attempt_process_quiescence(sibling)
+    sibling_status, sibling_metadata = sibling
+    process = attempt_process_quiescence(
+        sibling_metadata,
+        terminal_receipt=sibling_status in {"done", "killed", "cancelled"},
+    )
     if process.state == "quiescent":
         return
     reason = (
@@ -2843,7 +2893,7 @@ def _sibling_attempt_gate(
     )
     raise DispatchContractError(
         reason,
-        f"{route_node}:{sibling.get('attempt_id', '-')}:{process.reason}",
+        f"{route_node}:{sibling_metadata.get('attempt_id', '-')}:{process.reason}",
     )
 
 
@@ -3011,7 +3061,7 @@ def completion_attempt_readiness(
         return AttemptReadiness("unverifiable", "marker-attempt-not-terminal", attempt_id)
     if conflicting_active:
         return AttemptReadiness("draining", "conflicting-active-retry", attempt_id)
-    process = attempt_process_quiescence(metadata)
+    process = attempt_process_quiescence(metadata, terminal_receipt=True)
     if process.state == "quiescent":
         return AttemptReadiness("ready", process.reason, attempt_id)
     if process.state == "live":
@@ -3585,6 +3635,53 @@ def launch_orphan_watch(
         )
     except OSError as exc:
         raise DispatchContractError("orphan-watch-launch-failed", str(exc)) from exc
+    return proc.pid
+
+
+def launch_reap_watch(
+    jobs: Path,
+    attempt_id: str,
+    pid: int,
+    pid_start: str,
+    pgid: int,
+) -> int:
+    """Start the exact detached-process drain observer in the launch namespace."""
+
+    if not attempt_id or pid <= 0 or pgid != pid or not pid_start:
+        raise DispatchContractError(
+            "reap-watch-identity-invalid",
+            "attempt_id, leader pid/start, and leader pgid are required",
+        )
+    script = _MODULE_ROOT / "utilities" / "dispatch-reap-watch.py"
+    # The observer is governance machinery, not part of the governed attempt.
+    # A direct wrapper can inherit the same attempt tag that supplied its
+    # default --attempt-id; retaining it here would make the observer discover
+    # itself forever and prevent the empty receipt it exists to issue.
+    watcher_env = {
+        key: value
+        for key, value in os.environ.items()
+        if key != ATTEMPT_DESCENDANT_ENV
+    }
+    try:
+        proc = subprocess.Popen(
+            [
+                sys.executable,
+                str(script),
+                "--jobs", str(Path(jobs).resolve()),
+                "--attempt-id", attempt_id,
+                "--pid", str(pid),
+                "--pid-start", pid_start,
+                "--pgid", str(pgid),
+            ],
+            cwd="/",
+            env=watcher_env,
+            start_new_session=True,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except OSError as exc:
+        raise DispatchContractError("reap-watch-launch-failed", str(exc)) from exc
     return proc.pid
 
 

@@ -14,7 +14,7 @@ from typing import Any
 
 
 DIGEST = re.compile(r"sha256:[0-9a-f]{64}")
-SUPPORTED_HARNESSES = frozenset({"codex", "claude"})
+SUPPORTED_HARNESSES = frozenset({"claude", "codex", "opencode"})
 SUPPORTED_INDEPENDENCE = frozenset({"cross-harness", "degraded-same-harness"})
 SUPPORTED_AXES = frozenset({"cross-harness", "model-profile", "perspective"})
 SUPPORTED_PROFILES = frozenset({"deep", "balanced-deep", "light"})

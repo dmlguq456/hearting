@@ -39,7 +39,7 @@ dispatch and never changes the gate:
 |---|---|---|---|
 | Claude Code | native subagent | supported (`claude-subagent`) | registered headless, then inline |
 | Codex | native subagent | supported (`codex-native-subagent`) | registered headless, then inline |
-| OpenCode | native agents | no route-owned depth-2 evidence yet | registered headless where eligible, otherwise inline |
+| OpenCode | native agents | no route-owned dispatch-depth-2 evidence yet | registered headless where eligible, otherwise inline |
 
 Any native helper stays inside the parent sub-session's fixed files, mutates
 serially, returns only a bounded summary, and has no stage-gate authority.

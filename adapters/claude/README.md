@@ -47,7 +47,7 @@ so that residual runtime input is reported separately from profile masking.
 | interactive owner completion | `hooks/dispatch-owner-rewake.py`; `PostToolUse(Bash)` `asyncRewake` arms only from a successful same-session dispatch-depth-1 owner start, waits outside the model, and returns one exact-attempt receipt without recurring background monitors |
 | memory write guard | `hooks/builtin-memory-guard.sh` |
 | memory candidate exposure | `UserPromptSubmit` runs `hooks/mem-recall-inject.sh`: active current-project/global capsule headlines and IDs only, maximum three / 1,200 UTF-8 bytes, fail-open. The model decides relevance and reads full records. The bridge publishes the same-turn receipt required by main-session material mutation; explicit `recall-gate` is the fallback |
-| stage-session capacity | `dispatch-headless.py` projects the portable sub-session axes, phase brief, fixed-file fence, and `_internal/state/<attempt_id>.md`. `PreCompact` flushes the ledger, `PostCompact` re-reads it, and the edit hook denies missing/stale/out-of-list state. Sub-sessions carry `stage_authority=0`; only the depth-1 owner aggregates the one stage gate. |
+| stage-session capacity | `dispatch-headless.py` projects the portable sub-session axes, phase brief, fixed-file fence, and `_internal/state/<attempt_id>.md`. `PreCompact` flushes the ledger, `PostCompact` re-reads it, and the edit hook denies missing/stale/out-of-list state. Sub-sessions carry `stage_authority=0`; only the dispatch-depth-1 owner aggregates the one stage gate. |
 
 ## Runtime Home Projection
 

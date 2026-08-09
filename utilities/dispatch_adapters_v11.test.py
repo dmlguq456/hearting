@@ -181,6 +181,14 @@ class AdapterV11Test(unittest.TestCase):
     else:
      self.assertIn('launch_metadata["pid_scope"] = "namespace-local"',source)
     self.assertIn('os.environ.get("AGENT_DISPATCH_CHILD") == "1"',source)
+ def test_all_three_wrappers_install_the_same_detached_reap_observer(self):
+  for harness in ADAPTERS:
+   with self.subTest(harness=harness):
+    source=(ROOT/f"adapters/{harness}/bin/dispatch-headless.py").read_text(
+     encoding="utf-8")
+    self.assertIn("launch_reap_watch",source)
+    self.assertIn("if args.launch_lifecycle == DETACHED:",source)
+    self.assertIn('{"reap_watch": "post-exit", "reap_watch_pid":',source)
  def test_nested_codex_home_links_auth_but_keeps_mutable_state_local(self):
   with tempfile.TemporaryDirectory() as td:
    root=Path(td); source=root/"source"; source.mkdir(); worktree=root/"worktree"; worktree.mkdir()

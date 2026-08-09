@@ -490,6 +490,8 @@ class TestRoute(unittest.TestCase):
   self.assertEqual(by_id["test"],"diverse")
   self.assertEqual(by_id["report"],"claude")
   self.assertIsNotNone(route["dispatch_defaults_digest"])
+  self.assertEqual(route["dispatch_allocation"]["strategy"],"config-order")
+  self.assertEqual(route["dispatch_allocation"]["harness_order"],["claude","codex"])
  def test_seal_hash_changes_with_config_value_not_formatting(self):
   with dispatch_defaults_config(DD_CONFIG_A):
    a=self._standard()
@@ -511,6 +513,7 @@ class TestRoute(unittest.TestCase):
   legacy=json.loads(json.dumps(route))
   for node in legacy["nodes"]: node.pop("harness_affinity",None)
   legacy.pop("dispatch_defaults_digest",None)
+  legacy.pop("dispatch_allocation",None)
   legacy["route_hash"]=R.route_hash(legacy); legacy["route_id"]="rt-"+legacy["route_hash"].split(":",1)[1][:16]
   R.verify_route(legacy,R.ROOT)
  def test_seal_forged_vocabulary_fails(self):
@@ -525,6 +528,7 @@ class TestRoute(unittest.TestCase):
    with dispatch_defaults_config_path(Path(td)/"does-not-exist.yaml"):
     route=self._standard()
   self.assertIsNone(route["dispatch_defaults_digest"])
+  self.assertIsNone(route["dispatch_allocation"])
   for node in route["nodes"]: self.assertEqual(node["harness_affinity"],"unspecified")
  def test_seal_corrupt_config_fails_loud(self):
   with dispatch_defaults_config(DD_CONFIG_CORRUPT):

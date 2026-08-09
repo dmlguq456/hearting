@@ -110,8 +110,9 @@ An ordinary dispatch-depth-1 owner launches through `preflight.sh dispatch-owner
 dispatch` below: it delegates to the portable `utilities/dispatch-owner.py`
 selector, which reads `profiles/dispatch-defaults.yaml` and runs the SD-22
 cascade (explicit target, then hard eligibility, then configured
-`depth1_owner`, then eligibility fallback) before execing only the chosen
-adapter's wrapper.
+`depth1_owner`, then sealed recent-attempt balance, then eligibility fallback)
+before execing only the chosen adapter's wrapper. Schema-v2 defaults keep all
+three harnesses in the normal pool and expose bounded exact attempt counts.
 
 Check `preflight.sh headless [--check] [--require-hook-trust] <worktree>`.
 Launch registered jobs only through `preflight.sh dispatch
