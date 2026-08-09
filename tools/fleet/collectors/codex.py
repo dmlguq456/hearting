@@ -40,6 +40,8 @@ _SID_RE = re.compile(r"-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f
 
 _INDEX = {"ts": 0.0, "map": None}          # cwd → rollout paths (newest first)
 _INDEX_TTL = 1.5
+_START_MATCH_BEFORE_SEC = 5.0
+_START_MATCH_AFTER_SEC = 30.0
 _FALLBACK_CLAIMS = {"ts": 0.0, "sids": set()}  # session ids assigned without a proc fd
 _PROC_PATHS = {}                                  # pid -> rollout reserved at collect tick start
 _CFG = {"ts": 0.0, "model": None, "effort": None}
@@ -555,6 +557,102 @@ def _session_created(meta):
         return None
 
 
+def _process_started_at(sess):
+    """Convert one exact Linux ``/proc`` start identity to epoch seconds.
+
+    ``Session.proc_start`` is field 22 from ``/proc/<pid>/stat``: clock ticks
+    since boot.  ``btime`` uses the same boot epoch, so the pair is materially
+    stronger than the whole-minute ``ps etime`` used by the legacy fallback.
+    Missing/non-Linux evidence stays unknown and never enables attribution.
+    """
+    try:
+        ticks = int(sess.proc_start)
+        clock_ticks = int(os.sysconf("SC_CLK_TCK"))
+        if ticks < 0 or clock_ticks <= 0:
+            return None
+        with open("/proc/stat", encoding="ascii", errors="replace") as handle:
+            boot = next(
+                int(line.split()[1]) for line in handle
+                if line.startswith("btime ")
+            )
+    except (AttributeError, OSError, StopIteration, TypeError, ValueError):
+        return None
+    return boot + ticks / clock_ticks
+
+
+def _reserve_start_matched_rollouts(sessions, home, paths, claimed, denied=frozenset()):
+    """Reserve only mutually unique root rollouts by exact process start.
+
+    Incident 2026-08-10: two direct Codex TUIs in Eiren_invest held no rollout
+    fd.  Their root rollouts were uniquely separated by exact process start, but
+    the minute-rounded fallback saw both roots plus a subagent and left both
+    rows anonymous.  A pair is accepted only when the process has one candidate
+    and that rollout has one candidate process. Ambiguous graphs remain unknown.
+    """
+    by_cwd = {}
+    for sess in sessions:
+        if (
+            getattr(sess, "harness", None) != "codex"
+            or not getattr(sess, "cwd", None)
+            or sess.pid in paths
+            or sess.pid in denied
+            or getattr(sess, "app_server", False)
+            or getattr(sess, "managed_dir", None)
+            or getattr(sess, "is_child", False)
+        ):
+            continue
+        started = _process_started_at(sess)
+        if started is not None:
+            by_cwd.setdefault(sess.cwd, []).append((sess, started))
+
+    index = _index(home)
+    for cwd, started_sessions in by_cwd.items():
+        edges = {}
+        for sess, started in started_sessions:
+            candidates = set()
+            for path in index.get(cwd, []):
+                sid = _sid(path)
+                if not sid or sid in claimed:
+                    continue
+                meta = _rollout_meta(path)
+                if _is_subagent(meta):
+                    continue
+                if os.path.realpath(meta.get("cwd") or "") != os.path.realpath(cwd):
+                    continue
+                created = _session_created(meta)
+                if created is None:
+                    continue
+                delay = created - started
+                if -_START_MATCH_BEFORE_SEC <= delay <= _START_MATCH_AFTER_SEC:
+                    candidates.add(path)
+            if candidates:
+                edges[sess.pid] = candidates
+
+        while edges:
+            owners = {}
+            for pid, candidates in edges.items():
+                for path in candidates:
+                    owners.setdefault(path, set()).add(pid)
+            pairs = sorted(
+                (pid, next(iter(candidates)))
+                for pid, candidates in edges.items()
+                if len(candidates) == 1
+                and len(owners.get(next(iter(candidates)), ())) == 1
+            )
+            if not pairs:
+                break
+            assigned_pids = {pid for pid, _path in pairs}
+            assigned_paths = {path for _pid, path in pairs}
+            for pid, path in pairs:
+                paths[pid] = path
+                claimed.add(_sid(path))
+            edges = {
+                pid: candidates - assigned_paths
+                for pid, candidates in edges.items()
+                if pid not in assigned_pids and candidates - assigned_paths
+            }
+
+
 def _fallback_rollout(sess, home):
     """Match an idle TUI only when exactly one unclaimed rollout fits its start time."""
     now = time.time()
@@ -566,7 +664,10 @@ def _fallback_rollout(sess, home):
         sid = _sid(path)
         if not sid or sid in _FALLBACK_CLAIMS["sids"]:
             continue
-        created = _session_created(_rollout_meta(path))
+        meta = _rollout_meta(path)
+        if _is_subagent(meta):
+            continue
+        created = _session_created(meta)
         if created is not None and process_started - 300 <= created <= now + 300:
             candidates.append(path)
     if len(candidates) != 1:
@@ -641,6 +742,7 @@ def prepare_tick(sessions):
     # Managed Codex: move each app-server's rollout onto its own TUI client row. The sid
     # stays in `claimed`, so no other row can pick it up through the fallback either.
     donated = _transfer_managed_rollouts(sessions, paths)
+    _reserve_start_matched_rollouts(sessions, home, paths, claimed, donated)
     _PROC_PATHS.clear()
     _PROC_PATHS.update(paths)
     _FALLBACK_CLAIMS.update(ts=time.time(), sids=claimed)

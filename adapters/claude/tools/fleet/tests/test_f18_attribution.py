@@ -61,6 +61,48 @@ class ProcscanTaggingTest(unittest.TestCase):
 
 
 class CodexRolloutAttributionTest(unittest.TestCase):
+    def test_prepare_tick_pairs_same_cwd_roots_by_exact_process_start(self):
+        """2026-08-10 Invest incident: two direct TUIs must not stay anonymous.
+
+        Root rollout timestamps uniquely fit the two /proc start identities, while a
+        later subagent rollout in the same cwd is never a TUI fallback candidate.
+        """
+        first = Session(harness="codex", pid=10, cwd="/work/repo", proc_start="100")
+        second = Session(harness="codex", pid=20, cwd="/work/repo", proc_start="200")
+        one = "/r/rollout-2026-08-10T00-00-02-11111111-1111-1111-1111-111111111111.jsonl"
+        two = "/r/rollout-2026-08-10T00-00-42-22222222-2222-2222-2222-222222222222.jsonl"
+        child = "/r/rollout-2026-08-10T00-01-00-33333333-3333-3333-3333-333333333333.jsonl"
+        meta = {
+            one: {"cwd": "/work/repo", "timestamp": "2026-08-10T00:00:02Z", "source": "vscode"},
+            two: {"cwd": "/work/repo", "timestamp": "2026-08-10T00:00:42Z", "source": "vscode"},
+            child: {"cwd": "/work/repo", "timestamp": "2026-08-10T00:01:00Z",
+                    "source": {"subagent": {"thread_spawn": {}}}},
+        }
+        with mock.patch.object(codex, "_proc_rollout", return_value=None), \
+             mock.patch.object(codex, "_index", return_value={"/work/repo": [child, two, one]}), \
+             mock.patch.object(codex, "_rollout_meta", side_effect=lambda path: meta[path]), \
+             mock.patch.object(codex, "_process_started_at",
+                               side_effect=lambda sess: {10: 1786320000.0, 20: 1786320040.0}[sess.pid]), \
+             mock.patch.object(codex, "_tick_subagents", return_value={}):
+            tick = codex.prepare_tick([first, second])
+        self.assertEqual(tick.proc_paths, {10: one, 20: two})
+
+    def test_prepare_tick_refuses_non_unique_exact_start_pairing(self):
+        sessions = [
+            Session(harness="codex", pid=10, cwd="/work/repo", proc_start="100"),
+            Session(harness="codex", pid=20, cwd="/work/repo", proc_start="200"),
+        ]
+        one = "/r/rollout-2026-08-10T00-00-02-11111111-1111-1111-1111-111111111111.jsonl"
+        two = "/r/rollout-2026-08-10T00-00-02-22222222-2222-2222-2222-222222222222.jsonl"
+        with mock.patch.object(codex, "_proc_rollout", return_value=None), \
+             mock.patch.object(codex, "_index", return_value={"/work/repo": [two, one]}), \
+             mock.patch.object(codex, "_rollout_meta", return_value={
+                 "cwd": "/work/repo", "timestamp": "2026-08-10T00:00:02Z", "source": "vscode"}), \
+             mock.patch.object(codex, "_process_started_at", return_value=1786320000.0), \
+             mock.patch.object(codex, "_tick_subagents", return_value={}):
+            tick = codex.prepare_tick(sessions)
+        self.assertEqual(tick.proc_paths, {})
+
     def test_two_same_cwd_sessions_remain_unknown_when_fallback_is_ambiguous(self):
         sessions = [Session(harness="codex", pid=1, cwd="/work/repo", elapsed_min=1),
                     Session(harness="codex", pid=2, cwd="/work/repo", elapsed_min=1)]
