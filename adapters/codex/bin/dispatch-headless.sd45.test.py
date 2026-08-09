@@ -174,6 +174,9 @@ class CodexSandboxMountShape(unittest.TestCase):
             self.assertEqual(result.returncode, 65, result.stdout + result.stderr)
             output = result.stdout + result.stderr
             self.assertIn("invalid-worktree-codex-mount-target", output)
+            self.assertIn("failure_scope=exact-worktree", output)
+            self.assertIn("codex_command=ok", output)
+            self.assertIn("retry_on_isolated_worktree=1", output)
             self.assertIn("child_spawned=0", output)
             self.assertFalse(jobs.exists())
 
@@ -213,6 +216,9 @@ class CodexSandboxMountShape(unittest.TestCase):
             result = self._preflight_check(worktree)
         self.assertEqual(result.returncode, 65, result.stdout + result.stderr)
         self.assertIn("reason=invalid-worktree-codex-mount-target", result.stdout)
+        self.assertIn("failure_scope=exact-worktree", result.stdout)
+        self.assertIn("codex_command=ok", result.stdout)
+        self.assertIn("retry_on_isolated_worktree=1", result.stdout)
 
     def test_eligibility_probe_rejects_symlink_shape(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -222,6 +228,38 @@ class CodexSandboxMountShape(unittest.TestCase):
             result = self._preflight_check(worktree)
         self.assertEqual(result.returncode, 65, result.stdout + result.stderr)
         self.assertIn("reason=invalid-worktree-codex-mount-target", result.stdout)
+
+    def test_untracked_primary_file_does_not_poison_final_isolated_worktree(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            primary = Path(tmp) / "primary"
+            isolated = Path(tmp) / "isolated"
+            primary.mkdir()
+            subprocess.run(["git", "init", "-q", str(primary)], check=True)
+            subprocess.run(["git", "-C", str(primary), "config", "user.email", "fixture@example.com"], check=True)
+            subprocess.run(["git", "-C", str(primary), "config", "user.name", "Fixture"], check=True)
+            (primary / "tracked").write_text("fixture\n")
+            subprocess.run(["git", "-C", str(primary), "add", "tracked"], check=True)
+            subprocess.run(["git", "-C", str(primary), "commit", "-qm", "fixture"], check=True)
+            (primary / ".codex").write_text("")
+            subprocess.run(
+                ["git", "-C", str(primary), "worktree", "add", "-q", "-b", "isolated", str(isolated)],
+                check=True,
+            )
+            try:
+                primary_result = self._preflight_check(primary)
+                isolated_mount = WH.invalid_codex_mount_target(
+                    self.args("codex-exec-headless"), isolated
+                )
+            finally:
+                subprocess.run(
+                    ["git", "-C", str(primary), "worktree", "remove", "--force", str(isolated)],
+                    check=True,
+                )
+        self.assertEqual(primary_result.returncode, 65, primary_result.stdout + primary_result.stderr)
+        self.assertIn("failure_scope=exact-worktree", primary_result.stdout)
+        self.assertIn("codex_command=ok", primary_result.stdout)
+        self.assertIn("retry_on_isolated_worktree=1", primary_result.stdout)
+        self.assertIsNone(isolated_mount)
 
     def test_eligibility_probe_honors_the_disabled_inner_sandbox_signal(self):
         # `AGENT_DISPATCH_CHILD=1` is one of the two signals that make
@@ -239,7 +277,7 @@ class CodexSD45(unittest.TestCase):
   with tempfile.TemporaryDirectory() as td:
    base=Path(td); repo=base/"repo"; repo.mkdir(); subprocess.run(["git","init","-q",str(repo)],check=True); subprocess.run(["git","-C",str(repo),"config","user.email","fixture@example.com"],check=True); subprocess.run(["git","-C",str(repo),"config","user.name","Fixture"],check=True); (repo/"x").write_text("x"); subprocess.run(["git","-C",str(repo),"add","x"],check=True); subprocess.run(["git","-C",str(repo),"commit","-qm","init"],check=True)
    art=base/".agent_reports"; art.mkdir(); gate={"spec_read":{"satisfied":True,"source":"codex-fixture"},"drift_verdict":"within-spec","workflow_mode":"tracked","artifact_guard":{"satisfied":True,"source":"codex-fixture"}}
-   dispatch={"tuples":[{"parent_harness":"codex","parent_transport":"headless","parent_sandbox":"workspace-write","child_harness":"codex","launch_authority":"conductor","status":"supported","probe_source":"codex-fixture","probe_time":"2026-07-16T00:00:00Z","failure_class":""}],"native_subagent":[]}; route=R.compile_route("autopilot-code","dev","strong",repo,art,signals=["shared-contract"],transport="headless",tracking="tracked",tracked_gate_evidence=gate,dispatch_evidence=dispatch); path=base/"route.json"; path.write_text(json.dumps(route)); node=next(x for x in route["nodes"] if x["id"]=="execute"); jobs=base/"jobs.log"; logs=base/"logs"
+   dispatch={"tuples":[{"parent_harness":"codex","parent_transport":"headless","parent_sandbox":"workspace-write","child_harness":"codex","launch_authority":"conductor","status":"supported","probe_source":"codex-fixture","probe_time":"2026-07-16T00:00:00Z","failure_class":"","checked_worktree":str(repo.resolve()),"failure_scope":"none","codex_command":"ok","retry_on_isolated_worktree":0}],"native_subagent":[]}; route=R.compile_route("autopilot-code","dev","strong",repo,art,signals=["shared-contract"],transport="headless",tracking="tracked",tracked_gate_evidence=gate,dispatch_evidence=dispatch); path=base/"route.json"; path.write_text(json.dumps(route)); node=next(x for x in route["nodes"] if x["id"]=="execute"); jobs=base/"jobs.log"; logs=base/"logs"
    parent=subprocess.Popen(["sleep","60"]);self.addCleanup(parent.wait);self.addCleanup(parent.kill);parent_start=(Path("/proc")/str(parent.pid)/"stat").read_text().split()[21];jobs.write_text(f"2026-07-23T00:00:00Z\topen\t{repo}\t{repo}\towner\tattempt_schema_version=2,dispatch_depth=1,transport=headless,execution_surface=registered-headless,registered_worker=1,fallback_hop=same-harness-headless,worker_type=owner,harness=codex,runtime_sandbox=workspace-write,attempt_id=att-sd45-parent,pid={parent.pid},pid_start={parent_start}\n")
    args=[sys.executable,str(ROOT/"adapters/codex/bin/dispatch-headless.py"),"--register","--worktree",str(repo),"--slug","codex-sd45","--capability","autopilot-code","--capability-mode","dev","--worker-mode",node["unit"],"--qa","standard","--intensity","strong","--dispatch-depth","2","--parent","owner","--parent-harness","codex","--parent-transport","headless","--parent-sandbox","workspace-write","--nested-eligibility","supported","--eligibility-source","codex-fixture","--fallback-ordinal","1","--route-file",str(path),"--route-id",route["route_id"],"--route-hash",route["route_hash"],"--route-node","execute","--unit",node["unit"],"--registry-digest",route["registry_digest"],"--write-scope",";".join(node["write_scope"]),"--completion-gate",node["completion_gate"],"--model-role",node["role"],"--model-profile",node["model_profile"],"--jobs",str(jobs),"--log-dir",str(logs)]
    env={**{k:v for k,v in os.environ.items() if k!="AGENT_DISPATCH_JOBS"},"AGENT_HOME":str(ROOT),"AGENT_ARTIFACT_ROOT":str(art),"AGENT_DISPATCH_ATTEMPT_ID":"att-sd45-parent"}; ok=subprocess.run(args,text=True,capture_output=True,env=env); self.assertEqual(ok.returncode,0,ok.stdout+ok.stderr); prompt=next(logs.glob("codex-sd45*.codex.prompt.txt")).read_text(); self.assertIn("consume the assigned route only",prompt); self.assertNotIn("preflight.sh route autopilot-code",prompt); self.assertIn(f"unit={node['unit']}",jobs.read_text()); self.assertIn(f"unit={node['unit']}",ok.stdout)

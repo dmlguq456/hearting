@@ -599,15 +599,15 @@ EOF
     fi
     [ -n "$worktree" ] || { echo "codex preflight: headless --check requires a worktree path" >&2; exit 64; }
     if [ ! -d "$worktree" ]; then
-      printf 'check=failed\nreason=worktree-not-found\nworktree=%s\n' "$worktree"
+      printf 'check=failed\nreason=worktree-not-found\nfailure_scope=exact-worktree\ncodex_command=unchecked\nretry_on_isolated_worktree=1\nworktree=%s\n' "$worktree"
       exit 66
     fi
     if ! command -v codex >/dev/null 2>&1; then
-      printf 'check=failed\nreason=codex-command-unavailable\nworktree=%s\n' "$worktree"
+      printf 'check=failed\nreason=codex-command-unavailable\nfailure_scope=runtime-global\ncodex_command=unavailable\nretry_on_isolated_worktree=0\nworktree=%s\n' "$worktree"
       exit 69
     fi
     if ! git -C "$worktree" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-      printf 'check=failed\nreason=not-a-git-worktree\nworktree=%s\n' "$worktree"
+      printf 'check=failed\nreason=not-a-git-worktree\nfailure_scope=exact-worktree\ncodex_command=ok\nretry_on_isolated_worktree=1\nworktree=%s\n' "$worktree"
       exit 65
     fi
     # The sandboxed runtime mounts <worktree>/.codex, so a file or symlink there
@@ -621,7 +621,7 @@ EOF
     if [ "${CODEX_DISPATCH_SANDBOX_FORCE:-}" != "danger-full-access" ] \
       && [ "${AGENT_DISPATCH_CHILD:-}" != "1" ] \
       && { [ -L "$worktree/.codex" ] || { [ -e "$worktree/.codex" ] && [ ! -d "$worktree/.codex" ]; }; }; then
-      printf 'check=failed\nreason=invalid-worktree-codex-mount-target\ndetail=.codex must be a directory while the Codex sandbox is enabled\npath=%s\nworktree=%s\n' \
+      printf 'check=failed\nreason=invalid-worktree-codex-mount-target\ndetail=.codex must be a directory while the Codex sandbox is enabled\nfailure_scope=exact-worktree\ncodex_command=ok\nretry_on_isolated_worktree=1\npath=%s\nworktree=%s\n' \
         "$worktree/.codex" "$worktree"
       exit 65
     fi
@@ -630,7 +630,7 @@ EOF
     else
       codex_runtime_projection_check
     fi
-    printf 'check=ok\nworktree=%s\n' "$worktree"
+    printf 'check=ok\nfailure_scope=none\ncodex_command=ok\nretry_on_isolated_worktree=0\nworktree=%s\n' "$worktree"
     ;;
   nested-headless)
     shift

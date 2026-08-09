@@ -6,7 +6,9 @@ ROOT=Path(__file__).resolve().parents[1]
 def load(name,path):
  spec=importlib.util.spec_from_file_location(name,path); mod=importlib.util.module_from_spec(spec); spec.loader.exec_module(mod); return mod
 R=load("route",ROOT/"utilities/capability-route.py")
-DISPATCH={"tuples":[{"parent_harness":"codex","parent_transport":"headless","parent_sandbox":"danger-full-access","child_harness":"codex","launch_authority":"conductor","status":"supported","probe_source":"fixture","probe_time":"2026-07-16T00:00:00Z","failure_class":""}],"native_subagent":[]}
+
+def dispatch(worktree):
+ return {"tuples":[{"parent_harness":"codex","parent_transport":"headless","parent_sandbox":"workspace-write","child_harness":"codex","launch_authority":"conductor","status":"supported","probe_source":"fixture","probe_time":"2026-07-16T00:00:00Z","failure_class":"","checked_worktree":str(Path(worktree).resolve()),"failure_scope":"none","codex_command":"ok","retry_on_isolated_worktree":0}],"native_subagent":[]}
 
 class SpecTransactionTest(unittest.TestCase):
  def fixture(self, root: Path, *, component=""):
@@ -16,7 +18,7 @@ class SpecTransactionTest(unittest.TestCase):
   subprocess.run(["git","-C",str(root),"config","user.name","Fixture"],check=True)
   (root/"README").write_text("x\n"); subprocess.run(["git","-C",str(root),"add","README"],check=True); subprocess.run(["git","-C",str(root),"commit","-qm","init"],check=True)
   gate={"spec_read":{"satisfied":True,"source":"fixture"},"drift_verdict":"within-spec","workflow_mode":"tracked","artifact_guard":{"satisfied":True,"source":"fixture"}}
-  route=R.compile_route("autopilot-spec","update","strong",root,artifact,signals=["shared-contract"],transport="headless",tracking="tracked",tracked_gate_evidence=gate,dispatch_evidence=DISPATCH)
+  route=R.compile_route("autopilot-spec","update","strong",root,artifact,signals=["shared-contract"],transport="headless",tracking="tracked",tracked_gate_evidence=gate,dispatch_evidence=dispatch(root))
   route_path=root/"route.json"; route_path.write_text(json.dumps(route))
   return artifact,spec,route_path
 

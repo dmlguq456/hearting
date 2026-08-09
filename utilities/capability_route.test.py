@@ -93,7 +93,11 @@ class TestRoute(unittest.TestCase):
   # parent_sandbox follows the parent harness's real wrapper export; a claude
   # parent never exports the Codex `workspace-write` label.
   sandbox=R.WRAPPER_PARENT_SANDBOXES[parent][0] if parent in R.WRAPPER_PARENT_SANDBOXES else "workspace-write"
-  return {"parent_harness":parent,"parent_transport":"headless","parent_sandbox":sandbox,"child_harness":child,"launch_authority":authority,"status":status,"probe_source":"fixture-probe","probe_time":"2026-07-16T00:00:00Z","failure_class":failure}
+  local=failure in {
+   "invalid-worktree-codex-mount-target","not-a-git-worktree","worktree-not-found",
+  }
+  scope="none" if status=="supported" else "exact-worktree" if local else "runtime-global"
+  return {"parent_harness":parent,"parent_transport":"headless","parent_sandbox":sandbox,"child_harness":child,"launch_authority":authority,"status":status,"probe_source":"fixture-probe","probe_time":"2026-07-16T00:00:00Z","failure_class":failure,"checked_worktree":str(R.ROOT.resolve()),"failure_scope":scope,"codex_command":"ok" if child=="codex" else "not-applicable","retry_on_isolated_worktree":1 if local else 0}
  def args(self,**kw):
   gate={"spec_read":{"satisfied":True,"source":"canonical-prd-sha256"},"drift_verdict":"within-spec","workflow_mode":"tracked","artifact_guard":{"satisfied":True,"source":"conductor-prechecked"}}
   d=dict(capability="autopilot-code",capability_mode="dev",requested_intensity="direct",cwd=R.ROOT,artifact_root=R.ROOT,predicates=ALL,transport=None,inline_reason="atomic-direct",tracking="tracked",tracked_gate_evidence=gate); d.update(kw); return d
@@ -353,11 +357,35 @@ class TestRoute(unittest.TestCase):
   evidence=self.dispatch(self.nested(status="unsupported",failure="nested-network-unconfirmed"),self.nested(child="claude"))
   route=self.compile_v3(evidence); chain=route["nodes"][0]["fallback_hops"]
   self.assertEqual(route["dispatch_contract_version"],3)
+  self.assertEqual(route["dispatch_evidence_scope_version"],1)
   self.assertNotIn("broker_contract_version",route)
   self.assertEqual([row["fallback_hop"] for row in chain],R.FALLBACK_ORDER)
   self.assertEqual(chain[1]["candidates"][0]["launch_authority"],"conductor")
   self.assertNotIn("broker_root",route["dispatch_evidence"]["tuples"][0])
   R.verify_route(route,R.ROOT)
+ def test_checked_worktree_must_equal_route_cwd(self):
+  row=self.nested(); row["checked_worktree"]="/tmp/not-the-route-worktree"
+  with self.assertRaisesRegex(ValueError,"dispatch-evidence-worktree-mismatch"):
+   self.compile_v3(self.dispatch(row))
+ def test_pre_scope_v3_route_remains_verifiable_for_migration_close(self):
+  route=json.loads(json.dumps(self.compile_v3(self.dispatch(self.nested()))))
+  route.pop("dispatch_evidence_scope_version")
+  for row in route["dispatch_evidence"]["tuples"]:
+   for field in R.NESTED_SCOPE_FIELDS: row.pop(field,None)
+  for node in route["nodes"]:
+   for hop in node.get("fallback_hops",[]):
+    for row in hop.get("candidates",[]):
+     for field in R.NESTED_SCOPE_FIELDS: row.pop(field,None)
+  route["route_hash"]=R.route_hash(route)
+  route["route_id"]="rt-"+route["route_hash"].split(":",1)[1][:16]
+  R.verify_route(route,R.ROOT)
+ def test_worktree_local_unsupported_requires_reprobe_before_fallback(self):
+  local=self.nested(
+   status="unsupported", failure="invalid-worktree-codex-mount-target")
+  global_fallback=self.nested(parent="codex",child="claude")
+  with self.assertRaisesRegex(
+   ValueError,"dispatch-evidence-exact-worktree-reprobe-required"):
+   self.compile_v3(self.dispatch(local,global_fallback))
  def test_unknown_nested_tuple_fails_closed(self):
   with self.assertRaisesRegex(ValueError,"no supported direct headless tuple"):
    self.compile_v3(self.dispatch(self.nested(status="unknown",failure="unprobed-tuple")))

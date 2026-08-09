@@ -35,6 +35,15 @@ NESTED_FIELDS = {
     "parent_harness", "parent_transport", "parent_sandbox", "child_harness",
     "launch_authority", "status", "probe_source", "probe_time", "failure_class",
 }
+NESTED_SCOPE_FIELDS = {
+    "checked_worktree", "failure_scope", "codex_command",
+    "retry_on_isolated_worktree",
+}
+NESTED_FAILURE_SCOPES = {
+    "none", "exact-worktree", "runtime-global", "parent-runtime", "tuple-contract",
+}
+CODEX_COMMAND_STATES = {"ok", "unavailable", "unchecked", "not-applicable"}
+DISPATCH_EVIDENCE_SCOPE_VERSION = 1
 BROKER_FIELDS = {"broker_root", "broker_instance"}  # historical v1
 BROKER_FIELDS_V2 = {"broker_root"}                   # historical v2
 DISPATCH_CONTRACT_VERSION = 3
@@ -181,8 +190,14 @@ def _validate_tuple_parent_identity(row, parent_dispatch_depth):
             f"tuple sealed {row['parent_sandbox']!r}"
         )
 
-def _validate_dispatch_evidence(evidence, contract_version=DISPATCH_CONTRACT_VERSION,
-                                parent_dispatch_depth=EVIDENCE_CONSUMER_DISPATCH_DEPTH - 1):
+def _validate_dispatch_evidence(
+    evidence,
+    contract_version=DISPATCH_CONTRACT_VERSION,
+    parent_dispatch_depth=EVIDENCE_CONSUMER_DISPATCH_DEPTH - 1,
+    *,
+    expected_worktree=None,
+    require_scope=False,
+):
     contract_version = contract_version or 1
     if contract_version not in {1, 2, DISPATCH_CONTRACT_VERSION}:
         raise ValueError(f"unsupported dispatch contract version: {contract_version}")
@@ -199,6 +214,45 @@ def _validate_dispatch_evidence(evidence, contract_version=DISPATCH_CONTRACT_VER
         if not row["probe_source"] or not row["probe_time"]:
             raise ValueError("nested eligibility checked source/time required")
         normalized_row={key:row[key] for key in sorted(NESTED_FIELDS)}
+        present_scope=NESTED_SCOPE_FIELDS.intersection(row)
+        has_scope=NESTED_SCOPE_FIELDS.issubset(row)
+        if present_scope and not has_scope:
+            raise ValueError("nested eligibility scope fields incomplete")
+        if require_scope and not has_scope:
+            raise ValueError("nested eligibility exact-worktree scope required")
+        if has_scope:
+            checked=Path(row["checked_worktree"])
+            if not checked.is_absolute():
+                raise ValueError("nested eligibility checked_worktree must be absolute")
+            checked=checked.resolve()
+            if expected_worktree is not None and checked != Path(expected_worktree).resolve():
+                raise ValueError(
+                    "dispatch-evidence-worktree-mismatch: "
+                    f"route cwd {Path(expected_worktree).resolve()} != checked {checked}"
+                )
+            scope=row["failure_scope"]
+            if scope not in NESTED_FAILURE_SCOPES:
+                raise ValueError("invalid nested eligibility failure_scope")
+            if row["codex_command"] not in CODEX_COMMAND_STATES:
+                raise ValueError("invalid nested eligibility codex_command")
+            retry=row["retry_on_isolated_worktree"]
+            if type(retry) is not int or retry not in (0, 1):
+                raise ValueError("retry_on_isolated_worktree must be 0 or 1")
+            if row["status"] == "supported" and (scope != "none" or retry != 0):
+                raise ValueError("supported nested eligibility cannot carry failure scope")
+            if scope == "exact-worktree":
+                if row["status"] == "supported" or retry != 1:
+                    raise ValueError("exact-worktree failure requires unsupported retry evidence")
+                if row["child_harness"] == "codex" and row["codex_command"] != "ok":
+                    raise ValueError("Codex exact-worktree failure requires codex_command=ok")
+            elif retry != 0:
+                raise ValueError("isolated-worktree retry requires exact-worktree failure_scope")
+            normalized_row.update({
+                "checked_worktree": str(checked),
+                "codex_command": row["codex_command"],
+                "failure_scope": scope,
+                "retry_on_isolated_worktree": retry,
+            })
         if contract_version==DISPATCH_CONTRACT_VERSION:
             if row["launch_authority"] != "conductor":
                 raise ValueError("v3 dispatch evidence requires conductor launch authority")
@@ -238,11 +292,27 @@ def _validate_dispatch_evidence(evidence, contract_version=DISPATCH_CONTRACT_VER
         normalized_native.append({key:row[key] for key in sorted(NATIVE_EVIDENCE_FIELDS)})
     return {"tuples":normalized,"native_subagent":normalized_native}
 
-def _fallback_chain(evidence, contract_version=DISPATCH_CONTRACT_VERSION,
-                    parent_dispatch_depth=EVIDENCE_CONSUMER_DISPATCH_DEPTH - 1):
+def _fallback_chain(
+    evidence,
+    contract_version=DISPATCH_CONTRACT_VERSION,
+    parent_dispatch_depth=EVIDENCE_CONSUMER_DISPATCH_DEPTH - 1,
+    *,
+    expected_worktree=None,
+    require_scope=False,
+):
     contract_version = contract_version or 1
-    evidence=_validate_dispatch_evidence(evidence, contract_version, parent_dispatch_depth)
+    evidence=_validate_dispatch_evidence(
+        evidence, contract_version, parent_dispatch_depth,
+        expected_worktree=expected_worktree, require_scope=require_scope,
+    )
     tuples=evidence["tuples"]
+    if any(
+        row.get("status") == "unsupported"
+        and row.get("failure_scope") == "exact-worktree"
+        and row.get("retry_on_isolated_worktree") == 1
+        for row in tuples
+    ):
+        raise ValueError("dispatch-evidence-exact-worktree-reprobe-required")
     same=[row for row in tuples if row["child_harness"]==row["parent_harness"]]
     cross=[row for row in tuples if row["child_harness"]!=row["parent_harness"]]
     if contract_version==DISPATCH_CONTRACT_VERSION:
@@ -585,9 +655,11 @@ def _compile_from_recipe(registry, recipe, capability, capability_mode, requeste
         parent_dispatch_depth=_evidence_parent_dispatch_depth(
             nodes, recipe["standard_plus"]["owner_dispatch_depth"])
         checked_dispatch=_validate_dispatch_evidence(
-            dispatch_evidence, DISPATCH_CONTRACT_VERSION, parent_dispatch_depth)
+            dispatch_evidence, DISPATCH_CONTRACT_VERSION, parent_dispatch_depth,
+            expected_worktree=cwd, require_scope=True)
         chain=_fallback_chain(
-            checked_dispatch, DISPATCH_CONTRACT_VERSION, parent_dispatch_depth)
+            checked_dispatch, DISPATCH_CONTRACT_VERSION, parent_dispatch_depth,
+            expected_worktree=cwd, require_scope=True)
         for node in nodes:
             if node.get("dispatch_depth")==2:
                 node["fallback_hops"]=json.loads(json.dumps(chain))
@@ -622,6 +694,8 @@ def _compile_from_recipe(registry, recipe, capability, capability_mode, requeste
       "registered_headless_candidates":registered_headless_candidates,
       "registered_headless_policy":"serial-attempt" if effective=="quick" else None,
       "unit_catalog_digest":unit_catalog_digest()}
+    if checked_dispatch is not None:
+        payload["dispatch_evidence_scope_version"]=DISPATCH_EVIDENCE_SCOPE_VERSION
     if composed:
         payload["composed"]=True
         payload["composed_recipe"]=json.loads(json.dumps(recipe))
@@ -646,6 +720,9 @@ def verify_route(route, expected_cwd=None, *, allow_stale_registry=False):
         )
     if route.get("dispatch_contract_version") != DISPATCH_CONTRACT_VERSION:
         raise ValueError("legacy dispatch contract is read-only")
+    scope_version=route.get("dispatch_evidence_scope_version")
+    if scope_version not in (None, DISPATCH_EVIDENCE_SCOPE_VERSION):
+        raise ValueError("unsupported dispatch evidence scope version")
     if route.get("route_hash") != route_hash(route): raise ValueError("stale or modified route hash")
     if route.get("route_id") != "rt-"+route["route_hash"].split(":",1)[1][:16]: raise ValueError("invalid route id")
     if expected_cwd and Path(expected_cwd).resolve()!=Path(route["cwd"]): raise ValueError("route cwd mismatch")
@@ -856,8 +933,13 @@ def verify_route(route, expected_cwd=None, *, allow_stale_registry=False):
         parent_dispatch_depth=_evidence_parent_dispatch_depth(
             route.get("nodes",[]), route.get("owner_dispatch_depth"))
         checked_dispatch=_validate_dispatch_evidence(
-            route.get("dispatch_evidence"), contract_version, parent_dispatch_depth)
-        expected_chain=_fallback_chain(checked_dispatch, contract_version, parent_dispatch_depth)
+            route.get("dispatch_evidence"), contract_version, parent_dispatch_depth,
+            expected_worktree=route.get("cwd"),
+            require_scope=scope_version == DISPATCH_EVIDENCE_SCOPE_VERSION)
+        expected_chain=_fallback_chain(
+            checked_dispatch, contract_version, parent_dispatch_depth,
+            expected_worktree=route.get("cwd"),
+            require_scope=scope_version == DISPATCH_EVIDENCE_SCOPE_VERSION)
         for node in route.get("nodes",[]):
             if node.get("dispatch_depth")==2:
                 chain=_verify_fallback_chain(node, contract_version)

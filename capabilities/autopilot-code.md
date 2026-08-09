@@ -98,7 +98,7 @@ Additional code-entry gates:
 - detect whether `spec/pipeline_state.yaml` has changed since the last relevant plan and re-read newer spec/design artifacts before editing;
 - for app mode, treat design tokens and handoff artifacts as source contracts, not suggestions;
 - for destructive DB/schema/migration work, explain the command and risk, but do not auto-run destructive operations without explicit user approval;
-- for non-trivial feature, multi-file, or module work, use the runtime's isolated-worktree or equivalent dispatch policy from `core/OPERATIONS.md`.
+- for non-trivial feature, multi-file, or module work, use the runtime's isolated-worktree or equivalent dispatch policy from `core/OPERATIONS.md`; for standard+ create the final isolated worktree before collecting route eligibility evidence, and seal only tuples whose `checked_worktree` exactly matches the route `cwd`.
 - after main/orchestrator merges, verifies the integrated tree, and pushes the
   integration ref, invoke the guarded worktree cleanup check/apply path; never
   infer cleanup eligibility from a runtime session-end event.

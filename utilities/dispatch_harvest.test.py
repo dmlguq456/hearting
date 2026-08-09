@@ -59,6 +59,10 @@ class HarvestTest(unittest.TestCase):
                 "probe_source": "fixture",
                 "probe_time": "2026-07-21T00:00:00Z",
                 "failure_class": "",
+                "checked_worktree": str(self.repo.resolve()),
+                "failure_scope": "none",
+                "codex_command": "ok",
+                "retry_on_isolated_worktree": 0,
             }],
             "native_subagent": [],
         }

@@ -165,6 +165,38 @@ class NestedEligibilityTest(unittest.TestCase):
             row["probe_source"],
             "codex-owner-network-contract+direct-auth+headless-check",
         )
+        self.assertEqual(row["checked_worktree"], str(Path(worktree).resolve()))
+        self.assertEqual(row["failure_scope"], "none")
+        self.assertEqual(row["codex_command"], "ok")
+        self.assertEqual(row["retry_on_isolated_worktree"], 0)
+
+    def test_worktree_local_failure_is_retryable_without_hiding_codex(self):
+        with tempfile.TemporaryDirectory() as worktree, \
+             mock.patch.dict(os.environ, {"AGENT_NESTED_HEADLESS_NETWORK": "1"}, clear=True), \
+             mock.patch.object(
+                 N, "command_check",
+                 return_value=(
+                     "unsupported", "direct-headless-check",
+                     "invalid-worktree-codex-mount-target",
+                 ),
+             ):
+            row = N.evaluate(self.args(worktree))
+        self.assertEqual(row["status"], "unsupported")
+        self.assertEqual(row["failure_scope"], "exact-worktree")
+        self.assertEqual(row["codex_command"], "ok")
+        self.assertEqual(row["retry_on_isolated_worktree"], 1)
+
+    def test_command_unavailable_is_runtime_global_not_worktree_local(self):
+        with tempfile.TemporaryDirectory() as worktree, \
+             mock.patch.dict(os.environ, {"AGENT_NESTED_HEADLESS_NETWORK": "1"}, clear=True), \
+             mock.patch.object(
+                 N, "command_check",
+                 return_value=("unsupported", "direct-auth-check", "command-unavailable"),
+             ):
+            row = N.evaluate(self.args(worktree))
+        self.assertEqual(row["failure_scope"], "runtime-global")
+        self.assertEqual(row["codex_command"], "unavailable")
+        self.assertEqual(row["retry_on_isolated_worktree"], 0)
 
     def test_preflight_reason_word_becomes_the_failure_class(self):
         # A route reads `failure_class` back to decide whether another hop is

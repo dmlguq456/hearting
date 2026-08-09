@@ -1819,6 +1819,9 @@ def main(argv: list[str]) -> int:
             "invalid-worktree-codex-mount-target",
             65,
             detail=".codex must be a directory while the Codex sandbox is enabled",
+            failure_scope="exact-worktree",
+            codex_command="ok" if shutil.which("codex") else "unavailable",
+            retry_on_isolated_worktree="1",
             path=str(invalid_mount),
             child_spawned="0",
         )

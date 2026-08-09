@@ -42,13 +42,16 @@ class TestRunner(unittest.TestCase):
         (self.home / "core").mkdir(parents=True)
         (self.home / "core" / "CORE.md").write_text("core\n")
         (self.home / "utilities").symlink_to(ROOT / "utilities", target_is_directory=True)
-        self.route = self.artifacts / "route.json"
+        self.route = self.artifacts / ".runtime" / "routes" / "fixture.json"
+        self.route.parent.mkdir(parents=True)
         evidence = self.base / "dispatch-evidence.json"
         evidence.write_text(json.dumps({"tuples": [{
             "harness": "codex", "parent_harness": "codex", "parent_transport": "headless",
             "parent_sandbox": "workspace-write", "child_harness": "codex",
             "launch_authority": "conductor", "status": "supported", "probe_source": "test",
             "probe_time": "2026-07-27T00:00:00Z", "failure_class": "none",
+            "checked_worktree": str(self.repo.resolve()), "failure_scope": "none",
+            "codex_command": "ok", "retry_on_isolated_worktree": 0,
         }], "native_subagent": []}))
         result = subprocess.run([
             sys.executable, str(ROUTER), "compile", "--capability", "autopilot-lab",
@@ -58,7 +61,7 @@ class TestRunner(unittest.TestCase):
             "--spec-read", "not-applicable", "--drift-verdict", "no-project-spec",
             "--workflow-mode", "untracked", "--artifact-guard", "preflight-passed",
             "--output", str(self.route),
-        ], text=True, capture_output=True)
+        ], text=True, capture_output=True, env=CLEAN_ENV)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.registry = self.base / "registry.json"
         self.index = self.base / "resource-runs.index.json"
@@ -74,7 +77,8 @@ class TestRunner(unittest.TestCase):
         return subprocess.run([
             sys.executable, str(RUNNER), "--registry", str(self.registry), *args,
         ], cwd=cwd, text=True, capture_output=True,
-           env={**CLEAN_ENV, "AGENT_RESOURCE_RUN_INDEX": str(self.index)})
+           env={**CLEAN_ENV, "AGENT_HOME": str(self.home),
+                "AGENT_RESOURCE_RUN_INDEX": str(self.index)})
 
     def start_args(self, route=None, node="full-run", smoke=None, run_id="case", config_manifest=None):
         return ("start", "--run-id", run_id, "--cwd", str(self.repo), "--log", str(self.log),

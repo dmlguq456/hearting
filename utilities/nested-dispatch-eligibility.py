@@ -185,7 +185,58 @@ def preflight_failure_reason(output: str) -> str:
     return ""
 
 
-def evaluate(args: argparse.Namespace) -> dict[str, str]:
+WORKTREE_LOCAL_FAILURES = {
+    "invalid-worktree-codex-mount-target",
+    "not-a-git-worktree",
+    "worktree-not-found",
+}
+TUPLE_CONTRACT_SOURCES = {
+    "parent-harness-vocabulary",
+    "parent-sandbox-vocabulary",
+    "parent-transport-vocabulary",
+    "dispatch-contract-v3",
+    "codex-prospective-standard-owner-contract",
+}
+PARENT_RUNTIME_SOURCES = {
+    "codex-owner-network-contract",
+}
+
+
+def failure_diagnostics(
+    child_harness: str,
+    status: str,
+    source: str,
+    failure: str,
+) -> tuple[str, str, int]:
+    """Classify unsupported without turning a local shape into runtime loss.
+
+    Returns ``(failure_scope, codex_command, retry_on_isolated_worktree)``.
+    Command availability stays separate from authentication and projection
+    readiness so a valid Codex install is not hidden by one checkout collision.
+    """
+
+    command_checked = source.startswith("direct-") or "+direct-" in source
+    if child_harness != "codex":
+        codex_command = "not-applicable"
+    elif failure == "command-unavailable":
+        codex_command = "unavailable"
+    elif command_checked:
+        codex_command = "ok"
+    else:
+        codex_command = "unchecked"
+
+    if status == "supported":
+        return "none", codex_command, 0
+    if failure in WORKTREE_LOCAL_FAILURES:
+        return "exact-worktree", codex_command, 1
+    if source in TUPLE_CONTRACT_SOURCES:
+        return "tuple-contract", codex_command, 0
+    if source in PARENT_RUNTIME_SOURCES:
+        return "parent-runtime", codex_command, 0
+    return "runtime-global", codex_command, 0
+
+
+def evaluate(args: argparse.Namespace) -> dict[str, object]:
     args.parent_harness, harness_failure = resolve_parent_harness(args.parent_harness)
     args.parent_transport, transport_failure = resolve_parent_transport(args.parent_transport)
     prospective_owner = getattr(args, "prospective_standard_owner", False)
@@ -246,6 +297,9 @@ def evaluate(args: argparse.Namespace) -> dict[str, str]:
                 probe_scope = "prospective-standard-owner"
             else:
                 source = "codex-owner-network-contract+" + source
+    failure_scope, codex_command, retry_on_isolated_worktree = failure_diagnostics(
+        args.child_harness, status, source, failure
+    )
     return {
         "parent_harness": args.parent_harness,
         "parent_transport": args.parent_transport,
@@ -256,6 +310,10 @@ def evaluate(args: argparse.Namespace) -> dict[str, str]:
         "probe_source": source,
         "probe_time": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         "failure_class": failure,
+        "checked_worktree": str(Path(args.worktree).resolve()),
+        "failure_scope": failure_scope,
+        "codex_command": codex_command,
+        "retry_on_isolated_worktree": retry_on_isolated_worktree,
         "probe_scope": probe_scope,
         "next_check": next_check,
     }

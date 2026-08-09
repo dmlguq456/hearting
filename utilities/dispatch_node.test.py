@@ -18,7 +18,10 @@ S.loader.exec_module(N)
 def base_tuple(child_harness, status="supported", probe_source="fixture-check", failure_class=""):
     return {
         "child_harness": child_harness,
+        "checked_worktree": "/tmp/fixture-worktree",
+        "codex_command": "ok" if child_harness == "codex" else "not-applicable",
         "failure_class": failure_class,
+        "failure_scope": "none" if status == "supported" else "runtime-global",
         "launch_authority": "conductor",
         "parent_harness": "claude",
         "parent_sandbox": "default",
@@ -26,6 +29,7 @@ def base_tuple(child_harness, status="supported", probe_source="fixture-check", 
         "probe_source": probe_source,
         "probe_time": "2026-07-17T00:00:00Z",
         "status": status,
+        "retry_on_isolated_worktree": 0,
     }
 
 

@@ -12,6 +12,12 @@ file or the canonical jobs path is unavailable, stop instead of launching an unb
 
 #### Sealing the checked evidence (before the owner exists)
 
+Create the final isolated source worktree before collecting any standard+ route evidence.
+Run every probe against that exact absolute path; each tuple records it as
+`checked_worktree`, and the route compiler requires it to equal the route `cwd`. Evidence
+from the primary checkout, a staging worktree, or a worktree that was later replaced is not
+reusable for the final route.
+
 Each tuple answers "may the parent of a dispatch-depth-2 node spawn that child?", so every
 `--parent-*` value describes **the dispatch-depth-1 owner you are about to launch, not the
 session running the probe**. Take the defaults; they resolve that parent for you.
@@ -26,8 +32,16 @@ for CHILD in claude codex; do
     --parent-harness "$OWNER_HARNESS" --child-harness "$CHILD" \
     --launch-authority conductor --worktree "$WORKTREE" \
     "${OWNER_PROFILE_ARGS[@]}" --json
-done   # collect into {"tuples": [...], "native_subagent": []} for --dispatch-evidence
+done   # collect the exact-worktree tuples into --dispatch-evidence
 ```
+
+Every tuple also carries `failure_scope`, `codex_command`, and
+`retry_on_isolated_worktree`. A Codex worktree-local collision such as a non-directory
+`.codex` reports `failure_scope=exact-worktree`, `codex_command=ok`, and
+`retry_on_isolated_worktree=1`. That result requires a clean isolated worktree and a fresh
+probe; it must not remove Codex from global eligibility, select a Claude/native/inline
+fallback, mutate the user's `.codex`, or weaken the sandbox. Only a
+`failure_scope=runtime-global` result can make the runtime globally unavailable.
 
 `--parent-transport` and `--parent-sandbox` default to `auto`. A dispatch-depth-2 tuple's parent is
 always a registered-headless owner, so passing your own `interactive` transport is rejected at

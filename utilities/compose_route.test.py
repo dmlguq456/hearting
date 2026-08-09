@@ -15,6 +15,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 COMPOSE = ROOT / "utilities" / "compose-route.py"
@@ -37,6 +38,8 @@ FIXTURE_EVIDENCE = {
         "launch_authority": "conductor", "status": "supported",
         "probe_source": "fixture-probe", "probe_time": "2026-07-22T00:00:00Z",
         "failure_class": "",
+        "checked_worktree": str(ROOT.resolve()), "failure_scope": "none",
+        "codex_command": "not-applicable", "retry_on_isolated_worktree": 0,
     }],
     "native_subagent": [],
 }
@@ -130,6 +133,22 @@ class TestComposeRoute(unittest.TestCase):
             # the sealed file is byte-identical to stdout and passes verify.
             self.assertEqual(json.loads(Path(output).read_text()), route)
             R.verify_route(route, ROOT)
+
+    def test_live_probe_refuses_a_path_other_than_final_route_cwd(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            route_cwd = Path(tmp) / "route"
+            probe_cwd = Path(tmp) / "probe"
+            route_cwd.mkdir()
+            probe_cwd.mkdir()
+            args = type("Args", (), {
+                "dispatch_evidence": None,
+                "probe_worktree": str(probe_cwd),
+                "cwd": str(route_cwd),
+            })()
+            with mock.patch.object(C, "probe_child") as probe:
+                with self.assertRaisesRegex(ValueError, "final route cwd"):
+                    C.assemble_dispatch_evidence(args)
+            probe.assert_not_called()
 
     # --- fail-closed cases -----------------------------------------------
     def test_unknown_unit_fails_closed(self):

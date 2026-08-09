@@ -874,7 +874,8 @@ class DispatchBatchIntegrationTest(unittest.TestCase):
 
             artifact_root = base / ".agent_reports"
             artifact_root.mkdir()
-            route_path = base / "route.json"
+            route_path = artifact_root / ".runtime" / "routes" / "integration.json"
+            route_path.parent.mkdir(parents=True)
             evidence_path = base / "dispatch-evidence.json"
             evidence_path.write_text(
                 json.dumps({
@@ -889,6 +890,10 @@ class DispatchBatchIntegrationTest(unittest.TestCase):
                             "probe_source": "integration-fixture",
                             "probe_time": "2026-07-24T00:00:00Z",
                             "failure_class": "",
+                            "checked_worktree": str(repo.resolve()),
+                            "failure_scope": "none",
+                            "codex_command": "ok" if child == "codex" else "not-applicable",
+                            "retry_on_isolated_worktree": 0,
                         }
                         for child in ("codex", "claude")
                     ],
@@ -912,6 +917,7 @@ class DispatchBatchIntegrationTest(unittest.TestCase):
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 check=False,
+                env={key: value for key, value in os.environ.items() if key != "AGENT_ARTIFACT_ROOT"},
             )
             self.assertEqual(
                 compile_result.returncode, 0, compile_result.stdout + compile_result.stderr

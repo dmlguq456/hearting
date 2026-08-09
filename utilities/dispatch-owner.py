@@ -71,6 +71,14 @@ def _sealed_owner_harnesses(path):
         rows, field = route.get("registered_headless_candidates") or [], "harness"
     else:
         rows, field = (route.get("dispatch_evidence") or {}).get("tuples") or [], "parent_harness"
+        if any(
+            isinstance(row, dict)
+            and row.get("status") == "unsupported"
+            and row.get("failure_scope") == "exact-worktree"
+            and row.get("retry_on_isolated_worktree") == 1
+            for row in rows
+        ):
+            raise OwnerError("route-evidence-exact-worktree-reprobe-required")
     harnesses = {
         row.get(field)
         for row in rows

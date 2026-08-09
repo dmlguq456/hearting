@@ -345,6 +345,13 @@ def assemble_dispatch_evidence(args) -> dict:
     """Caller-supplied evidence passes through; otherwise probe each child live."""
     if args.dispatch_evidence:
         return json.loads(Path(args.dispatch_evidence).read_text(encoding="utf-8"))
+    probe_worktree = Path(args.probe_worktree or args.cwd).resolve()
+    route_worktree = Path(args.cwd).resolve()
+    if probe_worktree != route_worktree:
+        raise ValueError(
+            "probe worktree must equal the final route cwd: "
+            f"{probe_worktree} != {route_worktree}"
+        )
     children = args.probe_child or ["claude"]
     tuples = [
         probe_child(
@@ -353,7 +360,7 @@ def assemble_dispatch_evidence(args) -> dict:
             parent_transport=args.probe_parent_transport,
             parent_sandbox=args.probe_parent_sandbox,
             launch_authority=args.launch_authority,
-            worktree=args.probe_worktree or args.cwd,
+            worktree=probe_worktree,
         )
         for child in children
     ]

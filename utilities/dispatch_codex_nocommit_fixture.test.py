@@ -58,7 +58,7 @@ class CodexNoCommitFixtureTest(unittest.TestCase):
             "attempt_schema_version=2,dispatch_depth=1,transport=headless,"
             "execution_surface=registered-headless,registered_worker=1,"
             "fallback_hop=same-harness-headless,worker_type=owner,harness=codex,"
-            "runtime_sandbox=fixture,"
+            "runtime_sandbox=workspace-write,"
             f"attempt_id=att-nocommit-parent,pid={self.owner.pid},pid_start={owner_start}\n"
         )
 
@@ -77,9 +77,11 @@ class CodexNoCommitFixtureTest(unittest.TestCase):
             "artifact_guard": {"satisfied": True, "source": "fixture"},
         }
         dispatch = {"tuples": [{
-            "parent_harness": "codex", "parent_transport": "headless", "parent_sandbox": "fixture",
+            "parent_harness": "codex", "parent_transport": "headless", "parent_sandbox": "workspace-write",
             "child_harness": "codex", "launch_authority": "conductor", "status": "supported",
             "probe_source": "codex-fixture", "probe_time": "2026-07-16T00:00:00Z", "failure_class": "",
+            "checked_worktree": str(self.linked.resolve()), "failure_scope": "none",
+            "codex_command": "ok", "retry_on_isolated_worktree": 0,
         }], "native_subagent": []}
         return ROUTE.compile_route(
             "autopilot-code", "dev", "strong", self.linked, self.artifact,
@@ -89,7 +91,7 @@ class CodexNoCommitFixtureTest(unittest.TestCase):
 
     def base_env(self):
         return {
-            **os.environ,
+            **{key: value for key, value in os.environ.items() if key != "AGENT_DISPATCH_JOBS"},
             "AGENT_HOME": str(self.primary),
             "AGENT_ARTIFACT_ROOT": str(self.artifact),
             "AGENT_DISPATCH_ATTEMPT_ID": "att-nocommit-parent",
@@ -109,7 +111,7 @@ class CodexNoCommitFixtureTest(unittest.TestCase):
             "--worker-mode", node["unit"], "--qa", "standard",
             "--intensity", "strong", "--dispatch-depth", "2", "--parent", "owner",
             "--parent-harness", "codex", "--parent-transport", "headless",
-            "--parent-sandbox", "fixture", "--nested-eligibility", "supported",
+            "--parent-sandbox", "workspace-write", "--nested-eligibility", "supported",
             "--eligibility-source", "codex-fixture", "--fallback-ordinal", "1",
             "--route-file", str(route_path), "--route-id", route["route_id"],
             "--route-hash", route["route_hash"], "--route-node", "execute",

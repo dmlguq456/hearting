@@ -51,7 +51,7 @@ GATE = {
 }
 
 
-def nested_tuple(parent="claude", child="codex"):
+def nested_tuple(worktree, parent="claude", child="codex"):
     sandbox = ROUTE.WRAPPER_PARENT_SANDBOXES[parent][0]
     return {
         "parent_harness": parent, "parent_transport": "headless",
@@ -59,11 +59,14 @@ def nested_tuple(parent="claude", child="codex"):
         "launch_authority": "conductor", "status": "supported",
         "probe_source": "fixture-probe", "probe_time": "2026-08-04T00:00:00Z",
         "failure_class": "",
+        "checked_worktree": str(Path(worktree).resolve()), "failure_scope": "none",
+        "codex_command": "ok" if child == "codex" else "not-applicable",
+        "retry_on_isolated_worktree": 0,
     }
 
 
-def dispatch_evidence():
-    return {"tuples": [nested_tuple("claude", "claude"), nested_tuple("claude", "codex")],
+def dispatch_evidence(worktree):
+    return {"tuples": [nested_tuple(worktree, "claude", "claude"), nested_tuple(worktree, "claude", "codex")],
             "native_subagent": []}
 
 
@@ -73,7 +76,7 @@ def compile_fixture(capability, capability_mode, cwd, signals):
         predicates=[], signals=signals, transport="headless",
         transport_evidence="fixture", inline_reason=None, tracking="tracked",
         tracked_gate_evidence=copy.deepcopy(GATE),
-        dispatch_evidence=dispatch_evidence(),
+        dispatch_evidence=dispatch_evidence(cwd),
     )
 
 
@@ -845,6 +848,8 @@ class TestCapabilityIntegration(WorkflowFixture):
             quick_write_scope=["source/**"],
             quick_model_profile=topology["owner_profile_by_intensity"]["quick"],
             gate_index=compose.unit_io_gate_index(topology),
+            cycle_anchors=["analysis_project"], map_anchor="shards",
+            review_anchor="reviews",
             human_gate_bindings=[{"gate": "approved-action", "node": "act",
                                   "position": "entry"}],
         )
@@ -861,13 +866,15 @@ class TestCapabilityIntegration(WorkflowFixture):
             quick_write_scope=["source/**"],
             quick_model_profile=topology["owner_profile_by_intensity"]["quick"],
             gate_index=compose.unit_io_gate_index(topology),
+            cycle_anchors=["analysis_project"], map_anchor="shards",
+            review_anchor="reviews",
         )
         route = ROUTE.compile_composed_route(
             recipe, "dev", "standard", str(self.base), str(self.base),
             predicates=[], signals=["independent-verifier"], transport="headless",
             transport_evidence="fixture", tracking="tracked",
             tracked_gate_evidence=copy.deepcopy(GATE),
-            dispatch_evidence=dispatch_evidence())
+            dispatch_evidence=dispatch_evidence(self.base))
         self.assertEqual(route["workflow_contract"]["continuations"]["observe"], "monitor")
         self.assertEqual(route["workflow_contract"]["terminal_nodes"], ["verify"])
         path = self.base / f"{route['route_id']}.json"

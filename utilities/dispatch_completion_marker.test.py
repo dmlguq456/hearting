@@ -58,6 +58,10 @@ class CompletionMarkerTest(unittest.TestCase):
                 "probe_source": f"{harness}-fixture",
                 "probe_time": "2026-07-16T00:00:00Z",
                 "failure_class": "",
+                "checked_worktree": str(self.repo.resolve()),
+                "failure_scope": "none",
+                "codex_command": "ok" if harness == "codex" else "not-applicable",
+                "retry_on_isolated_worktree": 0,
             }
             for harness in ADAPTERS
         ]

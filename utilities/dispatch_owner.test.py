@@ -312,6 +312,19 @@ class RouteEvidenceOwnerHarnessTest(unittest.TestCase):
         ]}})
         self.assertEqual(OWNER._sealed_owner_harnesses(path), {"claude"})
 
+    def test_worktree_local_unsupported_never_selects_an_owner_fallback(self):
+        path = self._route({"effective_intensity": "standard", "dispatch_evidence": {"tuples": [
+            {"parent_harness": "codex", "status": "unsupported",
+             "failure_scope": "exact-worktree", "retry_on_isolated_worktree": 1},
+            {"parent_harness": "claude", "status": "supported"},
+        ]}})
+        with self.assertRaises(OWNER.OwnerError) as caught:
+            OWNER._sealed_owner_harnesses(path)
+        self.assertEqual(
+            str(caught.exception),
+            "route-evidence-exact-worktree-reprobe-required",
+        )
+
     def test_quick_route_uses_its_registered_headless_candidates(self):
         # quick seals no depth-2 tuples; reading `dispatch_evidence` here would
         # report "no supported owner harness" for a perfectly valid route.
