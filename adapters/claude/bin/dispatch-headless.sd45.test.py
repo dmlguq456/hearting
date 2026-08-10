@@ -158,6 +158,20 @@ class ClaudeSD78CompletionDelivery(unittest.TestCase):
         command = WH.shell_command(args, Path("/tmp/p.txt"), Path("/tmp/l.log"))
         self.assertIn("--add-dir /tmp/fixture-report-bundles", command)
 
+    def test_report_bundle_root_resolver_is_publish_stage_only(self):
+        with tempfile.TemporaryDirectory() as td, mock.patch.dict(
+            os.environ, {"REPORT_BUNDLE_ROOT": str(Path(td) / "store")}, clear=False,
+        ):
+            (Path(td) / "store").mkdir(); route = Path(td) / "route.json"
+            route.write_text(json.dumps({"capability": "autopilot-lab", "nodes": [{
+                "id": "publish", "kind": "capability-owner", "unit": "_kernel/owner",
+                "completion_gate": "lab-publish", "dispatch_depth": 1,
+            }]}))
+            self.assertEqual(WH.resolve_report_bundle_root(str(route), "publish"), Path(td) / "store")
+            for node in ("setup", "media", "report", "independent-verify", "sync"):
+                with self.subTest(node=node): self.assertIsNone(WH.resolve_report_bundle_root(str(route), node))
+            self.assertIsNone(WH.resolve_report_bundle_root(None, "publish"))
+
     def test_stage_direct_and_quick_launches_get_the_same_runtime_deny(self):
         cases = (("stage", "strong"), ("owner", "direct"), ("owner", "quick"))
         for worker_type, intensity in cases:
