@@ -21,6 +21,16 @@ print(sqlite3.connect(sys.argv[1]).execute(sys.argv[2]).fetchone()[0])
 PY
 }
 
+echo "== storage default: local XDG store when source memory is absent =="
+FALLBACK_HOME="$TMP/fallback-home"; FALLBACK_AGENT="$TMP/fallback-agent"
+mkdir -p "$FALLBACK_HOME" "$FALLBACK_AGENT"
+HOME="$FALLBACK_HOME" AGENT_HOME="$FALLBACK_AGENT" MEM_INIT=1 \
+  python3 "$MEM" add durable note \
+    "local data store fallback fixture record" --scope global >/dev/null 2>&1
+[ -f "$FALLBACK_HOME/.local/share/hearting/memory/memory.db" ] \
+  && ok "missing source memory defaults SQLite to the local data store" \
+  || bad "local data-store fallback was not selected"
+
 # ---------------------------------------------------------------- repair 1
 echo "== repair 1a: migrate v6 remaps unambiguous legacy cwd_origin keys =="
 PROJ="$TMP/proj"; mkdir -p "$PROJ"

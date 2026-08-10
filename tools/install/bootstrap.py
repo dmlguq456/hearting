@@ -16,8 +16,9 @@ def restore_memory(mem_store=None):
     """Restore ``memory.db`` from ``dump.jsonl`` when the database is absent.
 
     Args:
-        mem_store: Store directory. If omitted, use ``MEM_STORE`` and then
-            `paths.agent_home() / "memory"`.
+        mem_store: Store directory. If omitted, use ``MEM_STORE``, an existing
+            legacy `paths.agent_home() / "memory"`, and then the local XDG data
+            store.
 
     Returns:
         dict — {"action": "skipped"|"imported"|"failed", "detail": str}
@@ -25,7 +26,12 @@ def restore_memory(mem_store=None):
     if mem_store is None:
         mem_store = os.environ.get("MEM_STORE")
     if mem_store is None:
-        mem_store = paths.agent_home() / "memory"
+        legacy = paths.agent_home() / "memory"
+        if legacy.exists() or legacy.is_symlink():
+            mem_store = legacy
+        else:
+            data_home = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local" / "share"))
+            mem_store = data_home / "hearting" / "memory"
     mem_store = Path(mem_store)
 
     db_path = mem_store / "memory.db"

@@ -29,7 +29,15 @@ def default_agent_home() -> Path:
 
 
 AGENT_HOME = default_agent_home()
-STORE = Path(os.environ.get("MEM_STORE", AGENT_HOME / "memory"))
+def default_store() -> Path:
+    legacy = AGENT_HOME / "memory"
+    if legacy.exists() or legacy.is_symlink():
+        return legacy
+    data_home = Path(os.environ.get("XDG_DATA_HOME", HOME / ".local" / "share"))
+    return data_home / "hearting" / "memory"
+
+
+STORE = Path(os.environ["MEM_STORE"]) if os.environ.get("MEM_STORE") else default_store()
 DB = STORE / "memory.db"
 DUMP = STORE / "dump.jsonl"
 # ``projects`` is Claude's runtime session store. AGENT_HOME is the repository

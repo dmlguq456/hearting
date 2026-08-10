@@ -90,7 +90,10 @@ if ! command -v codex >/dev/null 2>&1; then
   exit 69
 fi
 
-store=${MEM_STORE:-$AGENT_ROOT/memory}
+default_store="$AGENT_ROOT/memory"
+[ -e "$default_store" ] || [ -L "$default_store" ] \
+  || default_store="${XDG_DATA_HOME:-$HOME/.local/share}/hearting/memory"
+store=${MEM_STORE:-$default_store}
 mkdir -p "$store"
 
 # Entry stale-GC: SIGKILL/OOM/reboot can orphan a lock or a transient capture file

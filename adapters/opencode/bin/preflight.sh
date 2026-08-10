@@ -788,7 +788,10 @@ EOF
     # Debounce: the OpenCode plugin fires this on session.idle, which occurs after
     # every turn. Rate-limit per session so a long TUI session triggers at most
     # one worker per OPENCODE_DISTILL_MIN_INTERVAL seconds (default 600).
-    store=${MEM_STORE:-$AGENT_ROOT/memory}
+    default_store="$AGENT_ROOT/memory"
+    [ -e "$default_store" ] || [ -L "$default_store" ] \
+      || default_store="${XDG_DATA_HOME:-$HOME/.local/share}/hearting/memory"
+    store=${MEM_STORE:-$default_store}
     mkdir -p "$store" 2>/dev/null || true
     stamp="$store/.opencode-distill-stamp-$sid"
     interval=${OPENCODE_DISTILL_MIN_INTERVAL:-600}

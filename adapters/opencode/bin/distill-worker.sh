@@ -110,7 +110,10 @@ if [ -z "$(printf '%s' "$delta" | tr -d '[:space:]')" ]; then
   exit 0
 fi
 
-store=${MEM_STORE:-$AGENT_ROOT/memory}
+default_store="$AGENT_ROOT/memory"
+[ -e "$default_store" ] || [ -L "$default_store" ] \
+  || default_store="${XDG_DATA_HOME:-$HOME/.local/share}/hearting/memory"
+store=${MEM_STORE:-$default_store}
 mkdir -p "$store"
 
 # Entry stale-GC (N7/N8): SIGKILL/OOM/reboot can orphan a lock or a transient

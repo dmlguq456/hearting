@@ -16,13 +16,13 @@ pending protection, lifecycle execution, bounded telemetry, and recovery.
 
 | Layer | Location | Git | Purpose |
 |---|---|---|---|
-| Source of truth | `<agent-home>/memory/memory.db` (SQLite WAL) | ignored binary | `records`, body/CJK FTS, retrieval-capsule FTS, and normalized topic index |
-| Git mirror | `<agent-home>/memory/dump.jsonl` (one ID-sorted record per line) | tracked in the memory repository | deterministic text export and exact `mem import` recovery source |
+| Source of truth | `${XDG_DATA_HOME:-~/.local/share}/hearting/memory/memory.db` (SQLite WAL; existing `<agent-home>/memory` remains compatible) | ignored binary | `records`, body/CJK FTS, retrieval-capsule FTS, and normalized topic index |
+| Git mirror | `<memory-store>/dump.jsonl` (one ID-sorted record per line) | tracked in the memory repository or linked to it | deterministic text export and exact `mem import` recovery source |
 | Harness projection | `<agent-home>/projects/<cwd>/memory/` | ignored | compatibility surface for stray auto-memory writes absorbed by `mem sync`; `mem project` can rebuild the projection |
 
 `memory.db` and the mirror checkout may be split across filesystems. Keep the
 live store on a local filesystem, place the `agent-memory` checkout elsewhere,
-and make `<agent-home>/memory/dump.jsonl` a symlink to that checkout's tracked
+and make `<memory-store>/dump.jsonl` a symlink to that checkout's tracked
 `dump.jsonl`. Export, commit, push, doctor, and maintenance follow the mirror
 target without replacing the symlink; the SQLite WAL files remain local.
 

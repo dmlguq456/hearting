@@ -38,7 +38,13 @@ def _agent_home():
 
 
 def _store():
-    return Path(os.environ.get("MEM_STORE", _agent_home() / "memory"))
+    if os.environ.get("MEM_STORE"):
+        return Path(os.environ["MEM_STORE"])
+    legacy = _agent_home() / "memory"
+    if legacy.exists() or legacy.is_symlink():
+        return legacy
+    return (Path(os.environ.get("XDG_DATA_HOME", str(Path.home() / ".local" / "share")))
+            / "hearting" / "memory")
 
 
 def _write_events_path():
