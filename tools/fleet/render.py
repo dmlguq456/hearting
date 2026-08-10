@@ -2396,13 +2396,43 @@ def _mem_alert_bucket(memory):
     return (" · ".join(parts), "lvl_y")
 
 
-def _group_key_job(j, session_groups=None, job_groups=None):
+def _unique_managed_parents(sessions):
+    """{normalized managed_dir: visible Codex TUI Session}, exact-one only."""
+    found = {}
+    ambiguous = set()
+    for session in sessions:
+        managed_dir = getattr(session, "managed_dir", None)
+        if (
+            getattr(session, "harness", None) != "codex"
+            or getattr(session, "app_server", False)
+            or not managed_dir
+        ):
+            continue
+        key = os.path.normpath(managed_dir)
+        if key in found:
+            ambiguous.add(key)
+        else:
+            found[key] = session
+    for key in ambiguous:
+        found.pop(key, None)
+    return found
+
+
+def _group_key_job(j, session_groups=None, job_groups=None, managed_session_groups=None):
     session_groups = session_groups or {}
     job_groups = job_groups or {}
+    managed_session_groups = managed_session_groups or {}
     if getattr(j, "parent_slug", None) and j.parent_slug in job_groups:
         return job_groups[j.parent_slug]
     if getattr(j, "parent_sid", None) and j.parent_sid in session_groups:
         return session_groups[j.parent_sid]
+    parent_managed_dir = getattr(j, "parent_managed_dir", None)
+    if (
+        getattr(j, "source", None) != "plugin-queue"
+        and parent_managed_dir
+        and os.path.normpath(parent_managed_dir) in managed_session_groups
+    ):
+        return managed_session_groups[os.path.normpath(parent_managed_dir)]
     if getattr(j, "parent_cwd", None):
         return project_of(j.parent_cwd)
     # Drill is fixture-rooted: keep its runner + dispatch-depth-1 owner + dispatch-depth-2 workers
@@ -3739,48 +3769,45 @@ def _resource_rows(resources, section):
                if _SHOW_ALL or getattr(r, "liveness", None) == "working"]
     if not visible:
         return []
-    rows = [[("  LAB RESOURCES", "head"), (_RFLUSH, None),
-             ("%d visible  " % len(visible), "head")]]
-    for project in sorted({getattr(r, "project", "(unknown)") for r in visible}):
-        rows.append([("  LAB resource", "lvl_b"), (" · %s" % project, "grp")])
-        project_rows = sorted(
-            (r for r in visible if getattr(r, "project", "(unknown)") == project),
-            key=lambda r: (getattr(r, "run_id", ""), getattr(r, "registry_path", "")))
-        for run in project_rows:
-            state = getattr(run, "liveness", "stale")
-            key = {"working": "working", "exited": "dim", "stale": "lvl_y"}.get(state, "dim")
-            marker = {"working": "●", "exited": "✓", "stale": "⚠"}.get(state, "?")
-            rows.append([
-                ("    %s " % marker, key), ("LAB resource", "lvl_b"),
-                ("  %s" % getattr(run, "run_id", "—"), key),
-                ("  %s" % state, key), (_RFLUSH, None),
-                (fmt_min(getattr(run, "elapsed_min", None)) + "  ", "dim"),
-            ])
-            route = getattr(run, "route", None) or "—"
-            node = getattr(run, "node", None) or "—"
-            rows.append([("      project %s · cwd %s" % (
-                project, getattr(run, "cwd", None) or "—"), "dim"),
-                (_RFLUSH, None), ("route %s · node %s  " % (route, node), "dim")])
-            updated = getattr(run, "log_updated_at", None)
-            updated_text = (time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(updated))
-                            if isinstance(updated, (int, float)) else "—")
-            rows.append([("      log %s · updated %s" % (
-                getattr(run, "log_path", None) or "—", updated_text), "dim")])
-            dirty = getattr(run, "source_dirty", None)
-            dirty_text = "—" if dirty is None else ("true" if dirty else "false")
-            rows.append([("      config %s · sha256 %s · commit %s · dirty %s" % (
-                getattr(run, "config_ref", None) or "—",
-                getattr(run, "config_sha256", None) or "—",
-                getattr(run, "source_commit", None) or "—", dirty_text), "dim")])
-            # Tracked-workflow line (OPERATIONS §5.12): a finished process must show why
-            # it ended and which registered attempt owns it, not just that it is gone.
-            exit_code = getattr(run, "exit_code", None)
-            rows.append([("      workflow %s · exit %s · owner %s%s" % (
-                getattr(run, "workflow_state", None) or "—",
-                "—" if exit_code is None else exit_code,
-                getattr(run, "parent_attempt_id", None) or "—",
-                (" · failure %s" % run.failure_class)
-                if getattr(run, "failure_class", None) else ""), "dim")])
+    counts = {
+        state: sum(1 for run in visible if getattr(run, "liveness", None) == state)
+        for state in ("working", "exited", "stale")
+    }
+    rows = [[
+        ("  LAB RESOURCES", "head"),
+        ("  %d visible · " % len(visible), "dim"),
+        ("working %d" % counts["working"], "working"),
+        (" · exited %d" % counts["exited"], "dim"),
+        (" · stale %d" % counts["stale"], "lvl_y" if counts["stale"] else "dim"),
+    ]]
+    state_rank = {"working": 0, "exited": 1, "stale": 2}
+    ordered = sorted(
+        visible,
+        key=lambda run: (
+            state_rank.get(getattr(run, "liveness", None), 3),
+            getattr(run, "project", "(unknown)"),
+            getattr(run, "run_id", ""),
+            getattr(run, "registry_path", ""),
+        ),
+    )
+    summary = [("    ", None)]
+    for index, run in enumerate(ordered[:3]):
+        if index:
+            summary.append(("  ·  ", "dim"))
+        state = getattr(run, "liveness", "stale")
+        key = {"working": "working", "exited": "dim", "stale": "lvl_y"}.get(state, "dim")
+        marker = {"working": "●", "exited": "✓", "stale": "⚠"}.get(state, "?")
+        project = getattr(run, "project", None) or "(unknown)"
+        run_id = getattr(run, "run_id", None) or "—"
+        node = getattr(run, "node", None) or "—"
+        summary.extend([
+            (marker + " ", key),
+            ("%s/%s" % (project, run_id), key),
+            (" · %s · %s" % (node, fmt_min(getattr(run, "elapsed_min", None))), "dim"),
+        ])
+    if len(ordered) > 3:
+        summary.append(("  +%d more" % (len(ordered) - 3), "dim"))
+    rows.append(summary)
     return rows
 
 
@@ -3918,6 +3945,10 @@ def _build_lines(sessions, jobs, section, narrow, malformed, layout="wide", memo
         groups.setdefault(gk, {"sessions": [], "jobs": []})["sessions"].append(s)
         if s.session_id:
             session_groups[s.session_id] = gk
+    managed_session_groups = {
+        managed_dir: _group_key_session(session)
+        for managed_dir, session in _unique_managed_parents(sessions).items()
+    }
     job_groups = {}
     # A route node has one current attempt. Keep older exact attempts in the alert
     # census/history, but suppress their rows by default so retries do not appear as
@@ -3925,7 +3956,12 @@ def _build_lines(sessions, jobs, section, narrow, malformed, layout="wide", memo
     top_jobs = [j for j in display_jobs if not (getattr(j, "parent_slug", None) and getattr(j, "depth", 1) >= 2)]
     depth_jobs = [j for j in display_jobs if getattr(j, "parent_slug", None) and getattr(j, "depth", 1) >= 2]
     for j in top_jobs + depth_jobs:
-        gk = _group_key_job(j, session_groups=session_groups, job_groups=job_groups)
+        gk = _group_key_job(
+            j,
+            session_groups=session_groups,
+            job_groups=job_groups,
+            managed_session_groups=managed_session_groups,
+        )
         groups.setdefault(gk, {"sessions": [], "jobs": []})["jobs"].append(j)
         if j.slug:
             job_groups[j.slug] = gk
@@ -4123,6 +4159,7 @@ def _build_lines(sessions, jobs, section, narrow, malformed, layout="wide", memo
         # their capability-owner job via parent_slug. This keeps main-session context light
         # while fleet still shows cross-harness orchestration shape.
         children = {}      # session_id -> [jobs] (nested under an on-screen parent)
+        managed_children = {}  # id(Session) -> [jobs], exact unique managed-dir recovery
         job_children = {}  # parent dispatch slug -> [dispatch-depth-2 jobs]
         orphans = []       # project-level fallback (parent dead/off-screen/no-env)
         loops_jobs = []    # no-parent-is-normal (cron loops) — no orphan marker
@@ -4139,6 +4176,7 @@ def _build_lines(sessions, jobs, section, narrow, malformed, layout="wide", memo
         # (user 2026-07-24: drill runs "orphan으로 잡히고 메인 세션은 연결도 안되고" — noise, since the
         # fixture decouples on purpose). Non-drill groups keep the exact prior classification.
         is_drill_case = str(name).startswith("drill:")
+        shown_managed_parents = _unique_managed_parents(shown)
         for j in group_jobs:
             if getattr(j, "parent_slug", None) and getattr(j, "depth", 1) >= 2:
                 if j.parent_slug in visible_parent_slugs:
@@ -4155,6 +4193,20 @@ def _build_lines(sessions, jobs, section, narrow, malformed, layout="wide", memo
                     orphans.append(j)
             elif j.is_child and j.parent_sid and j.parent_sid in shown_sids:
                 children.setdefault(j.parent_sid, []).append(j)
+            elif (
+                j.is_child
+                and getattr(j, "source", None) != "plugin-queue"
+                and getattr(j, "parent_managed_dir", None)
+            ):
+                managed_parent = shown_managed_parents.get(
+                    os.path.normpath(j.parent_managed_dir)
+                )
+                if managed_parent is not None:
+                    managed_children.setdefault(id(managed_parent), []).append(j)
+                elif j.key in _LOOPS_KEYS or is_drill_case:
+                    loops_jobs.append(j)
+                else:
+                    orphans.append(j)
             elif getattr(j, "source", None) == "plugin-queue":
                 # F-50c: a plugin-queue job nests ONLY on an exact `sessionId` ==
                 # `Session.session_id` match (the branch above). Its `parent_cwd` is the
@@ -4337,7 +4389,9 @@ def _build_lines(sessions, jobs, section, narrow, malformed, layout="wide", memo
                 lines.extend(_mem_row(s, layout))
                 _seen_glyphs.add("mem")
                 continue
-            kids = _sort_group_jobs(children.get(s.session_id, []))
+            kids = _sort_group_jobs(
+                children.get(s.session_id, []) + managed_children.get(id(s), [])
+            )
             if s.session_id in rendered_parent_sids:
                 kids = []
             elif s.session_id:

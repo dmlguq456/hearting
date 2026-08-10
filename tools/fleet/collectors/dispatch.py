@@ -61,6 +61,9 @@ _SHELLS = ("zsh", "bash", "sh", "dash")
 _PIPE_TOK = re.compile(r"[,\s]+")
 _DRILL_SLUG_RE = re.compile(r"^drill-[a-z]+-(.+)-\d{14}-\d+$")   # registry slug → case
 _DRILL_CWD_COMP_RE = re.compile(r"^drill-(.+)-[^-]+$")           # /tmp/drill-<case>-<rand> component to case
+_MANAGED_SIDECAR_RE = re.compile(
+    r"^(.*/\.harness/managed-sessions/[^/]+)/managed-sidecars/[^/]+$"
+)
 _TERMINAL_REGISTRY_STATUSES = frozenset(("done", "killed", "cancelled"))
 # F-46 (v29): a `done` row lingers this long as a display-only afterglow row — the job-row
 # mirror of the group cooling window (render `_COOL_WINDOW_MIN`). Rationale: a multi-minute
@@ -74,6 +77,21 @@ _DEGRADATION_CACHE_LIMIT = 128
 _DEGRADATION_REQUIRED = {"schema_version", "kind", "ts", "route_id", "route_node",
                          "route_hash", "dispatch_depth", "fallback_hop",
                          "execution_surface", "writer"}
+
+
+def _managed_parent_dir(sidecar_log):
+    """Exact managed-session state dir from a registered sidecar path.
+
+    The registry path is attribution evidence only when it is absolute and has the
+    launcher-owned ``.harness/managed-sessions/<state>/managed-sidecars/<file>`` shape.
+    Normalization removes harmless ``.`` components; malformed or out-of-tree values fail
+    closed so render never falls back to cwd guessing.
+    """
+    if not isinstance(sidecar_log, str) or not os.path.isabs(sidecar_log):
+        return None
+    normalized = os.path.normpath(sidecar_log)
+    match = _MANAGED_SIDECAR_RE.match(normalized)
+    return match.group(1) if match else None
 
 
 def _drill_case_from_slug(slug):
@@ -2165,6 +2183,7 @@ def _scan_jobs_log(path, seen_slugs, seen_keys=None, registry_priority=0):
         parent_slug = meta.get("parent") or meta.get("parent_slug") or None
         parent_sid = meta.get("parent_sid") or meta.get("parent_session_id") or None
         parent_cwd = meta.get("parent_cwd") or meta.get("parent_worktree") or None
+        parent_managed_dir = _managed_parent_dir(meta.get("managed_sidecar_log"))
         harness = _infer_harness(meta, slug)
         worker_type = meta.get("worker_type")
         unit = meta.get("unit") or None
@@ -2182,8 +2201,11 @@ def _scan_jobs_log(path, seen_slugs, seen_keys=None, registry_priority=0):
             capability_mode=capability_mode, worker_mode=worker_mode,
             mode_axis_conflict=mode_axis_conflict, qa=q,
             elapsed_min=row_age_min, slug=slug or worktree or repo,
-            cwd=cwd, parent_sid=parent_sid, parent_cwd=parent_cwd, parent_slug=parent_slug,
-            is_child=bool(parent_slug or parent_sid or parent_cwd), qa_source=qsrc, source="jobs", status=status,
+            cwd=cwd, parent_sid=parent_sid, parent_cwd=parent_cwd,
+            parent_managed_dir=parent_managed_dir,
+            parent_slug=parent_slug,
+            is_child=bool(parent_slug or parent_sid or parent_cwd or parent_managed_dir),
+            qa_source=qsrc, source="jobs", status=status,
             harness=harness, model=meta.get("model"),
             pid=registry_pid, proc_start=registry_start,
             pid_scope=meta.get("pid_scope"),

@@ -31,6 +31,24 @@ def _managed_dir(args):
     return match.group(1) if match else None
 
 
+def _user_ps_args(columns):
+    """GNU ps argv scoped to Fleet's current effective UID, or None.
+
+    The UID is resolved for every query rather than cached at import time so tests,
+    privilege transitions, and long-lived Fleet processes all use the caller's current
+    boundary.  Platforms without ``geteuid`` fail closed; Windows session discovery uses
+    ``_scan_disk`` and never depends on this helper.
+    """
+    geteuid = getattr(os, "geteuid", None)
+    if geteuid is None:
+        return None
+    try:
+        uid = str(geteuid())
+    except (OSError, TypeError, ValueError):
+        return None
+    return ["ps", "-u", uid, "-o", columns]
+
+
 def _read_cwd(pid):
     """(resolved cwd, orphan?) — orphan = /proc/<pid>/cwd symlink ended in ' (deleted)'."""
     try:
@@ -139,9 +157,12 @@ def _ps_lines():
     # (observed in statusline.sh:108). Harmless for procscan's comm match but kept for the shared
     # dispatch scan that reuses the same ps invocation contract.
     env = dict(os.environ, COLUMNS="100000")
+    argv = _user_ps_args("pid=,comm=,etime=,args=")
+    if argv is None:
+        return []
     try:
         out = subprocess.run(
-            ["ps", "-eo", "pid=,comm=,etime=,args="],
+            argv,
             capture_output=True, text=True, timeout=5, env=env,
         ).stdout
     except Exception:
@@ -203,8 +224,11 @@ def proc_tree():
     their own call — the same reason `_pid_ttys` is separate. comm is placed LAST because it
     can contain spaces; the numeric columns stay unambiguously splittable.
     """
+    argv = _user_ps_args("pid=,ppid=,etimes=,comm=")
+    if argv is None:
+        return {}
     try:
-        out = subprocess.run(["ps", "-eo", "pid=,ppid=,etimes=,comm="],
+        out = subprocess.run(argv,
                              capture_output=True, text=True, timeout=5).stdout
     except Exception:
         return {}
@@ -293,8 +317,11 @@ def exec_child(pid, tree=None, kids=None, min_age=EXEC_MIN_AGE_SEC,
 def _pid_ttys():
     """{pid: 'pts/N'} controlling tty per process (separate cheap ps so the main _ps_lines
     contract, shared with the dispatch scan, stays untouched). '?' (no tty) is kept as-is."""
+    argv = _user_ps_args("pid=,tty=")
+    if argv is None:
+        return {}
     try:
-        out = subprocess.run(["ps", "-eo", "pid=,tty="],
+        out = subprocess.run(argv,
                              capture_output=True, text=True, timeout=3).stdout
     except Exception:
         return {}

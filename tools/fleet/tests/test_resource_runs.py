@@ -56,19 +56,40 @@ class ResourceRunFleetTest(unittest.TestCase):
         self.assertEqual({row["run_id"] for row in all_rows["resource_jobs"]},
                          {"gpu-0", "gpu-1"})
 
-    def test_tui_badge_fields_and_terminal_toggle(self):
-        rows = [self.row("gpu-0"), self.row("gpu-1"), self.row("old", "exited")]
-        text = flatten(render._build_lines(
-            [], [], "dispatch", False, 0, resources=rows, term_width=200))
-        for value in ("LAB resource", "gpu-0", "gpu-1", "project project · cwd /work/project",
-                      "/work/project/train.log", "path:config.yaml", "full-run"):
+    def test_tui_is_two_line_summary_and_terminal_toggle(self):
+        rows = [
+            self.row("gpu-0"), self.row("gpu-1"),
+            self.row("old", "exited"), self.row("stale", "stale"),
+        ]
+        compact = render._resource_rows(rows, "dispatch")
+        self.assertEqual(len(compact), 2)
+        text = flatten(compact)
+        for value in ("LAB RESOURCES", "2 visible", "working 2", "exited 0", "stale 0",
+                      "project/gpu-0", "project/gpu-1", "full-run", "12m"):
             self.assertIn(value, text)
         self.assertNotIn("old", text)
+        self.assertNotIn("train.log", text)  # detailed provenance remains JSON-only.
         render.set_show_all(True)
-        shown = flatten(render._build_lines(
-            [], [], "dispatch", False, 0, resources=rows, term_width=200))
+        all_compact = render._resource_rows(rows, "dispatch")
+        self.assertEqual(len(all_compact), 2)
+        shown = flatten(all_compact)
+        self.assertIn("4 visible", shown)
+        self.assertIn("working 2", shown)
+        self.assertIn("exited 1", shown)
+        self.assertIn("stale 1", shown)
         self.assertIn("old", shown)
-        self.assertIn("exited", shown)
+        self.assertIn("+1 more", shown)
+
+    def test_tui_caps_run_summaries_at_three(self):
+        rows = [self.row("gpu-%d" % i) for i in range(5)]
+        compact = render._resource_rows(rows, "both")
+        self.assertEqual(len(compact), 2)
+        text = flatten(compact)
+        for run_id in ("gpu-0", "gpu-1", "gpu-2"):
+            self.assertIn("project/" + run_id, text)
+        self.assertNotIn("project/gpu-3", text)
+        self.assertNotIn("project/gpu-4", text)
+        self.assertIn("+2 more", text)
 
     def test_collector_keeps_multiple_runs_in_one_project(self):
         with tempfile.TemporaryDirectory() as td:

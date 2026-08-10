@@ -398,6 +398,8 @@ class DispatchJob:
     cwd: str = ""
     parent_sid: Optional[str] = None    # spawning parent session id (CLAUDE_CODE_SESSION_ID from environ)
     parent_cwd: Optional[str] = None    # fallback parent cwd when runtime session id is unavailable/mismatched
+    parent_managed_dir: Optional[str] = None  # exact managed Codex state dir derived from
+                                             # registered managed_sidecar_log (F-68)
     is_child: bool = False              # portable/adapter worker marker
     harness: Optional[str] = None       # claude | codex | opencode — dispatch runtime (None = unknown / jobs.log-only)
     qa_source: Optional[str] = None     # provenance of effective qa: argv | jobslog | plan | default
