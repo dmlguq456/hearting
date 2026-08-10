@@ -19,7 +19,8 @@ contract. It is adapter-owned output, not a legacy compatibility Skill copy.
 1. Before approval, route from this compact metadata and `core/WORKFLOW.md §0.2`; do not read the full portable source merely to propose the route.
 2. Present the five-field confirmation card from `core/WORKFLOW.md §0.4` unless the same route and scope are already approved.
 3. After approval, direct/quick acting sessions read `capabilities/autopilot-draft.md`; at `standard+`, the dispatch-depth-1 owner reads it and stage workers read only their assigned contracts.
-4. Run `adapters/codex/bin/preflight.sh capability-info autopilot-draft` and obey the reported status:
+4. Before the first durable capability artifact, compile and bind the checked route with `preflight.sh route --capability autopilot-draft ...`; `preflight.sh route autopilot-draft` is grounding only, not route participation. A native-subagent restriction never authorizes direct execution.
+5. Run `adapters/codex/bin/preflight.sh capability-info autopilot-draft` and obey the reported status:
    - `instruction-only`: use this Skill as Codex guidance plus explicit preflight guards.
    - `tool-contract`: report the named `tool_contract`, run any `tool_contract_check`, and obey `runtime_surface` / `fallback` before claiming full support.
    - `unsupported`: stop or use the reported `fallback`.
@@ -37,7 +38,8 @@ contract. It is adapter-owned output, not a legacy compatibility Skill copy.
 ## Required Guards
 
 - Before edits: `adapters/codex/bin/preflight.sh write <file> [session-id]`
-- Before capability routing/spec-changing work: `adapters/codex/bin/preflight.sh route autopilot-draft [cwd] [session-id]`
+- Capability grounding only: `adapters/codex/bin/preflight.sh route autopilot-draft [cwd] [session-id]`
+- Before durable capability output: `adapters/codex/bin/preflight.sh route --capability autopilot-draft <complete compile arguments>`
 - Before spec-changing work: `adapters/codex/bin/preflight.sh capability autopilot-draft [cwd] [session-id]`
 - After actually reading a spec PRD: `adapters/codex/bin/preflight.sh read <prd.md> [session-id]`
 - For workflow state: `adapters/codex/bin/preflight.sh status [cwd] [session-id]` and `adapters/codex/bin/preflight.sh prompt-signal [cwd] [session-id]`

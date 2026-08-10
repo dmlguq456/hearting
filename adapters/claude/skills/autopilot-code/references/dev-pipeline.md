@@ -25,7 +25,7 @@ session running the probe**. Take the defaults; they resolve that parent for you
 ```bash
 OWNER_PROFILE_ARGS=()
 if [ "$OWNER_HARNESS" = codex ]; then
-  OWNER_PROFILE_ARGS+=(--prospective-standard-owner)
+  OWNER_PROFILE_ARGS+=(--prospective-standard-owner --jobs "$CANONICAL_JOBS")
 fi
 for CHILD in claude codex; do
   python3 "$AGENT_HOME/utilities/nested-dispatch-eligibility.py" \
@@ -48,8 +48,9 @@ always a registered-headless owner, so passing your own `interactive` transport 
 the probe, again at `capability-route.py compile`, and again at launch. `--parent-harness` must
 be the adapter the owner will actually run as; bind that decision by passing the compiled route
 to the launch, `dispatch-owner --route-evidence "$ROUTE_FILE" --start ...`, so the adapter
-cascade cannot select a harness the tuples never probed. Getting any of this wrong does not stop
-the cycle — it silently exhausts hops 1 and 2 for every node and runs the whole route inline.
+cascade cannot select a harness the tuples never probed. Getting any of this wrong fails route
+compilation or owner selection before material work; it must never exhaust checked hops and then
+silently run the route inline.
 `--prospective-standard-owner` is only for this pre-owner Codex check. Once the Codex owner is
 running, omit it: the probe then requires the launcher's actual network marker.
 Dispatch every durable node through `utilities/dispatch-node.py`; it binds the route identity,
@@ -130,15 +131,21 @@ absence is *no claim*, never a failure.
 
 Run standard+ stages in-session only when:
 
-1. intensity is direct or quick;
-2. the runtime reports headless dispatch unavailable; or
+1. it is a micro-stage inside the checked quick one-shot owner;
+2. every route-sealed registered-headless candidate has a typed hard-unavailable result and the compiled fallback policy reaches inline; or
 3. the conductor judges the edit nonseparable because file artifacts cannot carry a boundary-coupled semantic contract.
 
-For case 3, record reasoning in `plans/<slug>/_internal/metrics.md`; an unrecorded inline standard+ run violates the contract. Still parallelize separable census or disjoint file groups. Dispatch-infrastructure self-modification requires the explicit `STAGE_DISPATCH_INLINE_OK` opt-out.
+Native-subagent prohibition is not a headless failure. An exact-worktree retry result is a
+re-isolate/re-probe stop and never reaches this list. For case 3, record reasoning in
+`plans/<slug>/_internal/metrics.md`; an unrecorded inline standard+ run violates the contract.
+Still parallelize separable census or disjoint file groups. Dispatch-infrastructure
+self-modification requires the explicit `STAGE_DISPATCH_INLINE_OK` opt-out.
 
 #### Usage-Aware Cross-Harness Routing
 
-Before dispatch, run `sh <agent-home>/utilities/usage-check.sh`. It reports per-harness `ok`, `limited(<reset>)`, or `unknown`; `ok` means no known block, not guaranteed capacity. Avoid limited runtimes, honor explicit `HARNESS_CAPACITY_BIAS`, otherwise default to the free cross-harness posture (OPERATIONS §5.10 SD-16, 2026-07-24): with two or more eligible harnesses, spread consecutive stage nodes across model families rather than homing to the conductor's harness, always place test or review on a different family than implementation, and record a task-fit or limit reason when a run intentionally keeps every node on one harness. Preserve `dispatch_depth`, `parent`, `worker_type`, `assigned_contract`, `model_role`, `harness`, `owner_harness`, and `parent_sid` metadata across runtimes.
+Before dispatch, run `sh <agent-home>/utilities/usage-check.sh`. It reports per-harness `ok`, `limited(<reset>)`, or `unknown`; `ok` means no known block, not guaranteed capacity. Avoid limited runtimes. An automatic/model-selected recovery also requires known positive capacity; unknown capacity is not positive availability. A user's explicit `--adapter` override may retain its separately audited unknown-capacity path when route evidence and hard eligibility still permit it. Otherwise default to the free cross-harness posture (OPERATIONS §5.10 SD-16, 2026-07-24): with two or more eligible harnesses, spread consecutive stage nodes across model families rather than homing to the conductor's harness, always place test or review on a different family than implementation, and record a task-fit or limit reason when a run intentionally keeps every node on one harness. Preserve `dispatch_depth`, `parent`, `worker_type`, `assigned_contract`, `model_role`, `harness`, `owner_harness`, and `parent_sid` metadata across runtimes.
+
+If the user disables a harness, do not run its auth, capacity, or headless probe. Emit that child tuple through `nested-dispatch-eligibility.py --user-disabled`; the sealed `unsupported/user-disabled` evidence excludes it from automatic recovery and explicit owner selection.
 
 If a stage dies immediately from usage, session, or authentication limits, the wrapper closes its row as `done,note=dead-<reason>` and records reset time when known. The wrapper does not retry; the conductor decides redispatch or cross-harness failover.
 
@@ -201,7 +208,7 @@ the typed receipt on resume. Only for an explicitly reported `poll-fallback`:
 sh "$AGENT_HOME/utilities/dispatch-wait.sh" --parent <cycle-slug>
 ```
 
-After the typed receipt (or fallback exit 0), read only plan status and paths. A terminal recovery receipt permits checked exact-attempt diagnosis; raw transcript inspection still requires a terminal/closed row or explicit operator recovery. For direct, quick, or unavailable headless runtime, invoke `code-plan` in-session.
+After the typed receipt (or fallback exit 0), read only plan status and paths. A terminal recovery receipt permits checked exact-attempt diagnosis; raw transcript inspection still requires a terminal/closed row or explicit operator recovery. Direct and the quick one-shot owner keep their declared inline plan; standard+ invokes `code-plan` in-session only after the compiled fallback policy reaches inline under the closed rules above.
 
 At `strong` the compiled route contains `plan` (`deep`) and `plan-alternative`
 (`balanced-deep`). At `thorough|adversarial` it also contains the light

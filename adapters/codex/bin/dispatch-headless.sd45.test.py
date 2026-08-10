@@ -272,6 +272,19 @@ class CodexSandboxMountShape(unittest.TestCase):
         self.assertNotIn("invalid-worktree-codex-mount-target", result.stdout + result.stderr)
 
 
+class CodexOwnerRegistryProjection(unittest.TestCase):
+    def test_missing_registry_writable_root_fails_before_launch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            args = argparse.Namespace(
+                nested_headless_network=True,
+                jobs_path=Path(tmp) / "registry" / "jobs.log",
+            )
+            with mock.patch.object(WH, "nested_owner_writable_dirs", return_value=()):
+                with self.assertRaises(WH.DispatchContractError) as ctx:
+                    WH.validate_nested_owner_registry_projection(args)
+        self.assertEqual(ctx.exception.reason, "owner-registry-sandbox-unwritable")
+
+
 class CodexSD45(unittest.TestCase):
  def test_route_consumer_and_scope_refusal(self):
   with tempfile.TemporaryDirectory() as td:

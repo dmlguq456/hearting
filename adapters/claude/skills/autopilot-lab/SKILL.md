@@ -41,6 +41,9 @@ stage workers load only their assigned stage contracts.
 ## Guard pointer
 
 Follow the portable artifact, worktree, role, and verification guards in the
-selected owner contract. Runtime projections must report unsupported mechanics
-and must not claim physical instruction masking, token, billing, or cost
-savings without verified evidence.
+selected owner contract. Before the first durable capability artifact, compile
+and bind the checked route even for direct intensity; direct is a compiled
+inline node, not route absence. A restriction on native subagents/agents is
+surface-local and never selects direct execution. Runtime projections must
+report unsupported mechanics and must not claim physical instruction masking,
+token, billing, or cost savings without verified evidence.

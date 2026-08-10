@@ -408,6 +408,29 @@ class TestRoute(unittest.TestCase):
  def test_unknown_nested_tuple_fails_closed(self):
   with self.assertRaisesRegex(ValueError,"no supported direct headless tuple"):
    self.compile_v3(self.dispatch(self.nested(status="unknown",failure="unprobed-tuple")))
+ def test_native_subagent_prohibition_never_authorizes_inline_execution(self):
+  evidence={
+   "tuples":[self.nested(
+    status="unsupported",failure="nested-network-unconfirmed")],
+   "native_subagent":[{
+    "harness":"codex","transport":"headless",
+    "execution_surface":"codex-native-subagent","registered_worker":False,
+    "status":"unsupported","check_source":"user-policy",
+    "failure_class":"user-disabled",
+   }],
+  }
+  with self.assertRaisesRegex(ValueError,"no supported direct headless tuple"):
+   self.compile_v3(evidence)
+ def test_rehashed_undeclared_fanout_node_is_rejected(self):
+  route=self.compile_v3(self.dispatch(self.nested()))
+  rogue=json.loads(json.dumps(route["nodes"][0]))
+  rogue["id"]="undeclared-fanout"
+  rogue["parallel_group"]="undeclared-group"
+  route["nodes"].append(rogue)
+  route["route_hash"]=R.route_hash(route)
+  route["route_id"]="rt-"+route["route_hash"].split(":",1)[1][:16]
+  with self.assertRaisesRegex(ValueError,"route nodes differ from the declared recipe"):
+   R.verify_route(route,R.ROOT)
  def test_depth0_parent_transport_is_rejected_at_compile(self):
   # 2026-08-04 agent-note: an interactive main session probed with its OWN
   # transport, so every dispatch-depth-2 hop failed at launch and the whole

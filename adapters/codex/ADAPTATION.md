@@ -29,6 +29,18 @@ removes project `AGENTS.md` discovery, so lifecycle suppression and
 harness-controlled prompt isolation are supported while physical project
 instruction masking remains an explicit fallback.
 
+## Runtime router diagnostic boundary (2026-08-10)
+
+`codex_core::tools::router` diagnostics belong to the Codex App Server/runtime,
+not to Hearting dispatch. Correlate one with the typed result of the exact tool
+call before assigning a harness failure. In the reported 2026-08-10 incident,
+the preceding and following tool calls both completed successfully and no
+Hearting failure receipt matched the diagnostic, so it is not evidence of
+managed-marker loss or a failed dispatch. When no typed result exists, retry
+only the exact idempotent tool call once; otherwise trust its typed completion.
+Do not infer an unmanaged parent, scan the process tree as launch authority, or
+switch dispatch surfaces from this uncorrelated runtime message.
+
 ## Design Principle
 
 Codex adaptation targets harness parity on Codex, not Claude surface parity.

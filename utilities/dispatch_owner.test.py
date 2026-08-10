@@ -96,6 +96,9 @@ class DispatchOwnerTests(unittest.TestCase):
             "DISPATCH_DEFAULTS_CONFIG": str(config or self.config(owners)),
             "CODEX_DISPATCH_MODEL": "interactive-inheritance-must-not-leak",
             "CODEX_DISPATCH_MODEL_PROFILE": "interactive-profile-must-not-leak",
+            "CODEX_HOME": str(self.home / "codex-home"),
+            "CLAUDE_CONFIG_DIR": str(self.home / "claude-home"),
+            "HARNESS_CAPACITY_SCORES": "claude:80,codex:80,opencode:80",
         })
         env.update(env_extra or {})
         return subprocess.run(args, text=True, capture_output=True, env=env)
@@ -118,6 +121,9 @@ class DispatchOwnerTests(unittest.TestCase):
             "DISPATCH_DEFAULTS_CONFIG": str(config or self.config(owners)),
             "CODEX_DISPATCH_MODEL": "interactive-inheritance-must-not-leak",
             "CODEX_DISPATCH_MODEL_PROFILE": "interactive-profile-must-not-leak",
+            "CODEX_HOME": str(self.home / "codex-home"),
+            "CLAUDE_CONFIG_DIR": str(self.home / "claude-home"),
+            "HARNESS_CAPACITY_SCORES": "claude:80,codex:80,opencode:80",
         }
 
     def _load_selector_module(self):
@@ -222,7 +228,9 @@ class DispatchOwnerTests(unittest.TestCase):
         result = self.run_owner(
             config=self.quality_config(),
             model_profile="light",
-            env_extra={"HARNESS_CAPACITY_SCORES": "claude:20,codex:30"},
+            env_extra={
+                "HARNESS_CAPACITY_SCORES": "claude:20,codex:30,opencode:90"
+            },
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("adapter=opencode", result.stdout)
@@ -303,13 +311,52 @@ class DispatchOwnerTests(unittest.TestCase):
         self.assertIn("fallback.1=codex:configured-candidates-ineligible", result.stdout)
         self.assertIn("rejected.1=claude:usage-limited", result.stdout)
 
-    def test_unknown_state_with_no_jobs_file_selects_configured_claude(self):
+    def test_unknown_capacity_never_selects_an_automatic_recovery(self):
         self.jobs.unlink()
-        result = self.run_owner()
+        result = self.run_owner(env_extra={"HARNESS_CAPACITY_SCORES": ""})
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("eligibility.claude=unknown", result.stdout)
+        self.assertIn("capacity_headroom.claude=unknown", result.stdout)
+        self.assertIn("reason=no-eligible-candidate", result.stdout)
+        self.assertIn("child_spawned=0", result.stdout)
+
+    def test_explicit_adapter_can_override_unknown_capacity(self):
+        self.jobs.unlink()
+        result = self.run_owner(
+            extra=("--adapter", "claude"),
+            env_extra={"HARNESS_CAPACITY_SCORES": ""},
+        )
         self.assert_model_map(result, "claude")
         self.assertIn("eligibility.claude=unknown", result.stdout)
-        self.assertIn("selection_source=configured-normal", result.stdout)
-        self.assertNotIn("rejected.1=claude", result.stdout)
+        self.assertIn("selection_source=explicit", result.stdout)
+
+    def test_route_user_disabled_harness_rejects_explicit_override_before_wrapper(self):
+        route = self.home / "user-disabled-route.json"
+        route.write_text(
+            json.dumps({
+                "effective_intensity": "standard",
+                "dispatch_evidence": {"tuples": [
+                    {
+                        "parent_harness": "claude",
+                        "status": "unsupported",
+                        "failure_scope": "runtime-global",
+                        "failure_class": "user-disabled",
+                    },
+                    {"parent_harness": "codex", "status": "supported"},
+                ]},
+            }),
+            encoding="utf-8",
+        )
+        rc, stdout, calls = self.run_owner_in_process(
+            self.base_argv(
+                extra=("--route-evidence", str(route), "--adapter", "claude")
+            ),
+            self.base_env(config=self.quality_config()),
+        )
+        self.assertNotEqual(rc, 0)
+        self.assertIn("reason=explicit-adapter-outside-route-evidence", stdout)
+        self.assertIn("child_spawned=0", stdout)
+        self.assertEqual(calls, [])
 
     def test_malformed_yaml_fails_before_materialization(self):
         config = self.home / "bad.yaml"
@@ -430,6 +477,21 @@ class RouteEvidenceOwnerHarnessTest(unittest.TestCase):
             str(caught.exception),
             "route-evidence-exact-worktree-reprobe-required",
         )
+
+    def test_user_disabled_harness_is_not_an_automatic_or_explicit_fallback(self):
+        path = self._route({
+            "effective_intensity": "standard",
+            "dispatch_evidence": {"tuples": [
+                {
+                    "parent_harness": "claude",
+                    "status": "unsupported",
+                    "failure_scope": "runtime-global",
+                    "failure_class": "user-disabled",
+                },
+                {"parent_harness": "codex", "status": "supported"},
+            ]},
+        })
+        self.assertEqual(OWNER._sealed_owner_harnesses(path), {"codex"})
 
     def test_quick_route_uses_its_registered_headless_candidates(self):
         # quick seals no depth-2 tuples; reading `dispatch_evidence` here would

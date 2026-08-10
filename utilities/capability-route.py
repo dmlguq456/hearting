@@ -758,6 +758,11 @@ def verify_route(route, expected_cwd=None, *, allow_stale_registry=False):
         # check that compares against it is skipped rather than guessed at.
         return dict(route, _registry_current=False)
     _validate_output_scopes(route.get("nodes", []))
+    def _node_identity(node):
+        return {
+            k: v for k, v in node.items()
+            if k not in ("fallback_hops", "harness_affinity", "harness_policy")
+        }
     if route.get("composed"):
         if route.get("effective_intensity") in ("direct","quick"):
             raise ValueError("composed routes require a standard+ effective intensity")
@@ -768,11 +773,6 @@ def verify_route(route, expected_cwd=None, *, allow_stale_registry=False):
             composed_recipe, registry,
             registry["owner_profile_by_intensity"]["standard"],
         )
-        def _node_identity(node):
-            return {
-                k: v for k, v in node.items()
-                if k not in ("fallback_hops", "harness_affinity", "harness_policy")
-            }
         expected_nodes=json.loads(json.dumps(composed_recipe["standard_plus"]["nodes"]))
         expected_nodes=_expand_parallel_groups(
             expected_nodes, composed_recipe["standard_plus"].get("parallel_groups"),
@@ -785,6 +785,17 @@ def verify_route(route, expected_cwd=None, *, allow_stale_registry=False):
         route_recipe=TOPO.resolve_recipe(
             registry, route.get("capability"), route.get("capability_mode")
         )
+        if route.get("effective_intensity") not in ("direct", "quick"):
+            expected_nodes=json.loads(json.dumps(route_recipe["standard_plus"]["nodes"]))
+            expected_nodes=_expand_parallel_groups(
+                expected_nodes, route_recipe["standard_plus"].get("parallel_groups"),
+                route.get("effective_intensity"))
+            # The remaining verifier owns field-level diagnostics.  This
+            # census closes only the undeclared fanout hole: a rehashed route
+            # may not add, remove, reorder, or rename recipe nodes.
+            if ([n.get("id") for n in route.get("nodes", [])]
+                    != [n.get("id") for n in expected_nodes]):
+                raise ValueError("route nodes differ from the declared recipe")
     expected_extensions=_realize_conditional_extensions(
         route_recipe, route.get("effective_intensity")
     )

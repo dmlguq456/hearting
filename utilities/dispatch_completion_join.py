@@ -46,10 +46,23 @@ MANAGED_SESSION_PARENT_DELIVERY = "codex-managed-gateway"
 SESSION_PARENT_DELIVERIES = frozenset(
     {SESSION_PARENT_DELIVERY, MANAGED_SESSION_PARENT_DELIVERY}
 )
+SUCCESS_NOTES = frozenset({"completed-marker", "completed-supervisor"})
 
 
 class JoinContractError(RuntimeError):
     """A registry or liveness boundary could not be proved."""
+
+
+def required_action_for_attempt(status: str, metadata: dict[str, str]) -> str:
+    """Return the one typed follow-up that the exact registry row permits."""
+
+    if status in OPEN_STATES:
+        return "complete-open"
+    if status != "done":
+        raise JoinContractError("owned-row-status-invalid")
+    if metadata.get("failure_class") == "pass" or metadata.get("note") in SUCCESS_NOTES:
+        return "advance-completed"
+    return "inspect-done-failure"
 
 
 @dataclass(frozen=True)
@@ -1255,16 +1268,8 @@ def _join_snapshot(
                     "status": row.status,
                     "readiness": readiness,
                     "reason": reason,
-                    "required_action": (
-                        "complete-open"
-                        if row.status in OPEN_STATES
-                        else (
-                            "advance-completed"
-                            if row.metadata.get("failure_class") == "pass"
-                            or row.metadata.get("note")
-                            in {"completed-marker", "completed-supervisor"}
-                            else "inspect-done-failure"
-                        )
+                    "required_action": required_action_for_attempt(
+                        row.status, row.metadata
                     ),
                 }
             )

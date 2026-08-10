@@ -7,6 +7,8 @@ deterministic conformance tests and adapters that can supply the same fields:
   material-route-guard.py bind --route <route.json> --cwd <dir> --session <id>
   material-route-guard.py check --tool <Edit|Write|Bash> [--file <path>] \
       [--command <shell>] --cwd <dir> --session <id>
+  material-route-guard.py check --tool ArtifactWrite --file <artifact> \
+      --cwd <project> --session <id>
   material-route-guard.py clear --session <id>
 
 Only a verified capability-route record is routing authority. Main interactive
@@ -56,6 +58,15 @@ EDIT_TOOLS = {
     "multiedit",
     "notebook_edit",
 }
+CAPABILITY_ARTIFACT_CAPS = {
+    "plans": {"autopilot-code", "audit"},
+    "research": {"autopilot-research", "autopilot-refine", "audit"},
+    "documents": {"autopilot-draft", "autopilot-refine", "audit"},
+    "experiments": {"autopilot-lab", "audit"},
+    "spec": {"autopilot-spec", "autopilot-design", "autopilot-ship", "audit"},
+    "analysis_project": {"analyze-project", "autopilot-code", "audit"},
+}
+ROUTABLE_CAPABILITIES = set().union(*CAPABILITY_ARTIFACT_CAPS.values())
 SOURCE_SUFFIXES = {
     ".asm", ".bash", ".c", ".cc", ".clj", ".cljs", ".cpp", ".cs",
     ".css", ".cu", ".cuh", ".cxx", ".dart", ".elm", ".erl", ".ex",
@@ -96,8 +107,8 @@ EXCLUDED_PARTS = {
     "vendor",
 }
 DENIAL = (
-    "material 작업인데 route 미선언 (silent no-route). hotfix라도 "
-    "autopilot-code(최소 --intensity direct)로 진입하라."
+    "material 작업인데 route 미선언 (silent no-route). direct 실행도 선택된 "
+    "capability route를 먼저 compile/bind해야 한다."
 )
 RECALL_RECEIPT_SCHEMA = 1
 RECALL_RECEIPT_MAX_AGE_SECONDS = 24 * 60 * 60
@@ -386,7 +397,7 @@ def verify_route(
     route = _load_route(route_file)
     capabilities = accepted_capabilities or {"autopilot-code"}
     if route.get("capability") not in capabilities:
-        raise RouteError("route-capability-not-autopilot-code")
+        raise RouteError("route-capability-not-accepted")
     if route.get("effective_intensity") not in INTENSITIES:
         raise RouteError("route-intensity-invalid")
     route_cwd = Path(str(route.get("cwd", ""))).resolve(strict=False)
@@ -440,7 +451,12 @@ def bind_route(
     agent_home: Path,
 ) -> dict[str, Any]:
     root = project_root(cwd)
-    route = verify_route(route_file, root, agent_home)
+    route = verify_route(
+        route_file,
+        root,
+        agent_home,
+        accepted_capabilities=ROUTABLE_CAPABILITIES,
+    )
     path = marker_path(agent_home, session_id)
     marker = {
         "schema_version": MARKER_SCHEMA,
@@ -473,7 +489,13 @@ def clear_route(session_id: str, agent_home: Path) -> None:
     gc_markers(agent_home)
 
 
-def session_route(session_id: str, root: Path, agent_home: Path) -> dict[str, Any]:
+def session_route(
+    session_id: str,
+    root: Path,
+    agent_home: Path,
+    *,
+    accepted_capabilities: set[str] | None = None,
+) -> dict[str, Any]:
     path = marker_path(agent_home, session_id)
     try:
         if path.is_symlink() or path.stat().st_size > 16_384:
@@ -493,13 +515,19 @@ def session_route(session_id: str, root: Path, agent_home: Path) -> dict[str, An
         root,
         agent_home,
         expected_route_id=str(marker.get("route_id", "")),
+        accepted_capabilities=accepted_capabilities,
     )
     if route.get("route_hash") != marker.get("route_hash"):
         raise RouteError("session-marker-route-hash-mismatch")
     return route
 
 
-def worker_route(root: Path, agent_home: Path) -> dict[str, Any] | None:
+def worker_route(
+    root: Path,
+    agent_home: Path,
+    *,
+    accepted_capabilities: set[str] | None = None,
+) -> dict[str, Any] | None:
     route_file = os.environ.get("AGENT_ROUTE_FILE", "")
     route_id = os.environ.get("AGENT_ROUTE_ID", "")
     route_node = os.environ.get("AGENT_ROUTE_NODE", "")
@@ -513,15 +541,60 @@ def worker_route(root: Path, agent_home: Path) -> dict[str, Any] | None:
         agent_home,
         expected_route_id=route_id,
         expected_node=route_node or None,
+        accepted_capabilities=accepted_capabilities,
     )
 
 
-def require_route(session_id: str, root: Path, agent_home: Path) -> bool:
-    worker = worker_route(root, agent_home)
+def active_route(
+    session_id: str,
+    root: Path,
+    agent_home: Path,
+    *,
+    accepted_capabilities: set[str] | None = None,
+) -> tuple[dict[str, Any], bool]:
+    worker = worker_route(
+        root,
+        agent_home,
+        accepted_capabilities=accepted_capabilities,
+    )
     if worker is not None:
-        return True
-    session_route(session_id, root, agent_home)
-    return False
+        return worker, True
+    return (
+        session_route(
+            session_id,
+            root,
+            agent_home,
+            accepted_capabilities=accepted_capabilities,
+        ),
+        False,
+    )
+
+
+def require_route(
+    session_id: str,
+    root: Path,
+    agent_home: Path,
+    *,
+    accepted_capabilities: set[str] | None = None,
+) -> bool:
+    _route, is_worker = active_route(
+        session_id,
+        root,
+        agent_home,
+        accepted_capabilities=accepted_capabilities,
+    )
+    return is_worker
+
+
+def capability_artifact_caps(path: Path) -> set[str] | None:
+    """Return capabilities allowed to author one durable artifact bucket."""
+
+    parts = path.resolve(strict=False).parts
+    for index, part in enumerate(parts[:-1]):
+        if part not in {".agent_reports", ".claude_reports"}:
+            continue
+        return CAPABILITY_ARTIFACT_CAPS.get(parts[index + 1])
+    return None
 
 
 def require_recall_opportunity(session_id: str, turn_id: str, root: Path) -> None:
@@ -964,6 +1037,28 @@ def check_action(
     command: str = "",
     turn_id: str = "",
 ) -> None:
+    if tool == "ArtifactWrite":
+        if not file_path:
+            return
+        target = _resolve_path(cwd, file_path)
+        accepted = capability_artifact_caps(target)
+        if not accepted:
+            return
+        root = project_root(cwd)
+        route, is_worker = active_route(
+            session_id,
+            root,
+            agent_home,
+            accepted_capabilities=accepted,
+        )
+        artifact_root = Path(str(route.get("artifact_root", ""))).resolve(
+            strict=False
+        )
+        if not _within(target.resolve(strict=False), artifact_root):
+            raise RouteError("route-artifact-root-mismatch")
+        if not is_worker:
+            require_recall_opportunity(session_id, turn_id, root)
+        return
     if tool in EDIT_TOOLS:
         if not file_path:
             return
@@ -972,7 +1067,12 @@ def check_action(
         if not is_material_source(target, repo):
             return
         root = project_root(cwd, target)
-        is_worker = require_route(session_id, root, agent_home)
+        is_worker = require_route(
+            session_id,
+            root,
+            agent_home,
+            accepted_capabilities={"autopilot-code"},
+        )
         if not is_worker:
             require_recall_opportunity(session_id, turn_id, root)
         return
@@ -982,7 +1082,12 @@ def check_action(
         repo = git_root(command_cwd)
         if repo is None or not commit_has_material(repo, all_tracked, path_mode, paths):
             continue
-        is_worker = require_route(session_id, repo, agent_home)
+        is_worker = require_route(
+            session_id,
+            repo,
+            agent_home,
+            accepted_capabilities={"autopilot-code"},
+        )
         if not is_worker:
             require_recall_opportunity(session_id, turn_id, repo)
 

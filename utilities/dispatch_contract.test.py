@@ -456,7 +456,8 @@ class DispatchContractTest(unittest.TestCase):
    fallback=[{"fallback_hop":"same-harness-headless","ordinal":1,
               "candidates":[{"child_harness":"codex","status":"supported"}]},
              {"fallback_hop":"cross-harness-headless","ordinal":2,
-              "candidates":[{"child_harness":"claude","status":"supported"}]}]
+              "candidates":[{"child_harness":"claude","status":"supported"},
+                            {"child_harness":"opencode","status":"supported"}]}]
    route={"route_id":"rt-replica","nodes":[
     {"id":"plan","dispatch_depth":2,"parallel_group":"plan","replica_group":"plan",
      "model_profile":"deep","perspective":"primary-plan","parallel_leg_index":0,"fallback_hops":fallback},
@@ -474,6 +475,10 @@ class DispatchContractTest(unittest.TestCase):
    self.assertEqual(expected["batch_group"],"plan")
    self.assertEqual(expected["batch_attempt_id"],"att-replica-start")
    self.assertEqual(expected["batch_parent_attempt_id"],"att-parent")
+   self.assertIn(
+    {"harness":"opencode","fallback_hop":"cross-harness-headless",
+     "fallback_ordinal":2},
+    expected["_batch_allowed_members"]["plan-alternative"])
 
    manifest,manifest_digest,leg_digests=build_manifest(
     replica_group="plan",route_id="rt-replica",parent_attempt_id="att-parent",
@@ -483,7 +488,7 @@ class DispatchContractTest(unittest.TestCase):
       "fallback_hop":"same-harness-headless","fallback_ordinal":1,
       "model_profile":"deep","perspective":"primary-plan","parallel_leg_index":0},
      {"assignment_sha256":"sha256:"+"a"*64,"attempt_id":"att-replica-peer",
-      "route_node":"plan-alternative","harness":"claude",
+      "route_node":"plan-alternative","harness":"opencode",
       "fallback_hop":"cross-harness-headless","fallback_ordinal":2,
       "model_profile":"balanced-deep","perspective":"independent-plan","parallel_leg_index":1},
     ],required_independence_axes=["cross-harness","model-profile","perspective"],

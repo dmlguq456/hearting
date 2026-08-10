@@ -71,11 +71,14 @@ def render(identifier: str, spec: dict, capability_file: Path) -> tuple[str, str
         use_steps = f"""1. Before approval, route from this compact metadata and `core/WORKFLOW.md §0.2`; do not read the full portable source merely to propose the route.
 2. Present the five-field confirmation card from `core/WORKFLOW.md §0.4` unless the same route and scope are already approved.
 3. After approval, direct/quick acting sessions read `capabilities/{identifier}.md`; at `standard+`, the dispatch-depth-1 owner reads it and stage workers read only their assigned contracts.
-4. Run `adapters/opencode/bin/preflight.sh capability-info {identifier}` and obey the reported status:"""
+4. Before the first durable capability artifact, compile and bind the checked route with `preflight.sh route --capability {identifier} ...`. A native-agent restriction never authorizes direct execution.
+5. Run `adapters/opencode/bin/preflight.sh capability-info {identifier}` and obey the reported status:"""
+        route_guard = f"- Before durable capability output: `adapters/opencode/bin/preflight.sh route --capability {identifier} <complete compile arguments>`"
     else:
         use_steps = f"""1. Read `capabilities/{identifier}.md` for the runtime-neutral contract.
 2. Run `adapters/opencode/bin/preflight.sh capability-info {identifier}`.
 3. Obey the reported status:"""
+        route_guard = ""
 
     body = f"""---
 name: {identifier}
@@ -116,6 +119,7 @@ capability contract. It is adapter-owned output, not a legacy compatibility Skil
 ## Required Guards
 
 - Before edits: `adapters/opencode/bin/preflight.sh write <file> [session-id]`
+{route_guard}
 - Before spec-changing work: `adapters/opencode/bin/preflight.sh capability {identifier} [cwd] [session-id]`
 - After actually reading a spec PRD: `adapters/opencode/bin/preflight.sh read <prd.md> [session-id]`
 

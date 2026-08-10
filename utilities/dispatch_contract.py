@@ -1452,7 +1452,7 @@ def replica_batch_expectation(
                 if not isinstance(candidate, dict) or candidate.get("status") != "supported":
                     continue
                 child_harness = candidate.get("child_harness")
-                if child_harness not in {"codex", "claude"}:
+                if child_harness not in {"codex", "claude", "opencode"}:
                     continue
                 allowed.append({
                     "harness": child_harness,

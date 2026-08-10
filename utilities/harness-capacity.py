@@ -123,14 +123,21 @@ def capacity_scores(*, stale_after: int = 3600, now: float | None = None) -> dic
 
 def rank_band(candidates, states, counts, declared_order, scores):
     """Rank eligible quality peers by headroom, then recent attempts and config order."""
-    candidates = [name for name in candidates if not _limited(states.get(name, "unknown"))]
+    # Automatic recovery needs positive evidence of fresh headroom.  Treating
+    # an absent/stale gauge as a neutral 50 silently redirected owners to a
+    # user-exhausted harness during the 2026-08-10 incident.
+    candidates = [
+        name
+        for name in candidates
+        if not _limited(states.get(name, "unknown"))
+        and scores.get(name) is not None
+        and float(scores[name]) > 0
+    ]
     order = {name: index for index, name in enumerate(declared_order)}
-    known = [scores[name] for name in candidates if scores.get(name) is not None]
-    neutral = sum(known) / len(known) if known else 50.0
     ranked = sorted(
         candidates,
         key=lambda name: (
-            -float(scores.get(name) if scores.get(name) is not None else neutral),
+            -float(scores[name]),
             int(counts.get(name, 0)),
             order.get(name, len(order)),
         ),

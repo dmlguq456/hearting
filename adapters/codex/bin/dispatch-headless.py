@@ -898,6 +898,10 @@ def nested_owner_writable_dirs(args: argparse.Namespace) -> tuple[Path, ...]:
     claude_config = Path(
         os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude"
     ).expanduser()
+    # SD-49: the owner must register every depth-2 attempt in the inherited
+    # canonical registry. Expose that registry's exact directory so the owner
+    # can take jobs.log.lock without widening access to the rest of agent home.
+    canonical_registry_root = Path(args.jobs_path).parent.resolve()
     # SD-72: dispatch-depth-2 launches inside the owner sandbox spawn a summary owner
     # that writes exact-attempt state under the fleet titles root; without
     # write access the pre-release fence closes every child as
@@ -908,12 +912,26 @@ def nested_owner_writable_dirs(args: argparse.Namespace) -> tuple[Path, ...]:
     spec_grounding = Path(args.agent_home) / ".spec-grounding"
     spec_grounding.mkdir(mode=0o700, parents=True, exist_ok=True)
     candidates = (
+        canonical_registry_root,
         Path(args.agent_home) / ".core-grounding",
         claude_config / "session-env",
         spec_grounding,
         summary_owner_root,
     )
     return tuple(path.resolve() for path in candidates if path.is_dir())
+
+
+def validate_nested_owner_registry_projection(args: argparse.Namespace) -> None:
+    """Fail before model launch if the canonical registry is absent from the sandbox."""
+
+    if not getattr(args, "nested_headless_network", False):
+        return
+    registry_root = Path(args.jobs_path).parent.resolve()
+    if registry_root not in nested_owner_writable_dirs(args):
+        raise DispatchContractError(
+            "owner-registry-sandbox-unwritable",
+            f"canonical registry root is not projected writable: {registry_root}",
+        )
 
 
 def _completion_owner(args: argparse.Namespace) -> bool:
@@ -2088,6 +2106,10 @@ def main(argv: list[str]) -> int:
         except DispatchContractError as exc:
             return fail(exc.reason, 65, detail=exc.detail, child_spawned="0")
     args.nested_headless_network = nested_headless_network_enabled(args)
+    try:
+        validate_nested_owner_registry_projection(args)
+    except DispatchContractError as e:
+        return fail(e.reason, 73, detail=e.detail, child_spawned="0")
     args.nested_codex_home = None
     args.nested_codex_home_path = (
         worktree / ".dispatch" / "nested-codex-home"

@@ -239,11 +239,10 @@ def _parse(argv):
 
 
 def _eligible(state):
-    """Match dispatch-route.sh's eligible(): only limited(...) is a hard failure.
+    """Return hard eligibility for an explicit user-selected adapter.
 
-    `unknown` (jobs.log unavailable) and `ok` both remain candidates, per
-    usage-check.sh's documented contract that `unknown` means "the
-    orchestrator decides," not a failure.
+    `unknown` is not a positive automatic capacity signal, but it remains a
+    valid explicit override when the route and user policy authorize it.
     """
 
     return state != "limited" and not state.startswith("limited(")
@@ -378,6 +377,11 @@ def main(argv):
 
         rejected = [h for h in sorted(states) if not _eligible(states[h])]
         capacity = _capacity.capacity_scores()
+
+        def automatically_available(harness):
+            score = capacity.get(harness)
+            return _eligible(states[harness]) and score is not None and score > 0
+
         selected = None
         source = "none"
         reason = "none"
@@ -393,7 +397,7 @@ def main(argv):
                 source = "configured-capacity-aware"
         if selected is None and config_version != 3:
             for harness in ranked(configured):
-                if _eligible(states[harness]):
+                if automatically_available(harness):
                     selected = harness
                     source = (
                         "configured-usage-balanced"
@@ -415,7 +419,7 @@ def main(argv):
             else:
                 fallback_pool = _defaults.LEGACY_NORMAL_HARNESSES
             for harness in ranked(fallback_pool):
-                if _eligible(states[harness]):
+                if automatically_available(harness):
                     selected, source, reason = harness, "eligibility-fallback", "configured-candidates-ineligible"
                     quality_band = "outside-policy-fallback"
                     break

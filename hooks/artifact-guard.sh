@@ -99,12 +99,25 @@ if [ -n "$local_project" ]; then
   fi
 fi
 
-case "$fp" in */_internal/*) exit 0 ;; esac   # Machine-managed canonical snapshot.
-
 # ---- Project root containing the canonical artifact root ----
 root=$local_project
 [ -z "$root" ] && exit 0
 cr=$canonical
+
+# Durable capability artifacts are execution, not routing prose. Every public
+# or internal write under a capability-owned bucket requires one verified
+# current route, including direct intensity. This runs before the `_internal`
+# snapshot exemption so scratch output cannot become retroactive authority
+# after a standard+ headless route failed.
+if ! python3 "$SCRIPT_DIR/material-route-guard.py" \
+  --agent-home "${AGENT_HOME:-$SCRIPT_DIR/..}" check \
+  --tool ArtifactWrite --file "$fp" --cwd "$root" \
+  --session "${sid:-artifact-guard}"; then
+  route_failure "capability-artifact-route-required"
+  exit 2
+fi
+
+case "$fp" in */_internal/*) exit 0 ;; esac   # Machine-managed canonical snapshot.
 
 # A route-backed spec write must declare spec_touch and assign a spec scope to
 # the active node.

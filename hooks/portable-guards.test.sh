@@ -47,6 +47,7 @@ unset AGENT_DISPATCH_PARENT_SESSION_ID AGENT_DISPATCH_OWNER_HARNESS CODEX_THREAD
 # or worker markers into fixtures — every case sets its own markers inline.
 unset CLAUDE_CODE_SESSION_ID CODEX_SESSION_ID \
   AGENT_SESSION_ROLE AGENT_DISPATCH_CHILD AGENT_DISPATCH_DEPTH \
+  AGENT_DISPATCH_JOBS \
   AGENT_ARTIFACT_ROOT AGENT_ROUTE_FILE AGENT_ROUTE_ID AGENT_ROUTE_NODE \
   CLAUDE_CODE_CHILD_SESSION OPENCODE_DISPATCH_SLUG FLEET_TITLE_REFRESH \
   MEM_DISTILL MEM_DISTILL_ENABLE
@@ -56,42 +57,72 @@ DIRECT_DISPATCH_HOME="$ROOT"
 echo "== artifact guard CLI =="
 mkdir -p "$TMP/proj/.agent_reports/spec"
 if "$ART" --file "$TMP/proj/.agent_reports/spec/prd.md" --session test >/tmp/art.out 2>/tmp/art.err; then
-  ok "spec write with no route declared passes (creation-order gate retired)"
+  bad "spec write with no route declared should fail"
 else
-  bad "spec write with no route declared should pass"
+  [ "$?" -eq 2 ] && grep -q 'capability-artifact-route-required' /tmp/art.err \
+    && ok "spec write with no route declared fails closed" \
+    || bad "spec write with no route declared returned the wrong failure"
 fi
 rm -f "$TMP/proj/.agent_reports/spec/prd.md"
-printf '{"route_id":"rt-fixture","spec_touch":false,"nodes":[{"id":"execute","write_scope":["source/**"]}]}\n' > "$TMP/route-no-spec.json"
-if AGENT_ROUTE_FILE="$TMP/route-no-spec.json" AGENT_ROUTE_ID=rt-fixture AGENT_ROUTE_NODE=execute \
+
+fixture_route() {
+  fixture_capability=$1
+  fixture_mode=$2
+  fixture_name=$3
+  fixture_output="$TMP/proj/.agent_reports/.runtime/routes/$fixture_name.json"
+  mkdir -p "$(dirname "$fixture_output")"
+  python3 "$ROOT/utilities/capability-route.py" compile \
+    --capability "$fixture_capability" --capability-mode "$fixture_mode" \
+    --intensity direct --cwd "$TMP/proj" \
+    --artifact-root "$TMP/proj/.agent_reports" \
+    --predicate atomic-outcome --predicate known-scope \
+    --predicate no-shared-contract --predicate no-resource-run \
+    --predicate no-artifact-handoff --predicate no-independent-verifier \
+    --predicate focused-verification --tracking untracked \
+    --spec-read not-applicable --drift-verdict no-project-spec \
+    --workflow-mode untracked --artifact-guard preflight-passed \
+    --inline-reason atomic-direct --output "$fixture_output" >/dev/null
+  printf '%s\n' "$fixture_output"
+}
+fixture_route_id() {
+  python3 -c 'import json,sys; print(json.load(open(sys.argv[1],encoding="utf-8"))["route_id"])' "$1"
+}
+
+route_no_spec=$(fixture_route autopilot-code dev route-no-spec)
+route_no_spec_id=$(fixture_route_id "$route_no_spec")
+if AGENT_ROUTE_FILE="$route_no_spec" AGENT_ROUTE_ID="$route_no_spec_id" AGENT_ROUTE_NODE=inline \
   "$ART" --file "$TMP/proj/.agent_reports/spec/prd.md" >/tmp/art_route.out 2>/tmp/art_route.err; then
-  bad "route without spec_touch should fail"
+  bad "a non-spec capability route should not authorize spec output"
 else
-  [ "$?" -eq 2 ] && grep -q 'spec-touch-not-declared-or-outside-node-scope' /tmp/art_route.err \
-    && grep -q 'rt-fixture' /tmp/art_route.err && ok "spec-touch omission is a route-addressed structured failure" \
-    || bad "spec-touch omission missing structured route failure"
+  [ "$?" -eq 2 ] && grep -q 'capability-artifact-route-required' /tmp/art_route.err \
+    && grep -q "$route_no_spec_id" /tmp/art_route.err \
+    && ok "a non-spec route is a route-addressed structured failure" \
+    || bad "non-spec route mismatch missing structured failure"
 fi
-printf '{"route_id":"rt-fixture","spec_touch":true,"nodes":[{"id":"prd-transaction","write_scope":["spec/**"]}]}\n' > "$TMP/route-spec.json"
-if AGENT_ROUTE_FILE="$TMP/route-spec.json" AGENT_ROUTE_ID=rt-fixture AGENT_ROUTE_NODE=prd-transaction \
+route_spec=$(fixture_route autopilot-spec update route-spec)
+route_spec_id=$(fixture_route_id "$route_spec")
+if AGENT_ROUTE_FILE="$route_spec" AGENT_ROUTE_ID="$route_spec_id" AGENT_ROUTE_NODE=inline \
   "$ART" --file "$TMP/proj/.agent_reports/spec/prd.md" >/tmp/art_route_guard.out 2>/tmp/art_route_guard.err; then
-  ok "route-approved spec_touch write passes with no upstream research (creation-order gate retired)"
+  ok "verified spec route authorizes its declared output"
 else
-  bad "route-approved spec_touch write should pass with no upstream research"
+  bad "verified spec route should authorize its declared output"
 fi
 
-printf '{"route_id":"rt-fixture","spec_touch":false,"nodes":[{"id":"plan","write_scope":["plan/**"]}]}\n' > "$TMP/route-plan.json"
+route_plan=$(fixture_route autopilot-code dev route-plan)
+route_plan_id=$(fixture_route_id "$route_plan")
 mkdir -p "$TMP/proj/.agent_reports/plans/2026-08-03_fixture/plan" "$TMP/proj/.agent_reports/test_logs" "$TMP/proj/.agent_reports/.runtime"
-if AGENT_ROUTE_FILE="$TMP/route-plan.json" AGENT_ROUTE_ID=rt-fixture AGENT_ROUTE_NODE=plan \
+if AGENT_ROUTE_FILE="$route_plan" AGENT_ROUTE_ID="$route_plan_id" AGENT_ROUTE_NODE=inline \
   "$ART" --file "$TMP/proj/.agent_reports/plans/2026-08-03_fixture/plan/plan.md" >/tmp/art_scope_in.out 2>/tmp/art_scope_in.err; then
   ok "artifact write inside the declared node scope passes"
 else
   bad "artifact write inside the declared node scope should pass"
 fi
-if AGENT_ROUTE_FILE="$TMP/route-plan.json" AGENT_ROUTE_ID=rt-fixture AGENT_ROUTE_NODE=plan \
+if AGENT_ROUTE_FILE="$route_plan" AGENT_ROUTE_ID="$route_plan_id" AGENT_ROUTE_NODE=inline \
   "$ART" --file "$TMP/proj/.agent_reports/test_logs/run.log" >/tmp/art_scope_out.out 2>/tmp/art_scope_out.err; then
   bad "artifact write outside the declared node scope should fail"
 else
   [ "$?" -eq 2 ] && grep -q 'artifact-write-outside-node-scope' /tmp/art_scope_out.err \
-    && grep -q 'rt-fixture' /tmp/art_scope_out.err && ok "out-of-scope artifact write is a route-addressed structured failure" \
+    && grep -q "$route_plan_id" /tmp/art_scope_out.err && ok "out-of-scope artifact write is a route-addressed structured failure" \
     || bad "out-of-scope artifact write missing structured route failure"
 fi
 if "$ART" --file "$TMP/proj/.agent_reports/test_logs/run.log" >/tmp/art_scope_noroute.out 2>/tmp/art_scope_noroute.err; then
@@ -99,7 +130,7 @@ if "$ART" --file "$TMP/proj/.agent_reports/test_logs/run.log" >/tmp/art_scope_no
 else
   bad "artifact write with no route declared should stay unbound"
 fi
-if AGENT_ROUTE_FILE="$TMP/route-plan.json" AGENT_ROUTE_ID=rt-fixture AGENT_ROUTE_NODE=plan \
+if AGENT_ROUTE_FILE="$route_plan" AGENT_ROUTE_ID="$route_plan_id" AGENT_ROUTE_NODE=inline \
   "$ART" --file "$TMP/proj/.agent_reports/.runtime/state.json" >/tmp/art_scope_dot.out 2>/tmp/art_scope_dot.err; then
   ok "dot-prefixed runtime state is exempt from node scope binding"
 else
@@ -109,14 +140,15 @@ fi
 # route node ("inline" is in route["nodes"]), so this exercises the ordinary
 # non-owner node-scope path, not the C-item owner defect (empty
 # AGENT_ROUTE_NODE). See the "owner binding" cases further down for that.
-printf '{"route_id":"rt-fixture","spec_touch":false,"nodes":[{"id":"inline","write_scope":["source-scoped","plans/<cycle>/**"]}]}\n' > "$TMP/route-owner.json"
-if AGENT_ROUTE_FILE="$TMP/route-owner.json" AGENT_ROUTE_ID=rt-fixture AGENT_ROUTE_NODE=inline \
+route_owner="$route_plan"
+route_owner_id="$route_plan_id"
+if AGENT_ROUTE_FILE="$route_owner" AGENT_ROUTE_ID="$route_owner_id" AGENT_ROUTE_NODE=inline \
   "$ART" --file "$TMP/proj/.agent_reports/plans/2026-08-03_fixture/plan/plan.md" >/tmp/art_cycle_in.out 2>/tmp/art_cycle_in.err; then
   ok "a <cycle> placeholder scope binds one path segment"
 else
   bad "a <cycle> placeholder scope should bind one path segment"
 fi
-if AGENT_ROUTE_FILE="$TMP/route-owner.json" AGENT_ROUTE_ID=rt-fixture AGENT_ROUTE_NODE=inline \
+if AGENT_ROUTE_FILE="$route_owner" AGENT_ROUTE_ID="$route_owner_id" AGENT_ROUTE_NODE=inline \
   "$ART" --file "$TMP/proj/.agent_reports/test_logs/run.log" >/tmp/art_cycle_out.out 2>/tmp/art_cycle_out.err; then
   bad "a worktree-only scope should not authorize an unrelated artifact write"
 else
@@ -126,34 +158,33 @@ fi
 
 # Item C: owner writes (empty AGENT_ROUTE_NODE, per SD-97) must skip node
 # write-scope matching, not fall through the node lookup's StopIteration.
-printf '{"route_id":"rt-owner","spec_touch":false,"nodes":[{"id":"execute","write_scope":["plans/<cycle>/**"]}]}\n' > "$TMP/route-owner-empty.json"
 mkdir -p "$TMP/proj/.agent_reports/plans/owner_cycle/dev_logs"
-if AGENT_ROUTE_FILE="$TMP/route-owner-empty.json" AGENT_ROUTE_ID=rt-owner AGENT_ROUTE_NODE="" \
+if AGENT_ROUTE_FILE="$route_owner" AGENT_ROUTE_ID="$route_owner_id" AGENT_ROUTE_NODE="" \
   "$ART" --file "$TMP/proj/.agent_reports/plans/owner_cycle/checklist.md" >/tmp/art_owner_ck.out 2>/tmp/art_owner_ck.err; then
   ok "owner binding (empty route node) can write cycle artifacts"
 else
   bad "owner binding (empty route node) should be able to write cycle artifacts"
 fi
-if AGENT_ROUTE_FILE="$TMP/route-owner-empty.json" AGENT_ROUTE_ID=rt-owner AGENT_ROUTE_NODE="" \
+if AGENT_ROUTE_FILE="$route_owner" AGENT_ROUTE_ID="$route_owner_id" AGENT_ROUTE_NODE="" \
   "$ART" --file "$TMP/proj/.agent_reports/plans/owner_cycle/dev_logs/x.md" >/tmp/art_owner_dl.out 2>/tmp/art_owner_dl.err; then
   ok "owner binding (empty route node) can write dev_logs artifacts"
 else
   bad "owner binding (empty route node) should be able to write dev_logs artifacts"
 fi
 mkdir -p "$TMP/proj/.agent_reports/spec"
-if AGENT_ROUTE_FILE="$TMP/route-owner-empty.json" AGENT_ROUTE_ID=rt-owner AGENT_ROUTE_NODE="" \
+if AGENT_ROUTE_FILE="$route_owner" AGENT_ROUTE_ID="$route_owner_id" AGENT_ROUTE_NODE="" \
   "$ART" --file "$TMP/proj/.agent_reports/spec/x.md" >/tmp/art_owner_spec.out 2>/tmp/art_owner_spec.err; then
   bad "owner binding must still be rejected from spec/ writes"
 else
-  [ "$?" -eq 2 ] && grep -q 'spec-touch-not-declared-or-outside-node-scope' /tmp/art_owner_spec.err \
+  [ "$?" -eq 2 ] && grep -q 'capability-artifact-route-required' /tmp/art_owner_spec.err \
     && ok "owner binding is rejected from spec/ writes" \
     || bad "owner binding spec/ rejection missing structured reason"
 fi
-if AGENT_ROUTE_FILE="$TMP/route-owner-empty.json" AGENT_ROUTE_ID=rt-owner AGENT_ROUTE_NODE=execute \
+if AGENT_ROUTE_FILE="$route_owner" AGENT_ROUTE_ID="$route_owner_id" AGENT_ROUTE_NODE=inline \
   "$ART" --file "$TMP/proj/.agent_reports/documents/fake/doc.md" >/tmp/art_node_scope.out 2>/tmp/art_node_scope.err; then
   bad "a real node's out-of-scope write must still be rejected"
 else
-  [ "$?" -eq 2 ] && grep -q 'artifact-write-outside-node-scope' /tmp/art_node_scope.err \
+  [ "$?" -eq 2 ] && grep -q 'capability-artifact-route-required' /tmp/art_node_scope.err \
     && ok "a real node's out-of-scope write is still rejected (owner exception did not widen)" \
     || bad "real node out-of-scope rejection missing structured reason"
 fi
@@ -168,7 +199,7 @@ mkdir -p "$TMP/ownerrepo/.agent_reports/_internal" "$TMP/ownerrepo-wt"
   git commit -q -m init
   git worktree add -q -b owner-topic "$TMP/ownerrepo-wt/topic"
 )
-if AGENT_ROUTE_FILE="$TMP/route-owner-empty.json" AGENT_ROUTE_ID=rt-owner AGENT_ROUTE_NODE="" \
+if AGENT_ROUTE_FILE="$route_owner" AGENT_ROUTE_ID="$route_owner_id" AGENT_ROUTE_NODE="" \
   "$ART" --file "$TMP/ownerrepo-wt/topic/.agent_reports/plans/owner_cycle/checklist.md" >/tmp/art_owner_root.out 2>/tmp/art_owner_root.err; then
   bad "owner binding must still respect the canonical artifact root boundary"
 else
@@ -177,19 +208,20 @@ else
     || bad "owner binding canonical-root rejection missing structured reason"
 fi
 
-printf '{"route_id":"rt-refine","route_hash":"sha256:refine","capability":"autopilot-refine","effective_intensity":"standard","spec_touch":false,"nodes":[{"id":"transaction","write_scope":["target-artifact","_internal/versions/**"]}]}\n' > "$TMP/route-refine.json"
+route_refine=$(fixture_route autopilot-refine default route-refine)
+route_refine_id=$(fixture_route_id "$route_refine")
 mkdir -p "$TMP/proj/.agent_reports/documents/cycle" "$TMP/proj/.agent_reports/rebuttal"
 printf 'before\n' > "$TMP/proj/.agent_reports/documents/cycle/doc.md"
 printf 'legacy\n' > "$TMP/proj/.agent_reports/rebuttal/rebuttal.md"
-if AGENT_ROUTE_FILE="$TMP/route-refine.json" AGENT_ROUTE_ID=rt-refine AGENT_ROUTE_NODE=transaction \
+if AGENT_ROUTE_FILE="$route_refine" AGENT_ROUTE_ID="$route_refine_id" AGENT_ROUTE_NODE=inline \
   "$ART" --file "$TMP/proj/.agent_reports/documents/cycle/doc.md" >/tmp/art_refine_owned.out 2>/tmp/art_refine_owned.err; then
-  [ "$(cat "$TMP/proj/.agent_reports/documents/cycle/_internal/versions/v1/doc.md")" = "before" ] \
-    && ok "major refine guard snapshots an owned document preimage" \
-    || bad "major refine guard did not preserve the owned document preimage"
+  [ ! -e "$TMP/proj/.agent_reports/documents/cycle/_internal/versions" ] \
+    && ok "direct refine authorizes an owned document without a snapshot" \
+    || bad "direct refine unexpectedly created a snapshot"
 else
   bad "target-artifact should authorize an owned document"
 fi
-if AGENT_ROUTE_FILE="$TMP/route-refine.json" AGENT_ROUTE_ID=rt-refine AGENT_ROUTE_NODE=transaction \
+if AGENT_ROUTE_FILE="$route_refine" AGENT_ROUTE_ID="$route_refine_id" AGENT_ROUTE_NODE=inline \
   "$ART" --file "$TMP/proj/.agent_reports/rebuttal/rebuttal.md" >/tmp/art_refine_unowned.out 2>/tmp/art_refine_unowned.err; then
   bad "target-artifact should not authorize an unowned rebuttal container"
 else
@@ -197,10 +229,11 @@ else
     && ok "target-artifact rejects unowned top-level artifact containers" \
     || bad "unowned target-artifact failure was not route-addressed"
 fi
-printf '{"route_id":"rt-refine-direct","route_hash":"sha256:refine-direct","capability":"autopilot-refine","effective_intensity":"direct","spec_touch":false,"nodes":[{"id":"inline","write_scope":["target-artifact","_internal/versions/**"]}]}\n' > "$TMP/route-refine-direct.json"
+route_refine_direct="$route_refine"
+route_refine_direct_id="$route_refine_id"
 mkdir -p "$TMP/proj/.agent_reports/documents/minor"
 printf 'minor\n' > "$TMP/proj/.agent_reports/documents/minor/doc.md"
-if AGENT_ROUTE_FILE="$TMP/route-refine-direct.json" AGENT_ROUTE_ID=rt-refine-direct AGENT_ROUTE_NODE=inline \
+if AGENT_ROUTE_FILE="$route_refine_direct" AGENT_ROUTE_ID="$route_refine_direct_id" AGENT_ROUTE_NODE=inline \
   "$ART" --file "$TMP/proj/.agent_reports/documents/minor/doc.md" >/tmp/art_refine_direct.out 2>/tmp/art_refine_direct.err; then
   [ ! -e "$TMP/proj/.agent_reports/documents/minor/_internal/versions" ] \
     && ok "direct minor refine remains snapshot-free" \
@@ -209,7 +242,7 @@ else
   bad "direct minor refine should pass for an owned document"
 fi
 mkdir -p "$TMP/proj/.agent_reports/plans/cycle/documents/fake"
-if AGENT_ROUTE_FILE="$TMP/route-refine-direct.json" AGENT_ROUTE_ID=rt-refine-direct AGENT_ROUTE_NODE=inline \
+if AGENT_ROUTE_FILE="$route_refine_direct" AGENT_ROUTE_ID="$route_refine_direct_id" AGENT_ROUTE_NODE=inline \
   "$ART" --file "$TMP/proj/.agent_reports/plans/cycle/documents/fake/doc.md" >/tmp/art_refine_nested.out 2>/tmp/art_refine_nested.err; then
   bad "target-artifact must be anchored to a canonical top-level container"
 else
@@ -672,9 +705,8 @@ if "$CODEX" read "$TMP/coreproj/core/CORE.md" codexcoregatesid >/tmp/codex_core_
 else
   bad "codex read+write wrapper should pass core-first gate"
 fi
-# Spec read gate fitted to Codex's write interception point (no Skill event):
-# a spec-changing artifact write while ungrounded is hard-denied; ordinary files
-# are not gated; reading prd.md clears the gate.
+# Spec reads satisfy grounding but never replace capability-route participation.
+# Ordinary source remains outside the artifact route gate.
 mkdir -p "$TMP/cxspec/.agent_reports/spec" "$TMP/cxspec/.agent_reports/research" "$TMP/cxspec/src"
 printf 'prd\n' > "$TMP/cxspec/.agent_reports/spec/prd.md"
 printf 'state: x\n' > "$TMP/cxspec/.agent_reports/spec/pipeline_state.yaml"
@@ -686,9 +718,11 @@ else
 fi
 "$CODEX" read "$TMP/cxspec/.agent_reports/spec/prd.md" cxwsid >/dev/null 2>&1
 if "$CODEX" write "$TMP/cxspec/.agent_reports/plans/c1/dev.md" cxwsid >/tmp/codex_wg.out 2>/tmp/codex_wg.err; then
-  ok "codex write guard passes spec-changing write after prd read"
+  bad "codex write guard should still require a route after prd read"
 else
-  bad "codex write guard should pass spec-changing write after prd read"
+  [ "$?" -eq 2 ] && grep -q 'capability-artifact-route-required' /tmp/codex_wg.err \
+    && ok "codex write guard keeps route participation separate from prd grounding" \
+    || bad "codex write guard returned the wrong post-grounding route failure"
 fi
 if "$CODEX" write "$TMP/cxspec/src/main.py" cxwsid2 >/tmp/codex_wg.out 2>/tmp/codex_wg.err; then
   ok "codex write guard does not gate ordinary source files"
@@ -738,9 +772,11 @@ echo "== workflow lifecycle CLI =="
 mkdir -p "$TMP/flowproj/.agent_reports"
 mkdir -p "$TMP/codex-artifact/.agent_reports/spec"
 if "$CODEX" write "$TMP/codex-artifact/.agent_reports/spec/prd.md" testsid >/tmp/codex-artifact.out 2>/tmp/codex-artifact.err; then
-  ok "codex write wrapper allows a spec write with no upstream research (creation-order gate retired)"
+  bad "codex write wrapper should require a verified capability route for spec output"
 else
-  bad "codex write wrapper should allow a spec write with no upstream research"
+  grep -q 'capability-artifact-route-required' /tmp/codex-artifact.err \
+    && ok "codex write wrapper requires a verified capability route for spec output" \
+    || bad "codex write wrapper returned the wrong route failure for spec output"
 fi
 if "$CODEX" memory "$TMP/flowproj" >/tmp/mem_inject.out 2>/tmp/mem_inject.err; then
   ok "codex memory wrapper exits cleanly"
@@ -2249,9 +2285,9 @@ if python3 -c 'import json,sys; d=json.loads(sys.argv[1]); assert d["decision"]=
 else
   bad "source-bearing functions.exec_command commit should be denied [$commit_decision]"
 fi
-codex_route="$TMP/repo/.agent_reports/route.json"
+codex_route="$TMP/repo/.agent_reports/.runtime/routes/codex-route.json"
 codex_compile="$ROOT/adapters/codex/bin/preflight.sh route --capability autopilot-code --capability-mode dev --intensity direct --cwd $TMP/repo --artifact-root $TMP/repo/.agent_reports --predicate atomic-outcome --predicate known-scope --predicate no-shared-contract --predicate no-resource-run --predicate no-artifact-handoff --predicate no-independent-verifier --predicate focused-verification --tracking untracked --spec-read not-applicable --drift-verdict no-project-spec --workflow-mode untracked --artifact-guard preflight-passed --inline-reason atomic-direct --output $codex_route"
-mkdir -p "$TMP/repo/.agent_reports"
+mkdir -p "$(dirname "$codex_route")"
 recall_opportunity "$TMP/repo" codex-bind
 if eval "$codex_compile" >"$TMP/codex_compile.out" 2>"$TMP/codex_compile.err" \
   && printf '%s\n' "{\"tool_name\":\"functions.exec_command\",\"input\":{\"command\":\"$codex_compile\"},\"session_id\":\"codex-bind\",\"cwd\":\"$TMP/repo\"}" \
@@ -2444,7 +2480,7 @@ if printf '{"prompt":"plain prompt","session_id":"%s","cwd":"%s"}\n' "$budget_si
 else
   bad "codex prompt hook should keep same-band token budget reinjection at zero bytes"
 fi
-codex_accounting_dir="$TMP/codex_budget_state/hearting/token-budget/accounting"
+codex_accounting_dir="$TMP/codex_budget_state/agent-harness/token-budget/accounting"
 if CODEX_HOME="$TMP/codex_hook_home/.codex" XDG_STATE_HOME="$TMP/codex_budget_state" "$budget_preflight" token-budget "$TMP/flowproj" "$budget_sid" kv >"$TMP/codex_budget_accounting_kv.out" 2>"$TMP/codex_budget_accounting_kv.err" \
   && grep -q '^accounting.hook_invocations=2$' "$TMP/codex_budget_accounting_kv.out" \
   && python3 - "$codex_accounting_dir" "$budget_sid" <<'PY'
@@ -2972,11 +3008,9 @@ if AGENT_HOME="$ROOT" CODEX_HOME="$RPHOME" "$ROOT/adapters/codex/bin/check-runti
 else
   grep -q '^status=failed' "$TMP/codex_rp0.out" && ok "codex check-runtime-projection reports an unwired home as failed" || bad "codex check-runtime-projection unwired output wrong"
 fi
-# 재홈 2026-07-22: the agent-modes surface retired for surface=unit-catalog (per-family
-# unit-family= lines). Until the §6.1-owned baseline refresh renames
-# native-bootstrap:agent-modes-total -> unit-catalog:total, accept exactly that
-# transition warnings plus the already-open Codex bootstrap baseline drift; any
-# other warning still fails.
+# Until the §6.1-owned baseline refresh lands, accept only the exact known
+# bootstrap/router/unit-catalog warning census. The count and representative
+# warnings keep an unrelated footprint regression from passing silently.
 if python3 "$ROOT/tools/context-footprint.py" --root "$ROOT" --skip-runtime --skip-hooks >"$TMP/context_footprint.out" 2>"$TMP/context_footprint.err" \
   && grep -q '^context_footprint_report=1' "$TMP/context_footprint.out" \
   && grep -q '^surface=codex-plugin ' "$TMP/context_footprint.out" \
@@ -2986,11 +3020,24 @@ if python3 "$ROOT/tools/context-footprint.py" --root "$ROOT" --skip-runtime --sk
   && grep -q '^unit-family=qa ' "$TMP/context_footprint.out" \
   && ! grep -q '^surface=native-bootstrap-agent-modes' "$TMP/context_footprint.out" \
   && { grep -q '^status=ok' "$TMP/context_footprint.out" \
-    || { grep -q '^status=warn warnings=5$' "$TMP/context_footprint.out" \
+    || { grep -q '^status=warn warnings=18$' "$TMP/context_footprint.out" \
+      && grep -q 'owner worker bootstrap 5846 > 4096 bytes' "$TMP/context_footprint.out" \
+      && grep -q 'stage worker bootstrap 4734 > 4096 bytes' "$TMP/context_footprint.out" \
+      && grep -q 'review worker bootstrap 4227 > 4096 bytes' "$TMP/context_footprint.out" \
+      && grep -q 'support worker bootstrap 4211 > 4096 bytes' "$TMP/context_footprint.out" \
       && grep -q 'bootstrap:claude footprint regression' "$TMP/context_footprint.out" \
       && grep -q 'bootstrap:codex footprint regression' "$TMP/context_footprint.out" \
       && grep -q 'bootstrap:opencode footprint regression' "$TMP/context_footprint.out" \
+      && grep -q 'entry-router:canonical:max footprint regression' "$TMP/context_footprint.out" \
+      && grep -q 'entry-router:claude:max footprint regression' "$TMP/context_footprint.out" \
+      && grep -q 'entry-router:codex:max footprint regression' "$TMP/context_footprint.out" \
+      && grep -q 'entry-router:opencode:max footprint regression' "$TMP/context_footprint.out" \
       && grep -q 'missing from context footprint baseline: unit-catalog:total' "$TMP/context_footprint.out" \
+      && grep -q 'worker-bootstrap:kernel footprint regression' "$TMP/context_footprint.out" \
+      && grep -q 'worker-bootstrap:owner footprint regression' "$TMP/context_footprint.out" \
+      && grep -q 'worker-bootstrap:review footprint regression' "$TMP/context_footprint.out" \
+      && grep -q 'worker-bootstrap:stage footprint regression' "$TMP/context_footprint.out" \
+      && grep -q 'worker-bootstrap:support footprint regression' "$TMP/context_footprint.out" \
       && grep -q 'was not measured: native-bootstrap:agent-modes-total' "$TMP/context_footprint.out"; }; }; then
   ok "context-footprint reports bootstrap and skill metadata without runtime hooks"
 else
@@ -3214,8 +3261,8 @@ fi
 # route wrapper: compile-then-bind (D1). Successful same-sid/cwd bind allows a
 # subsequent material Write; every negative creates no marker while
 # preserving the compiler's own stdout/stderr/exit status.
-mkdir -p "$TMP/repo/.agent_reports"
-opencode_route="$TMP/repo/.agent_reports/opencode-route.json"
+mkdir -p "$TMP/repo/.agent_reports/.runtime/routes"
+opencode_route="$TMP/repo/.agent_reports/.runtime/routes/opencode-route.json"
 opencode_route_args="--capability autopilot-code --capability-mode dev --intensity direct --cwd $TMP/repo --artifact-root $TMP/repo/.agent_reports --predicate atomic-outcome --predicate known-scope --predicate no-shared-contract --predicate no-resource-run --predicate no-artifact-handoff --predicate no-independent-verifier --predicate focused-verification --tracking untracked --spec-read not-applicable --drift-verdict no-project-spec --workflow-mode untracked --artifact-guard preflight-passed --inline-reason atomic-direct"
 recall_opportunity "$TMP/repo" opencode-bind
 if OPENCODE_SESSION_ID=opencode-bind "$OPENCODE" route $opencode_route_args --output "$opencode_route" >/tmp/opencode_route.out 2>/tmp/opencode_route.err \
@@ -3231,7 +3278,7 @@ else
   [ "$?" -eq 2 ] && ok "foreign session cannot reuse opencode material route marker" \
     || bad "foreign session denial wrong exit"
 fi
-opencode_route_nooutput="$TMP/repo/.agent_reports/opencode-route-nooutput.json"
+opencode_route_nooutput="$TMP/repo/.agent_reports/.runtime/routes/opencode-route-nooutput.json"
 rm -f "$opencode_route_nooutput"
 if OPENCODE_SESSION_ID=opencode-neg-nooutput "$OPENCODE" route $opencode_route_args >/tmp/opencode_neg_nooutput.out 2>/tmp/opencode_neg_nooutput.err \
   && [ ! -f "$opencode_route_nooutput" ] \
@@ -3241,8 +3288,8 @@ else
   [ ! -f "$opencode_route_nooutput" ] && ok "opencode route wrapper: no --output compiles unbound, creates no marker" \
     || bad "opencode route wrapper: no --output should create no marker"
 fi
-opencode_route_multi_a="$TMP/repo/.agent_reports/opencode-route-multi-a.json"
-opencode_route_multi_b="$TMP/repo/.agent_reports/opencode-route-multi-b.json"
+opencode_route_multi_a="$TMP/repo/.agent_reports/.runtime/routes/opencode-route-multi-a.json"
+opencode_route_multi_b="$TMP/repo/.agent_reports/.runtime/routes/opencode-route-multi-b.json"
 if OPENCODE_SESSION_ID=opencode-neg-multi "$OPENCODE" route $opencode_route_args --output "$opencode_route_multi_a" --output "$opencode_route_multi_b" >/tmp/opencode_neg_multi.out 2>/tmp/opencode_neg_multi.err; then
   :
 fi
@@ -3252,7 +3299,7 @@ else
   [ "$?" -eq 2 ] && ok "opencode route wrapper: more than one --output creates no marker" \
     || bad "opencode route wrapper: more than one --output wrong denial exit"
 fi
-opencode_route_nosid="$TMP/repo/.agent_reports/opencode-route-nosid.json"
+opencode_route_nosid="$TMP/repo/.agent_reports/.runtime/routes/opencode-route-nosid.json"
 rm -f "$opencode_route_nosid"
 if env -u OPENCODE_SESSION_ID "$OPENCODE" route $opencode_route_args --output "$opencode_route_nosid" >/tmp/opencode_neg_nosid.out 2>/tmp/opencode_neg_nosid.err \
   && [ -f "$opencode_route_nosid" ] \
@@ -3328,9 +3375,11 @@ fi
 echo "== opencode workflow lifecycle CLI =="
 mkdir -p "$TMP/opencode-artifact/.agent_reports/spec"
 if "$OPENCODE" write "$TMP/opencode-artifact/.agent_reports/spec/prd.md" opencodesid >/tmp/opencode_artifact.out 2>/tmp/opencode_artifact.err; then
-  ok "opencode write wrapper allows a spec write with no upstream research (creation-order gate retired)"
+  bad "opencode write wrapper should require a verified capability route for spec output"
 else
-  bad "opencode write wrapper should allow a spec write with no upstream research"
+  grep -q 'capability-artifact-route-required' /tmp/opencode_artifact.err \
+    && ok "opencode write wrapper requires a verified capability route for spec output" \
+    || bad "opencode write wrapper returned the wrong route failure for spec output"
 fi
 if "$OPENCODE" memory "$TMP/flowproj" >/tmp/opencode_mem.out 2>/tmp/opencode_mem.err; then
   ok "opencode memory wrapper exits cleanly"

@@ -26,6 +26,7 @@ from dispatch_completion_join import (  # noqa: E402
     consume_parent_session_attempt,
     JoinContractError,
     parent_session_state_path,
+    required_action_for_attempt,
     route_completion_evidence,
 )
 _route_spec = importlib.util.spec_from_file_location(
@@ -224,11 +225,22 @@ def main(argv: list[str]) -> int:
             rows.append(fields)
 
     terminal_results: dict[str, dict[str, object]] = {}
+    registry_failure_details: dict[str, dict[str, str]] = {}
     for fields in rows:
         metadata = parse_registry_metadata(fields[5])
         attempt_id = metadata.get("attempt_id", f"row-{len(terminal_results)}")
         if metadata.get("harness") not in (None, "", "codex", "claude"):
             continue
+        try:
+            required_action = required_action_for_attempt(fields[1], metadata)
+        except JoinContractError as exc:
+            print("check=failed")
+            print(f"reason={exc}")
+            return 64
+        if args.failure_detail and required_action != "inspect-done-failure":
+            print("check=failed")
+            print("reason=failure-detail-requires-terminal-failure")
+            return 64
         result = inspect_terminal_attempt(
             metadata.get("log_file"),
             worktree=fields[3],
@@ -240,9 +252,11 @@ def main(argv: list[str]) -> int:
             result.get("state") == "valid"
             and result.get("verdict") in {"FAIL", "BLOCKED"}
         ):
-            print("check=failed")
-            print("reason=failure-detail-requires-terminal-failure")
-            return 64
+            registry_failure_details[attempt_id] = {
+                "failure_class": metadata.get("failure_class") or "unknown",
+                "note": metadata.get("note") or "unknown",
+                "reconcile_reason": metadata.get("reconcile_reason") or "unknown",
+            }
 
     marked_done = 0
     if args.mark_done:
@@ -316,6 +330,12 @@ def main(argv: list[str]) -> int:
             ):
                 if key in terminal:
                     print(f"{key}={terminal[key]}")
+            registry_failure = registry_failure_details.get(metadata.get("attempt_id", ""))
+            if registry_failure is not None:
+                print("failure_source=registry-terminal")
+                print(f"registry_failure_class={registry_failure['failure_class']}")
+                print(f"registry_failure_note={registry_failure['note']}")
+                print(f"registry_reconcile_reason={registry_failure['reconcile_reason']}")
 
     native_rows = []
     for fields in rows:

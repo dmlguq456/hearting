@@ -71,6 +71,10 @@ Adapters must preserve the portable invariants relevant to this capability:
 
 Additional research-entry gates:
 
+- before creating either public or `_internal` research output, compile and bind the selected `autopilot-research` route; `direct` is a compiled inline node, while `quick` and `standard+` retain their registered-headless owner topology;
+- treat native-subagent availability or prohibition as surface-local evidence only. At `standard+`, it never authorizes main-session execution or bypasses the registered-headless owner;
+- if checked evidence reports `failure_scope=exact-worktree` with `retry_on_isolated_worktree=1`, re-isolate and re-probe or stop without writing research artifacts; a non-Git workspace does not turn the failure into inline authority;
+- realize search/analyze/report breadth only from the compiled recipe and its sealed `parallel_group` members. Never invent topical axes, reviewers, or native helpers after a route failure;
 - ask one scope-clarification round when the query is too broad, too short, or matches multiple modes, unless `--no-clarify` or resume mode is active;
 - keep raw source metadata in `_internal/`; public reports should cite or summarize, not expose noisy scrape output;
 - stop with a failed `pipeline_summary.md` when search returns no useful sources;
@@ -81,7 +85,7 @@ Additional research-entry gates:
 ## Portable Procedure
 
 1. Parse query, mode, depth, intensity, QA override, optional `--from`, and skip flags.
-2. Resolve or create `<artifact-root>/research/<topic>/`; if resuming, read `pipeline_state.yaml`.
+2. Compile and bind the selected route, then resolve or create `<artifact-root>/research/<topic>/`; if resuming, read `pipeline_state.yaml`.
 3. Infer mode when omitted and ask scope clarification when required.
 4. Build search queries, including 2-3 synonym or alternate-phrase expansions.
 5. Search mode-appropriate sources and write raw metadata under `_internal/`.

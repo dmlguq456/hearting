@@ -17,9 +17,11 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "utilities"))
 from dispatch_contract import (  # noqa: E402
     CANONICAL_PARENT_TRANSPORTS,
+    DispatchContractError,
     PARENT_TRANSPORT_BY_DISPATCH_DEPTH,
     WRAPPER_PARENT_SANDBOXES,
     codex_standard_owner_network_enabled,
+    ensure_global_registry_writable,
 )
 
 # WHOSE RUNTIME THIS PROBE DESCRIBES
@@ -199,7 +201,24 @@ TUPLE_CONTRACT_SOURCES = {
 }
 PARENT_RUNTIME_SOURCES = {
     "codex-owner-network-contract",
+    "codex-prospective-standard-owner-registry-contract",
 }
+
+
+def prospective_owner_registry_check(args: argparse.Namespace) -> tuple[bool, str]:
+    """Prove the exact canonical registry can be locked before owner launch."""
+
+    raw = getattr(args, "jobs", None) or os.environ.get("AGENT_DISPATCH_JOBS")
+    if not raw:
+        return False, "owner-registry-path-required"
+    jobs = Path(raw).expanduser()
+    if not jobs.is_absolute():
+        return False, "owner-registry-path-not-absolute"
+    try:
+        ensure_global_registry_writable(jobs.resolve())
+    except DispatchContractError:
+        return False, "owner-registry-unwritable"
+    return True, ""
 
 
 def failure_diagnostics(
@@ -240,6 +259,7 @@ def evaluate(args: argparse.Namespace) -> dict[str, object]:
     args.parent_harness, harness_failure = resolve_parent_harness(args.parent_harness)
     args.parent_transport, transport_failure = resolve_parent_transport(args.parent_transport)
     prospective_owner = getattr(args, "prospective_standard_owner", False)
+    user_disabled = getattr(args, "user_disabled", False)
     sandbox_failure = ""
     if not harness_failure:
         args.parent_sandbox, sandbox_failure = resolve_parent_sandbox(
@@ -286,6 +306,21 @@ def evaluate(args: argparse.Namespace) -> dict[str, object]:
             "codex-prospective-standard-owner-contract",
             "prospective-owner-codex-only",
         )
+    elif user_disabled:
+        status, source, failure = (
+            "unsupported",
+            "user-policy",
+            "user-disabled",
+        )
+    elif prospective_owner and not (
+        registry_result := prospective_owner_registry_check(args)
+    )[0]:
+        _registry_ok, registry_failure = registry_result
+        status, source, failure = (
+            "unsupported",
+            "codex-prospective-standard-owner-registry-contract",
+            registry_failure,
+        )
     elif codex_owner_tuple and not owner_marker and not prospective_owner:
         status, source, failure = "unsupported", "codex-owner-network-contract", "nested-network-unconfirmed"
         next_check = "--prospective-standard-owner"
@@ -293,7 +328,11 @@ def evaluate(args: argparse.Namespace) -> dict[str, object]:
         status, source, failure = command_check(args.child_harness, args.worktree)
         if status == "supported" and args.parent_harness == "codex":
             if prospective_owner and not owner_marker:
-                source = "codex-prospective-standard-owner-contract+" + source
+                source = (
+                    "codex-prospective-standard-owner-contract+"
+                    "codex-prospective-standard-owner-registry-contract+"
+                    + source
+                )
                 probe_scope = "prospective-standard-owner"
             else:
                 source = "codex-owner-network-contract+" + source
@@ -343,6 +382,15 @@ def main() -> int:
     p.add_argument("--child-harness", required=True, choices=("claude", "codex", "opencode"))
     p.add_argument("--launch-authority", required=True, choices=("conductor", "ancestor-broker"))
     p.add_argument("--worktree", required=True)
+    p.add_argument(
+        "--user-disabled",
+        action="store_true",
+        help="emit typed unsupported evidence without probing or launching the child harness",
+    )
+    p.add_argument(
+        "--jobs",
+        help="absolute canonical jobs.log path; required for a prospective Codex owner",
+    )
     p.add_argument(
         "--prospective-standard-owner", "--prospective-codex-standard-owner",
         dest="prospective_standard_owner",

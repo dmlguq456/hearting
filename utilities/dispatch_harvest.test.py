@@ -711,6 +711,42 @@ class HarvestTest(unittest.TestCase):
         self.assertEqual(rejected.returncode, 64)
         self.assertIn("reason=failure-detail-requires-terminal-failure", rejected.stdout)
 
+    def test_done_registry_failures_without_handoffs_remain_inspectable(self):
+        cases = (
+            ("contract", "final-handoff-invalid", "final-handoff-invalid"),
+            ("cancelled", "user-terminated", "user-terminated"),
+            ("failed", "owner-launch-failed", "spawn-failed"),
+        )
+        for failure_class, note, reconcile_reason in cases:
+            with self.subTest(failure_class=failure_class):
+                attempt = f"att-registry-{failure_class}"
+                jobs = self.base / f"registry-{failure_class}.jobs.log"
+                row = self.current_row(attempt).replace("\topen\t", "\tdone\t").rstrip("\n")
+                jobs.write_text(
+                    row
+                    + f",harness=codex,failure_class={failure_class},note={note},"
+                    + f"reconcile_reason={reconcile_reason},launch_outcome=never-launched\n",
+                    encoding="utf-8",
+                )
+                result = subprocess.run(
+                    [
+                        sys.executable,
+                        str(ROOT / "adapters/codex/bin/dispatch-harvest.py"),
+                        "--jobs", str(jobs), "--attempt-id", attempt,
+                        "--status", "done", "--failure-detail",
+                    ],
+                    text=True,
+                    capture_output=True,
+                    env=self.env(),
+                )
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn("failure_source=registry-terminal", result.stdout)
+                self.assertIn(f"registry_failure_class={failure_class}", result.stdout)
+                self.assertIn(f"registry_failure_note={note}", result.stdout)
+                self.assertIn(
+                    f"registry_reconcile_reason={reconcile_reason}", result.stdout
+                )
+
     def test_codex_exact_log_binding_and_malformed_handoff(self):
         selected = "att-harvest-selected"
         foreign = "att-harvest-foreign"

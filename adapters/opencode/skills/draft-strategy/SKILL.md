@@ -43,6 +43,7 @@ capability contract. It is adapter-owned output, not a legacy compatibility Skil
 ## Required Guards
 
 - Before edits: `adapters/opencode/bin/preflight.sh write <file> [session-id]`
+
 - Before spec-changing work: `adapters/opencode/bin/preflight.sh capability draft-strategy [cwd] [session-id]`
 - After actually reading a spec PRD: `adapters/opencode/bin/preflight.sh read <prd.md> [session-id]`
 

@@ -146,6 +146,128 @@ class MaterialRouteGuardTest(unittest.TestCase):
         allowed = self.guard("--tool", "Edit", "--file", str(self.repo / "app.py"))
         self.assertEqual(allowed.returncode, 0, allowed.stderr)
 
+    def test_non_git_research_exact_worktree_failure_cannot_write_inline_artifacts(self) -> None:
+        project = self.base / "samsung-shaped"
+        project.mkdir()
+        artifacts = project / ".agent_reports"
+        target = artifacts / "research" / "seminar" / "pipeline_state.yaml"
+        route = artifacts / ".runtime" / "routes" / "research.json"
+        evidence = self.base / "research-evidence.json"
+        evidence.write_text(
+            json.dumps({
+                "tuples": [{
+                    "parent_harness": "codex",
+                    "parent_transport": "headless",
+                    "parent_sandbox": "workspace-write",
+                    "child_harness": "codex",
+                    "launch_authority": "conductor",
+                    "status": "unsupported",
+                    "probe_source": "fixture-headless-check",
+                    "probe_time": "2026-08-10T00:00:00Z",
+                    "failure_class": "not-a-git-worktree",
+                    "checked_worktree": str(project.resolve()),
+                    "failure_scope": "exact-worktree",
+                    "codex_command": "ok",
+                    "retry_on_isolated_worktree": 1,
+                }],
+                "native_subagent": [{
+                    "harness": "codex",
+                    "transport": "headless",
+                    "status": "unsupported",
+                    "execution_surface": "codex-native-subagent",
+                    "registered_worker": False,
+                    "check_source": "user-policy:user-disabled",
+                }],
+            }),
+            encoding="utf-8",
+        )
+        blocked_compile = subprocess.run(
+            [
+                sys.executable, str(ROUTER), "compile",
+                "--capability", "autopilot-research",
+                "--capability-mode", "academic",
+                "--intensity", "standard",
+                "--cwd", str(project),
+                "--artifact-root", str(artifacts),
+                "--signal", "source-fanout",
+                "--transport", "headless",
+                "--tracking", "untracked",
+                "--spec-read", "not-applicable",
+                "--drift-verdict", "no-project-spec",
+                "--workflow-mode", "untracked",
+                "--artifact-guard", "preflight-passed",
+                "--dispatch-evidence", str(evidence),
+                "--output", str(route),
+            ],
+            text=True,
+            capture_output=True,
+        )
+        self.assertNotEqual(blocked_compile.returncode, 0)
+        self.assertIn(
+            "dispatch-evidence-exact-worktree-reprobe-required",
+            blocked_compile.stderr,
+        )
+        self.assertFalse(route.exists())
+
+        denied = subprocess.run(
+            [
+                sys.executable, str(GUARD), "--agent-home", str(self.home),
+                "check", "--tool", "ArtifactWrite", "--file", str(target),
+                "--cwd", str(project), "--session", "research-session",
+            ],
+            text=True,
+            capture_output=True,
+            env={**os.environ, "MEM_RECALL_RECEIPTS": str(self.receipts)},
+        )
+        self.assertEqual(denied.returncode, 2)
+        self.assertIn("session-route-missing", denied.stderr)
+        self.assertFalse(target.exists())
+
+        direct = [
+            sys.executable, str(ROUTER), "compile",
+            "--capability", "autopilot-research",
+            "--capability-mode", "academic",
+            "--intensity", "direct",
+            "--cwd", str(project),
+            "--artifact-root", str(artifacts),
+        ]
+        for predicate in PREDICATES:
+            direct += ["--predicate", predicate]
+        direct += [
+            "--transport", "interactive",
+            "--inline-reason", "atomic-direct",
+            "--tracking", "untracked",
+            "--spec-read", "not-applicable",
+            "--drift-verdict", "no-project-spec",
+            "--workflow-mode", "untracked",
+            "--artifact-guard", "preflight-passed",
+            "--output", str(route),
+        ]
+        compiled = subprocess.run(direct, text=True, capture_output=True)
+        self.assertEqual(compiled.returncode, 0, compiled.stderr)
+        bound = subprocess.run(
+            [
+                sys.executable, str(GUARD), "--agent-home", str(self.home),
+                "bind", "--route", str(route), "--cwd", str(project),
+                "--session", "research-session",
+            ],
+            text=True,
+            capture_output=True,
+        )
+        self.assertEqual(bound.returncode, 0, bound.stderr)
+        self.opportunity("research-session", cwd=project)
+        allowed = subprocess.run(
+            [
+                sys.executable, str(GUARD), "--agent-home", str(self.home),
+                "check", "--tool", "ArtifactWrite", "--file", str(target),
+                "--cwd", str(project), "--session", "research-session",
+            ],
+            text=True,
+            capture_output=True,
+            env={**os.environ, "MEM_RECALL_RECEIPTS": str(self.receipts)},
+        )
+        self.assertEqual(allowed.returncode, 0, allowed.stderr)
+
     def test_bound_route_requires_current_turn_recall_opportunity(self) -> None:
         self.assertEqual(self.bind().returncode, 0)
         missing = self.guard(

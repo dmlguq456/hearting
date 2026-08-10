@@ -113,6 +113,23 @@ class DispatchCompletionJoinTest(unittest.TestCase):
         self.live.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
         self.live.chmod(0o755)
 
+    def test_required_action_matches_receipt_and_harvest_contract(self):
+        self.assertEqual(
+            JOIN.required_action_for_attempt("open", {}), "complete-open"
+        )
+        self.assertEqual(
+            JOIN.required_action_for_attempt("done", {"failure_class": "pass"}),
+            "advance-completed",
+        )
+        self.assertEqual(
+            JOIN.required_action_for_attempt("done", {"note": "completed-supervisor"}),
+            "advance-completed",
+        )
+        self.assertEqual(
+            JOIN.required_action_for_attempt("done", {"failure_class": "contract"}),
+            "inspect-done-failure",
+        )
+
     def test_parallel_batch_waits_for_every_exact_child_and_ignores_foreign(self):
         parent = "att-parent"
         self.jobs.write_text(

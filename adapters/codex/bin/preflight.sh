@@ -74,7 +74,7 @@ usage: preflight.sh write <file> [session-id] [turn-id]
        preflight.sh managed-entry [--check] --codex-home <private-dir> --state-dir <private-dir> --workspace <dir> [--jobs <jobs.log>] [-- client-args...]
        preflight.sh subagent-info [--check]
        preflight.sh headless [--check] [--require-hook-trust] <worktree>
-       preflight.sh nested-headless --parent-harness <h> --parent-transport <t> --parent-sandbox <s> --child-harness <h> --launch-authority <authority> --worktree <path> [--prospective-standard-owner] [--json]
+       preflight.sh nested-headless --parent-harness <h> --parent-transport <t> --parent-sandbox <s> --child-harness <h> --launch-authority <authority> --worktree <path> [--prospective-standard-owner --jobs <canonical-jobs.log>] [--user-disabled] [--json]
        preflight.sh broker <status|stop> --jobs <jobs.log> [--root <broker-root>]  # legacy drain only
        preflight.sh dispatch [--dry-run|--register|--start] [--require-hook-trust] --worktree <path> --slug <slug> --capability <name> --capability-mode <mode> [--worker-mode <family/mode>] --qa <level> [--intensity <level>] [--dispatch-depth 1|2] [--parent <slug>] [--worker-type owner|stage|review|support] [--unit <unit>] [--assigned-contract <capability>] [--owner <capability>] (--model-profile <deep|balanced-deep|light|mini> [--model-role <role>]|--model-role <role>|--model <model> --reasoning <effort>|--inherit-model-settings) [--prompt-file <file>|--prompt-text <text>] [--jobs <jobs.log>]
        preflight.sh dispatch-owner [--adapter <harness>] [--dry-run|--register|--start] --worktree <path> --slug <slug> --capability <name> --capability-mode <mode> --qa <level> --intensity <level> --dispatch-depth 1 --worker-type owner --assigned-contract <capability> --owner <capability> --model-profile <deep|balanced-deep|light> [--prompt-file <file>|--prompt-text <text>] [--jobs <jobs.log>]
@@ -575,7 +575,7 @@ runtime_projection_requires=hearting,AGENTS.md,hooks.json,native-skills,native-a
 runtime_projection_strict_requires=complete-codex-hook-trust
 job_registry=<agent-home>/.dispatch/jobs.log (immutable AGENT_DISPATCH_JOBS for descendants)
 nested_eligibility_check=adapters/codex/bin/preflight.sh nested-headless --parent-harness <h> --parent-transport <t> --parent-sandbox <s> --child-harness <h> --launch-authority <a> --worktree <path>
-prospective_codex_owner_check=adapters/codex/bin/preflight.sh nested-headless --parent-harness codex --parent-transport headless --parent-sandbox workspace-write --child-harness <h> --launch-authority conductor --worktree <path> --prospective-standard-owner
+prospective_codex_owner_check=adapters/codex/bin/preflight.sh nested-headless --parent-harness codex --parent-transport headless --parent-sandbox workspace-write --child-harness <h> --launch-authority conductor --worktree <path> --prospective-standard-owner --jobs <canonical-jobs.log>
 fallback_chain=same-harness-headless,cross-harness-headless,native-subagent,inline
 fallback_runner=adapters/codex/bin/preflight.sh dispatch-chain --route <route> --node <node> --dry-run|--register|--start
 broker_lifecycle=retired-status-stop-only

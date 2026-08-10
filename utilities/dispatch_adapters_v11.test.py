@@ -155,6 +155,7 @@ class AdapterV11Test(unittest.TestCase):
    self.assertIn(f"--lease-file {root / 'supervisor-state' / 'att-dry-run-placeholder.lease'}",result.stdout)
    self.assertIn("--network-access",result.stdout)
    self.assertIn(f"--writable-root {ROOT / '.dispatch'}",result.stdout)
+   self.assertIn(f"--writable-root {jobs.parent.resolve()}",result.stdout)
    if (ROOT/".core-grounding").is_dir():
     self.assertIn(f"--writable-root {ROOT / '.core-grounding'}",result.stdout)
    self.assertIn(f"--writable-root {claude_config / 'session-env'}",result.stdout)
@@ -231,6 +232,14 @@ class AdapterV11Test(unittest.TestCase):
     self.assertIn("launch_reap_watch",source)
     self.assertIn("if args.launch_lifecycle == DETACHED:",source)
     self.assertIn('{"reap_watch": "post-exit", "reap_watch_pid":',source)
+ def test_parallel_batch_contract_projects_to_all_three_wrappers(self):
+  for harness in ADAPTERS:
+   with self.subTest(harness=harness):
+    source=(ROOT/f"adapters/{harness}/bin/dispatch-headless.py").read_text(
+     encoding="utf-8")
+    self.assertIn("REPLICA_RESERVATION_ROW_KEYS",source)
+    self.assertIn("replica_batch_expectation",source)
+    self.assertIn("expected_reservation=args.replica_batch_expectation",source)
  def test_nested_codex_home_links_auth_but_keeps_mutable_state_local(self):
   with tempfile.TemporaryDirectory() as td:
    root=Path(td); source=root/"source"; source.mkdir(); worktree=root/"worktree"; worktree.mkdir()

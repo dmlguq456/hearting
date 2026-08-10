@@ -473,7 +473,7 @@ callback failure terminates and reaps the child group and records
 `dead-parent-terminated`. Ordinary host-visible runs still select `detached` when
 the host-like evidence permits it; this verification does not force foreground
 lifecycles outside a transient namespace.
-`nested-dispatch-eligibility.py --prospective-standard-owner` is a Codex-only probe
+`nested-dispatch-eligibility.py --prospective-standard-owner --jobs <canonical-jobs.log>` is a Codex-only probe
 (`failure_class=prospective-owner-codex-only` under any other parent harness, including
 OpenCode); it does not check OpenCode owner eligibility.
 

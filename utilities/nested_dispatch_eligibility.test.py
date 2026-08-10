@@ -22,6 +22,8 @@ class NestedEligibilityTest(unittest.TestCase):
             child_harness="codex",
             launch_authority="conductor",
             worktree=worktree,
+            jobs=str(Path(worktree) / ".dispatch" / "jobs.log"),
+            user_disabled=False,
             prospective_standard_owner=False,
         )
 
@@ -73,6 +75,20 @@ class NestedEligibilityTest(unittest.TestCase):
         self.assertEqual(row["next_check"], "--prospective-standard-owner")
         checked.assert_not_called()
 
+    def test_user_disabled_child_is_recorded_without_runtime_probe(self):
+        with tempfile.TemporaryDirectory() as worktree, \
+             mock.patch.dict(os.environ, {}, clear=True), \
+             mock.patch.object(N, "command_check") as checked:
+            args = self.args(worktree)
+            args.child_harness = "claude"
+            args.user_disabled = True
+            row = N.evaluate(args)
+        self.assertEqual(row["status"], "unsupported")
+        self.assertEqual(row["probe_source"], "user-policy")
+        self.assertEqual(row["failure_class"], "user-disabled")
+        self.assertEqual(row["failure_scope"], "runtime-global")
+        checked.assert_not_called()
+
     def test_prospective_codex_owner_uses_launcher_contract_without_spoofing_marker(self):
         with tempfile.TemporaryDirectory() as worktree, \
              mock.patch.dict(os.environ, {}, clear=True), \
@@ -87,10 +103,36 @@ class NestedEligibilityTest(unittest.TestCase):
         self.assertEqual(row["status"], "supported")
         self.assertEqual(
             row["probe_source"],
-            "codex-prospective-standard-owner-contract+direct-auth+headless-check",
+            "codex-prospective-standard-owner-contract+"
+            "codex-prospective-standard-owner-registry-contract+"
+            "direct-auth+headless-check",
         )
         self.assertEqual(row["probe_scope"], "prospective-standard-owner")
         checked.assert_called_once_with("codex", worktree)
+
+    def test_prospective_owner_requires_the_exact_registry_path(self):
+        with tempfile.TemporaryDirectory() as worktree, \
+             mock.patch.dict(os.environ, {}, clear=True), \
+             mock.patch.object(N, "command_check") as checked:
+            args = self.args(worktree)
+            args.jobs = None
+            args.prospective_standard_owner = True
+            row = N.evaluate(args)
+        self.assertEqual(row["status"], "unsupported")
+        self.assertEqual(row["failure_class"], "owner-registry-path-required")
+        checked.assert_not_called()
+
+    def test_prospective_owner_rejects_an_unwritable_registry(self):
+        with tempfile.TemporaryDirectory() as worktree, \
+             mock.patch.dict(os.environ, {}, clear=True), \
+             mock.patch.object(N, "command_check") as checked:
+            args = self.args(worktree)
+            args.jobs = "/proc/1/hearting-dispatch/jobs.log"
+            args.prospective_standard_owner = True
+            row = N.evaluate(args)
+        self.assertEqual(row["status"], "unsupported")
+        self.assertEqual(row["failure_class"], "owner-registry-unwritable")
+        checked.assert_not_called()
 
     def test_prospective_owner_mode_rejects_a_non_codex_owner_tuple(self):
         with tempfile.TemporaryDirectory() as worktree, \

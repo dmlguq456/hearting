@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 from contextlib import contextmanager
 import fcntl
+import hashlib
 import json
 import os
 import re
@@ -24,6 +25,7 @@ from dispatch_contract import (  # noqa: E402
     DispatchContractError,
     GROUP_REAP_PROOF,
     GOVERNOR_RESERVATION_ENV,
+    REPLICA_RESERVATION_ROW_KEYS,
     anchored_capacity_failure,
     annotate_attempt_row,
     attempt_launch_is_available,
@@ -43,6 +45,7 @@ from dispatch_contract import (  # noqa: E402
     resolve_global_registry,
     resolve_live_parent_attempt,
     resolve_model_governor_root,
+    replica_batch_expectation,
     reserve_governor_token,
     spawn_claimed_attempt,
     validate_nested_eligibility,
@@ -483,6 +486,7 @@ def prompt(args: argparse.Namespace) -> tuple[str, str]:
         task, source = args.prompt_text, "inline"
     else:
         task, source = "Run the requested portable harness work.", "generated"
+    args.assignment_sha256 = "sha256:" + hashlib.sha256(task.encode("utf-8")).hexdigest()
     args.worker_type = resolve_worker_type(
         explicit=args.worker_type,
         dispatch_depth=args.dispatch_depth,
@@ -711,6 +715,15 @@ def append_job(jobs: Path, args: argparse.Namespace) -> bool:
             f",attempt_id={args.attempt_id},launch_authority={args.launch_authority}"
             f",fallback_ordinal={args.fallback_ordinal},launch_fence=registry-v1"
         )
+    replica_reservation = getattr(args, "replica_batch_reservation", {})
+    if replica_reservation:
+        pipe += (
+            f",parallel_group={replica_reservation['batch_group']}"
+            f",replica_group={replica_reservation['batch_group']}"
+        )
+        for key in REPLICA_RESERVATION_ROW_KEYS:
+            if key in replica_reservation:
+                pipe += f",{key}={replica_reservation[key]}"
     if args.capacity_retry:
         pipe += (
             f",capacity_retry=1,prior_attempt_id={args.prior_attempt_id}"
@@ -1199,6 +1212,31 @@ def main(argv: list[str]) -> int:
     rc = validate_route_record(args)
     if rc != 0:
         return rc
+    args.replica_batch_expectation = None
+    if action in {"register", "start"}:
+        try:
+            args.replica_batch_expectation = replica_batch_expectation(
+                args.route_file,
+                args.route_node,
+                action,
+                attempt_id=args.attempt_id or "",
+                parent_attempt_id=args.parent_attempt_id or "",
+                harness="opencode",
+                fallback_hop=args.fallback_hop,
+                fallback_ordinal=args.fallback_ordinal,
+            )
+        except DispatchContractError as exc:
+            return fail(exc.reason, 65, detail=exc.detail, child_spawned="0")
+        if (
+            args.replica_batch_expectation is not None
+            and not os.environ.get(GOVERNOR_RESERVATION_ENV)
+        ):
+            return fail(
+                "parallel-group-batch-required",
+                65,
+                detail="parallel-group start requires dispatch-batch admission",
+                child_spawned="0",
+            )
     try:
         attempt_policy = headless_attempt_policy(
             route_file=args.route_file, route_node=args.route_node,
@@ -1280,8 +1318,37 @@ def main(argv: list[str]) -> int:
             reason = e.reason if isinstance(e, DispatchContractError) else "parent-repo-unreadable"
             detail = e.detail if isinstance(e, DispatchContractError) else str(e)
             return fail(reason, 73, detail=detail, child_spawned="0")
+    if action == "start" and args.replica_batch_expectation is not None:
+        try:
+            args.replica_batch_expectation = replica_batch_expectation(
+                args.route_file,
+                args.route_node,
+                action,
+                attempt_id=args.attempt_id,
+                parent_attempt_id=args.parent_attempt_id or "",
+                harness="opencode",
+                fallback_hop=args.fallback_hop,
+                fallback_ordinal=args.fallback_ordinal,
+            )
+        except DispatchContractError as exc:
+            return fail(exc.reason, 65, detail=exc.detail, child_spawned="0")
     log_dir = Path(args.log_dir) if args.log_dir else agent_home / ".dispatch" / "logs"
     prompt_text, prompt_source = prompt(args)
+    if action == "start" and args.replica_batch_expectation is not None:
+        try:
+            args.replica_batch_expectation = replica_batch_expectation(
+                args.route_file,
+                args.route_node,
+                action,
+                attempt_id=args.attempt_id,
+                parent_attempt_id=args.parent_attempt_id or "",
+                harness="opencode",
+                fallback_hop=args.fallback_hop,
+                fallback_ordinal=args.fallback_ordinal,
+                assignment_sha256=args.assignment_sha256,
+            )
+        except DispatchContractError as exc:
+            return fail(exc.reason, 65, detail=exc.detail, child_spawned="0")
     prompt_name = (
         f"{args.slug}.{args.attempt_id}.opencode.prompt.txt"
         if args.attempt_id
@@ -1300,16 +1367,18 @@ def main(argv: list[str]) -> int:
     except DispatchContractError as exc:
         return fail(exc.reason, 73, detail=exc.detail, child_spawned="0")
     reservation_token = ""
+    args.replica_batch_reservation = {}
     if action in ("register", "start"):
         prompt_path.parent.mkdir(parents=True, exist_ok=True)
         log_path.parent.mkdir(parents=True, exist_ok=True)
         if action == "start":
             try:
-                reservation_token, _reservation_receipt = reserve_governor_token(
+                reservation_token, args.replica_batch_reservation = reserve_governor_token(
                     governor,
                     governor_root,
                     "dispatch",
                     provided_token=os.environ.get(GOVERNOR_RESERVATION_ENV, ""),
+                    expected_reservation=args.replica_batch_expectation,
                 )
             except DispatchContractError as exc:
                 return fail(exc.reason, 75, detail=exc.detail, child_spawned="0")
@@ -1481,7 +1550,8 @@ def main(argv: list[str]) -> int:
         start_ticks = launch_metadata.get("pid_start", "")
         try:
             args.governor_reservation = wait_governor_reservation_claim(
-                governor, governor_root, reservation_token, proc
+                governor, governor_root, reservation_token, proc,
+                expected_reservation=args.replica_batch_expectation,
             )
         except DispatchContractError as exc:
             try:
