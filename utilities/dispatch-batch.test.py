@@ -293,6 +293,35 @@ class DispatchBatchTest(unittest.TestCase):
         self.assertEqual(independence, "cross-harness")
         self.assertEqual({row[1] for row in rows}, {"claude", "opencode"})
 
+    def test_capacity_aware_batch_preserves_primary_quality_band(self):
+        route = json.loads(json.dumps(self.route))
+        route["dispatch_allocation"] = {
+            "strategy": "capacity-aware",
+            "window": 30,
+            "harness_order": ["claude", "codex", "opencode"],
+        }
+        for node in route["nodes"]:
+            node["harness_affinity"] = "diverse"
+            node["harness_policy"] = {
+                "primary": ["claude", "codex"],
+                "relief": ["opencode"],
+                "last_resort": [],
+                "promote_relief_below": 35,
+            }
+            node["fallback_hops"][1]["candidates"].append(
+                {"child_harness": "opencode", "status": "supported"}
+            )
+        with mock.patch.object(
+            BATCH.DISPATCH_NODE, "select_checked_tuple", return_value={"status": "supported"}
+        ), mock.patch.object(BATCH.CAPACITY, "capacity_scores", return_value={
+            "claude": 60, "codex": 80, "opencode": 100,
+        }):
+            rows, independence = BATCH.assign_harnesses(
+                route, route["nodes"], allow_degraded=False, jobs=self.jobs
+            )
+        self.assertEqual(independence, "cross-harness")
+        self.assertEqual({row[1] for row in rows}, {"claude", "codex"})
+
     def test_atomic_denial_starts_no_wrapper(self):
         stack, assignments = self.common_patches()
         output = io.StringIO()

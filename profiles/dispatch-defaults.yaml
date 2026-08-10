@@ -10,12 +10,17 @@
 # utilities/dispatch-defaults.py — no PyYAML/yq dependency.
 #
 # Schema (narrow subset, parsed by utilities/dispatch-defaults.py):
-#   schema_version: 2
-#   depth1_owner: [<harness>, ...]     # concrete harnesses only, no "diverse"
-#   opencode:
-#     relief_only: false               # OpenCode is a normal checked candidate
+#   schema_version: 3
+#   harnesses:
+#     enabled: [<harness>, ...]
+#   profiles:
+#     <profile>:
+#       primary: [<quality peers>]
+#       relief: [<lower-band relief candidates>]
+#       last_resort: [<last-resort candidates>]
+#       promote_relief_below: <0..100 headroom percent>
 #   allocation:
-#     strategy: least-recent-attempts
+#     strategy: capacity-aware
 #     window: 30                       # last exact registered attempts
 #   capabilities:
 #     <capability-name>:
@@ -27,33 +32,50 @@
 # never a concrete model id or reasoning/effort value; that stays owned by
 # the adapter model-map contract (SD-22 family/role split).
 
-schema_version: 2
+schema_version: 3
 
-# All three checked harnesses share the normal owner pool. With equal hard
-# eligibility, the least represented harness in the rolling attempt window is
-# selected; ties follow this declared order.
-depth1_owner: [claude, codex, opencode]
+harnesses:
+  enabled: [claude, codex, opencode]
 
-# OpenCode is a normal candidate after registered depth-2 parity. Runtime,
-# account, route-evidence, sandbox, and usage gates still fail closed exactly
-# like the sibling adapters.
-opencode:
-  relief_only: false
+# Capacity reorders only within a band. OpenCode is not a quality peer of the
+# two primary harnesses: deep work reaches it only as a last resort, while
+# light/mini work may promote it when both primary gauges are genuinely tight.
+profiles:
+  deep:
+    primary: [claude, codex]
+    relief: []
+    last_resort: [opencode]
+    promote_relief_below: 0
+  balanced-deep:
+    primary: [claude, codex]
+    relief: []
+    last_resort: [opencode]
+    promote_relief_below: 0
+  light:
+    primary: [claude, codex]
+    relief: [opencode]
+    last_resort: []
+    promote_relief_below: 35
+  mini:
+    primary: [claude, codex]
+    relief: [opencode]
+    last_resort: []
+    promote_relief_below: 35
 
 # Read-only allocation telemetry counts the last 30 exact registered attempt
-# rows in the selected canonical jobs.log. This balances recent dispatch load;
-# it does not claim provider capacity and never overrides a known limit.
+# rows in the selected canonical jobs.log. Fresh runtime gauges order quality
+# peers first; recent exact attempts break unknown/equal-capacity ties.
 allocation:
-  strategy: least-recent-attempts
+  strategy: capacity-aware
   window: 30
 
 capabilities:
   # autopilot-code: canonical topology node ids are frame, plan, plan-check,
   # execute, impl-review, test, report (capabilities/topologies.json v5).
   # PRD prose names "exec"/"review"; execute below realizes prose "exec" and
-  # test realizes the final verification stage. All stages use the balanced
-  # pool. Exact route evidence and task-specific
-  # explicit choices still outrank this soft default.
+  # test realizes the final verification stage. All stages keep `diverse`
+  # affinity, then their model profile selects the quality band above. Exact
+  # route evidence and task-specific explicit choices still outrank this soft default.
   # A literal exec/review key fails validation against the topology registry.
   # Parallel leg ids are compile-time expansions, not config keys. The batch
   # places a group across at least two harness families when available; the

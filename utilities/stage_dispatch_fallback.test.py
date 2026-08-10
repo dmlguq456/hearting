@@ -197,7 +197,8 @@ class FallbackTest(unittest.TestCase):
   self.seed_parent(harness="claude",sandbox="adapter-default")
   right={"AGENT_DISPATCH_CURRENT_HARNESS":"codex",
          "AGENT_DISPATCH_CURRENT_TRANSPORT":"headless",
-         "AGENT_DISPATCH_CURRENT_SANDBOX":"workspace-write"}
+         "AGENT_DISPATCH_CURRENT_SANDBOX":"workspace-write",
+         "HARNESS_CAPACITY_SCORES":"claude:80,codex:20"}
   dry=self.run_node(path,"plan-check","dry-run",**right)
   self.assertNotIn("check=ok",dry.stdout)
   self.assertIn("parent-attempt-not-found",dry.stdout)
@@ -206,7 +207,8 @@ class FallbackTest(unittest.TestCase):
   path=self.route(same_status="supported")
   right={"AGENT_DISPATCH_CURRENT_HARNESS":"codex",
          "AGENT_DISPATCH_CURRENT_TRANSPORT":"headless",
-         "AGENT_DISPATCH_CURRENT_SANDBOX":"workspace-write"}
+         "AGENT_DISPATCH_CURRENT_SANDBOX":"workspace-write",
+         "HARNESS_CAPACITY_SCORES":"claude:80,codex:20"}
   dry=self.run_node(path,"plan-check","dry-run",**right)
   self.assertEqual(dry.returncode,0,dry.stdout+dry.stderr)
   self.assertIn("selected_hop=cross-harness-headless",dry.stdout)
@@ -242,6 +244,31 @@ class FallbackTest(unittest.TestCase):
   selected=[hop["candidates"][0]["child_harness"] for hop in hops[:3]]
   self.assertEqual(selected,["opencode","claude","codex"])
   self.assertEqual(context["counts"],{"claude":1,"codex":1,"opencode":0})
+ def test_capacity_aware_stage_keeps_opencode_outside_primary_band(self):
+  node={
+   "harness_affinity":"diverse",
+   "harness_policy":{"primary":["claude","codex"],"relief":["opencode"],
+                     "last_resort":[],"promote_relief_below":35},
+   "fallback_hops":[
+    {"ordinal":1,"fallback_hop":"same-harness-headless","candidates":[
+     {"child_harness":"claude","status":"supported"}]},
+    {"ordinal":2,"fallback_hop":"cross-harness-headless","candidates":[
+     {"child_harness":"codex","status":"supported"},
+     {"child_harness":"opencode","status":"supported"}]},
+    {"ordinal":3,"fallback_hop":"native-subagent","candidates":[]},
+    {"ordinal":4,"fallback_hop":"inline","candidates":[]},
+   ],
+  }
+  route={"dispatch_allocation":{"strategy":"capacity-aware","window":30,
+                                 "harness_order":["claude","codex","opencode"]}}
+  with mock.patch.object(F,"_usage_states",return_value={
+      "claude":"ok","codex":"ok","opencode":"ok"}), \
+      mock.patch.object(F.CAPACITY,"capacity_scores",return_value={
+       "claude":60,"codex":80,"opencode":100}):
+   hops,context=F.ordered_fallback_hops(route,node,self.jobs)
+  selected=[hop["candidates"][0]["child_harness"] for hop in hops[:3]]
+  self.assertEqual(selected,["codex","claude","opencode"])
+  self.assertFalse(context["relief_promoted"])
  def test_registry_infrastructure_failure_is_not_a_candidate_failure(self):
   # An unwritable registry is a hard stop at --start. Treating it as one more
   # exhausted candidate would descend to inline and recreate the divergence

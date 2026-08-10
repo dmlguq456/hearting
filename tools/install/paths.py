@@ -63,6 +63,11 @@ def xdg_config_home():
     return _absolute_env_path("XDG_CONFIG_HOME", Path.home() / ".config")
 
 
+def hearting_config_dir():
+    """User-owned cross-runtime policy; never stored in a runtime's config home."""
+    return xdg_config_home() / "hearting"
+
+
 def xdg_state_home():
     """Freedesktop state root, honoring an explicit test/runtime override."""
     return _absolute_env_path("XDG_STATE_HOME", Path.home() / ".local" / "state")

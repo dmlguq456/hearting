@@ -37,7 +37,8 @@ class _ConfigHomeMixin:
         self._old_safety_env = {key: os.environ.get(key) for key in (
             "FLEET_TITLE_DISABLE", "FLEET_TITLE_CONCURRENCY", "FLEET_TITLE_MAX_STARTS",
             "FLEET_TITLE_PRIORITY_MAX_STARTS", "FLEET_TITLE_COMMAND",
-            "AGENT_MODEL_GOVERNOR_ROOT",
+            "AGENT_MODEL_GOVERNOR_ROOT", "HARNESS_CAPACITY_SCORES",
+            "HARNESS_CAPACITY_BIAS", "DISPATCH_DEFAULTS_CONFIG",
         )}
         os.environ["CLAUDE_CONFIG_DIR"] = os.path.join(self._tmp.name, "claude")
         os.environ["FLEET_TITLE_STATE_DIR"] = os.path.join(self._tmp.name, "state")
@@ -744,14 +745,23 @@ class SecurityTest(_ConfigHomeMixin, unittest.TestCase):
             _shutil.which = orig_which
 
     def test_cascade_skips_an_uninstalled_leader(self):
-        """opencode absent must fall through to claude, not go blank."""
+        """An absent first quality peer must fall through, not go blank."""
         import shutil as _shutil
         orig_which = _shutil.which
+        os.environ["HARNESS_CAPACITY_SCORES"] = "claude:80,codex:50"
         _shutil.which = lambda name: None if name == "opencode" else "/usr/bin/" + name
         try:
             self.assertEqual(rt.active_provider(), "claude")
         finally:
             _shutil.which = orig_which
+
+    def test_capacity_does_not_make_opencode_a_quality_peer(self):
+        os.environ["HARNESS_CAPACITY_SCORES"] = "claude:70,codex:80,opencode:100"
+        self.assertEqual(rt.selected_providers()[0], "codex")
+
+    def test_tight_primary_capacity_promotes_declared_opencode_relief(self):
+        os.environ["HARNESS_CAPACITY_SCORES"] = "claude:20,codex:30"
+        self.assertEqual(rt.selected_providers()[0], "opencode")
 
     def test_validate_caps_injected_long_string(self):
         payload = "rm -rf / ; " * 20

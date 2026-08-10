@@ -1,7 +1,7 @@
 """Runtime-neutral installer bootstrap helpers.
 
 ``restore_memory`` imports ``dump.jsonl`` when ``memory.db`` is absent.
-``install_launchers`` creates guarded ``~/.local/bin/{harness,fleet}`` symlinks.
+``install_launchers`` creates guarded ``~/.local/bin/{harness,fleet,mem}`` symlinks.
 The helpers remain usable independently of installer command wiring.
 """
 
@@ -67,6 +67,7 @@ LAUNCHERS = (
     ("hearting", "tools/install/harness.sh"),
     ("harness", "tools/install/harness.sh"),
     ("fleet", "tools/fleet/fleet.sh"),
+    ("mem", "tools/memory/mem.py"),
 )
 
 
@@ -81,7 +82,7 @@ def _is_our_symlink(target, source):
 
 
 def install_launchers(home=None, dry_run=False):
-    """Create guarded ``~/.local/bin/{harness,fleet}`` symlinks.
+    """Create guarded ``~/.local/bin/{harness,fleet,mem}`` symlinks.
 
     Args:
         home: Destination home directory, or ``Path.home()`` when omitted.
