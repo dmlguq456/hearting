@@ -10,13 +10,15 @@ trap 'rm -rf "$TMP"' EXIT HUP INT TERM
 HOME="$TMP/home"
 XDG_CONFIG_HOME="$HOME/.config"
 XDG_DATA_HOME="$HOME/.local/share"
+CODEX_HOME="$HOME/.codex"
+CLAUDE_CONFIG_DIR="$HOME/.claude"
 SENTINEL_LOG="$TMP/external-calls.log"
 SRC="$TMP/source-main"
 SRC2="$TMP/source-worktree"
 SRC_BAD="$TMP/source-bad"
 SRC_LINK="$TMP/source-link"
 BIN="$TMP/bin"
-export HOME XDG_CONFIG_HOME XDG_DATA_HOME SENTINEL_LOG
+export HOME XDG_CONFIG_HOME XDG_DATA_HOME CODEX_HOME CLAUDE_CONFIG_DIR SENTINEL_LOG
 mkdir -p "$HOME" "$BIN"
 : > "$SENTINEL_LOG"
 
@@ -79,9 +81,11 @@ make_fixture() {
   printf '%s\n' '# fixture memory' > "$root/adapters/claude/tools/memory/mem.py"
   printf '%s\n' '#!/bin/sh' 'exit 0' > "$root/adapters/claude/utilities/fixture.sh"
   chmod +x "$root/adapters/claude/utilities/fixture.sh"
+  printf '%s\n' '#!/bin/sh' 'echo fixture-statusline' > "$root/adapters/claude/statusline.sh"
+  chmod +x "$root/adapters/claude/statusline.sh"
   printf '%s\n' 'fixture' > "$root/adapters/claude/scaffolds/README.md"
   printf '%s\n' \
-    '{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"sh $HOME/.claude/utilities/fixture.sh"}]}]}}' \
+    '{"env":{"MEM_DISTILL_ENABLE":"1"},"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"sh $HOME/.claude/utilities/fixture.sh"}]}]},"statusLine":{"type":"command","command":"bash $HOME/.claude/statusline.sh","refreshInterval":60}}' \
     > "$root/adapters/claude/settings.json"
   printf '%s\n' '{"name":"hearting-claude","version":"1.0.0"}' \
     > "$root/adapters/claude/plugin-marketplace/plugins/hearting-claude/.claude-plugin/plugin.json"
@@ -105,7 +109,9 @@ make_fixture() {
 
 make_fixture "$SRC"
 mkdir -p "$HOME/.claude"
-printf '%s\n' '{"theme":"user"}' > "$HOME/.claude/settings.json"
+printf '%s\n' \
+  '{"theme":"user","env":{"MEM_DISTILL_ENABLE":"custom","USER_FLAG":"keep"},"statusLine":{"type":"command","command":"custom-statusline"}}' \
+  > "$HOME/.claude/settings.json"
 
 for command in curl wget npm bun codex claude opencode; do
   printf '%s\n' '#!/bin/sh' 'echo "$(basename "$0")" >> "$SENTINEL_LOG"' 'exit 97' \
@@ -119,6 +125,43 @@ export PATH AGENT_HOME
 harness() {
   sh "$ROOT/tools/install/harness.sh" "$@"
 }
+
+# A fresh managed activation must project its script but preserve conflicting
+# user-owned values. Status/doctor report the conflict until the user removes
+# those exact keys; uninstall must not remove the custom values.
+harness runtime activate --runtime claude --mode linked --source "$SRC" --json \
+  > "$TMP/claude-fresh-conflict.json"
+python3 - "$TMP/claude-fresh-conflict.json" "$HOME/.claude/settings.json" <<'PY'
+import json, sys
+row = json.load(open(sys.argv[1]))
+settings = json.load(open(sys.argv[2]))
+assert row["freshness"] == "duplicate", row
+assert row["config_conflicts"] == ["statusLine", "env.MEM_DISTILL_ENABLE"], row
+assert "config-conflict:statusLine" in row["duplicate_sources"], row
+assert settings["statusLine"]["command"] == "custom-statusline", settings
+assert settings["env"]["MEM_DISTILL_ENABLE"] == "custom", settings
+assert settings["env"]["USER_FLAG"] == "keep", settings
+PY
+test -L "$HOME/.claude/statusline.sh" || fail "fresh conflict lost Claude statusline projection"
+if harness runtime doctor --runtime claude --strict --json >/dev/null 2>&1; then
+  fail "Claude doctor accepted custom managed-config conflicts"
+fi
+harness uninstall claude >/dev/null
+test ! -e "$HOME/.claude/statusline.sh" && test ! -L "$HOME/.claude/statusline.sh" \
+  || fail "Claude conflict uninstall left statusline projection"
+python3 - "$HOME/.claude/settings.json" <<'PY'
+import json, sys
+path = sys.argv[1]
+settings = json.load(open(path))
+assert settings["statusLine"]["command"] == "custom-statusline", settings
+assert settings["env"]["MEM_DISTILL_ENABLE"] == "custom", settings
+assert settings["env"]["USER_FLAG"] == "keep", settings
+settings.pop("statusLine")
+settings["env"].pop("MEM_DISTILL_ENABLE")
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(settings, handle)
+PY
+ok "fresh Claude activation reports conflicts and uninstall preserves custom values"
 
 if ! harness runtime activate --runtime all --mode linked --source "$SRC" --json \
   > "$TMP/linked-activate.json"; then
@@ -162,11 +205,17 @@ test -L "$HOME/.config/opencode/plugins/hearting-guards.js" \
   || fail "OpenCode local plugin projection missing"
 test -L "$HOME/.claude/tools" || fail "Claude tools projection missing"
 test -L "$HOME/.claude/utilities" || fail "Claude utilities projection missing"
+test -L "$HOME/.claude/statusline.sh" || fail "Claude statusline projection missing"
+test -x "$HOME/.claude/statusline.sh" || fail "Claude statusline projection is not executable"
 python3 - "$HOME/.claude/settings.json" <<'PY'
 import json, sys
 data=json.load(open(sys.argv[1]))
 assert data["theme"] == "user"
 assert data["hooks"]["SessionStart"]
+assert data["statusLine"]["command"] == "bash $HOME/.claude/statusline.sh"
+assert data["statusLine"]["refreshInterval"] == 60
+assert data["env"]["MEM_DISTILL_ENABLE"] == "1"
+assert data["env"]["USER_FLAG"] == "keep"
 PY
 ok "offline linked activation/status/doctor for all runtimes"
 
@@ -203,8 +252,19 @@ for runtime, row in rows.items():
         "opencode": os.path.join(sys.argv[2], ".config", "opencode"),
     }[runtime]
     assert os.path.realpath(os.path.join(home, "skills", "demo")).startswith(row["active_root"])
+    if runtime == "claude":
+        assert os.path.realpath(os.path.join(home, "statusline.sh")).startswith(row["active_root"])
 PY
 printf '%s\n' '# packaged source advance' >> "$SRC/adapters/opencode/skills/demo/SKILL.md"
+python3 - "$SRC/adapters/claude/settings.json" <<'PY'
+import json, sys
+path = sys.argv[1]
+settings = json.load(open(path))
+settings["statusLine"]["refreshInterval"] = 30
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(settings, handle)
+PY
+printf '%s\n' '# packaged statusline advance' >> "$SRC/adapters/claude/statusline.sh"
 git -C "$SRC" add .
 git -C "$SRC" commit -qm packaged-advance
 harness runtime status --runtime all --json > "$TMP/package-stale.json"
@@ -219,13 +279,18 @@ for runtime in before:
     assert after[runtime]["freshness"] == "source-ahead"
 PY
 harness runtime refresh --runtime all --json > "$TMP/package-refreshed.json"
-python3 - "$TMP/package-before.json" "$TMP/package-refreshed.json" <<'PY'
-import json, sys
+python3 - "$TMP/package-before.json" "$TMP/package-refreshed.json" "$HOME" <<'PY'
+import json, os, sys
 before={r["runtime"]:r for r in json.load(open(sys.argv[1]))["runtimes"]}
 after={r["runtime"]:r for r in json.load(open(sys.argv[2]))["runtimes"]}
 for runtime in before:
     assert after[runtime]["active_revision"] != before[runtime]["active_revision"]
     assert after[runtime]["freshness"] == "fresh"
+settings = json.load(open(os.path.join(sys.argv[3], ".claude", "settings.json")))
+assert settings["statusLine"]["refreshInterval"] == 30, settings
+assert os.path.realpath(os.path.join(sys.argv[3], ".claude", "statusline.sh")).startswith(
+    after["claude"]["active_root"]
+)
 PY
 ok "packaged revision and digest stay immutable until refresh"
 
@@ -606,6 +671,20 @@ assert row["freshness"] == "fresh", row["freshness"]
 PY
 ok "claude status flags a registered hook whose command file is missing"
 
+chmod -x "$SRC/adapters/claude/statusline.sh"
+harness runtime status --runtime claude --json > "$TMP/statusline-not-executable.json" || true
+python3 - "$TMP/statusline-not-executable.json" <<'PY'
+import json, sys
+row = json.load(open(sys.argv[1]))
+assert row["freshness"] == "missing", row
+PY
+if harness runtime doctor --runtime claude --strict --json >/dev/null 2>&1; then
+  fail "Claude doctor accepted a non-executable managed statusline"
+fi
+chmod +x "$SRC/adapters/claude/statusline.sh"
+harness runtime doctor --runtime claude --strict --json >/dev/null
+ok "claude doctor rejects a broken managed statusline command"
+
 harness uninstall codex > "$TMP/uninstall-codex.log" 2>&1 \
   || { cat "$TMP/uninstall-codex.log" >&2; fail "codex uninstall failed"; }
 test ! -e "$HOME/.codex/hearting" && test ! -L "$HOME/.codex/hearting" \
@@ -624,15 +703,19 @@ harness uninstall claude > "$TMP/uninstall-claude.log" 2>&1 \
   || { cat "$TMP/uninstall-claude.log" >&2; fail "claude uninstall failed"; }
 test ! -e "$HOME/.claude/CLAUDE.md" && test ! -L "$HOME/.claude/CLAUDE.md" \
   || fail "uninstall left the claude bootstrap projection"
+test ! -e "$HOME/.claude/statusline.sh" && test ! -L "$HOME/.claude/statusline.sh" \
+  || fail "uninstall left the claude statusline projection"
 python3 - "$HOME/.claude/settings.json" <<'PY'
 import json, sys
 settings=json.load(open(sys.argv[1]))
 assert settings["theme"] == "user"
 hooks=settings.get("hooks", {})
 assert not hooks.get("SessionStart"), hooks
+assert "statusLine" not in settings, settings
+assert settings["env"] == {"USER_FLAG": "keep"}, settings
 assert settings["enabledPlugins"]["foreign@fixture"] is True
 PY
-ok "claude uninstall unmerges managed hooks and keeps user settings"
+ok "claude uninstall unmerges managed hooks, statusline, and env while keeping user settings"
 
 test ! -s "$SENTINEL_LOG" || fail "external command invoked: $(tr '\n' ' ' < "$SENTINEL_LOG")"
 ok "activation path used no runtime, marketplace, network, npm, or bun command"

@@ -35,6 +35,8 @@ import harness_manifest
 RUNTIMES = ("claude", "codex", "opencode")
 MODES = ("linked", "packaged")
 SCHEMA = 2
+CLAUDE_MANAGED_ENV_KEYS = ("MEM_DISTILL_ENABLE",)
+CLAUDE_STATUSLINE_COMMAND = "bash $HOME/.claude/statusline.sh"
 
 SESSION_ACTIONS = {
     "codex": {
@@ -394,6 +396,7 @@ def _linked_entries(
             (source_root / "adapters/claude/tools", home / "tools", "hook_config"),
             (source_root / "adapters/claude/utilities", home / "utilities", "hook_config"),
             (source_root / "adapters/claude/scaffolds", home / "scaffolds", "hook_config"),
+            (source_root / "adapters/claude/statusline.sh", home / "statusline.sh", "hook_config"),
         ]
         entries.extend(_entry(src, dst, surface) for src, dst, surface in fixed)
         # agent-modes runtime surface retired with the team agents: the unit catalog is
@@ -458,6 +461,12 @@ def _linked_entries(
         raise ActivationError(f"unsupported runtime: {runtime}")
 
     existing = [entry for entry in entries if Path(entry["source"]).exists()]
+    if runtime == "claude" and not (
+        source_root / "adapters/claude/statusline.sh"
+    ).is_file():
+        raise ActivationError(
+            f"source {source_root} lacks Claude statusline.sh activation surface"
+        )
     required_surfaces = {"instructions", "skill", "agent", "hook_config"}
     present_surfaces = {entry["surface"] for entry in existing}
     missing = sorted(required_surfaces - present_surfaces)
@@ -1013,13 +1022,42 @@ def _read_json_object(path: Path, label: str) -> dict:
     return data
 
 
-def _merge_claude_hooks(
+def _claude_managed_values(source: dict) -> dict:
+    statusline = source.get("statusLine")
+    if (
+        not isinstance(statusline, dict)
+        or statusline.get("type") != "command"
+        or statusline.get("command") != CLAUDE_STATUSLINE_COMMAND
+        or (
+            "refreshInterval" in statusline
+            and (
+                not isinstance(statusline["refreshInterval"], int)
+                or isinstance(statusline["refreshInterval"], bool)
+                or statusline["refreshInterval"] <= 0
+            )
+        )
+    ):
+        raise ActivationError("Claude settings source has no valid statusLine command")
+    source_env = source.get("env")
+    if not isinstance(source_env, dict):
+        raise ActivationError("Claude settings source has no env object")
+    managed_env = {}
+    for key in CLAUDE_MANAGED_ENV_KEYS:
+        value = source_env.get(key)
+        if not isinstance(value, str):
+            raise ActivationError(f"Claude settings source has no valid env.{key}")
+        managed_env[key] = value
+    return {"statusLine": statusline, "env": managed_env}
+
+
+def _merge_claude_settings(
     active_root: Path, previous: Optional[dict], scope: str = "global"
 ) -> dict:
     source = _read_json_object(_claude_hook_source(active_root), "Claude hook source")
     source_hooks = source.get("hooks")
     if not isinstance(source_hooks, dict) or not source_hooks:
         raise ActivationError("Claude hook source has no hooks object")
+    desired_values = _claude_managed_values(source)
     config = _config_path("claude", scope, "settings.json")
     original = config.read_bytes() if config.exists() else None
     data = _read_json_object(config, "Claude settings") if config.exists() else {}
@@ -1074,14 +1112,73 @@ def _merge_claude_hooks(
             known.add(marker)
             added += 1
             changed = True
+
+    previous_values = {}
+    if previous:
+        candidate = previous.get("managed_config", {}).get("claude_values", {})
+        if isinstance(candidate, dict):
+            previous_values = candidate
+    managed_values = {"env": {}}
+    conflicts = []
+    missing_value = object()
+
+    desired_statusline = desired_values["statusLine"]
+    current_statusline = data.get("statusLine", missing_value)
+    previous_statusline = previous_values.get("statusLine", missing_value)
+    if (
+        current_statusline is missing_value
+        or current_statusline == desired_statusline
+        or (
+            previous_statusline is not missing_value
+            and current_statusline == previous_statusline
+        )
+    ):
+        if current_statusline != desired_statusline:
+            data["statusLine"] = desired_statusline
+            changed = True
+        managed_values["statusLine"] = desired_statusline
+    else:
+        conflicts.append("statusLine")
+
+    current_env = data.get("env", missing_value)
+    if current_env is missing_value:
+        current_env = {}
+        data["env"] = current_env
+        changed = True
+    if not isinstance(current_env, dict):
+        conflicts.append("env")
+    else:
+        previous_env = previous_values.get("env", {})
+        if not isinstance(previous_env, dict):
+            previous_env = {}
+        for key, desired_value in desired_values["env"].items():
+            current_value = current_env.get(key, missing_value)
+            previous_value = previous_env.get(key, missing_value)
+            if (
+                current_value is missing_value
+                or current_value == desired_value
+                or (
+                    previous_value is not missing_value
+                    and current_value == previous_value
+                )
+            ):
+                if current_value != desired_value:
+                    current_env[key] = desired_value
+                    changed = True
+                managed_values["env"][key] = desired_value
+            else:
+                conflicts.append(f"env.{key}")
+
     if changed:
         _atomic_json(config, data)
     return {
-        "kind": "claude-hooks-merged",
+        "kind": "claude-settings-merged",
         "path": str(config),
         "disabled": disabled_plugins,
         "added": added,
-        "managed": source_hooks,
+        "managed_hooks": source_hooks,
+        "managed_values": managed_values,
+        "conflicts": conflicts,
         "backup": (
             _config_backup("claude", scope, config, original)
             if changed and original is not None
@@ -1090,25 +1187,57 @@ def _merge_claude_hooks(
     }
 
 
-def _claude_hooks_healthy(active_root: Path, scope: str = "global") -> bool:
+def _claude_settings_health(
+    active_root: Path, scope: str = "global"
+) -> tuple[bool, List[str]]:
     try:
         source = _read_json_object(_claude_hook_source(active_root), "Claude hook source")
         config = _read_json_object(
             _config_path("claude", scope, "settings.json"), "Claude settings"
         )
     except ActivationError:
-        return False
+        return True, []
     expected = source.get("hooks")
     actual = config.get("hooks")
+    missing = False
     if not isinstance(expected, dict) or not isinstance(actual, dict):
-        return False
-    for event, entries in expected.items():
-        if not isinstance(entries, list) or not isinstance(actual.get(event), list):
-            return False
-        present = {json.dumps(item, sort_keys=True) for item in actual[event]}
-        if any(json.dumps(item, sort_keys=True) not in present for item in entries):
-            return False
-    return _hook_command_files_present(actual)
+        missing = True
+    else:
+        for event, entries in expected.items():
+            if not isinstance(entries, list) or not isinstance(actual.get(event), list):
+                missing = True
+                continue
+            present = {json.dumps(item, sort_keys=True) for item in actual[event]}
+            if any(json.dumps(item, sort_keys=True) not in present for item in entries):
+                missing = True
+        if not _hook_command_files_present(actual):
+            missing = True
+
+    try:
+        desired_values = _claude_managed_values(source)
+    except ActivationError:
+        return True, []
+    conflicts = []
+    if "statusLine" not in config:
+        missing = True
+    elif config["statusLine"] != desired_values["statusLine"]:
+        conflicts.append("statusLine")
+    actual_env = config.get("env")
+    if "env" not in config:
+        missing = True
+    elif not isinstance(actual_env, dict):
+        conflicts.append("env")
+    else:
+        for key, value in desired_values["env"].items():
+            if key not in actual_env:
+                missing = True
+            elif actual_env[key] != value:
+                conflicts.append(f"env.{key}")
+
+    statusline = paths.runtime_home("claude", scope) / "statusline.sh"
+    if not statusline.is_file() or not os.access(statusline, os.X_OK):
+        missing = True
+    return missing, conflicts
 
 
 _HOOK_COMMAND_PATH_RE = re.compile(r"\$HOME/[^\s\"']+")
@@ -1195,7 +1324,7 @@ def _prepare_runtime_config(
         changes = [_disable_codex_plugin(scope)]
     elif runtime == "claude":
         changes = [
-            _merge_claude_hooks(active_root, previous, scope),
+            _merge_claude_settings(active_root, previous, scope),
             _disable_claude_plugin(scope),
         ]
     else:
@@ -1355,6 +1484,7 @@ def _journal_dest_allowed(runtime: str, dest: Path, scope: str) -> bool:
         "claude": {
             "hearting", "CLAUDE.md", "core", "capabilities", "roles",
             "agent-modes", "bin", "tools", "utilities", "scaffolds",
+            "statusline.sh",
         },
         "opencode": {
             "hearting", "AGENTS.md", "agent-core", "agent-capabilities",
@@ -1807,12 +1937,28 @@ def activate(
             "managed_config": {
                 "claude_hooks": next(
                     (
-                        change["managed"]
+                        change["managed_hooks"]
                         for change in config_changes
-                        if change.get("kind") == "claude-hooks-merged"
+                        if change.get("kind") == "claude-settings-merged"
                     ),
                     {},
-                )
+                ),
+                "claude_values": next(
+                    (
+                        change["managed_values"]
+                        for change in config_changes
+                        if change.get("kind") == "claude-settings-merged"
+                    ),
+                    {},
+                ),
+                "claude_conflicts": next(
+                    (
+                        change["conflicts"]
+                        for change in config_changes
+                        if change.get("kind") == "claude-settings-merged"
+                    ),
+                    [],
+                ),
             },
             "activated_at": _utc_now(),
         }
@@ -1841,6 +1987,7 @@ def _status_missing(runtime: str, scope: str) -> dict:
         "projection_digest": None,
         "discovery_paths": [],
         "duplicate_sources": duplicate_sources(runtime, scope),
+        "config_conflicts": [],
         "freshness": "missing",
         "session_action": SESSION_ACTIONS[runtime],
         "external_dependencies": [],
@@ -1884,8 +2031,11 @@ def status(runtime: str, scope: str = "global") -> dict:
     except ActivationError:
         entries, digest, missing, stale, unexpected = [], None, True, False, []
 
-    if runtime == "claude" and not _claude_hooks_healthy(active_root, scope):
-        missing = True
+    config_conflicts: List[str] = []
+    if runtime == "claude":
+        config_missing, config_conflicts = _claude_settings_health(active_root, scope)
+        if config_missing:
+            missing = True
     bundle_stale = False
     if state.get("mode") == "packaged":
         current_bundle_checksum = _bundle_checksum(active_root)
@@ -1899,12 +2049,19 @@ def status(runtime: str, scope: str = "global") -> dict:
         f"unmanaged-extra:{path.relative_to(paths.runtime_home(runtime, scope))}"
         for path in unexpected
     )
+    duplicates.extend(f"config-conflict:{item}" for item in config_conflicts)
     if duplicates:
         freshness = "duplicate"
-        next_action = (
-            f"harness runtime activate --runtime {runtime} --mode {state['mode']} "
-            f"--source {source_root}"
-        )
+        if config_conflicts:
+            next_action = (
+                f"resolve Claude settings conflicts ({','.join(config_conflicts)}), "
+                "then harness runtime refresh --runtime claude"
+            )
+        else:
+            next_action = (
+                f"harness runtime activate --runtime {runtime} --mode {state['mode']} "
+                f"--source {source_root}"
+            )
     elif missing:
         freshness = "missing"
         next_action = f"harness runtime refresh --runtime {runtime}"
@@ -1933,6 +2090,7 @@ def status(runtime: str, scope: str = "global") -> dict:
         "projection_digest": digest,
         "discovery_paths": [item["dest"] for item in entries],
         "duplicate_sources": duplicates,
+        "config_conflicts": config_conflicts,
         "freshness": freshness,
         "session_action": SESSION_ACTIONS[runtime],
         "external_dependencies": [],
@@ -1948,10 +2106,20 @@ def refresh(runtime: str, scope: str = "global") -> dict:
     return activate(runtime, state["mode"], state["source_root"], scope)
 
 
-def _unmerge_claude_hooks(state: dict, scope: str, dry_run: bool = False) -> List[str]:
-    """Remove exactly the managed hook entries activation merged into settings."""
-    managed = state.get("managed_config", {}).get("claude_hooks", {})
-    if not isinstance(managed, dict) or not managed:
+def _unmerge_claude_settings(
+    state: dict, scope: str, dry_run: bool = False
+) -> List[str]:
+    """Remove only exact values the activation record still proves it owns."""
+    managed_config = state.get("managed_config", {})
+    if not isinstance(managed_config, dict):
+        return []
+    managed_hooks = managed_config.get("claude_hooks", {})
+    managed_values = managed_config.get("claude_values", {})
+    if not isinstance(managed_hooks, dict):
+        managed_hooks = {}
+    if not isinstance(managed_values, dict):
+        managed_values = {}
+    if not managed_hooks and not managed_values:
         return []
     config = _config_path("claude", scope, "settings.json")
     if not config.exists():
@@ -1960,22 +2128,39 @@ def _unmerge_claude_hooks(state: dict, scope: str, dry_run: bool = False) -> Lis
         data = _read_json_object(config, "Claude settings")
     except ActivationError:
         return []
-    hooks = data.get("hooks")
-    if not isinstance(hooks, dict):
-        return []
     changed = False
-    for event, entries in managed.items():
-        current = hooks.get(event)
-        if not isinstance(current, list) or not isinstance(entries, list):
-            continue
-        managed_set = {json.dumps(item, sort_keys=True) for item in entries}
-        kept = [item for item in current if json.dumps(item, sort_keys=True) not in managed_set]
-        if len(kept) != len(current):
-            changed = True
-            if kept:
-                hooks[event] = kept
-            else:
-                hooks.pop(event)
+    hooks = data.get("hooks")
+    if isinstance(hooks, dict):
+        for event, entries in managed_hooks.items():
+            current = hooks.get(event)
+            if not isinstance(current, list) or not isinstance(entries, list):
+                continue
+            managed_set = {json.dumps(item, sort_keys=True) for item in entries}
+            kept = [
+                item
+                for item in current
+                if json.dumps(item, sort_keys=True) not in managed_set
+            ]
+            if len(kept) != len(current):
+                changed = True
+                if kept:
+                    hooks[event] = kept
+                else:
+                    hooks.pop(event)
+
+    managed_statusline = managed_values.get("statusLine")
+    if managed_statusline is not None and data.get("statusLine") == managed_statusline:
+        data.pop("statusLine")
+        changed = True
+    managed_env = managed_values.get("env", {})
+    current_env = data.get("env")
+    if isinstance(managed_env, dict) and isinstance(current_env, dict):
+        for key, value in managed_env.items():
+            if current_env.get(key) == value:
+                current_env.pop(key)
+                changed = True
+        if not current_env:
+            data.pop("env")
     if changed and not dry_run:
         _atomic_json(config, data)
     return [str(config)] if changed else []
@@ -2017,7 +2202,11 @@ def deactivate(runtime: str, scope: str = "global", dry_run: bool = False) -> di
         if not dry_run:
             _remove_path(dest)
         removed.append(value)
-    restored = _unmerge_claude_hooks(state, scope, dry_run=dry_run) if runtime == "claude" else []
+    restored = (
+        _unmerge_claude_settings(state, scope, dry_run=dry_run)
+        if runtime == "claude"
+        else []
+    )
     if not dry_run:
         bundles = paths.harness_state_dir(runtime, scope) / "bundles"
         if bundles.is_dir() and not bundles.is_symlink():
@@ -2043,6 +2232,7 @@ def doctor(runtime: str, strict: bool = False, scope: str = "global") -> dict:
         "strict": strict,
         "freshness": report["freshness"],
         "duplicate_sources": report["duplicate_sources"],
+        "config_conflicts": report.get("config_conflicts", []),
         "next_action": report["next_action"],
         "status": report,
     }

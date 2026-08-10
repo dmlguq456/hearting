@@ -40,6 +40,8 @@ Do not make `$HOME/.claude`, `$HOME/.codex`, or `$HOME/.config/opencode` the can
 The activation record lives at `<runtime-home>/.harness/activation.json` and is
 the machine-readable source of truth for source root, source/active revision,
 projection digest, discovery paths, duplicates, freshness, and session action.
+Claude records also expose `config_conflicts` when a user-owned value prevents
+an activation default from being adopted.
 
 ```bash
 curl -fsSL https://github.com/dmlguq456/hearting/releases/latest/download/install.sh | sh
@@ -91,7 +93,7 @@ harness install claude
 
 | Surface | Wiring | Contract |
 |---|---|---|
-| `CLAUDE.md`/`core`/`skills`/`agents`/`hooks`/`tools`/… | symlink | Repository changes appear immediately; harness-owned and read-only from the runtime |
+| `CLAUDE.md`/`core`/`skills`/`agents`/`hooks`/`tools`/`statusline.sh`/… | symlink | Repository changes appear immediately; harness-owned and read-only from the runtime |
 | `settings.json`/`keybindings.json` | copy once + hash manifest | Copy once and never link again (see configuration files below) |
 | packaged activation | repo-local immutable bundle → same native surfaces | Does not use plugin registries or caches |
 
@@ -101,12 +103,17 @@ harness install claude
   are copied once and never linked. Linking them even once can silently dirty
   the repository. `verify` and `update --reapply` use the hash manifest to
   detect, back up, and reapply drift.
-- **Runtime activation:** only harness hook entries are merged into the existing
-  `settings.json`, without duplicates. Referenced `tools` and `utilities` point
-  to either the source or an immutable bundle. Other user settings remain
-  unchanged, while the operation records an original-checksum backup and a
-  transaction journal. The legacy plugin generator is an optional distribution
-  artifact and is not part of Phase 1 activation.
+- **Runtime activation:** harness hook entries, `statusLine`, and the explicitly
+  allowlisted `env.MEM_DISTILL_ENABLE` default are merged into the existing
+  `settings.json`. Referenced `tools`, `utilities`, and `statusline.sh` point to
+  either the source or an immutable bundle. Missing or previously managed exact
+  values are installed or refreshed. A conflicting user value is preserved and
+  reported through `config_conflicts`; strict doctor remains unhealthy until the
+  conflict is resolved. Uninstall removes only values that still exactly match
+  the activation record, leaving custom values and unrelated settings untouched.
+  The operation records an original-checksum backup and a transaction journal.
+  The legacy plugin generator is an optional distribution artifact and is not
+  part of Phase 1 activation.
 - **Hook coexistence semantics** (`runtime_activation.py` merge contract):
   pre-existing user hook entries are preserved verbatim and keep their array
   position; harness entries are appended after them within each event, so on
