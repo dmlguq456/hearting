@@ -160,13 +160,15 @@ def _parse_latest_task_lifecycle(rollout_path, chunk=65536, max_scan=1048576):
     Rows are consumed in physical JSONL order from the tail.  A terminal event is
     trusted only when the immediately preceding lifecycle starts the same turn.
     Invalid lifecycle rows fail closed instead of exposing an older state.
+    ``max_scan=None`` performs the exact full-rollout scan required for a known
+    native subagent; ordinary session enrichment keeps its bounded default.
 
     Raw filesystem errors deliberately reach the caller so the caching wrapper can
     distinguish unreadable input from a readable, validated ``None`` result.
     """
     terminal = {"task_complete", "turn_aborted"}
     end = os.path.getsize(rollout_path)
-    floor = max(0, end - max_scan)
+    floor = 0 if max_scan is None else max(0, end - max_scan)
     carry = b""
     latest = None
     with open(rollout_path, "rb") as f:
@@ -261,7 +263,10 @@ def _subagent_active(edge_status, rollout_path, updated_at=None, updated_at_ms=N
         return False
     if normalized != "open" or not isinstance(rollout_path, str) or not rollout_path:
         return None
-    lifecycle = _latest_task_lifecycle(rollout_path)
+    # The state DB already proves this is a native child.  Its current turn can be
+    # larger than the ordinary session tail budget, so do not discard an otherwise
+    # exact spawn edge merely because the matching lifecycle lies beyond 1 MiB.
+    lifecycle = _latest_task_lifecycle(rollout_path, max_scan=None)
     if lifecycle is None:
         return None
     if lifecycle[0] in ("task_complete", "turn_aborted"):

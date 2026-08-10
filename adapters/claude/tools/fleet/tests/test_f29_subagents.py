@@ -192,9 +192,14 @@ class CodexSubagentTest(unittest.TestCase):
         con.close()
         return path
 
-    def _lifecycle(self, path, events, trailing=0):
+    def _lifecycle(self, path, events, trailing=0, between=0):
         with open(path, "w", encoding="utf-8") as handle:
-            for event_type, turn_id in events:
+            for index, (event_type, turn_id) in enumerate(events):
+                if index and between:
+                    handle.write(json.dumps({
+                        "type": "event_msg",
+                        "payload": {"type": "note", "text": "x" * between},
+                    }) + "\n")
                 handle.write(json.dumps({
                     "type": "event_msg",
                     "payload": {"type": event_type, "turn_id": turn_id},
@@ -237,6 +242,30 @@ class CodexSubagentTest(unittest.TestCase):
                 "id": "child", "lifecycle": "task_complete", "trailing_bytes": 70000,
             }])
             self.assertFalse(codex._thread_subagents(tmp)["parent"][0].active)
+
+    def test_subagent_start_beyond_session_scan_limit_remains_visible(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "active-large-rollout.jsonl")
+            self._lifecycle(
+                path,
+                [("task_started", "turn")],
+                trailing=1048576 + 4096,
+            )
+            self.assertIsNone(codex._latest_task_lifecycle(path))
+            self.assertTrue(codex._subagent_active("open", path))
+
+    def test_subagent_terminal_pair_may_span_more_than_session_scan_limit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            for terminal in ("task_complete", "turn_aborted"):
+                with self.subTest(terminal=terminal):
+                    path = os.path.join(tmp, terminal + ".jsonl")
+                    self._lifecycle(
+                        path,
+                        [("task_started", "turn"), (terminal, "turn")],
+                        between=1048576 + 4096,
+                    )
+                    self.assertIsNone(codex._latest_task_lifecycle(path))
+                    self.assertIs(codex._subagent_active("open", path), False)
 
     def test_matching_abort_is_done(self):
         with tempfile.TemporaryDirectory() as tmp:

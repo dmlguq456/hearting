@@ -635,12 +635,12 @@ _wt_count = gitinfo.worktree_count
 _HW = 16                      # Bare harness-badge width — narrow/stack L1 badges and the
                               # dispatch-prefix budget math still use this unmerged value.
 _HMW = 40                     # F-33/F-64/F-65: WIDE-layout harness field. The latest small
-                              # expansion is 38→40 (user 2026-08-06) so a depth-2 spawned row
+                              # expansion is 38→40 (user 2026-08-06) so a dispatch-depth-2 spawned row
                               # retains two more cells after paying for its hierarchy prefix.
                               # the labels that actually render are `claude code (Opus 5·xhigh)`
                               # at 26 cells and `codex (gpt-5.6-sol·xhigh)` at 25; at 40 the
                               # 33-cell `opencode (claude-sonnet-4-5·high)` worst case fits even
-                              # behind the depth-1 prefix (40-5=35) and the depth-2 field keeps
+                              # behind the dispatch-depth-1 prefix (40-5=35) and the dispatch-depth-2 field keeps
                               # 32 cells under the F-64 ladder, while staying below the
                               # blank-heavy 42 that F-58 rolled back. These two cells
                               # shift the whole wide row right and are charged to the _wide_slack
@@ -1531,12 +1531,12 @@ def _compact_dispatch_name(name, max_width=_DISPATCH_NAME_MAX):
 
 def _dispatch_prefix(j, orphan=False):
     # F-64c (v49, user 2026-08-05 연쇄 "depth=1을 조금 앞당겨서" → "세로선은 좀 더 들여쓰게"
-    # → "아주 조금만 더 + depth=2의 들여쓰기를 완화"): depth-1 sheds its ↳ arrow and sits at
+    # → "아주 조금만 더 + depth=2의 들여쓰기를 완화"): dispatch-depth-1 sheds its ↳ arrow and sits at
     # a 4-cell inset — the capsule rail (assembler post-pass at `_RAIL_COL`) is what marks
-    # the unit. depth≥2 keeps the ↳ spawn arrow (user 2026-07-16: indent-only depth-2 rows
-    # lost their arrow), TWO cells deeper per level past the depth-1 seat — the rail now
+    # the unit. depth≥2 keeps the ↳ spawn arrow (user 2026-07-16: indent-only dispatch-depth-2 rows
+    # lost their arrow), TWO cells deeper per level past the dispatch-depth-1 seat — the rail now
     # carries the unit boundary, so the ladder no longer needs the 3-cell step. The harness
-    # field absorbs the prefix (_HMW - len: depth-1 40-4=36, depth-2 40-8=32 ≥ the 26-cell
+    # field absorbs the prefix (_HMW - len: dispatch-depth-1 40-4=36, dispatch-depth-2 40-8=32 ≥ the 26-cell
     # worst-case live label).
     #
     # Project-level orphans (parent dead/off-screen, surfaced as a project fallback) intentionally
@@ -1552,11 +1552,11 @@ def _dispatch_prefix(j, orphan=False):
 
 # F-64c (v49, user 2026-08-05 "depth=1에서는 화살표를 안쓰고 쭉 세로줄로 … 점멸하도록",
 # 정정 "depth=1을 조금 앞당겨서 들여쓰기 폭을 줄이고 세로선은 그 아래 depth=2에 대해서만"):
-# a depth-1 dispatch unit renders arrowless at a shallow 2-cell inset, and a vertical rail
-# hangs UNDER it — through the NOW subtitle, ⚡strips, depth-2 rows and their details, but
+# a dispatch-depth-1 dispatch unit renders arrowless at a shallow 2-cell inset, and a vertical rail
+# hangs UNDER it — through the NOW subtitle, ⚡strips, dispatch-depth-2 rows and their details, but
 # never on the owner row itself. The rail BLINKS in the owner's stage hue while the owner
 # is working (same _BLINK_ON phase as the running token — blink changes brightness, never
-# hue) and sits steady dim otherwise. depth-2 rows keep their ↳ arrows — rail + arrow is
+# hue) and sits steady dim otherwise. dispatch-depth-2 rows keep their ↳ arrows — rail + arrow is
 # what tells a dispatch unit apart from a native sub-agent strip, which carries neither.
 # Wide layout only; narrow/stack cards keep prefixes as-is, and orphan rows keep their
 # flat `··` (a rail with no on-screen parent would imply lineage F-26 forbids guessing).
@@ -1571,7 +1571,7 @@ _RAIL_BOT = "╹"
 _RAIL_SOLO = "❙"
 _RAIL_CHARS = (_RAIL_TOP, _RAIL_MID, _RAIL_BOT, _RAIL_SOLO)
 _RAIL_COL = 4      # two steps in from the card edge (user 2026-08-05 "세로선은 좀 더
-                   # 들여쓰게" → "아주 조금만 더") — the depth-1 seat moved to a 4-cell
+                   # 들여쓰게" → "아주 조금만 더") — the dispatch-depth-1 seat moved to a 4-cell
                    # inset with it, so one cell of air stays between the rail and the
                    # owner's glyph and the capsule still brackets the WHOLE unit, owner
                    # row included
@@ -1592,7 +1592,7 @@ def _depth1_rail_color_index(key, stage, route_seq):
 def _overwrite_rail_cell(segs, col, char, key):
     """Overwrite ONE display cell of a row with the rail mark, splitting whatever seg
     covers it. Fail closed: if the target cell holds real content (not a space or the
-    depth-1 ↳ the rail replaces), return the row untouched."""
+    dispatch-depth-1 ↳ the rail replaces), return the row untouched."""
     out, pos, replaced = [], 0, False
     for text, k in segs:
         width = _dw(text) if text else 0
@@ -1997,9 +1997,9 @@ def _dispatch_row(j, orphan=False, parent_model=None, parent_harness=None, is_la
         # 되면 앞에 뜨던 정보들이 없어지고 - 만 남아서"): the options dial is static identity
         # like model/effort above, so the finished row keeps it dim instead of collapsing to
         # a bare `-`. Only the STAGE SLOT changes to a steady done token — never a blinking
-        # frame. F-64a: depth-2 workers show a bare `✓ done` (elapsed already rides the
-        # right-flushed time column); depth-1 afterglow keeps its counting-up elapsed (F-46)
-        # and depth-1 stale its age (`done <age>`, the v49 "last seen" successor).
+        # frame. F-64a: dispatch-depth-2 workers show a bare `✓ done` (elapsed already rides the
+        # right-flushed time column); dispatch-depth-1 afterglow keeps its counting-up elapsed (F-46)
+        # and dispatch-depth-1 stale its age (`done <age>`, the v49 "last seen" successor).
         segs.append((" " * _WIDE_STAGE_GAP, None))
         opt_segs, optw = _opts_segs(j)
         segs += opt_segs
@@ -4245,7 +4245,7 @@ def _build_lines(sessions, jobs, section, narrow, malformed, layout="wide", memo
                                 orphan=False, is_last=True):
             # Row authority is the attached WorkProjection.  No first-child or
             # first-route selection is allowed in this render-local tree walk.
-            block_start = len(lines)   # F-64c: the depth-1 rail spans everything emitted below
+            block_start = len(lines)   # F-64c: the dispatch-depth-1 rail spans everything emitted below
             stage_override = _projection_stage_for_dispatch(job)
             route_seq = _projection_route_seq(job)
             if job.liveness == "stale":
@@ -4301,7 +4301,7 @@ def _build_lines(sessions, jobs, section, narrow, malformed, layout="wide", memo
                 _emit_dispatch_tree(sub, parent_model=job.model or parent_model,
                                     parent_harness=job.harness or parent_harness,
                                     parent_effort=parent_effort, orphan=False)
-            # F-64c: bracket the WHOLE depth-1 unit — owner row included (user 2026-08-05
+            # F-64c: bracket the WHOLE dispatch-depth-1 unit — owner row included (user 2026-08-05
             # "다시 앞으로 당겨서 depth=1까지 묶어주고") — with the capsule rail in the
             # left margin: ╻ on the owner row, ┃ through the middle, ╹ on the last row.
             # A childless one-row unit has nothing to bind and stays unpainted. Working
