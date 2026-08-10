@@ -42,7 +42,7 @@ projects/
 # Unified memory store → 전용 repo(claude-memory)로 분리 (2026-06-15, DB-SoT 전환).
 # memory.db(로컬 SoT)·dump.jsonl(전용 repo가 추적)·파생물 전부 config repo 에선 무시.
 # root-anchored(/memory/): 코드 디렉토리 tools/memory/ 까지 무차별 매칭하지 않게 (2026-06-16).
-/memory/
+/memory
 
 # NFS temp files
 .nfs*
