@@ -7,7 +7,7 @@ S = importlib.util.spec_from_file_location("topology", P); T = importlib.util.mo
 
 PRESERVED_FULL_FIELD_DIGESTS = {
     ("autopilot-apply", ('default',)): (
-        "181a53d919618cabda3bc90dfcd459c15bbacc037e92dd52a51bcd46c9faf721",
+        "8b5adb03d56bf8b6e68c4ff78f35cde2e0076dcc3db46841658f4cb85645bf8b",
         "ef01f5c116d199aaee0f86d845921face1f7a7a5095ac73d30ad9a40d4b0233f",
     ),
     ("autopilot-code", ('audit', 'debug', 'dev')): (
@@ -23,23 +23,23 @@ PRESERVED_FULL_FIELD_DIGESTS = {
         "24338ba81e05c0bc6ccad3ee5af02dfb9a1ec6b49dbd9e2302ae49147296ce13",
     ),
     ("autopilot-lab", ('setup',)): (
-        "98b2752354e90c9bfd91a4c47a2971679d10a2614a6762dca02596b5f82ebb74",
+        "502f66344295ad67f2d3e09499efcc91d47d1caf8ef3b03863f0c3b37549c2a5",
         "9a26c0fea9a635d94f784379941c90a25d35ad7d2bcf1c3f21a1fcd5fad57183",
     ),
     ("autopilot-lab", ('eval',)): (
-        "87cb0301ac17bab3f9171feea8711120537277fe892d92f9b35a58988444cfc1",
+        "061cebe33404e79acccdaaa5fcf1bd1b66038e8d5e9f2061b32c1a43e6792db1",
         "47160a6d9acf73cf29ff137dcb90c1af3036148530af2a1628162692078f1e24",
     ),
     ("autopilot-refine", ('default',)): (
-        "5682843aa8bcc514c8598e6af477809fbb84cca0b4232cb5c11e099bd0524d42",
+        "74d2f582f1395d07caf42fb3c4f849f2cca00e9f81f19e7b051a15fc83ca829f",
         "d39b4446e7c7fca7def4629560d9ee10a342b536fa644ffee8023c5f06326203",
     ),
     ("autopilot-research", ('academic', 'market', 'technology')): (
-        "e7af8b5568a15d2341803674488224a8815a69b6d0a3bfd418987ea2cccc4c16",
+        "31a34e00fc4a58cd8e2f2b7f2daf1dd380ec41d681aa9ad2660367ced6f86571",
         "1c314d9a1c578256757109a35b0f08548d22391b3f079df0a790fe3534bfc057",
     ),
     ("autopilot-ship", ('default',)): (
-        "ee52421fef32145fba8d87e60b89c9d6fec72c5786207ac8ab0bdc47e56ad206",
+        "ea42832e8e0ebb85f2f07487921b4ff7502ed8ce5da0d8f72c7d062db8701593",
         "57f7c9ab1e362f246f0056927122c19163479334380cf84ab9a8785e620dcbf4",
     ),
     ("autopilot-spec", ('api', 'app', 'cli', 'library', 'research', 'update')): (
@@ -100,11 +100,11 @@ class TestTopology(unittest.TestCase):
         r=copy.deepcopy(self.r); r["recipes"][0]["standard_plus"]["nodes"][1]["write_scope"]=["source/**"]; self.assertRaises(T.TopologyError,T.validate_registry,r)
         r=copy.deepcopy(self.r); d=next(x for x in r["recipes"] if x["capability"]=="autopilot-design"); d["standard_plus"]["nodes"][0]["write_scope"]=["design/**"]; self.assertRaises(T.TopologyError,T.validate_registry,r)
     def test_concurrent_overlap(self):
-        r=copy.deepcopy(self.r); d=next(x for x in r["recipes"] if x["capability"]=="autopilot-design"); critic=next(n for n in d["standard_plus"]["nodes"] if n["id"]=="critic-review"); critic["depends_on"]=[]; critic["write_scope"]=["designs/<cycle>/04_review/verify/**"]; self.assertRaisesRegex(T.TopologyError,"overlap",T.validate_registry,r)
+        r=copy.deepcopy(self.r); d=next(x for x in r["recipes"] if x["capability"]=="autopilot-design"); critic=next(n for n in d["standard_plus"]["nodes"] if n["id"]=="critic-review"); critic["depends_on"]=[]; critic["outputs"]=["designs/<cycle>/04_review/verify/critic-verdict.json"]; critic["write_scope"]=["designs/<cycle>/04_review/verify/**"]; self.assertRaisesRegex(T.TopologyError,"overlap",T.validate_registry,r)
     def test_spec_scope_requires_owner_or_precondition(self):
         r=copy.deepcopy(self.r); code=next(x for x in r["recipes"] if x["capability"]=="autopilot-code")
         execute=next(n for n in code["standard_plus"]["nodes"] if n["id"]=="execute")
-        execute["write_scope"]=["spec/**"]
+        execute["write_scope"]=["spec/**","checklist.md","dev_logs/**"]
         self.assertRaisesRegex(T.TopologyError,"spec write scope requires",T.validate_registry,r)
         execute["guard_preconditions"]=["artifact-order-prechecked"]
         T.validate_registry(r)
@@ -245,7 +245,7 @@ class TestTopology(unittest.TestCase):
         self.assertRaisesRegex(T.TopologyError,"review, map, or pipeline worker",
             T.validate_registry,r)
         # anchor output shape: concrete files for stage anchors, '<dir>/**' only for map anchors
-        r=broken(lambda g: next(n for n in g["nodes"] if n["id"]=="plan").update(outputs=["plan/**"]))
+        r=broken(lambda g: next(n for n in g["nodes"] if n["id"]=="plan").update(outputs=["plan/**"],write_scope=["plan/**"]))
         self.assertRaisesRegex(T.TopologyError,"concrete",T.validate_registry,r)
         r=broken(lambda g: next(n for n in g["nodes"] if n["id"]=="research").update(
             outputs=["spec/_internal/research/spec-*/**"]),capability="autopilot-spec")

@@ -465,11 +465,14 @@ every other harness instead of a blanket `opencode-standard-depth2-unsupported`
 refusal. The adapter's `nested-headless` diagnostic establishes dispatch-depth-2
 parity together with this binding.
 The parent-bound foreground branch (`wait_foreground(..., parent_is_live=…)`) is
-byte-identical to the Claude wrapper's, but the 2026-08-07 acceptance smoke ran on a
-host-visible PID namespace, where every harness selects `detached`, so that branch was
-never entered. Its parent-death detection is implemented and unexercised on this host —
-a verification gap OpenCode shares with Claude, not an OpenCode-only one. Re-measure it
-on a genuinely namespaced runtime before calling it runtime-verified.
+byte-identical to the Claude wrapper's. A 2026-08-10 acceptance cell now exercises
+all three wrappers with the callback enabled and also runs the OpenCode wrapper in
+a real bubblewrap PID namespace. The remounted `/proc` selects
+`foreground-scoped` through the conservative `pid1-class` signal; an exact-parent
+callback failure terminates and reaps the child group and records
+`dead-parent-terminated`. Ordinary host-visible runs still select `detached` when
+the host-like evidence permits it; this verification does not force foreground
+lifecycles outside a transient namespace.
 `nested-dispatch-eligibility.py --prospective-standard-owner` is a Codex-only probe
 (`failure_class=prospective-owner-codex-only` under any other parent harness, including
 OpenCode); it does not check OpenCode owner eligibility.

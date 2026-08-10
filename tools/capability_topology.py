@@ -78,7 +78,43 @@ def _parallel_path(path, suffix):
     name, dot, ext = tail.rpartition(".")
     if not dot:
         return path + f"-{suffix}"
+    if head:
+        parent, parent_sep, directory = head.rpartition("/")
+        return f"{parent}{parent_sep}{directory}-{suffix}/{tail}"
     return f"{head}{sep}{name}.{suffix}{dot}{ext}"
+
+
+SEMANTIC_OUTPUTS = frozenset({
+    "applied-artifact", "apply-log", "components", "config",
+    "diff-preview", "evidence-map", "experiment-artifact",
+    "experiment-scaffold", "final-artifact", "render",
+    "research-artifact", "revised-artifact", "ship-checklist",
+    "snapshot", "source-diff", "strategy", "summary-stats",
+    "tokens", "version-snapshot",
+})
+
+
+def _is_semantic_output(output):
+    return output in SEMANTIC_OUTPUTS or any(
+        re.fullmatch(re.escape(token) + r"-[a-z0-9]+(?:-[a-z0-9]+)*", output)
+        for token in SEMANTIC_OUTPUTS
+    )
+
+
+def _output_within_scope(output, scope):
+    """Return whether one path output is writable under one declared scope."""
+    output_root = _scope_root(output)
+    scope_root = _scope_root(scope)
+    if scope.endswith("/**"):
+        return output_root == scope_root or output_root.startswith(scope_root + "/")
+    return output == scope
+
+
+def _uncovered_path_outputs(outputs, scopes):
+    return [
+        output for output in outputs if not _is_semantic_output(output)
+        if not any(_output_within_scope(output, scope) for scope in scopes)
+    ]
 
 
 _ANCHOR_WILDCARD_RE = re.compile(r"^<[a-z]+>$")
@@ -781,24 +817,12 @@ def _validate_recipe(recipe, registry, standard_plus_owner_profile):
         # output (containing "/") must classify into the same bucket domain.
         # Bare semantic tokens are an explicit closed vocabulary. A filename such
         # as plan.md is still a path even though it contains no slash.
-        semantic_outputs = {
-            "applied-artifact", "apply-log", "components", "config",
-            "diff-preview", "evidence-map", "experiment-artifact",
-            "experiment-scaffold", "final-artifact", "render",
-            "research-artifact", "revised-artifact", "ship-checklist",
-            "snapshot", "source-diff", "strategy", "summary-stats",
-            "tokens", "version-snapshot",
-        }
         path_outputs = [
-            out for out in node.get("outputs", []) if out not in semantic_outputs
+            out for out in node.get("outputs", []) if not _is_semantic_output(out)
         ]
         if path_outputs:
             _validate_bucket_anchor(recipe, registry, path_outputs, node["kind"], node["id"])
-            uncovered = [
-                out for out in path_outputs
-                if "/" not in out
-                if not any(_overlap(out, scope) for scope in scopes)
-            ]
+            uncovered = _uncovered_path_outputs(path_outputs, scopes)
             if uncovered:
                 raise TopologyError(
                     f"{recipe['capability']}:{node['id']}: outputs outside write_scope "

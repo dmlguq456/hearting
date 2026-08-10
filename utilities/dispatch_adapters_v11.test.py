@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import importlib.util, io, os, subprocess, sys, tempfile, threading, unittest
+import importlib.util, io, os, shutil, subprocess, sys, tempfile, threading, unittest
 from contextlib import redirect_stdout
 from pathlib import Path
 from unittest import mock
@@ -41,6 +41,48 @@ class AdapterV11Test(unittest.TestCase):
  def command(self,harness,action,repo,jobs,logs,status="supported"):
   wrapper,model=ADAPTERS[harness]
   return wrapper+[f"--{action}","--worktree",str(repo),"--slug",f"{harness}-v11","--capability","autopilot-code","--capability-mode","dev","--worker-mode","dev/backend","--intensity","standard","--dispatch-depth","2","--parent","owner","--worker-role","code-plan","--owner","autopilot-code","--jobs",str(jobs),"--log-dir",str(logs),"--attempt-id",f"att-{harness}-fixture-0001","--parent-harness",harness,"--parent-transport","headless","--parent-sandbox","fixture","--launch-authority","conductor","--nested-eligibility",status,"--eligibility-source",f"{harness}-fixture","--fallback-ordinal","1"]+model
+ def run_parent_callback_cell(self,harness,force_foreground):
+  with tempfile.TemporaryDirectory() as td:
+   root=Path(td); repo,art=self.fixture(root); jobs=root/"jobs.log"; logs=root/"logs"
+   fakebin=root/"bin"; fakebin.mkdir(); fake=fakebin/harness
+   fake.write_text("#!/bin/sh\nexec sleep 60\n",encoding="utf-8"); fake.chmod(0o755)
+   self.seed_parent(jobs,repo,harness=harness)
+   wrapper=self.load_wrapper(harness)
+   command=self.command(harness,"start",repo,jobs,logs)+["--foreground-timeout","5"]
+   argv=["dispatch-headless.py",*command[2:]]
+   env={**os.environ,"PATH":str(fakebin)+os.pathsep+os.environ.get("PATH",""),
+        "AGENT_HOME":str(ROOT),"AGENT_ARTIFACT_ROOT":str(art),
+        "AGENT_DISPATCH_JOBS":str(jobs),"AGENT_DISPATCH_CHILD":"1",
+        "AGENT_DISPATCH_ATTEMPT_ID":"att-parent-fixture",
+        "OPENCODE_CONFIG_CONTENT":"{}","XDG_STATE_HOME":str(root/"state")}
+   env.pop("AGENT_DISPATCH_ALLOW_NAMESPACED_SPAWN",None)
+   calls=[]
+   def parent_is_live(*_args):
+    calls.append(True); return False
+   patches=[mock.patch.dict(os.environ,env,clear=True),
+            mock.patch.object(wrapper,"parent_attempt_binding_is_live",parent_is_live)]
+   if force_foreground:
+    resolution=wrapper.reconcile_launch_lifecycle(
+     wrapper.DETACHED,{},evidence={
+      "lifecycle_selector_source":"nspid-vector",
+      "lifecycle_nspid_width":"2",
+      "lifecycle_pid1_class":"non-system-init",
+     })
+    patches.append(mock.patch.object(wrapper,"reconcile_launch_lifecycle",return_value=resolution))
+   if hasattr(wrapper,"check_runtime_projection"):
+    patches.append(mock.patch.object(wrapper,"check_runtime_projection",return_value=0))
+   if hasattr(wrapper,"ensure_runtime_home_projection"):
+    patches.append(mock.patch.object(wrapper,"ensure_runtime_home_projection",return_value=None))
+   if hasattr(wrapper,"launch_summary_owner"):
+    patches.append(mock.patch.object(
+     wrapper,"launch_summary_owner",return_value={"summary_owner":"test-fixture"}))
+   stream=io.StringIO()
+   for patch in patches: patch.start()
+   try:
+    with redirect_stdout(stream): code=wrapper.main(argv)
+   finally:
+    for patch in reversed(patches): patch.stop()
+   return code,stream.getvalue(),jobs.read_text(encoding="utf-8"),len(calls)
  def test_sibling_registry_rows_and_nested_refusal(self):
   for harness in ("codex", "claude", "opencode"):
    with self.subTest(harness=harness), tempfile.TemporaryDirectory() as td:
@@ -288,6 +330,45 @@ class AdapterV11Test(unittest.TestCase):
     self.assertIn("worker_exit=0",output)
     self.assertNotIn("dead-nested-sandbox-lifetime",row)
     self.assertIn("launch_outcome=governed-process-reaped",row)
+ def test_all_wrappers_exercise_parent_binding_callback_in_foreground_scope(self):
+  for harness in ADAPTERS:
+   with self.subTest(harness=harness):
+    code,output,row,calls=self.run_parent_callback_cell(harness,True)
+    self.assertEqual(code,0,output)
+    self.assertGreaterEqual(calls,1,output)
+    self.assertIn("launch_lifecycle=foreground-scoped",output)
+    self.assertIn("worker_failure=parent-terminated",output)
+    self.assertIn("note=dead-parent-terminated",row)
+    self.assertIn("launch_outcome=governed-process-reaped",row)
+ def test_opencode_parent_callback_runs_in_real_bubblewrap_pid_namespace(self):
+  if os.environ.get("HEARTING_BWRAP_PID_NS") == "1":
+   code,output,row,calls=self.run_parent_callback_cell("opencode",False)
+   self.assertEqual(code,0,output)
+   self.assertGreaterEqual(calls,1,output)
+   self.assertIn("lifecycle_selector_source=pid1-class",row)
+   self.assertIn("lifecycle_nspid_width=1",row)
+   self.assertIn("pid_scope=namespace-local",row)
+   self.assertIn("launch_lifecycle=foreground-scoped",output)
+   self.assertIn("worker_failure=parent-terminated",output)
+   self.assertIn("note=dead-parent-terminated",row)
+   self.assertIn("launch_outcome=governed-process-reaped",row)
+   return
+  bwrap=shutil.which("bwrap")
+  if not bwrap:
+   self.skipTest("bubblewrap is unavailable")
+  with tempfile.TemporaryDirectory() as dev_dir:
+   Path(dev_dir,"null").write_bytes(b"")
+   base=[bwrap,"--die-with-parent","--unshare-pid","--ro-bind","/","/",
+         "--proc","/proc","--bind",dev_dir,"/dev","--bind","/tmp","/tmp"]
+   probe=subprocess.run([*base,"true"],text=True,capture_output=True)
+   if probe.returncode:
+    self.skipTest("bubblewrap PID namespaces are unavailable: "+probe.stderr.strip())
+   env={**os.environ,"HEARTING_BWRAP_PID_NS":"1"}
+   result=subprocess.run(
+    [*base,sys.executable,str(Path(__file__).resolve()),
+     "AdapterV11Test.test_opencode_parent_callback_runs_in_real_bubblewrap_pid_namespace"],
+    cwd=ROOT,text=True,capture_output=True,env=env)
+  self.assertEqual(result.returncode,0,result.stdout+result.stderr)
  def test_exact_attempt_row_closure_is_isolated_for_both_wrappers(self):
   for harness in ("codex","claude"):
    with self.subTest(harness=harness), tempfile.TemporaryDirectory() as td:

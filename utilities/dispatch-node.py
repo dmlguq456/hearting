@@ -173,6 +173,22 @@ def has_model_selection(adapter_args):
     )
 
 
+def child_env(environ=None):
+    """Return the node-wrapper environment without ancestor-only bindings.
+
+    The wrapper receives this node's immutable route through explicit argv.
+    An inherited depth-1 owner binding describes a different route identity
+    and makes the wrapper reject the otherwise valid node tuple.
+    """
+    environ = os.environ if environ is None else environ
+    return {
+        key: value
+        for key, value in environ.items()
+        if not key.startswith("AGENT_OWNER_ROUTE_")
+        and not key.startswith("AGENT_DISPATCH_BROKER_")
+    }
+
+
 def collect_explicit_evidence(tokens, flags):
     """Scan trailing adapter args for `--flag value` and `--flag=value` forms.
 
@@ -303,5 +319,6 @@ def main():
  argv += ["--model-role",node.get("role","fast implementer")]
  if node.get("model_profile"):
   argv += ["--model-profile",node["model_profile"]]
- argv += strip_leading_separator(a.adapter_args); raise SystemExit(subprocess.run(argv).returncode)
+ argv += strip_leading_separator(a.adapter_args)
+ raise SystemExit(subprocess.run(argv, env=child_env()).returncode)
 if __name__=="__main__": main()

@@ -235,13 +235,14 @@ class BindDispatchEvidenceTest(unittest.TestCase):
 
 
 class MainMaterializationTest(unittest.TestCase):
-    def _run_main(self, argv, route):
+    def _run_main(self, argv, route, environ=None):
         captured = {}
 
         def fake_run(cmd, **kwargs):
             if "verify" in cmd:
                 return mock.Mock(returncode=0)
             captured["argv"] = cmd
+            captured["env"] = kwargs.get("env")
             return mock.Mock(returncode=0)
 
         with tempfile.TemporaryDirectory() as td:
@@ -249,13 +250,37 @@ class MainMaterializationTest(unittest.TestCase):
             route_path.write_text(json.dumps(route))
             full_argv = ["dispatch-node.py", "--route", str(route_path)] + argv
             with mock.patch.object(sys, "argv", full_argv), \
-                 mock.patch.dict(N.os.environ, {}, clear=True), \
+                 mock.patch.dict(N.os.environ, environ or {}, clear=True), \
                  mock.patch.object(N.subprocess, "run", side_effect=fake_run):
                 try:
                     N.main()
                 except SystemExit:
                     pass
+        self.last_wrapper_env = captured.get("env")
         return captured.get("argv")
+
+    def test_wrapper_launch_scrubs_owner_binding_and_keeps_node_binding(self):
+        node = make_node(depth=1, dispatch_fallback=[])
+        route = make_route(node, tuples=[])
+        argv = self._run_main(
+            ["--node", "execute", "--adapter", "claude", "--slug", "env"],
+            route,
+            environ={
+                "AGENT_OWNER_ROUTE_FILE": "/tmp/owner.json",
+                "AGENT_OWNER_ROUTE_ID": "rt-owner",
+                "AGENT_OWNER_ROUTE_HASH": "sha256:owner",
+                "AGENT_DISPATCH_BROKER_TOKEN": "retired",
+                "AGENT_ROUTE_FILE": "/tmp/node.json",
+                "AGENT_ROUTE_ID": "rt-node",
+            },
+        )
+        self.assertIsNotNone(argv)
+        self.assertNotIn("AGENT_OWNER_ROUTE_FILE", self.last_wrapper_env)
+        self.assertNotIn("AGENT_OWNER_ROUTE_ID", self.last_wrapper_env)
+        self.assertNotIn("AGENT_OWNER_ROUTE_HASH", self.last_wrapper_env)
+        self.assertNotIn("AGENT_DISPATCH_BROKER_TOKEN", self.last_wrapper_env)
+        self.assertEqual(self.last_wrapper_env["AGENT_ROUTE_FILE"], "/tmp/node.json")
+        self.assertEqual(self.last_wrapper_env["AGENT_ROUTE_ID"], "rt-node")
 
     def test_depth1_materialization_emits_no_evidence_and_preserves_safe_adapter_args(self):
         node = make_node(depth=1, dispatch_fallback=[])

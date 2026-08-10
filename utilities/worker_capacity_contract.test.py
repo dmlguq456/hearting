@@ -11,6 +11,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest import mock
 
@@ -36,6 +37,7 @@ ROUTE = load_script("worker_capacity_route", "capability-route.py")
 REGISTRY = load_script("worker_capacity_registry", "dispatch-registry.py")
 WORKER_ROUTE = load_script("worker_capacity_worker_route", "worker-route-guard.py")
 CHAIN = load_script("worker_capacity_chain", "stage-session-chain.py")
+STAGE_RUNTIME = load_script("worker_capacity_stage_runtime", "stage_session_runtime.py")
 
 
 class WorkerCapacityContractTest(unittest.TestCase):
@@ -106,6 +108,44 @@ class WorkerCapacityContractTest(unittest.TestCase):
         with self.assertRaises(DispatchContractError) as caught:
             validate_attempt_metadata({**axes, "stage_authority": 1})
         self.assertEqual(caught.exception.reason, "subsession-stage-authority-forbidden")
+
+    def test_b_runtime_binds_phase_brief_digest_into_validated_axes(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            worktree = root / "worktree"
+            worktree.mkdir()
+            brief = root / "brief.md"
+            brief.write_text("bounded phase contract\n", encoding="utf-8")
+            fixed = worktree / "fixed.py"
+            args = SimpleNamespace(
+                subsession_id="ss-exec1",
+                subsession_index=1,
+                subsession_count=1,
+                subsession_mode="serial",
+                subsession_purpose="planned",
+                session_chain_id="ssc-execute",
+                phase_brief=str(brief),
+                stage_authority=0,
+                fixed_file=[str(fixed)],
+                narrow_verify="python3 -m unittest focused",
+                expected_round_trips=2,
+                state_dir=None,
+                dispatch_depth=2,
+                route_id="rt-test",
+                route_node="execute",
+                attempt_id=None,
+                worktree=str(worktree),
+                execution_surface="registered-headless",
+                registered_worker=1,
+                fallback_hop="same-harness-headless",
+                replica_batch_expectation=None,
+                capability_owner="owner",
+            )
+            STAGE_RUNTIME.bind(args, artifact_root=root, action="dry-run")
+            self.assertEqual(
+                args.phase_brief_sha256,
+                hashlib.sha256(brief.read_bytes()).hexdigest(),
+            )
 
     def _fixture(
         self, td: str, *, mode: str = "serial", overlap: bool = False,

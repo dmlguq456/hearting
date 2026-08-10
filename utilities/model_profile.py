@@ -9,7 +9,8 @@ from pathlib import Path
 
 PORTABLE_PROFILES = ("deep", "balanced-deep", "light", "mini")
 SUBSTANTIVE_WORKER_TYPES = frozenset({"owner", "stage", "review"})
-SAFE_VALUE = re.compile(r"^[A-Za-z0-9._:/ -]+$")
+SAFE_VALUE = re.compile(r"^[A-Za-z0-9._:/ |,-]+$")
+SAFE_KEY = re.compile(r"^CFG_[A-Z0-9_]+$")
 
 
 class ModelProfileError(ValueError):
@@ -22,17 +23,31 @@ def load_config(path: str | Path) -> dict[str, str]:
         lines = Path(path).read_text(encoding="utf-8").splitlines()
     except OSError as exc:
         raise ModelProfileError(f"model profile config unreadable: {exc}") from exc
-    for raw in lines:
+    for lineno, raw in enumerate(lines, 1):
         line = raw.strip()
-        if not line or line.startswith("#") or "=" not in line:
+        if not line or line.startswith("#"):
+            continue
+        if "=" not in line:
+            if line.startswith("CFG_"):
+                raise ModelProfileError(
+                    f"model profile config line {lineno} is a malformed CFG_ declaration"
+                )
             continue
         key, value = line.split("=", 1)
         value = value.split("#", 1)[0].strip()
         if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
             value = value[1:-1]
         key = key.strip()
-        if not key.startswith("CFG_") or not value or not SAFE_VALUE.fullmatch(value):
+        if not key.startswith("CFG_"):
             continue
+        if not SAFE_KEY.fullmatch(key):
+            raise ModelProfileError(
+                f"model profile config line {lineno} has an invalid CFG_ key: {key!r}"
+            )
+        if not value or not SAFE_VALUE.fullmatch(value):
+            raise ModelProfileError(
+                f"model profile config line {lineno} has an invalid value for {key}"
+            )
         values[key] = value
     return values
 

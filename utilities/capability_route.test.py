@@ -267,7 +267,8 @@ class TestRoute(unittest.TestCase):
   self.assertEqual(alternative["parallel_independence_axes"],["cross-harness","model-profile","perspective"])
   self.assertEqual(alternative["dispatch_depth"],2)
   self.assertEqual(alternative["unit"],base["unit"])
-  self.assertEqual(alternative["outputs"],["_internal/dev_reviews/phase_review.alternative.md"])
+  self.assertEqual(alternative["outputs"],["_internal/dev_reviews-alternative/phase_review.md"])
+  self.assertEqual(alternative["write_scope"],["_internal/dev_reviews-alternative/**"])
   self.assertNotEqual(alternative["outputs"],base["outputs"])
   self.assertEqual((base["model_profile"],alternative["model_profile"]),("balanced-deep","light"))
   self.assertNotEqual(base["perspective"],alternative["perspective"])
@@ -287,19 +288,37 @@ class TestRoute(unittest.TestCase):
   self.assertEqual(frame["parallel_group"],"frame")
   self.assertEqual(frame_replica["parallel_group"],"frame")
   self.assertEqual(frame_replica["parallel_independence_axes"],["cross-harness","model-profile","perspective"])
-  self.assertEqual(frame_replica["outputs"],["shards/frame/direction-brief.alternative.md"])
+  self.assertEqual(frame_replica["outputs"],["shards/frame-alternative/direction-brief.md"])
+  self.assertEqual(frame_replica["write_scope"],["shards/frame-alternative/**"])
   plan=next(n for n in standard["nodes"] if n["id"]=="plan")
   self.assertIn("frame",plan["depends_on"]); self.assertIn("frame-alternative",plan["depends_on"])
   self.assertIn("shards/frame/direction-brief.md",plan["inputs"])
-  self.assertIn("shards/frame/direction-brief.alternative.md",plan["inputs"])
+  self.assertIn("shards/frame-alternative/direction-brief.md",plan["inputs"])
   strong=self.compile_v3(evidence)
   plan_replica=next(n for n in strong["nodes"] if n["id"]=="plan-alternative")
   self.assertEqual(plan_replica["outputs"],["plan.alternative.md","checklist.alternative.md"])
-  self.assertIn("shards/frame/direction-brief.alternative.md",plan_replica["inputs"])
+  self.assertIn("shards/frame-alternative/direction-brief.md",plan_replica["inputs"])
   check=next(n for n in strong["nodes"] if n["id"]=="plan-check")
   self.assertIn("plan",check["depends_on"]); self.assertIn("plan-alternative",check["depends_on"])
   self.assertIn("plan.alternative.md",check["inputs"]); self.assertIn("checklist.alternative.md",check["inputs"])
+  for node in strong["nodes"]:
+   self.assertEqual(
+    R.TOPO._uncovered_path_outputs(
+     node.get("outputs",[]),node.get("write_scope",[])),[],node["id"])
   R.verify_route(strong,R.ROOT)
+ def test_compile_and_verify_reject_outputs_outside_write_scope(self):
+  recipe=self._composed_recipe()
+  frame=next(node for node in recipe["standard_plus"]["nodes"] if node["id"]=="frame")
+  frame["outputs"]=["shards/elsewhere/direction-brief.md"]
+  with self.assertRaisesRegex(ValueError,"outputs outside write_scope"):
+   self._composed(recipe)
+  route=self.compile_v3(self.dispatch(self.nested()))
+  replica=next(node for node in route["nodes"] if node["id"]=="frame-alternative")
+  replica["outputs"]=["shards/frame/escaped.md"]
+  route["route_hash"]=R.route_hash(route)
+  route["route_id"]="rt-"+route["route_hash"].split(":",1)[1][:16]
+  with self.assertRaisesRegex(ValueError,"outputs outside write_scope"):
+   R.verify_route(route,R.ROOT)
  def test_map_worker_shard_replica_gets_disjoint_tree(self):
   # spec research shards replicate as a sibling '-replica' tree; the review
   # arbiter reads both trees.
@@ -563,7 +582,7 @@ class TestRoute(unittest.TestCase):
  def test_composed_spec_touch_gate(self):
   recipe=self._composed_recipe()
   execute=next(n for n in recipe["standard_plus"]["nodes"] if n["id"]=="execute")
-  execute["write_scope"]=["spec/**"]
+  execute["write_scope"]=["spec/**","checklist.md","dev_logs/**"]
   execute["guard_preconditions"]=["artifact-order-prechecked"]
   route=self._composed(recipe)
   self.assertTrue(route["spec_touch"])

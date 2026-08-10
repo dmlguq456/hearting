@@ -48,6 +48,40 @@ def args(adapter: str, profile: str, **overrides):
 
 
 class ModelProfileTest(unittest.TestCase):
+    def test_malformed_cfg_declarations_fail_loudly(self):
+        cases = {
+            "missing equals": "CFG_MODEL_PROFILE_GRANULARITY\n",
+            "invalid key": "CFG_model_profile=full\n",
+            "empty value": "CFG_MODEL_PROFILE_GRANULARITY=\n",
+            "unsafe value": "CFG_MODEL_PROFILE_GRANULARITY=full+collapsed\n",
+        }
+        for label, config_text in cases.items():
+            with tempfile.NamedTemporaryFile(
+                "w", suffix=".conf", delete=False
+            ) as handle:
+                handle.write(config_text)
+                path = handle.name
+            try:
+                with self.subTest(label=label), self.assertRaises(
+                    PROFILE.ModelProfileError
+                ) as caught:
+                    PROFILE.load_config(path)
+                self.assertIn("line 1", str(caught.exception))
+            finally:
+                Path(path).unlink()
+
+    def test_unrelated_non_cfg_lines_remain_ignored(self):
+        with tempfile.NamedTemporaryFile("w", suffix=".conf", delete=False) as handle:
+            handle.write("not a declaration\nOTHER=value\nCFG_MODEL_PROFILE_GRANULARITY=full\n")
+            path = handle.name
+        try:
+            self.assertEqual(
+                PROFILE.load_config(path),
+                {"CFG_MODEL_PROFILE_GRANULARITY": "full"},
+            )
+        finally:
+            Path(path).unlink()
+
     def test_portable_profiles_resolve_to_declared_adapter_budgets(self):
         expected = {
             # mini shares the light model at a lower effort — four profiles, four

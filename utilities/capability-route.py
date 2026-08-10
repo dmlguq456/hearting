@@ -371,14 +371,20 @@ def _verify_fallback_chain(node, contract_version=None):
     return chain
 
 def _parallel_path(path, suffix):
-    """Return a deterministic, disjoint artifact/scope path for one extra leg."""
-    if path.endswith("/**") and "*" not in path[:-3]:
-        return path[:-3] + f"-{suffix}/**"
-    head, sep, tail = path.rpartition("/")
-    name, dot, ext = tail.rpartition(".")
-    if not dot:
-        return path + f"-{suffix}"
-    return f"{head}{sep}{name}.{suffix}{dot}{ext}"
+    """Use the topology validator's single parallel artifact-path rule."""
+    return TOPO._parallel_path(path, suffix)
+
+
+def _validate_output_scopes(nodes):
+    """Reject realized nodes whose path outputs escape their write authority."""
+    for node in nodes:
+        uncovered = TOPO._uncovered_path_outputs(
+            node.get("outputs", []), node.get("write_scope", [])
+        )
+        if uncovered:
+            raise ValueError(
+                f"node {node.get('id')} outputs outside write_scope {sorted(uncovered)}"
+            )
 
 def _expand_parallel_groups(nodes, parallel_groups, effective_intensity):
     """Expand registry-v6 groups into ordered 2..4-way sibling nodes.
@@ -653,6 +659,7 @@ def _compile_from_recipe(registry, recipe, capability, capability_mode, requeste
         for node in nodes:
             node.pop("fallback_hops", None)
         selection_basis=[{"axis":"promotion","signal":s,"source":"caller"} for s in signals]
+    _validate_output_scopes(nodes)
     if effective != "direct" and inline_reason is not None:
         raise ValueError("inline_reason only applies to direct")
     if effective=="direct" and inline_reason not in registry["inline_reasons"]:
@@ -738,6 +745,7 @@ def verify_route(route, expected_cwd=None, *, allow_stale_registry=False):
     if route.get("route_hash") != route_hash(route): raise ValueError("stale or modified route hash")
     if route.get("route_id") != "rt-"+route["route_hash"].split(":",1)[1][:16]: raise ValueError("invalid route id")
     if expected_cwd and Path(expected_cwd).resolve()!=Path(route["cwd"]): raise ValueError("route cwd mismatch")
+    _validate_output_scopes(route.get("nodes", []))
     registry=TOPO.load_registry()
     registry_current=route["registry_digest"]==TOPO.registry_digest(registry)
     units_current=(route.get("unit_catalog_digest") is None
