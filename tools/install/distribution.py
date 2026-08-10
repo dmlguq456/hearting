@@ -250,16 +250,29 @@ def _allow_url(url: str) -> None:
     raise DistributionError(f"release URL must use HTTPS: {url}")
 
 
+def _request_headers(url: str) -> dict[str, str]:
+    """Build release headers without leaking GitHub credentials to overrides."""
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "User-Agent": "hearting-installer/1",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+    if urllib.parse.urlparse(url).hostname != "api.github.com":
+        return headers
+    for name in ("GH_TOKEN", "GITHUB_TOKEN"):
+        token = os.environ.get(name)
+        if token is None or token == "":
+            continue
+        if token != token.strip() or any(ord(char) < 32 for char in token):
+            raise DistributionError(f"{name} contains invalid whitespace or control characters")
+        headers["Authorization"] = "Bearer " + token
+        break
+    return headers
+
+
 def _read_url(url: str, limit: int) -> bytes:
     _allow_url(url)
-    request = urllib.request.Request(
-        url,
-        headers={
-            "Accept": "application/vnd.github+json",
-            "User-Agent": "hearting-installer/1",
-            "X-GitHub-Api-Version": "2022-11-28",
-        },
-    )
+    request = urllib.request.Request(url, headers=_request_headers(url))
     try:
         with urllib.request.urlopen(request, timeout=30) as response:
             _allow_url(response.geturl())
