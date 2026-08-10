@@ -29,8 +29,8 @@ real_self=$(readlink -f "$0" 2>/dev/null) || real_self=$0
 self_dir=$(CDPATH= cd -- "$(dirname -- "$real_self")" && pwd)
 repo_root=$(CDPATH= cd -- "$self_dir/.." && pwd)
 
-# SD-66: profiles/dispatch-defaults.yaml is the user-declared source for
-# stage-affinity (SD-22 cascade step 3). Validate unconditionally so a
+# SD-66: dispatch-defaults.py prefers the user-local policy and falls back to
+# profiles/dispatch-defaults.yaml for stage affinity. Validate unconditionally so a
 # malformed config fails loud even when an explicit --adapter/--family
 # already decides this call; resolution honors DISPATCH_DEFAULTS_CONFIG for
 # fixtures via utilities/dispatch-defaults.py.
@@ -86,13 +86,15 @@ choose=$effective_adapter
 [ -n "$choose" ] || case "$family" in gpt) choose=codex;; claude) choose=claude;; esac
 # SD-22 cascade: explicit adapter/family already resolved above; next comes
 # the validated config affinity, then the existing stage-heuristic/bias
-# fallback. Schema-v2 `diverse` ranks all normal checked harnesses from the
-# rolling exact-attempt counters sealed by the defaults policy.
+# fallback. This legacy role-only surface has no execution profile with which
+# to cross a quality band; under capacity-aware policy it therefore uses only
+# the rolling exact-attempt tie-breaker. Profile-aware dispatch-owner/stage
+# selectors own headroom and relief promotion.
 if [ -z "$choose" ]; then
   case "$config_affinity" in
     claude|codex) choose=$config_affinity;;
     diverse)
-      if [ "$allocation_strategy" = least-recent-attempts ]; then
+      if [ "$allocation_strategy" = least-recent-attempts ] || [ "$allocation_strategy" = capacity-aware ]; then
         pool=
         old_ifs=$IFS; IFS=,
         for candidate in $allocation_order; do
@@ -127,7 +129,7 @@ case "$choose" in claude|codex|opencode) ;; *) echo 'dispatch-route: no known ca
 rejected=; fallback=
 if ! eligible "$choose"; then
   s=$(state "$choose"); rejected="$choose:usage-$s"
-  if [ "$allocation_strategy" = least-recent-attempts ]; then
+  if [ "$allocation_strategy" = least-recent-attempts ] || [ "$allocation_strategy" = capacity-aware ]; then
     fallback_pool=
     old_ifs=$IFS; IFS=,
     for candidate in $allocation_order; do
@@ -174,6 +176,6 @@ echo "status=$mapped_status"; echo "adapter=$choose"; echo "family=$mapped_famil
 [ -z "$fallback" ] || echo "fallback.1=$fallback"
 echo "trace.1=explicit=${adapter:-none};family=${family:-none};eligibility=usage-$(state "$choose")"
 echo "trace.2=affinity=$affinity;maker_family=${maker_family:-unknown};required=${required:-none};bias=${bias:-unknown}"
-if [ "$allocation_strategy" = least-recent-attempts ]; then
+if [ "$allocation_strategy" = least-recent-attempts ] || [ "$allocation_strategy" = capacity-aware ]; then
   allocation_rank "$allocation_order" | sed 's/^rank=/allocation_rank=/'
 fi

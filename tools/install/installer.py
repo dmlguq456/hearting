@@ -30,6 +30,7 @@ import runtime_activation
 import extensions
 import distribution
 import codex_launcher
+import routing_config
 from drivers import get_driver, RUNTIMES
 
 # Exit codes map one-to-one to the PRD CLI table.
@@ -225,6 +226,18 @@ def cmd_install(args):
     any_blocked = any(result["blocked"] for result in results)
 
     if not any_blocked:
+        routing = routing_config.ensure(runtimes, dry_run=args.dry_run)
+        lines.append(
+            "routing-config: " + routing["status"] + " " + routing["path"]
+            + " enabled=" + ",".join(routing["enabled"])
+        )
+        checks.append(
+            {
+                "id": "routing-config.user-policy",
+                "ok": True,
+                "detail": routing["status"],
+            }
+        )
         if args.dry_run:
             launcher_results = bootstrap.install_launchers(dry_run=True)
             lines.append("bootstrap: mem-import skipped (dry-run — no dry-run mode for restore_memory)")
@@ -298,6 +311,14 @@ def cmd_verify(args):
         all_checks.extend(rt_checks)
         if any(not c["ok"] for c in rt_checks):
             ok = False
+    routing = routing_config.validate()
+    all_checks.append({
+        "id": "routing-config.user-policy",
+        "ok": routing["ok"],
+        "detail": routing["status"] + ": " + routing["path"],
+    })
+    if not routing["ok"]:
+        ok = False
     lines = [("✓" if c["ok"] else "✗") + f" {c['id']} {c['detail']}" for c in all_checks]
     return {"runtime": runtimes, "channel": "plugin" if args.plugin else "dev", "checks": all_checks,
             "drift": [], "exit": EXIT_OK if ok else EXIT_VERIFY_FAIL, "lines": lines}
@@ -684,6 +705,14 @@ def cmd_runtime(args):
             for report in reports:
                 if report.get("runtime") == "codex":
                     report["managed_launcher"] = launcher_result
+        if args.runtime_command in {"activate", "refresh"}:
+            routing = routing_config.ensure(targets)
+            lines.append(
+                "routing-config: " + routing["status"] + " " + routing["path"]
+                + " enabled=" + ",".join(routing["enabled"])
+            )
+            for report in reports:
+                report["routing_config"] = routing
     except runtime_activation.ActivationError as exc:
         rollback_errors = []
         for snapshot in reversed(snapshots):

@@ -1,0 +1,1 @@
+../../../../tools/install/projection-completeness.test.sh

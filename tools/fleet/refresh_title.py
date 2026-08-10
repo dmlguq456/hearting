@@ -477,12 +477,10 @@ def provider_model(adapter, home=None):
         return None
 
 
-# Ordered provider cascade. OpenCode leads because its `mini` model is the cheapest of
-# the three and this worker is the harness's highest-frequency model caller; the rest
-# follow so a machine with only one harness installed still gets titles. Every entry is
-# tool-free, but each runtime spells that differently — claude by flag, codex by
-# read-only sandbox, opencode by an agent definition with every tool set to false.
-PROVIDER_ORDER = ("opencode", "claude", "codex")
+# Legacy/config-failure fallback only. Normal selection consumes the same user-local
+# quality bands and capacity signals as registered dispatch. OpenCode is deliberately
+# not a default quality peer, even for this mini-profile worker.
+PROVIDER_ORDER = ("claude", "codex", "opencode")
 
 _OPENCODE_AGENT = """---
 description: "No-tools Fleet title/summary worker. Emits two labeled lines only."
@@ -559,11 +557,61 @@ def provider_command(adapter, prompt, model=None, home=None):
 
 
 def selected_providers():
-    """Explicit choice wins; otherwise the cascade. `fleet --title-provider` sets the env."""
+    """Explicit choice wins; otherwise use the shared mini-profile selector."""
     chosen = (os.environ.get("FLEET_TITLE_PROVIDER") or "").strip().lower()
     if chosen in PROVIDER_ORDER:
         return (chosen,)
-    return PROVIDER_ORDER
+    home = agent_home()
+    try:
+        defaults_spec = importlib.util.spec_from_file_location(
+            "fleet_dispatch_defaults", home / "utilities" / "dispatch-defaults.py"
+        )
+        capacity_spec = importlib.util.spec_from_file_location(
+            "fleet_harness_capacity", home / "utilities" / "harness-capacity.py"
+        )
+        allocation_spec = importlib.util.spec_from_file_location(
+            "fleet_dispatch_allocation", home / "utilities" / "dispatch_allocation.py"
+        )
+        if not all(spec and spec.loader for spec in (defaults_spec, capacity_spec, allocation_spec)):
+            return PROVIDER_ORDER
+        defaults = importlib.util.module_from_spec(defaults_spec)
+        capacity = importlib.util.module_from_spec(capacity_spec)
+        allocation_module = importlib.util.module_from_spec(allocation_spec)
+        defaults_spec.loader.exec_module(defaults)
+        capacity_spec.loader.exec_module(capacity)
+        allocation_spec.loader.exec_module(allocation_module)
+        config = defaults.load_and_validate(
+            defaults.default_config_path(), defaults.default_topology_path()
+        )
+        policy = defaults.query_profile_policy(config, "mini")
+        allocation = defaults.query_allocation(config)
+        jobs = Path(os.environ.get("AGENT_DISPATCH_JOBS") or home / ".dispatch" / "jobs.log")
+        states = {name: "ok" for name in PROVIDER_ORDER}
+        usage = subprocess.run(
+            [str(home / "utilities" / "usage-check.sh"), "--harness", "all", "--jobs", str(jobs)],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        if usage.returncode == 0:
+            for line in usage.stdout.splitlines():
+                fields = line.split()
+                if len(fields) == 2 and fields[0] in states:
+                    states[fields[0]] = fields[1]
+        counts = allocation_module.attempt_counts(jobs, window=allocation["window"])
+        scores = capacity.capacity_scores()
+        selected, _band, ranks, promoted = capacity.select(
+            policy, states, counts, allocation["harness_order"], scores
+        )
+        band_order = ("relief", "primary", "last_resort") if promoted else (
+            "primary", "relief", "last_resort"
+        )
+        ordered = [name for band in band_order for name in ranks[band]]
+        if selected in ordered:
+            ordered = [selected] + [name for name in ordered if name != selected]
+        return tuple(ordered) or PROVIDER_ORDER
+    except Exception:
+        return PROVIDER_ORDER
 
 
 def worker_argv(prompt, model=None):

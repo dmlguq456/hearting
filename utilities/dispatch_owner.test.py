@@ -59,14 +59,34 @@ class DispatchOwnerTests(unittest.TestCase):
         )
         return path
 
-    def run_owner(self, owners="claude", extra=(), config=None):
+    def quality_config(self):
+        path = self.home / "dispatch-defaults-v3.yaml"
+        path.write_text(
+            "schema_version: 3\n"
+            "harnesses:\n  enabled: [claude, codex, opencode]\n"
+            "profiles:\n"
+            "  deep:\n    primary: [claude, codex]\n    relief: []\n"
+            "    last_resort: [opencode]\n    promote_relief_below: 0\n"
+            "  balanced-deep:\n    primary: [claude, codex]\n    relief: []\n"
+            "    last_resort: [opencode]\n    promote_relief_below: 0\n"
+            "  light:\n    primary: [claude, codex]\n    relief: [opencode]\n"
+            "    last_resort: []\n    promote_relief_below: 35\n"
+            "  mini:\n    primary: [claude, codex]\n    relief: [opencode]\n"
+            "    last_resort: []\n    promote_relief_below: 35\n"
+            "allocation:\n  strategy: capacity-aware\n  window: 30\n"
+            "capabilities:\n",
+            encoding="utf-8",
+        )
+        return path
+
+    def run_owner(self, owners="claude", extra=(), config=None, *, model_profile="deep", env_extra=None):
         log_dir = self.home / "logs"
         args = [
             sys.executable, str(SELECTOR), "--dry-run", "--worktree", str(ROOT), "--slug", "owner-test",
             "--capability", "autopilot-code", "--capability-mode", "debug", "--qa", "standard",
             "--intensity", "standard", "--dispatch-depth", "1", "--worker-type", "owner",
             "--assigned-contract", "autopilot-code", "--owner", "autopilot-code",
-            "--model-profile", "deep", "--jobs", str(self.jobs), "--log-dir", str(log_dir),
+            "--model-profile", model_profile, "--jobs", str(self.jobs), "--log-dir", str(log_dir),
             *extra,
         ]
         env = os.environ.copy()
@@ -77,6 +97,7 @@ class DispatchOwnerTests(unittest.TestCase):
             "CODEX_DISPATCH_MODEL": "interactive-inheritance-must-not-leak",
             "CODEX_DISPATCH_MODEL_PROFILE": "interactive-profile-must-not-leak",
         })
+        env.update(env_extra or {})
         return subprocess.run(args, text=True, capture_output=True, env=env)
 
     def base_argv(self, extra=(), jobs=None, log_dir=None):
@@ -187,6 +208,37 @@ class DispatchOwnerTests(unittest.TestCase):
             selected,
             ["claude", "codex", "opencode", "claude", "codex", "opencode"],
         )
+
+    def test_schema_v3_capacity_orders_quality_peers_but_not_opencode(self):
+        result = self.run_owner(
+            config=self.quality_config(),
+            env_extra={"HARNESS_CAPACITY_SCORES": "claude:40,codex:80,opencode:100"},
+        )
+        self.assert_model_map(result, "codex")
+        self.assertIn("quality_band=primary", result.stdout)
+        self.assertIn("capacity_headroom.opencode=100.0", result.stdout)
+
+    def test_schema_v3_light_promotes_opencode_only_below_threshold(self):
+        result = self.run_owner(
+            config=self.quality_config(),
+            model_profile="light",
+            env_extra={"HARNESS_CAPACITY_SCORES": "claude:20,codex:30"},
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("adapter=opencode", result.stdout)
+        self.assertIn("quality_band=relief", result.stdout)
+        self.assertIn("relief_promoted=1", result.stdout)
+
+    def test_schema_v3_light_keeps_primary_when_headroom_is_healthy(self):
+        result = self.run_owner(
+            config=self.quality_config(),
+            model_profile="light",
+            env_extra={"HARNESS_CAPACITY_SCORES": "claude:20,codex:80"},
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("adapter=codex", result.stdout)
+        self.assertIn("quality_band=primary", result.stdout)
+        self.assertIn("relief_promoted=0", result.stdout)
 
     def test_caller_runtime_is_distinct_from_selected_owner_adapter(self):
         module = self._load_selector_module()
@@ -350,6 +402,21 @@ class RouteEvidenceOwnerHarnessTest(unittest.TestCase):
             {"parent_harness": "codex", "status": "unsupported"},
         ]}})
         self.assertEqual(OWNER._sealed_owner_harnesses(path), {"claude"})
+
+    def test_standard_route_exposes_sealed_owner_policy(self):
+        policy = {"primary": ["claude", "codex"], "relief": ["opencode"],
+                  "last_resort": [], "promote_relief_below": 35}
+        path = self._route({"effective_intensity": "standard",
+                            "owner_harness_policy": policy,
+                            "dispatch_allocation": {"strategy": "capacity-aware", "window": 30,
+                                                    "harness_order": ["claude", "codex", "opencode"]},
+                            "dispatch_evidence": {"tuples": [
+                                {"parent_harness": "claude", "status": "supported"},
+                                {"parent_harness": "codex", "status": "supported"},
+                            ]}})
+        context = OWNER._sealed_owner_context(path)
+        self.assertEqual(context["policy"], policy)
+        self.assertEqual(context["allocation"]["strategy"], "capacity-aware")
 
     def test_worktree_local_unsupported_never_selects_an_owner_fallback(self):
         path = self._route({"effective_intensity": "standard", "dispatch_evidence": {"tuples": [

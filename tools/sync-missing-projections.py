@@ -17,6 +17,8 @@ Domains (mirroring tools/check-adaptation-boundary.sh expectations):
 - ``scaffolds/``  → copy into  adapters/claude/scaffolds/
 - ``tools/memory``→ symlink    adapters/claude/tools/memory/<f>
                     → ../../../../tools/memory/<f> (established projection style)
+- ``tools/install``→ symlink   adapters/claude/tools/install/<f>
+                    → ../../../../tools/install/<f>
 
 ``utilities/`` needs no counterpart automation: `adapters/claude/utilities` is a
 whole-layer symlink to the shared portable layer (2026-07-22 collapse), so every
@@ -104,6 +106,7 @@ def sync(check: bool) -> int:
     counterpart_copy("loops")
     counterpart_copy("scaffolds")
     counterpart_symlink("tools/memory", "../../../../tools/memory")
+    counterpart_symlink("tools/install", "../../../../tools/install")
 
     if check:
         if missing:

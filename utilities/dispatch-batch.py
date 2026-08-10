@@ -43,6 +43,14 @@ from dispatch_allocation import (  # noqa: E402
     attempt_counts,
 )
 
+CAPACITY_SPEC = importlib.util.spec_from_file_location(
+    "harness_capacity", ROOT / "utilities" / "harness-capacity.py"
+)
+if CAPACITY_SPEC is None or CAPACITY_SPEC.loader is None:
+    raise RuntimeError("harness-capacity loader unavailable")
+CAPACITY = importlib.util.module_from_spec(CAPACITY_SPEC)
+CAPACITY_SPEC.loader.exec_module(CAPACITY)
+
 NODE_SPEC = importlib.util.spec_from_file_location(
     "dispatch_node", ROOT / "utilities" / "dispatch-node.py"
 )
@@ -196,11 +204,37 @@ def assign_harnesses(
     if (
         jobs is not None
         and isinstance(allocation, dict)
-        and allocation.get("strategy") == ALLOCATION_STRATEGY
+        and allocation.get("strategy") in {ALLOCATION_STRATEGY, "capacity-aware"}
     ):
         counts = attempt_counts(jobs, window=int(allocation["window"]))
         declared_order = allocation.get("harness_order") or declared_order
     order = {harness: index for index, harness in enumerate(declared_order)}
+    capacity = (
+        CAPACITY.capacity_scores()
+        if isinstance(allocation, dict) and allocation.get("strategy") == "capacity-aware"
+        else {harness: None for harness in SUPPORTED_BATCH_HARNESSES}
+    )
+
+    def band_rank(node, harness):
+        policy = node.get("harness_policy")
+        if not isinstance(policy, dict):
+            return 0
+        bands = ["primary", "relief", "last_resort"]
+        threshold = policy.get("promote_relief_below", 0)
+        primary = [capacity.get(name) for name in policy.get("primary", [])]
+        primary = [value for value in primary if value is not None]
+        if (
+            policy.get("relief")
+            and threshold
+            and primary
+            and len(primary) == len(policy.get("primary", []))
+            and max(primary) <= threshold
+        ):
+            bands = ["relief", "primary", "last_resort"]
+        for index, band in enumerate(bands):
+            if harness in policy.get(band, []):
+                return index
+        return len(bands) + 1
 
     def score(rows: tuple[tuple[str, str, int], ...]) -> tuple:
         affinity_misses = sum(
@@ -212,7 +246,12 @@ def assign_harnesses(
         )
         return (
             -len({row[0] for row in rows}),
+            sum(band_rank(node, row[0]) for node, row in zip(nodes, rows)),
             affinity_misses,
+            -sum(
+                capacity.get(row[0]) if capacity.get(row[0]) is not None else 50
+                for row in rows
+            ),
             sum(counts.get(row[0], 0) for row in rows),
             sum(row[2] for row in rows),
             tuple(order.get(row[0], len(order)) for row in rows),

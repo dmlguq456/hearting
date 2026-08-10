@@ -516,7 +516,7 @@ def _realize_conditional_extensions(recipe, effective_intensity):
             row["after"] = [terminal]
     return rows
 
-def _seal_dispatch_defaults(nodes, capability):
+def _seal_dispatch_defaults(nodes, capability, owner_profile=None):
     """Return defaults digest/allocation and stamp each dispatch-depth-2 node's
     harness_affinity, BEFORE route_hash is computed. Absent config -> all
     'unspecified' + digest None. Corrupt config -> fail-loud (reused loader
@@ -527,7 +527,8 @@ def _seal_dispatch_defaults(nodes, capability):
         for node in nodes:
             if node.get("dispatch_depth") == 2:
                 node["harness_affinity"] = "unspecified"
-        return None, None
+                node["harness_policy"] = None
+        return None, None, None
     try:
         cfg = DEFAULTS.load_and_validate(config_path, DEFAULTS.default_topology_path())
     except DEFAULTS.DefaultsConfigError as exc:
@@ -537,9 +538,13 @@ def _seal_dispatch_defaults(nodes, capability):
             node["harness_affinity"] = DEFAULTS.query_stage_affinity(
                 cfg, capability, node.get("parallel_anchor", node["id"])
             )
+            node["harness_policy"] = DEFAULTS.query_profile_policy(
+                cfg, node["model_profile"]
+            )
     return (
         "sha256:" + hashlib.sha256(canonical(cfg)).hexdigest(),
         DEFAULTS.query_allocation(cfg),
+        DEFAULTS.query_profile_policy(cfg, owner_profile) if owner_profile else None,
     )
 
 def unit_catalog_digest(units_root=None):
@@ -666,8 +671,8 @@ def _compile_from_recipe(registry, recipe, capability, capability_mode, requeste
         for node in nodes:
             if node.get("dispatch_depth")==2:
                 node["fallback_hops"]=json.loads(json.dumps(chain))
-    dispatch_defaults_digest,dispatch_allocation=_seal_dispatch_defaults(
-        nodes, capability
+    dispatch_defaults_digest,dispatch_allocation,owner_harness_policy=_seal_dispatch_defaults(
+        nodes, capability, owner_model_profile
     )
     spec_touch=any(_scope_touches_spec(scope) for node in nodes for scope in node["write_scope"])
     payload={
@@ -682,6 +687,7 @@ def _compile_from_recipe(registry, recipe, capability, capability_mode, requeste
       "registry_digest":TOPO.registry_digest(registry),
       "dispatch_defaults_digest":dispatch_defaults_digest,
       "dispatch_allocation":dispatch_allocation,
+      "owner_harness_policy":owner_harness_policy,
       "selection":{"direct_predicates":predicates,"promotion_signals":[{"signal":s,"source":"caller"} for s in signals],
                    "selection_basis":selection_basis,
                    "escalation_basis":[{"signal":s,"source":"caller"} for s in signals],
@@ -755,7 +761,10 @@ def verify_route(route, expected_cwd=None, *, allow_stale_registry=False):
             registry["owner_profile_by_intensity"]["standard"],
         )
         def _node_identity(node):
-            return {k:v for k,v in node.items() if k not in ("fallback_hops","harness_affinity")}
+            return {
+                k: v for k, v in node.items()
+                if k not in ("fallback_hops", "harness_affinity", "harness_policy")
+            }
         expected_nodes=json.loads(json.dumps(composed_recipe["standard_plus"]["nodes"]))
         expected_nodes=_expand_parallel_groups(
             expected_nodes, composed_recipe["standard_plus"].get("parallel_groups"),
@@ -797,14 +806,14 @@ def verify_route(route, expected_cwd=None, *, allow_stale_registry=False):
         }:
             raise ValueError("invalid dispatch_allocation shape")
         if allocation.get("strategy") not in {
-            "config-order", "least-recent-attempts"
+            "config-order", "least-recent-attempts", "capacity-aware"
         }:
             raise ValueError("invalid dispatch_allocation strategy")
         window = allocation.get("window")
         if (
             not isinstance(window, int)
             or window < 0
-            or (allocation["strategy"] == "least-recent-attempts" and window < 3)
+            or (allocation["strategy"] in {"least-recent-attempts", "capacity-aware"} and window < 3)
         ):
             raise ValueError("invalid dispatch_allocation window")
         order = allocation.get("harness_order")
@@ -823,6 +832,34 @@ def verify_route(route, expected_cwd=None, *, allow_stale_registry=False):
     )
     if route.get("owner_model_profile") != expected_owner_profile:
         raise ValueError("owner_model_profile differs from the portable intensity policy")
+    def validate_harness_policy(policy):
+        if policy is None:
+            return
+        if not isinstance(policy, dict):
+            raise ValueError("harness_policy must be a mapping or null")
+        flattened = []
+        for band in DEFAULTS.QUALITY_BANDS:
+            values = policy.get(band)
+            if not isinstance(values, list) or any(
+                value not in DEFAULTS.DISPATCHABLE_HARNESSES for value in values
+            ):
+                raise ValueError(f"invalid harness_policy band: {band}")
+            flattened.extend(values)
+        if len(flattened) != len(set(flattened)):
+            raise ValueError("harness_policy repeats a harness across bands")
+        threshold = policy.get("promote_relief_below")
+        if not isinstance(threshold, int) or not 0 <= threshold <= 100:
+            raise ValueError("invalid harness_policy promote_relief_below")
+    owner_policy = route.get("owner_harness_policy")
+    validate_harness_policy(owner_policy)
+    if effective == "direct" and owner_policy is not None:
+        raise ValueError("direct route cannot carry owner_harness_policy")
+    if owner_policy is not None and allocation is not None:
+        owner_set = {
+            harness for band in DEFAULTS.QUALITY_BANDS for harness in owner_policy[band]
+        }
+        if owner_set != set(allocation["harness_order"]):
+            raise ValueError("owner_harness_policy differs from dispatch allocation pool")
     realized_groups = {}
     for node in route.get("nodes", []):
         if node.get("kind") == "resource-runner":
@@ -860,6 +897,8 @@ def verify_route(route, expected_cwd=None, *, allow_stale_registry=False):
         observed_dispatch_depths.append(node["dispatch_depth"])
         if "harness_affinity" in node and node["harness_affinity"] not in VALID_AFFINITY:
             raise ValueError(f"invalid harness_affinity vocabulary: {node['harness_affinity']!r}")
+        policy = node.get("harness_policy")
+        validate_harness_policy(policy)
         if "execution_surface" in node and node["execution_surface"] not in EXECUTION_SURFACES:
             raise ValueError(f"invalid execution_surface vocabulary: {node['execution_surface']!r}")
         if "registered_worker" in node and not isinstance(node["registered_worker"], bool):

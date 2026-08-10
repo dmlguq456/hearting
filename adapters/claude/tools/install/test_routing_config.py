@@ -1,0 +1,1 @@
+../../../../tools/install/test_routing_config.py

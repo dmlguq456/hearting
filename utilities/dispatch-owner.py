@@ -29,6 +29,13 @@ if _allocation_spec is None or _allocation_spec.loader is None:
     raise RuntimeError("cannot load dispatch_allocation.py")
 _allocation = importlib.util.module_from_spec(_allocation_spec)
 _allocation_spec.loader.exec_module(_allocation)
+_capacity_spec = importlib.util.spec_from_file_location(
+    "harness_capacity", ROOT / "utilities" / "harness-capacity.py"
+)
+if _capacity_spec is None or _capacity_spec.loader is None:
+    raise RuntimeError("cannot load harness-capacity.py")
+_capacity = importlib.util.module_from_spec(_capacity_spec)
+_capacity_spec.loader.exec_module(_capacity)
 
 _FORBIDDEN = {
     "--worker-mode", "--model", "--reasoning", "--effort", "--variant",
@@ -49,8 +56,8 @@ class OwnerError(ValueError):
     pass
 
 
-def _sealed_owner_harnesses(path):
-    """Return the parent harnesses a standard+ route's checked evidence supports.
+def _sealed_owner_context(path):
+    """Return route-sealed owner candidates, quality policy, and allocation.
 
     An owner is not a route node, so this selector stays route-blind for
     dispatch (`--route-file` to the wrapper is `route-metadata-missing`). But
@@ -94,7 +101,28 @@ def _sealed_owner_harnesses(path):
     harnesses &= _defaults.DISPATCHABLE_HARNESSES
     if not harnesses:
         raise OwnerError("route-evidence-no-supported-owner-harness")
-    return harnesses
+    policy = route.get("owner_harness_policy")
+    if policy is not None:
+        if not isinstance(policy, dict) or any(
+            not isinstance(policy.get(band), list)
+            for band in _defaults.QUALITY_BANDS
+        ):
+            raise OwnerError("route-evidence-owner-policy-malformed")
+        threshold = policy.get("promote_relief_below")
+        if not isinstance(threshold, int) or not 0 <= threshold <= 100:
+            raise OwnerError("route-evidence-owner-policy-malformed")
+        if not isinstance(route.get("dispatch_allocation"), dict):
+            raise OwnerError("route-evidence-owner-allocation-missing")
+    return {
+        "harnesses": harnesses,
+        "policy": policy,
+        "allocation": route.get("dispatch_allocation"),
+    }
+
+
+def _sealed_owner_harnesses(path):
+    """Compatibility/query view used by diagnostics and tests."""
+    return _sealed_owner_context(path)["harnesses"]
 
 
 def _caller_harness(env):
@@ -242,7 +270,8 @@ def _usage(jobs):
 
 def _audit(
     status, adapter, source, configured, explicit, states, *, allocation=None,
-    counts=None, rejected=(), fallback=None, reason="none"
+    counts=None, rejected=(), fallback=None, reason="none", capacity=None,
+    quality_band=None, relief_promoted=False,
 ):
     lines = [
         f"status={status}", f"adapter={adapter or '-'}", f"selection_source={source}",
@@ -257,12 +286,21 @@ def _audit(
     for harness in _allocation.HARNESSES:
         if counts is not None:
             lines.append(f"attempt_count.{harness}={counts.get(harness, 0)}")
+        if capacity is not None:
+            value = capacity.get(harness)
+            lines.append(
+                f"capacity_headroom.{harness}="
+                + ("unknown" if value is None else str(round(value, 1)))
+            )
+    if quality_band:
+        lines.append(f"quality_band={quality_band}")
+    lines.append(f"relief_promoted={int(relief_promoted)}")
     for n, item in enumerate(rejected, 1):
         lines.append(f"rejected.{n}={item}:usage-{states[item]}")
     if fallback:
         lines.append(f"fallback.1={fallback}:configured-candidates-ineligible")
     lines += [
-        "trace.1=cascade=explicit>hard-eligibility>sealed-affinity>recent-attempt-balance",
+        "trace.1=cascade=explicit>hard-eligibility>quality-band>capacity>recent-attempt-balance",
         f"trace.2=explicit={explicit or 'none'};authorized={int(bool(explicit and explicit in _defaults.DISPATCHABLE_HARNESSES))}",
         "trace.3=eligibility=" + ",".join(f"{h}:{states[h]}" for h in sorted(states)),
         f"trace.4=configured={','.join(configured)};selected={adapter or '-'};source={source};deviation_reason={reason}",
@@ -280,24 +318,51 @@ def _error(reason, configured=(), explicit=None, states=None):
 def main(argv):
     try:
         explicit, values, forwarded, route_evidence = _parse(argv)
-        config = _load_defaults()
-        configured = list(_defaults.query_owners(config))
-        # Every schema-v2 harness is a normal checked candidate. Schema-v1
-        # compatibility still admits an explicit OpenCode relief request even
-        # though its configured and last-resort pools contain only two harnesses.
+        profile = values["--model-profile"]
+        sealed_context = _sealed_owner_context(route_evidence) if route_evidence else None
+        if sealed_context and isinstance(sealed_context.get("policy"), dict):
+            policy = dict(sealed_context["policy"])
+            config = None
+            config_version = 3
+        else:
+            config = _load_defaults()
+            policy = _defaults.query_profile_policy(config, profile)
+            config_version = config.get("schema_version")
+        configured = [
+            harness for band in _defaults.QUALITY_BANDS for harness in policy[band]
+        ]
+        # Legacy schema-v1 still admits an explicit OpenCode relief request;
+        # schema-v3 authorization comes from the enabled set and quality bands.
         if explicit is not None and explicit not in _defaults.DISPATCHABLE_HARNESSES:
             raise OwnerError("explicit-adapter-unauthorized")
-        sealed = _sealed_owner_harnesses(route_evidence) if route_evidence else None
+        if (
+            explicit is not None
+            and config_version == 3
+            and explicit not in configured
+        ):
+            raise OwnerError("explicit-adapter-disabled-by-user-policy")
+        sealed = sealed_context["harnesses"] if sealed_context else None
         if sealed is not None:
             if explicit is not None and explicit not in sealed:
                 raise OwnerError("explicit-adapter-outside-route-evidence")
             configured = [h for h in configured if h in sealed]
+            policy = {
+                **policy,
+                **{
+                    band: [h for h in policy[band] if h in sealed]
+                    for band in _defaults.QUALITY_BANDS
+                },
+            }
         jobs = values.get("--jobs", os.environ.get("AGENT_DISPATCH_JOBS", ""))
         states = _usage(jobs)
-        allocation = _defaults.query_allocation(config)
+        allocation = (
+            sealed_context.get("allocation")
+            if sealed_context and isinstance(sealed_context.get("allocation"), dict)
+            else _defaults.query_allocation(config)
+        )
         counts = (
             _allocation.attempt_counts(jobs, window=allocation["window"])
-            if allocation["strategy"] == _allocation.STRATEGY
+            if allocation["strategy"] in {_allocation.STRATEGY, "capacity-aware"}
             else {harness: 0 for harness in _allocation.HARNESSES}
         )
 
@@ -312,12 +377,21 @@ def main(argv):
             )
 
         rejected = [h for h in sorted(states) if not _eligible(states[h])]
+        capacity = _capacity.capacity_scores()
         selected = None
         source = "none"
         reason = "none"
+        quality_band = None
+        relief_promoted = False
         if explicit and _eligible(states[explicit]):
-            selected, source = explicit, "explicit"
-        if selected is None:
+            selected, source, quality_band = explicit, "explicit", "explicit"
+        if selected is None and config_version == 3:
+            selected, quality_band, _ranks, relief_promoted = _capacity.select(
+                policy, states, counts, allocation["harness_order"], capacity
+            )
+            if selected:
+                source = "configured-capacity-aware"
+        if selected is None and config_version != 3:
             for harness in ranked(configured):
                 if _eligible(states[harness]):
                     selected = harness
@@ -326,28 +400,30 @@ def main(argv):
                         if allocation["strategy"] == _allocation.STRATEGY
                         else "configured-normal"
                     )
+                    quality_band = "primary"
                     break
         if selected is None:
             # A sealed route constrains this last resort too: silently starting
             # an owner whose harness the checked tuples never probed only moves
             # the failure to every dispatch-depth-2 launch.
-            fallback_pool = (
-                sealed
-                if sealed is not None
-                else (
-                    _defaults.DISPATCHABLE_HARNESSES
-                    if config.get("schema_version") == 2
-                    else _defaults.LEGACY_NORMAL_HARNESSES
-                )
-            )
+            if config_version == 3:
+                fallback_pool = ()
+            elif sealed is not None:
+                fallback_pool = sealed
+            elif config_version == 2:
+                fallback_pool = _defaults.DISPATCHABLE_HARNESSES
+            else:
+                fallback_pool = _defaults.LEGACY_NORMAL_HARNESSES
             for harness in ranked(fallback_pool):
                 if _eligible(states[harness]):
                     selected, source, reason = harness, "eligibility-fallback", "configured-candidates-ineligible"
+                    quality_band = "outside-policy-fallback"
                     break
         if selected is None:
             print("\n".join(_audit(
                 "unavailable", None, "none", configured, explicit, states,
                 allocation=allocation, counts=counts, rejected=rejected,
+                capacity=capacity, relief_promoted=relief_promoted,
             )))
             print("check=failed\nreason=" + (
                 "no-eligible-route-evidence-candidate" if sealed is not None
@@ -360,14 +436,18 @@ def main(argv):
                                       allocation=allocation, counts=counts,
                                       rejected=rejected if source != "explicit" else (),
                                       fallback=selected if source == "eligibility-fallback" else None,
-                                      reason=reason)))
+                                      reason=reason, capacity=capacity,
+                                      quality_band=quality_band,
+                                      relief_promoted=relief_promoted)))
             print("check=failed\nreason=wrapper-unavailable\nchild_spawned=0")
             return 65
         print("\n".join(_audit("eligible", selected, source, configured, explicit, states,
                                   allocation=allocation, counts=counts,
                                   rejected=rejected if source != "explicit" else (),
                                   fallback=selected if source == "eligibility-fallback" else None,
-                                  reason=reason)), flush=True)
+                                  reason=reason, capacity=capacity,
+                                  quality_band=quality_band,
+                                  relief_promoted=relief_promoted)), flush=True)
         child_env = {
             key: value for key, value in os.environ.items() if not _MODEL_ENV.fullmatch(key)
         }

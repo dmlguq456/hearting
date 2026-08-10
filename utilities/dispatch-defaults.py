@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
-"""Strict standard-library loader/validator/query CLI for profiles/dispatch-defaults.yaml (SD-66).
+"""Strict standard-library loader/validator/query CLI for harness routing policy.
 
-Parses a deliberately narrow YAML subset (scalars, inline lists, two-level
+Parses a deliberately narrow YAML subset (scalars, inline lists, nested
 mappings, comments) — no PyYAML/yq dependency. Validates against the
 canonical topology node ids in capabilities/topologies.json and exposes
-affinity/owner/allocation queries used by utilities/dispatch-route.sh and its
-fixture tests. Schema v1 remains readable as the former two-harness,
-OpenCode-relief-only compatibility contract.
+affinity/owner/allocation/quality-band queries.  Schemas v1/v2 remain readable;
+schema v3 adds user-local enabled harnesses and per-profile quality bands.
 """
 import json
 import os
@@ -16,9 +15,12 @@ LEGACY_NORMAL_HARNESSES = {"claude", "codex"}
 DISPATCHABLE_HARNESSES = {"claude", "codex", "opencode"}
 KNOWN_HARNESSES = DISPATCHABLE_HARNESSES
 AFFINITY_VALUES = {"claude", "codex", "opencode", "diverse"}
-ALLOCATION_STRATEGIES = {"least-recent-attempts"}
+MODEL_PROFILES = ("deep", "balanced-deep", "light", "mini")
+QUALITY_BANDS = ("primary", "relief", "last_resort")
+ALLOCATION_STRATEGIES = {"least-recent-attempts", "capacity-aware"}
 TOP_LEVEL_KEYS = {
-    "schema_version", "depth1_owner", "opencode", "allocation", "capabilities"
+    "schema_version", "depth1_owner", "opencode", "allocation", "capabilities",
+    "harnesses", "profiles",
 }
 
 
@@ -34,10 +36,16 @@ def _repo_root():
 
 
 def default_config_path():
-    return os.environ.get(
-        "DISPATCH_DEFAULTS_CONFIG",
-        os.path.join(_repo_root(), "profiles", "dispatch-defaults.yaml"),
-    )
+    override = os.environ.get("DISPATCH_DEFAULTS_CONFIG")
+    if override:
+        return override
+    config_home = os.environ.get("XDG_CONFIG_HOME")
+    if not config_home:
+        config_home = os.path.join(os.path.expanduser("~"), ".config")
+    user_path = os.path.join(config_home, "hearting", "dispatch-defaults.yaml")
+    if os.path.isfile(user_path):
+        return user_path
+    return os.path.join(_repo_root(), "profiles", "dispatch-defaults.yaml")
 
 
 def default_topology_path():
@@ -146,55 +154,117 @@ def validate(config, capmap):
         errors.append("missing required key: schema_version")
     elif not isinstance(version, int):
         errors.append(f"schema_version must be an integer, got {version!r}")
-    elif version not in {1, 2}:
+    elif version not in {1, 2, 3}:
         errors.append(f"unsupported schema_version: {version!r}")
 
-    owner = config.get("depth1_owner")
-    if not isinstance(owner, list) or not owner:
-        errors.append("depth1_owner must be a non-empty list of concrete harnesses")
-    else:
-        seen = set()
-        allowed_owners = (
-            DISPATCHABLE_HARNESSES if version == 2 else LEGACY_NORMAL_HARNESSES
-        )
-        for h in owner:
-            if not isinstance(h, str) or h not in allowed_owners:
-                errors.append(f"depth1_owner contains an unknown/non-concrete harness: {h!r}")
-            elif h in seen:
-                errors.append(f"depth1_owner has a duplicate harness: {h!r}")
-            seen.add(h)
-
-    opencode = config.get("opencode")
-    if not isinstance(opencode, dict):
-        errors.append("opencode must be a mapping")
-    else:
-        unknown_oc = sorted(set(opencode) - {"relief_only"})
-        for key in unknown_oc:
-            errors.append(f"unknown opencode key: {key!r}")
-        expected_relief = version != 2
-        if opencode.get("relief_only") is not expected_relief:
-            errors.append(
-                "opencode.relief_only must be exactly "
-                f"{str(expected_relief).lower()} for schema v{version}"
+    enabled = []
+    if version in {1, 2}:
+        owner = config.get("depth1_owner")
+        if not isinstance(owner, list) or not owner:
+            errors.append("depth1_owner must be a non-empty list of concrete harnesses")
+        else:
+            seen = set()
+            allowed_owners = (
+                DISPATCHABLE_HARNESSES if version == 2 else LEGACY_NORMAL_HARNESSES
             )
+            for h in owner:
+                if not isinstance(h, str) or h not in allowed_owners:
+                    errors.append(f"depth1_owner contains an unknown/non-concrete harness: {h!r}")
+                elif h in seen:
+                    errors.append(f"depth1_owner has a duplicate harness: {h!r}")
+                seen.add(h)
+            enabled = list(owner)
+
+        opencode = config.get("opencode")
+        if not isinstance(opencode, dict):
+            errors.append("opencode must be a mapping")
+        else:
+            unknown_oc = sorted(set(opencode) - {"relief_only"})
+            for key in unknown_oc:
+                errors.append(f"unknown opencode key: {key!r}")
+            expected_relief = version != 2
+            if opencode.get("relief_only") is not expected_relief:
+                errors.append(
+                    "opencode.relief_only must be exactly "
+                    f"{str(expected_relief).lower()} for schema v{version}"
+                )
+        if "harnesses" in config or "profiles" in config:
+            errors.append("harnesses/profiles require schema_version 3")
+    elif version == 3:
+        if "depth1_owner" in config or "opencode" in config:
+            errors.append("schema v3 replaces depth1_owner/opencode with harnesses/profiles")
+        harnesses = config.get("harnesses")
+        if not isinstance(harnesses, dict):
+            errors.append("harnesses must be a mapping for schema v3")
+        else:
+            for key in sorted(set(harnesses) - {"enabled"}):
+                errors.append(f"unknown harnesses key: {key!r}")
+            enabled = harnesses.get("enabled")
+            if not isinstance(enabled, list) or not enabled:
+                errors.append("harnesses.enabled must be a non-empty list")
+                enabled = []
+            else:
+                seen = set()
+                for h in enabled:
+                    if h not in DISPATCHABLE_HARNESSES:
+                        errors.append(f"harnesses.enabled contains unknown harness: {h!r}")
+                    elif h in seen:
+                        errors.append(f"harnesses.enabled has a duplicate harness: {h!r}")
+                    seen.add(h)
+        profiles = config.get("profiles")
+        if not isinstance(profiles, dict):
+            errors.append("profiles must be a mapping for schema v3")
+        else:
+            for name in sorted(set(profiles) - set(MODEL_PROFILES)):
+                errors.append(f"unknown model profile: {name!r}")
+            for name in MODEL_PROFILES:
+                policy = profiles.get(name)
+                if not isinstance(policy, dict):
+                    errors.append(f"profiles.{name} must be a mapping")
+                    continue
+                allowed = set(QUALITY_BANDS) | {"promote_relief_below"}
+                for key in sorted(set(policy) - allowed):
+                    errors.append(f"unknown profiles.{name} key: {key!r}")
+                flattened = []
+                for band in QUALITY_BANDS:
+                    values = policy.get(band)
+                    if not isinstance(values, list):
+                        errors.append(f"profiles.{name}.{band} must be a list")
+                        continue
+                    flattened.extend(values)
+                    for h in values:
+                        if h not in DISPATCHABLE_HARNESSES:
+                            errors.append(f"profiles.{name}.{band} contains unknown harness: {h!r}")
+                if len(flattened) != len(set(flattened)):
+                    errors.append(f"profiles.{name} repeats a harness across quality bands")
+                if set(flattened) != set(enabled):
+                    errors.append(
+                        f"profiles.{name} bands must contain every enabled harness exactly once"
+                    )
+                threshold = policy.get("promote_relief_below")
+                if not isinstance(threshold, int) or not 0 <= threshold <= 100:
+                    errors.append(
+                        f"profiles.{name}.promote_relief_below must be an integer from 0 to 100"
+                    )
 
     allocation = config.get("allocation")
-    if version == 2:
+    if version in {2, 3}:
         if not isinstance(allocation, dict):
-            errors.append("allocation must be a mapping for schema v2")
+            errors.append(f"allocation must be a mapping for schema v{version}")
         else:
             unknown_allocation = sorted(set(allocation) - {"strategy", "window"})
             for key in unknown_allocation:
                 errors.append(f"unknown allocation key: {key!r}")
-            if allocation.get("strategy") not in ALLOCATION_STRATEGIES:
-                errors.append(
-                    "allocation.strategy must be least-recent-attempts"
-                )
+            strategy = allocation.get("strategy")
+            if strategy not in ALLOCATION_STRATEGIES:
+                errors.append(f"allocation.strategy must be one of {sorted(ALLOCATION_STRATEGIES)}")
+            if version == 2 and strategy != "least-recent-attempts":
+                errors.append("schema v2 allocation.strategy must be least-recent-attempts")
             window = allocation.get("window")
             if not isinstance(window, int) or not 3 <= window <= 300:
                 errors.append("allocation.window must be an integer from 3 to 300")
     elif allocation is not None:
-        errors.append("allocation requires schema_version 2")
+        errors.append("allocation requires schema_version 2 or 3")
 
     caps = config.get("capabilities", {})
     if not isinstance(caps, dict):
@@ -218,6 +288,10 @@ def validate(config, capmap):
                     errors.append(
                         f"invalid affinity value for {cap_name}.{stage_name}: {value!r} "
                         f"(allowed: {sorted(AFFINITY_VALUES)}; model/effort values are never allowed here)"
+                    )
+                elif version == 3 and value != "diverse" and value not in enabled:
+                    errors.append(
+                        f"affinity {cap_name}.{stage_name} targets disabled harness: {value!r}"
                     )
     return errors
 
@@ -255,12 +329,37 @@ def query_stage_affinity(config, capability, stage):
 
 
 def query_owners(config):
+    if config.get("schema_version") == 3:
+        return list((config.get("harnesses") or {}).get("enabled", []))
     return config.get("depth1_owner", [])
+
+
+def query_profile_policy(config, profile):
+    """Return ordered quality bands and the relief-promotion threshold.
+
+    Legacy schemas have one symmetric primary band.  This preserves their exact
+    selector behavior while letting v3 keep OpenCode outside the quality-peer set.
+    """
+    if profile not in MODEL_PROFILES:
+        raise DefaultsConfigError(f"unknown model profile: {profile!r}")
+    if config.get("schema_version") != 3:
+        return {
+            "primary": list(query_owners(config)),
+            "relief": [],
+            "last_resort": [],
+            "promote_relief_below": 0,
+        }
+    policy = config["profiles"][profile]
+    result = {
+        band: list(policy[band]) for band in QUALITY_BANDS
+    }
+    result["promote_relief_below"] = policy["promote_relief_below"]
+    return result
 
 
 def query_allocation(config):
     allocation = config.get("allocation")
-    if config.get("schema_version") == 2 and isinstance(allocation, dict):
+    if config.get("schema_version") in {2, 3} and isinstance(allocation, dict):
         return {
             "strategy": allocation["strategy"],
             "window": allocation["window"],
@@ -274,6 +373,11 @@ def query_allocation(config):
 
 
 def query_opencode_policy(config):
+    if config.get("schema_version") == 3:
+        policies = [query_profile_policy(config, profile) for profile in MODEL_PROFILES]
+        if all("opencode" not in policy["primary"] for policy in policies):
+            return "quality-banded"
+        return "normal"
     opencode = config.get("opencode", {})
     if isinstance(opencode, dict) and opencode.get("relief_only") is True:
         return "relief-only"
@@ -293,7 +397,7 @@ def _arg(args, flag, default=None):
 
 def main(argv):
     if not argv:
-        print("usage: dispatch-defaults.py <validate|affinity|owners|allocation|opencode-policy> [options]", file=sys.stderr)
+        print("usage: dispatch-defaults.py <validate|affinity|owners|policy|allocation|opencode-policy> [options]", file=sys.stderr)
         return 64
 
     op = argv[0]
@@ -317,6 +421,10 @@ def main(argv):
         return 0
     if op == "owners":
         print(",".join(query_owners(config)))
+        return 0
+    if op == "policy":
+        policy = query_profile_policy(config, _arg(rest, "--profile", "light"))
+        print(json.dumps(policy, sort_keys=True))
         return 0
     if op == "allocation":
         allocation = query_allocation(config)

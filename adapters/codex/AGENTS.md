@@ -108,11 +108,12 @@ in §0.5. Load full capability detail only in the acting owner or worker.
 An ordinary dispatch-depth-1 owner launches through `preflight.sh dispatch-owner
 --dry-run|--register|--start`, a separate low-level surface from `preflight.sh
 dispatch` below: it delegates to the portable `utilities/dispatch-owner.py`
-selector, which reads `profiles/dispatch-defaults.yaml` and runs the SD-22
-cascade (explicit target, then hard eligibility, then configured
-`depth1_owner`, then sealed recent-attempt balance, then eligibility fallback)
-before execing only the chosen adapter's wrapper. Schema-v2 defaults keep all
-three harnesses in the normal pool and expose bounded exact attempt counts.
+selector, which prefers the user-owned
+`${XDG_CONFIG_HOME:-~/.config}/hearting/dispatch-defaults.yaml` and falls back
+to `profiles/dispatch-defaults.yaml`. The SD-22 cascade is explicit target,
+hard eligibility, sealed stage affinity, profile quality band, fresh headroom,
+then recent exact-attempt balance. Capacity never crosses a quality band unless
+that profile's relief threshold is met; OpenCode is not a default deep peer.
 
 Check `preflight.sh headless [--check] [--require-hook-trust] <worktree>`.
 Launch registered jobs only through `preflight.sh dispatch

@@ -212,7 +212,7 @@ class TestRoute(unittest.TestCase):
       def stable(nodes):
        return [
         {key:value for key,value in node.items()
-         if key not in ("fallback_hops","harness_affinity")}
+         if key not in ("fallback_hops","harness_affinity","harness_policy")}
         for node in nodes
        ]
       self.assertEqual(stable(route["nodes"]),stable(expected))

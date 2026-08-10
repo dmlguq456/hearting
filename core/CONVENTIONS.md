@@ -114,6 +114,18 @@ Shared contracts use model roles rather than concrete model names. Vendor-specif
 
 The default role for a standard+ conductor is `deep orchestrator`. Do not alias the retained balanced `orchestrator` to it. A role names behavior and responsibility, not execution budget. Dispatch selection order is explicit route profile, hard eligibility, stage affinity, required group diversity, then capacity, cost, and latency. Portable core records role, model profile, and any required harness-family axis separately. Adapters own exact model IDs, effort/variant realization, runtime probes, and eligibility.
 
+Harness capacity is evaluated only inside user-declared quality bands. A fresh
+headroom signal may reorder quality peers and may promote a declared relief band
+below that profile's threshold; it never makes a lower-quality harness a default
+peer or lowers the sealed model profile. Missing gauges stay `unknown` and recent
+exact attempts are only a deterministic tie-breaker. A main agent should explicitly
+choose an allowed relief harness for low-risk, independently verifiable work when
+the weaker output cannot silently become final; it records that semantic judgment
+instead of encoding a permanent vendor-capacity claim in
+portable core. User-local policy owns enabled harnesses, band membership, and
+promotion thresholds; installation creates it once from available runtimes and
+subsequent updates preserve it.
+
 `utilities/dispatch-route.sh` is read-only and emits stable key/value trace, rejected, fallback, and unknown records. It does not register, launch, or mutate caches or worktrees. Without an adapter probe, OpenCode remains `unknown` rather than guessed.
 
 ### §2.2. Adapter Mapping

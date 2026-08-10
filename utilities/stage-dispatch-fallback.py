@@ -70,6 +70,14 @@ from dispatch_allocation import (  # noqa: E402
     rank_harnesses,
 )
 
+_CAPACITY_SPEC = importlib.util.spec_from_file_location(
+    "harness_capacity", ROOT / "utilities" / "harness-capacity.py"
+)
+if _CAPACITY_SPEC is None or _CAPACITY_SPEC.loader is None:
+    raise RuntimeError("cannot load harness-capacity.py")
+CAPACITY = importlib.util.module_from_spec(_CAPACITY_SPEC)
+_CAPACITY_SPEC.loader.exec_module(CAPACITY)
+
 ORDER = ["same-harness-headless", "cross-harness-headless", "native-subagent", "inline"]
 
 
@@ -175,7 +183,9 @@ def ordered_fallback_hops(
     """Rank the checked direct-headless band from the sealed allocation policy."""
 
     allocation = route.get("dispatch_allocation")
-    if not isinstance(allocation, dict) or allocation.get("strategy") != ALLOCATION_STRATEGY:
+    if not isinstance(allocation, dict) or allocation.get("strategy") not in {
+        ALLOCATION_STRATEGY, "capacity-aware"
+    }:
         return list(node["fallback_hops"]), None
     counts = attempt_counts(jobs, window=int(allocation["window"]))
     states = _usage_states(jobs)
@@ -195,11 +205,36 @@ def ordered_fallback_hops(
     candidates = list(headless)
     eligible = [harness for harness in candidates if _usage_eligible(states[harness])]
     limited = [harness for harness in candidates if harness not in eligible]
-    ranked = rank_harnesses(
-        eligible,
-        counts,
-        declared_order=allocation.get("harness_order") or ALLOCATION_HARNESSES,
-    )
+    scores = None
+    quality_band = None
+    relief_promoted = False
+    if allocation["strategy"] == "capacity-aware" and isinstance(node.get("harness_policy"), dict):
+        scores = CAPACITY.capacity_scores()
+        available = set(candidates)
+        policy = {
+            **node["harness_policy"],
+            **{
+                band: [h for h in node["harness_policy"][band] if h in available]
+                for band in ("primary", "relief", "last_resort")
+            },
+        }
+        _selected, quality_band, ranks, relief_promoted = CAPACITY.select(
+            policy,
+            states,
+            counts,
+            allocation.get("harness_order") or ALLOCATION_HARNESSES,
+            scores,
+        )
+        band_order = ("relief", "primary", "last_resort") if relief_promoted else (
+            "primary", "relief", "last_resort"
+        )
+        ranked = [h for band in band_order for h in ranks[band]]
+    else:
+        ranked = rank_harnesses(
+            eligible,
+            counts,
+            declared_order=allocation.get("harness_order") or ALLOCATION_HARNESSES,
+        )
     affinity = node.get("harness_affinity")
     if affinity in ranked:
         ranked = [affinity] + [harness for harness in ranked if harness != affinity]
@@ -219,6 +254,9 @@ def ordered_fallback_hops(
         "counts": counts,
         "states": states,
         "rank": ranked,
+        "capacity": scores,
+        "quality_band": quality_band,
+        "relief_promoted": relief_promoted,
     }
 
 
@@ -230,6 +268,15 @@ def emit_allocation(context: dict | None) -> None:
     for harness in ALLOCATION_HARNESSES:
         print(f"attempt_count.{harness}={context['counts'][harness]}")
     print("allocation_rank=" + ",".join(context["rank"]))
+    if context.get("capacity") is not None:
+        for harness in ALLOCATION_HARNESSES:
+            value = context["capacity"].get(harness)
+            print(
+                f"capacity_headroom.{harness}="
+                + ("unknown" if value is None else str(round(value, 1)))
+            )
+        print(f"quality_band={context.get('quality_band') or 'none'}")
+        print(f"relief_promoted={int(bool(context.get('relief_promoted')))}")
 
 
 def registry_failures(jobs: Path, route_id: str, node_id: str) -> dict[str, list[str]]:
