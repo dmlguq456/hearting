@@ -1,12 +1,14 @@
 """Runtime-neutral installer bootstrap helpers.
 
 ``restore_memory`` imports ``dump.jsonl`` when ``memory.db`` is absent.
-``install_launchers`` creates guarded ``~/.local/bin/{harness,fleet,mem}`` symlinks.
+``install_launchers`` creates guarded
+``~/.local/bin/{hearting,harness,fleet,mem}`` symlinks.
 The helpers remain usable independently of installer command wiring.
 """
 
 import os
 import subprocess
+import uuid
 from pathlib import Path
 
 import paths
@@ -83,12 +85,48 @@ def _is_our_symlink(target, source):
         return False
     try:
         return target.resolve() == source.resolve()
-    except OSError:
+    except (OSError, RuntimeError):
         return False
 
 
+def _symlink_destination(target):
+    """Return a normalized symlink destination without requiring it to exist."""
+    try:
+        raw = Path(os.readlink(target))
+        value = raw if raw.is_absolute() else target.parent / raw
+        return value.resolve(strict=False)
+    except (OSError, RuntimeError):
+        return None
+
+
+def _is_prior_linked_launcher(target, home, rel_source):
+    """Recognize only exact launchers from the two supported linked checkout names."""
+    destination = _symlink_destination(target)
+    if destination is None:
+        return False
+    try:
+        prior = {
+            (home / checkout / rel_source).resolve(strict=False)
+            for checkout in ("hearting", "agent_setting")
+        }
+    except (OSError, RuntimeError):
+        return False
+    return destination in prior
+
+
+def _replace_symlink(target, source):
+    """Atomically replace one already-validated installer-owned symlink."""
+    temporary = target.with_name(f".{target.name}.hearting-{uuid.uuid4().hex}")
+    try:
+        temporary.symlink_to(source)
+        os.replace(temporary, target)
+    finally:
+        if temporary.is_symlink():
+            temporary.unlink()
+
+
 def install_launchers(home=None, dry_run=False):
-    """Create guarded ``~/.local/bin/{harness,fleet,mem}`` symlinks.
+    """Create guarded ``~/.local/bin/{hearting,harness,fleet,mem}`` symlinks.
 
     Args:
         home: Destination home directory, or ``Path.home()`` when omitted.
@@ -96,58 +134,50 @@ def install_launchers(home=None, dry_run=False):
 
     Returns:
         list of dict — [{"name", "target", "source", "status"}, ...]
-        status ∈ {"planned", "created", "unchanged", "skipped-collision"}
+        status ∈ {"planned", "planned-migration", "created", "migrated-legacy",
+                  "unchanged", "skipped-collision"}
     """
     if home is None:
         home = Path.home()
+    home = Path(home)
     bin_dir = home / ".local" / "bin"
 
     results = []
 
-    if dry_run:
-        for name, rel_source in LAUNCHERS:
-            source = paths.resolve_source(rel_source)
-            target = bin_dir / name
-            results.append({
-                "name": name,
-                "target": str(target),
-                "source": str(source),
-                "status": "planned",
-            })
-        return results
-
-    bin_dir.mkdir(parents=True, exist_ok=True)
+    if not dry_run:
+        bin_dir.mkdir(parents=True, exist_ok=True)
 
     for name, rel_source in LAUNCHERS:
         source = paths.resolve_source(rel_source)
         target = bin_dir / name
+        common = {"name": name, "target": str(target), "source": str(source)}
 
         if target.exists() or target.is_symlink():
             if _is_our_symlink(target, source):
+                results.append({**common, "status": "unchanged"})
+                continue
+
+            if _is_prior_linked_launcher(target, home, rel_source):
+                old_source = _symlink_destination(target)
+                if not dry_run:
+                    _replace_symlink(target, source)
                 results.append({
-                    "name": name,
-                    "target": str(target),
-                    "source": str(source),
-                    "status": "unchanged",
+                    **common,
+                    "status": "planned-migration" if dry_run else "migrated-legacy",
+                    "detail": f"{old_source} -> {source}",
                 })
                 continue
 
             # Never overwrite a foreign file or symlink.
             results.append({
-                "name": name,
-                "target": str(target),
-                "source": str(source),
+                **common,
                 "status": "skipped-collision",
                 "detail": f"foreign '{name}' already at {target} — not overwriting",
             })
             continue
 
-        target.symlink_to(source)
-        results.append({
-            "name": name,
-            "target": str(target),
-            "source": str(source),
-            "status": "created",
-        })
+        if not dry_run:
+            target.symlink_to(source)
+        results.append({**common, "status": "planned" if dry_run else "created"})
 
     return results

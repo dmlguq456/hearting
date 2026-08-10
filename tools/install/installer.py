@@ -200,6 +200,7 @@ def cmd_install(args):
     lines = [f"install: runtime={r} scope={args.scope} plugin={args.plugin} dry_run={args.dry_run}" for r in runtimes]
     checks = []
     results = []
+    bootstrap_failed = False
 
     for rt in runtimes:
         driver = get_driver(rt)
@@ -250,6 +251,9 @@ def cmd_install(args):
                         "detail": lr.get("detail", lr["status"]),
                     }
                 )
+            bootstrap_failed = any(
+                lr["status"] == "skipped-collision" for lr in launcher_results
+            )
         else:
             mem_result = bootstrap.restore_memory()
             lines.append(f"bootstrap: mem-import -> {mem_result['action']} ({mem_result['detail']})")
@@ -260,6 +264,7 @@ def cmd_install(args):
                     "detail": mem_result["detail"],
                 }
             )
+            bootstrap_failed = mem_result["action"] == "failed"
 
             launcher_results = bootstrap.install_launchers(dry_run=False)
             for lr in launcher_results:
@@ -271,8 +276,11 @@ def cmd_install(args):
                         "detail": lr.get("detail", lr["status"]),
                     }
                 )
+            bootstrap_failed = bootstrap_failed or any(
+                lr["status"] == "skipped-collision" for lr in launcher_results
+            )
 
-    exit_code = EXIT_BLOCKED if any_blocked else EXIT_OK
+    exit_code = EXIT_BLOCKED if any_blocked else EXIT_FAIL if bootstrap_failed else EXIT_OK
     return {"runtime": runtimes, "channel": "plugin" if args.plugin else "dev", "checks": checks,
             "drift": [], "exit": exit_code, "lines": lines}
 
