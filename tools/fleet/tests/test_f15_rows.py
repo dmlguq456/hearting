@@ -247,7 +247,7 @@ class FoldingTest(unittest.TestCase):
         self.assertTrue(any(key in ("stg0_on", "stg0_off") for key in preparing_keys))
         self.assertNotIn("plan › exec › test", text)
 
-    def test_dead_children_fold_to_alert_by_default(self):
+    def test_dead_children_fold_without_integrated_alert_by_default(self):
         conductor = DispatchJob(key="code", slug="fleet-ui-v2", depth=1, liveness="idle",
                                 stage="exec", worker_role="capability-owner")
         dead_c = DispatchJob(key="code-test", slug="fleet-ui-v2-test", depth=2,
@@ -255,7 +255,8 @@ class FoldingTest(unittest.TestCase):
                              liveness="dead")
         text = self._emit(conductor, [dead_c])
         self.assertNotIn("test fleet-ui-v2-test", text)
-        self.assertIn("dead fleet-ui-v2-test", text)
+        self.assertNotIn("dead fleet-ui-v2-test", text)
+        self.assertIn("fleet-ui-v2", text)
 
         all_text = self._emit(conductor, [dead_c], show_all=True)
         self.assertIn("test fleet-ui-v2-test", all_text)

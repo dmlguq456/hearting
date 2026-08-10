@@ -107,9 +107,6 @@ _TWO_LINE_CUTOFF = 138     # width below which sessions render as 2-line cards (
                            # is gone — 2-line cards are the PRIMARY layout, wide 1-line is rare)
 _LAYOUT = "auto"            # 'auto' (width decides) | 'wide' | 'narrow' | 'stack' — `w` key cycles
 _LOOPS_KEYS = ("oncall", "note", "study", "drill")
-_ALERT_TAIL = re.compile(r"-\d{8,}-\d+$")   # loop job `<case>-<ts>-<pid>` tail (F-10 alert humanize)
-
-
 def _cycle_layout():
     global _LAYOUT
     _LAYOUT = {"auto": "wide", "wide": "narrow", "narrow": "stack", "stack": "auto"}[_LAYOUT]
@@ -2231,8 +2228,7 @@ _GOVERNOR_QUIET_FRACTION = 0.5   # F-28c "healthy 무음" (prd.md:288/311, plan 
 def _governor_segs():
     """`  ⚙ governor N/cap` — F-28c (prd.md:288/311). Pulse-ADJACENT, never merged into the
     pulse row's own session/job counts (I8 — this is a wholly separate line/collector). `None`
-    (source absent OR healthy-quiet) = caller omits the row entirely, same "zero lines when
-    healthy" contract the alert strip already uses."""
+    (source absent OR healthy-quiet) = caller omits the row entirely."""
     try:
         from .collectors import governor
         g = governor.collect()
@@ -2278,8 +2274,8 @@ def _pulse_segs(sessions, jobs):
 
 def _mem_summary_segs(memory):
     """F-19 pulse-adjacent summary row — `🧠 mem  +N added(Nw·Nd) · M expired · K pruned ·
-    last distill <elapsed>`. Healthy-silent: None when today's journal is empty AND no alert
-    fired (mirrors the alert-strip zero-lines-when-healthy convention)."""
+    last distill <elapsed>`. Healthy-silent when today's journal and diagnostic signals are
+    both empty. F-70 keeps memory diagnostics here after removing the integrated alert row."""
     if not memory:
         return None
     today = memory.get("today") or {}
@@ -2287,8 +2283,8 @@ def _mem_summary_segs(memory):
     expired = today.get("expired", 0)
     pruned = today.get("pruned", 0)
     alerts = memory.get("alerts") or {}
-    alert_active = bool(alerts.get("durable_over")) or bool(alerts.get("distill_stale"))
-    if not (added or expired or pruned) and not alert_active:
+    diagnostic_active = bool(alerts.get("durable_over")) or bool(alerts.get("distill_stale"))
+    if not (added or expired or pruned) and not diagnostic_active:
         return None
     last_min = memory.get("last_distill_min")
     seg = [("  🧠 ", "dim"), ("mem  ", "dim"),
@@ -2298,6 +2294,11 @@ def _mem_summary_segs(memory):
            (" · ", "dim"), ("%d pruned" % pruned, "dim"),
            (" · ", "dim"),
            ("last distill %s" % (fmt_min(last_min) if last_min is not None else "—"), "dim")]
+    durable_over = alerts.get("durable_over") or []
+    if durable_over:
+        seg += [(" · ", "dim"), ("durable %d over" % len(durable_over), "lvl_y")]
+    if alerts.get("distill_stale"):
+        seg += [(" · ", "dim"), ("distill stale", "lvl_y")]
     return seg
 
 
@@ -2369,31 +2370,6 @@ def _mem_repo_rows(events, sid_titles, limit=_MEM_REPO_ROW_LIMIT):
             seg.append(('"%s"' % _clip_w(snip, 60), "dim"))
         rows.append(seg)
     return rows
-
-
-def _mem_alert_bucket(memory):
-    """F-19 alert-strip bucket — durable soft-ceiling + distill-silence, appended LAST in the
-    dead > stale > ctx > mem priority order (§4.6)."""
-    if not memory:
-        return None
-    alerts = memory.get("alerts") or {}
-    parts = []
-    over = alerts.get("durable_over") or []
-    if over:
-        names = []
-        for cwd_origin, count in over[:4]:
-            label = str(cwd_origin or "?")
-            for prefix in ("git:", "root:", "id:"):
-                if label.startswith(prefix):
-                    label = label[len(prefix):]
-            names.append("%s=%d" % (_clip_w(label, 20), count))
-        more = " +%d" % (len(over) - 4) if len(over) > 4 else ""
-        parts.append("durable-over %s%s" % ("·".join(names), more))
-    if alerts.get("distill_stale"):
-        parts.append("distill stale %s" % fmt_min(memory.get("last_distill_min")))
-    if not parts:
-        return None
-    return (" · ".join(parts), "lvl_y")
 
 
 def _unique_managed_parents(sessions):
@@ -3088,6 +3064,21 @@ _API_DISABLED = False   # F-51c: FLEET_DISABLE=usage-api / --no-usage-api, set b
 def set_api_disabled(v):
     global _API_DISABLED
     _API_DISABLED = bool(v)
+
+
+_HEARTING = None   # resolved once by fleet.main; render ticks never inspect installer/git state
+
+
+def set_hearting(value):
+    global _HEARTING
+    _HEARTING = dict(value) if isinstance(value, dict) else None
+
+
+def _hearting_header_row():
+    value = _HEARTING or {}
+    version = str(value.get("version") or "unknown")
+    method = str(value.get("install_method") or "unmanaged")
+    return [("  hearting ", "head"), (version, "name_idle"), (" · ", "dim"), (method, "dim")]
 
 
 # --- F-30 (v10, prd.md:304-310) — process view: pipeline-centric regrouping, `p` toggle ---
@@ -3843,7 +3834,7 @@ def _build_lines(sessions, jobs, section, narrow, malformed, layout="wide", memo
     Same contract consumed by BOTH `render_once` (plain, full output) and `_draw` (viewport
     slices this same list) — `_OFFSET` must never be read here (see module docstring).
 
-    `memory` = F-19 collectors.memory.collect() result (or None — panel/alerts simply omitted;
+    `memory` = F-19 collectors.memory.collect() result (or None — memory rows simply omitted;
     tests default to None so every pre-F-19 call site keeps working unchanged).
     """
     global _SELECTABLE
@@ -3930,7 +3921,8 @@ def _build_lines(sessions, jobs, section, narrow, malformed, layout="wide", memo
             sessions, display_jobs, _route_views_by_id, malformed, memory,
             term_width, layout, node_evidence=_node_evidence)
         resource_lines = _resource_rows(resources, section)
-        return resource_lines + ([None] if resource_lines else []) + process_lines
+        return ([_hearting_header_row()] + resource_lines
+                + ([None] if resource_lines else []) + process_lines)
     # F-18b: mem-worker (distiller/curator/F-17 refresher) census — computed on the ORIGINAL
     # session list, before is_child/mem filtering, so folded/mem-only groups still surface a
     # total in the legend even when no group header badge fires.
@@ -3973,8 +3965,8 @@ def _build_lines(sessions, jobs, section, narrow, malformed, layout="wide", memo
         for managed_dir, session in _unique_managed_parents(sessions).items()
     }
     job_groups = {}
-    # A route node has one current attempt. Keep older exact attempts in the alert
-    # census/history, but suppress their rows by default so retries do not appear as
+    # A route node has one current attempt. Keep older exact attempts in history evidence,
+    # but suppress their rows by default so retries do not appear as
     # concurrent Fleet sessions. ``a`` restores the complete attempt history.
     top_jobs = [j for j in display_jobs if not (getattr(j, "parent_slug", None) and getattr(j, "depth", 1) >= 2)]
     depth_jobs = [j for j in display_jobs if getattr(j, "parent_slug", None) and getattr(j, "depth", 1) >= 2]
@@ -4020,7 +4012,7 @@ def _build_lines(sessions, jobs, section, narrow, malformed, layout="wide", memo
         visible_tiers = {name: _group_activity_rank(groups[name]) for name in visible_order}
         order = live_order.reconcile_groups(visible_order, visible_tiers) + non_card_order
 
-    lines = []
+    lines = [_hearting_header_row()]
     _seen_glyphs = set()
     # F-12(c) legend glyph-appearance tracking — LOCAL to this call (never module/global state,
     # _OFFSET invariant R3): which of the conditional legend glyphs actually got emitted this
@@ -4032,8 +4024,6 @@ def _build_lines(sessions, jobs, section, narrow, malformed, layout="wide", memo
     # fleet pulse — htop's "Tasks: N, M running" analogue: whole-board census + live spend Σ
     # Show the row by default; counts skip app-server companions. Extracted into _pulse_segs
     # (F-30, v10) so the process view (§5.1) shares this EXACT row instead of a second copy.
-    # `_real` stays a LOCAL here too — the alert strip below (ctx_items) still needs it.
-    _real = [s for s in sessions if not s.app_server and not getattr(s, "mem_worker", False)]
     lines.append(_pulse_segs(sessions, display_jobs))  # Aggregate cost rollup intentionally removed.
     resource_lines = _resource_rows(resources, section)
     if resource_lines:
@@ -4051,62 +4041,6 @@ def _build_lines(sessions, jobs, section, narrow, malformed, layout="wide", memo
             lines.extend(_mem_events)
             _seen_glyphs.add("mem")
 
-    # alert strip — CONDITIONAL (zero lines when healthy): compaction-imminent contexts and
-    # stalled dispatches (the stealth-death guard §5.10, surfaced on the board instead of only
-    # in dispatch-liveness.sh runs). dead jobs = red, warnings = yellow.
-    # F-10: names go through the same compaction as dispatch rows (_compact_dispatch_name) with
-    # a loop job's `<case>-<ts>-<pid>` tail stripped first (raw timestamps/pids are noise here);
-    # same-kind alerts aggregate into one line (`⚠ 2 dead jobs: a·b`), bucketed dead/stale/ctx.
-    def _alert_name(name):
-        return _compact_dispatch_name(_ALERT_TAIL.sub("", name or "") or (name or "?"), 20)
-
-    def _bucket_text(label, names):
-        if not names:
-            return None
-        if len(names) == 1:
-            return "%s %s" % (label, names[0])
-        shown = "·".join(names[:4])
-        more = " +%d" % (len(names) - 4) if len(names) > 4 else ""
-        return "%d %s jobs: %s%s" % (len(names), label, shown, more)
-
-    dead_names = [_alert_name(j.slug or j.key) for j in jobs if j.liveness == "dead"]
-    stale_names = [_alert_name(j.slug or j.key) for j in jobs if j.liveness == "stale"]
-    ctx_items = [(s.slug or "?", s.ctx_pct) for s in _real
-                 if s.ctx_pct is not None and s.ctx_pct >= 80 and s.liveness in ("working", "idle")]
-
-    buckets = []
-    dead_text = _bucket_text("dead", dead_names)
-    if dead_text:
-        buckets.append((dead_text, "lvl_r"))
-    stale_text = _bucket_text("stale", stale_names)
-    if stale_text:
-        buckets.append((stale_text, "lvl_y"))
-    if ctx_items:
-        worst = max(pct for _n, pct in ctx_items)
-        ctx_text = _bucket_text("context-high", [_alert_name(n) for n, _p in ctx_items]) \
-            if len(ctx_items) > 1 else "context %d%% %s" % (
-                ctx_items[0][1], _alert_name(ctx_items[0][0]))
-        buckets.append((ctx_text, "lvl_r" if worst >= 90 else "lvl_y"))
-    for _degradation_text in _degradation_alert_rows(_degradations, show_all=_SHOW_ALL):
-        buckets.append((_degradation_text, "lvl_y"))
-    mem_bucket = _mem_alert_bucket(memory)   # F-19 — last in priority (dead > stale > ctx > mem)
-    if mem_bucket:
-        buckets.append(mem_bucket)
-        _seen_glyphs.add("mem")
-
-    if buckets:
-        # priority truncation dead > stale > ctx when the row would overflow — buckets are
-        # already in that priority order, so drop from the tail. Budget mirrors the existing
-        # dormant-dirs line convention (`names[:90]`) rather than a hardcoded terminal width.
-        kept = list(buckets)
-        while len(kept) > 1 and sum(len(t) for t, _k in kept) + 3 * (len(kept) - 1) > 100:
-            kept.pop()
-        arow = [("  alert ", "head")]
-        for ai, (txt, akey) in enumerate(kept):
-            if ai:
-                arow.append(("   ", None))
-            arow.append(("⚠ " + txt, akey))
-        lines.append(arow)
     # usage/intel zone = PLAIN bg + a full-width dim rule below it (user 2026-07-03: intel
     # Keep tint directory-only so the intelligence zone is not confused with active cards.
     lines.append([(_HFILL, None)])
@@ -4892,49 +4826,6 @@ def _cursor_index(targets):
         if _entry_id(e) == _CURSOR_ID:
             return i
     return None
-
-
-def _degradation_alert_rows(degradations, show_all=False):
-    """Format failed-leg evidence without aggregating away sibling coordinates."""
-    rows = []
-    all_events = []
-    for key, events in (degradations or {}).items():
-        for event in events or ():
-            if isinstance(event, dict):
-                all_events.append(event)
-    unique = {}
-    for event in all_events:
-        unique[event.get("event_id") or repr(sorted(event.items()))] = event
-    grouped = {}
-    orphan = []
-    for event in unique.values():
-        if event.get("_unattributed") or not event.get("route_id"):
-            orphan.append(event)
-        else:
-            grouped.setdefault(event.get("route_id"), []).append(event)
-    for route_id, events in grouped.items():
-        events.sort(key=lambda item: item.get("ts", 0), reverse=True)
-        visible = events if show_all else events[:3]
-        for event in visible:
-            node = event.get("route_node") or "?"
-            if event.get("kind") == "chain-exhausted":
-                rows.append("⚠ %s fallback-chain-exhausted · all hops exhausted" % node)
-            elif int(event.get("dispatch_depth", 2) or 2) == 1:
-                rows.append("⚠ contract violation: quick degradation row · %s · %s · %s" % (
-                    route_id, node, event.get("fallback_hop") or "?"))
-            else:
-                index = event.get("parallel_leg_index")
-                count = event.get("parallel_leg_count")
-                coord = (" leg %s/%s" % (int(index) + 1, count)
-                         if index is not None and count else "")
-                rows.append("⚠ %s%s %s ✕ exit=%s %s" % (
-                    node, coord, event.get("harness") or "?",
-                    event.get("exit_code", "?"), event.get("reason") or "leg-failure"))
-        if not show_all and len(events) > 3:
-            rows.append("⚠ +%d more failed legs (--json)" % (len(events) - 3))
-    for event in orphan:
-        rows.append("⚠ unattributed degradation · %s" % (event.get("reason") or event.get("kind") or "event"))
-    return rows
 
 
 def _enter_select(targets):

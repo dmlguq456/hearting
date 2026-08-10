@@ -22,9 +22,11 @@ if __package__ in (None, ""):
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     from fleet.collectors import collect_all
     from fleet.collectors import procscan
+    from fleet import installinfo
 else:
     from .collectors import collect_all
     from .collectors import procscan
+    from . import installinfo
 
 
 def parse_args(argv):
@@ -95,7 +97,8 @@ def _collect_memory():
         return None
 
 
-def _snapshot_json(sessions, jobs, resource_jobs=None, usage=None, disabled=None, show_all=False):
+def _snapshot_json(sessions, jobs, resource_jobs=None, usage=None, disabled=None, show_all=False,
+                   hearting=None):
     resource_jobs = list(resource_jobs or [])
     visible_resources = resource_jobs if show_all else [
         row for row in resource_jobs if row.liveness == "working"
@@ -128,6 +131,8 @@ def _snapshot_json(sessions, jobs, resource_jobs=None, usage=None, disabled=None
         out["usage"] = usage
     if disabled is not None:
         out["disabled"] = disabled
+    if hearting is not None:
+        out["hearting"] = dict(hearting)
     return json.dumps(out, ensure_ascii=False, indent=2)
 
 
@@ -161,6 +166,7 @@ def _collect_route(entities):
 def main(argv=None):
     args = parse_args(argv if argv is not None else sys.argv[1:])
     hfilter = _harness_filter(args.harness)
+    hearting = installinfo.collect()
     disabled = _disabled_tokens()
     disabled["api_disabled"] = bool(disabled["api_disabled"] or args.no_usage_api)
     if args.title_provider:
@@ -230,7 +236,8 @@ def main(argv=None):
                              resource_jobs=projected_collector.last_resource_jobs,
                              usage=usage_json,
                              disabled=disabled,
-                             show_all=args.show_all))
+                             show_all=args.show_all,
+                             hearting=hearting))
         return 0
 
     # curses / --once path (render module) — resolved lazily so --json needs no curses.
@@ -245,6 +252,7 @@ def main(argv=None):
 
     render.set_show_all(args.show_all)
     render.set_api_disabled(disabled["api_disabled"])
+    render.set_hearting(hearting)
     # F-30 (v10, plan §P3/§9): --view is additive and honors the SAME single _PROCESS_VIEW
     # state the `p` key flips — never a second decision path. FLEET_VIEW env is the reduction
     # fallback the plan reserves in case --view itself is judged out of scope later (§9 note 1);

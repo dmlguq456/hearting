@@ -266,19 +266,21 @@ class RenderIntegrationTest(unittest.TestCase):
                                     layout="wide", memory=self._snapshot())
         self.assertNotIn("hello", self._text(lines))
 
-    def test_durable_over_alert_bucket_appears(self):
+    def test_durable_over_stays_on_memory_summary_without_alert_strip(self):
         snap = self._snapshot(alerts={"durable_over": [["proj-a", 85]], "distill_stale": False})
         lines = render._build_lines([], [], section="fleet", narrow=False, malformed=0,
                                     layout="wide", memory=snap)
         text = self._text(lines)
-        self.assertIn("durable-over", text)
-        self.assertIn("proj-a=85", text)
+        self.assertIn("durable 1 over", text)
+        self.assertNotIn("  alert ", text)
 
-    def test_distill_stale_alert_bucket_appears(self):
+    def test_distill_stale_stays_on_memory_summary_without_alert_strip(self):
         snap = self._snapshot(alerts={"durable_over": [], "distill_stale": True})
         lines = render._build_lines([], [], section="fleet", narrow=False, malformed=0,
                                     layout="wide", memory=snap)
-        self.assertIn("distill stale", self._text(lines))
+        text = self._text(lines)
+        self.assertIn("distill stale", text)
+        self.assertNotIn("  alert ", text)
 
 
 class RepoRowsRenderTest(unittest.TestCase):

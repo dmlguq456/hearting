@@ -147,12 +147,14 @@ class ContextDetailTruthTableTest(unittest.TestCase):
                 self.assertEqual(text(row), " " * render._CONTEXT_INDENT_W +
                                  LEAD + EMPTY * BASE + "   —")
 
-    def test_context_alert_uses_the_full_visible_label(self):
+    def test_hot_context_stays_visible_without_integrated_alert(self):
         session = self._session(slug="hot", ctx_pct=85)
         visible = text(render._build_lines([session], [], "fleet", False, 0,
                                            layout="wide", term_width=168))
-        self.assertIn("⚠ context 85% hot", visible)
+        self.assertNotIn("⚠ context", visible)
         self.assertNotIn("⚠ ctx ", visible)
+        self.assertIn("85%", visible)
+        self.assertIn("hot", visible)
 
     def test_context_row_is_cell_safe_at_all_required_widths(self):
         for width in (168, 120, 100, 60):

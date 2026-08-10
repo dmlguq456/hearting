@@ -1424,12 +1424,11 @@ class CodexAttemptIdentityTest(unittest.TestCase):
         lines = render._build_lines([], jobs, section="dispatch", narrow=False,
                                     malformed=0, layout="wide")
         text = "\n".join("".join(part for part, _key in line) for line in lines if line)
-        body = "\n".join(line for line in text.splitlines() if "alert" not in line)
-
-        self.assertIn("test-r5", body)
+        self.assertIn("test-r5", text)
         for retry in range(2, 5):
-            self.assertNotIn("test-r%d" % retry, body)
-        self.assertIn("3 dead jobs", text)  # history remains visible as a diagnostic summary
+            self.assertNotIn("test-r%d" % retry, text)
+        self.assertNotIn("dead jobs", text)
+        self.assertNotIn("  alert ", text)
 
     def test_default_render_hides_older_working_attempt(self):
         older = DispatchJob(key="code-test", slug="test-r4", cwd="/work/wt",
@@ -1944,33 +1943,27 @@ class ConductorBreadcrumbTest(unittest.TestCase):
                          ["stg3_on"])
 
 
-class AlertHumanizeTest(unittest.TestCase):
-    """F-10 — alert strip strips loop-job <case>-<ts>-<pid> tails and aggregates by kind."""
+class IntegratedAlertRemovalTest(unittest.TestCase):
+    """F-70 — unhealthy evidence remains on rows, never in an integrated alert strip."""
 
-    def _alert_text(self, lines):
-        for ln in lines:
-            if ln and ln[0][0] == "  alert ":
-                return "".join(t for t, _k in ln)
-        return None
+    def _text(self, lines):
+        return "\n".join("".join(t for t, _k in ln) for ln in lines if ln)
 
-    def test_alert_humanize_aggregates_and_strips_tail(self):
+    def test_dead_jobs_do_not_create_alert_strip(self):
         dead_a = DispatchJob(key="drill", slug="case-a-20260709-11111", liveness="dead")
         dead_b = DispatchJob(key="drill", slug="case-b-20260709-22222", liveness="dead")
         lines = render._build_lines([], [dead_a, dead_b], section="both", narrow=False,
                                     malformed=0, layout="wide")
-        text = self._alert_text(lines)
-        self.assertIsNotNone(text)
-        self.assertIn("2 dead jobs: case-a·case-b", text)
-        self.assertNotIn("20260709", text)
+        self.assertNotIn("  alert ", self._text(lines))
+        self.assertNotIn("dead jobs", self._text(lines))
 
-    def test_alert_humanize_single_stale_job_not_aggregated(self):
+    def test_stale_job_remains_visible_without_alert_strip(self):
         stale = DispatchJob(key="drill", slug="lone-case-20260709-33333", liveness="stale")
         lines = render._build_lines([], [stale], section="both", narrow=False, malformed=0,
                                     layout="wide")
-        text = self._alert_text(lines)
-        self.assertIsNotNone(text)
-        self.assertIn("stale lone-case", text)
-        self.assertNotIn("20260709", text)
+        text = self._text(lines)
+        self.assertNotIn("  alert ", text)
+        self.assertIn("lone-case-20260709-33333", text)
 
 
 if __name__ == "__main__":

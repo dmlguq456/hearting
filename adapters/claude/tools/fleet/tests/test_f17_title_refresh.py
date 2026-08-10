@@ -788,7 +788,7 @@ class SecurityTest(_ConfigHomeMixin, unittest.TestCase):
         self.assertEqual(rt.selected_providers()[0], "codex")
 
     def test_tight_primary_capacity_promotes_declared_opencode_relief(self):
-        os.environ["HARNESS_CAPACITY_SCORES"] = "claude:20,codex:30"
+        os.environ["HARNESS_CAPACITY_SCORES"] = "claude:20,codex:30,opencode:100"
         self.assertEqual(rt.selected_providers()[0], "opencode")
 
     def test_validate_caps_injected_long_string(self):
@@ -809,7 +809,7 @@ class TriggerLogicTest(unittest.TestCase):
         self.root = self._tmp.name
         self.agent_home = os.path.join(self.root, "home")
         os.makedirs(self.agent_home, exist_ok=True)
-        refresher_dir = os.path.join(self.root, "agent_setting", "tools", "fleet")
+        refresher_dir = os.path.join(self.agent_home, "tools", "fleet")
         os.makedirs(refresher_dir, exist_ok=True)
         self.refresher = os.path.join(refresher_dir, "refresh_title.py")
         with open(self.refresher, "w", encoding="utf-8") as f:
