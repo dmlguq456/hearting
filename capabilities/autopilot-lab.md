@@ -86,17 +86,19 @@ advances `metrics`, and `sync` is the terminal node.
 The separable stages of a `standard+` eval are: (1) context and experiment
 contract, (2) evaluation harness preparation, (3) checkpoint evaluation run,
 (4) metrics and per-array analysis, (5) figures, audio, and playback HTML,
-(6) formal report assembly, (7) independent verification, and (8) spec sync
-when applicable followed by the optional artifact-sink extension. Group stages into workers by file ownership and dependency rather than
+(6) canonical report-bundle assembly, (7) independent verification, (8)
+atomic publication to the installed report-bundle root, and (9) spec sync
+when applicable followed by the optional identity-only artifact-sink extension. Group stages into workers by file ownership and dependency rather than
 opening one session per stage:
 
 | Worker | Owns (write) | Typical stages |
 |---|---|---|
 | eval worker | eval harness, raw metrics (`metrics.jsonl`, `run.json`), `_RUNLOG` row | 2–4 |
 | media worker | `figures/`, audio segments, playback `report/*.html` | 5 |
-| report worker | `REPORT.md`, `STORY.md`, `summary.md` | 6 |
+| report worker | staged `report/{index.html,REPORT.md,report_manifest.json,media/}`, `STORY.md`, `summary.md` | 6 |
 | verification worker | read-only checks; verdict artifact only | 7 |
-| closing stage | `autopilot-spec` update when applicable (a research-mode blueprint advances as a roadmap: close the step with its verdict and evidence, re-plan the tail), then offer the canonical experiment artifact to the optional app-neutral sink; unavailable records `skipped/extension-unavailable` | 8 |
+| publication stage | `report-bundle publish` with explicit project/experiment/version, then destination verification; writes only the installed bundle root and `bundle-publication.json` | 8 |
+| closing stage | `autopilot-spec` update when applicable (a research-mode blueprint advances as a roadmap: close the step with its verdict and evidence, re-plan the tail), then offer only `bundle_id`, version, and `report/index.html` to the optional app-neutral sink; unavailable records `skipped/extension-unavailable` | 9 |
 
 The main session or its dispatch-depth-1 conductor applies the `WORKFLOW §0.3`
 pre-execution gate before the checkpoint evaluation run, dispatches workers
@@ -228,8 +230,12 @@ count), exposing the matched member path per root.
 ## Routing Boundary
 
 Full-run entry is gated by a current hash-bound smoke attestation and detached
-resource-run identity. Evaluation reports use one `report_manifest.json`
-validated by `tools/report-manifest-verify.py` for 48 kHz/full-band media, summary statistics, hashes,
+resource-run identity. Evaluation reports use one `report_manifest.json`. New
+publishable bundles use schema v2 from
+`capabilities/report-bundle-manifest.schema.json`, permitting prose-only
+reports while requiring a closed file/hash/link inventory. Declared media
+additionally requires actual decode/playback and the 1:1 evidence set. Legacy
+schema v1 remains validated by `tools/report-manifest-verify.py` for 48 kHz/full-band media, summary statistics, hashes,
 1:1 audio/waveform/spectrogram/playback sets, and visual evidence. Its optional `bundle`
 block declares each representation's `format`, `roles`, and file binding plus one shared
 `title` and one `primary_representation_id`; for audio/media evaluations the playback HTML
@@ -246,8 +252,9 @@ update. `autopilot-refine` corrects existing document surfaces only;
 `autopilot-spec` records evaluation-policy or blueprint changes without
 executing them; formal prose assembly hands off to `autopilot-draft`. Every
 completed setup or eval durable terminal evaluates the route-sealed optional
-artifact-sink extension under `WORKFLOW §0.2`: an available sink receives the
-canonical artifact through the app-neutral receipt contract, while unavailable
+artifact-sink extension under `WORKFLOW §0.2`: after atomic bundle publication,
+an available sink receives receipt v2 identity (`bundle_id`, `version`, and
+`report/index.html`) without an absolute bundle path or upload, while unavailable
 state records `skipped/extension-unavailable` and preserves lab completion.
 The extension remains separate from lab execution and other secondary
 ownership. None of these secondaries replaces the lab execution, and lab does

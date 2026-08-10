@@ -250,5 +250,15 @@ class OpenCodePermissionDefault(unittest.TestCase):
             config = json.loads(WH.scoped_external_directory_config("/tmp/fixture-artifact-root"))
         self.assertEqual(config["permission"]["external_directory"]["*"], "allow")
 
+    def test_report_bundle_root_is_narrowly_allowed(self):
+        with mock.patch.dict(os.environ, {"OPENCODE_CONFIG_CONTENT": ""}, clear=False):
+            config = json.loads(WH.scoped_external_directory_config(
+                "/tmp/fixture-artifact-root", "/tmp/fixture-report-bundles"
+            ))
+        rules = config["permission"]["external_directory"]
+        self.assertEqual(rules["/tmp/fixture-report-bundles"], "allow")
+        self.assertEqual(rules["/tmp/fixture-report-bundles/**"], "allow")
+        self.assertEqual(rules["*"], "deny")
+
 
 if __name__=="__main__": unittest.main()

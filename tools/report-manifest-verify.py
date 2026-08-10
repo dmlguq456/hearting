@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
-"""Verify one shared Markdown/HTML/audio visualization report manifest."""
-import argparse, hashlib, json, re, sys
+"""Verify legacy media reports and self-contained report bundle manifests."""
+import argparse, hashlib, imghdr, json, re, sys, wave
+from html.parser import HTMLParser
 from pathlib import Path
+from urllib.parse import unquote, urlsplit
 KINDS=("audio","waveform","spectrogram","playback")
 ROLES=("canonical","summary","interactive","navigation")
 BUNDLE_KEYS=("title","primary_representation_id","representations","equivalence_groups")
@@ -48,7 +50,7 @@ def load_bundle(root,data,texts):
   if not isinstance(order,list) or not order or len(set(order))!=len(order) or any(not isinstance(section,str) or not section for section in order): raise ValueError("invalid equivalence group section order")
   ids.add(gid); groups.append((set(members),order))
  return title,pid,reps,groups
-def verify(path):
+def _verify_v1(path):
  path=Path(path).resolve(); root=path.parent; data=json.loads(path.read_text())
  if data.get("schema_version")!=1: raise ValueError("schema_version must be 1")
  house=data.get("house_parameters",{})
@@ -86,6 +88,156 @@ def verify(path):
     if title not in reps[rid][1]: raise ValueError("equivalence group member missing the shared title: "+rid)
   if len(canon_ids)>1 and not any(canon_ids<=members for members,_ in eq_groups): raise ValueError("multiple canonical representations require one declared equivalence group")
  return {"samples":len(groups),"media":sum(map(len,groups.values())),"bundle_classification":"declared" if has_bundle else "legacy/unspecified"}
+
+
+V2_KEYS={"schema_version","bundle_id","project","experiment_id","version","entrypoint","files","media"}
+V2_FILE_KEYS={"path","sha256"}
+V2_MEDIA_KEYS={"path","sha256","sample_id","kind"}
+COMPONENT_PAT=re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+HASH_PAT=re.compile(r"^[0-9a-f]{64}$")
+REMOTE_SCHEMES={"http","https","mailto"}
+
+
+class _HTMLLinks(HTMLParser):
+ def __init__(self):
+  super().__init__(convert_charrefs=True); self.links=[]; self.styles=[]
+ def handle_starttag(self,tag,attrs):
+  for key,value in attrs:
+   if value is None: continue
+   key=key.lower()
+   if key in {"href","src","poster"}: self.links.append((key,value))
+   elif key=="style": self.styles.append(value)
+
+
+def _v2_relpath(raw,label):
+ if not isinstance(raw,str) or not raw or "\\" in raw: raise ValueError(label+" must be a non-empty POSIX relative path")
+ path=Path(raw)
+ if path.is_absolute() or raw.startswith("/") or any(part in {"",".",".."} for part in path.parts): raise ValueError(label+" escapes bundle root: "+raw)
+ return path
+
+
+def _v2_file(root,row,label):
+ if not isinstance(row,dict) or set(row)!=V2_FILE_KEYS: raise ValueError("invalid "+label+" record")
+ rel=_v2_relpath(row.get("path"),label)
+ if not isinstance(row.get("sha256"),str) or not HASH_PAT.fullmatch(row["sha256"]): raise ValueError("invalid sha256: "+str(row.get("path")))
+ path=root/rel
+ if path.is_symlink() or not path.is_file(): raise ValueError("missing or unsafe bundle file: "+str(rel))
+ if hashlib.sha256(path.read_bytes()).hexdigest()!=row["sha256"]: raise ValueError("hash mismatch: "+str(rel))
+ return rel,path
+
+
+def _link_target(root,document,value,attribute):
+ raw=value.strip().strip("<>")
+ if not raw or raw.startswith("#"): return
+ split=urlsplit(raw)
+ scheme=split.scheme.lower()
+ if scheme:
+  if scheme=="data" and attribute in {"src","poster","asset"}: return
+  if scheme in REMOTE_SCHEMES and attribute=="href": return
+  raise ValueError("non-self-contained resource link: "+raw)
+ path_text=unquote(split.path)
+ if not path_text: return
+ if path_text.startswith("/") or "\\" in path_text: raise ValueError("bundle link escapes root: "+raw)
+ target=(document.parent/Path(path_text)).resolve(strict=False)
+ try: target.relative_to(root)
+ except ValueError: raise ValueError("bundle link escapes root: "+raw)
+ if target.is_dir(): target=target/"index.html"
+ if target.is_symlink() or not target.is_file(): raise ValueError("missing internal link target: "+raw)
+
+
+def _verify_links(root,files):
+ markdown=re.compile(r"(!?)\[[^\]]*\]\(([^)\s]+)(?:\s+['\"][^)]*)?\)")
+ css=re.compile(r"url\(\s*(['\"]?)(.*?)\1\s*\)",re.I)
+ for rel,path in files.items():
+  suffix=path.suffix.lower()
+  if suffix not in {".html",".htm",".md",".markdown",".css"}: continue
+  text=path.read_text(encoding="utf-8")
+  if suffix in {".html",".htm"}:
+   parser=_HTMLLinks(); parser.feed(text); parser.close()
+   for attr,value in parser.links: _link_target(root,path,value,attr)
+   for style in parser.styles:
+    for _,value in css.findall(style): _link_target(root,path,value,"asset")
+  elif suffix==".css":
+   for _,value in css.findall(text): _link_target(root,path,value,"asset")
+  else:
+   for marker,value in markdown.findall(text): _link_target(root,path,value,"asset" if marker else "href")
+
+
+def _decode_media(path,kind):
+ if kind=="audio":
+  if path.suffix.lower() not in {".wav",".wave"}: raise ValueError("unsupported fail-closed audio format: "+path.name)
+  try:
+   with wave.open(str(path),"rb") as source:
+    if source.getnchannels()<1 or source.getframerate()<1 or source.getnframes()<1: raise ValueError
+    source.readframes(min(source.getnframes(),source.getframerate()))
+  except (wave.Error,EOFError,OSError,ValueError): raise ValueError("media decode failed: "+path.name)
+ elif kind in {"waveform","spectrogram"}:
+  if imghdr.what(str(path)) is None: raise ValueError("media decode failed: "+path.name)
+ elif kind=="playback":
+  if path.suffix.lower() not in {".html",".htm"}: raise ValueError("playback must be HTML: "+path.name)
+  try: parser=_HTMLLinks(); parser.feed(path.read_text(encoding="utf-8")); parser.close()
+  except (UnicodeError,OSError): raise ValueError("playback decode failed: "+path.name)
+
+
+def _verify_v2(path):
+ path=Path(path)
+ if path.is_symlink(): raise ValueError("v2 manifest must not be a symlink")
+ path=path.resolve(); root=path.parent
+ if path.name!="report_manifest.json" or path.is_symlink() or not path.is_file(): raise ValueError("v2 manifest must be report_manifest.json")
+ data=json.loads(path.read_text(encoding="utf-8"))
+ if set(data)!=V2_KEYS: raise ValueError("invalid v2 manifest properties")
+ for key in ("project","experiment_id","version"):
+  if not isinstance(data.get(key),str) or not COMPONENT_PAT.fullmatch(data[key]): raise ValueError("invalid "+key)
+ if data.get("bundle_id")!=data["project"]+"/"+data["experiment_id"]: raise ValueError("bundle_id must equal project/experiment_id")
+ if data.get("entrypoint")!="index.html": raise ValueError("entrypoint must be index.html")
+ media_dir=root/"media"
+ if media_dir.is_symlink() or not media_dir.is_dir(): raise ValueError("canonical media directory is required")
+ rows=data.get("files")
+ if not isinstance(rows,list) or len(rows)<2: raise ValueError("files must contain the complete bundle inventory")
+ declared={}; paths={}
+ for row in rows:
+  rel,file_path=_v2_file(root,row,"file")
+  key=rel.as_posix()
+  if key in declared: raise ValueError("duplicate file inventory path: "+key)
+  declared[key]=row["sha256"]; paths[rel]=file_path
+ for required in ("index.html","REPORT.md"):
+  if required not in declared: raise ValueError("missing canonical file inventory: "+required)
+ actual=set()
+ for candidate in root.rglob("*"):
+  if candidate.is_symlink(): raise ValueError("symlink forbidden in report bundle: "+str(candidate.relative_to(root)))
+  if candidate.is_file() and candidate!=path: actual.add(candidate.relative_to(root).as_posix())
+ if actual!=set(declared):
+  extra=sorted(actual-set(declared)); missing=sorted(set(declared)-actual)
+  raise ValueError("bundle inventory mismatch: extra="+",".join(extra)+" missing="+",".join(missing))
+ _verify_links(root,paths)
+ media=data.get("media")
+ if not isinstance(media,list): raise ValueError("media must be an array")
+ groups={}; media_paths=set()
+ for row in media:
+  if not isinstance(row,dict) or set(row)!=V2_MEDIA_KEYS: raise ValueError("invalid media record")
+  kind=row.get("kind"); sample=row.get("sample_id")
+  if kind not in KINDS or not isinstance(sample,str) or not COMPONENT_PAT.fullmatch(sample): raise ValueError("invalid media identity")
+  rel=_v2_relpath(row.get("path"),"media")
+  if rel.parts[0]!="media" or rel.as_posix() not in declared or declared[rel.as_posix()]!=row.get("sha256"): raise ValueError("media must bind to the file inventory: "+str(rel))
+  if rel.as_posix() in media_paths: raise ValueError("duplicate media path: "+str(rel))
+  media_paths.add(rel.as_posix()); groups.setdefault(sample,set()).add(kind); _decode_media(root/rel,kind)
+ if groups:
+  if any(kinds!=set(KINDS) for kinds in groups.values()): raise ValueError("each declared sample requires 1:1 audio/waveform/spectrogram/playback")
+  for sample in groups:
+   playback=next(root/Path(row["path"]) for row in media if row["sample_id"]==sample and row["kind"]=="playback")
+   text=playback.read_text(encoding="utf-8")
+   for row in media:
+    if row["sample_id"]==sample and row["kind"]!="playback" and Path(row["path"]).name not in text: raise ValueError("playback does not bind declared media: "+row["path"])
+ return {"samples":len(groups),"media":len(media),"bundle_id":data["bundle_id"],"version":data["version"],"entrypoint":"report/index.html","bundle_classification":"bundle/v2"}
+
+
+def verify(path):
+ path=Path(path)
+ data=json.loads(path.read_text(encoding="utf-8"))
+ version=data.get("schema_version")
+ if version==1: return _verify_v1(path)
+ if version==2: return _verify_v2(path)
+ raise ValueError("schema_version must be 1 or 2")
 def main():
  p=argparse.ArgumentParser(); p.add_argument("manifest"); p.add_argument("--classification",action="store_true"); a=p.parse_args(); result=verify(a.manifest)
  if a.classification: print(result["bundle_classification"])

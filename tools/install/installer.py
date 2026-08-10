@@ -31,6 +31,7 @@ import extensions
 import distribution
 import codex_launcher
 import routing_config
+import report_bundle_config
 from drivers import get_driver, RUNTIMES
 
 # Exit codes map one-to-one to the PRD CLI table.
@@ -74,6 +75,10 @@ def build_parser():
 
     p_install = sub.add_parser("install", parents=[common], help="Install projections, runtime-owned surfaces, and manifests")
     p_install.add_argument("target", nargs="?", choices=[*RUNTIMES, "all"], default="all")
+    p_install.add_argument(
+        "--report-bundle-root",
+        help="Absolute report bundle store; initialized once and then user-owned",
+    )
 
     p_verify = sub.add_parser("verify", parents=[common], help="Run the automated Migration Order checks")
     p_verify.add_argument("target", nargs="?", choices=RUNTIMES, default=None)
@@ -122,6 +127,10 @@ def build_parser():
     runtime_common(p_runtime_activate, require_runtime=True)
     p_runtime_activate.add_argument("--mode", choices=runtime_activation.MODES, required=True)
     p_runtime_activate.add_argument("--source", help="local canonical repo (default: AGENT_HOME)")
+    p_runtime_activate.add_argument(
+        "--report-bundle-root",
+        help="Absolute report bundle store; initialized once and then user-owned",
+    )
 
     p_runtime_refresh = runtime_sub.add_parser("refresh", help="Refresh the current mode from its local source")
     runtime_common(p_runtime_refresh, require_runtime=True)
@@ -239,6 +248,24 @@ def cmd_install(args):
                 "detail": routing["status"],
             }
         )
+        try:
+            bundle_config = report_bundle_config.ensure(
+                args.report_bundle_root, dry_run=args.dry_run
+            )
+        except ValueError as exc:
+            any_blocked = True
+            lines.append(f"report-bundle-config: blocked ({exc})")
+            checks.append({"id": "report-bundle-config.root", "ok": False, "detail": str(exc)})
+        else:
+            lines.append(
+                "report-bundle-config: " + bundle_config["status"] + " "
+                + bundle_config["path"] + " root=" + bundle_config["root"]
+            )
+            checks.append({
+                "id": "report-bundle-config.root",
+                "ok": True,
+                "detail": bundle_config["status"],
+            })
         if args.dry_run:
             launcher_results = bootstrap.install_launchers(dry_run=True)
             lines.append("bootstrap: mem-import skipped (dry-run — no dry-run mode for restore_memory)")
@@ -326,6 +353,14 @@ def cmd_verify(args):
         "detail": routing["status"] + ": " + routing["path"],
     })
     if not routing["ok"]:
+        ok = False
+    bundle_config = report_bundle_config.validate()
+    all_checks.append({
+        "id": "report-bundle-config.root",
+        "ok": bundle_config["ok"],
+        "detail": bundle_config["status"] + ": " + bundle_config["path"],
+    })
+    if not bundle_config["ok"]:
         ok = False
     lines = [("✓" if c["ok"] else "✗") + f" {c['id']} {c['detail']}" for c in all_checks]
     return {"runtime": runtimes, "channel": "plugin" if args.plugin else "dev", "checks": all_checks,
@@ -721,6 +756,16 @@ def cmd_runtime(args):
             )
             for report in reports:
                 report["routing_config"] = routing
+            requested_root = (
+                args.report_bundle_root if args.runtime_command == "activate" else None
+            )
+            bundle_config = report_bundle_config.ensure(requested_root)
+            lines.append(
+                "report-bundle-config: " + bundle_config["status"] + " "
+                + bundle_config["path"] + " root=" + bundle_config["root"]
+            )
+            for report in reports:
+                report["report_bundle_config"] = bundle_config
     except runtime_activation.ActivationError as exc:
         rollback_errors = []
         for snapshot in reversed(snapshots):

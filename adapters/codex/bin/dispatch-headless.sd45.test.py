@@ -295,8 +295,8 @@ class CodexSD45(unittest.TestCase):
    args=[sys.executable,str(ROOT/"adapters/codex/bin/dispatch-headless.py"),"--register","--worktree",str(repo),"--slug","codex-sd45","--capability","autopilot-code","--capability-mode","dev","--worker-mode",node["unit"],"--qa","standard","--intensity","strong","--dispatch-depth","2","--parent","owner","--parent-harness","codex","--parent-transport","headless","--parent-sandbox","workspace-write","--nested-eligibility","supported","--eligibility-source","codex-fixture","--fallback-ordinal","1","--route-file",str(path),"--route-id",route["route_id"],"--route-hash",route["route_hash"],"--route-node","execute","--unit",node["unit"],"--registry-digest",route["registry_digest"],"--write-scope",";".join(node["write_scope"]),"--completion-gate",node["completion_gate"],"--model-role",node["role"],"--model-profile",node["model_profile"],"--jobs",str(jobs),"--log-dir",str(logs)]
    env={**{k:v for k,v in os.environ.items() if k!="AGENT_DISPATCH_JOBS"},"AGENT_HOME":str(ROOT),"AGENT_ARTIFACT_ROOT":str(art),"AGENT_DISPATCH_ATTEMPT_ID":"att-sd45-parent"}; ok=subprocess.run(args,text=True,capture_output=True,env=env); self.assertEqual(ok.returncode,0,ok.stdout+ok.stderr); prompt=next(logs.glob("codex-sd45*.codex.prompt.txt")).read_text(); self.assertIn("consume the assigned route only",prompt); self.assertNotIn("preflight.sh route autopilot-code",prompt); self.assertIn(f"unit={node['unit']}",jobs.read_text()); self.assertIn(f"unit={node['unit']}",ok.stdout)
    bad=args.copy(); bad[bad.index(";".join(node["write_scope"]))]="spec/**"; denied=subprocess.run(bad,text=True,capture_output=True,env=env); self.assertEqual(denied.returncode,65); self.assertIn("route-node-scope-mismatch",denied.stderr)
-   legacy=[sys.executable,str(ROOT/"adapters/codex/bin/dispatch-headless.py"),"--dry-run","--worktree",str(repo),"--slug","codex-legacy-scope","--capability","autopilot-code","--mode","dev","--qa","standard","--write-scope","source/**","--model","gpt-test","--reasoning","low"]
-   compatible=subprocess.run(legacy,text=True,capture_output=True,env=env); self.assertEqual(compatible.returncode,0,compatible.stderr); self.assertIn("status=dry-run",compatible.stdout)
+   legacy=[sys.executable,str(ROOT/"adapters/codex/bin/dispatch-headless.py"),"--dry-run","--worktree",str(repo),"--slug","codex-legacy-scope","--capability","autopilot-code","--mode","dev","--qa","standard","--write-scope","source/**","--model","gpt-test","--reasoning","low","--sandbox","danger-full-access"]
+   compatible=subprocess.run(legacy,text=True,capture_output=True,env=env); self.assertEqual(compatible.returncode,0,compatible.stdout+compatible.stderr); self.assertIn("status=dry-run",compatible.stdout)
 
 
 def _prompt_args(**overrides):
@@ -355,6 +355,25 @@ class CodexSD78CompletionDelivery(unittest.TestCase):
             "--lease-file /tmp/fixture-agent-home/.dispatch/supervisor-state/att-parent.lease",
             command,
         )
+
+    def test_lab_shell_projects_only_configured_report_bundle_root(self):
+        args = _prompt_args(
+            attempt_id="att-parent",
+            capability="autopilot-lab",
+            report_bundle_root=Path("/tmp/fixture-report-bundles"),
+        )
+        command = WH.shell_command(args, Path("/tmp/p.txt"), Path("/tmp/l.log"))
+        self.assertIn("--writable-root /tmp/fixture-report-bundles", command)
+
+    def test_report_bundle_root_resolver_is_lab_only(self):
+        with tempfile.TemporaryDirectory() as td, mock.patch.dict(
+            os.environ,
+            {"XDG_CONFIG_HOME": str(Path(td) / "config"), "REPORT_BUNDLE_ROOT": str(Path(td) / "store")},
+            clear=False,
+        ):
+            (Path(td) / "store").mkdir()
+            self.assertEqual(WH.resolve_report_bundle_root("autopilot-lab"), Path(td) / "store")
+            self.assertIsNone(WH.resolve_report_bundle_root("autopilot-code"))
 
     def test_supervised_state_path_rejects_attempt_path_escape(self):
         args = _prompt_args(attempt_id="att-../../outside")

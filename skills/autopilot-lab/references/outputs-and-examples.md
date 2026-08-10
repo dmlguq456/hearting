@@ -19,7 +19,12 @@
 │   │       ├── log.txt
 │   │       └── eval_result.json    Optional one-off result; never name it metrics.json(l)
 │   ├── figures/                    [T2] Plots from the `material/figure-gen` unit
-│   ├── report/                     [T2] Iframe HTML: lab audio/media plus draft/design prose
+│   ├── report/                     [T2] Staged canonical bundle
+│   │   ├── index.html              Canonical published entrypoint
+│   │   ├── REPORT.md               Self-contained report copy
+│   │   ├── report_manifest.json    Schema v2 closed inventory
+│   │   └── media/                  Empty for prose-only; declared media is decode-verified
+│   ├── bundle-publication.json     Stable bundle_id/version/entrypoint only; no absolute root
 │   └── _internal/                  [T3]
 │       ├── plan_reviews/           `research/plan-review` unit logs
 │       └── debug_reviews/          `qa/ml-debug` unit logs

@@ -550,6 +550,24 @@ def resolve_artifact_root(worktree: str) -> str:
     return value
 
 
+def resolve_report_bundle_root(capability: str) -> Path | None:
+    if capability != "autopilot-lab":
+        return None
+    result = subprocess.run(
+        [sys.executable, str(ROOT / "tools" / "report-bundle.py"), "root", "--optional"],
+        text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
+    )
+    value = result.stdout.strip()
+    if result.returncode != 0:
+        raise ValueError((result.stderr or result.stdout or "invalid report bundle root").strip())
+    if not value:
+        return None
+    path = Path(value)
+    if not path.is_absolute() or path.is_symlink() or not path.is_dir():
+        raise ValueError("configured report bundle root is not a safe directory")
+    return path
+
+
 def qa_track(capability: str) -> str:
     if capability.startswith("code-") or capability == "autopilot-code":
         return "code"
@@ -1009,6 +1027,8 @@ def shell_command(args: argparse.Namespace, prompt_path: Path, log_path: Path) -
             "--approval", args.approval,
             "--writable-root", str(args.artifact_root),
         ]
+        if getattr(args, "report_bundle_root", None) is not None:
+            command += ["--writable-root", str(args.report_bundle_root)]
         if getattr(args, "owner_route_binding", None):
             command += [
                 "--route-file", args.owner_route_binding.route_file,
@@ -1046,6 +1066,8 @@ def shell_command(args: argparse.Namespace, prompt_path: Path, log_path: Path) -
         "--add-dir",
         args.artifact_root,
     ]
+    if getattr(args, "report_bundle_root", None) is not None:
+        cmd += ["--add-dir", str(args.report_bundle_root)]
     if args.nested_headless_network or (args.dispatch_depth == 2 and args.route_id and args.attempt_id):
         # A dispatch-depth-1 conductor must update the canonical attempt registry and
         # materialize child prompt/transcript files under <agent-home>/.dispatch.
@@ -1846,8 +1868,9 @@ def main(argv: list[str]) -> int:
         )
     try:
         args.artifact_root = resolve_artifact_root(args.worktree)
+        args.report_bundle_root = resolve_report_bundle_root(args.capability)
     except ValueError as e:
-        return fail("artifact-root-resolution-failed", 64, detail=str(e), worktree=args.worktree)
+        return fail("writable-root-resolution-failed", 64, detail=str(e), worktree=args.worktree)
     args.worker_type = resolve_worker_type(
         explicit=args.worker_type,
         dispatch_depth=args.dispatch_depth,
@@ -2228,6 +2251,7 @@ def main(argv: list[str]) -> int:
             "AGENT_DISPATCH_OWNER": args.capability_owner or "",
             "AGENT_DISPATCH_OWNER_HARNESS": args.owner_harness or "",
             "AGENT_ARTIFACT_ROOT": args.artifact_root,
+            "REPORT_BUNDLE_ROOT": str(args.report_bundle_root or ""),
             "AGENT_ROUTE_FILE": (
                 args.route_file
                 or (args.owner_route_binding.route_file if args.owner_route_binding else "")

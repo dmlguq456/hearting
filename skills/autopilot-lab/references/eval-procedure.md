@@ -13,7 +13,8 @@ Evaluate a completed checkpoint from the latest setup experiment or from `--pare
 | E3-3 compare | `research/research-survey` unit | `REPORT.md`, `research/`, and `analysis_project/paper/` | Comparison section in `REPORT.md` | Dispatched dispatch depth 2 |
 | E3-4/E3-5 report assembly (report worker) | `editorial/report` unit or draft handoff | metrics, figures, STORY inputs | `REPORT.md`, `STORY.md`, `summary.md` | Dispatched dispatch depth 2 |
 | Independent verification | `qa/test` unit, read-only | Final artifacts | Verdict record under `_internal/` | Dispatched dispatch depth 2, read-only |
-| Optional artifact sink | `autopilot-spec` update when applicable, then app-neutral artifact emission | Finalized experiment results | Sink receipt or typed skip | After terminal E3-4: available offers the canonical experiment artifact; unavailable records `skipped/extension-unavailable` |
+| Bundle publication | owner, deterministic CLI | Verified staged `report/` plus explicit project/experiment/version | `bundle-publication.json` | Run `tools/report-bundle.py publish`; version is never inferred |
+| Optional artifact sink | `autopilot-spec` update when applicable, then app-neutral artifact emission | `bundle-publication.json` | Sink receipt v2 or typed skip | After terminal sync: available sends only bundle_id/version/report/index.html; unavailable records `skipped/extension-unavailable` |
 
 The dispatch-depth-1 owner integrates worker outputs, resolves cross-stage conflicts, and stays in the flow: liveness watching and harvest belong to the same work (`OPERATIONS §5.10` SD-14), not a fire-and-forget dispatch.
 
@@ -65,7 +66,12 @@ Embed every generated figure in `REPORT.md` with `![<caption>](figures/<plot>.pn
 - **General prose report:** hand off to `autopilot-draft --mode doc` with `summary.md`, `STORY.md`, `figures/`, and run metrics. Draft owns prose generation and produces `documents/{date}_{slug}/`; eval only requests the handoff.
 - **Playback HTML for audio/media experiments:** have the `material/figure-gen` unit generate separated audio, spectrogram segments, and embedded `<audio>`/`<img>` in `experiments/{date}_{slug}/report/report.html`. Markdown previews block `<audio>`, so an audio domain makes this HTML the primary `interactive` playback representation and `REPORT.md` its `summary`/`navigation` companion; they are not interchangeable equivalent formats. Declare both in the manifest `bundle` with one shared `title` and `primary_representation_id`. Split long audio into pages of bounded segments. When necessary, serve locally through `python -m http.server --bind 0.0.0.0 <port>` and provide the URL.
 
-`REPORT.md` remains the default self-contained deliverable. Prose-pipeline output and playback HTML are optional layers; when both exist, let prose link relatively to the HTML comparison. Coexistence is not equivalence: declare it in `bundle.equivalence_groups` with the shared title and declared ordered section identity, or leave it undeclared.
+Assemble publishable output in a staged `report/` with canonical
+`index.html`, `REPORT.md`, `report_manifest.json`, and `media/`. Manifest v2
+may declare an empty media array for prose-only research. If media is declared,
+the verifier requires decodable audio/images, playable HTML, and the complete
+1:1 evidence set. Every local Markdown/HTML/CSS link and every non-manifest file
+must be inventory-bound before publication.
 
 **E3-4. Save and finalize:**
 
@@ -75,4 +81,4 @@ Embed every generated figure in `REPORT.md` with `![<caption>](figures/<plot>.pn
 - Update the existing experiment row in `<artifact-root>/experiments/_RUNLOG.md` from pending to done with result and next step. Do not append a second row. Mark the attempt with `(← <parent_slug>)` when applicable. Append only when an eval-only entry has no existing row. Use failed status for interruption or failure.
 - Update the existing `run.json` to `status: "done"`, current `ended_at`, and `best: {name,value,step}` using the same metric as the report and RUNLOG. On failure, write `status: "failed"` and `ended_at` but omit `best`.
 - Emit `run.json best` and parent delta for worklog consumption. Lab emits only; worklog receives and creates cards. Do not recompute the result or push proactively.
-- After `REPORT.md`, `STORY.md`, `_RUNLOG.md`, and `run.json` are durable, evaluate the route-sealed optional artifact-sink extension for done and failed terminal states with durable artifacts. When available, offer the canonical experiment artifact through the app-neutral receipt contract; on unavailable, record `skipped/extension-unavailable`. User suggestion does not override either branch.
+- After `REPORT.md`, `STORY.md`, `_RUNLOG.md`, and `run.json` are durable, verify the staged bundle, publish it atomically with explicit project/experiment/version, and verify the destination. Record `bundle-publication.json` without an absolute root. After sync, evaluate the route-sealed optional artifact-sink extension for done and failed terminal states with durable artifacts. When available, send receipt v2 with only stable bundle identity, version, and `report/index.html`; on unavailable, record `skipped/extension-unavailable`. User suggestion does not override either branch.
