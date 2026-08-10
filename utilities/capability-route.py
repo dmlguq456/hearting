@@ -745,7 +745,6 @@ def verify_route(route, expected_cwd=None, *, allow_stale_registry=False):
     if route.get("route_hash") != route_hash(route): raise ValueError("stale or modified route hash")
     if route.get("route_id") != "rt-"+route["route_hash"].split(":",1)[1][:16]: raise ValueError("invalid route id")
     if expected_cwd and Path(expected_cwd).resolve()!=Path(route["cwd"]): raise ValueError("route cwd mismatch")
-    _validate_output_scopes(route.get("nodes", []))
     registry=TOPO.load_registry()
     registry_current=route["registry_digest"]==TOPO.registry_digest(registry)
     units_current=(route.get("unit_catalog_digest") is None
@@ -758,6 +757,7 @@ def verify_route(route, expected_cwd=None, *, allow_stale_registry=False):
         # A stale sealed graph cannot be re-derived from the current registry, so every
         # check that compares against it is skipped rather than guessed at.
         return dict(route, _registry_current=False)
+    _validate_output_scopes(route.get("nodes", []))
     if route.get("composed"):
         if route.get("effective_intensity") in ("direct","quick"):
             raise ValueError("composed routes require a standard+ effective intensity")
