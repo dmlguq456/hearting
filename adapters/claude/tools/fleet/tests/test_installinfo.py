@@ -119,6 +119,24 @@ class InstallInfoTest(unittest.TestCase):
                                  "  hearting v7.0.0 · linked")
         render.set_process_view(False)
 
+    def test_header_styles_release_build_dirty_and_method_as_quiet_metadata(self):
+        render.set_hearting({"version": "v7.0.0-6-g0abc1234-dirty",
+                             "install_method": "linked"})
+        self.assertEqual(render._hearting_header_row(), [
+            ("  hearting ", "head"),
+            ("v7.0.0", "version_release"),
+            ("-6-g0abc1234", "version_build"),
+            ("-dirty", "version_dirty"),
+            (" · ", "dim"),
+            ("linked", "version_method"),
+        ])
+
+    def test_header_keeps_untagged_commit_visually_subordinate(self):
+        self.assertEqual(render._hearting_version_segments("0abc1234-dirty"), [
+            ("0abc1234", "version_build"),
+            ("-dirty", "version_dirty"),
+        ])
+
     def test_snapshot_json_exposes_same_identity(self):
         identity = {"version": "v7.0.0", "install_method": "managed/stable",
                     "source": "distribution", "runtimes": ["codex"]}

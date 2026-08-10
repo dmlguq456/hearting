@@ -136,6 +136,8 @@ _TINT_PAIR = {}    # (tint_char, hue_char) → curses attr — the (fg, tint_bg)
 _A_B, _A_D = _A_BOLD, _A_DIM
 _HUE_OF = {
     None: ("d", 0), "dim": ("d", _A_D), "head": ("d", _A_D), "unknown": ("d", _A_D),
+    "version_release": ("l", _A_D), "version_build": ("d", _A_D),
+    "version_dirty": ("y", _A_D), "version_method": ("d", _A_D),
     "name_work": ("w", _A_B), "name_idle": ("w", _A_B), "name_dim": ("w", _A_D),
     "grp": ("w", _A_B), "branch_s": ("d", 0), "cost_hi": ("w", _A_B),
     "qa_quick": ("d", _A_D), "qa_light": ("d", _A_D), "qa_standard": ("d", 0),
@@ -296,6 +298,13 @@ def _init_colors():
     # harness identity = dim colored text (color lives ONLY here for identity)
     for h in ("claude", "codex", "opencode"):
         _COLOR["h_" + h] = _COLOR.get("h_" + h, 0) | curses.A_DIM
+    # Hearting identity is persistent metadata, not the screen's focal point.  Keep the
+    # release in a quiet blue-grey and make checkout/build details recede further.  Dirty
+    # remains barely warm so it is discoverable without reading like an alert.
+    _COLOR["version_release"] = _COLOR.get("h_opencode", 0) | curses.A_DIM
+    _COLOR["version_build"] = curses.A_DIM
+    _COLOR["version_dirty"] = _COLOR.get("yellow", 0) | curses.A_DIM
+    _COLOR["version_method"] = curses.A_DIM
     # session name = THE left pillar of every row (design r2): bright bold for any live session —
     # the eye lands here first; only stale/dead recede. working is distinguished by its dot blink.
     _COLOR["name_work"] = _COLOR.get("soft", 0) | curses.A_BOLD
@@ -3074,11 +3083,45 @@ def set_hearting(value):
     _HEARTING = dict(value) if isinstance(value, dict) else None
 
 
+_VERSION_RELEASE_RE = re.compile(r"^v?\d+(?:\.\d+)+(?:[-+][0-9A-Za-z.]+)?$")
+_VERSION_BUILD_RE = re.compile(r"-\d+-g[0-9a-fA-F]+$")
+
+
+def _hearting_version_segments(version):
+    """Split a git-described version into quiet visual roles without changing its text."""
+    remaining = version
+    dirty = ""
+    if remaining.endswith("-dirty"):
+        remaining = remaining[:-6]
+        dirty = "-dirty"
+
+    build = ""
+    match = _VERSION_BUILD_RE.search(remaining)
+    if match:
+        build = match.group(0)
+        remaining = remaining[:match.start()]
+
+    if remaining == "unknown":
+        base_key = "unknown"
+    elif _VERSION_RELEASE_RE.fullmatch(remaining):
+        base_key = "version_release"
+    else:
+        base_key = "version_build"
+
+    segments = [(remaining, base_key)] if remaining else []
+    if build:
+        segments.append((build, "version_build"))
+    if dirty:
+        segments.append((dirty, "version_dirty"))
+    return segments or [(version, "unknown")]
+
+
 def _hearting_header_row():
     value = _HEARTING or {}
     version = str(value.get("version") or "unknown")
     method = str(value.get("install_method") or "unmanaged")
-    return [("  hearting ", "head"), (version, "name_idle"), (" · ", "dim"), (method, "dim")]
+    return ([("  hearting ", "head")] + _hearting_version_segments(version)
+            + [(" · ", "dim"), (method, "version_method")])
 
 
 # --- F-30 (v10, prd.md:304-310) — process view: pipeline-centric regrouping, `p` toggle ---
