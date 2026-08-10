@@ -143,6 +143,7 @@ jobs:
         if: steps.plan.outputs.release == 'true'
         timeout-minutes: 10
         env:
+          GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ steps.plan.outputs.version }}
         run: ./tools/release/post-publish-smoke.sh "$GITHUB_REPOSITORY" "$RELEASE_TAG"
 

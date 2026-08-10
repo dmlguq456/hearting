@@ -43,6 +43,26 @@ import distribution as d
 import installer
 os.environ["CODEX_HOME"] = str(Path(os.environ["HOME"]) / ".codex")
 
+# GitHub Actions smoke installs authenticate only the API metadata lookup. The
+# token must never be attached to arbitrary release-index overrides or asset
+# hosts, and malformed credentials fail before urllib sees them.
+os.environ["GH_TOKEN"] = "fixture-token"
+assert d._request_headers("https://api.github.com/repos/acme/hearting/releases/latest")[
+    "Authorization"
+] == "Bearer fixture-token"
+assert "Authorization" not in d._request_headers(
+    "https://github.com/acme/hearting/releases/download/v1/hearting.tar.gz"
+)
+assert "Authorization" not in d._request_headers("https://example.test/release.json")
+os.environ["GH_TOKEN"] = "bad\nvalue"
+try:
+    d._request_headers("https://api.github.com/repos/acme/hearting/releases/latest")
+except d.DistributionError as exc:
+    assert "invalid whitespace" in str(exc)
+else:
+    raise AssertionError("malformed GitHub token was accepted")
+os.environ.pop("GH_TOKEN")
+
 # Status probes are read-only and must never depend on the host user bus.
 real_probe_command = d._probe_command
 probe_calls = []
