@@ -175,6 +175,51 @@ class F51UsageCacheTest(unittest.TestCase):
         urlopen_spy.assert_not_called()
         walk_spy.assert_not_called()
 
+    def test_collect_all_preserves_account_snapshot_without_a_session(self):
+        """Account quota survives the collector boundary even with no process row."""
+        from fleet import collectors
+        from fleet.collectors import procscan
+        snapshots = {
+            "claude": {"payload": {"rl_5h": 31, "rl_7d": 81},
+                       "freshness": "fresh", "observed_at": 1000},
+            "codex": {"payload": None, "freshness": "unknown", "observed_at": None},
+        }
+        with tempfile.TemporaryDirectory() as jobs_tmp, \
+             mock.patch.object(procscan, "scan", return_value=[]), \
+             mock.patch.object(usage_cache, "account_usage",
+                               side_effect=lambda harness, **_kwargs: snapshots[harness]):
+            sessions, _jobs = collectors.collect_all(
+                jobs_path=os.path.join(jobs_tmp, "jobs.log"))
+        self.assertEqual([], sessions)
+        self.assertEqual(
+            {"rl_5h": 31, "rl_7d": 81},
+            collectors.collect_all.last_usage_snapshots["claude"]["payload"],
+        )
+
+    def test_collect_all_replaces_stale_codex_window_label_from_account_cache(self):
+        from fleet import collectors
+        from fleet.collectors import procscan
+        from fleet.collectors import codex as codex_mod
+        from fleet.model import Session
+        session = Session(harness="codex", pid=1, cwd=None, liveness="idle",
+                          rl_5h=48, rl_windows=[["5h", 48, None]])
+        snapshots = {
+            "claude": {"payload": None, "freshness": "unknown", "observed_at": None},
+            "codex": {"payload": {"rl_5h": None, "rl_7d": 48,
+                                   "windows": [["7d", 48, 2000]]},
+                      "freshness": "fresh", "observed_at": 1000},
+        }
+        with tempfile.TemporaryDirectory() as jobs_tmp, \
+             mock.patch.object(procscan, "scan", return_value=[session]), \
+             mock.patch.object(codex_mod, "prepare_tick", return_value={}), \
+             mock.patch.object(codex_mod, "enrich"), \
+             mock.patch.object(usage_cache, "account_usage",
+                               side_effect=lambda harness, **_kwargs: snapshots[harness]):
+            sessions, _jobs = collectors.collect_all(
+                jobs_path=os.path.join(jobs_tmp, "jobs.log"))
+        self.assertEqual([["7d", 48, 2000]], sessions[0].rl_windows)
+        self.assertEqual(48, sessions[0].rl_7d)
+
     def test_refresh_returns_before_permanently_blocked_fetcher_and_then_reads_new_cache(self):
         gate = threading.Event()
         usage_cache.FETCHERS["claude"] = lambda: (gate.wait(), {"rl_5h": 77})[1]

@@ -3701,7 +3701,8 @@ def live_harnesses(sessions):
             and not getattr(s, "mem_worker", False)}
 
 
-def _usage_header_rows(sessions, layout="wide", now=None, api_disabled=False):
+def _usage_header_rows(sessions, layout="wide", now=None, api_disabled=False,
+                       usage_snapshots=None):
     """Build account usage rows independently of the main line builder.
 
     F-51c: `api_disabled` (user opted out via FLEET_DISABLE=usage-api / --no-usage-api) is
@@ -3718,6 +3719,28 @@ def _usage_header_rows(sessions, layout="wide", now=None, api_disabled=False):
             if cur is None or (s.mtime or 0) > (cur[3] or 0):
                 rl[s.harness] = (s.rl_5h, s.rl_7d, s.rl_ms, s.mtime, s.rl_rs,
                                  getattr(s, "rl_windows", None), freshness)
+    # A quota snapshot is account-scoped.  It must remain visible when there is no current
+    # process row for that harness (for example immediately after session cleanup).
+    for harness, snapshot in (usage_snapshots or {}).items():
+        if not isinstance(snapshot, dict):
+            continue
+        payload = snapshot.get("payload")
+        if not isinstance(payload, dict):
+            continue
+        r5 = payload.get("rl_5h")
+        r7 = payload.get("rl_7d")
+        rms = payload.get("rl_ms")
+        rwins = payload.get("rl_windows")
+        if rwins is None:
+            rwins = payload.get("windows")
+        if r5 is None and r7 is None and not rms and not rwins:
+            continue
+        observed_at = snapshot.get("observed_at")
+        rl[harness] = (
+            r5, r7, rms, observed_at,
+            (payload.get("rs_5h"), payload.get("rs_7d")), rwins,
+            snapshot.get("freshness"),
+        )
     live = live_harnesses(sessions)
     if not rl and not live:
         return []
@@ -3812,7 +3835,7 @@ def _resource_rows(resources, section):
 
 
 def _build_lines(sessions, jobs, section, narrow, malformed, layout="wide", memory=None,
-                 term_width=None, live_order=None, resources=None):
+                 term_width=None, live_order=None, resources=None, usage_snapshots=None):
     """Return a flat list of segment-lines for the whole screen (None = blank line).
 
     Side effect: refreshes the module-level `_SELECTABLE` stash (F-27) — see its definition.
@@ -4004,7 +4027,8 @@ def _build_lines(sessions, jobs, section, narrow, malformed, layout="wide", memo
     # build. working/idle/dispatch/`~` stay unconditional (always relevant vocabulary); the
     # rest (detached/stale/dead/child-jobs/worktrees) only show up in the legend when at least
     # one row used them.
-    lines.extend(_usage_header_rows(sessions, layout=layout, api_disabled=_API_DISABLED))
+    lines.extend(_usage_header_rows(sessions, layout=layout, api_disabled=_API_DISABLED,
+                                    usage_snapshots=usage_snapshots))
     # fleet pulse — htop's "Tasks: N, M running" analogue: whole-board census + live spend Σ
     # Show the row by default; counts skip app-server companions. Extracted into _pulse_segs
     # (F-30, v10) so the process view (§5.1) shares this EXACT row instead of a second copy.
@@ -4588,6 +4612,7 @@ def render_once(collect_all, hfilter, section):
     global _GIT_TELEMETRY
     sessions, jobs = collect_all(harness_filter=hfilter)
     resources = list(getattr(collect_all, "last_resource_jobs", []))
+    usage_snapshots = dict(getattr(collect_all, "last_usage_snapshots", {}))
     malformed = _malformed()
     mem_snapshot = _collect_memory()
     try:
@@ -4600,7 +4625,7 @@ def render_once(collect_all, hfilter, section):
     try:
         lines = _build_lines(sessions, jobs, section, narrow=False, malformed=malformed,
                              layout=_layout_mode(tw), memory=mem_snapshot, term_width=tw,
-                             resources=resources)
+                             resources=resources, usage_snapshots=usage_snapshots)
     finally:
         _GIT_TELEMETRY = previous_git_telemetry
     out = "\n".join(_plain(l) for l in lines) + "\n"
@@ -5359,7 +5384,7 @@ def reset_scroll():
 
 
 def _draw(stdscr, sessions, jobs, section, malformed, memory=None, live_order=None,
-          resources=None):
+          resources=None, usage_snapshots=None):
     global _OFFSET, _TOGGLE_ROWS, _CLICK_ROWS, _FOLD_ROWS, _PROMPT_HITS, _CURSOR_ID
     # reset before any early-return so a stale map never survives a click (§4.1 pattern) —
     # _PROMPT_HITS in particular must never carry the PRIOR stage's coordinates into this
@@ -5374,7 +5399,7 @@ def _draw(stdscr, sessions, jobs, section, malformed, memory=None, live_order=No
     narrow = w < _NARROW_CUTOFF
     lines = _build_lines(sessions, jobs, section, narrow, malformed, layout=_layout_mode(w),
                          memory=memory, term_width=w, live_order=live_order,
-                         resources=resources)
+                         resources=resources, usage_snapshots=usage_snapshots)
     body_h = max(1, h - 1)   # reserve 1 footer row
 
     # F-27: the cursor tracks a ROW, so the viewport follows it (not the reverse). Done before
@@ -5467,11 +5492,12 @@ def _loop(stdscr, collect_all, hfilter, section, interval):
     stdscr.timeout(200)                     # getch blocks ≤200ms → responsive keys
     sessions, jobs = collect_all(harness_filter=hfilter)
     resources = list(getattr(collect_all, "last_resource_jobs", []))
+    usage_snapshots = dict(getattr(collect_all, "last_usage_snapshots", {}))
     malformed = _malformed()
     mem_snapshot = _collect_memory()
     last = time.time()
     _draw(stdscr, sessions, jobs, section, malformed, memory=mem_snapshot,
-          live_order=live_order, resources=resources)
+          live_order=live_order, resources=resources, usage_snapshots=usage_snapshots)
     while True:
         # wake exactly at the next 0.5s blink boundary (regular period) but stay key-responsive (≤200ms)
         _nb = (int(time.time() * 10) + 1) / 10.0   # 10fps wake — the spinner cadence
@@ -5496,12 +5522,13 @@ def _loop(stdscr, collect_all, hfilter, section, interval):
             else:
                 _handle_prompt_key(ch)
             _draw(stdscr, sessions, jobs, section, malformed, memory=mem_snapshot,
-                  live_order=live_order, resources=resources)
+                  live_order=live_order, resources=resources, usage_snapshots=usage_snapshots)
             continue
         if _SELECT_MODE:
             if _handle_select_key(ch):
                 _draw(stdscr, sessions, jobs, section, malformed, memory=mem_snapshot,
-                      live_order=live_order, resources=resources)
+                      live_order=live_order, resources=resources,
+                      usage_snapshots=usage_snapshots)
                 continue
         elif ch in (ord("s"), ord("S"), ord("x"), ord("X")):
             # Enter selection mode. `x` doubles as the enter shortcut so the "press x to kill"
@@ -5509,7 +5536,7 @@ def _loop(stdscr, collect_all, hfilter, section, interval):
             if not _enter_select(_live_targets()):
                 _set_action("no selectable rows")
             _draw(stdscr, sessions, jobs, section, malformed, memory=mem_snapshot,
-                  live_order=live_order, resources=resources)
+                  live_order=live_order, resources=resources, usage_snapshots=usage_snapshots)
             continue
 
         # --- base mode: scroll keys UNCHANGED (F-27 regression budget = 0) ---
@@ -5527,6 +5554,7 @@ def _loop(stdscr, collect_all, hfilter, section, interval):
         if force or (now - last) >= interval:
             sessions, jobs = collect_all(harness_filter=hfilter)
             resources = list(getattr(collect_all, "last_resource_jobs", []))
+            usage_snapshots = dict(getattr(collect_all, "last_usage_snapshots", {}))
             malformed = _malformed()
             mem_snapshot = _collect_memory()
             last = now
@@ -5534,7 +5562,7 @@ def _loop(stdscr, collect_all, hfilter, section, interval):
         _BLINK_ON = (int(now * 2) % 2 == 0)     # ~2 Hz working-dot blink (manual — A_BLINK unreliable)
         # redraw every wake (covers KEY_RESIZE, blink and tick) — _draw clamps _OFFSET internally.
         _draw(stdscr, sessions, jobs, section, malformed, memory=mem_snapshot,
-              live_order=live_order, resources=resources)
+              live_order=live_order, resources=resources, usage_snapshots=usage_snapshots)
 
 
 def run_live(collect_all, hfilter, section, interval):

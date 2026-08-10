@@ -207,10 +207,13 @@ def main(argv=None):
             getattr(collect_all, "last_resource_jobs", []))
         projected_collector.last_resource_malformed = getattr(
             collect_all, "last_resource_malformed", 0)
+        projected_collector.last_usage_snapshots = dict(
+            getattr(collect_all, "last_usage_snapshots", {}))
         return result
 
     projected_collector.last_resource_jobs = []
     projected_collector.last_resource_malformed = 0
+    projected_collector.last_usage_snapshots = {}
 
     if args.json:
         sessions, jobs = projected_collector(harness_filter=hfilter)
@@ -268,11 +271,14 @@ def main(argv=None):
             getattr(base_collector, "last_resource_jobs", []))
         live_collector.last_resource_malformed = getattr(
             base_collector, "last_resource_malformed", 0)
+        live_collector.last_usage_snapshots = dict(
+            getattr(base_collector, "last_usage_snapshots", {}))
         previous_sessions = list(sessions)
         return sessions, jobs
 
     live_collector.last_resource_jobs = []
     live_collector.last_resource_malformed = 0
+    live_collector.last_usage_snapshots = {}
 
     return render.run_live(live_collector, hfilter, args.section, args.interval)
 

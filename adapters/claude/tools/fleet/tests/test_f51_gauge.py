@@ -134,6 +134,50 @@ class F51GaugeTest(unittest.TestCase):
         self.assertIn("—", joined)
         self.assertNotIn(render._BAR_FULL, joined)
 
+    def test_account_cache_renders_without_a_session_row(self):
+        snapshots = {
+            "claude": {
+                "payload": {"rl_5h": 31, "rl_7d": 81},
+                "freshness": "fresh",
+                "observed_at": 1000,
+            },
+        }
+        rows = render._usage_header_rows([], now=1000, usage_snapshots=snapshots)
+        visible = "\n".join("".join(value for value, _key in row) for row in rows)
+        self.assertIn("claude code", visible)
+        self.assertIn("31%", visible)
+        self.assertIn("81%", visible)
+        self.assertNotIn("no usage api", visible)
+
+    def test_empty_account_cache_does_not_invent_a_usage_row(self):
+        snapshots = {
+            "claude": {
+                "payload": {},
+                "freshness": "unknown",
+                "observed_at": None,
+            },
+        }
+        self.assertEqual([], render._usage_header_rows([], usage_snapshots=snapshots))
+
+    def test_codex_account_window_keeps_its_runtime_duration_label(self):
+        snapshots = {
+            "codex": {
+                "payload": {
+                    "rl_5h": None,
+                    "rl_7d": 48,
+                    "windows": [["7d", 48, 2000]],
+                },
+                "freshness": "fresh",
+                "observed_at": 1000,
+            },
+        }
+        rows = render._usage_header_rows([], now=1000, usage_snapshots=snapshots)
+        visible = "\n".join("".join(value for value, _key in row) for row in rows)
+        self.assertIn("codex", visible)
+        self.assertIn("7d", visible)
+        self.assertIn("48%", visible)
+        self.assertNotIn("5h", visible)
+
     def test_wide_ledger_matches_the_frozen_fixture_exactly(self):
         """A8: `f51_wide_ledger_v49.json` records `_wide_slack`/`_wide_name_width` for every
         terminal width 60..400 — recompute both and diff against the frozen ledger so a

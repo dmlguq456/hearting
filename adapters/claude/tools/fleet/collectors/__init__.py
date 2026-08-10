@@ -217,30 +217,46 @@ def collect_all(harness_filter=None, jobs_path=None, usage="cache-only"):
 
     # --- account usage: cache snapshot on every path; only live may request refresh ---
     usage_meta = {}
+    usage_snapshots = {}
     try:
         from . import usage_cache
         for harness in ("claude", "codex"):
             if harness_filter is not None and harness not in set(harness_filter):
                 continue
             snap = usage_cache.account_usage(harness, usage=usage if usage == "refresh" else "cache-only")
+            usage_snapshots[harness] = snap
             usage_meta[harness] = {k: snap.get(k) for k in ("freshness", "observed_at")}
             payload = snap.get("payload") or {}
             if not isinstance(payload, dict):
                 continue
+            account_windows = payload.get("rl_windows")
+            if account_windows is None:
+                account_windows = payload.get("windows")
             for s in sessions:
                 if s.harness != harness or (harness == "claude" and s.is_child):
                     continue
-                for key in ("rl_5h", "rl_7d", "rl_ms", "rl_windows"):
+                for key in ("rl_5h", "rl_7d", "rl_ms"):
                     value = payload.get(key)
                     if value is not None and value != []:
                         setattr(s, key, value)
+                if account_windows:
+                    s.rl_windows = account_windows
+                elif harness == "codex" and (
+                        payload.get("rl_5h") is not None or payload.get("rl_7d") is not None):
+                    # Account data is newer than rollout enrichment.  Do not let an old
+                    # dynamic window (for example a former 5h primary) override its labels.
+                    s.rl_windows = None
                 if payload.get("rs_5h") or payload.get("rs_7d"):
                     s.rl_rs = (payload.get("rs_5h"), payload.get("rs_7d"))
                 s._usage_freshness = snap.get("freshness")
                 s._usage_observed_at = snap.get("observed_at")
     except Exception:
         usage_meta = {}
+        usage_snapshots = {}
     collect_all.last_usage = usage_meta
+    # Account quota belongs to the harness, not to an individual process row.  Keep the
+    # complete cache snapshot available even when session cleanup leaves no visible row.
+    collect_all.last_usage_snapshots = usage_snapshots
 
     # --- liveness → 4-state ---
     try:
@@ -332,3 +348,5 @@ def collect_all(harness_filter=None, jobs_path=None, usage="cache-only"):
 
 collect_all.last_resource_jobs = []
 collect_all.last_resource_malformed = 0
+collect_all.last_usage = {}
+collect_all.last_usage_snapshots = {}
