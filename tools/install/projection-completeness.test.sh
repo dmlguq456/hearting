@@ -113,9 +113,13 @@ python3 - "$TMP/verify.json" <<'PY'
 import json, sys
 row = json.load(open(sys.argv[1]))
 assert row["exit"] == 0, row
-assert len(row["checks"]) == 3, row
 assert all(item["ok"] for item in row["checks"]), row
-assert all(item["id"].endswith(".runtime-activation") for item in row["checks"]), row
+assert {item["id"] for item in row["checks"]} == {
+    "claude.runtime-activation",
+    "codex.runtime-activation",
+    "opencode.runtime-activation",
+    "routing-config.user-policy",
+}, row
 PY
 
 # Duplicate remediation next_action names the source, not a retired flag.
