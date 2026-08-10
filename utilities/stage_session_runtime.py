@@ -116,6 +116,7 @@ def bind(args: argparse.Namespace, *, artifact_root: str | Path, action: str) ->
         "subsession_mode": args.subsession_mode,
         "subsession_purpose": args.subsession_purpose,
         "phase_brief": args.phase_brief,
+        "phase_brief_sha256": args.phase_brief_sha256,
         "state_ledger": args.state_ledger,
         "fixed_files_sha256": args.fixed_files_sha256,
         "narrow_verify_sha256": args.narrow_verify_sha256,

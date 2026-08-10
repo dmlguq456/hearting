@@ -149,7 +149,8 @@
        "reviews/apply-verdict.json"
       ],
       "write_scope": [
-       "reviews/apply/**"
+       "reviews/apply/**",
+       "reviews/apply-verdict.json"
       ],
       "resource_class": "normal",
       "completion_gate": "apply-verify",
@@ -1434,7 +1435,8 @@
        "reviews/smoke-attestation.json"
       ],
       "write_scope": [
-       "reviews/smoke/**"
+       "reviews/smoke/**",
+       "reviews/smoke-attestation.json"
       ],
       "resource_class": "normal",
       "completion_gate": "hash-bound-smoke",
@@ -1497,7 +1499,8 @@
        "reviews/run-verdict.json"
       ],
       "write_scope": [
-       "reviews/run/**"
+       "reviews/run/**",
+       "reviews/run-verdict.json"
       ],
       "resource_class": "normal",
       "completion_gate": "lab-run-verify",
@@ -1808,7 +1811,8 @@
        "reviews/eval-verdict.json"
       ],
       "write_scope": [
-       "reviews/eval/**"
+       "reviews/eval/**",
+       "reviews/eval-verdict.json"
       ],
       "resource_class": "normal",
       "completion_gate": "lab-independent-verify",
@@ -1979,7 +1983,8 @@
        "reviews/refine-verdict.json"
       ],
       "write_scope": [
-       "reviews/refine/**"
+       "reviews/refine/**",
+       "reviews/refine-verdict.json"
       ],
       "resource_class": "normal",
       "completion_gate": "refine-review",
@@ -2259,7 +2264,8 @@
        "reviews/claim-verdict.json"
       ],
       "write_scope": [
-       "reviews/claims/**"
+       "reviews/claims/**",
+       "reviews/claim-verdict.json"
       ],
       "resource_class": "normal",
       "completion_gate": "research-claims",
@@ -2460,7 +2466,8 @@
        "reviews/security-verdict.json"
       ],
       "write_scope": [
-       "reviews/security/**"
+       "reviews/security/**",
+       "reviews/security-verdict.json"
       ],
       "resource_class": "normal",
       "completion_gate": "ship-security",
@@ -2493,7 +2500,8 @@
        "reviews/release-verdict.json"
       ],
       "write_scope": [
-       "reviews/release/**"
+       "reviews/release/**",
+       "reviews/release-verdict.json"
       ],
       "resource_class": "normal",
       "completion_gate": "ship-release",
@@ -2559,7 +2567,8 @@
        "reviews/post-deploy-verdict.json"
       ],
       "write_scope": [
-       "reviews/post-deploy/**"
+       "reviews/post-deploy/**",
+       "reviews/post-deploy-verdict.json"
       ],
       "resource_class": "normal",
       "completion_gate": "ship-post-deploy-verify",

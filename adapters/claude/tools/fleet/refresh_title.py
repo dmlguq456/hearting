@@ -1209,6 +1209,13 @@ def main(argv=None):
         offset = previous.get("offset", 0) if isinstance(previous.get("offset"), int) else 0
         previous_title = previous.get("title", "") if isinstance(previous.get("title"), str) else ""
         previous_summary = previous.get("summary") if isinstance(previous.get("summary"), str) else None
+        previous_summary_ts = (
+            previous.get("summary_ts", previous.get("ts"))
+            if previous_summary else None
+        )
+        if (not isinstance(previous_summary_ts, (int, float))
+                or isinstance(previous_summary_ts, bool)):
+            previous_summary_ts = None
         previous_failures = _summary_failures(previous)
         cursor_kind = None
         if args.opencode_db:
@@ -1236,6 +1243,7 @@ def main(argv=None):
                 offset=new_offset,
                 harness=args.harness,
                 summary=previous_summary,
+                summary_ts=previous_summary_ts,
                 summary_failures=previous_failures,
                 cursor_kind=cursor_kind,
             )
@@ -1246,10 +1254,6 @@ def main(argv=None):
         title = validate_title(output)
         if title and title.lower() == "untitled":
             title = None
-        # The subtitle stands on its own each round (no previous-summary fallback): a
-        # stale "what it's doing right now" is worse than none, unlike the title, which
-        # is still a reasonable name for the session even a tick late (F-13 honest
-        # degrade — silence over a misleading live claim).
         summary = validate_summary(_labeled_line(output, _NOW_LINE_RE))
         summary_failures = (0 if summary else
                             min(len(SUMMARY_RETRY_DELAYS), previous_failures + 1))
@@ -1259,7 +1263,8 @@ def main(argv=None):
             source=_provider_source() if title else source,
             offset=new_offset if summary else offset,
             harness=args.harness,
-            summary=summary,
+            summary=summary or previous_summary,
+            summary_ts=None if summary else previous_summary_ts,
             summary_failures=summary_failures,
             cursor_kind=cursor_kind,
         )

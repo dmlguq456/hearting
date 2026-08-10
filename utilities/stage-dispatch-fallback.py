@@ -279,7 +279,19 @@ def emit_allocation(context: dict | None) -> None:
         print(f"relief_promoted={int(bool(context.get('relief_promoted')))}")
 
 
+TUPLE_FAILURE_CLASS = "launch-tuple"
+
+
 def registry_failures(jobs: Path, route_id: str, node_id: str) -> dict[str, list[str]]:
+    """Return only failures explicitly classified as launch-tuple failures.
+
+    A terminal ``dead-*`` note describes one attempt, not the health of the
+    sealed parent/child harness tuple. Worker verdicts, liveness reconciliation,
+    watchdog expiry, and capacity handling therefore cannot spend a tuple by
+    themselves. Producers that have exact pre-launch tuple evidence must record
+    ``failure_class=launch-tuple``; current-invocation failures can still use the
+    explicit ``--failed-tuple`` input without persisting that inference.
+    """
     failures: dict[str, list[str]] = {}
     if not jobs.is_file():
         return failures
@@ -291,7 +303,8 @@ def registry_failures(jobs: Path, route_id: str, node_id: str) -> dict[str, list
         if metadata.get("route_id") != route_id or metadata.get("route_node") != node_id:
             continue
         if (not metadata.get("note", "").startswith("dead-")
-                or metadata.get("note") == "dead-capacity"):
+                or metadata.get("note") == "dead-capacity"
+                or metadata.get("failure_class") != TUPLE_FAILURE_CLASS):
             continue
         required = ("parent_harness", "parent_transport", "parent_sandbox", "child_harness", "launch_authority")
         if any(not metadata.get(key) for key in required):

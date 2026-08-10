@@ -116,6 +116,7 @@ class TitlesHelperTest(_ConfigHomeMixin, unittest.TestCase):
         titles.write("sidS", "A title", summary="지금 렌더 그룹 루프를 분석 중", now=100.0)
         d = titles.read("sidS")
         self.assertEqual(d["summary"], "지금 렌더 그룹 루프를 분석 중")
+        self.assertEqual(d["summary_ts"], 100.0)
 
     def test_summary_omitted_when_none(self):
         titles.write("sidS2", "A title", now=100.0)
@@ -154,6 +155,29 @@ class TitlesHelperTest(_ConfigHomeMixin, unittest.TestCase):
             titles.fresh_summary_with_ts("sidTs", now=2000.0 + 25 * 3600),
             (None, None))
         self.assertEqual(titles.fresh_summary_with_ts("sidMissing"), (None, None))
+
+    def test_fresh_summary_with_ts_uses_independent_timestamp(self):
+        titles.write(
+            "sidIndependent", "t", summary="preserved status",
+            summary_ts=1000.0, now=2000.0,
+        )
+        self.assertEqual(
+            titles.fresh_summary_with_ts("sidIndependent", now=3000.0),
+            ("preserved status", 1000.0),
+        )
+
+    def test_legacy_summary_without_summary_ts_falls_back_to_sidecar_ts(self):
+        path = titles.sidecar_path("sidLegacySummary")
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump({
+                "title": "legacy", "ts": 1000.0, "source": "refresher",
+                "offset": 1, "summary": "legacy status",
+            }, handle)
+        self.assertEqual(
+            titles.fresh_summary_with_ts("sidLegacySummary", now=1001.0),
+            ("legacy status", 1000.0),
+        )
 
     def test_fresh_summary_must_cover_latest_user_boundary(self):
         titles.write("sidB", "t", summary="previous turn", offset=42, now=1000.0)
@@ -577,10 +601,12 @@ class DeltaOffsetTest(_ConfigHomeMixin, unittest.TestCase):
             size = os.path.getsize(path)
             titles.write("sidE", "Existing Title", summary="still doing the same thing",
                          offset=size, now=time.time() - 700)
+            before = titles.read("sidE")["summary_ts"]
             rt.main(["--sid", "sidE", "--transcript", path])
             d = titles.read("sidE")
             self.assertEqual(d["title"], "Existing Title")
             self.assertEqual(d["summary"], "still doing the same thing")
+            self.assertEqual(d["summary_ts"], before)
 
     def test_main_two_line_output_saves_title_and_summary(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -597,13 +623,14 @@ class DeltaOffsetTest(_ConfigHomeMixin, unittest.TestCase):
             self.assertEqual(d["title"], "Fleet strip revamp")
             self.assertEqual(d["summary"], "지금 그룹 루프를 분석 중")
 
-    def test_main_missing_now_line_degrades_to_title_only(self):
+    def test_main_missing_now_line_preserves_summary_age_and_cursor(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = os.path.join(tmp, "t.jsonl")
             with open(path, "w", encoding="utf-8") as f:
                 f.write(json.dumps({"message": "please rename this session"}) + "\n")
             titles.write("sidTO", "Old title", summary="stale status", offset=0,
                          now=time.time() - 1000)
+            before = titles.read("sidTO")
             original = rt.run_worker
             rt.run_worker = lambda *a, **k: "TITLE: New Title Only"
             try:
@@ -612,8 +639,9 @@ class DeltaOffsetTest(_ConfigHomeMixin, unittest.TestCase):
                 rt.run_worker = original
             d = titles.read("sidTO")
             self.assertEqual(d["title"], "New Title Only")
-            self.assertNotIn("summary", d,
-                             "NOW 파싱 실패는 이전 요약을 이어받지 않는다 (정직 강등, 실황 우선)")
+            self.assertEqual(d["summary"], "stale status")
+            self.assertEqual(d["summary_ts"], before["summary_ts"])
+            self.assertGreater(d["ts"], before["ts"])
             self.assertEqual(d["offset"], 0)
             self.assertEqual(d["summary_failures"], 1)
 

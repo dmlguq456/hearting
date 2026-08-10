@@ -140,11 +140,27 @@ class FallbackTest(unittest.TestCase):
   self.assertIn("reason=parallel-group-batch-required",first.stdout)
   self.assertEqual(len(self.jobs.read_text().splitlines()),1)
   self.assertIn("att-fallback-parent",self.jobs.read_text())
- def test_registry_prevents_unchanged_same_harness_retry(self):
+ def test_registry_prevents_explicitly_classified_tuple_retry(self):
   path=self.route(same_status="supported"); route=json.loads(path.read_text())
-  pipe=f"capability=autopilot-code,route_id={route['route_id']},route_node=plan,parent=owner,attempt_id=att-prior000000,parent_harness=codex,parent_transport=headless,parent_sandbox=workspace-write,child_harness=codex,launch_authority=conductor,note=dead-network"
+  pipe=f"capability=autopilot-code,route_id={route['route_id']},route_node=plan,parent=owner,attempt_id=att-prior000000,parent_harness=codex,parent_transport=headless,parent_sandbox=workspace-write,child_harness=codex,launch_authority=conductor,note=dead-launch-error,failure_class=launch-tuple"
   self.jobs.write_text(f"2026-07-16T00:00:00Z\tdone\t/repo\t{self.repo}\tfallback-plan\t{pipe}\n")
   result=self.run_chain(path); self.assertEqual(result.returncode,0,result.stdout+result.stderr); self.assertIn("selected_hop=cross-harness-headless",result.stdout); self.assertIn("skipped-prior-unchanged-failure",result.stdout)
+ def test_registry_worker_deaths_do_not_spend_a_launch_tuple(self):
+  path=self.route(same_status="supported"); route=json.loads(path.read_text())
+  base=(f"capability=autopilot-code,route_id={route['route_id']},route_node=plan,"
+        "parent=owner,parent_harness=codex,parent_transport=headless,"
+        "parent_sandbox=workspace-write,child_harness=codex,launch_authority=conductor")
+  self.jobs.write_text(
+   f"2026-07-16T00:00:00Z\tdone\t/repo\t{self.repo}\tworker-fail\t"
+   f"{base},attempt_id=att-worker-fail,note=dead-worker-fail,failure_class=fail\n"
+   f"2026-07-16T00:00:01Z\tdone\t/repo\t{self.repo}\tworker-dead\t"
+   f"{base},attempt_id=att-worker-dead,note=dead-exact-pid\n",
+   encoding="utf-8")
+  self.assertEqual(F.registry_failures(self.jobs,route["route_id"],"plan"),{})
+  result=self.run_chain(path)
+  self.assertEqual(result.returncode,0,result.stdout+result.stderr)
+  self.assertRegex(result.stdout,r"selected_hop=(same|cross)-harness-headless")
+  self.assertNotIn("skipped-prior-unchanged-failure",result.stdout)
  def test_invalid_model_role_is_structured_and_preserved(self):
   path=self.route(same_status="supported")
   cross="codex/headless/workspace-write/claude/conductor"

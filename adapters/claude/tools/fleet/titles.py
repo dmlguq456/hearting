@@ -3,7 +3,7 @@
 Canonical state:
   <state-root>/<harness>/<sid>.json
   {"title": str, "ts": float, "source": str, "offset": int, "cursor_kind": str,
-   "summary": str, "summary_failures": int}
+   "summary": str, "summary_ts": float, "summary_failures": int}
 
 ``summary`` is additive (F-16/F-17 merge): the same haiku call that produces the
 title also returns a live one-sentence status, written alongside it. Absent on
@@ -132,7 +132,7 @@ def fresh_summary_with_ts(sid, harness="claude", now=None,
     data = read(sid, harness=harness)
     if not data:
         return (None, None)
-    ts = data.get("ts")
+    ts = data.get("summary_ts", data.get("ts"))
     if not isinstance(ts, (int, float)):
         return (None, None)
     now = time.time() if now is None else now
@@ -150,15 +150,16 @@ def fresh_summary_with_ts(sid, harness="claude", now=None,
 
 
 def write(sid, title, source="refresher", offset=0, now=None, harness="claude", summary=None,
-          cursor_kind=None, summary_failures=0):
+          summary_ts=None, cursor_kind=None, summary_failures=0):
     """Atomically write neutral fleet-owned state. ``title=''`` is allowed.
 
     ``summary`` is additive and omitted from the written dict when falsy — old
     readers see the same shape they always have.
     """
+    write_ts = time.time() if now is None else now
     data = {
         "title": title or "",
-        "ts": time.time() if now is None else now,
+        "ts": write_ts,
         "source": source,
         "offset": int(offset),
     }
@@ -166,6 +167,11 @@ def write(sid, title, source="refresher", offset=0, now=None, harness="claude", 
         data["cursor_kind"] = str(cursor_kind)
     if summary:
         data["summary"] = summary
+        data["summary_ts"] = (
+            summary_ts
+            if isinstance(summary_ts, (int, float)) and not isinstance(summary_ts, bool)
+            else write_ts
+        )
     if isinstance(summary_failures, int) and not isinstance(summary_failures, bool) and summary_failures > 0:
         data["summary_failures"] = summary_failures
     directory = titles_dir(harness)
