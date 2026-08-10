@@ -172,6 +172,22 @@ def _git_run(args, cwd, env=None, timeout=30):
         return 1, "", str(ex)
 
 
+def _dump_worktree_path(path=None):
+    """Return the real mirror path while preserving a split-store symlink.
+
+    A machine may keep the WAL database in a local ``MEM_STORE`` while its
+    tracked ``dump.jsonl`` lives in a separate agent-memory checkout (for
+    example on NAS).  In that layout ``STORE/dump.jsonl`` is a symlink.  All
+    atomic mirror replacements and Git operations must target the symlink's
+    destination, not replace the link itself.
+    """
+    candidate = Path(path) if path is not None else DUMP
+    try:
+        return candidate.resolve(strict=False) if candidate.is_symlink() else candidate
+    except OSError:
+        return candidate
+
+
 def _commit_dump():
     """Commit the synchronized dump as a PLAIN commit (2026-07-22 audit W1/W2).
 
@@ -187,7 +203,8 @@ def _commit_dump():
     """
     if os.environ.get("MEM_DUMP_COMMIT") == "0":
         return  # Explicit escape hatch.
-    repo = DUMP.parent  # STORE; dump.jsonl lives in the agent-memory repo working tree
+    dump = _dump_worktree_path()
+    repo = dump.parent
 
     def _warn(step, rc, err):
         tail = (err or "").strip().splitlines()
@@ -197,15 +214,15 @@ def _commit_dump():
     if not _git_out(["rev-parse", "--is-inside-work-tree"], repo):
         return  # Non-git store: no-op.
     # Stage only dump.jsonl; never touch databases, backups, or unrelated files.
-    rc, _, err = _git_run(["add", "--", DUMP.name], repo)
+    rc, _, err = _git_run(["add", "--", dump.name], repo)
     if rc != 0:
         _warn("git-add", rc, err)
         return
     # Skip the commit when the staged dump is unchanged.
-    if _git_rc(["diff", "--cached", "--quiet", "--", DUMP.name], repo) == 0:
+    if _git_rc(["diff", "--cached", "--quiet", "--", dump.name], repo) == 0:
         return  # nothing staged → no commit
     msg = f"{AUTO_DUMP_MSG_PREFIX} ({datetime.datetime.now().isoformat(timespec='seconds')})"
-    rc, _, err = _git_run(["commit", "-m", msg, "--", DUMP.name], repo)
+    rc, _, err = _git_run(["commit", "-m", msg, "--", dump.name], repo)
     if rc != 0:
         _warn("git-commit", rc, err)
         return
@@ -227,7 +244,7 @@ def maintenance(squash_days=14, apply=False):
     by default; ``--apply`` executes. A pushed mirror needs an explicit
     force-push afterwards — this function never pushes.
     """
-    repo = STORE
+    repo = _dump_worktree_path().parent
     if not _git_out(["rev-parse", "--is-inside-work-tree"], repo):
         print(f"[maintenance] store is not a git repository: {repo}")
         return 0
@@ -2356,7 +2373,7 @@ def distill(sid, advance=False, source_name="claude"):
 # ---------- export / import ----------
 def export_dump(target_path=None):
     """Export a deterministic, ID-sorted 16-column JSONL mirror."""
-    dest = Path(target_path) if target_path else DUMP
+    dest = _dump_worktree_path(target_path)
     con = get_con()
     try:
         sql = f"SELECT {', '.join(RECORD_COLS)} FROM records ORDER BY id"

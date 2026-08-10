@@ -212,6 +212,29 @@ rm -f "$STORE5/.git/index.lock"
 CNT2="$(git -C "$STORE5" rev-list --count HEAD)"
 [ "$CNT2" = 2 ] && ok "failed sync stayed non-fatal (no commit, no crash)" || bad "count after lock=$CNT2"
 
+echo "== repair 3a: local DB and external dump checkout stay split =="
+STORE6="$TMP/store-split"; DREPO6="$TMP/dumprepo-split"
+mkdir -p "$STORE6" "$DREPO6"
+git -C "$DREPO6" init -q
+git -C "$DREPO6" config user.email mem-test@example.invalid
+git -C "$DREPO6" config user.name "mem test"
+: > "$DREPO6/dump.jsonl"
+ln -s "$DREPO6/dump.jsonl" "$STORE6/dump.jsonl"
+export MEM_STORE="$STORE6"
+( cd "$PROJ5" && python3 "$MEM" add durable note \
+    "split local database and external dump repository fixture" >/dev/null 2>&1 )
+( cd "$PROJ5" && python3 "$MEM" sync >/dev/null 2>&1 )
+[ -L "$STORE6/dump.jsonl" ] && ok "sync preserves the local dump symlink" \
+  || bad "sync replaced the local dump symlink"
+[ -f "$STORE6/memory.db" ] && ok "SQLite database stays in the local store" \
+  || bad "local SQLite database missing"
+[ "$(git -C "$DREPO6" rev-list --count HEAD)" = 1 ] \
+  && ok "sync commits through the symlink into the dump checkout" \
+  || bad "external dump checkout did not receive one commit"
+grep -q 'split local database' "$DREPO6/dump.jsonl" \
+  && ok "external dump mirror contains the synchronized record" \
+  || bad "external dump mirror was not refreshed"
+
 echo "== repair 3b: maintenance squashes old history and preserves trees =="
 DREPO="$TMP/dumprepo"; mkdir -p "$DREPO"; git -C "$DREPO" init -q
 git -C "$DREPO" config user.email mem-test@example.invalid

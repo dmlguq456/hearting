@@ -20,6 +20,12 @@ pending protection, lifecycle execution, bounded telemetry, and recovery.
 | Git mirror | `<agent-home>/memory/dump.jsonl` (one ID-sorted record per line) | tracked in the memory repository | deterministic text export and exact `mem import` recovery source |
 | Harness projection | `<agent-home>/projects/<cwd>/memory/` | ignored | compatibility surface for stray auto-memory writes absorbed by `mem sync`; `mem project` can rebuild the projection |
 
+`memory.db` and the mirror checkout may be split across filesystems. Keep the
+live store on a local filesystem, place the `agent-memory` checkout elsewhere,
+and make `<agent-home>/memory/dump.jsonl` a symlink to that checkout's tracked
+`dump.jsonl`. Export, commit, push, doctor, and maintenance follow the mirror
+target without replacing the symlink; the SQLite WAL files remain local.
+
 A record combines `tier` (`working|durable`), `scope` (`project|global`),
 `type`, `delivery_state` (`ordinary|pending|consumed`), a retrieval capsule, and
 temporal `status` (`active|superseded`). Working records have
