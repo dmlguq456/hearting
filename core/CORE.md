@@ -115,7 +115,28 @@ The artifact root contains durable, project-scoped work products:
 | `designs/` | standalone design decision records (spec-owned design instead anchors at `spec/design/`) |
 | `.runtime/` | artifact-root-scoped runtime state (route lifecycle records and similar); the only bucket name for this, legacy `_runtime/` is read-only |
 
-## 3.1. Agent Notes And Worklog Board
+## 3.1. Report Bundle Root
+
+Published reports use a user-installed, cross-project storage root named
+`REPORT_BUNDLE_ROOT`. It is separate from the project artifact root: artifacts
+record how work was produced, while the bundle root holds immutable,
+self-contained reports for read-only consumers.
+
+```text
+<report-bundle-root>/<project>/<experiment-id>/<version>/report/
+├── index.html
+├── REPORT.md
+├── report_manifest.json
+└── media/
+```
+
+The installer records the absolute root once under the user Hearting config
+and thereafter preserves it. Runtime resolution uses an explicit environment
+override before that config. Source and database records carry only stable
+`project/experiment/version` identity and `report/index.html`, never the
+absolute bundle path. `bundle_id` is the reproducible `project/experiment`.
+
+## 3.2. Agent Notes And Worklog Board
 
 The canonical neutral name for the cross-project continuity board data root is:
 

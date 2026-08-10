@@ -231,6 +231,23 @@ When adding an invariant, add its mechanically expressible portion to determinis
 - Installed runtime surface: `harness verify`
 - Value proposition, information order, and semantic equivalence: human review; no automatic prose fix
 
+### §4.0. Report Bundle Publication Contract
+
+New published reports use `capabilities/report-bundle-manifest.schema.json`
+schema v2. It is content-neutral: prose-only research reports are valid when
+`index.html`, `REPORT.md`, every other internal document/asset, and their
+SHA-256 values form a closed inventory. Local HTML, Markdown, and CSS links
+must remain inside the report root and resolve; symlinks, missing or unlisted
+files, root escapes, and hash mismatches fail closed.
+
+The v1 `capabilities/report-manifest.schema.json` remains the compatibility
+contract for 48 kHz media reports. In v2, media evidence is conditional: an
+empty media set is valid, but once a sample is declared it requires the 1:1
+audio/waveform/spectrogram/playback set, actual decode/playback validation,
+and inventory-bound hashes. Publisher and dry-run backfill receive explicit
+project, experiment, and version values and never infer version from paths or
+timestamps.
+
 ### §4.1. Report Figure Evidence Contract
 
 Report spectrograms separate the computation contract from the communication

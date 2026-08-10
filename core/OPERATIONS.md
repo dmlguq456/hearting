@@ -150,6 +150,11 @@ Dispatch rules:
      `--add-dir`; OpenCode exact `permission.external_directory` rule).
      Writes to the task worktree's `.agent_reports/**` or
      `.claude_reports/**` snapshot fail closed.
+     When a route includes report publication, wrappers also resolve the
+     create-once Hearting `REPORT_BUNDLE_ROOT` setting and project only that
+     exact directory as an external writable root. They never widen access to
+     its parent, embed the absolute root in artifact-sink receipts, or grant it
+     to an unrelated route.
    - **Light team delegation:** open a team agent in the background and name the work root in its prompt. The main session opens QA against that same path. Use only for small, fast iterations.
    - **Quick one-shot:** compile one dispatch-depth-1 conductor and launch it only
      through a checked registered-headless wrapper. Its micro-stages stay inline

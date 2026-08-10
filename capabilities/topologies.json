@@ -1739,12 +1739,10 @@
        "summary-stats.json"
       ],
       "outputs": [
-       "media/**",
-       "report_manifest.json"
+       "report/media/**"
       ],
       "write_scope": [
-       "media/**",
-       "report_manifest.json"
+       "report/media/**"
       ],
       "resource_class": "bulk-generation",
       "completion_gate": "lab-media",
@@ -1770,16 +1768,18 @@
       "inputs": [
        "metrics.jsonl",
        "summary-stats.json",
-       "report_manifest.json"
+       "report/media/**"
       ],
       "outputs": [
-       "REPORT.md",
-       "report.html",
+       "report/REPORT.md",
+       "report/index.html",
+       "report/report_manifest.json",
        "experiment-artifact"
       ],
       "write_scope": [
-       "REPORT.md",
-       "report.html"
+       "report/REPORT.md",
+       "report/index.html",
+       "report/report_manifest.json"
       ],
       "resource_class": "normal",
       "completion_gate": "lab-report",
@@ -1803,9 +1803,10 @@
       ],
       "role": "fast reviewer",
       "inputs": [
-       "REPORT.md",
-       "report.html",
-       "report_manifest.json"
+       "report/REPORT.md",
+       "report/index.html",
+       "report/report_manifest.json",
+       "report/media/**"
       ],
       "outputs": [
        "reviews/eval-verdict.json"
@@ -1830,14 +1831,47 @@
       }
      },
      {
-      "id": "sync",
+      "id": "publish",
       "kind": "capability-owner",
       "depends_on": [
        "independent-verify"
       ],
       "role": "deep orchestrator",
       "inputs": [
-       "reviews/eval-verdict.json"
+       "reviews/eval-verdict.json",
+       "report/**",
+       "project-experiment-version"
+      ],
+      "outputs": [
+       "bundle-publication.json"
+      ],
+      "write_scope": [
+       "bundle-publication.json"
+      ],
+      "resource_class": "normal",
+      "completion_gate": "lab-publish",
+      "dispatch_depth": 1,
+      "fallback_hops": [
+       "same-harness-headless",
+       "cross-harness-headless",
+       "inline"
+      ],
+      "unit": "_kernel/owner",
+      "model_profile": "deep",
+      "continuation": {
+       "kind": "inline-next"
+      }
+     },
+     {
+      "id": "sync",
+      "kind": "capability-owner",
+      "depends_on": [
+       "publish"
+      ],
+      "role": "deep orchestrator",
+      "inputs": [
+       "reviews/eval-verdict.json",
+       "bundle-publication.json"
       ],
       "outputs": [
        "spec-note-sync.json"
@@ -1903,8 +1937,8 @@
      ],
      "source_outputs": [
       {
-       "node": "report",
-       "output": "experiment-artifact"
+       "node": "publish",
+       "output": "bundle-publication.json"
       }
      ],
      "on_unavailable": "skip"
@@ -1916,6 +1950,7 @@
     "lab-media",
     "lab-report",
     "lab-independent-verify",
+    "lab-publish",
     "lab-sync"
    ],
    "human_gates": [],
@@ -1926,6 +1961,7 @@
     "media",
     "report",
     "independent-verify",
+    "publish",
     "sync"
    ],
    "artifact_scope": {
@@ -3055,6 +3091,10 @@
   "lab-independent-verify": {
    "kind": "unit-io",
    "unit": "qa/test"
+  },
+  "lab-publish": {
+   "kind": "custom",
+   "doc": "owner atomic report-bundle publication after manifest verification; explicit project/experiment/version"
   },
   "lab-sync": {
    "kind": "custom",

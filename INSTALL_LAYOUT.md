@@ -36,6 +36,28 @@ $HOME/.local/share/opencode/  # OpenCode data home (DB, logs, snapshots)
 
 Do not make `$HOME/.claude`, `$HOME/.codex`, or `$HOME/.config/opencode` the canonical repo. Those directories contain runtime-owned state such as credentials, sessions, logs, SQLite databases, caches, and shell snapshots.
 
+## Report Bundle Store
+
+Installation also initializes one cross-runtime report store. Pass an explicit
+absolute root when storage placement matters:
+
+```bash
+harness install all --report-bundle-root /srv/hearting/report-bundles
+```
+
+The installer records it once in
+`${XDG_CONFIG_HOME:-$HOME/.config}/hearting/report-bundle.json`; later
+install/update invocations preserve the file byte-for-byte. Without an option,
+the initial value comes from `REPORT_BUNDLE_ROOT`, then falls back to
+`${XDG_DATA_HOME:-$HOME/.local/share}/hearting/report-bundles`. Runtime
+resolution gives the environment variable precedence over the stored value.
+`harness verify` fails if the config or configured directory is invalid.
+
+Published bundles use
+`<root>/<project>/<experiment>/<version>/report/{index.html,REPORT.md,report_manifest.json,media/}`.
+Consumers store stable identifiers and `report/index.html`, never this absolute
+root.
+
 ## Activation Modes
 
 The activation record lives at `<runtime-home>/.harness/activation.json` and is

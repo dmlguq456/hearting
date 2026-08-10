@@ -146,6 +146,12 @@ Precedence, highest first:
    the primary result. Hooks are not activation authority. The extension owns
    product-specific setup guidance, identity, upsert behavior, and publication.
 
+   A report-bundle offer uses receipt schema v2 and adds exactly
+   `bundle_id`, `version`, and `entrypoint` (`report/index.html`) to the v1
+   artifact completion fields. The three are all-or-none. Neither an absolute
+   bundle path nor file payload is passed to the sink. Offers without bundle
+   metadata remain receipt v1 for compatibility.
+
    | Primary capability | optional artifact-sink policy |
    |---|---|
    | `autopilot-code`, `autopilot-draft`, `autopilot-lab`, `autopilot-refine`, `autopilot-research` | Topology-sealed after the declared durable terminal; offered only while an extension handler is registered and available. |

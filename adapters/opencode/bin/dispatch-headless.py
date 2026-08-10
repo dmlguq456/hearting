@@ -421,6 +421,24 @@ def resolve_artifact_root(worktree: str) -> str:
     return value
 
 
+def resolve_report_bundle_root(capability: str) -> Path | None:
+    if capability != "autopilot-lab":
+        return None
+    result = subprocess.run(
+        [sys.executable, str(ROOT / "tools" / "report-bundle.py"), "root", "--optional"],
+        text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
+    )
+    value = result.stdout.strip()
+    if result.returncode != 0:
+        raise ValueError((result.stderr or result.stdout or "invalid report bundle root").strip())
+    if not value:
+        return None
+    path = Path(value)
+    if not path.is_absolute() or path.is_symlink() or not path.is_dir():
+        raise ValueError("configured report bundle root is not a safe directory")
+    return path
+
+
 def qa_track(capability: str) -> str:
     if capability.startswith("code-") or capability == "autopilot-code":
         return "code"
@@ -431,7 +449,7 @@ def qa_track(capability: str) -> str:
     return "general"
 
 
-def scoped_external_directory_config(artifact_root: str) -> str:
+def scoped_external_directory_config(artifact_root: str, report_bundle_root: str | None = None) -> str:
     raw = os.environ.get("OPENCODE_CONFIG_CONTENT", "").strip()
     try:
         config = json.loads(raw) if raw else {}
@@ -468,9 +486,12 @@ def scoped_external_directory_config(artifact_root: str) -> str:
     else:
         raise ValueError("OpenCode external_directory permission must be a string or object")
 
-    for pattern in (artifact_root, f"{artifact_root}/**"):
-        rules.pop(pattern, None)
-        rules[pattern] = "allow"
+    for root in (artifact_root, report_bundle_root):
+        if not root:
+            continue
+        for pattern in (root, f"{root}/**"):
+            rules.pop(pattern, None)
+            rules[pattern] = "allow"
     permission["external_directory"] = rules
     config["permission"] = permission
     return json.dumps(config, ensure_ascii=False, separators=(",", ":"))
@@ -1152,7 +1173,11 @@ def main(argv: list[str]) -> int:
         return fail("not-a-git-worktree", 65, worktree=args.worktree)
     try:
         args.artifact_root = resolve_artifact_root(args.worktree)
-        args.opencode_config_content = scoped_external_directory_config(args.artifact_root)
+        args.report_bundle_root = resolve_report_bundle_root(args.capability)
+        args.opencode_config_content = scoped_external_directory_config(
+            args.artifact_root,
+            str(args.report_bundle_root) if args.report_bundle_root is not None else None,
+        )
     except ValueError as e:
         return fail("artifact-root-access-config-failed", 64, detail=str(e), worktree=args.worktree)
     args.worker_type = resolve_worker_type(
@@ -1436,6 +1461,7 @@ def main(argv: list[str]) -> int:
             "AGENT_DISPATCH_OWNER": args.capability_owner or "",
             "AGENT_DISPATCH_OWNER_HARNESS": args.owner_harness or "",
             "AGENT_ARTIFACT_ROOT": args.artifact_root,
+            "REPORT_BUNDLE_ROOT": str(args.report_bundle_root or ""),
             "AGENT_ROUTE_FILE": (
                 args.route_file
                 or (args.owner_route_binding.route_file if args.owner_route_binding else "")

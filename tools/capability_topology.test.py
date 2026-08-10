@@ -27,7 +27,7 @@ PRESERVED_FULL_FIELD_DIGESTS = {
         "9a26c0fea9a635d94f784379941c90a25d35ad7d2bcf1c3f21a1fcd5fad57183",
     ),
     ("autopilot-lab", ('eval',)): (
-        "061cebe33404e79acccdaaa5fcf1bd1b66038e8d5e9f2061b32c1a43e6792db1",
+        "f3b5dbd108b70b96c29f0af3e76c4cb10f9ce31aed215aa6f0f4ea2f1edac920",
         "47160a6d9acf73cf29ff137dcb90c1af3036148530af2a1628162692078f1e24",
     ),
     ("autopilot-refine", ('default',)): (
@@ -126,7 +126,7 @@ class TestTopology(unittest.TestCase):
             # not a workflow completing, so the sink offer anchors on the handoff that
             # records what happens next (2026-08-04 BC_ResNet_tf).
             ("autopilot-lab",("setup",)):("handoff","full-run","experiment-artifact"),
-            ("autopilot-lab",("eval",)):("sync","report","experiment-artifact"),
+            ("autopilot-lab",("eval",)):("sync","publish","bundle-publication.json"),
             ("autopilot-refine",("default",)):("transaction","transaction","revised-artifact"),
             ("autopilot-research",("academic","market","technology")):("claim-verify","report","research-artifact"),
         }
@@ -261,7 +261,7 @@ class TestTopology(unittest.TestCase):
         })
         expected = {
             ("autopilot-apply", ("default",)): ["handback"],
-            ("autopilot-lab", ("eval",)): ["sync"],
+            ("autopilot-lab", ("eval",)): ["publish", "sync"],
             ("autopilot-lab", ("setup",)): ["handoff"],
             ("autopilot-refine", ("default",)): ["transaction"],
             ("autopilot-ship", ("default",)): ["release-setup", "deploy"],

@@ -486,6 +486,24 @@ def resolve_artifact_root(worktree: str) -> str:
     return value
 
 
+def resolve_report_bundle_root(capability: str) -> Path | None:
+    if capability != "autopilot-lab":
+        return None
+    result = subprocess.run(
+        [sys.executable, str(ROOT / "tools" / "report-bundle.py"), "root", "--optional"],
+        text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
+    )
+    value = result.stdout.strip()
+    if result.returncode != 0:
+        raise ValueError((result.stderr or result.stdout or "invalid report bundle root").strip())
+    if not value:
+        return None
+    path = Path(value)
+    if not path.is_absolute() or path.is_symlink() or not path.is_dir():
+        raise ValueError("configured report bundle root is not a safe directory")
+    return path
+
+
 def dispatch_prompt(
     args: argparse.Namespace,
     task_input: tuple[str, str] | None = None,
@@ -846,6 +864,8 @@ def shell_command(args: argparse.Namespace, prompt_path: Path, log_path: Path) -
             "--state-file", str(completion_state_path(args)),
             "--add-dir", str(args.artifact_root),
         ]
+        if getattr(args, "report_bundle_root", None) is not None:
+            command += ["--add-dir", str(args.report_bundle_root)]
         if getattr(args, "owner_route_binding", None):
             command += [
                 "--route-file", args.owner_route_binding.route_file,
@@ -873,6 +893,8 @@ def shell_command(args: argparse.Namespace, prompt_path: Path, log_path: Path) -
         "--output-format", "stream-json", "--verbose",
         "--no-session-persistence",
     ]
+    if getattr(args, "report_bundle_root", None) is not None:
+        cmd += ["--add-dir", str(args.report_bundle_root)]
     if args.resolved_model_settings["source"] != "inherit":
         cmd += [
             "--model",
@@ -1433,8 +1455,9 @@ def main(argv: list[str]) -> int:
         return fail("not-a-git-worktree", 65, worktree=args.worktree)
     try:
         args.artifact_root = resolve_artifact_root(args.worktree)
+        args.report_bundle_root = resolve_report_bundle_root(args.capability)
     except ValueError as e:
-        return fail("artifact-root-resolution-failed", 64, detail=str(e), worktree=args.worktree)
+        return fail("writable-root-resolution-failed", 64, detail=str(e), worktree=args.worktree)
     args.worker_type = resolve_worker_type(
         explicit=args.worker_type,
         dispatch_depth=args.dispatch_depth,
@@ -1805,6 +1828,7 @@ def main(argv: list[str]) -> int:
             "AGENT_DISPATCH_OWNER": args.capability_owner or "",
             "AGENT_DISPATCH_OWNER_HARNESS": args.owner_harness or "",
             "AGENT_ARTIFACT_ROOT": args.artifact_root,
+            "REPORT_BUNDLE_ROOT": str(args.report_bundle_root or ""),
             "AGENT_ROUTE_FILE": (
                 args.route_file
                 or (args.owner_route_binding.route_file if args.owner_route_binding else "")

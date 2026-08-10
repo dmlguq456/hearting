@@ -150,6 +150,14 @@ class ClaudeSD78CompletionDelivery(unittest.TestCase):
                     self.assertIn(name, command)
                 self.assertNotIn("--disallowedTools Bash", command)
 
+    def test_lab_shell_projects_configured_report_bundle_root(self):
+        args = _shell_command_args(
+            capability="autopilot-lab",
+            report_bundle_root=Path("/tmp/fixture-report-bundles"),
+        )
+        command = WH.shell_command(args, Path("/tmp/p.txt"), Path("/tmp/l.log"))
+        self.assertIn("--add-dir /tmp/fixture-report-bundles", command)
+
     def test_stage_direct_and_quick_launches_get_the_same_runtime_deny(self):
         cases = (("stage", "strong"), ("owner", "direct"), ("owner", "quick"))
         for worker_type, intensity in cases:
