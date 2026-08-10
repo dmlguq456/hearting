@@ -30,6 +30,11 @@ _CLAUDE_TABLE = (
         {"action": "copy_once", "source": f"claude_setting/{name}", "dest_name": name}
         for name in _CLAUDE_COPY_ONCE_NAMES
     ]
+    + [{
+        "action": "seed_once",
+        "source": "adapters/claude/config/models.conf",
+        "dest_name": "agent-config/models.conf",
+    }]
     + [
         # Delegate the Windows-only path without reimplementing install-windows.sh.
         {"action": "delegate", "cmd": ["bash", "adapters/claude/bin/install-windows.sh"]},
@@ -57,7 +62,6 @@ _CODEX_FIXED_SYMLINKS = [
     ("agent-modes", "codex_setting/codex-modes"),
     ("agent-agents", "codex_setting/codex-agents"),
     ("agent-hooks", "codex_setting/codex-hooks"),
-    ("agent-config", "codex_setting/codex-config"),
     ("hooks.json", "codex_setting/codex-hooks/hooks.json"),
 ]
 
@@ -66,6 +70,11 @@ _CODEX_TABLE = (
         {"action": "symlink", "source": source, "dest_name": dest_name}
         for dest_name, source in _CODEX_FIXED_SYMLINKS
     ]
+    + [{
+        "action": "seed_once",
+        "source": "adapters/codex/config/models.conf",
+        "dest_name": "agent-config/models.conf",
+    }]
     + [
         {
             "action": "symlink_glob",
@@ -111,6 +120,11 @@ _OPENCODE_TABLE = (
         {"action": "symlink", "source": source, "dest_name": dest_name}
         for dest_name, source in _OPENCODE_FIXED_SYMLINKS
     ]
+    + [{
+        "action": "seed_once",
+        "source": "adapters/opencode/config/models.conf",
+        "dest_name": "agent-config/models.conf",
+    }]
     + [
         {
             "action": "symlink_glob",
@@ -165,7 +179,7 @@ def _expand(table, runtime, scope):
     for item in table:
         action = item["action"]
 
-        if action in ("symlink", "copy_once"):
+        if action in ("symlink", "copy_once", "seed_once"):
             source_relpath = item["source"]
             source_path = _resolve_source_path(source_relpath)
             dest_path = runtime_home / item["dest_name"]
@@ -232,7 +246,7 @@ def plan(runtimes, scope="global"):
     """Return resolved projection plans by runtime.
 
     Return shape: ``{runtime: [entry, ...]}``.
-    {"action": "symlink"|"copy_once", "source": str, "dest": str, "source_present": True}
+    {"action": "symlink"|"copy_once"|"seed_once", "source": str, "dest": str, "source_present": True}
     {"action": "delegate", "cmd": [...], "source_present": True}
     {"action": "merge", "note": str, "source_present": True}
     {"action": "skip", "reason": str, "dest": str}

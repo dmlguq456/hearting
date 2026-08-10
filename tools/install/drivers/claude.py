@@ -16,6 +16,7 @@ import paths
 import projector
 import manifest
 import verifier
+import user_model_config
 
 RUNTIME = "claude"
 
@@ -224,6 +225,28 @@ def install(scope="global", plugin=False, dry_run=False):
             )
             continue
 
+        if action == "seed_once":
+            try:
+                actions.append(
+                    user_model_config.seed_model_config(
+                        RUNTIME,
+                        entry["source"],
+                        paths.runtime_home(RUNTIME, scope),
+                        dry_run=dry_run,
+                    )
+                )
+            except user_model_config.UserModelConfigError as exc:
+                actions.append(
+                    {
+                        "action": "seed_once",
+                        "source": entry["source"],
+                        "dest": entry["dest"],
+                        "status": "blocked",
+                        "detail": str(exc),
+                    }
+                )
+            continue
+
         if action == "delegate":
             is_windows = os.name == "nt"
             if not is_windows or dry_run:
@@ -285,6 +308,12 @@ def checks(scope="global"):
             dest = entry["dest"]
             name = Path(dest).name
             check_list.append(verifier.check_file_exists(f"claude.file.{name}", dest))
+        elif action == "seed_once":
+            check_list.append(
+                user_model_config.verification_check(
+                    "claude.file.agent-config.models.conf", entry["dest"]
+                )
+            )
         # Skip and delegate entries are not read-only verification targets.
 
     agent_home = str(paths.agent_home())

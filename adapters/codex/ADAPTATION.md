@@ -478,8 +478,10 @@ Registry writes and harvest rewrites are serialized with a `.lock` file.
 
 ## Model Mapping
 
-`adapters/codex/config/models.conf` is the sole concrete source. Behavioral
-roles resolve through `preflight.sh role`; registered route profiles resolve as:
+`adapters/codex/config/models.conf` is the shipped concrete default. Install
+seeds `$CODEX_HOME/agent-config/models.conf` once; a valid complete user file is
+selected as one unit, otherwise the shipped file is selected as one unit.
+Behavioral roles resolve through `preflight.sh role`; registered route profiles resolve as:
 
 | Model profile | Concrete realization |
 |---|---|

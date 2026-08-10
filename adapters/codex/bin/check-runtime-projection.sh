@@ -5,7 +5,7 @@
 # `status=ok|failed`. Hard checks (symlink wiring, linked skills/agents) drive
 # status; bootstrap/plugin checks are soft (skipped when codex is unavailable,
 # the plugin reports install commands when missing). config.toml stays
-# runtime-owned, so only the harness config fragment pointer is checked.
+# runtime-owned. Hearting's model map is a separate user-owned regular file.
 # Set CODEX_REQUIRE_HOOK_TRUST=1 to make missing `/hooks` trust records fail.
 set -eu
 
@@ -68,7 +68,7 @@ expect_link "$CODEX_HOME/agent-roles"              "$S/roles"                   
 expect_link "$CODEX_HOME/agent-bin"                "$S/bin"                       agent-bin
 expect_link "$CODEX_HOME/agent-hooks"              "$S/codex-hooks"               agent-hooks
 if [ "$native_managed" -eq 1 ]; then
-  for name in hearting-readme agent-tools agent-utilities agent-scaffolds agent-skills agent-agents agent-config agent-plugin-marketplace; do
+  for name in hearting-readme agent-tools agent-utilities agent-scaffolds agent-skills agent-agents agent-plugin-marketplace; do
     printf 'check=%s:skipped reason=runtime-managed\n' "$name"
   done
   printf 'check=agent-modes:ok reason=runtime-managed-per-file\n'
@@ -86,8 +86,14 @@ else
   expect_link "$CODEX_HOME/agent-skills"             "$S/codex-skills"              agent-skills
   expect_link "$CODEX_HOME/agent-agents"             "$S/codex-agents"              agent-agents
   expect_link "$CODEX_HOME/agent-modes"              "$S/codex-modes"               agent-modes
-  expect_link "$CODEX_HOME/agent-config"             "$S/codex-config"              agent-config
   expect_link "$CODEX_HOME/agent-plugin-marketplace" "$S/codex-plugin-marketplace" agent-plugin-marketplace
+fi
+
+if [ -f "$CODEX_HOME/agent-config/models.conf" ] && [ ! -L "$CODEX_HOME/agent-config" ] && [ ! -L "$CODEX_HOME/agent-config/models.conf" ]; then
+  printf 'check=agent-config:ok reason=user-owned-model-config\n'
+else
+  printf 'check=agent-config:failed reason=expected-regular-user-model-config\n'
+  fails=$((fails + 1))
 fi
 
 hook_trust_check() {

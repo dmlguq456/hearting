@@ -6,7 +6,8 @@
 # It NEVER touches Codex-owned credentials, sessions, history, logs, caches,
 # config.toml, or local databases. It creates/refreshes the harness `agent-*`
 # pointers, `hooks.json`, selected per-skill / per-agent symlinks, and the
-# manifest-backed interactive launcher in the user's harness bin directory. A
+# one-time user model default, and the manifest-backed interactive launcher in
+# the user's harness bin directory. A
 # pre-existing real `hooks.json` is backed up once to `hooks.json.pre-harness`
 # before it is replaced by the projection symlink. The launcher records the real
 # Codex binding and restores it through `harness uninstall codex`.
@@ -119,8 +120,17 @@ link "$S/codex-modes"                    "$CODEX_HOME/agent-modes"
 link "$S/codex-agents"                   "$CODEX_HOME/agent-agents"
 link "$S/codex-plugin-marketplace"       "$CODEX_HOME/agent-plugin-marketplace"
 link "$S/codex-hooks"                    "$CODEX_HOME/agent-hooks"
-link "$S/codex-config"                   "$CODEX_HOME/agent-config"
 link "$S/codex-hooks/hooks.json"         "$CODEX_HOME/hooks.json"
+
+model_config_result=$(python3 "$AGENT_HOME/tools/install/user_model_config.py" \
+  --adapter codex \
+  --source "$AGENT_HOME/adapters/codex/config/models.conf" \
+  --runtime-home "$CODEX_HOME") || {
+    printf '%s\n' "$model_config_result" >&2
+    echo "install-runtime-projection: user model config seed failed" >&2
+    exit 3
+  }
+printf 'model_config=%s\n' "$model_config_result"
 
 # Native Codex skill discovery: one symlink per generated skill directory, or
 # plugin-only discovery with stale harness-owned skill symlinks removed.

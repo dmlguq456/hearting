@@ -28,8 +28,13 @@ import paths
 TOOLS_ROOT = Path(__file__).resolve().parents[1]
 if str(TOOLS_ROOT) not in sys.path:
     sys.path.insert(0, str(TOOLS_ROOT))
+UTILITIES_ROOT = Path(__file__).resolve().parents[2] / "utilities"
+if str(UTILITIES_ROOT) not in sys.path:
+    sys.path.insert(0, str(UTILITIES_ROOT))
 
 import harness_manifest
+import model_config
+import user_model_config
 
 
 RUNTIMES = ("claude", "codex", "opencode")
@@ -1902,6 +1907,17 @@ def activate(
     if mode == "packaged":
         active_root = _build_bundle(runtime, source_root, revision, scope)
 
+    # This is an independent user preference seed, not an activation-owned
+    # projection. A later refresh, rollback, or uninstall must not remove it.
+    try:
+        model_config_action = user_model_config.seed_model_config(
+            runtime,
+            active_root / "adapters" / runtime / "config" / "models.conf",
+            paths.runtime_home(runtime, scope),
+        )
+    except user_model_config.UserModelConfigError as exc:
+        raise ActivationError(str(exc)) from exc
+
     desired = _desired_entries(runtime, mode, source_root, active_root, revision, scope)
     digest = _projection_digest(desired)
     packaged_checksum = _bundle_checksum(active_root) if mode == "packaged" else None
@@ -1959,6 +1975,7 @@ def activate(
                     ),
                     [],
                 ),
+                "model_config": model_config_action,
             },
             "activated_at": _utc_now(),
         }
@@ -1978,6 +1995,7 @@ def activate(
 
 
 def _status_missing(runtime: str, scope: str) -> dict:
+    config_path = paths.runtime_home(runtime, scope) / "agent-config" / "models.conf"
     return {
         "runtime": runtime,
         "mode": None,
@@ -1988,6 +2006,10 @@ def _status_missing(runtime: str, scope: str) -> dict:
         "discovery_paths": [],
         "duplicate_sources": duplicate_sources(runtime, scope),
         "config_conflicts": [],
+        "model_config_path": str(config_path),
+        "model_config_present": config_path.is_file() and not config_path.is_symlink(),
+        "model_config_source": None,
+        "model_config_reason": "activation-missing",
         "freshness": "missing",
         "session_action": SESSION_ACTIONS[runtime],
         "external_dependencies": [],
@@ -2036,6 +2058,20 @@ def status(runtime: str, scope: str = "global") -> dict:
         config_missing, config_conflicts = _claude_settings_health(active_root, scope)
         if config_missing:
             missing = True
+    model_config_path = paths.runtime_home(runtime, scope) / "agent-config" / "models.conf"
+    model_config_present = model_config_path.is_file() and not model_config_path.is_symlink()
+    try:
+        _, model_receipt = model_config.resolve_config(
+            runtime,
+            runtime=paths.runtime_home(runtime, scope),
+            source_root=active_root,
+        )
+        model_config_source = model_receipt.source
+        model_config_reason = model_receipt.reason
+    except model_config.ModelConfigError as exc:
+        model_config_source = "unavailable"
+        model_config_reason = f"shipped-unusable:{exc}"
+        missing = True
     bundle_stale = False
     if state.get("mode") == "packaged":
         current_bundle_checksum = _bundle_checksum(active_root)
@@ -2091,6 +2127,10 @@ def status(runtime: str, scope: str = "global") -> dict:
         "discovery_paths": [item["dest"] for item in entries],
         "duplicate_sources": duplicates,
         "config_conflicts": config_conflicts,
+        "model_config_path": str(model_config_path),
+        "model_config_present": model_config_present,
+        "model_config_source": model_config_source,
+        "model_config_reason": model_config_reason,
         "freshness": freshness,
         "session_action": SESSION_ACTIONS[runtime],
         "external_dependencies": [],

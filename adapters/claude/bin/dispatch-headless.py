@@ -87,9 +87,10 @@ from stage_session_runtime import (  # noqa: E402
 )
 from model_profile import (  # noqa: E402
     ModelProfileError,
-    resolve_profile,
+    resolve_runtime_profile,
     validate_registered_profile,
 )
+from model_config import ModelConfigError, resolve_config  # noqa: E402
 from codex_dispatch_terminal import inspect_terminal_attempt  # noqa: E402
 from codex_managed_dispatch import (  # noqa: E402
     MANAGED_PARENT_DELIVERY,
@@ -315,27 +316,12 @@ def role_map(role: str) -> dict[str, str]:
 
 
 def _model_policy() -> dict[str, str]:
-    path = ROOT / "adapters" / "claude" / "config" / "models.conf"
-    values: dict[str, str] = {}
     try:
-        lines = path.read_text(encoding="utf-8").splitlines()
-    except OSError as exc:
+        values, _receipt = resolve_config("claude", source_root=ROOT)
+    except ModelConfigError as exc:
         raise ModelSelectionError(
             "dispatch-model-policy-unavailable", str(exc)
         ) from exc
-    for raw in lines:
-        line = raw.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, value = line.split("=", 1)
-        value = value.strip()
-        if value[:1] in {'"', "'"}:
-            quote = value[0]
-            end = value.find(quote, 1)
-            value = value[1:end] if end != -1 else value[1:]
-        else:
-            value = value.split("#", 1)[0].strip()
-        values[key.strip()] = value
     return values
 
 
@@ -396,8 +382,8 @@ def resolve_model_settings(args: argparse.Namespace) -> dict[str, str]:
                 "a route-sealed model profile may use a concrete override only on a checked capacity retry",
             )
         try:
-            resolved = resolve_profile(
-                "claude", ROOT / "adapters" / "claude" / "config" / "models.conf", args.model_profile
+            resolved, _receipt = resolve_runtime_profile(
+                "claude", args.model_profile, source_root=ROOT
             )
         except ModelProfileError as exc:
             raise ModelSelectionError("invalid-dispatch-model-profile", str(exc)) from exc

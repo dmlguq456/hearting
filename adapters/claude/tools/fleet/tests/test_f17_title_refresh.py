@@ -23,7 +23,14 @@ from fleet import refresh_title as rt           # noqa: E402
 from fleet.model import DispatchJob, Session    # noqa: E402
 from fleet.collectors import claude, codex      # noqa: E402
 
-_REPO_ROOT = os.path.dirname(_TOOLS_DIR)
+def _find_repo_root():
+    for candidate in Path(__file__).resolve().parents:
+        if (candidate / "core" / "CORE.md").is_file():
+            return str(candidate)
+    return os.path.dirname(_TOOLS_DIR)
+
+
+_REPO_ROOT = _find_repo_root()
 _STATUSLINE = os.path.join(_REPO_ROOT, "adapters", "claude", "statusline.sh")
 
 
@@ -32,7 +39,9 @@ class _ConfigHomeMixin:
 
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
-        self._old_env = os.environ.get("CLAUDE_CONFIG_DIR")
+        self._old_runtime_env = {key: os.environ.get(key) for key in (
+            "AGENT_HOME", "CLAUDE_CONFIG_DIR", "CODEX_HOME", "XDG_CONFIG_HOME",
+        )}
         self._old_title_state = os.environ.get("FLEET_TITLE_STATE_DIR")
         self._old_safety_env = {key: os.environ.get(key) for key in (
             "FLEET_TITLE_DISABLE", "FLEET_TITLE_CONCURRENCY", "FLEET_TITLE_MAX_STARTS",
@@ -40,17 +49,21 @@ class _ConfigHomeMixin:
             "AGENT_MODEL_GOVERNOR_ROOT", "HARNESS_CAPACITY_SCORES",
             "HARNESS_CAPACITY_BIAS", "DISPATCH_DEFAULTS_CONFIG",
         )}
+        os.environ["AGENT_HOME"] = _REPO_ROOT
         os.environ["CLAUDE_CONFIG_DIR"] = os.path.join(self._tmp.name, "claude")
+        os.environ["CODEX_HOME"] = os.path.join(self._tmp.name, "codex")
+        os.environ["XDG_CONFIG_HOME"] = os.path.join(self._tmp.name, "config")
         os.environ["FLEET_TITLE_STATE_DIR"] = os.path.join(self._tmp.name, "state")
         for key in self._old_safety_env:
             os.environ.pop(key, None)
         os.environ["AGENT_MODEL_GOVERNOR_ROOT"] = os.path.join(self._tmp.name, "governor")
 
     def tearDown(self):
-        if self._old_env is None:
-            os.environ.pop("CLAUDE_CONFIG_DIR", None)
-        else:
-            os.environ["CLAUDE_CONFIG_DIR"] = self._old_env
+        for key, value in self._old_runtime_env.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
         if self._old_title_state is None:
             os.environ.pop("FLEET_TITLE_STATE_DIR", None)
         else:

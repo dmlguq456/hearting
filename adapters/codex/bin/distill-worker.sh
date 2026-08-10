@@ -46,7 +46,7 @@ contract has been accepted. CODEX_DISTILL_APPLY=1 is ignored and exits 69
 until that acceptance gate is set.
 
 Per-mode model tier: increment=nudge tier, curate=light tier, resolved from
-adapters/codex/config/models.conf (the sole source of concrete models). Override
+the complete user model config or shipped adapter fallback. Override
 with CODEX_DISTILL_MODEL (global) or CODEX_DISTILL_MODEL_INCREMENT/CURATE (per mode).
 EOF
 }
@@ -214,10 +214,10 @@ addition is useful.
 EOF
 fi
 
-# Per-mode model tier: concrete models come only from ../config/models.conf.
+# Per-mode model tier: use the complete user config or shipped fallback.
 # CODEX_DISTILL_MODEL is a global back-compat override; otherwise the mode's
 # lifecycle tier (curate=light, increment=nudge) resolves to that tier's model.
-. "$SCRIPT_DIR/../config/models.conf"
+eval "$("$ROOT/utilities/model-config.sh" --adapter codex --source-root "$ROOT")"
 tier_model() {
   case "$1" in
     deep) printf '%s' "$CFG_TIER_DEEP_MODEL" ;;

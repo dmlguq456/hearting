@@ -456,23 +456,24 @@ def agent_home():
 def provider_model(adapter, home=None):
     """The adapter's `mini` model, resolved through the portable profile resolver.
 
-    Fleet must not name a concrete model: `adapters/<a>/config/models.conf` is the single
-    source of truth, and the title worker is a `mini` consumer like any other lifecycle
-    helper. Resolving here means a tier change in that config reaches Fleet with no code
+    Fleet must not name a concrete model: the complete user model config, with
+    the shipped adapter file as fallback, is the runtime source of truth. The
+    title worker is a `mini` consumer like any other lifecycle helper. Resolving
+    here means a tier change in that config reaches Fleet with no code
     edit — which is exactly what did NOT happen while this module hardcoded `haiku`
     (F-17 predated the config SoT by eleven days and the guard exempted `tools/fleet/`
     wholesale as display-only, so the pin stayed invisible for a month).
     """
     home = Path(home or agent_home())
-    config = home / "adapters" / adapter / "config" / "models.conf"
-    if not config.is_file():
-        return None
     try:
         utilities = str(home / "utilities")
         if utilities not in sys.path:
             sys.path.insert(0, utilities)
         import model_profile
-        return model_profile.resolve_profile(adapter, config, "mini").get("model")
+        resolved, _receipt = model_profile.resolve_runtime_profile(
+            adapter, "mini", source_root=home
+        )
+        return resolved.get("model")
     except Exception:
         return None
 

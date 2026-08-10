@@ -163,7 +163,8 @@ main/orchestrator chooses per job and the wrapper only reflects that choice:
   cannot select that override.
 - A route-bound headless job carries a sealed `model_profile` independently of
   its behavioral `model_role`. The wrapper resolves `deep`, `balanced-deep`,
-  `light`, or `mini` through `config/models.conf`; it rejects caller replacement
+  `light`, or `mini` through the complete user `agent-config/models.conf` when
+  valid and the complete shipped `config/models.conf` otherwise; it rejects caller replacement
   with a trailing concrete model/effort and rejects `mini` for substantive
   registered dispatch-depth-1/2 work. A `_kernel/owner` may therefore be profile-only and
   never needs a stage `worker_mode`. Non-route jobs retain explicit role or

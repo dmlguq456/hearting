@@ -4,12 +4,10 @@
 # model (core/ADAPTATION.md §3). Injection re-emits the FULL tool_input with a
 # `model` field added. Explicit eligible pins remain untouched; inherited/fork
 # selection and config-declared main-session-only models are denied because a
-# native worker must never inherit an interactive-only main model. Tier resolution
-# (CFG_NATIVE_SUBAGENT -> CFG_TIER_<T>_MODEL) reads the Claude adapter
-# models.conf relative to this script's realpath — <hookdir>/../config/ for an
-# adapter-local or fixture layout, <hookdir>/../adapters/claude/config/ for the
-# canonical shared hooks/ layer; no concrete model ID is hardcoded here
-# (tools/check-model-config.py).
+# native worker must never inherit an interactive-only main model. Tier
+# resolution selects the complete user model config when valid and the complete
+# shipped Claude config otherwise. A local fixture layout keeps the direct
+# shipped-file fallback; no concrete model ID is hardcoded here.
 # Runtime override: CLAUDE_NATIVE_SUBAGENT_MODEL=<eligible-alias> forces the
 # injected model. `inherit` and config-declared main-session-only aliases are
 # typed denials. Malformed non-actionable input remains silent; a valid Agent
@@ -39,6 +37,34 @@ def parse_conf(path):
                 val = val.split("#", 1)[0].strip()
             conf[key.strip()] = val
     return conf
+
+
+def model_conf(hook_dir):
+    """Use the shared whole-file resolver in a checkout or installed bundle."""
+    current = os.path.realpath(hook_dir)
+    for _ in range(5):
+        utility_dir = os.path.join(current, "utilities")
+        shipped = os.path.join(
+            current, "adapters", "claude", "config", "models.conf"
+        )
+        if os.path.isfile(os.path.join(utility_dir, "model_config.py")) and os.path.isfile(shipped):
+            if utility_dir not in sys.path:
+                sys.path.insert(0, utility_dir)
+            from model_config import resolve_config
+            values, _receipt = resolve_config("claude", source_root=current)
+            return values
+        parent = os.path.dirname(current)
+        if parent == current:
+            break
+        current = parent
+
+    for candidate in (
+        os.path.join(hook_dir, "..", "config", "models.conf"),
+        os.path.join(hook_dir, "..", "adapters", "claude", "config", "models.conf"),
+    ):
+        if os.path.isfile(candidate):
+            return parse_conf(candidate)
+    return None
 
 
 def frontmatter_model(path):
@@ -93,18 +119,10 @@ def restricted_model(model, restricted):
 
 def apply_policy(tool_input):
     hook_dir = os.path.dirname(os.path.realpath(__file__))
-    conf_path = None
-    for candidate in (
-        os.path.join(hook_dir, "..", "config", "models.conf"),
-        os.path.join(hook_dir, "..", "adapters", "claude", "config", "models.conf"),
-    ):
-        if os.path.isfile(candidate):
-            conf_path = candidate
-            break
-    if conf_path is None:
+    conf = model_conf(hook_dir)
+    if conf is None:
         deny("native-subagent-model-policy-unavailable")
         return
-    conf = parse_conf(conf_path)
     if "CFG_MAIN_SESSION_ONLY_MODELS" not in conf:
         deny("native-subagent-model-policy-unavailable")
         return

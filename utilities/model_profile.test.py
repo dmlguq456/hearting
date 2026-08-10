@@ -5,11 +5,13 @@ from __future__ import annotations
 import argparse
 import importlib.util
 from pathlib import Path
+import sys
 import tempfile
 import unittest
 
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "utilities"))
 
 
 def load(name: str, path: Path):
@@ -128,6 +130,25 @@ class ModelProfileTest(unittest.TestCase):
                 self.assertEqual(resolved["role"], "fast implementer")
                 self.assertEqual(resolved["profile"], "balanced-deep")
                 self.assertNotEqual(resolved["model"], "inherit")
+
+    def test_runtime_profile_prefers_complete_user_config(self):
+        adapter = "codex"
+        shipped = (ROOT / "adapters" / adapter / "config" / "models.conf").read_text()
+        with tempfile.TemporaryDirectory() as temporary:
+            home = Path(temporary)
+            user = home / "agent-config" / "models.conf"
+            user.parent.mkdir()
+            user.write_text(
+                shipped.replace(
+                    "CFG_TIER_DEEP_MODEL=gpt-5.6-sol",
+                    "CFG_TIER_DEEP_MODEL=user/deep",
+                )
+            )
+            resolved, receipt = PROFILE.resolve_runtime_profile(
+                adapter, "deep", runtime=home, source_root=ROOT
+            )
+            self.assertEqual(resolved["model"], "user/deep")
+            self.assertEqual(receipt.source, "user")
 
     def test_owner_profile_does_not_need_a_stage_role(self):
         for adapter, wrapper in WRAPPERS.items():

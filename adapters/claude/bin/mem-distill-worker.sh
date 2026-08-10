@@ -22,10 +22,11 @@ case "$mode" in
   *) echo "mem-distill-worker: unknown mode: $mode" >&2; exit 64 ;;
 esac
 
-# Concrete models come only from ../config/models.conf. fast-distiller is the
-# turn-nudge/increment tier; deep-curator is the session-end curate tier.
+# Concrete models come from the complete user config or shipped fallback.
+# fast-distiller is the turn-nudge tier; deep-curator is the session-end tier.
 _mmdir=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
-. "$_mmdir/../config/models.conf"
+_root=$(CDPATH= cd -- "$_mmdir/../../.." && pwd)
+eval "$("$_root/utilities/model-config.sh" --adapter claude --source-root "$_root")"
 _tier_model() {
   case "$1" in
     deep) printf '%s' "$CFG_TIER_DEEP_MODEL" ;;

@@ -18,7 +18,7 @@ trap 'rm -rf "$TMP"' EXIT
 # a copied hook next to a fixture conf verifies tier resolution deterministically.
 mkdir -p "$TMP/hooks" "$TMP/config" "$TMP/home" "$TMP/noconf/hooks" \
   "$TMP/nopolicy/hooks" "$TMP/nopolicy/config" \
-  "$TMP/proj/.claude/agents"
+  "$TMP/proj/.claude/agents" "$TMP/user-runtime/agent-config"
 cp "$HOOK_SRC" "$TMP/hooks/subagent-model-default.sh"
 cp "$HOOK_SRC" "$TMP/noconf/hooks/subagent-model-default.sh"
 cp "$HOOK_SRC" "$TMP/nopolicy/hooks/subagent-model-default.sh"
@@ -34,6 +34,9 @@ cat > "$TMP/nopolicy/config/models.conf" <<'EOF'
 CFG_TIER_LIGHT_MODEL=sonnet
 CFG_NATIVE_SUBAGENT=light
 EOF
+sed 's/^CFG_TIER_LIGHT_MODEL=.*/CFG_TIER_LIGHT_MODEL=user-light/' \
+  "$SRC_DIR/../adapters/claude/config/models.conf" \
+  > "$TMP/user-runtime/agent-config/models.conf"
 cat > "$TMP/proj/.claude/agents/zz-pinned-team.md" <<'EOF'
 ---
 name: zz-pinned-team
@@ -98,6 +101,14 @@ printf '%s' '{"tool_name":"Task","tool_input":{"description":"x","prompt":"y"}}'
 [ $? = 0 ] && [ ! -s "$TMP/a2.err" ] && assert_injected "$TMP/a2.out" sonnet \
   && ok "Task spawn gets the same injection" \
   || bad "Task spawn did not get injection"
+
+# (a3) the canonical hook selects a complete user-owned config before shipped
+printf '%s' '{"tool_name":"Agent","tool_input":{"description":"x","prompt":"y","subagent_type":"general-purpose"}}' \
+  | env -i HOME="$TMP/home" PATH="$PATH" CLAUDE_CONFIG_DIR="$TMP/user-runtime" \
+      bash "$HOOK_SRC" >"$TMP/a3.out" 2>"$TMP/a3.err"
+[ $? = 0 ] && [ ! -s "$TMP/a3.err" ] && assert_injected "$TMP/a3.out" user-light \
+  && ok "canonical hook prefers the complete user model config" \
+  || bad "canonical hook did not prefer the user model config"
 
 # (b) explicit per-invocation model -> untouched
 printf '%s' '{"tool_name":"Agent","tool_input":{"description":"x","prompt":"y","model":"haiku"}}' \

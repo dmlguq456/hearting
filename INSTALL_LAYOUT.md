@@ -58,6 +58,28 @@ Published bundles use
 Consumers store stable identifiers and `report/index.html`, never this absolute
 root.
 
+## User model configuration
+
+Every adapter ships its release default at
+`adapters/<adapter>/config/models.conf`. Install and activation copy that file
+once to `<runtime-home>/agent-config/models.conf`. The runtime-home copy is a
+user-owned Hearting preference surface, not a managed projection:
+
+- an existing regular file is preserved byte-for-byte on install, refresh,
+  update, reapply, and uninstall;
+- the file is never a symlink and is not recorded as a managed copy-once file;
+- runtime model/profile consumers use the complete user file only when it is
+  safe and contains every shipped key, otherwise they use the complete shipped
+  default and report the fallback reason;
+- native runtime configuration such as Codex `config.toml`, Claude
+  `settings.json`, and OpenCode `opencode.json(c)` remains independently owned
+  by that runtime.
+
+The Codex installer recognizes only the former harness-owned
+`agent-config -> adapters/codex/config` projection as a legacy migration. It
+replaces that link with a real directory and seeds `models.conf`; a foreign link
+or real-file collision blocks instead of being guessed away.
+
 ## Activation Modes
 
 The activation record lives at `<runtime-home>/.harness/activation.json` and is

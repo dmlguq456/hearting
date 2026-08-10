@@ -16,6 +16,7 @@ import projector
 import manifest
 import verifier
 import codex_launcher
+import user_model_config
 
 RUNTIME = "codex"
 
@@ -166,6 +167,28 @@ def install(scope="global", plugin=False, dry_run=False):
             )
             continue
 
+        if action == "seed_once":
+            try:
+                actions.append(
+                    user_model_config.seed_model_config(
+                        RUNTIME,
+                        entry["source"],
+                        paths.runtime_home(RUNTIME, scope),
+                        dry_run=dry_run,
+                    )
+                )
+            except user_model_config.UserModelConfigError as exc:
+                actions.append(
+                    {
+                        "action": "seed_once",
+                        "source": entry["source"],
+                        "dest": entry["dest"],
+                        "status": "blocked",
+                        "detail": str(exc),
+                    }
+                )
+            continue
+
     if plugin:
         actions.append(_plugin_action(dry_run))
         try:
@@ -207,12 +230,17 @@ def checks(scope="global"):
     check_list = []
 
     for entry in entries:
-        if entry["action"] != "symlink":
-            continue
-        dest = entry["dest"]
-        dest_path = Path(dest)
-        check_id = f"codex.symlink.{dest_path.parent.name}.{dest_path.name}"
-        check_list.append(verifier.check_symlink(check_id, dest, entry["source"]))
+        if entry["action"] == "symlink":
+            dest = entry["dest"]
+            dest_path = Path(dest)
+            check_id = f"codex.symlink.{dest_path.parent.name}.{dest_path.name}"
+            check_list.append(verifier.check_symlink(check_id, dest, entry["source"]))
+        elif entry["action"] == "seed_once":
+            check_list.append(
+                user_model_config.verification_check(
+                    "codex.file.agent-config.models.conf", entry["dest"]
+                )
+            )
 
     check_list.append(
         verifier.check_cmd(

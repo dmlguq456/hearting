@@ -1,6 +1,7 @@
 #!/bin/sh
 # Managed release lifecycle/security checks under one isolated HOME.
 set -eu
+export PYTHONDONTWRITEBYTECODE=1
 
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
 TMP=$(mktemp -d)
@@ -545,6 +546,10 @@ echo "ok - release launcher and syntax"
 # the real packaged activation for all three runtimes without a Git checkout.
 INTEGRATION="$TMP/integration"
 mkdir -p "$INTEGRATION/assets"
+# This fixture deliberately replaces HOME. On shared filesystems the checkout
+# can have a different numeric owner, so carry the exact test root into the
+# temporary protected Git config instead of depending on the developer's HOME.
+git config --file "$HOME/.gitconfig" --add safe.directory "$ROOT"
 python3 - "$ROOT" "$INTEGRATION" <<'PY'
 import hashlib
 import importlib.util
@@ -559,7 +564,10 @@ root = Path(sys.argv[1])
 target = Path(sys.argv[2])
 archive = target / "assets/hearting.tar.gz"
 listed = subprocess.run(
-    ["git", "-C", str(root), "ls-files", "--cached", "--others", "--exclude-standard", "-z"],
+    [
+        "git", "-C", str(root), "ls-files", "--cached", "--others",
+        "--exclude-standard", "-z",
+    ],
     check=True,
     capture_output=True,
 ).stdout.decode().split("\0")

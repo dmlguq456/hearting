@@ -351,8 +351,10 @@ AGENT_VARIANT_ORCHESTRATOR
 AGENT_EXTERNAL_CMD
 ```
 
-OpenCode uses `provider/model-id` strings and an optional `variant`. The sole
-concrete source is `adapters/opencode/config/models.conf`. Registered profiles
+OpenCode uses `provider/model-id` strings and an optional `variant`. The shipped
+default is `adapters/opencode/config/models.conf`; install seeds the user-owned
+`agent-config/models.conf` once. Runtime consumers select one complete file and
+fall back to the shipped file when the user file is invalid. Registered profiles
 resolve to `deep=deep-tier/runtime-default`,
 `balanced-deep=deep-tier/runtime-default` (reported as collapsed),
 `light=light-tier/runtime-default`, and

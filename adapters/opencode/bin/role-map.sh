@@ -1,10 +1,12 @@
 #!/usr/bin/env sh
 set -eu
 
-# Concrete provider/model-id strings live only in ../config/models.conf.
+# Concrete provider/model-id strings come from the user copy when valid, with
+# the shipped adapter file as a whole-file fallback.
 # This script owns role->bucket->tier routing (semantic), never model literals.
 _ocdir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-. "$_ocdir/../config/models.conf"
+_root=$(CDPATH= cd -- "$_ocdir/../../.." && pwd)
+eval "$("$_root/utilities/model-config.sh" --adapter opencode --source-root "$_root")"
 
 usage() {
   cat <<'EOF'

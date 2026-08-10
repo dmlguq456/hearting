@@ -36,6 +36,7 @@ make_fixture() {
   mkdir -p \
     "$root/core" "$root/capabilities" "$root/roles" \
     "$root/adapters/codex/bin" "$root/adapters/codex/hooks" \
+    "$root/adapters/codex/config" \
     "$root/adapters/codex/modes/dev" "$root/adapters/codex/skills/demo" \
     "$root/adapters/codex/agents" \
     "$root/adapters/codex/plugins/hearting-codex/.codex-plugin" \
@@ -43,18 +44,21 @@ make_fixture() {
     "$root/adapters/claude/agent-modes/dev" "$root/adapters/claude/skills/demo" \
     "$root/adapters/claude/agents" "$root/adapters/claude/commands" \
     "$root/adapters/claude/hooks" "$root/adapters/claude/bin" \
+    "$root/adapters/claude/config" \
     "$root/adapters/claude/tools/memory" "$root/adapters/claude/utilities" \
     "$root/adapters/claude/scaffolds" \
     "$root/adapters/claude/plugin-marketplace/plugins/hearting-claude/.claude-plugin" \
     "$root/adapters/claude/plugin-marketplace/plugins/hearting-claude/skills/demo" \
     "$root/adapters/opencode/skills/demo" "$root/adapters/opencode/agents/memory-scout" \
-    "$root/adapters/opencode/commands" "$root/adapters/opencode/plugins"
+    "$root/adapters/opencode/commands" "$root/adapters/opencode/plugins" \
+    "$root/adapters/opencode/config"
 
   printf '%s\n' '# core fixture' > "$root/core/CORE.md"
   printf '%s\n' '# capability fixture' > "$root/capabilities/README.md"
   printf '%s\n' '# role fixture' > "$root/roles/README.md"
 
   printf '%s\n' '# Codex instructions' > "$root/adapters/codex/AGENTS.md"
+  printf '%s\n' 'CFG_TIER_DEEP_MODEL=codex-default' > "$root/adapters/codex/config/models.conf"
   printf '%s\n' '#!/bin/sh' 'exit 0' > "$root/adapters/codex/bin/preflight.sh"
   chmod +x "$root/adapters/codex/bin/preflight.sh"
   printf '%s\n' '{"hooks":{}}' > "$root/adapters/codex/hooks/hooks.json"
@@ -69,6 +73,7 @@ make_fixture() {
     "$root/adapters/codex/plugins/hearting-codex/skills/demo/SKILL.md"
 
   printf '%s\n' '# Claude instructions' > "$root/adapters/claude/CLAUDE.md"
+  printf '%s\n' 'CFG_TIER_DEEP_MODEL=claude-default' > "$root/adapters/claude/config/models.conf"
   printf '%s\n' '# mode' > "$root/adapters/claude/agent-modes/dev/refactor.md"
   printf '%s\n' '---' 'name: demo' 'description: demo' '---' '# demo claude' \
     > "$root/adapters/claude/skills/demo/SKILL.md"
@@ -93,6 +98,7 @@ make_fixture() {
     "$root/adapters/claude/plugin-marketplace/plugins/hearting-claude/skills/demo/SKILL.md"
 
   printf '%s\n' '# OpenCode instructions' > "$root/adapters/opencode/AGENTS.md"
+  printf '%s\n' 'CFG_TIER_DEEP_MODEL=opencode-default' > "$root/adapters/opencode/config/models.conf"
   printf '%s\n' '---' 'name: demo' 'description: demo' '---' '# demo opencode' \
     > "$root/adapters/opencode/skills/demo/SKILL.md"
   printf '%s\n' '# demo agent' > "$root/adapters/opencode/agents/memory-scout/demo.md"
@@ -218,6 +224,30 @@ assert data["env"]["MEM_DISTILL_ENABLE"] == "1"
 assert data["env"]["USER_FLAG"] == "keep"
 PY
 ok "offline linked activation/status/doctor for all runtimes"
+
+for runtime_home in "$HOME/.claude" "$HOME/.codex" "$HOME/.config/opencode"; do
+  test -f "$runtime_home/agent-config/models.conf" \
+    || fail "user model config was not seeded for $runtime_home"
+  test ! -L "$runtime_home/agent-config/models.conf" \
+    || fail "user model config remained a symlink for $runtime_home"
+done
+printf '%s\n' 'CFG_TIER_DEEP_MODEL=user-custom' \
+  > "$HOME/.codex/agent-config/models.conf"
+harness runtime refresh --runtime codex --json >/dev/null
+grep -q '^CFG_TIER_DEEP_MODEL=user-custom$' \
+  "$HOME/.codex/agent-config/models.conf" \
+  || fail "Codex refresh rewrote the user model config"
+python3 - "$ROOT" <<'PY'
+import os, sys
+sys.path.insert(0, os.path.join(sys.argv[1], "tools", "install"))
+import runtime_activation
+row = runtime_activation.status("codex")
+assert row["freshness"] == "fresh", row
+assert row["model_config_present"] is True, row
+assert row["model_config_source"] == "user", row
+assert row["model_config_reason"] == "user-valid", row
+PY
+ok "runtime activation seeds model defaults once and preserves customization"
 
 harness runtime status --runtime codex --json > "$TMP/codex-before.json"
 printf '%s\n' '# live linked change' >> "$SRC/adapters/codex/skills/demo/SKILL.md"
@@ -691,6 +721,9 @@ test ! -e "$HOME/.codex/hearting" && test ! -L "$HOME/.codex/hearting" \
   || fail "uninstall left the codex hearting projection"
 test ! -e "$HOME/.codex/AGENTS.md" && test ! -L "$HOME/.codex/AGENTS.md" \
   || fail "uninstall left the codex AGENTS.md projection"
+grep -q '^CFG_TIER_DEEP_MODEL=user-custom$' \
+  "$HOME/.codex/agent-config/models.conf" \
+  || fail "Codex uninstall removed or rewrote the user model config"
 harness runtime status --runtime codex --json > "$TMP/uninstalled-codex.json" || true
 python3 - "$TMP/uninstalled-codex.json" <<'PY'
 import json, sys
@@ -705,6 +738,8 @@ test ! -e "$HOME/.claude/CLAUDE.md" && test ! -L "$HOME/.claude/CLAUDE.md" \
   || fail "uninstall left the claude bootstrap projection"
 test ! -e "$HOME/.claude/statusline.sh" && test ! -L "$HOME/.claude/statusline.sh" \
   || fail "uninstall left the claude statusline projection"
+test -f "$HOME/.claude/agent-config/models.conf" \
+  || fail "Claude uninstall removed the user model config"
 python3 - "$HOME/.claude/settings.json" <<'PY'
 import json, sys
 settings=json.load(open(sys.argv[1]))
