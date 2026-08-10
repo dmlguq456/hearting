@@ -23,9 +23,11 @@ assert v['event']=='artifact.completed' and v['status']=='completed'
 if v['schema_version']==1:
     assert set(v)==base
 else:
-    assert v['schema_version']==2 and set(v)==base|{'bundle_id','version','entrypoint'}
+    bundle={'schema_version','event','status','completed_at','bundle_id','version','entrypoint'}
+    assert v['schema_version']==2 and set(v)==bundle
     assert v['bundle_id']=='demo/eval-1' and v['version']=='v2' and v['entrypoint']=='report/index.html'
-    assert 'bundle_path' not in v and not v['entrypoint'].startswith('/')
+    assert not {'bundle_path','source_path','source_capability','project_root','body'} & set(v)
+    assert not v['entrypoint'].startswith('/')
 PY
 printf '{"status":"created"}\n'
 SH
@@ -35,6 +37,7 @@ if AGENT_ARTIFACT_SINK_COMMAND="$TMP/handler-link" "$SINK" --check >/dev/null 2>
 AGENT_ARTIFACT_SINK_COMMAND="$TMP/handler" "$SINK" --check | grep -q connected
 AGENT_ARTIFACT_SINK_COMMAND="$TMP/handler" "$SINK" emit --source "$TMP/project/result.md" --capability autopilot-code --project-root "$TMP/project" --completed-at 2026-07-30T07:00:00Z | grep -q created
 AGENT_ARTIFACT_SINK_COMMAND="$TMP/handler" "$SINK" emit --source "$TMP/project/result.md" --capability autopilot-lab --project-root "$TMP/project" --bundle-id demo/eval-1 --bundle-version v2 --entrypoint report/index.html | grep -q created
+AGENT_ARTIFACT_SINK_COMMAND="$TMP/handler" "$SINK" emit --bundle-id demo/eval-1 --bundle-version v2 --entrypoint report/index.html | grep -q created
 if AGENT_ARTIFACT_SINK_COMMAND="$TMP/handler" "$SINK" emit --source "$TMP/project/result.md" --capability autopilot-lab --project-root "$TMP/project" --bundle-id demo/eval-1 >/dev/null 2>&1; then exit 1; else [ "$?" -eq 64 ]; fi
 if AGENT_ARTIFACT_SINK_COMMAND="$TMP/handler" "$SINK" emit --source "$TMP/project/result.md" --capability autopilot-lab --project-root "$TMP/project" --bundle-id demo/eval-1 --bundle-version v2 --entrypoint /absolute/index.html >/dev/null 2>&1; then exit 1; else [ "$?" -eq 64 ]; fi
 if AGENT_ARTIFACT_SINK_COMMAND="$TMP/handler" "$SINK" emit --source "$TMP/project/result.md" --capability 'bad value' --project-root "$TMP/project" >/dev/null 2>&1; then exit 1; else [ "$?" -eq 64 ]; fi

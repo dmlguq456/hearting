@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Verify legacy media reports and self-contained report bundle manifests."""
-import argparse, hashlib, imghdr, json, re, sys, wave
+import argparse, hashlib, json, re, shutil, subprocess, sys
 from html.parser import HTMLParser
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
@@ -100,13 +100,31 @@ REMOTE_SCHEMES={"http","https","mailto"}
 
 class _HTMLLinks(HTMLParser):
  def __init__(self):
-  super().__init__(convert_charrefs=True); self.links=[]; self.styles=[]
+  super().__init__(convert_charrefs=True); self.links=[]; self.styles=[]; self.style_blocks=[]; self.dom_links=[]; self._style_depth=0
  def handle_starttag(self,tag,attrs):
+  tag=tag.lower()
+  if tag=="style": self._style_depth+=1
   for key,value in attrs:
    if value is None: continue
    key=key.lower()
-   if key in {"href","src","poster"}: self.links.append((key,value))
+   if key in {"href","src","poster"}:
+    self.links.append((key,value)); self.dom_links.append((tag,key,value))
+   elif key=="srcset":
+    for candidate in _srcset_values(value):
+     self.links.append(("asset",candidate)); self.dom_links.append((tag,key,candidate))
    elif key=="style": self.styles.append(value)
+ def handle_endtag(self,tag):
+  if tag.lower()=="style" and self._style_depth: self._style_depth-=1
+ def handle_data(self,data):
+  if self._style_depth: self.style_blocks.append(data)
+
+
+def _srcset_values(value):
+ values=[]
+ for candidate in value.split(","):
+  candidate=candidate.strip()
+  if candidate: values.append(candidate.split()[0])
+ return values
 
 
 def _v2_relpath(raw,label):
@@ -126,7 +144,7 @@ def _v2_file(root,row,label):
  return rel,path
 
 
-def _link_target(root,document,value,attribute):
+def _link_target(root,document,value,attribute,inventory):
  raw=value.strip().strip("<>")
  if not raw or raw.startswith("#"): return
  split=urlsplit(raw)
@@ -143,40 +161,90 @@ def _link_target(root,document,value,attribute):
  except ValueError: raise ValueError("bundle link escapes root: "+raw)
  if target.is_dir(): target=target/"index.html"
  if target.is_symlink() or not target.is_file(): raise ValueError("missing internal link target: "+raw)
+ rel=target.relative_to(root).as_posix()
+ if rel not in inventory: raise ValueError("internal link target is not in bundle inventory: "+raw)
+ return rel
 
 
-def _verify_links(root,files):
- markdown=re.compile(r"(!?)\[[^\]]*\]\(([^)\s]+)(?:\s+['\"][^)]*)?\)")
- css=re.compile(r"url\(\s*(['\"]?)(.*?)\1\s*\)",re.I)
+def _css_links(text):
+ text=re.sub(r"/\*.*?\*/","",text,flags=re.S)
+ url_pattern=re.compile(r"url\(\s*(['\"]?)(.*?)\1\s*\)",re.I)
+ import_pattern=re.compile(r"@import\s+(['\"])(.*?)\1",re.I)
+ return [value for _,value in url_pattern.findall(text)]+[value for _,value in import_pattern.findall(text)]
+
+
+def _markdown_links(text):
+ inline=re.compile(r"(!?)\[[^\]]*\]\(([^)\s]+)(?:\s+['\"][^)]*)?\)")
+ definition=re.compile(r"^[ \t]{0,3}\[([^\]]+)\]:\s*(?:<([^>]+)>|(\S+))",re.M)
+ references={}
+ for label,angled,plain in definition.findall(text):
+  references[" ".join(label.lower().split())]=angled or plain
+ links=[("asset" if marker else "href",value) for marker,value in inline.findall(text)]
+ full=re.compile(r"(!?)\[([^\]]+)\]\[([^\]]*)\]")
+ used=set()
+ for marker,text_label,raw_label in full.findall(text):
+  label=" ".join((raw_label or text_label).lower().split())
+  if label in references:
+   used.add(label); links.append(("asset" if marker else "href",references[label]))
+ shortcut=re.compile(r"(!?)\[([^\]]+)\](?![\[(])")
+ for marker,raw_label in shortcut.findall(text):
+  label=" ".join(raw_label.lower().split())
+  if label in references and label not in used: links.append(("asset" if marker else "href",references[label]))
+ for label,value in references.items():
+  if label not in used: links.append(("href",value))
+ return links
+
+
+def _verify_links(root,files,inventory):
  for rel,path in files.items():
   suffix=path.suffix.lower()
   if suffix not in {".html",".htm",".md",".markdown",".css"}: continue
   text=path.read_text(encoding="utf-8")
   if suffix in {".html",".htm"}:
    parser=_HTMLLinks(); parser.feed(text); parser.close()
-   for attr,value in parser.links: _link_target(root,path,value,attr)
+   for attr,value in parser.links: _link_target(root,path,value,attr,inventory)
    for style in parser.styles:
-    for _,value in css.findall(style): _link_target(root,path,value,"asset")
+    for value in _css_links(style): _link_target(root,path,value,"asset",inventory)
+   for block in parser.style_blocks:
+    for value in _css_links(block): _link_target(root,path,value,"asset",inventory)
   elif suffix==".css":
-   for _,value in css.findall(text): _link_target(root,path,value,"asset")
+   for value in _css_links(text): _link_target(root,path,value,"asset",inventory)
   else:
-   for marker,value in markdown.findall(text): _link_target(root,path,value,"asset" if marker else "href")
+   for attr,value in _markdown_links(text): _link_target(root,path,value,attr,inventory)
 
 
 def _decode_media(path,kind):
- if kind=="audio":
-  if path.suffix.lower() not in {".wav",".wave"}: raise ValueError("unsupported fail-closed audio format: "+path.name)
+ if kind in {"audio","waveform","spectrogram"}:
+  ffmpeg=shutil.which("ffmpeg")
+  if not ffmpeg: raise ValueError("media decode failed: ffmpeg unavailable")
   try:
-   with wave.open(str(path),"rb") as source:
-    if source.getnchannels()<1 or source.getframerate()<1 or source.getnframes()<1: raise ValueError
-    source.readframes(min(source.getnframes(),source.getframerate()))
-  except (wave.Error,EOFError,OSError,ValueError): raise ValueError("media decode failed: "+path.name)
- elif kind in {"waveform","spectrogram"}:
-  if imghdr.what(str(path)) is None: raise ValueError("media decode failed: "+path.name)
+   result=subprocess.run(
+    [ffmpeg,"-nostdin","-v","error","-xerror","-i",str(path),"-map","0:0","-f","null","-"],
+    shell=False,timeout=10,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,check=False,
+   )
+  except (OSError,subprocess.TimeoutExpired): raise ValueError("media decode failed: "+path.name)
+  if result.returncode!=0: raise ValueError("media decode failed: "+path.name)
  elif kind=="playback":
   if path.suffix.lower() not in {".html",".htm"}: raise ValueError("playback must be HTML: "+path.name)
   try: parser=_HTMLLinks(); parser.feed(path.read_text(encoding="utf-8")); parser.close()
   except (UnicodeError,OSError): raise ValueError("playback decode failed: "+path.name)
+
+
+def _verify_playback_bindings(root,playback,rows,inventory):
+ try:
+  parser=_HTMLLinks(); parser.feed(playback.read_text(encoding="utf-8")); parser.close()
+ except (UnicodeError,OSError): raise ValueError("playback decode failed: "+playback.name)
+ bindings=set()
+ for tag,attribute,value in parser.dom_links:
+  rel=_link_target(root,playback,value,"asset" if attribute in {"src","srcset","poster"} else "href",inventory)
+  if rel: bindings.add((tag,attribute,rel))
+ for row in rows:
+  if row["kind"]=="playback": continue
+  expected=row["path"]
+  if row["kind"]=="audio": allowed={"audio","source","a"}
+  else: allowed={"img","source","a"}
+  if not any(tag in allowed and rel==expected for tag,_,rel in bindings):
+   raise ValueError("playback does not bind declared media: "+expected)
 
 
 def _verify_v2(path):
@@ -209,7 +277,7 @@ def _verify_v2(path):
  if actual!=set(declared):
   extra=sorted(actual-set(declared)); missing=sorted(set(declared)-actual)
   raise ValueError("bundle inventory mismatch: extra="+",".join(extra)+" missing="+",".join(missing))
- _verify_links(root,paths)
+ _verify_links(root,paths,set(declared))
  media=data.get("media")
  if not isinstance(media,list): raise ValueError("media must be an array")
  groups={}; media_paths=set()
@@ -225,9 +293,7 @@ def _verify_v2(path):
   if any(kinds!=set(KINDS) for kinds in groups.values()): raise ValueError("each declared sample requires 1:1 audio/waveform/spectrogram/playback")
   for sample in groups:
    playback=next(root/Path(row["path"]) for row in media if row["sample_id"]==sample and row["kind"]=="playback")
-   text=playback.read_text(encoding="utf-8")
-   for row in media:
-    if row["sample_id"]==sample and row["kind"]!="playback" and Path(row["path"]).name not in text: raise ValueError("playback does not bind declared media: "+row["path"])
+   _verify_playback_bindings(root,playback,[row for row in media if row["sample_id"]==sample],set(declared))
  return {"samples":len(groups),"media":len(media),"bundle_id":data["bundle_id"],"version":data["version"],"entrypoint":"report/index.html","bundle_classification":"bundle/v2"}
 
 

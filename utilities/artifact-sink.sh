@@ -51,11 +51,6 @@ case "${1:-}" in
   *) exit 64 ;;
 esac
 
-[ -n "$source_path" ] && [ -n "$source_capability" ] && [ -n "$project_root" ] || exit 64
-case "$source_capability" in
-  ''|[!a-z]*|*[!a-z0-9-]*) exit 64 ;;
-esac
-[ "${#source_capability}" -le 64 ] || exit 64
 bundle_fields=0
 [ -n "$bundle_id" ] && bundle_fields=$((bundle_fields + 1))
 [ -n "$bundle_version" ] && bundle_fields=$((bundle_fields + 1))
@@ -72,12 +67,18 @@ if [ "$bundle_fields" -eq 3 ]; then
   case "$bundle_experiment" in [A-Za-z0-9]*) ;; *) exit 64 ;; esac
   case "$bundle_version" in [A-Za-z0-9]*) ;; *) exit 64 ;; esac
   [ "$entrypoint" = "report/index.html" ] || exit 64
+else
+  [ -n "$source_path" ] && [ -n "$source_capability" ] && [ -n "$project_root" ] || exit 64
+  case "$source_capability" in
+    ''|[!a-z]*|*[!a-z0-9-]*) exit 64 ;;
+  esac
+  [ "${#source_capability}" -le 64 ] || exit 64
+  [ -f "$source_path" ] && [ ! -L "$source_path" ] || exit 64
+  source_path=$(realpath -- "$source_path" 2>/dev/null) || exit 64
+  project_root=$(realpath -- "$project_root" 2>/dev/null) || exit 64
+  [ -f "$source_path" ] && [ -d "$project_root" ] || exit 64
+  case "$source_path" in "$project_root"/*) ;; *) exit 64 ;; esac
 fi
-[ -f "$source_path" ] && [ ! -L "$source_path" ] || exit 64
-source_path=$(realpath -- "$source_path" 2>/dev/null) || exit 64
-project_root=$(realpath -- "$project_root" 2>/dev/null) || exit 64
-[ -f "$source_path" ] && [ -d "$project_root" ] || exit 64
-case "$source_path" in "$project_root"/*) ;; *) exit 64 ;; esac
 [ -n "$completed_at" ] || completed_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 
 umask 077
@@ -93,17 +94,26 @@ try:
         raise ValueError
 except ValueError:
     raise SystemExit(64)
-value = {
-    "schema_version": 2 if bundle_id else 1,
-    "event": "artifact.completed",
-    "source_path": source,
-    "source_capability": capability,
-    "project_root": root,
-    "status": "completed",
-    "completed_at": completed_at,
-}
 if bundle_id:
-    value.update({"bundle_id": bundle_id, "version": version, "entrypoint": entrypoint})
+    value = {
+        "schema_version": 2,
+        "event": "artifact.completed",
+        "status": "completed",
+        "completed_at": completed_at,
+        "bundle_id": bundle_id,
+        "version": version,
+        "entrypoint": entrypoint,
+    }
+else:
+    value = {
+        "schema_version": 1,
+        "event": "artifact.completed",
+        "source_path": source,
+        "source_capability": capability,
+        "project_root": root,
+        "status": "completed",
+        "completed_at": completed_at,
+    }
 with open(target, "w", encoding="utf-8") as handle:
     json.dump(value, handle, ensure_ascii=False, separators=(",", ":"))
     handle.write("\n")

@@ -486,8 +486,25 @@ def resolve_artifact_root(worktree: str) -> str:
     return value
 
 
-def resolve_report_bundle_root(capability: str) -> Path | None:
-    if capability != "autopilot-lab":
+def _is_report_bundle_publish_stage(route_file: str | None, route_node: str | None) -> bool:
+    if not route_file or route_node != "publish":
+        return False
+    try:
+        route = json.loads(Path(route_file).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    expected = {
+        "id": "publish", "kind": "capability-owner", "unit": "_kernel/owner",
+        "completion_gate": "lab-publish", "dispatch_depth": 1,
+    }
+    return route.get("capability") == "autopilot-lab" and any(
+        all(node.get(key) == value for key, value in expected.items())
+        for node in route.get("nodes", []) if isinstance(node, dict)
+    )
+
+
+def resolve_report_bundle_root(route_file: str | None, route_node: str | None) -> Path | None:
+    if not _is_report_bundle_publish_stage(route_file, route_node):
         return None
     result = subprocess.run(
         [sys.executable, str(ROOT / "tools" / "report-bundle.py"), "root", "--optional"],
@@ -1455,7 +1472,7 @@ def main(argv: list[str]) -> int:
         return fail("not-a-git-worktree", 65, worktree=args.worktree)
     try:
         args.artifact_root = resolve_artifact_root(args.worktree)
-        args.report_bundle_root = resolve_report_bundle_root(args.capability)
+        args.report_bundle_root = resolve_report_bundle_root(args.route_file, args.route_node)
     except ValueError as e:
         return fail("writable-root-resolution-failed", 64, detail=str(e), worktree=args.worktree)
     args.worker_type = resolve_worker_type(
