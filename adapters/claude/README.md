@@ -104,7 +104,16 @@ Route-bound registered work uses a second, independent execution-budget axis:
 | `light` | `sonnet` / `medium` | routine implementation, verification, reporting, and breadth legs |
 | `mini` | `haiku` / `medium` | lifecycle and micro-semantic helpers only; substantive dispatch-depth-1/2 work is rejected |
 
-The route compiler seals `model_profile`; the wrapper resolves it through `config/models.conf` and may also receive the independently sealed `model_role`. A dispatch-depth-1 `_kernel/owner` is valid with a profile and no stage `worker_mode`. Non-route jobs retain explicit role/concrete-model selection. Registered inheritance and config-declared interactive-main-only models are rejected before launch; `fable` therefore remains available only to the interactive main session, while its usage/status telemetry stays visible.
+The route compiler seals `model_profile`; the wrapper resolves it through the
+complete user copy at `$CLAUDE_CONFIG_DIR/agent-config/models.conf` (default
+`~/.claude`) when valid, otherwise through the complete shipped
+`config/models.conf`. Installation seeds the user copy once and never rewrites
+or removes it. The wrapper may also receive the independently sealed
+`model_role`. A dispatch-depth-1 `_kernel/owner` is valid with a profile and no
+stage `worker_mode`. Non-route jobs retain explicit role/concrete-model
+selection. Registered inheritance and config-declared interactive-main-only
+models are rejected before launch; `fable` therefore remains available only to
+the interactive main session, while its usage/status telemetry stays visible.
 
 Two `CONVENTIONS §1.1` properties are intensity-independent and this adapter honors them: every review the `품질관리팀` runs carries the refute-by-default adversarial stance (anchored in `CONVENTIONS §1.1` / `roles/MODES.md`; `agent-modes/qa/_review_rules.md` is the single source for the code-review, plan-review, and test modes that load it), and every declared independent group records its realized independence. Registry-v6 groups launch 2–4 blind dispatch-depth-2 siblings atomically, use at least two harness families when `cross-harness` is required, and add asymmetric model profiles and perspectives to reduce correlated error. The hostile `external adversary` pass stays reserved for `adversarial`. If an explicitly requested cross-harness axis cannot be realized, fail loudly; an auto-selected group may use typed same-family degradation while preserving and reporting profile/perspective diversity.
 

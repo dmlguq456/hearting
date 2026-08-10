@@ -1,12 +1,14 @@
 #!/usr/bin/env sh
 set -eu
-# Concrete model IDs and default efforts live only in ../config/models.conf.
+# Concrete model IDs and default efforts come from the user copy when valid,
+# with the shipped adapter file as a whole-file fallback.
 # Role->tier grouping is ALSO config-owned (CFG_ROLES_DEEP/LIGHT): membership is
 # derived here instead of hardcoded case labels (2026-07-22 단일원천화). Env
 # override chain preserved: deep=SOL, light=BALANCED>LUNA (BALANCED, formerly the
 # orchestrator-only knob, now covers the whole light tier — operator override).
 dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-. "$dir/../config/models.conf"
+root=$(CDPATH= cd -- "$dir/../../.." && pwd)
+eval "$("$root/utilities/model-config.sh" --adapter codex --source-root "$root")"
 role=$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]' | tr '_-' '  ' | awk '{$1=$1; print}')
 family=gpt
 case "|$CFG_ROLES_DEEP|" in

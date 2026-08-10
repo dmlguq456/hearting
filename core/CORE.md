@@ -50,6 +50,15 @@ downloaded, and session reload or restart boundaries remain runtime-specific.
 
 Runtime homes should be adapter projections, not the source repository. Keep credentials, sessions, logs, SQLite state, caches, and other runtime-owned files in the runtime home. Expose the harness into each runtime home with symlinks or adapter-owned bootstrap files.
 
+Portable model profiles belong to core, while each adapter owns its shipped
+concrete model mapping. Installation seeds that mapping once as
+`<runtime-home>/agent-config/models.conf`. The seeded file is user-owned: it is
+never symlinked, refreshed, reapplied, or removed by a harness update or
+uninstall. Runtime consumers select a valid, complete user file as one unit and
+otherwise fall back to the shipped adapter default as one unit; they never merge
+the two. Native runtime settings and adapter fragments remain outside
+`agent-config`.
+
 Project-independent global runtime state (the dispatch attempt registry and
 similar cross-project bookkeeping) lives under `<agent-home>/.dispatch/` or an
 XDG state directory, never inside a project artifact root — this is the

@@ -102,6 +102,9 @@ import json, sys
 data = json.load(open(sys.argv[1]))
 for row in data["runtimes"]:
     assert row["freshness"] == "fresh", row
+    assert row["model_config_present"] is True, row
+    assert row["model_config_source"] == "user", row
+    assert row["model_config_reason"] == "user-valid", row
     assert "profile" not in row, row
 PY
 
@@ -114,7 +117,25 @@ PY
 }
 
 assert_projection linked
+
+# Every adapter gets the same user-owned, copy-once model surface. Reapplying a
+# different activation mode must preserve those bytes instead of refreshing
+# them from the release defaults.
+for config in \
+  "$HOME/.claude/agent-config/models.conf" \
+  "$HOME/.codex/agent-config/models.conf" \
+  "$HOME/.config/opencode/agent-config/models.conf"; do
+  printf '%s\n' '# user customization survives activation updates' >> "$config"
+done
+sha256sum \
+  "$HOME/.claude/agent-config/models.conf" \
+  "$HOME/.codex/agent-config/models.conf" \
+  "$HOME/.config/opencode/agent-config/models.conf" \
+  > "$TMP/user-model-config.sha256"
+
 assert_projection packaged
+sha256sum -c "$TMP/user-model-config.sha256" >/dev/null \
+  || fail "packaged reactivation rewrote a user model config"
 
 # User-facing verify follows activation state instead of legacy projection checks.
 harness verify --json > "$TMP/verify.json"
@@ -259,5 +280,12 @@ row = json.load(open(sys.argv[1]))
 assert row["exit"] == 3, row
 assert "outside Phase 1" in row["error"], row
 PY
+
+# The OpenCode leg closes the generic deactivation path not covered by the
+# Codex/Claude uninstall assertions in runtime-activation.test.sh.
+harness uninstall opencode >/dev/null
+sha256sum -c "$TMP/user-model-config.sha256" 2>/dev/null \
+  | grep -F "$HOME/.config/opencode/agent-config/models.conf: OK" >/dev/null \
+  || fail "OpenCode uninstall removed or rewrote the user model config"
 
 echo "projection-completeness: PASS"

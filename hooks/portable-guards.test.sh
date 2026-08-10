@@ -51,14 +51,13 @@ unset CLAUDE_CODE_SESSION_ID CODEX_SESSION_ID \
   AGENT_ARTIFACT_ROOT AGENT_ROUTE_FILE AGENT_ROUTE_ID AGENT_ROUTE_NODE \
   CLAUDE_CODE_CHILD_SESSION OPENCODE_DISPATCH_SLUG FLEET_TITLE_REFRESH \
   MEM_DISTILL MEM_DISTILL_ENABLE
+# Adapter wrappers resolve their installed runtime pointer; invoking the Python
+# scripts directly falls back to the checkout that contains the script. Keep
+# those two contracts separate when the developer HOME already has Hearting.
+CODEX_WRAPPED_DISPATCH_HOME=$(AGENT_HOME="$TMP/not-agent-home" \
+  "$ROOT/adapters/codex/utilities/agent-home.sh")
+OPENCODE_WRAPPED_DISPATCH_HOME="$ROOT"
 DIRECT_DISPATCH_HOME="$ROOT"
-if [ -f "$HOME/.codex/hearting/core/CORE.md" ]; then
-  DIRECT_DISPATCH_HOME="$HOME/.codex/hearting"
-elif [ -f "$HOME/hearting/core/CORE.md" ]; then
-  DIRECT_DISPATCH_HOME="$HOME/hearting"
-elif [ -f "$HOME/agent_setting/core/CORE.md" ]; then
-  DIRECT_DISPATCH_HOME="$HOME/agent_setting"
-fi
 
 echo "== artifact guard CLI =="
 mkdir -p "$TMP/proj/.agent_reports/spec"
@@ -1163,8 +1162,8 @@ else
   fi
 fi
 if "$CODEX" dispatch --dry-run --worktree "$TMP/repo" --slug codex-default-home --capability autopilot-code --mode dev --qa standard --prompt-text "do work" --model gpt-test --reasoning low >/tmp/codex_dispatch_default.out 2>/tmp/codex_dispatch_default.err \
-  && grep -Fxq "job_registry=$DIRECT_DISPATCH_HOME/.dispatch/jobs.log" /tmp/codex_dispatch_default.out \
-  && grep -Fxq "prompt_file=$DIRECT_DISPATCH_HOME/.dispatch/logs/codex-default-home.codex.prompt.txt" /tmp/codex_dispatch_default.out \
+  && grep -Fxq "job_registry=$(readlink -f "$CODEX_WRAPPED_DISPATCH_HOME")/.dispatch/jobs.log" /tmp/codex_dispatch_default.out \
+  && grep -Fxq "prompt_file=$CODEX_WRAPPED_DISPATCH_HOME/.dispatch/logs/codex-default-home.codex.prompt.txt" /tmp/codex_dispatch_default.out \
   && [ ! -e "$AGENT_HOME/.dispatch/jobs.log" ]; then
   ok "codex dispatch wrapper defaults to validated harness root"
 else
@@ -3604,8 +3603,8 @@ else
   bad "opencode dispatch wrapper should start nested slug from prompt file"
 fi
 if "$OPENCODE" dispatch --dry-run --worktree "$TMP/repo" --slug opencode-default-home --capability autopilot-code --mode dev --qa standard --prompt-text "do work" --model provider/test --variant low >/tmp/opencode_dispatch_default.out 2>/tmp/opencode_dispatch_default.err \
-  && grep -Fxq "job_registry=$ROOT/.dispatch/jobs.log" /tmp/opencode_dispatch_default.out \
-  && grep -Fxq "prompt_file=$ROOT/.dispatch/logs/opencode-default-home.opencode.prompt.txt" /tmp/opencode_dispatch_default.out \
+  && grep -Fxq "job_registry=$(readlink -f "$OPENCODE_WRAPPED_DISPATCH_HOME")/.dispatch/jobs.log" /tmp/opencode_dispatch_default.out \
+  && grep -Fxq "prompt_file=$OPENCODE_WRAPPED_DISPATCH_HOME/.dispatch/logs/opencode-default-home.opencode.prompt.txt" /tmp/opencode_dispatch_default.out \
   && [ ! -e "$AGENT_HOME/.dispatch/jobs.log" ]; then
   ok "opencode dispatch wrapper defaults to validated harness root"
 else

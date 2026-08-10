@@ -1,9 +1,11 @@
 #!/usr/bin/env sh
 set -eu
 
-# Concrete model IDs and default efforts live only in ../config/models.conf.
+# Concrete model IDs and default efforts come from the user copy when valid,
+# with the shipped adapter file as a whole-file fallback.
 _cmdir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-. "$_cmdir/../config/models.conf"
+_root=$(CDPATH= cd -- "$_cmdir/../../.." && pwd)
+eval "$("$_root/utilities/model-config.sh" --adapter codex --source-root "$_root")"
 
 usage() {
   cat <<'EOF'

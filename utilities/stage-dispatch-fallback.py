@@ -16,6 +16,7 @@ import time
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "utilities"))
+from model_config import ModelConfigError, resolve_config  # noqa: E402
 
 
 def _unit_role(unit):
@@ -542,25 +543,11 @@ def capacity_attempt_identity(args, route, node, row, ordinal, model):
 
 
 def _adapter_models_conf(harness: str) -> dict[str, str]:
-    conf = ROOT / f"adapters/{harness}/config/models.conf"
-    cfg: dict[str, str] = {}
-    if not conf.is_file():
-        return cfg
-    for raw in conf.read_text(encoding="utf-8").splitlines():
-        line = raw.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, val = line.split("=", 1)
-        val = val.strip()
-        if val[:1] in ('"', "'"):
-            end = val.find(val[0], 1)
-            val = val[1:end] if end != -1 else val[1:]
-        else:
-            hidx = val.find("#")
-            if hidx != -1:
-                val = val[:hidx].strip()
-        cfg[key.strip()] = val
-    return cfg
+    try:
+        config, _receipt = resolve_config(harness, source_root=ROOT)
+        return config
+    except ModelConfigError:
+        return {}
 
 
 def capacity_cascade(harness: str) -> list[tuple[str, str]]:

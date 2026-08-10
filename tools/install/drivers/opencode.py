@@ -16,6 +16,7 @@ import paths
 import projector
 import manifest
 import verifier
+import user_model_config
 
 RUNTIME = "opencode"
 
@@ -186,6 +187,29 @@ def install(scope="global", plugin=False, dry_run=False):
             )
             continue
 
+        if action == "seed_once":
+            try:
+                actions.append(
+                    user_model_config.seed_model_config(
+                        RUNTIME,
+                        entry["source"],
+                        paths.runtime_home(RUNTIME, scope),
+                        dry_run=dry_run,
+                    )
+                )
+            except user_model_config.UserModelConfigError as exc:
+                actions.append(
+                    {
+                        "action": "seed_once",
+                        "source": entry["source"],
+                        "dest": entry["dest"],
+                        "status": "blocked",
+                        "detail": str(exc),
+                    }
+                )
+                blocked = True
+            continue
+
         if action == "merge":
             cfg_path = _config_path(scope)
             our_instructions = _instructions_path()
@@ -258,6 +282,12 @@ def checks(scope="global"):
             check_id = f"opencode.symlink.{dest_path.parent.name}.{dest_path.name}"
             check_list.append(
                 verifier.check_symlink(check_id, dest, entry["source"])
+            )
+        elif action == "seed_once":
+            check_list.append(
+                user_model_config.verification_check(
+                    "opencode.file.agent-config.models.conf", entry["dest"]
+                )
             )
         # Skip and merge entries are not read-only verification targets.
 

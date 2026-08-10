@@ -92,7 +92,7 @@ from stage_session_runtime import (  # noqa: E402
 )
 from model_profile import (  # noqa: E402
     ModelProfileError,
-    resolve_profile,
+    resolve_runtime_profile,
     validate_registered_profile,
 )
 from codex_dispatch_terminal import inspect_terminal_attempt  # noqa: E402
@@ -627,8 +627,8 @@ def resolve_model_settings(args: argparse.Namespace) -> dict[str, str]:
                 "a route-sealed model profile may use a concrete override only on a checked capacity retry",
             )
         try:
-            resolved = resolve_profile(
-                "codex", ROOT / "adapters" / "codex" / "config" / "models.conf", args.model_profile
+            resolved, _receipt = resolve_runtime_profile(
+                "codex", args.model_profile, source_root=ROOT
             )
         except ModelProfileError as exc:
             raise ModelSelectionError("invalid-dispatch-model-profile", str(exc)) from exc

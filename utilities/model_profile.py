@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
+from typing import Mapping
 
 
 PORTABLE_PROFILES = ("deep", "balanced-deep", "light", "mini")
@@ -52,10 +53,13 @@ def load_config(path: str | Path) -> dict[str, str]:
     return values
 
 
-def resolve_profile(adapter: str, config_path: str | Path, profile: str) -> dict[str, str]:
+def resolve_profile_values(
+    adapter: str, config: Mapping[str, str], profile: str
+) -> dict[str, str]:
     if profile not in PORTABLE_PROFILES:
         raise ModelProfileError(f"unknown portable model profile: {profile!r}")
-    config = load_config(config_path)
+    if adapter not in {"claude", "codex", "opencode"}:
+        raise ModelProfileError(f"unknown adapter: {adapter!r}")
     profile_key = "CFG_MODEL_PROFILE_" + profile.upper().replace("-", "_")
     spec = config.get(profile_key)
     if not spec or spec.count(":") != 1:
@@ -65,12 +69,10 @@ def resolve_profile(adapter: str, config_path: str | Path, profile: str) -> dict
     model = config.get(f"CFG_TIER_{tier_key}_MODEL")
     budget_suffix = "VARIANT" if adapter == "opencode" else "EFFORT"
     declared_default = config.get(f"CFG_TIER_{tier_key}_{budget_suffix}")
-    profile_granularity_key = "CFG_MODEL_PROFILE_GRANULARITY_" + profile.upper().replace("-", "_")
-    granularity = config.get(profile_granularity_key) or config.get(
+    granularity_key = "CFG_MODEL_PROFILE_GRANULARITY_" + profile.upper().replace("-", "_")
+    granularity = config.get(granularity_key) or config.get(
         "CFG_MODEL_PROFILE_GRANULARITY", "unknown"
     )
-    if adapter not in {"claude", "codex", "opencode"}:
-        raise ModelProfileError(f"unknown adapter: {adapter!r}")
     if not model or not declared_default:
         raise ModelProfileError(f"profile tier {tier!r} lacks model/{budget_suffix.lower()}")
     if not budget:
@@ -83,6 +85,33 @@ def resolve_profile(adapter: str, config_path: str | Path, profile: str) -> dict
         "budget_kind": budget_suffix.lower(),
         "granularity": granularity,
     }
+
+
+def resolve_profile(adapter: str, config_path: str | Path, profile: str) -> dict[str, str]:
+    return resolve_profile_values(adapter, load_config(config_path), profile)
+
+
+def resolve_runtime_profile(
+    adapter: str,
+    profile: str,
+    *,
+    runtime: str | Path | None = None,
+    environ: dict[str, str] | None = None,
+    source_root: str | Path | None = None,
+) -> tuple[dict[str, str], object]:
+    """Resolve a profile from the complete user file or complete shipped fallback."""
+    try:
+        from model_config import ModelConfigError, resolve_config
+    except ImportError:  # package import in focused unit tests
+        from utilities.model_config import ModelConfigError, resolve_config
+
+    try:
+        values, receipt = resolve_config(
+            adapter, runtime=runtime, environ=environ, source_root=source_root
+        )
+    except ModelConfigError as exc:
+        raise ModelProfileError(f"runtime model config unavailable: {exc}") from exc
+    return resolve_profile_values(adapter, values, profile), receipt
 
 
 def validate_registered_profile(
