@@ -233,8 +233,8 @@ cache는 소유하지 않습니다. 자세한 매핑은
 Maintainer는 managed release 대신 live checkout을 사용할 수 있습니다.
 
 ```bash
-git clone https://github.com/dmlguq456/hearting.git ~/agent_setting
-cd ~/agent_setting
+git clone https://github.com/dmlguq456/hearting.git ~/hearting
+cd ~/hearting
 ./tools/install/harness.sh runtime activate --runtime all --mode linked
 ```
 

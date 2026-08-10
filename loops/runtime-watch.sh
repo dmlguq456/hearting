@@ -14,7 +14,17 @@ case "${1:---probe}" in
   *) echo "runtime-watch: unknown arg: $1" >&2; exit 64 ;;
 esac
 
-AGENT_HOME="${AGENT_HOME:-${CLAUDE_HOME:-$HOME/agent_setting}}"
+if [ -z "${AGENT_HOME:-}" ]; then
+  if [ -n "${CLAUDE_HOME:-}" ]; then
+    AGENT_HOME="$CLAUDE_HOME"
+  elif [ -d "$HOME/hearting" ]; then
+    AGENT_HOME="$HOME/hearting"
+  elif [ -d "$HOME/agent_setting" ]; then
+    AGENT_HOME="$HOME/agent_setting"
+  else
+    AGENT_HOME="$HOME/.claude"
+  fi
+fi
 STATE_DIR="${RUNTIME_WATCH_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/agent-runtime-watch}"
 AGENT_LOOP_ENV="${AGENT_LOOP_ENV:-$HOME/.config/hearting/loops.env}"
 [ -f "$AGENT_LOOP_ENV" ] && . "$AGENT_LOOP_ENV"

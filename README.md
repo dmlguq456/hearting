@@ -239,8 +239,8 @@ databases, logs, and foreign caches remain outside its ownership. See
 Maintainers can keep a live checkout instead of the managed release:
 
 ```bash
-git clone https://github.com/dmlguq456/hearting.git ~/agent_setting
-cd ~/agent_setting
+git clone https://github.com/dmlguq456/hearting.git ~/hearting
+cd ~/hearting
 ./tools/install/harness.sh runtime activate --runtime all --mode linked
 ```
 

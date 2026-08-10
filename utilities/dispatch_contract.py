@@ -73,7 +73,7 @@ CANONICAL_PARENT_TRANSPORTS = WRAPPER_TRANSPORTS
 # dispatch-depth-0 session is `interactive`. Every surface that probes, seals,
 # compiles, or launches a checked nested tuple resolves the expectation from
 # here instead of reading the probing caller's own runtime (2026-08-04
-# agent-note incident: a standard route sealed with the depth-0 caller's
+# Cairn incident: a standard route sealed with the depth-0 caller's
 # `interactive` transport made every same/cross-harness candidate unresolvable
 # at launch and demoted the whole cycle to the inline hop).
 PARENT_TRANSPORT_BY_DISPATCH_DEPTH = {0: "interactive", 1: "headless"}
@@ -279,6 +279,8 @@ def resolve_agent_home() -> Path:
     for candidate in (
         os.environ.get("AGENT_HOME"),
         os.environ.get("CLAUDE_HOME"),
+        str(Path.home() / ".local" / "share" / "hearting" / "current"),
+        str(Path.home() / "hearting"),
         str(Path.home() / "agent_setting"),
         str(Path.home() / ".claude"),
     ):

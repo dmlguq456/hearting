@@ -31,9 +31,9 @@ def _agent_home():
         return Path(os.environ["AGENT_HOME"])
     if os.environ.get("CLAUDE_HOME"):
         return Path(os.environ["CLAUDE_HOME"])
-    neutral = Path.home() / "agent_setting"
-    if neutral.exists():
-        return neutral
+    for neutral in (Path.home() / "hearting", Path.home() / "agent_setting"):
+        if neutral.exists():
+            return neutral
     return Path.home() / ".claude"
 
 

@@ -42,9 +42,9 @@ def _job(**over):
         "kind": "task",
         "kindLabel": "rescue",
         "title": "Codex Task",
-        "workspaceRoot": "/home/u/agent-note",
+        "workspaceRoot": "/home/u/cairn",
         "jobClass": "task",
-        "summary": "<task> 저장소: /home/u/agent-note-wt/x — Milkdown 빈 문단 직렬화를 추적하라.",
+        "summary": "<task> 저장소: /home/u/cairn-wt/x — Milkdown 빈 문단 직렬화를 추적하라.",
         "write": False,
         "sessionId": _SID,
         "status": "running",
@@ -53,7 +53,7 @@ def _job(**over):
         "logFile": "/tmp/does-not-exist.log",
         "threadId": "6f0a1d5c-0000-4000-8000-000000000001",
         "turnId": "turn-1",
-        "request": {"cwd": "/home/u/agent-note", "model": None, "effort": None,
+        "request": {"cwd": "/home/u/cairn", "model": None, "effort": None,
                     "prompt": "SECRET PROMPT BODY"},
     }
     record.update(over)
@@ -66,7 +66,7 @@ class _QueueFixture(unittest.TestCase):
         self._tmp = tempfile.TemporaryDirectory()
         self.home = self._tmp.name
         self.state_dir = os.path.join(
-            self.home, "plugins", "data", "codex-openai-codex", "state", "agent-note-abc")
+            self.home, "plugins", "data", "codex-openai-codex", "state", "cairn-abc")
         os.makedirs(self.state_dir)
         self._procs = []
 
@@ -160,14 +160,14 @@ class RequiredFieldsTest(_QueueFixture):
         record.pop("request")
         self.write_state([record])
         job = self.collect()[0]
-        self.assertEqual(job.cwd, "/home/u/agent-note")
+        self.assertEqual(job.cwd, "/home/u/cairn")
 
     def test_request_cwd_outranks_workspace_root(self):
-        record = _job(workspaceRoot="/home/u/agent-note")
-        record["request"] = {"cwd": "/home/u/agent-note-wt/branch"}
+        record = _job(workspaceRoot="/home/u/cairn")
+        record["request"] = {"cwd": "/home/u/cairn-wt/branch"}
         self.write_state([record])
         job = self.collect()[0]
-        self.assertEqual(job.cwd, "/home/u/agent-note-wt/branch")
+        self.assertEqual(job.cwd, "/home/u/cairn-wt/branch")
 
 
 class RowModelTest(_QueueFixture):
@@ -304,9 +304,9 @@ class NestingTest(_QueueFixture):
         self.write_state([_job(pid=None)])
         return self.collect()[0]
 
-    def _session(self, session_id, cwd="/home/u/agent-note"):
+    def _session(self, session_id, cwd="/home/u/cairn"):
         return Session(harness="claude", pid=101, cwd=cwd, session_id=session_id,
-                       slug="agent-note", title="parent", liveness="working")
+                       slug="cairn", title="parent", liveness="working")
 
     def test_exact_session_id_match_nests_the_row(self):
         text = self._render([self._session(_SID)], [self._row()])
@@ -326,8 +326,8 @@ class NestingTest(_QueueFixture):
 
     def test_plugin_row_never_adopts_another_child_session_title(self):
         from fleet import collectors
-        child = Session(harness="codex", pid=7, cwd="/home/u/agent-note", session_id="child",
-                        slug="agent-note", title="borrowed title", liveness="working",
+        child = Session(harness="codex", pid=7, cwd="/home/u/cairn", session_id="child",
+                        slug="cairn", title="borrowed title", liveness="working",
                         is_child=True)
         job = self._row()
         collectors._adopt_child_titles([child], [job])
@@ -382,8 +382,8 @@ class SurfaceBoundaryTest(_QueueFixture):
     def test_a_jobs_log_row_with_the_same_cwd_stays_a_separate_row(self):
         self.write_state([_job(pid=None)])
         plugin_row = self.collect()[0]
-        registry_row = DispatchJob(key="autopilot-code", slug="agent-note-x",
-                                   cwd="/home/u/agent-note", source="jobs", status="running",
+        registry_row = DispatchJob(key="autopilot-code", slug="cairn-x",
+                                   cwd="/home/u/cairn", source="jobs", status="running",
                                    harness="codex", liveness="working")
         rows = [registry_row, plugin_row]
         self.assertEqual(len({(j.source, j.slug) for j in rows}), 2)

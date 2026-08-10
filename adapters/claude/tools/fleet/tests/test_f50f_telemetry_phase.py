@@ -40,7 +40,7 @@ def _job(**over):
         "kind": "task",
         "kindLabel": "rescue",
         "title": "Codex Task",
-        "workspaceRoot": "/home/u/agent-note",
+        "workspaceRoot": "/home/u/cairn",
         "jobClass": "task",
         "summary": "<task> Milkdown 빈 문단 직렬화를 추적하라.",
         "write": False,
@@ -62,7 +62,7 @@ class _Fixture(unittest.TestCase):
         self.home = os.path.join(self._tmp.name, "claude")
         self.codex_home = os.path.join(self._tmp.name, "codex")
         self.state_dir = os.path.join(
-            self.home, "plugins", "data", "codex-openai-codex", "state", "agent-note-abc")
+            self.home, "plugins", "data", "codex-openai-codex", "state", "cairn-abc")
         os.makedirs(self.state_dir)
 
     def tearDown(self):
@@ -80,7 +80,7 @@ class _Fixture(unittest.TestCase):
         os.makedirs(day_dir, exist_ok=True)
         path = os.path.join(
             day_dir, "rollout-%s-%s-%sT00-00-00-%s.jsonl" % (day + (thread_id,)))
-        lines = [{"type": "session_meta", "payload": {"cwd": "/home/u/agent-note"}}]
+        lines = [{"type": "session_meta", "payload": {"cwd": "/home/u/cairn"}}]
         if token_count:
             lines.append({"type": "event_msg", "payload": {
                 "type": "token_count",

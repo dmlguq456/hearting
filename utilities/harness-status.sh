@@ -154,8 +154,8 @@ if [ -n "$sibling_slug" ]; then
 fi
 
 notes_root=${AGENT_NOTES_ROOT:-${WORKLOG_NOTES_ROOT:-}}
-board_app=${WORKLOG_BOARD_APP:-}
-board_wt=${WORKLOG_BOARD_WT:-}
+board_app=${CAIRN_APP:-${WORKLOG_BOARD_APP:-}}
+board_wt=${CAIRN_WT:-${WORKLOG_BOARD_WT:-}}
 if [ -n "$notes_root" ]; then
   printf 'agent_notes_root=%s\n' "$notes_root"
   [ -d "$notes_root" ] && printf 'agent_notes_root_exists=1\n' || printf 'agent_notes_root_exists=0\n'

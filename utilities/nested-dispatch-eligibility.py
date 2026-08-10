@@ -37,7 +37,7 @@ from dispatch_contract import (  # noqa: E402
 #
 # Both known incidents are the same trap on different fields of the same
 # tuple: 2026-07-31 v2-audit sealed parent_sandbox=none, and 2026-08-04
-# agent-note sealed the caller's own parent_transport=interactive and lost a
+# Cairn sealed the caller's own parent_transport=interactive and lost a
 # whole standard cycle to the inline hop. All three fields are therefore
 # resolved or rejected here, at probe time, and cross-checked again at route
 # compile (capability-route.py) and at launch (dispatch_contract.py).

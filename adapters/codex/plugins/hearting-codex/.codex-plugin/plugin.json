@@ -3,14 +3,14 @@
   "version": "0.1.0+codex.20260715015036",
   "description": "Codex-native plugin projection for the portable agent harness.",
   "author": {
-    "name": "agent_setting"
+    "name": "hearting"
   },
   "skills": "./skills/",
   "interface": {
     "displayName": "Hearting Codex",
     "shortDescription": "Portable agent harness capabilities for Codex.",
-    "longDescription": "Adapter-owned Codex plugin projection generated from portable agent_setting capability contracts. Legacy runtime files are reference only.",
-    "developerName": "agent_setting",
+    "longDescription": "Adapter-owned Codex plugin projection generated from portable Hearting capability contracts. Legacy runtime files are reference only.",
+    "developerName": "hearting",
     "category": "Developer Tools",
     "capabilities": [
       "Interactive",

@@ -28,6 +28,8 @@ else
     agent_root="$local_root"
   elif valid_root "${HOME:-}/.codex/hearting"; then
     agent_root="$HOME/.codex/hearting"
+  elif valid_root "${HOME:-}/hearting"; then
+    agent_root="$HOME/hearting"
   elif valid_root "${HOME:-}/agent_setting"; then
     agent_root="$HOME/agent_setting"
   else

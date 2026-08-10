@@ -25,7 +25,7 @@ Rules:
 - **Hard cap 40 lines** between the markers. The block is a blueprint, not a changelog — rewrite it to stay current and short; never append version history into it.
 - **Same-transaction refresh**: every update-mode transaction (major or minor) refreshes the block together with the body under the same `.pipeline-lock`, and the block's `⟨v{N}⟩` marker matches the version being written. A stale summary is drift.
 - **Legacy adoption**: a PRD without the block gains it on its next update; do not run a separate sweep just to inject blocks.
-- **Stable contract**: the marker strings are consumed downstream by deterministic extractors (e.g., the agent-note spec mirror shows the block as the default blueprint view and feeds it to routing/steward context — agent-note PRD §54.10). Never rename, localize, or nest the markers; write the block content in the artifact language of the PRD.
+- **Stable contract**: the marker strings are consumed downstream by deterministic extractors (e.g., the Cairn spec mirror shows the block as the default blueprint view and feeds it to routing/steward context — Cairn PRD §54.10). Never rename, localize, or nest the markers; write the block content in the artifact language of the PRD.
 
 ### Step 1: Collect Information and Confirm
 

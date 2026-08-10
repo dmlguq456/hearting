@@ -31,7 +31,7 @@ def plugin_json() -> dict:
         "version": PLUGIN_VERSION,
         "description": "Codex-native plugin projection for the portable agent harness.",
         "author": {
-            "name": "agent_setting",
+            "name": "hearting",
         },
         "skills": "./skills/",
         "interface": {
@@ -39,9 +39,9 @@ def plugin_json() -> dict:
             "shortDescription": "Portable agent harness capabilities for Codex.",
             "longDescription": (
                 "Adapter-owned Codex plugin projection generated from portable "
-                "agent_setting capability contracts. Legacy runtime files are reference only."
+                "Hearting capability contracts. Legacy runtime files are reference only."
             ),
-            "developerName": "agent_setting",
+            "developerName": "hearting",
             "category": "Developer Tools",
             "capabilities": ["Interactive", "Write"],
             "defaultPrompt": [

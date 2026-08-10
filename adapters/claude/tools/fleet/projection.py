@@ -341,15 +341,15 @@ def _has_entries(path):
 
 def _grounding_home():
     """Agent home holding `.spec-grounding/`. Reproduces `route._completion_home`
-    (AGENT_HOME -> CLAUDE_HOME -> $HOME/agent_setting if a dir -> ~/.claude) rather
+    (AGENT_HOME -> CLAUDE_HOME -> $HOME/hearting -> legacy $HOME/agent_setting -> ~/.claude) rather
     than importing it: projection.py has no route dependency for this lookup and
     one four-line resolver is cheaper than inverting that edge."""
     h = os.environ.get("AGENT_HOME") or os.environ.get("CLAUDE_HOME")
     if h:
         return h
-    cand = os.path.expanduser("~/agent_setting")
-    if os.path.isdir(cand):
-        return cand
+    for cand in (os.path.expanduser("~/hearting"), os.path.expanduser("~/agent_setting")):
+        if os.path.isdir(cand):
+            return cand
     return os.path.expanduser("~/.claude")
 
 

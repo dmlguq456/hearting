@@ -274,7 +274,7 @@ Codex harness pointer before executing bridge scripts.
 Manual `preflight.sh` entry preserves the same source/runtime separation. A
 valid explicit `AGENT_HOME` remains authoritative; otherwise the wrapper uses
 the Codex-owned agent-home resolver to select the installed
-`$HOME/agent_setting` or Codex runtime pointer. The git root containing the
+`$HOME/hearting`, legacy `$HOME/agent_setting`, or the Codex runtime pointer. The git root containing the
 invoked script is only a standalone-checkout fallback, so a worktree-local
 preflight executable cannot silently activate an uninstalled feature worktree
 as the orchestration root.

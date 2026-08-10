@@ -73,7 +73,7 @@ class TestRoute(unittest.TestCase):
   # touch the real installed home or leak state between tests via a shared route_id.
   # `resolve_agent_home()` only honors AGENT_HOME when `<AGENT_HOME>/core/CORE.md`
   # exists -- without this marker file it silently falls through to the real
-  # `~/agent_setting`, which is exactly the leak this isolation exists to prevent.
+  # `~/hearting` (or legacy `~/agent_setting`), which is exactly the leak this isolation prevents.
   self._tmp_home=tempfile.TemporaryDirectory()
   (Path(self._tmp_home.name)/"core").mkdir(parents=True,exist_ok=True)
   (Path(self._tmp_home.name)/"core"/"CORE.md").write_text("fixture\n",encoding="utf-8")
@@ -432,7 +432,7 @@ class TestRoute(unittest.TestCase):
   with self.assertRaisesRegex(ValueError,"route nodes differ from the declared recipe"):
    R.verify_route(route,R.ROOT)
  def test_depth0_parent_transport_is_rejected_at_compile(self):
-  # 2026-08-04 agent-note: an interactive main session probed with its OWN
+  # 2026-08-04 cairn: an interactive main session probed with its OWN
   # transport, so every dispatch-depth-2 hop failed at launch and the whole
   # standard cycle ran inline. The tuple describes the depth-1 owner, never
   # the probing caller, so it can only ever be headless.

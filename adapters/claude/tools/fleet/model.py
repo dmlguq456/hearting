@@ -198,7 +198,7 @@ def project_of(cwd):
     a single interleaved pass would let an outer `_worktrees` component win over an
     inner `-wt` component, which is the wrong precedence (see the mixed 7th test case
     below). Edge cases verified — see plan Verification §1 / dev_logs/step_01_model.md:
-      /x/agent_setting-wt/fleet-dashboard              -> agent_setting
+      /x/hearting-wt/fleet-dashboard                   -> hearting
       /x/.claude/worklog-board-wt/studio-c2            -> worklog-board
       /x/.claude-wt/definitions-manifest               -> .claude
       /x/Stream_Diar_Baselines_worktrees/m5b_ls_eend_engine -> Stream_Diar_Baselines

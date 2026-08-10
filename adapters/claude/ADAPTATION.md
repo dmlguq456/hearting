@@ -212,7 +212,7 @@ paths now point at adapter-owned realization files instead of the common root:
 | Skills | `claude_setting/skills -> ../adapters/claude/skills` | Adapter-owned concrete Claude Skill files preserve old behavior while portable specs grow under `capabilities/` | Continue splitting semantics into `capabilities/<name>.md`; keep Claude frontmatter and runtime wording here |
 | Agent modes | `claude_setting/agent-modes -> ../adapters/claude/agent-modes` | Adapter-owned concrete mode projection files preserve current Claude behavior while `roles/MODES.md` classifies portability | Continue splitting adapter-coupled mode semantics into runtime-neutral fragments or adapter-native notes as non-Claude adapters implement equivalents |
 | Hooks | `claude_setting/hooks -> ../adapters/claude/hooks` | Adapter-owned concrete hook projection files preserve current Claude behavior; `core/HOOKS.md` names the invariant layer | Continue splitting Claude payload handling from portable invariant checks as non-Claude adapters implement equivalents |
-| Utilities | `claude_setting/utilities -> ../adapters/claude/utilities -> ../../utilities` (whole-layer symlink) | Split complete (2026-07-22): zero Claude-only utility files remain; the last delta (`agent-worklog-state.sh` local paths) moved to runtime `settings.json` env (`AGENT_NOTES_ROOT`/`WORKLOG_BOARD_APP`/`WORKLOG_BOARD_WT`) | None — a future Claude-only utility delta requires deliberately reintroducing the per-file layer plus an exemptions row |
+| Utilities | `claude_setting/utilities -> ../adapters/claude/utilities -> ../../utilities` (whole-layer symlink) | Split complete (2026-07-22): zero Claude-only utility files remain; the last delta (`agent-worklog-state.sh` local paths) moved to runtime `settings.json` env (`AGENT_NOTES_ROOT`/`CAIRN_APP`/`CAIRN_WT`; legacy `WORKLOG_BOARD_*` read fallback) | None — a future Claude-only utility delta requires deliberately reintroducing the per-file layer plus an exemptions row |
 | Tools | `claude_setting/tools -> ../adapters/claude/tools` | Adapter-owned concrete tool files preserve current Claude helper behavior while tool semantics are split | Isolate Claude session adapters under adapter or tool plugin |
 | Loops | `claude_setting/loops -> ../adapters/claude/loops` | Adapter-owned concrete loop files preserve current Claude drill/oncall/study behavior | Split runtime-coupled loop invocation if non-Claude adapters need native loop runners |
 | Scaffolds | `claude_setting/scaffolds -> ../adapters/claude/scaffolds` | Adapter-owned concrete scaffold files preserve current Claude design/template behavior | Move Claude-only scaffold assumptions into adapter-native files when found; keep portable scaffold intent in common docs |
@@ -264,7 +264,7 @@ points at `adapters/claude/utilities`, which is itself ONE symlink to the shared
 `utilities/` layer. Every shared utility — including a newly added file — resolves
 for Claude with zero per-file mirror work, and per-file Claude deltas are retired.
 Runtime-local worklog discovery paths live in runtime `settings.json` env
-(`AGENT_NOTES_ROOT`, `WORKLOG_BOARD_APP`, `WORKLOG_BOARD_WT`), not in script copies.
+(`AGENT_NOTES_ROOT`, `CAIRN_APP`, `CAIRN_WT`; legacy `WORKLOG_BOARD_*` read fallback), not in script copies.
 
 Scaffold assets now follow the same concrete projection pattern:
 `claude_setting/scaffolds` points at `adapters/claude/scaffolds/`, whose files

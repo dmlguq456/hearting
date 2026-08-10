@@ -52,7 +52,13 @@ unset CLAUDE_CODE_SESSION_ID CODEX_SESSION_ID \
   CLAUDE_CODE_CHILD_SESSION OPENCODE_DISPATCH_SLUG FLEET_TITLE_REFRESH \
   MEM_DISTILL MEM_DISTILL_ENABLE
 DIRECT_DISPATCH_HOME="$ROOT"
-[ -f "$HOME/agent_setting/core/CORE.md" ] && DIRECT_DISPATCH_HOME="$HOME/agent_setting"
+if [ -f "$HOME/.codex/hearting/core/CORE.md" ]; then
+  DIRECT_DISPATCH_HOME="$HOME/.codex/hearting"
+elif [ -f "$HOME/hearting/core/CORE.md" ]; then
+  DIRECT_DISPATCH_HOME="$HOME/hearting"
+elif [ -f "$HOME/agent_setting/core/CORE.md" ]; then
+  DIRECT_DISPATCH_HOME="$HOME/agent_setting"
+fi
 
 echo "== artifact guard CLI =="
 mkdir -p "$TMP/proj/.agent_reports/spec"
@@ -473,6 +479,22 @@ if AGENT_HOME="$TMP/not-agent-home" HOME="$TMP/codex_pointer_home" "$ROOT/adapte
 else
   bad "codex agent-home wrapper should ignore invalid AGENT_HOME"
 fi
+mkdir -p "$TMP/codex_linked_home/hearting/core" "$TMP/codex_linked_home/agent_setting/core"
+printf 'core\n' > "$TMP/codex_linked_home/hearting/core/CORE.md"
+printf 'legacy\n' > "$TMP/codex_linked_home/agent_setting/core/CORE.md"
+if env -u AGENT_HOME HOME="$TMP/codex_linked_home" "$ROOT/adapters/codex/utilities/agent-home.sh" >/tmp/codex_agent_home_linked.out 2>/tmp/codex_agent_home_linked.err \
+  && grep -q "^$TMP/codex_linked_home/hearting$" /tmp/codex_agent_home_linked.out; then
+  ok "codex agent-home wrapper prefers canonical hearting checkout"
+else
+  bad "codex agent-home wrapper must prefer canonical hearting checkout"
+fi
+rm -rf "$TMP/codex_linked_home/hearting"
+if env -u AGENT_HOME HOME="$TMP/codex_linked_home" "$ROOT/adapters/codex/utilities/agent-home.sh" >/tmp/codex_agent_home_legacy.out 2>/tmp/codex_agent_home_legacy.err \
+  && grep -q "^$TMP/codex_linked_home/agent_setting$" /tmp/codex_agent_home_legacy.out; then
+  ok "codex agent-home wrapper retains legacy agent_setting fallback"
+else
+  bad "codex agent-home wrapper must retain legacy agent_setting fallback"
+fi
 
 # A preflight executable located in a linked/feature checkout is an
 # orchestration source, not the installed harness root. Its default registry
@@ -817,7 +839,7 @@ fi
 mkdir -p "$TMP/notes/cards" "$TMP/notes/_layer2/notes" "$TMP/board/.cache" "$TMP/board-wt"
 printf 'card\n' > "$TMP/notes/cards/demo.md"
 printf 'note\n' > "$TMP/notes/_layer2/notes/demo.md"
-if AGENT_NOTES_ROOT="$TMP/notes" WORKLOG_BOARD_APP="$TMP/board" WORKLOG_BOARD_WT="$TMP/board-wt" \
+if AGENT_NOTES_ROOT="$TMP/notes" CAIRN_APP="$TMP/board" CAIRN_WT="$TMP/board-wt" \
   "$CODEX" worklog "$TMP/flowproj" >/tmp/worklog.out 2>/tmp/worklog.err \
   && grep -q "^agent-notes-root=$TMP/notes$" /tmp/worklog.out \
   && grep -q "^worklog-board-app=$TMP/board$" /tmp/worklog.out \
@@ -828,7 +850,7 @@ if AGENT_NOTES_ROOT="$TMP/notes" WORKLOG_BOARD_APP="$TMP/board" WORKLOG_BOARD_WT
 else
   bad "codex worklog wrapper should report read-only state"
 fi
-if env -u AGENT_NOTES_ROOT -u WORKLOG_NOTES_ROOT -u WORKLOG_BOARD_APP -u WORKLOG_BOARD_WT \
+if env -u AGENT_NOTES_ROOT -u WORKLOG_NOTES_ROOT -u CAIRN_APP -u CAIRN_WT -u WORKLOG_BOARD_APP -u WORKLOG_BOARD_WT \
   "$CODEX" worklog "$TMP/flowproj" >/tmp/worklog-default.out 2>/tmp/worklog-default.err \
   && grep -q '^agent-notes-root=unset$' /tmp/worklog-default.out \
   && grep -q '^worklog-board-app=unset$' /tmp/worklog-default.out \
@@ -839,7 +861,7 @@ else
   bad "codex worklog wrapper should not default to Claude runtime paths"
 fi
 printf 'T\topen\t/r\t/r-wt/a\tjob-a\tcap\nT\tdone\t/r\t/r-wt/b\tjob-b\tcap\n' > "$TMP/status_jobs.log"
-if AGENT_NOTES_ROOT="$TMP/notes" WORKLOG_BOARD_APP="$TMP/board" WORKLOG_BOARD_WT="$TMP/board-wt" AGENT_DISPATCH_JOBS="$TMP/status_jobs.log" \
+if AGENT_NOTES_ROOT="$TMP/notes" CAIRN_APP="$TMP/board" CAIRN_WT="$TMP/board-wt" AGENT_DISPATCH_JOBS="$TMP/status_jobs.log" \
   "$CODEX" status "$TMP/flowproj" testsid >/tmp/codex_status.out 2>/tmp/codex_status.err \
   && grep -q '^adapter=codex$' /tmp/codex_status.out \
   && grep -q '^headless_open_jobs=1$' /tmp/codex_status.out \
@@ -3020,7 +3042,7 @@ if python3 "$ROOT/tools/context-footprint.py" --root "$ROOT" --skip-runtime --sk
   && grep -q '^unit-family=qa ' "$TMP/context_footprint.out" \
   && ! grep -q '^surface=native-bootstrap-agent-modes' "$TMP/context_footprint.out" \
   && { grep -q '^status=ok' "$TMP/context_footprint.out" \
-    || { grep -q '^status=warn warnings=18$' "$TMP/context_footprint.out" \
+    || { grep -q '^status=warn warnings=19$' "$TMP/context_footprint.out" \
       && grep -q 'owner worker bootstrap 5846 > 4096 bytes' "$TMP/context_footprint.out" \
       && grep -q 'stage worker bootstrap 4734 > 4096 bytes' "$TMP/context_footprint.out" \
       && grep -q 'review worker bootstrap 4227 > 4096 bytes' "$TMP/context_footprint.out" \
@@ -3030,6 +3052,7 @@ if python3 "$ROOT/tools/context-footprint.py" --root "$ROOT" --skip-runtime --sk
       && grep -q 'bootstrap:opencode footprint regression' "$TMP/context_footprint.out" \
       && grep -q 'entry-router:canonical:max footprint regression' "$TMP/context_footprint.out" \
       && grep -q 'entry-router:claude:max footprint regression' "$TMP/context_footprint.out" \
+      && grep -q 'entry-router:claude-plugin:max footprint regression' "$TMP/context_footprint.out" \
       && grep -q 'entry-router:codex:max footprint regression' "$TMP/context_footprint.out" \
       && grep -q 'entry-router:opencode:max footprint regression' "$TMP/context_footprint.out" \
       && grep -q 'missing from context footprint baseline: unit-catalog:total' "$TMP/context_footprint.out" \
@@ -3235,6 +3258,22 @@ if AGENT_HOME="$TMP/not-agent-home" HOME="$TMP/opencode_pointer_home" "$ROOT/ada
 else
   bad "opencode agent-home wrapper should ignore invalid AGENT_HOME"
 fi
+mkdir -p "$TMP/opencode_linked_home/hearting/core" "$TMP/opencode_linked_home/agent_setting/core"
+printf 'core\n' > "$TMP/opencode_linked_home/hearting/core/CORE.md"
+printf 'legacy\n' > "$TMP/opencode_linked_home/agent_setting/core/CORE.md"
+if env -u AGENT_HOME HOME="$TMP/opencode_linked_home" "$ROOT/adapters/opencode/utilities/agent-home.sh" >/tmp/opencode_agent_home_linked.out 2>/tmp/opencode_agent_home_linked.err \
+  && grep -q "^$TMP/opencode_linked_home/hearting$" /tmp/opencode_agent_home_linked.out; then
+  ok "opencode agent-home wrapper prefers canonical hearting checkout"
+else
+  bad "opencode agent-home wrapper must prefer canonical hearting checkout"
+fi
+rm -rf "$TMP/opencode_linked_home/hearting"
+if env -u AGENT_HOME HOME="$TMP/opencode_linked_home" "$ROOT/adapters/opencode/utilities/agent-home.sh" >/tmp/opencode_agent_home_legacy.out 2>/tmp/opencode_agent_home_legacy.err \
+  && grep -q "^$TMP/opencode_linked_home/agent_setting$" /tmp/opencode_agent_home_legacy.out; then
+  ok "opencode agent-home wrapper retains legacy agent_setting fallback"
+else
+  bad "opencode agent-home wrapper must retain legacy agent_setting fallback"
+fi
 
 echo "== opencode material-route + worktree-path wrapper =="
 opencode_source="$TMP/repo/opencode_source.py"
@@ -3402,7 +3441,7 @@ if "$OPENCODE" briefing "$TMP/flowproj" >/tmp/opencode_brief.out 2>/tmp/opencode
 else
   bad "opencode briefing wrapper should exit cleanly"
 fi
-if AGENT_NOTES_ROOT="$TMP/notes" WORKLOG_BOARD_APP="$TMP/board" WORKLOG_BOARD_WT="$TMP/board-wt" \
+if AGENT_NOTES_ROOT="$TMP/notes" CAIRN_APP="$TMP/board" CAIRN_WT="$TMP/board-wt" \
   "$OPENCODE" worklog "$TMP/flowproj" >/tmp/opencode_worklog.out 2>/tmp/opencode_worklog.err \
   && grep -q "^agent-notes-root=$TMP/notes$" /tmp/opencode_worklog.out \
   && grep -q '^note=read-only inventory;' /tmp/opencode_worklog.out; then
@@ -3410,7 +3449,7 @@ if AGENT_NOTES_ROOT="$TMP/notes" WORKLOG_BOARD_APP="$TMP/board" WORKLOG_BOARD_WT
 else
   bad "opencode worklog wrapper should report read-only state"
 fi
-if env -u AGENT_NOTES_ROOT -u WORKLOG_NOTES_ROOT -u WORKLOG_BOARD_APP -u WORKLOG_BOARD_WT \
+if env -u AGENT_NOTES_ROOT -u WORKLOG_NOTES_ROOT -u CAIRN_APP -u CAIRN_WT -u WORKLOG_BOARD_APP -u WORKLOG_BOARD_WT \
   "$OPENCODE" worklog "$TMP/flowproj" >/tmp/opencode_worklog_default.out 2>/tmp/opencode_worklog_default.err \
   && grep -q '^agent-notes-root=unset$' /tmp/opencode_worklog_default.out \
   && ! grep -q '/.claude/worklog-board' /tmp/opencode_worklog_default.out; then
@@ -3418,7 +3457,7 @@ if env -u AGENT_NOTES_ROOT -u WORKLOG_NOTES_ROOT -u WORKLOG_BOARD_APP -u WORKLOG
 else
   bad "opencode worklog wrapper should not default to Claude runtime paths"
 fi
-if AGENT_NOTES_ROOT="$TMP/notes" WORKLOG_BOARD_APP="$TMP/board" WORKLOG_BOARD_WT="$TMP/board-wt" \
+if AGENT_NOTES_ROOT="$TMP/notes" CAIRN_APP="$TMP/board" CAIRN_WT="$TMP/board-wt" \
   "$OPENCODE" status "$TMP/flowproj" opencodesid >/tmp/opencode_status.out 2>/tmp/opencode_status.err \
   && grep -q '^adapter=opencode$' /tmp/opencode_status.out \
   && grep -q '^runtime_surface=adapter-owned-harness-status$' /tmp/opencode_status.out \

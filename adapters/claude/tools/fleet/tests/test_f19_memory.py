@@ -30,7 +30,7 @@ def _write_lines(path, lines):
 
 class _TmpStoreCase(unittest.TestCase):
     """Isolates every test behind its own MEM_STORE/MEM_WRITE_EVENTS — never touches the
-    real ~/.local/state or ~/agent_setting journal (mirrors the 2026-07-11 실유출 회귀 fix)."""
+    real ~/.local/state or ~/hearting journal (mirrors the 2026-07-11 실유출 회귀 fix)."""
 
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()

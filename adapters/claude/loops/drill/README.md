@@ -23,7 +23,7 @@ RUN_JUDGE=1 <agent-home>/loops/drill/run.sh  # add an LLM pass over response dis
 
 Do not run the full suite after every change. Select the changed instruction axis with `--axis`; cron on-call and study checks use a sample. Running without arguments is the explicit full-suite path. Full-ceremony cases, especially on the artifact axis, are expensive.
 
-For Fleet grouping, each case uses `/tmp/drill-<case>-*/repo` as one group root. When `AGENT_DISPATCH_JOBS` is set, runner, owner, and stage/child registration, monitoring, and harvesting all use that registry. The runner row does not implicitly inherit `parent_sid` or `parent_cwd` from the `agent_setting/main` session that started it. The capability owner inside the case is depth 1; stage or review workers opened by that owner are depth 2.
+For Fleet grouping, each case uses `/tmp/drill-<case>-*/repo` as one group root. When `AGENT_DISPATCH_JOBS` is set, runner, owner, and stage/child registration, monitoring, and harvesting all use that registry. The runner row does not implicitly inherit `parent_sid` or `parent_cwd` from the `hearting/main` session that started it. The capability owner inside the case is depth 1; stage or review workers opened by that owner are depth 2.
 
 - Run after committing instruction changes under `<agent-home>`, not every night.
 - Use the user's default model so the drill matches normal usage; do not pin a model.

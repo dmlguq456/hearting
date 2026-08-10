@@ -21,7 +21,7 @@ agent_home() {
   else
     # A standalone, not-yet-installed checkout remains usable. A linked
     # feature worktree does not reach this branch when the canonical
-    # $HOME/agent_setting or Codex runtime pointer is available.
+    # $HOME/hearting, legacy $HOME/agent_setting, or the Codex runtime pointer is available.
     printf '%s\n' "$ROOT"
   fi
 }
@@ -812,10 +812,10 @@ EOF
     ;;
   worklog)
     cwd=${2:-$PWD}
-    AGENT_HOME="$AGENT_ROOT" \
+      AGENT_HOME="$AGENT_ROOT" \
       AGENT_NOTES_ROOT="${AGENT_NOTES_ROOT:-${WORKLOG_NOTES_ROOT:-}}" \
-      WORKLOG_BOARD_APP="${WORKLOG_BOARD_APP:-}" \
-      WORKLOG_BOARD_WT="${WORKLOG_BOARD_WT:-}" \
+      CAIRN_APP="${CAIRN_APP:-${WORKLOG_BOARD_APP:-}}" \
+      CAIRN_WT="${CAIRN_WT:-${WORKLOG_BOARD_WT:-}}" \
       "$ROOT/utilities/agent-worklog-state.sh" "$cwd"
     ;;
   artifact-sink)

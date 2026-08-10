@@ -22,9 +22,9 @@ def default_agent_home() -> Path:
         return Path(os.environ["AGENT_HOME"])
     if os.environ.get("CLAUDE_HOME"):
         return Path(os.environ["CLAUDE_HOME"])
-    neutral = HOME / "agent_setting"
-    if neutral.exists():
-        return neutral
+    for neutral in (HOME / "hearting", HOME / "agent_setting"):
+        if neutral.exists():
+            return neutral
     return HOME / ".claude"
 
 
@@ -866,17 +866,18 @@ def _migrate_v5(con):
 def _v6_rename_targets():
     """Retired remote keys remapped to the live successor checkout (v6).
 
-    github.com/dmlguq456/claude_setting was renamed to agent_setting
+    github.com/dmlguq456/claude_setting was renamed to hearting
     (2026-07-22 memory audit W3 follow-up; the records under the old key are
     2026-06 harness-internal content and this repository's history predates
     the rename). The target is DERIVED from the live AGENT_HOME checkout via
     project_key — never hardcoded — and the entry applies only where that
-    checkout is the same-org ``agent_setting`` repository, so machines whose
+    checkout is the same-org ``hearting`` repository (or its legacy
+    ``agent_setting`` name), so machines whose
     AGENT_HOME resolves elsewhere are unaffected.
     """
     old = "git:github.com/dmlguq456/claude_setting"
     target = project_key(AGENT_HOME, seed=False)
-    if (target.startswith("git:") and target.endswith("/agent_setting")
+    if (target.startswith("git:") and target.rsplit("/", 1)[-1] in {"hearting", "agent_setting"}
             and target.rsplit("/", 1)[0] == old.rsplit("/", 1)[0]):
         return {old: target}
     return {}

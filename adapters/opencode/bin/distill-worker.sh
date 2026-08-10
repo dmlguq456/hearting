@@ -76,7 +76,7 @@ esac
 
 # Propagate the caller-supplied session cwd so downstream `apply-distill-actions.py`
 # → `mem.py add` records it via `MEM_CWD or os.getcwd()` (mem.py:977). Without this,
-# the distill launcher's shell cwd (typically agent_setting) gets baked into the
+# the distill launcher's shell cwd (typically hearting) gets baked into the
 # write-event journal, so fleet's per-repo memory rows map curator events to the
 # wrong project card. mem.py already prefers MEM_CWD; we only need to set it here.
 [ -n "$cwd" ] && export MEM_CWD="$cwd"

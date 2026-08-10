@@ -22,8 +22,8 @@ cycle and does not require this lock.
 Acquire immediately before `autopilot-spec` Step 3 or update mode, `autopilot-code` state/summary writes, or a spec-drift update. The helper holds the lock around the supplied transaction command, prepares and verifies the prior PRD bytes itself, and exports `AGENT_SPEC_NEXT_VERSION` only after the latest version is re-read under lock. Callers must not create or validate the snapshot themselves:
 
 ```bash
-REPORTS_DIR=$("${AGENT_HOME:-$HOME/agent_setting}/utilities/artifact-root.sh" "$PWD") || exit
-python3 "${AGENT_HOME:-$HOME/agent_setting}/utilities/spec-transaction.py" run \
+REPORTS_DIR=$("${AGENT_HOME:-$HOME/hearting}/utilities/artifact-root.sh" "$PWD") || exit
+python3 "${AGENT_HOME:-$HOME/hearting}/utilities/spec-transaction.py" run \
   --artifact-root "$REPORTS_DIR" --worktree "$(pwd -P)" \
   --route "$ROUTE_RECORD" --node "$ROUTE_NODE" --wait-timeout 600 -- \
   sh ./the-owning-capability-transaction.sh
@@ -41,7 +41,7 @@ The helper releases automatically after normal completion, interruption, or erro
 For a read-only check before touching the spec:
 
 ```bash
-REPORTS_DIR=$("${AGENT_HOME:-$HOME/agent_setting}/utilities/artifact-root.sh" "$PWD") || exit
+REPORTS_DIR=$("${AGENT_HOME:-$HOME/hearting}/utilities/artifact-root.sh" "$PWD") || exit
 [ -s "$REPORTS_DIR/.pipeline-lock" ] && cat "$REPORTS_DIR/.pipeline-lock" || echo "no active edit"
 ```
 

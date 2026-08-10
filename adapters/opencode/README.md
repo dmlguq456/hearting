@@ -231,7 +231,7 @@ to the harness repo so the plugin can resolve `adapters/opencode/bin/preflight.s
 Target layout:
 
 ```text
-$HOME/agent_setting/        # neutral repo
+$HOME/hearting/             # canonical neutral repo
 $HOME/.config/opencode/     # OpenCode global config home
 $HOME/.local/share/opencode/  # OpenCode data home (DB, logs, snapshots)
 ```
@@ -244,7 +244,7 @@ in the config. At minimum, the OpenCode adapter should expose a stable pointer
 back to the neutral repo:
 
 ```text
-$HOME/.config/opencode/hearting -> $HOME/agent_setting
+$HOME/.config/opencode/hearting -> $HOME/hearting
 ```
 
 The `instructions` array in `opencode.json`/`opencode.jsonc` should include the
@@ -254,7 +254,7 @@ projected bootstrap file:
 {
   "$schema": "https://opencode.ai/config.json",
   "instructions": [
-    "$HOME/agent_setting/opencode_setting/AGENTS.md"
+    "$HOME/hearting/opencode_setting/AGENTS.md"
   ]
 }
 ```
@@ -330,7 +330,7 @@ For native OpenCode surface checks, disable the Claude compatibility autoload:
 
 ```bash
 OPENCODE_DISABLE_CLAUDE_CODE_SKILLS=1 \
-OPENCODE_CONFIG_CONTENT='{"skills":{"paths":["/path/to/agent_setting/opencode_setting/opencode-skills"]}}' \
+OPENCODE_CONFIG_CONTENT='{"skills":{"paths":["/path/to/hearting/opencode_setting/opencode-skills"]}}' \
   opencode debug skill --pure
 ```
 

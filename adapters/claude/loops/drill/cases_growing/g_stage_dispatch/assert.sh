@@ -18,7 +18,7 @@ fail=0
 JOBS=""
 for cand in "${AGENT_DISPATCH_JOBS:-}" \
             "${AGENT_HOME:-}/.dispatch/jobs.log" \
-            "$HOME/agent_setting/.dispatch/jobs.log" \
+            "$HOME/hearting/.dispatch/jobs.log" \
             "$HOME/.claude/.dispatch/jobs.log"; do
   [ -n "$cand" ] && [ -f "$cand" ] && { JOBS="$cand"; break; }
 done

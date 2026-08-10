@@ -1224,7 +1224,7 @@ def resolve_agent_home() -> Path:
     # conductor Stop gate) agree on ONE registry root. When AGENT_HOME is unset,
     # falling straight back to ROOT (=worktree) split the registry: the wrapper
     # wrote jobs.log under the worktree while the readers looked under
-    # $HOME/agent_setting/.dispatch — so the liveness/Stop layer never saw the
+    # $HOME/hearting/.dispatch — so the liveness/Stop layer never saw the
     # rows the wrapper appended (SD-14b② registry gap).
     def _valid(p):
         return bool(p) and (Path(p) / "core" / "CORE.md").is_file()
@@ -1232,6 +1232,7 @@ def resolve_agent_home() -> Path:
     for cand in (
         os.environ.get("AGENT_HOME"),
         os.environ.get("CLAUDE_HOME"),
+        str(Path.home() / "hearting"),
         str(Path.home() / "agent_setting"),
         str(Path.home() / ".claude"),
     ):

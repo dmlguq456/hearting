@@ -36,6 +36,11 @@ _loop_agent_home() {
     printf '%s\n' "$root"
     return 0
   fi
+  cand="$HOME/hearting"
+  if [ -d "$cand" ]; then
+    printf '%s\n' "$cand"
+    return 0
+  fi
   cand="$HOME/agent_setting"
   if [ -d "$cand" ]; then
     printf '%s\n' "$cand"

@@ -321,7 +321,7 @@ class NestedEligibilityTest(unittest.TestCase):
         self.assertEqual(row["parent_sandbox"], "adapter-default")
 
     def test_callers_own_interactive_transport_fails_before_runtime_probe(self):
-        # 2026-08-04 agent-note: the depth-0 session filled in its own
+        # 2026-08-04 cairn: the depth-0 session filled in its own
         # transport. Canonical vocabulary, wrong subject.
         with tempfile.TemporaryDirectory() as worktree, \
              mock.patch.object(N, "command_check") as checked:

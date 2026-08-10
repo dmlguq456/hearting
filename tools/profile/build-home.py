@@ -260,7 +260,7 @@ def build_instance(agent_home, name, harness, worker_type, fragments, expose, sl
     # is deliberately never linked so it stays instance-isolated).
 
     # credentials shared, never duplicated/mutated. The source is the RUNTIME config
-    # home, not the repo: in the split layout (AGENT_HOME=~/agent_setting, runtime
+    # home, not the repo: in the split layout (AGENT_HOME=~/hearting, runtime
     # ~/.claude) `agent_home/.credentials.json` never exists, so every profiled child
     # spawned logged-out (jobs.log note=dead-auth 2026-07-19 r1b — depth-2 stage
     # dispatch silently degraded to inline). Same shape as the codex wrapper, which

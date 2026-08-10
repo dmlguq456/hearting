@@ -2056,8 +2056,8 @@ check_portable_agent_home_resolution() {
   fi
 
   for p in tools/memory/mem.py adapters/claude/tools/memory/mem.py; do
-    if ! grep -Fq 'HOME / "agent_setting"' "$p"; then
-      fail_msg "$p must prefer neutral ~/agent_setting before legacy runtime home"
+    if ! grep -Fq 'HOME / "hearting"' "$p" || ! grep -Fq 'HOME / "agent_setting"' "$p"; then
+      fail_msg "$p must prefer canonical ~/hearting and retain ~/agent_setting before legacy runtime home"
     fi
   done
 }

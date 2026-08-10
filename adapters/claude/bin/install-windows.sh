@@ -100,7 +100,7 @@ MEM="$CLAUDE_DIR/tools/memory/mem.py"
 if [ -f "$MEM" ]; then
   if "$PYBIN" "$MEM" stats 2>/dev/null | grep -qi 'DB 없음\|no db\|not found'; then
     DUMP=""
-    for cand in "$HOME_DIR/agent_setting/memory/dump.jsonl" "$CLAUDE_DIR/memory/dump.jsonl"; do
+    for cand in "$HOME_DIR/hearting/memory/dump.jsonl" "$HOME_DIR/agent_setting/memory/dump.jsonl" "$CLAUDE_DIR/memory/dump.jsonl"; do
       [ -f "$cand" ] && { DUMP="$cand"; break; }
     done
     if [ -n "$DUMP" ]; then

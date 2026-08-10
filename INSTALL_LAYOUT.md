@@ -26,7 +26,8 @@ through native discovery paths and adapter bootstrap files.
 ```text
 $HOME/.local/share/hearting/releases/<version>/  # managed immutable release
 $HOME/.local/share/hearting/current              # atomic active pointer
-$HOME/agent_setting/                                  # optional maintainer checkout
+$HOME/hearting/                                       # canonical maintainer checkout
+$HOME/agent_setting/                                  # legacy checkout fallback
 $HOME/.claude/              # Claude Code runtime home
 $HOME/.codex/               # Codex runtime home
 $HOME/.config/opencode/     # OpenCode global config home
@@ -187,7 +188,7 @@ state or providers. The launcher `tools/fleet/fleet.sh` runs from the repository
 directly; to get the one-word `fleet` command, symlink it onto `PATH`:
 
 ```bash
-export AGENT_HOME="$HOME/agent_setting"
+export AGENT_HOME="$HOME/hearting"
 mkdir -p "$HOME/.local/bin"
 ln -sfn "$AGENT_HOME/tools/fleet/fleet.sh" "$HOME/.local/bin/fleet"   # needs ~/.local/bin on PATH
 ```

@@ -186,7 +186,7 @@ class FallbackTest(unittest.TestCase):
   return next((line.split("=",1)[1] for line in result.stdout.splitlines()
                if line.startswith(("selected_hop=","reason="))),"-")
  def test_dry_run_and_start_agree_on_a_wrong_parent_runtime(self):
-  # 2026-08-04 agent-note: dry-run reported `check=ok,
+  # 2026-08-04 cairn: dry-run reported `check=ok,
   # selected_hop=same-harness-headless` for a route whose sealed parent could
   # never resolve, and only --start descended to inline. The sealed harness
   # here is codex while the running owner is claude -- the transport-axis

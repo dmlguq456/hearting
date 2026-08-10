@@ -766,15 +766,15 @@ def _dispatch_liveness(job, now, track=True, codex_index=None):
 # --- jobs.log path ---
 def _registry_home():
     """Canonical dispatch-registry home — reproduces utilities/agent-home.sh resolution
-    (AGENT_HOME → CLAUDE_HOME → $HOME/agent_setting if a dir → ~/.claude). Holds
+    (AGENT_HOME → CLAUDE_HOME → $HOME/hearting → legacy $HOME/agent_setting → ~/.claude). Holds
     .dispatch/jobs.log and .dispatch/homes/ (profile masked homes). Distinct from the
     runtime telemetry home (_proj_home). See core/OPERATIONS.md §5.10."""
     h = os.environ.get("AGENT_HOME") or os.environ.get("CLAUDE_HOME")
     if h:
         return h
-    cand = os.path.expanduser("~/agent_setting")
-    if os.path.isdir(cand):
-        return cand
+    for cand in (os.path.expanduser("~/hearting"), os.path.expanduser("~/agent_setting")):
+        if os.path.isdir(cand):
+            return cand
     return os.path.expanduser("~/.claude")
 
 
@@ -851,7 +851,7 @@ def _candidate_jobs_paths(override=None):
 def _proj_home():
     """Runtime telemetry home (projects/sessions/.statusline) — Claude Code config dir.
     DISTINCT from the registry home (_registry_home): telemetry dirs live only here, not
-    under agent_setting. CLAUDE_CONFIG_DIR override honored, else ~/.claude."""
+    under Hearting. CLAUDE_CONFIG_DIR override honored, else ~/.claude."""
     return os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude")
 
 
@@ -1464,7 +1464,7 @@ def _job_liveness(path, now, stale_min=15, profile=None, slug=None):
     profile-aware (isomorphic to dispatch-liveness.sh, spec §7): when `profile` is set
     (and `slug` available), the job's transcript is isolated under its masked config home
     (`.dispatch/homes/<slug>.<profile>/projects/<enc>`) under the REGISTRY home
-    (`_registry_home()` — masked homes live under agent_setting/.dispatch/homes/, never
+    (`_registry_home()` — masked homes live under hearting/.dispatch/homes/, never
     under the runtime telemetry home), rather than the RUNTIME home's `projects/<enc>`
     (`_proj_home()`) used by the non-profile branch. Resolving the profile branch against
     the wrong root would always false-DEAD a profile job. profile None (the pre-existing,

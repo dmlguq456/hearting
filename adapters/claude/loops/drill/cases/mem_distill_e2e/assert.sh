@@ -20,7 +20,7 @@ STORE=$(mktemp -d /tmp/drill-memstore-XXXX)
 export MEM_STORE="$STORE" MEM_DISTILL_ENABLE=1
 
 DISPATCH="$HOME/.claude/hooks/mem-distill-dispatch.sh"
-[ -f "$DISPATCH" ] || DISPATCH="${DRILL_MARKER_HOME:-$HOME/agent_setting}/adapters/claude/hooks/mem-distill-dispatch.sh"
+[ -f "$DISPATCH" ] || DISPATCH="${DRILL_MARKER_HOME:-$HOME/hearting}/adapters/claude/hooks/mem-distill-dispatch.sh"
 
 fail=0
 bash "$DISPATCH" distill "$sid" "$WORK/repo" >/dev/null 2>&1

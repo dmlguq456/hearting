@@ -597,10 +597,10 @@ EOF
     ;;
   worklog)
     cwd=${2:-$PWD}
-    AGENT_HOME="$AGENT_ROOT" \
+      AGENT_HOME="$AGENT_ROOT" \
       AGENT_NOTES_ROOT="${AGENT_NOTES_ROOT:-${WORKLOG_NOTES_ROOT:-}}" \
-      WORKLOG_BOARD_APP="${WORKLOG_BOARD_APP:-}" \
-      WORKLOG_BOARD_WT="${WORKLOG_BOARD_WT:-}" \
+      CAIRN_APP="${CAIRN_APP:-${WORKLOG_BOARD_APP:-}}" \
+      CAIRN_WT="${CAIRN_WT:-${WORKLOG_BOARD_WT:-}}" \
       "$ROOT/utilities/agent-worklog-state.sh" "$cwd"
     ;;
   artifact-sink)

@@ -72,7 +72,7 @@ project Claude Skill, Agent, command, hook, or statusline files into Codex.
 | role mode | Run `adapters/codex/bin/preflight.sh mode-info <family/mode>` before using a `roles/modes/` fragment; use the reported `native_mode_path` under `adapters/codex/modes/`; portable modes can be used directly, tool-contract modes require equivalent tools, unsupported modes report `fallback=reference-only` when no Codex-native runtime surface exists |
 | native mode surface | Mode guides are generated under `adapters/codex/modes/` from `roles/modes/`; design modes additionally require the Codex visual-harness tool contract before claiming rendered visual completion |
 | adapter bootstrap | Load `adapters/codex/AGENTS.md`, then `core/CORE.md` plus task-relevant shared docs; do not treat `CLAUDE.md` as portable bootstrap |
-| agent home | A valid explicit `AGENT_HOME` wins. Otherwise Codex-owned wrappers resolve the canonical `$HOME/agent_setting` or `$HOME/.codex/hearting` installation before falling back to their source checkout; invoking `preflight.sh` through a linked feature worktree therefore does not activate that worktree as the runtime harness root |
+| agent home | A valid explicit `AGENT_HOME` wins. Otherwise Codex-owned wrappers resolve `$HOME/.codex/hearting`, canonical `$HOME/hearting`, or legacy `$HOME/agent_setting` before falling back to their source checkout; invoking `preflight.sh` through a linked feature worktree therefore does not activate that worktree as the runtime harness root |
 | permission model | Run `adapters/codex/bin/preflight.sh permissions`; use Codex native approval policy and sandbox settings, not Claude `allowedTools` |
 | MCP config | Run `adapters/codex/bin/preflight.sh mcp [--check]`; use Codex native `codex mcp`/config surfaces, not Claude `settings.json` MCP payloads |
 | artifact root | primary-checkout canonical `.agent_reports` via `utilities/artifact-root.sh`; linked-worktree snapshots are read-only; legacy fallback only at the canonical root |
@@ -355,14 +355,14 @@ projection, bridge, boundary, and current-hash trust gate.
 Target layout:
 
 ```text
-$HOME/agent_setting/        # neutral repo
+$HOME/hearting/             # canonical neutral repo
 $HOME/.codex/               # Codex runtime home
 ```
 
 Codex runtime state such as `auth.json`, logs, SQLite state, sessions, model caches, and shell snapshots should stay in `$HOME/.codex`. The neutral harness should be referenced from Codex through explicit bootstrap instructions, symlinks, or wrapper configuration. At minimum, the Codex adapter should expose a stable pointer back to the neutral repo, for example:
 
 ```text
-$HOME/.codex/hearting -> $HOME/agent_setting
+$HOME/.codex/hearting -> $HOME/hearting
 ```
 
 Further Codex-specific files can be added under `adapters/codex/` and symlinked or generated into `$HOME/.codex` as the adapter matures.

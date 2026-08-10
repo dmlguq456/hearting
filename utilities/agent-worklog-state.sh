@@ -4,8 +4,8 @@ set -eu
 cwd=${1:-$PWD}
 
 notes_root=${AGENT_NOTES_ROOT:-${WORKLOG_NOTES_ROOT:-}}
-board_app=${WORKLOG_BOARD_APP:-}
-board_wt=${WORKLOG_BOARD_WT:-}
+board_app=${CAIRN_APP:-${WORKLOG_BOARD_APP:-}}
+board_wt=${CAIRN_WT:-${WORKLOG_BOARD_WT:-}}
 
 count_files() {
   dir=$1

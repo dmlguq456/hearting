@@ -529,7 +529,7 @@ rm -rf "$STORE_5" "$PROJ_5" "$STORE_5B" "$PROJ_5B"
 # ══════════════════════════════════════════════════════════════════
 echo "== ⑥: live DB preservation =="
 
-LIVE_DB="${AGENT_HOME:-$HOME/agent_setting}/memory/memory.db"
+LIVE_DB="${AGENT_HOME:-$HOME/hearting}/memory/memory.db"
 if [ -f "$LIVE_DB" ]; then
     STORE_6="$(mktemp -d)"; PROJ_6="$(mktemp -d)"
     # Copy live DB READ-ONLY (cp source only, never write back)

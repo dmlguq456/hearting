@@ -54,26 +54,26 @@ so that residual runtime input is reported separately from profile masking.
 Target layout:
 
 ```text
-$HOME/agent_setting/        # neutral repo
-$HOME/agent_setting/claude_setting/ # versioned Claude projection
+$HOME/hearting/             # canonical neutral repo
+$HOME/hearting/claude_setting/ # versioned Claude projection
 $HOME/.claude/              # Claude Code runtime home
 ```
 
 Claude Code should see the same files it expects today, but they should be symlinked from the versioned Claude projection where practical:
 
 ```text
-$HOME/.claude/CLAUDE.md      -> $HOME/agent_setting/claude_setting/CLAUDE.md
-$HOME/.claude/README.md      -> $HOME/agent_setting/claude_setting/README.md
-$HOME/.claude/core           -> $HOME/agent_setting/claude_setting/core
-$HOME/.claude/skills         -> $HOME/agent_setting/claude_setting/skills
-$HOME/.claude/agents         -> $HOME/agent_setting/claude_setting/agents
-$HOME/.claude/agent-modes    -> $HOME/agent_setting/claude_setting/agent-modes
-$HOME/.claude/hooks          -> $HOME/agent_setting/claude_setting/hooks
-$HOME/.claude/utilities      -> $HOME/agent_setting/claude_setting/utilities
-$HOME/.claude/tools          -> $HOME/agent_setting/claude_setting/tools
-$HOME/.claude/commands       -> $HOME/agent_setting/claude_setting/commands
-$HOME/.claude/bin            -> $HOME/agent_setting/claude_setting/bin
-$HOME/.claude/statusline.sh  -> $HOME/agent_setting/claude_setting/statusline.sh
+$HOME/.claude/CLAUDE.md      -> $HOME/hearting/claude_setting/CLAUDE.md
+$HOME/.claude/README.md      -> $HOME/hearting/claude_setting/README.md
+$HOME/.claude/core           -> $HOME/hearting/claude_setting/core
+$HOME/.claude/skills         -> $HOME/hearting/claude_setting/skills
+$HOME/.claude/agents         -> $HOME/hearting/claude_setting/agents
+$HOME/.claude/agent-modes    -> $HOME/hearting/claude_setting/agent-modes
+$HOME/.claude/hooks          -> $HOME/hearting/claude_setting/hooks
+$HOME/.claude/utilities      -> $HOME/hearting/claude_setting/utilities
+$HOME/.claude/tools          -> $HOME/hearting/claude_setting/tools
+$HOME/.claude/commands       -> $HOME/hearting/claude_setting/commands
+$HOME/.claude/bin            -> $HOME/hearting/claude_setting/bin
+$HOME/.claude/statusline.sh  -> $HOME/hearting/claude_setting/statusline.sh
 ```
 
 Keep Claude-owned mutable state in `$HOME/.claude`: credentials, sessions, projects, history, shell snapshots, cache, daemon logs, and local DBs. Do not move those into the neutral repo.
@@ -114,4 +114,4 @@ Claude Code projects created before the neutral artifact root use `.claude_repor
 
 For shell code, use `utilities/artifact-root.sh`. In a linked task worktree it resolves the primary checkout, so a tracked local artifact snapshot is never a write target. Headless dispatch passes that exact path with Claude `--add-dir`.
 
-For harness-home paths, use `utilities/agent-home.sh` or the equivalent rule: prefer `AGENT_HOME`, then `CLAUDE_HOME`, then `$HOME/agent_setting` when present, then `$HOME/.claude` as legacy fallback.
+For harness-home paths, use `utilities/agent-home.sh` or the equivalent rule: prefer `AGENT_HOME`, then `CLAUDE_HOME`, then a managed release, `$HOME/hearting`, legacy `$HOME/agent_setting`, and finally `$HOME/.claude`.

@@ -192,7 +192,7 @@ class DispatchSummaryTest(unittest.TestCase):
         config = Path(self.tmp.name) / "config"
         os.environ["CLAUDE_CONFIG_DIR"] = str(config)
         # Encoded-cwd hit.
-        encoded = config / "projects" / "-home-user-agent-note-wt-hook-sweep"
+        encoded = config / "projects" / "-home-user-cairn-wt-hook-sweep"
         encoded.mkdir(parents=True)
         exact = encoded / f"{session_id}.jsonl"
         exact.write_text("{}\n", encoding="utf-8")

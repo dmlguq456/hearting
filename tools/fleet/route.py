@@ -236,16 +236,16 @@ def load(path, expect_hash=None, expect_id=None):
 # --- completion gate markers (prd.md:308, v10 minor #2 — read-only) ---
 def _completion_home():
     """Agent home holding `.dispatch/completion/`. Reproduces `collectors/dispatch._registry_home`
-    (AGENT_HOME → CLAUDE_HOME → $HOME/agent_setting if a dir → ~/.claude) rather than importing
+    (AGENT_HOME → CLAUDE_HOME → $HOME/hearting → legacy $HOME/agent_setting → ~/.claude) rather than importing
     it: route.py has no collectors dependency today (it is a peer of model.py, imported BY
     dispatch.py's consumers), and one four-line resolver is cheaper than inverting that edge.
     Kept in sync with `utilities/capability-route.py:230 completion_dir()`, the writer."""
     h = os.environ.get("AGENT_HOME") or os.environ.get("CLAUDE_HOME")
     if h:
         return h
-    cand = os.path.expanduser("~/agent_setting")
-    if os.path.isdir(cand):
-        return cand
+    for cand in (os.path.expanduser("~/hearting"), os.path.expanduser("~/agent_setting")):
+        if os.path.isdir(cand):
+            return cand
     return os.path.expanduser("~/.claude")
 
 

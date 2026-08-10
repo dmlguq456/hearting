@@ -126,7 +126,7 @@ title_root="${FLEET_TITLE_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/agent
 if [ -n "$S_SID" ] && [ -n "${S_TRANSCRIPT:-}" ] && [ "${FLEET_TITLE_REFRESH:-}" != "1" ] \
    && [ "${FLEET_TITLE_DISABLE:-}" != "1" ] && [ ! -e "$title_root/.refresh-disabled" ] \
    && [ -f "$S_TRANSCRIPT" ] && command -v python3 >/dev/null 2>&1; then
-  refresher="$AGENT_HOME/../agent_setting/tools/fleet/refresh_title.py"   # ↙ 실경로는 §6 note
+  refresher="$AGENT_HOME/tools/fleet/refresh_title.py"
   [ -f "$refresher" ] || refresher="$(dirname "$AGENT_HOME")/tools/fleet/refresh_title.py"
   title_dir="$title_root/claude"
   sc="$title_dir/$S_SID.json"

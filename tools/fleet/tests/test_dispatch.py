@@ -234,17 +234,23 @@ class RegistryHomeTest(unittest.TestCase):
         with mock.patch.dict(os.environ, {"CLAUDE_HOME": "/claude-home"}, clear=True):
             self.assertEqual(dispatch._registry_home(), "/claude-home")
 
-    def test_agent_setting_isdir_fallback(self):
-        # Regression guard: the OLD _jobs_path/_proj_home fallback skipped this
-        # $HOME/agent_setting step entirely (plan Current State §2) — this is the step
-        # that must now be honored when no env var is set and the dir exists.
+    def test_hearting_isdir_fallback(self):
+        # Canonical linked checkout wins when no explicit home is configured.
         with mock.patch.dict(os.environ, {}, clear=True), \
              mock.patch("fleet.collectors.dispatch.os.path.expanduser",
                          side_effect=lambda p: p.replace("~", "/home/u")), \
              mock.patch("fleet.collectors.dispatch.os.path.isdir", return_value=True):
+            self.assertEqual(dispatch._registry_home(), "/home/u/hearting")
+
+    def test_agent_setting_remains_legacy_fallback(self):
+        with mock.patch.dict(os.environ, {}, clear=True), \
+             mock.patch("fleet.collectors.dispatch.os.path.expanduser",
+                         side_effect=lambda p: p.replace("~", "/home/u")), \
+             mock.patch("fleet.collectors.dispatch.os.path.isdir",
+                         side_effect=lambda p: p.endswith("/agent_setting")):
             self.assertEqual(dispatch._registry_home(), "/home/u/agent_setting")
 
-    def test_dot_claude_fallback_when_agent_setting_absent(self):
+    def test_dot_claude_fallback_when_linked_checkouts_absent(self):
         with mock.patch.dict(os.environ, {}, clear=True), \
              mock.patch("fleet.collectors.dispatch.os.path.expanduser",
                          side_effect=lambda p: p.replace("~", "/home/u")), \

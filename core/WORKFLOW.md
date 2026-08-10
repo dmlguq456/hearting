@@ -243,7 +243,7 @@ by `utilities/capability-route.py compile`. For code, that route is
 `autopilot-code` at no less than `direct`. A Skill invocation, the prose card,
 an earlier session's record, or a stale record from another cwd is not route
 participation. Hotfixes do not bypass this floor. This invariant was hardened
-after the 2026-07-24 agent-note incident in which a route card was shown but no
+after the 2026-07-24 Cairn incident in which a route card was shown but no
 route was entered and the feature was edited, committed, and deployed through
 silent no-route work.
 
