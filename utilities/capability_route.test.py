@@ -606,6 +606,17 @@ class TestRoute(unittest.TestCase):
   legacy["route_hash"]=R.route_hash(legacy)
   legacy["route_id"]="rt-"+legacy["route_hash"].split(":",1)[1][:16]
   R.verify_route(legacy,R.ROOT)
+ def test_stale_route_close_can_record_outcome_after_output_scope_rule_changes(self):
+  route=self.compile_v3(self.dispatch(self.nested()))
+  replica=next(node for node in route["nodes"] if node["id"]=="frame-alternative")
+  replica["outputs"]=["shards/frame/direction-brief.alternative.md"]
+  route["registry_digest"]="sha256:"+"0"*64
+  route["route_hash"]=R.route_hash(route)
+  route["route_id"]="rt-"+route["route_hash"].split(":",1)[1][:16]
+  with self.assertRaisesRegex(ValueError,"stale registry digest"):
+   R.verify_route(route,R.ROOT)
+  verified=R.verify_route(route,R.ROOT,allow_stale_registry=True)
+  self.assertIs(verified["_registry_current"],False)
  def test_close_writes_an_idempotent_outcome_sidecar(self):
   route=R.compile_route(**self.args())
   with tempfile.TemporaryDirectory() as tmp:
