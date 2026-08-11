@@ -9,7 +9,7 @@ durable source of truth (that is the published manifest + its events). See
 """
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, Iterable, Mapping, Tuple
+from typing import Any, Dict, Iterable, Mapping, Optional, Tuple
 
 from artifact_manifest import (
     ValidationReport,
@@ -61,6 +61,37 @@ def empty(artifact_root_id: str) -> IndexDocument:
     )
 
 
+_ROW_SHAPES = {
+    "stable_ids": frozenset({"kind", "cycle_id", "manifest_id"}),
+    "event_ids": frozenset({"stream_id", "stream_sequence", "cycle_id"}),
+    "streams": frozenset({"last_sequence", "cycle_id", "last_event_id"}),
+    "manifests": frozenset(
+        {"manifest_id", "manifest_revision_id", "cycle_id", "manifest_digest", "idempotency_key"}
+    ),
+    "cycles": frozenset({"campaign_id", "cycle_path", "manifest_digest"}),
+}
+_ROUTE_ROW_SHAPE = frozenset({"cycle_id", "route_hash"})
+
+
+def _check_row_shape(section: str, key: Any, row: Any, expected: frozenset) -> None:
+    """The index is a closed document at every depth, not only its top level.
+
+    A forged or hand-edited nested row must fail parse loudly instead of being
+    trusted by `idempotent_match()`/`check()` downstream.
+    """
+    if not isinstance(key, str) or not key:
+        raise ValueError("index {0} key must be a non-empty string".format(section))
+    if not isinstance(row, dict):
+        raise ValueError("index {0}[{1!r}] row must be an object".format(section, key))
+    got = set(row.keys())
+    if got != set(expected):
+        raise ValueError(
+            "index {0}[{1!r}] row keys {2} do not match the closed shape {3}".format(
+                section, key, sorted(got), sorted(expected)
+            )
+        )
+
+
 def parse(payload: Mapping[str, Any]) -> IndexDocument:
     if not isinstance(payload, dict):
         raise ValueError("index payload must be an object")
@@ -70,15 +101,35 @@ def parse(payload: Mapping[str, Any]) -> IndexDocument:
     missing = _INDEX_KEYS - set(payload.keys())
     if missing:
         raise ValueError("missing index key(s): {0}".format(sorted(missing)))
+    if not isinstance(payload["schema_version"], int) or isinstance(payload["schema_version"], bool):
+        raise ValueError("index schema_version must be an integer")
+    if not isinstance(payload["artifact_root_id"], str) or not payload["artifact_root_id"]:
+        raise ValueError("index artifact_root_id must be a non-empty string")
+    for section, expected in _ROW_SHAPES.items():
+        rows = payload[section]
+        if not isinstance(rows, dict):
+            raise ValueError("index {0} must be an object".format(section))
+        for key, row in rows.items():
+            _check_row_shape(section, key, row, expected)
+    routes = payload["routes"]
+    if not isinstance(routes, dict):
+        raise ValueError("index routes must be an object")
+    for root_id, bucket in routes.items():
+        if not isinstance(root_id, str) or not root_id:
+            raise ValueError("index routes key must be a non-empty string")
+        if not isinstance(bucket, dict):
+            raise ValueError("index routes[{0!r}] must be an object".format(root_id))
+        for route_id, row in bucket.items():
+            _check_row_shape("routes[{0!r}]".format(root_id), route_id, row, _ROUTE_ROW_SHAPE)
     return IndexDocument(
         schema_version=payload["schema_version"],
         artifact_root_id=payload["artifact_root_id"],
-        stable_ids=dict(payload["stable_ids"]),
-        routes={k: dict(v) for k, v in payload["routes"].items()},
-        event_ids=dict(payload["event_ids"]),
-        streams=dict(payload["streams"]),
-        manifests=dict(payload["manifests"]),
-        cycles=dict(payload["cycles"]),
+        stable_ids={k: dict(v) for k, v in payload["stable_ids"].items()},
+        routes={k: {rk: dict(rv) for rk, rv in v.items()} for k, v in payload["routes"].items()},
+        event_ids={k: dict(v) for k, v in payload["event_ids"].items()},
+        streams={k: dict(v) for k, v in payload["streams"].items()},
+        manifests={k: dict(v) for k, v in payload["manifests"].items()},
+        cycles={k: dict(v) for k, v in payload["cycles"].items()},
     )
 
 
@@ -112,12 +163,22 @@ def idempotent_match(
     return existing.get("manifest_digest") == manifest_digest
 
 
+# Kinds that legitimately recur across cycle manifests: one campaign owns many
+# cycles (D-1), and canonical shared references with their immutable revisions
+# are recorded by every cycle that used them (D-3). Same id + same kind is a
+# re-reference, never a collision; every other kind is single-owner.
+_REUSABLE_SAME_KIND = frozenset(
+    {"campaign", "shared_reference", "shared_reference_revision"}
+)
+
+
 def check(
     index: IndexDocument,
     document: Mapping[str, Any],
     *,
     idempotency_key: str,
     manifest_digest: str,
+    repository_id: Optional[str] = None,
 ) -> ValidationReport:
     violations = []
 
@@ -127,6 +188,15 @@ def check(
                 "index-root-identity-mismatch",
                 "$.artifact_root_id",
                 "manifest artifact_root_id does not match frozen root identity",
+            )
+        )
+
+    if repository_id is not None and document.get("repository_id") != repository_id:
+        violations.append(
+            Violation(
+                "index-repository-identity-mismatch",
+                "$.repository_id",
+                "manifest repository_id does not match frozen root identity",
             )
         )
 
@@ -145,12 +215,35 @@ def check(
             )
         )
 
+    parent_cycle_id = cycle.get("parent_cycle_id")
+    if (
+        parent_cycle_id is not None
+        and not is_idempotent_retry
+        and parent_cycle_id not in index.cycles
+    ):
+        violations.append(
+            Violation(
+                "index-orphan-parent-cycle",
+                "$.cycle.parent_cycle_id",
+                "parent cycle is not an admitted cycle in this root",
+            )
+        )
+
     incoming_ids = declared_ids(document)
     for stable_id, kind in incoming_ids.items():
-        if kind in ("manifest", "manifest_revision"):
-            continue
         existing = index.stable_ids.get(stable_id)
-        if existing is not None and not is_idempotent_retry:
+        if existing is None or is_idempotent_retry:
+            continue
+        existing_kind = existing.get("kind") if isinstance(existing, dict) else None
+        if existing_kind != kind:
+            violations.append(
+                Violation(
+                    "index-stable-id-kind-conflict",
+                    "$.<stable-ids>[{0!r}]".format(stable_id),
+                    "stable id already present with kind {0!r}".format(existing_kind),
+                )
+            )
+        elif kind not in _REUSABLE_SAME_KIND:
             violations.append(
                 Violation(
                     "index-stable-id-duplicate",
@@ -246,8 +339,10 @@ def apply(
     manifest_id = document.get("manifest_id")
 
     for stable_id, kind in declared_ids(document).items():
-        if kind in ("manifest", "manifest_revision"):
-            continue
+        # manifest/manifest_revision ids are tracked here too: a manifest
+        # revision id is immutable and single-use (D-4/D-6), so its reuse by a
+        # different cycle or key must be refusable from the same uniqueness
+        # surface as every other stable id.
         stable_ids[stable_id] = {
             "kind": kind,
             "cycle_id": cycle_id,
@@ -313,12 +408,49 @@ def apply(
 def build(
     admitted: Iterable[Tuple[Mapping[str, Any], str, str, str]]
 ) -> IndexDocument:
+    """Rebuild from published documents, refusing cross-manifest conflicts.
+
+    Rebuild input order is directory order, not admission order, so per-item
+    stream-continuity cursors cannot be enforced here; instead the union of
+    each stream's sequences is verified for duplicates and gaps after the fold.
+    Every other uniqueness rule is the same `check()` used incrementally —
+    a conflict is a refusal, never a silent overwrite (D-7).
+    """
     items = list(admitted)
     if not items:
         raise ValueError("build() requires at least one admitted document to seed artifact_root_id")
     root_id = items[0][0].get("artifact_root_id")
     index = empty(root_id)
+    stream_sequences: Dict[str, Dict[int, int]] = {}
     for document, cycle_path, manifest_digest, idempotency_key in items:
+        report = check(
+            index,
+            document,
+            idempotency_key=idempotency_key,
+            manifest_digest=manifest_digest,
+        )
+        conflict_codes = sorted(
+            {
+                v.code
+                for v in report.violations
+                if v.code != "index-stream-sequence-discontinuous"
+                and v.code != "index-orphan-parent-cycle"
+            }
+        )
+        if conflict_codes:
+            raise ValueError(
+                "build-conflict for idempotency key {0!r}: {1}".format(
+                    idempotency_key, ", ".join(conflict_codes)
+                )
+            )
+        for stream_id, (min_seq, max_seq) in declared_streams(document).items():
+            bucket = stream_sequences.setdefault(stream_id, {})
+            for row in document.get("events", []) or []:
+                if not isinstance(row, dict) or row.get("stream_id") != stream_id:
+                    continue
+                seq = row.get("stream_sequence")
+                if isinstance(seq, int) and not isinstance(seq, bool):
+                    bucket[seq] = bucket.get(seq, 0) + 1
         index = apply(
             index,
             document,
@@ -326,4 +458,30 @@ def build(
             manifest_digest=manifest_digest,
             idempotency_key=idempotency_key,
         )
+    for stream_id, bucket in sorted(stream_sequences.items()):
+        duplicates = sorted(seq for seq, count in bucket.items() if count > 1)
+        if duplicates:
+            raise ValueError(
+                "build-conflict for stream {0!r}: duplicate sequence(s) {1}".format(
+                    stream_id, duplicates
+                )
+            )
+        expected = set(range(1, (max(bucket) if bucket else 0) + 1))
+        missing = sorted(expected - set(bucket))
+        if missing:
+            raise ValueError(
+                "build-conflict for stream {0!r}: missing sequence(s) {1}".format(
+                    stream_id, missing
+                )
+            )
+    # Parent linkage is order-independent: verify against the fully folded set.
+    for document, _cycle_path, _digest, idempotency_key in items:
+        cycle = document.get("cycle") if isinstance(document.get("cycle"), dict) else {}
+        parent_cycle_id = cycle.get("parent_cycle_id")
+        if parent_cycle_id is not None and parent_cycle_id not in index.cycles:
+            raise ValueError(
+                "build-conflict for idempotency key {0!r}: orphan parent cycle {1!r}".format(
+                    idempotency_key, parent_cycle_id
+                )
+            )
     return index

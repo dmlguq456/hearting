@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import os
+import shutil
 import sys
+import tempfile
+import time
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -47,9 +50,24 @@ class TestAllocator(unittest.TestCase):
         self.assertEqual(value, "evt_" + ("abcd" * 8))
 
     def test_same_entropy_yields_same_id_regardless_of_cwd_and_clock(self):
+        # The name is the contract: actually vary cwd and the visible clock
+        # between the two allocations so a path- or time-derived id would fail.
         alloc1 = m.IdAllocator(entropy=m.FixedEntropy(b"\x01\x02\x03"))
-        alloc2 = m.IdAllocator(entropy=m.FixedEntropy(b"\x01\x02\x03"))
-        self.assertEqual(alloc1.allocate("artifact"), alloc2.allocate("artifact"))
+        first = alloc1.allocate("artifact")
+
+        original_cwd = os.getcwd()
+        original_time = time.time
+        scratch = tempfile.mkdtemp(prefix="identity-cwd-")
+        try:
+            os.chdir(scratch)
+            time.time = lambda: original_time() + 86400.0
+            alloc2 = m.IdAllocator(entropy=m.FixedEntropy(b"\x01\x02\x03"))
+            second = alloc2.allocate("artifact")
+        finally:
+            time.time = original_time
+            os.chdir(original_cwd)
+            shutil.rmtree(scratch, ignore_errors=True)
+        self.assertEqual(first, second)
 
     def test_migration_namespace_seat_raises_not_implemented(self):
         with self.assertRaises(NotImplementedError):

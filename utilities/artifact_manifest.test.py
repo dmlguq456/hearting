@@ -605,6 +605,29 @@ class TestSupersedeRevoke(unittest.TestCase):
         doc["events"][1]["revokes_event_id"] = doc["events"][0]["event_id"]
         self.assertIn("event-supersession-unauthorized", _codes(m.validate_events(doc)))
 
+    def test_rejects_producer_actor_revoking_user_event(self):
+        # F4/D-11: user-correction precedence binds every non-user actor, not
+        # only the curator lane.
+        doc = _valid_document()
+        doc["events"][0]["actor"] = {"kind": "user", "id": "u"}
+        doc["events"][1]["actor"] = {"kind": "producer", "id": "p"}
+        doc["events"][1]["revokes_event_id"] = doc["events"][0]["event_id"]
+        self.assertIn("event-supersession-unauthorized", _codes(m.validate_events(doc)))
+
+    def test_rejects_system_actor_superseding_user_event(self):
+        doc = _valid_document()
+        doc["events"][0]["actor"] = {"kind": "user", "id": "u"}
+        doc["events"][1]["actor"] = {"kind": "system", "id": "s"}
+        doc["events"][1]["supersedes_event_id"] = doc["events"][0]["event_id"]
+        self.assertIn("event-supersession-unauthorized", _codes(m.validate_events(doc)))
+
+    def test_allows_user_actor_superseding_user_event(self):
+        doc = _valid_document()
+        doc["events"][0]["actor"] = {"kind": "user", "id": "u"}
+        doc["events"][1]["actor"] = {"kind": "user", "id": "u"}
+        doc["events"][1]["supersedes_event_id"] = doc["events"][0]["event_id"]
+        self.assertNotIn("event-supersession-unauthorized", _codes(m.validate_events(doc)))
+
 
 class TestDeterminism(unittest.TestCase):
     def test_canonical_bytes_are_key_order_independent(self):
@@ -638,6 +661,40 @@ class TestDeterminism(unittest.TestCase):
         doc["events"][1]["recorded_at"] = "2026-08-11T00:00:00Z"
         folded = m.fold_events(doc)
         self.assertEqual([e["event_id"] for e in folded], [doc["events"][0]["event_id"], doc["events"][1]["event_id"]])
+
+    def test_fold_ignores_unauthorized_supersession_of_user_event(self):
+        # F4/D-11: even called standalone, fold never lets a producer/system
+        # link remove a user event; only a user event can.
+        doc = _valid_document()
+        doc["events"][0]["actor"] = {"kind": "user", "id": "u"}
+        doc["events"][1]["actor"] = {"kind": "producer", "id": "p"}
+        doc["events"][1]["revokes_event_id"] = doc["events"][0]["event_id"]
+        folded = m.fold_events(doc)
+        self.assertIn(doc["events"][0]["event_id"], [e["event_id"] for e in folded])
+
+    def test_fold_applies_authorized_user_supersession(self):
+        doc = _valid_document()
+        doc["events"][0]["actor"] = {"kind": "user", "id": "u"}
+        doc["events"][1]["actor"] = {"kind": "user", "id": "u"}
+        doc["events"][1]["supersedes_event_id"] = doc["events"][0]["event_id"]
+        folded = m.fold_events(doc)
+        self.assertNotIn(doc["events"][0]["event_id"], [e["event_id"] for e in folded])
+
+    def test_enum_unhashable_value_rejected_not_crash(self):
+        # F1a: an unhashable enum candidate must be a wrong-value violation,
+        # never a TypeError escaping the validator.
+        doc = _valid_document()
+        doc["events"][0]["event_type"] = []
+        report = m.validate(doc)
+        self.assertFalse(report.ok)
+        self.assertIn("wrong-value", {v.code for v in report.violations})
+
+    def test_enum_unhashable_actor_kind_rejected_not_crash(self):
+        doc = _valid_document()
+        doc["events"][0]["actor"] = {"kind": {}, "id": "x"}
+        report = m.validate(doc)
+        self.assertFalse(report.ok)
+        self.assertIn("wrong-value", {v.code for v in report.violations})
 
     def test_fold_is_stable_under_input_shuffle(self):
         doc = _valid_document()

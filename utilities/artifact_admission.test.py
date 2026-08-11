@@ -537,5 +537,98 @@ class TestNonScopeInvariants(AdmissionContractBase):
         self.assertEqual(found, [], "admission created symlinks: {0}".format(found))
 
 
+class TestReviewFindingRegressions(AdmissionContractBase):
+    """Named regressions for the 2026-08-11 independent-review findings."""
+
+    def test_noop_idempotent_requires_existing_cycle_folder(self):
+        # F1b: a forged/drifted index row must not fake an admission.
+        doc, outcome = self._admit_valid(key="k-noop-folder")
+        cycle_dir = self.root / outcome.cycle_path
+        shutil.rmtree(str(self.root / "campaigns"))
+        src = self._stage_source(b"hello")
+        retry = self._admit(doc, src, "k-noop-folder")
+        self.assertEqual(retry.status, "rejected", retry.to_payload())
+        self.assertIn(
+            "index-idempotent-target-missing", [v.code for v in retry.violations]
+        )
+
+    def test_rejects_foreign_repository_id(self):
+        # F3a: repository identity is part of admission tenancy (D-4).
+        identity = self._identity()
+        doc, content = _make_valid_document(self.alloc, identity)
+        doc["repository_id"] = "repo_" + "f" * 32
+        src = self._stage_source(content)
+        self._assert_rejected_and_unchanged(
+            doc, src, "k-foreign-repo", expect_code="index-repository-identity-mismatch"
+        )
+
+    def test_second_cycle_in_same_campaign_admits(self):
+        # F2b: one campaign owns many cycles (D-1); the second admission of the
+        # same campaign must not be a duplicate-stable-id rejection.
+        identity = self._identity()
+        doc1, content1 = _make_valid_document(self.alloc, identity)
+        src1 = self._stage_source(content1)
+        out1 = self._admit(doc1, src1, "k-camp-c1")
+        self.assertEqual(out1.status, "admitted", out1.to_payload())
+        doc2, content2 = _make_valid_document(
+            self.alloc, identity, camp_id=doc1["campaign"]["campaign_id"]
+        )
+        doc2["cycle"]["parent_cycle_id"] = doc1["cycle"]["cycle_id"]
+        src2 = self._stage_source(content2)
+        out2 = self._admit(doc2, src2, "k-camp-c2")
+        self.assertEqual(out2.status, "admitted", out2.to_payload())
+
+    def test_rejects_orphan_parent_cycle(self):
+        # F2a: A-1 orphan-parent refusal at the admission surface.
+        identity = self._identity()
+        doc, content = _make_valid_document(self.alloc, identity)
+        doc["cycle"]["parent_cycle_id"] = self.alloc.allocate("cycle")
+        src = self._stage_source(content)
+        self._assert_rejected_and_unchanged(
+            doc, src, "k-orphan-parent", expect_code="index-orphan-parent-cycle"
+        )
+
+    def test_recover_waits_for_admission_lock(self):
+        # F6: public recover() takes the same mutex as admit() so it cannot
+        # quarantine a live admission's staging.
+        self._admit_valid(key="k-recover-lock")
+        fd = adm._acquire_lock(self.root, timeout=5.0)
+        try:
+            with self.assertRaises(adm.AdmissionBusy):
+                adm.recover(self.root, lock_timeout=0.3)
+        finally:
+            adm._release_lock(self.root, fd)
+
+    def test_rollforward_verifies_declared_payload(self):
+        # F7ii: recovery roll-forward must verify declared file digests, not
+        # only manifest.json.
+        doc, outcome = self._admit_valid(key="k-rollforward")
+        cycle_dir = self.root / outcome.cycle_path
+        (cycle_dir / "plan.md").write_bytes(b"corrupted-payload")
+        rel_target = os.path.relpath(str(cycle_dir), str(self.root))
+        adm._write_journal(
+            self.root,
+            "k-rollforward",
+            state="published",
+            publish_target=rel_target,
+            staging_path=".admitting-gone",
+            manifest_digest=outcome.manifest_digest,
+            cycle_relative="",
+        )
+        with self.assertRaises(adm.AdmissionRecoveryRequired):
+            adm.recover(self.root)
+
+    def test_rebuild_records_manifest_id_fallback(self):
+        # F8i: the manifest-id fallback is a recorded machine-readable fact.
+        doc, outcome = self._admit_valid(key="custom-key-original")
+        os.unlink(str(adm._index_path(self.root)))
+        adm.rebuild_index(self.root)
+        report = adm._read_json(adm._admission_dir(self.root) / "rebuild-report.json")
+        self.assertIsNotNone(report)
+        self.assertEqual(
+            report["fallback_idempotency_keys"], [doc["manifest_id"]]
+        )
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

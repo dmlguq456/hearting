@@ -232,7 +232,13 @@ class TestEnvironmentFacts(AtomicityTestBase):
             "rename_onto_empty_dir_replaced": rename_replaced,
         }
         sys.stderr.write("ENV-FACTS: {0}\n".format(json.dumps(record)))
-        self.assertIn("fs_type", record)
+        # The publish path must not depend on rename refusing an empty target
+        # directory: on this class of filesystem the observed behaviour can be
+        # a silent replace (F-1). The EEXIST-class primitives asserted above
+        # are the actual exclusivity substrate, and the admission-level defence
+        # is test_admit_does_not_replace_existing_empty_canonical_directory.
+        self.assertIsNotNone(record["rename_onto_empty_dir_replaced"])
+        self.assertIsInstance(record["rename_onto_empty_dir_replaced"], bool)
 
 
 class TestStagingDevice(AtomicityTestBase):
@@ -313,7 +319,10 @@ class TestConcurrentAdmission(AtomicityTestBase):
         r2 = json.loads(out2.decode("utf-8"))
 
         statuses = sorted([r1["status"], r2["status"]])
-        self.assertIn(statuses, (["admitted", "admitted"], ["admitted", "noop-idempotent"]))
+        # Exactly one process may admit; the mutex makes the loser observe the
+        # winner's manifest and report the idempotent no-op. A double
+        # "admitted" is the broken-mutex signature and must fail loudly.
+        self.assertEqual(statuses, ["admitted", "noop-idempotent"])
 
         cycle_dir = self.root / "campaigns" / doc["campaign"]["campaign_id"] / "cycles" / doc["cycle"]["cycle_id"]
         self.assertTrue(cycle_dir.is_dir())
@@ -536,12 +545,12 @@ class TestCrashRecovery(AtomicityTestBase):
 
 class TestLockContract(AtomicityTestBase):
     def test_live_holder_lock_raises_admission_busy(self):
-        adm._acquire_lock(self.root, timeout=10.0)
+        fd = adm._acquire_lock(self.root, timeout=10.0)
         try:
             with self.assertRaises(adm.AdmissionBusy):
                 adm._acquire_lock(self.root, timeout=0.3)
         finally:
-            adm._release_lock(self.root)
+            adm._release_lock(self.root, fd)
 
     def test_dead_holder_lock_is_reclaimed(self):
         lock_dir = adm._lock_dir(self.root)
@@ -558,8 +567,44 @@ class TestLockContract(AtomicityTestBase):
             "boot_id": adm._boot_id(),
         }
         adm._create_exclusive_json(lock_dir / "holder.json", holder)
-        adm._acquire_lock(self.root, timeout=5.0)
-        adm._release_lock(self.root)
+        fd = adm._acquire_lock(self.root, timeout=5.0)
+        try:
+            # one-way migration: the dead legacy mkdir-lock was cleared under
+            # the flock's exclusivity.
+            self.assertFalse(lock_dir.exists())
+        finally:
+            adm._release_lock(self.root, fd)
+
+    def test_flock_released_on_holder_death(self):
+        """F5 regression: a killed holder releases the mutex automatically.
+
+        With the OS advisory lock there is no dead-holder record to reclaim,
+        so the two-waiter reclamation race of the mkdir mutex cannot exist.
+        """
+        code = (
+            "import os, sys, time\n"
+            "sys.path.insert(0, {0!r})\n"
+            "import artifact_admission as adm\n"
+            "fd = adm._acquire_lock({1!r}, timeout=5.0)\n"
+            "print('LOCKED', flush=True)\n"
+            "time.sleep(60)\n"
+        ).format(str(Path(__file__).resolve().parent), str(self.root))
+        child = subprocess.Popen(
+            [sys.executable, "-c", code], stdout=subprocess.PIPE
+        )
+        try:
+            line = child.stdout.readline().decode("utf-8").strip()
+            self.assertEqual(line, "LOCKED")
+            with self.assertRaises(adm.AdmissionBusy):
+                adm._acquire_lock(self.root, timeout=0.3)
+            child.kill()
+            child.wait(timeout=10)
+            fd = adm._acquire_lock(self.root, timeout=5.0)
+            adm._release_lock(self.root, fd)
+        finally:
+            if child.poll() is None:
+                child.kill()
+                child.wait(timeout=10)
 
     def test_pid_reuse_does_not_steal_live_lock(self):
         holder = {

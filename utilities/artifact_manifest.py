@@ -309,7 +309,14 @@ def _v_literal(expected: Any):
 
 def _v_enum(allowed: frozenset):
     def validator(value: Any, path: str, violations: List[Violation]) -> None:
-        if value not in allowed:
+        # An unhashable candidate (list/dict) can never be a member; membership
+        # against a frozenset would raise TypeError instead of rejecting, so the
+        # closed schema must classify it as a wrong-value violation itself.
+        try:
+            member = value in allowed
+        except TypeError:
+            member = False
+        if not member:
             violations.append(
                 Violation("wrong-value", path, "expected one of {0}".format(sorted(allowed)))
             )
@@ -999,7 +1006,7 @@ def validate_lineage(document: Mapping[str, Any]) -> ValidationReport:
     event_type_by_id = {}
     for row in events:
         et = row.get("event_type")
-        if et is not None and et not in _EVENT_TYPES:
+        if et is not None and (not isinstance(et, str) or et not in _EVENT_TYPES):
             violations.append(
                 Violation(
                     "unknown-event-type",
@@ -1250,18 +1257,12 @@ def validate_events(document: Mapping[str, Any]) -> ValidationReport:
             else:
                 bucket[target] = eid
             target_row = events_by_id.get(target)
-            if (
-                isinstance(target_row, dict)
-                and isinstance(target_row.get("actor"), dict)
-                and target_row["actor"].get("kind") == "user"
-                and isinstance(row.get("actor"), dict)
-                and row["actor"].get("kind") == "curator-proposal-accepted"
-            ):
+            if not _authorized_supersession(row, target_row):
                 violations.append(
                     Violation(
                         "event-supersession-unauthorized",
                         "$.events[?event_id={0!r}]".format(eid),
-                        "curator-proposal-accepted actor cannot {0} a user event".format(kind),
+                        "only a later user event may {0} a user event".format(kind),
                     )
                 )
 
@@ -1273,14 +1274,35 @@ def validate_events(document: Mapping[str, Any]) -> ValidationReport:
 # ---------------------------------------------------------------------------
 
 
+def _authorized_supersession(row: Any, target_row: Any) -> bool:
+    """D-11 user-correction precedence.
+
+    A user event may only be superseded or revoked by a later authorized user
+    event. Every other actor kind (producer, system, curator-proposal-accepted)
+    lacks that authority. Non-user targets keep the existing permissive rule.
+    """
+    if not isinstance(target_row, dict):
+        return True  # dangling target is reported separately
+    target_actor = target_row.get("actor")
+    if not isinstance(target_actor, dict) or target_actor.get("kind") != "user":
+        return True
+    actor = row.get("actor") if isinstance(row, dict) else None
+    return isinstance(actor, dict) and actor.get("kind") == "user"
+
+
 def fold_events(document: Mapping[str, Any]) -> Tuple[Dict[str, Any], ...]:
     events = [r for r in document.get("events", []) or [] if isinstance(r, dict)]
 
+    events_by_id = {row.get("event_id"): row for row in events}
     superseded_or_revoked = set()
     for row in events:
         for key in ("supersedes_event_id", "revokes_event_id"):
             target = row.get(key)
-            if target is not None:
+            if target is None:
+                continue
+            # Fold defends user-correction precedence even standalone: an
+            # unauthorized supersession link never removes the user event.
+            if _authorized_supersession(row, events_by_id.get(target)):
                 superseded_or_revoked.add(target)
 
     live = [row for row in events if row.get("event_id") not in superseded_or_revoked]
