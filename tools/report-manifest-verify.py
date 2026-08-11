@@ -216,19 +216,39 @@ def _markdown_links(text):
  return links
 
 
+def _markdown_raw_html(text):
+ lines=[]; fence=None
+ for line in text.splitlines():
+  stripped=line.lstrip()
+  marker=stripped[:3] if stripped.startswith(("```","~~~")) else None
+  if fence:
+   if marker==fence: fence=None
+   continue
+  if marker:
+   fence=marker; continue
+  if line.startswith(("    ","\t")): continue
+  lines.append(line)
+ return re.sub(r"`+[^`\n]*`+","","\n".join(lines))
+
+
+def _verify_html_markup(root,path,text,inventory):
+ parser=_HTMLLinks(); parser.feed(text); parser.close()
+ rel=path.relative_to(root).as_posix()
+ if parser.active: raise ValueError("active HTML content forbidden: "+rel)
+ for attr,value in parser.links: _link_target(root,path,value,attr,inventory)
+ for style in parser.styles:
+  for value in _css_links(style): _link_target(root,path,value,"asset",inventory)
+ for block in parser.style_blocks:
+  for value in _css_links(block): _link_target(root,path,value,"asset",inventory)
+
+
 def _verify_links(root,files,inventory):
  for rel,path in files.items():
   suffix=path.suffix.lower()
   if suffix not in {".html",".htm",".md",".markdown",".css",".svg",".xml"}: continue
   text=path.read_text(encoding="utf-8")
   if suffix in {".html",".htm"}:
-   parser=_HTMLLinks(); parser.feed(text); parser.close()
-   if parser.active: raise ValueError("active HTML content forbidden: "+rel.as_posix())
-   for attr,value in parser.links: _link_target(root,path,value,attr,inventory)
-   for style in parser.styles:
-    for value in _css_links(style): _link_target(root,path,value,"asset",inventory)
-   for block in parser.style_blocks:
-    for value in _css_links(block): _link_target(root,path,value,"asset",inventory)
+   _verify_html_markup(root,path,text,inventory)
   elif suffix in {".svg",".xml"}:
    parser=_HTMLLinks(); parser.feed(text); parser.close()
    if parser.active: raise ValueError("active HTML content forbidden: "+rel.as_posix())
@@ -237,6 +257,7 @@ def _verify_links(root,files,inventory):
    for value in _css_links(text): _link_target(root,path,value,"asset",inventory)
   else:
    for attr,value in _markdown_links(text): _link_target(root,path,value,attr,inventory)
+   _verify_html_markup(root,path,_markdown_raw_html(text),inventory)
 
 
 def _decode_media(path,kind):

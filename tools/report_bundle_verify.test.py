@@ -161,6 +161,24 @@ class BundleV2Tests(unittest.TestCase):
             data["files"][1]["sha256"] = digest(root / "index.html"); path.write_text(json.dumps(data))
             with self.assertRaisesRegex(ValueError, "active HTML content forbidden"): B.VERIFY.verify(path)
 
+    def test_markdown_raw_html_resources_and_active_content_fail_closed(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td); path, data = self.prose(root)
+            cases = (
+                ('<img src="https://evil.invalid/x.png">', "non-self-contained resource"),
+                ("<script>alert(1)</script>", "active HTML content forbidden"),
+                ('<img src="index.html" onerror="alert(1)">', "active HTML content forbidden"),
+                ('<a href="javascript:alert(1)">x</a>', "active HTML content forbidden"),
+                ('<meta http-equiv="refresh" content="0; url=index.html">', "active HTML content forbidden"),
+            )
+            for markdown, error in cases:
+                (root / "REPORT.md").write_text(markdown, encoding="utf-8")
+                data["files"][0]["sha256"] = digest(root / "REPORT.md"); path.write_text(json.dumps(data))
+                with self.subTest(markdown=markdown), self.assertRaisesRegex(ValueError, error): B.VERIFY.verify(path)
+            (root / "REPORT.md").write_text("```html\n<script>example</script>\n```\n[report](index.html)\n", encoding="utf-8")
+            data["files"][0]["sha256"] = digest(root / "REPORT.md"); path.write_text(json.dumps(data))
+            self.assertEqual(B.VERIFY.verify(path)["bundle_classification"], "bundle/v2")
+
     @unittest.skipUnless(shutil.which("ffmpeg"), "ffmpeg actual-decode fixture")
     def test_audio_format_parity_wav_mp3_ogg(self):
         for suffix in (".wav", ".mp3", ".ogg"):
@@ -207,6 +225,7 @@ class BundleV2Tests(unittest.TestCase):
         self.assertEqual(B._integrity_reason(ValueError("playback decode failed: x")), "playback")
         self.assertEqual(B._integrity_reason(ValueError("media decode failed: ffmpeg unavailable")), "decode")
         self.assertEqual(B._integrity_reason(ValueError("bundle storage transient failure")), "transient")
+        self.assertEqual(B._integrity_reason(OSError(5, "Input/output error")), "transient")
 
     def test_publish_is_atomic_idempotent_and_collision_safe(self):
         with tempfile.TemporaryDirectory() as td:
@@ -234,6 +253,11 @@ class BundleV2Tests(unittest.TestCase):
             second = B.run_integrity(store, state, heartbeat, checked_at="2026-08-11T00:01:00+00:00")
             self.assertEqual(second["bundle_state_writes"], 0); self.assertEqual(state.read_bytes(), state_bytes)
             self.assertNotEqual(heartbeat.read_bytes(), first_heartbeat)
+            with mock.patch.object(B.VERIFY, "verify", side_effect=OSError(5, "Input/output error")):
+                transient = B.run_integrity(store, state, heartbeat, checked_at="2026-08-11T00:01:30+00:00")
+            self.assertEqual(transient["bundles"]["proj/exp/v1"], {"status": "checking", "reason": "transient"})
+            self.assertEqual(transient["effective_bundles"]["proj/exp/v1"], {"status": "healthy", "reason": None})
+            self.assertEqual(transient["bundle_state_writes"], 0); self.assertEqual(state.read_bytes(), state_bytes)
             report = store / "proj/exp/v1/report/REPORT.md"; report.write_text("corrupt", encoding="utf-8")
             broken = B.run_integrity(store, state, heartbeat, checked_at="2026-08-11T00:02:00+00:00")
             self.assertEqual(broken["bundle_state_writes"], 1)
@@ -327,11 +351,18 @@ class BundleV2Tests(unittest.TestCase):
             for forbidden in ("source_root", "project_root", "source_path", "source_sha256", "body", "revision"):
                 self.assertNotIn(forbidden, encoded)
             data = json.loads(inventory.read_text()); data["bundles"][0]["documents"].reverse(); inventory.write_text(json.dumps(data))
-            with self.assertRaisesRegex(B.BundleError, "deterministic manifest path order"): B.link_existing_plan(inventory)
+            with self.assertRaisesRegex(B.BundleError, "complete manifest document set"): B.link_existing_plan(inventory)
             data["bundles"][0]["documents"].reverse(); data["bundles"][0]["documents"][1]["parent_document_id"] = "missing"
             inventory.write_text(json.dumps(data))
             with self.assertRaisesRegex(B.BundleError, "hierarchy"): B.link_existing_plan(inventory)
             data["bundles"][0]["documents"][1]["parent_document_id"] = "report"; inventory.write_text(json.dumps(data))
+            data["bundles"][0]["documents"][1]["source_path"] = "REPORT.md"; inventory.write_text(json.dumps(data))
+            with self.assertRaisesRegex(B.BundleError, "complete manifest document set"): B.link_existing_plan(inventory)
+            data["bundles"][0]["documents"][1]["source_path"] = "child.md"; inventory.write_text(json.dumps(data))
+            outside_project = root / "other-project-root"; outside_project.mkdir()
+            data["bundles"][0]["project_root"] = str(outside_project); inventory.write_text(json.dumps(data))
+            with self.assertRaisesRegex(B.BundleError, "contained by project_root"): B.link_existing_plan(inventory)
+            data["bundles"][0]["project_root"] = str(root); inventory.write_text(json.dumps(data))
             data = json.loads(inventory.read_text()); data["bundles"][1]["documents"][0]["note_id"] = "note-00"
             inventory.write_text(json.dumps(data))
             with self.assertRaisesRegex(B.BundleError, "duplicate"): B.link_existing_plan(inventory)
