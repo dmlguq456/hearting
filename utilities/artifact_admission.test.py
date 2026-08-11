@@ -634,10 +634,18 @@ class TestReviewFindingRegressions(AdmissionContractBase):
         self.assertTrue(report.ok, [v.to_payload() for v in report.violations])
 
     def test_noop_idempotent_rejects_foreign_repository_even_with_index_row(self):
-        # Round-2: repository tenancy is checked before the idempotent verdict.
+        # Round-2/3: repository tenancy is checked before the idempotent
+        # verdict. Changing repository_id also changes the manifest digest, so
+        # reaching the no-op branch requires the forged-index scenario itself:
+        # an index row whose stored digest matches the foreign document.
         doc, outcome = self._admit_valid(key="k-tenancy-noop")
         forged = dict(doc)
         forged["repository_id"] = "repo_" + "e" * 32
+        forged_digest = m.manifest_digest(forged)
+        index_path = adm._index_path(self.root)
+        payload = json.loads(index_path.read_bytes().decode("utf-8"))
+        payload["manifests"]["k-tenancy-noop"]["manifest_digest"] = forged_digest
+        index_path.write_bytes(m.canonical_bytes(payload))
         src = self._stage_source(b"hello")
         retry = self._admit(forged, src, "k-tenancy-noop")
         self.assertEqual(retry.status, "rejected", retry.to_payload())
