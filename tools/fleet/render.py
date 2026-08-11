@@ -39,6 +39,7 @@ import time
 from .model import (fmt_min, dash, project_of, exec_child_is_wait,
                     LIVENESS_STATES, PLUGIN_QUEUE_STATES)
 from . import gitinfo
+from .refresh import LiveSnapshot, RefreshPump
 
 # curses attribute constants — real values when curses is present, harmless 0 fallbacks
 # otherwise, so this module imports (and the plain --once path runs) with no curses at all.
@@ -5422,80 +5423,115 @@ def _loop(stdscr, collect_all, hfilter, section, interval):
             curses.mousemask(curses.BUTTON1_CLICKED)
         except Exception:
             pass
+
+    def collect_snapshot():
+        sessions, jobs = collect_all(harness_filter=hfilter)
+        hearting = _HEARTING
+        hearting_refresh = getattr(collect_all, "hearting_refresh", None)
+        if callable(hearting_refresh):
+            try:
+                hearting = hearting_refresh()
+            except Exception:
+                pass
+        return LiveSnapshot(
+            sessions=list(sessions),
+            jobs=list(jobs),
+            resources=list(getattr(collect_all, "last_resource_jobs", [])),
+            usage_snapshots=dict(getattr(collect_all, "last_usage_snapshots", {})),
+            malformed=_malformed(),
+            memory=_collect_memory(),
+            hearting=dict(hearting) if isinstance(hearting, dict) else None,
+        )
+
+    # The TUI is useful immediately: draw an empty last-good frame, then atomically
+    # adopt the first complete snapshot. No collector ever runs on this thread.
+    snapshot = LiveSnapshot(hearting=dict(_HEARTING) if isinstance(_HEARTING, dict) else None)
+    generation = 0
+    pump = RefreshPump(collect_snapshot, interval)
+    pump.start()
+    sessions, jobs = snapshot.sessions, snapshot.jobs
+    resources = snapshot.resources
+    usage_snapshots = snapshot.usage_snapshots
+    malformed = snapshot.malformed
+    mem_snapshot = snapshot.memory
     stdscr.timeout(200)                     # getch blocks ≤200ms → responsive keys
-    sessions, jobs = collect_all(harness_filter=hfilter)
-    resources = list(getattr(collect_all, "last_resource_jobs", []))
-    usage_snapshots = dict(getattr(collect_all, "last_usage_snapshots", {}))
-    malformed = _malformed()
-    mem_snapshot = _collect_memory()
-    last = time.time()
     _draw(stdscr, sessions, jobs, section, malformed, memory=mem_snapshot,
           live_order=live_order, resources=resources, usage_snapshots=usage_snapshots)
-    while True:
-        # wake exactly at the next 0.5s blink boundary (regular period) but stay key-responsive (≤200ms)
-        _nb = (int(time.time() * 10) + 1) / 10.0   # 10fps wake — the spinner cadence
-        stdscr.timeout(max(20, min(100, int((_nb - time.time()) * 1000) + 1)))
-        ch = stdscr.getch()
-        if ch in (ord("q"), ord("Q")):
-            return 0
-        h, w = stdscr.getmaxyx()
-        body_h = max(1, h - 1)
-        # --- F-27: a pending confirmation swallows ALL keys. Nothing else can happen while
-        # the user is being asked, and only an explicit yes proceeds. ---
-        if _PROMPT is not None:
-            # §4.4.1 — _handle_mouse MUST be called from inside this block (not before it with
-            # its own `continue`): the _draw two lines below is what repopulates _PROMPT_HITS
-            # for the CURRENT stage before the next getch can land a click. Placing the mouse
-            # call ahead of this block would let a click 2 read a stale (pre-transition) map
-            # and silently defeat the confirm→confirm2 coordinate inversion (§4.4).
-            if ch == curses.KEY_MOUSE:
+    try:
+        while True:
+            # Wake at the next 0.1s spinner frame while staying key-responsive. Collection
+            # is independent, so a slow ps/dispatch/git call cannot pause this cadence.
+            _nb = (int(time.time() * 10) + 1) / 10.0
+            stdscr.timeout(max(20, min(100, int((_nb - time.time()) * 1000) + 1)))
+            ch = stdscr.getch()
+            now = time.time()
+            pump.request_due(now=time.monotonic())
+            update = pump.poll(generation)
+            if update is not None:
+                generation, snapshot = update
+                sessions, jobs = snapshot.sessions, snapshot.jobs
+                resources = snapshot.resources
+                usage_snapshots = snapshot.usage_snapshots
+                malformed = snapshot.malformed
+                mem_snapshot = snapshot.memory
+                if snapshot.hearting is not None:
+                    set_hearting(snapshot.hearting)
+            _BLINK_ON = (int(now * 2) % 2 == 0)
+
+            if ch in (ord("q"), ord("Q")):
+                return 0
+            h, w = stdscr.getmaxyx()
+            body_h = max(1, h - 1)
+            # --- F-27: a pending confirmation swallows ALL keys. Nothing else can happen while
+            # the user is being asked, and only an explicit yes proceeds. ---
+            if _PROMPT is not None:
+                # §4.4.1 — _handle_mouse MUST be called from inside this block (not before it with
+                # its own `continue`): the _draw two lines below is what repopulates _PROMPT_HITS
+                # for the CURRENT stage before the next getch can land a click. Placing the mouse
+                # call ahead of this block would let a click 2 read a stale (pre-transition) map
+                # and silently defeat the confirm→confirm2 coordinate inversion (§4.4).
+                if ch == curses.KEY_MOUSE:
+                    mx, my = _getmouse_xy()
+                    if mx is not None:
+                        _handle_mouse(mx, my)
+                else:
+                    _handle_prompt_key(ch)
+                _draw(stdscr, sessions, jobs, section, malformed, memory=mem_snapshot,
+                      live_order=live_order, resources=resources, usage_snapshots=usage_snapshots)
+                continue
+            if _SELECT_MODE:
+                if _handle_select_key(ch):
+                    _draw(stdscr, sessions, jobs, section, malformed, memory=mem_snapshot,
+                          live_order=live_order, resources=resources,
+                          usage_snapshots=usage_snapshots)
+                    continue
+            elif ch in (ord("s"), ord("S"), ord("x"), ord("X")):
+                # Enter selection mode. `x` doubles as the enter shortcut so the "press x to kill"
+                # intent works from a cold start; it selects, it never kills on the first press.
+                if not _enter_select(_live_targets()):
+                    _set_action("no selectable rows")
+                _draw(stdscr, sessions, jobs, section, malformed, memory=mem_snapshot,
+                      live_order=live_order, resources=resources, usage_snapshots=usage_snapshots)
+                continue
+
+            # --- base mode: scroll keys UNCHANGED (F-27 regression budget = 0) ---
+            if _handle_base_key(ch, body_h):
+                pass
+            elif ch == curses.KEY_MOUSE:
                 mx, my = _getmouse_xy()
                 if mx is not None:
                     _handle_mouse(mx, my)
-            else:
-                _handle_prompt_key(ch)
+            # KEY_RESIZE: no special handling needed — _draw's clamp re-clamps against the new
+            # body_h below; do NOT reset _OFFSET here (would destroy scroll position).
+
+            if ch in (ord("r"), ord("R")):
+                pump.request(force=True)
+            _poll_pending_kill()     # F-27 grace window — non-blocking; may raise a re-prompt
+            # Redraw every wake for the spinner/blink; curses doupdate emits only changed cells.
             _draw(stdscr, sessions, jobs, section, malformed, memory=mem_snapshot,
                   live_order=live_order, resources=resources, usage_snapshots=usage_snapshots)
-            continue
-        if _SELECT_MODE:
-            if _handle_select_key(ch):
-                _draw(stdscr, sessions, jobs, section, malformed, memory=mem_snapshot,
-                      live_order=live_order, resources=resources,
-                      usage_snapshots=usage_snapshots)
-                continue
-        elif ch in (ord("s"), ord("S"), ord("x"), ord("X")):
-            # Enter selection mode. `x` doubles as the enter shortcut so the "press x to kill"
-            # intent works from a cold start; it selects, it never kills on the first press.
-            if not _enter_select(_live_targets()):
-                _set_action("no selectable rows")
-            _draw(stdscr, sessions, jobs, section, malformed, memory=mem_snapshot,
-                  live_order=live_order, resources=resources, usage_snapshots=usage_snapshots)
-            continue
-
-        # --- base mode: scroll keys UNCHANGED (F-27 regression budget = 0) ---
-        if _handle_base_key(ch, body_h):
-            pass
-        elif ch == curses.KEY_MOUSE:
-            mx, my = _getmouse_xy()
-            if mx is not None:
-                _handle_mouse(mx, my)
-        # KEY_RESIZE: no special handling needed — _draw's clamp re-clamps against the new
-        # body_h below; do NOT reset _OFFSET here (would destroy scroll position).
-
-        force = ch in (ord("r"), ord("R"))
-        now = time.time()
-        if force or (now - last) >= interval:
-            sessions, jobs = collect_all(harness_filter=hfilter)
-            resources = list(getattr(collect_all, "last_resource_jobs", []))
-            usage_snapshots = dict(getattr(collect_all, "last_usage_snapshots", {}))
-            malformed = _malformed()
-            mem_snapshot = _collect_memory()
-            last = now
-        _poll_pending_kill()     # F-27 grace window — non-blocking; may raise a re-prompt
-        _BLINK_ON = (int(now * 2) % 2 == 0)     # ~2 Hz working-dot blink (manual — A_BLINK unreliable)
-        # redraw every wake (covers KEY_RESIZE, blink and tick) — _draw clamps _OFFSET internally.
-        _draw(stdscr, sessions, jobs, section, malformed, memory=mem_snapshot,
-              live_order=live_order, resources=resources, usage_snapshots=usage_snapshots)
+    finally:
+        pump.stop(join_timeout=1.0)
 
 
 def run_live(collect_all, hfilter, section, interval):
