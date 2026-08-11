@@ -1069,6 +1069,12 @@ def _plugin_phase(j):
     return _clip_w(" ".join(phase.split()), _STAGE_ZONE_MAX)
 
 
+def _is_plugin_agent(job):
+    """F-73 semantic boundary: plugin storage is not dispatch identity."""
+    return (getattr(job, "surface_kind", None) == "plugin-agent"
+            or getattr(job, "source", None) == "plugin-queue")
+
+
 def _dispatch_stage_segs(j, key, stage, slug_name, working=False, route_seq=None,
                          route_zone=None):
     if getattr(j, "source", None) == "plugin-queue":
@@ -2283,7 +2289,8 @@ def _pulse_segs(sessions, jobs):
     n_dt = sum(1 for s in _real if s.detached and s.liveness not in ("stale", "dead"))
     # F-46: an afterglow row is finished work kept on screen for readability — it is never
     # part of the census (working/idle/job count), exactly as a cooling group is not "hot".
-    listed_jobs = [j for j in jobs if not getattr(j, "afterglow", False)]
+    listed_jobs = [j for j in jobs
+                   if not _is_plugin_agent(j) and not getattr(j, "afterglow", False)]
     if not _SHOW_ALL:
         listed_jobs = [j for j in listed_jobs if j.liveness != "dead"]
     jw = sum(1 for j in listed_jobs if j.liveness == "working")
@@ -2450,6 +2457,14 @@ def _group_key_job(j, session_groups=None, job_groups=None, managed_session_grou
             return drill_group
         return "loops"
     return project_of(j.cwd)
+
+
+def _visible_group_jobs(jobs, show_sessions, show_jobs):
+    """Section routing for mixed storage: plugin agents belong to Fleet, not dispatch."""
+    return [
+        job for job in jobs
+        if (show_sessions if _is_plugin_agent(job) else show_jobs)
+    ]
 
 
 def _group_activity_rank(g):
@@ -2698,6 +2713,37 @@ def _subagent_strip(subs, depth=0):
     return [segs]
 
 
+def _plugin_agent_row(job, orphan=False, term_width=None):
+    """F-73 single-line openai-codex plugin agent; never a session-detail card."""
+    if getattr(job, "afterglow", False):
+        marker, marker_key = _LIVE_GLYPH["done"], "dim"
+    elif getattr(job, "liveness", None) == "working":
+        marker = "●"
+        marker_key = "g_work" if _BLINK_ON else "g_work_off"
+    else:
+        marker, marker_key = _glyph(getattr(job, "liveness", None), dim=True)
+
+    elapsed = fmt_min(getattr(job, "elapsed_min", None))
+    phase = _plugin_phase(job)
+    orphan_text = "  (orphan)" if orphan else ""
+    title = getattr(job, "title", None) or getattr(job, "slug", None) or ""
+    fixed = (_dw(_SUBAGENT_IND) + _dw(_ICON_SUBAGENT) + _dw("codex task ")
+             + _dw(marker) + _dw("  " + elapsed)
+             + (_dw(" : " + phase) if phase else 0) + _dw(orphan_text))
+    title_room = max(0, (term_width or _SUMMARY_FALLBACK_W) - fixed - 2)
+
+    segs = [(_SUBAGENT_IND, None), (_ICON_SUBAGENT, "dim"),
+            ("codex task", None if getattr(job, "liveness", None) == "working" else "dim"),
+            (" ", None), (marker, marker_key), ("  " + elapsed, "dim")]
+    if title and title_room >= 4:
+        segs += [("  ", None), (_clip_w(title, title_room), "dim")]
+    if phase:
+        segs += [(" : " + phase, "dim")]
+    if orphan_text:
+        segs += [(orphan_text, "gate_u")]
+    return [segs]
+
+
 _SUMMARY_FALLBACK_W = 60   # hermetic/no-terminal-width callers (mirrors the dim-snippet clip
                            # convention used elsewhere, e.g. the memory-row snippet cells)
 
@@ -2751,6 +2797,8 @@ def _summary_row(summary, depth=0, term_width=None, start_col=None, summary_ts=N
 
 def _dispatch_summary_detail_row(job, depth=1, term_width=None, orphan=False):
     """Use the main-session detail grammar for every live model dispatch."""
+    if _is_plugin_agent(job):
+        return []
     if getattr(job, "liveness", None) in ("stale", "dead"):
         return []
     # opencode belongs here too: its attempt stream carries per-step context tokens, so an
@@ -3527,6 +3575,8 @@ def _degrade_candidates(jobs, covered_slugs=()):
     seen = set()
     out = []
     for j in pool:
+        if _is_plugin_agent(j):
+            continue
         if getattr(j, "route_id", None):
             continue
         if max(1, int(getattr(j, "depth", 1) or 1)) != 1:
@@ -3639,20 +3689,30 @@ def _build_process_lines(sessions, jobs, route_views_by_id, malformed, memory, t
                 covered_slugs.add(parent)
     degrade_jobs = _degrade_candidates(jobs, covered_slugs)
 
-    # F-29 — plain top-level sessions running a native sub-agent. Process view is route-centric
-    # and emits no plain-session row, so without this a session's ⚡ agents are invisible here
-    # even though group view shows them in its session loop. Collected up front so they alone
-    # can populate the screen when no route/degrade card exists.
-    sub_sessions = []
+    # F-29/F-73 — plain top-level sessions owning native or plugin sub-agents. Process view is
+    # route-centric and emits no plain-session row, so collect one minimal owner anchor here.
+    plugin_by_parent = {}
+    plugin_orphans = []
+    for job in jobs:
+        if not _is_plugin_agent(job):
+            continue
+        if getattr(job, "parent_sid", None):
+            plugin_by_parent.setdefault(job.parent_sid, []).append(job)
+        else:
+            plugin_orphans.append(job)
+    agent_sessions = []
     for s in sessions:
         if (getattr(s, "app_server", False) or getattr(s, "is_child", False)
                 or getattr(s, "mem_worker", False)):
             continue
         s_subs = [sa for sa in (getattr(s, "subagents", None) or []) if sa.active or _SHOW_ALL]
-        if s_subs:
-            sub_sessions.append((s, s_subs))
+        plugin_subs = plugin_by_parent.pop(getattr(s, "session_id", None), [])
+        if s_subs or plugin_subs:
+            agent_sessions.append((s, s_subs, plugin_subs))
+    for remaining in plugin_by_parent.values():
+        plugin_orphans.extend(remaining)
 
-    if not real_views and not degrade_jobs and not sub_sessions:
+    if not real_views and not degrade_jobs and not agent_sessions and not plugin_orphans:
         # prd.md:310 — an honest "nothing is running" statement, never a blank screen.
         lines.append([("  no active route", "dim")])
         return lines
@@ -3699,8 +3759,8 @@ def _build_process_lines(sessions, jobs, route_views_by_id, malformed, memory, t
 
     # Routeless sessions with active sub-agents — one minimal owner anchor + the same strip,
     # skipping any pid already shown under a route/degrade card above (no double draw).
-    for s, s_subs in sub_sessions:
-        if s.pid and s.pid in covered_pids:
+    for s, s_subs, plugin_subs in agent_sessions:
+        if s.pid and s.pid in covered_pids and not plugin_subs:
             continue
         if not first:
             lines.append(None)
@@ -3710,7 +3770,16 @@ def _build_process_lines(sessions, jobs, route_views_by_id, malformed, memory, t
         if getattr(s, "model", None):
             anchor.append(("  " + str(s.model), "dim"))
         lines.append(anchor)
-        lines.extend(_subagent_strip(s_subs))
+        if s_subs:
+            lines.extend(_subagent_strip(s_subs))
+        for plugin_job in plugin_subs:
+            lines.extend(_plugin_agent_row(plugin_job, term_width=term_width))
+
+    for plugin_job in plugin_orphans:
+        if not first:
+            lines.append(None)
+        first = False
+        lines.extend(_plugin_agent_row(plugin_job, orphan=True, term_width=term_width))
 
     # StateTracker.sweep() precedent — a card key not seen this tick must not leak its fold
     # flag into a future, unrelated card that happens to reuse the same route_id/slug.
@@ -4057,7 +4126,7 @@ def _build_lines(sessions, jobs, section, narrow, malformed, layout="wide", memo
         for name in order:
             g = groups[name]
             group_sessions = g["sessions"] if show_sessions else []
-            group_jobs = g["jobs"] if show_jobs else []
+            group_jobs = _visible_group_jobs(g["jobs"], show_sessions, show_jobs)
             if not _SHOW_ALL:
                 group_jobs = [j for j in group_jobs if j.liveness != "dead"]
             if not group_sessions and not group_jobs:
@@ -4132,7 +4201,7 @@ def _build_lines(sessions, jobs, section, narrow, malformed, layout="wide", memo
     for name in order:
         g = groups[name]
         group_sessions = g["sessions"] if show_sessions else []
-        group_jobs = g["jobs"] if show_jobs else []
+        group_jobs = _visible_group_jobs(g["jobs"], show_sessions, show_jobs)
         if not _SHOW_ALL:
             group_jobs = [j for j in group_jobs if j.liveness != "dead"]
         if not group_sessions and not group_jobs:
@@ -4419,7 +4488,10 @@ def _build_lines(sessions, jobs, section, narrow, malformed, layout="wide", memo
                 kids = []
             elif s.session_id:
                 rendered_parent_sids.add(s.session_id)
-            nested_n = len(kids) + sum(len(job_children.get(k.slug, [])) for k in kids)
+            plugin_kids = [kid for kid in kids if _is_plugin_agent(kid)]
+            dispatch_kids = [kid for kid in kids if not _is_plugin_agent(kid)]
+            nested_n = (len(dispatch_kids)
+                        + sum(len(job_children.get(k.slug, [])) for k in dispatch_kids))
             if s.liveness == "stale":
                 _seen_glyphs.add("stale")
             elif s.liveness == "dead":
@@ -4434,6 +4506,8 @@ def _build_lines(sessions, jobs, section, narrow, malformed, layout="wide", memo
                 _seen_glyphs.add("child")
             if getattr(s, "subagents", None):
                 _seen_glyphs.add("subagent")
+            if plugin_kids:
+                _seen_glyphs.add("subagent")
             session_projection = getattr(s, "work_projection", None)
             session_route = getattr(session_projection, "route_id", None)
             visible_route_owner = (
@@ -4447,7 +4521,7 @@ def _build_lines(sessions, jobs, section, narrow, malformed, layout="wide", memo
                     and getattr(getattr(child, "work_projection", None), "source", None)
                     == "route-exact"
                     and not getattr(getattr(child, "work_projection", None), "ambiguity", None)
-                    for child in kids
+                    for child in dispatch_kids
                 )
             )
             recovered_session_owner = s.session_id in recovered_session_ids
@@ -4480,10 +4554,12 @@ def _build_lines(sessions, jobs, section, narrow, malformed, layout="wide", memo
                          if sa.active or _SHOW_ALL]
             if shown_subs:
                 lines.extend(_subagent_strip(shown_subs))
-            for i, cj in enumerate(kids):
+            for plugin_job in plugin_kids:
+                lines.extend(_plugin_agent_row(plugin_job, term_width=term_width))
+            for i, cj in enumerate(dispatch_kids):
                 _emit_dispatch_tree(cj, parent_model=s.model, parent_harness=s.harness,
                                     parent_effort=s.effort, orphan=False,
-                                    is_last=(i == len(kids) - 1))
+                                    is_last=(i == len(dispatch_kids) - 1))
         if group_sessions and hidden:
             lines.append([("     +%d stale/companion hidden" % hidden, "dim")])
 
@@ -4491,7 +4567,11 @@ def _build_lines(sessions, jobs, section, narrow, malformed, layout="wide", memo
         if orphans:
             lines.append(_orphan_divider(term_width))
         for oj in _sort_group_jobs(orphans):
-            _emit_dispatch_tree(oj, orphan=show_sessions)
+            if _is_plugin_agent(oj):
+                _seen_glyphs.add("subagent")
+                lines.extend(_plugin_agent_row(oj, orphan=True, term_width=term_width))
+            else:
+                _emit_dispatch_tree(oj, orphan=show_sessions)
         for lj in _sort_group_jobs(loops_jobs):
             _emit_dispatch_tree(lj, orphan=False)
 
@@ -4569,7 +4649,7 @@ def _build_lines(sessions, jobs, section, narrow, malformed, layout="wide", memo
         legend += [("▾N", "dim"), (" child jobs   ", "dim")]
     if "subagent" in _seen_glyphs:
         legend += [(_ICON_SUBAGENT, "dim"), (" sub-agent   ", "dim")]
-    if jobs:
+    if any(not _is_plugin_agent(job) for job in jobs):
         legend += [("↳", "dim"), (" dispatch   ", "dim")]
     if "wt" in _seen_glyphs:
         legend += [("🚧 N", "dim"), (" worktrees   ", "dim")]

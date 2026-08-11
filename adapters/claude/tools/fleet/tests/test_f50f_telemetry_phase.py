@@ -219,26 +219,50 @@ class PhaseMicroStatusTest(_Fixture):
         self.assertNotEqual(getattr(job.work_projection, "stage_label", None), "investigating")
         self.assertEqual(job.work_projection.source, "none")
 
+
+class PluginAgentDisplayTest(_Fixture):
+    """F-73 — plugin tasks use one subagent row, never a dispatch/session card."""
+
+    def test_single_agent_row_keeps_phase_but_has_no_dispatch_marker(self):
+        job = self.row()
+        rows = render._plugin_agent_row(job, term_width=120)
+        self.assertEqual(len(rows), 1)
+        text = "".join(part for part, _key in rows[0])
+        self.assertIn("⚡codex task", text)
+        self.assertIn("investigating", text)
+        self.assertNotIn("↳", text)
+
+    def test_plugin_agent_never_opens_a_context_detail_row(self):
+        self.write_rollout()
+        job = self.row()
+        self.assertIsNotNone(job.context)
+        self.assertEqual(render._dispatch_summary_detail_row(job), [])
+
+    def test_plugin_agent_is_not_a_dispatch_pulse_count(self):
+        job = self.row()
+        text = "".join(part for part, _key in render._pulse_segs([], [job]))
+        self.assertNotIn("job", text)
+        self.assertNotIn("↳", text)
+
     def test_wide_row_shows_the_phase_in_the_stage_zone(self):
         job = self.row()
-        text = "".join(t for t, _k in render._dispatch_row(job))
+        text = "".join(t for t, _k in render._plugin_agent_row(job)[0])
         self.assertIn("investigating", text)
 
 
 class TelemetryRenderTest(_Fixture):
-    """F-50f display — the shared gauge row, with `—` when the join found nothing."""
+    """F-73 display — rollout telemetry stays JSON-only for plugin subagents."""
 
-    def test_live_row_gets_the_context_gauge(self):
+    def test_live_row_suppresses_the_context_gauge(self):
         self.write_rollout()
         job = self.row()
         rows = render._dispatch_summary_detail_row(job, depth=1, term_width=120)
-        self.assertEqual("".join(t for t, _k in rows[0]).count("%"), 1)
-        self.assertIn("31%", "".join(t for t, _k in rows[0]))
+        self.assertEqual(rows, [])
 
-    def test_failed_join_renders_the_honest_deficit(self):
+    def test_failed_join_also_has_no_session_detail(self):
         job = self.row()
         rows = render._dispatch_summary_detail_row(job, depth=1, term_width=120)
-        self.assertIn("—", "".join(t for t, _k in rows[0]))
+        self.assertEqual(rows, [])
 
     def test_finished_row_keeps_the_no_live_telemetry_lane(self):
         self.write_rollout()

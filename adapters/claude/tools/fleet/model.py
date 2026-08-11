@@ -404,7 +404,10 @@ class DispatchJob:
     is_child: bool = False              # portable/adapter worker marker
     harness: Optional[str] = None       # claude | codex | opencode — dispatch runtime (None = unknown / jobs.log-only)
     qa_source: Optional[str] = None     # provenance of effective qa: argv | jobslog | plan | default
-    source: str = "proc"                # proc | jobs
+    source: str = "proc"                # proc | jobs | plugin-queue
+    # F-73: collector/storage compatibility may still use DispatchJob, but this
+    # semantic surface is rendered as an agent rather than registered dispatch.
+    surface_kind: Optional[str] = None   # plugin-agent | None (registered/legacy job)
     status: Optional[str] = None        # raw jobs.log status (open/running/...)
     afterglow: bool = False             # F-46 (v29): a `done` registry row still inside the
                                         # 15-min afterglow window. Display-only and additive —

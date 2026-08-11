@@ -144,14 +144,12 @@ class F52cLivenessLeadTest(unittest.TestCase):
         self.assertEqual(key, render._glyph("working")[1])
         self.assertFalse(set(text) & set(render._SPIN))
 
-    def test_dispatch_detail_row_is_fully_muted(self):
-        """F-50f's plugin-queue job is the one dispatch row that owns a context window; it
-        reuses this gauge row, but supporting telemetry must stay below the primary row."""
+    def test_plugin_agent_has_no_context_detail_row(self):
+        """F-73: plugin-queue telemetry stays JSON-only; the subagent row has no gauge."""
         job = DispatchJob(key="code", slug="w", harness="codex", depth=1, source="plugin-queue",
                           liveness="working", context=ContextProjection(40, "normal", "x"))
         row = render._dispatch_summary_detail_row(job, depth=1, term_width=168)
-        self.assertEqual({key for _part, key in row[0] if key is not None}, {"dim"})
-        self.assertNotEqual(self._lead(row)[1], render._glyph("working")[1])
+        self.assertEqual(row, [])
 
     def test_no_book_icon_and_no_new_state_vocabulary(self):
         session = Session(harness="claude", pid=1, cwd="/x", liveness="idle", ctx_pct=40)

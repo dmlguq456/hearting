@@ -177,6 +177,7 @@ class RowModelTest(_QueueFixture):
         self.write_state([_job()])
         job = self.collect()[0]
         self.assertEqual(job.source, "plugin-queue")
+        self.assertEqual(job.surface_kind, "plugin-agent")
         self.assertEqual(job.harness, "codex")
         self.assertEqual(job.slug, "task-msctc65b-8gt40r")
         self.assertEqual(job.key, "rescue")            # kindLabel
@@ -295,8 +296,8 @@ class TerminalStatusTest(_QueueFixture):
 class NestingTest(_QueueFixture):
     """F-50c — exact `sessionId` == `Session.session_id`, else the orphan rule."""
 
-    def _render(self, sessions, jobs):
-        lines = render._build_lines(sessions, jobs, section="both", narrow=False,
+    def _render(self, sessions, jobs, section="both"):
+        lines = render._build_lines(sessions, jobs, section=section, narrow=False,
                                     malformed=0, layout="wide")
         return "\n".join("".join(part for part, _key in line) for line in lines if line)
 
@@ -310,13 +311,21 @@ class NestingTest(_QueueFixture):
 
     def test_exact_session_id_match_nests_the_row(self):
         text = self._render([self._session(_SID)], [self._row()])
-        self.assertIn("↳", text)
+        self.assertIn("⚡codex task", text)
+        self.assertNotIn("↳", text)
+        self.assertNotIn("dispatch", text)
         self.assertNotIn("(orphan)", text)
 
     def test_same_cwd_without_the_session_id_stays_an_orphan(self):
         # The plugin workspace root is NOT an attribution path (misattribution guard).
         text = self._render([self._session("a-different-session-id")], [self._row()])
         self.assertIn("(orphan)", text)
+
+    def test_fleet_section_owns_plugin_agents_and_dispatch_section_does_not(self):
+        parent = self._session(_SID)
+        job = self._row()
+        self.assertIn("⚡codex task", self._render([parent], [job], section="fleet"))
+        self.assertNotIn("⚡codex task", self._render([parent], [job], section="dispatch"))
 
     def test_collect_all_never_reclassifies_a_same_cwd_session_as_a_child(self):
         from fleet import collectors
@@ -366,6 +375,7 @@ class DisplayAndJsonTest(_QueueFixture):
                 continue
             self.assertEqual(observed[name], value, name)
         self.assertEqual(payload["source"], "plugin-queue")
+        self.assertEqual(payload["surface_kind"], "plugin-agent")
 
     def test_json_omits_the_prompt_body(self):
         self.write_state([_job(pid=None)])

@@ -246,6 +246,7 @@ def _row(record, state_dir, now, codex_home=None):
         elapsed_min=elapsed_min,
         status=status,                       # verbatim plugin word; fleet never rewrites it
         source="plugin-queue",
+        surface_kind="plugin-agent",        # F-73: not a registered dispatch identity
         harness="codex",
         # F-50c: `sessionId` is the spawning CLAUDE session. It only ever nests on an exact
         # session-id match; `parent_cwd` is recorded as observed metadata, never as a
