@@ -149,6 +149,7 @@ assert {item["id"] for item in row["checks"]} == {
     "codex.runtime-activation",
     "opencode.runtime-activation",
     "routing-config.user-policy",
+    "report-bundle-config.root",
 }, row
 PY
 

@@ -3588,7 +3588,6 @@ def _build_process_lines(sessions, jobs, route_views_by_id, malformed, memory, t
     lines.append([(_HFILL, None)])
     lines.append(None)
     lines.append([("  PROCESS VIEW", "head"), (_RFLUSH, None), ("p group view  ", "head")])
-    lines.append(None)
 
     session_by_identity = {(s.pid, getattr(s, "proc_start", None)): s
                            for s in sessions if s.pid is not None and s.proc_start is not None}
@@ -3964,7 +3963,7 @@ def _build_lines(sessions, jobs, section, narrow, malformed, layout="wide", memo
             sessions, display_jobs, _route_views_by_id, malformed, memory,
             term_width, layout, node_evidence=_node_evidence)
         resource_lines = _resource_rows(resources, section)
-        return ([_hearting_header_row()] + resource_lines
+        return ([_hearting_header_row(), None] + resource_lines
                 + ([None] if resource_lines else []) + process_lines)
     # F-18b: mem-worker (distiller/curator/F-17 refresher) census — computed on the ORIGINAL
     # session list, before is_child/mem filtering, so folded/mem-only groups still surface a
@@ -4055,7 +4054,9 @@ def _build_lines(sessions, jobs, section, narrow, malformed, layout="wide", memo
         visible_tiers = {name: _group_activity_rank(groups[name]) for name in visible_order}
         order = live_order.reconcile_groups(visible_order, visible_tiers) + non_card_order
 
-    lines = [_hearting_header_row()]
+    # The product identity is a distinct, quiet title block. Keep one breathing row
+    # before account usage begins instead of letting the two metadata zones touch.
+    lines = [_hearting_header_row(), None]
     _seen_glyphs = set()
     # F-12(c) legend glyph-appearance tracking — LOCAL to this call (never module/global state,
     # _OFFSET invariant R3): which of the conditional legend glyphs actually got emitted this
@@ -4103,8 +4104,6 @@ def _build_lines(sessions, jobs, section, narrow, malformed, layout="wide", memo
         # spaces mirror the tint rows' right inset so the label right-aligns with the values.
         lines.append([(_sh + _col_head(wide_name_width or _NW_S), "head"), (_RFLUSH, None),
                       ("time" + " " * (_INSET + _PAD_IN + 1), "head")])
-    lines.append(None)                  # Gap below the column header.
-
     first = True
     folded_groups = []       # dormant dirs — aggregated into ONE line at the bottom (user: the
                              # stack of per-dir folded rules at the bottom was visual noise)

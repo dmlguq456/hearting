@@ -1071,8 +1071,15 @@ class NoRegressionTest(unittest.TestCase):
                 without_subs, [], section="fleet", narrow=False,
                 malformed=0, term_width=168,
             )
-        pulse_with = "".join(t for t, _k in lines_with[1])
-        pulse_without = "".join(t for t, _k in lines_without[1])
+        def pulse(lines):
+            return next(
+                "".join(text for text, _key in line)
+                for line in lines if line
+                if "".join(text for text, _key in line).lstrip().startswith("fleet ")
+            )
+
+        pulse_with = pulse(lines_with)
+        pulse_without = pulse(lines_without)
         self.assertEqual(pulse_with, pulse_without,
                          "서브에이전트 존재가 fleet pulse 줄을 바꿨다")
 

@@ -11,6 +11,7 @@ TOOLS = Path(__file__).resolve().parents[2]
 if str(TOOLS) not in sys.path:
     sys.path.insert(0, str(TOOLS))
 from fleet import fleet, installinfo, render  # noqa: E402
+from fleet.model import Session  # noqa: E402
 
 
 class InstallInfoTest(unittest.TestCase):
@@ -136,6 +137,35 @@ class InstallInfoTest(unittest.TestCase):
             ("0abc1234", "version_build"),
             ("-dirty", "version_dirty"),
         ])
+
+    def test_header_and_first_divider_use_one_breathing_row_each(self):
+        session = Session(harness="codex", pid=1, cwd="/work/repo", slug="session",
+                          liveness="working")
+        usage = [[("  usage", "dim")]]
+        with mock.patch.object(render, "_usage_header_rows", return_value=usage):
+            lines = render._build_lines([session], [], "both", False, 0, layout="narrow")
+
+        self.assertIsNone(lines[1])
+        self.assertEqual("".join(text for text, _key in lines[2]), "  usage")
+        divider = next(i for i, line in enumerate(lines)
+                       if line and line[0][0] == render._HFILL)
+        header = next(i for i, line in enumerate(lines)
+                      if line and "SESSIONS" in "".join(text for text, _key in line))
+        self.assertEqual(header, divider + 2)
+        self.assertIsNone(lines[divider + 1])
+        self.assertIsNotNone(lines[header + 1])
+
+    def test_process_view_keeps_same_compact_divider_spacing(self):
+        render.set_process_view(True)
+        lines = render._build_lines([], [], "both", False, 0, layout="narrow")
+        self.assertIsNone(lines[1])
+        divider = next(i for i, line in enumerate(lines)
+                       if line and line[0][0] == render._HFILL)
+        header = next(i for i, line in enumerate(lines)
+                      if line and "PROCESS VIEW" in "".join(text for text, _key in line))
+        self.assertEqual(header, divider + 2)
+        self.assertIsNone(lines[divider + 1])
+        self.assertIsNotNone(lines[header + 1])
 
     def test_snapshot_json_exposes_same_identity(self):
         identity = {"version": "v7.0.0", "install_method": "managed/stable",
