@@ -149,7 +149,25 @@ if [ -n "$tool_contract" ]; then
   fi
 fi
 printf 'note=%s\n' "$note"
-if python3 "$ROOT/tools/capability_topology.py" summary --capability "$cap" >/tmp/codex-capability-topology.$$ 2>/dev/null; then
-  cat /tmp/codex-capability-topology.$$
-  rm -f /tmp/codex-capability-topology.$$
+topology_summary=$(mktemp)
+trap 'rm -f "$topology_summary"' EXIT
+if python3 "$ROOT/tools/capability_topology.py" summary --capability "$cap" >"$topology_summary" 2>/dev/null; then
+  cat "$topology_summary"
+else
+  # Compose-on-demand capabilities intentionally have no topology registry
+  # recipe. Their portable capability modes still come from the manifest and
+  # must remain visible to the Codex dispatch wrapper, just as they are to the
+  # sibling adapters. Without this fallback a valid composed route reaches the
+  # owner selector but fails as capability-mode-contract-missing.
+  python3 - "$ROOT/harness-manifest.json" "$cap" <<'PY'
+import json
+import sys
+
+manifest_path, capability = sys.argv[1:]
+with open(manifest_path, encoding="utf-8") as handle:
+    manifest = json.load(handle)
+modes = manifest.get("capabilities", {}).get(capability, {}).get("modes", [])
+if modes:
+    print("capability_modes=" + ",".join(sorted(modes)))
+PY
 fi

@@ -1096,7 +1096,7 @@ class DispatchBatchIntegrationTest(unittest.TestCase):
             agent_home.mkdir()
             for name in (
                 "adapters", "capabilities", "codex_setting", "core", "hooks",
-                "roles", "skills", "utilities",
+                "roles", "skills", "tools", "utilities",
             ):
                 (agent_home / name).symlink_to(ROOT / name, target_is_directory=True)
             codex_home = base / "codex-home"

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -14,6 +15,9 @@ from dispatch_mode_contract import (
     validate_manifest_mode_axes,
     validate_route_mode_axes,
 )
+
+
+ROOT = Path(__file__).resolve().parents[1]
 
 
 def args(**overrides):
@@ -117,6 +121,16 @@ class DispatchModeContractTest(unittest.TestCase):
                 "autopilot-code", "plan", "capability_modes=audit,debug,dev\n"
             )
         self.assertEqual("invalid-dispatch-capability-mode", caught.exception.reason)
+
+    def test_codex_capability_info_exposes_composed_capability_modes(self):
+        result = subprocess.run(
+            [str(ROOT / "adapters/codex/bin/capability-map.sh"), "analyze-project"],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("capability_modes=code,doc,paper\n", result.stdout)
 
     def test_manifest_validates_capability_and_worker_axes(self):
         with tempfile.TemporaryDirectory() as directory:
