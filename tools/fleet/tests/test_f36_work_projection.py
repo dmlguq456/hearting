@@ -4,10 +4,12 @@ import os
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 from fleet import projection, render, route  # noqa: E402
+from fleet.collectors import dispatch  # noqa: E402
 from fleet.model import DispatchJob, Session  # noqa: E402
 
 
@@ -229,6 +231,89 @@ class WorkProjectionTest(unittest.TestCase):
         projection.attach_projections([], [owner, child], now=100.0)
         self.assertEqual(owner.work_projection.ambiguity, "owner-route-conflict")
         self.assertIsNone(owner.work_projection.route_id)
+
+    def test_registered_owner_binding_projects_route_before_first_child(self):
+        record = route.load(REAL)
+        rid, route_hash = record["route_id"], record["route_hash"]
+        with tempfile.TemporaryDirectory() as tmp:
+            jobs_path = os.path.join(tmp, "jobs.log")
+            metadata = ",".join((
+                "capability=autopilot-code", "capability_mode=debug",
+                "attempt_schema_version=2", "dispatch_depth=1",
+                "transport=headless", "execution_surface=registered-headless",
+                "registered_worker=1", "fallback_hop=same-harness-headless",
+                "worker_type=owner", "assigned_contract=autopilot-code",
+                "owner=autopilot-code", "intensity=standard",
+                "attempt_id=att-owner-binding",
+                "owner_route_file=" + REAL, "owner_route_id=" + rid,
+                "owner_route_hash=" + route_hash,
+            ))
+            with open(jobs_path, "w", encoding="utf-8") as stream:
+                stream.write("2099-01-01T00:00:00Z\topen\t/repo\t/worktree\towner\t"
+                             + metadata + "\n")
+            jobs, malformed = dispatch._scan_jobs_log(jobs_path, set())
+
+        self.assertEqual(malformed, 0)
+        self.assertEqual((jobs[0].owner_route_id, jobs[0].owner_route_hash),
+                         (rid, route_hash))
+        projection.attach_projections([], jobs, now=100.0)
+        owner = jobs[0]
+        self.assertEqual(owner.work_projection.source, "route-exact")
+        self.assertEqual(owner.work_projection.route_id, rid)
+        self.assertEqual(owner.work_projection.progress.total, 4)
+        lines = render._build_lines([], jobs, section="dispatch", narrow=False,
+                                    malformed=0, layout="wide")
+        text = "\n".join("".join(token for token, _kind in line)
+                         for line in lines if line)
+        for stage in ("plan", "execute", "test", "report"):
+            self.assertIn(stage, text)
+        self.assertNotIn("preparing…", text)
+        self.assertNotIn("running", text)
+
+    def test_owner_binding_adopts_started_child_and_rejects_conflicts(self):
+        owner_record = route.load(REAL)
+        rid, route_hash = owner_record["route_id"], owner_record["route_hash"]
+        owner = DispatchJob(
+            key="code", slug="owner", depth=1, worker_type="owner",
+            attempt_id="att-owner", liveness="working",
+            owner_route_file=REAL, owner_route_id=rid, owner_route_hash=route_hash,
+        )
+        child = DispatchJob(
+            key="code-execute", slug="child", depth=2, parent_slug="owner",
+            route_id=rid, route_file=REAL, route_hash=route_hash,
+            route_node="execute", assigned_contract="code-execute",
+            liveness="working",
+        )
+        projection.attach_projections([], [owner, child], now=100.0)
+        self.assertEqual(owner.work_projection.stage_label, "execute")
+        with mock.patch.object(render, "_BLINK_ON", True):
+            lines = render._build_lines([], [owner, child], section="dispatch",
+                                        narrow=False, malformed=0, layout="wide")
+        text = "\n".join("".join(token for token, _kind in line)
+                         for line in lines if line)
+        self.assertIn("running", text)
+
+        other = route.load(COMPOSED)
+        conflict = DispatchJob(
+            key="claim", slug="other", depth=2, parent_slug="owner",
+            route_id=other["route_id"], route_file=COMPOSED,
+            route_hash=other["route_hash"], route_node="claim-a",
+            liveness="working",
+        )
+        projection.attach_projections([], [owner, conflict], now=100.0)
+        self.assertEqual(owner.work_projection.ambiguity, "owner-route-conflict")
+
+    def test_partial_owner_binding_fails_closed(self):
+        record = route.load(REAL)
+        owner = DispatchJob(
+            key="code", slug="owner", depth=1, worker_type="owner",
+            owner_route_file=REAL, owner_route_id=record["route_id"],
+            liveness="working",
+        )
+        projection.attach_projections([], [owner], now=100.0)
+        self.assertEqual(owner.work_projection.source, "registry-exact")
+        self.assertEqual(owner.work_projection.ambiguity,
+                         "owner-route-binding-invalid")
 
     def test_old_route_keys_and_private_evidence_remain_compatible(self):
         rid = route.load(REAL)["route_id"]

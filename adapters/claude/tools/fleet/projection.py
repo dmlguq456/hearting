@@ -107,29 +107,35 @@ def normalize_context(evidence, now=None, live=False):
     return public, ev
 
 
-def _route_record(entity, route_records=None):
-    """Load one record, retaining a diagnostic reason without weakening old route.load()."""
+def _route_record_values(rid, path, expected_hash, route_records=None):
+    """Load one exact route tuple without conflating owner and stage metadata."""
     from . import route
 
-    rid = _field(entity, "route_id")
     if not rid:
         return None, None
     records = route_records or {}
     if isinstance(records, dict) and rid in records:
         record = records[rid]
         if (record.get("route_id") != rid
-                or (_field(entity, "route_hash") and record.get("route_hash") != _field(entity, "route_hash"))):
+                or (expected_hash and record.get("route_hash") != expected_hash)):
             return None, ROUTE_RECORD_MISMATCH
         return record, None
-    path = _field(entity, "route_file")
     if not path:
         return None, ROUTE_RECORD_MISMATCH
     diagnostic = getattr(route, "load_diagnostic", None)
     if diagnostic:
-        result = diagnostic(path, expect_hash=_field(entity, "route_hash"), expect_id=rid)
+        result = diagnostic(path, expect_hash=expected_hash, expect_id=rid)
         return result.record, (None if result.valid else ROUTE_RECORD_MISMATCH)
-    record = route.load(path, expect_hash=_field(entity, "route_hash"), expect_id=rid)
+    record = route.load(path, expect_hash=expected_hash, expect_id=rid)
     return record, (None if record is not None else ROUTE_RECORD_MISMATCH)
+
+
+def _route_record(entity, route_records=None):
+    """Load one record, retaining a diagnostic reason without weakening old route.load()."""
+    return _route_record_values(
+        _field(entity, "route_id"), _field(entity, "route_file"),
+        _field(entity, "route_hash"), route_records=route_records,
+    )
 
 
 def _active_node(node, state, job=None):
@@ -718,6 +724,28 @@ def _explicit(entity):
                for name in ("route_file", "route_id", "route_hash", "route_node"))
 
 
+def _owner_route_binding(entity):
+    """Return a complete wrapper-validated owner binding or its fail-closed error."""
+    values = {
+        "route_file": _field(entity, "owner_route_file"),
+        "route_id": _field(entity, "owner_route_id"),
+        "route_hash": _field(entity, "owner_route_hash"),
+    }
+    present = [value not in (None, "") for value in values.values()]
+    if not any(present):
+        return None, None
+    try:
+        depth = int(_field(entity, "depth") or 1)
+    except (TypeError, ValueError):
+        depth = None
+    if (not all(present)
+            or depth != 1
+            or _field(entity, "worker_type") != "owner"
+            or _field(entity, "route_node") not in (None, "")):
+        return None, "owner-route-binding-invalid"
+    return values, None
+
+
 def _owner_children(entity, jobs):
     """Return only children named by the stable owner-link contracts."""
     sid = _field(entity, "session_id")
@@ -760,6 +788,43 @@ def resolve_work_projection(entity, jobs=(), route_records=None, node_evidence=N
     if ident in seen:
         return WorkProjection(ambiguity=OWNER_ROUTE_CONFLICT)
     seen.add(ident)
+    owner_binding, owner_binding_error = _owner_route_binding(entity)
+    if owner_binding_error:
+        return WorkProjection(
+            source="registry-exact", route_id=_field(entity, "owner_route_id"),
+            route_hash=_field(entity, "owner_route_hash"),
+            attempt_id=_field(entity, "attempt_id"), node_state="unknown",
+            ambiguity=owner_binding_error,
+        )
+    if owner_binding:
+        record, failure = _route_record_values(
+            owner_binding["route_id"], owner_binding["route_file"],
+            owner_binding["route_hash"], route_records=route_records,
+        )
+        if record is None:
+            return WorkProjection(
+                source="registry-exact", route_id=owner_binding["route_id"],
+                route_hash=owner_binding["route_hash"],
+                attempt_id=_field(entity, "attempt_id"), node_state="unknown",
+                ambiguity=failure or ROUTE_RECORD_MISMATCH,
+            )
+        children = _owner_children(entity, jobs)
+        child_conflict = any(
+            (_field(child, "route_id") and _field(child, "route_id") != owner_binding["route_id"])
+            or (_field(child, "route_hash")
+                and _field(child, "route_hash") != owner_binding["route_hash"])
+            for child in children
+        )
+        if child_conflict:
+            return WorkProjection(source="none", node_state="unknown",
+                                  ambiguity=OWNER_ROUTE_CONFLICT)
+        same_jobs = [j for j in jobs
+                     if _field(j, "route_id") == owner_binding["route_id"]]
+        return _projection_from_record(
+            entity, record, owner_binding["route_id"], same_jobs,
+            node_evidence=(node_evidence or {}).get(owner_binding["route_id"], {}),
+            now=now, owner=True, degradations=degradations,
+        )
     pid, proc_start = _field(entity, "pid"), _field(entity, "proc_start")
     identity_evidence_present = pid is not None and proc_start is not None
     if identity_evidence_present:

@@ -286,13 +286,18 @@ def collect(root=None, env=None, runner=subprocess.run, refresh_remote=False, no
     for runtime, path in activation_paths:
         state = _load_json(path)
         mode = state.get("mode") if state else None
+        active_exact = bool(state and _same_root(state.get("active_root"), root))
         if (state and state.get("schema") == ACTIVATION_SCHEMA
                 and mode in ACTIVATION_MODES
-                and (_same_root(state.get("active_root"), root)
+                and (active_exact
                      or _same_root(state.get("source_root"), root))):
-            matches.append((runtime, mode))
+            revision = state.get("active_revision")
+            revision = (revision.lower() if active_exact and mode == "packaged"
+                        and isinstance(revision, str)
+                        and re.fullmatch(r"[0-9a-fA-F]{40}", revision) else None)
+            matches.append((runtime, mode, revision))
 
-    modes = {mode for _runtime, mode in matches}
+    modes = {mode for _runtime, mode, _revision in matches}
     method = next(iter(modes)) if len(modes) == 1 else "mixed" if modes else "unmanaged"
     version = None
     if refresh_remote and method in {"linked", "unmanaged"}:
@@ -303,9 +308,13 @@ def collect(root=None, env=None, runner=subprocess.run, refresh_remote=False, no
             dirty = bool(head and _git_dirty(root, runner, head, observed))
             version = remote_version + ("-dirty" if dirty else "")
     local_version = _release_version(root)
-    if local_version is None and not fast_local:
+    if local_version is None and not fast_local and method in {"linked", "unmanaged"}:
         local_version = _git_version(root, runner)
-    version = version or local_version or _head_version(root) or "unknown"
+    head_version = _head_version(root) if method in {"linked", "unmanaged"} else None
+    revisions = {revision for _runtime, mode, revision in matches
+                 if mode == "packaged" and revision}
+    activation_version = next(iter(revisions))[:8] if method == "packaged" and len(revisions) == 1 else None
+    version = version or local_version or head_version or activation_version or "unknown"
     return {"version": version, "install_method": method,
             "source": "activation" if matches else "fallback",
-            "runtimes": [runtime for runtime, _mode in matches]}
+            "runtimes": [runtime for runtime, _mode, _revision in matches]}

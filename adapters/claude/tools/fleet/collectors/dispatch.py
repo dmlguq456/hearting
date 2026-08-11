@@ -2301,6 +2301,9 @@ def _scan_jobs_log(path, seen_slugs, seen_keys=None, registry_priority=0):
             parallel_leg_count=_parse_optional_int(meta.get("batch_declared_size")),
             route_file=meta.get("route_file"), route_id=meta.get("route_id"),
             route_hash=meta.get("route_hash"), route_node=meta.get("route_node"),
+            owner_route_file=meta.get("owner_route_file"),
+            owner_route_id=meta.get("owner_route_id"),
+            owner_route_hash=meta.get("owner_route_hash"),
             attempt_id=meta.get("attempt_id"),
             artifact_root=meta.get("artifact_root"),
             registry_order=registry_order,
@@ -2549,6 +2552,8 @@ def collect(jobs_path=None, harness_filter=None):
         j.mode is None or j.capability_mode is None
         or j.worker_mode is None or j.profile is None
         or (j.attempt_id and not getattr(j, "_log_file", None))
+        or (j.attempt_id and j.worker_type == "owner"
+            and not all((j.owner_route_file, j.owner_route_id, j.owner_route_hash)))
         for j in proc_jobs
     ):
         log_fields = _jobs_log_fields(paths)
@@ -2569,6 +2574,11 @@ def collect(jobs_path=None, harness_filter=None):
                     j._registry_path = metadata.get("_registry_path")
                     if not j.artifact_root:
                         j.artifact_root = metadata.get("artifact_root")
+                if (j.attempt_id and metadata.get("attempt_id") == j.attempt_id
+                        and j.worker_type == "owner"):
+                    j.owner_route_file = j.owner_route_file or metadata.get("owner_route_file")
+                    j.owner_route_id = j.owner_route_id or metadata.get("owner_route_id")
+                    j.owner_route_hash = j.owner_route_hash or metadata.get("owner_route_hash")
                 cap_mode, worker_mode, conflict = _dispatch_mode_axes(
                     {
                         "capability_mode": j.capability_mode,

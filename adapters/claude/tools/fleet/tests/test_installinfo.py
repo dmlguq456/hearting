@@ -35,16 +35,24 @@ class InstallInfoTest(unittest.TestCase):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(value), encoding="utf-8")
 
-    def _activation(self, runtime, mode, root=None):
+    def _activation(self, runtime, mode, root=None, revision=None,
+                    active_root=None, source_root=None):
         homes = {
             "claude": self.home / ".claude",
             "codex": self.home / ".codex",
             "opencode": self.home / ".config/opencode",
         }
-        self._write_json(homes[runtime] / ".harness/activation.json", {
+        state = {
             "schema": 2, "mode": mode, "active_root": str(root or self.root),
             "source_root": str(root or self.root),
-        })
+        }
+        if active_root is not None:
+            state["active_root"] = str(active_root)
+        if source_root is not None:
+            state["source_root"] = str(source_root)
+        if revision is not None:
+            state["active_revision"] = revision
+        self._write_json(homes[runtime] / ".harness/activation.json", state)
 
     @staticmethod
     def _git(stdout="v9.1.0-2-gabc-dirty", returncode=0):
@@ -104,10 +112,35 @@ class InstallInfoTest(unittest.TestCase):
         self.assertEqual(value["version"], head[:8])
 
     def test_packaged_prefers_release_marker(self):
-        self._activation("claude", "packaged")
+        self._activation("claude", "packaged", revision="a" * 40)
         (self.root / "RELEASE_VERSION").write_text("v4.0.0\n", encoding="utf-8")
         value = installinfo.collect(self.root, self.env, self._git(returncode=1))
         self.assertEqual((value["version"], value["install_method"]), ("v4.0.0", "packaged"))
+
+    def test_packaged_falls_back_to_exact_activation_revision_without_git(self):
+        revision = "a1" * 20
+        self._activation("claude", "packaged", revision=revision)
+
+        def runner(*_args, **_kwargs):
+            raise AssertionError("packaged activation fallback must not spawn git")
+
+        for kwargs in ({}, {"fast_local": True},
+                       {"refresh_remote": True, "now": 1.0}):
+            with self.subTest(kwargs=kwargs):
+                value = installinfo.collect(self.root, self.env, runner, **kwargs)
+                self.assertEqual((value["version"], value["install_method"]),
+                                 (revision[:8], "packaged"))
+
+    def test_packaged_revision_requires_valid_oid_and_exact_active_root(self):
+        foreign = Path(self.tmp.name) / "foreign-active"
+        foreign.mkdir()
+        for revision, active_root in (("bad", self.root), ("b" * 40, foreign)):
+            with self.subTest(revision=revision, active_root=active_root):
+                self._activation("codex", "packaged", revision=revision,
+                                 active_root=active_root, source_root=self.root)
+                value = installinfo.collect(self.root, self.env, self._git(returncode=1))
+                self.assertEqual((value["version"], value["install_method"]),
+                                 ("unknown", "packaged"))
 
     def test_linked_live_refresh_uses_highest_head_exact_annotated_remote_semver(self):
         self._activation("codex", "linked")
