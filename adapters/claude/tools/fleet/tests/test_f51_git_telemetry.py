@@ -418,6 +418,21 @@ class F51GitTelemetryTest(unittest.TestCase):
         finally:
             gitinfo.ahead_behind = old
 
+    def test_live_snapshot_enrichment_deduplicates_cwd_and_attaches_metadata(self):
+        first = Session(harness="codex", pid=1, cwd="/nas/repo", liveness="working")
+        second = Session(harness="claude", pid=2, cwd="/nas/repo", liveness="idle")
+        with mock.patch.object(gitinfo, "branch", return_value="main") as branch, \
+             mock.patch.object(gitinfo, "worktree_count", return_value=4) as count, \
+             mock.patch.object(gitinfo, "cached_ahead_behind", return_value=(2, 1)), \
+             mock.patch.object(gitinfo, "ahead_behind", side_effect=AssertionError):
+            gitinfo.enrich_entities([first, second], schedule_ahead=False)
+        self.assertEqual(branch.call_count, 1)
+        self.assertEqual(count.call_count, 1)
+        for row in (first, second):
+            self.assertEqual(row.branch, "main")
+            self.assertEqual((row.branch_ahead, row.branch_behind), (2, 1))
+            self.assertEqual(row.worktree_count, 4)
+
 
 if __name__ == "__main__":
     unittest.main()

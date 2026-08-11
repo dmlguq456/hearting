@@ -18,6 +18,7 @@ class LiveSnapshot:
     usage_snapshots: dict = field(default_factory=dict)
     malformed: int = 0
     memory: object = None
+    governor: object = None
     hearting: dict = None
 
 
@@ -73,7 +74,13 @@ class RefreshPump:
             if not force and current < self._next_due:
                 return False
             if self._running:
-                self._pending = True
+                # A periodic deadline that expires during a slow collection is
+                # already represented by that in-flight collection. Queuing it
+                # would make a producer slower than ``interval`` run forever
+                # with no idle gap. Only an explicit user refresh earns one
+                # coalesced follow-up.
+                if force:
+                    self._pending = True
                 return False
             self._running = True
             self._next_due = current + self._interval
@@ -121,8 +128,10 @@ class RefreshPump:
             else:
                 self._last_error = error
             self._running = False
+            # Schedule from completion, not start. A slow producer therefore
+            # gets a real cooldown instead of immediately chasing elapsed ticks.
+            self._next_due = self._clock() + self._interval
             if self._pending and not self._stopped:
                 self._pending = False
                 self._running = True
-                self._next_due = self._clock() + self._interval
                 self._start_locked()

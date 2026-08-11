@@ -302,6 +302,7 @@ class Session:
     branch: Optional[str] = None        # git branch override — demo fixtures; None = compute from cwd
     branch_ahead: Optional[int] = None  # additive background git telemetry
     branch_behind: Optional[int] = None
+    worktree_count: int = 0             # snapshot-owned; render never scans .git/worktrees
     mem_worker: bool = False   # Memory worker or title refresher; summarized and hidden by default.
     # F-29 (v9, prd.md:290-295) — enrichment ONLY, never a session-existence signal (prd.md:291).
     # None = source absent/unconfirmed (honest gap, prd.md:292's "no guessing"); [] = source
@@ -415,6 +416,9 @@ class DispatchJob:
     artifact_root: Optional[str] = None  # registry artifact_root meta — a source-only worktree
                                          # (OPERATIONS §5.10) writes plans/ THERE, not under cwd
     branch: Optional[str] = None        # git branch override — demo fixtures; None = compute from cwd
+    branch_ahead: Optional[int] = None  # live snapshot Git telemetry
+    branch_behind: Optional[int] = None
+    worktree_count: int = 0             # snapshot-owned; render never scans .git/worktrees
     depth: int = 1                      # display compatibility alias; derived from dispatch_depth on current rows
     dispatch_depth: Optional[int] = None  # portable route topology: 0 main, 1 owner, 2 bounded node
     transport: Optional[str] = None

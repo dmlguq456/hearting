@@ -11,7 +11,8 @@ if str(TOOLS) not in sys.path:
     sys.path.insert(0, str(TOOLS))
 
 from fleet.refresh import RefreshPump  # noqa: E402
-from fleet import render  # noqa: E402
+from fleet import gitinfo, render  # noqa: E402
+from fleet.model import Session  # noqa: E402
 
 
 class RefreshPumpTest(unittest.TestCase):
@@ -80,6 +81,33 @@ class RefreshPumpTest(unittest.TestCase):
         self._wait(lambda: pump.generation == 2 and not pump.running)
         self.assertEqual(calls, 2)
         self.assertEqual(max_active, 1)
+        pump.stop()
+
+    def test_elapsed_periodic_ticks_do_not_chain_a_slow_collector(self):
+        clock = [0.0]
+        entered = threading.Event()
+        release = threading.Event()
+        calls = 0
+
+        def producer():
+            nonlocal calls
+            calls += 1
+            entered.set()
+            release.wait()
+            return calls
+
+        pump = RefreshPump(producer, 2.0, clock=lambda: clock[0])
+        pump.start()
+        self.assertTrue(entered.wait(1.0))
+        clock[0] = 20.0
+        for _ in range(8):
+            self.assertFalse(pump.request_due())
+        release.set()
+        self._wait(lambda: pump.generation == 1 and not pump.running)
+        self.assertEqual(calls, 1)
+        self.assertFalse(pump.request_due(now=21.9))
+        self.assertTrue(pump.request_due(now=22.0))
+        self._wait(lambda: pump.generation == 2 and not pump.running)
         pump.stop()
 
     def test_failure_preserves_last_good_and_next_success_advances_generation(self):
@@ -165,6 +193,20 @@ class RefreshPumpTest(unittest.TestCase):
         self.assertFalse(thread.is_alive())
         self.assertEqual(result, [0])
         self.assertNotEqual(collector_threads, [thread.ident])
+
+    def test_live_line_build_uses_snapshot_git_and_governor_only(self):
+        session = Session(harness="codex", pid=1, cwd="/nas/project", slug="project",
+                          title="work", liveness="working", branch="main",
+                          branch_ahead=2, branch_behind=1, worktree_count=3)
+        with mock.patch.object(render, "_git_branch", side_effect=AssertionError), \
+             mock.patch.object(render, "_wt_count", side_effect=AssertionError), \
+             mock.patch.object(gitinfo, "ahead_behind", side_effect=AssertionError):
+            lines = render._build_lines(
+                [session], [], "both", False, 0, term_width=160,
+                live_order=render._LiveOrderState(), governor=None)
+        visible = "\n".join(render._plain(line) for line in lines)
+        self.assertIn("(main ↑2 ↓1)", visible)
+        self.assertIn("🚧 3", visible)
 
 
 if __name__ == "__main__":

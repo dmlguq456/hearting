@@ -154,3 +154,32 @@ def ahead_behind(cwd):
             threading.Thread(target=_worker, args=(cwd, branch(cwd)),
                              name="fleet-git-%s" % abs(hash(cwd)), daemon=True).start()
     return None
+
+
+def enrich_entities(entities, schedule_ahead=True):
+    """Attach Git display metadata outside the render loop.
+
+    ``branch()`` and ``worktree_count()`` perform small filesystem reads which
+    become visibly expensive on NAS-backed repositories when repeated at the
+    10fps animation cadence. The live snapshot worker calls this helper once
+    per unique cwd; renderers consume only the attached values.
+    """
+    rows = list(entities or ())
+    metadata = {}
+    for cwd in dict.fromkeys(getattr(row, "cwd", None) for row in rows):
+        if not cwd:
+            continue
+        br = branch(cwd)
+        count = worktree_count(cwd)
+        if schedule_ahead:
+            ahead_behind(cwd)
+        metadata[cwd] = (br, count, cached_ahead_behind(cwd))
+    for row in rows:
+        cwd = getattr(row, "cwd", None)
+        br, count, divergence = metadata.get(cwd, (None, 0, None))
+        if not getattr(row, "branch", None):
+            row.branch = br
+        row.worktree_count = count
+        row.branch_ahead = divergence[0] if divergence else None
+        row.branch_behind = divergence[1] if divergence else None
+    return rows

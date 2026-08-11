@@ -626,6 +626,7 @@ _BR_CACHE = {"ts": 0.0, "map": {}}
 
 _git_branch = gitinfo.branch
 _wt_count = gitinfo.worktree_count
+_IO_UNSET = object()
 
 
 # ---------- row builders (return a single segment-line: [(text, color_key), ...]) ----------
@@ -791,14 +792,16 @@ def _col_head(name_width):
             + " " * _WIDE_STAGE_GAP + "stages" + " " * _WIDE_TIME_GAP)
 
 
-def _branch_suffix_segs(cwd, branch, dim=True, optional=False):
+def _branch_suffix_segs(cwd, branch, dim=True, optional=False,
+                        ahead=_IO_UNSET, behind=_IO_UNSET):
     """Integrated `` (branch)`` suffix for the session column.
 
     Wide rows reserve a fixed amount for this suffix; narrow/stack rows use only
     its visible width. Branch text keeps the former brightness distinction while
     the punctuation recedes.
     """
-    br = branch or _git_branch(cwd)
+    snapshot_owned = ahead is not _IO_UNSET or behind is not _IO_UNSET
+    br = branch or (None if snapshot_owned else _git_branch(cwd))
     if not br and optional:
         return []
     # The title side reserves `_NAME_GAP`, so the visible suffix may use one cell
@@ -806,7 +809,10 @@ def _branch_suffix_segs(cwd, branch, dim=True, optional=False):
     shown = _clip_w(str(br or "—"), max(1, _BRANCH_SUFFIX_W - 2))
     base = [(" (", "dim"), (shown, "dim" if dim else "branch_s")]
     close = [(")", "dim")]
-    counts = gitinfo.ahead_behind(cwd) if _GIT_TELEMETRY and br and cwd else None
+    if snapshot_owned:
+        counts = ((ahead or 0), (behind or 0)) if (ahead or behind) else None
+    else:
+        counts = gitinfo.ahead_behind(cwd) if _GIT_TELEMETRY and br and cwd else None
     if not counts:
         return base + close
     ahead, behind = counts
@@ -1490,7 +1496,10 @@ def _session_row(s, narrow, is_parent=False, child_count=0, name_width=None,
     for text, key in suffix:
         segs.append((text, key))
         used += _dw(text)
-    branch_segs = _branch_suffix_segs(s.cwd, s.branch, dim=dim_tel)
+    branch_segs = _branch_suffix_segs(
+        s.cwd, s.branch, dim=dim_tel,
+        ahead=getattr(s, "branch_ahead", None),
+        behind=getattr(s, "branch_behind", None))
     segs += branch_segs
     used += sum(_dw(text) for text, _key in branch_segs)
     session_width = avail + _BRANCH_SUFFIX_W
@@ -1980,7 +1989,9 @@ def _dispatch_row(j, orphan=False, parent_model=None, parent_harness=None, is_la
     if otag and used + len(otag) <= avail:
         segs.append((otag, "gate_u")); used += len(otag)
     branch_segs = _branch_suffix_segs(
-        "" if key in _LOOPS_KEYS else j.cwd, j.branch, optional=key in _LOOPS_KEYS)
+        "" if key in _LOOPS_KEYS else j.cwd, j.branch, optional=key in _LOOPS_KEYS,
+        ahead=getattr(j, "branch_ahead", None),
+        behind=getattr(j, "branch_behind", None))
     segs += branch_segs
     used += sum(_dw(text) for text, _key in branch_segs)
     session_width = avail + _BRANCH_SUFFIX_W
@@ -2074,7 +2085,10 @@ def _session_row_2line(s, is_parent=False, child_count=0, _split=False, term_wid
     # is actually inserted is decided below, once the name's budget is known.
     prov_seg = (" %s" % s.provenance, "dim") if getattr(s, "provenance", None) else None
     prov_pos = len(suffix)
-    br_segs = _branch_suffix_segs(s.cwd, s.branch, dim=dim_tel, optional=True)
+    br_segs = _branch_suffix_segs(
+        s.cwd, s.branch, dim=dim_tel, optional=True,
+        ahead=getattr(s, "branch_ahead", None),
+        behind=getattr(s, "branch_behind", None))
     if not _split:
         suffix.extend(br_segs)
     if s.app_server:
@@ -2180,7 +2194,9 @@ def _dispatch_row_2line(j, orphan=False, parent_model=None, parent_effort=None, 
     if orphan:
         l1.append(("  (orphan)", "gate_u"))
     br_segs = _branch_suffix_segs(
-        "" if key in _LOOPS_KEYS else j.cwd, j.branch, optional=True)
+        "" if key in _LOOPS_KEYS else j.cwd, j.branch, optional=True,
+        ahead=getattr(j, "branch_ahead", None),
+        behind=getattr(j, "branch_behind", None))
     if not _split:
         l1.extend(br_segs)
 
@@ -2235,15 +2251,18 @@ _GOVERNOR_QUIET_FRACTION = 0.5   # F-28c "healthy 무음" (prd.md:288/311, plan 
                                   # actually worth a glance.
 
 
-def _governor_segs():
+def _governor_segs(snapshot=_IO_UNSET):
     """`  ⚙ governor N/cap` — F-28c (prd.md:288/311). Pulse-ADJACENT, never merged into the
     pulse row's own session/job counts (I8 — this is a wholly separate line/collector). `None`
     (source absent OR healthy-quiet) = caller omits the row entirely."""
-    try:
-        from .collectors import governor
-        g = governor.collect()
-    except Exception:
-        g = None
+    if snapshot is _IO_UNSET:
+        try:
+            from .collectors import governor
+            g = governor.collect()
+        except Exception:
+            g = None
+    else:
+        g = snapshot
     if not g:
         return None
     active, cap = g.get("active", 0), g.get("cap", 0)
@@ -3563,7 +3582,7 @@ def _degrade_card(job, session_by_identity, term_width):
 
 
 def _build_process_lines(sessions, jobs, route_views_by_id, malformed, memory, term_width, layout,
-                         node_evidence=None):
+                         node_evidence=None, governor=_IO_UNSET):
     """F-30 (prd.md:304-310) — the process view: one card per ACTIVE route (pipeline-centric
     regrouping) instead of the group view's per-project regrouping. Returns the SAME flat
     segment-line contract as `_build_lines` ([[(text,key),...]|None]) — `_draw`/`render_once`/
@@ -3578,7 +3597,7 @@ def _build_process_lines(sessions, jobs, route_views_by_id, malformed, memory, t
     global _FOLDABLE
     _FOLDABLE = []
     lines = [_pulse_segs(sessions, jobs)]
-    _governor = _governor_segs()
+    _governor = _governor_segs(governor)
     if _governor is not None:
         lines.append(_governor)
     _mem_summary = _mem_summary_segs(memory)
@@ -3869,7 +3888,8 @@ def _resource_rows(resources, section):
 
 
 def _build_lines(sessions, jobs, section, narrow, malformed, layout="wide", memory=None,
-                 term_width=None, live_order=None, resources=None, usage_snapshots=None):
+                 term_width=None, live_order=None, resources=None, usage_snapshots=None,
+                 governor=_IO_UNSET):
     """Return a flat list of segment-lines for the whole screen (None = blank line).
 
     Side effect: refreshes the module-level `_SELECTABLE` stash (F-27) — see its definition.
@@ -3962,7 +3982,7 @@ def _build_lines(sessions, jobs, section, narrow, malformed, layout="wide", memo
         # the same way route resolution itself needed it for defect 1.
         process_lines = _build_process_lines(
             sessions, display_jobs, _route_views_by_id, malformed, memory,
-            term_width, layout, node_evidence=_node_evidence)
+            term_width, layout, node_evidence=_node_evidence, governor=governor)
         resource_lines = _resource_rows(resources, section)
         return ([_hearting_header_row(), None] + resource_lines
                 + ([None] if resource_lines else []) + process_lines)
@@ -4073,7 +4093,7 @@ def _build_lines(sessions, jobs, section, narrow, malformed, layout="wide", memo
     resource_lines = _resource_rows(resources, section)
     if resource_lines:
         lines.extend(resource_lines)
-    _governor = _governor_segs()               # F-28c — pulse-adjacent, never merged into pulse
+    _governor = _governor_segs(governor)       # F-28c — snapshot-owned in the live loop
     if _governor is not None:                  # counts (I8); None = source absent or quiet.
         lines.append(_governor)
     _mem_summary = _mem_summary_segs(memory)
@@ -4261,7 +4281,8 @@ def _build_lines(sessions, jobs, section, narrow, malformed, layout="wide", memo
         # Cooling names share the dim-yellow indicator color; cold keeps the default title color.
         _name_key = "grp_hot" if n_work else ("grp_cool" if _cool_min is not None else "grp")
         head_segs += [(name, _name_key), ("/", "dim")]
-        _nwt = _wt_count(gcwd)
+        _nwt = max((getattr(entity, "worktree_count", 0)
+                    for entity in group_sessions + group_jobs), default=0)
         if _nwt:
             # Match statusline notation for parallel or leftover worktrees.
             head_segs += [(" 🚧 %d" % _nwt, "g_idle")]
@@ -4585,6 +4606,14 @@ def _collect_memory():
         return None
 
 
+def _collect_governor():
+    try:
+        from .collectors import governor
+        return governor.collect()
+    except Exception:
+        return None
+
+
 def render_once(collect_all, hfilter, section):
     global _GIT_TELEMETRY
     sessions, jobs = collect_all(harness_filter=hfilter)
@@ -4592,6 +4621,8 @@ def render_once(collect_all, hfilter, section):
     usage_snapshots = dict(getattr(collect_all, "last_usage_snapshots", {}))
     malformed = _malformed()
     mem_snapshot = _collect_memory()
+    governor_snapshot = _collect_governor()
+    gitinfo.enrich_entities(list(sessions) + list(jobs), schedule_ahead=False)
     try:
         import shutil
         tw = shutil.get_terminal_size().columns
@@ -4602,7 +4633,8 @@ def render_once(collect_all, hfilter, section):
     try:
         lines = _build_lines(sessions, jobs, section, narrow=False, malformed=malformed,
                              layout=_layout_mode(tw), memory=mem_snapshot, term_width=tw,
-                             resources=resources, usage_snapshots=usage_snapshots)
+                             resources=resources, usage_snapshots=usage_snapshots,
+                             governor=governor_snapshot)
     finally:
         _GIT_TELEMETRY = previous_git_telemetry
     out = "\n".join(_plain(l) for l in lines) + "\n"
@@ -5318,7 +5350,7 @@ def reset_scroll():
 
 
 def _draw(stdscr, sessions, jobs, section, malformed, memory=None, live_order=None,
-          resources=None, usage_snapshots=None):
+          resources=None, usage_snapshots=None, governor=None):
     global _OFFSET, _TOGGLE_ROWS, _CLICK_ROWS, _FOLD_ROWS, _PROMPT_HITS, _CURSOR_ID
     # reset before any early-return so a stale map never survives a click (§4.1 pattern) —
     # _PROMPT_HITS in particular must never carry the PRIOR stage's coordinates into this
@@ -5333,7 +5365,8 @@ def _draw(stdscr, sessions, jobs, section, malformed, memory=None, live_order=No
     narrow = w < _NARROW_CUTOFF
     lines = _build_lines(sessions, jobs, section, narrow, malformed, layout=_layout_mode(w),
                          memory=memory, term_width=w, live_order=live_order,
-                         resources=resources, usage_snapshots=usage_snapshots)
+                         resources=resources, usage_snapshots=usage_snapshots,
+                         governor=governor)
     body_h = max(1, h - 1)   # reserve 1 footer row
 
     # F-27: the cursor tracks a ROW, so the viewport follows it (not the reverse). Done before
@@ -5426,6 +5459,8 @@ def _loop(stdscr, collect_all, hfilter, section, interval):
 
     def collect_snapshot():
         sessions, jobs = collect_all(harness_filter=hfilter)
+        sessions, jobs = list(sessions), list(jobs)
+        gitinfo.enrich_entities(sessions + jobs, schedule_ahead=True)
         hearting = _HEARTING
         hearting_refresh = getattr(collect_all, "hearting_refresh", None)
         if callable(hearting_refresh):
@@ -5434,12 +5469,13 @@ def _loop(stdscr, collect_all, hfilter, section, interval):
             except Exception:
                 pass
         return LiveSnapshot(
-            sessions=list(sessions),
-            jobs=list(jobs),
+            sessions=sessions,
+            jobs=jobs,
             resources=list(getattr(collect_all, "last_resource_jobs", [])),
             usage_snapshots=dict(getattr(collect_all, "last_usage_snapshots", {})),
             malformed=_malformed(),
             memory=_collect_memory(),
+            governor=_collect_governor(),
             hearting=dict(hearting) if isinstance(hearting, dict) else None,
         )
 
@@ -5454,9 +5490,11 @@ def _loop(stdscr, collect_all, hfilter, section, interval):
     usage_snapshots = snapshot.usage_snapshots
     malformed = snapshot.malformed
     mem_snapshot = snapshot.memory
+    governor_snapshot = snapshot.governor
     stdscr.timeout(200)                     # getch blocks ≤200ms → responsive keys
     _draw(stdscr, sessions, jobs, section, malformed, memory=mem_snapshot,
-          live_order=live_order, resources=resources, usage_snapshots=usage_snapshots)
+          live_order=live_order, resources=resources, usage_snapshots=usage_snapshots,
+          governor=governor_snapshot)
     try:
         while True:
             # Wake at the next 0.1s spinner frame while staying key-responsive. Collection
@@ -5474,6 +5512,7 @@ def _loop(stdscr, collect_all, hfilter, section, interval):
                 usage_snapshots = snapshot.usage_snapshots
                 malformed = snapshot.malformed
                 mem_snapshot = snapshot.memory
+                governor_snapshot = snapshot.governor
                 if snapshot.hearting is not None:
                     set_hearting(snapshot.hearting)
             _BLINK_ON = (int(now * 2) % 2 == 0)
@@ -5497,13 +5536,14 @@ def _loop(stdscr, collect_all, hfilter, section, interval):
                 else:
                     _handle_prompt_key(ch)
                 _draw(stdscr, sessions, jobs, section, malformed, memory=mem_snapshot,
-                      live_order=live_order, resources=resources, usage_snapshots=usage_snapshots)
+                      live_order=live_order, resources=resources, usage_snapshots=usage_snapshots,
+                      governor=governor_snapshot)
                 continue
             if _SELECT_MODE:
                 if _handle_select_key(ch):
                     _draw(stdscr, sessions, jobs, section, malformed, memory=mem_snapshot,
                           live_order=live_order, resources=resources,
-                          usage_snapshots=usage_snapshots)
+                          usage_snapshots=usage_snapshots, governor=governor_snapshot)
                     continue
             elif ch in (ord("s"), ord("S"), ord("x"), ord("X")):
                 # Enter selection mode. `x` doubles as the enter shortcut so the "press x to kill"
@@ -5511,7 +5551,8 @@ def _loop(stdscr, collect_all, hfilter, section, interval):
                 if not _enter_select(_live_targets()):
                     _set_action("no selectable rows")
                 _draw(stdscr, sessions, jobs, section, malformed, memory=mem_snapshot,
-                      live_order=live_order, resources=resources, usage_snapshots=usage_snapshots)
+                      live_order=live_order, resources=resources, usage_snapshots=usage_snapshots,
+                      governor=governor_snapshot)
                 continue
 
             # --- base mode: scroll keys UNCHANGED (F-27 regression budget = 0) ---
@@ -5529,7 +5570,8 @@ def _loop(stdscr, collect_all, hfilter, section, interval):
             _poll_pending_kill()     # F-27 grace window — non-blocking; may raise a re-prompt
             # Redraw every wake for the spinner/blink; curses doupdate emits only changed cells.
             _draw(stdscr, sessions, jobs, section, malformed, memory=mem_snapshot,
-                  live_order=live_order, resources=resources, usage_snapshots=usage_snapshots)
+                  live_order=live_order, resources=resources, usage_snapshots=usage_snapshots,
+                  governor=governor_snapshot)
     finally:
         pump.stop(join_timeout=1.0)
 
