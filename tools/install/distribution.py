@@ -46,6 +46,12 @@ REQUIRED_RELEASE_FILES = (
     "tools/install/harness.sh",
     "tools/install/installer.py",
     "tools/install/distribution.py",
+    "tools/fleet/fleet.sh",
+    "tools/memory/mem.py",
+)
+TOOL_LAUNCHERS = (
+    ("fleet", "tools/fleet/fleet.sh"),
+    ("mem", "tools/memory/mem.py"),
 )
 _REPOSITORY_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 _VERSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
@@ -547,6 +553,88 @@ def _launcher_is_harness_link(path: Path) -> bool:
     return target.as_posix().endswith("/tools/install/harness.sh")
 
 
+def _launcher_destination(path: Path) -> Optional[Path]:
+    if not path.is_symlink():
+        return None
+    try:
+        raw = Path(os.readlink(path))
+        target = raw if raw.is_absolute() else path.parent / raw
+        return target.resolve(strict=False)
+    except (OSError, RuntimeError):
+        return None
+
+
+def _known_tool_launcher_roots(state: Optional[dict]) -> set[Path]:
+    roots = {_home() / "hearting", _home() / "agent_setting"}
+    if state and state.get("release_root"):
+        roots.add(Path(state["release_root"]))
+    current = _launcher_destination(current_path())
+    if current is not None:
+        roots.add(current)
+    for runtime in RUNTIMES:
+        activation = _activation_state(runtime)
+        source = activation.get("source_root") if activation else None
+        if source and Path(source).is_absolute():
+            roots.add(Path(source))
+    return {root.resolve(strict=False) for root in roots}
+
+
+def _tool_launcher_is_owned(
+    path: Path, relative_source: str, state: Optional[dict]
+) -> bool:
+    try:
+        raw = Path(os.readlink(path))
+        lexical = raw if raw.is_absolute() else path.parent / raw
+        if lexical.absolute() == (current_path() / relative_source).absolute():
+            return True
+    except OSError:
+        return False
+    destination = _launcher_destination(path)
+    if destination is None:
+        return False
+    return destination in {
+        (root / relative_source).resolve(strict=False)
+        for root in _known_tool_launcher_roots(state)
+    }
+
+
+def _snapshot_tool_launchers(state: Optional[dict]) -> dict[str, Optional[str]]:
+    snapshot = {}
+    for name, relative_source in TOOL_LAUNCHERS:
+        path = bin_dir() / name
+        if path.exists() and not path.is_symlink():
+            raise DistributionError(
+                f"Hearting launcher already exists and is not owned: {path}"
+            )
+        if path.is_symlink() and not _tool_launcher_is_owned(
+            path, relative_source, state
+        ):
+            raise DistributionError(f"Hearting launcher is a foreign symlink: {path}")
+        snapshot[name] = os.readlink(path) if path.is_symlink() else None
+    return snapshot
+
+
+def _install_tool_launchers(root: Path) -> bool:
+    changed = False
+    for name, relative_source in TOOL_LAUNCHERS:
+        source = root / relative_source
+        if source.is_symlink() or not source.is_file():
+            raise DistributionError(
+                f"managed release lacks launcher source: {relative_source}"
+            )
+        path = bin_dir() / name
+        desired = current_path() / relative_source
+        if not path.is_symlink() or Path(os.readlink(path)) != desired:
+            _atomic_symlink(path, desired)
+            changed = True
+    return changed
+
+
+def _restore_tool_launchers(snapshot: dict[str, Optional[str]]) -> None:
+    for name, _relative_source in TOOL_LAUNCHERS:
+        _restore_link(bin_dir() / name, snapshot[name])
+
+
 def _repair_managed_pointers(state: dict) -> bool:
     target = Path(state["release_root"])
     if target.is_symlink() or not target.is_dir():
@@ -573,6 +661,8 @@ def _repair_managed_pointers(state: dict) -> bool:
             raise DistributionError(
                 f"managed release file escapes root: {relative}"
             ) from exc
+
+    _snapshot_tool_launchers(state)
 
     changed = False
     current = current_path()
@@ -602,6 +692,8 @@ def _repair_managed_pointers(state: dict) -> bool:
         raise DistributionError(f"harness launcher is a foreign symlink: {legacy}")
     if not legacy.is_symlink() or Path(os.readlink(legacy)) != desired:
         _atomic_symlink(legacy, desired)
+        changed = True
+    if _install_tool_launchers(target):
         changed = True
     return changed
 
@@ -794,6 +886,21 @@ def _install_or_update(
         if launcher.is_symlink() and not _launcher_is_harness_link(launcher):
             raise DistributionError(f"harness launcher is a foreign symlink: {launcher}")
         previous_launcher = os.readlink(launcher) if launcher.is_symlink() else None
+        legacy_launcher = legacy_launcher_path()
+        if legacy_launcher.exists() and not legacy_launcher.is_symlink():
+            raise DistributionError(
+                f"harness launcher already exists and is not owned: {legacy_launcher}"
+            )
+        if legacy_launcher.is_symlink() and not _launcher_is_harness_link(
+            legacy_launcher
+        ):
+            raise DistributionError(
+                f"harness launcher is a foreign symlink: {legacy_launcher}"
+            )
+        previous_legacy_launcher = (
+            os.readlink(legacy_launcher) if legacy_launcher.is_symlink() else None
+        )
+        previous_tool_launchers = _snapshot_tool_launchers(previous_state)
         previous_state_bytes = state_path().read_bytes() if state_path().is_file() else None
         old_root = (
             Path(previous_state["release_root"])
@@ -812,7 +919,8 @@ def _install_or_update(
             activation = _activate_release(target, selected)
             _atomic_symlink(current, target)
             _atomic_symlink(launcher, current / "tools/install/harness.sh")
-            _atomic_symlink(legacy_launcher_path(), current / "tools/install/harness.sh")
+            _atomic_symlink(legacy_launcher, current / "tools/install/harness.sh")
+            _install_tool_launchers(target)
             next_state = {
                 "schema": STATE_SCHEMA,
                 "repository": repository,
@@ -846,6 +954,8 @@ def _install_or_update(
             try:
                 _restore_link(current, previous_current)
                 _restore_link(launcher, previous_launcher)
+                _restore_link(legacy_launcher, previous_legacy_launcher)
+                _restore_tool_launchers(previous_tool_launchers)
                 if previous_state_bytes is None:
                     state_path().unlink(missing_ok=True)
                 else:

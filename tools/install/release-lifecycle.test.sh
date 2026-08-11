@@ -83,6 +83,8 @@ required = {
     "hearting/tools/install/harness.sh": "#!/bin/sh\n",
     "hearting/tools/install/installer.py": "# fixture\n",
     "hearting/tools/install/distribution.py": "# fixture\n",
+    "hearting/tools/fleet/fleet.sh": "#!/bin/sh\n",
+    "hearting/tools/memory/mem.py": "#!/usr/bin/env python3\n",
 }
 
 def make_release(version, attack=None, wrong_checksum=False):
@@ -164,6 +166,10 @@ assert installed["status"] == "installed"
 assert Path(installed["release_root"]).name == "v1.0.0"
 assert d.current_path().resolve().name == "v1.0.0"
 assert d.launcher_path().is_symlink()
+for name, relative in d.TOOL_LAUNCHERS:
+    path = d.bin_dir() / name
+    assert path.is_symlink()
+    assert Path(os.readlink(path)) == d.current_path() / relative
 assert d.is_managed()
 service, timer = d._systemd_paths()
 assert service.is_file() and timer.is_file()
@@ -283,10 +289,25 @@ same = d.update()
 assert same["status"] == "up-to-date"
 assert len(activation_calls) == 1
 
+fleet_launcher = d.bin_dir() / "fleet"
+fleet_launcher.unlink()
+fleet_launcher.symlink_to(tmp / "foreign/fleet")
+try:
+    d.update()
+except d.DistributionError:
+    pass
+else:
+    raise AssertionError("foreign Fleet launcher was overwritten")
+assert Path(os.readlink(fleet_launcher)) == tmp / "foreign/fleet"
+fleet_launcher.unlink()
+fleet_launcher.symlink_to(d.current_path() / "tools/fleet/fleet.sh")
+
 old_root = Path(installed["release_root"])
 linked = tmp / "linked-checkout"
 linked.mkdir()
 (linked / "sentinel").write_text("unchanged")
+(d.bin_dir() / "fleet").unlink()
+(d.bin_dir() / "fleet").symlink_to(linked / "tools/fleet/fleet.sh")
 runtime_homes = {
     "claude": Path(os.environ["HOME"]) / ".claude",
     "codex": Path(os.environ["HOME"]) / ".codex",
@@ -308,6 +329,9 @@ assert set(updated["runtimes"]) == {"codex", "opencode"}
 assert updated["skipped"] == {"claude": "linked"}
 assert (linked / "sentinel").read_text() == "unchanged"
 assert d.current_path().resolve().name == "v1.1.0"
+assert Path(os.readlink(d.bin_dir() / "fleet")) == (
+    d.current_path() / "tools/fleet/fleet.sh"
+)
 for runtime in ("codex", "opencode"):
     path = runtime_homes[runtime] / ".harness/activation.json"
     path.write_text(
@@ -334,6 +358,9 @@ assert d.current_path().resolve().name == "v1.1.0"
 assert d.state_path().read_bytes() == state_before_failure
 assert not (d.data_root() / "releases/v1.2.0").exists()
 assert activation_calls[-1][0] == "v1.1.0"
+assert Path(os.readlink(d.bin_dir() / "fleet")) == (
+    d.current_path() / "tools/fleet/fleet.sh"
+)
 
 for version, attack, wrong in [
     ("v1.2.1", None, True),
