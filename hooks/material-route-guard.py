@@ -496,6 +496,27 @@ def session_route(
     *,
     accepted_capabilities: set[str] | None = None,
 ) -> dict[str, Any]:
+    marker = _load_session_marker(session_id, agent_home)
+    if Path(str(marker.get("cwd", ""))).resolve(strict=False) != root.resolve():
+        raise RouteError("session-marker-cwd-mismatch")
+    route = verify_route(
+        Path(str(marker.get("route_file", ""))),
+        root,
+        agent_home,
+        expected_route_id=str(marker.get("route_id", "")),
+        accepted_capabilities=accepted_capabilities,
+    )
+    if route.get("route_hash") != marker.get("route_hash"):
+        raise RouteError("session-marker-route-hash-mismatch")
+    return route
+
+
+def _load_session_marker(
+    session_id: str,
+    agent_home: Path,
+) -> dict[str, Any]:
+    """Load identity-bound marker data before choosing its sealed checkout."""
+
     path = marker_path(agent_home, session_id)
     try:
         if path.is_symlink() or path.stat().st_size > 16_384:
@@ -507,19 +528,57 @@ def session_route(
         raise RouteError("session-marker-invalid")
     if marker.get("session_key") != session_key(session_id):
         raise RouteError("session-marker-foreign")
-    if Path(str(marker.get("cwd", ""))).resolve(strict=False) != root.resolve():
-        raise RouteError("session-marker-cwd-mismatch")
-    route_file = Path(str(marker.get("route_file", "")))
+    return marker
+
+
+def artifact_active_route(
+    session_id: str,
+    agent_home: Path,
+    *,
+    accepted_capabilities: set[str],
+) -> tuple[dict[str, Any], bool, Path]:
+    """Resolve an artifact write against the route's sealed checkout.
+
+    Linked worktrees deliberately write durable artifacts to the primary
+    checkout.  The target/caller path therefore cannot be used as the route
+    verification cwd.  Source edits keep using ``active_route`` and its exact
+    checkout equality; only artifact writes take this sealed-root path.
+    """
+
+    route_file_raw = os.environ.get("AGENT_ROUTE_FILE", "")
+    route_id = os.environ.get("AGENT_ROUTE_ID", "")
+    route_node = os.environ.get("AGENT_ROUTE_NODE", "")
+    is_worker = bool(route_file_raw or route_id or route_node)
+    if is_worker:
+        if not route_file_raw or not route_id:
+            raise RouteError("worker-route-binding-incomplete")
+        route_file = Path(route_file_raw)
+        unverified = _load_route(route_file)
+        sealed_root = Path(str(unverified.get("cwd", ""))).resolve(
+            strict=False
+        )
+        route = verify_route(
+            route_file,
+            sealed_root,
+            agent_home,
+            expected_route_id=route_id,
+            expected_node=route_node or None,
+            accepted_capabilities=accepted_capabilities,
+        )
+        return route, True, sealed_root
+
+    marker = _load_session_marker(session_id, agent_home)
+    sealed_root = Path(str(marker.get("cwd", ""))).resolve(strict=False)
     route = verify_route(
-        route_file,
-        root,
+        Path(str(marker.get("route_file", ""))),
+        sealed_root,
         agent_home,
         expected_route_id=str(marker.get("route_id", "")),
         accepted_capabilities=accepted_capabilities,
     )
     if route.get("route_hash") != marker.get("route_hash"):
         raise RouteError("session-marker-route-hash-mismatch")
-    return route
+    return route, False, sealed_root
 
 
 def worker_route(
@@ -1044,10 +1103,8 @@ def check_action(
         accepted = capability_artifact_caps(target)
         if not accepted:
             return
-        root = project_root(cwd)
-        route, is_worker = active_route(
+        route, is_worker, sealed_root = artifact_active_route(
             session_id,
-            root,
             agent_home,
             accepted_capabilities=accepted,
         )
@@ -1057,7 +1114,7 @@ def check_action(
         if not _within(target.resolve(strict=False), artifact_root):
             raise RouteError("route-artifact-root-mismatch")
         if not is_worker:
-            require_recall_opportunity(session_id, turn_id, root)
+            require_recall_opportunity(session_id, turn_id, sealed_root)
         return
     if tool in EDIT_TOOLS:
         if not file_path:

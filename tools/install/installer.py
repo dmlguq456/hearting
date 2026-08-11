@@ -55,8 +55,8 @@ def build_parser():
     p = _UsageExitParser(
         prog="harness",
         description=(
-            "hearting installer — managed releases for users, "
-            "linked checkouts for maintainers."
+            "hearting installer — immutable local snapshots by default; "
+            "linked checkouts are an explicit maintainer debug mode."
         ),
     )
     # Common options inherited by all subcommands.
@@ -123,9 +123,17 @@ def build_parser():
     p_runtime_status = runtime_sub.add_parser("status", help="Show the active source and freshness")
     runtime_common(p_runtime_status)
 
-    p_runtime_activate = runtime_sub.add_parser("activate", help="Activate a linked or packaged source")
+    p_runtime_activate = runtime_sub.add_parser(
+        "activate",
+        help="Activate an immutable packaged snapshot (default) or explicit linked debug source",
+    )
     runtime_common(p_runtime_activate, require_runtime=True)
-    p_runtime_activate.add_argument("--mode", choices=runtime_activation.MODES, required=True)
+    p_runtime_activate.add_argument(
+        "--mode",
+        choices=runtime_activation.MODES,
+        default="packaged",
+        help="packaged (default, session-stable) or linked (explicit live/debug projection)",
+    )
     p_runtime_activate.add_argument("--source", help="local canonical repo (default: AGENT_HOME)")
     p_runtime_activate.add_argument(
         "--report-bundle-root",

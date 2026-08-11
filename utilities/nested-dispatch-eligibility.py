@@ -136,7 +136,17 @@ def auth_check(child_harness: str, worktree: str | Path | None = None) -> tuple[
     # worktree.  Running the auth probe from the primary checkout falsely
     # reported auth-unavailable even though the projected CODEX_HOME was valid.
     cwd = Path(worktree).resolve() if worktree else ROOT
-    result = subprocess.run(command, cwd=cwd, text=True, capture_output=True, check=False)
+    try:
+        result = subprocess.run(
+            command,
+            cwd=cwd,
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=AUTH_CHECK_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired:
+        return False, "auth-check-timeout"
     if result.returncode != 0 or not (
         accepted(result.stdout) or accepted(result.stderr)
     ):
@@ -160,7 +170,17 @@ def command_check(child_harness: str, worktree: str) -> tuple[str, str, str]:
         return "unsupported", "direct-command-check", "command-unavailable"
     else:
         return "unknown", "unsupported-child-harness", "unknown-harness"
-    result = subprocess.run(command, cwd=worktree, text=True, capture_output=True, check=False)
+    try:
+        result = subprocess.run(
+            command,
+            cwd=worktree,
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=HEADLESS_CHECK_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired:
+        return "unsupported", "direct-headless-check", "headless-check-timeout"
     if result.returncode == 0:
         return "supported", "direct-auth+headless-check", ""
     detail = (result.stdout + "\n" + result.stderr).strip().replace("\n", ";")
@@ -203,6 +223,8 @@ PARENT_RUNTIME_SOURCES = {
     "codex-owner-network-contract",
     "codex-prospective-standard-owner-registry-contract",
 }
+AUTH_CHECK_TIMEOUT_SECONDS = 20
+HEADLESS_CHECK_TIMEOUT_SECONDS = 180
 
 
 def prospective_owner_registry_check(args: argparse.Namespace) -> tuple[bool, str]:
@@ -322,9 +344,15 @@ def evaluate(args: argparse.Namespace) -> dict[str, object]:
             registry_failure,
         )
     elif codex_owner_tuple and not owner_marker and not prospective_owner:
-        status, source, failure = "unsupported", "codex-owner-network-contract", "nested-network-unconfirmed"
+        status, source, failure = (
+            "unsupported",
+            "codex-owner-network-contract",
+            "prospective-owner-check-required",
+        )
         next_check = "--prospective-standard-owner"
     else:
+        if prospective_owner:
+            probe_scope = "prospective-standard-owner"
         status, source, failure = command_check(args.child_harness, args.worktree)
         if status == "supported" and args.parent_harness == "codex":
             if prospective_owner and not owner_marker:
@@ -333,7 +361,6 @@ def evaluate(args: argparse.Namespace) -> dict[str, object]:
                     "codex-prospective-standard-owner-registry-contract+"
                     + source
                 )
-                probe_scope = "prospective-standard-owner"
             else:
                 source = "codex-owner-network-contract+" + source
     failure_scope, codex_command, retry_on_isolated_worktree = failure_diagnostics(

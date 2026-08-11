@@ -7,9 +7,16 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import runtime_activation as activation  # noqa: E402
+import installer  # noqa: E402
 
 
 class RuntimeSnapshotTest(unittest.TestCase):
+    def test_runtime_activate_defaults_to_packaged_snapshot(self):
+        args = installer.build_parser().parse_args(
+            ["runtime", "activate", "--runtime", "codex"]
+        )
+        self.assertEqual(args.mode, "packaged")
+
     def test_snapshot_and_restore_preserve_live_managed_session_sockets(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

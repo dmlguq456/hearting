@@ -1355,6 +1355,16 @@ class DispatchContractTest(unittest.TestCase):
   terminal=D.attempt_process_quiescence(receipt,terminal_receipt=True)
   self.assertEqual((terminal.state,terminal.reason),
                    ("quiescent","governed-process-group-reaped"))
+  # A canonical terminal registry row is itself the exact terminal gate. Its
+  # complete post-exit receipt must survive the observer namespace exit rather
+  # than being revived by a stale summary/UI heartbeat.
+  observed=D.observed_attempt_liveness("done",receipt)
+  self.assertEqual((observed.state,observed.process_state),
+                   ("terminal","quiescent"))
+  self.assertEqual(observed.process_reason,"governed-process-group-reaped")
+  still_open=D.observed_attempt_liveness("open",receipt)
+  self.assertEqual((still_open.state,still_open.process_state),
+                   ("unverifiable","unverifiable"))
   # An equivalent receipt observed from its own namespace keeps its verdict, so
   # the seam did not break the ordinary foreground-reap path.
   proc=subprocess.Popen([sys.executable,"-c","import time; time.sleep(30)"],

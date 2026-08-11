@@ -214,12 +214,12 @@ shows the same structure as a diagram.
 | `tools/install/` | Activation lifecycle that leaves runtime-owned state alone |
 | `.agent_reports/` | Project artifacts for specs, plans, test evidence, and handoffs |
 
-Managed releases are the general-user default. `linked` remains the maintainer
-mode: checkout changes appear immediately on the discovery path, and the
-release updater never fetches, pulls, or repoints that checkout. File visibility
-and instruction reload are separate concerns, so `runtime status` reports
-whether each runtime needs a re-invocation, new session, or restart through
-`session_action`.
+Immutable packaged releases or local snapshots are the default for users and
+maintainers. `linked` remains an explicit live-debug mode: checkout changes
+appear immediately on the discovery path, so it cannot guarantee one coherent
+runtime generation for a long session. File visibility and instruction reload
+are separate concerns, so `runtime status` reports whether each runtime needs a
+re-invocation, new session, or restart through `session_action`.
 
 ## Runtime support
 
@@ -236,13 +236,17 @@ databases, logs, and foreign caches remain outside its ownership. See
 
 ## Develop the harness
 
-Maintainers can keep a live checkout instead of the managed release:
+Maintainers build and activate a local immutable snapshot from a clean checkout:
 
 ```bash
 git clone https://github.com/dmlguq456/hearting.git ~/hearting
 cd ~/hearting
-./tools/install/harness.sh runtime activate --runtime all --mode linked
+./tools/install/harness.sh runtime activate --runtime all
 ```
+
+Use `--mode linked` only when intentionally debugging live projection behavior.
+Updating the checkout does not activate a new snapshot; run `runtime refresh`
+explicitly, and only new sessions use the new root.
 
 Enable the repository's own Git hooks once per clone:
 

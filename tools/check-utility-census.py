@@ -26,16 +26,21 @@ TEST_PATTERNS = (".test.py", ".test.sh")
 def census_scopes(text: str) -> list[tuple[str, set[str]]]:
     projected = re.findall(r'^\s*UTILITY_PROJECTED="([^"]*)"', text, re.M)
     deferred = re.findall(r'^\s*UTILITY_DEFERRED="([^"]*)"', text, re.M)
-    if len(projected) != 2 or len(deferred) != 2:
+    shared = re.findall(
+        r'^\s*SHARED_UTILITY_DEFERRED="([^"]*)"', text, re.M
+    )
+    if len(projected) != 2 or len(deferred) != 2 or len(shared) != 1:
         raise SystemExit(
             "check-utility-census: expected exactly 2 UTILITY_PROJECTED and 2 "
-            f"UTILITY_DEFERRED lists in {BOUNDARY.name}, found "
-            f"{len(projected)}/{len(deferred)} — realign this parser with the guard"
+            "UTILITY_DEFERRED lists plus 1 SHARED_UTILITY_DEFERRED list in "
+            f"{BOUNDARY.name}, found {len(projected)}/{len(deferred)}/{len(shared)} "
+            "— realign this parser with the guard"
         )
+    shared_members = set(shared[0].split())
     scopes = []
     for label, p, d in (("codex", projected[0], deferred[0]),
                         ("opencode", projected[1], deferred[1])):
-        scopes.append((label, set(p.split()) | set(d.split())))
+        scopes.append((label, set(p.split()) | set(d.split()) | shared_members))
     return scopes
 
 

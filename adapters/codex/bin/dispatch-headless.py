@@ -385,7 +385,11 @@ def resolve_parent_completion_delivery(args: argparse.Namespace) -> str:
                     "interactive-auto-wake-unsupported"
                 )
             return "poll-fallback"
-        args.parent_completion_reason = "managed-single-ingress-live"
+        if args.managed_gateway_binding.thread_advanced:
+            args.parent_session_id = args.managed_gateway_binding.thread_id
+            args.parent_completion_reason = "managed-thread-advanced"
+        else:
+            args.parent_completion_reason = "managed-single-ingress-live"
         return MANAGED_PARENT_DELIVERY
     if direct_registered and args.parent_harness == "claude":
         args.parent_completion_reason = "claude-async-rewake-resume"

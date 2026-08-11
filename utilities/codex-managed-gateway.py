@@ -43,6 +43,7 @@ MAX_CONTROL_BYTES = 16 * 1024
 MAX_CONTEXT_BYTES = 2048
 MAX_LEDGER_BYTES = 4 * 1024 * 1024
 MAX_DELIVERIES = 4096
+MAX_THREAD_LINEAGE = 16
 INTERNAL_ID_PREFIX = "hearting-managed:"
 ID_PATTERN = re.compile(r"^[A-Za-z0-9._:@/+\-=]{1,256}$")
 FLEET_SESSION_PATTERN = re.compile(r"^[A-Za-z0-9._-]{1,256}$")
@@ -486,6 +487,7 @@ class ManagedGateway:
         self._upstream: WebSocket | None = None
         self._epoch = 0
         self._current_thread_id = ""
+        self._thread_predecessors: dict[str, str] = {}
         self._threads: dict[str, ThreadState] = {}
         self._tui_requests: dict[tuple[str, Any], tuple[str, dict[str, Any]]] = {}
         self._appserver_requests: dict[
@@ -566,6 +568,7 @@ class ManagedGateway:
                 self._tui = tui
                 self._upstream = upstream
                 self._current_thread_id = ""
+                self._thread_predecessors.clear()
                 self._threads.clear()
                 self._tui_requests.clear()
                 for thread_id in {
@@ -641,6 +644,7 @@ class ManagedGateway:
                 self._appserver_requests.clear()
                 self._threads.clear()
                 self._current_thread_id = ""
+                self._thread_predecessors.clear()
                 current_tui = self._tui
                 current_upstream = self._upstream
                 self._tui = None
@@ -924,12 +928,20 @@ class ManagedGateway:
         params: dict[str, Any],
         message: dict[str, Any],
     ) -> None:
-        if method in {"thread/start", "thread/resume"} and "error" not in message:
+        if method in {"thread/start", "thread/resume", "thread/fork"} and "error" not in message:
             thread_id = (
                 thread_id_from_message(message)
                 or str(params.get("threadId", ""))
             )
             if thread_id:
+                predecessor = params.get("threadId")
+                if (
+                    method == "thread/fork"
+                    and isinstance(predecessor, str)
+                    and ID_PATTERN.fullmatch(predecessor)
+                    and predecessor != thread_id
+                ):
+                    self._thread_predecessors[thread_id] = predecessor
                 self._current_thread_id = thread_id
                 self._threads.setdefault(thread_id, ThreadState())
         if method != "turn/start":
@@ -1164,6 +1176,16 @@ class ManagedGateway:
     def status(self) -> dict[str, Any]:
         with self._lock:
             state = self._threads.get(self._current_thread_id)
+            ancestors: list[str] = []
+            observed = {self._current_thread_id}
+            current = self._current_thread_id
+            while len(ancestors) < MAX_THREAD_LINEAGE:
+                predecessor = self._thread_predecessors.get(current, "")
+                if not predecessor or predecessor in observed:
+                    break
+                ancestors.append(predecessor)
+                observed.add(predecessor)
+                current = predecessor
             return {
                 "schema_version": 1,
                 "status": (
@@ -1172,6 +1194,7 @@ class ManagedGateway:
                 ),
                 "epoch": self._epoch,
                 "thread_id": self._current_thread_id,
+                "thread_ancestors": ancestors,
                 "active_turn_id": state.active_turn_id if state else "",
                 "approval_owner": "tui",
                 "upstream_clients": 1 if self._upstream else 0,

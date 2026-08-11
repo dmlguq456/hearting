@@ -37,6 +37,14 @@ class ManagedGatewayBinding:
     control_socket: Path
     thread_id: str
     epoch: int
+    inherited_thread_id: str = ""
+
+    @property
+    def thread_advanced(self) -> bool:
+        return bool(
+            self.inherited_thread_id
+            and self.inherited_thread_id != self.thread_id
+        )
 
 
 @dataclass(frozen=True)
@@ -136,10 +144,22 @@ def probe_managed_codex_parent(
         control, {"schema_version": 1, "op": "status"}
     )
     epoch = response.get("epoch")
+    gateway_thread = response.get("thread_id")
+    ancestors = response.get("thread_ancestors", [])
+    lineage_valid = (
+        isinstance(ancestors, list)
+        and len(ancestors) <= 16
+        and all(isinstance(value, str) for value in ancestors)
+    )
+    inherited_is_current_or_ancestor = (
+        gateway_thread == current_thread
+        or (lineage_valid and current_thread in ancestors)
+    )
     if (
         response.get("schema_version") != 1
         or response.get("status") != "ready"
-        or response.get("thread_id") != current_thread
+        or not isinstance(gateway_thread, str)
+        or not inherited_is_current_or_ancestor
         or response.get("approval_owner") != "tui"
         or response.get("upstream_clients") != 1
         or not isinstance(epoch, int)
@@ -147,7 +167,9 @@ def probe_managed_codex_parent(
         or epoch < 1
     ):
         raise ManagedDispatchError("managed-gateway-not-ready")
-    return ManagedGatewayBinding(control, current_thread, epoch)
+    return ManagedGatewayBinding(
+        control, gateway_thread, epoch, inherited_thread_id=current_thread
+    )
 
 
 def sealed_batch_id(thread_id: str, attempt_ids: set[str]) -> str:

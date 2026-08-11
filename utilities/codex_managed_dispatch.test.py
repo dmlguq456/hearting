@@ -26,9 +26,16 @@ SPEC.loader.exec_module(MANAGED)
 
 
 class StatusServer:
-    def __init__(self, path: Path, *, thread_id: str = "thread-1") -> None:
+    def __init__(
+        self,
+        path: Path,
+        *,
+        thread_id: str = "thread-1",
+        thread_ancestors: list[str] | None = None,
+    ) -> None:
         self.path = path
         self.thread_id = thread_id
+        self.thread_ancestors = thread_ancestors or []
         self.request: dict[str, object] | None = None
         self.listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         self.listener.bind(str(path))
@@ -51,6 +58,7 @@ class StatusServer:
             "status": "ready",
             "epoch": 7,
             "thread_id": self.thread_id,
+            "thread_ancestors": self.thread_ancestors,
             "active_turn_id": "",
             "approval_owner": "tui",
             "upstream_clients": 1,
@@ -110,6 +118,37 @@ class ManagedDispatchTest(unittest.TestCase):
 
     def test_probe_rejects_foreign_thread(self) -> None:
         server = StatusServer(self.control, thread_id="thread-foreign")
+        self.addCleanup(server.close)
+        with self.assertRaises(MANAGED.ManagedDispatchError) as raised:
+            MANAGED.probe_managed_codex_parent(
+                parent_harness="codex",
+                parent_session_id="thread-1",
+                environ=self.env(self.control),
+            )
+        self.assertEqual(str(raised.exception), "managed-gateway-not-ready")
+
+    def test_probe_accepts_gateway_witnessed_fork_and_resolves_successor(self) -> None:
+        server = StatusServer(
+            self.control,
+            thread_id="thread-2",
+            thread_ancestors=["thread-1"],
+        )
+        self.addCleanup(server.close)
+        binding = MANAGED.probe_managed_codex_parent(
+            parent_harness="codex",
+            parent_session_id="thread-1",
+            environ=self.env(self.control),
+        )
+        self.assertEqual(binding.thread_id, "thread-2")
+        self.assertEqual(binding.inherited_thread_id, "thread-1")
+        self.assertTrue(binding.thread_advanced)
+
+    def test_probe_rejects_unwitnessed_thread_switch(self) -> None:
+        server = StatusServer(
+            self.control,
+            thread_id="thread-2",
+            thread_ancestors=["thread-unrelated"],
+        )
         self.addCleanup(server.close)
         with self.assertRaises(MANAGED.ManagedDispatchError) as raised:
             MANAGED.probe_managed_codex_parent(

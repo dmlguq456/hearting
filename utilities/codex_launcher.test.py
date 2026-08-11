@@ -71,8 +71,12 @@ class CodexLauncherRuntimeTest(unittest.TestCase):
             entry.write_text("# fixture\n", encoding="utf-8")
             real = root / "codex-real"
             real.write_text("# fixture\n", encoding="utf-8")
-            with mock.patch.dict(os.environ, {"AGENT_HOME": str(agent_home)}):
-                command = launcher.managed_command(["resume", "--last"], home, real)
+            command = launcher.managed_command(
+                ["resume", "--last"],
+                home,
+                real,
+                {"active_root": agent_home},
+            )
             self.assertEqual(command[1], str(entry))
             self.assertEqual(command[command.index("--codex") + 1], str(real))
             state_dir = Path(command[command.index("--state-dir") + 1])
@@ -101,8 +105,9 @@ class CodexLauncherRuntimeTest(unittest.TestCase):
                 "resume",
                 "--last",
             ]
-            with mock.patch.dict(os.environ, {"AGENT_HOME": str(agent_home)}):
-                command = launcher.managed_command(original, home, real)
+            command = launcher.managed_command(
+                original, home, real, {"active_root": agent_home}
+            )
             separator = command.index("--")
             self.assertEqual(command[separator + 1 :], original)
 
@@ -116,6 +121,64 @@ class CodexLauncherRuntimeTest(unittest.TestCase):
             self.assertTrue(launcher.managed_auth_ready(home))
             auth.chmod(0o644)
             self.assertFalse(launcher.managed_auth_ready(home))
+
+    def test_packaged_runtime_is_resolved_once_across_activation_switch(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            home = root / ".codex"
+            harness = home / ".harness"
+            bundles = harness / "bundles"
+            bundles.mkdir(parents=True)
+
+            def packaged(name: str) -> Path:
+                source = bundles / name / "source"
+                (source / "core").mkdir(parents=True)
+                (source / "core" / "CORE.md").write_text("core\n", encoding="utf-8")
+                entry = source / "utilities" / "codex-managed-entry.py"
+                entry.parent.mkdir()
+                entry.write_text(f"# {name}\n", encoding="utf-8")
+                (source.parent / "bundle.json").write_text(
+                    '{"checksum":"sum-%s","source_revision":"rev-%s"}\n'
+                    % (name, name),
+                    encoding="utf-8",
+                )
+                return source
+
+            first = packaged("first")
+            second = packaged("second")
+            projection = home / "hearting"
+            projection.symlink_to(first, target_is_directory=True)
+            activation = harness / "activation.json"
+
+            def select(name: str, source: Path) -> None:
+                activation.write_text(
+                    '{"schema":2,"runtime":"codex","mode":"packaged",'
+                    '"active_root":"%s","active_revision":"rev-%s",'
+                    '"bundle_checksum":"sum-%s"}\n' % (source, name, name),
+                    encoding="utf-8",
+                )
+                activation.chmod(0o600)
+
+            select("first", first)
+            binding = launcher.pinned_runtime(home)
+            projection.unlink()
+            projection.symlink_to(second, target_is_directory=True)
+            select("second", second)
+
+            real = root / "codex-real"
+            real.write_text("fixture\n", encoding="utf-8")
+            command = launcher.managed_command([], home, real, binding)
+            self.assertEqual(
+                Path(command[1]), first / "utilities" / "codex-managed-entry.py"
+            )
+            with mock.patch.dict(os.environ, {}, clear=False):
+                launcher.export_runtime_binding(binding)
+                self.assertEqual(os.environ["AGENT_HOME"], str(first))
+                self.assertEqual(os.environ["AGENT_RUNTIME_ROOT"], str(first))
+                self.assertEqual(
+                    os.environ["AGENT_RUNTIME_IDENTITY"],
+                    "packaged:rev-first:sum-first",
+                )
 
     def test_state_rejects_a_wrapper_real_command(self) -> None:
         # Binding to another install's ingress would exec this launcher forever.

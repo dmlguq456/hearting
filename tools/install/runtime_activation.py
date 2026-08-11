@@ -2013,7 +2013,8 @@ def _status_missing(runtime: str, scope: str) -> dict:
         "freshness": "missing",
         "session_action": SESSION_ACTIONS[runtime],
         "external_dependencies": [],
-        "next_action": f"harness runtime activate --runtime {runtime} --mode linked",
+        "session_consistency": "not-active",
+        "next_action": f"harness runtime activate --runtime {runtime}",
     }
 
 
@@ -2134,6 +2135,11 @@ def status(runtime: str, scope: str = "global") -> dict:
         "freshness": freshness,
         "session_action": SESSION_ACTIONS[runtime],
         "external_dependencies": [],
+        "session_consistency": (
+            "pinned-immutable-root"
+            if state["mode"] == "packaged"
+            else "mutable-linked-debug"
+        ),
         "next_action": next_action,
     }
 

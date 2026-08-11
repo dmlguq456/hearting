@@ -504,7 +504,7 @@ class CodexSD78CompletionDelivery(unittest.TestCase):
 
     def test_managed_interactive_parent_selects_single_ingress_gateway(self):
         args = self.parent_args()
-        binding = object()
+        binding = mock.Mock(thread_advanced=False)
         with mock.patch.dict(
             os.environ,
             {
@@ -529,6 +529,37 @@ class CodexSD78CompletionDelivery(unittest.TestCase):
         probe.assert_called_once_with(
             parent_harness="codex",
             parent_session_id=args.parent_session_id,
+        )
+
+    def test_managed_interactive_parent_resolves_witnessed_fork_successor(self):
+        args = self.parent_args()
+        inherited = args.parent_session_id
+        binding = mock.Mock(
+            thread_advanced=True,
+            thread_id="thread-fork-successor",
+        )
+        with mock.patch.dict(
+            os.environ,
+            {
+                "CODEX_THREAD_ID": inherited,
+                "AGENT_DISPATCH_CHILD": "0",
+                "AGENT_CODEX_MANAGED_GATEWAY": "1",
+                "AGENT_CODEX_MANAGED_PARENT_RUNTIME": "codex",
+            },
+            clear=True,
+        ), mock.patch.object(
+            WH, "probe_managed_codex_parent", return_value=binding
+        ) as probe:
+            WH.bind_parent_completion_delivery(args)
+        self.assertEqual(
+            args.parent_completion_delivery, WH.MANAGED_PARENT_DELIVERY
+        )
+        self.assertEqual(args.parent_session_id, "thread-fork-successor")
+        self.assertEqual(
+            args.parent_completion_reason, "managed-thread-advanced"
+        )
+        probe.assert_called_once_with(
+            parent_harness="codex", parent_session_id=inherited
         )
 
     def test_managed_probe_failure_is_typed_poll_fallback(self):

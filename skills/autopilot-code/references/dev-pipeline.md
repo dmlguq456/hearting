@@ -18,21 +18,16 @@ Run every probe against that exact absolute path; each tuple records it as
 from the primary checkout, a staging worktree, or a worktree that was later replaced is not
 reusable for the final route.
 
-Each tuple answers "may the parent of a dispatch-depth-2 node spawn that child?", so every
-`--parent-*` value describes **the dispatch-depth-1 owner you are about to launch, not the
-session running the probe**. Take the defaults; they resolve that parent for you.
+Each tuple answers "may the parent of a dispatch-depth-2 node spawn that child?" Use the
+readiness generator so the caller never has to reproduce the prospective-owner context or
+assemble the evidence schema by hand.
 
 ```bash
-OWNER_PROFILE_ARGS=()
-if [ "$OWNER_HARNESS" = codex ]; then
-  OWNER_PROFILE_ARGS+=(--prospective-standard-owner --jobs "$CANONICAL_JOBS")
-fi
-for CHILD in claude codex; do
-  python3 "$AGENT_HOME/utilities/nested-dispatch-eligibility.py" \
-    --parent-harness "$OWNER_HARNESS" --child-harness "$CHILD" \
-    --launch-authority conductor --worktree "$WORKTREE" \
-    "${OWNER_PROFILE_ARGS[@]}" --json
-done   # collect the exact-worktree tuples into --dispatch-evidence
+python3 "$AGENT_HOME/utilities/dispatch-readiness.py" \
+  --worktree "$WORKTREE" --jobs "$CANONICAL_JOBS" \
+  --owner-harness "$OWNER_HARNESS" \
+  --child-harness claude --child-harness codex \
+  --output "$DISPATCH_EVIDENCE"
 ```
 
 Every tuple also carries `failure_scope`, `codex_command`, and
@@ -51,8 +46,11 @@ to the launch, `dispatch-owner --route-evidence "$ROUTE_FILE" --start ...`, so t
 cascade cannot select a harness the tuples never probed. Getting any of this wrong fails route
 compilation or owner selection before material work; it must never exhaust checked hops and then
 silently run the route inline.
-`--prospective-standard-owner` is only for this pre-owner Codex check. Once the Codex owner is
-running, omit it: the probe then requires the launcher's actual network marker.
+For a Codex owner the generator automatically applies the prospective standard-owner network
+and exact registry check. A raw depth-0 `nested-headless` call without that context reports
+`prospective-owner-check-required`; it is not evidence that nested networking is unavailable.
+Once the Codex owner is running, its internal probe instead requires the launcher's actual
+network marker.
 Dispatch every durable node through `utilities/dispatch-node.py`; it binds the route identity,
 node, write scope, completion gate, exact fallback tuple, and current attempt axes to the
 selected adapter wrapper:

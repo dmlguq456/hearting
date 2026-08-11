@@ -201,6 +201,14 @@ class FakeAppServer:
                         "result": {"thread": {"id": "thread-1"}},
                     }
                 )
+            elif method == "thread/fork":
+                websocket.write_json(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": message["id"],
+                        "result": {"thread": {"id": "thread-2"}},
+                    }
+                )
             elif method == "turn/start":
                 with self.lock:
                     self.start_count += 1
@@ -494,6 +502,17 @@ class ManagedGatewayTest(unittest.TestCase):
         raise AssertionError(
             f"interaction marker did not become {'present' if present else 'absent'}"
         )
+
+    def test_status_proves_witnessed_fork_lineage(self) -> None:
+        result = self.client.request(
+            "thread/fork", {"threadId": "thread-1"}
+        )
+        self.assertEqual(result["thread"]["id"], "thread-2")
+        status = control(
+            self.control, {"schema_version": 1, "op": "status"}
+        )
+        self.assertEqual(status["thread_id"], "thread-2")
+        self.assertEqual(status["thread_ancestors"], ["thread-1"])
 
     def test_idle_completion_starts_once_and_duplicate_replays(self) -> None:
         first = control(self.control, receipt_request())

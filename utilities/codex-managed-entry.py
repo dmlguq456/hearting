@@ -282,6 +282,13 @@ def execute(args: argparse.Namespace) -> int:
             "CODEX_HOME": str(codex_home),
             "CODEX_SQLITE_HOME": str(codex_home),
             "AGENT_HOME": str(ROOT),
+            "AGENT_RUNTIME_ROOT": str(ROOT),
+            "AGENT_RUNTIME_IDENTITY": os.environ.get(
+                "AGENT_RUNTIME_IDENTITY", f"direct:{ROOT.name}"
+            ),
+            "AGENT_RUNTIME_ACTIVATION_MODE": os.environ.get(
+                "AGENT_RUNTIME_ACTIVATION_MODE", "direct"
+            ),
             "AGENT_CODEX_MANAGED_GATEWAY": "1",
             "AGENT_CODEX_MANAGED_PARENT_RUNTIME": "codex",
             "AGENT_CODEX_MANAGED_CONTROL_SOCKET": str(control),

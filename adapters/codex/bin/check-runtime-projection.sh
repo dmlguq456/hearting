@@ -40,8 +40,9 @@ if [ -f "$activation_state" ]; then
 import json, pathlib, sys
 state = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
 source = pathlib.Path(state.get("source_root", "")).resolve()
+active = pathlib.Path(state.get("active_root") or source).resolve()
 expected = pathlib.Path(sys.argv[2]).resolve()
-if state.get("runtime") == "codex" and source == expected and state.get("activated_projection_digest"):
+if state.get("runtime") == "codex" and active == expected and state.get("activated_projection_digest"):
     print("managed")
     raise SystemExit(0)
 raise SystemExit(1)
@@ -72,8 +73,10 @@ if [ "$native_managed" -eq 1 ]; then
     printf 'check=%s:skipped reason=runtime-managed\n' "$name"
   done
   printf 'check=agent-modes:ok reason=runtime-managed-per-file\n'
-  if "$AGENT_HOME/tools/install/harness.sh" runtime doctor --runtime codex --strict --json >/dev/null 2>&1; then
-    printf 'check=runtime-activation:ok\n'
+  if [ "${CODEX_RUNTIME_PROJECTION_FAST:-0}" = "1" ]; then
+    printf 'check=runtime-activation:ok reason=fast-pinned-identity\n'
+  elif "$AGENT_HOME/tools/install/harness.sh" runtime doctor --runtime codex --strict --json >/dev/null 2>&1; then
+    printf 'check=runtime-activation:ok reason=strict-doctor\n'
   else
     printf 'check=runtime-activation:failed\n'
     fails=$((fails + 1))

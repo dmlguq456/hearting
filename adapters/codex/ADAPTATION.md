@@ -628,6 +628,12 @@ same-harness → cross-harness → native → inline ordering. Adapter launches 
 exact attempt, `pid`, and `/proc` start-tick identity; shared-worktree transcript
 activity cannot revive an exited retry.
 
+Before that owner exists, `dispatch-readiness` generates the exact-worktree
+evidence atomically and automatically applies the prospective Codex owner
+network and registry contract. A raw depth-0 `nested-headless` call without that
+context is typed `prospective-owner-check-required`; it is not a runtime-global
+network failure.
+
 `dispatch-chain` selects a provisional launch lifecycle from its current PID
 scope, and every Codex, Claude, or OpenCode wrapper rechecks its actual scope
 before attempt registration. A transient wrapper promotes `detached` to

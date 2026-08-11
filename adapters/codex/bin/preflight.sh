@@ -75,6 +75,7 @@ usage: preflight.sh write <file> [session-id] [turn-id]
        preflight.sh subagent-info [--check]
        preflight.sh headless [--check] [--require-hook-trust] <worktree>
        preflight.sh nested-headless --parent-harness <h> --parent-transport <t> --parent-sandbox <s> --child-harness <h> --launch-authority <authority> --worktree <path> [--prospective-standard-owner --jobs <canonical-jobs.log>] [--user-disabled] [--json]
+       preflight.sh dispatch-readiness --worktree <path> --jobs <canonical-jobs.log> --owner-harness <h>... --child-harness <h>... --output <evidence.json>
        preflight.sh broker <status|stop> --jobs <jobs.log> [--root <broker-root>]  # legacy drain only
        preflight.sh dispatch [--dry-run|--register|--start] [--require-hook-trust] --worktree <path> --slug <slug> --capability <name> --capability-mode <mode> [--worker-mode <family/mode>] --qa <level> [--intensity <level>] [--dispatch-depth 1|2] [--parent <slug>] [--worker-type owner|stage|review|support] [--unit <unit>] [--assigned-contract <capability>] [--owner <capability>] (--model-profile <deep|balanced-deep|light|mini> [--model-role <role>]|--model-role <role>|--model <model> --reasoning <effort>|--inherit-model-settings) [--prompt-file <file>|--prompt-text <text>] [--jobs <jobs.log>]
        preflight.sh dispatch-owner [--adapter <harness>] [--dry-run|--register|--start] --worktree <path> --slug <slug> --capability <name> --capability-mode <mode> --qa <level> --intensity <level> --dispatch-depth 1 --worker-type owner --assigned-contract <capability> --owner <capability> --model-profile <deep|balanced-deep|light> [--prompt-file <file>|--prompt-text <text>] [--jobs <jobs.log>]
@@ -227,7 +228,7 @@ codex_runtime_projection_check() {
     printf 'check=failed\nreason=codex-home-unset\n'
     return 69
   fi
-  AGENT_HOME="$AGENT_ROOT" CODEX_RUNTIME_PROJECTION_SKIP_CLI_DISCOVERY=1 CODEX_REQUIRE_HOOK_TRUST="${CODEX_REQUIRE_HOOK_TRUST:-0}" \
+  AGENT_HOME="$AGENT_ROOT" CODEX_RUNTIME_PROJECTION_FAST=1 CODEX_RUNTIME_PROJECTION_SKIP_CLI_DISCOVERY=1 CODEX_REQUIRE_HOOK_TRUST="${CODEX_REQUIRE_HOOK_TRUST:-0}" \
     "$ROOT/adapters/codex/bin/check-runtime-projection.sh" || return $?
   printf 'runtime_projection=ok\ncodex_home=%s\n' "$codex_home"
   return 0
@@ -638,6 +639,10 @@ EOF
   nested-headless)
     shift
     python3 "$ROOT/utilities/nested-dispatch-eligibility.py" "$@"
+    ;;
+  dispatch-readiness)
+    shift
+    python3 "$ROOT/utilities/dispatch-readiness.py" "$@"
     ;;
   broker)
     shift

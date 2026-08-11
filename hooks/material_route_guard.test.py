@@ -308,6 +308,75 @@ class MaterialRouteGuardTest(unittest.TestCase):
         )
         self.assertEqual(recovered.returncode, 0, recovered.stderr)
 
+    def test_linked_worktree_route_allows_only_primary_canonical_artifacts(self) -> None:
+        linked = self.base / "linked"
+        subprocess.run(
+            ["git", "-C", str(self.repo), "worktree", "add", "-q", str(linked), "HEAD"],
+            check=True,
+        )
+        artifact_root = self.repo / ".agent_reports"
+        route = artifact_root / ".runtime" / "routes" / "linked.json"
+        route.parent.mkdir(parents=True)
+        command = [
+            sys.executable, str(ROUTER), "compile",
+            "--capability", "autopilot-code",
+            "--capability-mode", "dev",
+            "--intensity", "direct",
+            "--cwd", str(linked),
+            "--artifact-root", str(artifact_root),
+        ]
+        for predicate in PREDICATES:
+            command += ["--predicate", predicate]
+        command += [
+            "--transport", "interactive",
+            "--inline-reason", "atomic-direct",
+            "--tracking", "untracked",
+            "--spec-read", "not-applicable",
+            "--drift-verdict", "no-project-spec",
+            "--workflow-mode", "untracked",
+            "--artifact-guard", "preflight-passed",
+            "--output", str(route),
+        ]
+        compiled = subprocess.run(command, text=True, capture_output=True)
+        self.assertEqual(compiled.returncode, 0, compiled.stderr)
+        bound = subprocess.run(
+            [
+                sys.executable, str(GUARD), "--agent-home", str(self.home),
+                "bind", "--route", str(route), "--cwd", str(linked),
+                "--session", "linked-session",
+            ],
+            text=True,
+            capture_output=True,
+        )
+        self.assertEqual(bound.returncode, 0, bound.stderr)
+        self.opportunity("linked-session", cwd=linked)
+        target = artifact_root / "plans" / "runtime" / "plan.md"
+        allowed = subprocess.run(
+            [
+                sys.executable, str(GUARD), "--agent-home", str(self.home),
+                "check", "--tool", "ArtifactWrite", "--file", str(target),
+                "--cwd", str(artifact_root), "--session", "linked-session",
+            ],
+            text=True,
+            capture_output=True,
+            env={**os.environ, "MEM_RECALL_RECEIPTS": str(self.receipts)},
+        )
+        self.assertEqual(allowed.returncode, 0, allowed.stderr)
+
+        foreign = self.base / "foreign" / ".agent_reports" / "plans" / "plan.md"
+        denied = subprocess.run(
+            [
+                sys.executable, str(GUARD), "--agent-home", str(self.home),
+                "check", "--tool", "ArtifactWrite", "--file", str(foreign),
+                "--cwd", str(foreign.parent), "--session", "linked-session",
+            ],
+            text=True,
+            capture_output=True,
+            env={**os.environ, "MEM_RECALL_RECEIPTS": str(self.receipts)},
+        )
+        self.assertEqual(denied.returncode, 2)
+        self.assertIn("route-artifact-root-mismatch", denied.stderr)
+
     def test_claude_transcript_turn_anchor_tracks_latest_real_user_uuid(self) -> None:
         transcript = self.base / "transcript.jsonl"
         transcript.write_text(

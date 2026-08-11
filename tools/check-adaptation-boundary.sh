@@ -16,6 +16,9 @@ fi
 cd "$ROOT"
 
 fail=0
+# Shared pre-owner evidence generator is invoked through adapter preflight
+# wrappers and remains at the portable root; no adapter-local utility symlink.
+SHARED_UTILITY_DEFERRED="dispatch-readiness.py"
 
 say() {
   printf '%s\n' "$*"
@@ -1309,7 +1312,8 @@ check_codex_utility_projection() {
     case "$bn" in
       *.test.py|*.test.sh) continue ;;
     esac
-    case " $UTILITY_PROJECTED $UTILITY_DEFERRED " in
+    [ "$bn" = "$SHARED_UTILITY_DEFERRED" ] && continue
+    case " $UTILITY_PROJECTED $UTILITY_DEFERRED $SHARED_UTILITY_DEFERRED " in
       *" $bn "*) ;;
       *) fail_msg "no projection decision for utilities/$bn (must be classified projected or deferred)" ;;
     esac
@@ -2363,7 +2367,8 @@ check_opencode_utility_projection() {
     case "$bn" in
       *.test.py|*.test.sh) continue ;;
     esac
-    case " $UTILITY_PROJECTED $UTILITY_DEFERRED " in
+    [ "$bn" = "$SHARED_UTILITY_DEFERRED" ] && continue
+    case " $UTILITY_PROJECTED $UTILITY_DEFERRED $SHARED_UTILITY_DEFERRED " in
       *" $bn "*) ;;
       *) fail_msg "no projection decision for utilities/$bn (must be classified projected or deferred)" ;;
     esac
@@ -3224,6 +3229,9 @@ check_adaptation_inventory_native_surfaces() {
     || ! grep -Fq 'harness-agents-not-linked-or-miswired' adapters/codex/bin/check-runtime-projection.sh \
     || ! grep -Fq 'CODEX_RUNTIME_PROJECTION_CLI_TIMEOUT' adapters/codex/bin/check-runtime-projection.sh \
     || ! grep -Fq 'codex-cli-timeout' adapters/codex/bin/check-runtime-projection.sh \
+    || ! grep -Fq 'CODEX_RUNTIME_PROJECTION_FAST=1' adapters/codex/bin/preflight.sh \
+    || ! grep -Fq 'reason=fast-pinned-identity' adapters/codex/bin/check-runtime-projection.sh \
+    || ! grep -Fq 'reason=strict-doctor' adapters/codex/bin/check-runtime-projection.sh \
     || ! grep -Fq 'CODEX_RUNTIME_PROJECTION_SKIP_CLI_DISCOVERY=1' adapters/codex/bin/preflight.sh \
     || ! grep -Fq 'check=hook-trust:review-needed' adapters/codex/README.md \
     || ! grep -Fq 'authoritative App Server `hooks/list`' adapters/codex/README.md \

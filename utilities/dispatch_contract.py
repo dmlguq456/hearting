@@ -1310,7 +1310,10 @@ def observed_attempt_liveness(
     visible reconciliation obligation, whether or not the envelope survived.
     """
 
-    process = attempt_process_quiescence(metadata)
+    process = attempt_process_quiescence(
+        metadata,
+        terminal_receipt=status in {"done", "killed", "cancelled"},
+    )
     if status in {"open", "running"}:
         if process.state == "live":
             state, reason = "alive", process.reason

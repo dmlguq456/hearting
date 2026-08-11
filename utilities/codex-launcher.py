@@ -116,6 +116,78 @@ def _state(home: Path) -> dict:
     return value
 
 
+def pinned_runtime(home: Path) -> dict:
+    """Resolve one activation root once for the lifetime of a new session."""
+
+    path = home / ".harness" / "activation.json"
+    if path.is_symlink() or not path.is_file() or path.stat().st_size > 2_000_000:
+        raise LauncherError(f"runtime activation state is unavailable: {path}")
+    info = path.stat()
+    if info.st_uid != os.geteuid() or info.st_mode & 0o077:
+        raise LauncherError(f"runtime activation state permissions are unsafe: {path}")
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise LauncherError(f"runtime activation state is invalid: {path}") from exc
+    if (
+        not isinstance(value, dict)
+        or value.get("schema") != 2
+        or value.get("runtime") != "codex"
+        or value.get("mode") not in {"packaged", "linked"}
+    ):
+        raise LauncherError(f"runtime activation state is incomplete: {path}")
+    active = Path(str(value.get("active_root", "")))
+    if not active.is_absolute() or active.is_symlink():
+        raise LauncherError("runtime activation root is unsafe")
+    try:
+        active = active.resolve(strict=True)
+        projected = (home / "hearting").resolve(strict=True)
+    except OSError as exc:
+        raise LauncherError("runtime activation projection is unavailable") from exc
+    if projected != active or not (active / "core" / "CORE.md").is_file():
+        raise LauncherError("runtime activation projection is inconsistent")
+    revision = value.get("active_revision")
+    if not isinstance(revision, str) or not revision:
+        raise LauncherError("runtime activation revision is missing")
+    checksum = value.get("bundle_checksum")
+    if value["mode"] == "packaged":
+        bundle_root = (home / ".harness" / "bundles").resolve(strict=False)
+        try:
+            active.relative_to(bundle_root)
+        except ValueError as exc:
+            raise LauncherError("packaged runtime root escapes bundle storage") from exc
+        metadata = active.parent / "bundle.json"
+        try:
+            bundle = json.loads(metadata.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise LauncherError("packaged runtime metadata is unavailable") from exc
+        if (
+            not isinstance(checksum, str)
+            or not checksum
+            or not isinstance(bundle, dict)
+            or bundle.get("checksum") != checksum
+            or bundle.get("source_revision") != revision
+        ):
+            raise LauncherError("packaged runtime identity is inconsistent")
+    return {
+        "active_root": active,
+        "mode": value["mode"],
+        "revision": revision,
+        "identity": f"{value['mode']}:{revision}:{checksum or '-'}",
+    }
+
+
+def export_runtime_binding(binding: dict) -> None:
+    os.environ.update(
+        {
+            "AGENT_HOME": str(binding["active_root"]),
+            "AGENT_RUNTIME_ROOT": str(binding["active_root"]),
+            "AGENT_RUNTIME_IDENTITY": str(binding["identity"]),
+            "AGENT_RUNTIME_ACTIVATION_MODE": str(binding["mode"]),
+        }
+    )
+
+
 def _is_harness_wrapper(command: Path) -> bool:
     """A recorded binding must never point at any install's launcher ingress."""
     try:
@@ -203,9 +275,11 @@ def workspace(args: list[str]) -> Path:
     return (candidate if candidate.is_absolute() else current / candidate).resolve(strict=False)
 
 
-def managed_command(args: list[str], home: Path, real: Path) -> list[str]:
-    agent_home_raw = os.environ.get("AGENT_HOME")
-    agent_home = Path(agent_home_raw) if agent_home_raw else home / "hearting"
+def managed_command(
+    args: list[str], home: Path, real: Path, binding: dict | None = None
+) -> list[str]:
+    binding = binding or pinned_runtime(home)
+    agent_home = Path(binding["active_root"])
     entry = agent_home / "utilities" / "codex-managed-entry.py"
     if not entry.is_file():
         raise LauncherError(f"managed-entry projection is unavailable: {entry}")
@@ -254,7 +328,9 @@ def main() -> int:
         # usable, but only a home with its own launcher state may become a
         # managed interactive parent.
         if state_home == runtime_home and should_manage(args) and managed_auth_ready(runtime_home):
-            command = managed_command(args, runtime_home, real)
+            binding = pinned_runtime(runtime_home)
+            export_runtime_binding(binding)
+            command = managed_command(args, runtime_home, real, binding)
         else:
             command = [str(real), *args]
         os.execv(command[0], command)

@@ -52,6 +52,7 @@ and `ADAPTATION.md`; command output is authoritative for current support.
 | delegation/QA | `preflight.sh subagent-info --check`, `preflight.sh qa-policy <level> [code|research|doc|general]` |
 | readiness/loops | `preflight.sh doctor [--runtime]`, `preflight.sh loop-info <oncall|note|study|drill|runtime-watch>` |
 | dispatch control | `preflight.sh dispatch-wait --attempt-id <id> --max 300..600`, `preflight.sh liveness`, `preflight.sh harvest`, `preflight.sh dispatch-reconcile` |
+| dispatch readiness | `preflight.sh dispatch-readiness --worktree <path> --jobs <jobs.log> --owner-harness <h>... --child-harness <h>... --output <evidence.json>` |
 | managed Codex | `preflight.sh managed-entry [--check] --codex-home <private-dir> --state-dir <private-dir> --workspace <dir> [--jobs <jobs.log>]` |
 | install | `install-runtime-projection.sh [--install-plugin] [--skills-mode native|plugin|both]`, `check-runtime-projection.sh`, `preflight.sh runtime-projection --require-hook-trust` |
 
@@ -76,6 +77,11 @@ Arbitrary detached shell output still does not auto-resume. For non-dispatch
 long-running work, obey `preflight.sh
 loop-info runtime-watch` and its explicit automatic-follow-up-impossible fallback
 instead of ending with a detached completion promise.
+
+The managed gateway's witnessed `thread/fork` lineage is authoritative for a
+forked session. An inherited `CODEX_THREAD_ID` is only a start-thread hint; a
+proved successor is reported as `managed-thread-advanced` and sealed into the
+batch, while an unrelated thread switch still fails closed.
 
 ## Tool Contracts
 

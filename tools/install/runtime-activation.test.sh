@@ -186,10 +186,11 @@ expected={
  "claude":{"instructions":"new-session","skill":"reinvoke","agent":"new-session","hook_config":"new-session"},
  "opencode":{"instructions":"restart-required","skill":"restart-required","agent":"restart-required","hook_config":"restart-required"},
 }
-required={"runtime","mode","source_root","source_revision","active_revision","projection_digest","discovery_paths","duplicate_sources","freshness","session_action","external_dependencies"}
+required={"runtime","mode","source_root","source_revision","active_revision","projection_digest","discovery_paths","duplicate_sources","freshness","session_action","session_consistency","external_dependencies"}
 for row in data["runtimes"]:
     assert required <= set(row), (row["runtime"], required-set(row))
     assert row["mode"] == "linked" and row["freshness"] == "fresh"
+    assert row["session_consistency"] == "mutable-linked-debug"
     assert row["source_root"] == os.path.realpath(sys.argv[2])
     assert row["duplicate_sources"] == [] and row["external_dependencies"] == []
     assert row["session_action"] == expected[row["runtime"]]
@@ -276,6 +277,7 @@ rows={row["runtime"]: row for row in json.load(open(sys.argv[1]))["runtimes"]}
 for runtime, row in rows.items():
     assert "/.harness/bundles/" in row["active_root"]
     assert row["bundle_checksum"]
+    assert row["session_consistency"] == "pinned-immutable-root"
     home={
         "codex": os.path.join(sys.argv[2], ".codex"),
         "claude": os.path.join(sys.argv[2], ".claude"),
@@ -304,6 +306,7 @@ before={r["runtime"]:r for r in json.load(open(sys.argv[1]))["runtimes"]}
 after={r["runtime"]:r for r in json.load(open(sys.argv[2]))["runtimes"]}
 for runtime in before:
     assert after[runtime]["mode"] == "packaged"
+    assert after[runtime]["session_consistency"] == "pinned-immutable-root"
     assert after[runtime]["active_revision"] == before[runtime]["active_revision"]
     assert after[runtime]["projection_digest"] == before[runtime]["projection_digest"]
     assert after[runtime]["freshness"] == "source-ahead"

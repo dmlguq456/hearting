@@ -3,6 +3,7 @@ import argparse
 import importlib.util
 import os
 import tempfile
+import subprocess
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -64,13 +65,33 @@ class NestedEligibilityTest(unittest.TestCase):
              mock.patch.object(N.subprocess, "run", return_value=result):
             self.assertEqual(N.auth_check("codex"), (False, "auth-unavailable"))
 
+    def test_auth_and_headless_checks_are_bounded(self):
+        with mock.patch.object(N.shutil, "which", return_value="/bin/codex"), \
+             mock.patch.object(
+                 N.subprocess,
+                 "run",
+                 side_effect=subprocess.TimeoutExpired(["codex"], 20),
+             ):
+            self.assertEqual(N.auth_check("codex"), (False, "auth-check-timeout"))
+        with tempfile.TemporaryDirectory() as worktree, \
+             mock.patch.object(N, "auth_check", return_value=(True, "")), \
+             mock.patch.object(
+                 N.subprocess,
+                 "run",
+                 side_effect=subprocess.TimeoutExpired(["preflight"], 180),
+             ):
+            self.assertEqual(
+                N.command_check("codex", worktree),
+                ("unsupported", "direct-headless-check", "headless-check-timeout"),
+            )
+
     def test_codex_owner_requires_network_profile_before_command_check(self):
         with tempfile.TemporaryDirectory() as worktree, \
              mock.patch.dict(os.environ, {}, clear=True), \
              mock.patch.object(N, "command_check") as checked:
             row = N.evaluate(self.args(worktree))
         self.assertEqual(row["status"], "unsupported")
-        self.assertEqual(row["failure_class"], "nested-network-unconfirmed")
+        self.assertEqual(row["failure_class"], "prospective-owner-check-required")
         self.assertEqual(row["probe_scope"], "active-owner-runtime")
         self.assertEqual(row["next_check"], "--prospective-standard-owner")
         checked.assert_not_called()
