@@ -21,7 +21,6 @@ import fcntl
 import json
 import os
 import re
-import socket
 import stat
 import time
 import uuid
@@ -170,70 +169,6 @@ def _read_json(path: Path) -> Optional[Dict[str, Any]]:
 # ---------------------------------------------------------------------------
 
 
-def _boot_id() -> Optional[str]:
-    try:
-        with open("/proc/sys/kernel/random/boot_id", "r") as fh:
-            return fh.read().strip()
-    except OSError:
-        return None
-
-
-def _proc_start_ticks(pid: int) -> Optional[int]:
-    try:
-        with open("/proc/{0}/stat".format(pid), "r") as fh:
-            raw = fh.read()
-    except OSError:
-        return None
-    # field 2 is "(comm)" which may itself contain spaces/parens; split on the
-    # last ')' to skip past it safely, then index from there.
-    close_paren = raw.rfind(")")
-    if close_paren == -1:
-        return None
-    rest = raw[close_paren + 1 :].split()
-    # rest[0] is field 3 (state); field 22 (starttime) is rest[22 - 3] = rest[19]
-    idx = 22 - 3
-    if len(rest) <= idx:
-        return None
-    try:
-        return int(rest[idx])
-    except ValueError:
-        return None
-
-
-def _holder_payload(attempt: str) -> Dict[str, Any]:
-    pid = os.getpid()
-    return {
-        "pid": pid,
-        "host": socket.gethostname(),
-        "proc_start_ticks": _proc_start_ticks(pid),
-        "acquired_at": time.time(),
-        "attempt": attempt,
-        "boot_id": _boot_id(),
-    }
-
-
-def _pid_is_live(payload: Dict[str, Any]) -> bool:
-    if payload.get("host") != socket.gethostname():
-        # Cross-host liveness is out of scope this cycle -- assume alive,
-        # never hijack.
-        return True
-    current_boot_id = _boot_id()
-    recorded_boot_id = payload.get("boot_id")
-    if current_boot_id is not None and recorded_boot_id is not None:
-        if current_boot_id != recorded_boot_id:
-            return False  # proven reboot since lock was taken
-    pid = payload.get("pid")
-    if not isinstance(pid, int):
-        return False
-    current_ticks = _proc_start_ticks(pid)
-    if current_ticks is None:
-        return False  # /proc/<pid> absent
-    recorded_ticks = payload.get("proc_start_ticks")
-    if recorded_ticks is None:
-        return True  # cannot disprove liveness; do not hijack
-    return current_ticks == recorded_ticks
-
-
 def _lock_dir(root: Path) -> Path:
     # Legacy mkdir-mutex location from the pre-flock implementation. Only read
     # for one-way migration under the flock; never created by current code.
@@ -279,30 +214,9 @@ def _acquire_lock(root: Path, timeout: float, now: Optional[float] = None) -> in
                     st_path.st_dev,
                     st_path.st_ino,
                 ) == (st_fd.st_dev, st_fd.st_ino):
-                    # One-way migration: honor a live legacy mkdir-lock holder,
-                    # clear a dead one. We hold the flock, so this is
-                    # single-writer.
-                    legacy_dir = _lock_dir(root)
-                    if legacy_dir.exists():
-                        holder = _read_json(legacy_dir / "holder.json")
-                        if holder is not None and _pid_is_live(holder):
-                            try:
-                                os.unlink(str(lock_path))
-                            except OSError:
-                                pass
-                            raise AdmissionBusy(
-                                "legacy admission lock held by live process {0!r}".format(
-                                    holder
-                                )
-                            )
-                        try:
-                            (legacy_dir / "holder.json").unlink()
-                        except OSError:
-                            pass
-                        try:
-                            os.rmdir(str(legacy_dir))
-                        except OSError:
-                            pass
+                    # No pre-flock version of this module was ever released, so
+                    # there is no legacy mkdir-lock population to migrate; a
+                    # stray legacy `lock/` directory is inert diagnostics only.
                     # The lock file stays empty and is unlinked on release: the
                     # flock is the exclusivity, and a rejected admission leaves
                     # every byte of the root unchanged.
@@ -327,8 +241,14 @@ def _acquire_lock(root: Path, timeout: float, now: Optional[float] = None) -> in
 def _release_lock(root: Path, fd: int) -> None:
     # Unlink before unlocking, while exclusivity still holds; a waiter that
     # locked the old inode fails its path/inode verification and retries.
+    # Unlink only when the path still names this holder's inode, so a release
+    # can never remove a successor's live lock file.
+    lock_path = _lock_file_path(root)
     try:
-        os.unlink(str(_lock_file_path(root)))
+        st_fd = os.fstat(fd)
+        st_path = os.stat(str(lock_path))
+        if (st_path.st_dev, st_path.st_ino) == (st_fd.st_dev, st_fd.st_ino):
+            os.unlink(str(lock_path))
     except OSError:
         pass
     try:
@@ -784,6 +704,12 @@ def _compute_rebuilt_index(
                             manifest_path
                         )
                     )
+                if document.get("repository_id") != identity.repository_id:
+                    raise AdmissionRecoveryRequired(
+                        "published manifest at {0} names a foreign repository_id".format(
+                            manifest_path
+                        )
+                    )
                 digest = artifact_manifest.manifest_digest(document)
                 cycle_path = os.path.relpath(str(cycle_dir), str(root))
                 # The idempotency key is caller-supplied and is deliberately NOT
@@ -807,11 +733,11 @@ def _compute_rebuilt_index(
 def rebuild_index(root: Path) -> artifact_index.IndexDocument:
     root = Path(root)
     index, fallback_keys = _compute_rebuilt_index(root)
-    _write_index(root, index)
     # A manifest-id fallback means the caller-supplied idempotency key was not
     # recoverable (index absent), so an exact retry with the original custom
     # key will no longer be a no-op. That divergence is a recorded, machine-
-    # readable fact rather than a code comment.
+    # readable fact — written BEFORE the index is published so a crash between
+    # the two writes cannot apply the fallback silently.
     report_path = _admission_dir(root) / "rebuild-report.json"
     _atomic_write_bytes(
         report_path,
@@ -824,6 +750,7 @@ def rebuild_index(root: Path) -> artifact_index.IndexDocument:
             }
         ),
     )
+    _write_index(root, index)
     return index
 
 
@@ -1021,6 +948,24 @@ def admit(
 
         # step 4 -- root identity bootstrap.
         identity = ensure_root_identity(root, allocator=request.allocator, now=now)
+
+        # step 4b -- repository tenancy is checked before every other verdict,
+        # including the idempotent no-op: a forged index row must never let a
+        # foreign repository's manifest through (D-4).
+        if document.get("repository_id") != identity.repository_id:
+            return AdmissionOutcome(
+                status="rejected",
+                cycle_path=None,
+                manifest_digest=digest,
+                violations=(
+                    Violation(
+                        "index-repository-identity-mismatch",
+                        "$.repository_id",
+                        "manifest repository_id does not match frozen root identity",
+                    ),
+                ),
+                index_changed=False,
+            )
 
         # step 5 -- load index.
         index = load_index(root)

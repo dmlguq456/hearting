@@ -618,6 +618,33 @@ class TestReviewFindingRegressions(AdmissionContractBase):
         with self.assertRaises(adm.AdmissionRecoveryRequired):
             adm.recover(self.root)
 
+    def test_verify_index_passes_for_multi_cycle_campaign(self):
+        # Round-2 regression: incremental admission order vs lexical rebuild
+        # order must produce byte-identical indexes for shared entities.
+        identity = self._identity()
+        doc1, content1 = _make_valid_document(self.alloc, identity)
+        out1 = self._admit(doc1, self._stage_source(content1), "k-mc-1")
+        self.assertEqual(out1.status, "admitted", out1.to_payload())
+        doc2, content2 = _make_valid_document(
+            self.alloc, identity, camp_id=doc1["campaign"]["campaign_id"]
+        )
+        out2 = self._admit(doc2, self._stage_source(content2), "k-mc-2")
+        self.assertEqual(out2.status, "admitted", out2.to_payload())
+        report = adm.verify_index(self.root)
+        self.assertTrue(report.ok, [v.to_payload() for v in report.violations])
+
+    def test_noop_idempotent_rejects_foreign_repository_even_with_index_row(self):
+        # Round-2: repository tenancy is checked before the idempotent verdict.
+        doc, outcome = self._admit_valid(key="k-tenancy-noop")
+        forged = dict(doc)
+        forged["repository_id"] = "repo_" + "e" * 32
+        src = self._stage_source(b"hello")
+        retry = self._admit(forged, src, "k-tenancy-noop")
+        self.assertEqual(retry.status, "rejected", retry.to_payload())
+        self.assertIn(
+            "index-repository-identity-mismatch", [v.code for v in retry.violations]
+        )
+
     def test_rebuild_records_manifest_id_fallback(self):
         # F8i: the manifest-id fallback is a recorded machine-readable fact.
         doc, outcome = self._admit_valid(key="custom-key-original")

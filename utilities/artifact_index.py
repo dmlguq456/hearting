@@ -8,6 +8,7 @@ durable source of truth (that is the published manifest + its events). See
 `index.json` and calls into this module with data already in hand.
 """
 
+import os.path
 from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, Mapping, Optional, Tuple
 
@@ -90,6 +91,32 @@ def _check_row_shape(section: str, key: Any, row: Any, expected: frozenset) -> N
                 section, key, sorted(got), sorted(expected)
             )
         )
+    for field_name, value in row.items():
+        if field_name in ("stream_sequence", "last_sequence"):
+            if not isinstance(value, int) or isinstance(value, bool):
+                raise ValueError(
+                    "index {0}[{1!r}].{2} must be an integer".format(
+                        section, key, field_name
+                    )
+                )
+        elif value is not None and not isinstance(value, str):
+            raise ValueError(
+                "index {0}[{1!r}].{2} must be a string or null".format(
+                    section, key, field_name
+                )
+            )
+    cycle_path = row.get("cycle_path")
+    if cycle_path is not None:
+        normalized = os.path.normpath(cycle_path)
+        if (
+            os.path.isabs(cycle_path)
+            or normalized.startswith("..")
+            or normalized != cycle_path.rstrip("/")
+        ):
+            raise ValueError(
+                "index {0}[{1!r}].cycle_path must be a normalized "
+                "root-relative path".format(section, key)
+            )
 
 
 def parse(payload: Mapping[str, Any]) -> IndexDocument:
@@ -216,18 +243,33 @@ def check(
         )
 
     parent_cycle_id = cycle.get("parent_cycle_id")
-    if (
-        parent_cycle_id is not None
-        and not is_idempotent_retry
-        and parent_cycle_id not in index.cycles
-    ):
-        violations.append(
-            Violation(
-                "index-orphan-parent-cycle",
-                "$.cycle.parent_cycle_id",
-                "parent cycle is not an admitted cycle in this root",
+    if parent_cycle_id is not None and not is_idempotent_retry:
+        if parent_cycle_id == cycle_id:
+            violations.append(
+                Violation(
+                    "index-self-parent-cycle",
+                    "$.cycle.parent_cycle_id",
+                    "cycle cannot be its own parent",
+                )
             )
-        )
+        elif parent_cycle_id not in index.cycles:
+            violations.append(
+                Violation(
+                    "index-orphan-parent-cycle",
+                    "$.cycle.parent_cycle_id",
+                    "parent cycle is not an admitted cycle in this root",
+                )
+            )
+        else:
+            parent_campaign = index.cycles[parent_cycle_id].get("campaign_id")
+            if parent_campaign != cycle.get("campaign_id"):
+                violations.append(
+                    Violation(
+                        "index-parent-cycle-campaign-mismatch",
+                        "$.cycle.parent_cycle_id",
+                        "parent cycle belongs to a different campaign",
+                    )
+                )
 
     incoming_ids = declared_ids(document)
     for stable_id, kind in incoming_ids.items():
@@ -343,11 +385,21 @@ def apply(
         # revision id is immutable and single-use (D-4/D-6), so its reuse by a
         # different cycle or key must be refusable from the same uniqueness
         # surface as every other stable id.
-        stable_ids[stable_id] = {
-            "kind": kind,
-            "cycle_id": cycle_id,
-            "manifest_id": manifest_id,
-        }
+        if kind in _REUSABLE_SAME_KIND:
+            # A shared entity has no single owning cycle; storing the last
+            # declaring cycle would make the row depend on processing order
+            # and break rebuild-vs-incremental byte equality (D-7).
+            stable_ids[stable_id] = {
+                "kind": kind,
+                "cycle_id": None,
+                "manifest_id": None,
+            }
+        else:
+            stable_ids[stable_id] = {
+                "kind": kind,
+                "cycle_id": cycle_id,
+                "manifest_id": manifest_id,
+            }
 
     for root_id, route_id in declared_routes(document):
         bucket = dict(routes.get(root_id, {}))
@@ -475,13 +527,41 @@ def build(
                 )
             )
     # Parent linkage is order-independent: verify against the fully folded set.
+    parent_of: Dict[str, str] = {}
+    campaign_of: Dict[str, Any] = {}
     for document, _cycle_path, _digest, idempotency_key in items:
         cycle = document.get("cycle") if isinstance(document.get("cycle"), dict) else {}
+        cid = cycle.get("cycle_id")
+        campaign_of[cid] = cycle.get("campaign_id")
         parent_cycle_id = cycle.get("parent_cycle_id")
-        if parent_cycle_id is not None and parent_cycle_id not in index.cycles:
+        if parent_cycle_id is None:
+            continue
+        if parent_cycle_id not in index.cycles:
             raise ValueError(
                 "build-conflict for idempotency key {0!r}: orphan parent cycle {1!r}".format(
                     idempotency_key, parent_cycle_id
                 )
             )
+        parent_row = index.cycles[parent_cycle_id]
+        if parent_row.get("campaign_id") != cycle.get("campaign_id"):
+            raise ValueError(
+                "build-conflict for idempotency key {0!r}: parent cycle {1!r} "
+                "belongs to a different campaign".format(idempotency_key, parent_cycle_id)
+            )
+        parent_of[cid] = parent_cycle_id
+    # A parent chain from tampered on-disk input could be circular; incremental
+    # admission cannot create one (a parent must already exist), so this is a
+    # rebuild-only defence.
+    for start in sorted(parent_of):
+        seen = set()
+        node = start
+        while node in parent_of:
+            if node in seen:
+                raise ValueError(
+                    "build-conflict: circular parent chain through cycle {0!r}".format(
+                        start
+                    )
+                )
+            seen.add(node)
+            node = parent_of[node]
     return index

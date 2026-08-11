@@ -364,6 +364,73 @@ class TestIndex(unittest.TestCase):
         with self.assertRaises(ValueError):
             ix.build(items)
 
+    def test_reusable_rows_are_order_independent(self):
+        # Rebuild input order is lexical while incremental order is admission
+        # order; shared-entity rows must not depend on either (D-7).
+        doc1 = _document(self.root_id, self.alloc)
+        doc2 = _document(self.root_id, self.alloc)
+        doc2["campaign"] = dict(doc1["campaign"])
+        doc2["cycle"]["campaign_id"] = doc1["campaign"]["campaign_id"]
+        items_fwd = [
+            (doc1, "p/c1", m.manifest_digest(doc1), doc1["manifest_id"]),
+            (doc2, "p/c2", m.manifest_digest(doc2), doc2["manifest_id"]),
+        ]
+        items_rev = list(reversed(items_fwd))
+        self.assertEqual(
+            ix.canonical_bytes(ix.build(items_fwd)),
+            ix.canonical_bytes(ix.build(items_rev)),
+        )
+
+    def test_check_rejects_self_parent_cycle(self):
+        doc = _document(self.root_id, self.alloc)
+        doc["cycle"]["parent_cycle_id"] = doc["cycle"]["cycle_id"]
+        digest = m.manifest_digest(doc)
+        report = ix.check(
+            ix.empty(self.root_id),
+            doc,
+            idempotency_key=doc["manifest_id"],
+            manifest_digest=digest,
+        )
+        self.assertFalse(report.ok)
+        self.assertIn("index-self-parent-cycle", {v.code for v in report.violations})
+
+    def test_check_rejects_cross_campaign_parent_cycle(self):
+        doc1 = _document(self.root_id, self.alloc)
+        index, _digest1, _key1 = self._apply(ix.empty(self.root_id), doc1)
+        doc2 = _document(self.root_id, self.alloc)
+        doc2["cycle"]["parent_cycle_id"] = doc1["cycle"]["cycle_id"]
+        digest2 = m.manifest_digest(doc2)
+        report = ix.check(
+            index, doc2, idempotency_key=doc2["manifest_id"], manifest_digest=digest2
+        )
+        self.assertFalse(report.ok)
+        self.assertIn(
+            "index-parent-cycle-campaign-mismatch", {v.code for v in report.violations}
+        )
+
+    def test_build_refuses_circular_parent_chain(self):
+        doc1 = _document(self.root_id, self.alloc)
+        doc2 = _document(self.root_id, self.alloc)
+        doc2["campaign"] = dict(doc1["campaign"])
+        doc2["cycle"]["campaign_id"] = doc1["campaign"]["campaign_id"]
+        doc1["cycle"]["parent_cycle_id"] = doc2["cycle"]["cycle_id"]
+        doc2["cycle"]["parent_cycle_id"] = doc1["cycle"]["cycle_id"]
+        items = [
+            (doc1, "p/c1", m.manifest_digest(doc1), doc1["manifest_id"]),
+            (doc2, "p/c2", m.manifest_digest(doc2), doc2["manifest_id"]),
+        ]
+        with self.assertRaises(ValueError):
+            ix.build(items)
+
+    def test_parse_rejects_traversal_cycle_path(self):
+        doc = _document(self.root_id, self.alloc)
+        index, _digest, _key = self._apply(ix.empty(self.root_id), doc)
+        payload = ix.to_payload(index)
+        row = payload["cycles"][doc["cycle"]["cycle_id"]]
+        row["cycle_path"] = "../outside"
+        with self.assertRaises(ValueError):
+            ix.parse(payload)
+
     def test_build_accepts_multi_cycle_campaign(self):
         doc1 = _document(self.root_id, self.alloc)
         doc2 = _document(self.root_id, self.alloc)

@@ -237,8 +237,17 @@ class TestEnvironmentFacts(AtomicityTestBase):
         # a silent replace (F-1). The EEXIST-class primitives asserted above
         # are the actual exclusivity substrate, and the admission-level defence
         # is test_admit_does_not_replace_existing_empty_canonical_directory.
-        self.assertIsNotNone(record["rename_onto_empty_dir_replaced"])
-        self.assertIsInstance(record["rename_onto_empty_dir_replaced"], bool)
+        # The observation itself must at least be deterministic on this root.
+        target_empty2 = probe_dir / "target-empty-2"
+        target_empty2.mkdir()
+        source_dir2 = probe_dir / "source-2"
+        source_dir2.mkdir()
+        try:
+            os.rename(str(source_dir2), str(target_empty2))
+            rename_replaced_again = True
+        except OSError:
+            rename_replaced_again = False
+        self.assertEqual(record["rename_onto_empty_dir_replaced"], rename_replaced_again)
 
 
 class TestStagingDevice(AtomicityTestBase):
@@ -552,26 +561,15 @@ class TestLockContract(AtomicityTestBase):
         finally:
             adm._release_lock(self.root, fd)
 
-    def test_dead_holder_lock_is_reclaimed(self):
+    def test_stray_legacy_lock_dir_is_inert(self):
+        # No pre-flock version ever shipped, so a stray legacy `lock/` dir is
+        # diagnostics only: it neither blocks acquisition nor gets mutated.
         lock_dir = adm._lock_dir(self.root)
         lock_dir.mkdir(parents=True)
-        fake_pid = 999999
-        while os.path.exists("/proc/{0}".format(fake_pid)):
-            fake_pid -= 1
-        holder = {
-            "pid": fake_pid,
-            "host": adm.socket.gethostname(),
-            "proc_start_ticks": 1,
-            "acquired_at": time.time(),
-            "attempt": "dead-holder",
-            "boot_id": adm._boot_id(),
-        }
-        adm._create_exclusive_json(lock_dir / "holder.json", holder)
+        adm._create_exclusive_json(lock_dir / "holder.json", {"stray": True})
         fd = adm._acquire_lock(self.root, timeout=5.0)
         try:
-            # one-way migration: the dead legacy mkdir-lock was cleared under
-            # the flock's exclusivity.
-            self.assertFalse(lock_dir.exists())
+            self.assertTrue((lock_dir / "holder.json").is_file())
         finally:
             adm._release_lock(self.root, fd)
 
@@ -606,16 +604,19 @@ class TestLockContract(AtomicityTestBase):
                 child.kill()
                 child.wait(timeout=10)
 
-    def test_pid_reuse_does_not_steal_live_lock(self):
-        holder = {
-            "pid": os.getpid(),
-            "host": adm.socket.gethostname(),
-            "proc_start_ticks": adm._proc_start_ticks(os.getpid()) + 1000,
-            "acquired_at": time.time(),
-            "attempt": "stale-record",
-            "boot_id": adm._boot_id(),
-        }
-        self.assertFalse(adm._pid_is_live(holder))
+    def test_release_does_not_unlink_successor_lock_file(self):
+        # A releasing holder must only unlink the inode it actually locked; if
+        # the pathname was already replaced, release leaves it alone.
+        fd = adm._acquire_lock(self.root, timeout=5.0)
+        lock_path = adm._lock_file_path(self.root)
+        os.unlink(str(lock_path))
+        with open(str(lock_path), "wb"):
+            pass
+        successor_ino = os.stat(str(lock_path)).st_ino
+        adm._release_lock(self.root, fd)
+        self.assertTrue(lock_path.exists())
+        self.assertEqual(os.stat(str(lock_path)).st_ino, successor_ino)
+        os.unlink(str(lock_path))
 
 
 if __name__ == "__main__":

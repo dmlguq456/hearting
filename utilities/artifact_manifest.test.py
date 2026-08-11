@@ -621,6 +621,13 @@ class TestSupersedeRevoke(unittest.TestCase):
         doc["events"][1]["supersedes_event_id"] = doc["events"][0]["event_id"]
         self.assertIn("event-supersession-unauthorized", _codes(m.validate_events(doc)))
 
+    def test_rejects_same_stream_supersession_of_later_event(self):
+        # Round-2: a same-stream supersession must come after its target;
+        # "later" is deterministic stream order, not recorded_at prose.
+        doc = _valid_document()
+        doc["events"][0]["supersedes_event_id"] = doc["events"][1]["event_id"]
+        self.assertIn("event-supersession-not-later", _codes(m.validate_events(doc)))
+
     def test_allows_user_actor_superseding_user_event(self):
         doc = _valid_document()
         doc["events"][0]["actor"] = {"kind": "user", "id": "u"}

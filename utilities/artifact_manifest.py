@@ -1265,6 +1265,22 @@ def validate_events(document: Mapping[str, Any]) -> ValidationReport:
                         "only a later user event may {0} a user event".format(kind),
                     )
                 )
+            if (
+                isinstance(target_row, dict)
+                and row.get("stream_id") == target_row.get("stream_id")
+                and isinstance(row.get("stream_sequence"), int)
+                and isinstance(target_row.get("stream_sequence"), int)
+                and not isinstance(row.get("stream_sequence"), bool)
+                and not isinstance(target_row.get("stream_sequence"), bool)
+                and row["stream_sequence"] <= target_row["stream_sequence"]
+            ):
+                violations.append(
+                    Violation(
+                        "event-supersession-not-later",
+                        "$.events[?event_id={0!r}]".format(eid),
+                        "a same-stream {0} must come after its target".format(kind),
+                    )
+                )
 
     return _report(violations)
 
