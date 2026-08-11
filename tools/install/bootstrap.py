@@ -6,6 +6,7 @@
 The helpers remain usable independently of installer command wiring.
 """
 
+import json
 import os
 import subprocess
 import uuid
@@ -100,7 +101,7 @@ def _symlink_destination(target):
 
 
 def _is_prior_linked_launcher(target, home, rel_source):
-    """Recognize only exact launchers from the two supported linked checkout names."""
+    """Recognize exact launchers from legacy or activated Hearting sources."""
     destination = _symlink_destination(target)
     if destination is None:
         return False
@@ -111,6 +112,32 @@ def _is_prior_linked_launcher(target, home, rel_source):
         }
     except (OSError, RuntimeError):
         return False
+    activation_paths = (
+        ("claude", home / ".claude" / ".harness" / "activation.json"),
+        ("codex", home / ".codex" / ".harness" / "activation.json"),
+        (
+            "opencode",
+            home / ".config" / "opencode" / ".harness" / "activation.json",
+        ),
+    )
+    for runtime, activation in activation_paths:
+        try:
+            if activation.is_symlink() or activation.stat().st_size > 1 << 20:
+                continue
+            record = json.loads(activation.read_text(encoding="utf-8"))
+            if (
+                not isinstance(record, dict)
+                or record.get("schema") != 2
+                or record.get("runtime") != runtime
+                or record.get("scope") != "global"
+            ):
+                continue
+            source_root = Path(record.get("source_root", ""))
+            if not source_root.is_absolute():
+                continue
+            prior.add((source_root / rel_source).resolve(strict=False))
+        except (OSError, RuntimeError, ValueError, json.JSONDecodeError):
+            continue
     return destination in prior
 
 

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Regression tests for installer-owned PATH launcher migration."""
 
+import json
 import os
 import sys
 import tempfile
@@ -82,6 +83,31 @@ class LauncherMigrationTest(unittest.TestCase):
             target.resolve(), (self.source / dict(bootstrap.LAUNCHERS)["fleet"]).resolve()
         )
 
+    def test_active_arbitrary_checkout_is_a_safe_migration_source(self):
+        prior_source = self.root / "mounted/team/hearting"
+        rel_source = dict(bootstrap.LAUNCHERS)["fleet"]
+        prior_launcher = prior_source / rel_source
+        prior_launcher.parent.mkdir(parents=True)
+        prior_launcher.write_text("#!/bin/sh\n", encoding="utf-8")
+        activation = self.home / ".claude/.harness/activation.json"
+        activation.parent.mkdir(parents=True)
+        activation.write_text(json.dumps({
+            "schema": 2,
+            "runtime": "claude",
+            "scope": "global",
+            "source_root": str(prior_source),
+        }), encoding="utf-8")
+        target = self._target("fleet")
+        target.parent.mkdir(parents=True)
+        target.symlink_to(prior_launcher)
+
+        result = {row["name"]: row for row in bootstrap.install_launchers(
+            home=self.home
+        )}
+
+        self.assertEqual(result["fleet"]["status"], "migrated-legacy")
+        self.assertEqual(target.resolve(), (self.source / rel_source).resolve())
+
     def test_foreign_entries_are_preserved_while_missing_launchers_are_created(self):
         fleet = self._target("fleet")
         fleet.parent.mkdir(parents=True)
@@ -103,7 +129,7 @@ class InstallerCollisionExitTest(unittest.TestCase):
     def test_install_returns_failure_when_a_foreign_launcher_is_preserved(self):
         args = SimpleNamespace(
             runtimes=["claude"], target=None, scope="global",
-            plugin=False, dry_run=False,
+            plugin=False, dry_run=False, report_bundle_root=None,
         )
         driver = mock.Mock()
         driver.install.return_value = {"actions": [], "blocked": False}
@@ -116,6 +142,11 @@ class InstallerCollisionExitTest(unittest.TestCase):
                 "status": "preserved", "path": "/tmp/config",
                 "enabled": ["claude"],
             }))
+            stack.enter_context(mock.patch.object(
+                installer.report_bundle_config, "ensure", return_value={
+                    "status": "preserved", "path": "/tmp/report-bundle.json",
+                    "root": "/tmp/reports",
+                }))
             stack.enter_context(mock.patch.object(
                 installer.bootstrap, "restore_memory", return_value={
                 "action": "skipped", "detail": "present",
