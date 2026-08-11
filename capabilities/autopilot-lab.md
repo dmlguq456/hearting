@@ -239,7 +239,12 @@ scriptless DOM-bound playback, and the 1:1 evidence set. Exact experiment and
 evaluation logs needed for reproduction live under `report/logs/` as ordinary
 v2 `files[]` members; log/report/media bytes and absolute bundle paths are never
 uploaded to Turso. All active HTML fails closed and Cairn serves only verified
-bundles under CSP `script-src 'none'`. Publication is sibling-stage,
+bundles under CSP `script-src 'none'; form-action 'none'`. Only `<a href>` is
+remote navigation; every other resource link is inventory-local. Audio must
+expose `0:a:0`; waveform/spectrogram must be PNG/JPEG/GIF/WebP with image magic
+and an image stream; each sample kind occurs exactly once. Serialized manifests
+are at most 1,048,576 bytes and each of `files`/`media` is capped at 10,000 rows.
+Publication is sibling-stage,
 same-descriptor hash verified, and atomic no-replace; consumers mount the root
 read-only. Periodic validation records per-bundle health transitions only while
 one bounded global heartbeat proves monitor liveness. Existing-note backfill is

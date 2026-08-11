@@ -335,7 +335,7 @@ def link_existing_plan(inventory_path):
         verified = VERIFY.verify(source_root / "report_manifest.json")
         if verified.get("bundle_id") != identity or verified.get("version") != version:
             raise BundleError("link-only source manifest identity mismatch")
-        manifest_data = json.loads((source_root / "report_manifest.json").read_text(encoding="utf-8"))
+        manifest_data = VERIFY._read_manifest(source_root / "report_manifest.json")
         file_hashes = {row["path"]: row["sha256"] for row in manifest_data["files"]}
         documents = bundle["documents"]
         if not isinstance(documents, list) or not documents:

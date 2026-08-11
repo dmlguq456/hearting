@@ -259,10 +259,15 @@ or an absolute bundle path. Receipt v2 is likewise IDs-only.
 Published HTML is scriptless. The verifier rejects every `<script>` element,
 active embedding elements, inline event handlers, `srcdoc`, script URL schemes,
 and refresh redirects in HTML/SVG/XML. Consumers serve verified pages with CSP
-`script-src 'none'`; a playback page binds declared media through actual DOM
-media/link elements. Declared audio is WAV, MP3, or OGG and every format uses
-the same bounded, shell-free `ffmpeg -xerror` decode path. Missing ffmpeg or a
-decode/playback failure is an integrity failure.
+`script-src 'none'; form-action 'none'`; only `<a href>` may be remote
+navigation, while every other resource-bearing `href`/`src` stays in the closed
+inventory. A playback page binds declared media through actual DOM media/link
+elements. Declared audio is WAV, MP3, or OGG and must expose a decodable audio
+stream. Waveform and spectrogram evidence is PNG, JPEG, GIF, or WebP with valid
+magic and a decodable image stream. Every format uses the same bounded,
+shell-free `ffmpeg -xerror` path. Missing ffmpeg, duplicate sample kinds, or a
+decode/playback failure is an integrity failure. A serialized manifest is at
+most 1,048,576 bytes; `files` and `media` are each capped at 10,000 rows.
 
 Publication copies into a sibling staging directory, hashes each regular
 single-link file through one descriptor, verifies the closed staged inventory,

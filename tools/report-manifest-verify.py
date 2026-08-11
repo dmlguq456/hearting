@@ -51,7 +51,7 @@ def load_bundle(root,data,texts):
   ids.add(gid); groups.append((set(members),order))
  return title,pid,reps,groups
 def _verify_v1(path):
- path=Path(path).resolve(); root=path.parent; data=json.loads(path.read_text())
+ path=Path(path).resolve(); root=path.parent; data=_read_manifest(path)
  if data.get("schema_version")!=1: raise ValueError("schema_version must be 1")
  house=data.get("house_parameters",{})
  if house.get("sample_rate_hz")!=48000 or house.get("frequency_band_hz")!=[0,24000]: raise ValueError("house parameters require 48kHz/full-band 0-24kHz")
@@ -96,9 +96,22 @@ V2_MEDIA_KEYS={"path","sha256","sample_id","kind"}
 COMPONENT_PAT=re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 HASH_PAT=re.compile(r"^[0-9a-f]{64}$")
 REMOTE_SCHEMES={"http","https","mailto"}
-AUDIO_SUFFIXES={".wav",".mp3",".ogg"}
+AUDIO_SUFFIXES={".wav",".wave",".mp3",".ogg"}
+IMAGE_SUFFIXES={".png",".jpg",".jpeg",".gif",".webp"}
 ACTIVE_TAGS={"script","iframe","object","embed","applet","frame","frameset","portal","base","form","button","input","select","textarea"}
 TRANSIENT_ERRNOS={errno.EIO,errno.ESTALE,errno.ETIMEDOUT,errno.EAGAIN,errno.ENETDOWN,errno.ENETUNREACH}
+MAX_MANIFEST_BYTES=1048576
+MAX_INVENTORY_ROWS=10000
+
+
+def _read_manifest(path):
+ path=Path(path)
+ try:
+  with path.open("rb") as handle: payload=handle.read(MAX_MANIFEST_BYTES+1)
+ except OSError: raise
+ if len(payload)>MAX_MANIFEST_BYTES: raise ValueError("manifest exceeds 1048576-byte limit")
+ try: return json.loads(payload.decode("utf-8"))
+ except UnicodeDecodeError: raise ValueError("manifest must be UTF-8")
 
 
 class _HTMLLinks(HTMLParser):
@@ -110,15 +123,16 @@ class _HTMLLinks(HTMLParser):
   if tag=="style": self._style_depth+=1
   for key,value in attrs:
    key=key.lower()
-   if key.startswith("on") or key=="srcdoc": self.active.append("attribute:"+key)
+   if key.startswith("on") or key in {"srcdoc","formaction"}: self.active.append("attribute:"+key)
    if value is None: continue
    if value.strip().lower().startswith(("javascript:","vbscript:")): self.active.append("scheme:"+key)
    if tag=="meta" and key=="http-equiv" and value.strip().lower()=="refresh": self.active.append("meta-refresh")
-   if key in {"href","src","poster"}:
-    self.links.append((key,value)); self.dom_links.append((tag,key,value))
+   if key in {"href","xlink:href","src","poster"}:
+    semantic="href" if tag=="a" and key=="href" else "asset"
+    self.links.append((tag,semantic,value)); self.dom_links.append((tag,key,value))
    elif key=="srcset":
     for candidate in _srcset_values(value):
-     self.links.append(("asset",candidate)); self.dom_links.append((tag,key,candidate))
+     self.links.append((tag,"asset",candidate)); self.dom_links.append((tag,key,candidate))
    elif key=="style": self.styles.append(value)
  def handle_endtag(self,tag):
   if tag.lower()=="style" and self._style_depth: self._style_depth-=1
@@ -235,7 +249,7 @@ def _verify_html_markup(root,path,text,inventory):
  parser=_HTMLLinks(); parser.feed(text); parser.close()
  rel=path.relative_to(root).as_posix()
  if parser.active: raise ValueError("active HTML content forbidden: "+rel)
- for attr,value in parser.links: _link_target(root,path,value,attr,inventory)
+ for _,attr,value in parser.links: _link_target(root,path,value,attr,inventory)
  for style in parser.styles:
   for value in _css_links(style): _link_target(root,path,value,"asset",inventory)
  for block in parser.style_blocks:
@@ -252,7 +266,7 @@ def _verify_links(root,files,inventory):
   elif suffix in {".svg",".xml"}:
    parser=_HTMLLinks(); parser.feed(text); parser.close()
    if parser.active: raise ValueError("active HTML content forbidden: "+rel.as_posix())
-   for attr,value in parser.links: _link_target(root,path,value,attr,inventory)
+   for _,attr,value in parser.links: _link_target(root,path,value,attr,inventory)
   elif suffix==".css":
    for value in _css_links(text): _link_target(root,path,value,"asset",inventory)
   else:
@@ -260,14 +274,28 @@ def _verify_links(root,files,inventory):
    _verify_html_markup(root,path,_markdown_raw_html(text),inventory)
 
 
+def _image_magic(path):
+ with path.open("rb") as handle: header=handle.read(16)
+ suffix=path.suffix.lower()
+ if suffix==".png": return header.startswith(b"\x89PNG\r\n\x1a\n")
+ if suffix in {".jpg",".jpeg"}: return header.startswith(b"\xff\xd8\xff")
+ if suffix==".gif": return header.startswith((b"GIF87a",b"GIF89a"))
+ if suffix==".webp": return header.startswith(b"RIFF") and header[8:12]==b"WEBP"
+ return False
+
+
 def _decode_media(path,kind):
  if kind in {"audio","waveform","spectrogram"}:
   if kind=="audio" and path.suffix.lower() not in AUDIO_SUFFIXES: raise ValueError("audio format must be WAV, MP3, or OGG: "+path.name)
+  if kind in {"waveform","spectrogram"} and (path.suffix.lower() not in IMAGE_SUFFIXES or not _image_magic(path)):
+   raise ValueError("image format or structure invalid: "+path.name)
   ffmpeg=shutil.which("ffmpeg")
   if not ffmpeg: raise ValueError("media decode failed: ffmpeg unavailable")
+  stream="0:a:0" if kind=="audio" else "0:v:0"
+  disable=["-vn"] if kind=="audio" else ["-an"]
   try:
    result=subprocess.run(
-    [ffmpeg,"-nostdin","-v","error","-xerror","-i",str(path),"-map","0:0","-f","null","-"],
+    [ffmpeg,"-nostdin","-v","error","-xerror","-i",str(path),"-map",stream,*disable,"-f","null","-"],
     shell=False,timeout=10,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,check=False,
    )
   except (OSError,subprocess.TimeoutExpired): raise ValueError("media decode failed: "+path.name)
@@ -285,7 +313,8 @@ def _verify_playback_bindings(root,playback,rows,inventory):
  except (UnicodeError,OSError): raise ValueError("playback decode failed: "+playback.name)
  bindings=set()
  for tag,attribute,value in parser.dom_links:
-  rel=_link_target(root,playback,value,"asset" if attribute in {"src","srcset","poster"} else "href",inventory)
+  semantic="href" if tag=="a" and attribute=="href" else "asset"
+  rel=_link_target(root,playback,value,semantic,inventory)
   if rel: bindings.add((tag,attribute,rel))
  for row in rows:
   if row["kind"]=="playback": continue
@@ -302,7 +331,7 @@ def _verify_v2(path):
  path=path.resolve(); root=path.parent
  if path.name!="report_manifest.json" or path.is_symlink() or not path.is_file(): raise ValueError("v2 manifest must be report_manifest.json")
  if not stat.S_ISREG(path.stat().st_mode) or path.stat().st_nlink!=1: raise ValueError("v2 manifest must be a single-link regular file")
- data=json.loads(path.read_text(encoding="utf-8"))
+ data=_read_manifest(path)
  if set(data)!=V2_KEYS: raise ValueError("invalid v2 manifest properties")
  for key in ("project","experiment_id","version"):
   if not isinstance(data.get(key),str) or not COMPONENT_PAT.fullmatch(data[key]): raise ValueError("invalid "+key)
@@ -311,7 +340,7 @@ def _verify_v2(path):
  media_dir=root/"media"
  if media_dir.is_symlink() or not media_dir.is_dir(): raise ValueError("canonical media directory is required")
  rows=data.get("files")
- if not isinstance(rows,list) or len(rows)<2: raise ValueError("files must contain the complete bundle inventory")
+ if not isinstance(rows,list) or not 2<=len(rows)<=MAX_INVENTORY_ROWS: raise ValueError("files must contain 2..10000 complete inventory rows")
  declared={}; paths={}
  for row in rows:
   rel,file_path=_v2_file(root,row,"file")
@@ -329,7 +358,7 @@ def _verify_v2(path):
   raise ValueError("bundle inventory mismatch: extra="+",".join(extra)+" missing="+",".join(missing))
  _verify_links(root,paths,set(declared))
  media=data.get("media")
- if not isinstance(media,list): raise ValueError("media must be an array")
+ if not isinstance(media,list) or len(media)>MAX_INVENTORY_ROWS: raise ValueError("media must contain at most 10000 rows")
  groups={}; media_paths=set()
  for row in media:
   if not isinstance(row,dict) or set(row)!=V2_MEDIA_KEYS: raise ValueError("invalid media record")
@@ -338,18 +367,20 @@ def _verify_v2(path):
   rel=_v2_relpath(row.get("path"),"media")
   if rel.parts[0]!="media" or rel.as_posix() not in declared or declared[rel.as_posix()]!=row.get("sha256"): raise ValueError("media must bind to the file inventory: "+str(rel))
   if rel.as_posix() in media_paths: raise ValueError("duplicate media path: "+str(rel))
-  media_paths.add(rel.as_posix()); groups.setdefault(sample,set()).add(kind); _decode_media(root/rel,kind)
+  group=groups.setdefault(sample,{})
+  if kind in group: raise ValueError("duplicate media sample kind: "+sample+"/"+kind)
+  media_paths.add(rel.as_posix()); group[kind]=row; _decode_media(root/rel,kind)
  if groups:
-  if any(kinds!=set(KINDS) for kinds in groups.values()): raise ValueError("each declared sample requires 1:1 audio/waveform/spectrogram/playback")
-  for sample in groups:
-   playback=next(root/Path(row["path"]) for row in media if row["sample_id"]==sample and row["kind"]=="playback")
-   _verify_playback_bindings(root,playback,[row for row in media if row["sample_id"]==sample],set(declared))
+  if any(set(kinds)!=set(KINDS) or len(kinds)!=4 for kinds in groups.values()): raise ValueError("each declared sample requires exactly one audio/waveform/spectrogram/playback")
+  for sample,group in groups.items():
+   playback=root/Path(group["playback"]["path"])
+   _verify_playback_bindings(root,playback,list(group.values()),set(declared))
  return {"samples":len(groups),"media":len(media),"bundle_id":data["bundle_id"],"version":data["version"],"entrypoint":"report/index.html","bundle_classification":"bundle/v2"}
 
 
 def verify(path):
  path=Path(path)
- data=json.loads(path.read_text(encoding="utf-8"))
+ data=_read_manifest(path)
  version=data.get("schema_version")
  if version==1: return _verify_v1(path)
  if version==2: return _verify_v2(path)

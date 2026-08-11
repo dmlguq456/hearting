@@ -75,8 +75,13 @@ may declare an empty media array for prose-only research. If media is declared,
 audio is WAV, MP3, or OGG and the verifier requires the same actual ffmpeg decode
 path, decodable images, scriptless playback HTML, and the complete 1:1 evidence
 set. Every local Markdown/HTML/CSS link and every non-manifest file must be
-inventory-bound before publication. All active HTML fails closed; the consumer
-serves verified playback with CSP `script-src 'none'`.
+inventory-bound before publication. Only `<a href>` may navigate remotely;
+resource href/src values stay inventory-local. Audio must expose a real audio
+stream, waveform/spectrogram files must be PNG/JPEG/GIF/WebP image streams, and
+each sample kind occurs exactly once. The manifest is at most 1,048,576 bytes
+with at most 10,000 rows in each inventory. All active HTML fails closed; the
+consumer serves verified playback with CSP
+`script-src 'none'; form-action 'none'`.
 
 **E3-4. Save and finalize:**
 
