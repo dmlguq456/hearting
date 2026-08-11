@@ -1,3 +1,5 @@
+import contextlib
+import io
 import json
 import sys
 import tempfile
@@ -22,6 +24,8 @@ class InstallInfoTest(unittest.TestCase):
         self.root = Path(self.tmp.name) / "hearting"
         self.root.mkdir(parents=True)
         self.env = {"HOME": str(self.home)}
+        installinfo._REMOTE_CACHE.clear()
+        installinfo._DIRTY_CACHE.clear()
 
     def tearDown(self):
         render.set_process_view(False)
@@ -47,6 +51,12 @@ class InstallInfoTest(unittest.TestCase):
         def run(*_args, **_kwargs):
             return SimpleNamespace(returncode=returncode, stdout=stdout)
         return run
+
+    def _git_head(self, oid):
+        gitdir = self.root / ".git"
+        (gitdir / "refs/heads").mkdir(parents=True)
+        (gitdir / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+        (gitdir / "refs/heads/main").write_text(oid + "\n", encoding="utf-8")
 
     def test_managed_stable_and_pinned_win_for_exact_release_root(self):
         state_path = self.home / ".local/state/hearting/distribution.json"
@@ -75,11 +85,116 @@ class InstallInfoTest(unittest.TestCase):
         self.assertEqual(len(calls), 1)
         self.assertEqual(calls[0][1]["timeout"], 2)
 
+    def test_live_fast_local_fallback_reads_head_without_git_subprocess(self):
+        self._activation("codex", "linked")
+        head = "e" * 40
+        self._git_head(head)
+
+        def runner(*_args, **_kwargs):
+            raise AssertionError("fast local version must not spawn git")
+
+        value = installinfo.collect(self.root, self.env, runner, fast_local=True)
+        self.assertEqual(value["version"], head[:8])
+
+    def test_snapshot_describe_failure_falls_back_to_direct_head(self):
+        self._activation("codex", "linked")
+        head = "f" * 40
+        self._git_head(head)
+        value = installinfo.collect(self.root, self.env, self._git(returncode=1))
+        self.assertEqual(value["version"], head[:8])
+
     def test_packaged_prefers_release_marker(self):
         self._activation("claude", "packaged")
         (self.root / "RELEASE_VERSION").write_text("v4.0.0\n", encoding="utf-8")
         value = installinfo.collect(self.root, self.env, self._git(returncode=1))
         self.assertEqual((value["version"], value["install_method"]), ("v4.0.0", "packaged"))
+
+    def test_linked_live_refresh_uses_highest_head_exact_annotated_remote_semver(self):
+        self._activation("codex", "linked")
+        head = "b" * 40
+        self._git_head(head)
+        tag_object = "a" * 40
+        calls = []
+
+        def runner(argv, **_kwargs):
+            calls.append(argv)
+            if argv[1] == "ls-remote":
+                return SimpleNamespace(returncode=0, stdout=(
+                    f"{head}\trefs/tags/v9.1.0\n"
+                    f"{tag_object}\trefs/tags/v10.0.0\n"
+                    f"{head}\trefs/tags/v10.0.0^{{}}\n"
+                    f"{head}\trefs/tags/not-semver\n"))
+            return SimpleNamespace(returncode=0, stdout="")
+
+        value = installinfo.collect(self.root, self.env, runner,
+                                    refresh_remote=True, now=100.0)
+        self.assertEqual(value["version"], "v10.0.0")
+        self.assertEqual(value["install_method"], "linked")
+        self.assertEqual(sum(argv[1] == "ls-remote" for argv in calls), 1)
+
+    def test_remote_release_dirty_suffix_and_success_ttl(self):
+        self._activation("codex", "linked")
+        head = "c" * 40
+        self._git_head(head)
+        remote_calls = 0
+
+        def runner(argv, **_kwargs):
+            nonlocal remote_calls
+            if argv[1] == "ls-remote":
+                remote_calls += 1
+                return SimpleNamespace(returncode=0,
+                    stdout=f"{head}\trefs/tags/v3.4.5\n")
+            return SimpleNamespace(returncode=1, stdout="")
+
+        first = installinfo.collect(self.root, self.env, runner,
+                                    refresh_remote=True, now=100.0)
+        cached = installinfo.collect(self.root, self.env, runner,
+                                     refresh_remote=True, now=399.0)
+        expired = installinfo.collect(self.root, self.env, runner,
+                                      refresh_remote=True, now=401.0)
+        self.assertEqual(first["version"], "v3.4.5-dirty")
+        self.assertEqual(cached["version"], "v3.4.5-dirty")
+        self.assertEqual(expired["version"], "v3.4.5-dirty")
+        self.assertEqual(remote_calls, 2)
+
+    def test_remote_failure_keeps_same_head_last_good(self):
+        self._activation("codex", "linked")
+        head = "d" * 40
+        self._git_head(head)
+        fail = False
+
+        def runner(argv, **_kwargs):
+            if argv[1] == "ls-remote":
+                if fail:
+                    return SimpleNamespace(returncode=1, stdout="")
+                return SimpleNamespace(returncode=0,
+                    stdout=f"{head}\trefs/tags/v7.8.9\n")
+            return SimpleNamespace(returncode=0, stdout="")
+
+        self.assertEqual(installinfo.collect(self.root, self.env, runner,
+                         refresh_remote=True, now=1.0)["version"], "v7.8.9")
+        fail = True
+        self.assertEqual(installinfo.collect(self.root, self.env, runner,
+                         refresh_remote=True, now=302.0)["version"], "v7.8.9")
+
+    def test_managed_and_packaged_live_refresh_never_query_remote(self):
+        calls = []
+
+        def runner(argv, **_kwargs):
+            calls.append(argv)
+            return SimpleNamespace(returncode=1, stdout="")
+
+        distribution = self.home / ".local/state/hearting/distribution.json"
+        self._write_json(distribution, {"schema": 1, "version": "v1.2.3",
+            "channel": "stable", "release_root": str(self.root)})
+        installinfo.collect(self.root, self.env, runner, refresh_remote=True, now=1.0)
+        self.assertEqual(calls, [])
+
+        distribution.unlink()
+        self._activation("claude", "packaged")
+        (self.root / "RELEASE_VERSION").write_text("v1.2.3\n", encoding="utf-8")
+        installinfo.collect(self.root, self.env, runner, refresh_remote=True, now=1.0)
+        self.assertEqual(calls, [])
 
     def test_conflicting_exact_activation_modes_are_mixed(self):
         self._activation("claude", "linked")
@@ -172,6 +287,42 @@ class InstallInfoTest(unittest.TestCase):
                     "source": "distribution", "runtimes": ["codex"]}
         value = json.loads(fleet._snapshot_json([], [], hearting=identity))
         self.assertEqual(value["hearting"], identity)
+
+    def test_json_snapshot_does_not_enable_remote_refresh(self):
+        calls = []
+
+        def identity(*_args, **kwargs):
+            calls.append(kwargs)
+            return {"version": "v1.0.0", "install_method": "linked",
+                    "source": "activation", "runtimes": ["codex"]}
+
+        with mock.patch.object(installinfo, "collect", side_effect=identity), \
+             mock.patch.object(fleet, "collect_all", return_value=([], [])), \
+             contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(fleet.main(["--json"]), 0)
+        self.assertEqual(calls, [{}])
+
+    def test_live_collector_enables_remote_refresh_off_the_snapshot_paths(self):
+        calls = []
+        identity = {"version": "v1.0.0", "install_method": "linked",
+                    "source": "activation", "runtimes": ["codex"]}
+
+        def collect_identity(*_args, **kwargs):
+            calls.append(kwargs)
+            return identity
+
+        def run_live(collector, _hfilter, _section, _interval):
+            self.assertTrue(callable(collector.hearting_refresh))
+            collector.hearting_refresh()
+            return 0
+
+        with mock.patch.object(installinfo, "collect", side_effect=collect_identity), \
+             mock.patch.object(render, "run_live", side_effect=run_live):
+            self.assertEqual(fleet.main([]), 0)
+        self.assertEqual(calls, [
+            {"fast_local": True},
+            {"refresh_remote": True, "fast_local": True},
+        ])
 
 
 if __name__ == "__main__":

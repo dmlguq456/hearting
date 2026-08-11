@@ -8,7 +8,7 @@ refreshing, or closing this TUI never invokes a model provider. Git telemetry re
 bounded background work. ``--json`` and ``--once`` are side-effect-free snapshots.
 
 Modes:
-  (default)  curses full-screen, re-collect + redraw every --interval seconds
+  (default)  curses full-screen, background re-collect every --interval seconds
   --once     single snapshot; plain stdout when not a TTY / curses unavailable
   --json     collectors' result as JSON to stdout (pipe / debug / test)
 """
@@ -166,7 +166,8 @@ def _collect_route(entities):
 def main(argv=None):
     args = parse_args(argv if argv is not None else sys.argv[1:])
     hfilter = _harness_filter(args.harness)
-    hearting = installinfo.collect()
+    hearting = (installinfo.collect() if args.json or args.once
+                else installinfo.collect(fast_local=True))
     disabled = _disabled_tokens()
     disabled["api_disabled"] = bool(disabled["api_disabled"] or args.no_usage_api)
     if args.title_provider:
@@ -287,6 +288,10 @@ def main(argv=None):
     live_collector.last_resource_jobs = []
     live_collector.last_resource_malformed = 0
     live_collector.last_usage_snapshots = {}
+    # Live-only metadata refresh. render's snapshot pump invokes this off the curses
+    # thread; --once/--json never opt into remote release discovery.
+    live_collector.hearting_refresh = lambda: installinfo.collect(
+        refresh_remote=True, fast_local=True)
 
     return render.run_live(live_collector, hfilter, args.section, args.interval)
 
