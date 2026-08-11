@@ -64,7 +64,7 @@ def session_digest(session_id: str) -> str:
 def token_budget_root(state_dir: str | Path | None = None) -> Path:
     if state_dir is not None:
         return Path(state_dir)
-    return Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local" / "state") / "agent-harness" / "token-budget"
+    return Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local" / "state") / "hearting" / "token-budget"
 
 
 def accounting_dir(state_dir: str | Path | None = None) -> Path:

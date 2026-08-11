@@ -476,7 +476,7 @@ class AccountingTest(unittest.TestCase):
                     os.environ["XDG_STATE_HOME"] = old
             # The env is restored, so read through the explicit token-budget root.
             aggregate = read_accounting(
-                SID, adapter="codex", state_dir=Path(state) / "agent-harness" / "token-budget")
+                SID, adapter="codex", state_dir=Path(state) / "hearting" / "token-budget")
             self.assertEqual(aggregate["hook_invocations"], 1)
             self.assertEqual(aggregate["zero_injections"], 1)
             self.assertEqual(aggregate["zero_reason_counts"]["timeout_or_error"], 1)

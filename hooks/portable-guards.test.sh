@@ -2501,7 +2501,7 @@ if printf '{"prompt":"plain prompt","session_id":"%s","cwd":"%s"}\n' "$budget_si
 else
   bad "codex prompt hook should keep same-band token budget reinjection at zero bytes"
 fi
-codex_accounting_dir="$TMP/codex_budget_state/agent-harness/token-budget/accounting"
+codex_accounting_dir="$TMP/codex_budget_state/hearting/token-budget/accounting"
 if CODEX_HOME="$TMP/codex_hook_home/.codex" XDG_STATE_HOME="$TMP/codex_budget_state" "$budget_preflight" token-budget "$TMP/flowproj" "$budget_sid" kv >"$TMP/codex_budget_accounting_kv.out" 2>"$TMP/codex_budget_accounting_kv.err" \
   && grep -q '^accounting.hook_invocations=2$' "$TMP/codex_budget_accounting_kv.out" \
   && python3 - "$codex_accounting_dir" "$budget_sid" <<'PY'
