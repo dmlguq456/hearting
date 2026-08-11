@@ -86,16 +86,28 @@ assert row["freshness"] == "fresh", row["freshness"]
 PY
 done
 
+# Model routing becomes user-owned on first install. Uninstall must preserve the
+# exact regular-file bytes for both runtimes while removing harness projections.
+sha256sum \
+  "$SMOKE/home/.claude/agent-config/models.conf" \
+  "$SMOKE/home/.codex/agent-config/models.conf" \
+  > "$SMOKE/user-model-config.sha256"
+
 run_isolated "$SMOKE/home/.local/bin/harness" uninstall codex >/dev/null
 run_isolated "$SMOKE/home/.local/bin/harness" uninstall claude >/dev/null
 if [ -e "$SMOKE/home/.local/bin/codex" ]; then
   echo "post-publish smoke: uninstall left the codex wrapper" >&2
   exit 1
 fi
-leftovers=$(find "$SMOKE/home/.codex" ! -type d 2>/dev/null | wc -l)
+sha256sum -c "$SMOKE/user-model-config.sha256" >/dev/null || {
+  echo "post-publish smoke: uninstall changed a user-owned model config" >&2
+  exit 1
+}
+codex_model_config="$SMOKE/home/.codex/agent-config/models.conf"
+leftovers=$(find "$SMOKE/home/.codex" ! -type d ! -path "$codex_model_config" 2>/dev/null | wc -l)
 if [ "$leftovers" -ne 0 ]; then
-  find "$SMOKE/home/.codex" ! -type d >&2
-  echo "post-publish smoke: uninstall left $leftovers file(s) in .codex" >&2
+  find "$SMOKE/home/.codex" ! -type d ! -path "$codex_model_config" >&2
+  echo "post-publish smoke: uninstall left $leftovers harness-owned file(s) in .codex" >&2
   exit 1
 fi
 if [ -e "$SMOKE/home/.claude/CLAUDE.md" ] || [ -L "$SMOKE/home/.claude/CLAUDE.md" ]; then
