@@ -370,9 +370,28 @@ class ClaudeSessionSupervisorTest(unittest.TestCase):
             }
         )
         self.assertEqual(prompt.count("preflight.sh harvest --attempt-id"), 2)
+        self.assertEqual(
+            prompt.count(
+                str(ROOT / "adapters" / "codex" / "bin" / "preflight.sh")
+                + " harvest --attempt-id"
+            ),
+            2,
+        )
+        self.assertIn("shared, runtime-neutral registry harvest compatibility surface", prompt)
+        self.assertIn("does not select or change the owner or child harness", prompt)
         self.assertIn("--attempt-id att-child-a --status open --mark-done", prompt)
         self.assertIn("--attempt-id att-child-b --status open --mark-done", prompt)
         self.assertNotIn("RAW_CLAUDE_SENTINEL", prompt)
+
+    def test_remediation_prompt_uses_shared_absolute_harvest_surface(self):
+        prompt = supervisor.remediation_prompt({"att-child"})
+        self.assertIn(
+            str(ROOT / "adapters" / "codex" / "bin" / "preflight.sh")
+            + " harvest --attempt-id att-child --mark-done",
+            prompt,
+        )
+        self.assertIn("shared, runtime-neutral registry harvest compatibility surface", prompt)
+        self.assertIn("does not change either harness", prompt)
 
     def test_missing_result_has_no_false_terminal(self):
         broken = self.base / "broken.py"

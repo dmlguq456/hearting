@@ -461,6 +461,19 @@ class DispatchCompletionJoinTest(unittest.TestCase):
             parent_slug="owner",
         )
         self.assertEqual(harvest, JOIN.SupervisorShellAction("harvest", "att-a"))
+        absolute_harvest = JOIN.classify_supervised_shell_command(
+            base=JOIN.ROOT,
+            command=(
+                f"{JOIN.ROOT / 'adapters/codex/bin/preflight.sh'} harvest "
+                "--attempt-id att-b --status open --mark-done"
+            ),
+            open_attempt_ids=open_attempts,
+            parent_slug="owner",
+        )
+        self.assertEqual(
+            absolute_harvest,
+            JOIN.SupervisorShellAction("harvest", "att-b"),
+        )
         harvest_all = JOIN.classify_supervised_shell_command(
             base=JOIN.ROOT,
             command=(

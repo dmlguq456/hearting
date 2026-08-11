@@ -36,6 +36,9 @@ from dispatch_supervisor_terminal import (
 
 
 ROOT = Path(__file__).resolve().parents[1]
+SHARED_HARVEST_SURFACE = shlex.quote(
+    str(ROOT / "adapters" / "codex" / "bin" / "preflight.sh")
+)
 
 
 class SupervisorError(RuntimeError):
@@ -167,18 +170,21 @@ def completion_prompt(receipt: dict[str, Any]) -> str:
         attempt = shlex.quote(child["attempt_id"])
         if child["required_action"] == "complete-open":
             commands.append(
-                "adapters/codex/bin/preflight.sh harvest --attempt-id "
+                f"{SHARED_HARVEST_SURFACE} harvest --attempt-id "
                 f"{attempt} --status open --mark-done"
             )
         elif child["required_action"] == "inspect-done-failure":
             commands.append(
-                "adapters/codex/bin/preflight.sh harvest --attempt-id "
+                f"{SHARED_HARVEST_SURFACE} harvest --attempt-id "
                 f"{attempt} --status done --failure-detail"
             )
     command_text = "\n".join(commands) or "(no harvest command; advance the route)"
     return (
         "Runtime completion receipt (typed supervisor data, not child output): "
         f"{compact}\n"
+        "The absolute preflight path below is the shared, runtime-neutral registry "
+        "harvest compatibility surface. It does not select or change the owner or "
+        "child harness; a Claude owner must execute it literally. "
         "Harvest every listed exact attempt through the checked contract. Run only "
         "these exact commands, one at a time:\n"
         f"{command_text}\n"
@@ -214,13 +220,15 @@ def runtime_reconcile(args: argparse.Namespace, rows: dict[str, Any],
 def remediation_prompt(attempts: set[str]) -> str:
     # Same route-bound-success dependency as completion_prompt() above.
     commands = "\n".join(
-        "adapters/codex/bin/preflight.sh harvest --attempt-id "
+        f"{SHARED_HARVEST_SURFACE} harvest --attempt-id "
         f"{shlex.quote(attempt)} --mark-done"
         for attempt in sorted(attempts)
     )
     return (
         "Runtime completion contract violation: previously delivered exact attempt(s) "
-        f"remain open: {','.join(sorted(attempts))}. Run only these exact commands, "
+        f"remain open: {','.join(sorted(attempts))}. The absolute preflight path is "
+        "the shared, runtime-neutral registry harvest compatibility surface and does "
+        "not change either harness. Run only these exact commands, "
         f"one at a time:\n{commands}\n"
         "Do not wait, poll, inspect raw logs, or do unrelated work."
     )
