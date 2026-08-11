@@ -248,6 +248,42 @@ and inventory-bound hashes. Publisher and dry-run backfill receive explicit
 project, experiment, and version values and never infer version from paths or
 timestamps.
 
+Schema v2 stays exact: experiment logs, report documents, and media are ordinary
+members of `files[]`; adding them never adds manifest properties or creates a
+new schema version. A publishable experiment bundle keeps original logs under
+`logs/`, canonical report/navigation documents at the report root, and evidence
+under `media/`. Turso receives only stable bundle/document identifiers and a
+manifest snapshot digest. It never receives original log, report body, media,
+or an absolute bundle path. Receipt v2 is likewise IDs-only.
+
+Published HTML is scriptless. The verifier rejects every `<script>` element,
+active embedding elements, inline event handlers, `srcdoc`, script URL schemes,
+and refresh redirects in HTML/SVG/XML. Consumers serve verified pages with CSP
+`script-src 'none'`; a playback page binds declared media through actual DOM
+media/link elements. Declared audio is WAV, MP3, or OGG and every format uses
+the same bounded, shell-free `ffmpeg -xerror` decode path. Missing ffmpeg or a
+decode/playback failure is an integrity failure.
+
+Publication copies into a sibling staging directory, hashes each regular
+single-link file through one descriptor, verifies the closed staged inventory,
+and uses an atomic same-filesystem no-replace rename. Existing identical
+versions are unchanged; collisions fail closed. Consumers mount the bundle root
+read-only. A periodic full verifier records per-bundle state only on a health
+transition (`healthy|broken|checking` with machine reason codes); unchanged
+health causes zero per-bundle writes. One separate bounded global heartbeat per
+run proves monitor liveness and freshness. Transient root/NFS unavailability is
+not rewritten as integrity loss.
+
+Existing-note backfill uses the authoritative 38-bundle census and emits only
+ordered `document_id` to existing `note_id` mappings. It validates canonical
+source path, manifest hash, hierarchy, unique note identity, and canonical
+project-root device/inode before producing an IDs-only dry-run request. Missing,
+extra, duplicate, ambiguous, aliased, or order-mismatched rows reject the whole
+candidate. Apply belongs to Cairn and may write only bundle/document/link/health
+rows; the `l2_notes` row count, IDs, bodies, revisions, cards, parents, and pages
+remain byte-identical. Link rewriting is consumer-owned presentation only and
+never weakens the producer's exact source hash proof.
+
 ### §4.1. Report Figure Evidence Contract
 
 Report spectrograms separate the computation contract from the communication

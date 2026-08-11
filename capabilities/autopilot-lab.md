@@ -95,7 +95,7 @@ opening one session per stage:
 |---|---|---|
 | eval worker | eval harness, raw metrics (`metrics.jsonl`, `run.json`), `_RUNLOG` row | 2–4 |
 | media worker | `figures/`, audio segments, playback `report/*.html` | 5 |
-| report worker | staged `report/{index.html,REPORT.md,report_manifest.json,media/}`, `STORY.md`, `summary.md` | 6 |
+| report worker | staged `report/{index.html,REPORT.md,report_manifest.json,logs/,media/}`, `STORY.md`, `summary.md` | 6 |
 | verification worker | read-only checks; verdict artifact only | 7 |
 | publication stage | `report-bundle publish` with explicit project/experiment/version, then destination verification; writes only the installed bundle root and `bundle-publication.json` | 8 |
 | closing stage | `autopilot-spec` update when applicable (a research-mode blueprint advances as a roadmap: close the step with its verdict and evidence, re-plan the tail), then offer only `bundle_id`, version, and `report/index.html` to the optional app-neutral sink; unavailable records `skipped/extension-unavailable` | 9 |
@@ -234,7 +234,19 @@ resource-run identity. Evaluation reports use one `report_manifest.json`. New
 publishable bundles use schema v2 from
 `capabilities/report-bundle-manifest.schema.json`, permitting prose-only
 reports while requiring a closed file/hash/link inventory. Declared media
-additionally requires actual decode/playback and the 1:1 evidence set. Legacy
+additionally requires WAV/MP3/OGG parity through actual bounded ffmpeg decode,
+scriptless DOM-bound playback, and the 1:1 evidence set. Exact experiment and
+evaluation logs needed for reproduction live under `report/logs/` as ordinary
+v2 `files[]` members; log/report/media bytes and absolute bundle paths are never
+uploaded to Turso. All active HTML fails closed and Cairn serves only verified
+bundles under CSP `script-src 'none'`. Publication is sibling-stage,
+same-descriptor hash verified, and atomic no-replace; consumers mount the root
+read-only. Periodic validation records per-bundle health transitions only while
+one bounded global heartbeat proves monitor liveness. Existing-note backfill is
+limited to the authoritative 38-bundle census and ordered IDs-only dry-run
+mappings; ambiguity, hierarchy/order drift, source hash drift, or canonical
+project-root aliasing rejects the whole candidate without changing `l2_notes`.
+Legacy
 schema v1 remains validated by `tools/report-manifest-verify.py` for 48 kHz/full-band media, summary statistics, hashes,
 1:1 audio/waveform/spectrogram/playback sets, and visual evidence. Its optional `bundle`
 block declares each representation's `format`, `roles`, and file binding plus one shared

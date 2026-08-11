@@ -1,0 +1,13 @@
+{
+  "schema_version": 2,
+  "bundle_id": "project/experiment",
+  "version": "v1",
+  "entrypoint": "report/index.html",
+  "mode": "dry-run",
+  "documents": [
+    {
+      "document_id": "report",
+      "note_id": "note-001"
+    }
+  ]
+}

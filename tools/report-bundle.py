@@ -4,6 +4,9 @@
 from __future__ import annotations
 
 import argparse
+import ctypes
+from datetime import datetime, timezone
+import errno
 import hashlib
 import importlib.util
 import json
@@ -52,15 +55,8 @@ def resolve_root(raw=None, optional=False):
         raise BundleError(str(exc))
 
 
-def _tree_digest(root):
-    digest = hashlib.sha256()
-    for path in sorted(item for item in root.rglob("*") if item.is_file()):
-        if path.is_symlink():
-            raise BundleError("symlink forbidden: " + str(path.relative_to(root)))
-        rel = path.relative_to(root).as_posix().encode("utf-8")
-        digest.update(len(rel).to_bytes(8, "big")); digest.update(rel)
-        data = path.read_bytes(); digest.update(len(data).to_bytes(8, "big")); digest.update(data)
-    return digest.hexdigest()
+def _manifest_digest(root):
+    return hashlib.sha256((Path(root) / "report_manifest.json").read_bytes()).hexdigest()
 
 
 def _safe_container(root, parts):
@@ -76,6 +72,35 @@ def _safe_container(root, parts):
         if current.is_symlink() or not current.is_dir():
             raise BundleError("unsafe bundle destination component: " + str(current))
     return current
+
+
+def _rename_noreplace(source, target):
+    """Atomically publish a directory only while the destination is absent."""
+    libc = ctypes.CDLL(None, use_errno=True)
+    renameat2 = getattr(libc, "renameat2", None)
+    if renameat2 is None:
+        raise BundleError("atomic no-replace rename is unavailable")
+    renameat2.argtypes = (ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint)
+    renameat2.restype = ctypes.c_int
+    result = renameat2(-100, os.fsencode(source), -100, os.fsencode(target), 1)
+    if result == 0:
+        return
+    error = ctypes.get_errno()
+    if error == errno.EEXIST:
+        raise BundleError("bundle version collision: destination appeared during publication")
+    raise BundleError("atomic no-replace rename failed: " + os.strerror(error))
+
+
+def _atomic_json(path, value):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name("." + path.name + ".tmp-" + str(os.getpid()) + "-" + secrets.token_hex(4))
+    try:
+        temporary.write_text(json.dumps(value, sort_keys=True) + "\n", encoding="utf-8")
+        os.replace(temporary, path)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
 
 
 def publish(source, project, experiment, version, root=None):
@@ -106,7 +131,7 @@ def publish(source, project, experiment, version, root=None):
             VERIFY.verify(target / "report_manifest.json")
         except Exception as exc:
             raise BundleError("existing bundle is invalid: " + str(exc))
-        if _tree_digest(source) == _tree_digest(target):
+        if _manifest_digest(source) == _manifest_digest(target):
             return {"status": "unchanged", "bundle_id": bundle_id(project, experiment), "version": version, "entrypoint": "report/index.html"}
         raise BundleError("bundle version collision: existing content differs")
 
@@ -114,11 +139,82 @@ def publish(source, project, experiment, version, root=None):
     try:
         shutil.copytree(source, staging, symlinks=False)
         VERIFY.verify(staging / "report_manifest.json")
-        os.replace(staging, target)
+        _rename_noreplace(staging, target)
     finally:
         if staging.exists():
             shutil.rmtree(staging)
     return {"status": "published", "bundle_id": bundle_id(project, experiment), "version": version, "entrypoint": "report/index.html"}
+
+
+def _integrity_reason(error):
+    message = str(error).lower()
+    for token, reason in (
+        ("storage transient", "transient"), ("timed out", "transient"),
+        ("missing", "missing"), ("no such file", "missing"), ("hash", "hash"), ("playback", "playback"),
+        ("decode", "decode"), ("active html", "active-content"),
+        ("link", "link"), ("escape", "root"), ("symlink", "root"), ("unsafe", "root"),
+    ):
+        if token in message:
+            return reason
+    return "root"
+
+
+def integrity_check(root, previous=None, checked_at=None):
+    """Read-only full sweep; callers persist only returned transitions."""
+    root = resolve_root(root)
+    if root.is_symlink() or not root.is_dir():
+        raise BundleError("report bundle root unavailable")
+    previous = previous or {"schema_version": 1, "bundles": {}}
+    if set(previous) != {"schema_version", "bundles"} or previous["schema_version"] != 1 or not isinstance(previous["bundles"], dict):
+        raise BundleError("invalid integrity state")
+    bundles = {}
+    for version_dir in sorted(path for path in root.glob("*/*/*") if path.is_dir() or path.is_symlink()):
+        rel = version_dir.relative_to(root)
+        if len(rel.parts) != 3:
+            continue
+        project, experiment, version = rel.parts
+        identity = bundle_id(project, experiment) + "/" + component(version, "version")
+        manifest = version_dir / "report" / "report_manifest.json"
+        try:
+            if version_dir.is_symlink():
+                raise ValueError("unsafe bundle version symlink")
+            result = VERIFY.verify(manifest)
+            if result["bundle_id"] + "/" + result["version"] != identity:
+                raise ValueError("bundle identity mismatch")
+            bundles[identity] = {"status": "healthy", "reason": None}
+        except (ValueError, OSError, KeyError, TypeError, json.JSONDecodeError) as exc:
+            bundles[identity] = {"status": "broken", "reason": _integrity_reason(exc)}
+    previous_bundles = previous["bundles"]
+    for identity in set(previous_bundles) - set(bundles):
+        bundles[identity] = {"status": "broken", "reason": "missing"}
+    transitions = []
+    for identity in sorted(set(previous_bundles) | set(bundles)):
+        before = previous_bundles.get(identity)
+        after = bundles.get(identity, {"status": "broken", "reason": "missing"})
+        if before != after:
+            transitions.append({"bundle": identity, "before": before, "after": after})
+    return {
+        "schema_version": 1,
+        "checked_at": checked_at or datetime.now(timezone.utc).isoformat(),
+        "bundles": bundles,
+        "transitions": transitions,
+    }
+
+
+def run_integrity(root, state_path=None, heartbeat_path=None, checked_at=None):
+    previous = None
+    if state_path and Path(state_path).is_file():
+        previous = json.loads(Path(state_path).read_text(encoding="utf-8"))
+    result = integrity_check(root, previous=previous, checked_at=checked_at)
+    state_writes = 0
+    if state_path and result["transitions"]:
+        _atomic_json(state_path, {"schema_version": 1, "bundles": result["bundles"]})
+        state_writes = len(result["transitions"])
+    heartbeat_writes = 0
+    if heartbeat_path:
+        _atomic_json(heartbeat_path, {"schema_version": 1, "checked_at": result["checked_at"], "bundle_count": len(result["bundles"])})
+        heartbeat_writes = 1
+    return dict(result, bundle_state_writes=state_writes, heartbeat_writes=heartbeat_writes)
 
 
 def backfill_plan(source, project, experiment, version):
@@ -174,13 +270,119 @@ def backfill_plan(source, project, experiment, version):
     }
 
 
+def link_existing_plan(inventory_path):
+    """Validate the authoritative local census and emit IDs-only Cairn requests."""
+    inventory_path = Path(inventory_path)
+    data = json.loads(inventory_path.read_text(encoding="utf-8"))
+    if set(data) != {"schema_version", "candidate_count", "bundles"} or data.get("schema_version") != 1:
+        raise BundleError("invalid link-only inventory")
+    bundles = data.get("bundles")
+    if data.get("candidate_count") != 38 or not isinstance(bundles, list) or len(bundles) != 38:
+        raise BundleError("authoritative link-only inventory must contain exactly 38 bundles")
+    requests = []
+    aliases = {}
+    seen_identities = set()
+    all_note_ids = set()
+    total_documents = 0
+    for bundle in bundles:
+        expected_bundle_keys = {"source_root", "project_root", "project", "experiment_id", "version", "already_generated", "documents"}
+        if not isinstance(bundle, dict) or set(bundle) != expected_bundle_keys:
+            raise BundleError("invalid link-only bundle record")
+        if bundle["already_generated"] is not False:
+            raise BundleError("already-generated bundle mapping rejected")
+        project = component(bundle["project"], "project")
+        experiment = component(bundle["experiment_id"], "experiment")
+        version = component(bundle["version"], "version")
+        identity = bundle_id(project, experiment)
+        identity_version = identity + "/" + version
+        if identity_version in seen_identities:
+            raise BundleError("duplicate link-only bundle identity")
+        seen_identities.add(identity_version)
+        project_root = Path(bundle["project_root"])
+        if not project_root.is_absolute() or project_root.is_symlink() or not project_root.is_dir() or str(project_root) != str(project_root.resolve()):
+            raise BundleError("project_root must be an exact canonical directory")
+        project_stat = project_root.stat()
+        alias_key = (project_stat.st_dev, project_stat.st_ino)
+        previous_project = aliases.setdefault(alias_key, project)
+        if previous_project != project:
+            raise BundleError("cross-project canonical-root alias collision")
+        source_root = Path(bundle["source_root"])
+        if not source_root.is_absolute() or source_root.is_symlink() or not source_root.is_dir() or str(source_root) != str(source_root.resolve()):
+            raise BundleError("source_root must be an exact canonical directory")
+        verified = VERIFY.verify(source_root / "report_manifest.json")
+        if verified.get("bundle_id") != identity or verified.get("version") != version:
+            raise BundleError("link-only source manifest identity mismatch")
+        manifest_data = json.loads((source_root / "report_manifest.json").read_text(encoding="utf-8"))
+        file_hashes = {row["path"]: row["sha256"] for row in manifest_data["files"]}
+        documents = bundle["documents"]
+        if not isinstance(documents, list) or not documents:
+            raise BundleError("link-only bundle requires documents")
+        source_paths = [row.get("source_path") for row in documents if isinstance(row, dict)]
+        if source_paths != ["REPORT.md"] + sorted(source_paths[1:]):
+            raise BundleError("link-only documents are not in deterministic manifest path order")
+        seen_documents = set()
+        seen_notes = set()
+        mappings = []
+        for index, row in enumerate(documents):
+            expected_document_keys = {"document_id", "source_path", "source_sha256", "parent_document_id", "note_id", "note_body_sha256", "note_revision"}
+            if not isinstance(row, dict) or set(row) != expected_document_keys:
+                raise BundleError("invalid link-only document record")
+            document_id = component(row["document_id"], "document_id")
+            note_id = component(row["note_id"], "note_id")
+            source_path = _link_inventory_path(row["source_path"])
+            if index == 0 and (document_id != "report" or source_path != "REPORT.md" or row["parent_document_id"] is not None):
+                raise BundleError("link-only report document must be first and parentless")
+            parent = row["parent_document_id"]
+            if index and (not isinstance(parent, str) or parent not in seen_documents):
+                raise BundleError("link-only parent hierarchy is ambiguous or out of order")
+            if document_id in seen_documents or note_id in seen_notes or note_id in all_note_ids:
+                raise BundleError("duplicate link-only document or note identity")
+            if source_path not in file_hashes or file_hashes[source_path] != row["source_sha256"]:
+                raise BundleError("link-only source hash is not manifest-bound")
+            if not VERIFY.HASH_PAT.fullmatch(str(row["note_body_sha256"])) or not isinstance(row["note_revision"], (int, str)):
+                raise BundleError("invalid existing-note snapshot proof")
+            seen_documents.add(document_id); seen_notes.add(note_id); all_note_ids.add(note_id)
+            mappings.append({"document_id": document_id, "note_id": note_id})
+        total_documents += len(mappings)
+        requests.append({
+            "schema_version": 2,
+            "bundle_id": identity,
+            "version": version,
+            "entrypoint": "report/index.html",
+            "mode": "dry-run",
+            "documents": mappings,
+        })
+    return {
+        "schema_version": 1,
+        "operation": "existing-note-link-only-census",
+        "candidate_count": 38,
+        "document_count": total_documents,
+        "requests": requests,
+        "proof": {
+            "l2_notes_insert_rows": 0,
+            "l2_notes_update_rows": 0,
+            "l2_notes_body_revision_changes": 0,
+            "absolute_paths_in_requests": False,
+        },
+        "mutation": False,
+    }
+
+
+def _link_inventory_path(value):
+    path = VERIFY._v2_relpath(value, "source_path")
+    return path.as_posix()
+
+
 def parser():
     top = argparse.ArgumentParser(prog="report-bundle")
     sub = top.add_subparsers(dest="command", required=True)
     root = sub.add_parser("root"); root.add_argument("--optional", action="store_true")
     verify = sub.add_parser("verify"); verify.add_argument("manifest")
+    integrity = sub.add_parser("integrity")
+    integrity.add_argument("--root"); integrity.add_argument("--state"); integrity.add_argument("--heartbeat")
     publish_parser = sub.add_parser("publish")
     backfill = sub.add_parser("backfill")
+    link_existing = sub.add_parser("link-existing")
     for command in (publish_parser, backfill):
         command.add_argument("--source", required=True)
         command.add_argument("--project", required=True)
@@ -188,6 +390,8 @@ def parser():
         command.add_argument("--version", required=True)
     publish_parser.add_argument("--root")
     backfill.add_argument("--dry-run", action="store_true", required=True)
+    link_existing.add_argument("--inventory", required=True)
+    link_existing.add_argument("--dry-run", action="store_true", required=True)
     return top
 
 
@@ -199,8 +403,12 @@ def main(argv=None):
         return 0
     if args.command == "verify":
         result = VERIFY.verify(args.manifest)
+    elif args.command == "integrity":
+        result = run_integrity(args.root, args.state, args.heartbeat)
     elif args.command == "publish":
         result = publish(args.source, args.project, args.experiment, args.version, args.root)
+    elif args.command == "link-existing":
+        result = link_existing_plan(args.inventory)
     else:
         result = backfill_plan(args.source, args.project, args.experiment, args.version)
     print(json.dumps(result, sort_keys=True))
