@@ -22,6 +22,24 @@ def digest(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def corrupt_ogg_audio_pages(path):
+    payload = bytearray(path.read_bytes()); offset = 0; audio_serial = None; pages = []
+    while offset + 27 <= len(payload) and payload[offset:offset + 4] == b"OggS":
+        segments = payload[offset + 26]; table_end = offset + 27 + segments
+        size = sum(payload[offset + 27:table_end]); page_end = table_end + size
+        serial = int.from_bytes(payload[offset + 14:offset + 18], "little")
+        body = bytes(payload[table_end:page_end]); pages.append((serial, table_end, page_end, body))
+        if body.startswith(b"\x01vorbis"): audio_serial = serial
+        offset = page_end
+    if audio_serial is None: raise AssertionError("fixture has no Vorbis stream")
+    changed = 0
+    for serial, start, end, body in pages:
+        if serial == audio_serial and not body.startswith((b"\x01vorbis", b"\x03vorbis", b"\x05vorbis")) and end > start:
+            payload[start] ^= 0xFF; changed += 1
+    if not changed: raise AssertionError("fixture has no audio data page")
+    path.write_bytes(payload)
+
+
 class BundleV2Tests(unittest.TestCase):
     def test_cross_repo_v2_golden_shapes_are_exact(self):
         link = json.loads((HERE.parent / "capabilities/report-bundle-link-existing.request.example.json").read_text())
@@ -61,6 +79,20 @@ class BundleV2Tests(unittest.TestCase):
         for name, kind in zip(names, kinds):
             row = {"path": "media/" + name, "sha256": digest(media / name)}
             data["files"].append(dict(row)); data["media"].append(dict(row, sample_id="s1", kind=kind))
+
+    def replace_audio(self, root, data, replacement):
+        audio = next(row for row in data["media"] if row["kind"] == "audio")
+        file_row = next(row for row in data["files"] if row["path"] == audio["path"])
+        old = root / audio["path"]
+        if old != replacement and old.exists(): old.unlink()
+        new_path = replacement.relative_to(root).as_posix(); new_hash = digest(replacement)
+        old_name = Path(audio["path"]).name
+        audio.update(path=new_path, sha256=new_hash); file_row.update(path=new_path, sha256=new_hash)
+        playback = root / "media/playback.html"
+        playback.write_text(playback.read_text().replace(old_name, replacement.name), encoding="utf-8")
+        playback_hash = digest(playback)
+        next(row for row in data["files"] if row["path"] == "media/playback.html")["sha256"] = playback_hash
+        next(row for row in data["media"] if row["kind"] == "playback")["sha256"] = playback_hash
 
     def test_prose_only_passes(self):
         with tempfile.TemporaryDirectory() as td:
@@ -115,6 +147,7 @@ class BundleV2Tests(unittest.TestCase):
         ) as run:
             B.VERIFY._decode_media(Path("/fixture/audio.wav"), "audio")
         self.assertFalse(run.call_args.kwargs["shell"])
+        self.assertIn("0:a:0", run.call_args.args[0]); self.assertIn("-vn", run.call_args.args[0])
         self.assertEqual(run.call_args.kwargs["timeout"], 10)
         self.assertIs(run.call_args.kwargs["stdout"], B.VERIFY.subprocess.DEVNULL)
         self.assertIs(run.call_args.kwargs["stderr"], B.VERIFY.subprocess.DEVNULL)
@@ -128,6 +161,7 @@ class BundleV2Tests(unittest.TestCase):
                 (root / "index.html", "<style>body{background:url('../outside.png')}</style>", "escapes root"),
                 (root / "index.html", "<style>@import '../outside.css';</style>", "escapes root"),
                 (root / "index.html", '<a href="report_manifest.json">manifest</a>', "not in bundle inventory"),
+                (root / "index.html", '<link rel="stylesheet" href="https://evil.invalid/x.css">', "non-self-contained resource"),
             )
             for target, text, error in cases:
                 (root / "REPORT.md").write_text("# Report\n[Open report](index.html)\n", encoding="utf-8")
@@ -170,6 +204,8 @@ class BundleV2Tests(unittest.TestCase):
                 ('<img src="index.html" onerror="alert(1)">', "active HTML content forbidden"),
                 ('<a href="javascript:alert(1)">x</a>', "active HTML content forbidden"),
                 ('<meta http-equiv="refresh" content="0; url=index.html">', "active HTML content forbidden"),
+                ('<link rel="stylesheet" href="https://evil.invalid/x.css">', "non-self-contained resource"),
+                ('<div formaction="https://evil.invalid/">x</div>', "active HTML content forbidden"),
             )
             for markdown, error in cases:
                 (root / "REPORT.md").write_text(markdown, encoding="utf-8")
@@ -179,13 +215,30 @@ class BundleV2Tests(unittest.TestCase):
             data["files"][0]["sha256"] = digest(root / "REPORT.md"); path.write_text(json.dumps(data))
             self.assertEqual(B.VERIFY.verify(path)["bundle_classification"], "bundle/v2")
 
+    def test_svg_resource_href_is_not_remote_navigation(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td); path, data = self.prose(root)
+            svg = root / "diagram.svg"
+            for attribute in ("href", "xlink:href"):
+                svg.write_text('<svg><use %s="https://evil.invalid/x.svg#id"></use></svg>' % attribute, encoding="utf-8")
+                if not any(row["path"] == "diagram.svg" for row in data["files"]): data["files"].append({"path": "diagram.svg", "sha256": digest(svg)})
+                else: next(row for row in data["files"] if row["path"] == "diagram.svg")["sha256"] = digest(svg)
+                path.write_text(json.dumps(data))
+                with self.subTest(attribute=attribute), self.assertRaisesRegex(ValueError, "non-self-contained resource"): B.VERIFY.verify(path)
+
     @unittest.skipUnless(shutil.which("ffmpeg"), "ffmpeg actual-decode fixture")
     def test_audio_format_parity_wav_mp3_ogg(self):
-        for suffix in (".wav", ".mp3", ".ogg"):
+        for suffix in (".wav", ".wave", ".mp3", ".ogg"):
             with self.subTest(suffix=suffix), tempfile.TemporaryDirectory() as td:
                 root = Path(td); path, data = self.prose(root); self.add_media(root, data)
                 audio = root / "media/audio.wav"
-                if suffix != ".wav":
+                if suffix == ".wave":
+                    converted = audio.with_suffix(suffix); audio.rename(converted)
+                    data["files"][2]["path"] = "media/" + converted.name
+                    data["media"][0]["path"] = "media/" + converted.name
+                    playback = root / "media/playback.html"
+                    playback.write_text(playback.read_text().replace("audio.wav", converted.name), encoding="utf-8")
+                elif suffix != ".wav":
                     converted = audio.with_suffix(suffix)
                     subprocess.run([shutil.which("ffmpeg"), "-nostdin", "-v", "error", "-xerror", "-i", str(audio), str(converted)], check=True)
                     audio.unlink(); data["files"][2]["path"] = "media/" + converted.name
@@ -197,6 +250,65 @@ class BundleV2Tests(unittest.TestCase):
                 data["files"][-1]["sha256"] = digest(root / "media/playback.html")
                 data["media"][-1]["sha256"] = data["files"][-1]["sha256"]
                 path.write_text(json.dumps(data)); self.assertEqual(B.VERIFY.verify(path)["media"], 4)
+
+    @unittest.skipUnless(shutil.which("ffmpeg"), "ffmpeg adversarial media fixtures")
+    def test_audio_requires_real_audio_stream_and_decodes_it_when_video_is_first(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td); path, data = self.prose(root); self.add_media(root, data)
+            video_only = root / "media/audio.ogg"
+            subprocess.run([
+                shutil.which("ffmpeg"), "-nostdin", "-v", "error", "-xerror", "-f", "lavfi", "-i",
+                "color=c=black:s=16x16:d=0.2", "-c:v", "libtheora", "-an", str(video_only),
+            ], check=True)
+            self.replace_audio(root, data, video_only); path.write_text(json.dumps(data))
+            with self.assertRaisesRegex(ValueError, "decode failed"): B.VERIFY.verify(path)
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td); path, data = self.prose(root); self.add_media(root, data)
+            mixed = root / "media/audio.ogg"
+            subprocess.run([
+                shutil.which("ffmpeg"), "-nostdin", "-v", "error", "-xerror",
+                "-f", "lavfi", "-i", "color=c=black:s=16x16:d=0.3",
+                "-f", "lavfi", "-i", "sine=frequency=440:duration=0.3",
+                "-map", "0:v:0", "-map", "1:a:0", "-c:v", "libtheora", "-c:a", "libvorbis", "-shortest", str(mixed),
+            ], check=True)
+            self.replace_audio(root, data, mixed); path.write_text(json.dumps(data))
+            self.assertEqual(B.VERIFY.verify(path)["media"], 4)
+            corrupt_ogg_audio_pages(mixed)
+            audio_hash = digest(mixed)
+            next(row for row in data["files"] if row["path"] == "media/audio.ogg")["sha256"] = audio_hash
+            next(row for row in data["media"] if row["kind"] == "audio")["sha256"] = audio_hash
+            path.write_text(json.dumps(data))
+            with self.assertRaisesRegex(ValueError, "decode failed"): B.VERIFY.verify(path)
+
+    @unittest.skipUnless(shutil.which("ffmpeg"), "ffmpeg adversarial media fixtures")
+    def test_images_require_allowed_magic_image_stream_and_unique_sample_kind(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td); path, data = self.prose(root); self.add_media(root, data)
+            waveform = root / "media/waveform.png"
+            video = root / "media/not-image.ogg"
+            subprocess.run([
+                shutil.which("ffmpeg"), "-nostdin", "-v", "error", "-xerror", "-f", "lavfi", "-i",
+                "color=c=black:s=16x16:d=0.2", "-c:v", "libtheora", "-an", str(video),
+            ], check=True)
+            waveform.write_bytes(video.read_bytes()); video.unlink()
+            image_hash = digest(waveform)
+            next(row for row in data["files"] if row["path"] == "media/waveform.png")["sha256"] = image_hash
+            next(row for row in data["media"] if row["kind"] == "waveform")["sha256"] = image_hash
+            path.write_text(json.dumps(data))
+            with self.assertRaisesRegex(ValueError, "image format or structure invalid"): B.VERIFY.verify(path)
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td); path, data = self.prose(root); self.add_media(root, data)
+            second = root / "media/audio-2.wav"; shutil.copyfile(root / "media/audio.wav", second)
+            row = {"path": "media/audio-2.wav", "sha256": digest(second)}
+            data["files"].append(dict(row)); data["media"].append(dict(row, sample_id="s1", kind="audio")); path.write_text(json.dumps(data))
+            with self.assertRaisesRegex(ValueError, "duplicate media sample kind"): B.VERIFY.verify(path)
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td); _, data = self.prose(root); self.add_media(root, data)
+            with mock.patch.object(B.VERIFY.shutil, "which", return_value="/usr/bin/ffmpeg"), mock.patch.object(
+                B.VERIFY.subprocess, "run", return_value=mock.Mock(returncode=0),
+            ) as run:
+                B.VERIFY._decode_media(root / "media/waveform.png", "waveform")
+            self.assertIn("0:v:0", run.call_args.args[0]); self.assertIn("-an", run.call_args.args[0])
 
     def test_audio_extension_and_hardlinks_fail_closed(self):
         with tempfile.TemporaryDirectory() as td:
@@ -299,6 +411,31 @@ class BundleV2Tests(unittest.TestCase):
             self.assertEqual(B.VERIFY.verify(path)["bundle_classification"], "bundle/v2")
             raw.write_text("step=1 loss=0.20\n", encoding="utf-8")
             with self.assertRaisesRegex(ValueError, "hash mismatch"): B.VERIFY.verify(path)
+
+    def test_manifest_byte_and_inventory_row_bounds_match_consumer(self):
+        schema = json.loads((HERE.parent / "capabilities/report-bundle-manifest.schema.json").read_text())
+        self.assertEqual(schema["properties"]["files"]["maxItems"], 10000)
+        self.assertEqual(schema["properties"]["media"]["maxItems"], 10000)
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td); path, data = self.prose(root)
+            compact = json.dumps(data, separators=(",", ":")).encode()
+            path.write_bytes(compact + b" " * (B.VERIFY.MAX_MANIFEST_BYTES - len(compact)))
+            self.assertEqual(path.stat().st_size, 1048576); self.assertEqual(B.VERIFY.verify(path)["bundle_classification"], "bundle/v2")
+            with path.open("ab") as handle: handle.write(b" ")
+            with self.assertRaisesRegex(ValueError, "1048576-byte limit"): B.VERIFY.verify(path)
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td); path, data = self.prose(root)
+            empty_hash = hashlib.sha256(b"").hexdigest()
+            for index in range(9998):
+                name = "f%04d" % index; (root / name).touch()
+                data["files"].append({"path": name, "sha256": empty_hash})
+            path.write_text(json.dumps(data, separators=(",", ":")), encoding="utf-8")
+            self.assertLessEqual(path.stat().st_size, B.VERIFY.MAX_MANIFEST_BYTES)
+            self.assertEqual(len(data["files"]), 10000); self.assertEqual(B.VERIFY.verify(path)["bundle_classification"], "bundle/v2")
+            data["files"].append({"path": "overflow", "sha256": empty_hash})
+            path.write_text(json.dumps(data, separators=(",", ":")), encoding="utf-8")
+            self.assertLessEqual(path.stat().st_size, B.VERIFY.MAX_MANIFEST_BYTES)
+            with self.assertRaisesRegex(ValueError, "2..10000"): B.VERIFY.verify(path)
 
     def test_backfill_maps_briefing_excludes_pipeline_summary_and_generates_index(self):
         with tempfile.TemporaryDirectory() as td:

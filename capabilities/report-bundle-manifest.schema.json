@@ -13,11 +13,11 @@
     "version": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"},
     "entrypoint": {"const": "index.html"},
     "files": {
-      "type": "array", "minItems": 2,
+      "type": "array", "minItems": 2, "maxItems": 10000,
       "items": {"$ref": "#/$defs/file"}
     },
     "media": {
-      "type": "array",
+      "type": "array", "maxItems": 10000,
       "items": {
         "type": "object", "additionalProperties": false,
         "required": ["path", "sha256", "sample_id", "kind"],
