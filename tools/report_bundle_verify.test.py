@@ -162,6 +162,12 @@ class BundleV2Tests(unittest.TestCase):
                 (root / "index.html", "<style>@import '../outside.css';</style>", "escapes root"),
                 (root / "index.html", '<a href="report_manifest.json">manifest</a>', "not in bundle inventory"),
                 (root / "index.html", '<link rel="stylesheet" href="https://evil.invalid/x.css">', "non-self-contained resource"),
+                (root / "index.html", '<img src="data:image/png;base64,AAAA">', "non-self-contained resource"),
+                (root / "index.html", '<video poster="data:image/png;base64,AAAA"></video>', "non-self-contained resource"),
+                (root / "index.html", '<img srcset="data:image/png;base64,AAAA 1x">', "non-self-contained resource"),
+                (root / "index.html", '<style>body{background:url(data:image/png;base64,AAAA)}</style>', "non-self-contained resource"),
+                (root / "index.html", '<style>@import "data:text/css,body{}";</style>', "non-self-contained resource"),
+                (root / "REPORT.md", '![pixel](data:image/png;base64,AAAA)', "non-self-contained resource"),
             )
             for target, text, error in cases:
                 (root / "REPORT.md").write_text("# Report\n[Open report](index.html)\n", encoding="utf-8")
@@ -206,12 +212,13 @@ class BundleV2Tests(unittest.TestCase):
                 ('<meta http-equiv="refresh" content="0; url=index.html">', "active HTML content forbidden"),
                 ('<link rel="stylesheet" href="https://evil.invalid/x.css">', "non-self-contained resource"),
                 ('<div formaction="https://evil.invalid/">x</div>', "active HTML content forbidden"),
+                ('<img src="data:image/png;base64,AAAA">', "non-self-contained resource"),
             )
             for markdown, error in cases:
                 (root / "REPORT.md").write_text(markdown, encoding="utf-8")
                 data["files"][0]["sha256"] = digest(root / "REPORT.md"); path.write_text(json.dumps(data))
                 with self.subTest(markdown=markdown), self.assertRaisesRegex(ValueError, error): B.VERIFY.verify(path)
-            (root / "REPORT.md").write_text("```html\n<script>example</script>\n```\n[report](index.html)\n", encoding="utf-8")
+            (root / "REPORT.md").write_text("ordinary data:image/png;base64,AAAA text and `![pixel](data:image/png;base64,AAAA)` code\n```html\n<script>example</script>\n![pixel](data:image/png;base64,AAAA)\n```\n[report](index.html)\n", encoding="utf-8")
             data["files"][0]["sha256"] = digest(root / "REPORT.md"); path.write_text(json.dumps(data))
             self.assertEqual(B.VERIFY.verify(path)["bundle_classification"], "bundle/v2")
 
@@ -220,11 +227,12 @@ class BundleV2Tests(unittest.TestCase):
             root = Path(td); path, data = self.prose(root)
             svg = root / "diagram.svg"
             for attribute in ("href", "xlink:href"):
-                svg.write_text('<svg><use %s="https://evil.invalid/x.svg#id"></use></svg>' % attribute, encoding="utf-8")
-                if not any(row["path"] == "diagram.svg" for row in data["files"]): data["files"].append({"path": "diagram.svg", "sha256": digest(svg)})
-                else: next(row for row in data["files"] if row["path"] == "diagram.svg")["sha256"] = digest(svg)
-                path.write_text(json.dumps(data))
-                with self.subTest(attribute=attribute), self.assertRaisesRegex(ValueError, "non-self-contained resource"): B.VERIFY.verify(path)
+                for target in ("https://evil.invalid/x.svg#id", "data:image/svg+xml,%3Csvg/%3E"):
+                    svg.write_text('<svg><use %s="%s"></use></svg>' % (attribute, target), encoding="utf-8")
+                    if not any(row["path"] == "diagram.svg" for row in data["files"]): data["files"].append({"path": "diagram.svg", "sha256": digest(svg)})
+                    else: next(row for row in data["files"] if row["path"] == "diagram.svg")["sha256"] = digest(svg)
+                    path.write_text(json.dumps(data))
+                    with self.subTest(attribute=attribute, target=target), self.assertRaisesRegex(ValueError, "non-self-contained resource"): B.VERIFY.verify(path)
 
     @unittest.skipUnless(shutil.which("ffmpeg"), "ffmpeg actual-decode fixture")
     def test_audio_format_parity_wav_mp3_ogg(self):
