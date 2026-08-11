@@ -34,6 +34,16 @@ from fleet.model import ATTEMPT_CLASSIFIER_SOURCE, DispatchJob, Session  # noqa:
 
 class RenderDispatchPresentationTest(unittest.TestCase):
 
+    def test_registry_split_is_rendered_as_an_explicit_warning(self):
+        job = DispatchJob(
+            key="code", slug="split-owner", cwd="/work/repo", harness="codex",
+            depth=1, dispatch_depth=1, liveness="working", note="registry-split",
+        )
+        lines = render._build_lines([], [job], section="dispatch", narrow=False,
+                                    malformed=0, layout="wide")
+        text = "\n".join("".join(part for part, _key in line) for line in lines if line)
+        self.assertIn("registry-split", text)
+
     def test_cross_harness_child_does_not_inherit_parent_model(self):
         parent = Session(harness="codex", pid=1, cwd="/work/repo",
                          session_id="codex-parent", slug="repo", model="gpt-5.6-sol",
@@ -433,6 +443,50 @@ class RuntimeHomeIndependenceTest(unittest.TestCase):
     def test_claude_home_honors_claude_config_dir(self):
         with mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": "/cfg"}, clear=True):
             self.assertEqual(claude._home(), "/cfg")
+
+
+class RegistrySplitVisibilityTest(unittest.TestCase):
+
+    def test_exact_process_registry_outside_candidates_is_shown_and_marked(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            canonical = root / "canonical" / "jobs.log"
+            canonical.parent.mkdir()
+            canonical.touch()
+            split = root / "bundle" / ".dispatch" / "jobs.log"
+            split.parent.mkdir(parents=True)
+            attempt = "att-split-registry"
+            split.write_text(
+                "2026-08-11T00:00:00+00:00\topen\t/repo\t%s\tsplit-owner\t"
+                "attempt_schema_version=2,dispatch_depth=1,transport=headless,"
+                "execution_surface=registered-headless,registered_worker=1,"
+                "fallback_hop=same-harness-headless,capability=autopilot-code,"
+                "harness=codex,worker_type=owner,launch_started=1,attempt_id=%s\n"
+                % (root, attempt),
+                encoding="utf-8",
+            )
+            with mock.patch.object(dispatch, "_scan_processes", return_value=[]) as scan, \
+                 mock.patch.object(dispatch, "_candidate_jobs_paths",
+                                   return_value=[str(canonical)]):
+                scan.observed_registries = {str(split): {attempt}}
+                jobs = dispatch.collect()
+
+        self.assertEqual(len(jobs), 1)
+        self.assertEqual(jobs[0].attempt_id, attempt)
+        self.assertEqual(jobs[0].note, "registry-split")
+        self.assertEqual(
+            dispatch.collect.last_registry_splits,
+            {str(split): [attempt]},
+        )
+
+    def test_unproven_process_registry_path_is_ignored(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "jobs.log"
+            path.write_text("", encoding="utf-8")
+            result = dispatch._validated_split_registry_paths(
+                [], {str(path): {"att-not-present"}}
+            )
+        self.assertEqual(result, {})
 
 
 class OpenCodeContextTest(unittest.TestCase):

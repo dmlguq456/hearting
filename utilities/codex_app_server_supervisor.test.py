@@ -43,7 +43,7 @@ def child_row(attempt: str = "att-child", slug: str = "child", status: str = "op
     return (
         f"2026-07-23T00:00:00Z\t{status}\t/repo\t/wt\t{slug}\t"
         "attempt_schema_version=2,dispatch_depth=2,transport=headless,"
-        "execution_surface=registered-headless,registered_worker=1,"
+        "execution_surface=registered-headless,registered_worker=1,launch_started=1,"
         f"attempt_id={attempt},parent_attempt_id={PARENT},note=RAW_CHILD_SENTINEL\n"
     )
 
@@ -123,8 +123,17 @@ class CodexAppServerSupervisorTest(unittest.TestCase):
                                 'command':'python3 worker.py --private value',
                                 'aggregatedOutput':'MUST_NOT_REACH_FLEET','exitCode':0,
                                 'status':'completed'}}})
+                        dry_first = os.environ.get('FAKE_DRY_RUN_FIRST') == '1'
+                        if dry_first and turns == 2:
+                            with open(os.environ['FAKE_JOBS'], 'a', encoding='utf-8') as h:
+                                h.write('2026-08-11T00:00:00Z\\topen\\t/repo\\t/wt\\tchild\\t'
+                                        'attempt_schema_version=2,dispatch_depth=2,transport=headless,'
+                                        'execution_surface=registered-headless,registered_worker=1,'
+                                        'launch_started=1,attempt_id=att-child-retry,'
+                                        'parent_attempt_id=att-parent\\n')
                         final_first = os.environ.get('FAKE_NO_CHILD') == '1'
-                        text = ('artifact: -\\nverdict: PASS\\nblocker: none'
+                        text = ('runtime_wait: registered-children' if dry_first and turns <= 2
+                                else 'artifact: -\\nverdict: PASS\\nblocker: none'
                                 if turns > 1 or final_first else 'runtime_wait: registered-children')
                         send({'jsonrpc':'2.0','method':'item/completed','params':{
                             'threadId':'thread-1','turnId':turn_id,'completedAtMs':1,
@@ -279,6 +288,24 @@ class CodexAppServerSupervisorTest(unittest.TestCase):
         self.assertFalse(self.state.exists())
         self.assertFalse(self.lease.exists())
 
+    def test_empty_runtime_wait_retries_start_in_same_thread_before_join(self):
+        self.jobs.write_text(owner_row(self.lease), encoding="utf-8")
+        result = self.run_supervisor(
+            FAKE_DRY_RUN_FIRST="1", FAKE_JOBS=str(self.jobs)
+        )
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        trace = [json.loads(line) for line in self.trace.read_text().splitlines()]
+        turns = [row for row in trace if row["event"] == "turn-start"]
+        self.assertEqual(len(turns), 3)
+        self.assertIn("rerun the checked child dispatch with --start", turns[1]["prompt"])
+        self.assertIn("registered=1, started=1, and child_spawned=1", turns[1]["prompt"])
+        rows = [json.loads(line) for line in result.stdout.splitlines()]
+        correction = next(
+            row for row in rows
+            if row.get("continuation_reason") == "runtime-wait-without-started-child"
+        )
+        self.assertEqual(correction["state"], "registration-required")
+
     def test_bound_long_route_survives_thirteen_continuations_and_completes(self):
         route = self.base / "long-route.json"
         route_value = seal_route({
@@ -313,7 +340,7 @@ class CodexAppServerSupervisorTest(unittest.TestCase):
                                 h.write('2026-08-06T00:00:00Z\\topen\\t/repo\\t/wt\\t'
                                         f'child-{turns}\\tattempt_schema_version=2,'
                                         'dispatch_depth=2,transport=headless,'
-                                        'execution_surface=registered-headless,registered_worker=1,'
+                                        'execution_surface=registered-headless,registered_worker=1,launch_started=1,'
                                         f'attempt_id={attempt},parent_attempt_id=att-parent\\n')
                             text = 'runtime_wait: registered-children'
                         else:
@@ -424,7 +451,7 @@ class CodexAppServerSupervisorTest(unittest.TestCase):
         return (
             f"2026-07-23T00:00:00Z\topen\t{self.base}\t{self.base}\tchild\t"
             "attempt_schema_version=2,dispatch_depth=2,transport=headless,"
-            "execution_surface=registered-headless,registered_worker=1,"
+            "execution_surface=registered-headless,registered_worker=1,launch_started=1,"
             "fallback_hop=same-harness-headless,harness=codex,"
             f"attempt_id=att-child,parent_attempt_id={PARENT},"
             f"log_file={log},artifact_root={self.artifact_root},"
@@ -470,7 +497,7 @@ class CodexAppServerSupervisorTest(unittest.TestCase):
         row = (
             f"2026-07-23T00:00:00Z\topen\t{self.base}\t{self.base}\tchild\t"
             "attempt_schema_version=2,dispatch_depth=2,transport=headless,"
-            "execution_surface=registered-headless,registered_worker=1,"
+            "execution_surface=registered-headless,registered_worker=1,launch_started=1,"
             "fallback_hop=same-harness-headless,harness=codex,"
             f"attempt_id=att-live,parent_attempt_id={PARENT},"
             f"log_file={log},artifact_root={self.artifact_root},"

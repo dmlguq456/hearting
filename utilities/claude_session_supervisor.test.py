@@ -47,7 +47,7 @@ def child_row(status: str = "open", harness: str = "claude") -> str:
     return (
         f"2026-07-23T00:00:00Z\t{status}\t/repo\t/wt\tchild\t"
         "attempt_schema_version=2,dispatch_depth=2,transport=headless,"
-        "execution_surface=registered-headless,registered_worker=1,"
+        "execution_surface=registered-headless,registered_worker=1,launch_started=1,"
         f"harness={harness},"
         f"attempt_id=att-child,parent_attempt_id={PARENT},note=RAW_CLAUDE_SENTINEL\n"
     )
@@ -82,8 +82,17 @@ class ClaudeSessionSupervisorTest(unittest.TestCase):
                     h.write(json.dumps({'event':'turn-start','time':time.monotonic(),
                                         'resume':resume,'session':session,'prompt':prompt,
                                         'args':args,'delivered':delivered}) + '\\n')
+                dry_first = os.environ.get('FAKE_DRY_RUN_FIRST') == '1'
+                if dry_first and resume and not delivered:
+                    with open(os.environ['FAKE_JOBS'], 'a', encoding='utf-8') as h:
+                        h.write('2026-08-11T00:00:00Z\\topen\\t/repo\\t/wt\\tchild\\t'
+                                'attempt_schema_version=2,dispatch_depth=2,transport=headless,'
+                                'execution_surface=registered-headless,registered_worker=1,'
+                                'launch_started=1,attempt_id=att-child-retry,'
+                                'parent_attempt_id=att-parent\\n')
                 final_first = os.environ.get('FAKE_NO_CHILD') == '1'
-                text = ('artifact: -\\nverdict: PASS\\nblocker: none'
+                text = ('runtime_wait: registered-children' if dry_first and not delivered
+                        else 'artifact: -\\nverdict: PASS\\nblocker: none'
                         if resume or final_first else 'runtime_wait: registered-children')
                 print(json.dumps({'type':'system','subtype':'init',
                                   'private':'RAW_PARENT_CONTEXT_SENTINEL'}))
@@ -241,6 +250,25 @@ class ClaudeSessionSupervisorTest(unittest.TestCase):
         self.assertFalse(trace[0]["resume"])
         self.assertFalse(self.state.exists())
 
+    def test_empty_runtime_wait_retries_start_in_same_session_before_join(self):
+        self.jobs.write_text(owner_row(), encoding="utf-8")
+        result = self.run_supervisor(
+            FAKE_DRY_RUN_FIRST="1", FAKE_JOBS=str(self.jobs)
+        )
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        trace = [json.loads(line) for line in self.trace.read_text().splitlines()]
+        turns = [row for row in trace if row["event"] == "turn-start"]
+        self.assertEqual(len(turns), 3)
+        self.assertTrue(turns[1]["resume"])
+        self.assertIn("rerun the checked child dispatch with --start", turns[1]["prompt"])
+        self.assertIn("registered=1, started=1, and child_spawned=1", turns[1]["prompt"])
+        rows = [json.loads(line) for line in result.stdout.splitlines()]
+        self.assertTrue(any(
+            row.get("continuation_reason") == "runtime-wait-without-started-child"
+            and row.get("state") == "registration-required"
+            for row in rows
+        ))
+
     def test_bound_long_route_survives_thirteen_continuations_and_completes(self):
         route = self.base / "long-route.json"
         route_value = seal_route({
@@ -265,7 +293,7 @@ class ClaudeSessionSupervisorTest(unittest.TestCase):
                         h.write('2026-08-06T00:00:00Z\\topen\\t/repo\\t/wt\\t'
                                 f'child-{turn}\\tattempt_schema_version=2,'
                                 'dispatch_depth=2,transport=headless,'
-                                'execution_surface=registered-headless,registered_worker=1,'
+                                'execution_surface=registered-headless,registered_worker=1,launch_started=1,'
                                 f'attempt_id={attempt},parent_attempt_id=att-parent\\n')
                     text = 'runtime_wait: registered-children'
                 else:
@@ -452,7 +480,7 @@ class ClaudeSessionSupervisorTest(unittest.TestCase):
         return (
             f"2026-07-23T00:00:00Z\topen\t{self.base}\t{self.base}\tchild\t"
             "attempt_schema_version=2,dispatch_depth=2,transport=headless,"
-            "execution_surface=registered-headless,registered_worker=1,"
+            "execution_surface=registered-headless,registered_worker=1,launch_started=1,"
             "fallback_hop=same-harness-headless,harness=claude,"
             f"attempt_id=att-child,parent_attempt_id={PARENT},"
             f"log_file={log},artifact_root={self.artifact_root},"
@@ -511,7 +539,7 @@ class ClaudeSessionSupervisorTest(unittest.TestCase):
         row = (
             f"2026-07-23T00:00:00Z\topen\t{self.base}\t{self.base}\tchild\t"
             "attempt_schema_version=2,dispatch_depth=2,transport=headless,"
-            "execution_surface=registered-headless,registered_worker=1,"
+            "execution_surface=registered-headless,registered_worker=1,launch_started=1,"
             "fallback_hop=same-harness-headless,harness=claude,"
             f"attempt_id=att-live,parent_attempt_id={PARENT},"
             f"log_file={log},artifact_root={self.artifact_root},"

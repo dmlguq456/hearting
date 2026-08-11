@@ -78,6 +78,10 @@ long-running work, obey `preflight.sh
 loop-info runtime-watch` and its explicit automatic-follow-up-impossible fallback
 instead of ending with a detached completion promise.
 
+The managed launcher exports the session's one canonical `AGENT_DISPATCH_JOBS`.
+Treat it as immutable at every dispatch depth; never reconstruct a registry from
+`$AGENT_HOME/.dispatch/jobs.log`, because packaged `$AGENT_HOME` is versioned source.
+
 The managed gateway's witnessed `thread/fork` lineage is authoritative for a
 forked session. An inherited `CODEX_THREAD_ID` is only a start-thread hint; a
 proved successor is reported as `managed-thread-advanced` and sealed into the
@@ -153,7 +157,9 @@ dispatch-depth-2 workers do not. The retired broker exposes only legacy `status`
 `standard+` uses a dispatch-depth-1 capability owner and, when separable, dispatch-depth-2
 `code-plan -> code-execute -> code-test -> code-report` stage workers.
 `direct` is inline; `quick` is one registered-headless dispatch-depth-1 one-shot conductor. Dispatch depth 3 is
-forbidden. Record an inline exception in plan metrics. After integration,
+forbidden. Before an owner yields `runtime_wait: registered-children`, every child
+start receipt must contain `registered=1`, `started=1`, and `child_spawned=1`;
+dry-run or register-only output is not a wait receipt. Record an inline exception in plan metrics. After integration,
 verification, and push, use `preflight.sh worktree-cleanup --check` before
 `--apply`; SessionEnd/Stop never cleans worktrees.
 

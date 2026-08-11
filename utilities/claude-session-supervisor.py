@@ -18,6 +18,9 @@ from dispatch_completion_join import (
     current_children,
     reconcile_finished_children,
     remove_supervisor_state,
+    runtime_wait_requested,
+    start_retry_prompt,
+    unstarted_child_attempts,
     write_supervisor_state,
 )
 from dispatch_continuation_budget import (
@@ -376,6 +379,7 @@ def main(argv: list[str] | None = None) -> int:
     state_path = Path(args.state_file) if args.state_file else None
     delivered: set[str] = set()
     remediated: set[tuple[str, ...]] = set()
+    launch_remediated: set[tuple[str, ...]] = set()
     next_prompt = initial_prompt
     continuations = 0
     resume = False
@@ -398,6 +402,32 @@ def main(argv: list[str] | None = None) -> int:
             rows = current_children(Path(args.jobs), args.parent_attempt_id)
             current = {row.attempt_id: row for row in rows}
             new_attempts = set(current).difference(delivered)
+            unstarted = unstarted_child_attempts(
+                [current[attempt] for attempt in new_attempts]
+            )
+            empty_wait = (
+                not current
+                and runtime_wait_requested(result.get("result"))
+            )
+            if unstarted or empty_wait:
+                signature = tuple(sorted(unstarted))
+                if signature in launch_remediated or continuations >= args.max_continuations:
+                    raise SupervisorError("runtime-wait-without-started-child")
+                launch_remediated.add(signature)
+                emit(
+                    {
+                        "type": "dispatch.supervisor.resumed",
+                        "parent_attempt_id": args.parent_attempt_id,
+                        "state": "registration-required",
+                        "attempt_count": len(unstarted),
+                        "continuation_reason": "runtime-wait-without-started-child",
+                        "continuation_ordinal": continuations + 1,
+                    }
+                )
+                next_prompt = start_retry_prompt(unstarted)
+                continuations += 1
+                resume = True
+                continue
             if new_attempts:
                 if continuations >= args.max_continuations:
                     raise SupervisorError("continuation-limit-exceeded")

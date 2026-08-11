@@ -267,6 +267,32 @@ def _usage(jobs):
     return states
 
 
+def _resolved_path(value):
+    return Path(value).expanduser().resolve(strict=False)
+
+
+def _authoritative_jobs(values, env):
+    """Preserve the registry selected by a managed interactive parent.
+
+    A packaged activation root is immutable source, not runtime state.  The
+    managed launcher exports the enrolled registry once; accepting a different
+    depth-1 ``--jobs`` value would split the attempt graph before the selected
+    adapter gets a chance to validate it.
+    """
+
+    explicit = values.get("--jobs", "")
+    inherited = env.get("AGENT_DISPATCH_JOBS", "")
+    managed = (
+        env.get("AGENT_CODEX_MANAGED_GATEWAY") == "1"
+        and env.get("AGENT_CODEX_MANAGED_PARENT_RUNTIME") == "codex"
+    )
+    if managed and inherited:
+        if explicit and _resolved_path(explicit) != _resolved_path(inherited):
+            raise OwnerError("managed-parent-registry-immutable")
+        return inherited
+    return explicit or inherited
+
+
 def _audit(
     status, adapter, source, configured, explicit, states, *, allocation=None,
     counts=None, rejected=(), fallback=None, reason="none", capacity=None,
@@ -317,6 +343,7 @@ def _error(reason, configured=(), explicit=None, states=None):
 def main(argv):
     try:
         explicit, values, forwarded, route_evidence = _parse(argv)
+        jobs = _authoritative_jobs(values, os.environ)
         profile = values["--model-profile"]
         sealed_context = _sealed_owner_context(route_evidence) if route_evidence else None
         if sealed_context and isinstance(sealed_context.get("policy"), dict):
@@ -352,7 +379,6 @@ def main(argv):
                     for band in _defaults.QUALITY_BANDS
                 },
             }
-        jobs = values.get("--jobs", os.environ.get("AGENT_DISPATCH_JOBS", ""))
         states = _usage(jobs)
         allocation = (
             sealed_context.get("allocation")

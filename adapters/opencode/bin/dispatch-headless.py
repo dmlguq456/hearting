@@ -1180,6 +1180,8 @@ def main(argv: list[str]) -> int:
     args.worktree = str(Path(args.worktree).resolve())
     action = "start" if args.start else "register" if args.register else "dry-run"
     args.action = action
+    if action == "dry-run":
+        args.attempt_id = None
     if args.broker_request_id or args.launch_authority == "ancestor-broker":
         return fail("launch-broker-retired", 76, child_spawned="0")
     args.agent_home = resolve_agent_home()
@@ -1750,6 +1752,7 @@ def main(argv: list[str]) -> int:
         + (str(getattr(args, "governor_reservation", {}).get("state", "-")))
     )
     print(f"registry_authority={registry.source}")
+    print(f"preview={1 if action == 'dry-run' else 0}")
     print(f"attempt_id={args.attempt_id or '-'}")
     print(f"launch_authority={args.launch_authority}")
     print(f"fallback_ordinal={args.fallback_ordinal}")
@@ -1765,6 +1768,16 @@ def main(argv: list[str]) -> int:
     )
     print(f"registered={1 if args.attempt_claimed else 0}")
     print(f"started={1 if action == 'start' and args.attempt_claimed else 0}")
+    print(
+        "child_spawned="
+        + str(
+            int(
+                action == "start"
+                and bool(args.attempt_claimed)
+                and bool(getattr(args, "child_pid", None))
+            )
+        )
+    )
     print(f"child_pid={getattr(args, 'child_pid', None) or '-'}")
     print(f"child_pid_start={getattr(args, 'child_pid_start', None) or '-'}")
     print(f"launch_heartbeat={getattr(args, 'launch_heartbeat', 'not-started')}")

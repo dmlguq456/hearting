@@ -30,6 +30,9 @@ class DispatchOwnerTests(unittest.TestCase):
         self.home = Path(self.tmp.name)
         self.jobs = self.home / "jobs.log"
         self.jobs.touch()
+        (self.home / ".gitconfig").write_text(
+            f"[safe]\n\tdirectory = {ROOT}\n", encoding="utf-8"
+        )
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -99,6 +102,12 @@ class DispatchOwnerTests(unittest.TestCase):
             "CODEX_HOME": str(self.home / "codex-home"),
             "CLAUDE_CONFIG_DIR": str(self.home / "claude-home"),
             "HARNESS_CAPACITY_SCORES": "claude:80,codex:80,opencode:80",
+            "AGENT_CODEX_MANAGED_GATEWAY": "0",
+            "AGENT_CODEX_MANAGED_PARENT_RUNTIME": "",
+            "AGENT_DISPATCH_JOBS": str(self.jobs),
+            "GIT_CONFIG_COUNT": "1",
+            "GIT_CONFIG_KEY_0": "safe.directory",
+            "GIT_CONFIG_VALUE_0": str(ROOT),
         })
         env.update(env_extra or {})
         return subprocess.run(args, text=True, capture_output=True, env=env)
@@ -124,6 +133,12 @@ class DispatchOwnerTests(unittest.TestCase):
             "CODEX_HOME": str(self.home / "codex-home"),
             "CLAUDE_CONFIG_DIR": str(self.home / "claude-home"),
             "HARNESS_CAPACITY_SCORES": "claude:80,codex:80,opencode:80",
+            "AGENT_CODEX_MANAGED_GATEWAY": "0",
+            "AGENT_CODEX_MANAGED_PARENT_RUNTIME": "",
+            "AGENT_DISPATCH_JOBS": str(self.jobs),
+            "GIT_CONFIG_COUNT": "1",
+            "GIT_CONFIG_KEY_0": "safe.directory",
+            "GIT_CONFIG_VALUE_0": str(ROOT),
         }
 
     def _load_selector_module(self):
@@ -410,6 +425,42 @@ class DispatchOwnerTests(unittest.TestCase):
                 self.assertNotIn("check=ok", stdout)
                 self.assertEqual(calls, [])
                 self.assertEqual(self._snapshot_side_effects(), before)
+
+    def test_managed_parent_rejects_explicit_split_registry_before_usage_or_wrapper(self):
+        canonical = self.home / "canonical" / "jobs.log"
+        canonical.parent.mkdir()
+        canonical.touch()
+        before = self._snapshot_side_effects()
+        rc, stdout, calls = self.run_owner_in_process(
+            self.base_argv(),
+            {
+                **self.base_env(),
+                "AGENT_CODEX_MANAGED_GATEWAY": "1",
+                "AGENT_CODEX_MANAGED_PARENT_RUNTIME": "codex",
+                "AGENT_DISPATCH_JOBS": str(canonical),
+            },
+        )
+        self.assertEqual(rc, 65)
+        self.assertIn("reason=managed-parent-registry-immutable", stdout)
+        self.assertIn("child_spawned=0", stdout)
+        self.assertEqual(calls, [])
+        self.assertEqual(self._snapshot_side_effects(), before)
+
+    def test_managed_parent_accepts_realpath_alias_of_canonical_registry(self):
+        canonical = self.home / "canonical" / "jobs.log"
+        canonical.parent.mkdir()
+        canonical.touch()
+        alias = self.home / "jobs-alias.log"
+        alias.symlink_to(canonical)
+        selected = OWNER._authoritative_jobs(
+            {"--jobs": str(alias)},
+            {
+                "AGENT_CODEX_MANAGED_GATEWAY": "1",
+                "AGENT_CODEX_MANAGED_PARENT_RUNTIME": "codex",
+                "AGENT_DISPATCH_JOBS": str(canonical),
+            },
+        )
+        self.assertEqual(selected, str(canonical))
 
     def test_no_eligible_candidate_fails_without_wrapper_or_process(self):
         stamp = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")

@@ -2628,6 +2628,16 @@ def resolve_global_registry(
     explicit = _absolute(explicit_jobs, "jobs") if explicit_jobs else None
     inherited = _absolute(inherited_raw, "agent-dispatch-jobs") if inherited_raw else None
 
+    managed_parent = (
+        env.get("AGENT_CODEX_MANAGED_GATEWAY") == "1"
+        and env.get("AGENT_CODEX_MANAGED_PARENT_RUNTIME") == "codex"
+    )
+    if managed_parent and inherited and explicit and inherited != explicit:
+        raise DispatchContractError(
+            "managed-parent-registry-immutable",
+            f"explicit={explicit} inherited={inherited}",
+        )
+
     if dispatch_depth > 1 and inherited and explicit and inherited != explicit:
         raise DispatchContractError(
             "noncanonical-nested-jobs",
@@ -2641,9 +2651,10 @@ def resolve_global_registry(
             "nested --start requires inherited AGENT_DISPATCH_JOBS",
         )
 
-    # A dispatch-depth-1 invocation is the root dispatch boundary. It may deliberately
-    # choose a new canonical registry even when the invoking shell carries an
-    # unrelated ambient value.  Only nested invocations must inherit exactly.
+    # An ordinary dispatch-depth-1 invocation is the root dispatch boundary and may
+    # choose a new registry over unrelated ambient shell state.  A managed interactive
+    # parent is different: its launcher enrolled one canonical registry, so the check
+    # above makes that inherited path immutable for the entire session.
     if dispatch_depth <= 1 and explicit:
         return RegistrySelection(explicit, "root-explicit", False)
     if inherited:
@@ -3464,7 +3475,7 @@ def attempt_launch_state(
 ) -> str:
     """Return the typed launch receipt state for one exact attempt."""
     if action == "dry-run":
-        return "preview"
+        return "preview-only"
     if claimed:
         return "claimed"
     try:

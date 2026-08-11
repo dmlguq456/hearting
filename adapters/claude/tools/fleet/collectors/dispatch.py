@@ -1967,9 +1967,22 @@ def _suppress_terminal_attempt_proc_jobs(proc_jobs, terminal_attempts):
 
 
 # --- source (a): process scan (uncapped, no related() filter) ---
+def _dispatch_env_candidate(comm, args):
+    """Bound /proc environ reads to plausible runtime/dispatch processes."""
+
+    executable = os.path.basename((args.split(None, 1) or [""])[0])
+    return (
+        os.path.basename(comm) in _KNOWN_HARNESSES
+        or executable in _KNOWN_HARNESSES
+        or "app-server" in args
+        or "dispatch" in args
+    )
+
+
 def _scan_processes():
     jobs = []
     seen = set()
+    observed_registries = {}
     for line in procscan._ps_lines():
         line = line.strip()
         if not line:
@@ -1981,7 +1994,15 @@ def _scan_processes():
         args = parts[3] if len(parts) > 3 else ""
         ms = _AUTOPILOT.findall(args)
         loop = _LOOPS.search(args)
-        env = procscan.read_environ(pid_s) if (ms or loop) else {}
+        env = (
+            procscan.read_environ(pid_s)
+            if (ms or loop or _dispatch_env_candidate(_comm, args))
+            else {}
+        )
+        observed_attempt = env.get("AGENT_DISPATCH_ATTEMPT_ID")
+        observed_registry = env.get("AGENT_DISPATCH_JOBS")
+        if observed_attempt and observed_registry and os.path.isabs(observed_registry):
+            observed_registries.setdefault(observed_registry, set()).add(observed_attempt)
         # Session-end distillers and Fleet title refreshers can inherit dispatch
         # metadata and even contain `/autopilot-*` as prompt data. They are support
         # workers, not dispatch jobs; procscan exposes them only through the dedicated
@@ -2104,7 +2125,50 @@ def _scan_processes():
                 model_role=env.get("AGENT_DISPATCH_MODEL_ROLE"),
                 attempt_id=env.get("AGENT_DISPATCH_ATTEMPT_ID") or None,
             ))
+    _scan_processes.observed_registries = observed_registries
     return jobs
+
+
+_scan_processes.observed_registries = {}
+
+
+def _validated_split_registry_paths(canonical_paths, observed=None):
+    """Return live process-selected registries outside Fleet's canonical set.
+
+    A path is admitted only when the same-user process environment names an exact
+    attempt and that file contains the attempt row.  This is a read-only visibility
+    fallback, not registry authority: jobs from it are marked ``registry-split`` so
+    the launch defect remains visible instead of being normalized away.
+    """
+
+    observed = (
+        getattr(_scan_processes, "observed_registries", {})
+        if observed is None
+        else observed
+    )
+    canonical = {os.path.realpath(path) for path in canonical_paths}
+    result = {}
+    for raw_path, attempts in observed.items():
+        if not isinstance(raw_path, str) or not os.path.isabs(raw_path):
+            continue
+        real = os.path.realpath(raw_path)
+        if real in canonical or not os.path.isfile(raw_path):
+            continue
+        matched = set()
+        try:
+            with open(raw_path, encoding="utf-8", errors="replace") as handle:
+                for line in handle:
+                    fields = line.rstrip("\n").split("\t")
+                    if len(fields) != 6:
+                        continue
+                    attempt = _parse_pipe_meta(fields[5]).get("attempt_id")
+                    if attempt in attempts:
+                        matched.add(attempt)
+        except OSError:
+            continue
+        if matched:
+            result[raw_path] = matched
+    return result
 
 
 # --- source (b): jobs.log tolerant merge ---
@@ -2454,6 +2518,8 @@ def collect(jobs_path=None, harness_filter=None):
     is cross-harness by design (jobs, not sessions)."""
     proc_jobs = _scan_processes()
     paths = _candidate_jobs_paths(jobs_path)
+    split_registries = _validated_split_registry_paths(paths)
+    paths.extend(split_registries)
     try:
         route_nodes, terminal_attempts = _scan_registry_evidence(paths)
     except Exception:
@@ -2469,6 +2535,10 @@ def collect(jobs_path=None, harness_filter=None):
         path_jobs, path_malformed = _scan_jobs_log(
             path, seen, seen_keys, registry_priority=registry_priority
         )
+        if path in split_registries:
+            for job in path_jobs:
+                if job.attempt_id in split_registries[path]:
+                    job.note = "registry-split"
         log_jobs.extend(path_jobs)
         malformed += path_malformed
     jobs = proc_jobs + log_jobs
@@ -2568,11 +2638,15 @@ def collect(jobs_path=None, harness_filter=None):
     # (module attribute, not a return-signature change — every existing caller stays untouched).
     collect.last_route_nodes = route_nodes
     collect.last_terminal_attempts = terminal_attempts
+    collect.last_registry_splits = {
+        path: sorted(attempts) for path, attempts in split_registries.items()
+    }
     collect.last_degradations = _scan_degradations(set(route_nodes) | {getattr(j, "route_id", None) for j in jobs if getattr(j, "route_id", None)})
     return jobs
 
 
 collect.last_malformed = 0
+collect.last_registry_splits = {}
 collect.last_route_nodes = {}
 collect.last_terminal_attempts = {}
 collect.last_degradations = {}

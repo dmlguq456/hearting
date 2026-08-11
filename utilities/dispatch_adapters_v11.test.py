@@ -113,6 +113,25 @@ class AdapterV11Test(unittest.TestCase):
     self.assertEqual(blocked.returncode,73,blocked.stdout+blocked.stderr)
     self.assertIn("reason=global-registry-unwritable",blocked.stdout)
     self.assertIn("child_spawned=0",blocked.stdout)
+ def test_all_wrapper_previews_are_visibly_non_attempts(self):
+  for harness in ADAPTERS:
+   with self.subTest(harness=harness), tempfile.TemporaryDirectory() as td:
+    root=Path(td); repo,art=self.fixture(root); jobs=root/"jobs.log"; logs=root/"logs"
+    env={**os.environ,"AGENT_HOME":str(ROOT),"AGENT_ARTIFACT_ROOT":str(art),
+         "AGENT_DISPATCH_JOBS":str(jobs),"OPENCODE_CONFIG_CONTENT":"{}"}
+    self.seed_parent(jobs,repo,harness=harness)
+    env["AGENT_DISPATCH_ATTEMPT_ID"]="att-parent-fixture"
+    before=jobs.read_text(encoding="utf-8")
+    result=subprocess.run(self.command(harness,"dry-run",repo,jobs,logs),
+                          text=True,capture_output=True,env=env)
+    self.assertEqual(result.returncode,0,result.stdout+result.stderr)
+    self.assertIn("preview=1",result.stdout)
+    self.assertIn("attempt_id=-",result.stdout)
+    self.assertIn("launch_state=preview-only",result.stdout)
+    self.assertIn("registered=0",result.stdout)
+    self.assertIn("started=0",result.stdout)
+    self.assertIn("child_spawned=0",result.stdout)
+    self.assertEqual(jobs.read_text(encoding="utf-8"),before)
  def test_opencode_depth_two_fails_closed_without_a_live_parent(self):
   # register only, mirroring the codex/claude sibling contract test above:
   # --start also probes the real local opencode runtime projection
@@ -140,7 +159,7 @@ class AdapterV11Test(unittest.TestCase):
             "--model","gpt-test","--reasoning","low","--log-dir",str(logs),
             "--jobs",str(jobs)]
    env={**os.environ,"AGENT_HOME":str(ROOT),"AGENT_ARTIFACT_ROOT":str(art),
-        "CLAUDE_CONFIG_DIR":str(claude_config)}
+        "CLAUDE_CONFIG_DIR":str(claude_config),"AGENT_DISPATCH_JOBS":str(jobs)}
    for runtime_key in (
     "CODEX_THREAD_ID", "CODEX_SESSION_ID", "CLAUDE_CODE_SESSION_ID",
     "OPENCODE_SESSION_ID", "AGENT_DISPATCH_CALLER_HARNESS",
@@ -151,8 +170,10 @@ class AdapterV11Test(unittest.TestCase):
    self.assertEqual(result.returncode,0,result.stdout+result.stderr)
    self.assertIn("nested_headless_network=1",result.stdout)
    self.assertIn("completion_delivery=app-server-supervised",result.stdout)
-   self.assertIn(f"supervisor_lease_file={root / 'supervisor-state' / 'att-dry-run-placeholder.lease'}",result.stdout)
-   self.assertIn(f"--lease-file {root / 'supervisor-state' / 'att-dry-run-placeholder.lease'}",result.stdout)
+   self.assertIn(f"supervisor_lease_file={root / 'supervisor-state' / 'preview-only.lease'}",result.stdout)
+   self.assertIn(f"--lease-file {root / 'supervisor-state' / 'preview-only.lease'}",result.stdout)
+   self.assertIn("preview=1",result.stdout)
+   self.assertIn("attempt_id=-",result.stdout)
    self.assertIn("--network-access",result.stdout)
    self.assertIn(f"--writable-root {ROOT / '.dispatch'}",result.stdout)
    self.assertIn(f"--writable-root {jobs.parent.resolve()}",result.stdout)

@@ -47,6 +47,7 @@ SESSION_PARENT_DELIVERIES = frozenset(
     {SESSION_PARENT_DELIVERY, MANAGED_SESSION_PARENT_DELIVERY}
 )
 SUCCESS_NOTES = frozenset({"completed-marker", "completed-supervisor"})
+RUNTIME_WAIT_SENTINEL = "runtime_wait: registered-children"
 
 
 class JoinContractError(RuntimeError):
@@ -97,6 +98,41 @@ class SupervisedDispatchContext:
     parent_attempt_id: str
     route: dict[str, object]
     rows: tuple[ChildRow, ...]
+
+
+def runtime_wait_requested(value: object) -> bool:
+    """Accept only the exact owner park sentinel, never prose that mentions it."""
+
+    return isinstance(value, str) and value.strip() == RUNTIME_WAIT_SENTINEL
+
+
+def unstarted_child_attempts(rows: list[ChildRow]) -> set[str]:
+    """Return registered children lacking the durable child-spawn receipt.
+
+    ``launch_started=1`` is written only after the exact PID/start/PGID fence has
+    proved a live spawned process.  It is therefore the registry equivalent of a
+    wrapper receipt with registered=1, started=1, and child_spawned=1.
+    """
+
+    return {
+        row.attempt_id
+        for row in rows
+        if row.metadata.get("launch_started") != "1"
+    }
+
+
+def start_retry_prompt(attempts: set[str] | None = None) -> str:
+    """Bounded same-session correction for a preview/register-only park."""
+
+    exact = ",".join(sorted(attempts or ())) or "none"
+    return (
+        "Runtime wait was rejected because no fully started child batch exists "
+        f"(registered-only attempts: {exact}). In this turn, rerun the checked child "
+        "dispatch with --start, not --dry-run or --register. Treat check=ok or an "
+        "attempt_id as preview metadata only. Yield `runtime_wait: registered-children` "
+        "only after the start receipt itself reports registered=1, started=1, and "
+        "child_spawned=1. Do not perform unrelated work."
+    )
 
 
 def _safe_identity(value: str) -> bool:

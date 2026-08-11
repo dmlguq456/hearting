@@ -927,6 +927,17 @@ class DispatchContractTest(unittest.TestCase):
    with self.assertRaises(D.DispatchContractError) as caught:
     D.resolve_global_registry(root,str(local),2,"start",{})
    self.assertEqual(caught.exception.reason,"global-registry-unset")
+ def test_managed_parent_registry_is_immutable_at_depth_one(self):
+  with tempfile.TemporaryDirectory() as td:
+   root=Path(td); canonical=root/"managed/jobs.log"; split=root/"bundle/.dispatch/jobs.log"
+   env={"AGENT_CODEX_MANAGED_GATEWAY":"1",
+        "AGENT_CODEX_MANAGED_PARENT_RUNTIME":"codex",
+        "AGENT_DISPATCH_JOBS":str(canonical)}
+   selected=D.resolve_global_registry(root,str(canonical),1,"start",env)
+   self.assertEqual(selected.path,canonical.resolve())
+   with self.assertRaises(D.DispatchContractError) as caught:
+    D.resolve_global_registry(root,str(split),1,"start",env)
+   self.assertEqual(caught.exception.reason,"managed-parent-registry-immutable")
  def test_unwritable_registry_is_structured(self):
   with self.assertRaises(D.DispatchContractError) as caught:
    D.ensure_global_registry_writable(Path("/proc/1/stage-dispatch-v11/jobs.log"))

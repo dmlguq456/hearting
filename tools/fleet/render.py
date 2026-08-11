@@ -1965,7 +1965,8 @@ def _dispatch_row(j, orphan=False, parent_model=None, parent_harness=None, is_la
                                 eff, max(1, _HMW - len(prefix)),
                                 _BADGE_KEY.get(j.harness, "dim"), dim=True, unknown="—")
     avail = max(3, name_width or _NW_S)
-    otag = "  (orphan)" if orphan else ""
+    registry_split = getattr(j, "note", None) == "registry-split"
+    otag = "  (registry-split)" if registry_split else "  (orphan)" if orphan else ""
     label = _dispatch_stage_label(j)
     # F-64 (v49): the dispatch name uses the REAL responsive zone like session rows do —
     # the old unconditional `_TITLE_MAX` clamp ellipsized names at 24 cells and left the
@@ -1987,7 +1988,7 @@ def _dispatch_row(j, orphan=False, parent_model=None, parent_harness=None, is_la
     name_key_j = "name_dim" if dead_stale_j else _BADGE_KEY.get(j.harness, "name_dim")
     segs.append((nm, name_key_j))
     if otag and used + len(otag) <= avail:
-        segs.append((otag, "gate_u")); used += len(otag)
+        segs.append((otag, "g_dead" if registry_split else "gate_u")); used += len(otag)
     branch_segs = _branch_suffix_segs(
         "" if key in _LOOPS_KEYS else j.cwd, j.branch, optional=key in _LOOPS_KEYS,
         ahead=getattr(j, "branch_ahead", None),

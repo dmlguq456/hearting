@@ -360,3 +360,19 @@ restores them. Stop or any other signal-capable control must revalidate that
 same exact identity plus the recorded process-group leader immediately before
 signalling. This contract was promoted after live GPU training was invisible
 to Fleet on 2026-08-04 despite a complete experiment-local registry.
+
+### Managed dispatch registry and wait receipts
+
+A managed interactive parent selects its canonical `AGENT_DISPATCH_JOBS` at
+entry, so a dispatch-depth-1 owner cannot replace it; an explicit path may only
+be a realpath-equivalent alias. Never reconstruct this path as
+`$AGENT_HOME/.dispatch/jobs.log` inside an activated session: packaged
+`$AGENT_HOME` is immutable versioned source, not the enrolled runtime-state home.
+
+The model may yield `runtime_wait: registered-children` only after each checked
+`--start` receipt reports `registered=1`, `started=1`, and `child_spawned=1`.
+`check=ok`, a dry-run identifier, or a register-only row is never launch evidence.
+The supervisor accepts only exact child rows whose durable launch fence records
+`launch_started=1`. An empty or register-only runtime wait receives one bounded
+same-session correction requiring `--start` and the three-field receipt; repeated
+absence then fails closed.
