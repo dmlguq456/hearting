@@ -31,6 +31,8 @@ need core/CONVENTIONS.md 'WORKFLOW §0.2'                                    'CO
 # 2. capability contracts
 need capabilities/autopilot-lab.md    'Eval execution topology'  'autopilot-lab eval topology 존재'
 need capabilities/autopilot-lab.md    '## Routing Boundary'      'autopilot-lab Routing Boundary 존재'
+need capabilities/autopilot-lab.md    'report/logs/'              'autopilot-lab original-log bundle contract 존재'
+need capabilities/autopilot-lab.md    "script-src 'none'"        'autopilot-lab scriptless consumer contract 존재'
 need capabilities/autopilot-refine.md '## Routing Boundary'      'autopilot-refine Routing Boundary 존재'
 need capabilities/autopilot-refine.md 'autopilot-lab'            'autopilot-refine → lab primary 위임 절'
 need capabilities/autopilot-spec.md   'never substitutes'        'autopilot-spec spec-sync 비대체 절'
@@ -40,6 +42,7 @@ need capabilities/analyze-project.md  'Artifact absence alone is not a trigger' 
 
 # 3. generated Codex projection 이 topology 를 실어 나르는가 (파리티 갭 회귀)
 need adapters/codex/skills/autopilot-lab/SKILL.md 'capabilities/autopilot-lab.md' 'Codex lab projection 에 owner pointer 존재'
+need adapters/opencode/skills/autopilot-lab/SKILL.md 'capabilities/autopilot-lab.md' 'OpenCode lab projection 에 owner pointer 존재'
 need adapters/codex/skills/autopilot-refine/SKILL.md 'capabilities/autopilot-refine.md' 'Codex refine projection 에 owner pointer 존재'
 
 # 4. adapter bootstraps
@@ -52,6 +55,8 @@ need adapters/opencode/AGENTS.md 'core/WORKFLOW.md §0.2'           'OpenCode bo
 # 5. Claude skill realization
 need skills/autopilot-lab/SKILL.md 'core/WORKFLOW.md §0.2'         'lab SKILL semantic routing 참조'
 need skills/autopilot-lab/references/eval-procedure.md 'pre-execution gate' 'lab eval-procedure gate 참조'
+need adapters/claude/skills/autopilot-lab/references/eval-procedure.md 'WAV, MP3, or OGG' 'Claude lab audio parity projection 존재'
+need adapters/claude/plugin-marketplace/plugins/hearting-claude/skills/autopilot-lab/references/eval-procedure.md 'WAV, MP3, or OGG' 'Claude plugin lab audio parity projection 존재'
 
 # 6. 행동 드릴 fixture 존재 (Cases A–E)
 for c in r_route_lab_eval_primary r_route_refine_doc_only r_route_spec_policy_lab_exec \

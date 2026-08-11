@@ -67,11 +67,16 @@ Embed every generated figure in `REPORT.md` with `![<caption>](figures/<plot>.pn
 - **Playback HTML for audio/media experiments:** have the `material/figure-gen` unit generate separated audio, spectrogram segments, and embedded `<audio>`/`<img>` in `experiments/{date}_{slug}/report/report.html`. Markdown previews block `<audio>`, so an audio domain makes this HTML the primary `interactive` playback representation and `REPORT.md` its `summary`/`navigation` companion; they are not interchangeable equivalent formats. Declare both in the manifest `bundle` with one shared `title` and `primary_representation_id`. Split long audio into pages of bounded segments. When necessary, serve locally through `python -m http.server --bind 0.0.0.0 <port>` and provide the URL.
 
 Assemble publishable output in a staged `report/` with canonical
-`index.html`, `REPORT.md`, `report_manifest.json`, and `media/`. Manifest v2
+`index.html`, `REPORT.md`, `report_manifest.json`, `logs/`, and `media/`. Copy
+the original report/evaluation logs needed for reproduction into `logs/` and
+bind them through the exact v2 `files[]` inventory; never upload those logs or
+report bodies to Turso. Manifest v2
 may declare an empty media array for prose-only research. If media is declared,
-the verifier requires decodable audio/images, playable HTML, and the complete
-1:1 evidence set. Every local Markdown/HTML/CSS link and every non-manifest file
-must be inventory-bound before publication.
+audio is WAV, MP3, or OGG and the verifier requires the same actual ffmpeg decode
+path, decodable images, scriptless playback HTML, and the complete 1:1 evidence
+set. Every local Markdown/HTML/CSS link and every non-manifest file must be
+inventory-bound before publication. All active HTML fails closed; the consumer
+serves verified playback with CSP `script-src 'none'`.
 
 **E3-4. Save and finalize:**
 

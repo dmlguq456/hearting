@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Verify legacy media reports and self-contained report bundle manifests."""
-import argparse, hashlib, json, re, shutil, subprocess, sys
+import argparse, errno, hashlib, json, os, re, shutil, stat, subprocess, sys
 from html.parser import HTMLParser
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
@@ -96,17 +96,24 @@ V2_MEDIA_KEYS={"path","sha256","sample_id","kind"}
 COMPONENT_PAT=re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 HASH_PAT=re.compile(r"^[0-9a-f]{64}$")
 REMOTE_SCHEMES={"http","https","mailto"}
+AUDIO_SUFFIXES={".wav",".mp3",".ogg"}
+ACTIVE_TAGS={"script","iframe","object","embed","applet","frame","frameset","portal","base","form","button","input","select","textarea"}
+TRANSIENT_ERRNOS={errno.EIO,errno.ESTALE,errno.ETIMEDOUT,errno.EAGAIN,errno.ENETDOWN,errno.ENETUNREACH}
 
 
 class _HTMLLinks(HTMLParser):
  def __init__(self):
-  super().__init__(convert_charrefs=True); self.links=[]; self.styles=[]; self.style_blocks=[]; self.dom_links=[]; self._style_depth=0
+  super().__init__(convert_charrefs=True); self.links=[]; self.styles=[]; self.style_blocks=[]; self.dom_links=[]; self.active=[]; self._style_depth=0
  def handle_starttag(self,tag,attrs):
   tag=tag.lower()
+  if tag in ACTIVE_TAGS: self.active.append("tag:"+tag)
   if tag=="style": self._style_depth+=1
   for key,value in attrs:
-   if value is None: continue
    key=key.lower()
+   if key.startswith("on") or key=="srcdoc": self.active.append("attribute:"+key)
+   if value is None: continue
+   if value.strip().lower().startswith(("javascript:","vbscript:")): self.active.append("scheme:"+key)
+   if tag=="meta" and key=="http-equiv" and value.strip().lower()=="refresh": self.active.append("meta-refresh")
    if key in {"href","src","poster"}:
     self.links.append((key,value)); self.dom_links.append((tag,key,value))
    elif key=="srcset":
@@ -139,8 +146,22 @@ def _v2_file(root,row,label):
  rel=_v2_relpath(row.get("path"),label)
  if not isinstance(row.get("sha256"),str) or not HASH_PAT.fullmatch(row["sha256"]): raise ValueError("invalid sha256: "+str(row.get("path")))
  path=root/rel
- if path.is_symlink() or not path.is_file(): raise ValueError("missing or unsafe bundle file: "+str(rel))
- if hashlib.sha256(path.read_bytes()).hexdigest()!=row["sha256"]: raise ValueError("hash mismatch: "+str(rel))
+ try:
+  descriptor=os.open(path,os.O_RDONLY|getattr(os,"O_NOFOLLOW",0))
+ except OSError as error:
+  if error.errno in TRANSIENT_ERRNOS: raise ValueError("bundle storage transient failure: "+str(rel))
+  raise ValueError("missing or unsafe bundle file: "+str(rel))
+ try:
+  before=os.fstat(descriptor)
+  if not stat.S_ISREG(before.st_mode) or before.st_nlink!=1: raise ValueError("missing or unsafe bundle file: "+str(rel))
+  digest=hashlib.sha256()
+  with os.fdopen(descriptor,"rb",closefd=False) as handle:
+   for block in iter(lambda:handle.read(1024*1024),b""): digest.update(block)
+  after=os.fstat(descriptor)
+  if (before.st_dev,before.st_ino,before.st_size,before.st_mtime_ns)!=(after.st_dev,after.st_ino,after.st_size,after.st_mtime_ns):
+   raise ValueError("bundle file changed while hashing: "+str(rel))
+  if digest.hexdigest()!=row["sha256"]: raise ValueError("hash mismatch: "+str(rel))
+ finally: os.close(descriptor)
  return rel,path
 
 
@@ -198,15 +219,20 @@ def _markdown_links(text):
 def _verify_links(root,files,inventory):
  for rel,path in files.items():
   suffix=path.suffix.lower()
-  if suffix not in {".html",".htm",".md",".markdown",".css"}: continue
+  if suffix not in {".html",".htm",".md",".markdown",".css",".svg",".xml"}: continue
   text=path.read_text(encoding="utf-8")
   if suffix in {".html",".htm"}:
    parser=_HTMLLinks(); parser.feed(text); parser.close()
+   if parser.active: raise ValueError("active HTML content forbidden: "+rel.as_posix())
    for attr,value in parser.links: _link_target(root,path,value,attr,inventory)
    for style in parser.styles:
     for value in _css_links(style): _link_target(root,path,value,"asset",inventory)
    for block in parser.style_blocks:
     for value in _css_links(block): _link_target(root,path,value,"asset",inventory)
+  elif suffix in {".svg",".xml"}:
+   parser=_HTMLLinks(); parser.feed(text); parser.close()
+   if parser.active: raise ValueError("active HTML content forbidden: "+rel.as_posix())
+   for attr,value in parser.links: _link_target(root,path,value,attr,inventory)
   elif suffix==".css":
    for value in _css_links(text): _link_target(root,path,value,"asset",inventory)
   else:
@@ -215,6 +241,7 @@ def _verify_links(root,files,inventory):
 
 def _decode_media(path,kind):
  if kind in {"audio","waveform","spectrogram"}:
+  if kind=="audio" and path.suffix.lower() not in AUDIO_SUFFIXES: raise ValueError("audio format must be WAV, MP3, or OGG: "+path.name)
   ffmpeg=shutil.which("ffmpeg")
   if not ffmpeg: raise ValueError("media decode failed: ffmpeg unavailable")
   try:
@@ -228,6 +255,7 @@ def _decode_media(path,kind):
   if path.suffix.lower() not in {".html",".htm"}: raise ValueError("playback must be HTML: "+path.name)
   try: parser=_HTMLLinks(); parser.feed(path.read_text(encoding="utf-8")); parser.close()
   except (UnicodeError,OSError): raise ValueError("playback decode failed: "+path.name)
+  if parser.active: raise ValueError("active HTML content forbidden: "+path.name)
 
 
 def _verify_playback_bindings(root,playback,rows,inventory):
@@ -241,7 +269,7 @@ def _verify_playback_bindings(root,playback,rows,inventory):
  for row in rows:
   if row["kind"]=="playback": continue
   expected=row["path"]
-  if row["kind"]=="audio": allowed={"audio","source","a"}
+  if row["kind"]=="audio": allowed={"audio","video","source","a"}
   else: allowed={"img","source","a"}
   if not any(tag in allowed and rel==expected for tag,_,rel in bindings):
    raise ValueError("playback does not bind declared media: "+expected)
@@ -252,6 +280,7 @@ def _verify_v2(path):
  if path.is_symlink(): raise ValueError("v2 manifest must not be a symlink")
  path=path.resolve(); root=path.parent
  if path.name!="report_manifest.json" or path.is_symlink() or not path.is_file(): raise ValueError("v2 manifest must be report_manifest.json")
+ if not stat.S_ISREG(path.stat().st_mode) or path.stat().st_nlink!=1: raise ValueError("v2 manifest must be a single-link regular file")
  data=json.loads(path.read_text(encoding="utf-8"))
  if set(data)!=V2_KEYS: raise ValueError("invalid v2 manifest properties")
  for key in ("project","experiment_id","version"):
