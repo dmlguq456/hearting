@@ -185,7 +185,6 @@ def _link_target(root,document,value,attribute,inventory):
  split=urlsplit(raw)
  scheme=split.scheme.lower()
  if scheme:
-  if scheme=="data" and attribute in {"src","poster","asset"}: return
   if scheme in REMOTE_SCHEMES and attribute=="href": return
   raise ValueError("non-self-contained resource link: "+raw)
  path_text=unquote(split.path)
@@ -209,6 +208,7 @@ def _css_links(text):
 
 
 def _markdown_links(text):
+ text=_markdown_raw_html(text)
  inline=re.compile(r"(!?)\[[^\]]*\]\(([^)\s]+)(?:\s+['\"][^)]*)?\)")
  definition=re.compile(r"^[ \t]{0,3}\[([^\]]+)\]:\s*(?:<([^>]+)>|(\S+))",re.M)
  references={}
