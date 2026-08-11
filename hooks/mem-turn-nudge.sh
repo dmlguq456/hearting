@@ -33,7 +33,10 @@ EVENT="${EVENT:-}"; SID="${SID:-default}"
 [ "$EVENT" = "UserPromptSubmit" ] || exit 0
 
 N="${MEM_NUDGE_INTERVAL:-10}"
-STORE="${MEM_STORE:-$AGENT_HOME/memory}"
+default_store="$AGENT_HOME/memory"
+[ -e "$default_store" ] || [ -L "$default_store" ] \
+  || default_store="${XDG_DATA_HOME:-$HOME/.local/share}/hearting/memory"
+STORE="${MEM_STORE:-$default_store}"
 DB="$STORE/memory.db"
 STATE="$STORE/.turn-state-$SID"
 

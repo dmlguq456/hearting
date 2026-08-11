@@ -6,6 +6,10 @@ set -u
 
 HOOK="$(cd "$(dirname "$0")" && pwd)/mem-turn-nudge.sh"
 [ -f "$HOOK" ] || { echo "FAIL: hook not found at $HOOK"; exit 1; }
+DISPATCH="$(cd "$(dirname "$0")" && pwd)/mem-distill-dispatch.sh"
+BRIEFING="$(cd "$(dirname "$0")" && pwd)/mem-briefing-inject.sh"
+[ -f "$DISPATCH" ] && [ -f "$BRIEFING" ] \
+  || { echo "FAIL: sibling memory hook not found"; exit 1; }
 
 # D-42 hermeticity: this file may itself run inside a registered worker, whose
 # markers would otherwise gate every case into the silent branch (false green on
@@ -140,6 +144,54 @@ if [ -e "$teammate_state" ]; then
   ok "T9: CLAUDE_CODE_CHILD_SESSION alone keeps the turn counter running"
 else
   bad "T9: teammate session (runtime marker only) was wrongly gated as a worker"
+fi
+
+echo "== T10: packaged root without legacy memory uses the XDG persistent store =="
+packaged_root="$TMP/packaged-root"
+xdg_data="$TMP/xdg-data"
+packaged_sid="packaged-root-nudge"
+mkdir -p "$packaged_root" "$xdg_data"
+printf '{"hook_event_name":"UserPromptSubmit","session_id":"%s","prompt":"x"}' "$packaged_sid" \
+  | env -u MEM_STORE AGENT_HOME="$packaged_root" XDG_DATA_HOME="$xdg_data" \
+      MEM_NUDGE_INTERVAL=100 bash "$HOOK" >/dev/null
+if [ -f "$xdg_data/hearting/memory/.turn-state-$packaged_sid" ] \
+  && [ ! -e "$packaged_root/memory" ]; then
+  ok "T10: immutable packaged root stays clean; counter uses XDG memory"
+else
+  bad "T10: packaged root was mutated or XDG counter was not created"
+fi
+
+echo "== T11: packaged distill dispatcher uses the XDG persistent store =="
+distill_root="$TMP/packaged-distill-root"
+distill_xdg="$TMP/distill-xdg"
+mkdir -p "$distill_root" "$distill_xdg"
+printf '{"session_id":"packaged-distill","cwd":"%s"}' "$TMP" \
+  | env -u MEM_STORE AGENT_HOME="$distill_root" XDG_DATA_HOME="$distill_xdg" \
+      MEM_DISTILL_ENABLE=1 bash "$DISPATCH" >/dev/null
+if [ -d "$distill_xdg/hearting/memory" ] && [ ! -e "$distill_root/memory" ]; then
+  ok "T11: packaged distill root stays clean; state uses XDG memory"
+else
+  bad "T11: packaged distill root was mutated or XDG store was not created"
+fi
+
+echo "== T12: packaged briefing hook uses the XDG persistent store =="
+briefing_root="$TMP/packaged-briefing-root"
+briefing_xdg="$TMP/briefing-xdg"
+briefing_home="$TMP/briefing-home"
+briefing_desk="$briefing_home/.claude"
+briefing_report="$TMP/briefing-report.md"
+mkdir -p "$briefing_root" "$briefing_xdg" "$briefing_desk"
+printf 'briefing fixture\n' > "$briefing_report"
+env -u MEM_STORE HOME="$briefing_home" AGENT_HOME="$briefing_root" \
+  XDG_DATA_HOME="$briefing_xdg" MEM_BRIEFING_DESK="$briefing_desk" \
+  MEM_BRIEFING_ONCALL="$briefing_report" MEM_PY=/bin/false \
+  bash "$BRIEFING" --cwd "$briefing_desk" --format text >/dev/null
+if find "$briefing_xdg/hearting/memory" -maxdepth 1 -name '.briefing-*' \
+    -type f -print -quit 2>/dev/null | grep -q . \
+  && [ ! -e "$briefing_root/memory" ]; then
+  ok "T12: packaged briefing root stays clean; marker uses XDG memory"
+else
+  bad "T12: packaged briefing root was mutated or XDG marker was not created"
 fi
 
 echo
