@@ -147,6 +147,11 @@ def publish(source, project, experiment, version, root=None):
 
 
 def _integrity_reason(error):
+    if isinstance(error, OSError):
+        if error.errno in VERIFY.TRANSIENT_ERRNOS:
+            return "transient"
+        if error.errno == errno.ENOENT:
+            return "missing"
     message = str(error).lower()
     for token, reason in (
         ("storage transient", "transient"), ("timed out", "transient"),
@@ -168,6 +173,8 @@ def integrity_check(root, previous=None, checked_at=None):
     if set(previous) != {"schema_version", "bundles"} or previous["schema_version"] != 1 or not isinstance(previous["bundles"], dict):
         raise BundleError("invalid integrity state")
     bundles = {}
+    effective_bundles = {}
+    transient_identities = set()
     for version_dir in sorted(path for path in root.glob("*/*/*") if path.is_dir() or path.is_symlink()):
         rel = version_dir.relative_to(root)
         if len(rel.parts) != 3:
@@ -182,21 +189,33 @@ def integrity_check(root, previous=None, checked_at=None):
             if result["bundle_id"] + "/" + result["version"] != identity:
                 raise ValueError("bundle identity mismatch")
             bundles[identity] = {"status": "healthy", "reason": None}
+            effective_bundles[identity] = bundles[identity]
         except (ValueError, OSError, KeyError, TypeError, json.JSONDecodeError) as exc:
-            bundles[identity] = {"status": "broken", "reason": _integrity_reason(exc)}
+            reason = _integrity_reason(exc)
+            if reason == "transient":
+                bundles[identity] = {"status": "checking", "reason": "transient"}
+                transient_identities.add(identity)
+            else:
+                bundles[identity] = {"status": "broken", "reason": reason}
+                effective_bundles[identity] = bundles[identity]
     previous_bundles = previous["bundles"]
-    for identity in set(previous_bundles) - set(bundles):
-        bundles[identity] = {"status": "broken", "reason": "missing"}
+    for identity in transient_identities:
+        if identity in previous_bundles:
+            effective_bundles[identity] = previous_bundles[identity]
+    for identity in set(previous_bundles) - set(effective_bundles) - transient_identities:
+        effective_bundles[identity] = {"status": "broken", "reason": "missing"}
+        bundles[identity] = effective_bundles[identity]
     transitions = []
-    for identity in sorted(set(previous_bundles) | set(bundles)):
+    for identity in sorted(set(previous_bundles) | set(effective_bundles)):
         before = previous_bundles.get(identity)
-        after = bundles.get(identity, {"status": "broken", "reason": "missing"})
+        after = effective_bundles.get(identity)
         if before != after:
             transitions.append({"bundle": identity, "before": before, "after": after})
     return {
         "schema_version": 1,
         "checked_at": checked_at or datetime.now(timezone.utc).isoformat(),
         "bundles": bundles,
+        "effective_bundles": effective_bundles,
         "transitions": transitions,
     }
 
@@ -208,7 +227,7 @@ def run_integrity(root, state_path=None, heartbeat_path=None, checked_at=None):
     result = integrity_check(root, previous=previous, checked_at=checked_at)
     state_writes = 0
     if state_path and result["transitions"]:
-        _atomic_json(state_path, {"schema_version": 1, "bundles": result["bundles"]})
+        _atomic_json(state_path, {"schema_version": 1, "bundles": result["effective_bundles"]})
         state_writes = len(result["transitions"])
     heartbeat_writes = 0
     if heartbeat_path:
@@ -309,6 +328,10 @@ def link_existing_plan(inventory_path):
         source_root = Path(bundle["source_root"])
         if not source_root.is_absolute() or source_root.is_symlink() or not source_root.is_dir() or str(source_root) != str(source_root.resolve()):
             raise BundleError("source_root must be an exact canonical directory")
+        try:
+            source_root.relative_to(project_root)
+        except ValueError:
+            raise BundleError("source_root must be canonically contained by project_root")
         verified = VERIFY.verify(source_root / "report_manifest.json")
         if verified.get("bundle_id") != identity or verified.get("version") != version:
             raise BundleError("link-only source manifest identity mismatch")
@@ -318,8 +341,11 @@ def link_existing_plan(inventory_path):
         if not isinstance(documents, list) or not documents:
             raise BundleError("link-only bundle requires documents")
         source_paths = [row.get("source_path") for row in documents if isinstance(row, dict)]
-        if source_paths != ["REPORT.md"] + sorted(source_paths[1:]):
-            raise BundleError("link-only documents are not in deterministic manifest path order")
+        expected_source_paths = ["REPORT.md"] + sorted(
+            path for path in file_hashes if path != "REPORT.md" and Path(path).suffix.lower() == ".md"
+        )
+        if len(source_paths) != len(set(source_paths)) or source_paths != expected_source_paths:
+            raise BundleError("link-only documents must exactly match the complete manifest document set in deterministic order")
         seen_documents = set()
         seen_notes = set()
         mappings = []
@@ -333,8 +359,8 @@ def link_existing_plan(inventory_path):
             if index == 0 and (document_id != "report" or source_path != "REPORT.md" or row["parent_document_id"] is not None):
                 raise BundleError("link-only report document must be first and parentless")
             parent = row["parent_document_id"]
-            if index and (not isinstance(parent, str) or parent not in seen_documents):
-                raise BundleError("link-only parent hierarchy is ambiguous or out of order")
+            if index and parent != "report":
+                raise BundleError("link-only child hierarchy must use the report representative as parent")
             if document_id in seen_documents or note_id in seen_notes or note_id in all_note_ids:
                 raise BundleError("duplicate link-only document or note identity")
             if source_path not in file_hashes or file_hashes[source_path] != row["source_sha256"]:
