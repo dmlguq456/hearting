@@ -1244,9 +1244,11 @@ def _collapse_parallel_nodes(nodes):
 
     The individual legs already render as their own dispatch rows under the
     conductor (user 2026-07-24: "병렬 leg를 굳이 표현을 안해도 되잖아"), so every
-    route-projection surface names the group once. State is the group's strictest
-    liveness (failed > active > reconciling > all-done > all-pending); downstream
-    ``depends_on`` references to a member are rewritten to the merged id."""
+    route-projection surface names the group once. State follows the F-41d precedence
+    (failed > active > degraded > reconciling > done > pending); downstream
+    ``depends_on`` references to a member are rewritten to the merged id. In particular,
+    a completed leg plus a pending leg is steady ``done`` rather than a fabricated
+    ``active`` stage."""
     nodes = list(nodes or ())
     groups = {}
     for node in nodes:
@@ -1259,18 +1261,12 @@ def _collapse_parallel_nodes(nodes):
     merged_by_group, merged_id_of = {}, {}
     for gid, members in groups.items():
         states = [m.get("state") for m in members]
-        if "failed" in states:
-            state = "failed"
-        elif "active" in states:
-            state = "active"
-        elif "reconciling" in states:
-            state = "reconciling"
-        elif all(s == "done" for s in states):
-            state = "done"
-        elif all(s == "pending" for s in states):
-            state = "pending"
-        else:
-            state = "active"
+        state = next(
+            (candidate for candidate in
+             ("failed", "active", "degraded", "reconciling", "done", "pending")
+             if candidate in states),
+            "pending",
+        )
         member_ids = {m.get("id") for m in members}
         deps = []
         for m in members:

@@ -856,6 +856,7 @@ def _proj_home():
 
 
 _CLAUDE_STREAM_TAIL_BYTES = 512 * 1024
+_CLAUDE_SUPERVISOR_HEAD_BYTES = 64 * 1024
 _CLAUDE_SUBAGENT_SCAN_BYTES = 8 * 1024 * 1024
 _CLAUDE_DISPATCH_CONTEXT_WINDOW_DEFAULT = 1_000_000
 _CLAUDE_STREAM_CACHE = {}       # path -> (mtime_ns, size, parsed)
@@ -998,6 +999,68 @@ def _tool_label(name, tool_input=None, command=None):
     return str(name)[:48] if isinstance(name, str) and name else None
 
 
+def _supervised_claude_transcript(job, receipt_path):
+    """Resolve one supervisor-announced transcript, never a cwd/session neighbour.
+
+    A supervised Claude owner writes a receipt stream whose first row binds the exact
+    runtime session to the exact worktree.  Accept only that shape, require it to agree
+    with the attempt-owned job cwd, and construct the single canonical project path.
+    Missing, malformed, repeated, or mismatched announcements fail closed.
+    """
+    try:
+        with open(receipt_path, "rb") as stream:
+            raw = stream.read(_CLAUDE_SUPERVISOR_HEAD_BYTES)
+    except OSError:
+        return None, None
+    rows = []
+    for line in raw.decode("utf-8", "replace").splitlines():
+        if not line.strip():
+            continue
+        try:
+            row = json.loads(line)
+        except Exception:
+            return None, None
+        if not isinstance(row, dict):
+            return None, None
+        rows.append(row)
+    if not rows or rows[0].get("type") != "dispatch.supervisor.session":
+        return None, None
+    announcements = [
+        row for row in rows if row.get("type") == "dispatch.supervisor.session"
+    ]
+    if len(announcements) != 1:
+        return None, "multiple-supervisor-session-events"
+    announcement = announcements[0]
+    session_id = announcement.get("session_id")
+    announced_cwd = announcement.get("cwd")
+    job_cwd = getattr(job, "cwd", None)
+    if not (
+        isinstance(session_id, str)
+        and re.fullmatch(r"[A-Za-z0-9._-]+", session_id)
+        and isinstance(announced_cwd, str)
+        and os.path.isabs(announced_cwd)
+        and isinstance(job_cwd, str)
+        and os.path.isabs(job_cwd)
+    ):
+        return None, "invalid-supervisor-session-event"
+    try:
+        if os.path.realpath(announced_cwd) != os.path.realpath(job_cwd):
+            return None, "supervisor-worktree-mismatch"
+    except (OSError, TypeError, ValueError):
+        return None, "supervisor-worktree-mismatch"
+    # Claude's project encoding is deterministic (`/`, `.`, `_` -> `-`).  Do not
+    # glob for this session id: a same-id file under another project is not evidence.
+    encoded_cwd = "".join("-" if ch in "/._" else ch for ch in announced_cwd)
+    project_dir = os.path.realpath(os.path.join(_proj_home(), "projects", encoded_cwd))
+    transcript = os.path.realpath(os.path.join(project_dir, session_id + ".jsonl"))
+    try:
+        if os.path.commonpath((project_dir, transcript)) != project_dir:
+            return None, "invalid-supervisor-session-event"
+    except (TypeError, ValueError):
+        return None, "invalid-supervisor-session-event"
+    return (transcript, None) if os.path.isfile(transcript) else (None, None)
+
+
 def _parse_claude_stream_tail(path):
     """Read one bounded exact-attempt tail for identity, context, and open tool."""
     try:
@@ -1031,7 +1094,7 @@ def _parse_claude_stream_tail(path):
             continue
         if not isinstance(payload, dict):
             continue
-        sid = payload.get("session_id")
+        sid = payload.get("session_id") or payload.get("sessionId")
         if isinstance(sid, str) and sid:
             session_ids.add(sid)
         row_type = payload.get("type")
@@ -1107,6 +1170,24 @@ def _enrich_claude_stream_session(job):
     if parsed.get("ambiguity"):
         job.association_ambiguity = parsed["ambiguity"]
         return
+    telemetry_path = path
+    transcript, ambiguity = _supervised_claude_transcript(job, path)
+    if ambiguity:
+        job.association_ambiguity = ambiguity
+        return
+    if transcript is not None:
+        announced_session_id = parsed.get("session_id")
+        resolved = _parse_claude_stream_tail(transcript)
+        if not resolved:
+            return
+        if resolved.get("ambiguity"):
+            job.association_ambiguity = resolved["ambiguity"]
+            return
+        if resolved.get("session_id") != announced_session_id:
+            job.association_ambiguity = "supervisor-transcript-session-mismatch"
+            return
+        parsed = resolved
+        telemetry_path = transcript
     job._dispatch_context_owned = True
     active_context_tokens = parsed.get("active_context_tokens")
     context_window_tokens = parsed.get("context_window_tokens")
@@ -1130,10 +1211,12 @@ def _enrich_claude_stream_session(job):
     job.exec_tool = parsed.get("exec_tool")
     if job.ctx_pct is not None:
         try:
-            st = os.stat(path)
+            st = os.stat(telemetry_path)
             sequence = (st.st_mtime_ns, st.st_size)
             job._context_evidence = ContextEvidence(
-                used_pct=job.ctx_pct, source="claude-attempt-stream",
+                used_pct=job.ctx_pct,
+                source=("claude-session-transcript" if telemetry_path != path
+                        else "claude-attempt-stream"),
                 sequence=sequence, source_head_sequence=sequence,
                 observed_at=st.st_mtime, fresh_until=st.st_mtime + 900)
         except OSError:
@@ -1145,12 +1228,15 @@ def _enrich_claude_stream_session(job):
     try:
         from . import claude as claude_collector
         subagents = claude_collector._tail_subagents(
-            path, max_scan=_CLAUDE_SUBAGENT_SCAN_BYTES)
+            telemetry_path, max_scan=_CLAUDE_SUBAGENT_SCAN_BYTES)
     except Exception:
         subagents = None
     if subagents is not None:
         for subagent in subagents:
-            subagent.source = "claude-attempt-stream"
+            subagent.source = (
+                "claude-session-transcript" if telemetry_path != path
+                else "claude-attempt-stream"
+            )
         job.subagents = subagents
     session_id = parsed.get("session_id")
     if not session_id:

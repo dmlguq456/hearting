@@ -442,7 +442,10 @@ class ClaudeStreamSessionTest(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.logs = os.path.join(self.tmp.name, ".dispatch", "logs")
         os.makedirs(self.logs)
-        self.env = mock.patch.dict(os.environ, {"AGENT_HOME": self.tmp.name})
+        self.env = mock.patch.dict(os.environ, {
+            "AGENT_HOME": self.tmp.name,
+            "CLAUDE_CONFIG_DIR": self.tmp.name,
+        })
         self.env.start()
         dispatch_collector._CLAUDE_STREAM_CACHE.clear()
 
@@ -463,6 +466,25 @@ class ClaudeStreamSessionTest(unittest.TestCase):
         with open(job._log_file, "w", encoding="utf-8") as stream:
             for row in rows:
                 stream.write(json.dumps(row) + "\n")
+
+    def _write_transcript(self, cwd, sid, rows):
+        encoded = "".join("-" if ch in "/._" else ch for ch in cwd)
+        project = os.path.join(self.tmp.name, "projects", encoded)
+        os.makedirs(project, exist_ok=True)
+        path = os.path.join(project, sid + ".jsonl")
+        with open(path, "w", encoding="utf-8") as stream:
+            for row in rows:
+                stream.write(json.dumps(row) + "\n")
+        return path
+
+    @staticmethod
+    def _supervisor(sid, cwd):
+        return {
+            "type": "dispatch.supervisor.session",
+            "parent_attempt_id": "att-parent",
+            "session_id": sid,
+            "cwd": cwd,
+        }
 
     @staticmethod
     def _assistant(sid, model_id, active):
@@ -588,6 +610,83 @@ class ClaudeStreamSessionTest(unittest.TestCase):
             stream.write(json.dumps(self._assistant("sid-x", "claude-fable-5", 160)) + "\n")
         dispatch_collector._enrich_claude_stream_session(foreign)
         self.assertFalse(hasattr(foreign, "_runtime_session_id"))
+
+    def test_supervisor_receipt_resolves_exact_worktree_session_transcript(self):
+        cwd = os.path.join(self.tmp.name, "worktree")
+        os.makedirs(cwd)
+        sid = "11111111-2222-3333-4444-555555555555"
+        job = self._job("att-supervised")
+        job.cwd = cwd
+        self._write_log(job, [self._supervisor(sid, cwd)])
+        assistant = self._assistant(sid, "claude-fable-5", 240)
+        assistant["sessionId"] = assistant.pop("session_id")
+        assistant["message"]["content"] = [{
+            "type": "tool_use", "name": "Bash", "id": "toolu-exact",
+            "input": {"command": "python3 exact.py"},
+        }]
+        self._write_transcript(cwd, sid, [assistant, {
+            "type": "result", "sessionId": sid,
+            "modelUsage": {"claude-fable-5": {"contextWindow": 1200}},
+        }])
+
+        dispatch_collector._enrich_claude_stream_session(job)
+
+        self.assertEqual(job._runtime_session_id, sid)
+        self.assertEqual(job.active_context_tokens, 240)
+        self.assertEqual(job.context_window_tokens, 1200)
+        self.assertEqual(job.ctx_pct, 20)
+        self.assertEqual(job.exec_tool, {"name": "python3"})
+        self.assertEqual(job._context_evidence.source, "claude-session-transcript")
+
+    def test_supervisor_missing_transcript_does_not_borrow_neighbor(self):
+        cwd = os.path.join(self.tmp.name, "worktree")
+        os.makedirs(cwd)
+        sid = "11111111-2222-3333-4444-555555555555"
+        job = self._job("att-supervised-missing")
+        job.cwd = cwd
+        self._write_log(job, [self._supervisor(sid, cwd)])
+        self._write_transcript(cwd, "neighbor-session", [
+            self._assistant("neighbor-session", "claude-fable-5", 999),
+        ])
+
+        dispatch_collector._enrich_claude_stream_session(job)
+
+        self.assertIsNone(job.active_context_tokens)
+        self.assertIsNone(job.context_window_tokens)
+        self.assertIsNone(job.exec_tool)
+
+    def test_supervisor_malformed_ambiguous_and_mismatched_evidence_is_denied(self):
+        cwd = os.path.join(self.tmp.name, "worktree")
+        other = os.path.join(self.tmp.name, "other")
+        os.makedirs(cwd)
+        os.makedirs(other)
+        sid = "11111111-2222-3333-4444-555555555555"
+
+        malformed = self._job("att-supervised-malformed")
+        malformed.cwd = cwd
+        self._write_log(malformed, [self._supervisor("../bad", cwd)])
+        dispatch_collector._enrich_claude_stream_session(malformed)
+        self.assertEqual(malformed.association_ambiguity,
+                         "invalid-supervisor-session-event")
+        self.assertFalse(hasattr(malformed, "_runtime_session_id"))
+
+        ambiguous = self._job("att-supervised-ambiguous")
+        ambiguous.cwd = cwd
+        self._write_log(ambiguous, [self._supervisor(sid, cwd),
+                                    self._supervisor(sid, cwd)])
+        dispatch_collector._enrich_claude_stream_session(ambiguous)
+        self.assertEqual(ambiguous.association_ambiguity,
+                         "multiple-supervisor-session-events")
+
+        mismatched = self._job("att-supervised-mismatch")
+        mismatched.cwd = cwd
+        self._write_log(mismatched, [self._supervisor(sid, other)])
+        self._write_transcript(other, sid, [self._assistant(
+            sid, "claude-fable-5", 999)])
+        dispatch_collector._enrich_claude_stream_session(mismatched)
+        self.assertEqual(mismatched.association_ambiguity,
+                         "supervisor-worktree-mismatch")
+        self.assertIsNone(mismatched.active_context_tokens)
 
 
 class ChildAssociationTest(unittest.TestCase):

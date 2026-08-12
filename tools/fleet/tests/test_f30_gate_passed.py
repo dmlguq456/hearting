@@ -137,6 +137,28 @@ class GateMarkTest(GateMarkBase):
             with self.subTest(node=node):
                 self.assertIs(route.gate_mark(self.record, node, home=self.home), True)
 
+    def test_exact_inline_fallback_marker_passes_without_registered_worker(self):
+        marker = self._marker("plan")
+        marker.update({
+            "transport": "headless",
+            "execution_surface": "inline",
+            "registered_worker": False,
+            "fallback_hop": "inline",
+        })
+        self._write("plan.json", marker)
+        self._write("plan.1.json", marker)
+        link_name = "plan." + marker["attempt_id"] + ".attempt.json"
+        with open(os.path.join(self.cdir, link_name), encoding="utf-8") as handle:
+            link = json.load(handle)
+        link.update({
+            "transport": "headless",
+            "execution_surface": "inline",
+            "registered_worker": False,
+            "fallback_hop": "inline",
+        })
+        self._write(link_name, link)
+        self.assertIs(route.gate_mark(self.record, "plan", home=self.home), True)
+
     def test_absent_marker_is_no_claim(self):
         os.remove(os.path.join(self.cdir, "test.json"))
         route.clear_cache()
@@ -275,13 +297,21 @@ class BuildViewsGatePassedTest(GateMarkBase):
         got = {n["id"]: n["gate_passed"] for n in v["nodes"]}
         self.assertEqual(got, {"plan": True, "execute": None, "test": True, "report": None})
 
-    def test_gate_passed_is_independent_of_state(self):
-        """A `pending` node with a marker still reports passed, and a `done` node without one
-        stays no-claim — proof the two dimensions are not derived from each other."""
+    def test_marker_makes_node_done_but_done_without_marker_stays_no_claim(self):
+        """F-41b lets an exact marker complete a marker-only inline node.  The reverse
+        remains independent: terminal registry evidence does not invent a gate marker."""
         v = self._view({self.route_id: {"plan": True}})
         plan = next(n for n in v["nodes"] if n["id"] == "plan")
-        self.assertEqual(plan["state"], "pending")
+        self.assertEqual(plan["state"], "done")
         self.assertIs(plan["gate_passed"], True)
+
+        done = route.build_views(
+            [], {self.route_id: {"execute": {"status": "done"}}},
+            {self.route_id: self.record}, 1_000_000.0,
+        )[0]
+        execute = next(n for n in done["nodes"] if n["id"] == "execute")
+        self.assertEqual(execute["state"], "done")
+        self.assertIsNone(execute["gate_passed"])
 
     def test_build_views_does_no_io(self):
         with mock.patch("os.stat", side_effect=AssertionError("build_views touched the fs")), \
@@ -438,9 +468,8 @@ class GateDetailRowTest(GateMarkBase):
 
 class NodeStateMarkerSupersedesTest(unittest.TestCase):
     """2026-07-24 (user "execute도 X로 뜨는데 왜?"): a completion marker supersedes a
-    SUPERSEDED dead attempt (failed -> done). Narrowed to the failed case ONLY — a pending
-    node with a marker stays pending, so prd.md:308 state/gate_passed independence holds for
-    the done/no-claim/marker-outlives-job cases."""
+    SUPERSEDED dead attempt (failed -> done). F-41b also makes a valid marker authoritative
+    for an inline fallback leg that intentionally has no jobs.log row."""
 
     class _Row:
         def __init__(self, node, liveness, state_evidence=None):
@@ -520,15 +549,65 @@ class NodeStateMarkerSupersedesTest(unittest.TestCase):
         st = route._node_state("execute", [], ev, 100.0, completion_marked=True)
         self.assertEqual(st["state"], "done")
 
-    def test_pending_node_with_marker_stays_pending(self):
-        # Boundary: independence preserved for the non-failed case (prd.md:308).
+    def test_marker_only_inline_node_is_done(self):
         st = route._node_state("plan", [], {}, 100.0, completion_marked=True)
-        self.assertEqual(st["state"], "pending")
+        self.assertEqual(st["state"], "done")
+        self.assertIsNone(st["job"])
 
     def test_active_wins_over_marker(self):
         st = route._node_state("execute", [self._Row("execute", "working")], {}, 100.0,
                                completion_marked=True)
         self.assertEqual(st["state"], "active")
+
+    def test_inline_plan_group_is_steady_while_execute_is_sole_active_stage(self):
+        record = {
+            "route_hash": "sha256:test",
+            "nodes": [
+                {"id": "plan", "depends_on": [], "parallel_group": "plan",
+                 "completion_gate": "code-plan"},
+                {"id": "plan-inline", "depends_on": [], "parallel_group": "plan",
+                 "completion_gate": "code-plan"},
+                {"id": "execute", "depends_on": ["plan", "plan-inline"],
+                 "completion_gate": "code-execute"},
+            ],
+        }
+        execute = self._Row("execute", "working")
+        view = route._record_view(
+            record, "rt-inline-plan", [execute], {}, 100.0,
+            gate_marks_for_route={"plan": True, "plan-inline": True},
+        )
+        collapsed = render._collapse_parallel_nodes(view["nodes"])
+        self.assertEqual([(node["id"], node["state"]) for node in collapsed],
+                         [("plan(2-way)", "done"), ("execute", "active")])
+        self.assertEqual([node["id"] for node in collapsed if node["state"] == "active"],
+                         ["execute"])
+
+    def test_done_plus_pending_plan_group_is_not_fabricated_active(self):
+        """A started downstream node must not make a mixed parallel group blink.
+
+        F-41d explicitly places ``done`` above ``pending``. This is the live Claude owner
+        shape where one plan leg completed, the unused alternative never registered, and
+        execute is the only genuinely active stage.
+        """
+        record = {
+            "route_hash": "sha256:test",
+            "nodes": [
+                {"id": "plan", "depends_on": [], "parallel_group": "plan",
+                 "completion_gate": "code-plan"},
+                {"id": "plan-alternative", "depends_on": [], "parallel_group": "plan",
+                 "completion_gate": "code-plan"},
+                {"id": "execute", "depends_on": ["plan", "plan-alternative"],
+                 "completion_gate": "code-execute"},
+            ],
+        }
+        execute = self._Row("execute", "working")
+        view = route._record_view(
+            record, "rt-partial-plan", [execute],
+            {"plan": {"status": "done", "note": "completed-marker"}}, 100.0,
+        )
+        collapsed = render._collapse_parallel_nodes(view["nodes"])
+        self.assertEqual([(node["id"], node["state"]) for node in collapsed],
+                         [("plan(2-way)", "done"), ("execute", "active")])
 
 
 class ReconciliationRenderTest(unittest.TestCase):
@@ -565,6 +644,12 @@ class ReconciliationRenderTest(unittest.TestCase):
                          "active")
         self.assertEqual(render._collapse_parallel_nodes(legs("reconciling", "failed"))[0]["state"],
                          "failed")
+        self.assertEqual(render._collapse_parallel_nodes(legs("degraded", "reconciling"))[0]["state"],
+                         "degraded")
+        self.assertEqual(render._collapse_parallel_nodes(legs("done", "pending"))[0]["state"],
+                         "done")
+        self.assertEqual(render._collapse_parallel_nodes(legs("pending", "pending"))[0]["state"],
+                         "pending")
 
 
 class ProjectionMarkThreadingTest(GateMarkBase):

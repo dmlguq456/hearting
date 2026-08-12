@@ -226,7 +226,9 @@ class ReplicaCollapseTest(unittest.TestCase):
             (("done", "done"), "done"),
             (("pending", "pending"), "pending"),
             (("done", "active"), "active"),
-            (("done", "pending"), "active"),
+            (("done", "pending"), "done"),
+            (("reconciling", "done"), "reconciling"),
+            (("degraded", "reconciling"), "degraded"),
         )
         for (primary, replica), expected in cases:
             collapsed = render._collapse_replica_nodes(

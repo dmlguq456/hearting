@@ -495,12 +495,9 @@ def _node_state(node_id, route_jobs, ev_by_node, now, completion_marked=False, d
     no evidence is pending. `now` is the ONLY clock input — never read internally, so this
     stays hermetically testable (T1-14/T1-15).
 
-    `completion_marked` (2026-07-24): an immutable completion marker is authoritative proof
-    the node's completion gate passed, so it SUPERSEDES a dead/stale EARLIER attempt row or
-    a `dead-*`/`fleet-kill` note — the exact shape of a node that died once (watchdog, supervisor
-    race) and was then re-run to a marker or recovered inline. Without this, such a node rendered
-    `✕` despite being done (user 2026-07-24: "execute도 X로 뜨는데 왜?"). `active` still wins above:
-    a live job means the node is being re-run right now, which outranks a past marker."""
+    `completion_marked`: an immutable, exactly validated completion marker is authoritative
+    proof that the node is done, including marker-only inline fallback legs that never had a
+    jobs.log row. `active` still wins: a live re-run outranks a past marker."""
     live = [j for j in route_jobs if getattr(j, "route_node", None) == node_id]
     active = [j for j in live if j.liveness == "working"]
     if active:
@@ -512,6 +509,27 @@ def _node_state(node_id, route_jobs, ev_by_node, now, completion_marked=False, d
         ))
         return {"state": "active", "elapsed_min": j.elapsed_min, "model": j.model,
                 "harness": j.harness, "effort": j.effort, "pid": j.pid, "note": None, "job": j}
+    if completion_marked:
+        # F-41b: marker authority is independent of whether the successful execution
+        # surface registered a worker. Preserve any terminal attempt/event telemetry,
+        # but never synthesize a live job from marker or degradation evidence.
+        candidates = [j for j in live if j.liveness in ("stale", "dead")]
+        if candidates:
+            src = max(candidates, key=lambda row: (
+                -(getattr(row, "registry_priority", None)
+                  if getattr(row, "registry_priority", None) is not None else 0),
+                getattr(row, "registry_order", None)
+                if getattr(row, "registry_order", None) is not None else -1,
+                -(getattr(row, "elapsed_min", None)
+                  if getattr(row, "elapsed_min", None) is not None else 10**9),
+            ))
+            return {"state": "done", "elapsed_min": src.elapsed_min, "model": src.model,
+                    "harness": src.harness, "effort": src.effort, "pid": None,
+                    "note": (ev_by_node.get(node_id) or {}).get("note"), "job": None}
+        ev = ev_by_node.get(node_id) or {}
+        return {"state": "done", "elapsed_min": _ev_elapsed(ev, now), "model": ev.get("model"),
+                "harness": ev.get("harness"), "effort": ev.get("effort"), "pid": None,
+                "note": ev.get("note"), "job": None}
     failed_live = [j for j in live if j.liveness in ("stale", "dead")]
 
     def _best(rows):
@@ -530,21 +548,6 @@ def _node_state(node_id, route_jobs, ev_by_node, now, completion_marked=False, d
         ev_status in ("killed", "cancelled")
         or (ev_status == "done" and fail_note)
     )
-    is_failed = bool(failed_live) or explicit_failure
-    if is_failed and completion_marked:
-        # Marker supersedes the SUPERSEDED dead attempt -> done. Narrowed to the failed case
-        # ONLY: a `pending` node with a marker stays pending (prd.md:308 keeps `state` and
-        # `gate_passed` independent for the done/no-claim/marker-outlives-job cases). We keep
-        # the dead attempt's telemetry so elapsed/model still render, but drop the job handle —
-        # the node is complete, not a live target.
-        src = _best(failed_live) if failed_live else None
-        if src is not None:
-            return {"state": "done", "elapsed_min": src.elapsed_min, "model": src.model,
-                    "harness": src.harness, "effort": src.effort, "pid": None,
-                    "note": note, "job": None}
-        return {"state": "done", "elapsed_min": _ev_elapsed(ev, now), "model": ev.get("model"),
-                "harness": ev.get("harness"), "effort": ev.get("effort"), "pid": None,
-                "note": note, "job": None}
     if explicit_failure:
         if failed_live:
             j = _best(failed_live)
