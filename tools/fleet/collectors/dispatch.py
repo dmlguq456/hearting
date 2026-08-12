@@ -889,7 +889,14 @@ def _owned_attempt_log_path(job):
             roots.append(os.path.join(os.path.dirname(registry_dir), ".dispatch", "logs"))
     artifact_root = getattr(job, "artifact_root", None)
     if artifact_root:
-        roots.append(os.path.realpath(artifact_root))
+        real_artifact = os.path.realpath(artifact_root)
+        roots.append(real_artifact)
+        # A launcher streams workers to $AGENT_HOME/.dispatch/logs
+        # (dispatch-liveness.sh), while a managed parent may register the row in
+        # a DIFFERENT runtime-home registry (codex managed gateway). The only
+        # row-declared anchor for that launch home is the artifact root's
+        # parent — accept exactly its .dispatch/logs subtree, nothing wider.
+        roots.append(os.path.join(os.path.dirname(real_artifact), ".dispatch", "logs"))
     allowed = False
     for root in roots:
         try:
@@ -2174,7 +2181,11 @@ def _validated_split_registry_paths(canonical_paths, observed=None):
 # --- source (b): jobs.log tolerant merge ---
 def _iso_elapsed_min(ts):
     try:
-        dt = datetime.fromisoformat(ts.strip())
+        raw = ts.strip()
+        # Registry rows stamp `…Z`; fromisoformat only learned that suffix in 3.11.
+        if raw.endswith("Z"):
+            raw = raw[:-1] + "+00:00"
+        dt = datetime.fromisoformat(raw)
     except Exception:
         return None
     if dt.tzinfo is None:

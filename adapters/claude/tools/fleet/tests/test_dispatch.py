@@ -232,6 +232,20 @@ class RenderDispatchPresentationTest(unittest.TestCase):
 
 
 # --- D1: _registry_home() / _jobs_path() precedence ---
+class IsoElapsedMinTest(unittest.TestCase):
+    """Registry rows stamp `…Z`; Python < 3.11 fromisoformat rejects that suffix,
+    which silently blanked every registry-sourced elapsed column (2026-08-12)."""
+
+    def test_z_suffix_utc_timestamp_is_parsed(self):
+        self.assertIsNotNone(dispatch._iso_elapsed_min("2026-08-12T00:29:57.028405Z"))
+
+    def test_explicit_offset_timestamp_still_parses(self):
+        self.assertIsNotNone(dispatch._iso_elapsed_min("2026-08-12T00:29:57+00:00"))
+
+    def test_garbage_still_returns_none(self):
+        self.assertIsNone(dispatch._iso_elapsed_min("not-a-timestamp"))
+
+
 class RegistryHomeTest(unittest.TestCase):
 
     def test_agent_home_wins_over_claude_home(self):

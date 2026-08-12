@@ -169,6 +169,53 @@ class AttemptSummaryFallbackTest(unittest.TestCase):
             self.assertEqual(job.title, "Attempt title")
             self.assertEqual(job.summary, "Attempt NOW")
 
+    def test_launch_home_dispatch_logs_sibling_of_artifact_root_is_accepted(self):
+        # Cross-home regression (2026-08-12): the launcher streamed the worker to
+        # $AGENT_HOME/.dispatch/logs while the managed codex gateway registered the
+        # row in a DIFFERENT runtime-home registry, so neither the registry-adjacent
+        # roots nor the artifact root itself covered the declared log_file.
+        with tempfile.TemporaryDirectory() as tmp:
+            launch_home = os.path.join(tmp, "checkout")
+            artifact = os.path.join(launch_home, ".agent_reports")
+            log_dir = os.path.join(launch_home, ".dispatch", "logs")
+            os.makedirs(artifact)
+            os.makedirs(log_dir)
+            registry_dir = os.path.join(tmp, "codex-home", ".harness", "dispatch")
+            os.makedirs(registry_dir)
+            path = os.path.join(log_dir, "child.att-crosshome.claude.jsonl")
+            with open(path, "w", encoding="utf-8") as stream:
+                stream.write("{}\n")
+            job = DispatchJob(
+                key="code-plan", slug="child", cwd="/work", harness="claude",
+                is_child=True, liveness="working", attempt_id="att-crosshome",
+                artifact_root=artifact,
+            )
+            job._registry_path = os.path.join(registry_dir, "jobs.log")
+            job._log_file = path
+            with mock.patch.object(dispatch, "_registry_home", return_value="/not/the/runtime"):
+                self.assertEqual(dispatch._owned_attempt_log_path(job), os.path.realpath(path))
+
+    def test_launch_home_sibling_outside_dispatch_logs_is_rejected(self):
+        # The new root is exactly `<artifact-root parent>/.dispatch/logs`; a file
+        # anywhere else in the launch home stays outside the fail-closed allowlist.
+        with tempfile.TemporaryDirectory() as tmp:
+            launch_home = os.path.join(tmp, "checkout")
+            artifact = os.path.join(launch_home, ".agent_reports")
+            stray_dir = os.path.join(launch_home, ".dispatch", "homes")
+            os.makedirs(artifact)
+            os.makedirs(stray_dir)
+            path = os.path.join(stray_dir, "child.att-stray.claude.jsonl")
+            with open(path, "w", encoding="utf-8") as stream:
+                stream.write("{}\n")
+            job = DispatchJob(
+                key="code-plan", slug="child", cwd="/work", harness="claude",
+                is_child=True, liveness="working", attempt_id="att-stray",
+                artifact_root=artifact,
+            )
+            job._log_file = path
+            with mock.patch.object(dispatch, "_registry_home", return_value="/not/the/runtime"):
+                self.assertIsNone(dispatch._owned_attempt_log_path(job))
+
     def test_attempt_log_outside_allowed_roots_is_rejected(self):
         with tempfile.TemporaryDirectory() as tmp:
             registry = os.path.join(tmp, "home")
