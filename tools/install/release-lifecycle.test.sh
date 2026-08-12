@@ -85,6 +85,7 @@ required = {
     "hearting/tools/install/distribution.py": "# fixture\n",
     "hearting/tools/fleet/fleet.sh": "#!/bin/sh\n",
     "hearting/tools/memory/mem.py": "#!/usr/bin/env python3\n",
+    "hearting/tools/integrations/mattermost/mm.py": "#!/usr/bin/env python3\n",
 }
 
 def make_release(version, attack=None, wrong_checksum=False):

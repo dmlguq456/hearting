@@ -48,10 +48,12 @@ REQUIRED_RELEASE_FILES = (
     "tools/install/distribution.py",
     "tools/fleet/fleet.sh",
     "tools/memory/mem.py",
+    "tools/integrations/mattermost/mm.py",
 )
 TOOL_LAUNCHERS = (
     ("fleet", "tools/fleet/fleet.sh"),
     ("mem", "tools/memory/mem.py"),
+    ("mm", "tools/integrations/mattermost/mm.py"),
 )
 _REPOSITORY_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 _VERSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
