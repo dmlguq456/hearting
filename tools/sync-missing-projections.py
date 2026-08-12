@@ -19,6 +19,8 @@ Domains (mirroring tools/check-adaptation-boundary.sh expectations):
                     → ../../../../tools/memory/<f> (established projection style)
 - ``tools/install``→ symlink   adapters/claude/tools/install/<f>
                     → ../../../../tools/install/<f>
+- ``tools/integrations``→ symlink adapters/claude/tools/integrations/<f>
+                    (relative link depth follows the file's nesting)
 
 ``utilities/`` needs no counterpart automation: `adapters/claude/utilities` is a
 whole-layer symlink to the shared portable layer (2026-07-22 collapse), so every
@@ -83,7 +85,7 @@ def sync(check: bool) -> int:
             n += 1
         return n
 
-    def counterpart_symlink(domain: str, link_prefix: str) -> int:
+    def counterpart_symlink(domain: str) -> int:
         nonlocal created
         n = 0
         for src in walk(Path(domain)):
@@ -97,7 +99,9 @@ def sync(check: bool) -> int:
                 missing.append(str(dst.relative_to(ROOT)))
                 continue
             dst.parent.mkdir(parents=True, exist_ok=True)
-            os.symlink(f"{link_prefix}/{rel}", dst)
+            # Depth-aware relative link: flat files keep the established
+            # ../../../../<domain>/<f> shape and nested files gain the extra hops.
+            os.symlink(os.path.relpath(src, dst.parent), dst)
             print(f"linked {dst.relative_to(ROOT)}")
             created += 1
             n += 1
@@ -105,8 +109,9 @@ def sync(check: bool) -> int:
 
     counterpart_copy("loops")
     counterpart_copy("scaffolds")
-    counterpart_symlink("tools/memory", "../../../../tools/memory")
-    counterpart_symlink("tools/install", "../../../../tools/install")
+    counterpart_symlink("tools/memory")
+    counterpart_symlink("tools/install")
+    counterpart_symlink("tools/integrations")
 
     if check:
         if missing:
