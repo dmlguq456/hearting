@@ -281,6 +281,7 @@ class CompletionMarkerTest(unittest.TestCase):
         allow = {
             (ROOT / "utilities" / "dispatch_contract.py").resolve(),
             (ROOT / "utilities" / "dispatch_completion_marker.test.py").resolve(),
+            (ROOT / "utilities" / "dispatch_state_root_rotation.test.py").resolve(),
         }
         for adapter in ("claude", "codex", "opencode"):
             allow.add((ROOT / "adapters" / adapter / "bin" / "dispatch-headless.py").resolve())
