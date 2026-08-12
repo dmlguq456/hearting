@@ -241,6 +241,12 @@ class WorkerCapacityContractTest(unittest.TestCase):
             evidence.write_text("combined gate PASS\n")
             prior = os.environ.get("AGENT_HOME")
             os.environ["AGENT_HOME"] = str(agent_home)
+            # completion_dir() resolves the dispatch state root ahead of
+            # AGENT_HOME/.dispatch, preferring an inherited AGENT_DISPATCH_JOBS
+            # -- clear it so this in-process test isn't sensitive to the
+            # invoking shell's real registry.
+            prior_jobs = os.environ.get("AGENT_DISPATCH_JOBS")
+            os.environ.pop("AGENT_DISPATCH_JOBS", None)
             try:
                 route["_route_file"] = str(route_path)
                 marker, receipt = ROUTE.complete_subsession_stage(
@@ -256,6 +262,10 @@ class WorkerCapacityContractTest(unittest.TestCase):
                     os.environ.pop("AGENT_HOME", None)
                 else:
                     os.environ["AGENT_HOME"] = prior
+                if prior_jobs is None:
+                    os.environ.pop("AGENT_DISPATCH_JOBS", None)
+                else:
+                    os.environ["AGENT_DISPATCH_JOBS"] = prior_jobs
 
     def test_c_ripple_map_is_bounded_and_deterministic(self):
         with tempfile.TemporaryDirectory() as td:

@@ -27,6 +27,7 @@ from dispatch_contract import (  # noqa: E402
     completion_marker_gate,
     PRELAUNCH_PROCESS_BLOCK_REASONS,
     completion_marker_is_current,
+    dispatch_state_roots,
     parse_registry_metadata,
     recover_unstarted_attempt,
     resolve_agent_home,
@@ -851,9 +852,16 @@ def existing_leg_result(
             ),
             None,
         )
-        marker_path = (
-            agent_home / ".dispatch" / "completion" / str(route["route_id"])
-            / f"{leg['node']}.json"
+        marker_path = next(
+            (
+                candidate
+                for candidate in (
+                    root / "completion" / str(route["route_id"]) / f"{leg['node']}.json"
+                    for root in dispatch_state_roots(agent_home, jobs)
+                )
+                if candidate.is_file()
+            ),
+            agent_home / ".dispatch" / "completion" / str(route["route_id"]) / f"{leg['node']}.json",
         )
         try:
             marker = json.loads(marker_path.read_text(encoding="utf-8"))

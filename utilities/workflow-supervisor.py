@@ -964,7 +964,10 @@ def cmd_survey(args):
         "schema_version": SURVEY_SCHEMA_VERSION,
         "artifact_root": str(artifact_root),
         "ledger_root": str(WS.default_ledger_root()),
-        "completion_root": str(route_module().resolve_agent_home() / ".dispatch" / "completion"),
+        "completion_root": str(
+            route_module().resolve_dispatch_state_root(route_module().resolve_agent_home())
+            / "completion"
+        ),
         "stale_after_seconds": args.stale_after_seconds,
         "rows": rows,
         "diagnostics": diagnostics,

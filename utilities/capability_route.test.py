@@ -79,10 +79,18 @@ class TestRoute(unittest.TestCase):
   (Path(self._tmp_home.name)/"core"/"CORE.md").write_text("fixture\n",encoding="utf-8")
   self._previous_agent_home=os.environ.get("AGENT_HOME")
   os.environ["AGENT_HOME"]=self._tmp_home.name
+  # completion_dir()/write_completion_marker() now resolve the dispatch state
+  # root ahead of agent-home-relative state (I-2 unification), preferring an
+  # inherited AGENT_DISPATCH_JOBS over AGENT_HOME/.dispatch -- clear it too so
+  # a developer/CI shell's real registry never leaks into these fixtures.
+  self._previous_dispatch_jobs=os.environ.get("AGENT_DISPATCH_JOBS")
+  os.environ.pop("AGENT_DISPATCH_JOBS",None)
   self.addCleanup(self._restore_agent_home)
  def _restore_agent_home(self):
   if self._previous_agent_home is None: os.environ.pop("AGENT_HOME",None)
   else: os.environ["AGENT_HOME"]=self._previous_agent_home
+  if self._previous_dispatch_jobs is None: os.environ.pop("AGENT_DISPATCH_JOBS",None)
+  else: os.environ["AGENT_DISPATCH_JOBS"]=self._previous_dispatch_jobs
   self._tmp_home.cleanup()
  def dispatch(self,*rows):
   return {"tuples":list(rows),"native_subagent":[{

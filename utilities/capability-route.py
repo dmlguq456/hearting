@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Compile, verify, and complete immutable capability routes."""
 from __future__ import annotations
-import argparse, contextlib, fcntl, hashlib, importlib.util, json, os, re, subprocess, sys, uuid
+import argparse, contextlib, fcntl, hashlib, importlib.util, json, os, re, shutil, subprocess, sys, uuid
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -21,9 +21,11 @@ from dispatch_contract import (
     WRAPPER_TRANSPORTS,
     _atomic_registry_replace,
     attempt_process_quiescence,
+    dispatch_state_roots,
     ensure_global_registry_writable,
     parse_registry_metadata,
     resolve_agent_home,
+    resolve_dispatch_state_root,
     validate_attempt_metadata,
 )
 from stage_session_contract import load_manifest
@@ -1055,8 +1057,31 @@ def write_once(path, payload):
         return
     with os.fdopen(fd,"w",encoding="utf-8") as fh: fh.write(data); fh.flush(); os.fsync(fh.fileno())
 
-def completion_dir(route_id):
-    return resolve_agent_home()/".dispatch"/"completion"/route_id
+def completion_dir(route_id, *, jobs=None):
+    return resolve_dispatch_state_root(resolve_agent_home(), jobs)/"completion"/route_id
+
+
+def _migrate_completion_dir_forward(route_id, *, jobs=None):
+    """One-time, idempotent, origin-preserving copy of a legacy
+    agent-home-relative completion dir into the canonical dispatch state
+    root, so a route that started writing before this cycle's resolver
+    unification keeps its marker/history reachable at the new root the
+    writer now uses exclusively (design constraint 3 / 7)."""
+
+    agent_home = resolve_agent_home()
+    new = completion_dir(route_id, jobs=jobs)
+    old = agent_home/".dispatch"/"completion"/route_id
+    if new.is_dir() or not old.is_dir() or new == old:
+        return
+    new.parent.mkdir(parents=True, exist_ok=True)
+    tmp = new.parent/f".migrate-{route_id}.{os.getpid()}"
+    if tmp.exists():
+        shutil.rmtree(tmp, ignore_errors=True)
+    try:
+        shutil.copytree(old, tmp)
+        os.rename(tmp, new)
+    except OSError:
+        shutil.rmtree(tmp, ignore_errors=True)
 
 # Shared read-only terminal-gate seam: `close_route()` and `workflow-supervisor.py`'s
 # `status`/`complete` all need the same four-field marker-identity truth (route id,
@@ -1303,6 +1328,7 @@ def _next_marker_sequence(directory, node_id):
     return maximum+1
 
 def write_completion_marker(route, node, node_id, evidence, *, attempt_id=None, attempt_metadata=None):
+    _migrate_completion_dir_forward(route["route_id"])
     directory=completion_dir(route["route_id"])
     canonical_path=directory/f"{node_id}.json"
     sha=hashlib.sha256(evidence.read_bytes()).hexdigest()

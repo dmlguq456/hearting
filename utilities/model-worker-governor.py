@@ -495,6 +495,7 @@ def _validate_batch_peer(
         attempt_process_quiescence,
         completion_attempt_readiness,
         completion_marker_is_current,
+        dispatch_state_roots,
         parse_registry_metadata,
         validate_attempt_metadata,
     )
@@ -583,9 +584,17 @@ def _validate_batch_peer(
             ),
             None,
         )
-        marker_path = (
+        marker_path = next(
+            (
+                candidate
+                for candidate in (
+                    root / "completion" / str(manifest["route_id"]) / f"{member['route_node']}.json"
+                    for root in dispatch_state_roots(paths["agent_home"], jobs)
+                )
+                if candidate.is_file()
+            ),
             paths["agent_home"] / ".dispatch" / "completion"
-            / str(manifest["route_id"]) / f"{member['route_node']}.json"
+            / str(manifest["route_id"]) / f"{member['route_node']}.json",
         )
         try:
             marker = json.loads(marker_path.read_text(encoding="utf-8"))

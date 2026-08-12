@@ -264,6 +264,31 @@ def _completion_home():
     return os.path.expanduser("~/.claude")
 
 
+def _dispatch_state_roots(home=None):
+    """Read-order candidates for dispatch state: canonical state root
+    (dirname of the resolved registry, honoring an inherited
+    AGENT_DISPATCH_JOBS) first, then the legacy agent-home-relative tree
+    (I-2 read-fallback). Falls back to the single legacy candidate if the
+    canonical resolver cannot be located or fails for any reason -- this
+    reader must stay tolerant, never raise."""
+
+    agent_home = home or _completion_home()
+    legacy = os.path.join(agent_home, ".dispatch")
+    here = Path(__file__).resolve()
+    for candidate in here.parents:
+        utilities_dir = candidate / "utilities"
+        if (utilities_dir / "dispatch_contract.py").is_file():
+            if str(utilities_dir) not in sys.path:
+                sys.path.insert(0, str(utilities_dir))
+            try:
+                from dispatch_contract import dispatch_state_roots
+
+                return [str(root) for root in dispatch_state_roots(Path(agent_home))]
+            except Exception:
+                return [legacy]
+    return [legacy]
+
+
 def _load_marker_uncached(abspath):
     try:
         with open(abspath, encoding="utf-8") as f:
@@ -351,9 +376,14 @@ def gate_mark(record, node_id, home=None):
     )
     if node is None:
         return None
-    directory = os.path.join(home or _completion_home(), ".dispatch", "completion", route_id)
-    path = os.path.join(directory, node_id + ".json")
-    marker = _load_marker(path)
+    marker = None
+    path = None
+    for state_root in _dispatch_state_roots(home):
+        directory = os.path.join(state_root, "completion", route_id)
+        path = os.path.join(directory, node_id + ".json")
+        marker = _load_marker(path)
+        if marker is not None:
+            break
     if marker is None:
         return None
     if (

@@ -121,12 +121,19 @@ class CompletionMarkerTest(unittest.TestCase):
         return path
 
     def base_env(self):
-        return {
+        # completion_dir() resolves the dispatch state root ahead of
+        # AGENT_HOME/.dispatch (I-2 unification), preferring an inherited
+        # AGENT_DISPATCH_JOBS -- clear it so the invoking shell's real
+        # registry never leaks into this fixture's agent-home-relative marker
+        # expectations.
+        env = {
             **os.environ,
             "AGENT_HOME": str(self.agent_home),
             "AGENT_ARTIFACT_ROOT": str(self.artifact),
             "OPENCODE_CONFIG_CONTENT": "{}",
         }
+        env.pop("AGENT_DISPATCH_JOBS", None)
+        return env
 
     def wrapper_command(self, harness, action, route_path, route, node_id):
         wrapper, _ = ADAPTERS[harness]
@@ -627,6 +634,7 @@ class CompletionMarkerTest(unittest.TestCase):
             pass
         args = Args()
         args.agent_home = self.agent_home
+        args.jobs = self.jobs
         args.now = 0.0
         newest = {}
         for row in rows:
@@ -694,7 +702,7 @@ class CompletionMarkerTest(unittest.TestCase):
         prior_row = next(r for r in rows if r["meta"].get("attempt_id") == "att-prior-link")
         class Args:
             pass
-        args = Args(); args.agent_home = self.agent_home; args.now = 0.0
+        args = Args(); args.agent_home = self.agent_home; args.jobs = self.jobs; args.now = 0.0
         newest = {}
         for row in rows:
             key = (row["meta"].get("route_id"), row["meta"].get("route_node"))

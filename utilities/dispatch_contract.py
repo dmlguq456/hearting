@@ -2876,8 +2876,18 @@ def completion_marker_gate(
     missing = []
     blocked: list[tuple[str, AttemptReadiness]] = []
     for dep in node.get("depends_on", []):
-        marker_path = Path(agent_home) / ".dispatch" / "completion" / route["route_id"] / f"{dep}.json"
-        if not marker_path.is_file():
+        marker_path = next(
+            (
+                candidate
+                for candidate in (
+                    root / "completion" / route["route_id"] / f"{dep}.json"
+                    for root in dispatch_state_roots(agent_home, jobs)
+                )
+                if candidate.is_file()
+            ),
+            None,
+        )
+        if marker_path is None:
             missing.append(dep)
             continue
         try:
@@ -2893,7 +2903,7 @@ def completion_marker_gate(
             route,
             dep_node,
             marker,
-            jobs or (Path(agent_home) / ".dispatch" / "jobs.log"),
+            jobs or (resolve_dispatch_state_root(agent_home) / "jobs.log"),
             registry_lines=registry_lines,
         )
         if readiness.state != "ready":
@@ -2913,7 +2923,7 @@ def completion_marker_gate(
     _sibling_attempt_gate(
         route,
         route_node,
-        jobs or (Path(agent_home) / ".dispatch" / "jobs.log"),
+        jobs or (resolve_dispatch_state_root(agent_home) / "jobs.log"),
         registry_lines=registry_lines,
         attempt_id=attempt_id,
     )

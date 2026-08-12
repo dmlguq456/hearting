@@ -1,12 +1,18 @@
 #!/usr/bin/env python3
 """Materialize a registry route node onto existing adapter dispatch wrappers."""
-import argparse, json, os, subprocess, sys
+import argparse, importlib.util, json, os, subprocess, sys
 from collections import namedtuple
 from pathlib import Path
 ROOT=Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "utilities"))
 from dispatch_contract import GOVERNOR_RESERVATION_ENV
 from worker_bootstrap import assigned_contract, worker_type_for_kind
+
+_route_spec = importlib.util.spec_from_file_location(
+    "capability_route", ROOT / "utilities" / "capability-route.py"
+)
+ROUTE = importlib.util.module_from_spec(_route_spec)
+_route_spec.loader.exec_module(ROUTE)
 
 # SD-66 fix-forward: deterministic dispatch_evidence -> wrapper-argument binding
 # for dispatch-depth-2 route nodes (PRD §13.7.6, acceptance ③). Only same/cross-harness
@@ -350,7 +356,7 @@ def main():
    print("child_spawned=0")
    raise SystemExit(65)
  if node["kind"]=="resource-runner": print("resource_runner="+str(ROOT/"utilities/resource-runner.py")+"\nroute_node="+a.node); return
- print("completion_marker="+str(Path(os.environ.get("AGENT_HOME", ROOT))/".dispatch/completion"/route["route_id"]/(node["id"]+".json")))
+ print("completion_marker="+str(ROUTE.completion_dir(route["route_id"])/(node["id"]+".json")))
  wrapper=ROOT/"adapters"/a.adapter/"bin"/"dispatch-headless.py"
  try:
   worker_type=worker_type_for_kind(node["kind"])

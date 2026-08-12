@@ -29,6 +29,7 @@ from dispatch_contract import (DispatchContractError, annotate_attempt_row_if,
                                process_observation,
                                process_state,
                                process_start_ticks,
+                               dispatch_state_roots,
                                reconcile_local_registry, resolve_agent_home,
                                signal_exact_process_group,
                                validate_attempt_metadata)  # noqa: E402
@@ -43,6 +44,21 @@ sys.modules[_cleanup_spec.name] = cleanup
 _cleanup_spec.loader.exec_module(cleanup)
 
 OPEN = {"open", "running"}
+
+
+def _first_existing_dispatch_path(home, jobs, *parts):
+    """Read-order lookup across the canonical dispatch state root and the
+    legacy agent-home-relative tree (I-2 read-fallback, design constraint 3):
+    a marker/heartbeat/watchdog file written before this cycle's resolver
+    unification is still found at its legacy location."""
+
+    if home is None:
+        return None
+    candidates = [root.joinpath(*parts) for root in dispatch_state_roots(home, jobs)]
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return candidates[0] if candidates else None
 
 
 def parse_meta(pipe):
@@ -103,11 +119,13 @@ def current(rows):
     return passthrough + sorted(newest.values(), key=lambda row: row["order"])
 
 
-def attempt_heartbeat(home, meta):
+def attempt_heartbeat(home, meta, jobs=None):
     attempt = (meta.get("attempt_id") or "").replace("/", "_")
     if home is None or not attempt:
         return None
-    path = home / ".dispatch" / "heartbeats" / f"{attempt}.json"
+    path = _first_existing_dispatch_path(home, jobs, "heartbeats", f"{attempt}.json")
+    if path is None:
+        return None
     try:
         if path.stat().st_size > 8192:
             return None
@@ -117,12 +135,14 @@ def attempt_heartbeat(home, meta):
         return None
 
 
-def attempt_terminal_observation(home, meta):
+def attempt_terminal_observation(home, meta, jobs=None):
     attempt = (meta.get("attempt_id") or "").replace("/", "_")
     route, node = meta.get("route_id"), meta.get("route_node")
     if home is None or not attempt or not route or not node:
         return None
-    path = home / ".dispatch" / "watchdog" / f"{attempt}.json"
+    path = _first_existing_dispatch_path(home, jobs, "watchdog", f"{attempt}.json")
+    if path is None:
+        return None
     try:
         if path.stat().st_size > 8192:
             return None
@@ -139,7 +159,7 @@ def attempt_terminal_observation(home, meta):
     }
 
 
-def proc_inputs(row, home=None):
+def proc_inputs(row, home=None, jobs=None):
     meta = row["meta"]
     raw_local = meta.get("pid", "")
     local_pid = int(raw_local) if raw_local.isdigit() else None
@@ -163,8 +183,8 @@ def proc_inputs(row, home=None):
             "attempt_descendants": attempt_tagged_descendants(meta).state,
             "attempt_id": meta.get("attempt_id"), "route_id": meta.get("route_id"),
             "route_node": meta.get("route_node"),
-            "heartbeat": attempt_heartbeat(home, meta),
-            "terminal_observation": attempt_terminal_observation(home, meta)}
+            "heartbeat": attempt_heartbeat(home, meta, jobs),
+            "terminal_observation": attempt_terminal_observation(home, meta, jobs)}
 
 
 def timestamp(value):
@@ -177,16 +197,18 @@ def timestamp(value):
         return None
 
 
-def terminal_marker(row, home):
+def terminal_marker(row, home, jobs=None):
     meta = row["meta"]
     route, node = meta.get("route_id"), meta.get("route_node")
     route_hash, gate = meta.get("route_hash"), meta.get("completion_gate")
     if not route or not node or not route_hash or not gate:
         return False, "terminal-row-contract-incomplete"
-    marker_path = home / ".dispatch" / "completion" / route / f"{node}.json"
+    marker_path = _first_existing_dispatch_path(home, jobs, "completion", route, f"{node}.json")
+    if marker_path is None:
+        return False, "terminal-marker-invalid"
     try: marker = json.loads(marker_path.read_text(encoding="utf-8"))
     except (OSError, ValueError): return False, "terminal-marker-invalid"
-    if marker.get("schema_version") != 2 or not _marker_backed_repair(row, home):
+    if marker.get("schema_version") != 2 or not _marker_backed_repair(row, home, jobs):
         return False, "terminal-marker-attempt-link-invalid"
     evidence_record = marker.get("evidence") if isinstance(marker.get("evidence"), dict) else {}
     evidence = Path(str(evidence_record.get("path", "")))
@@ -210,15 +232,15 @@ def terminal_marker(row, home):
     if updated is not None and updated > marker_time:
         return False, "newer-registry-transition"
     attempt = meta.get("attempt_id", "").replace("/", "_")
-    heartbeat_path = home / ".dispatch" / "heartbeats" / f"{attempt}.json"
+    heartbeat_path = _first_existing_dispatch_path(home, jobs, "heartbeats", f"{attempt}.json")
     try:
-        heartbeat = json.loads(heartbeat_path.read_text(encoding="utf-8"))
+        heartbeat = json.loads(heartbeat_path.read_text(encoding="utf-8")) if heartbeat_path else {}
     except (OSError, ValueError):
         heartbeat = {}
     if float(heartbeat.get("updated_at", 0) or 0) > marker_time:
         return False, "newer-heartbeat"
-    watchdog = home / ".dispatch" / "watchdog" / f"{meta.get('attempt_id', '').replace('/', '_')}.json"
-    try: watch = json.loads(watchdog.read_text())
+    watchdog = _first_existing_dispatch_path(home, jobs, "watchdog", f"{attempt}.json")
+    try: watch = json.loads(watchdog.read_text()) if watchdog else {}
     except (OSError, ValueError): watch = {}
     quiet = int(watch.get("quiet_windows", 0) or 0)
     observed = float(watch.get("observed_at", 0) or 0)
@@ -227,7 +249,7 @@ def terminal_marker(row, home):
     return (proved, "stale-terminal-proved" if proved else "stale-terminal-dwell")
 
 
-def _marker_backed_repair(row, home):
+def _marker_backed_repair(row, home, jobs=None):
     """SD-70: was ``complete``'s marker written but its row-close step failed?
 
     ``complete_node`` (capability-route.py) writes an attempt-linkage sibling
@@ -239,8 +261,12 @@ def _marker_backed_repair(row, home):
     route_id, node, attempt_id = meta.get("route_id"), meta.get("route_node"), meta.get("attempt_id")
     if not (route_id and node and attempt_id and home): return False
     safe_attempt = "".join(c if c.isalnum() or c in "._-" else "_" for c in attempt_id)
-    directory = home / ".dispatch" / "completion" / route_id
-    linkage_path = directory / f"{node}.{safe_attempt}.attempt.json"
+    linkage_path = _first_existing_dispatch_path(
+        home, jobs, "completion", route_id, f"{node}.{safe_attempt}.attempt.json"
+    )
+    if linkage_path is None:
+        return False
+    directory = linkage_path.parent
     try:
         linkage = json.loads(linkage_path.read_text(encoding="utf-8"))
         history_path = Path(linkage["completion_marker_history"])
@@ -357,7 +383,7 @@ def resolve_owner_route(row, rows=None):
     return None, None, "route-context-conflict" if candidates else "no-route"
 
 
-def route_incomplete(row, home, rows=None):
+def route_incomplete(row, home, rows=None, jobs=None):
     """SD-64/71: route nodes lacking a completion marker for a conductor row's route.
 
     Fails closed (returns an empty set) when the route record cannot be read
@@ -374,8 +400,11 @@ def route_incomplete(row, home, rows=None):
         node_ids = None
     if node_ids is None:
         return set(), "route-record-unreadable"
-    completion_dir = home / ".dispatch" / "completion" / route_id
-    missing = {node_id for node_id in node_ids if not (completion_dir / f"{node_id}.json").is_file()}
+    completion_roots = [root / "completion" / route_id for root in dispatch_state_roots(home, jobs)]
+    missing = {
+        node_id for node_id in node_ids
+        if not any((root / f"{node_id}.json").is_file() for root in completion_roots)
+    }
     return missing, "ok"
 
 
@@ -438,9 +467,9 @@ def classify(row, args, newest_orders, rows=None):
         # marker. The envelope alone never proves completion, so a marker-less
         # PASS row is either a still-draining worker or a typed worker death —
         # never `completed-*`.
-        if _marker_backed_repair(row, args.agent_home):
+        if _marker_backed_repair(row, args.agent_home, args.jobs):
             return "marker-backed-stale", "completed-marker-linkage", "completed-marker"
-        exact = classify_attempt_evidence(proc_inputs(row, args.agent_home), args.now)
+        exact = classify_attempt_evidence(proc_inputs(row, args.agent_home, args.jobs), args.now)
         if exact and exact["state"] == "working":
             return "active", exact["rule"], None
         if exact and exact["state"] in {"done", "dead"}:
@@ -456,15 +485,15 @@ def classify(row, args, newest_orders, rows=None):
             )
             return "terminal-handoff", f"{reason}:marker-missing", note
         return "terminal-draining", f"{reason}:marker-missing-quiescence-unverifiable", None
-    exact = classify_attempt_evidence(proc_inputs(row, args.agent_home), args.now)
+    exact = classify_attempt_evidence(proc_inputs(row, args.agent_home, args.jobs), args.now)
     if exact and exact["state"] == "working": return "active", exact["rule"], None
     if exact and exact["state"] == "done": return "terminal-heartbeat", exact["rule"], "completed-terminal-heartbeat"
     if exact and exact["state"] == "dead":
-        if _marker_backed_repair(row, args.agent_home):
+        if _marker_backed_repair(row, args.agent_home, args.jobs):
             return "marker-backed-stale", "completed-marker-linkage", "completed-marker"
         if (rows is not None and meta.get("worker_type") == "owner"
                 and not meta.get("route_node")):
-            incomplete, record_status = route_incomplete(row, args.agent_home, rows)
+            incomplete, record_status = route_incomplete(row, args.agent_home, rows, args.jobs)
             if record_status == "ok" and incomplete and has_orphaned_dependents(row, rows, incomplete, args):
                 return "orphan", "dead-parent-orphaned", "dead-parent-orphaned"
         # Same closure, distinguishable cause: this row died with a fresh
@@ -475,7 +504,7 @@ def classify(row, args, newest_orders, rows=None):
         return "exact-dead", exact["rule"], "dead-exact-pid"
     key = fold_key(meta)
     if all(key[:2]) and newest_orders.get(key) == row["order"]:
-        proven, reason = terminal_marker(row, args.agent_home)
+        proven, reason = terminal_marker(row, args.agent_home, args.jobs)
         if proven: return "stale-terminal", reason, "dead-stale-terminal"
     worktree = Path(row["worktree"])
     if worktree.is_absolute() and worktree.is_dir():
@@ -587,7 +616,7 @@ def _cascade_terminal_note(row, rows, args):
     # A hash-bound marker wins even while the exact process is still alive and
     # flushing. The generic classifier checks process liveness first, so the
     # cascade must make this precedence explicit.
-    if _marker_backed_repair(row, args.agent_home):
+    if _marker_backed_repair(row, args.agent_home, args.jobs):
         return "completed-marker", "completed-marker-linkage"
     category, reason, note = classify(row, args, _newest_orders(rows), rows)
     if category in _CASCADE_TERMINAL_CATEGORIES and note:
@@ -1033,7 +1062,7 @@ def emit_orphan_status(rows, args):
     category, reason, note = classify(row, args, newest, rows)
     if note == "dead-parent-orphaned":
         route_id, route_file, _ = resolve_owner_route(row, rows)
-        incomplete, _ = route_incomplete(row, args.agent_home, rows)
+        incomplete, _ = route_incomplete(row, args.agent_home, rows, args.jobs)
         boundary = resume_boundary(route_file, incomplete)
         closed = False
         cascade = []
@@ -1097,7 +1126,7 @@ def emit_orphan_scan(rows, args):
         _, _, note = classify(row, args, newest, rows)
         if note == "dead-parent-orphaned":
             route_id, route_file, _ = resolve_owner_route(row, rows)
-            incomplete, _ = route_incomplete(row, args.agent_home, rows)
+            incomplete, _ = route_incomplete(row, args.agent_home, rows, args.jobs)
             boundary = resume_boundary(route_file, incomplete)
             orphans.append({"attempt_id": meta.get("attempt_id"), "route_id": route_id,
                             "slug": row["slug"], "resume_boundary": boundary or "-"})
@@ -1127,7 +1156,7 @@ def main(argv):
         row = {"meta": {"pid": str(args.pid), "pid_start": args.pid_start,
                         "pid_scope": args.pid_scope, "attempt_id": args.attempt,
                         "route_id": args.route, "route_node": args.node}}
-        verdict = classify_attempt_evidence(proc_inputs(row, args.agent_home), args.now)
+        verdict = classify_attempt_evidence(proc_inputs(row, args.agent_home, args.jobs), args.now)
         if verdict is None:
             print("check=failed\nreason=exact-identity-required"); return 65
         print("check=ok")

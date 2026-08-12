@@ -82,11 +82,16 @@ class HarvestTest(unittest.TestCase):
         self.temp.cleanup()
 
     def env(self):
-        return {
+        # completion_dir() resolves the dispatch state root ahead of
+        # AGENT_HOME/.dispatch, preferring an inherited AGENT_DISPATCH_JOBS --
+        # clear it so this fixture's real registry never leaks in.
+        env = {
             **os.environ,
             "AGENT_HOME": str(self.home),
             "AGENT_ARTIFACT_ROOT": str(self.artifact),
         }
+        env.pop("AGENT_DISPATCH_JOBS", None)
+        return env
 
     def current_row(self, attempt, slug="worker"):
         pipe = (
@@ -143,6 +148,8 @@ class HarvestTest(unittest.TestCase):
         attempt = "att-harvest-exact"
         old = os.environ.get("AGENT_HOME")
         os.environ["AGENT_HOME"] = str(self.home)
+        old_jobs = os.environ.get("AGENT_DISPATCH_JOBS")
+        os.environ.pop("AGENT_DISPATCH_JOBS", None)
         try:
             with self.assertRaisesRegex(ValueError, "attempt-row-absent"):
                 ROUTE.complete_node(
@@ -162,6 +169,10 @@ class HarvestTest(unittest.TestCase):
                 os.environ.pop("AGENT_HOME", None)
             else:
                 os.environ["AGENT_HOME"] = old
+            if old_jobs is None:
+                os.environ.pop("AGENT_DISPATCH_JOBS", None)
+            else:
+                os.environ["AGENT_DISPATCH_JOBS"] = old_jobs
         completion = (
             self.home / ".dispatch/completion" / self.route["route_id"] / "plan.json"
         )
@@ -300,6 +311,8 @@ class HarvestTest(unittest.TestCase):
         attempt = "att-harvest-stale"
         old = os.environ.get("AGENT_HOME")
         os.environ["AGENT_HOME"] = str(self.home)
+        old_jobs = os.environ.get("AGENT_DISPATCH_JOBS")
+        os.environ.pop("AGENT_DISPATCH_JOBS", None)
         try:
             with self.assertRaisesRegex(ValueError, "attempt-row-absent"):
                 ROUTE.complete_node(
@@ -320,6 +333,10 @@ class HarvestTest(unittest.TestCase):
                 os.environ.pop("AGENT_HOME", None)
             else:
                 os.environ["AGENT_HOME"] = old
+            if old_jobs is None:
+                os.environ.pop("AGENT_DISPATCH_JOBS", None)
+            else:
+                os.environ["AGENT_DISPATCH_JOBS"] = old_jobs
         # A completion marker minted for a DIFFERENT attempt id — reused
         # against this row it must fail the identity check, not complete it.
         completion = (
