@@ -1334,7 +1334,13 @@ def append_job(jobs: Path, args: argparse.Namespace) -> bool:
         pipe += f",approval={args.approval}"
     if args.profile:
         pipe += f",profile={args.profile}"
-    pipe += f",artifact_root={args.artifact_root},log_file={args.log_path}"
+    # launch_home seals the resolved AGENT_HOME this wrapper launched under, so a
+    # reader (fleet) can locate the default log dir without guessing the install
+    # layout — the registry row may live in a different runtime home than the logs.
+    pipe += (
+        f",artifact_root={args.artifact_root},log_file={args.log_path}"
+        f",launch_home={args.agent_home}"
+    )
     pipe += stage_session_metadata(args)
     if args.attempt_id:
         pipe += (

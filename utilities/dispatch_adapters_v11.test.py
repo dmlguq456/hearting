@@ -100,6 +100,7 @@ class AdapterV11Test(unittest.TestCase):
     self.assertIn("nested_eligibility=supported",row); self.assertIn("fallback_ordinal=1",row)
     self.assertIn("parent_attempt_id=att-parent-fixture",row)
     self.assertIn("parent_pid=",row);self.assertIn("parent_pid_start=",row)
+    self.assertIn(f"launch_home={ROOT}",row)
     duplicate=subprocess.run(self.command(harness,"register",repo,jobs,logs),text=True,capture_output=True,env=env)
     self.assertEqual(duplicate.returncode,0,duplicate.stdout+duplicate.stderr)
     self.assertIn("duplicate_attempt=1",duplicate.stdout); self.assertIn("registered=0",duplicate.stdout)

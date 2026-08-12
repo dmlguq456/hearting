@@ -216,6 +216,44 @@ class AttemptSummaryFallbackTest(unittest.TestCase):
             with mock.patch.object(dispatch, "_registry_home", return_value="/not/the/runtime"):
                 self.assertIsNone(dispatch._owned_attempt_log_path(job))
 
+    def test_sealed_launch_home_log_dir_is_accepted(self):
+        # OPERATIONS §5.10 SD-49: the row seals launch_home, so the launch's
+        # default log dir is row-declared — no install-layout heuristic needed.
+        with tempfile.TemporaryDirectory() as tmp:
+            launch_home = os.path.join(tmp, "install-home")
+            log_dir = os.path.join(launch_home, ".dispatch", "logs")
+            os.makedirs(log_dir)
+            path = os.path.join(log_dir, "child.att-sealed.claude.jsonl")
+            with open(path, "w", encoding="utf-8") as stream:
+                stream.write("{}\n")
+            job = DispatchJob(
+                key="code-plan", slug="child", cwd="/work", harness="claude",
+                is_child=True, liveness="working", attempt_id="att-sealed",
+            )
+            job._log_file = path
+            job._launch_home = launch_home
+            with mock.patch.object(dispatch, "_registry_home", return_value="/not/the/runtime"):
+                self.assertEqual(dispatch._owned_attempt_log_path(job), os.path.realpath(path))
+
+    def test_sealed_launch_home_outside_its_log_dir_is_rejected(self):
+        # The sealed key widens trust by exactly one subtree; anywhere else in
+        # that home stays outside the fail-closed allowlist.
+        with tempfile.TemporaryDirectory() as tmp:
+            launch_home = os.path.join(tmp, "install-home")
+            stray = os.path.join(launch_home, "elsewhere")
+            os.makedirs(stray)
+            path = os.path.join(stray, "child.att-sealed.claude.jsonl")
+            with open(path, "w", encoding="utf-8") as stream:
+                stream.write("{}\n")
+            job = DispatchJob(
+                key="code-plan", slug="child", cwd="/work", harness="claude",
+                is_child=True, liveness="working", attempt_id="att-sealed",
+            )
+            job._log_file = path
+            job._launch_home = launch_home
+            with mock.patch.object(dispatch, "_registry_home", return_value="/not/the/runtime"):
+                self.assertIsNone(dispatch._owned_attempt_log_path(job))
+
     def test_attempt_log_outside_allowed_roots_is_rejected(self):
         with tempfile.TemporaryDirectory() as tmp:
             registry = os.path.join(tmp, "home")

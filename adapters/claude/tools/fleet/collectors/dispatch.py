@@ -897,6 +897,13 @@ def _owned_attempt_log_path(job):
         # row-declared anchor for that launch home is the artifact root's
         # parent — accept exactly its .dispatch/logs subtree, nothing wider.
         roots.append(os.path.join(os.path.dirname(real_artifact), ".dispatch", "logs"))
+    # OPERATIONS §5.10 SD-49: current wrappers seal launch_home=<resolved agent
+    # home> in the row, so the launch's default log dir needs no layout guessing.
+    # Accept exactly that home's .dispatch/logs subtree; legacy rows without the
+    # key keep the heuristic roots above.
+    launch_home = getattr(job, "_launch_home", None)
+    if launch_home:
+        roots.append(os.path.join(os.path.realpath(launch_home), ".dispatch", "logs"))
     allowed = False
     for root in roots:
         try:
@@ -2322,6 +2329,7 @@ def _scan_jobs_log(path, seen_slugs, seen_keys=None, registry_priority=0):
             afterglow=afterglow,
         )
         job._log_file = meta.get("log_file")
+        job._launch_home = meta.get("launch_home")
         job._registry_path = path
         job._registry_metadata = dict(meta)
         jobs.append(job)
@@ -2582,6 +2590,7 @@ def collect(jobs_path=None, harness_filter=None):
                 if (j.attempt_id and metadata.get("attempt_id") == j.attempt_id
                         and not getattr(j, "_log_file", None)):
                     j._log_file = metadata.get("log_file")
+                    j._launch_home = metadata.get("launch_home")
                     j._registry_path = metadata.get("_registry_path")
                     if not j.artifact_root:
                         j.artifact_root = metadata.get("artifact_root")
