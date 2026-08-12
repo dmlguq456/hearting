@@ -530,22 +530,70 @@ def cmd_status(args):
     runtimes = resolve_runtimes(args)
     lines = []
     checks = []
+    managed = None
+    if args.scope == "global" and not args.plugin:
+        try:
+            managed = distribution.managed_status()
+        except distribution.DistributionError as exc:
+            return {
+                "runtime": runtimes,
+                "channel": "managed-release",
+                "checks": [
+                    {"id": "distribution.status", "ok": False, "detail": str(exc)}
+                ],
+                "drift": [],
+                "exit": EXIT_FAIL,
+                "lines": [f"managed release: invalid state: {exc}"],
+            }
     for rt in runtimes:
-        driver = get_driver(rt)
-        s = driver.status(scope=args.scope)
-        detail = f"channel={s['channel']} version={s['version']} drift={s['drift_count']}"
         try:
             activation = runtime_activation.status(rt, scope=args.scope)
             freshness = activation.get("freshness", "unknown")
             if activation.get("mode") is None:
                 freshness = "not-activated"
         except runtime_activation.ActivationError as exc:
+            activation = None
             freshness = f"error:{exc}"
-        detail += f" projection={freshness}"
+        managed_runtime = False
+        if managed and activation and rt in managed["runtimes"]:
+            source = activation.get("source_root")
+            try:
+                managed_runtime = (
+                    activation.get("mode") == "packaged"
+                    and source is not None
+                    and Path(source).expanduser().resolve(strict=False)
+                    == Path(managed["release_root"]).expanduser().resolve(strict=False)
+                )
+            except (OSError, TypeError, ValueError):
+                managed_runtime = False
+        if managed_runtime:
+            channel = "managed-release"
+            version = managed["version"]
+            drift_count = 0
+        else:
+            status = get_driver(rt).status(scope=args.scope)
+            channel = status["channel"]
+            version = status["version"]
+            drift_count = status["drift_count"]
+        detail = (
+            f"channel={channel} version={version} drift={drift_count} "
+            f"projection={freshness}"
+        )
         healthy = freshness in ("fresh", "not-activated")
         checks.append({"id": f"{rt}.status", "ok": healthy, "detail": detail})
         lines.append(f"{rt}: {detail}")
-    return {"runtime": runtimes, "channel": "dev", "checks": checks, "drift": [], "exit": EXIT_OK, "lines": lines}
+    channel = managed["channel"] if managed else ("plugin" if args.plugin else "dev")
+    result = {
+        "runtime": runtimes,
+        "channel": channel,
+        "checks": checks,
+        "drift": [],
+        "exit": EXIT_OK,
+        "lines": lines,
+    }
+    if managed:
+        result["release"] = managed
+    return result
 
 
 def cmd_uninstall(args):

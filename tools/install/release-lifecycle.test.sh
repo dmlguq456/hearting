@@ -670,13 +670,15 @@ set -e
 
 HARNESS_REPOSITORY=other/harness HARNESS_VERSION=v-other "$INTEGRATION/assets/install.sh" --no-auto-update --json > "$INTEGRATION/install.json"
 "$HARNESS_BIN_DIR/harness" runtime doctor --runtime all --strict --json > "$INTEGRATION/doctor.json"
+"$HARNESS_BIN_DIR/harness" status --json > "$INTEGRATION/status.json"
 "$HARNESS_BIN_DIR/harness" update --json > "$INTEGRATION/update.json"
 
-python3 - "$INTEGRATION/install.json" "$INTEGRATION/doctor.json" "$INTEGRATION/update.json" <<'PY'
+python3 - "$INTEGRATION/install.json" "$INTEGRATION/doctor.json" "$INTEGRATION/status.json" "$INTEGRATION/update.json" <<'PY'
 import json, os, sys
 installed = json.load(open(sys.argv[1]))
 doctor = json.load(open(sys.argv[2]))
-updated = json.load(open(sys.argv[3]))
+status = json.load(open(sys.argv[3]))
+updated = json.load(open(sys.argv[4]))
 state = json.load(
     open(os.path.join(os.environ["XDG_STATE_HOME"], "hearting/distribution.json"))
 )
@@ -685,6 +687,12 @@ assert installed["version"] == "v0.0.0-integration"
 assert state["repository"] == "example/harness"
 assert set(installed["runtimes"]) == {"claude", "codex", "opencode"}
 assert doctor["exit"] == 0
+assert status["exit"] == 0 and status["channel"] == "managed-release"
+assert status["release"]["version"] == "v0.0.0-integration"
+assert all(
+    "channel=managed-release version=v0.0.0-integration" in check["detail"]
+    for check in status["checks"]
+)
 assert updated["release"]["status"] == "up-to-date"
 PY
 
