@@ -354,6 +354,44 @@ class BindDispatchEvidenceTest(unittest.TestCase):
         self.assertIn("AGENT_DISPATCH_CURRENT_TRANSPORT", ctx.exception.fields["missing"])
 
 
+class DryRunCompletionMarkerPathTest(unittest.TestCase):
+    """Plan-check round-1 T5: dispatch-node.py's dry-run completion_marker=
+    line must match capability-route.py's own completion_dir() output
+    string-for-string -- it used to reimplement the derivation inline as
+    Path(os.environ.get("AGENT_HOME", ROOT))/".dispatch/completion"/..., which
+    could silently diverge from the writer's actual resolved state root."""
+
+    def test_dry_run_completion_marker_matches_completion_dir(self):
+        import contextlib
+        import io
+
+        node = make_node(depth=1, dispatch_fallback=[])
+        route = make_route(node, tuples=[])
+        with tempfile.TemporaryDirectory() as td:
+            route_path = Path(td) / "route.json"
+            route_path.write_text(json.dumps(route))
+            full_argv = [
+                "dispatch-node.py", "--route", str(route_path),
+                "--node", "execute", "--adapter", "claude", "--slug", "dry-marker",
+                "--action", "dry-run",
+            ]
+            captured_stdout = io.StringIO()
+            with mock.patch.object(sys, "argv", full_argv), \
+                 mock.patch.dict(N.os.environ, {}, clear=True), \
+                 mock.patch.object(N.subprocess, "run", return_value=mock.Mock(returncode=0)), \
+                 contextlib.redirect_stdout(captured_stdout):
+                try:
+                    N.main()
+                except SystemExit:
+                    pass
+        lines = captured_stdout.getvalue().splitlines()
+        marker_lines = [line for line in lines if line.startswith("completion_marker=")]
+        self.assertEqual(len(marker_lines), 1, lines)
+        printed = marker_lines[0][len("completion_marker="):]
+        expected = str(N.ROUTE.completion_dir(route["route_id"]) / (node["id"] + ".json"))
+        self.assertEqual(printed, expected)
+
+
 class MainMaterializationTest(unittest.TestCase):
     def _run_main(self, argv, route, environ=None):
         captured = {}

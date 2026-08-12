@@ -8,9 +8,9 @@
 # Legacy fallback: $HOME/.claude
 set -eu
 
-if [ "${AGENT_HOME:-}" ]; then
+if [ -n "${AGENT_HOME:-}" ] && [ -f "$AGENT_HOME/core/CORE.md" ]; then
   printf '%s\n' "$AGENT_HOME"
-elif [ "${CLAUDE_HOME:-}" ]; then
+elif [ -n "${CLAUDE_HOME:-}" ] && [ -f "$CLAUDE_HOME/core/CORE.md" ]; then
   printf '%s\n' "$CLAUDE_HOME"
 elif [ -f "${XDG_DATA_HOME:-$HOME/.local/share}/hearting/current/core/CORE.md" ]; then
   printf '%s\n' "${XDG_DATA_HOME:-$HOME/.local/share}/hearting/current"

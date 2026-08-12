@@ -285,6 +285,81 @@ class CodexOwnerRegistryProjection(unittest.TestCase):
         self.assertEqual(ctx.exception.reason, "owner-registry-sandbox-unwritable")
 
 
+class CodexRouteBoundWorkerGrant(unittest.TestCase):
+    """Plan-check round-1 Finding 1/2: nested_owner_writable_dirs() only fires
+    for an owner with nested_headless_network -- an ordinary registered
+    dispatch_depth==2 worker got zero .core-grounding grant from it, so
+    core-read-marker.sh's mkdir died EROFS for every plain depth-2 Codex
+    worker. route_bound_worker_writable_dirs() must grant .core-grounding
+    unconditionally whenever route_id is set, independent of the owner-only
+    network-widening gate."""
+
+    def _depth2_args(self, tmp):
+        agent_home = Path(tmp) / "agent-home"
+        (agent_home / "core").mkdir(parents=True)
+        (agent_home / "core" / "CORE.md").write_text("fixture\n")
+        return argparse.Namespace(
+            worktree=str(Path(tmp) / "repo"),
+            artifact_root=str(Path(tmp) / "artifacts"),
+            report_bundle_root=None,
+            agent_home=agent_home,
+            jobs_path=Path(tmp) / "jobs.log",
+            dispatch_depth=2,
+            route_id="rt-fixture",
+            attempt_id="att-fixture",
+            nested_headless_network=False,
+            worker_type="stage",
+            sandbox="workspace-write",
+            approval="never",
+            resolved_completion_delivery="one-shot",
+            resolved_model_settings={"source": "inherit"},
+            owner_route_binding=None,
+            max_continuations=None,
+        )
+
+    def test_ordinary_depth2_worker_gets_core_grounding_independent_of_network_gate(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            args = self._depth2_args(tmp)
+            self.assertEqual(WH.nested_owner_writable_dirs(args), ())
+            WH.ensure_owner_writable_dirs(args)
+            granted = WH.route_bound_worker_writable_dirs(args)
+        self.assertEqual(granted, (args.agent_home.resolve() / ".core-grounding",))
+
+    def test_ordinary_depth2_worker_add_dir_list_includes_core_grounding(self):
+        # The direct verification requirement (c): build the args for a plain
+        # dispatch_depth=2 worker (not owner, no nested_headless_network) and
+        # assert .core-grounding is present in the actual --add-dir set the
+        # wrapper hands to `codex exec`.
+        with tempfile.TemporaryDirectory() as tmp:
+            args = self._depth2_args(tmp)
+            WH.ensure_owner_writable_dirs(args)
+            command = WH.shell_command(args, Path(tmp) / "p.txt", Path(tmp) / "l.log")
+            core_grounding = str((args.agent_home.resolve() / ".core-grounding"))
+            self.assertIn(core_grounding, command)
+            self.assertIn(f"--add-dir {core_grounding}", command)
+            self.assertTrue((args.agent_home / ".core-grounding").is_dir())
+
+    def test_owner_network_widened_worker_also_still_gets_core_grounding(self):
+        # .spec-grounding's shape (unconditional grant, D-B) must not regress
+        # for the owner-network case either -- .core-grounding stays granted
+        # via route_bound_worker_writable_dirs() regardless of the owner path.
+        with tempfile.TemporaryDirectory() as tmp:
+            args = self._depth2_args(tmp)
+            args.dispatch_depth = 1
+            args.worker_type = "owner"
+            args.nested_headless_network = True
+            WH.ensure_owner_writable_dirs(args)
+            command = WH.shell_command(args, Path(tmp) / "p.txt", Path(tmp) / "l.log")
+        core_grounding = str((args.agent_home.resolve() / ".core-grounding"))
+        self.assertIn(f"--add-dir {core_grounding}", command)
+
+    def test_route_bound_grant_empty_without_route_id(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            args = self._depth2_args(tmp)
+            args.route_id = None
+            self.assertEqual(WH.route_bound_worker_writable_dirs(args), ())
+
+
 class CodexSD45(unittest.TestCase):
  def test_route_consumer_and_scope_refusal(self):
   with tempfile.TemporaryDirectory() as td:

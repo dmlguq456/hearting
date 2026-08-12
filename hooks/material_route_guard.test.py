@@ -146,6 +146,63 @@ class MaterialRouteGuardTest(unittest.TestCase):
         allowed = self.guard("--tool", "Edit", "--file", str(self.repo / "app.py"))
         self.assertEqual(allowed.returncode, 0, allowed.stderr)
 
+    def test_bind_and_artifact_guard_check_agree_without_agent_home_override(self) -> None:
+        """I-6 regression (assignment 검증요구 (b) / plan-check round-1 T2):
+        without an explicit --agent-home override, a direct `bind` and a
+        `check` reached through hooks/artifact-guard.sh (which used to inject
+        its own --agent-home, unconditionally overriding whatever env the
+        caller set) must resolve the SAME `.route-grounding` state directory
+        purely from AGENT_HOME env -- otherwise a bound route is invisible to
+        the artifact-guard-mediated check, or vice versa."""
+        self.opportunity("session-env-only")
+        clean = {
+            key: value for key, value in os.environ.items()
+            if key not in {"AGENT_ROUTE_FILE", "AGENT_ROUTE_ID", "AGENT_ROUTE_NODE", "AGENT_HOME"}
+        }
+        env = {**clean, "AGENT_HOME": str(self.home), "MEM_RECALL_RECEIPTS": str(self.receipts)}
+
+        bind = subprocess.run(
+            [sys.executable, str(GUARD), "bind", "--route", str(self.route),
+             "--cwd", str(self.repo), "--session", "session-env-only"],
+            text=True, capture_output=True, env=env,
+        )
+        self.assertEqual(bind.returncode, 0, bind.stderr)
+
+        marker_path = MATERIAL_GUARD.marker_path(self.home, "session-env-only")
+        self.assertTrue(marker_path.is_file(), "bind must write under AGENT_HOME/.route-grounding")
+
+        artifact_root = self.base / "guard-artifacts" / ".agent_reports"
+        artifact_root.mkdir(parents=True)
+        target = artifact_root / "notes.md"
+        route_record = json.loads(self.route.read_text())
+        check = subprocess.run(
+            ["bash", str(ROOT / "hooks" / "artifact-guard.sh"),
+             "--file", str(target), "--session", "session-env-only"],
+            text=True, capture_output=True,
+            env={
+                **env,
+                "AGENT_ARTIFACT_ROOT": str(artifact_root),
+                "AGENT_ROUTE_FILE": str(self.route),
+                "AGENT_ROUTE_ID": route_record["route_id"],
+                "AGENT_ROUTE_NODE": "",
+            },
+            cwd=str(self.repo),
+        )
+        self.assertEqual(check.returncode, 0, check.stderr)
+
+        # The check path must have read the SAME marker bind wrote -- not a
+        # second, disagreeing root -- proving both surfaces resolved AGENT_HOME
+        # identically with no override on either call.
+        direct_check = subprocess.run(
+            [sys.executable, str(GUARD), "check", "--tool", "ArtifactWrite",
+             "--file", str(target), "--cwd", str(self.repo), "--session", "session-env-only"],
+            text=True, capture_output=True, env=env,
+        )
+        self.assertEqual(direct_check.returncode, 0, direct_check.stderr)
+        self.assertEqual(
+            MATERIAL_GUARD.marker_path(self.home, "session-env-only"), marker_path,
+        )
+
     def test_non_git_research_exact_worktree_failure_cannot_write_inline_artifacts(self) -> None:
         project = self.base / "samsung-shaped"
         project.mkdir()

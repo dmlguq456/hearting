@@ -696,3 +696,68 @@ assert result["status"] in {"up-to-date", "repaired"}
 assert result["version"] == "v0.0.0-integration"
 PY
 echo "ok - release-bound installer and legacy redirect activate and verify all runtimes"
+
+# I-2 regression (plan-check round-1 frame §6.4 / assignment 검증요구 (a)):
+# _cleanup_releases keeps only the 2 most recent packaged releases and
+# shutil.rmtree()s the rest. Dispatch state (completion markers) must live
+# beside the canonical registry (dispatch_state_root), never inside a
+# packaged release, or 3 rotations silently destroy it.
+python3 - "$ROOT" <<'PY'
+import json, os, sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+sys.path.insert(0, str(root / "tools/install"))
+sys.path.insert(0, str(root / "utilities"))
+import distribution as d
+import dispatch_contract as dc
+import importlib.util
+spec = importlib.util.spec_from_file_location("route", root / "utilities/capability-route.py")
+ROUTE = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(ROUTE)
+
+releases = d.data_root() / "releases"
+releases.mkdir(parents=True, exist_ok=True)
+runtime = d.data_root() / "runtime"
+jobs = runtime / ".harness" / "dispatch" / "jobs.log"
+
+import time
+# Earlier steps in this script populate the same shared releases/ directory
+# with real (roughly "now") mtimes; push these fixture releases far into the
+# future so they unambiguously sort as the newest regardless of what already
+# exists there, keeping this block's "which 2 survive" assertions exact.
+future_base = time.time() + 10_000_000
+release_dirs = []
+for i, name in enumerate(("v-rot-1", "v-rot-2", "v-rot-3", "v-rot-4")):
+    rel = releases / name
+    (rel / "core").mkdir(parents=True)
+    (rel / "core" / "CORE.md").write_text("fixture\n")
+    os.utime(rel, (future_base + i, future_base + i))  # deterministic mtime ordering
+    release_dirs.append(rel)
+
+oldest = release_dirs[0]
+os.environ["AGENT_HOME"] = str(oldest)
+os.environ["AGENT_DISPATCH_JOBS"] = str(jobs)
+
+# Write dispatch state while AGENT_HOME points at what will become the
+# rotated-away release -- this is exactly the ordering a real
+# register/complete sees relative to a later install-time rotation.
+state_root = dc.dispatch_state_root(jobs)
+assert not str(state_root).startswith(str(releases)), (
+    "dispatch state root must never live under the packaged releases tree"
+)
+completion_dir = state_root / "completion" / "rt-rotation-fixture"
+completion_dir.mkdir(parents=True)
+marker_path = completion_dir / "plan.json"
+marker_path.write_text(json.dumps({"schema_version": 2, "route_id": "rt-rotation-fixture"}))
+
+# 3 rotations: only the 2 most recent release dirs survive.
+d._cleanup_releases(keep=set())
+
+assert not release_dirs[0].exists(), "oldest release should have been rmtree'd"
+assert not release_dirs[1].exists(), "second-oldest release should have been rmtree'd"
+assert release_dirs[2].exists() and release_dirs[3].exists()
+assert marker_path.is_file(), "completion marker must survive release rotation"
+assert json.loads(marker_path.read_text())["route_id"] == "rt-rotation-fixture"
+PY
+echo "ok - dispatch state root content is unchanged across 3 release rotations"
