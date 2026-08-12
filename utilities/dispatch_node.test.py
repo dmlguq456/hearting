@@ -384,11 +384,13 @@ class DryRunCompletionMarkerPathTest(unittest.TestCase):
                     N.main()
                 except SystemExit:
                     pass
+                expected = str(
+                    N.ROUTE.completion_dir(route["route_id"]) / (node["id"] + ".json")
+                )
         lines = captured_stdout.getvalue().splitlines()
         marker_lines = [line for line in lines if line.startswith("completion_marker=")]
         self.assertEqual(len(marker_lines), 1, lines)
         printed = marker_lines[0][len("completion_marker="):]
-        expected = str(N.ROUTE.completion_dir(route["route_id"]) / (node["id"] + ".json"))
         self.assertEqual(printed, expected)
 
 
