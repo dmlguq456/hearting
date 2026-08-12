@@ -56,6 +56,8 @@ def render(enabled) -> str:
         "allocation:",
         "  strategy: capacity-aware",
         "  window: 30",
+        # Omitted cells inherit the shipped profiles/dispatch-defaults.yaml
+        # capability baseline; a cell written here always wins over it.
         "capabilities:",
         "",
     ]

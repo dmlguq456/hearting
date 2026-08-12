@@ -15,8 +15,8 @@ N = importlib.util.module_from_spec(S)
 S.loader.exec_module(N)
 
 
-def base_tuple(child_harness, status="supported", probe_source="fixture-check", failure_class=""):
-    return {
+def base_tuple(child_harness, status="supported", probe_source="fixture-check", failure_class="", parent=None):
+    row = {
         "child_harness": child_harness,
         "checked_worktree": "/tmp/fixture-worktree",
         "codex_command": "ok" if child_harness == "codex" else "not-applicable",
@@ -31,6 +31,9 @@ def base_tuple(child_harness, status="supported", probe_source="fixture-check", 
         "status": status,
         "retry_on_isolated_worktree": 0,
     }
+    if parent:
+        row.update(parent)
+    return row
 
 
 def make_fallback(claude=None, codex=None, opencode=None):
@@ -132,6 +135,123 @@ class SelectCheckedTupleTest(unittest.TestCase):
         route = make_route(node, tuples=[drifted, base_tuple("codex"), base_tuple("opencode")])
         selected = N.select_checked_tuple(route, node, "claude")
         self.assertEqual(selected["probe_time"], "2026-07-18T00:00:00Z")
+
+
+CODEX_PARENT = {"parent_harness": "codex", "parent_transport": "headless", "parent_sandbox": "default"}
+CLAUDE_PARENT = {"parent_harness": "claude", "parent_transport": "headless", "parent_sandbox": "default"}
+CODEX_PARENT_WORKSPACE_WRITE = {
+    "parent_harness": "codex", "parent_transport": "headless", "parent_sandbox": "workspace-write",
+}
+
+
+class ResolveCheckedTupleParentAwareTest(unittest.TestCase):
+    def test_foreign_same_harness_row_no_longer_shadows_this_parents_cross_row(self):
+        codex_parent_codex_child = base_tuple("codex", parent=CODEX_PARENT)
+        claude_parent_codex_child = base_tuple("codex", probe_source="second-check")
+        node = make_node(dispatch_fallback=[
+            {"ordinal": 1, "fallback_hop": "same-harness-headless", "candidates": [codex_parent_codex_child]},
+            {"ordinal": 2, "fallback_hop": "cross-harness-headless", "candidates": [claude_parent_codex_child]},
+        ])
+        route = make_route(node, tuples=[codex_parent_codex_child, claude_parent_codex_child])
+        selection = N.resolve_checked_tuple(route, node, "codex", parent_identity=CLAUDE_PARENT)
+        self.assertEqual(selection.fallback_hop, "cross-harness-headless")
+        self.assertEqual(selection.ordinal, 2)
+        self.assertEqual(selection.tuple_row["parent_harness"], "claude")
+
+    def test_codex_parent_reaches_the_supported_cross_harness_claude_tuple(self):
+        claude_parent_claude_child = base_tuple("claude")
+        codex_parent_claude_child = base_tuple(
+            "claude", probe_source="second-check", parent=CODEX_PARENT_WORKSPACE_WRITE
+        )
+        node = make_node(dispatch_fallback=[
+            {"ordinal": 1, "fallback_hop": "same-harness-headless", "candidates": [claude_parent_claude_child]},
+            {"ordinal": 2, "fallback_hop": "cross-harness-headless", "candidates": [codex_parent_claude_child]},
+        ])
+        route = make_route(node, tuples=[claude_parent_claude_child, codex_parent_claude_child])
+        selection = N.resolve_checked_tuple(
+            route, node, "claude", parent_identity=CODEX_PARENT_WORKSPACE_WRITE
+        )
+        self.assertEqual(selection.fallback_hop, "cross-harness-headless")
+        self.assertEqual(selection.ordinal, 2)
+        self.assertEqual(selection.tuple_row["parent_harness"], "codex")
+
+    def test_only_foreign_parent_rows_report_parent_runtime_mismatch(self):
+        node = make_node()
+        route = make_route(node)
+        with self.assertRaises(N.DispatchNodeError) as ctx:
+            N.resolve_checked_tuple(route, node, "claude", parent_identity=CODEX_PARENT_WORKSPACE_WRITE)
+        self.assertEqual(ctx.exception.reason, "dispatch-evidence-parent-runtime-mismatch")
+        with self.assertRaises(N.DispatchNodeError) as expected_ctx:
+            N.validate_parent_identity(base_tuple("claude"), CODEX_PARENT_WORKSPACE_WRITE)
+        self.assertEqual(ctx.exception.fields["mismatch"], expected_ctx.exception.fields["mismatch"])
+
+    def test_adapter_with_no_rows_reports_no_eligible_fallback_even_with_parent(self):
+        node = make_node(dispatch_fallback=[
+            {"ordinal": 1, "fallback_hop": "same-harness-headless", "candidates": [base_tuple("claude")]},
+        ])
+        route = make_route(node)
+        with self.assertRaises(N.DispatchNodeError) as ctx:
+            N.resolve_checked_tuple(route, node, "codex", parent_identity=CODEX_PARENT_WORKSPACE_WRITE)
+        self.assertEqual(ctx.exception.reason, "dispatch-evidence-no-eligible-fallback")
+
+    def test_parent_identity_none_preserves_todays_walk(self):
+        codex_parent_codex_child = base_tuple("codex", parent=CODEX_PARENT)
+        claude_parent_codex_child = base_tuple("codex", probe_source="second-check")
+        node = make_node(dispatch_fallback=[
+            {"ordinal": 1, "fallback_hop": "same-harness-headless", "candidates": [codex_parent_codex_child]},
+            {"ordinal": 2, "fallback_hop": "cross-harness-headless", "candidates": [claude_parent_codex_child]},
+        ])
+        route = make_route(node, tuples=[codex_parent_codex_child, claude_parent_codex_child])
+        selection = N.resolve_checked_tuple(route, node, "codex", parent_identity=None)
+        self.assertEqual(selection.ordinal, 1)
+        self.assertEqual(selection.tuple_row["parent_harness"], "codex")
+
+    def test_ambiguity_is_evaluated_after_parent_filtering(self):
+        claude_row = base_tuple("codex")
+        codex_row = base_tuple("codex", probe_source="second-check", parent=CODEX_PARENT)
+        node = make_node(dispatch_fallback=[
+            {"ordinal": 2, "fallback_hop": "cross-harness-headless", "candidates": [claude_row, codex_row]},
+        ])
+        route = make_route(node, tuples=[claude_row, codex_row])
+        selection = N.resolve_checked_tuple(route, node, "codex", parent_identity=CLAUDE_PARENT)
+        self.assertEqual(selection.tuple_row["parent_harness"], "claude")
+        with self.assertRaises(N.DispatchNodeError) as ctx:
+            N.resolve_checked_tuple(route, node, "codex", parent_identity=None)
+        self.assertEqual(ctx.exception.reason, "dispatch-evidence-ambiguous-candidate")
+
+    def test_two_rows_for_the_same_parent_and_adapter_still_ambiguous(self):
+        node = make_node(dispatch_fallback=[
+            {"ordinal": 2, "fallback_hop": "cross-harness-headless",
+             "candidates": [base_tuple("codex"), base_tuple("codex", probe_source="second-check")]},
+        ])
+        route = make_route(node)
+        with self.assertRaises(N.DispatchNodeError) as ctx:
+            N.resolve_checked_tuple(route, node, "codex", parent_identity=CLAUDE_PARENT)
+        self.assertEqual(ctx.exception.reason, "dispatch-evidence-ambiguous-candidate")
+
+    def test_resolution_reports_the_hop_and_ordinal_of_the_bound_tuple(self):
+        node = make_node()
+        route = make_route(node)
+        selection = N.resolve_checked_tuple(route, node, "codex")
+        self.assertEqual(selection.fallback_hop, "cross-harness-headless")
+        self.assertEqual(selection.ordinal, 2)
+        self.assertEqual(selection.tuple_row["child_harness"], "codex")
+
+    def test_bind_dispatch_evidence_binds_this_parents_tuple(self):
+        claude_parent_claude_child = base_tuple("claude")
+        codex_parent_claude_child = base_tuple(
+            "claude", probe_source="second-check", parent=CODEX_PARENT_WORKSPACE_WRITE
+        )
+        node = make_node(dispatch_fallback=[
+            {"ordinal": 1, "fallback_hop": "same-harness-headless", "candidates": [claude_parent_claude_child]},
+            {"ordinal": 2, "fallback_hop": "cross-harness-headless", "candidates": [codex_parent_claude_child]},
+        ])
+        route = make_route(node, tuples=[claude_parent_claude_child, codex_parent_claude_child])
+        extra = N.bind_dispatch_evidence(
+            route, node, "claude", [], parent_identity=CODEX_PARENT_WORKSPACE_WRITE
+        )
+        as_dict = dict(zip(extra[0::2], extra[1::2]))
+        self.assertEqual(as_dict["--parent-harness"], "codex")
 
 
 class BindDispatchEvidenceTest(unittest.TestCase):

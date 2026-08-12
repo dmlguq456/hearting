@@ -33,16 +33,21 @@ class CapacityPolicyTests(unittest.TestCase):
     def test_relief_promotes_only_below_declared_threshold(self):
         chosen, band, _ranks, promoted = C.select(
             self.policy, self.states, self.counts, C.HARNESSES,
-            {"claude": 20, "codex": 30, "opencode": None},
+            {"claude": 20, "codex": 30, "opencode": 100},
         )
         self.assertEqual((chosen, band, promoted), ("opencode", "relief", True))
 
-    def test_unknown_primary_gauges_do_not_promote_relief(self):
+    def test_unknown_gauges_are_excluded_from_every_band(self):
+        # Hardened after the 2026-08-10 incident: treating an absent/stale
+        # gauge as a neutral 50 silently redirected owners onto a
+        # user-exhausted harness. rank_band excludes unknown gauges from
+        # eligibility entirely, so with every gauge unknown no band has a
+        # candidate at all.
         chosen, band, _ranks, promoted = C.select(
             self.policy, self.states, self.counts, C.HARNESSES,
             {name: None for name in C.HARNESSES},
         )
-        self.assertEqual((chosen, band, promoted), ("claude", "primary", False))
+        self.assertEqual((chosen, band, promoted), (None, None, False))
 
     def test_one_unknown_primary_gauge_still_blocks_relief_promotion(self):
         chosen, band, _ranks, promoted = C.select(
@@ -55,7 +60,7 @@ class CapacityPolicyTests(unittest.TestCase):
         states = {**self.states, "claude": "limited(noon)", "codex": "limited(3pm)"}
         chosen, band, _ranks, promoted = C.select(
             self.policy, states, self.counts, C.HARNESSES,
-            {"claude": 90, "codex": 90, "opencode": None},
+            {"claude": 90, "codex": 90, "opencode": 90},
         )
         self.assertEqual((chosen, band), ("opencode", "relief"))
 
@@ -66,6 +71,19 @@ class CapacityPolicyTests(unittest.TestCase):
                 {name: 80 for name in C.HARNESSES},
             )
         self.assertEqual((chosen, band), ("claude", "primary"))
+
+    def test_unknown_or_stale_gauge_is_excluded_from_eligibility(self):
+        ranked = C.rank_band(
+            list(C.HARNESSES), self.states, self.counts, C.HARNESSES,
+            {"claude": 80, "codex": None, "opencode": 40},
+        )
+        self.assertNotIn("codex", ranked)
+        self.assertEqual(set(ranked), {"claude", "opencode"})
+
+    def test_ordering_score_is_neutral_for_unknown_and_never_a_gate(self):
+        self.assertEqual(C.ordering_score({}, "opencode"), C.ORDERING_NEUTRAL_SCORE)
+        self.assertEqual(C.ordering_score({}, "opencode"), 50.0)
+        self.assertEqual(C.ordering_score({"opencode": 73}, "opencode"), 73.0)
 
 
 if __name__ == "__main__":

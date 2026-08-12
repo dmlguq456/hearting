@@ -52,6 +52,64 @@ def default_topology_path():
     return os.path.join(_repo_root(), "capabilities", "topologies.json")
 
 
+SHIPPED_CONFIG_PATH = os.path.join(_repo_root(), "profiles", "dispatch-defaults.yaml")
+
+
+def shipped_capability_baseline():
+    """Return the shipped profiles/dispatch-defaults.yaml `capabilities` mapping.
+
+    `{}` when the shipped file is absent. A malformed shipped file raises
+    DefaultsConfigError from the parser; the caller wraps it as a named,
+    fail-loud "corrupt shipped baseline" condition rather than silently
+    reproducing the defect this repairs.
+    """
+    if not os.path.isfile(SHIPPED_CONFIG_PATH):
+        return {}
+    with open(SHIPPED_CONFIG_PATH, encoding="utf-8") as f:
+        text = f.read()
+    shipped = parse_yaml_subset(text)
+    caps = shipped.get("capabilities")
+    return caps if isinstance(caps, dict) else {}
+
+
+def merge_capability_baseline(config, capmap, baseline=None):
+    """Merge shipped capability affinity cells beneath the user's config.
+
+    A user cell always wins; an absent user cell inherits the baseline value.
+    A baseline cell is dropped, never an error, when its capability or stage is
+    unknown to `capmap`, its value is outside AFFINITY_VALUES, or its value
+    names a concrete harness the user has disabled. Iterates sorted keys so
+    the merged object is deterministic — `canonical()` in capability-route.py
+    sorts keys too, so `_seal_dispatch_defaults`'s digest over this merged
+    object is deterministic for free.
+    """
+    baseline = shipped_capability_baseline() if baseline is None else baseline
+    enabled = set(query_owners(config))
+    merged_caps = {
+        cap: dict(stagemap) if isinstance(stagemap, dict) else {}
+        for cap, stagemap in (config.get("capabilities") or {}).items()
+    }
+    for cap_name in sorted(baseline):
+        if cap_name not in capmap:
+            continue
+        stagemap = baseline.get(cap_name)
+        if not isinstance(stagemap, dict):
+            continue
+        for stage_name in sorted(stagemap):
+            if stage_name not in capmap[cap_name]:
+                continue
+            value = stagemap[stage_name]
+            if value not in AFFINITY_VALUES:
+                continue
+            if value != "diverse" and value not in enabled:
+                continue
+            merged_caps.setdefault(cap_name, {})
+            merged_caps[cap_name].setdefault(stage_name, value)
+    merged = dict(config)
+    merged["capabilities"] = merged_caps
+    return merged
+
+
 def _strip_comment(line):
     in_quote = None
     out = []
@@ -304,7 +362,20 @@ def load_and_validate(config_path, topology_path):
     errors = validate(config, capmap)
     if errors:
         raise DefaultsConfigError("; ".join(errors))
-    return config
+    # Merging before validation would turn a valid user file into a loud
+    # failure for every user the moment the shipped baseline goes stale, so
+    # this runs strictly after validation of the raw user config above. The
+    # shipped file merging into itself would be a no-op anyway, but the path
+    # comparison also avoids a redundant re-parse.
+    if os.path.realpath(config_path) == os.path.realpath(SHIPPED_CONFIG_PATH):
+        return config
+    try:
+        baseline = shipped_capability_baseline()
+    except (DefaultsConfigError, OSError, json.JSONDecodeError) as exc:
+        raise DefaultsConfigError(
+            f"corrupt shipped dispatch-defaults baseline: {exc}"
+        ) from exc
+    return merge_capability_baseline(config, capmap, baseline=baseline)
 
 
 def query_affinity(config, capability, stage):

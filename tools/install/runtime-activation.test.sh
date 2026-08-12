@@ -61,6 +61,9 @@ make_fixture() {
   printf '%s\n' 'CFG_TIER_DEEP_MODEL=codex-default' > "$root/adapters/codex/config/models.conf"
   printf '%s\n' '#!/bin/sh' 'exit 0' > "$root/adapters/codex/bin/preflight.sh"
   chmod +x "$root/adapters/codex/bin/preflight.sh"
+  cp "$ROOT/adapters/codex/bin/check-runtime-projection.sh" \
+    "$root/adapters/codex/bin/check-runtime-projection.sh"
+  chmod +x "$root/adapters/codex/bin/check-runtime-projection.sh"
   printf '%s\n' '{"hooks":{}}' > "$root/adapters/codex/hooks/hooks.json"
   printf '%s\n' '# mode' > "$root/adapters/codex/modes/dev/refactor.md"
   printf '%s\n' '---' 'name: demo' 'description: demo' '---' '# demo codex' \
@@ -287,6 +290,27 @@ for runtime, row in rows.items():
     if runtime == "claude":
         assert os.path.realpath(os.path.join(home, "statusline.sh")).startswith(row["active_root"])
 PY
+codex_bundle=$(python3 - "$TMP/package-before.json" <<'PY'
+import json, sys
+for row in json.load(open(sys.argv[1]))["runtimes"]:
+    if row["runtime"] == "codex":
+        print(row["active_root"])
+        break
+PY
+)
+for checker_home in "$SRC" "$codex_bundle"; do
+  AGENT_HOME="$checker_home" CODEX_RUNTIME_PROJECTION_FAST=1 \
+    CODEX_RUNTIME_PROJECTION_SKIP_CLI_DISCOVERY=1 \
+    sh "$codex_bundle/adapters/codex/bin/check-runtime-projection.sh" \
+    > "$TMP/package-projection-check.txt" \
+    || fail "packaged Codex projection checker rejected active_root from $checker_home"
+  grep -q '^check=runtime-activation:ok reason=fast-pinned-identity$' \
+    "$TMP/package-projection-check.txt" \
+    || fail "packaged Codex projection checker did not use activation identity"
+  grep -q '^status=ok$' "$TMP/package-projection-check.txt" \
+    || fail "packaged Codex projection checker did not finish cleanly"
+done
+ok "packaged Codex projection checker accepts source and pinned active roots"
 printf '%s\n' '# packaged source advance' >> "$SRC/adapters/opencode/skills/demo/SKILL.md"
 python3 - "$SRC/adapters/claude/settings.json" <<'PY'
 import json, sys

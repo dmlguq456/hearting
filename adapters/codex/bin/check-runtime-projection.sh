@@ -35,20 +35,54 @@ real() { readlink -f "$1" 2>/dev/null || true; }
 # the legacy installer instead projects the complete compatibility trees.
 activation_state="$CODEX_HOME/.harness/activation.json"
 native_managed=0
+managed_active=""
 if [ -f "$activation_state" ]; then
-  if python3 - "$activation_state" "$AGENT_HOME" <<'PY' 2>/dev/null; then
+  if managed_active=$(python3 - "$activation_state" "$AGENT_HOME" "$CODEX_HOME/hearting" <<'PY' 2>/dev/null
 import json, pathlib, sys
 state = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
-source = pathlib.Path(state.get("source_root", "")).resolve()
-active = pathlib.Path(state.get("active_root") or source).resolve()
-expected = pathlib.Path(sys.argv[2]).resolve()
-if state.get("runtime") == "codex" and active == expected and state.get("activated_projection_digest"):
-    print("managed")
+source = pathlib.Path(state.get("source_root", "")).resolve(strict=False)
+active = pathlib.Path(state.get("active_root") or source).resolve(strict=False)
+expected = pathlib.Path(sys.argv[2]).resolve(strict=False)
+runtime_link = pathlib.Path(sys.argv[3])
+linked_active = runtime_link.is_symlink() and runtime_link.resolve(strict=False) == active
+if (
+    state.get("runtime") == "codex"
+    and state.get("activated_projection_digest")
+    and expected in {source, active}
+    and linked_active
+    and (active / "core" / "CORE.md").is_file()
+):
+    print(active)
     raise SystemExit(0)
 raise SystemExit(1)
 PY
+  ); then
     native_managed=1
+    # A packaged activation intentionally pins discovery links to its immutable
+    # active_root while source_root may keep advancing. Validate the active
+    # projection, not the caller's mutable source checkout. Linked mode has
+    # active_root == source_root and follows the same path.
+    AGENT_HOME=$managed_active
+    S="$AGENT_HOME/codex_setting"
   fi
+fi
+
+agents_source="$S/AGENTS.md"
+core_source="$S/core"
+capabilities_source="$S/capabilities"
+roles_source="$S/roles"
+bin_source="$S/bin"
+hooks_source="$S/codex-hooks"
+if [ "$native_managed" -eq 1 ]; then
+  # runtime_activation.py projects canonical sources directly. Compatibility
+  # aliases under codex_setting are a legacy/user-facing exposure surface and
+  # must not be required to validate a managed linked or packaged activation.
+  agents_source="$AGENT_HOME/adapters/codex/AGENTS.md"
+  core_source="$AGENT_HOME/core"
+  capabilities_source="$AGENT_HOME/capabilities"
+  roles_source="$AGENT_HOME/roles"
+  bin_source="$AGENT_HOME/adapters/codex/bin"
+  hooks_source="$AGENT_HOME/adapters/codex/hooks"
 fi
 
 expect_link() {  # <linkpath> <expected-target> <checkname>
@@ -62,12 +96,12 @@ expect_link() {  # <linkpath> <expected-target> <checkname>
 }
 
 expect_link "$CODEX_HOME/hearting"            "$AGENT_HOME"                  hearting
-expect_link "$CODEX_HOME/AGENTS.md"                "$S/AGENTS.md"                 agents-md
-expect_link "$CODEX_HOME/agent-core"               "$S/core"                      agent-core
-expect_link "$CODEX_HOME/agent-capabilities"       "$S/capabilities"              agent-capabilities
-expect_link "$CODEX_HOME/agent-roles"              "$S/roles"                     agent-roles
-expect_link "$CODEX_HOME/agent-bin"                "$S/bin"                       agent-bin
-expect_link "$CODEX_HOME/agent-hooks"              "$S/codex-hooks"               agent-hooks
+expect_link "$CODEX_HOME/AGENTS.md"                "$agents_source"                agents-md
+expect_link "$CODEX_HOME/agent-core"               "$core_source"                  agent-core
+expect_link "$CODEX_HOME/agent-capabilities"       "$capabilities_source"          agent-capabilities
+expect_link "$CODEX_HOME/agent-roles"              "$roles_source"                 agent-roles
+expect_link "$CODEX_HOME/agent-bin"                "$bin_source"                   agent-bin
+expect_link "$CODEX_HOME/agent-hooks"              "$hooks_source"                 agent-hooks
 if [ "$native_managed" -eq 1 ]; then
   for name in hearting-readme agent-tools agent-utilities agent-scaffolds agent-skills agent-agents agent-plugin-marketplace; do
     printf 'check=%s:skipped reason=runtime-managed\n' "$name"
@@ -146,9 +180,9 @@ if ! hook_trust_check; then
 fi
 
 # hooks.json: harness projection symlink, or a real file with matching content.
-if [ -L "$CODEX_HOME/hooks.json" ] && [ "$(real "$CODEX_HOME/hooks.json")" = "$(real "$S/codex-hooks/hooks.json")" ]; then
+if [ -L "$CODEX_HOME/hooks.json" ] && [ "$(real "$CODEX_HOME/hooks.json")" = "$(real "$hooks_source/hooks.json")" ]; then
   printf 'check=hooks-json:ok\n'
-elif [ -f "$CODEX_HOME/hooks.json" ] && cmp -s "$CODEX_HOME/hooks.json" "$S/codex-hooks/hooks.json"; then
+elif [ -f "$CODEX_HOME/hooks.json" ] && cmp -s "$CODEX_HOME/hooks.json" "$hooks_source/hooks.json"; then
   printf 'check=hooks-json:ok reason=content-match\n'
 else
   printf 'check=hooks-json:failed reason=not-harness-hook-projection\n'
