@@ -77,7 +77,6 @@ LAUNCHERS = (
     ("harness", "tools/install/harness.sh"),
     ("fleet", "tools/fleet/fleet.sh"),
     ("mem", "tools/memory/mem.py"),
-    ("mm", "tools/integrations/mattermost/mm.py"),
 )
 
 
