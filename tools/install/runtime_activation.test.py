@@ -11,6 +11,28 @@ import installer  # noqa: E402
 
 
 class RuntimeSnapshotTest(unittest.TestCase):
+    def test_release_revision_ignores_runtime_grounding_markers(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "RELEASE_VERSION").write_text("v1.2.3\n", encoding="utf-8")
+            (root / "core").mkdir()
+            (root / "core" / "CORE.md").write_text("stable\n", encoding="utf-8")
+            expected = activation.source_revision(root)
+
+            for marker in (
+                ".capability-grounding",
+                ".route-grounding",
+                ".core-grounding",
+                ".spec-grounding",
+            ):
+                marker_root = root / marker
+                marker_root.mkdir()
+                (marker_root / "session.json").write_text("{}\n", encoding="utf-8")
+                self.assertEqual(activation.source_revision(root), expected, marker)
+
+            (root / "core" / "CORE.md").write_text("changed\n", encoding="utf-8")
+            self.assertNotEqual(activation.source_revision(root), expected)
+
     def test_runtime_activate_defaults_to_packaged_snapshot(self):
         args = installer.build_parser().parse_args(
             ["runtime", "activate", "--runtime", "codex"]
