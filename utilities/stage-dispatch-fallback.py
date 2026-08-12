@@ -179,7 +179,7 @@ def _usage_eligible(state: str) -> bool:
 
 
 def ordered_fallback_hops(
-    route: dict, node: dict, jobs: Path
+    route: dict, node: dict, jobs: Path, *, parent_identity: dict | None = None
 ) -> tuple[list[dict], dict | None]:
     """Rank the checked direct-headless band from the sealed allocation policy."""
 
@@ -187,6 +187,12 @@ def ordered_fallback_hops(
     if not isinstance(allocation, dict) or allocation.get("strategy") not in {
         ALLOCATION_STRATEGY, "capacity-aware"
     }:
+        # Without an allocation policy the chain is the compiled order and
+        # every candidate at every hop is visited, so parent_runtime_failure
+        # below skips a foreign row and the correct row is still reached.
+        # Only the allocation path collapses the chain to one row per
+        # harness (via headless.setdefault below) and therefore needs the
+        # parent filter.
         return list(node["fallback_hops"]), None
     counts = attempt_counts(jobs, window=int(allocation["window"]))
     states = _usage_states(jobs)
@@ -199,7 +205,18 @@ def ordered_fallback_hops(
             continue
         for row in hop.get("candidates", []):
             harness = row.get("child_harness")
+            if not DISPATCH_NODE.candidate_matches_parent(row, parent_identity):
+                # A foreign parent's row must not claim this harness slot. It
+                # is kept in the trailing band rather than dropped, so the
+                # attempt trace still records
+                # skipped-dispatch-evidence-parent-runtime-mismatch exactly
+                # as today.
+                trailing_rows.append((hop, row))
+                continue
             if row.get("status") == "supported" and harness in ALLOCATION_HARNESSES:
+                # After parent filtering a child adapter appears at exactly
+                # one ordinal, so setdefault's first-wins is a no-op here
+                # rather than the silent deletion it used to be.
                 headless.setdefault(harness, (hop, row))
             else:
                 trailing_rows.append((hop, row))
@@ -1023,7 +1040,7 @@ def main() -> int:
     attempts: list[str] = []
     direct_failures: list[dict[str, str]] = []
     fallback_hops, allocation_context = ordered_fallback_hops(
-        route, node, args.jobs
+        route, node, args.jobs, parent_identity=parent_identity
     )
     recorded_prior_skips = set()
     for ordered_hop in fallback_hops:

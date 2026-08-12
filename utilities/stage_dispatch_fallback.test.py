@@ -285,6 +285,66 @@ class FallbackTest(unittest.TestCase):
   selected=[hop["candidates"][0]["child_harness"] for hop in hops[:3]]
   self.assertEqual(selected,["codex","claude","opencode"])
   self.assertFalse(context["relief_promoted"])
+ def _shadowed_claude_node(self):
+  # D7's live case reproduced on the third resolver: ordinal 1 seals a
+  # foreign-parent (claude) same-harness claude row that would otherwise
+  # shadow ordinal 2's checked codex-parent claude row.
+  return {
+   "harness_affinity":"diverse",
+   "fallback_hops":[
+    {"ordinal":1,"fallback_hop":"same-harness-headless","candidates":[
+     {"child_harness":"claude","status":"supported",
+      "parent_harness":"claude","parent_transport":"headless","parent_sandbox":"workspace-write"},
+    ]},
+    {"ordinal":2,"fallback_hop":"cross-harness-headless","candidates":[
+     {"child_harness":"claude","status":"supported",
+      "parent_harness":"codex","parent_transport":"headless","parent_sandbox":"workspace-write"},
+     {"child_harness":"codex","status":"supported",
+      "parent_harness":"codex","parent_transport":"headless","parent_sandbox":"workspace-write"},
+    ]},
+    {"ordinal":3,"fallback_hop":"native-subagent","candidates":[]},
+    {"ordinal":4,"fallback_hop":"inline","candidates":[]},
+   ],
+  }
+ def test_foreign_parent_row_does_not_claim_the_harness_slot(self):
+  node=self._shadowed_claude_node()
+  route={"dispatch_allocation":{
+   "strategy":"least-recent-attempts","window":30,
+   "harness_order":["claude","codex","opencode"],
+  }}
+  actual_parent={"parent_harness":"codex","parent_transport":"headless","parent_sandbox":"workspace-write"}
+  with mock.patch.object(F,"_usage_states",return_value={
+      "claude":"ok","codex":"ok","opencode":"ok"}):
+   hops,context=F.ordered_fallback_hops(route,node,self.jobs,parent_identity=actual_parent)
+  ranked_by_harness={h["candidates"][0]["child_harness"]:h["candidates"][0] for h in hops[:len(context["rank"])]}
+  self.assertEqual(ranked_by_harness["claude"]["parent_harness"],"codex")
+  trailing=[c for h in hops[len(context["rank"]):] for c in h.get("candidates",[]) if c]
+  self.assertTrue(any(
+   c.get("parent_harness")=="claude" and c.get("child_harness")=="claude" for c in trailing
+  ))
+ def test_parent_identity_none_preserves_todays_chain(self):
+  node=self._shadowed_claude_node()
+  route={"dispatch_allocation":{
+   "strategy":"least-recent-attempts","window":30,
+   "harness_order":["claude","codex","opencode"],
+  }}
+  with mock.patch.object(F,"_usage_states",return_value={
+      "claude":"ok","codex":"ok","opencode":"ok"}):
+   hops,context=F.ordered_fallback_hops(route,node,self.jobs)
+  ranked_by_harness={h["candidates"][0]["child_harness"]:h["candidates"][0] for h in hops[:len(context["rank"])]}
+  self.assertEqual(ranked_by_harness["claude"]["parent_harness"],"claude")
+ def test_foreign_only_evidence_still_traces_the_parent_runtime_mismatch(self):
+  # Keeping the foreign row in the trailing band (rather than dropping it) is
+  # what keeps this trace meaningful: the sealed evidence is for parent codex,
+  # the live owner runs as claude.
+  path=self.route(same_status="supported")
+  wrong={"AGENT_DISPATCH_CURRENT_HARNESS":"claude",
+         "AGENT_DISPATCH_CURRENT_TRANSPORT":"headless",
+         "AGENT_DISPATCH_CURRENT_SANDBOX":"adapter-default"}
+  dry=self.run_node(path,"plan-check","dry-run",**wrong)
+  self.assertEqual(dry.returncode,79,dry.stdout+dry.stderr)
+  self.assertIn("skipped-dispatch-evidence-parent-runtime-mismatch",dry.stdout)
+  self.assertIn("last_direct_failure_reason=dispatch-evidence-parent-runtime-mismatch",dry.stdout)
  def test_registry_infrastructure_failure_is_not_a_candidate_failure(self):
   # An unwritable registry is a hard stop at --start. Treating it as one more
   # exhausted candidate would descend to inline and recreate the divergence

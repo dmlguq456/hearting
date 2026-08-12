@@ -61,6 +61,100 @@ def replica_node(node_id: str, affinity: str = "unspecified") -> dict[str, objec
     }
 
 
+def resolve_side_effect(route, node, adapter, parent_identity=None):
+    """Walk a fixture node's own fallback_hops, faithfully to resolve_checked_tuple.
+
+    Keeps per-adapter hop/ordinal faithful to the fixture instead of collapsing
+    every leg to one constant tuple, so receipt hop/ordinal assertions stay
+    meaningful under the mock.
+    """
+    for entry in sorted(node.get("fallback_hops", []), key=lambda row: row.get("ordinal", 0)):
+        if entry.get("fallback_hop") not in BATCH.DISPATCH_NODE.FALLBACK_HOPS:
+            continue
+        rows = [row for row in entry.get("candidates", []) if row.get("child_harness") == adapter]
+        if not rows:
+            continue
+        if len(rows) > 1:
+            raise BATCH.DISPATCH_NODE.DispatchNodeError(
+                "dispatch-evidence-ambiguous-candidate", adapter=adapter
+            )
+        if rows[0].get("status") != "supported":
+            raise BATCH.DISPATCH_NODE.DispatchNodeError(
+                "dispatch-evidence-candidate-unsupported",
+                adapter=adapter, status=str(rows[0].get("status")),
+            )
+        return BATCH.DISPATCH_NODE.CheckedSelection(
+            {"status": "supported", "child_harness": adapter},
+            rows[0],
+            str(entry["fallback_hop"]),
+            int(entry["ordinal"]),
+        )
+    raise BATCH.DISPATCH_NODE.DispatchNodeError(
+        "dispatch-evidence-no-eligible-fallback", adapter=adapter
+    )
+
+
+def single_family_node(node_id: str) -> dict[str, object]:
+    """One node whose only checked-supported family is claude."""
+    return {
+        "id": node_id,
+        "dispatch_depth": 2,
+        "fallback_hops": [
+            {"ordinal": 1, "fallback_hop": "same-harness-headless", "candidates": [
+                {"child_harness": "claude", "status": "supported"},
+                {"child_harness": "codex", "status": "unsupported"},
+            ]},
+        ],
+    }
+
+
+def zero_family_node(node_id: str) -> dict[str, object]:
+    """One node with no usable family at all."""
+    return {
+        "id": node_id,
+        "dispatch_depth": 2,
+        "fallback_hops": [
+            {"ordinal": 1, "fallback_hop": "same-harness-headless", "candidates": [
+                {"child_harness": "codex", "status": "unsupported"},
+            ]},
+        ],
+    }
+
+
+def ambiguous_codex_node(node_id: str) -> dict[str, object]:
+    """Succeeds via claude but excludes codex for a *different* typed reason
+    (ambiguous-candidate) than zero_family_node's own (candidate-unsupported)
+    -- used to prove a later node's per-node exclusion detail is not polluted
+    by an earlier, already-succeeded node's accumulated reasons.
+    """
+    return {
+        "id": node_id,
+        "dispatch_depth": 2,
+        "fallback_hops": [
+            {"ordinal": 1, "fallback_hop": "same-harness-headless", "candidates": [
+                {"child_harness": "codex", "status": "supported"},
+                {"child_harness": "codex", "status": "supported"},
+                {"child_harness": "claude", "status": "supported"},
+            ]},
+        ],
+    }
+
+
+def three_family_excluded_node(node_id: str) -> dict[str, object]:
+    """One node where all three harness families are checked-unsupported."""
+    return {
+        "id": node_id,
+        "dispatch_depth": 2,
+        "fallback_hops": [
+            {"ordinal": 1, "fallback_hop": "same-harness-headless", "candidates": [
+                {"child_harness": "codex", "status": "unsupported"},
+                {"child_harness": "claude", "status": "unsupported"},
+                {"child_harness": "opencode", "status": "unsupported"},
+            ]},
+        ],
+    }
+
+
 def success_receipt(command: list[str], *, started: str = "1", duplicate: str = "0") -> str:
     adapter = command[command.index("--adapter") + 1]
     attempt_id = command[command.index("--attempt-id") + 1]
@@ -255,13 +349,14 @@ class DispatchBatchTest(unittest.TestCase):
 
     def test_assignment_prefers_distinct_harnesses_and_declared_affinity(self):
         with mock.patch.object(
-            BATCH.DISPATCH_NODE, "select_checked_tuple", return_value={"status": "supported"}
+            BATCH.DISPATCH_NODE, "resolve_checked_tuple", side_effect=resolve_side_effect
         ):
-            rows, independence = BATCH.assign_harnesses(
+            rows, independence, diagnostics = BATCH.assign_harnesses(
                 self.route, self.route["nodes"], allow_degraded=False
             )
         self.assertEqual(independence, "cross-harness")
         self.assertEqual([row[1] for row in rows], ["codex", "claude"])
+        self.assertEqual(diagnostics["degradation_cause"], "")
 
     def test_assignment_uses_recent_counts_to_share_parallel_legs_across_three(self):
         route = json.loads(json.dumps(self.route))
@@ -285,9 +380,9 @@ class DispatchBatchTest(unittest.TestCase):
             encoding="utf-8",
         )
         with mock.patch.object(
-            BATCH.DISPATCH_NODE, "select_checked_tuple", return_value={"status": "supported"}
+            BATCH.DISPATCH_NODE, "resolve_checked_tuple", side_effect=resolve_side_effect
         ):
-            rows, independence = BATCH.assign_harnesses(
+            rows, independence, diagnostics = BATCH.assign_harnesses(
                 route, route["nodes"], allow_degraded=False, jobs=self.jobs
             )
         self.assertEqual(independence, "cross-harness")
@@ -312,22 +407,304 @@ class DispatchBatchTest(unittest.TestCase):
                 {"child_harness": "opencode", "status": "supported"}
             )
         with mock.patch.object(
-            BATCH.DISPATCH_NODE, "select_checked_tuple", return_value={"status": "supported"}
+            BATCH.DISPATCH_NODE, "resolve_checked_tuple", side_effect=resolve_side_effect
         ), mock.patch.object(BATCH.CAPACITY, "capacity_scores", return_value={
             "claude": 60, "codex": 80, "opencode": 100,
         }):
-            rows, independence = BATCH.assign_harnesses(
+            rows, independence, diagnostics = BATCH.assign_harnesses(
                 route, route["nodes"], allow_degraded=False, jobs=self.jobs
             )
         self.assertEqual(independence, "cross-harness")
         self.assertEqual({row[1] for row in rows}, {"claude", "codex"})
+
+    def test_receipt_hop_and_ordinal_match_the_bound_tuple(self):
+        # D7 live case reproduced end to end: a foreign claude->claude row
+        # shadows nothing once assign_harnesses consumes the one shared
+        # resolver, so the leg's recorded hop/ordinal is the bound tuple's own
+        # rather than a second, independently walked value (the candidate()
+        # deletion this guards).
+        claude_parent_claude_child = {
+            "child_harness": "claude", "status": "supported",
+            "parent_harness": "claude", "parent_transport": "headless",
+            "parent_sandbox": "workspace-write", "launch_authority": "conductor",
+            "probe_source": "fixture-check", "failure_class": "",
+        }
+        codex_parent_claude_child = {
+            **claude_parent_claude_child,
+            "parent_harness": "codex", "probe_source": "second-check",
+        }
+        codex_parent_codex_child = {
+            "child_harness": "codex", "status": "supported",
+            "parent_harness": "codex", "parent_transport": "headless",
+            "parent_sandbox": "workspace-write", "launch_authority": "conductor",
+            "probe_source": "third-check", "failure_class": "",
+        }
+        node1 = {
+            "id": "plan", "dispatch_depth": 2,
+            "fallback_hops": [
+                {"ordinal": 1, "fallback_hop": "same-harness-headless",
+                 "candidates": [claude_parent_claude_child]},
+                {"ordinal": 2, "fallback_hop": "cross-harness-headless",
+                 "candidates": [codex_parent_claude_child]},
+            ],
+        }
+        node2 = {
+            "id": "plan-replica", "dispatch_depth": 2,
+            "fallback_hops": [
+                {"ordinal": 1, "fallback_hop": "same-harness-headless",
+                 "candidates": [codex_parent_codex_child]},
+            ],
+        }
+        route = {
+            "route_id": "rt-fixture", "route_hash": "sha256:fixture",
+            "dispatch_evidence": {"tuples": [
+                claude_parent_claude_child, codex_parent_claude_child, codex_parent_codex_child,
+            ]},
+        }
+        actual_parent = {
+            "parent_harness": "codex", "parent_transport": "headless",
+            "parent_sandbox": "workspace-write",
+        }
+        rows, independence, diagnostics = BATCH.assign_harnesses(
+            route, [node1, node2], allow_degraded=False, parent_identity=actual_parent,
+        )
+        self.assertEqual(independence, "cross-harness")
+        by_adapter = {adapter: (hop, ordinal) for _node, adapter, hop, ordinal in rows}
+        self.assertEqual(by_adapter["claude"], ("cross-harness-headless", 2))
+        self.assertEqual(by_adapter["codex"], ("same-harness-headless", 1))
+
+    def test_two_usable_families_stay_cross_harness_even_with_the_degrade_flag(self):
+        # D3 equivalence (frame-synthesis.md D3): group width is in [2, 4] and
+        # every leg holds >= 1 option, so `len(usable) >= 2` is *exactly*
+        # `distinct != []`. A fixture where a same-family assignment would
+        # otherwise win is therefore provably impossible to build here (see
+        # dev_reviews/phase_01.md #4 and dev_reviews-alternative/phase_01.md's
+        # closing note) -- this characterizes that flipping
+        # --allow-degraded-independence does not change independence or
+        # degradation_cause once two families are usable; it is not, and
+        # structurally cannot be, a regression guard on a live gate.
+        with mock.patch.object(
+            BATCH.DISPATCH_NODE, "resolve_checked_tuple", side_effect=resolve_side_effect
+        ):
+            rows, independence, diagnostics = BATCH.assign_harnesses(
+                self.route, self.route["nodes"], allow_degraded=True
+            )
+        self.assertEqual(independence, "cross-harness")
+        self.assertEqual(diagnostics["degradation_cause"], "")
+        self.assertEqual(set(diagnostics["usable_families"]), {"codex", "claude"})
+
+    def test_single_usable_family_degrades_with_typed_evidence(self):
+        # assign_harnesses is side-effect free (G2): it never writes the
+        # ledger itself. Persistence is exercised separately by
+        # test_persist_degradation_forwards_route_and_reason_fields and
+        # test_degraded_dry_run_writes_no_ledger_row.
+        nodes = [single_family_node("plan"), single_family_node("plan-replica")]
+        route = {"route_id": "rt-fixture", "route_hash": "sha256:fixture"}
+        with mock.patch.object(
+            BATCH.DISPATCH_NODE, "resolve_checked_tuple", side_effect=resolve_side_effect
+        ):
+            rows, independence, diagnostics = BATCH.assign_harnesses(
+                route, nodes, allow_degraded=True
+            )
+        self.assertEqual(independence, "degraded-same-harness")
+        self.assertEqual(diagnostics["usable_families"], ["claude"])
+        self.assertEqual(diagnostics["family_exclusions"], {
+            "codex": ["dispatch-evidence-candidate-unsupported"],
+            "opencode": ["dispatch-evidence-no-eligible-fallback"],
+        })
+        self.assertEqual(diagnostics["degradation_cause"], "single-usable-harness-family")
+        self.assertIn("codex=unsupported", diagnostics["degradation_detail"])
+
+    def test_single_usable_family_without_the_flag_raises_with_evidence(self):
+        nodes = [single_family_node("plan"), single_family_node("plan-replica")]
+        route = {"route_id": "rt-fixture", "route_hash": "sha256:fixture"}
+        with mock.patch.object(
+            BATCH.DISPATCH_NODE, "resolve_checked_tuple", side_effect=resolve_side_effect
+        ), self.assertRaises(BATCH.BatchError) as ctx:
+            BATCH.assign_harnesses(route, nodes, allow_degraded=False)
+        self.assertEqual(ctx.exception.reason, "parallel-cross-harness-unavailable")
+        self.assertEqual(ctx.exception.degradation_reason, "single-usable-harness-family")
+        self.assertIsNone(ctx.exception.route_node)
+        self.assertIn("usable=claude", ctx.exception.detail)
+        self.assertIn("codex=unsupported", ctx.exception.detail)
+
+    def test_exclusion_detail_renders_every_reason_for_a_multi_reason_adapter(self):
+        # G1: codex fails with a *different* typed reason on each leg
+        # (candidate-unsupported on "plan", no-eligible-fallback on the
+        # second leg, which has no codex row at all). The old
+        # `next(iter(set))` pick was both hash-order nondeterministic and
+        # discarded one of the two reasons outright; both must render,
+        # deterministically ordered.
+        codex_absent_node = {
+            "id": "plan-replica-2", "dispatch_depth": 2,
+            "fallback_hops": [
+                {"ordinal": 1, "fallback_hop": "same-harness-headless", "candidates": [
+                    {"child_harness": "claude", "status": "supported"},
+                ]},
+            ],
+        }
+        nodes = [single_family_node("plan"), codex_absent_node]
+        route = {"route_id": "rt-fixture", "route_hash": "sha256:fixture"}
+        with mock.patch.object(
+            BATCH.DISPATCH_NODE, "resolve_checked_tuple", side_effect=resolve_side_effect
+        ), self.assertRaises(BATCH.BatchError) as ctx:
+            BATCH.assign_harnesses(route, nodes, allow_degraded=False)
+        self.assertEqual(ctx.exception.reason, "parallel-cross-harness-unavailable")
+        self.assertIn("codex=unsupported+no-candidate", ctx.exception.detail)
+
+    def test_no_usable_family_reports_typed_node_evidence(self):
+        # zero_family_node must NOT be the first node processed: if it were,
+        # the raise would fire before any other node's exclusions had
+        # accumulated, and the per-node scoping this test guards (G3) would
+        # never be exercised (dev_reviews/phase_01.md #3,
+        # dev_reviews-alternative/phase_01.md's matching finding). "plan"
+        # excludes codex for a *different* reason (ambiguous-candidate) than
+        # "plan-replica" does; that must not leak into plan-replica's detail.
+        nodes = [ambiguous_codex_node("plan"), zero_family_node("plan-replica")]
+        route = {"route_id": "rt-fixture", "route_hash": "sha256:fixture"}
+        with mock.patch.object(
+            BATCH.DISPATCH_NODE, "resolve_checked_tuple", side_effect=resolve_side_effect
+        ), self.assertRaises(BATCH.BatchError) as ctx:
+            BATCH.assign_harnesses(route, nodes, allow_degraded=True)
+        self.assertEqual(ctx.exception.reason, "parallel-headless-unavailable")
+        self.assertEqual(ctx.exception.degradation_reason, "no-usable-harness-family")
+        self.assertEqual(ctx.exception.route_node, "plan-replica")
+        self.assertIn("node=plan-replica", ctx.exception.detail)
+        self.assertIn("codex=unsupported", ctx.exception.detail)
+        self.assertNotIn("ambiguous", ctx.exception.detail)
+
+    def test_persist_degradation_forwards_route_and_reason_fields(self):
+        with mock.patch.object(BATCH, "record_degradation") as record:
+            BATCH._persist_degradation(
+                self.base, self.route, route_node="plan",
+                reason="no-usable-harness-family",
+                detail="node=plan;codex=unsupported",
+            )
+        record.assert_called_once()
+        kwargs = record.call_args.kwargs
+        self.assertEqual(kwargs["route_node"], "plan")
+        self.assertEqual(kwargs["reason"], "no-usable-harness-family")
+        self.assertEqual(kwargs["agent_home"], self.base)
+        self.assertEqual(kwargs["route_id"], self.route["route_id"])
+
+    def test_degraded_dry_run_writes_no_ledger_row(self):
+        # G2: assign_harnesses is now pure and main() only persists when
+        # args.action == "start"; a dry-run preview must leave no row behind.
+        output = io.StringIO()
+        with mock.patch.object(BATCH, "record_degradation") as record:
+            self._degraded_dry_run_receipt(output)
+        record.assert_not_called()
+
+    def _degraded_dry_run_receipt(self, output):
+        assignments = [
+            (self.route["nodes"][0], "codex", "same-harness-headless", 1),
+            (self.route["nodes"][1], "codex", "same-harness-headless", 1),
+        ]
+        diagnostics = {
+            "families_considered": ["codex", "claude", "opencode"],
+            "usable_families": ["codex"],
+            "family_exclusions": {"claude": ["dispatch-evidence-candidate-unsupported"]},
+            "capacity": {"codex": None, "claude": None, "opencode": None},
+            "degradation_cause": "single-usable-harness-family",
+        }
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(mock.patch.object(BATCH, "load_route", return_value=self.route))
+            stack.enter_context(mock.patch.object(
+                BATCH, "assign_harnesses",
+                return_value=(assignments, "degraded-same-harness", diagnostics),
+            ))
+            stack.enter_context(mock.patch.object(BATCH, "resolve_agent_home", return_value=self.base))
+            stack.enter_context(mock.patch.object(BATCH, "resolve_global_registry", return_value=SimpleNamespace(path=self.jobs)))
+            stack.enter_context(mock.patch.object(BATCH, "resolve_live_parent_attempt"))
+            stack.enter_context(mock.patch.object(BATCH, "completion_marker_gate"))
+            stack.enter_context(mock.patch.object(BATCH.subprocess, "check_output", return_value=str(self.base)))
+            stack.enter_context(mock.patch.dict(os.environ, {
+                "AGENT_DISPATCH_SELF_SLUG": "owner",
+                "AGENT_DISPATCH_ATTEMPT_ID": "att-parent-fixture",
+                "AGENT_DISPATCH_CURRENT_HARNESS": "codex",
+                "AGENT_DISPATCH_CURRENT_TRANSPORT": "headless",
+                "AGENT_DISPATCH_CURRENT_SANDBOX": "workspace-write",
+            }))
+            with contextlib.redirect_stdout(output):
+                rc = BATCH.main(self.argv("dry-run") + ["--allow-degraded-independence"])
+        return rc, json.loads(output.getvalue())
+
+    def test_degraded_batch_keeps_the_manifest_stable_degradation_reason(self):
+        output = io.StringIO()
+        rc, receipt = self._degraded_dry_run_receipt(output)
+        self.assertEqual(rc, 0)
+        self.assertEqual(receipt["state"], "validated")
+        self.assertEqual(receipt["degradation_reason"], "cross-harness-unavailable-user-allowed")
+        self.assertEqual(receipt["selection_diagnostics"]["degradation_cause"], "single-usable-harness-family")
+
+    def test_degraded_batch_never_claims_a_cross_harness_realized_axis(self):
+        output = io.StringIO()
+        _rc, receipt = self._degraded_dry_run_receipt(output)
+        self.assertNotIn("cross-harness", receipt["realized_independence_axes"])
+
+    def test_ledger_detail_survives_a_three_family_exclusion(self):
+        node_id = "plan-" + "x" * 300
+        nodes = [three_family_excluded_node(node_id), single_family_node("plan-replica")]
+        route = {"route_id": "rt-fixture", "route_hash": "sha256:fixture"}
+        with mock.patch.object(
+            BATCH.DISPATCH_NODE, "resolve_checked_tuple", side_effect=resolve_side_effect
+        ), self.assertRaises(BATCH.BatchError) as ctx:
+            BATCH.assign_harnesses(route, nodes, allow_degraded=True)
+        self.assertEqual(ctx.exception.degradation_reason, "no-usable-harness-family")
+        self.assertEqual(ctx.exception.route_node, node_id)
+        self.assertIn("codex=unsupported", ctx.exception.detail)
+        with mock.patch.object(BATCH, "record_degradation") as record:
+            BATCH._persist_degradation(
+                self.base, route, route_node=ctx.exception.route_node,
+                reason=ctx.exception.degradation_reason, detail=ctx.exception.detail,
+            )
+        self.assertLessEqual(len(record.call_args.kwargs["detail"]), 512)
+
+    def test_unknown_capacity_harness_is_still_selectable_in_a_batch(self):
+        # Item 4's anti-regression on the batch side: ordering_score's neutral
+        # treatment of an unknown gauge must never turn into an eligibility
+        # gate, or an OpenCode-only leg (no proactive gauge by design) would
+        # fail the whole batch instead of just being ordered neutrally.
+        node1 = {
+            "id": "plan", "dispatch_depth": 2,
+            "fallback_hops": [
+                {"ordinal": 1, "fallback_hop": "same-harness-headless", "candidates": [
+                    {"child_harness": "opencode", "status": "supported"},
+                ]},
+            ],
+        }
+        node2 = {
+            "id": "plan-replica", "dispatch_depth": 2,
+            "fallback_hops": [
+                {"ordinal": 1, "fallback_hop": "same-harness-headless", "candidates": [
+                    {"child_harness": "claude", "status": "supported"},
+                ]},
+            ],
+        }
+        route = {
+            "route_id": "rt-fixture", "route_hash": "sha256:fixture",
+            "dispatch_allocation": {
+                "strategy": "capacity-aware", "window": 30,
+                "harness_order": ["claude", "codex", "opencode"],
+            },
+        }
+        with mock.patch.object(
+            BATCH.DISPATCH_NODE, "resolve_checked_tuple", side_effect=resolve_side_effect
+        ), mock.patch.object(BATCH.CAPACITY, "capacity_scores", return_value={
+            "claude": 80, "codex": 80, "opencode": None,
+        }):
+            rows, independence, diagnostics = BATCH.assign_harnesses(
+                route, [node1, node2], allow_degraded=False, jobs=self.jobs
+            )
+        self.assertEqual(independence, "cross-harness")
+        self.assertEqual({row[1] for row in rows}, {"opencode", "claude"})
 
     def test_atomic_denial_starts_no_wrapper(self):
         stack, assignments = self.common_patches()
         output = io.StringIO()
         with stack:
             stack.enter_context(mock.patch.object(BATCH, "load_route", return_value=self.route))
-            stack.enter_context(mock.patch.object(BATCH, "assign_harnesses", return_value=(assignments, "cross-harness")))
+            stack.enter_context(mock.patch.object(BATCH, "assign_harnesses", return_value=(assignments, "cross-harness", {"families_considered": [], "usable_families": [], "family_exclusions": {}, "capacity": {}, "degradation_cause": ""})))
             stack.enter_context(mock.patch.object(BATCH, "resolve_agent_home", return_value=self.base))
             stack.enter_context(mock.patch.object(BATCH, "resolve_global_registry", return_value=SimpleNamespace(path=self.jobs)))
             stack.enter_context(mock.patch.object(BATCH, "resolve_live_parent_attempt"))
@@ -389,7 +766,7 @@ class DispatchBatchTest(unittest.TestCase):
 
         with stack:
             stack.enter_context(mock.patch.object(BATCH, "load_route", return_value=self.route))
-            stack.enter_context(mock.patch.object(BATCH, "assign_harnesses", return_value=(assignments, "cross-harness")))
+            stack.enter_context(mock.patch.object(BATCH, "assign_harnesses", return_value=(assignments, "cross-harness", {"families_considered": [], "usable_families": [], "family_exclusions": {}, "capacity": {}, "degradation_cause": ""})))
             stack.enter_context(mock.patch.object(BATCH, "resolve_agent_home", return_value=self.base))
             stack.enter_context(mock.patch.object(BATCH, "resolve_global_registry", return_value=SimpleNamespace(path=self.jobs)))
             stack.enter_context(mock.patch.object(BATCH, "resolve_live_parent_attempt"))
@@ -450,7 +827,7 @@ class DispatchBatchTest(unittest.TestCase):
         with contextlib.ExitStack() as stack:
             stack.enter_context(mock.patch.object(BATCH, "load_route", return_value=route))
             stack.enter_context(mock.patch.object(
-                BATCH, "assign_harnesses", return_value=(assignments, "cross-harness")
+                BATCH, "assign_harnesses", return_value=(assignments, "cross-harness", {"families_considered": [], "usable_families": [], "family_exclusions": {}, "capacity": {}, "degradation_cause": ""})
             ))
             stack.enter_context(mock.patch.object(BATCH, "resolve_agent_home", return_value=self.base))
             stack.enter_context(mock.patch.object(
@@ -538,7 +915,7 @@ class DispatchBatchTest(unittest.TestCase):
 
         with stack:
             stack.enter_context(mock.patch.object(BATCH, "load_route", return_value=self.route))
-            stack.enter_context(mock.patch.object(BATCH, "assign_harnesses", return_value=(assignments, "cross-harness")))
+            stack.enter_context(mock.patch.object(BATCH, "assign_harnesses", return_value=(assignments, "cross-harness", {"families_considered": [], "usable_families": [], "family_exclusions": {}, "capacity": {}, "degradation_cause": ""})))
             stack.enter_context(mock.patch.object(BATCH, "resolve_agent_home", return_value=self.base))
             stack.enter_context(mock.patch.object(BATCH, "resolve_global_registry", return_value=SimpleNamespace(path=self.jobs)))
             stack.enter_context(mock.patch.object(BATCH, "resolve_live_parent_attempt"))
@@ -611,7 +988,7 @@ class DispatchBatchTest(unittest.TestCase):
 
         with stack:
             stack.enter_context(mock.patch.object(BATCH, "load_route", return_value=self.route))
-            stack.enter_context(mock.patch.object(BATCH, "assign_harnesses", return_value=(assignments, "cross-harness")))
+            stack.enter_context(mock.patch.object(BATCH, "assign_harnesses", return_value=(assignments, "cross-harness", {"families_considered": [], "usable_families": [], "family_exclusions": {}, "capacity": {}, "degradation_cause": ""})))
             stack.enter_context(mock.patch.object(BATCH, "resolve_agent_home", return_value=self.base))
             stack.enter_context(mock.patch.object(BATCH, "resolve_global_registry", return_value=SimpleNamespace(path=self.jobs)))
             stack.enter_context(mock.patch.object(BATCH, "resolve_live_parent_attempt"))
@@ -651,7 +1028,7 @@ class DispatchBatchTest(unittest.TestCase):
         argv[argv.index("--slug-prefix") + 1] = "renamed-display"
         with stack:
             stack.enter_context(mock.patch.object(BATCH, "load_route", return_value=self.route))
-            stack.enter_context(mock.patch.object(BATCH, "assign_harnesses", return_value=(assignments, "cross-harness")))
+            stack.enter_context(mock.patch.object(BATCH, "assign_harnesses", return_value=(assignments, "cross-harness", {"families_considered": [], "usable_families": [], "family_exclusions": {}, "capacity": {}, "degradation_cause": ""})))
             stack.enter_context(mock.patch.object(BATCH, "resolve_agent_home", return_value=self.base))
             stack.enter_context(mock.patch.object(BATCH, "resolve_global_registry", return_value=SimpleNamespace(path=self.jobs)))
             stack.enter_context(mock.patch.object(BATCH, "resolve_live_parent_attempt"))
@@ -705,7 +1082,7 @@ class DispatchBatchTest(unittest.TestCase):
         }), encoding="utf-8")
         with stack:
             stack.enter_context(mock.patch.object(BATCH, "load_route", return_value=self.route))
-            stack.enter_context(mock.patch.object(BATCH, "assign_harnesses", return_value=(assignments, "cross-harness")))
+            stack.enter_context(mock.patch.object(BATCH, "assign_harnesses", return_value=(assignments, "cross-harness", {"families_considered": [], "usable_families": [], "family_exclusions": {}, "capacity": {}, "degradation_cause": ""})))
             stack.enter_context(mock.patch.object(BATCH, "resolve_agent_home", return_value=self.base))
             stack.enter_context(mock.patch.object(BATCH, "resolve_global_registry", return_value=SimpleNamespace(path=self.jobs)))
             stack.enter_context(mock.patch.object(BATCH, "resolve_live_parent_attempt"))
@@ -745,7 +1122,7 @@ class DispatchBatchTest(unittest.TestCase):
 
         with stack:
             stack.enter_context(mock.patch.object(BATCH, "load_route", return_value=self.route))
-            stack.enter_context(mock.patch.object(BATCH, "assign_harnesses", return_value=(assignments, "cross-harness")))
+            stack.enter_context(mock.patch.object(BATCH, "assign_harnesses", return_value=(assignments, "cross-harness", {"families_considered": [], "usable_families": [], "family_exclusions": {}, "capacity": {}, "degradation_cause": ""})))
             stack.enter_context(mock.patch.object(BATCH, "resolve_agent_home", return_value=self.base))
             stack.enter_context(mock.patch.object(BATCH, "resolve_global_registry", return_value=SimpleNamespace(path=self.jobs)))
             stack.enter_context(mock.patch.object(BATCH, "resolve_live_parent_attempt"))
@@ -778,7 +1155,7 @@ class DispatchBatchTest(unittest.TestCase):
         self.write_existing(failed, status="done", note="dead-capacity")
         with stack:
             stack.enter_context(mock.patch.object(BATCH, "load_route", return_value=self.route))
-            stack.enter_context(mock.patch.object(BATCH, "assign_harnesses", return_value=(assignments, "cross-harness")))
+            stack.enter_context(mock.patch.object(BATCH, "assign_harnesses", return_value=(assignments, "cross-harness", {"families_considered": [], "usable_families": [], "family_exclusions": {}, "capacity": {}, "degradation_cause": ""})))
             stack.enter_context(mock.patch.object(BATCH, "resolve_agent_home", return_value=self.base))
             stack.enter_context(mock.patch.object(BATCH, "resolve_global_registry", return_value=SimpleNamespace(path=self.jobs)))
             stack.enter_context(mock.patch.object(BATCH, "resolve_live_parent_attempt"))
@@ -809,7 +1186,7 @@ class DispatchBatchTest(unittest.TestCase):
         with stack:
             stack.enter_context(mock.patch.object(BATCH, "load_route", return_value=self.route))
             stack.enter_context(mock.patch.object(
-                BATCH, "assign_harnesses", return_value=(assignments, "cross-harness")
+                BATCH, "assign_harnesses", return_value=(assignments, "cross-harness", {"families_considered": [], "usable_families": [], "family_exclusions": {}, "capacity": {}, "degradation_cause": ""})
             ))
             stack.enter_context(mock.patch.object(BATCH, "resolve_agent_home", return_value=self.base))
             stack.enter_context(mock.patch.object(
@@ -911,7 +1288,7 @@ class DispatchBatchTest(unittest.TestCase):
 
         with stack:
             stack.enter_context(mock.patch.object(BATCH, "load_route", return_value=self.route))
-            stack.enter_context(mock.patch.object(BATCH, "assign_harnesses", return_value=(assignments, "cross-harness")))
+            stack.enter_context(mock.patch.object(BATCH, "assign_harnesses", return_value=(assignments, "cross-harness", {"families_considered": [], "usable_families": [], "family_exclusions": {}, "capacity": {}, "degradation_cause": ""})))
             stack.enter_context(mock.patch.object(BATCH, "resolve_agent_home", return_value=self.base))
             stack.enter_context(mock.patch.object(BATCH, "resolve_global_registry", return_value=SimpleNamespace(path=self.jobs)))
             stack.enter_context(mock.patch.object(BATCH, "resolve_live_parent_attempt"))

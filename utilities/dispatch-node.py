@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Materialize a registry route node onto existing adapter dispatch wrappers."""
 import argparse, json, os, subprocess, sys
+from collections import namedtuple
 from pathlib import Path
 ROOT=Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "utilities"))
@@ -70,56 +71,118 @@ def _normalized_failure_class(row):
     return row.get("failure_class") or ""
 
 
-def select_checked_tuple(route, node, adapter):
-    """Pick the one supported checked tuple for `adapter` at this node.
+CheckedSelection = namedtuple(
+    "CheckedSelection", ("tuple_row", "candidate", "fallback_hop", "ordinal")
+)
 
-    Walks the node's `fallback_hops` entries in ascending ordinal order,
-    considering only same/cross-harness-headless hops whose candidate
-    `child_harness` equals `adapter`. The first ordinal offering a candidate
-    for this adapter is authoritative; it must be unambiguous, `supported`,
-    and have exactly one matching counterpart in the route's top-level
-    `dispatch_evidence.tuples` (matched on identity + status + probe_source +
-    normalized failure_class; `probe_time` is deliberately excluded).
+
+def candidate_matches_parent(row, parent_identity):
+    """True when a sealed candidate row describes the actual launching parent.
+
+    Mirrors validate_parent_identity's comparison without raising, so a caller
+    can filter on parent identity *before* ordinal selection and still classify
+    an empty result against the unfiltered set.
+
+    `parent_identity is None` is a dispatch-depth-0/manual caller with no
+    exported runtime identity: every row matches, and the foreign-parent shadow
+    documented in resolve_checked_tuple stays reachable by hand on that path.
+    That is deliberate — there is no parent to filter by — and it means this
+    class of defect is contained, not eliminated.
+    """
+    if parent_identity is None:
+        return True
+    return all(row.get(field) == parent_identity.get(field) for field in CURRENT_PARENT_ENV)
+
+
+def resolve_checked_tuple(route, node, adapter, parent_identity=None):
+    """Resolve the one checked tuple for (node, adapter, actual parent).
+
+    Returns CheckedSelection(tuple_row, candidate, fallback_hop, ordinal) so no
+    caller can re-derive the hop/ordinal from a second, divergent walk.
+
+    capability-route.py:_fallback_chain partitions sealed evidence by
+    `child_harness == parent_harness` *per row*, so ordinal 1
+    (same-harness-headless) and ordinal 2 (cross-harness-headless) both hold
+    rows for every sealed parent. Filtering on child_harness alone let a foreign
+    parent's row at ordinal 1 shadow this parent's row at ordinal 2. Parent
+    filtering is therefore a distinct step that runs BEFORE ordinal selection;
+    after it, a given adapter can appear at exactly one ordinal.
+
+    Reason precedence (asserted verbatim by dispatch_node.test.py):
+      * parent-filtered set non-empty  -> walk its ordinals; ambiguous-candidate,
+        candidate-unsupported, no-top-level-counterpart and
+        conflicting-counterparts keep exactly today's meaning;
+      * parent-filtered set empty AND adapter-only set non-empty ->
+        dispatch-evidence-parent-runtime-mismatch, built from the row today's
+        unfiltered walk would have selected, so `mismatch=field:record=…:actual=…`
+        is byte-stable;
+      * adapter has no row at any ordinal ->
+        dispatch-evidence-no-eligible-fallback.
     """
     fallbacks = sorted(
         (f for f in node.get("fallback_hops", []) if f.get("fallback_hop") in FALLBACK_HOPS),
         key=lambda f: f.get("ordinal", 0),
     )
-    for entry in fallbacks:
-        matches = [c for c in entry.get("candidates", []) if c.get("child_harness") == adapter]
-        if not matches:
-            continue
-        if len(matches) > 1:
-            raise DispatchNodeError(
-                "dispatch-evidence-ambiguous-candidate",
-                ordinal=str(entry.get("ordinal")), adapter=adapter,
-            )
-        candidate = matches[0]
-        if candidate.get("status") != "supported":
-            raise DispatchNodeError(
-                "dispatch-evidence-candidate-unsupported",
-                ordinal=str(entry.get("ordinal")), adapter=adapter,
-                status=str(candidate.get("status")),
-            )
-        top_tuples = route.get("dispatch_evidence", {}).get("tuples", [])
-        counterparts = [
-            t for t in top_tuples
-            if all(t.get(f) == candidate.get(f) for f in EVIDENCE_TUPLE_FIELDS)
-            and _normalized_failure_class(t) == _normalized_failure_class(candidate)
-        ]
-        if not counterparts:
-            raise DispatchNodeError(
-                "dispatch-evidence-no-top-level-counterpart",
-                ordinal=str(entry.get("ordinal")), adapter=adapter,
-            )
-        if len(counterparts) > 1:
-            raise DispatchNodeError(
-                "dispatch-evidence-conflicting-counterparts",
-                ordinal=str(entry.get("ordinal")), adapter=adapter,
-                count=str(len(counterparts)),
-            )
-        return counterparts[0]
-    raise DispatchNodeError("dispatch-evidence-no-eligible-fallback", adapter=adapter)
+    adapter_hits = [
+        (entry, [c for c in entry.get("candidates", []) if c.get("child_harness") == adapter])
+        for entry in fallbacks
+    ]
+    adapter_hits = [(entry, rows) for entry, rows in adapter_hits if rows]
+    if not adapter_hits:
+        raise DispatchNodeError("dispatch-evidence-no-eligible-fallback", adapter=adapter)
+    parent_hits = [
+        (entry, [c for c in rows if candidate_matches_parent(c, parent_identity)])
+        for entry, rows in adapter_hits
+    ]
+    parent_hits = [(entry, rows) for entry, rows in parent_hits if rows]
+    if not parent_hits:
+        # Only foreign-parent tuples were sealed for this adapter: the documented
+        # dispatch-depth-0-sealing failure mode (core/OPERATIONS.md §5.10).
+        # Classify against the unfiltered set so the typed reason and its field
+        # format are unchanged. validate_parent_identity always raises here.
+        validate_parent_identity(adapter_hits[0][1][0], parent_identity)
+        raise DispatchNodeError(
+            "dispatch-evidence-parent-runtime-mismatch", adapter=adapter
+        )  # defensive: unreachable
+    entry, matches = parent_hits[0]
+    if len(matches) > 1:
+        raise DispatchNodeError(
+            "dispatch-evidence-ambiguous-candidate",
+            ordinal=str(entry.get("ordinal")), adapter=adapter,
+        )
+    candidate = matches[0]
+    if candidate.get("status") != "supported":
+        raise DispatchNodeError(
+            "dispatch-evidence-candidate-unsupported",
+            ordinal=str(entry.get("ordinal")), adapter=adapter,
+            status=str(candidate.get("status")),
+        )
+    top_tuples = route.get("dispatch_evidence", {}).get("tuples", [])
+    counterparts = [
+        t for t in top_tuples
+        if all(t.get(f) == candidate.get(f) for f in EVIDENCE_TUPLE_FIELDS)
+        and _normalized_failure_class(t) == _normalized_failure_class(candidate)
+    ]
+    if not counterparts:
+        raise DispatchNodeError(
+            "dispatch-evidence-no-top-level-counterpart",
+            ordinal=str(entry.get("ordinal")), adapter=adapter,
+        )
+    if len(counterparts) > 1:
+        raise DispatchNodeError(
+            "dispatch-evidence-conflicting-counterparts",
+            ordinal=str(entry.get("ordinal")), adapter=adapter,
+            count=str(len(counterparts)),
+        )
+    return CheckedSelection(
+        counterparts[0], candidate,
+        str(entry.get("fallback_hop")), int(entry.get("ordinal", 0)),
+    )
+
+
+def select_checked_tuple(route, node, adapter, parent_identity=None):
+    """Backward-compatible view of resolve_checked_tuple: the tuple row only."""
+    return resolve_checked_tuple(route, node, adapter, parent_identity).tuple_row
 
 
 def current_parent_identity(environ=None):
@@ -228,7 +291,11 @@ def bind_dispatch_evidence(route, node, adapter, adapter_args, parent_identity=N
     explicit/record mismatch (or disagreeing duplicate explicit occurrences)
     stops before wrapper invocation via `DispatchNodeError`.
     """
-    tuple_row = select_checked_tuple(route, node, adapter)
+    tuple_row = resolve_checked_tuple(route, node, adapter, parent_identity).tuple_row
+    # Defence in depth: resolve_checked_tuple has already filtered on parent
+    # identity before ordinal selection, so this is now a no-op assertion. Keep
+    # it — it is the last guard if resolve_checked_tuple's filtering is ever
+    # weakened.
     validate_parent_identity(tuple_row, parent_identity)
     record = {flag: str(tuple_row.get(field, "")) for field, flag in EVIDENCE_FLAG_MAP.items()}
     # The failure class is always part of the comparison set, even when the

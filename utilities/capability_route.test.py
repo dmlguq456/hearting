@@ -524,10 +524,15 @@ class TestRoute(unittest.TestCase):
   by_id={n["id"]:n["harness_affinity"] for n in route["nodes"]}
   self.assertEqual(set(by_id),{"frame","frame-alternative","plan","plan-check","execute","impl-review","test","report"})
   for value in by_id.values(): self.assertIn(value,R.VALID_AFFINITY)
-  self.assertEqual(by_id["frame"],"unspecified")
-  self.assertEqual(by_id["plan"],"unspecified")
-  self.assertEqual(by_id["plan-check"],"unspecified")
-  self.assertEqual(by_id["impl-review"],"unspecified")
+  # DD_CONFIG_A leaves these four cells sparse; the shipped
+  # profiles/dispatch-defaults.yaml capability baseline now merges beneath
+  # the user file, so they answer "diverse" instead of "unspecified".
+  self.assertEqual(by_id["frame"],"diverse")
+  self.assertEqual(by_id["plan"],"diverse")
+  self.assertEqual(by_id["plan-check"],"diverse")
+  self.assertEqual(by_id["impl-review"],"diverse")
+  # execute/test/report are explicit user cells in DD_CONFIG_A and stay put —
+  # this is the in-suite proof that a user cell outranks the baseline.
   self.assertEqual(by_id["execute"],"codex")
   self.assertEqual(by_id["test"],"diverse")
   self.assertEqual(by_id["report"],"claude")

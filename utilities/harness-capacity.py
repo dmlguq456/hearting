@@ -121,8 +121,38 @@ def capacity_scores(*, stale_after: int = 3600, now: float | None = None) -> dic
     }
 
 
+ORDERING_NEUTRAL_SCORE = 50.0
+
+
+def ordering_score(scores, harness, neutral=ORDERING_NEUTRAL_SCORE):
+    """Order candidates that checked evidence has ALREADY proven eligible.
+
+    This is deliberately not `rank_band`'s question and must never become a
+    gate. `rank_band` answers *eligibility*: an absent or stale gauge is
+    excluded, hardened after the 2026-08-10 incident in which treating unknown
+    as a neutral 50 redirected owners onto a user-exhausted harness.
+    `ordering_score` answers *ordering among candidates a checked dispatch tuple
+    already authorizes*, so an unknown gauge is neutral rather than
+    disqualifying: OpenCode exposes no proactive gauge by design (see
+    `capacity_scores`) and both primary gauges can be stale, so gating here
+    would fail whole batches instead of ordering them.
+
+    The numeric behaviour is exactly the value this replaces in
+    dispatch-batch.py's assignment score; changing it is a separate,
+    evidence-requiring decision and is out of scope for this repair.
+    """
+    value = scores.get(harness)
+    return float(neutral) if value is None else float(value)
+
+
 def rank_band(candidates, states, counts, declared_order, scores):
-    """Rank eligible quality peers by headroom, then recent attempts and config order."""
+    """Rank eligible quality peers by headroom, then recent attempts and config order.
+
+    Answers *eligibility*, not ordering: see `ordering_score` for the batch's
+    separate ordering-only term over candidates already proven eligible here.
+    Do not harmonise the two — an unknown gauge is exclusion here and neutral
+    there, deliberately.
+    """
     # Automatic recovery needs positive evidence of fresh headroom.  Treating
     # an absent/stale gauge as a neutral 50 silently redirected owners to a
     # user-exhausted harness during the 2026-08-10 incident.

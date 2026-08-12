@@ -59,25 +59,56 @@ if NODE_SPEC is None or NODE_SPEC.loader is None:  # pragma: no cover - install 
 DISPATCH_NODE = importlib.util.module_from_spec(NODE_SPEC)
 NODE_SPEC.loader.exec_module(DISPATCH_NODE)
 
-# All three, in preference order. `candidate()` filters the node's own compiled
-# fallback_hops by child_harness, so an adapter listed here is only ever selected when
-# the route actually sealed a supported candidate for it — this list widens what may be
-# chosen, never what is authorized. OpenCode was absent without a recorded reason while
-# `dispatch-defaults.DISPATCHABLE_HARNESSES` already authorized it as a relief target,
-# and with only two entries the `>= 2 distinct harnesses` rule below had exactly one
-# legal combination, leaving cross-family placement no slack at all.
+# All three, in preference order. `DISPATCH_NODE.resolve_checked_tuple` filters the
+# node's own compiled fallback_hops by child_harness and by the actual launching
+# parent identity, so an adapter listed here is only ever selected when the route
+# actually sealed a supported, this-parent candidate for it — this list widens what
+# may be chosen, never what is authorized. OpenCode was absent without a recorded
+# reason while `dispatch-defaults.DISPATCHABLE_HARNESSES` already authorized it as a
+# relief target, and with only two entries the `>= 2 distinct harnesses` rule below
+# had exactly one legal combination, leaving cross-family placement no slack at all.
 SUPPORTED_BATCH_HARNESSES = ("codex", "claude", "opencode")
 SAFE_SLUG = re.compile(r"[^A-Za-z0-9._-]+")
 RESERVATION_TOKEN = re.compile(r"[0-9a-f]{32}")
 OUTPUT_TAIL_BYTES = 65536
 DEFAULT_PROMPT = "Execute the selected immutable parallel leg and emit its completion evidence."
 
+# Closed degradation vocabulary. An unconstrained free-text reason reproduces
+# the defect one layer down: dispatch_degradation.py clips `reason` to 160
+# characters and enforces nothing.
+DEGRADATION_CAUSES = frozenset({
+    "single-usable-harness-family",   # exactly one usable family for the group
+    "no-usable-harness-family",       # a leg had no usable adapter at all
+})
+# Compact ledger codes: `detail` clips at 512 chars, so full typed reasons do
+# not fit for a three-family group.
+EXCLUSION_CODES = {
+    "dispatch-evidence-no-eligible-fallback": "no-candidate",
+    "dispatch-evidence-candidate-unsupported": "unsupported",
+    "dispatch-evidence-ambiguous-candidate": "ambiguous",
+    "dispatch-evidence-no-top-level-counterpart": "no-counterpart",
+    "dispatch-evidence-conflicting-counterparts": "conflicting-counterparts",
+    "dispatch-evidence-parent-runtime-mismatch": "parent-mismatch",
+}
+
 
 class BatchError(RuntimeError):
-    def __init__(self, reason: str, detail: str = ""):
+    def __init__(
+        self,
+        reason: str,
+        detail: str = "",
+        *,
+        degradation_reason: str | None = None,
+        route_node: str | None = None,
+    ):
         super().__init__(detail or reason)
         self.reason = reason
         self.detail = detail or reason
+        # Set only for the two assign_harnesses raises that used to write a
+        # ledger row themselves. main() persists from these fields, and only
+        # when args.action == "start" -- see _persist_degradation.
+        self.degradation_reason = degradation_reason
+        self.route_node = route_node
 
 
 def fail(reason: str, code: int, **fields: object) -> int:
@@ -149,17 +180,37 @@ def parallel_nodes(route: dict[str, object], group: str) -> list[dict[str, objec
 replica_nodes = parallel_nodes
 
 
-def candidate(node: dict[str, object], adapter: str) -> tuple[str, int] | None:
-    for entry in sorted(node.get("fallback_hops", []), key=lambda row: row.get("ordinal", 0)):
-        if entry.get("fallback_hop") not in DISPATCH_NODE.FALLBACK_HOPS:
-            continue
-        rows = [row for row in entry.get("candidates", []) if row.get("child_harness") == adapter]
-        if not rows:
-            continue
-        if len(rows) == 1 and rows[0].get("status") == "supported":
-            return str(entry["fallback_hop"]), int(entry["ordinal"])
-        return None
-    return None
+def _exclusion_codes(exclusions: dict[str, set[str]], *, exclude: set[str] = frozenset()) -> str:
+    """Render every reason for every excluded adapter, deterministically.
+
+    `next(iter(set_of_str))` picks by string hash, which CPython randomises
+    per process; it also silently drops every reason but one when an adapter
+    carries more than one. Sort both levels instead so the same inputs always
+    render the same string, and no reason is discarded.
+    """
+    return ";".join(
+        f"{adapter}=" + "+".join(EXCLUSION_CODES.get(reason, reason) for reason in sorted(reasons))
+        for adapter, reasons in sorted(exclusions.items())
+        if adapter not in exclude
+    )
+
+
+def _persist_degradation(
+    agent_home: Path,
+    route: dict[str, object],
+    *,
+    route_node: str | None,
+    reason: str,
+    detail: str,
+) -> None:
+    record_degradation(
+        route_id=route.get("route_id"), route_node=route_node,
+        route_hash=route.get("route_hash"), dispatch_depth=2,
+        fallback_hop=None, execution_surface="registered-headless",
+        writer="dispatch-batch.py", kind="degradation",
+        agent_home=agent_home,
+        reason=reason, detail=detail[:512],
+    )
 
 
 def assign_harnesses(
@@ -169,34 +220,84 @@ def assign_harnesses(
     allow_degraded: bool,
     parent_identity: dict[str, str] | None = None,
     jobs: Path | None = None,
-) -> tuple[list[tuple[dict[str, object], str, str, int]], str]:
+) -> tuple[list[tuple[dict[str, object], str, str, int]], str, dict[str, object]]:
+    """Pick a harness per node. Side-effect free: never writes the ledger.
+
+    A caller that wants a durable degradation row persists it itself, using
+    this function's returned diagnostics on success (`degradation_cause`/
+    `degradation_detail`) or a raised BatchError's `degradation_reason`/
+    `route_node`/`detail` on failure -- and only when a real launch is
+    intended (see `_persist_degradation` and its two call sites in `main`).
+    """
     options: list[list[tuple[str, str, int]]] = []
+    exclusions: dict[str, set[str]] = {}
     for node in nodes:
         choices = []
+        # Scoped to this node only, so a later node's failure detail cannot
+        # report an earlier (possibly already-succeeded) node's exclusions as
+        # its own. `exclusions` keeps accumulating across nodes for the
+        # group-level diagnostics/degradation evidence below, which
+        # legitimately wants group-wide reasons.
+        node_exclusions: dict[str, set[str]] = {}
         for adapter in SUPPORTED_BATCH_HARNESSES:
-            selected = candidate(node, adapter)
-            if selected is None:
-                continue
             try:
-                tuple_row = DISPATCH_NODE.select_checked_tuple(route, node, adapter)
-                if parent_identity is not None:
-                    DISPATCH_NODE.validate_parent_identity(tuple_row, parent_identity)
-            except DISPATCH_NODE.DispatchNodeError:
+                selection = DISPATCH_NODE.resolve_checked_tuple(
+                    route, node, adapter, parent_identity=parent_identity
+                )
+            except DISPATCH_NODE.DispatchNodeError as exc:
+                exclusions.setdefault(adapter, set()).add(exc.reason)
+                node_exclusions.setdefault(adapter, set()).add(exc.reason)
                 continue
-            choices.append((adapter, selected[0], selected[1]))
+            choices.append((adapter, selection.fallback_hop, selection.ordinal))
         if not choices:
-            raise BatchError("parallel-headless-unavailable", str(node.get("id", "-")))
+            detail = f"node={node.get('id', '-')}"
+            codes = _exclusion_codes(node_exclusions)
+            if codes:
+                detail += f";{codes}"
+            raise BatchError(
+                "parallel-headless-unavailable", detail,
+                degradation_reason="no-usable-harness-family",
+                route_node=node.get("id"),
+            )
         options.append(choices)
+
+    usable = sorted({adapter for choices in options for adapter, _hop, _ord in choices})
 
     combinations = list(itertools.product(*options))
     distinct = [rows for rows in combinations if len({row[0] for row in rows}) >= 2]
     independence = "cross-harness"
-    if distinct:
+    if len(usable) >= 2:
+        # Group width is >= 2 and every leg holds >= 1 option, so two usable
+        # families always admit a two-family assignment: `not distinct` is
+        # exactly "fewer than two usable compatible harness families". The
+        # blanket --allow-degraded-independence boolean is therefore never
+        # consulted on this branch and cannot downgrade an achievable
+        # cross-harness group.
+        if not distinct:
+            # defensive: unreachable -- the equivalence above guarantees
+            # distinct != [] whenever len(usable) >= 2.
+            raise BatchError(
+                "cross-harness-equivalence-violated",
+                f"usable={','.join(usable)}",
+            )
         combinations = distinct
     elif allow_degraded:
         independence = "degraded-same-harness"
     else:
-        raise BatchError("parallel-cross-harness-unavailable")
+        detail = f"usable={','.join(usable) or '-'}"
+        codes = _exclusion_codes(exclusions, exclude=set(usable))
+        if codes:
+            detail += f";{codes}"
+        raise BatchError(
+            "parallel-cross-harness-unavailable", detail,
+            degradation_reason="single-usable-harness-family",
+        )
+
+    degradation_cause = "" if independence == "cross-harness" else "single-usable-harness-family"
+    if degradation_cause and degradation_cause not in DEGRADATION_CAUSES:
+        # defensive: unreachable -- degradation_cause is only ever assigned
+        # the literal "single-usable-harness-family" two lines above.
+        raise BatchError("degradation-cause-not-in-vocabulary", degradation_cause)
 
     allocation = route.get("dispatch_allocation")
     counts = {harness: 0 for harness in SUPPORTED_BATCH_HARNESSES}
@@ -248,20 +349,35 @@ def assign_harnesses(
             -len({row[0] for row in rows}),
             sum(band_rank(node, row[0]) for node, row in zip(nodes, rows)),
             affinity_misses,
-            -sum(
-                capacity.get(row[0]) if capacity.get(row[0]) is not None else 50
-                for row in rows
-            ),
+            -sum(CAPACITY.ordering_score(capacity, row[0]) for row in rows),
             sum(counts.get(row[0], 0) for row in rows),
             sum(row[2] for row in rows),
             tuple(order.get(row[0], len(order)) for row in rows),
         )
 
+    diagnostics = {
+        "families_considered": list(SUPPORTED_BATCH_HARNESSES),
+        "usable_families": usable,
+        "family_exclusions": {
+            adapter: sorted(reasons)
+            for adapter, reasons in sorted(exclusions.items())
+            if adapter not in usable
+        },
+        "capacity": {h: capacity.get(h) for h in SUPPORTED_BATCH_HARNESSES},
+        "degradation_cause": degradation_cause,
+    }
+    if degradation_cause:
+        detail = f"usable={','.join(usable) or '-'}"
+        codes = _exclusion_codes(exclusions, exclude=set(usable))
+        if codes:
+            detail += f";{codes}"
+        diagnostics["degradation_detail"] = detail[:512]
+
     chosen = min(combinations, key=score)
     return [
         (node, adapter, hop, ordinal)
         for node, (adapter, hop, ordinal) in zip(nodes, chosen)
-    ], independence
+    ], independence, diagnostics
 
 
 def stable_attempt_id(
@@ -764,6 +880,7 @@ def batch_receipt(
     results: list[dict[str, object]],
     admitted: int,
     interrupted_signal: int = 0,
+    selection_diagnostics: dict[str, object] | None = None,
 ) -> tuple[dict[str, object], bool]:
     order = {str(leg["attempt_id"]): index for index, leg in enumerate(legs)}
     results.sort(key=lambda leg: order[str(leg["attempt_id"])])
@@ -800,6 +917,8 @@ def batch_receipt(
         "existing": existing_count,
         "legs": results,
     }
+    if selection_diagnostics is not None:
+        receipt["selection_diagnostics"] = selection_diagnostics
     if interrupted_signal:
         receipt["signal"] = interrupted_signal
     return receipt, success
@@ -852,6 +971,8 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("one of --parallel-group or --replica-group is required")
     args.replica_group = args.parallel_group
 
+    agent_home = None
+    route: dict[str, object] = {}
     try:
         route_path = args.route.resolve()
         route = load_route(route_path)
@@ -866,13 +987,22 @@ def main(argv: list[str] | None = None) -> int:
             2,
             args.action,
         ).path
-        assignments, independence = assign_harnesses(
+        assignments, independence, diagnostics = assign_harnesses(
             route,
             nodes,
             allow_degraded=args.allow_degraded_independence,
             parent_identity=parent_identity,
             jobs=jobs,
         )
+        if args.action == "start" and diagnostics.get("degradation_cause"):
+            # A preview (dry-run/register) must never write a durable row for
+            # a group that never launched -- assign_harnesses no longer
+            # writes at all; only a real start persists, and only here.
+            _persist_degradation(
+                agent_home, route, route_node=None,
+                reason=diagnostics["degradation_cause"],
+                detail=diagnostics.get("degradation_detail", ""),
+            )
         self_slug = os.environ.get("AGENT_DISPATCH_SELF_SLUG", "")
         parent_attempt = os.environ.get("AGENT_DISPATCH_ATTEMPT_ID", "")
         if not self_slug or args.parent != self_slug or not parent_attempt:
@@ -904,6 +1034,12 @@ def main(argv: list[str] | None = None) -> int:
     ) as exc:
         reason = getattr(exc, "reason", "batch-validation-failed")
         detail = getattr(exc, "detail", str(exc))
+        degradation_reason = getattr(exc, "degradation_reason", None)
+        if degradation_reason and args.action == "start" and agent_home is not None:
+            _persist_degradation(
+                agent_home, route, route_node=getattr(exc, "route_node", None),
+                reason=degradation_reason, detail=detail,
+            )
         return fail(reason, 78 if reason in PRELAUNCH_PROCESS_BLOCK_REASONS else 65, detail=detail)
 
     lifecycle = select_launch_lifecycle()
@@ -915,6 +1051,9 @@ def main(argv: list[str] | None = None) -> int:
         realized_axes.append("model-profile")
     if len({str(node.get("perspective")) for node, _, _, _ in assignments}) == len(nodes):
         realized_axes.append("perspective")
+    diagnostics["independence_axis_delta"] = [
+        axis for axis in required_axes if axis not in realized_axes
+    ]
     degradation_reason = (
         "" if independence == "cross-harness"
         else "cross-harness-unavailable-user-allowed"
@@ -987,6 +1126,7 @@ def main(argv: list[str] | None = None) -> int:
             "degradation_reason": degradation_reason,
             "launch_lifecycle": lifecycle,
             "legs": legs,
+            "selection_diagnostics": diagnostics,
         }, separators=(",", ":"), sort_keys=True))
         return 0
 
@@ -1046,6 +1186,7 @@ def main(argv: list[str] | None = None) -> int:
             legs=legs,
             results=results,
             admitted=0,
+            selection_diagnostics=diagnostics,
         )
         receipt["degradation_ledger"] = _record_failed_legs(route, results, agent_home) or "-"
         print(json.dumps(receipt, separators=(",", ":"), sort_keys=True))
@@ -1248,6 +1389,7 @@ def main(argv: list[str] | None = None) -> int:
         results=results,
         admitted=len(tokens),
         interrupted_signal=interrupted_signal,
+        selection_diagnostics=diagnostics,
     )
     receipt["degradation_ledger"] = _record_failed_legs(route, results, agent_home) or "-"
     print(json.dumps(receipt, separators=(",", ":"), sort_keys=True))

@@ -53,9 +53,12 @@ out=$(route --stage report); assert "$out" 'trace.1=explicit=none;family=none;el
 # Configured value is honored for an addressable, populated cell.
 out=$(route --capability autopilot-code --stage execute); assert "$out" 'adapter=codex'
 
-# Omitted cell (plan is not in the fixture) stays neutral/discretionary and
-# falls through to the existing stage-name heuristic.
-out=$(route --capability autopilot-code --stage plan); assert "$out" 'adapter=codex'; assert "$out" 'role=deep maker'
+# Omitted cell (plan is not in the fixture) no longer falls through to the
+# stage-name heuristic: it inherits the shipped profiles/dispatch-defaults.yaml
+# capability baseline's "diverse" cell for autopilot-code.plan, which under
+# this schema-v1 fixture (config-order allocation, no maker family) resolves
+# to the bias default.
+out=$(route --capability autopilot-code --stage plan); assert "$out" 'adapter=claude'; assert "$out" 'role=deep maker'
 
 # Configured "diverse" resolves against maker family, same as the built-in
 # diverse heuristic.
