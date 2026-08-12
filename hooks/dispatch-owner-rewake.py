@@ -15,6 +15,9 @@ import sys
 import time
 from typing import Any
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "utilities"))
+from dispatch_contract import resolve_agent_home as _resolve_agent_home  # noqa: E402
+
 
 ATTEMPT = re.compile(r"att-[A-Za-z0-9._-]{1,240}\Z")
 DEFAULT_INTERVAL_SECONDS = 20
@@ -228,12 +231,7 @@ def registry_launch(payload: object) -> Launch | None:
 
 
 def agent_home() -> Path:
-    configured = os.environ.get("AGENT_HOME")
-    if configured:
-        candidate = Path(configured).expanduser()
-        if (candidate / "core" / "CORE.md").is_file():
-            return candidate.resolve()
-    return Path(__file__).resolve().parents[1]
+    return _resolve_agent_home()
 
 
 def _bounded_number(name: str, default: int, minimum: int, maximum: int) -> int:

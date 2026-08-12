@@ -35,6 +35,9 @@ from typing import Any, Iterable, NamedTuple
 
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "utilities"))
+from dispatch_contract import resolve_agent_home as _resolve_agent_home  # noqa: E402
+
 STATE_DIR_NAME = ".route-grounding"
 MARKER_SCHEMA = 1
 MAX_MARKERS = 512
@@ -131,15 +134,23 @@ def _run(command: list[str], *, cwd: Path | None = None) -> subprocess.Completed
 
 
 def resolve_agent_home(explicit: str | None = None) -> Path:
-    for candidate in (explicit, os.environ.get("AGENT_HOME")):
-        if candidate and (Path(candidate) / "core" / "CORE.md").is_file():
-            return Path(candidate).resolve()
+    # Delegates to the one canonical resolver (utilities/dispatch_contract.py)
+    # so bind (this hook) and check (artifact-guard.sh -> this hook) land on
+    # the same root as every other consumer instead of each recomputing its
+    # own fallback (I-6). `explicit` and a shell-level last resort are kept
+    # for callers that supply an override or run where the python resolver
+    # itself cannot be reached.
+    if explicit and (Path(explicit) / "core" / "CORE.md").is_file():
+        return Path(explicit)
+    home = _resolve_agent_home()
+    if home != ROOT:
+        return home
     resolver = ROOT / "utilities" / "agent-home.sh"
     try:
         result = _run([str(resolver)])
         candidate = Path(result.stdout.strip())
         if result.returncode == 0 and (candidate / "core" / "CORE.md").is_file():
-            return candidate.resolve()
+            return candidate
     except (OSError, subprocess.SubprocessError):
         pass
     return ROOT

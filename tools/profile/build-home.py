@@ -34,12 +34,15 @@ BOOTSTRAP_FILENAME = {"claude": "CLAUDE.md", "codex": "AGENTS.md"}
 
 
 def resolve_agent_home():
-    """Env-first, else marker-walk up from this file's location.
+    """Env-first, else the canonical resolver, else marker-walk.
 
     Must work byte-identically from both the repo copy (tools/profile/) and
-    the concrete adapter mirror (adapters/claude/tools/profile/) — a fixed
-    parents[N] index cannot serve both depths, so this walks upward looking
-    for the core/CORE.md marker rather than assuming a fixed depth.
+    the concrete adapter mirror (adapters/claude/tools/profile/) — this file
+    is itself a symlink into the canonical tree, so `Path(__file__).resolve()`
+    always lands at the same physical location regardless of invocation path,
+    letting the canonical `utilities/dispatch_contract.py` be imported
+    directly. Marker-walk remains the fallback for the (unsupported today)
+    case where that import cannot succeed.
     """
     env_home = os.environ.get("AGENT_HOME")
     if env_home:
@@ -47,6 +50,14 @@ def resolve_agent_home():
         if (candidate / "core" / "CORE.md").is_file():
             return candidate.resolve()
     here = Path(__file__).resolve()
+    utilities_dir = here.parents[1].parent / "utilities"
+    if (utilities_dir / "dispatch_contract.py").is_file():
+        sys.path.insert(0, str(utilities_dir))
+        from dispatch_contract import resolve_agent_home as _resolve_agent_home
+
+        resolved = _resolve_agent_home()
+        if (resolved / "core" / "CORE.md").is_file():
+            return resolved
     for candidate in here.parents:
         if (candidate / "core" / "CORE.md").is_file():
             return candidate

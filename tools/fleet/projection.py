@@ -10,7 +10,9 @@ from __future__ import annotations
 import glob
 import os
 import re
+import sys
 import time
+from pathlib import Path
 from typing import Iterable, Optional
 
 from .model import (
@@ -346,16 +348,23 @@ def _has_entries(path):
 
 
 def _grounding_home():
-    """Agent home holding `.spec-grounding/`. Reproduces `route._completion_home`
-    (AGENT_HOME -> CLAUDE_HOME -> $HOME/hearting -> legacy $HOME/agent_setting -> ~/.claude) rather
-    than importing it: projection.py has no route dependency for this lookup and
-    one four-line resolver is cheaper than inverting that edge."""
+    """Agent home holding `.spec-grounding/`. Delegates to the one canonical
+    resolver (utilities/dispatch_contract.resolve_agent_home) instead of a
+    local reimplementation, matching `route._completion_home`. An explicit
+    `AGENT_HOME`/`CLAUDE_HOME` env override is honored unconditionally; only
+    the unset-env fallback chain goes through the validated resolver."""
     h = os.environ.get("AGENT_HOME") or os.environ.get("CLAUDE_HOME")
     if h:
         return h
-    for cand in (os.path.expanduser("~/hearting"), os.path.expanduser("~/agent_setting")):
-        if os.path.isdir(cand):
-            return cand
+    here = Path(__file__).resolve()
+    for candidate in here.parents:
+        utilities_dir = candidate / "utilities"
+        if (utilities_dir / "dispatch_contract.py").is_file():
+            if str(utilities_dir) not in sys.path:
+                sys.path.insert(0, str(utilities_dir))
+            from dispatch_contract import resolve_agent_home
+
+            return str(resolve_agent_home())
     return os.path.expanduser("~/.claude")
 
 

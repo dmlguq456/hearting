@@ -4,7 +4,12 @@ import fcntl
 import hashlib
 import json
 import os
+import sys
 import time
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from dispatch_contract import resolve_agent_home as _resolve_agent_home  # noqa: E402
 
 _KINDS = {"degradation", "chain-exhausted", "leg-failure"}
 _HOPS = {"same-harness-headless", "cross-harness-headless", "native-subagent", "inline"}
@@ -12,7 +17,7 @@ _SURFACES = {"registered-headless", "codex-native-subagent", "claude-subagent", 
 _OPTIONAL = {"fallback_ordinal", "fleet_visibility", "reason", "detail", "registered_worker", "capability", "completion_gate", "route_file", "parent", "parent_attempt_id", "parent_pid", "parent_pid_start", "harness", "attempt_trace", "prior_attempt_ids", "last_direct_failure", "child_proof", "parallel_group", "parallel_leg_index", "parallel_leg_count", "attempt_id", "exit_code", "launch_state", "event_id"}
 
 def _home():
-    return os.environ.get("AGENT_HOME") or os.environ.get("CLAUDE_HOME") or os.path.expanduser("~/.claude")
+    return str(_resolve_agent_home())
 
 def _clip(value, limit):
     if value is None:

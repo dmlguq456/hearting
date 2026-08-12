@@ -251,7 +251,7 @@ case "$cmd" in
   material-route)
     [ "$#" -ge 2 ] || { echo "opencode preflight: material-route requires an action" >&2; exit 64; }
     shift
-    exec python3 "$ROOT/hooks/material-route-guard.py" --agent-home "$ROOT" "$@"
+    exec python3 "$ROOT/hooks/material-route-guard.py" --agent-home "$AGENT_ROOT" "$@"
     ;;
   worktree-path)
     shift

@@ -16,6 +16,7 @@ ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "utilities"))
 from dispatch_contract import anchored_capacity_failure  # noqa: E402
+from dispatch_contract import resolve_agent_home as _resolve_agent_home  # noqa: E402
 from tools.fleet.model import (  # noqa: E402
     ATTEMPT_CLASSIFIER_SOURCE,
     classify_attempt_evidence,
@@ -327,10 +328,9 @@ def main(argv: list[str]) -> int:
 
 
 def resolve_agent_home() -> Path:
-    env_home = os.environ.get("AGENT_HOME")
-    if env_home and (Path(env_home) / "core" / "CORE.md").is_file():
-        return Path(env_home)
-    return ROOT
+    return _resolve_agent_home(
+        runtime_pointer=Path.home() / ".config" / "opencode" / "hearting"
+    )
 
 
 if __name__ == "__main__":

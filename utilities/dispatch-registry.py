@@ -1118,7 +1118,7 @@ def main(argv):
     p.add_argument("--pid", type=int); p.add_argument("--pid-start"); p.add_argument("--pid-scope")
     p.add_argument("--cascade-grace", type=float, default=2.0, help=argparse.SUPPRESS)
     p.add_argument("--cascade-kill-wait", type=float, default=1.0, help=argparse.SUPPRESS)
-    args = p.parse_args(argv[1:]); args.agent_home = (args.agent_home or resolve_agent_home()).resolve()
+    args = p.parse_args(argv[1:]); args.agent_home = args.agent_home or resolve_agent_home()
     if args.cascade_grace < 0 or args.cascade_kill_wait < 0:
         print("check=failed\nreason=invalid-cascade-timeout"); return 64
     if args.operation == "attempt-state":

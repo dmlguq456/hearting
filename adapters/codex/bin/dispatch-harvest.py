@@ -19,6 +19,7 @@ from dispatch_contract import (  # noqa: E402
     close_attempt_row,
     parse_registry_metadata,
     reconcile_local_registry,
+    resolve_agent_home as _resolve_agent_home,
     validate_attempt_metadata,
 )
 from codex_dispatch_terminal import inspect_terminal_attempt  # noqa: E402
@@ -90,10 +91,7 @@ def matches(args: argparse.Namespace, fields: list[str]) -> bool:
 
 
 def resolve_agent_home() -> Path:
-    env_home = os.environ.get("AGENT_HOME")
-    if env_home and (Path(env_home) / "core" / "CORE.md").is_file():
-        return Path(env_home)
-    return ROOT
+    return _resolve_agent_home(runtime_pointer=Path.home() / ".codex" / "hearting")
 
 
 def _complete_exact_routed_attempt(jobs: Path, metadata: dict[str, str], completion: Path) -> None:

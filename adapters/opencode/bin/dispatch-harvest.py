@@ -14,6 +14,7 @@ ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT / "utilities"))
 from dispatch_contract import (DispatchContractError, close_attempt_row,
                                parse_registry_metadata, reconcile_local_registry,
+                               resolve_agent_home as _resolve_agent_home,
                                validate_attempt_metadata)  # noqa: E402
 from dispatch_completion_join import route_completion_evidence  # noqa: E402
 _route_spec = importlib.util.spec_from_file_location(
@@ -73,10 +74,9 @@ def matches(args: argparse.Namespace, fields: list[str]) -> bool:
 
 
 def resolve_agent_home() -> Path:
-    env_home = os.environ.get("AGENT_HOME")
-    if env_home and (Path(env_home) / "core" / "CORE.md").is_file():
-        return Path(env_home)
-    return ROOT
+    return _resolve_agent_home(
+        runtime_pointer=Path.home() / ".config" / "opencode" / "hearting"
+    )
 
 
 def _complete_exact_routed_attempt(jobs: Path, metadata: dict[str, str], completion: Path) -> None:

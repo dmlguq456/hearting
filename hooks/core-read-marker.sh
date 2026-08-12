@@ -3,7 +3,7 @@
 # Portable CLI: core-read-marker.sh --file <core-doc.md> [--session <id>] [--agent-home <dir>]
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-AGENT_HOME="${AGENT_HOME:-$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)}"
+AGENT_HOME="${AGENT_HOME:-$("$SCRIPT_DIR/../utilities/agent-home.sh")}"
 
 usage() {
   cat <<'EOF'

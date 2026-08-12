@@ -43,6 +43,7 @@ from dispatch_contract import (  # noqa: E402
     parse_registry_metadata,
     parent_attempt_binding_is_live,
     resolve_global_registry,
+    resolve_agent_home as _resolve_agent_home,
     resolve_live_parent_attempt,
     resolve_model_governor_root,
     replica_batch_expectation,
@@ -1255,26 +1256,14 @@ def watch_early_death(
 
 
 def resolve_agent_home() -> Path:
-    # Mirror utilities/agent-home.sh preference order so the wrapper (writer of
-    # jobs.log) and the shell readers (dispatch-liveness / dispatch-wait / the
-    # conductor Stop gate) agree on ONE registry root. When AGENT_HOME is unset,
-    # falling straight back to ROOT (=worktree) split the registry: the wrapper
-    # wrote jobs.log under the worktree while the readers looked under
-    # $HOME/hearting/.dispatch — so the liveness/Stop layer never saw the
-    # rows the wrapper appended (SD-14b② registry gap).
-    def _valid(p):
-        return bool(p) and (Path(p) / "core" / "CORE.md").is_file()
-
-    for cand in (
-        os.environ.get("AGENT_HOME"),
-        os.environ.get("CLAUDE_HOME"),
-        str(Path.home() / "hearting"),
-        str(Path.home() / "agent_setting"),
-        str(Path.home() / ".claude"),
-    ):
-        if _valid(cand):
-            return Path(cand)
-    return ROOT
+    # Delegates to the one canonical resolver (utilities/dispatch_contract.py)
+    # so this wrapper (writer of jobs.log) and every other consumer -- shell
+    # readers (dispatch-liveness / dispatch-wait / the conductor Stop gate),
+    # guard hooks, fleet -- agree on ONE root. The prior local reimplementation
+    # fell back to ROOT (=worktree) and skipped the XDG `current` pointer,
+    # which could split the registry from the agent-home-relative readers
+    # (SD-14b② registry gap).
+    return _resolve_agent_home()
 
 
 def build_home_gate(agent_home: Path, profile: str, extra: list[str], reason: str) -> int:
@@ -1856,6 +1845,7 @@ def main(argv: list[str]) -> int:
             "AGENT_ROUTE_NODE": args.route_node or "",
             "AGENT_MODEL_GOVERNOR_ROOT": str(governor_root),
             GOVERNOR_RESERVATION_ENV: reservation_token,
+            "AGENT_HOME": str(args.agent_home),
             "AGENT_DISPATCH_JOBS": str(jobs),
             "AGENT_DISPATCH_CURRENT_HARNESS": "claude",
             "AGENT_DISPATCH_CURRENT_TRANSPORT": "headless",

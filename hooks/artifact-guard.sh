@@ -110,7 +110,7 @@ cr=$canonical
 # snapshot exemption so scratch output cannot become retroactive authority
 # after a standard+ headless route failed.
 if ! python3 "$SCRIPT_DIR/material-route-guard.py" \
-  --agent-home "${AGENT_HOME:-$SCRIPT_DIR/..}" check \
+  check \
   --tool ArtifactWrite --file "$fp" --cwd "$root" \
   --session "${sid:-artifact-guard}"; then
   route_failure "capability-artifact-route-required"

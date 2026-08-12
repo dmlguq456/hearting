@@ -12,11 +12,11 @@ if [ "${AGENT_HOME:-}" ]; then
   printf '%s\n' "$AGENT_HOME"
 elif [ "${CLAUDE_HOME:-}" ]; then
   printf '%s\n' "$CLAUDE_HOME"
-elif [ -d "${XDG_DATA_HOME:-$HOME/.local/share}/hearting/current" ]; then
+elif [ -f "${XDG_DATA_HOME:-$HOME/.local/share}/hearting/current/core/CORE.md" ]; then
   printf '%s\n' "${XDG_DATA_HOME:-$HOME/.local/share}/hearting/current"
-elif [ -d "$HOME/hearting" ]; then
+elif [ -f "$HOME/hearting/core/CORE.md" ]; then
   printf '%s\n' "$HOME/hearting"
-elif [ -d "$HOME/agent_setting" ]; then
+elif [ -f "$HOME/agent_setting/core/CORE.md" ]; then
   printf '%s\n' "$HOME/agent_setting"
 else
   printf '%s\n' "$HOME/.claude"

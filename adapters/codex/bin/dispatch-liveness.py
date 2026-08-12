@@ -20,6 +20,7 @@ from dispatch_contract import (  # noqa: E402
     observed_attempt_liveness,
     process_start_ticks,
     process_state,
+    resolve_agent_home as _resolve_agent_home,
 )
 from codex_dispatch_terminal import (  # noqa: E402
     inspect_terminal_attempt,
@@ -512,10 +513,7 @@ def main(argv: list[str]) -> int:
 
 
 def resolve_agent_home() -> Path:
-    env_home = os.environ.get("AGENT_HOME")
-    if env_home and (Path(env_home) / "core" / "CORE.md").is_file():
-        return Path(env_home)
-    return ROOT
+    return _resolve_agent_home(runtime_pointer=Path.home() / ".codex" / "hearting")
 
 
 if __name__ == "__main__":

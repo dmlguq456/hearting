@@ -260,33 +260,63 @@ def anchored_capacity_failure(text: str) -> bool:
     return False
 
 
-def resolve_agent_home() -> Path:
-    """Validated AGENT_HOME resolution shared by writers and readers of
-    dispatch state that must agree on one root (jobs.log, completion markers).
+def resolve_agent_home(runtime_pointer: str | Path | None = None) -> Path:
+    """Validated AGENT_HOME (source root) resolution shared by every consumer
+    that must agree on where the packaged/versioned agent installation lives.
+
+    This function resolves only the **source root** -- the immutable,
+    versioned code checkout. It is not responsible for dispatch state
+    (jobs.log, completion markers, logs, ...); that is
+    `resolve_dispatch_state_root()`'s job, derived from the canonical
+    registry path, not from this function's return value.
 
     Mirrors adapters/claude/bin/dispatch-headless.py:546-558's preference
     order. A naive `os.environ.get("AGENT_HOME", ROOT)` falls back to the
     caller's own worktree when AGENT_HOME is unset, which previously split
-    the global registry between the wrapper (writer, worktree-relative) and
-    the liveness/Stop readers (agent-home-relative) -- SD-14b(2). Every
-    consumer that must land in the SAME directory as another process has to
-    go through this one function, not re-derive its own fallback.
+    consumers between the wrapper (writer, worktree-relative) and the
+    liveness/Stop readers (agent-home-relative) -- SD-14b(2). Every consumer
+    that must land in the SAME directory as another process has to go
+    through this one function, not re-derive its own fallback.
+
+    `runtime_pointer` is an optional caller-supplied candidate (not a new env
+    var) inserted between `CLAUDE_HOME` and the XDG `current` pointer, so a
+    runtime with its own bundle/pointer convention (codex `~/.codex/hearting`,
+    opencode `~/.config/opencode/hearting`) can prioritize it without forking
+    this function.
     """
 
     def _valid(candidate: str | None) -> bool:
         return bool(candidate) and (Path(candidate) / "core" / "CORE.md").is_file()
 
-    for candidate in (
+    candidates = [
         os.environ.get("AGENT_HOME"),
         os.environ.get("CLAUDE_HOME"),
-        str(Path.home() / ".local" / "share" / "hearting" / "current"),
-        str(Path.home() / "hearting"),
-        str(Path.home() / "agent_setting"),
-        str(Path.home() / ".claude"),
-    ):
+    ]
+    if runtime_pointer is not None:
+        candidates.append(str(runtime_pointer))
+    candidates.extend(
+        [
+            str(Path.home() / ".local" / "share" / "hearting" / "current"),
+            str(Path.home() / "hearting"),
+            str(Path.home() / "agent_setting"),
+            str(Path.home() / ".claude"),
+        ]
+    )
+    for candidate in candidates:
         if _valid(candidate):
             return Path(candidate)
     return _MODULE_ROOT
+
+
+def agent_home_equivalent(a: str | Path, b: str | Path) -> bool:
+    """Compare two agent-home candidates by resolved identity.
+
+    Stored/compared state paths must keep pointer form (no `.resolve()`); use
+    this helper only at comparison sites, never to normalize a path before
+    writing or persisting it.
+    """
+
+    return Path(a).resolve(strict=False) == Path(b).resolve(strict=False)
 
 
 def resolve_model_governor_root(

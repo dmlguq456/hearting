@@ -7,9 +7,13 @@ import fcntl
 import hashlib
 import json
 import os
+import sys
 import tempfile
 import time
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from dispatch_contract import resolve_agent_home as _resolve_agent_home  # noqa: E402
 
 INDEX_SCHEMA = 1
 REGISTRY_SCHEMA = 1
@@ -17,16 +21,8 @@ IDENTITY_KEYS = ("pid", "starttime", "command_hash")
 
 
 def agent_home() -> Path:
-    configured = os.environ.get("AGENT_HOME")
-    if configured:
-        candidate = Path(configured).expanduser().resolve(strict=False)
-        if (candidate / "core" / "CORE.md").is_file():
-            return candidate
     codex_home = Path(os.environ.get("CODEX_HOME", Path.home() / ".codex"))
-    installed = (codex_home / "hearting").expanduser().resolve(strict=False)
-    if (installed / "core" / "CORE.md").is_file():
-        return installed
-    return Path(__file__).resolve().parents[1]
+    return _resolve_agent_home(runtime_pointer=codex_home / "hearting")
 
 
 def default_index_path() -> Path:

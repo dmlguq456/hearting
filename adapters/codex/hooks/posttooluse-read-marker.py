@@ -15,6 +15,12 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parents[3]
 PREFLIGHT = ROOT / "adapters" / "codex" / "bin" / "preflight.sh"
+sys.path.insert(0, str(ROOT / "utilities"))
+from dispatch_contract import resolve_agent_home as _resolve_agent_home  # noqa: E402
+
+
+def _agent_home() -> Path:
+    return _resolve_agent_home(runtime_pointer=Path.home() / ".codex" / "hearting")
 
 
 def first_string(mapping: dict[str, Any], *keys: str) -> str:
@@ -143,7 +149,7 @@ def bind_material_route(payload: dict[str, Any], session_id: str) -> None:
         return
     effective_cwd = invocations[0].effective_cwd
     env = os.environ.copy()
-    env.setdefault("AGENT_HOME", str(ROOT))
+    env.setdefault("AGENT_HOME", str(_agent_home()))
     subprocess.run(
         [str(PREFLIGHT), "material-route", "bind", "--route", str(outputs[0]),
          "--cwd", str(effective_cwd), "--session", session_id],
@@ -169,7 +175,7 @@ def main() -> int:
     if not file:
         return 0
     env = os.environ.copy()
-    env.setdefault("AGENT_HOME", str(ROOT))
+    env.setdefault("AGENT_HOME", str(_agent_home()))
     result = subprocess.run(
         [str(PREFLIGHT), "read", file, session_id],
         cwd=str(ROOT),

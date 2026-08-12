@@ -43,6 +43,7 @@ from dispatch_contract import (  # noqa: E402
     parent_attempt_binding_is_live,
     parse_registry_metadata,
     resolve_global_registry,
+    resolve_agent_home as _resolve_agent_home,
     resolve_live_parent_attempt,
     resolve_model_governor_root,
     replica_batch_expectation,
@@ -954,13 +955,13 @@ def watch_early_death(
 
 
 def resolve_agent_home() -> Path:
-    env_home = os.environ.get("AGENT_HOME")
-    if env_home and (Path(env_home) / "core" / "CORE.md").is_file():
-        return Path(env_home)
-    for maintainer_home in (Path.home() / "hearting", Path.home() / "agent_setting"):
-        if (maintainer_home / "core" / "CORE.md").is_file():
-            return maintainer_home
-    return ROOT
+    # Delegates to the one canonical resolver, passing this runtime's bundle
+    # pointer (~/.config/opencode/hearting) so opencode's deliberate
+    # bundle-first priority is preserved without forking the resolver's
+    # fallback chain.
+    return _resolve_agent_home(
+        runtime_pointer=Path.home() / ".config" / "opencode" / "hearting"
+    )
 
 
 def check_runtime_projection(worktree: str) -> int:
@@ -1498,6 +1499,7 @@ def main(argv: list[str]) -> int:
             "AGENT_ROUTE_NODE": args.route_node or "",
             "AGENT_MODEL_GOVERNOR_ROOT": str(governor_root),
             GOVERNOR_RESERVATION_ENV: reservation_token,
+            "AGENT_HOME": str(args.agent_home),
             "AGENT_DISPATCH_JOBS": str(jobs),
             "AGENT_DISPATCH_CURRENT_HARNESS": "opencode",
             "AGENT_DISPATCH_CURRENT_TRANSPORT": "headless",
