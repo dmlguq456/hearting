@@ -354,16 +354,13 @@ def main():
         "--home-root",
         metavar="DIR",
         default=None,
-        help="override the instance home root (default: $AGENT_HOME/.dispatch/homes/)",
+        help="override the instance home root (default: canonical dispatch state root/homes/)",
     )
     args = parser.parse_args()
 
     agent_home = resolve_agent_home()
-    # Shared-home-root contract: the profile home lands under <AGENT_HOME>/.dispatch/homes/,
-    # and the readers (fleet _proj_home(), utilities/dispatch-liveness.sh via agent-home.sh)
-    # must resolve the SAME root to find the isolated transcript. Profile dispatch therefore
-    # presumes a consistent AGENT_HOME across writer (wrapper) and readers; with AGENT_HOME
-    # unset the reader fallbacks diverge and profile jobs read as false-DEAD (see plan Risks).
+    # Profile homes are mutable dispatch state. Writers and readers derive the
+    # same root from AGENT_DISPATCH_JOBS; AGENT_HOME remains immutable source.
     home_root = Path(args.home_root) if args.home_root else resolve_dispatch_state_root(agent_home) / "homes"
 
     if args.check:

@@ -12,6 +12,9 @@ bad() { printf 'FAIL - %s\n' "$1"; fails=$((fails + 1)); }
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 AH="$tmp/agent_setting"; mkdir -p "$AH/.dispatch" "$AH/core"; : > "$AH/core/CORE.md"
 jobs="$AH/.dispatch/jobs.log"
+# Hermetic fixture: a managed parent may export a real registry, but this
+# test intentionally exercises AGENT_HOME's legacy fallback.
+unset AGENT_DISPATCH_JOBS
 now_iso=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 old_iso=$(date -u -d '10 hours ago' +%Y-%m-%dT%H:%M:%SZ)
 # SD-16e: reset 값을 실행 시각에 비의존이 되도록 now 상대로 동적 산출한다.

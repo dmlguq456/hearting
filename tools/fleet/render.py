@@ -2617,9 +2617,8 @@ def _select_entry_job(j, line_idx):
             "cwd": j.cwd, "slug": j.slug,
             "label": j.slug or j.key, "harness": j.harness, "source": j.source,
             "is_worker": bool(getattr(j, "is_child", False))}
-_FOLD_CHILD_LIVENESS = {"done", "queued", "idle", "unknown"}   # F-15b P0-2: dispatch-depth-2 stage-worker
-                                                                # rows folded into the conductor
-                                                                # breadcrumb unless working/stale/dead
+_FOLD_CHILD_LIVENESS = {"done"}   # Completed depth-2 rows fold into the owner breadcrumb.
+                                  # Queued/idle/unknown remain visible execution identities.
 
 # F-29 (v9, prd.md:290-295) — sub-agent observation rows. `⚡` is the PRD-specified glyph.
 # Reads distinctly from dispatch's `🚀`/`↳` so the two nested-row kinds never visually merge.
@@ -4431,10 +4430,9 @@ def _build_lines(sessions, jobs, section, narrow, malformed, layout="wide", memo
                 lines.extend(_subagent_strip(
                     shown_job_subs, depth=max(1, int(getattr(job, "depth", 1) or 1))))
             for sub in _sort_group_jobs(job_children.get(job.slug, [])):
-                # F-15b P0-2: a dispatch-depth-2 stage worker that is done/queued/idle is already
-                # absorbed into the conductor's own breadcrumb (✓/dim future segment) — only
-                # working (active) or stale/dead (failed, needs to be seen) children get their
-                # own row. `_SHOW_ALL` (the existing `a`-key toggle) restores the folded ones.
+                # F-15b P0-2: only a completed stage is absorbed into the
+                # conductor breadcrumb. A registered queued/idle/unknown child
+                # is still execution identity and must keep its own row.
                 if (max(1, int(getattr(sub, "depth", 1) or 1)) >= 2 and not _SHOW_ALL
                         and sub.liveness in _FOLD_CHILD_LIVENESS):
                     continue

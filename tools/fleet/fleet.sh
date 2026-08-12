@@ -15,6 +15,12 @@ while [ -h "$SOURCE" ]; do
 done
 SCRIPT_DIR=$(cd -P "$(dirname "$SOURCE")" && pwd)
 FLEET_PY="$SCRIPT_DIR/fleet.py"
+HARNESS_ROOT=$(cd -P "$SCRIPT_DIR/../.." && pwd)
+if [ -f "$HARNESS_ROOT/core/CORE.md" ]; then
+  # The launcher owns source identity. Mutable dispatch state continues to
+  # follow an inherited AGENT_DISPATCH_JOBS or each row's registry path.
+  export AGENT_HOME="$HARNESS_ROOT"
+fi
 
 # FLEET_PYTHON overrides interpreter discovery. On Windows the `python`/`python3`
 # on PATH are the WindowsApps app-execution aliases (a pymanager stub that can

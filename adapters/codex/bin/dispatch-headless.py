@@ -1696,6 +1696,18 @@ def resolve_agent_home() -> Path:
     return _resolve_agent_home(runtime_pointer=Path.home() / ".codex" / "hearting")
 
 
+def resolve_profile_home_root(args) -> Path:
+    """Profile instances are mutable dispatch state, not packaged source."""
+
+    agent_home = resolve_agent_home()
+    jobs = (
+        getattr(args, "jobs", None)
+        or os.environ.get("AGENT_DISPATCH_JOBS")
+        or agent_home / ".dispatch" / "jobs.log"
+    )
+    return dispatch_state_root(jobs) / "homes"
+
+
 def ensure_runtime_home_projection(worktree: Path) -> Path | None:
     """Expose the active Codex session store to Fleet without copying runtime state."""
     runtime_home = Path(os.environ.get("CODEX_HOME", "~/.codex")).expanduser().resolve()
@@ -2112,7 +2124,7 @@ def main(argv: list[str]) -> int:
         if rc != 0:
             return rc
         if args.profile:
-            home_root = resolve_agent_home() / ".dispatch" / "homes"
+            home_root = resolve_profile_home_root(args)
             build_home = resolve_agent_home() / "tools" / "profile" / "build-home.py"
             check_result = subprocess.run(
                 ["python3", str(build_home), args.profile, "--check"],

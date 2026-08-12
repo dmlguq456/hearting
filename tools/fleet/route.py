@@ -264,7 +264,7 @@ def _completion_home():
     return os.path.expanduser("~/.claude")
 
 
-def _dispatch_state_roots(home=None):
+def _dispatch_state_roots(home=None, jobs=None):
     """Read-order candidates for dispatch state: canonical state root
     (dirname of the resolved registry, honoring an inherited
     AGENT_DISPATCH_JOBS) first, then the legacy agent-home-relative tree
@@ -283,7 +283,10 @@ def _dispatch_state_roots(home=None):
             try:
                 from dispatch_contract import dispatch_state_roots
 
-                return [str(root) for root in dispatch_state_roots(Path(agent_home))]
+                return [
+                    str(root)
+                    for root in dispatch_state_roots(Path(agent_home), jobs=jobs)
+                ]
             except Exception:
                 return [legacy]
     return [legacy]
@@ -353,7 +356,7 @@ def _latest_marker_path(directory, node_id):
     return best[1] if best else None
 
 
-def gate_mark(record, node_id, home=None):
+def gate_mark(record, node_id, home=None, state_roots=None):
     """`True` if this node's completion gate is PROVEN passed, else `None` — never `False`.
 
     prd.md:308: "marker 존재 + record의 route_id/route_hash 일치 = 통과 / marker 부재 =
@@ -378,7 +381,7 @@ def gate_mark(record, node_id, home=None):
         return None
     marker = None
     path = None
-    for state_root in _dispatch_state_roots(home):
+    for state_root in state_roots or _dispatch_state_roots(home):
         directory = os.path.join(state_root, "completion", route_id)
         path = os.path.join(directory, node_id + ".json")
         marker = _load_marker(path)
@@ -454,18 +457,38 @@ def gate_mark(record, node_id, home=None):
     return True
 
 
-def resolve_gate_marks(records, home=None):
+def _route_state_roots(route_id, jobs, home=None):
+    roots = []
+    for job in jobs or ():
+        if getattr(job, "route_id", None) != route_id:
+            continue
+        launch_home = getattr(job, "_launch_home", None) or home or _completion_home()
+        registry_path = getattr(job, "_registry_path", None)
+        roots.extend(_dispatch_state_roots(launch_home, jobs=registry_path))
+    roots.extend(_dispatch_state_roots(home))
+    result = []
+    for value in roots:
+        path = os.path.realpath(value)
+        if path not in result:
+            result.append(path)
+    return result
+
+
+def resolve_gate_marks(records, home=None, jobs=()):
     """{route_id: {node_id: True}} — the second impure entry point (sibling of resolve_records).
     Only PASSED nodes appear; a missing key is the no-claim default, so callers never have to
     distinguish "absent" from "False" (there is no False)."""
     marks = {}
     for rid, record in (records or {}).items():
         per_node = {}
+        state_roots = _route_state_roots(rid, jobs, home=home)
         for n in (record.get("nodes") or []):
             if not isinstance(n, dict):
                 continue
             nid = n.get("id")
-            if isinstance(nid, str) and gate_mark(record, nid, home=home):
+            if isinstance(nid, str) and gate_mark(
+                record, nid, home=home, state_roots=state_roots
+            ):
                 per_node[nid] = True
         if per_node:
             marks[rid] = per_node
@@ -803,7 +826,14 @@ def collect_views(jobs, node_evidence=None, now=None, degradations=None):
     now = time.time() if now is None else now
     node_evidence = node_evidence or {}
     records = resolve_records(jobs, node_evidence)
-    return build_views(jobs, node_evidence, records, now, resolve_gate_marks(records), degradations)
+    return build_views(
+        jobs,
+        node_evidence,
+        records,
+        now,
+        resolve_gate_marks(records, jobs=jobs),
+        degradations,
+    )
 
 
 def summary(views):

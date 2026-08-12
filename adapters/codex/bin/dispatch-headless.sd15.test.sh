@@ -7,6 +7,9 @@
 #   (1) scan_death 패턴/reset 추출 (2) launch 직후 조기 limit-death → row done,note=dead-<reason>,
 #   reset=<x> 로 마감 + reset 캐시 (3) clean 조기 exit(비-limit)는 row 를 안 건드림(open 유지).
 set -uo pipefail
+# Hermetic fixture: a managed caller may export its real immutable registry.
+# This test builds an isolated registry under $AH and must not inherit that row set.
+unset AGENT_DISPATCH_JOBS
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 WRAP="$SCRIPT_DIR/dispatch-headless.py"
 fails=0

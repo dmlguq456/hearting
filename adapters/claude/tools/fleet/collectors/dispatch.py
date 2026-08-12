@@ -33,7 +33,11 @@ _ROOT = next(
     and (parent / "utilities" / "dispatch_contract.py").is_file()
 )
 sys.path.insert(0, str(_ROOT / "utilities"))
-from dispatch_contract import observed_attempt_liveness  # noqa: E402
+from dispatch_contract import (  # noqa: E402
+    dispatch_state_roots,
+    observed_attempt_liveness,
+    resolve_agent_home,
+)
 from codex_dispatch_terminal import terminal_envelope_observed  # noqa: E402
 
 from .. import model
@@ -410,13 +414,46 @@ def _codex_transcript_cwd(path):
     return None
 
 
-def _codex_sessions_dir(profile=None, slug=None):
+def _row_state_roots(job=None, agent_home=None):
+    """Return mutable dispatch-state roots for one registry row.
+
+    The row's registry parent is canonical. ``launch_home/.dispatch`` is a
+    bounded read-only fallback for attempts created before the state-root
+    contract was unified. Fleet's packaged source root is never state
+    authority.
+    """
+
+    home = agent_home or getattr(job, "_launch_home", None) or _registry_home()
+    jobs = getattr(job, "_registry_path", None)
+    if not jobs:
+        # A row always carries its scanned registry path. Calls without a row
+        # are compatibility helpers and must not become dependent on whatever
+        # registry the observer process happened to inherit.
+        jobs = os.path.join(str(home), ".dispatch", "jobs.log")
+    try:
+        return tuple(str(path) for path in dispatch_state_roots(Path(home), jobs=jobs))
+    except (OSError, TypeError, ValueError):
+        legacy = os.path.join(str(home), ".dispatch")
+        if jobs:
+            canonical = os.path.dirname(os.path.realpath(jobs))
+            return (canonical,) if canonical == legacy else (canonical, legacy)
+        return (legacy,)
+
+
+def _codex_sessions_dirs_for_profile(profile, slug, job=None):
+    return [
+        os.path.join(root, "homes", "%s.%s" % (slug, profile), "sessions")
+        for root in _row_state_roots(job)
+    ]
+
+
+def _codex_sessions_dir(profile=None, slug=None, job=None):
     if profile and slug:
-        return os.path.join(_registry_home(), ".dispatch", "homes", "%s.%s" % (slug, profile), "sessions")
+        return _codex_sessions_dirs_for_profile(profile, slug, job=job)[0]
     return os.path.join(_codex_home(), "sessions")
 
 
-def _codex_sessions_dirs(cwd, profile=None, slug=None):
+def _codex_sessions_dirs(cwd, profile=None, slug=None, job=None):
     """Return every session store that can own this Codex dispatch.
 
     Nested Codex conductors commonly launch a stage worker with a worktree-local
@@ -425,7 +462,7 @@ def _codex_sessions_dirs(cwd, profile=None, slug=None):
     Profile jobs remain isolated to their explicit profile home.
     """
     if profile and slug:
-        return [_codex_sessions_dir(profile, slug)]
+        return _codex_sessions_dirs_for_profile(profile, slug, job=job)
 
     candidates = []
     if cwd:
@@ -450,8 +487,13 @@ def _build_codex_rollout_index(jobs):
     for job in jobs:
         if getattr(job, "harness", None) != "codex" or not getattr(job, "cwd", None):
             continue
+        row_kwargs = (
+            {"job": job}
+            if getattr(job, "_registry_path", None) or getattr(job, "_launch_home", None)
+            else {}
+        )
         for candidate in _codex_sessions_dirs(
-            job.cwd, getattr(job, "profile", None), getattr(job, "slug", None)
+            job.cwd, getattr(job, "profile", None), getattr(job, "slug", None), **row_kwargs
         ):
             root = os.path.abspath(candidate)
             if root in seen_roots:
@@ -495,18 +537,18 @@ def _build_codex_rollout_index(jobs):
 
 
 def _codex_job_liveness(cwd, now, stale_min=15, profile=None, slug=None,
-                        codex_index=None):
+                        codex_index=None, job=None):
     if not cwd:
         return "unknown"
     newest = None
     if isinstance(codex_index, dict):
         wanted_cwd = os.path.abspath(cwd)
-        for sessions in _codex_sessions_dirs(cwd, profile, slug):
+        for sessions in _codex_sessions_dirs(cwd, profile, slug, job=job):
             mtime = codex_index.get(os.path.abspath(sessions), {}).get(wanted_cwd)
             if mtime is not None and (newest is None or mtime > newest):
                 newest = mtime
     else:
-        for sessions in _codex_sessions_dirs(cwd, profile, slug):
+        for sessions in _codex_sessions_dirs(cwd, profile, slug, job=job):
             try:
                 for root, _dirs, names in os.walk(sessions):
                     for name in names:
@@ -541,17 +583,19 @@ def _opencode_to_seconds(ts):
     return float(ts) / 1000.0 if ts > 10_000_000_000 else float(ts)
 
 
-def _opencode_heartbeat_age(slug, now):
+def _opencode_heartbeat_age(slug, now, job=None):
     if not slug:
         return None
-    path = os.path.join(_registry_home(), ".dispatch", "logs", slug + ".heartbeat")
-    try:
-        return (now - os.path.getmtime(path)) / 60.0
-    except OSError:
-        return None
+    for root in _row_state_roots(job):
+        path = os.path.join(root, "logs", slug + ".heartbeat")
+        try:
+            return (now - os.path.getmtime(path)) / 60.0
+        except OSError:
+            continue
+    return None
 
 
-def _opencode_job_liveness(cwd, now, stale_min=15, slug=None):
+def _opencode_job_liveness(cwd, now, stale_min=15, slug=None, job=None):
     if not cwd:
         return "unknown"
     db = _opencode_db()
@@ -587,7 +631,7 @@ def _opencode_job_liveness(cwd, now, stale_min=15, slug=None):
             con.close()
     if newest:
         return "working" if (now - newest) / 60.0 <= stale_min else "stale"
-    hb_age = _opencode_heartbeat_age(slug, now)
+    hb_age = _opencode_heartbeat_age(slug, now, job=job)
     if hb_age is not None and hb_age <= stale_min:
         return "working"
     return "dead"
@@ -606,45 +650,48 @@ def _job_transcript_signal(job, now, codex_index=None):
     if job.harness == "codex":
         return _codex_job_liveness(
             job.cwd, now, profile=job.profile, slug=job.slug,
-            codex_index=codex_index,
+            codex_index=codex_index, job=job,
         )
     if job.harness == "opencode":
-        return _opencode_job_liveness(job.cwd, now, slug=job.slug)
-    return _job_liveness(job.cwd, now, profile=job.profile, slug=job.slug)
+        return _opencode_job_liveness(job.cwd, now, slug=job.slug, job=job)
+    return _job_liveness(job.cwd, now, profile=job.profile, slug=job.slug, job=job)
 
 
-def _attempt_heartbeat(attempt_id):
+def _attempt_state_record(job, bucket):
+    """Read one bounded attempt record from row-authoritative state roots."""
+
+    attempt_id = getattr(job, "attempt_id", None)
+    if not attempt_id or bucket not in {"heartbeats", "watchdog"}:
+        return None
+    name = str(attempt_id).replace("/", "_") + ".json"
+    for root in _row_state_roots(job):
+        directory = os.path.realpath(os.path.join(root, bucket))
+        raw_path = os.path.join(directory, name)
+        path = os.path.realpath(raw_path)
+        try:
+            if os.path.commonpath((directory, path)) != directory or os.path.islink(raw_path):
+                continue
+            if os.path.getsize(path) > 8192:
+                continue
+            with open(path, encoding="utf-8") as handle:
+                value = json.load(handle)
+        except (OSError, ValueError):
+            continue
+        if isinstance(value, dict):
+            return value
+    return None
+
+
+def _attempt_heartbeat(job):
     """Read the bounded SD-58 record for one exact attempt, if present."""
-    if not attempt_id:
-        return None
-    path = os.path.join(
-        _registry_home(), ".dispatch", "heartbeats",
-        str(attempt_id).replace("/", "_") + ".json",
-    )
-    try:
-        if os.path.getsize(path) > 8192:
-            return None
-        with open(path, encoding="utf-8") as handle:
-            value = json.load(handle)
-        return value if isinstance(value, dict) else None
-    except (OSError, ValueError):
-        return None
+    return _attempt_state_record(job, "heartbeats")
 
 
-def _attempt_terminal_observation(attempt_id, route_id, route_node):
+def _attempt_terminal_observation(job):
+    attempt_id, route_id, route_node = job.attempt_id, job.route_id, job.route_node
     if not attempt_id or not route_id or not route_node:
         return None
-    path = os.path.join(
-        _registry_home(), ".dispatch", "watchdog",
-        str(attempt_id).replace("/", "_") + ".json",
-    )
-    try:
-        if os.path.getsize(path) > 8192:
-            return None
-        with open(path, encoding="utf-8") as handle:
-            value = json.load(handle)
-    except (OSError, ValueError):
-        return None
+    value = _attempt_state_record(job, "watchdog")
     if not isinstance(value, dict) or not value.get("terminal_action"):
         return None
     return {
@@ -679,9 +726,7 @@ def _dispatch_liveness(job, now, track=True, codex_index=None):
                 actual_proc_start = str(observed_start)
                 pid_alive = True
                 proc_start_match = str(observed_start) == str(job.proc_start)
-    terminal_observation = _attempt_terminal_observation(
-        job.attempt_id, job.route_id, job.route_node
-    )
+    terminal_observation = _attempt_terminal_observation(job)
     common_observation = None
     registry_metadata = getattr(job, "_registry_metadata", None)
     if (
@@ -733,7 +778,7 @@ def _dispatch_liveness(job, now, track=True, codex_index=None):
         "route_id": job.route_id,
         "route_node": job.route_node,
         "registry_transition": {"status": job.status},
-        "heartbeat": _attempt_heartbeat(job.attempt_id),
+        "heartbeat": _attempt_heartbeat(job),
         "terminal_observation": terminal_observation,
         "observed_liveness": (
             {
@@ -772,10 +817,7 @@ def _registry_home():
     h = os.environ.get("AGENT_HOME") or os.environ.get("CLAUDE_HOME")
     if h:
         return h
-    for cand in (os.path.expanduser("~/hearting"), os.path.expanduser("~/agent_setting")):
-        if os.path.isdir(cand):
-            return cand
-    return os.path.expanduser("~/.claude")
+    return str(resolve_agent_home())
 
 
 def _jobs_path(override=None):
@@ -816,6 +858,16 @@ def _installed_registry_paths():
     return out
 
 
+def _is_versioned_source_home(path):
+    """Whether ``path`` is an activated immutable release directory."""
+
+    try:
+        resolved = Path(path).expanduser().resolve(strict=False)
+    except (OSError, TypeError, ValueError):
+        return False
+    return resolved.parent.name == "releases" and resolved.parent.parent.name == "hearting"
+
+
 def _candidate_jobs_paths(override=None):
     """Dispatch registries to read, in precedence order.
 
@@ -831,11 +883,19 @@ def _candidate_jobs_paths(override=None):
     env = os.environ.get("AGENT_DISPATCH_JOBS")
     if env:
         return [env]
-    paths = [_jobs_path()]
+    default = _jobs_path()
+    # A packaged AGENT_HOME is versioned source. It must never become mutable
+    # registry authority merely because Fleet was launched from that release.
+    default_home = Path(default).expanduser().parent.parent
+    paths = [] if _is_versioned_source_home(default_home) else [default]
     legacy = os.path.expanduser("~/.claude/.dispatch/jobs.log")
-    if legacy and not _same_path(legacy, paths[0]) and os.path.exists(legacy):
+    if legacy and not any(_same_path(legacy, path) for path in paths) and os.path.exists(legacy):
         paths.append(legacy)
     paths.extend(_installed_registry_paths())
+    if not paths:
+        # Keep a deterministic, harmless read candidate for a fresh install;
+        # the scanner treats a missing legacy file as empty.
+        paths.append(legacy)
     result = []
     seen = set()
     for path in paths:
@@ -1526,8 +1586,8 @@ def _claude_job_model(pid_s, jcwd=None):
     launched with --model opus showed the PARENT's model (user 2026-07-02: main=Fable /
     dispatch-model policy remains observable through fleet)."""
     # Runtime-home only (accepted asymmetry, plan A5/R7): a profile(masked) headless job's
-    # own sessions/.statusline live under its masked config home
-    # (_registry_home()/.dispatch/homes/...), not here, so this lookup misses and degrades
+    # own sessions/.statusline live under its registry-relative masked config home,
+    # not here, so this lookup misses and degrades
     # to None while _job_liveness (which DOES branch on profile) stays correct. Deferred
     # fix recorded in R7.
     home = _proj_home()
@@ -1558,7 +1618,7 @@ def _claude_job_model(pid_s, jcwd=None):
     return _model_display(ids[-1]) if ids else None
 
 
-def _job_liveness(path, now, stale_min=15, profile=None, slug=None):
+def _job_liveness(path, now, stale_min=15, profile=None, slug=None, job=None):
     """working (transcript ≤15min) / stale (hung) / dead (no transcript) / unknown (no path).
 
     profile-aware (isomorphic to dispatch-liveness.sh, spec §7): when `profile` is set
@@ -1572,19 +1632,22 @@ def _job_liveness(path, now, stale_min=15, profile=None, slug=None):
     if not path:
         return "unknown"
     if profile and slug:
-        proj = os.path.join(_registry_home(), ".dispatch", "homes", "%s.%s" % (slug, profile),
-                             "projects", _enc(path))
+        candidates = [
+            os.path.join(root, "homes", "%s.%s" % (slug, profile), "projects", _enc(path))
+            for root in _row_state_roots(job)
+        ]
     else:
-        proj = os.path.join(_proj_home(), "projects", _enc(path))
+        candidates = [os.path.join(_proj_home(), "projects", _enc(path))]
     newest = None
-    try:
-        for n in os.listdir(proj):
-            if n.endswith(".jsonl"):
-                m = os.path.getmtime(os.path.join(proj, n))
-                if newest is None or m > newest:
-                    newest = m
-    except OSError:
-        return "dead"
+    for proj in candidates:
+        try:
+            for n in os.listdir(proj):
+                if n.endswith(".jsonl"):
+                    m = os.path.getmtime(os.path.join(proj, n))
+                    if newest is None or m > newest:
+                        newest = m
+        except OSError:
+            continue
     if newest is None:
         return "dead"
     return "working" if (now - newest) / 60.0 <= stale_min else "stale"
@@ -1599,12 +1662,21 @@ def _has_entries(p):
         return False
 
 
-def _scan_degradations(route_ids, agent_home=None, tail=64):
+def _scan_degradations(route_ids, agent_home=None, tail=64, jobs=()):
     """Read only resolved route shards; malformed evidence is non-fatal and skipped."""
-    root = os.path.join(agent_home or _registry_home(), ".dispatch", "degradations")
+    wanted = {str(rid) for rid in (route_ids or ()) if rid}
+    state_roots = list(_row_state_roots(agent_home=agent_home))
+    for job in jobs or ():
+        if str(getattr(job, "route_id", "")) in wanted:
+            state_roots.extend(_row_state_roots(job))
+    roots = []
+    for state_root in state_roots:
+        root = os.path.realpath(os.path.join(state_root, "degradations"))
+        if root not in roots:
+            roots.append(root)
     out, seen = {}, set()
-    paths = [os.path.join(root, str(rid) + ".jsonl") for rid in (route_ids or ())]
-    paths.append(os.path.join(root, "_unattributed.jsonl"))
+    paths = [os.path.join(root, rid + ".jsonl") for rid in wanted for root in roots]
+    paths.extend(os.path.join(root, "_unattributed.jsonl") for root in roots)
     for path in paths:
         try:
             st = os.stat(path)
@@ -2601,6 +2673,8 @@ def _annotate_orphan_conductors(jobs, now, jobs_path=None):
 
     args = _Args()
     args.agent_home = _Path(_registry_home())
+    args.jobs = _Path(jobs_path)
+    args.integration_ref = None
     args.now = now
     for j in dead_owners:
         row = next((r for r in rows if r["meta"].get("attempt_id") == j.attempt_id), None)
@@ -2613,7 +2687,9 @@ def _annotate_orphan_conductors(jobs, now, jobs_path=None):
         if note == "dead-parent-orphaned":
             try:
                 _, route_file, _ = registry.resolve_owner_route(row, rows)
-                incomplete, _ = registry.route_incomplete(row, args.agent_home, rows)
+                incomplete, _ = registry.route_incomplete(
+                    row, args.agent_home, rows, args.jobs
+                )
                 boundary = registry.resume_boundary(route_file, incomplete)
             except Exception:
                 boundary = None
@@ -2757,7 +2833,12 @@ def collect(jobs_path=None, harness_filter=None):
     collect.last_registry_splits = {
         path: sorted(attempts) for path, attempts in split_registries.items()
     }
-    collect.last_degradations = _scan_degradations(set(route_nodes) | {getattr(j, "route_id", None) for j in jobs if getattr(j, "route_id", None)})
+    collect.last_degradations = _scan_degradations(
+        set(route_nodes) | {
+            getattr(j, "route_id", None) for j in jobs if getattr(j, "route_id", None)
+        },
+        jobs=jobs,
+    )
     return jobs
 
 

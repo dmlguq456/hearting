@@ -24,6 +24,14 @@ def fake_probe_result(**row):
 
 
 class CodexSD45InternalProbe(unittest.TestCase):
+    def test_profile_home_follows_selected_registry_not_packaged_source(self):
+        args = argparse.Namespace(jobs="/runtime/.harness/dispatch/jobs.log")
+        with mock.patch.object(WH, "resolve_agent_home", return_value=Path("/release/v1")):
+            self.assertEqual(
+                WH.resolve_profile_home_root(args),
+                Path("/runtime/.harness/dispatch/homes"),
+            )
+
     def test_absent_evidence_binds_supported_and_marks_internal(self):
         args = probe_args()
         row = dict(parent_harness="claude", parent_transport="headless", parent_sandbox="default",

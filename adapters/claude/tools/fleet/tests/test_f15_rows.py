@@ -206,7 +206,7 @@ class FoldingTest(unittest.TestCase):
             render.set_show_all(False)
         return "\n".join("".join(t for t, _k in ln) for ln in lines if ln)
 
-    def test_only_working_child_gets_own_row_others_folded(self):
+    def test_nonterminal_children_get_rows_and_done_child_folds(self):
         conductor = DispatchJob(key="code", slug="fleet-ui-v2", depth=1, liveness="idle",
                                 stage="exec", worker_role="capability-owner")
         plan_c = DispatchJob(key="code-plan", slug="fleet-ui-v2-plan", depth=2,
@@ -220,7 +220,14 @@ class FoldingTest(unittest.TestCase):
         text = self._emit(conductor, [plan_c, exec_c, test_c])
         self.assertIn("exec fleet-ui-v2-execute", text)
         self.assertNotIn("plan fleet-ui-v2-plan", text)
-        self.assertNotIn("test fleet-ui-v2-test", text)
+        self.assertIn("test fleet-ui-v2-test", text)
+
+        for state in ("idle", "unknown"):
+            child = DispatchJob(key="code-test", slug="fleet-ui-v2-" + state,
+                                depth=2, parent_slug="fleet-ui-v2",
+                                worker_role="code-test", liveness=state)
+            self.assertIn("fleet-ui-v2-" + state,
+                          self._emit(conductor, [child]), state)
 
     def test_portable_persona_child_is_visible_with_exec_hue_without_owner_track(self):
         conductor = DispatchJob(key="code", slug="agent-home-code-owner", depth=1,

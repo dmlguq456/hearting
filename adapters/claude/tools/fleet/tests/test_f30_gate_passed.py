@@ -264,6 +264,20 @@ class GateMarkTest(GateMarkBase):
 
 
 class ResolveGateMarksTest(GateMarkBase):
+    def test_row_registry_state_root_outranks_observer_home(self):
+        observer = os.path.join(self._tmp.name, "observer")
+        os.makedirs(observer)
+        state_root = os.path.dirname(os.path.dirname(self.cdir))
+        launch_home = os.path.join(self._tmp.name, "release")
+        os.makedirs(launch_home)
+        job = mock.Mock(route_id=self.route_id)
+        job._launch_home = launch_home
+        job._registry_path = os.path.join(state_root, "jobs.log")
+        marks = route.resolve_gate_marks(
+            {self.route_id: self.record}, home=observer, jobs=[job]
+        )
+        self.assertEqual(set(marks[self.route_id]), set(_NODES))
+
     def test_resolve_returns_only_passed_nodes(self):
         os.remove(os.path.join(self.cdir, "report.json"))
         route.clear_cache()

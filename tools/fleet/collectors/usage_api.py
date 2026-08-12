@@ -23,8 +23,9 @@ _cache = {"ts": 0.0, "ok_ts": 0.0, "ms_ts": 0.0, "data": None}
 
 
 def _home():
-    return (os.environ.get("AGENT_HOME") or os.environ.get("CLAUDE_HOME")
-            or os.path.expanduser("~/.claude"))
+    # Claude credentials belong to Claude Code, never to Hearting's packaged
+    # source root pinned by the Fleet launcher.
+    return os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude")
 
 
 def _epoch(v):

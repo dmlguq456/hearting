@@ -6,6 +6,9 @@
 #   (3) clean 조기 exit(비-limit)는 row open 유지 (4) ADAPTATION: hang-on-limit(#8203)은 watch 를
 #   벗어나 row open 유지(→ liveness 담당) (5) liveness log_shows_limit 이 그 hang 로그를 DEAD 로 잡음.
 set -uo pipefail
+# Hermetic fixture: a managed caller may export its real immutable registry.
+# This test builds an isolated registry under $AH and must not inherit that row set.
+unset AGENT_DISPATCH_JOBS
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 WRAP="$SCRIPT_DIR/dispatch-headless.py"
 LIVE="$SCRIPT_DIR/dispatch-liveness.py"

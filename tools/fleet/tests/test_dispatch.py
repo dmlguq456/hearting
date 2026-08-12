@@ -27,9 +27,52 @@ if _TOOLS_DIR not in sys.path:
 from fleet.collectors import dispatch  # noqa: E402
 from fleet.collectors import claude    # noqa: E402
 from fleet.collectors import opencode  # noqa: E402
+from fleet.collectors import usage_api  # noqa: E402
 from fleet import render             # noqa: E402
 from fleet import collectors as fleet_collectors  # noqa: E402
 from fleet.model import ATTEMPT_CLASSIFIER_SOURCE, DispatchJob, Session  # noqa: E402
+
+
+class RuntimeRootSeparationTest(unittest.TestCase):
+
+    def test_claude_credentials_ignore_harness_source_root(self):
+        with mock.patch.dict(os.environ, {
+            "AGENT_HOME": "/release/hearting",
+            "CLAUDE_CONFIG_DIR": "/runtime/claude",
+        }, clear=False):
+            self.assertEqual(usage_api._home(), "/runtime/claude")
+
+    def test_degradation_reader_uses_row_registry_state_root(self):
+        with tempfile.TemporaryDirectory() as td:
+            launch = os.path.join(td, "release")
+            state = os.path.join(td, "state")
+            observer = os.path.join(td, "observer")
+            shard = os.path.join(state, "degradations")
+            os.makedirs(shard)
+            os.makedirs(launch)
+            os.makedirs(observer)
+            event = {
+                "schema_version": 1,
+                "kind": "degradation",
+                "ts": 1.0,
+                "route_id": "rt-sealed",
+                "route_node": "execute",
+                "route_hash": "h",
+                "dispatch_depth": 2,
+                "fallback_hop": "inline",
+                "execution_surface": "inline",
+                "writer": "stage-dispatch-fallback.py",
+                "event_id": "dg-sealed",
+            }
+            with open(os.path.join(shard, "rt-sealed.jsonl"), "w", encoding="utf-8") as out:
+                out.write(json.dumps(event) + "\n")
+            job = DispatchJob(key="code", slug="sealed", route_id="rt-sealed")
+            job._launch_home = launch
+            job._registry_path = os.path.join(state, "jobs.log")
+            rows = dispatch._scan_degradations(
+                {"rt-sealed"}, agent_home=observer, jobs=[job]
+            )
+            self.assertEqual(rows["rt-sealed"][0]["event_id"], "dg-sealed")
 
 
 class RenderDispatchPresentationTest(unittest.TestCase):
@@ -350,6 +393,17 @@ class RegistryHomeTest(unittest.TestCase):
             self.assertEqual(dispatch._candidate_jobs_paths(), [
                 "/home/u/.claude/.dispatch/jobs.log",
             ])
+
+    def test_packaged_source_home_is_never_a_registry_candidate(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            release = os.path.join(tmp, "hearting", "releases", "v1")
+            os.makedirs(release)
+            legacy = os.path.join(tmp, ".claude", ".dispatch", "jobs.log")
+            with mock.patch.dict(os.environ, {"AGENT_HOME": release}, clear=True), \
+                 mock.patch.object(dispatch, "_installed_registry_paths", return_value=[]), \
+                 mock.patch("fleet.collectors.dispatch.os.path.expanduser", return_value=legacy), \
+                 mock.patch("fleet.collectors.dispatch.os.path.exists", return_value=False):
+                self.assertEqual(dispatch._candidate_jobs_paths(), [legacy])
 
 
 # --- D1b: installed per-runtime-home registries (<runtime-home>/.harness/dispatch/jobs.log)
@@ -1304,6 +1358,32 @@ class CodexAttemptIdentityTest(unittest.TestCase):
         self.assertEqual(state, "working")
         self.assertEqual(job.state_evidence["attempt"]["source"], "heartbeat")
         self.assertEqual(job.state_evidence["attempt"]["pid_scope"], "namespace-local")
+
+    def test_namespace_heartbeat_uses_row_registry_state_root(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            launch_home = os.path.join(tmp, "release")
+            state_root = os.path.join(tmp, "state")
+            heartbeat_dir = os.path.join(state_root, "heartbeats")
+            os.makedirs(heartbeat_dir)
+            os.makedirs(launch_home)
+            attempt = "att-sealed-state-root"
+            with open(os.path.join(heartbeat_dir, attempt + ".json"), "w",
+                      encoding="utf-8") as out:
+                json.dump({"attempt_id": attempt, "route_id": "rt-a",
+                           "route_node": "test", "phase": "tool",
+                           "sequence": 3, "updated_at": 990}, out)
+            job = DispatchJob(key="code-test", slug="sealed", cwd="/work/wt",
+                              source="jobs", status="open", harness="codex",
+                              pid=437, proc_start="777", pid_scope="namespace-local",
+                              attempt_id=attempt, route_id="rt-a", route_node="test")
+            job._launch_home = launch_home
+            job._registry_path = os.path.join(state_root, "jobs.log")
+            with mock.patch.object(dispatch, "_job_transcript_signal", return_value="dead"), \
+                 mock.patch("fleet.collectors.dispatch.os.path.exists", return_value=False):
+                state = dispatch._dispatch_liveness(job, now=1000.0, track=False)
+
+        self.assertEqual(state, "working")
+        self.assertEqual(job.state_evidence["attempt"]["source"], "heartbeat")
 
     def test_namespace_local_numeric_pid_collision_is_not_process_authority(self):
         with tempfile.TemporaryDirectory() as tmp:
