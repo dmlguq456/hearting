@@ -449,8 +449,29 @@ def validate_summary(raw):
     return line
 
 
+def _harness_root(resolved_module_path):
+    """Marker-proven harness root for a module file, however it was reached.
+
+    The statusline spawns this worker through a runtime-home projection
+    (`~/.claude/tools` → `<bundle>/adapters/claude/tools/fleet/...`) without an
+    exported AGENT_HOME. A fixed parents[2] hop from the RESOLVED path then
+    lands on `adapters/claude` instead of the harness root, which silently
+    breaks every provider lookup (no model, no worker, `refresher:none`) — the
+    2026-08-12 "claude main-session summaries vanished" regression. Walk to the
+    same marker pair installinfo trusts; the legacy hop stays as the fallback
+    for marker-less trees (tests, partial fixtures).
+    """
+    for parent in resolved_module_path.parents:
+        if (parent / "harness-manifest.json").is_file() and (parent / "core" / "CORE.md").is_file():
+            return parent
+    return resolved_module_path.parents[2]
+
+
 def agent_home():
-    return Path(os.environ.get("AGENT_HOME") or Path(__file__).resolve().parents[2])
+    env = os.environ.get("AGENT_HOME")
+    if env:
+        return Path(env)
+    return _harness_root(Path(__file__).resolve())
 
 
 def provider_model(adapter, home=None):

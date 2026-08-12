@@ -274,6 +274,44 @@ class PriorityTest(_ConfigHomeMixin, unittest.TestCase):
         self.assertEqual(sess.slug, "repo-ab12cd34")
 
 
+class HarnessRootTest(unittest.TestCase):
+    """The worker's home derivation must survive projection-symlink entry routes.
+
+    2026-08-12 regression: statusline invoked the worker via the runtime-home
+    projection (`~/.claude/tools` → `<bundle>/adapters/claude/tools/fleet/...`);
+    the fixed parents[2] hop then named `adapters/claude` as home and every
+    provider lookup failed, so claude main-session summaries vanished."""
+
+    def test_projection_route_walks_to_the_marker_root(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "bundle" / "source"
+            (root / "core").mkdir(parents=True)
+            (root / "core" / "CORE.md").write_text("x", encoding="utf-8")
+            (root / "harness-manifest.json").write_text("{}", encoding="utf-8")
+            module = root / "adapters" / "claude" / "tools" / "fleet" / "refresh_title.py"
+            module.parent.mkdir(parents=True)
+            module.write_text("# projected concrete copy", encoding="utf-8")
+            self.assertEqual(rt._harness_root(module), root)
+
+    def test_direct_route_finds_the_same_root(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "checkout"
+            (root / "core").mkdir(parents=True)
+            (root / "core" / "CORE.md").write_text("x", encoding="utf-8")
+            (root / "harness-manifest.json").write_text("{}", encoding="utf-8")
+            module = root / "tools" / "fleet" / "refresh_title.py"
+            module.parent.mkdir(parents=True)
+            module.write_text("# canonical", encoding="utf-8")
+            self.assertEqual(rt._harness_root(module), root)
+
+    def test_markerless_tree_keeps_the_legacy_hop(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            module = Path(tmp) / "tools" / "fleet" / "refresh_title.py"
+            module.parent.mkdir(parents=True)
+            module.write_text("# fixture", encoding="utf-8")
+            self.assertEqual(rt._harness_root(module), Path(tmp))
+
+
 class ValidateTitleTest(unittest.TestCase):
 
     def test_validate_len_cap(self):
