@@ -43,7 +43,7 @@ while [ $# -gt 0 ]; do
     *) echo "usage-check: unknown arg '$1'" >&2; exit 64 ;;
   esac
 done
-[ -n "$JOBS" ] || JOBS="$AGENT_HOME/.dispatch/jobs.log"
+[ -n "$JOBS" ] || JOBS="${AGENT_DISPATCH_JOBS:-$AGENT_HOME/.dispatch/jobs.log}"
 case "$HARNESS" in all) HARNESSES="claude codex opencode" ;; *) HARNESSES="$HARNESS" ;; esac
 
 now=$(date +%s)

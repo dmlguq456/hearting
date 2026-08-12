@@ -26,13 +26,14 @@ if [ "$#" -gt 0 ] && [ "${1#--}" = "$1" ]; then
 else
   JOBS=${AGENT_DISPATCH_JOBS:-$AGENT_HOME/.dispatch/jobs.log}
 fi
+STATE_ROOT=$("$SCRIPT_DIR/dispatch-state-root.sh" "$JOBS")
 STALE_MIN="${DISPATCH_STALE_MIN:-15}"   # Suspect hang/death after N quiet minutes.
 # Runtime root (HLS-6): session transcripts/state live under the runtime, not
 # the harness source repository. Claude defaults to CLAUDE_CONFIG_DIR; other
 # adapters override DISPATCH_RUNTIME_ROOT. Profile homes are already isolated.
 RUNTIME_ROOT="${DISPATCH_RUNTIME_ROOT:-${CLAUDE_CONFIG_DIR:-$HOME/.claude}}"
 PROJ="$RUNTIME_ROOT/projects"
-LOG_DIR="$AGENT_HOME/.dispatch/logs"
+LOG_DIR="$STATE_ROOT/logs"
 # SD-15: if an open job log ends with a limit/auth fatal pattern, use that as
 # the DEAD reason. Keep this deliberate duplicate synchronized with
 # dispatch-headless.py DEATH_PATTERNS.
@@ -289,7 +290,7 @@ while IFS=$'\t' read -r ts status repo wt slug pipe || [ -n "${ts:-}" ]; do
       name=""
       case "$pipe" in *profile=*) name=${pipe##*profile=}; name=${name%%,*};; esac
       if [ -n "$name" ]; then
-        dir="$AGENT_HOME/.dispatch/homes/${slug}.${name}/projects/$enc"
+        dir="$STATE_ROOT/homes/${slug}.${name}/projects/$enc"
       else
         dir="$PROJ/$enc"
       fi

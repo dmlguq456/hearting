@@ -28,6 +28,7 @@ from dispatch_contract import (  # noqa: E402
     attempt_process_quiescence,
     authoritative_process_identities,
     close_attempt_row_if,
+    dispatch_state_root,
     process_start_ticks,
     process_state,
     resolve_agent_home,
@@ -102,12 +103,11 @@ def write_json(path, value):
         except FileNotFoundError: pass
 
 
-def state_paths(home, attempt):
+def state_paths(state_root, attempt):
     name = attempt.replace("/", "_")
-    base = home / ".dispatch"
-    return (base / "heartbeats" / f"{name}.json",
-            base / "watchdog" / f"{name}.json",
-            base / "watchdog" / f"{name}.lock")
+    return (state_root / "heartbeats" / f"{name}.json",
+            state_root / "watchdog" / f"{name}.json",
+            state_root / "watchdog" / f"{name}.lock")
 
 
 def require_row(args):
@@ -289,7 +289,7 @@ def scoped_file_signature(metadata, worktree=""):
 
 def inspect(args, now):
     fields, metadata = require_row(args)
-    heartbeat, _, _ = state_paths(args.agent_home, args.attempt_id)
+    heartbeat, _, _ = state_paths(dispatch_state_root(args.jobs), args.attempt_id)
     verdict = classify_attempt_evidence({
         **proc_evidence(metadata), "attempt_id": args.attempt_id,
         "route_id": args.route_id, "route_node": args.route_node,
@@ -308,7 +308,7 @@ def heartbeat(args, now):
     require_row(args)
     if args.phase not in PROGRESS_PHASES or args.kind not in KINDS or not args.evidence:
         raise DispatchContractError("progress-evidence-invalid", "phase/kind/evidence")
-    hb_path, _, lock_path = state_paths(args.agent_home, args.attempt_id)
+    hb_path, _, lock_path = state_paths(dispatch_state_root(args.jobs), args.attempt_id)
     with locked(lock_path):
         old = read_json(hb_path)
         if old.get("phase") in PROGRESS_PHASES and PROGRESS_PHASES.index(args.phase) < PROGRESS_PHASES.index(old["phase"]):
@@ -329,9 +329,9 @@ def heartbeat(args, now):
         return value
 
 
-def capacity_log_evidence(home, slug, metadata):
+def capacity_log_evidence(state_root, slug, metadata):
     """Return a bounded log path only for an anchored terminal capacity line."""
-    log_dir = home / ".dispatch" / "logs"
+    log_dir = state_root / "logs"
     exact = Path(metadata.get("log_file", ""))
     paths = [exact] if exact.is_absolute() else sorted(log_dir.glob(f"{slug}.*"))
     for path in paths:
@@ -354,7 +354,7 @@ def capacity_log_evidence(home, slug, metadata):
 def watchdog(args, now):
     fields, metadata = require_row(args)
     verdict = inspect(args, now)
-    hb_path, wd_path, lock_path = state_paths(args.agent_home, args.attempt_id)
+    hb_path, wd_path, lock_path = state_paths(dispatch_state_root(args.jobs), args.attempt_id)
     hb = read_json(hb_path)
     fingerprint = deterministic_progress_fingerprint({
         "attempt_id": args.attempt_id, "route_id": args.route_id,
@@ -367,7 +367,7 @@ def watchdog(args, now):
     })
     with locked(lock_path):
         state = read_json(wd_path)
-        capacity_path = capacity_log_evidence(args.agent_home, fields[4], metadata)
+        capacity_path = capacity_log_evidence(dispatch_state_root(args.jobs), fields[4], metadata)
         if metadata.get("note") == "dead-capacity" or capacity_path is not None:
             closed = metadata.get("note") == "dead-capacity"
             exact = inspect(args, now)

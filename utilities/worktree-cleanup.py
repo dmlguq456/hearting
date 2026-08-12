@@ -20,7 +20,13 @@ import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "utilities"))
-from dispatch_contract import DispatchContractError, parse_registry_metadata, validate_attempt_metadata
+from dispatch_contract import (
+    DispatchContractError,
+    dispatch_state_root,
+    parse_registry_metadata,
+    resolve_agent_home as _resolve_agent_home,
+    validate_attempt_metadata,
+)
 
 OPEN_STATES = {"open", "running"}
 MAX_AUDIT_BYTES = 1024 * 1024
@@ -76,13 +82,7 @@ def normalize(path: str | Path) -> Path:
 
 
 def resolve_agent_home() -> Path:
-    env_home = os.environ.get("AGENT_HOME")
-    if env_home and (Path(env_home) / "core" / "CORE.md").is_file():
-        return normalize(env_home)
-    for maintainer_home in (Path.home() / "hearting", Path.home() / "agent_setting"):
-        if (maintainer_home / "core" / "CORE.md").is_file():
-            return normalize(maintainer_home)
-    return ROOT
+    return _resolve_agent_home()
 
 
 def worktree_entries(repo: Path) -> list[WorktreeEntry]:
@@ -500,7 +500,7 @@ def main(argv: list[str]) -> int:
         or os.environ.get("AGENT_DISPATCH_JOBS")
         or agent_home / ".dispatch" / "jobs.log"
     )
-    audit = normalize(args.audit or agent_home / ".dispatch" / "worktree-cleanup.jsonl")
+    audit = normalize(args.audit or dispatch_state_root(jobs) / "worktree-cleanup.jsonl")
 
     if args.all_eligible:
         targets = registered_job_worktrees(jobs, normalize(args.repo))

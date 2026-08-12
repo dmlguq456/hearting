@@ -101,7 +101,7 @@ if [ "$#" -gt 0 ]; then
       *) echo "conductor-stop-gate: unknown arg '$1'" >&2; exit 64 ;;
     esac
   done
-  [ -n "$jobs" ] || jobs="$AGENT_HOME/.dispatch/jobs.log"
+  [ -n "$jobs" ] || jobs="${AGENT_DISPATCH_JOBS:-$AGENT_HOME/.dispatch/jobs.log}"
   decide "$self" "$jobs" "$stop_active" || true
   exit 0
 fi
@@ -112,6 +112,6 @@ input=$(cat 2>/dev/null)
 stop_active=$(printf '%s' "$input" | grep -o '"stop_hook_active"[[:space:]]*:[[:space:]]*true' | head -1)
 [ -n "$stop_active" ] && stop_active="true" || stop_active="false"
 self="${AGENT_DISPATCH_SELF_SLUG:-}"
-jobs="$AGENT_HOME/.dispatch/jobs.log"
+jobs="${AGENT_DISPATCH_JOBS:-$AGENT_HOME/.dispatch/jobs.log}"
 decide "$self" "$jobs" "$stop_active" || true
 exit 0

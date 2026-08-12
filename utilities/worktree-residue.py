@@ -41,6 +41,9 @@ import tempfile
 SOURCE_ROOT = Path(__file__).resolve().parents[1]
 _agent_home = Path(os.environ.get("AGENT_HOME", SOURCE_ROOT)).expanduser().resolve(strict=False)
 AGENT_HOME = _agent_home if (_agent_home / "core/CORE.md").is_file() else SOURCE_ROOT
+sys.path.insert(0, str(SOURCE_ROOT / "utilities"))
+from dispatch_contract import resolve_dispatch_state_root  # noqa: E402
+DISPATCH_STATE_HOME = resolve_dispatch_state_root(AGENT_HOME)
 PATTERN_FILE = ".agent-build-residue"
 MAX_AUDIT_BYTES = 512 * 1024
 KEEP_AUDIT_BYTES = 256 * 1024
@@ -125,7 +128,7 @@ def main() -> int:
     parser.add_argument(
         "--audit",
         type=Path,
-        default=AGENT_HOME / ".dispatch/build-residue.jsonl",
+        default=DISPATCH_STATE_HOME / "build-residue.jsonl",
         help="audit journal path (default: <agent-home>/.dispatch/build-residue.jsonl)",
     )
     args = parser.parse_args()

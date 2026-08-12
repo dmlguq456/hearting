@@ -30,7 +30,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "utilities"))
-from dispatch_contract import resolve_agent_home  # noqa: E402
+from dispatch_contract import resolve_agent_home, resolve_dispatch_state_root  # noqa: E402
 
 LEDGER_SCHEMA_VERSION = 1
 
@@ -157,7 +157,7 @@ def default_ledger_root() -> Path:
     override = os.environ.get("AGENT_WORKFLOW_ROOT")
     if override:
         return Path(override).expanduser()
-    return resolve_agent_home() / ".dispatch" / "workflow"
+    return resolve_dispatch_state_root(resolve_agent_home()) / "workflow"
 
 
 class WorkflowLedger:

@@ -167,7 +167,7 @@ class ProgressTest(unittest.TestCase):
     def test_delayed_capacity_line_closes_exact_attempt(self):
         P.heartbeat(self.args(), 0)
         P.watchdog(self.args(apply=True), 0)
-        logs = self.home / ".dispatch" / "logs"; logs.mkdir(parents=True)
+        logs = self.base / "logs"; logs.mkdir(parents=True)
         (logs / "stage.codex.jsonl").write_text("Selected model is at capacity\n")
         state = P.watchdog(self.args(apply=True), 1)
         self.assertEqual(state["terminal_action"], "dead-capacity")
@@ -175,7 +175,7 @@ class ProgressTest(unittest.TestCase):
         self.assertIn("note=dead-capacity", self.jobs.read_text())
 
     def test_capacity_scan_is_bound_to_the_exact_attempt_log(self):
-        logs = self.home / ".dispatch" / "logs"; logs.mkdir(parents=True)
+        logs = self.base / "logs"; logs.mkdir(parents=True)
         old_log = logs / "stage.att-old.codex.jsonl"
         exact_log = logs / "stage.att-current.codex.jsonl"
         old_log.write_text("Selected model is at capacity\n")

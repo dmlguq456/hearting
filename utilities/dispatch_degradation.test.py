@@ -17,6 +17,18 @@ if TOOLS not in sys.path:
 
 
 class DegradationWriterTest(unittest.TestCase):
+    def setUp(self):
+        # record_degradation() resolves the dispatch state root ahead of
+        # agent_home/.dispatch, preferring an inherited AGENT_DISPATCH_JOBS --
+        # clear it so these agent-home-relative fixtures aren't sensitive to
+        # the invoking shell's real registry.
+        self._prior_jobs = os.environ.pop("AGENT_DISPATCH_JOBS", None)
+        self.addCleanup(self._restore_jobs)
+
+    def _restore_jobs(self):
+        if self._prior_jobs is not None:
+            os.environ["AGENT_DISPATCH_JOBS"] = self._prior_jobs
+
     def test_depth_zero_is_not_written(self):
         with tempfile.TemporaryDirectory() as home:
             self.assertIsNone(record_degradation(agent_home=home, dispatch_depth=0,

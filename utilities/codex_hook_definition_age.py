@@ -9,9 +9,13 @@ import json
 import math
 import os
 from pathlib import Path
+import sys
 import tempfile
 import uuid
 from typing import Callable
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from dispatch_contract import resolve_dispatch_state_root  # noqa: E402
 
 
 @dataclass(frozen=True)
@@ -75,7 +79,7 @@ def prove_parent_definition(
     if now_ms is not None:
         now_ms()
     harness_home = Path(os.environ.get("AGENT_HOME", "~/.codex")).expanduser()
-    ledger = Path(ledger_path) if ledger_path is not None else harness_home / ".dispatch" / "codex-hook-definition-ledger.json"
+    ledger = Path(ledger_path) if ledger_path is not None else resolve_dispatch_state_root(harness_home) / "codex-hook-definition-ledger.json"
     lock = Path(lock_path) if lock_path is not None else ledger.with_name(ledger.name + ".lock")
     try:
         ledger.parent.mkdir(parents=True, exist_ok=True)

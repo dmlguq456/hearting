@@ -10,6 +10,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from dispatch_contract import resolve_agent_home as _resolve_agent_home  # noqa: E402
+from dispatch_contract import resolve_dispatch_state_root as _resolve_dispatch_state_root  # noqa: E402
 
 _KINDS = {"degradation", "chain-exhausted", "leg-failure"}
 _HOPS = {"same-harness-headless", "cross-harness-headless", "native-subagent", "inline"}
@@ -29,7 +30,7 @@ def _event_id(row):
     identity = [row.get(k) for k in ("kind", "route_id", "route_node", "attempt_id", "parallel_leg_index", "parallel_leg_count", "fallback_ordinal", "writer")]
     return "dg-" + hashlib.sha256(json.dumps(identity, ensure_ascii=False, separators=(",", ":")).encode()).hexdigest()[:24]
 
-def record_degradation(*, route_id=None, route_node=None, route_hash=None, dispatch_depth=0, fallback_hop=None, execution_surface=None, writer=None, kind="degradation", agent_home=None, **fields):
+def record_degradation(*, route_id=None, route_node=None, route_hash=None, dispatch_depth=0, fallback_hop=None, execution_surface=None, writer=None, kind="degradation", agent_home=None, jobs=None, **fields):
     """Append one bounded record; every failure is intentionally swallowed."""
     try:
         depth = int(dispatch_depth)
@@ -44,7 +45,7 @@ def record_degradation(*, route_id=None, route_node=None, route_hash=None, dispa
                 row[key] = _clip(row[key], limit)
         row["event_id"] = fields.get("event_id") or _event_id(row)
         payload = (json.dumps(row, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8")
-        root = os.path.join(agent_home or _home(), ".dispatch", "degradations")
+        root = str(_resolve_dispatch_state_root(agent_home or _home(), jobs) / "degradations")
         os.makedirs(root, exist_ok=True)
         filename = route_id + ".jsonl" if isinstance(route_id, str) and route_id else "_unattributed.jsonl"
         path = os.path.join(root, filename)

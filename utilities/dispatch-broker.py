@@ -29,6 +29,8 @@ import uuid
 SOURCE_ROOT = Path(__file__).resolve().parents[1]
 _agent_home = Path(os.environ.get("AGENT_HOME", SOURCE_ROOT)).expanduser().resolve(strict=False)
 ROOT = _agent_home if (_agent_home / "core/CORE.md").is_file() else SOURCE_ROOT
+sys.path.insert(0, str(SOURCE_ROOT / "utilities"))
+from dispatch_contract import resolve_dispatch_state_root  # noqa: E402
 SCHEMA_VERSION = 1
 TERMINAL = {"done", "failed", "cancelled"}
 ACTIONS = {"dry-run", "register", "start"}
@@ -117,8 +119,7 @@ def default_root() -> Path:
     explicit = os.environ.get("AGENT_DISPATCH_BROKER_ROOT")
     if explicit:
         return Path(explicit).expanduser().resolve(strict=False)
-    agent_home = Path(os.environ.get("AGENT_HOME", ROOT)).expanduser().resolve(strict=False)
-    return agent_home / ".dispatch" / "broker"
+    return resolve_dispatch_state_root(ROOT) / "broker"
 
 
 def absolute(value: object, field: str, *, must_exist: bool = False) -> Path:

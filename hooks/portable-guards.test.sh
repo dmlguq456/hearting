@@ -57,7 +57,17 @@ unset CLAUDE_CODE_SESSION_ID CODEX_SESSION_ID \
 CODEX_WRAPPED_DISPATCH_HOME=$(AGENT_HOME="$TMP/not-agent-home" \
   "$ROOT/adapters/codex/utilities/agent-home.sh")
 OPENCODE_WRAPPED_DISPATCH_HOME="$ROOT"
-DIRECT_DISPATCH_HOME="$ROOT"
+# A direct python invocation of an adapter's dispatch-headless.py now delegates
+# its agent-home resolution to the one canonical resolver with that adapter's
+# runtime pointer (I-6 unification), so it resolves identically to that
+# adapter's own bundle-aware agent-home.sh chain -- no longer a bare $ROOT
+# fallback. opencode's preflight.sh wrapper keeps its own simpler
+# non-bundle-aware local resolver (untouched by this cycle), so
+# OPENCODE_WRAPPED_DISPATCH_HOME above stays $ROOT; only the *direct* python
+# invocation paths change.
+CODEX_DIRECT_DISPATCH_HOME="$CODEX_WRAPPED_DISPATCH_HOME"
+OPENCODE_DIRECT_DISPATCH_HOME=$(AGENT_HOME="$TMP/not-agent-home" \
+  "$ROOT/adapters/opencode/utilities/agent-home.sh")
 
 echo "== artifact guard CLI =="
 mkdir -p "$TMP/proj/.agent_reports/spec"
@@ -1163,15 +1173,15 @@ else
 fi
 if "$CODEX" dispatch --dry-run --worktree "$TMP/repo" --slug codex-default-home --capability autopilot-code --mode dev --qa standard --prompt-text "do work" --model gpt-test --reasoning low >/tmp/codex_dispatch_default.out 2>/tmp/codex_dispatch_default.err \
   && grep -Fxq "job_registry=$(readlink -f "$CODEX_WRAPPED_DISPATCH_HOME")/.dispatch/jobs.log" /tmp/codex_dispatch_default.out \
-  && grep -Fxq "prompt_file=$CODEX_WRAPPED_DISPATCH_HOME/.dispatch/logs/codex-default-home.codex.prompt.txt" /tmp/codex_dispatch_default.out \
+  && grep -Fxq "prompt_file=$(readlink -f "$CODEX_WRAPPED_DISPATCH_HOME")/.dispatch/logs/codex-default-home.codex.prompt.txt" /tmp/codex_dispatch_default.out \
   && [ ! -e "$AGENT_HOME/.dispatch/jobs.log" ]; then
   ok "codex dispatch wrapper defaults to validated harness root"
 else
   bad "codex dispatch wrapper should not trust invalid AGENT_HOME for default registry"
 fi
 if AGENT_HOME="$TMP/not-agent-home" python3 "$ROOT/adapters/codex/bin/dispatch-headless.py" --dry-run --worktree "$TMP/repo" --slug codex-direct-home --capability autopilot-code --mode dev --qa standard --prompt-text "do work" --model gpt-test --reasoning low >/tmp/codex_dispatch_direct.out 2>/tmp/codex_dispatch_direct.err \
-  && grep -Fxq "job_registry=$DIRECT_DISPATCH_HOME/.dispatch/jobs.log" /tmp/codex_dispatch_direct.out \
-  && grep -Fxq "prompt_file=$DIRECT_DISPATCH_HOME/.dispatch/logs/codex-direct-home.codex.prompt.txt" /tmp/codex_dispatch_direct.out; then
+  && grep -Fxq "job_registry=$(readlink -f "$CODEX_DIRECT_DISPATCH_HOME")/.dispatch/jobs.log" /tmp/codex_dispatch_direct.out \
+  && grep -Fxq "prompt_file=$(readlink -f "$CODEX_DIRECT_DISPATCH_HOME")/.dispatch/logs/codex-direct-home.codex.prompt.txt" /tmp/codex_dispatch_direct.out; then
   ok "codex dispatch script ignores invalid AGENT_HOME"
 else
   bad "codex dispatch script should validate AGENT_HOME"
@@ -3604,15 +3614,15 @@ else
 fi
 if "$OPENCODE" dispatch --dry-run --worktree "$TMP/repo" --slug opencode-default-home --capability autopilot-code --mode dev --qa standard --prompt-text "do work" --model provider/test --variant low >/tmp/opencode_dispatch_default.out 2>/tmp/opencode_dispatch_default.err \
   && grep -Fxq "job_registry=$(readlink -f "$OPENCODE_WRAPPED_DISPATCH_HOME")/.dispatch/jobs.log" /tmp/opencode_dispatch_default.out \
-  && grep -Fxq "prompt_file=$OPENCODE_WRAPPED_DISPATCH_HOME/.dispatch/logs/opencode-default-home.opencode.prompt.txt" /tmp/opencode_dispatch_default.out \
+  && grep -Fxq "prompt_file=$(readlink -f "$OPENCODE_WRAPPED_DISPATCH_HOME")/.dispatch/logs/opencode-default-home.opencode.prompt.txt" /tmp/opencode_dispatch_default.out \
   && [ ! -e "$AGENT_HOME/.dispatch/jobs.log" ]; then
   ok "opencode dispatch wrapper defaults to validated harness root"
 else
   bad "opencode dispatch wrapper should not trust invalid AGENT_HOME for default registry"
 fi
 if AGENT_HOME="$TMP/not-agent-home" python3 "$ROOT/adapters/opencode/bin/dispatch-headless.py" --dry-run --worktree "$TMP/repo" --slug opencode-direct-home --capability autopilot-code --mode dev --qa standard --prompt-text "do work" --model provider/test --variant low >/tmp/opencode_dispatch_direct.out 2>/tmp/opencode_dispatch_direct.err \
-  && grep -Fxq "job_registry=$DIRECT_DISPATCH_HOME/.dispatch/jobs.log" /tmp/opencode_dispatch_direct.out \
-  && grep -Fxq "prompt_file=$DIRECT_DISPATCH_HOME/.dispatch/logs/opencode-direct-home.opencode.prompt.txt" /tmp/opencode_dispatch_direct.out; then
+  && grep -Fxq "job_registry=$(readlink -f "$OPENCODE_DIRECT_DISPATCH_HOME")/.dispatch/jobs.log" /tmp/opencode_dispatch_direct.out \
+  && grep -Fxq "prompt_file=$(readlink -f "$OPENCODE_DIRECT_DISPATCH_HOME")/.dispatch/logs/opencode-direct-home.opencode.prompt.txt" /tmp/opencode_dispatch_direct.out; then
   ok "opencode dispatch script ignores invalid AGENT_HOME"
 else
   bad "opencode dispatch script should validate AGENT_HOME"

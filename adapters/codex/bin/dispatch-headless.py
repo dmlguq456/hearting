@@ -1627,14 +1627,14 @@ def seed_launch_heartbeat(args: argparse.Namespace, jobs: Path, pid: int, start:
     return "ok" if result.returncode == 0 else "failed"
 
 
-def write_reset_cache(agent_home: Path, harness: str, reason: str, reset: str) -> None:
+def write_reset_cache(agent_home: Path, harness: str, reason: str, reset: str, jobs: Path | None = None) -> None:
     """SD-15↔SD-16: cache the last known limit reset for usage-check.sh to read.
 
     File `.dispatch/usage-reset.<harness>` holds one line: `<iso-ts> <reason> <reset>`.
     Best-effort — a cache write failure never blocks dispatch bookkeeping.
     """
     try:
-        cache = agent_home / ".dispatch" / f"usage-reset.{harness}"
+        cache = (dispatch_state_root(jobs) if jobs else agent_home / ".dispatch") / f"usage-reset.{harness}"
         cache.parent.mkdir(parents=True, exist_ok=True)
         ts = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
         cache.write_text(f"{ts} {reason} {reset}\n", encoding="utf-8")
@@ -2685,7 +2685,7 @@ def main(argv: list[str]) -> int:
                 reason, reset = death
                 close_job_row(jobs, args.slug, args.worktree, reason, reset, args.attempt_id)
                 if reason != "capacity":
-                    write_reset_cache(agent_home, "codex", reason, reset)
+                    write_reset_cache(agent_home, "codex", reason, reset, args.jobs_path)
                 args.early_death = (reason, reset)
 
     print("check=ok")

@@ -21,6 +21,7 @@ from dispatch_contract import (  # noqa: E402
     process_start_ticks,
     process_state,
     resolve_agent_home as _resolve_agent_home,
+    resolve_dispatch_state_root,
 )
 from codex_dispatch_terminal import (  # noqa: E402
     inspect_terminal_attempt,
@@ -59,7 +60,7 @@ def log_shows_limit(agent_home: Path, slug: str) -> Path | None:
     """
     if not slug:
         return None
-    log_dir = agent_home / ".dispatch" / "logs"
+    log_dir = resolve_dispatch_state_root(agent_home) / "logs"
     for lf in sorted(log_dir.glob(f"{slug}.*")):
         if not lf.is_file():
             continue
@@ -142,7 +143,7 @@ def attempt_heartbeat(agent_home: Path, metadata: dict[str, str]) -> dict | None
     attempt = metadata.get("attempt_id", "").replace("/", "_")
     if not attempt:
         return None
-    path = agent_home / ".dispatch" / "heartbeats" / f"{attempt}.json"
+    path = resolve_dispatch_state_root(agent_home) / "heartbeats" / f"{attempt}.json"
     try:
         if path.stat().st_size > 8192:
             return None
@@ -160,7 +161,7 @@ def attempt_terminal_observation(
     node = metadata.get("route_node")
     if not attempt or not route or not node:
         return None
-    path = agent_home / ".dispatch" / "watchdog" / f"{attempt}.json"
+    path = resolve_dispatch_state_root(agent_home) / "watchdog" / f"{attempt}.json"
     try:
         if path.stat().st_size > 8192:
             return None
@@ -261,7 +262,7 @@ def sessions_dir_for(pipe: str, slug: str, agent_home: Path, default_sessions: P
     """
     prof = parse_profile(pipe)
     if prof:
-        return agent_home / ".dispatch" / "homes" / f"{slug}.{prof}" / "sessions"
+        return resolve_dispatch_state_root(agent_home) / "homes" / f"{slug}.{prof}" / "sessions"
     return default_sessions
 
 
@@ -329,7 +330,7 @@ def main(argv: list[str]) -> int:
 
     agent_home = resolve_agent_home()
     jobs_override = argv[1] if len(argv) == 2 else os.environ.get("AGENT_DISPATCH_JOBS")
-    jobs = Path(jobs_override) if jobs_override else agent_home / ".dispatch" / "jobs.log"
+    jobs = Path(jobs_override) if jobs_override else resolve_dispatch_state_root(agent_home) / "jobs.log"
     default_sessions = Path(os.environ.get("CODEX_SESSIONS", Path.home() / ".codex" / "sessions"))
     stale_min = int(os.environ.get("DISPATCH_STALE_MIN", "15"))
 
@@ -475,7 +476,7 @@ def main(argv: list[str]) -> int:
             )
             transcript = locate_latest_for_worktree_dirs(sessions_dirs, worktree)
             if transcript is None:
-                wrapper_log = agent_home / ".dispatch" / "logs" / f"{slug}.codex.jsonl"
+                wrapper_log = resolve_dispatch_state_root(agent_home) / "logs" / f"{slug}.codex.jsonl"
                 if wrapper_log.is_file():
                     transcript = wrapper_log
             if transcript is None:

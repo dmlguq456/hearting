@@ -14,6 +14,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from dispatch_contract import resolve_agent_home as _resolve_agent_home  # noqa: E402
+from dispatch_contract import resolve_dispatch_state_root as _resolve_dispatch_state_root  # noqa: E402
 
 INDEX_SCHEMA = 1
 REGISTRY_SCHEMA = 1
@@ -28,7 +29,7 @@ def agent_home() -> Path:
 def default_index_path() -> Path:
     override = os.environ.get("AGENT_RESOURCE_RUN_INDEX")
     return Path(override).expanduser().resolve(strict=False) if override else (
-        agent_home() / ".dispatch" / "resource-runs.index.json"
+        _resolve_dispatch_state_root(agent_home()) / "resource-runs.index.json"
     )
 
 

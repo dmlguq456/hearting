@@ -67,6 +67,19 @@ def resolve_agent_home():
     sys.exit(1)
 
 
+def resolve_dispatch_state_root(agent_home):
+    """Canonical dispatch state root for `agent_home`, falling back to the
+    legacy `<agent_home>/.dispatch` shape if the resolver cannot be imported."""
+    here = Path(__file__).resolve()
+    utilities_dir = here.parents[1].parent / "utilities"
+    if (utilities_dir / "dispatch_contract.py").is_file():
+        sys.path.insert(0, str(utilities_dir))
+        from dispatch_contract import resolve_dispatch_state_root as _resolve
+
+        return _resolve(agent_home)
+    return agent_home / ".dispatch"
+
+
 def first_existing(*paths):
     for p in paths:
         p = Path(p)
@@ -351,7 +364,7 @@ def main():
     # must resolve the SAME root to find the isolated transcript. Profile dispatch therefore
     # presumes a consistent AGENT_HOME across writer (wrapper) and readers; with AGENT_HOME
     # unset the reader fallbacks diverge and profile jobs read as false-DEAD (see plan Risks).
-    home_root = Path(args.home_root) if args.home_root else agent_home / ".dispatch" / "homes"
+    home_root = Path(args.home_root) if args.home_root else resolve_dispatch_state_root(agent_home) / "homes"
 
     if args.check:
         do_check(agent_home, args.name)

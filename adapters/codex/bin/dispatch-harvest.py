@@ -20,6 +20,7 @@ from dispatch_contract import (  # noqa: E402
     parse_registry_metadata,
     reconcile_local_registry,
     resolve_agent_home as _resolve_agent_home,
+    resolve_dispatch_state_root,
     validate_attempt_metadata,
 )
 from codex_dispatch_terminal import inspect_terminal_attempt  # noqa: E402
@@ -199,7 +200,7 @@ def main(argv: list[str]) -> int:
 
     agent_home = resolve_agent_home()
     jobs_override = args.jobs or os.environ.get("AGENT_DISPATCH_JOBS")
-    jobs = Path(jobs_override) if jobs_override else agent_home / ".dispatch" / "jobs.log"
+    jobs = Path(jobs_override) if jobs_override else resolve_dispatch_state_root(agent_home) / "jobs.log"
     args.reconciled = 0
     if args.reconcile_local:
         try:
@@ -295,7 +296,7 @@ def main(argv: list[str]) -> int:
         if live and not args.keep_home:
             profile_name = metadata.get("profile")
             if profile_name:
-                home = resolve_agent_home() / ".dispatch" / "homes" / (
+                home = resolve_dispatch_state_root(resolve_agent_home()) / "homes" / (
                     f"{target[4]}.{profile_name}"
                 )
                 if home.exists():

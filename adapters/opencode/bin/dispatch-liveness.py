@@ -17,6 +17,7 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "utilities"))
 from dispatch_contract import anchored_capacity_failure  # noqa: E402
 from dispatch_contract import resolve_agent_home as _resolve_agent_home  # noqa: E402
+from dispatch_contract import resolve_dispatch_state_root  # noqa: E402
 from tools.fleet.model import (  # noqa: E402
     ATTEMPT_CLASSIFIER_SOURCE,
     classify_attempt_evidence,
@@ -49,7 +50,7 @@ def log_shows_limit(agent_home: Path, slug: str) -> Path | None:
     """
     if not slug:
         return None
-    log_dir = agent_home / ".dispatch" / "logs"
+    log_dir = resolve_dispatch_state_root(agent_home) / "logs"
     for lf in sorted(log_dir.glob(f"{slug}.*")):
         if not lf.is_file():
             continue
@@ -147,7 +148,7 @@ def heartbeat_age_min(agent_home: Path, slug: str, now: float) -> float | None:
     """
     if not slug:
         return None
-    hb = agent_home / ".dispatch" / "logs" / f"{slug}.heartbeat"
+    hb = resolve_dispatch_state_root(agent_home) / "logs" / f"{slug}.heartbeat"
     try:
         mtime = hb.stat().st_mtime
     except OSError:
@@ -166,14 +167,14 @@ def plugin_loaded_for_slug(agent_home: Path, slug: str) -> bool:
     """
     if not slug:
         return False
-    return (agent_home / ".dispatch" / f"plugin-load.{slug}.mark").is_file()
+    return (resolve_dispatch_state_root(agent_home) / f"plugin-load.{slug}.mark").is_file()
 
 
 def attempt_heartbeat(agent_home: Path, metadata: dict[str, str]) -> dict | None:
     attempt = metadata.get("attempt_id", "").replace("/", "_")
     if not attempt:
         return None
-    path = agent_home / ".dispatch" / "heartbeats" / f"{attempt}.json"
+    path = resolve_dispatch_state_root(agent_home) / "heartbeats" / f"{attempt}.json"
     try:
         if path.stat().st_size > 8192:
             return None
@@ -210,7 +211,7 @@ def main(argv: list[str]) -> int:
 
     agent_home = resolve_agent_home()
     jobs_override = argv[1] if len(argv) == 2 else os.environ.get("AGENT_DISPATCH_JOBS")
-    jobs = Path(jobs_override) if jobs_override else agent_home / ".dispatch" / "jobs.log"
+    jobs = Path(jobs_override) if jobs_override else resolve_dispatch_state_root(agent_home) / "jobs.log"
     database = db_path()
     stale_min = int(os.environ.get("DISPATCH_STALE_MIN", "15"))
 
