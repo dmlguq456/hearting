@@ -258,28 +258,49 @@ class RegistryHomeTest(unittest.TestCase):
         with mock.patch.dict(os.environ, {"CLAUDE_HOME": "/claude-home"}, clear=True):
             self.assertEqual(dispatch._registry_home(), "/claude-home")
 
+    # The unset-env fallback chain now delegates to the one canonical resolver
+    # (utilities/dispatch_contract.resolve_agent_home), which validates each
+    # candidate by `core/CORE.md` presence rather than bare `isdir` — that
+    # validation is exactly what closes the real defect this cycle fixes
+    # (this reader used to land on an empty `~/agent_setting` with no
+    # `.dispatch` at all). These fixtures build a real fake $HOME tree instead
+    # of monkeypatching `os.path.isdir`/`expanduser`, since the resolver reads
+    # `Path.home()` and `Path.is_file()` directly.
+
     def test_hearting_isdir_fallback(self):
-        # Canonical linked checkout wins when no explicit home is configured.
-        with mock.patch.dict(os.environ, {}, clear=True), \
-             mock.patch("fleet.collectors.dispatch.os.path.expanduser",
-                         side_effect=lambda p: p.replace("~", "/home/u")), \
-             mock.patch("fleet.collectors.dispatch.os.path.isdir", return_value=True):
-            self.assertEqual(dispatch._registry_home(), "/home/u/hearting")
+        # Canonical linked checkout wins when no explicit home and no XDG
+        # `current` pointer is configured.
+        with tempfile.TemporaryDirectory() as home:
+            (Path(home) / "hearting" / "core").mkdir(parents=True)
+            (Path(home) / "hearting" / "core" / "CORE.md").write_text("x")
+            with mock.patch.dict(
+                os.environ,
+                {"HOME": home, "XDG_DATA_HOME": str(Path(home) / ".local" / "share")},
+                clear=True,
+            ), mock.patch("pathlib.Path.home", return_value=Path(home)):
+                self.assertEqual(dispatch._registry_home(), str(Path(home) / "hearting"))
 
     def test_agent_setting_remains_legacy_fallback(self):
-        with mock.patch.dict(os.environ, {}, clear=True), \
-             mock.patch("fleet.collectors.dispatch.os.path.expanduser",
-                         side_effect=lambda p: p.replace("~", "/home/u")), \
-             mock.patch("fleet.collectors.dispatch.os.path.isdir",
-                         side_effect=lambda p: p.endswith("/agent_setting")):
-            self.assertEqual(dispatch._registry_home(), "/home/u/agent_setting")
+        with tempfile.TemporaryDirectory() as home:
+            (Path(home) / "agent_setting" / "core").mkdir(parents=True)
+            (Path(home) / "agent_setting" / "core" / "CORE.md").write_text("x")
+            with mock.patch.dict(
+                os.environ,
+                {"HOME": home, "XDG_DATA_HOME": str(Path(home) / ".local" / "share")},
+                clear=True,
+            ), mock.patch("pathlib.Path.home", return_value=Path(home)):
+                self.assertEqual(dispatch._registry_home(), str(Path(home) / "agent_setting"))
 
     def test_dot_claude_fallback_when_linked_checkouts_absent(self):
-        with mock.patch.dict(os.environ, {}, clear=True), \
-             mock.patch("fleet.collectors.dispatch.os.path.expanduser",
-                         side_effect=lambda p: p.replace("~", "/home/u")), \
-             mock.patch("fleet.collectors.dispatch.os.path.isdir", return_value=False):
-            self.assertEqual(dispatch._registry_home(), "/home/u/.claude")
+        with tempfile.TemporaryDirectory() as home:
+            (Path(home) / ".claude" / "core").mkdir(parents=True)
+            (Path(home) / ".claude" / "core" / "CORE.md").write_text("x")
+            with mock.patch.dict(
+                os.environ,
+                {"HOME": home, "XDG_DATA_HOME": str(Path(home) / ".local" / "share")},
+                clear=True,
+            ), mock.patch("pathlib.Path.home", return_value=Path(home)):
+                self.assertEqual(dispatch._registry_home(), str(Path(home) / ".claude"))
 
     def test_jobs_path_override_beats_everything(self):
         with mock.patch.dict(os.environ,

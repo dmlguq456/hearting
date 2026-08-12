@@ -42,8 +42,10 @@ Contract:
 import hashlib
 import json
 import os
+import sys
 import time
 from dataclasses import dataclass
+from pathlib import Path
 
 _CACHE = {}          # {abspath: (mtime, size, record|None)}
 _MARKER_CACHE = {}   # {abspath: (mtime, size, marker|None)} — same shape, separate namespace
@@ -235,18 +237,56 @@ def load(path, expect_hash=None, expect_id=None):
 
 # --- completion gate markers (prd.md:308, v10 minor #2 — read-only) ---
 def _completion_home():
-    """Agent home holding `.dispatch/completion/`. Reproduces `collectors/dispatch._registry_home`
-    (AGENT_HOME → CLAUDE_HOME → $HOME/hearting → legacy $HOME/agent_setting → ~/.claude) rather than importing
-    it: route.py has no collectors dependency today (it is a peer of model.py, imported BY
-    dispatch.py's consumers), and one four-line resolver is cheaper than inverting that edge.
-    Kept in sync with `utilities/capability-route.py:230 completion_dir()`, the writer."""
+    """Agent home holding `.dispatch/completion/`. Delegates to the one canonical
+    resolver (`utilities/dispatch_contract.resolve_agent_home`) instead of a local
+    reimplementation: the prior four-line chain returned `~/agent_setting` whenever
+    it existed and had no `core/CORE.md` check, so this reader landed on an empty
+    directory in real deployments while the writer (`capability-route.py
+    completion_dir()`, :1058-1059) used the validated resolver. `route.py` stays
+    zero-third-party-dependency; this only imports the sibling stdlib-only module,
+    located by walking up from this file's own resolved location so it works both
+    from the canonical tree and the rsynced `adapters/claude/tools/fleet/` mirror.
+    An explicit `AGENT_HOME`/`CLAUDE_HOME` env override is honored unconditionally
+    (test fixtures and callers may point it at a bare directory); only the
+    unset-env fallback chain goes through the validated resolver."""
     h = os.environ.get("AGENT_HOME") or os.environ.get("CLAUDE_HOME")
     if h:
         return h
-    for cand in (os.path.expanduser("~/hearting"), os.path.expanduser("~/agent_setting")):
-        if os.path.isdir(cand):
-            return cand
+    here = Path(__file__).resolve()
+    for candidate in here.parents:
+        utilities_dir = candidate / "utilities"
+        if (utilities_dir / "dispatch_contract.py").is_file():
+            if str(utilities_dir) not in sys.path:
+                sys.path.insert(0, str(utilities_dir))
+            from dispatch_contract import resolve_agent_home
+
+            return str(resolve_agent_home())
     return os.path.expanduser("~/.claude")
+
+
+def _dispatch_state_roots(home=None):
+    """Read-order candidates for dispatch state: canonical state root
+    (dirname of the resolved registry, honoring an inherited
+    AGENT_DISPATCH_JOBS) first, then the legacy agent-home-relative tree
+    (I-2 read-fallback). Falls back to the single legacy candidate if the
+    canonical resolver cannot be located or fails for any reason -- this
+    reader must stay tolerant, never raise."""
+
+    agent_home = home or _completion_home()
+    legacy = os.path.join(agent_home, ".dispatch")
+    here = Path(__file__).resolve()
+    for candidate in here.parents:
+        utilities_dir = candidate / "utilities"
+        if (utilities_dir / "dispatch_contract.py").is_file():
+            if str(utilities_dir) not in sys.path:
+                sys.path.insert(0, str(utilities_dir))
+            try:
+                from dispatch_contract import dispatch_state_roots
+
+                return [str(root) for root in dispatch_state_roots(Path(agent_home))]
+            except Exception:
+                return [legacy]
+    return [legacy]
 
 
 def _load_marker_uncached(abspath):
@@ -336,9 +376,14 @@ def gate_mark(record, node_id, home=None):
     )
     if node is None:
         return None
-    directory = os.path.join(home or _completion_home(), ".dispatch", "completion", route_id)
-    path = os.path.join(directory, node_id + ".json")
-    marker = _load_marker(path)
+    marker = None
+    path = None
+    for state_root in _dispatch_state_roots(home):
+        directory = os.path.join(state_root, "completion", route_id)
+        path = os.path.join(directory, node_id + ".json")
+        marker = _load_marker(path)
+        if marker is not None:
+            break
     if marker is None:
         return None
     if (
