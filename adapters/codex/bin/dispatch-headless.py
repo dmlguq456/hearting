@@ -39,6 +39,7 @@ from dispatch_contract import (  # noqa: E402
     completion_marker_gate,
     PRELAUNCH_PROCESS_BLOCK_REASONS,
     codex_standard_owner_network_enabled,
+    dispatch_state_root,
     ensure_global_registry_writable,
     headless_attempt_policy,
     launch_orphan_watch,
@@ -933,8 +934,18 @@ def invalid_codex_mount_target(args: argparse.Namespace, worktree: Path) -> Path
     return None
 
 
+def _spec_grounding_dir(args: argparse.Namespace) -> Path:
+    return Path(args.agent_home) / ".spec-grounding"
+
+
+def _core_grounding_dir(args: argparse.Namespace) -> Path:
+    return Path(args.agent_home) / ".core-grounding"
+
+
 def nested_owner_writable_dirs(args: argparse.Namespace) -> tuple[Path, ...]:
-    """Expose only the runtime scratch roots a Codex owner may need downstream."""
+    """Expose only the runtime scratch roots an owner-network-widened Codex owner
+    may need downstream. A pure query -- see `ensure_owner_writable_dirs` for the
+    one place these directories are created before launch."""
 
     if not getattr(args, "nested_headless_network", False):
         return ()
@@ -944,24 +955,77 @@ def nested_owner_writable_dirs(args: argparse.Namespace) -> tuple[Path, ...]:
     # SD-49: the owner must register every depth-2 attempt in the inherited
     # canonical registry. Expose that registry's exact directory so the owner
     # can take jobs.log.lock without widening access to the rest of agent home.
-    canonical_registry_root = Path(args.jobs_path).parent.resolve()
+    canonical_registry_root = dispatch_state_root(args.jobs_path)
     # SD-72: dispatch-depth-2 launches inside the owner sandbox spawn a summary owner
     # that writes exact-attempt state under the fleet titles root; without
     # write access the pre-release fence closes every child as
-    # `summary-owner-launch-failed`/`never-launched`. A spec-backed owner also
-    # records its own PRD-read marker under `.spec-grounding`.
+    # `summary-owner-launch-failed`/`never-launched`.
     summary_owner_root = owner_root()
-    summary_owner_root.mkdir(mode=0o700, parents=True, exist_ok=True)
-    spec_grounding = Path(args.agent_home) / ".spec-grounding"
-    spec_grounding.mkdir(mode=0o700, parents=True, exist_ok=True)
     candidates = (
         canonical_registry_root,
-        Path(args.agent_home) / ".core-grounding",
         claude_config / "session-env",
-        spec_grounding,
         summary_owner_root,
     )
     return tuple(path.resolve() for path in candidates if path.is_dir())
+
+
+def route_bound_worker_writable_dirs(args: argparse.Namespace) -> tuple[Path, ...]:
+    """Grant set for an ordinary registered `dispatch_depth==2` Codex worker,
+    independent of the owner-only `nested_headless_network` gate (plan-check
+    round-1 Finding 1): a route-bound worker still runs the portable core-read
+    guard hook and must be able to record its own `.core-grounding` marker, the
+    same as `.spec-grounding` is already granted unconditionally below. A pure
+    query -- see `ensure_owner_writable_dirs`."""
+
+    if not getattr(args, "route_id", None):
+        return ()
+    return tuple(
+        path.resolve() for path in (_core_grounding_dir(args),) if path.is_dir()
+    )
+
+
+def ensure_owner_writable_dirs(args: argparse.Namespace) -> None:
+    """Create every directory this launch will grant sandbox write access to,
+    once, before the child command is built. A query function (above) never
+    has this side effect -- a create failure here is a typed launch failure,
+    not a silently narrowed grant list."""
+
+    to_create = []
+    if getattr(args, "nested_headless_network", False):
+        to_create.append(owner_root())
+    if getattr(args, "route_id", None):
+        to_create.append(_spec_grounding_dir(args))
+        to_create.append(_core_grounding_dir(args))
+    for path in to_create:
+        try:
+            path.mkdir(mode=0o700, parents=True, exist_ok=True)
+        except OSError as exc:
+            raise DispatchContractError("owner-writable-root-uncreatable", f"{path}: {exc}")
+
+
+def _is_within(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root.resolve(strict=False))
+        return True
+    except ValueError:
+        return False
+
+
+def assert_register_mkdir_containment(args: argparse.Namespace, *paths: Path) -> None:
+    """`--action register`/`start` must never mkdir outside the granted set
+    (verification requirement (c) / plan-check round-1 Finding 2)."""
+
+    granted = (
+        (dispatch_state_root(args.jobs_path),)
+        + nested_owner_writable_dirs(args)
+        + route_bound_worker_writable_dirs(args)
+    )
+    for path in paths:
+        resolved = path.resolve(strict=False)
+        if not any(_is_within(resolved, root) for root in granted):
+            raise DispatchContractError(
+                "register-mkdir-outside-granted-root", str(resolved)
+            )
 
 
 def validate_nested_owner_registry_projection(args: argparse.Namespace) -> None:
@@ -969,7 +1033,7 @@ def validate_nested_owner_registry_projection(args: argparse.Namespace) -> None:
 
     if not getattr(args, "nested_headless_network", False):
         return
-    registry_root = Path(args.jobs_path).parent.resolve()
+    registry_root = dispatch_state_root(args.jobs_path)
     if registry_root not in nested_owner_writable_dirs(args):
         raise DispatchContractError(
             "owner-registry-sandbox-unwritable",
@@ -1024,15 +1088,16 @@ def resolve_completion_delivery(args: argparse.Namespace) -> str:
 
 
 def completion_state_path(args: argparse.Namespace) -> Path:
+    state_root = dispatch_state_root(args.jobs_path)
     if not args.attempt_id:
-        return Path(args.agent_home) / ".dispatch" / "supervisor-state" / "preview-only.json"
+        return state_root / "supervisor-state" / "preview-only.json"
     attempt_id = args.attempt_id
     if re.fullmatch(r"att-[A-Za-z0-9._-]{1,240}", attempt_id) is None:
         raise DispatchContractError(
             "completion-state-attempt-invalid",
             "supervised completion requires a path-safe exact attempt id",
         )
-    return Path(args.agent_home) / ".dispatch" / "supervisor-state" / f"{attempt_id}.json"
+    return state_root / "supervisor-state" / f"{attempt_id}.json"
 
 
 def completion_lease_path(args: argparse.Namespace) -> Path:
@@ -1069,13 +1134,16 @@ def shell_command(args: argparse.Namespace, prompt_path: Path, log_path: Path) -
         if args.nested_headless_network or (
             args.dispatch_depth == 2 and args.route_id and args.attempt_id
         ):
-            command += ["--writable-root", str(args.agent_home / ".dispatch")]
+            command += [
+                "--writable-root",
+                str(dispatch_state_root(args.jobs_path)),
+            ]
         for writable_dir in nested_owner_writable_dirs(args):
             command += ["--writable-root", str(writable_dir)]
         if args.route_id:
-            spec_grounding = args.agent_home / ".spec-grounding"
-            spec_grounding.mkdir(mode=0o700, parents=True, exist_ok=True)
-            command += ["--writable-root", str(spec_grounding)]
+            command += ["--writable-root", str(_spec_grounding_dir(args))]
+        for writable_dir in route_bound_worker_writable_dirs(args):
+            command += ["--writable-root", str(writable_dir)]
         if args.nested_headless_network:
             command += ["--network-access"]
         if args.resolved_model_settings["source"] != "inherit":
@@ -1099,10 +1167,13 @@ def shell_command(args: argparse.Namespace, prompt_path: Path, log_path: Path) -
         cmd += ["--add-dir", str(args.report_bundle_root)]
     if args.nested_headless_network or (args.dispatch_depth == 2 and args.route_id and args.attempt_id):
         # A dispatch-depth-1 conductor must update the canonical attempt registry and
-        # materialize child prompt/transcript files under <agent-home>/.dispatch.
-        # A route-bound dispatch-depth-2 stage needs the same narrow writable root for
-        # its own SD-58 heartbeat. Network remains owner-only below.
-        cmd += ["--add-dir", str(args.agent_home / ".dispatch")]
+        # materialize child prompt/transcript files under the canonical dispatch
+        # state root. A route-bound dispatch-depth-2 stage needs the same narrow
+        # writable root for its own SD-58 heartbeat. Network remains owner-only below.
+        cmd += [
+            "--add-dir",
+            str(dispatch_state_root(args.jobs_path)),
+        ]
     for writable_dir in nested_owner_writable_dirs(args):
         # Core read markers and Claude's Bash pre-exec snapshot are the only
         # home-scoped writes needed by a recursive standard+ Codex owner.
@@ -1114,9 +1185,12 @@ def shell_command(args: argparse.Namespace, prompt_path: Path, log_path: Path) -
         # writable roots, so this is intentionally narrow — never all of
         # agent home, and never .git. Codex-only: the Claude wrapper commits
         # normally from its own worktree and has no equivalent boundary gap.
-        spec_grounding = args.agent_home / ".spec-grounding"
-        spec_grounding.mkdir(mode=0o700, parents=True, exist_ok=True)
-        cmd += ["--add-dir", str(spec_grounding)]
+        cmd += ["--add-dir", str(_spec_grounding_dir(args))]
+    for writable_dir in route_bound_worker_writable_dirs(args):
+        # SD-72: an ordinary route-bound depth-2 worker also runs the portable
+        # core-read guard hook and must record its own .core-grounding marker,
+        # independent of the owner-only nested_headless_network network grant.
+        cmd += ["--add-dir", str(writable_dir)]
     cmd += ["--sandbox", effective_runtime_sandbox(args)]
     if args.nested_headless_network:
         cmd += ["-c", "sandbox_workspace_write.network_access=true"]
@@ -2144,7 +2218,11 @@ def main(argv: list[str]) -> int:
             completion_lease_path(args)
     except DispatchContractError as e:
         return fail(e.reason, 69, detail=e.detail, child_spawned="0")
-    log_dir = Path(args.log_dir) if args.log_dir else agent_home / ".dispatch" / "logs"
+    log_dir = (
+        Path(args.log_dir)
+        if args.log_dir
+        else dispatch_state_root(args.jobs_path) / "logs"
+    )
     task_input = task_prompt(args)
     prompt_text, prompt_source = dispatch_prompt(args, task_input)
     assignment_sha256 = "sha256:" + hashlib.sha256(
@@ -2197,6 +2275,10 @@ def main(argv: list[str]) -> int:
     )
     log_path = log_dir / log_name
     args.log_path = log_path
+    try:
+        ensure_owner_writable_dirs(args)
+    except DispatchContractError as e:
+        return fail(e.reason, 73, detail=e.detail, child_spawned="0")
     command = shell_command(args, prompt_path, log_path)
 
     governor = ROOT / "utilities" / "model-worker-governor.py"
@@ -2207,6 +2289,10 @@ def main(argv: list[str]) -> int:
     reservation_token = ""
     args.replica_batch_reservation = {}
     if action in ("register", "start"):
+        try:
+            assert_register_mkdir_containment(args, prompt_path.parent, log_path.parent)
+        except DispatchContractError as e:
+            return fail(e.reason, 73, detail=e.detail, child_spawned="0")
         prompt_path.parent.mkdir(parents=True, exist_ok=True)
         log_path.parent.mkdir(parents=True, exist_ok=True)
         if action == "start":

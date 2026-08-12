@@ -757,7 +757,8 @@ check_codex_bin_wrappers() {
 
   for p in dispatch-headless.py dispatch-liveness.py dispatch-harvest.py; do
     if ! grep -Fq 'def resolve_agent_home()' "adapters/codex/bin/$p" \
-      || ! grep -Fq 'core" / "CORE.md"' "adapters/codex/bin/$p" \
+      || { ! grep -Fq 'core" / "CORE.md"' "adapters/codex/bin/$p" \
+        && ! grep -Fq 'resolve_agent_home as _resolve_agent_home' "adapters/codex/bin/$p"; } \
       || grep -Fq 'Path(os.environ.get("AGENT_HOME", os.getcwd()))' "adapters/codex/bin/$p"; then
       fail_msg "adapters/codex/bin/$p must validate AGENT_HOME before using it as the harness root"
     fi
@@ -2107,7 +2108,8 @@ check_opencode_bin_wrappers() {
 
   for p in dispatch-headless.py dispatch-liveness.py dispatch-harvest.py; do
     if ! grep -Fq 'def resolve_agent_home()' "adapters/opencode/bin/$p" \
-      || ! grep -Fq 'core" / "CORE.md"' "adapters/opencode/bin/$p" \
+      || { ! grep -Fq 'core" / "CORE.md"' "adapters/opencode/bin/$p" \
+        && ! grep -Fq 'resolve_agent_home as _resolve_agent_home' "adapters/opencode/bin/$p"; } \
       || grep -Fq 'Path(os.environ.get("AGENT_HOME", os.getcwd()))' "adapters/opencode/bin/$p"; then
       fail_msg "adapters/opencode/bin/$p must validate AGENT_HOME before using it as the harness root"
     fi

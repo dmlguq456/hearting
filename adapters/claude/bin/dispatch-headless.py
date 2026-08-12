@@ -34,6 +34,7 @@ from dispatch_contract import (  # noqa: E402
     claim_attempt_row,
     close_attempt_row,
     completion_marker_gate,
+    dispatch_state_root,
     PRELAUNCH_PROCESS_BLOCK_REASONS,
     ensure_global_registry_writable,
     headless_attempt_policy,
@@ -851,15 +852,16 @@ def resolve_completion_delivery(args: argparse.Namespace) -> str:
 
 
 def completion_state_path(args: argparse.Namespace) -> Path:
+    state_root = dispatch_state_root(args.jobs_path)
     if not args.attempt_id:
-        return Path(args.agent_home) / ".dispatch" / "supervisor-state" / "preview-only.json"
+        return state_root / "supervisor-state" / "preview-only.json"
     attempt_id = args.attempt_id
     if re.fullmatch(r"att-[A-Za-z0-9._-]{1,240}", attempt_id) is None:
         raise DispatchContractError(
             "completion-state-attempt-invalid",
             "supervised completion requires a path-safe exact attempt id",
         )
-    return Path(args.agent_home) / ".dispatch" / "supervisor-state" / f"{attempt_id}.json"
+    return state_root / "supervisor-state" / f"{attempt_id}.json"
 
 
 def shell_command(args: argparse.Namespace, prompt_path: Path, log_path: Path) -> str:
@@ -1680,8 +1682,12 @@ def main(argv: list[str]) -> int:
             completion_state_path(args)
     except DispatchContractError as e:
         return fail(e.reason, 69, detail=e.detail, child_spawned="0")
-    log_dir = Path(args.log_dir) if args.log_dir else agent_home / ".dispatch" / "logs"
-    home_root = agent_home / ".dispatch" / "homes"
+    log_dir = (
+        Path(args.log_dir)
+        if args.log_dir
+        else dispatch_state_root(args.jobs_path) / "logs"
+    )
+    home_root = dispatch_state_root(args.jobs_path) / "homes"
     instance_dir = home_root / f"{args.slug}.{args.profile}" if args.profile else None
 
     task_input = task_prompt(args)

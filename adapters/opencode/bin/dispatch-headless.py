@@ -34,6 +34,7 @@ from dispatch_contract import (  # noqa: E402
     claim_attempt_row,
     close_attempt_row,
     completion_marker_gate,
+    dispatch_state_root,
     PRELAUNCH_PROCESS_BLOCK_REASONS,
     ensure_global_registry_writable,
     headless_attempt_policy,
@@ -1329,6 +1330,7 @@ def main(argv: list[str]) -> int:
     try:
         registry = resolve_global_registry(agent_home, args.jobs, args.dispatch_depth, action)
         jobs = registry.path
+        args.jobs_path = jobs
         args.attempt_id = new_attempt_id(args.attempt_id) if action in ("register", "start") else args.attempt_id
         if action in ("register", "start"):
             ensure_global_registry_writable(jobs)
@@ -1383,7 +1385,11 @@ def main(argv: list[str]) -> int:
             )
         except DispatchContractError as exc:
             return fail(exc.reason, 65, detail=exc.detail, child_spawned="0")
-    log_dir = Path(args.log_dir) if args.log_dir else agent_home / ".dispatch" / "logs"
+    log_dir = (
+        Path(args.log_dir)
+        if args.log_dir
+        else dispatch_state_root(args.jobs_path) / "logs"
+    )
     prompt_text, prompt_source = prompt(args)
     if action == "start" and args.replica_batch_expectation is not None:
         try:

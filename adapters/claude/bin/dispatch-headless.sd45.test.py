@@ -126,6 +126,7 @@ def _shell_command_args(**overrides):
         worker_type="owner", intensity="strong", artifact_root="/tmp/fixture-artifacts",
         worktree="/tmp/fixture-worktree",
         agent_home=Path("/tmp/fixture-agent-home"),
+        jobs_path=Path("/tmp/jobs.log"),
         completion_gate=None, assigned_contract=None, unit=None,
         capability_mode="dev", worker_mode=None, mode=None,
         resolved_model_settings={"source": "inherit", "role": "-", "model": None, "effort": None},
@@ -223,7 +224,7 @@ class ClaudeSD78CompletionDelivery(unittest.TestCase):
         self.assertNotIn("--no-session-persistence", command)
         self.assertIn("--parent-attempt-id att-parent", command)
         self.assertIn(
-            "--state-file /tmp/fixture-agent-home/.dispatch/supervisor-state/att-parent.json",
+            "--state-file /tmp/supervisor-state/att-parent.json",
             command,
         )
 

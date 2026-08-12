@@ -521,8 +521,7 @@ def supervisor_lease_path(jobs: str | Path, attempt_id: str) -> Path:
 
     if re.fullmatch(r"att-[A-Za-z0-9._-]{1,240}", attempt_id) is None:
         raise DispatchContractError("supervisor-lease-attempt-invalid", attempt_id)
-    registry = Path(jobs).expanduser().resolve(strict=False)
-    return registry.parent / "supervisor-state" / f"{attempt_id}.lease"
+    return dispatch_state_root(jobs) / "supervisor-state" / f"{attempt_id}.lease"
 
 
 def _validated_supervisor_lease_path(
@@ -2692,6 +2691,53 @@ def resolve_global_registry(
     if explicit:
         return RegistrySelection(explicit, "root-explicit", False)
     return RegistrySelection((agent_home / ".dispatch" / "jobs.log").resolve(), "agent-home", False)
+
+
+def dispatch_state_root(jobs: str | Path) -> Path:
+    """The one derivation: dispatch state lives beside its canonical registry."""
+
+    return Path(jobs).expanduser().resolve(strict=False).parent
+
+
+def resolve_dispatch_state_root(
+    agent_home: Path,
+    explicit_jobs: str | Path | None = None,
+    environ: dict[str, str] | os._Environ[str] | None = None,
+) -> Path:
+    """Resolve the one canonical dispatch state root.
+
+    Chain: ① `explicit_jobs` (a `RegistrySelection.path` the caller already
+    holds) -> ② inherited `AGENT_DISPATCH_JOBS` -> ③ `agent_home/.dispatch`
+    (legacy default when no registry has been selected yet). No new env
+    var -- the only override surface remains `AGENT_DISPATCH_JOBS`, so marker
+    root and registry root cannot structurally diverge. A caller that already
+    has a `RegistrySelection` must pass `explicit_jobs=selection.path` so
+    marker root and registry root are pinned to the same value at the call
+    site, not re-derived independently.
+    """
+
+    if explicit_jobs is not None:
+        return dispatch_state_root(explicit_jobs)
+    env = os.environ if environ is None else environ
+    inherited = env.get("AGENT_DISPATCH_JOBS")
+    if inherited:
+        return dispatch_state_root(inherited)
+    return Path(agent_home) / ".dispatch"
+
+
+def dispatch_state_roots(
+    agent_home: Path, jobs: str | Path | None = None
+) -> tuple[Path, ...]:
+    """Read order for dispatch state: canonical state root first, legacy
+    agent-home-relative tree second. Deduplicated. The writer uses only
+    `dispatch_state_roots(...)[0]`; only readers should iterate the tuple.
+    """
+
+    canonical = resolve_dispatch_state_root(agent_home, explicit_jobs=jobs)
+    legacy = Path(agent_home) / ".dispatch"
+    if canonical == legacy:
+        return (canonical,)
+    return (canonical, legacy)
 
 
 def ensure_global_registry_writable(path: Path) -> None:
