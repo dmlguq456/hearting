@@ -105,14 +105,43 @@ class RenderDispatchPresentationTest(unittest.TestCase):
         # F-64c (v49, user 2026-08-05 "depth=1을 조금 앞당겨서 들여쓰기 폭을 줄이고
         # 세로선은 그 아래 depth=2에 대해서만"): depth-1 sits arrowless at a shallow
         # 2-cell inset (its unit mark is the hanging rail, painted by the assembler);
-        # depth≥2 keeps the ↳ spawn arrow three cells deeper per level.
+        # depth≥2 keeps the ↳ spawn arrow three cells deeper per level. The prefix now also
+        # SPELLS the depth (`d1`/`d2`) in its first two cells — same widths, same arrow.
         top = DispatchJob(key="code", slug="top", depth=1)
         nested = DispatchJob(key="code", slug="nested", depth=2)
 
-        self.assertEqual(render._dispatch_prefix(top), "    ")
-        self.assertEqual(render._dispatch_prefix(nested), "      ↳ ")
+        self.assertEqual(render._dispatch_prefix(top), "d1  ")
+        self.assertEqual(render._dispatch_prefix(nested), "d2    ↳ ")
         self.assertEqual(len(render._dispatch_prefix(nested)), 8)
-        self.assertEqual(render._dispatch_prefix(top, orphan=True), "··  ")
+        self.assertEqual(render._dispatch_prefix(top, orphan=True), "d1··")
+
+    def test_dispatch_depth_is_spelled_out_not_only_indented(self):
+        """Working-memory obligation: a row must SHOW its dispatch depth, not imply it.
+
+        The token is read from the row's own depth value (no allowlist, no re-derivation),
+        every fixed-width contract downstream is preserved, and the depth-2 arrow survives.
+        """
+        prefixes = {
+            depth: render._dispatch_prefix(DispatchJob(key="code", slug="s", depth=depth))
+            for depth in (1, 2, 3)
+        }
+        for depth, prefix in prefixes.items():
+            with self.subTest(depth=depth):
+                self.assertTrue(prefix.startswith("d%d" % depth), prefix)
+                # unchanged column contract: 4 cells at depth 1, +2 per level after that
+                self.assertEqual(len(prefix), 4 + 2 * (depth - 1) + (2 if depth > 1 else 0))
+                # the rail cell (`_RAIL_COL`) must stay overwritable — a real glyph there
+                # would make the assembler fail closed and drop the capsule rail
+                if len(prefix) > render._RAIL_COL:
+                    self.assertEqual(prefix[render._RAIL_COL], " ")
+        self.assertIn("↳", prefixes[2])
+        self.assertNotIn("↳", prefixes[1])
+
+        # and it reaches the rendered row, not just the helper
+        job = DispatchJob(key="code", slug="leg", cwd="/work/repo", depth=2,
+                          harness="claude", liveness="working", elapsed_min=3)
+        text = "".join(part for part, _key in render._dispatch_row(job))
+        self.assertTrue(text.lstrip().startswith("d2"), text)
 
     def _rail_fixture(self, owner_liveness="working"):
         parent = Session(harness="claude", pid=1, cwd="/work/repo", session_id="sid-1",
