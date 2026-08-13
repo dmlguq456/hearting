@@ -922,6 +922,46 @@ for pair in "$DISPATCH|hooks" "$CLAUDE_DISPATCH|claude-adapter"; do
   fi
 done
 
+# ============================================================
+# G-75 — inherited foreign governor reservation must not poison distillation
+# ============================================================
+echo "== G-75: dispatcher drops an inherited absent reservation before distill admission =="
+
+STOREg75="$(mktemp -d)"; PROJg75="$(mktemp -d)"; STUBg75="$(mktemp -d)"
+CLEANUP+=("$STOREg75" "$PROJg75" "$STUBg75")
+cat > "$STUBg75/distill-worker" <<'STUBEOF'
+#!/bin/sh
+json='{"tier":"working","type":"decision","body":"g75","headline":"g75","aliases":["g75"],"entities":["G-75"],"topics":["memory-pipeline"],"artifact_refs":[]}'
+printf '%s\n' "$json" | tee "$DISTILL_JSON_CAPTURE"
+touch "$DISTILL_WORKER_CALLED"
+STUBEOF
+chmod +x "$STUBg75/distill-worker"
+
+for pair in "$DISPATCH|hooks" "$CLAUDE_DISPATCH|claude-adapter"; do
+  disp="${pair%%|*}"; label="${pair##*|}"; sid="g75-$label"
+  rm -rf "$STOREg75"/.distill-budget-* "$STOREg75/.governor" 2>/dev/null || true
+  enc="$PROJg75/-home-fake-$sid"; mkdir -p "$enc"
+  cat > "$enc/$sid.jsonl" <<JSONL
+{"type":"user","message":{"role":"user","content":"G-75 prompt"},"uuid":"${sid}u1","timestamp":"t1","isSidechain":false}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"G-75 reply"}]},"uuid":"${sid}a1","timestamp":"t2","isSidechain":false}
+JSONL
+  capture="$STOREg75/$sid.jsonl.out"; called="$STOREg75/$sid.called"
+  MEM_STORE="$STOREg75" MEM_PROJECTS="$PROJg75" MEM_DISTILL_ENABLE=1 \
+    MEM_DISTILL_WORKER="$STUBg75/distill-worker" \
+    DISTILL_JSON_CAPTURE="$capture" DISTILL_WORKER_CALLED="$called" \
+    AGENT_MODEL_GOVERNOR_ROOT="$STOREg75/.governor" \
+    AGENT_MODEL_GOVERNOR_RESERVATION_TOKEN=00000000000000000000000000000000 \
+    bash "$disp" distill "$sid" /tmp
+  for _ in $(seq 1 50); do [ ! -d "$STOREg75/.distill-lock-$sid" ] && break; sleep 0.1; done
+  if [ -f "$called" ] && grep -q '"headline":"g75"' "$capture" 2>/dev/null \
+    && [ -f "$STOREg75/.distill-state-$sid" ] \
+    && ! grep -q " 75 increment $sid " "$STOREg75/.distill-failures.log" 2>/dev/null; then
+    ok "G-75 ($label): argv dispatch runs stub, captures JSON, exits cleanly despite absent inherited token"
+  else
+    bad "G-75 ($label): inherited absent token still poisoned dispatcher/governor handshake"
+  fi
+done
+
 echo
 echo "RESULT: PASS=$PASS FAIL=$FAIL"
 [ "$FAIL" = "0" ]

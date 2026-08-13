@@ -120,6 +120,16 @@ runenv() { # $1=HOME ... command
     PATH="/usr/bin:/bin" "$@"
 }
 
+# Simulate a runtime-owned AGENT_HOME that projects core identity but does not
+# ship the implementation/config required by these consumers.
+mkdir -p "$TMP/partial-agent-home/core"
+: > "$TMP/partial-agent-home/core/CORE.md"
+runenv_partial() { # $1=HOME ... command
+  _h=$1; shift
+  env AGENT_HOME="$TMP/partial-agent-home" HOME="$_h" XDG_DATA_HOME="$TMP/xdg" \
+    PATH="/usr/bin:/bin" "$@"
+}
+
 # red 판정 = 근본 원인(잘못된 루트 아래 파일을 집는다) 공통 1차 단정 + 스크립트별 2차 시그니처.
 # 세 스크립트의 실패 문자열은 서로 다르므로(§3.1) 단일 공통 정규식은 쓰지 않는다(r3 정정).
 assert_red() {   # $1=label $2=home $3=sig1(ERE) $4=sig2(ERE, may be empty) $5...=command
@@ -204,6 +214,32 @@ else
   case "$_wtA" in
     *WT-BUNDLE*) ok "(a) worktree-cleanup.sh: WT-BUNDLE (resolved bundle root)" ;;
     *) bad "(a) worktree-cleanup.sh: expected WT-BUNDLE; got: $_wtA" ;;
+  esac
+
+  echo "== partial AGENT_HOME is downgraded when it lacks the consumer file =="
+  _partial_map_a=$(runenv_partial "$TMP/homeA" "$TMP/homeA/.claude/bin/model-map.sh" 'deep maker' 2>/dev/null)
+  case "$_partial_map_a" in
+    *BUNDLE-SENTINEL*) ok "partial AGENT_HOME: symlink layout falls back to bundle model config" ;;
+    *) bad "partial AGENT_HOME: symlink layout did not reach bundle config: $_partial_map_a" ;;
+  esac
+  _partial_map_b=$(runenv_partial "$TMP/homeB" "$TMP/homeB/.claude/bin/model-map.sh" 'deep maker' 2>/dev/null)
+  case "$_partial_map_b" in
+    *RELEASE-SENTINEL*) ok "partial AGENT_HOME: copy layout falls back to managed release model config" ;;
+    *) bad "partial AGENT_HOME: copy layout did not reach release config: $_partial_map_b" ;;
+  esac
+  assert_green_call "partial AGENT_HOME: worker symlink layout" "$TMP/homeA" \
+    env AGENT_HOME="$TMP/partial-agent-home" "$TMP/homeA/.claude/bin/mem-distill-worker.sh" increment fast-distiller "$TMP/prompt.txt"
+  assert_green_call "partial AGENT_HOME: worker copy layout" "$TMP/homeB" \
+    env AGENT_HOME="$TMP/partial-agent-home" "$TMP/homeB/.claude/bin/mem-distill-worker.sh" increment fast-distiller "$TMP/prompt.txt"
+  _partial_wt_a=$(runenv_partial "$TMP/homeA" "$TMP/homeA/.claude/bin/worktree-cleanup.sh" --help 2>/dev/null)
+  case "$_partial_wt_a" in
+    *WT-BUNDLE*) ok "partial AGENT_HOME: cleanup symlink layout falls back to bundle" ;;
+    *) bad "partial AGENT_HOME: cleanup symlink layout did not reach bundle: $_partial_wt_a" ;;
+  esac
+  _partial_wt_b=$(runenv_partial "$TMP/homeB" "$TMP/homeB/.claude/bin/worktree-cleanup.sh" --help 2>/dev/null)
+  case "$_partial_wt_b" in
+    *WT-RELEASE*) ok "partial AGENT_HOME: cleanup copy layout falls back to managed release" ;;
+    *) bad "partial AGENT_HOME: cleanup copy layout did not reach release: $_partial_wt_b" ;;
   esac
 
   for f in mem-distill-worker.sh model-map.sh worktree-cleanup.sh; do

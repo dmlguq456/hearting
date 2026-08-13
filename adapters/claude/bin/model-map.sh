@@ -9,10 +9,13 @@ set -eu
 # 설치본은 이 파일에 디렉토리 심링크(~/.claude/bin) 또는 실파일 복사로 도달한다.
 # 논리 cd+pwd 에 고정 3단 hop 을 더하면 두 형태 모두에서 엉뚱한 루트를 잡는다.
 _hr_marked() { [ -f "$1/harness-manifest.json" ] && [ -f "$1/core/CORE.md" ]; }
-_harness_root() {                      # $1 = 이 스크립트의 self 경로
+_harness_root() {                      # $1 = self path, $2 = required root file
   _hr_self=$1
-  # (1) AGENT_HOME (core/CORE.md 로 검증)
-  if [ -n "${AGENT_HOME:-}" ] && [ -f "$AGENT_HOME/core/CORE.md" ]; then
+  _hr_required=$2
+  # (1) A partial runtime projection is not a model-config source.
+  if [ -n "${AGENT_HOME:-}" ] \
+    && [ -f "$AGENT_HOME/core/CORE.md" ] \
+    && [ -f "$AGENT_HOME/$_hr_required" ]; then
     printf '%s\n' "$AGENT_HOME"; return 0
   fi
   # (2) 물리 해석된 스크립트 디렉토리에서 마커 쌍 상향 walk — 번들 정체성 보존
@@ -25,8 +28,10 @@ _harness_root() {                      # $1 = 이 스크립트의 self 경로
   # (3) 형제 경로 agent-home.sh — 논리 경로로 호출해야 ~/.claude/utilities 를 탄다
   _hr_log=$(CDPATH= cd -- "$(dirname -- "$_hr_self")" && pwd)
   if [ -x "$_hr_log/../utilities/agent-home.sh" ]; then
-    _hr_out=$("$_hr_log/../utilities/agent-home.sh" 2>/dev/null || true)
-    if [ -n "$_hr_out" ] && [ -f "$_hr_out/core/CORE.md" ]; then
+    _hr_out=$(AGENT_HOME= "$_hr_log/../utilities/agent-home.sh" 2>/dev/null || true)
+    if [ -n "$_hr_out" ] \
+      && [ -f "$_hr_out/core/CORE.md" ] \
+      && [ -f "$_hr_out/$_hr_required" ]; then
       printf '%s\n' "$_hr_out"; return 0
     fi
   fi
@@ -35,7 +40,7 @@ _harness_root() {                      # $1 = 이 스크립트의 self 경로
 }
 # ------------------------------------------------------------------------------
 
-root=$(_harness_root "$0")
+root=$(_harness_root "$0" utilities/model-config.sh)
 eval "$("$root/utilities/model-config.sh" --adapter claude --source-root "$root")"
 role=$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]' | tr '_-' '  ' | awk '{$1=$1; print}')
 family=claude
