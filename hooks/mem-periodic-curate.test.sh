@@ -321,6 +321,44 @@ grep -q "select origin=.* active=3 durable=0 cwd=$HEAVY8\$" "$LOG8" \
   && ok "⑧: selection log carries origin/active/durable evidence" \
   || bad "⑧: selection evidence line missing for heavy project"
 
+# ============================================================
+# ⑨ installed symlink layout → dispatch stays on the adapter projection
+# ============================================================
+# Regression for worker home-resolution defect #4: ~/.claude/utilities is a
+# symlink chain landing in the portable source tree, so a literal
+# "$HOOK_DIR/../hooks" is kernel-resolved onto the PORTABLE dispatcher (no
+# adapter MEM_DISTILL_WORKER default → silent pre-lock exit) instead of the
+# adapter projection at ~/.claude/hooks. Reproduce the installed layout with
+# real symlinks and two distinguishable dispatcher stubs; the run must reach
+# the adapter stub and never the portable one.
+echo "== ⑨ installed symlink layout → adapter dispatcher, not portable =="
+BASE9="$(mktemp -d)"; STORE9="$(mktemp -d)"; PROJ9="$(mktemp -d)"; REALDIR9="$(mktemp -d)"
+CLEANUP+=("$BASE9" "$STORE9" "$PROJ9" "$REALDIR9")
+SRC9="$BASE9/bundle/source"
+HOME9="$BASE9/home"
+mkdir -p "$SRC9/hooks" "$SRC9/utilities" "$SRC9/adapters/claude" "$HOME9/hooks"
+cp "$UTIL" "$SRC9/utilities/mem-periodic-curate.sh"
+printf '#!/bin/sh\nprintf %%s\\\\n "%s"\n' "$BASE9" > "$SRC9/utilities/agent-home.sh"
+chmod +x "$SRC9/utilities/agent-home.sh"
+ln -s ../../utilities "$SRC9/adapters/claude/utilities"
+ln -s "$SRC9/adapters/claude/utilities" "$HOME9/utilities"
+printf '#!/bin/sh\nprintf "portable\\n" >> "$DISPATCH_TRACE"\n' > "$SRC9/hooks/mem-distill-dispatch.sh"
+printf '#!/bin/sh\nprintf "adapter\\n" >> "$DISPATCH_TRACE"\n' > "$HOME9/hooks/mem-distill-dispatch.sh"
+chmod +x "$SRC9/hooks/mem-distill-dispatch.sh" "$HOME9/hooks/mem-distill-dispatch.sh"
+mkproject_seeded "$PROJ9" "$REALDIR9" "$STORE9" 1
+
+MEM_PERIODIC_CURATE_ENABLE=1 MEM_DISTILL_ENABLE=1 \
+  MEM_STORE="$STORE9" MEM_PROJECTS="$PROJ9" MEM_PY="$MEM" \
+  DISPATCH_TRACE="$STORE9/trace" \
+  bash "$HOME9/utilities/mem-periodic-curate.sh" 2>/dev/null
+
+grep -q '^adapter$' "$STORE9/trace" 2>/dev/null \
+  && ok "⑨: installed layout dispatches through the adapter projection" \
+  || bad "⑨: adapter dispatcher was never reached"
+grep -q '^portable$' "$STORE9/trace" 2>/dev/null \
+  && bad "⑨: dispatch escaped onto the portable dispatcher (physical ..)" \
+  || ok "⑨: portable dispatcher never invoked from the installed layout"
+
 echo
 echo "RESULT: PASS=$PASS FAIL=$FAIL"
 [ "$FAIL" = "0" ]

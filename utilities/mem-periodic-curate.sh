@@ -22,7 +22,16 @@
 set -euo pipefail
 HOOK_DIR="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]:-$0}")" && pwd)"
 AGENT_HOME="${AGENT_HOME:-$("$HOOK_DIR/../utilities/agent-home.sh")}"
-DISPATCH="$HOOK_DIR/../hooks/mem-distill-dispatch.sh"
+# The dispatcher must be addressed through the LOGICAL parent, not a literal
+# `..`: in the installed layout ~/.claude/utilities is a symlink chain landing
+# in the portable source tree (adapters/claude/utilities -> ../../utilities),
+# and the kernel resolves `..` against that physical target — so
+# "$HOOK_DIR/../hooks" escapes the adapter projection onto the portable
+# dispatcher, whose MEM_DISTILL_WORKER has no adapter default, and every
+# nightly dispatch exits silently before taking its lock (fourth member of the
+# 2026-08-13 worker home-resolution defect series). dirname trims the path as
+# a string, keeping ~/.claude/hooks — the adapter dispatcher.
+DISPATCH="$(dirname -- "$HOOK_DIR")/hooks/mem-distill-dispatch.sh"
 MEM="${MEM_PY:-$AGENT_HOME/tools/memory/mem.py}"
 
 [ "${MEM_PERIODIC_CURATE_ENABLE:-}" = "1" ] || exit 0
@@ -64,9 +73,12 @@ esac
 _run_started="$(date +%s)"
 _run_deadline=$((_run_started + _run_timeout))
 
-# Candidate cwds are `PROJECTS_ROOT/<encoded-cwd>/memory` directories — the
-# same convention tools/memory/mem.py already uses for the profile projection
-# (mem.py:2658). Decode each encoded directory name back to a real, existing
+# Candidate cwds are all `PROJECTS_ROOT/<encoded-cwd>` session directories.
+# (The earlier `<encoded-cwd>/memory` restriction was a legacy mirror-dir
+# convention: it kept most record-holding projects out of the candidate set
+# entirely — the first ranked field run still missed SR_CorrNet-class backlogs
+# whose sessions never grew a memory/ subdir. Eligibility now comes from the
+# store DB alone.) Decode each encoded directory name back to a real, existing
 # cwd with the same walk-from-root algorithm mem.py's own `_decode_enc_cwd`
 # uses; this is a small, self-contained duplication rather than an import,
 # matching this cycle's F-1 precedent of not sharing code across a boundary
@@ -165,10 +177,10 @@ except sqlite3.Error as exc:
     sys.exit(0)
 
 best = {}  # origin -> representative existing cwd (shortest, then lexicographic)
-for memory_dir in sorted(projects_root.glob("*/memory")):
-    if not memory_dir.is_dir():
+for session_dir in sorted(projects_root.iterdir()):
+    if not session_dir.is_dir():
         continue
-    resolved = decode(memory_dir.parent.name)
+    resolved = decode(session_dir.name)
     if resolved is None:
         continue
     try:
