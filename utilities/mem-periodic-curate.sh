@@ -64,21 +64,38 @@ esac
 _run_started="$(date +%s)"
 _run_deadline=$((_run_started + _run_timeout))
 
-# Eligible projects are `PROJECTS_ROOT/<encoded-cwd>/memory` directories — the
+# Candidate cwds are `PROJECTS_ROOT/<encoded-cwd>/memory` directories — the
 # same convention tools/memory/mem.py already uses for the profile projection
 # (mem.py:2658). Decode each encoded directory name back to a real, existing
 # cwd with the same walk-from-root algorithm mem.py's own `_decode_enc_cwd`
 # uses; this is a small, self-contained duplication rather than an import,
 # matching this cycle's F-1 precedent of not sharing code across a boundary
 # whose reliability is exactly what is in question.
+#
+# Selection is NOT directory order. The first field run showed worker-session
+# residue (codex bundle source paths and similar) pre-empting the MAX_PROJECTS
+# cap alphabetically while the projects with real durable backlog never got
+# curated — every dispatched slot was a 0-1s no-op. So the decoded candidates
+# are ranked by the store DB itself: map each cwd to its project key with
+# mem.py's own project_key (read-only; several session dirs can collapse onto
+# one origin — a worktree and its main checkout, or a bundle checkout of the
+# same remote — and then the shortest path represents the origin), keep only
+# origins that actually hold active project records, and dispatch
+# soft-ceiling-exceeded origins first, then by active record count. A missing
+# or unreadable DB yields no candidates: with no records there is nothing a
+# curator could act on.
 _project_paths() {
-  python3 - "$PROJECTS_ROOT" "$_max" <<'PYEOF'
+  python3 - "$PROJECTS_ROOT" "$_max" "$MEM" "$STORE" <<'PYEOF'
+import importlib.util
 import re
+import sqlite3
 import sys
 from pathlib import Path
 
 projects_root = Path(sys.argv[1])
 limit = int(sys.argv[2])
+mem_path = Path(sys.argv[3])
+store = Path(sys.argv[4])
 
 
 def decode(enc):
@@ -116,17 +133,66 @@ def decode(enc):
 if not projects_root.is_dir():
     sys.exit(0)
 
-count = 0
+# mem.py is the single authority for cwd -> project-key mapping; import the
+# exact file the dispatcher itself will call so both sides agree on origins.
+try:
+    spec = importlib.util.spec_from_file_location("_mem_for_curate", str(mem_path))
+    mem = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mem)
+except Exception as exc:
+    print(f"mem-periodic-curate enumeration status=mem-import-error ({exc})",
+          file=sys.stderr)
+    sys.exit(0)
+
+# Active project-scope record counts per origin, read-only. WAL readers do not
+# block writers; any failure here means no ranking basis, hence no dispatch.
+counts = {}
+try:
+    con = sqlite3.connect(f"file:{store / 'memory.db'}?mode=ro", uri=True)
+    try:
+        rows = con.execute(
+            "SELECT cwd_origin, COUNT(*),"
+            " SUM(CASE WHEN tier='durable' THEN 1 ELSE 0 END)"
+            " FROM records WHERE scope='project' AND status='active'"
+            " AND cwd_origin IS NOT NULL GROUP BY cwd_origin")
+        for origin, active, durable in rows:
+            counts[origin] = (active, durable or 0)
+    finally:
+        con.close()
+except sqlite3.Error as exc:
+    print(f"mem-periodic-curate enumeration status=db-error ({exc})",
+          file=sys.stderr)
+    sys.exit(0)
+
+best = {}  # origin -> representative existing cwd (shortest, then lexicographic)
 for memory_dir in sorted(projects_root.glob("*/memory")):
-    if count >= limit:
-        break
     if not memory_dir.is_dir():
         continue
     resolved = decode(memory_dir.parent.name)
     if resolved is None:
         continue
-    print(str(resolved))
-    count += 1
+    try:
+        # seed=False: enumeration must stay read-only and never plant markers.
+        origin = mem.project_key(resolved)
+    except Exception:
+        continue
+    if origin not in counts:
+        continue
+    cand = str(resolved)
+    cur = best.get(origin)
+    if cur is None or (len(cand), cand) < (len(cur), cur):
+        best[origin] = cand
+
+soft_ceiling = getattr(mem, "DOCTOR_DURABLE_SOFT_CEILING", 80)
+ranked = sorted(
+    best.items(),
+    key=lambda kv: (0 if counts[kv[0]][1] > soft_ceiling else 1,
+                    -counts[kv[0]][0], kv[0]))
+for origin, cwd in ranked[:limit]:
+    active, durable = counts[origin]
+    print(f"mem-periodic-curate select origin={origin} active={active}"
+          f" durable={durable} cwd={cwd}", file=sys.stderr)
+    print(cwd)
 PYEOF
 }
 
