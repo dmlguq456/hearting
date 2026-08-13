@@ -106,6 +106,22 @@ def rewind_target(sid, since, source=None):
     return last_before, skipped, True
 
 
+def _cwd_of(sid, source=None):
+    """Logical project cwd of a session, decoded from its transcript directory.
+
+    The dispatcher's argument mode is ``distill <sid> <cwd>`` and working-tier
+    scope comes from that cwd, so the re-harvest call must carry it. Fail open
+    to None; the dispatcher then falls back to its own $PWD default."""
+    src = source or mem.ClaudeCodeJsonlSource(sid)
+    located = src.locate()
+    if located is None:
+        return None
+    try:
+        return mem._decode_enc_cwd(Path(located).parent.name)
+    except Exception:
+        return None
+
+
 def plan_recovery(since, store=None):
     rows = []
     for path in affected_markers(since, store=store):
@@ -119,6 +135,7 @@ def plan_recovery(since, store=None):
             "target": target,
             "skipped": skipped,
             "located": located,
+            "cwd": _cwd_of(sid) if located else None,
             # Already at the target, or no transcript to rewind against.
             "actionable": located and target != current,
         })
@@ -186,10 +203,15 @@ def reharvest(rows, dispatcher=None):
         return 0
     done = 0
     for row in rows:
-        env = dict(os.environ, CLAUDE_SESSION_ID=row["sid"])
+        # The dispatcher's argument mode is `distill <sid> <cwd>`; an argv-less
+        # call falls through to its stdin-JSON branch and exits as a silent
+        # no-op (observed 2026-08-13 — the first recovery wave launched zero
+        # workers). An empty cwd argument degrades to the dispatcher's own
+        # $PWD default via `${3:-$PWD}`.
         try:
-            subprocess.run([dispatcher], env=env, timeout=900,
-                           capture_output=True, text=True)
+            subprocess.run(
+                [dispatcher, "distill", row["sid"], row.get("cwd") or ""],
+                timeout=900, capture_output=True, text=True)
             done += 1
         except Exception as exc:                  # pragma: no cover - defensive
             print(f"reharvest: {row['sid']}: {exc}", file=sys.stderr)
@@ -243,7 +265,12 @@ def main(argv=None):
     print(f"rewound {len(actionable)} marker(s)")
 
     if args.reharvest:
-        count = reharvest(actionable)
+        # Re-trigger every located session, not only freshly rewound ones: a
+        # marker rewound by an earlier --apply whose dispatch never launched
+        # (start-budget denial, the argv no-op above) is `already-at-target`
+        # yet still holds an unprocessed delta. The dispatcher skips empty
+        # deltas deterministically, so this stays idempotent.
+        count = reharvest([r for r in rows if r["located"]])
         print(f"re-harvested {count} session(s) sequentially")
     return 0
 
