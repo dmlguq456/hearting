@@ -201,6 +201,28 @@ def is_managed() -> bool:
     return bool(state and state.get("release_root") and state.get("version"))
 
 
+def managed_status() -> Optional[dict]:
+    """Return the validated managed-release identity for status surfaces.
+
+    Runtime projection manifests can predate a managed release activation and
+    therefore cannot identify the installed distribution version. Keep this
+    public view small and derive it from the same validated state that owns
+    install and update decisions. (Restored after ecaeedfb dropped it while
+    installer.py's status surface still calls it.)
+    """
+
+    state = _load_state()
+    if state is None:
+        return None
+    return {
+        "channel": "managed-release",
+        "version": state["version"],
+        "release_root": state["release_root"],
+        "runtimes": list(state["runtimes"]),
+        "pinned_version": state.get("pinned_version"),
+    }
+
+
 @contextlib.contextmanager
 def _distribution_lock():
     root = state_root()
