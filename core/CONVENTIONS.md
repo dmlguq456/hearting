@@ -636,12 +636,15 @@ suffix (e.g. `-alternative`) may only appear as a subdirectory inside the
 owning anchor, never by escaping it.
 
 route lifecycle records live in a single hidden runtime location:
-`<artifact-root>/.runtime/routes/<name>.json`, with a terminal sidecar
-`<name>.outcome.json` beside it. `compile --output` outside that directory is
-a typed rejection; omitting `--output` defaults to the canonical path. `status`
-and `close` still recognize four legacy locations (root-level `*-route.json`,
-`routes/`, `_routes/`, `.routes/`) read-only and flag them as drift; only new
-writes to legacy locations are blocked.
+`<artifact-root>/.runtime/routes/<route_id>.json`, with the sole terminal
+sidecar `<route_id>.outcome.json` beside it. A slug, capability, date, node, or
+attempt suffix is not a valid new basename even inside the canonical directory.
+`compile --output` outside that exact path is a typed rejection; omitting
+`--output` defaults to it. Existing aliases in the canonical directory and
+records in four legacy locations (root-level `*-route.json`, `routes/`,
+`_routes/`, `.routes/`) remain readable and closeable so they are not stranded;
+`status` reports them as `alias_basename` or location drift. Only new writes to
+aliases and legacy locations are blocked.
 
 `.runtime/` is the only bucket name for artifact-root-scoped runtime state.
 Legacy `_runtime/` is recognized read-only and must never be freshly created.
