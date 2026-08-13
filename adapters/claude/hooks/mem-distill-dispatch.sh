@@ -388,6 +388,14 @@ fi
   elif [ "$worker_rc" -eq 0 ]; then
     rm -f "$FAILC" 2>/dev/null || true
     python3 "$MEM" distill "$SID" --source "${MEM_SESSION_SOURCE:-claude}" --advance >/dev/null 2>&1 || true
+  elif [ "$worker_rc" -eq 75 ]; then
+    # Capacity denial (governor class cap / reservation admission, EX_TEMPFAIL).
+    # Nothing is wrong with this delta — counting these toward the strike
+    # ceiling would forced-advance (= lose) a healthy delta after three busy
+    # moments (observed 2026-08-13 during the recovery backlog drain). Log for
+    # observability, leave the marker and the strike counter untouched; a later
+    # trigger retries the same delta under a free slot.
+    _distill_failure_log "$SID" "$MODE" "$worker_rc" "capacity-skip"
   else
     _n=$(cat "$FAILC" 2>/dev/null || printf 0)
     case "$_n" in ''|*[!0-9]*) _n=0 ;; esac

@@ -846,6 +846,8 @@ STUBr2fail="$(mktemp -d)"; STUBr2ok="$(mktemp -d)"
 CLEANUP+=("$STOREr2" "$PROJr2" "$STUBr2fail" "$STUBr2ok")
 printf '#!/bin/sh\nexit 1\n' > "$STUBr2fail/claude"; chmod +x "$STUBr2fail/claude"
 printf '#!/bin/sh\n# empty output, success\n' > "$STUBr2ok/claude"; chmod +x "$STUBr2ok/claude"
+STUBr2cap="$(mktemp -d)"; CLEANUP+=("$STUBr2cap")
+printf '#!/bin/sh\nexit 75\n' > "$STUBr2cap/claude"; chmod +x "$STUBr2cap/claude"
 
 for pair in "$DISPATCH|hooks" "$CLAUDE_DISPATCH|claude-adapter"; do
   disp="${pair%%|*}"; label="${pair##*|}"
@@ -889,6 +891,23 @@ for pair in "$DISPATCH|hooks" "$CLAUDE_DISPATCH|claude-adapter"; do
   [ ! -f "$STOREr2/.distill-fail-$sid3" ] \
     && ok "R-2③ ($label): no .distill-fail-* counter created on success" \
     || bad "R-2③ ($label): .distill-fail-* counter unexpectedly created on success"
+
+  # ③b exit 75 (capacity denial, EX_TEMPFAIL) → marker NOT advanced, strike
+  # counter untouched, capacity-skip logged. A busy governor is not a bad
+  # delta; three busy moments must never forced-advance (= lose) it
+  # (2026-08-13 recovery-drain observation).
+  sid3b="r2-cap-$label"
+  r2_mkfix "$STOREr2" "$PROJr2" "$sid3b"
+  r2_run "$disp" "$STOREr2" "$PROJr2" "$sid3b" "$STUBr2cap"
+  [ ! -f "$STOREr2/.distill-state-$sid3b" ] \
+    && ok "R-2③b ($label): capacity denial → marker NOT advanced" \
+    || bad "R-2③b ($label): marker advanced on a capacity denial"
+  [ ! -f "$STOREr2/.distill-fail-$sid3b" ] \
+    && ok "R-2③b ($label): capacity denial does not touch the strike counter" \
+    || bad "R-2③b ($label): strike counter = '$(cat "$STOREr2/.distill-fail-$sid3b" 2>/dev/null)' after capacity denial"
+  grep -q "capacity-skip" "$STOREr2/.distill-failures.log" 2>/dev/null \
+    && ok "R-2③b ($label): .distill-failures.log records capacity-skip" \
+    || bad "R-2③b ($label): capacity-skip entry missing"
 
   # ④ failure then success on the same sid → counter resets (deleted)
   sid4="r2-reset-$label"
