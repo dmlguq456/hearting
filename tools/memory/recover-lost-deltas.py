@@ -152,8 +152,16 @@ def worker_boots(worker=None):
     if not worker:
         root = os.environ.get("AGENT_HOME")
         if root:
-            cand = Path(root) / "adapters/claude/bin/mem-distill-worker.sh"
-            worker = str(cand) if cand.exists() else None
+            # Installed homes are flattened (`<home>/bin/...`); only a source
+            # checkout keeps the adapters/ tree. Probing the repo shape alone
+            # made --apply refuse on every installed deployment (2026-08-13).
+            for cand in (
+                Path(root) / "bin/mem-distill-worker.sh",
+                Path(root) / "adapters/claude/bin/mem-distill-worker.sh",
+            ):
+                if cand.exists():
+                    worker = str(cand)
+                    break
     if not worker or not Path(worker).exists():
         return False, "worker not found"
     with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False) as fh:
