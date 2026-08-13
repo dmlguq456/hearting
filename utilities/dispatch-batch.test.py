@@ -196,6 +196,11 @@ def success_receipt(command: list[str], *, started: str = "1", duplicate: str = 
 
 class DispatchBatchTest(unittest.TestCase):
     def setUp(self) -> None:
+        governor_env = mock.patch.dict(
+            os.environ, {"AGENT_MODEL_GOVERNOR_ROOT": ""}
+        )
+        governor_env.start()
+        self.addCleanup(governor_env.stop)
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.base = Path(self.temp.name)

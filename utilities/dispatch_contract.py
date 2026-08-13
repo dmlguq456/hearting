@@ -19,7 +19,7 @@ import sys
 import tempfile
 import time
 import uuid
-from typing import Callable, Iterator
+from typing import Callable, Iterator, NamedTuple
 
 from replica_batch_contract import (
     DIGEST,
@@ -155,6 +155,8 @@ ATTEMPT_MUTABLE_METADATA = {
     "teardown_claimed_at",
     "teardown_claim_pid",
     "teardown_claim_pid_start",
+    "reap_close_deferred",
+    "reap_close_deferred_at",
 }
 ATTEMPT_TERMINAL_EVIDENCE_KEYS = {
     "api_status",
@@ -1994,6 +1996,73 @@ def _parent_liveness_evidence(
     ):
         return True, "supervisor-lease", None
     return False, process.reason, None
+
+
+class ParentCompletionWindow(NamedTuple):
+    """Whether an exact live parent still owns delivery of a child's result."""
+
+    deferred: bool
+    source: str
+
+
+def parent_completion_window(
+    jobs: Path, child_fields: list[str], child_metadata: dict[str, str]
+) -> ParentCompletionWindow:
+    """Decide whether a proven-live exact parent still owns this child's completion.
+
+    F-1: extends the S-3 missing-result closure axis with the delivering
+    parent's liveness, so reap-watch does not race a still-live conductor's
+    ``capability-route.py complete``. Never acquires ``<jobs>.lock`` (SD-49) —
+    callers under the lock re-evaluate this as the sole authoritative
+    decision point (see ``still_orphan`` in ``dispatch-registry.py`` for the
+    same unlocked-read precedent).
+    """
+
+    parent_attempt_id = child_metadata.get("parent_attempt_id", "")
+    if not parent_attempt_id:
+        return ParentCompletionWindow(False, "parent-attempt-absent")
+    try:
+        lines = Path(jobs).read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return ParentCompletionWindow(False, "parent-attempt-absent")
+    all_matches: list[tuple[list[str], dict[str, str]]] = []
+    for line in lines:
+        fields = line.split("\t")
+        if len(fields) != 6:
+            continue
+        metadata = parse_registry_metadata(fields[5])
+        if metadata.get("attempt_id") == parent_attempt_id:
+            all_matches.append((fields, metadata))
+    if not all_matches:
+        return ParentCompletionWindow(False, "parent-attempt-absent")
+    open_matches = [m for m in all_matches if m[0][1] in {"open", "running"}]
+    if not open_matches:
+        return ParentCompletionWindow(False, "parent-attempt-not-open")
+    if len(open_matches) > 1:
+        return ParentCompletionWindow(False, "parent-attempt-ambiguous")
+    parent_fields, parent_metadata = open_matches[0]
+    try:
+        validate_attempt_metadata(parent_metadata)
+    except DispatchContractError:
+        return ParentCompletionWindow(False, "parent-contract-invalid")
+    # Strict AND on the same two axes `spawn_claimed_attempt` already treats as
+    # the canonical depth-1 owner identity (dispatch_depth == "1" and
+    # worker_type == "owner"); depth-3 dispatch is forbidden, so no other
+    # parent role exists to widen this against (plan-check round 1, finding 3).
+    same_identity = (
+        parent_metadata.get("dispatch_depth") == "1"
+        and parent_metadata.get("worker_type") == "owner"
+        and parent_fields[3] == child_fields[3]
+        and canonical_repository_identity(parent_fields[2])
+        == canonical_repository_identity(child_fields[2])
+        and parent_fields[4] == child_metadata.get("parent")
+    )
+    if not same_identity:
+        return ParentCompletionWindow(False, "parent-identity-foreign")
+    live, reason, _identity = _parent_liveness_evidence(jobs, parent_metadata)
+    if not live:
+        return ParentCompletionWindow(False, f"parent-not-live:{reason}")
+    return ParentCompletionWindow(True, f"parent-live:{reason}")
 
 
 def _parent_metadata_matches_binding(

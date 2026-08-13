@@ -31,6 +31,100 @@ class DispatchContractTest(unittest.TestCase):
           "fallback_hop=same-harness-headless,worker_type=owner,"
           f"attempt_id={attempt},pid={pid},pid_start={start}{extra}")
 
+ def parent_row(self,attempt,pid,start,*,status="open",worktree="/wt",
+                repo="/repo",slug="owner",extra=""):
+  return (f"2026-08-13T00:00:00Z\t{status}\t{repo}\t{worktree}\t{slug}\t"
+          "attempt_schema_version=2,dispatch_depth=1,transport=headless,"
+          "execution_surface=registered-headless,registered_worker=1,"
+          "fallback_hop=same-harness-headless,worker_type=owner,"
+          f"attempt_id={attempt},pid={pid},pid_start={start}{extra}")
+
+ # F-1: parent_completion_window's typed `source` pins the fail-closed axes
+ # (§F-1.2) — one fixture per source value, absent/not-open/ambiguous/
+ # contract-invalid/foreign-slug/foreign-worktree/pid-start-mismatch fail
+ # closed, only live-process/live-supervisor-lease defer.
+ def test_parent_completion_window_source_axes(self):
+  with tempfile.TemporaryDirectory() as td:
+   base=Path(td);jobs=base/"jobs.log"
+   child_fields=["2026-08-13T00:00:00Z","open","/repo","/wt","leg","meta"]
+
+   jobs.write_text("")
+   self.assertEqual(
+    D.parent_completion_window(jobs,child_fields,{}).source,
+    "parent-attempt-absent")
+
+   child_meta={"parent_attempt_id":"att-parent","parent":"owner"}
+   self.assertEqual(
+    D.parent_completion_window(jobs,child_fields,child_meta).source,
+    "parent-attempt-absent")
+
+   jobs.write_text(self.parent_row("att-parent",999999,"1",status="done")+"\n")
+   self.assertEqual(
+    D.parent_completion_window(jobs,child_fields,child_meta).source,
+    "parent-attempt-not-open")
+
+   jobs.write_text(
+    self.parent_row("att-parent",999999,"1")+"\n"+
+    self.parent_row("att-parent",999998,"1")+"\n")
+   self.assertEqual(
+    D.parent_completion_window(jobs,child_fields,child_meta).source,
+    "parent-attempt-ambiguous")
+
+   jobs.write_text(
+    "2026-08-13T00:00:00Z\topen\t/repo\t/wt\towner\t"
+    "attempt_schema_version=1,attempt_id=att-parent\n")
+   self.assertEqual(
+    D.parent_completion_window(jobs,child_fields,child_meta).source,
+    "parent-contract-invalid")
+
+   jobs.write_text(self.parent_row("att-parent",999999,"1",slug="different")+"\n")
+   self.assertEqual(
+    D.parent_completion_window(jobs,child_fields,child_meta).source,
+    "parent-identity-foreign")
+
+   jobs.write_text(
+    self.parent_row("att-parent",999999,"1",worktree="/wt-foreign")+"\n")
+   self.assertEqual(
+    D.parent_completion_window(jobs,child_fields,child_meta).source,
+    "parent-identity-foreign")
+
+   proc=subprocess.Popen(["sleep","30"])
+   try:
+    jobs.write_text(self.parent_row("att-parent",proc.pid,"1")+"\n")
+    window=D.parent_completion_window(jobs,child_fields,child_meta)
+    self.assertFalse(window.deferred)
+    self.assertTrue(window.source.startswith("parent-not-live:"),window.source)
+
+    start=D.process_start_ticks(proc.pid)
+    jobs.write_text(self.parent_row("att-parent",proc.pid,start)+"\n")
+    self.assertEqual(
+     D.parent_completion_window(jobs,child_fields,child_meta),
+     D.ParentCompletionWindow(True,"parent-live:process"))
+   finally:
+    proc.kill();proc.wait(timeout=5)
+
+   lease=D.supervisor_lease_path(jobs,"att-parent")
+   lease.parent.mkdir(parents=True)
+   holder=lease.open("a+")
+   fcntl.flock(holder.fileno(),fcntl.LOCK_EX|fcntl.LOCK_NB)
+   try:
+    nonce="a"*64
+    extra=(",harness=codex,runtime_sandbox=workspace-write,"
+           "completion_delivery=app-server-supervised,"
+           f"supervisor_lease={D.SUPERVISOR_LEASE_KIND},"
+           f"supervisor_lease_file={lease},supervisor_lease_nonce={nonce},"
+           "pid_scope=namespace-local,"
+           "pid_observer_ns=pid:[outer],pid_ns=pid:[outer]")
+    jobs.write_text(self.parent_row("att-parent",424242,"1",extra=extra)+"\n")
+    holder.seek(0);holder.truncate()
+    holder.write(f"kind={D.SUPERVISOR_LEASE_KIND}\nattempt_id=att-parent\nnonce={nonce}\n")
+    holder.flush()
+    with mock.patch.object(D,"process_namespace_identity",return_value="pid:[inner]"):
+     window=D.parent_completion_window(jobs,child_fields,child_meta)
+    self.assertEqual(window,D.ParentCompletionWindow(True,"parent-live:supervisor-lease"))
+   finally:
+    fcntl.flock(holder.fileno(),fcntl.LOCK_UN);holder.close()
+
  def test_live_parent_binding_is_attempt_exact_and_same_slug_safe(self):
   with tempfile.TemporaryDirectory() as td:
    jobs=Path(td)/"jobs.log"

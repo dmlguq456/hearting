@@ -19,6 +19,68 @@ CURRENT = (
     "execution_surface=registered-headless,registered_worker=1,"
     "fallback_hop=same-harness-headless,worker_type=stage"
 )
+OWNER = (
+    "attempt_schema_version=2,dispatch_depth=1,transport=headless,"
+    "execution_surface=registered-headless,registered_worker=1,"
+    "fallback_hop=same-harness-headless,worker_type=owner"
+)
+
+
+def _row(status, repo, worktree, slug, meta_str):
+    return f"2026-08-13T00:00:00Z\t{status}\t{repo}\t{worktree}\t{slug}\t{meta_str}"
+
+
+def _registry_with_parent_and_leg(
+    base, parent_proc, leg_proc, *, parent_open=True, foreign=None
+):
+    """Write a two-row registry sharing worktree/repo/slug and parent linkage.
+
+    `foreign` selects one deliberately-broken parent axis for the
+    not-a-completion-window fixtures: "worktree", "pid_start", or None
+    (leaves ``parent_open`` alone to model a plain terminal parent row).
+    """
+
+    parent_identity = D.process_launch_identity(parent_proc.pid)
+    leg_identity = D.process_launch_identity(leg_proc.pid)
+    repo, worktree, slug = "/repo", "/wt", "owner"
+
+    parent_meta = dict(parent_identity)
+    parent_meta["attempt_id"] = "att-parent"
+    parent_meta["launch_lifecycle"] = "registered"
+    if foreign == "pid_start":
+        parent_meta["pid_start"] = "1"
+
+    leg_meta = dict(leg_identity)
+    leg_meta["attempt_id"] = "att-leg"
+    leg_meta["launch_lifecycle"] = "detached"
+    leg_meta["parent"] = slug
+    leg_meta["parent_attempt_id"] = "att-parent"
+    leg_meta["log_file"] = str(base / "missing.jsonl")
+
+    parent_worktree = "/wt-foreign" if foreign == "worktree" else worktree
+    parent_status = "open" if parent_open else "done"
+
+    jobs = base / "jobs.log"
+    jobs.write_text(
+        _row(
+            parent_status,
+            repo,
+            parent_worktree,
+            slug,
+            OWNER + "," + ",".join(f"{k}={v}" for k, v in parent_meta.items()),
+        )
+        + "\n"
+        + _row(
+            "open",
+            repo,
+            worktree,
+            "leg",
+            CURRENT + "," + ",".join(f"{k}={v}" for k, v in leg_meta.items()),
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    return jobs
 
 
 class DispatchReapWatchTest(unittest.TestCase):
@@ -136,6 +198,137 @@ class DispatchReapWatchTest(unittest.TestCase):
             self.assertIn("\tdone\t", row)
             self.assertIn("note=dead-missing-result", row)
             self.assertIn("dispatch-reap-missing-result-v1", row)
+
+    def test_live_parent_defers_missing_result_close(self):
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            parent = subprocess.Popen(["sleep", "5"])
+            leg = subprocess.Popen(
+                ["sleep", "0.08"],
+                env={**os.environ, D.ATTEMPT_DESCENDANT_ENV: "att-leg"},
+                start_new_session=True,
+            )
+            try:
+                jobs = _registry_with_parent_and_leg(base, parent, leg)
+                leg_identity = D.process_launch_identity(leg.pid)
+                watcher = subprocess.Popen(
+                    [
+                        sys.executable,
+                        str(WATCH),
+                        "--jobs", str(jobs),
+                        "--attempt-id", "att-leg",
+                        "--pid", str(leg.pid),
+                        "--pid-start", leg_identity["pid_start"],
+                        "--pgid", leg_identity["pgid"],
+                        "--interval", "0.02",
+                        "--parent-recheck-interval", "0.05",
+                    ]
+                )
+                leg.wait(timeout=5)
+                deadline = time.time() + 3
+                row = ""
+                while time.time() < deadline:
+                    row = jobs.read_text(encoding="utf-8")
+                    if "reap_close_deferred=parent-live:process" in row:
+                        break
+                    time.sleep(0.05)
+                self.assertIn("reap_close_deferred=parent-live:process", row)
+                self.assertIn("att-leg", row.splitlines()[1])
+                self.assertEqual(row.splitlines()[1].split("\t")[1], "open")
+
+                self.assertTrue(
+                    D.close_attempt_row(jobs, "att-leg", "completed-marker")
+                )
+                self.assertEqual(watcher.wait(timeout=5), 0)
+                row = jobs.read_text(encoding="utf-8")
+                leg_row = next(
+                    line for line in row.splitlines() if "att-leg" in line
+                )
+                self.assertEqual(leg_row.split("\t")[1], "done")
+                self.assertIn("note=completed-marker", leg_row)
+                self.assertNotIn("dead-missing-result", leg_row)
+            finally:
+                parent.kill()
+                parent.wait(timeout=5)
+
+    def test_dead_parent_closes_leg_as_missing_result(self):
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            parent = subprocess.Popen(["sleep", "5"])
+            leg = subprocess.Popen(
+                ["sleep", "0.08"],
+                env={**os.environ, D.ATTEMPT_DESCENDANT_ENV: "att-leg"},
+                start_new_session=True,
+            )
+            jobs = _registry_with_parent_and_leg(base, parent, leg)
+            leg_identity = D.process_launch_identity(leg.pid)
+            leg.wait(timeout=5)
+            parent.kill()
+            parent.wait(timeout=5)
+            watcher = subprocess.Popen(
+                [
+                    sys.executable,
+                    str(WATCH),
+                    "--jobs", str(jobs),
+                    "--attempt-id", "att-leg",
+                    "--pid", str(leg.pid),
+                    "--pid-start", leg_identity["pid_start"],
+                    "--pgid", leg_identity["pgid"],
+                    "--interval", "0.02",
+                    "--parent-recheck-interval", "0.05",
+                ]
+            )
+            self.assertEqual(watcher.wait(timeout=5), 0)
+            row = jobs.read_text(encoding="utf-8")
+            leg_row = next(line for line in row.splitlines() if "att-leg" in line)
+            self.assertEqual(leg_row.split("\t")[1], "done")
+            self.assertIn("note=dead-missing-result", leg_row)
+            self.assertIn("dispatch-reap-missing-result-v1", leg_row)
+
+    def test_foreign_or_terminal_parent_row_is_not_a_completion_window(self):
+        cases = {
+            "terminal-parent": dict(parent_open=False),
+            "foreign-worktree": dict(foreign="worktree"),
+            "foreign-pid-start": dict(foreign="pid_start"),
+        }
+        for name, kwargs in cases.items():
+            with self.subTest(name):
+                with tempfile.TemporaryDirectory() as td:
+                    base = Path(td)
+                    parent = subprocess.Popen(["sleep", "5"])
+                    leg = subprocess.Popen(
+                        ["sleep", "0.08"],
+                        env={**os.environ, D.ATTEMPT_DESCENDANT_ENV: "att-leg"},
+                        start_new_session=True,
+                    )
+                    try:
+                        jobs = _registry_with_parent_and_leg(base, parent, leg, **kwargs)
+                        leg_identity = D.process_launch_identity(leg.pid)
+                        watcher = subprocess.Popen(
+                            [
+                                sys.executable,
+                                str(WATCH),
+                                "--jobs", str(jobs),
+                                "--attempt-id", "att-leg",
+                                "--pid", str(leg.pid),
+                                "--pid-start", leg_identity["pid_start"],
+                                "--pgid", leg_identity["pgid"],
+                                "--interval", "0.02",
+                                "--parent-recheck-interval", "0.05",
+                            ]
+                        )
+                        leg.wait(timeout=5)
+                        self.assertEqual(watcher.wait(timeout=5), 0)
+                        row = jobs.read_text(encoding="utf-8")
+                        leg_row = next(
+                            line for line in row.splitlines() if "att-leg" in line
+                        )
+                        self.assertEqual(leg_row.split("\t")[1], "done")
+                        self.assertIn("note=dead-missing-result", leg_row)
+                        self.assertNotIn("reap_close_deferred=parent-live", leg_row)
+                    finally:
+                        parent.kill()
+                        parent.wait(timeout=5)
 
 
 if __name__ == "__main__":
