@@ -555,11 +555,61 @@ def _is_reconciling_attempt(job):
     return True
 
 
+def _owner_row(job):
+    """True for a dispatch-depth-1 owner attempt row (portable topology, never a guess)."""
+    depth = getattr(job, "dispatch_depth", None)
+    if depth is None:
+        depth = getattr(job, "depth", None)
+    try:
+        return int(depth) == 1
+    except (TypeError, ValueError):
+        return False
+
+
+def _recovery_reason(node_id, route_jobs, failed_job):
+    """Reason string | None — is a relaunch for this node already staged? (user 2026-08-13)
+
+    A crashed attempt makes the node's row dead, but the route is not necessarily finished:
+    the registry may already carry the recovery path. Two exact registry-owned shapes count,
+    and nothing else — an inferred "probably coming back" would be the same fabrication SD-F2
+    forbids:
+
+    ``awaiting-resume``  the orphan classifier (SD-64/71, stamped by the dispatch collector,
+                         never re-derived here) named THIS node as the route's resume boundary.
+    ``relaunch-open``    a strictly newer registry attempt for this node (or a newer owner
+                         attempt on the same route) is open/working rather than dead.
+
+    With neither present the node keeps its established ``failed`` verdict — a dead end still
+    renders ✕.
+    """
+    for j in route_jobs:
+        if (getattr(j, "note", None) == "dead-parent-orphaned"
+                and getattr(j, "resume_boundary", None) == node_id):
+            return "awaiting-resume"
+    order = getattr(failed_job, "registry_order", None)
+    if not isinstance(order, int) or isinstance(order, bool):
+        return None
+    for j in route_jobs:
+        if j is failed_job:
+            continue
+        other = getattr(j, "registry_order", None)
+        if not isinstance(other, int) or isinstance(other, bool) or other <= order:
+            continue
+        if not (getattr(j, "route_node", None) == node_id or _owner_row(j)):
+            continue
+        if getattr(j, "liveness", None) == "working" or getattr(j, "status", None) in (
+            "open", "running",
+        ):
+            return "relaunch-open"
+    return None
+
+
 def _node_state(node_id, route_jobs, ev_by_node, now, completion_marked=False, degradation=None):
     """One node's state, per the priority table (PRD F-41): active (live job) beats a
     published completion marker (done); explicit killed/cancelled/fail-note evidence beats
     exact reconciliation; the current exact ``reconcile-needed`` attempt becomes
-    ``reconciling``; generic dead/stale becomes failed; a clean registry row becomes done;
+    ``reconciling``; a generic dead/stale row inside a registry-proven recovery window becomes
+    ``recovering``, and only a dead row with NO recovery path becomes failed; a clean registry row becomes done;
     no evidence is pending. `now` is the ONLY clock input — never read internally, so this
     stays hermetically testable (T1-14/T1-15).
 
@@ -634,6 +684,14 @@ def _node_state(node_id, route_jobs, ev_by_node, now, completion_marked=False, d
             return {"state": "reconciling", "elapsed_min": j.elapsed_min, "model": j.model,
                     "harness": j.harness, "effort": j.effort, "pid": j.pid,
                     "note": getattr(j, "note", None) or note or "reconcile-needed", "job": j}
+        # user 2026-08-13 (mem-pipeline-revival r3 crash): a dead row inside a registry-proven
+        # recovery window is not an established pipeline failure. Explicit killed/cancelled
+        # evidence above still wins — this only reclassifies the GENERIC dead/stale verdict.
+        recovery = _recovery_reason(node_id, route_jobs, j)
+        if recovery:
+            return {"state": "recovering", "elapsed_min": j.elapsed_min, "model": j.model,
+                    "harness": j.harness, "effort": j.effort, "pid": j.pid,
+                    "note": recovery, "job": j}
         return {"state": "failed", "elapsed_min": j.elapsed_min, "model": j.model,
                 "harness": j.harness, "effort": j.effort, "pid": j.pid,
                 "note": note, "job": j}
@@ -743,7 +801,11 @@ def build_views(jobs, node_evidence, records, now, gate_marks=None, degradations
     by_route = {}
     order = []
     for j in jobs:
-        rid = getattr(j, "route_id", None)
+        # A dispatch-depth-1 owner attempt binds its route through `owner_route_id` instead of a
+        # stage job's `route_id` tuple. It still carries no `route_node`, so it can never become a
+        # node's own live/failed row — but the recovery-window judge needs to SEE it (a relaunch
+        # after a crash is registered as a new owner attempt on the same route).
+        rid = getattr(j, "route_id", None) or getattr(j, "owner_route_id", None)
         if not rid:
             continue
         if rid not in by_route:

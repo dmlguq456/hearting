@@ -945,7 +945,7 @@ def _drop_past_stages(items, cur_i, max_width):
 def _route_current_index(route_seq):
     """The breadcrumb's CURRENT node index — the single judge every current-hue consumer
     shares (the lit token and the F-64c rail must never disagree on color)."""
-    for want in ("active", "degraded", "reconciling"):
+    for want in ("active", "degraded", "recovering", "reconciling"):
         found = next((i for i, (_nid, st) in enumerate(route_seq) if st == want), None)
         if found is not None:
             return found
@@ -970,7 +970,7 @@ def _route_stage_segs(route_seq, working, max_width):
             items.append((i, nid + "✕", "lvl_r"))
         elif st == "degraded":
             items.append((i, nid + "◐", "lvl_y"))
-        elif st == "reconciling":
+        elif st in ("reconciling", "recovering"):
             items.append((i, nid + "…", "lvl_y"))
         elif st == "done":
             items.append((i, nid + "✓", "stg%d_off" % (i % 5)))
@@ -1263,7 +1263,7 @@ def _collapse_parallel_nodes(nodes):
         states = [m.get("state") for m in members]
         state = next(
             (candidate for candidate in
-             ("failed", "active", "degraded", "reconciling", "done", "pending")
+             ("failed", "active", "degraded", "recovering", "reconciling", "done", "pending")
              if candidate in states),
             "pending",
         )
@@ -1561,11 +1561,19 @@ def _dispatch_prefix(j, orphan=False):
     # drop the ↳ tree arrow — a parent-child arrow with no on-screen parent misleads readers into
     # attaching the orphan to whatever live session row happens to sit above it. Replace with a
     # same-width flat `··` "no-hierarchy" mark so the column stays aligned without implying nesting.
+    #
+    # SD working memory (dispatch depth must be READABLE, not only implied): the ladder's
+    # indent and ↳ arrow encode depth positionally, which a reader has to reconstruct from
+    # column arithmetic. The first two cells of the SAME fixed-width prefix now carry the
+    # depth token `d1`/`d2`/`d3` outright. Zero width change — the prefix stays 4 cells at
+    # dispatch-depth-1 and 2 more per level after that, so every column contract downstream
+    # (`_HMW` absorption, `_RAIL_COL` = 4) is untouched; the rail cell stays a space.
     depth = max(1, min(3, int(getattr(j, "depth", 1) or 1)))
+    token = "d%d" % depth
     if depth == 1:
-        return "··  " if orphan else "    "
+        return token + ("··" if orphan else "  ")
     marker = "··" if orphan else "↳ "
-    return "    " + "  " * (depth - 1) + marker
+    return token + "  " + "  " * (depth - 1) + marker
 
 
 # F-64c (v49, user 2026-08-05 "depth=1에서는 화살표를 안쓰고 쭉 세로줄로 … 점멸하도록",
@@ -3040,6 +3048,7 @@ def _stage_detail_rows(nodes, depth=0, term_width=None, indent=None):
             "done": ("✓", "dim"),
             "active": ("●", "g_work" if _BLINK_ON else "g_work_off"),
             "reconciling": ("…", "lvl_y"),
+            "recovering": ("…", "lvl_y"),
             "failed": ("✕", "lvl_r"),
             "degraded": ("◐", "lvl_y"),
             "pending": ("○", "dim"),
@@ -3239,6 +3248,12 @@ def _route_node_text(n):
     if st == "reconciling":
         tail = (" " + fmt_min(elapsed)) if elapsed is not None else ""
         return "%s …gate%s%s" % (nid, tail, deps), "lvl_y", mark
+    if st == "recovering":
+        # user 2026-08-13: a crashed attempt with a staged relaunch must not read as ✕. The
+        # label names the exact registry reason route.py decided, never a guess made here.
+        tail = (" " + fmt_min(elapsed)) if elapsed is not None else ""
+        reason = n.get("note") or "recovery"
+        return "%s …%s%s%s" % (nid, reason, tail, deps), "lvl_y", mark
     if st == "failed":
         tail = (" " + fmt_min(elapsed)) if elapsed is not None else ""
         return "%s ✕%s%s" % (nid, tail, deps), "lvl_r", mark
@@ -3737,6 +3752,8 @@ def _build_process_lines(sessions, jobs, route_views_by_id, malformed, memory, t
                 covered_pids.add(nj.pid)
             if isinstance(n, dict) and n.get("state") == "degraded":
                 _seen_glyphs.add("degraded")
+            if isinstance(n, dict) and n.get("state") == "recovering":
+                _seen_glyphs.add("recovering")
         seen_keys.add(meta["card_key"])
 
     for job in degrade_jobs:
@@ -4637,6 +4654,8 @@ def _build_lines(sessions, jobs, section, narrow, malformed, layout="wide", memo
         legend += [("✕", "g_dead"), (" dead     ", "dim")]
     if "degraded" in _seen_glyphs:
         legend += [("◐", "lvl_y"), (" degraded node   ", "dim")]
+    if "recovering" in _seen_glyphs:
+        legend += [("…", "lvl_y"), (" recovery pending   ", "dim")]
     if "blocked" in _seen_glyphs:
         legend += [("◑", "g_blocked"), (" blocked session   ", "dim")]
     if "child" in _seen_glyphs:
