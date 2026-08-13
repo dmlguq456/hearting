@@ -50,6 +50,20 @@ case "${MEM_PERIODIC_CURATE_MAX_PROJECTS:-8}" in
   *) _max="${MEM_PERIODIC_CURATE_MAX_PROJECTS:-8}" ;;
 esac
 
+# Bound both one curator and the whole cron firing. A timed-out curator keeps
+# its D-41 lock/slot until its own cleanup runs; in that case this batch stops
+# instead of starting another project and violating the sequential contract.
+case "${MEM_PERIODIC_CURATE_PROJECT_TIMEOUT:-${MEM_PERIODIC_CURATE_WAIT:-1800}}" in
+  ''|*[!0-9]*|0) _project_timeout=1800 ;;
+  *) _project_timeout="${MEM_PERIODIC_CURATE_PROJECT_TIMEOUT:-${MEM_PERIODIC_CURATE_WAIT:-1800}}" ;;
+esac
+case "${MEM_PERIODIC_CURATE_TIMEOUT:-1800}" in
+  ''|*[!0-9]*|0) _run_timeout=1800 ;;
+  *) _run_timeout="${MEM_PERIODIC_CURATE_TIMEOUT:-1800}" ;;
+esac
+_run_started="$(date +%s)"
+_run_deadline=$((_run_started + _run_timeout))
+
 # Eligible projects are `PROJECTS_ROOT/<encoded-cwd>/memory` directories — the
 # same convention tools/memory/mem.py already uses for the profile projection
 # (mem.py:2658). Decode each encoded directory name back to a real, existing
@@ -125,32 +139,42 @@ PYEOF
 # dispatcher checks the identical marker and would otherwise treat every
 # periodic-curate dispatch as a worker call and silently no-op it.
 #
-# The dispatcher backgrounds its own worker and returns immediately, so a
-# bare sequential call here would still let multiple projects' workers run
-# concurrently. Compute the same per-project lock name the dispatcher derives
-# from cwd and poll for its release before moving to the next project, so
-# "sequential" holds for the actual curator runs, not just for this loop.
+# The dispatcher backgrounds its own worker and returns immediately, so a bare
+# sequential call here would still let multiple projects' workers run
+# concurrently. The per-project lock belongs to that detached worker and its
+# EXIT trap removes it only after the worker and applier finish. Waiting for the
+# lock to disappear therefore joins the real curate run without changing the
+# dispatcher's detached-worker contract.
 while IFS= read -r cwd; do
   [ -n "$cwd" ] || continue
+  _started="$(date +%s)"
+  if [ "$_started" -ge "$_run_deadline" ]; then
+    printf 'mem-periodic-curate project=%s elapsed=%ss status=run-timeout\n' \
+      "$cwd" "$((_started - _run_started))" >&2
+    break
+  fi
   project_key="$(printf '%s' "$cwd" | python3 -c 'import sys, hashlib; print(hashlib.sha1(sys.stdin.buffer.read()).hexdigest()[:16])' 2>/dev/null || true)"
-  [ -n "$project_key" ] || continue
+  if [ -z "$project_key" ]; then
+    printf 'mem-periodic-curate project=%s elapsed=0s status=key-error\n' "$cwd" >&2
+    continue
+  fi
   MEM_PY="$MEM" MEM_STORE="$STORE" \
     bash "$DISPATCH" periodic-curate "$cwd" </dev/null >/dev/null 2>&1 || true
-  # Wait out the whole curate budget, not an arbitrary 10 seconds. A deep
-  # curator legitimately runs up to MEM_DISTILL_TIMEOUT_CURATE (default 600s),
-  # so a short poll would return early and let the next project's dispatch
-  # overlap the previous one — silently breaking the "sequential" contract this
-  # script, core/HOOKS.md, and core/MEMORY.md all state. The dispatcher's own
-  # D-41 slots still cap total concurrency; this loop is what makes the
-  # stated invariant true rather than approximately true.
-  _wait_budget="${MEM_PERIODIC_CURATE_WAIT:-${MEM_DISTILL_TIMEOUT_CURATE:-600}}"
-  # +60s of headroom so the lock's own stale cleanup, not this poll, is what
-  # releases a wedged run; then give up rather than blocking the night's batch.
-  _deadline=$(( $(date +%s) + _wait_budget + 60 ))
+  _deadline=$((_started + _project_timeout))
+  [ "$_deadline" -le "$_run_deadline" ] || _deadline="$_run_deadline"
+  _status=complete
   while [ -d "$STORE/.distill-lock-periodic-$project_key" ]; do
-    [ "$(date +%s)" -ge "$_deadline" ] && break
+    if [ "$(date +%s)" -ge "$_deadline" ]; then
+      _status=timeout
+      break
+    fi
     sleep 1
   done
+  _finished="$(date +%s)"
+  printf 'mem-periodic-curate project=%s elapsed=%ss status=%s\n' \
+    "$cwd" "$((_finished - _started))" "$_status" >&2
+  # Never dispatch the next project while this worker still owns its lock.
+  [ "$_status" = complete ] || break
 done < <(_project_paths)
 
 exit 0
