@@ -88,6 +88,30 @@ class CapacityPolicyTests(unittest.TestCase):
         self.assertEqual(C.ordering_score({}, "opencode"), 50.0)
         self.assertEqual(C.ordering_score({"opencode": 73}, "opencode"), 73.0)
 
+    def test_balanced_gate_demotes_used_percent_at_or_above_ninety(self):
+        ranked = C.rank_band(
+            ["claude", "codex"], self.states, {"claude": 0, "codex": 1},
+            ["claude", "codex"], {"claude": 5, "codex": 80},
+            strategy="balanced", usage_gate_used_percent=90,
+        )
+        self.assertEqual(ranked, ["codex", "claude"])
+
+    def test_balanced_all_gated_uses_maximum_headroom(self):
+        ranked = C.rank_band(
+            ["claude", "codex", "opencode"], self.states,
+            {"claude": 0, "codex": 0, "opencode": 0}, C.HARNESSES,
+            {"claude": 9, "codex": 4, "opencode": 1}, strategy="balanced",
+        )
+        self.assertEqual(ranked, ["claude", "codex", "opencode"])
+
+    def test_balanced_unknown_gauge_is_optimistic_pass(self):
+        ranked = C.rank_band(
+            ["claude", "codex"], self.states, {"claude": 3, "codex": 0},
+            ["claude", "codex"], {"claude": 10, "codex": None},
+            strategy="balanced",
+        )
+        self.assertEqual(ranked, ["codex", "claude"])
+
 
 class CodexGaugeReaderTests(unittest.TestCase):
     """The codex gauge must not starve on idle: live probe first, rollout second.

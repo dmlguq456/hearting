@@ -143,4 +143,14 @@ class CapacityTest(unittest.TestCase):
    state,fields,_=F.capacity_retry(self.args,self.route,self.node,self.row,1,self.failed,[])
   self.assertEqual((state,fields["model"]),("success","opus"))
   self.assertEqual(command.call_args.args[6],("opus","xhigh"))
+ def test_balanced_all_gated_stage_candidates_choose_maximum_headroom(self):
+  import importlib.util
+  spec=importlib.util.spec_from_file_location("capacity",ROOT/"utilities/harness-capacity.py")
+  capacity=importlib.util.module_from_spec(spec); spec.loader.exec_module(capacity)
+  chosen,band,_,_=capacity.select(
+   {"primary":["claude","codex","opencode"],"relief":[],"last_resort":[],"promote_relief_below":0},
+   {"claude":"ok","codex":"ok","opencode":"ok"},
+   {"claude":0,"codex":0,"opencode":0}, ["claude","codex","opencode"],
+   {"claude":9,"codex":4,"opencode":1}, strategy="balanced")
+  self.assertEqual((chosen,band),("claude","primary"))
 if __name__=="__main__":unittest.main()

@@ -20,8 +20,9 @@
 #       last_resort: [<last-resort candidates>]
 #       promote_relief_below: <0..100 headroom percent>
 #   allocation:
-#     strategy: capacity-aware
+#     strategy: balanced
 #     window: 30                       # last exact registered attempts
+#     usage_gate_used_percent: 90
 #   capabilities:
 #     <capability-name>:
 #       <canonical-topology-node-id>: <claude|codex|opencode|diverse>
@@ -52,22 +53,23 @@ profiles:
     last_resort: [opencode]
     promote_relief_below: 0
   light:
-    primary: [claude, codex]
-    relief: [opencode]
+    primary: [claude, codex, opencode]
+    relief: []
     last_resort: []
-    promote_relief_below: 35
+    promote_relief_below: 0
   mini:
-    primary: [claude, codex]
-    relief: [opencode]
+    primary: [claude, codex, opencode]
+    relief: []
     last_resort: []
-    promote_relief_below: 35
+    promote_relief_below: 0
 
 # Read-only allocation telemetry counts the last 30 exact registered attempt
 # rows in the selected canonical jobs.log. Fresh runtime gauges order quality
 # peers first; recent exact attempts break unknown/equal-capacity ties.
 allocation:
-  strategy: capacity-aware
+  strategy: balanced
   window: 30
+  usage_gate_used_percent: 90
 
 capabilities:
   # autopilot-code: canonical topology node ids are frame, plan, plan-check,

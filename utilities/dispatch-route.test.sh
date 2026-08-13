@@ -142,6 +142,50 @@ policy=$(python3 "$root/utilities/dispatch-defaults.py" opencode-policy --config
 : > "$jobs"
 export DISPATCH_DEFAULTS_CONFIG="$cfg"
 
+# ---- SD-67: balanced keeps allocation ranking and OpenCode in fallback pool ----
+cfg_balanced="$tmp/dispatch-defaults-balanced.yaml"
+cat > "$cfg_balanced" <<'EOF'
+schema_version: 3
+harnesses:
+  enabled: [claude, codex, opencode]
+profiles:
+  deep:
+    primary: [claude, codex]
+    relief: []
+    last_resort: [opencode]
+    promote_relief_below: 0
+  balanced-deep:
+    primary: [claude, codex]
+    relief: []
+    last_resort: [opencode]
+    promote_relief_below: 0
+  light:
+    primary: [claude, codex, opencode]
+    relief: []
+    last_resort: []
+    promote_relief_below: 0
+  mini:
+    primary: [claude, codex, opencode]
+    relief: []
+    last_resort: []
+    promote_relief_below: 0
+allocation:
+  strategy: balanced
+  window: 30
+  usage_gate_used_percent: 90
+capabilities:
+  autopilot-code:
+    execute: diverse
+EOF
+export DISPATCH_DEFAULTS_CONFIG="$cfg_balanced"
+: > "$jobs"
+out=$(route --capability autopilot-code --stage execute)
+assert "$out" 'allocation_rank=claude,codex,opencode'
+printf '%s\tdone\tx\tx\tx\tharness=claude,attempt_schema_version=2,registered_worker=1,attempt_id=att-bc\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$jobs"
+out=$(route --capability autopilot-code --stage execute)
+assert "$out" 'allocation_rank=codex,opencode,claude'
+printf '%s\n' "$out" | grep -q 'opencode' || { echo "balanced fallback pool lost OpenCode" >&2; exit 1; }
+
 # ---- malformed config fails loud with useful stderr, for every class ----
 bad_model_like="$tmp/bad-model-like.yaml"
 cat > "$bad_model_like" <<'EOF'

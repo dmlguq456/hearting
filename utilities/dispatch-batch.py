@@ -331,14 +331,14 @@ def assign_harnesses(
     if (
         jobs is not None
         and isinstance(allocation, dict)
-        and allocation.get("strategy") in {ALLOCATION_STRATEGY, "capacity-aware"}
+        and allocation.get("strategy") in {ALLOCATION_STRATEGY, "capacity-aware", "balanced"}
     ):
         counts = attempt_counts(jobs, window=int(allocation["window"]))
         declared_order = allocation.get("harness_order") or declared_order
     order = {harness: index for index, harness in enumerate(declared_order)}
     capacity = (
         CAPACITY.capacity_scores()
-        if isinstance(allocation, dict) and allocation.get("strategy") == "capacity-aware"
+        if isinstance(allocation, dict) and allocation.get("strategy") in {"capacity-aware", "balanced"}
         else {harness: None for harness in SUPPORTED_BATCH_HARNESSES}
     )
 
@@ -371,12 +371,25 @@ def assign_harnesses(
                 None, "", "unspecified", "diverse", row[0]
             }
         )
+        if isinstance(allocation, dict) and allocation.get("strategy") == "balanced":
+            gate = 100 - allocation.get("usage_gate_used_percent", 90)
+            gated = [capacity.get(row[0]) is not None and capacity.get(row[0]) <= gate for row in rows]
+            all_gated = bool(gated) and all(gated)
+            allocation_order = (
+                sum(0 if item else 1 for item in gated),
+                -sum(float(capacity.get(row[0]) or 0) for row in rows) if all_gated else 0,
+                sum(counts.get(row[0], 0) for row in rows),
+            )
+        else:
+            allocation_order = (
+                -sum(CAPACITY.ordering_score(capacity, row[0]) for row in rows),
+                sum(counts.get(row[0], 0) for row in rows),
+            )
         return (
             -len({row[0] for row in rows}),
             sum(band_rank(node, row[0]) for node, row in zip(nodes, rows)),
             affinity_misses,
-            -sum(CAPACITY.ordering_score(capacity, row[0]) for row in rows),
-            sum(counts.get(row[0], 0) for row in rows),
+            *allocation_order,
             sum(row[2] for row in rows),
             tuple(order.get(row[0], len(order)) for row in rows),
         )

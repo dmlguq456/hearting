@@ -10,6 +10,7 @@ from pathlib import Path
 
 HARNESSES = ("claude", "codex", "opencode")
 STRATEGY = "least-recent-attempts"
+BALANCED_STRATEGY = "balanced"
 
 
 def _metadata(value: str) -> dict[str, str]:

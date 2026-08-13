@@ -17,7 +17,8 @@ KNOWN_HARNESSES = DISPATCHABLE_HARNESSES
 AFFINITY_VALUES = {"claude", "codex", "opencode", "diverse"}
 MODEL_PROFILES = ("deep", "balanced-deep", "light", "mini")
 QUALITY_BANDS = ("primary", "relief", "last_resort")
-ALLOCATION_STRATEGIES = {"least-recent-attempts", "capacity-aware"}
+ALLOCATION_STRATEGIES = {"least-recent-attempts", "capacity-aware", "balanced"}
+DEFAULT_USAGE_GATE_USED_PERCENT = 90
 TOP_LEVEL_KEYS = {
     "schema_version", "depth1_owner", "opencode", "allocation", "capabilities",
     "harnesses", "profiles",
@@ -310,7 +311,7 @@ def validate(config, capmap):
         if not isinstance(allocation, dict):
             errors.append(f"allocation must be a mapping for schema v{version}")
         else:
-            unknown_allocation = sorted(set(allocation) - {"strategy", "window"})
+            unknown_allocation = sorted(set(allocation) - {"strategy", "window", "usage_gate_used_percent"})
             for key in unknown_allocation:
                 errors.append(f"unknown allocation key: {key!r}")
             strategy = allocation.get("strategy")
@@ -321,6 +322,9 @@ def validate(config, capmap):
             window = allocation.get("window")
             if not isinstance(window, int) or not 3 <= window <= 300:
                 errors.append("allocation.window must be an integer from 3 to 300")
+            gate = allocation.get("usage_gate_used_percent", DEFAULT_USAGE_GATE_USED_PERCENT)
+            if not isinstance(gate, int) or not 0 <= gate <= 100:
+                errors.append("allocation.usage_gate_used_percent must be an integer from 0 to 100")
     elif allocation is not None:
         errors.append("allocation requires schema_version 2 or 3")
 
@@ -434,11 +438,13 @@ def query_allocation(config):
         return {
             "strategy": allocation["strategy"],
             "window": allocation["window"],
+            "usage_gate_used_percent": allocation.get("usage_gate_used_percent", DEFAULT_USAGE_GATE_USED_PERCENT),
             "harness_order": list(query_owners(config)),
         }
     return {
         "strategy": "config-order",
         "window": 0,
+        "usage_gate_used_percent": DEFAULT_USAGE_GATE_USED_PERCENT,
         "harness_order": list(query_owners(config)),
     }
 
@@ -501,6 +507,7 @@ def main(argv):
         allocation = query_allocation(config)
         print(f"strategy={allocation['strategy']}")
         print(f"window={allocation['window']}")
+        print(f"usage_gate_used_percent={allocation['usage_gate_used_percent']}")
         print("harness_order=" + ",".join(allocation["harness_order"]))
         return 0
     if op == "opencode-policy":

@@ -62,6 +62,22 @@ class DispatchOwnerTests(unittest.TestCase):
         )
         return path
 
+    def balanced_quality_config(self):
+        path = self.home / "dispatch-defaults-balanced-quality.yaml"
+        path.write_text(
+            "schema_version: 3\n"
+            "harnesses:\n  enabled: [claude, codex, opencode]\n"
+            "profiles:\n"
+            "  deep:\n    primary: [claude, codex]\n    relief: []\n    last_resort: [opencode]\n    promote_relief_below: 0\n"
+            "  balanced-deep:\n    primary: [claude, codex]\n    relief: []\n    last_resort: [opencode]\n    promote_relief_below: 0\n"
+            "  light:\n    primary: [claude, codex, opencode]\n    relief: []\n    last_resort: []\n    promote_relief_below: 0\n"
+            "  mini:\n    primary: [claude, codex, opencode]\n    relief: []\n    last_resort: []\n    promote_relief_below: 0\n"
+            "allocation:\n  strategy: balanced\n  window: 30\n  usage_gate_used_percent: 90\n"
+            "capabilities:\n",
+            encoding="utf-8",
+        )
+        return path
+
     def quality_config(self):
         path = self.home / "dispatch-defaults-v3.yaml"
         path.write_text(
@@ -229,6 +245,30 @@ class DispatchOwnerTests(unittest.TestCase):
             selected,
             ["claude", "codex", "opencode", "claude", "codex", "opencode"],
         )
+
+    def test_balanced_recent_count_rotation_is_even_across_three_harnesses(self):
+        config = self.balanced_quality_config()
+        selected = []
+        for index in range(3):
+            result = self.run_owner(config=config, model_profile="light")
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            selected.append(next(line.split("=", 1)[1] for line in result.stdout.splitlines()
+                                 if line.startswith("adapter=")))
+            with self.jobs.open("a", encoding="utf-8") as handle:
+                handle.write(f"2026-08-09T00:00:{index:02d}Z\tdone\t/repo\t/wt\towner\t"
+                             f"attempt_schema_version=2,registered_worker=1,attempt_id=att-r{index},harness={selected[-1]}\n")
+        self.assertEqual(selected, ["claude", "codex", "opencode"])
+        self.assertIn("allocation_strategy=balanced", result.stdout)
+
+    def test_opencode_is_light_peer_but_deep_last_resort(self):
+        config = self.balanced_quality_config()
+        light = self.run_owner(config=config, model_profile="light")
+        self.assertEqual(light.returncode, 0, light.stdout + light.stderr)
+        self.assertIn("adapter=claude", light.stdout)
+        deep = self.run_owner(config=config, model_profile="deep")
+        self.assertEqual(deep.returncode, 0, deep.stdout + deep.stderr)
+        self.assertIn("quality_band=primary", deep.stdout)
+        self.assertNotIn("adapter=opencode", deep.stdout)
 
     def test_schema_v3_capacity_orders_quality_peers_but_not_opencode(self):
         result = self.run_owner(

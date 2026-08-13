@@ -185,7 +185,7 @@ def ordered_fallback_hops(
 
     allocation = route.get("dispatch_allocation")
     if not isinstance(allocation, dict) or allocation.get("strategy") not in {
-        ALLOCATION_STRATEGY, "capacity-aware"
+        ALLOCATION_STRATEGY, "capacity-aware", "balanced"
     }:
         # Without an allocation policy the chain is the compiled order and
         # every candidate at every hop is visited, so parent_runtime_failure
@@ -226,7 +226,7 @@ def ordered_fallback_hops(
     scores = None
     quality_band = None
     relief_promoted = False
-    if allocation["strategy"] == "capacity-aware" and isinstance(node.get("harness_policy"), dict):
+    if allocation["strategy"] in {"capacity-aware", "balanced"} and isinstance(node.get("harness_policy"), dict):
         scores = CAPACITY.capacity_scores()
         available = set(candidates)
         policy = {
@@ -242,6 +242,8 @@ def ordered_fallback_hops(
             counts,
             allocation.get("harness_order") or ALLOCATION_HARNESSES,
             scores,
+            strategy=allocation["strategy"],
+            usage_gate_used_percent=allocation.get("usage_gate_used_percent", 90),
         )
         band_order = ("relief", "primary", "last_resort") if relief_promoted else (
             "primary", "relief", "last_resort"
@@ -269,6 +271,7 @@ def ordered_fallback_hops(
     return ordered, {
         "strategy": allocation["strategy"],
         "window": allocation["window"],
+        "usage_gate_used_percent": allocation.get("usage_gate_used_percent", 90),
         "counts": counts,
         "states": states,
         "rank": ranked,
