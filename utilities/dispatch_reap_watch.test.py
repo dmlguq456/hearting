@@ -93,6 +93,50 @@ class DispatchReapWatchTest(unittest.TestCase):
                 f"attempt_descendant_observer_ns={identity['pid_observer_ns']}", row
             )
 
+    def test_open_missing_result_is_closed_after_exact_group_drain(self):
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            jobs = base / "jobs.log"
+            attempt = "att-detached-missing-result"
+            worker = subprocess.Popen(
+                ["sleep", "0.08"],
+                env={**os.environ, D.ATTEMPT_DESCENDANT_ENV: attempt},
+                start_new_session=True,
+            )
+            identity = D.process_launch_identity(worker.pid)
+            metadata = ",".join(
+                f"{key}={value}"
+                for key, value in {
+                    **identity,
+                    "attempt_id": attempt,
+                    "launch_lifecycle": "detached",
+                    "log_file": str(base / "missing.jsonl"),
+                }.items()
+            )
+            jobs.write_text(
+                "2026-08-09T00:00:00Z\topen\t/repo\t/wt\tworker\t"
+                f"{CURRENT},{metadata}\n",
+                encoding="utf-8",
+            )
+            watcher = subprocess.Popen(
+                [
+                    sys.executable,
+                    str(WATCH),
+                    "--jobs", str(jobs),
+                    "--attempt-id", attempt,
+                    "--pid", str(worker.pid),
+                    "--pid-start", identity["pid_start"],
+                    "--pgid", identity["pgid"],
+                    "--interval", "0.02",
+                ],
+            )
+            worker.wait(timeout=5)
+            self.assertEqual(watcher.wait(timeout=5), 0)
+            row = jobs.read_text(encoding="utf-8")
+            self.assertIn("\tdone\t", row)
+            self.assertIn("note=dead-missing-result", row)
+            self.assertIn("dispatch-reap-missing-result-v1", row)
+
 
 if __name__ == "__main__":
     unittest.main()

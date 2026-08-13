@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
 import importlib.util
+import hashlib
 import json
 import os
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
+import time
 import unittest
 from unittest import mock
 
@@ -53,6 +56,118 @@ class ProgressTest(unittest.TestCase):
         self.assertEqual(second["terminal_action"], "dead-no-progress")
         self.proc.wait(timeout=3)
         self.assertIn("note=dead-no-progress", self.jobs.read_text())
+
+    def _verification_lease(self, process, *, deadline=100):
+        lease = self.base / "verification-leases" / f"{self.attempt}.json"
+        lease.parent.mkdir(parents=True, exist_ok=True)
+        start = P.process_start_ticks(process.pid)
+        command = (Path("/proc") / str(process.pid) / "cmdline").read_bytes().rstrip(b"\0")
+        lease.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "attempt_id": self.attempt,
+                    "route_id": "rt-1",
+                    "route_node": "test",
+                    "command_digest": hashlib.sha256(command).hexdigest(),
+                    "pid": process.pid,
+                    "pid_start": start,
+                    "pgid": process.pid,
+                    "started_at": 0,
+                    "deadline": deadline,
+                }
+            ),
+            encoding="utf-8",
+        )
+        return lease
+
+    @staticmethod
+    def _stop_process(process):
+        if process.poll() is None:
+            process.kill()
+        process.wait()
+
+    def test_live_bounded_verification_lease_pauses_quiet_windows(self):
+        verification = subprocess.Popen(["sleep", "60"], start_new_session=True)
+        self.addCleanup(self._stop_process, verification)
+        self._verification_lease(verification)
+        P.heartbeat(self.args(), 0)
+        first = P.watchdog(self.args(), 10)
+        second = P.watchdog(self.args(), 20)
+        self.assertEqual(first["action"], "background-active")
+        self.assertEqual(second["quiet_windows"], 0)
+        (self.base / "verification-leases" / f"{self.attempt}.json").unlink()
+        resumed = P.watchdog(self.args(), 30)
+        self.assertEqual((resumed["action"], resumed["quiet_windows"]), ("warning", 1))
+
+    def test_expired_verification_lease_does_not_exempt_stall(self):
+        verification = subprocess.Popen(["sleep", "60"], start_new_session=True)
+        self.addCleanup(self._stop_process, verification)
+        self._verification_lease(verification, deadline=5)
+        P.heartbeat(self.args(), 0)
+        state = P.watchdog(self.args(), 10)
+        self.assertEqual((state["action"], state["quiet_windows"]), ("warning", 1))
+
+    def test_foreign_and_digest_mismatched_verification_lease_fail_closed(self):
+        verification = subprocess.Popen(["sleep", "60"], start_new_session=True)
+        self.addCleanup(self._stop_process, verification)
+        lease = self._verification_lease(verification)
+        P.heartbeat(self.args(), 0)
+        value = json.loads(lease.read_text(encoding="utf-8"))
+        value["attempt_id"] = "att-foreign"
+        lease.write_text(json.dumps(value), encoding="utf-8")
+        self.assertEqual(P.watchdog(self.args(), 10)["action"], "warning")
+        P.heartbeat(
+            self.args(phase="tool", kind="tool", evidence="digest-round"), 20
+        )
+        value["attempt_id"] = self.attempt
+        value["command_digest"] = "d" * 64
+        lease.write_text(json.dumps(value), encoding="utf-8")
+        self.assertEqual(P.watchdog(self.args(), 30)["action"], "observe")
+        self.assertEqual(P.watchdog(self.args(), 40)["action"], "warning")
+
+    def test_pid_reused_verification_lease_fails_closed(self):
+        verification = subprocess.Popen(["sleep", "60"], start_new_session=True)
+        self.addCleanup(self._stop_process, verification)
+        lease = self._verification_lease(verification)
+        value = json.loads(lease.read_text(encoding="utf-8"))
+        value["pid_start"] = "1"
+        lease.write_text(json.dumps(value), encoding="utf-8")
+        P.heartbeat(self.args(), 0)
+        self.assertEqual(P.watchdog(self.args(), 10)["action"], "warning")
+
+    def test_checked_verification_helper_registers_and_removes_exact_lease(self):
+        helper = ROOT / "utilities/verification-background-lease.py"
+        lease = self.base / "verification-leases" / f"{self.attempt}.json"
+        runner = subprocess.Popen(
+            [
+                sys.executable,
+                str(helper),
+                "--timeout",
+                "2",
+                "--",
+                sys.executable,
+                "-c",
+                "import time; time.sleep(0.3)",
+            ],
+            env={
+                **os.environ,
+                "AGENT_DISPATCH_ATTEMPT_ID": self.attempt,
+                "AGENT_DISPATCH_JOBS": str(self.jobs),
+            },
+        )
+        self.addCleanup(self._stop_process, runner)
+        for _ in range(100):
+            if lease.is_file():
+                break
+            time.sleep(0.01)
+        self.assertTrue(lease.is_file())
+        value = json.loads(lease.read_text(encoding="utf-8"))
+        self.assertEqual(value["attempt_id"], self.attempt)
+        self.assertEqual(value["route_id"], "rt-1")
+        self.assertIsNotNone(P.verification_lease(self.args(), time.time()))
+        self.assertEqual(runner.wait(timeout=3), 0)
+        self.assertFalse(lease.exists())
 
     def test_speech_is_not_progress_and_heartbeat_resets(self):
         P.heartbeat(self.args(), 0)

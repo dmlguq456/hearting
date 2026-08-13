@@ -74,13 +74,17 @@ if [ "$check_only" -eq 1 ]; then
   exit 0
 fi
 
-if command -v timeout >/dev/null 2>&1; then
-  timeout "$timeout_s" "$@"
-  rc=$?
-else
-  "$@"
-  rc=$?
+runner_dir=$(CDPATH= cd -P -- "$(dirname -- "$0")" && pwd -P)
+agent_root=$(CDPATH= cd -P -- "$runner_dir/../../../.." && pwd -P)
+lease_runner="$agent_root/utilities/verification-background-lease.py"
+if [ ! -r "$lease_runner" ]; then
+  printf 'status=unavailable\n'
+  printf 'reason=verification-lease-runner-not-found\n'
+  exit 69
 fi
+python3 "$lease_runner" \
+  --timeout "$timeout_s" -- "$@"
+rc=$?
 
 if [ "$rc" -eq 0 ]; then
   printf 'status=ok\n'

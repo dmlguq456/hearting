@@ -110,6 +110,58 @@ def state_paths(state_root, attempt):
             state_root / "watchdog" / f"{name}.lock")
 
 
+def verification_lease(args, now):
+    """Return one exact live runtime verification lease, else ``None``."""
+
+    path = (
+        dispatch_state_root(args.jobs)
+        / "verification-leases"
+        / f"{args.attempt_id.replace('/', '_')}.json"
+    )
+    value = read_json(path)
+    digest = value.get("command_digest")
+    pid = value.get("pid")
+    pgid = value.get("pgid")
+    deadline = value.get("deadline")
+    if (
+        value.get("schema_version") != 1
+        or value.get("attempt_id") != args.attempt_id
+        or value.get("route_id") != args.route_id
+        or value.get("route_node") != args.route_node
+        or not isinstance(digest, str)
+        or len(digest) != 64
+        or any(char not in "0123456789abcdef" for char in digest)
+        or not isinstance(pid, int)
+        or not isinstance(pgid, int)
+        or pid <= 0
+        or pgid != pid
+        or not isinstance(deadline, (int, float))
+        or deadline < now
+        or process_start_ticks(pid) != str(value.get("pid_start") or "")
+        or process_state(pid) == "Z"
+        or verification_process_digest(pid) != digest
+    ):
+        return None
+    try:
+        if os.getpgid(pid) != pgid:
+            return None
+    except OSError:
+        return None
+    return value
+
+
+def verification_process_digest(pid):
+    """Hash the exact live argv without trusting the lease's copied command."""
+
+    try:
+        raw = (Path("/proc") / str(pid) / "cmdline").read_bytes().rstrip(b"\0")
+    except OSError:
+        return ""
+    if not raw:
+        return ""
+    return hashlib.sha256(raw).hexdigest()
+
+
 def require_row(args):
     row = exact_row(args.jobs, args.attempt_id)
     if row is None:
@@ -356,6 +408,7 @@ def watchdog(args, now):
     verdict = inspect(args, now)
     hb_path, wd_path, lock_path = state_paths(dispatch_state_root(args.jobs), args.attempt_id)
     hb = read_json(hb_path)
+    background = verification_lease(args, now)
     fingerprint = deterministic_progress_fingerprint({
         "attempt_id": args.attempt_id, "route_id": args.route_id,
         "route_node": args.route_node, "heartbeat": hb or None,
@@ -364,6 +417,16 @@ def watchdog(args, now):
         },
         "file_signature": scoped_file_signature(metadata, fields[3]),
         "artifact_signature": metadata.get("artifact_sha256") or None,
+        "background_verification": (
+            {
+                "command_digest": background.get("command_digest"),
+                "pid": background.get("pid"),
+                "pid_start": background.get("pid_start"),
+                "deadline": background.get("deadline"),
+            }
+            if background
+            else None
+        ),
     })
     with locked(lock_path):
         state = read_json(wd_path)
@@ -440,6 +503,28 @@ def watchdog(args, now):
                           "observed_at": now, "verdict": verdict["state"]})
             write_json(wd_path, state)
             return defer_terminal_until_quiescent(state, metadata)
+        if background is not None:
+            state.update(
+                {
+                    "schema_version": 1,
+                    "attempt_id": args.attempt_id,
+                    "route_id": args.route_id,
+                    "route_node": args.route_node,
+                    "classifier_source": ATTEMPT_CLASSIFIER_SOURCE,
+                    "fingerprint": fingerprint,
+                    "last_progress_at": now,
+                    "last_window_at": now,
+                    "quiet_windows": int(state.get("quiet_windows", 0)),
+                    "warning": 0,
+                    "observed_at": now,
+                    "verdict": verdict["state"],
+                    "action": "background-active",
+                    "verification_command_digest": background["command_digest"],
+                    "verification_deadline": background["deadline"],
+                }
+            )
+            write_json(wd_path, state)
+            return state
         if verdict["state"] == "dead":
             terminal = inspect_terminal_log(metadata.get("log_file"))
             terminal_note = terminal.get("failure_note") if terminal else ""

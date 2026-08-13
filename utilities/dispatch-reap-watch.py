@@ -14,27 +14,36 @@ from dispatch_contract import (
     annotate_attempt_row,
     attempt_scan_namespace_authority,
     attempt_tagged_descendants,
+    close_attempt_row_if,
     parse_registry_metadata,
     process_group_observation,
     process_namespace_identity,
     process_start_ticks,
 )
+from codex_dispatch_terminal import terminal_envelope_observed
 
 
-def attempt_metadata(jobs: Path, attempt_id: str) -> dict[str, str]:
+def attempt_record(
+    jobs: Path, attempt_id: str
+) -> tuple[str, dict[str, str]] | None:
+    found = None
     try:
         lines = jobs.read_text(encoding="utf-8", errors="replace").splitlines()
     except OSError:
-        return {}
-    matches = []
+        return None
     for line in lines:
         fields = line.split("\t")
         if len(fields) != 6:
             continue
         metadata = parse_registry_metadata(fields[5])
         if metadata.get("attempt_id") == attempt_id:
-            matches.append(metadata)
-    return matches[0] if len(matches) == 1 else {}
+            found = (fields[1], metadata)
+    return found
+
+
+def attempt_metadata(jobs: Path, attempt_id: str) -> dict[str, str]:
+    record = attempt_record(jobs, attempt_id)
+    return record[1] if record is not None else {}
 
 
 def exact_binding(metadata: dict[str, str], args: argparse.Namespace) -> bool:
@@ -86,7 +95,42 @@ def watch(args: argparse.Namespace) -> int:
                 "attempt_descendant_observer_ns": metadata["pid_observer_ns"],
             },
         )
-        return 0 if annotated else 65
+        if not annotated:
+            return 65
+
+        # The drain proof is the last moment at which the detached watcher has
+        # exact process authority.  If no semantic terminal envelope exists and
+        # the row is still open, close the residue as typed missing-result.
+        # A concurrently written result always wins this fallback.
+        record = attempt_record(args.jobs, args.attempt_id)
+        if (
+            record is not None
+            and record[0] in {"open", "running"}
+            and not terminal_envelope_observed(record[1].get("log_file"))
+        ):
+            expected = dict(record[1])
+
+            def still_missing_result(fields):
+                current = parse_registry_metadata(fields[5])
+                return bool(
+                    fields[1] in {"open", "running"}
+                    and current.get("pid") == expected.get("pid")
+                    and current.get("pid_start") == expected.get("pid_start")
+                    and current.get("pgid") == expected.get("pgid")
+                    and not terminal_envelope_observed(current.get("log_file"))
+                )
+
+            close_attempt_row_if(
+                args.jobs,
+                args.attempt_id,
+                "dead-missing-result",
+                still_missing_result,
+                evidence={
+                    "classifier_source": "dispatch-reap-missing-result-v1",
+                    "reconcile_reason": "governed-process-group-drained",
+                },
+            )
+        return 0
 
 
 def main(argv=None) -> int:
