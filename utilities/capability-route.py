@@ -1178,6 +1178,12 @@ def terminal_gate_proven(gates):
 def canonical_routes_dir(artifact_root):
     return Path(artifact_root).resolve()/".runtime"/"routes"
 
+def canonical_route_path(artifact_root, route_id):
+    return canonical_routes_dir(artifact_root)/f"{route_id}.json"
+
+def route_path_is_exact(path, artifact_root, route_id):
+    return Path(path).resolve() == canonical_route_path(artifact_root, route_id)
+
 def classify_route_location(path, artifact_root):
     """canonical | legacy-root | legacy-routes | legacy-_routes | legacy-.routes | outside"""
     resolved=Path(path).resolve()
@@ -1208,6 +1214,7 @@ def atomic_write(path, payload):
 # stayed false. Absence of these keys (v2 and earlier sidecars) has different
 # semantics than an explicit `false` -- readers must not fold the two together.
 OUTCOME_SCHEMA_VERSION=3
+PUBLICATION_RESULTS=frozenset({"not-offered","skipped","succeeded","failed"})
 
 def outcome_path(route_file):
     path=Path(route_file); return path.with_name(path.stem+".outcome.json")
@@ -1223,7 +1230,7 @@ def _head_commit(cwd):
 # itself: `route_hash` covers every field but the hash and id, so any added key makes
 # `verify_route` reject it. The closure lives in a sidecar and binds `route_hash`, so a
 # recompiled route leaves a detectably stale one rather than a silently wrong one.
-def close_route(route, route_file, commit=None, summary=None):
+def close_route(route, route_file, commit=None, summary=None, publication=None):
     from datetime import datetime, timezone
     # F7: D-2's single-storage-location contract has a compile-time entrance gate
     # (`route-output-outside-canonical`) but had no exit gate -- `close` would
@@ -1233,6 +1240,17 @@ def close_route(route, route_file, commit=None, summary=None):
     location=classify_route_location(route_file,route["artifact_root"])
     if location != "canonical" and location not in _LEGACY_LOCATIONS:
         raise ValueError("route-close-outside-canonical-or-legacy")
+    alias_basename=(location=="canonical" and not route_path_is_exact(
+        route_file,route["artifact_root"],route["route_id"]))
+    if alias_basename or location in _LEGACY_LOCATIONS:
+        print(
+            "capability-route: route-location-drift "
+            f"location={location} alias_basename={str(alias_basename).lower()} "
+            f"route_file={Path(route_file).resolve()}",
+            file=sys.stderr,
+        )
+    if publication is not None and publication not in PUBLICATION_RESULTS:
+        raise ValueError("publication-unknown-result")
     target=outcome_path(route_file)
     if target.exists():
         return json.loads(target.read_text(encoding="utf-8")), False
@@ -1241,7 +1259,7 @@ def close_route(route, route_file, commit=None, summary=None):
     # recompute this, so the sidecar's `terminal_gate_proven` reflects gate state at
     # the moment of THIS close, not at any later inspection.
     gates=terminal_gate_observation(route)
-    outcome={"schema_version":OUTCOME_SCHEMA_VERSION,
+    outcome={"schema_version":4 if publication is not None else OUTCOME_SCHEMA_VERSION,
              "route_id":route["route_id"],"route_hash":route["route_hash"],
              "route_file":str(Path(route_file).resolve()),"cwd":route["cwd"],
              "capability":route["capability"],"effective_intensity":route["effective_intensity"],
@@ -1250,6 +1268,7 @@ def close_route(route, route_file, commit=None, summary=None):
              "registry_current":route.get("_registry_current",True),
              "route_location":classify_route_location(route_file,route["artifact_root"]),
              "terminal_gate_proven":terminal_gate_proven(gates),"terminal_gates":gates}
+    if publication is not None: outcome["publication"]=publication
     atomic_write(target,outcome)
     return outcome, True
 
@@ -1295,6 +1314,9 @@ def route_status(artifact_root, *, diagnostics=None):
                  "source_commit":raw.get("source_commit"),"closed":target.is_file(),
                  "location":location,"drift":location != "canonical",
                  "read_only":location in _LEGACY_LOCATIONS}
+            row["alias_basename"]=(location=="canonical" and not route_path_is_exact(
+                path,artifact_root,row["route_id"]))
+            row["drift"]=row["drift"] or row["alias_basename"]
             if row["closed"]:
                 try: closure=json.loads(target.read_text(encoding="utf-8"))
                 except (OSError,json.JSONDecodeError,UnicodeDecodeError): closure={}
@@ -1852,12 +1874,15 @@ def main():
                 a.predicate,a.signal,a.transport,a.transport_evidence,a.inline_reason,
                 a.tracking,gate,dispatch_evidence,registered_headless_evidence,
             )
+        expected_output=canonical_route_path(a.artifact_root,route["route_id"])
         if a.output:
             output_path=Path(a.output)
             if classify_route_location(output_path,a.artifact_root) != "canonical":
                 raise ValueError("route-output-outside-canonical")
+            if not route_path_is_exact(output_path,a.artifact_root,route["route_id"]):
+                raise ValueError("route-output-alias-basename")
         else:
-            output_path=canonical_routes_dir(a.artifact_root)/f"{route['route_id']}.json"
+            output_path=expected_output
         write_once(output_path,route)
         print(f"route_file={output_path.resolve()}",file=sys.stderr)
         print(json.dumps(route,sort_keys=True))
