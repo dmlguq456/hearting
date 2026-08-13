@@ -180,14 +180,22 @@ done
 
 # Rolling 10-minute start budget. These fixed leases persist after completion,
 # preventing a large backlog from draining sequentially as worker slots reopen.
+# periodic-curate is exempt: it has exactly one strictly sequential caller
+# (the R-3 cron loop) already bounded by its own project/run timeouts, and the
+# 4-start rolling budget otherwise silently no-ops the tail of every nightly
+# batch (observed 2026-08-13 field run: projects 5-8 completed in 0s with no
+# worker start). The v18 anti-fan-out budget targets many concurrent session
+# hook triggers; the per-project lock and worker slots still bound this mode.
 BUDGET=""
-_i=1
-while [ "$_i" -le "$_budget_max" ]; do
-  _candidate="$STORE/.distill-budget-$_i"
-  if mkdir "$_candidate" 2>/dev/null; then BUDGET="$_candidate"; break; fi
-  _i=$((_i + 1))
-done
-[ -n "$BUDGET" ] || { rmdir "$SLOT" "$LOCK" 2>/dev/null || true; exit 0; }
+if [ "$MODE" != "periodic-curate" ]; then
+  _i=1
+  while [ "$_i" -le "$_budget_max" ]; do
+    _candidate="$STORE/.distill-budget-$_i"
+    if mkdir "$_candidate" 2>/dev/null; then BUDGET="$_candidate"; break; fi
+    _i=$((_i + 1))
+  done
+  [ -n "$BUDGET" ] || { rmdir "$SLOT" "$LOCK" 2>/dev/null || true; exit 0; }
+fi
 
 # Any failure before the detached child is established rolls back all leases.
 # The successful child replaces this trap and keeps BUDGET until rolling expiry.
@@ -222,6 +230,22 @@ fi
 # No-tools, data-embedded prompt contract. Bash does not recursively evaluate
 # command syntax inside expanded DATA values, but the call site must still pass
 # the prompt as one argument/file. ARG_MAX remains a bounded residual risk.
+#
+# Reattribute needs conversation evidence: a periodic run judges from SNAPSHOT
+# and ARTIFACTS alone, and under that blindness the model adopts every orphan
+# it is shown (2026-08-13 field run: 40 foreign document-project records were
+# reattributed into the curated project). Session-end curate keeps the action;
+# periodic-curate removes it from the offered vocabulary AND the applier
+# enforces the denial deterministically (--deny-reattribute).
+if [ "$MODE" = "periodic-curate" ]; then
+  REATTR_SHAPE=""
+  REATTR_RULE="- Orphan records are context you lack evidence to judge: reattribute is not
+  an available action in periodic curation. Leave orphan records untouched."
+else
+  REATTR_SHAPE="  {\"action\":\"reattribute\",\"id\":\"<orphan id>\"}
+"
+  REATTR_RULE=""
+fi
 if [ "$MODE" = "curate" ] || [ "$MODE" = "periodic-curate" ]; then
   # deep curator — action JSON (add/reinforce/merge/prune/graduate/reattribute).
   PROMPT="You are a no-tools session memory curator.
@@ -261,10 +285,11 @@ Output contract: stdout contains JSON objects only, one per line. Allowed shapes
   {\"action\":\"merge\",\"ids\":[\"<id>\",\"<id>\"],\"canonical\":\"<id>\"}
   {\"action\":\"prune\",\"id\":\"<snapshot id>\"}
   {\"action\":\"graduate\",\"id\":\"<snapshot id>\",\"to\":\"durable\"}
-  {\"action\":\"reattribute\",\"id\":\"<orphan id>\"}
-  {\"action\":\"supersede\",\"id\":\"<older snapshot id>\",\"by\":\"<newer snapshot id>\"}
+${REATTR_SHAPE}  {\"action\":\"supersede\",\"id\":\"<older snapshot id>\",\"by\":\"<newer snapshot id>\"}
 
 Mechanical boundaries:
+${REATTR_RULE:+$REATTR_RULE
+}
 - Choose the tier from its lifecycle: working is finite-lived; durable persists.
 - artifact-pointer requires artifact_refs and its body contains only why/when to
   retrieve the artifact, never a duplicate summary of artifact contents.
@@ -379,8 +404,13 @@ fi
   # (observed 2026-08-13 — recovery-drain output was indistinguishable from
   # hand-written records). Curate mode still overrides to actor=curator inside
   # the applier.
+  # periodic-curate: reattribute denial is enforced here, not only in the
+  # prompt — the worker output is untrusted model text.
+  _deny_flag=""
+  [ "$MODE" = "periodic-curate" ] && _deny_flag="--deny-reattribute"
   MEM_DISTILL=1 python3 "$APPLIER" \
-    "$OUT" "$MEM" --mode "$WORKER_MODE" --snapshot-ids "$SNAPIDS_FILE" || true
+    "$OUT" "$MEM" --mode "$WORKER_MODE" --snapshot-ids "$SNAPIDS_FILE" \
+    ${_deny_flag:+"$_deny_flag"} || true
 
   if [ "$MODE" = "periodic-curate" ]; then
     # R-3: no delta window to close, so no marker advance and no R-2 strike

@@ -359,6 +359,71 @@ grep -q '^portable$' "$STORE9/trace" 2>/dev/null \
   && bad "⑨: dispatch escaped onto the portable dispatcher (physical ..)" \
   || ok "⑨: portable dispatcher never invoked from the installed layout"
 
+# ============================================================
+# ⑩ exhausted start budget does not truncate the nightly batch
+# ============================================================
+# The rolling 4-start budget guards concurrent hook fan-out; the nightly loop
+# is one bounded sequential caller. Under the shared budget the 2026-08-13
+# field run silently no-opped projects 5-8 (0s complete, no worker start).
+# Pre-exhaust all four budget leases; every project must still be dispatched.
+echo "== ⑩ exhausted start budget → periodic batch still dispatches all =="
+STORE10="$(mktemp -d)"; PROJ10="$(mktemp -d)"; STUB10="$(mktemp -d)"
+CLEANUP+=("$STORE10" "$PROJ10" "$STUB10")
+REALDIR10A="$(mktemp -d)"; REALDIR10B="$(mktemp -d)"
+CLEANUP+=("$REALDIR10A" "$REALDIR10B")
+mkproject_seeded "$PROJ10" "$REALDIR10A" "$STORE10" 1
+mkproject_seeded "$PROJ10" "$REALDIR10B" "$STORE10" 1
+printf '%s' "$CONC_STUB_BODY" > "$STUB10/claude"; chmod +x "$STUB10/claude"
+mkdir -p "$STORE10/.distill-budget-1" "$STORE10/.distill-budget-2" \
+  "$STORE10/.distill-budget-3" "$STORE10/.distill-budget-4"
+
+MEM_PERIODIC_CURATE_ENABLE=1 MEM_DISTILL_ENABLE=1 \
+  MEM_STORE="$STORE10" MEM_PROJECTS="$PROJ10" MEM_PY="$MEM" \
+  MEM_DISTILL_WORKER=claude PATH="$STUB10:$PATH" \
+  AGENT_MODEL_GOVERNOR_ROOT="$STORE10/.test-model-governor" \
+  CONC_DIR="$STORE10" \
+  bash "$UTIL" 2>/dev/null
+
+calls10="$(wc -l < "$STORE10/calls" 2>/dev/null || echo 0)"
+[ "${calls10:-0}" = "2" ] \
+  && ok "⑩: all projects dispatched despite exhausted start budget" \
+  || bad "⑩: worker call count = ${calls10:-0}, expected 2 (budget truncated the batch)"
+
+# ============================================================
+# ⑪ applier denies reattribute for periodic curation
+# ============================================================
+# The evidence-blind periodic curator must not adopt orphans even when the
+# (untrusted) worker output asks to. The dispatcher passes --deny-reattribute;
+# assert the applier layer enforces it while other curate actions still pass.
+echo "== ⑪ --deny-reattribute → reattribute skipped, reinforce still applied =="
+STORE11="$(mktemp -d)"; STUB11="$(mktemp -d)"
+CLEANUP+=("$STORE11" "$STUB11")
+APPLIER11="$ROOT/tools/memory/apply-distill-actions.py"
+cat > "$STUB11/memstub.py" <<'EOS'
+import sys
+with open(sys.argv[sys.argv.index("--trace") + 1] if "--trace" in sys.argv else
+          __import__("os").environ["MEMSTUB_TRACE"], "a") as fh:
+    fh.write(" ".join(sys.argv[1:]) + "\n")
+EOS
+printf '%s\n' \
+  '{"action":"reattribute","id":"rec-a"}' \
+  '{"action":"reinforce","id":"rec-b"}' > "$STORE11/out.jsonl"
+printf 'rec-a rec-b\n' > "$STORE11/snapids"
+
+MEMSTUB_TRACE="$STORE11/trace" python3 "$APPLIER11" "$STORE11/out.jsonl" \
+  "$STUB11/memstub.py" --mode curate --snapshot-ids "$STORE11/snapids" \
+  --deny-reattribute 2>"$STORE11/stderr"
+
+grep -q "^reattribute " "$STORE11/trace" 2>/dev/null \
+  && bad "⑪: reattribute reached mem despite --deny-reattribute" \
+  || ok "⑪: reattribute never reached mem under --deny-reattribute"
+grep -q "^reinforce rec-b$" "$STORE11/trace" 2>/dev/null \
+  && ok "⑪: reinforce still applied alongside the denial" \
+  || bad "⑪: reinforce was not applied (denial over-blocked)"
+grep -q "skip reattribute: denied in periodic curation" "$STORE11/stderr" \
+  && ok "⑪: denial is logged as an explicit skip" \
+  || bad "⑪: denial skip message missing"
+
 echo
 echo "RESULT: PASS=$PASS FAIL=$FAIL"
 [ "$FAIL" = "0" ]

@@ -29,7 +29,8 @@ def _load_snapshot_ids(path):
         return set()
 
 
-def apply_actions(out_path, mem_path, mode="increment", snapshot_ids_path=""):
+def apply_actions(out_path, mem_path, mode="increment", snapshot_ids_path="",
+                  deny_reattribute=False):
     # In curate mode this is a destructive allowlist, not every id printed in the
     # snapshot. `curate-snapshot` deliberately omits PROTECTED PENDING handoff/
     # thread ids, so model output cannot prune or merge them through this layer.
@@ -84,6 +85,15 @@ def apply_actions(out_path, mem_path, mode="increment", snapshot_ids_path=""):
         # for every adapter at the shared applier (deterministic, §0.5).
         if action in ("reinforce", "prune", "graduate", "reattribute", "merge", "supersede") and mode != "curate":
             sys.stderr.write(f"[distill-parse] skip {action}: id-mutation not allowed in {mode} mode (add-only)\n")
+            continue
+
+        # Periodic curation runs without conversation evidence; adopting orphan
+        # records under that blindness is guesswork (2026-08-13 field run:
+        # 40 foreign records absorbed). The dispatcher passes --deny-reattribute
+        # for that mode so the denial is enforced on untrusted worker output,
+        # not merely requested in the prompt.
+        if action == "reattribute" and deny_reattribute:
+            sys.stderr.write("[distill-parse] skip reattribute: denied in periodic curation\n")
             continue
 
         if action == "add":
@@ -179,8 +189,11 @@ def main(argv=None):
     parser.add_argument("mem_path")
     parser.add_argument("--mode", choices=("increment", "curate"), default="increment")
     parser.add_argument("--snapshot-ids", default="")
+    parser.add_argument("--deny-reattribute", action="store_true",
+                        help="Reject reattribute actions (periodic curation)")
     args = parser.parse_args(argv)
-    return apply_actions(args.out_path, args.mem_path, args.mode, args.snapshot_ids)
+    return apply_actions(args.out_path, args.mem_path, args.mode, args.snapshot_ids,
+                         deny_reattribute=args.deny_reattribute)
 
 
 if __name__ == "__main__":
