@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 from pathlib import Path
 import subprocess
@@ -64,9 +65,36 @@ class RegisteredParentParkTest(unittest.TestCase):
         self.state.write_text(
             json.dumps(
                 {
-                    "schema_version": 1,
+                    "schema_version": 2,
                     "parent_attempt_id": PARENT,
                     "delivered_attempt_ids": delivered,
+                    "phase": "deliverable" if delivered else "parked",
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    def write_outbox_state(self, receipt: dict[str, object], row: str) -> None:
+        receipt_bytes = json.dumps(
+            receipt, separators=(",", ":"), sort_keys=True
+        ).encode("utf-8")
+        self.state.write_text(
+            json.dumps(
+                {
+                    "schema_version": 2,
+                    "parent_attempt_id": PARENT,
+                    "delivered_attempt_ids": [CHILD],
+                    "phase": "deliverable",
+                    "outbox": {
+                        "receipt_id": "receipt-test",
+                        "receipt_digest": hashlib.sha256(receipt_bytes).hexdigest(),
+                        "attempt_ids": [CHILD],
+                        "row_revisions": {
+                            CHILD: hashlib.sha256(row.encode("utf-8")).hexdigest()
+                        },
+                        "receipt": receipt,
+                        "consumed_attempt_ids": [],
+                    },
                 }
             ),
             encoding="utf-8",
@@ -153,6 +181,39 @@ class RegisteredParentParkTest(unittest.TestCase):
             self.jobs.read_text(encoding="utf-8").rstrip()
             + ",launch_outcome=never-launched\n",
             encoding="utf-8",
+        )
+
+    def test_outbox_row_advance_selects_current_done_failure_action(self) -> None:
+        original = self.jobs.read_text(encoding="utf-8").rstrip("\n")
+        receipt = {
+            "schema_version": 2,
+            "state": "ready",
+            "parent_attempt_id": PARENT,
+            "children": [
+                {
+                    "attempt_id": CHILD,
+                    "status": "open",
+                    "required_action": "complete-open",
+                }
+            ],
+        }
+        self.write_outbox_state(receipt, original)
+        self.jobs.write_text(
+            original.replace("\topen\t", "\tdone\t")
+            + ",failure_class=fail,note=dead-worker-fail\n",
+            encoding="utf-8",
+        )
+        self.assert_denied(
+            "Bash",
+            f"adapters/codex/bin/preflight.sh harvest --attempt-id {CHILD} "
+            "--status open --mark-done",
+        )
+        self.assertIsNone(
+            self.invoke(
+                "Bash",
+                f"adapters/codex/bin/preflight.sh harvest --attempt-id {CHILD} "
+                "--status done --failure-detail",
+            )
         )
         self.write_state([CHILD])
         self.assert_denied("Read")

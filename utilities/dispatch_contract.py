@@ -561,15 +561,20 @@ def _supervisor_lease_metadata_valid(
     jobs: str | Path, metadata: dict[str, str]
 ) -> bool:
     attempt_id = metadata.get("attempt_id", "")
+    delivery_by_harness = {
+        "claude": "session-resume-supervised",
+        "codex": "app-server-supervised",
+    }
+    harness = metadata.get("harness", "")
     if (
         metadata.get("attempt_schema_version") != "2"
         or metadata.get("dispatch_depth") != "1"
         or metadata.get("worker_type") != "owner"
-        or metadata.get("harness") != "codex"
+        or harness not in delivery_by_harness
         or metadata.get("transport") != "headless"
         or metadata.get("execution_surface") != "registered-headless"
         or metadata.get("registered_worker") != "1"
-        or metadata.get("completion_delivery") != "app-server-supervised"
+        or metadata.get("completion_delivery") != delivery_by_harness[harness]
         or metadata.get("supervisor_lease") != SUPERVISOR_LEASE_KIND
         or SUPERVISOR_LEASE_NONCE_RE.fullmatch(
             metadata.get("supervisor_lease_nonce", "")
@@ -723,9 +728,13 @@ def hold_supervisor_lease(
             ) from exc
         yield path
     finally:
+        preserve_recovery_file = sys.exc_info()[0] is not None
         try:
             current = path.lstat()
-            if (current.st_dev, current.st_ino) == (inode.st_dev, inode.st_ino):
+            if (
+                not preserve_recovery_file
+                and (current.st_dev, current.st_ino) == (inode.st_dev, inode.st_ino)
+            ):
                 path.unlink()
         except FileNotFoundError:
             pass
@@ -1372,6 +1381,40 @@ def observed_attempt_liveness(
         reason=reason,
         process_state=process.state,
         process_reason=process.reason,
+    )
+
+
+def observed_supervised_owner_liveness(
+    jobs: str | Path,
+    status: str,
+    metadata: dict[str, str],
+    *,
+    supervisor_phase: str = "",
+    terminal_envelope: bool = False,
+) -> ObservedAttemptLiveness:
+    """Classify an owner without confusing an inner turn exit for owner death.
+
+    ``parked`` and ``deliverable`` are runtime-owned phases.  They count as
+    alive only while the exact outer supervisor lease is both well-formed and
+    held; a stale file, foreign nonce, or PID-reused process remains
+    fail-closed.  All other cases retain the ordinary exact-attempt verdict.
+    """
+
+    if (
+        status in {"open", "running"}
+        and supervisor_phase in {"parked", "deliverable", "recovery"}
+        and supervisor_lease_is_held(jobs, metadata)
+    ):
+        return ObservedAttemptLiveness(
+            state="parked-supervised",
+            reason=f"supervisor-{supervisor_phase}",
+            process_state="live",
+            process_reason="supervisor-lease-held",
+        )
+    return observed_attempt_liveness(
+        status,
+        metadata,
+        terminal_envelope=terminal_envelope,
     )
 
 
@@ -2704,6 +2747,30 @@ def dispatch_state_root(jobs: str | Path) -> Path:
     """The one derivation: dispatch state lives beside its canonical registry."""
 
     return Path(jobs).expanduser().resolve(strict=False).parent
+
+
+def validate_dispatch_log_dir(
+    jobs: str | Path, log_dir: str | Path | None
+) -> Path:
+    """Resolve a launch log directory inside the registry-owned state root."""
+
+    state_root = dispatch_state_root(jobs)
+    candidate = (
+        state_root / "logs"
+        if log_dir is None
+        else Path(log_dir).expanduser().resolve(strict=False)
+    )
+    try:
+        candidate.relative_to(state_root)
+    except ValueError as exc:
+        raise DispatchContractError(
+            "log-dir-outside-dispatch-state-root", str(candidate)
+        ) from exc
+    if candidate == state_root or candidate.is_symlink() or candidate.parent.is_symlink():
+        raise DispatchContractError(
+            "log-dir-outside-dispatch-state-root", str(candidate)
+        )
+    return candidate
 
 
 def resolve_dispatch_state_root(

@@ -162,6 +162,54 @@ class DispatchContractTest(unittest.TestCase):
    finally:
     fcntl.flock(holder.fileno(),fcntl.LOCK_UN);holder.close()
 
+ def test_supervisor_lease_file_is_preserved_for_recovery_exception(self):
+  with tempfile.TemporaryDirectory() as td:
+   base=Path(td);jobs=base/"jobs.log";attempt="att-parent-recovery"
+   lease=D.supervisor_lease_path(jobs,attempt);nonce="d"*64
+   extra=(",harness=codex,runtime_sandbox=workspace-write,"
+          "completion_delivery=app-server-supervised,"
+          f"supervisor_lease={D.SUPERVISOR_LEASE_KIND},"
+          f"supervisor_lease_file={lease},supervisor_lease_nonce={nonce}")
+   jobs.write_text(self.owner_row(attempt,437,"20",extra=extra)+"\n")
+   manager=D.hold_supervisor_lease(jobs,attempt,lease)
+   manager.__enter__()
+   error=RuntimeError("recovery")
+   manager.__exit__(RuntimeError,error,error.__traceback__)
+   self.assertTrue(lease.is_file())
+   self.assertFalse(D.supervisor_lease_is_held(jobs,D.parse_registry_metadata(
+    jobs.read_text().split("\t",5)[5])))
+   self.assertTrue(D.remove_supervisor_lease(lease))
+
+ def test_claude_and_codex_share_parked_supervisor_liveness(self):
+  for harness,delivery in (
+   ("claude","session-resume-supervised"),
+   ("codex","app-server-supervised"),
+  ):
+   with self.subTest(harness=harness), tempfile.TemporaryDirectory() as td:
+    base=Path(td);jobs=base/"jobs.log";attempt=f"att-{harness}-parked"
+    lease=D.supervisor_lease_path(jobs,attempt);lease.parent.mkdir(parents=True)
+    nonce=("a" if harness=="claude" else "b")*64
+    extra=(f",harness={harness},runtime_sandbox=workspace-write,"
+           f"completion_delivery={delivery},"
+           f"supervisor_lease={D.SUPERVISOR_LEASE_KIND},"
+           f"supervisor_lease_file={lease},supervisor_lease_nonce={nonce}")
+    row=self.owner_row(attempt,99999991,"1",extra=extra)
+    jobs.write_text(row+"\n")
+    holder=lease.open("a+")
+    holder.write(f"kind={D.SUPERVISOR_LEASE_KIND}\nattempt_id={attempt}\nnonce={nonce}\n")
+    holder.flush();fcntl.flock(holder.fileno(),fcntl.LOCK_EX|fcntl.LOCK_NB)
+    try:
+     metadata=D.parse_registry_metadata(row.split("\t",5)[5])
+     observed=D.observed_supervised_owner_liveness(
+      jobs,"open",metadata,supervisor_phase="parked")
+     self.assertEqual(observed.state,"parked-supervised")
+     self.assertEqual(observed.reason,"supervisor-parked")
+    finally:
+     fcntl.flock(holder.fileno(),fcntl.LOCK_UN);holder.close()
+    stale=D.observed_supervised_owner_liveness(
+     jobs,"open",metadata,supervisor_phase="parked")
+    self.assertNotEqual(stale.state,"parked-supervised")
+
  def test_parent_repo_identity_canonicalizes_primary_and_linked_but_keeps_worktree_exact(self):
   with tempfile.TemporaryDirectory() as td:
    base=Path(td);primary=base/"primary";linked=base/"linked"

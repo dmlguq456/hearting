@@ -38,7 +38,9 @@ from codex_dispatch_terminal import (  # noqa: E402
 )
 OPEN_STATES = frozenset({"open", "running"})
 SCHEMA_VERSION = 2
-STATE_SCHEMA_VERSION = 1
+STATE_SCHEMA_VERSION = 2
+PARENT_SESSION_STATE_SCHEMA_VERSION = 1
+STATE_PHASES = frozenset({"parked", "deliverable", "running-turn", "recovery", "terminal"})
 MAX_STATE_BYTES = 16384
 MAX_BATCH_ATTEMPTS = 4
 SESSION_PARENT_DELIVERY = "codex-stop-hook"
@@ -77,6 +79,27 @@ class ChildRow:
 
 
 @dataclass(frozen=True)
+class SupervisorOutbox:
+    """One idempotent completion receipt committed before model delivery."""
+
+    receipt_id: str
+    receipt_digest: str
+    attempt_ids: frozenset[str]
+    row_revisions: tuple[tuple[str, str], ...]
+    receipt: dict[str, object] | None = None
+    consumed_attempt_ids: frozenset[str] = frozenset()
+
+
+@dataclass(frozen=True)
+class SupervisorState:
+    """Validated schema-v2 supervisor phase and optional durable outbox."""
+
+    phase: str
+    delivered_attempt_ids: frozenset[str]
+    outbox: SupervisorOutbox | None = None
+
+
+@dataclass(frozen=True)
 class ParentSessionState:
     attempt_ids: frozenset[str]
     delivered_attempt_ids: frozenset[str]
@@ -86,6 +109,9 @@ class ParentSessionState:
 class SupervisorShellAction:
     kind: str
     attempt_id: str = ""
+    status: str = ""
+    mark_done: bool = False
+    failure_detail: bool = False
 
 
 @dataclass(frozen=True)
@@ -143,26 +169,87 @@ def _safe_identity(value: str) -> bool:
     )
 
 
-def write_supervisor_state(
+@contextmanager
+def _supervisor_state_lock(path: Path):
+    try:
+        path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        lock_path = path.with_name(f"{path.name}.lock")
+        with lock_path.open("a+", encoding="utf-8") as handle:
+            os.chmod(lock_path, 0o600)
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            yield
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    except OSError as exc:
+        raise JoinContractError("supervisor-state-lock-unavailable") from exc
+
+
+def _write_supervisor_state_unlocked(
     path: Path | None,
     parent_attempt_id: str,
     delivered_attempt_ids: set[str],
+    *,
+    phase: str = "parked",
+    outbox: SupervisorOutbox | None = None,
 ) -> None:
-    """Atomically publish the bounded phase state consumed by native hooks."""
-
     if path is None:
         return
+    previous_phase = "absent"
+    try:
+        previous_value = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(previous_value, dict) and isinstance(
+            previous_value.get("phase"), str
+        ):
+            previous_phase = previous_value["phase"]
+    except (FileNotFoundError, OSError, ValueError):
+        pass
     if (
         not path.is_absolute()
         or not _safe_identity(parent_attempt_id)
+        or phase not in STATE_PHASES
         or any(not _safe_identity(attempt) for attempt in delivered_attempt_ids)
+        or (outbox is not None and phase not in {"deliverable", "recovery"})
     ):
         raise JoinContractError("supervisor-state-contract-invalid")
     value = {
         "schema_version": STATE_SCHEMA_VERSION,
         "parent_attempt_id": parent_attempt_id,
         "delivered_attempt_ids": sorted(delivered_attempt_ids),
+        "phase": phase,
     }
+    if outbox is not None:
+        if (
+            not _safe_identity(outbox.receipt_id)
+            or not re_fullmatch_digest(outbox.receipt_digest)
+            or not outbox.attempt_ids
+            or len(outbox.attempt_ids) > MAX_BATCH_ATTEMPTS
+            or not outbox.attempt_ids.issubset(delivered_attempt_ids)
+            or any(not _safe_identity(attempt) for attempt in outbox.attempt_ids)
+            or {attempt for attempt, _revision in outbox.row_revisions}
+            != set(outbox.attempt_ids)
+            or any(
+                not _safe_identity(attempt) or not re_fullmatch_digest(revision)
+                for attempt, revision in outbox.row_revisions
+            )
+            or outbox.receipt is None
+            or not outbox.consumed_attempt_ids.issubset(outbox.attempt_ids)
+        ):
+            raise JoinContractError("supervisor-outbox-contract-invalid")
+        try:
+            receipt_bytes = json.dumps(
+                outbox.receipt, separators=(",", ":"), sort_keys=True
+            ).encode("utf-8")
+        except (TypeError, ValueError) as exc:
+            raise JoinContractError("supervisor-outbox-receipt-invalid") from exc
+        if hashlib.sha256(receipt_bytes).hexdigest() != outbox.receipt_digest:
+            raise JoinContractError("supervisor-outbox-receipt-digest-mismatch")
+        value["outbox"] = {
+            "receipt_id": outbox.receipt_id,
+            "receipt_digest": outbox.receipt_digest,
+            "attempt_ids": sorted(outbox.attempt_ids),
+            "row_revisions": dict(outbox.row_revisions),
+            "receipt": outbox.receipt,
+            "consumed_attempt_ids": sorted(outbox.consumed_attempt_ids),
+        }
     encoded = json.dumps(value, separators=(",", ":"), sort_keys=True).encode("utf-8")
     if len(encoded) > MAX_STATE_BYTES:
         raise JoinContractError("supervisor-state-oversized")
@@ -178,6 +265,13 @@ def write_supervisor_state(
             os.fsync(handle.fileno())
         temporary.chmod(0o600)
         os.replace(temporary, path)
+        _append_supervisor_transition(
+            path,
+            parent_attempt_id,
+            previous_phase,
+            phase,
+            outbox,
+        )
     except OSError as exc:
         if temporary is not None:
             try:
@@ -187,11 +281,82 @@ def write_supervisor_state(
         raise JoinContractError("supervisor-state-unwritable") from exc
 
 
-def read_supervisor_state(
+def _append_supervisor_transition(
+    path: Path,
+    parent_attempt_id: str,
+    previous_phase: str,
+    phase: str,
+    outbox: SupervisorOutbox | None,
+) -> None:
+    """Append the exact outer process and phase edge for later diagnosis."""
+
+    try:
+        stat_fields = (Path("/proc") / str(os.getpid()) / "stat").read_text(
+            encoding="utf-8"
+        )
+        process_start = stat_fields[stat_fields.rfind(")") + 2 :].split()[19]
+        event = {
+            "schema_version": 1,
+            "parent_attempt_id": parent_attempt_id,
+            "previous_phase": previous_phase,
+            "phase": phase,
+            "outer_pid": os.getpid(),
+            "outer_pid_start": process_start,
+            "receipt_id": outbox.receipt_id if outbox is not None else "",
+            "consumed_attempt_ids": (
+                sorted(outbox.consumed_attempt_ids) if outbox is not None else []
+            ),
+        }
+        encoded = json.dumps(
+            event, separators=(",", ":"), sort_keys=True
+        ).encode("utf-8") + b"\n"
+        audit = path.with_name(f"{path.name}.transitions.jsonl")
+        flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, "O_CLOEXEC", 0)
+        fd = os.open(audit, flags, 0o600)
+        try:
+            os.fchmod(fd, 0o600)
+            if os.write(fd, encoded) != len(encoded):
+                raise OSError("short supervisor transition write")
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+    except (IndexError, OSError) as exc:
+        raise JoinContractError("supervisor-transition-audit-unwritable") from exc
+
+
+def write_supervisor_state(
     path: Path | None,
     parent_attempt_id: str,
-) -> set[str] | None:
-    """Return delivered attempts, or None for missing/invalid state."""
+    delivered_attempt_ids: set[str],
+    *,
+    phase: str = "parked",
+    outbox: SupervisorOutbox | None = None,
+) -> None:
+    """Atomically publish the bounded phase state consumed by native hooks."""
+
+    if path is None:
+        return
+    with _supervisor_state_lock(path):
+        _write_supervisor_state_unlocked(
+            path,
+            parent_attempt_id,
+            delivered_attempt_ids,
+            phase=phase,
+            outbox=outbox,
+        )
+
+
+def re_fullmatch_digest(value: object) -> bool:
+    return isinstance(value, str) and len(value) == 64 and all(
+        char in "0123456789abcdef" for char in value
+    )
+
+
+def read_supervisor_phase_state(
+    path: Path | None,
+    parent_attempt_id: str,
+) -> SupervisorState | None:
+    """Return a fully validated phase/outbox snapshot, or ``None``."""
 
     if path is None or not path.is_absolute() or not _safe_identity(parent_attempt_id):
         return None
@@ -205,6 +370,7 @@ def read_supervisor_state(
         not isinstance(value, dict)
         or value.get("schema_version") != STATE_SCHEMA_VERSION
         or value.get("parent_attempt_id") != parent_attempt_id
+        or value.get("phase") not in STATE_PHASES
     ):
         return None
     raw = value.get("delivered_attempt_ids")
@@ -215,7 +381,343 @@ def read_supervisor_state(
         if not isinstance(attempt, str) or not _safe_identity(attempt) or attempt in delivered:
             return None
         delivered.add(attempt)
-    return delivered
+    outbox_value = value.get("outbox")
+    outbox: SupervisorOutbox | None = None
+    if outbox_value is not None:
+        if not isinstance(outbox_value, dict) or value.get("phase") not in {
+            "deliverable",
+            "recovery",
+        }:
+            return None
+        receipt_id = outbox_value.get("receipt_id")
+        receipt_digest = outbox_value.get("receipt_digest")
+        raw_attempts = outbox_value.get("attempt_ids")
+        raw_revisions = outbox_value.get("row_revisions")
+        receipt = outbox_value.get("receipt")
+        raw_consumed = outbox_value.get("consumed_attempt_ids", [])
+        if (
+            not isinstance(receipt_id, str)
+            or not _safe_identity(receipt_id)
+            or not re_fullmatch_digest(receipt_digest)
+            or not isinstance(raw_attempts, list)
+            or not raw_attempts
+            or len(raw_attempts) > MAX_BATCH_ATTEMPTS
+            or not isinstance(raw_revisions, dict)
+            or not isinstance(receipt, dict)
+            or not isinstance(raw_consumed, list)
+        ):
+            return None
+        attempts: set[str] = set()
+        revisions: list[tuple[str, str]] = []
+        for attempt in raw_attempts:
+            revision = raw_revisions.get(attempt)
+            if (
+                not isinstance(attempt, str)
+                or not _safe_identity(attempt)
+                or attempt in attempts
+                or not re_fullmatch_digest(revision)
+            ):
+                return None
+            attempts.add(attempt)
+            revisions.append((attempt, str(revision)))
+        if set(raw_revisions) != attempts or not attempts.issubset(delivered):
+            return None
+        consumed: set[str] = set()
+        for attempt in raw_consumed:
+            if (
+                not isinstance(attempt, str)
+                or attempt not in attempts
+                or attempt in consumed
+            ):
+                return None
+            consumed.add(attempt)
+        try:
+            receipt_bytes = json.dumps(
+                receipt, separators=(",", ":"), sort_keys=True
+            ).encode("utf-8")
+        except (TypeError, ValueError):
+            return None
+        if hashlib.sha256(receipt_bytes).hexdigest() != receipt_digest:
+            return None
+        outbox = SupervisorOutbox(
+            receipt_id,
+            str(receipt_digest),
+            frozenset(attempts),
+            tuple(sorted(revisions)),
+            receipt,
+            frozenset(consumed),
+        )
+    return SupervisorState(
+        str(value["phase"]), frozenset(delivered), outbox
+    )
+
+
+def read_supervisor_state(
+    path: Path | None,
+    parent_attempt_id: str,
+) -> set[str] | None:
+    """Compatibility view returning only the delivered attempt set."""
+
+    state = read_supervisor_phase_state(path, parent_attempt_id)
+    return set(state.delivered_attempt_ids) if state is not None else None
+
+
+def child_row_revision(row: ChildRow) -> str:
+    """Return the bounded exact-row revision sealed into an outbox receipt."""
+
+    return hashlib.sha256(row.raw.encode("utf-8")).hexdigest()
+
+
+def receipt_with_current_actions(
+    receipt: dict[str, object], rows: list[ChildRow]
+) -> dict[str, object]:
+    """Refresh copied status/action fields from the current exact rows."""
+
+    raw_children = receipt.get("children")
+    if not isinstance(raw_children, list) or not raw_children:
+        raise JoinContractError("supervisor-outbox-children-invalid")
+    indexed = {row.attempt_id: row for row in rows}
+    refreshed_children: list[dict[str, object]] = []
+    seen: set[str] = set()
+    for raw_child in raw_children:
+        if not isinstance(raw_child, dict):
+            raise JoinContractError("supervisor-outbox-children-invalid")
+        attempt = raw_child.get("attempt_id")
+        if (
+            not isinstance(attempt, str)
+            or attempt in seen
+            or attempt not in indexed
+        ):
+            raise JoinContractError("supervisor-outbox-attempt-set-mismatch")
+        seen.add(attempt)
+        row = indexed[attempt]
+        child = dict(raw_child)
+        previous = (child.get("status"), child.get("required_action"))
+        child["status"] = row.status
+        child["required_action"] = required_action_for_attempt(
+            row.status, row.metadata
+        )
+        if previous != (child["status"], child["required_action"]):
+            child["reason"] = "row-advanced"
+        refreshed_children.append(child)
+    if seen != set(indexed):
+        raise JoinContractError("supervisor-outbox-attempt-set-mismatch")
+    refreshed = dict(receipt)
+    refreshed["children"] = refreshed_children
+    return refreshed
+
+
+def prepare_supervisor_outbox(
+    path: Path | None,
+    parent_attempt_id: str,
+    delivered_attempt_ids: set[str],
+    receipt: dict[str, object],
+    rows: list[ChildRow],
+) -> SupervisorState:
+    """Commit one deterministic actionable receipt before model delivery."""
+
+    if receipt.get("state") in {"timeout", "no-children", "contract-error"}:
+        raise JoinContractError("supervisor-outbox-receipt-not-actionable")
+    raw_children = receipt.get("children")
+    if not isinstance(raw_children, list) or not raw_children:
+        raise JoinContractError("supervisor-outbox-children-invalid")
+    attempts = {
+        str(child.get("attempt_id"))
+        for child in raw_children
+        if isinstance(child, dict) and isinstance(child.get("attempt_id"), str)
+    }
+    indexed = {row.attempt_id: row for row in rows}
+    if (
+        len(attempts) != len(raw_children)
+        or not attempts
+        or len(attempts) > MAX_BATCH_ATTEMPTS
+        or set(indexed) != attempts
+    ):
+        raise JoinContractError("supervisor-outbox-attempt-set-mismatch")
+    canonical_receipt = json.dumps(
+        receipt, separators=(",", ":"), sort_keys=True
+    ).encode("utf-8")
+    receipt_digest = hashlib.sha256(canonical_receipt).hexdigest()
+    revisions = tuple(
+        sorted((attempt, child_row_revision(indexed[attempt])) for attempt in attempts)
+    )
+    identity_material = json.dumps(
+        {
+            "parent_attempt_id": parent_attempt_id,
+            "receipt_digest": receipt_digest,
+            "row_revisions": dict(revisions),
+        },
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    outbox = SupervisorOutbox(
+        "receipt-" + hashlib.sha256(identity_material).hexdigest()[:32],
+        receipt_digest,
+        frozenset(attempts),
+        revisions,
+        dict(receipt),
+    )
+    delivered = set(delivered_attempt_ids).union(attempts)
+    write_supervisor_state(
+        path,
+        parent_attempt_id,
+        delivered,
+        phase="deliverable",
+        outbox=outbox,
+    )
+    return SupervisorState("deliverable", frozenset(delivered), outbox)
+
+
+def refresh_supervisor_outbox_actions(
+    path: Path | None,
+    parent_attempt_id: str,
+    rows: list[ChildRow],
+) -> SupervisorState:
+    """Recommit one pending outbox against the exact current row generations.
+
+    The receipt identity names one delivery transaction and therefore remains
+    stable across a row advance.  Its digest, copied status/action fields, and
+    row revisions must advance together before the next model delivery.
+    """
+
+    if path is None:
+        raise JoinContractError("supervisor-state-path-missing")
+    with _supervisor_state_lock(path):
+        state = read_supervisor_phase_state(path, parent_attempt_id)
+        if state is None or state.outbox is None:
+            raise JoinContractError("supervisor-outbox-missing")
+        outbox = state.outbox
+        indexed = {row.attempt_id: row for row in rows}
+        if set(indexed) != set(outbox.attempt_ids):
+            raise JoinContractError("supervisor-outbox-attempt-set-mismatch")
+        refreshed_receipt = receipt_with_current_actions(
+            outbox.receipt or {}, rows
+        )
+        encoded = json.dumps(
+            refreshed_receipt, separators=(",", ":"), sort_keys=True
+        ).encode("utf-8")
+        refreshed_outbox = SupervisorOutbox(
+            outbox.receipt_id,
+            hashlib.sha256(encoded).hexdigest(),
+            outbox.attempt_ids,
+            tuple(
+                sorted(
+                    (attempt, child_row_revision(indexed[attempt]))
+                    for attempt in outbox.attempt_ids
+                )
+            ),
+            refreshed_receipt,
+            outbox.consumed_attempt_ids,
+        )
+        _write_supervisor_state_unlocked(
+            path,
+            parent_attempt_id,
+            set(state.delivered_attempt_ids),
+            phase="deliverable",
+            outbox=refreshed_outbox,
+        )
+        return SupervisorState(
+            "deliverable", state.delivered_attempt_ids, refreshed_outbox
+        )
+
+
+def supervisor_outbox_row_state(
+    state: SupervisorState,
+    rows: list[ChildRow],
+) -> str:
+    """Compare an outbox to current exact rows without trusting stale status."""
+
+    if state.outbox is None:
+        return "absent"
+    indexed = {row.attempt_id: row for row in rows}
+    pending = state.outbox.attempt_ids.difference(
+        state.outbox.consumed_attempt_ids
+    )
+    if not pending:
+        return "consumed"
+    if not pending.issubset(indexed):
+        return "row-missing"
+    current = {
+        attempt: child_row_revision(indexed[attempt])
+        for attempt in pending
+    }
+    expected = {
+        attempt: revision
+        for attempt, revision in state.outbox.row_revisions
+        if attempt in pending
+    }
+    return "current" if current == expected else "row-advanced"
+
+
+def consume_supervisor_outbox_attempts(
+    path: Path | None,
+    parent_attempt_id: str,
+    attempt_ids: set[str],
+) -> bool:
+    """Exactly once consume successful current-row actions from one outbox."""
+
+    if path is None or not attempt_ids:
+        return False
+    with _supervisor_state_lock(path):
+        state = read_supervisor_phase_state(path, parent_attempt_id)
+        if state is None or state.outbox is None:
+            return False
+        outbox = state.outbox
+        pending = outbox.attempt_ids.difference(outbox.consumed_attempt_ids)
+        if not attempt_ids.issubset(pending):
+            return False
+        consumed = outbox.consumed_attempt_ids.union(attempt_ids)
+        remaining = outbox.attempt_ids.difference(consumed)
+        next_outbox = None
+        phase = "running-turn"
+        if remaining:
+            next_outbox = SupervisorOutbox(
+                outbox.receipt_id,
+                outbox.receipt_digest,
+                outbox.attempt_ids,
+                outbox.row_revisions,
+                outbox.receipt,
+                frozenset(consumed),
+            )
+            phase = state.phase
+        _write_supervisor_state_unlocked(
+            path,
+            parent_attempt_id,
+            set(state.delivered_attempt_ids),
+            phase=phase,
+            outbox=next_outbox,
+        )
+        return True
+
+
+def consume_advance_completed_outbox(
+    path: Path | None,
+    parent_attempt_id: str,
+    rows: list[ChildRow],
+) -> set[str]:
+    """Consume no-command advance actions after current-row revalidation."""
+
+    state = read_supervisor_phase_state(path, parent_attempt_id)
+    if state is None or state.outbox is None:
+        return set()
+    pending = state.outbox.attempt_ids.difference(
+        state.outbox.consumed_attempt_ids
+    )
+    indexed = {row.attempt_id: row for row in rows}
+    completed = {
+        attempt
+        for attempt in pending
+        if attempt in indexed
+        and required_action_for_attempt(
+            indexed[attempt].status, indexed[attempt].metadata
+        )
+        == "advance-completed"
+    }
+    if completed and consume_supervisor_outbox_attempts(
+        path, parent_attempt_id, completed
+    ):
+        return completed
+    return set()
 
 
 def remove_supervisor_state(path: Path | None) -> None:
@@ -272,7 +774,7 @@ def _write_parent_session_state_unlocked(
     ):
         raise JoinContractError("parent-session-state-contract-invalid")
     value = {
-        "schema_version": STATE_SCHEMA_VERSION,
+        "schema_version": PARENT_SESSION_STATE_SCHEMA_VERSION,
         "parent_session_id_sha256": hashlib.sha256(
             parent_session_id.encode("utf-8")
         ).hexdigest(),
@@ -344,7 +846,7 @@ def _read_parent_session_state_unlocked(
     expected_digest = hashlib.sha256(parent_session_id.encode("utf-8")).hexdigest()
     if (
         not isinstance(value, dict)
-        or value.get("schema_version") != STATE_SCHEMA_VERSION
+        or value.get("schema_version") != PARENT_SESSION_STATE_SCHEMA_VERSION
         or value.get("parent_session_id_sha256") != expected_digest
     ):
         return None
@@ -895,12 +1397,16 @@ def classify_supervised_shell_command(
         if any(len(values) != 1 for values in options.values()):
             return None
         attempt = options["--attempt-id"][0]
-        if (
-            attempt not in open_attempt_ids
-            or options.get("--status", ["open"])[0] not in {"open", "all"}
-        ):
+        status = options.get("--status", ["open"])[0]
+        if attempt not in open_attempt_ids or status not in {"open", "done", "all"}:
             return None
-        return SupervisorShellAction("harvest", attempt)
+        return SupervisorShellAction(
+            "harvest",
+            attempt,
+            status,
+            "--mark-done" in options,
+            "--failure-detail" in options,
+        )
 
     strict_binding = _strict_supervisor_binding_requested(
         jobs=jobs,
@@ -1096,6 +1602,31 @@ def current_children(
         if missing:
             raise JoinContractError("expected-attempt-missing")
     return sorted(latest.values(), key=lambda row: row.order)
+
+
+def current_attempt_row(jobs: Path, attempt_id: str) -> ChildRow | None:
+    """Return the latest exact registry row for one attempt identity."""
+
+    if not _safe_identity(attempt_id):
+        raise JoinContractError("attempt-id-invalid")
+    try:
+        lines = jobs.read_text(encoding="utf-8", errors="replace").splitlines()
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise JoinContractError("registry-unreadable") from exc
+    found: ChildRow | None = None
+    for order, line in enumerate(lines):
+        fields = line.split("\t")
+        if len(fields) != 6:
+            continue
+        metadata = _metadata(fields[5])
+        if metadata.get("attempt_id") != attempt_id:
+            continue
+        if metadata.get("attempt_schema_version") != "2":
+            raise JoinContractError("attempt-row-schema-invalid")
+        found = ChildRow(order, fields[1], fields[4], attempt_id, line, metadata)
+    return found
 
 
 def current_session_children(
@@ -1547,9 +2078,19 @@ def close_finished_child(row: ChildRow, *, jobs: str | Path) -> str:
         detail = terminal.get("reason")
         reason = f"{skip}:{detail}" if detail else skip
         if (
-            str(terminal.get("state")) == "invalid"
-            and str(detail or "").startswith("artifact-")
-            and _close_invalid_envelope_child(row, jobs=jobs, reason=reason)
+            str(terminal.get("state")) == "absent"
+            and _close_invalid_envelope_child(
+                row,
+                jobs=jobs,
+                reason="terminal-envelope-absent",
+                note="dead-missing-result",
+                classifier_source="completion-join-missing-result-v1",
+                terminal_envelope=False,
+            )
+        ):
+            return ""
+        if str(terminal.get("state")) == "invalid" and _close_invalid_envelope_child(
+            row, jobs=jobs, reason=reason
         ):
             return ""
         return reason
@@ -1616,6 +2157,7 @@ def _close_invalid_envelope_child(
     reason: str,
     note: str = "dead-invalid-envelope",
     classifier_source: str = "completion-join-invalid-envelope-v1",
+    terminal_envelope: bool = True,
 ) -> bool:
     """Close a quiescent child whose terminal envelope can never legally complete.
 
@@ -1629,7 +2171,7 @@ def _close_invalid_envelope_child(
     """
 
     observed = observed_attempt_liveness(
-        row.status, row.metadata, terminal_envelope=True
+        row.status, row.metadata, terminal_envelope=terminal_envelope
     )
     if observed.state != "reconcile-needed" or observed.process_state != "quiescent":
         return False
