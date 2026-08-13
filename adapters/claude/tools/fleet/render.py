@@ -515,6 +515,10 @@ def _model_key(model, dim=False):
 # say WHICH opus the harness resolved).
 _ROLE_MODEL_NAME = {"opus": "Opus", "sonnet": "Sonnet", "haiku": "Haiku", "fable": "Fable"}
 
+# Bare dispatch roles are resolved by the current runtimes but preserved raw by collectors.
+# Centralize their human-facing names here; unknown values remain byte-for-byte unchanged.
+_DISPATCH_MODEL_NAMES = {"opus": "Opus 5", "sonnet": "Sonnet 5", "haiku": "Haiku 4.5"}
+
 
 def _clean_model(name):
     """'Opus 4.8 (1M context)' → 'Opus 4.8' (drop the trailing parenthetical — redundant, ugly
@@ -559,6 +563,12 @@ def _short_model_id(name):
         return name
     fam, major, minor = m.group(1).capitalize(), m.group(2), m.group(3)
     return "%s %s" % (fam, major + ("." + minor if minor else ""))
+
+
+def _dispatch_display_model(name):
+    if not name:
+        return name
+    return _DISPATCH_MODEL_NAMES.get(str(name).strip().lower(), _short_model_id(name))
 
 
 # mid-height bar (━ filled / ─ empty): the glyphs sit at the cell's vertical centre, so gauges on
@@ -1276,6 +1286,11 @@ def _collapse_parallel_nodes(nodes):
         elapsed = [m.get("elapsed_min") for m in members
                    if m.get("elapsed_min") is not None]
         merged = dict(members[0])
+        # ``gate_passed`` is the single completion carrier for registered,
+        # native, and inline attempts alike.  It is resolved from the exact
+        # schema-2 completion marker before this pure projection step; a note or
+        # generic ``done`` state must never manufacture a gate pass.
+        member_gates = [bool(m.get("gate_passed")) for m in members]
         merged.update({
             "id": "%s(%d-way)" % (gid, len(members)), "state": state,
             "depends_on": deps,
@@ -1284,7 +1299,7 @@ def _collapse_parallel_nodes(nodes):
             # unit/model represents the group.
             "unit": None, "unit_choices": [], "model": None, "effort": None,
             "elapsed_min": max(elapsed) if elapsed else None,
-            "gate_passed": True if all(m.get("gate_passed") for m in members) else None,
+            "gate_passed": True if all(member_gates) else None,
         })
         merged_by_group[gid] = merged
         for m in members:
@@ -1569,7 +1584,7 @@ def _dispatch_prefix(j, orphan=False):
     depth = max(1, min(3, int(getattr(j, "depth", 1) or 1)))
     if depth == 1:
         return "··  " if orphan else "    "
-    marker = "··" if orphan else "↳ "
+    marker = "··" if orphan else "  "
     return "    " + "  " * (depth - 1) + marker
 
 
@@ -1588,16 +1603,12 @@ def _dispatch_prefix(j, orphan=False):
 # is the top-short `╻` and its last the bottom-short `╹`, so the capsule has open ends and
 # never fuses with the rows above/below the unit. A one-row run uses the standalone short
 # bar `❙` (both ends open; box-drawing has no middle-only heavy segment).
-_RAIL_TOP = "╻"
-_RAIL_MID = "┃"
-_RAIL_BOT = "╹"
+_RAIL_TOP = "╭─"
+_RAIL_MID = "│ "
+_RAIL_BOT = "╰───"
 _RAIL_SOLO = "❙"
-_RAIL_CHARS = (_RAIL_TOP, _RAIL_MID, _RAIL_BOT, _RAIL_SOLO)
-_RAIL_COL = 4      # two steps in from the card edge (user 2026-08-05 "세로선은 좀 더
-                   # 들여쓰게" → "아주 조금만 더") — the dispatch-depth-1 seat moved to a 4-cell
-                   # inset with it, so one cell of air stays between the rail and the
-                   # owner's glyph and the capsule still brackets the WHOLE unit, owner
-                   # row included
+_RAIL_CHARS = (_RAIL_TOP, _RAIL_MID, _RAIL_MID.strip(), _RAIL_BOT, _RAIL_SOLO)
+_RAIL_COL = 2      # capsule begins at the dispatch unit's own inset in every layout
 
 
 def _depth1_rail_color_index(key, stage, route_seq):
@@ -1634,6 +1645,29 @@ def _overwrite_rail_cell(segs, col, char, key):
         pos += width
         replaced = True
     return out if replaced else segs
+
+
+def _overwrite_rail_text(segs, col, mark, key):
+    """Paint a multi-cell capsule edge over whitespace at ``col``."""
+    out, pos = [], 0
+    mark_width = _dw(mark)
+    for seg_i, (text, old_key) in enumerate(segs):
+        width = _dw(text) if text else 0
+        if pos <= col and col + mark_width <= pos + width:
+            left = col - pos
+            right = left + mark_width
+            if text[left:right].strip():
+                return segs
+            if text[:left]:
+                out.append((text[:left], old_key))
+            out.append((mark, key))
+            if text[right:]:
+                out.append((text[right:], old_key))
+            out.extend(segs[seg_i + 1:])
+            return out
+        out.append((text, old_key))
+        pos += width
+    return segs
 
 
 _ORPHAN_DIVIDER_LABEL = "  ⌄ orphaned dispatch rows"
@@ -1968,7 +2002,8 @@ def _dispatch_row(j, orphan=False, parent_model=None, parent_harness=None, is_la
     prefix = _dispatch_prefix(j, orphan=orphan)
     segs = [("  ", None), (prefix, "dim"), (gch, gkey), (" ", None)]
     segs += _harness_model_cell(j.harness,
-                                None if j.liveness == "dead" else (j.model or parent_model),
+                                None if j.liveness == "dead" else
+                                _dispatch_display_model(j.model or parent_model),
                                 eff, max(1, _HMW - len(prefix)),
                                 _BADGE_KEY.get(j.harness, "dim"), dim=True, unknown="—")
     avail = max(3, name_width or _NW_S)
@@ -2216,13 +2251,13 @@ def _dispatch_row_2line(j, orphan=False, parent_model=None, parent_effort=None, 
         # elapsed cell, so no depth needs it repeated (F-64a).
         eff = j.effort or parent_effort or None
         l2 = [("    ", None), (_pad(fmt_min(j.elapsed_min), _HW), "dim")]
-        l2 += _model_cell(j.model or parent_model, eff, _MW, dim=True)
+        l2 += _model_cell(_dispatch_display_model(j.model or parent_model), eff, _MW, dim=True)
         l2.append(("    ", None))
         l2 += _stage_zone_segs([("done %s" % _LIVE_GLYPH["done"], "dim")])
     else:
         eff = j.effort or parent_effort or None
         l2 = [("    ", None), (_pad(fmt_min(j.elapsed_min), _HW), "dim")]
-        l2 += _model_cell(j.model or parent_model, eff, _MW, dim=True)
+        l2 += _model_cell(_dispatch_display_model(j.model or parent_model), eff, _MW, dim=True)
         l2.append(("    ", None))
         opt_segs, optw = _opts_segs(j)
         l2 += opt_segs
@@ -2237,18 +2272,35 @@ def _dispatch_row_2line(j, orphan=False, parent_model=None, parent_effort=None, 
 
 
 # ---------- grouping assembler ----------
+_SYSTEM_GROUP = "⚙ system"
+
+
 def _group_key_session(s):
     return project_of(s.cwd)
 
 
 def _mem_row(s, layout="wide"):
-    """Render a dim one-line memory worker, hidden unless ``a`` is toggled."""
+    """Render one automation worker inside the dedicated system group."""
     name = _clip_w(s.title or s.slug or (s.harness or "?"), 40)
     seg = [("  🧠 ", "dim"), ("mem ", "dim"),
            (name, "dim"), ("  ", None),
            ((s.harness or "—"), "dim"), ("  ", None),
            (fmt_min(s.elapsed_min), "dim")]
     return [seg]
+
+
+def _periodic_curate_row(memory):
+    try:
+        item = (memory or {}).get("periodic_curate")
+        if not isinstance(item, dict) or not item.get("total"):
+            return None
+        slug = project_of(item.get("current_cwd"))
+        elapsed = _fmt_exec_age(item.get("elapsed_s", 0))
+        return [("  ⚙ ", "g_work"),
+                ("야간 큐레이터 %d/%d %s %s" %
+                 (int(item.get("done", 0)) + 1, int(item["total"]), slug, elapsed), "g_work")]
+    except (KeyError, TypeError, ValueError):
+        return None
 
 
 _GOVERNOR_QUIET_FRACTION = 0.5   # F-28c "healthy 무음" (prd.md:288/311, plan §6a) — hide the row
@@ -2891,6 +2943,10 @@ def _exec_detail_segs(entity):
         glyph = _EXEC_GLYPH
         if exec_child_is_wait(child):            # v47: waiting, never bright
             glyph, key = _WAIT_GLYPH, "dim"
+        else:
+            # A real non-helper descendant is experiment activity even if its interactive
+            # parent is sleeping. Promote only this status detail, never the title.
+            key = "g_work"
         text = "%s %s" % (glyph, child["comm"])
         if isinstance(etime, (int, float)) and not isinstance(etime, bool):
             text += " %s" % _fmt_exec_age(etime)
@@ -3417,7 +3473,7 @@ def _route_job_row(job, max_width=None):
     the one field with no fixed budget elsewhere, so it yields first — same "the variable-width
     field clips, the fixed-shape fields never do" idiom as `_compact_dispatch_name`."""
     hn = _BADGE_TEXT.get(job.harness, "—") if job.harness else "—"
-    model_txt = _clean_model(dash(job.model)) or "—"
+    model_txt = _clean_model(dash(_dispatch_display_model(job.model))) or "—"
     eff = ("(%s)" % job.effort) if job.effort else ""
     tail = "⏳%s" % fmt_min(job.elapsed_min) if job.elapsed_min is not None else ""
     prefix = "     └▸🚀 "
@@ -4072,11 +4128,7 @@ def _build_lines(sessions, jobs, section, narrow, malformed, layout="wide", memo
     wide_route_zone = (_route_zone_width(term_width, wide_name_width)
                        if layout == "wide" else None)
     n_mem_total = sum(1 for s in sessions if getattr(s, "mem_worker", False))
-    mem_by_group = {}
-    for s in sessions:
-        if getattr(s, "mem_worker", False):
-            gk_mem = _group_key_session(s)
-            mem_by_group[gk_mem] = mem_by_group.get(gk_mem, 0) + 1
+    mem_by_group = {_SYSTEM_GROUP: n_mem_total} if n_mem_total else {}
     # F-19 repo rows: session-id -> display title, resolved on the ORIGINAL (unfiltered) list
     # so a mem event's source session still resolves even after mem-worker/child filtering
     # below drops it from the visible rows.
@@ -4090,15 +4142,14 @@ def _build_lines(sessions, jobs, section, narrow, malformed, layout="wide", memo
                          if getattr(s, "is_child", False) and getattr(s, "subagents", None)}
     # headless dispatch children are shown as dispatch rows under their parent — never as
     # top-level sessions (the same headless process would otherwise double-show as session+job).
-    # mem-worker sessions are excluded from grouping/census by default (F-18b) — they inherit
-    # parent cwd/env and would otherwise misattribute into drill/project groups; `a` toggle
-    # (_SHOW_ALL) restores them as a dedicated dim row (see _mem_row below).
-    sessions = [s for s in sessions
-                if not s.is_child and not (getattr(s, "mem_worker", False) and not _SHOW_ALL)]
+    # Automation workers inherit a parent's cwd, so never attribute them to a project card.
+    # They remain visible by default in one dedicated system card; --all does not duplicate
+    # or relocate them.
+    sessions = [s for s in sessions if not s.is_child]
     groups = {}
     session_groups = {}
     for s in sessions:
-        gk = _group_key_session(s)
+        gk = _SYSTEM_GROUP if getattr(s, "mem_worker", False) else _group_key_session(s)
         groups.setdefault(gk, {"sessions": [], "jobs": []})["sessions"].append(s)
         if s.session_id:
             session_groups[s.session_id] = gk
@@ -4126,7 +4177,8 @@ def _build_lines(sessions, jobs, section, narrow, malformed, layout="wide", memo
     show_sessions = section in ("fleet", "both")
     show_jobs = section in ("dispatch", "both")
 
-    order = sorted(groups.keys(), key=lambda name: _group_sort_key(name, groups[name]))
+    order = sorted(groups.keys(), key=lambda name: (
+        0 if name == _SYSTEM_GROUP else 1, _group_sort_key(name, groups[name])))
 
     # Anchor only project cards that will actually be visible.  This mirrors the
     # existing section/dead-job/fold decisions below, so hidden cards are pruned.
@@ -4327,7 +4379,7 @@ def _build_lines(sessions, jobs, section, narrow, malformed, layout="wide", memo
             else:
                 orphans.append(j)
 
-        gcwd = "" if name == "loops" else (group_sessions[0].cwd if group_sessions else
+        gcwd = "" if name in ("loops", _SYSTEM_GROUP) else (group_sessions[0].cwd if group_sessions else
                 (group_jobs[0].cwd if group_jobs else ""))
         # The section title has no indicator glyph; the title itself carries active state.
         # while the group works, plain bold otherwise. Doubles with the active card tint.
@@ -4359,7 +4411,9 @@ def _build_lines(sessions, jobs, section, narrow, malformed, layout="wide", memo
             head_segs += [(_COOL_RING, "grp_cold"), (" ", None)]
         # Cooling names share the dim-yellow indicator color; cold keeps the default title color.
         _name_key = "grp_hot" if n_work else ("grp_cool" if _cool_min is not None else "grp")
-        head_segs += [(name, _name_key), ("/", "dim")]
+        head_segs += [(name, _name_key)]
+        if name != _SYSTEM_GROUP:
+            head_segs.append(("/", "dim"))
         _nwt = max((getattr(entity, "worktree_count", 0)
                     for entity in group_sessions + group_jobs), default=0)
         if _nwt:
@@ -4377,6 +4431,10 @@ def _build_lines(sessions, jobs, section, narrow, malformed, layout="wide", memo
         # tinted row of the panel, ▍ anchor on the card's padding edge; no floating label.
         _g0 = len(lines)                # panel start (title INCLUDED in the tint range)
         lines.append(head_segs)
+        if name == _SYSTEM_GROUP:
+            curate_row = _periodic_curate_row(memory)
+            if curate_row is not None:
+                lines.append(curate_row)
         _rail_key = "grp_live" if n_work else "dim"
         if n_work:
             _body_tint = _TINT_BODY_HOT       # Active: midnight-blue tint.
@@ -4453,14 +4511,10 @@ def _build_lines(sessions, jobs, section, narrow, malformed, layout="wide", memo
                 _emit_dispatch_tree(sub, parent_model=job.model or parent_model,
                                     parent_harness=job.harness or parent_harness,
                                     parent_effort=parent_effort, orphan=False)
-            # F-64c: bracket the WHOLE dispatch-depth-1 unit — owner row included (user 2026-08-05
-            # "다시 앞으로 당겨서 depth=1까지 묶어주고") — with the capsule rail in the
-            # left margin: ╻ on the owner row, ┃ through the middle, ╹ on the last row.
-            # A childless one-row unit has nothing to bind and stays unpainted. Working
-            # owners blink in their stage hue (brightness only); finished/stale sit dim.
-            if (_jrow is None and not orphan
-                    and max(1, int(getattr(job, "depth", 1) or 1)) == 1
-                    and len(lines) - block_start >= 2):
+            # F-63: a depth-1 owner and all descendants form one nested capsule card.
+            # The owner opens with ╭─, every body row shares a │ rail, and a dedicated
+            # ╰─── line closes the unit. Depth remains positional; no d1/d2 labels.
+            if (not orphan and max(1, int(getattr(job, "depth", 1) or 1)) == 1):
                 if job.liveness == "working":
                     color_i = _depth1_rail_color_index(
                         getattr(job, "key", None),
@@ -4468,6 +4522,7 @@ def _build_lines(sessions, jobs, section, narrow, malformed, layout="wide", memo
                     rail_key = ("stg%d_on" if _BLINK_ON else "stg%d_off") % color_i
                 else:
                     rail_key = "dim"
+                lines.append([(" " * (_RAIL_COL + len(_RAIL_BOT)), None)])
                 first, last = block_start, len(lines) - 1
                 for idx in range(first, len(lines)):
                     if idx == first:
@@ -4476,8 +4531,7 @@ def _build_lines(sessions, jobs, section, narrow, malformed, layout="wide", memo
                         char = _RAIL_BOT
                     else:
                         char = _RAIL_MID
-                    lines[idx] = _overwrite_rail_cell(
-                        lines[idx], _RAIL_COL, char, rail_key)
+                    lines[idx] = _overwrite_rail_text(lines[idx], _RAIL_COL, char, rail_key)
 
         shown = _sort_group_sessions(shown)
         if live_order is not None:
@@ -4485,7 +4539,7 @@ def _build_lines(sessions, jobs, section, narrow, malformed, layout="wide", memo
         rendered_parent_sids = set()  # ambiguous enrichment must not duplicate a dispatch tree
         for s in shown:
             if getattr(s, "mem_worker", False):
-                # Memory rows use a dedicated dim summary and appear only after the ``a`` toggle.
+                # Automation rows belong only to the dedicated system card.
                 lines.extend(_mem_row(s, layout))
                 _seen_glyphs.add("mem")
                 continue
@@ -4691,6 +4745,9 @@ def _plain(segs):
 def _collect_memory():
     # F-19: best-effort — a collector import/read failure must never break the render.
     try:
+        if os.environ.get("FLEET_DEMO"):
+            from . import demo
+            return demo.memory_snapshot()
         from .collectors import memory as memcol
         return memcol.collect()
     except Exception:

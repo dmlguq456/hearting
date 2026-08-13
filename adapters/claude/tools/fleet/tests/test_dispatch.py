@@ -77,6 +77,21 @@ class RuntimeRootSeparationTest(unittest.TestCase):
 
 class RenderDispatchPresentationTest(unittest.TestCase):
 
+    def test_inline_marker_gate_counts_as_group_gate_pass(self):
+        nodes = [
+            {"id": "frame-a", "parallel_group": "frame", "gate_passed": True},
+            {
+                "id": "frame-b",
+                "parallel_group": "frame",
+                "gate_passed": True,
+                "execution_surface": "inline",
+            },
+            {"id": "frame-c", "parallel_group": "frame", "gate_passed": True},
+        ]
+        collapsed = render._collapse_parallel_nodes(nodes)
+        group = next(node for node in collapsed if node["id"] == "frame(3-way)")
+        self.assertTrue(group["gate_passed"])
+
     def test_registry_split_is_rendered_as_an_explicit_warning(self):
         job = DispatchJob(
             key="code", slug="split-owner", cwd="/work/repo", harness="codex",
@@ -101,7 +116,7 @@ class RenderDispatchPresentationTest(unittest.TestCase):
 
         self.assertEqual(text.count("gpt-5.6-sol"), 1)
 
-    def test_depth_prefixes_arrowless_depth1_and_deeper_depth2_arrow(self):
+    def test_depth_prefixes_are_arrowless_inside_nested_card(self):
         # F-64c (v49, user 2026-08-05 "depth=1을 조금 앞당겨서 들여쓰기 폭을 줄이고
         # 세로선은 그 아래 depth=2에 대해서만"): depth-1 sits arrowless at a shallow
         # 2-cell inset (its unit mark is the hanging rail, painted by the assembler);
@@ -112,7 +127,7 @@ class RenderDispatchPresentationTest(unittest.TestCase):
         nested = DispatchJob(key="code", slug="nested", depth=2)
 
         self.assertEqual(render._dispatch_prefix(top), "    ")
-        self.assertEqual(render._dispatch_prefix(nested), "      ↳ ")
+        self.assertEqual(render._dispatch_prefix(nested), "        ")
         self.assertEqual(len(render._dispatch_prefix(nested)), 8)
         self.assertEqual(render._dispatch_prefix(top, orphan=True), "··  ")
 
@@ -165,7 +180,7 @@ class RenderDispatchPresentationTest(unittest.TestCase):
         self.assertTrue(any(
             render._RAIL_BOT in "".join(p for p, _k in line)
             for line in lines[leg_index + 1:] if line))
-        self.assertIn("↳", leg_txt)               # depth-2 keeps its spawn arrow
+        self.assertNotIn("↳", leg_txt)            # capsule replaces the arrow ladder
 
     def test_f64c_childless_dispatch_card_brackets_its_context_detail(self):
         parent, d1, _d2 = self._rail_fixture()
@@ -176,10 +191,10 @@ class RenderDispatchPresentationTest(unittest.TestCase):
         owner_txt = "".join(p for p, _k in owner)
         self.assertIn(render._RAIL_TOP, owner_txt)
         owner_index = lines.index(owner)
-        self.assertIn(
-            render._RAIL_BOT,
-            "".join(p for p, _k in next(line for line in lines[owner_index + 1:] if line)),
-        )
+        self.assertTrue(any(
+            render._RAIL_BOT in "".join(p for p, _k in line)
+            for line in lines[owner_index + 1:] if line
+        ))
 
     def test_f64c_rail_blinks_in_stage_hue_only_while_working(self):
         for blink, expected in ((True, "stg0_on"), (False, "stg0_off")):
@@ -204,11 +219,12 @@ class RenderDispatchPresentationTest(unittest.TestCase):
         self.assertEqual(render._depth1_rail_color_index("code", "execute", None), 0)
         self.assertEqual(render._depth1_rail_color_index("nope", None, None), 0)
 
-    def test_f64c_rail_is_wide_layout_only(self):
+    def test_f63_capsule_frame_is_present_in_narrow_layout(self):
         lines = self._rail_lines(layout="narrow")
         joined = "".join(p for line in lines if line for p, _k in line)
-        for ch in render._RAIL_CHARS:
-            self.assertNotIn(ch, joined)
+        self.assertIn(render._RAIL_TOP, joined)
+        self.assertIn(render._RAIL_MID, joined)
+        self.assertIn(render._RAIL_BOT, joined)
 
     def test_dispatch_role_suffix_has_no_qa_token(self):
         # qa axis retired (CONVENTIONS §1.1); intensity moved to the dial's paren knob
@@ -1542,6 +1558,52 @@ class CodexAttemptIdentityTest(unittest.TestCase):
                 "".join(part for part, _key in line) for line in lines if line
             )
             self.assertIn("stale-owner", text)
+
+    def test_parked_owner_uses_shared_supervisor_liveness_classifier(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            jobs_log = os.path.join(tmp, "jobs.log")
+            state_dir = os.path.join(tmp, "supervisor-state")
+            os.makedirs(state_dir)
+            attempt = "att-parked-owner"
+            with open(os.path.join(state_dir, attempt + ".json"), "w", encoding="utf-8") as out:
+                json.dump(
+                    {
+                        "schema_version": 2,
+                        "parent_attempt_id": attempt,
+                        "delivered_attempt_ids": [],
+                        "phase": "parked",
+                    },
+                    out,
+                )
+            with open(jobs_log, "w", encoding="utf-8") as out:
+                out.write(
+                    "2026-08-13T00:00:00Z\topen\t/repo\t/wt\tparked-owner\t"
+                    "capability=autopilot-code,harness=codex,"
+                    "attempt_schema_version=2,dispatch_depth=1,transport=headless,"
+                    "execution_surface=registered-headless,registered_worker=1,"
+                    "fallback_hop=same-harness-headless,"
+                    "worker_type=owner,attempt_id=att-parked-owner,"
+                    "route_id=rt-parked,route_node=owner\n"
+                )
+            rows, malformed = dispatch._scan_jobs_log(jobs_log, set())
+            self.assertEqual(malformed, 0)
+            observed = mock.Mock(
+                state="parked-supervised",
+                reason="supervisor-parked",
+                process_state="live",
+                process_reason="supervisor-lease-held",
+            )
+            with mock.patch.object(
+                dispatch,
+                "observed_supervised_owner_liveness",
+                return_value=observed,
+            ) as classifier, mock.patch.object(
+                dispatch, "_job_transcript_signal", return_value="dead"
+            ):
+                state = dispatch._dispatch_liveness(rows[0], now=1000.0, track=False)
+            self.assertEqual(state, "idle")
+            self.assertEqual(rows[0].stage, "parked-supervised")
+            self.assertEqual(classifier.call_args.kwargs["supervisor_phase"], "parked")
 
     def test_legacy_row_without_process_identity_keeps_rollout_fallback(self):
         job = DispatchJob(key="code-test", slug="legacy", cwd="/work/wt",

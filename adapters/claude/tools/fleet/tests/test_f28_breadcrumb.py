@@ -245,6 +245,23 @@ class ReplicaCollapseTest(unittest.TestCase):
         ]
         self.assertEqual(render._collapse_replica_nodes(nodes), nodes)
 
+    def test_inline_marker_gate_does_not_blank_the_group_gate(self):
+        # S-2 additional surface: marker resolution gives an inline fallback
+        # the same typed `gate_passed` carrier as registered legs.  Collapse
+        # must preserve that carrier without consulting status-note strings.
+        nodes = [
+            {"id": "frame", "state": "done", "level": 0, "depends_on": [],
+             "parallel_group": "frame", "gate_passed": True},
+            {"id": "frame-alternative", "state": "done", "level": 0, "depends_on": [],
+             "parallel_group": "frame", "gate_passed": True},
+            {"id": "frame-contrarian", "state": "done", "level": 0, "depends_on": [],
+             "parallel_group": "frame", "gate_passed": True,
+             "execution_surface": "inline"},
+        ]
+        collapsed = render._collapse_parallel_nodes(nodes)
+        self.assertEqual(collapsed[0]["id"], "frame(3-way)")
+        self.assertTrue(collapsed[0]["gate_passed"])
+
 
 if __name__ == "__main__":
     unittest.main()
