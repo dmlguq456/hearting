@@ -1562,18 +1562,15 @@ def _dispatch_prefix(j, orphan=False):
     # attaching the orphan to whatever live session row happens to sit above it. Replace with a
     # same-width flat `··` "no-hierarchy" mark so the column stays aligned without implying nesting.
     #
-    # SD working memory (dispatch depth must be READABLE, not only implied): the ladder's
-    # indent and ↳ arrow encode depth positionally, which a reader has to reconstruct from
-    # column arithmetic. The first two cells of the SAME fixed-width prefix now carry the
-    # depth token `d1`/`d2`/`d3` outright. Zero width change — the prefix stays 4 cells at
-    # dispatch-depth-1 and 2 more per level after that, so every column contract downstream
-    # (`_HMW` absorption, `_RAIL_COL` = 4) is untouched; the rail cell stays a space.
+    # Depth stays positional (indent + ↳ + rail). An explicit `d1`/`d2` text token was
+    # tried on 2026-08-13 and reverted the same day: the user never asked for it (the
+    # sourcing working-memory note carried no requester) and found it noisy. Depth
+    # readability improvements, if any, go through explicit user direction.
     depth = max(1, min(3, int(getattr(j, "depth", 1) or 1)))
-    token = "d%d" % depth
     if depth == 1:
-        return token + ("··" if orphan else "  ")
+        return "··  " if orphan else "    "
     marker = "··" if orphan else "↳ "
-    return token + "  " + "  " * (depth - 1) + marker
+    return "    " + "  " * (depth - 1) + marker
 
 
 # F-64c (v49, user 2026-08-05 "depth=1에서는 화살표를 안쓰고 쭉 세로줄로 … 점멸하도록",
