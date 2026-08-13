@@ -83,8 +83,8 @@ runtime path, and any Claude-specific preview/screenshot/console wiring.
 
 Claude `UserPromptSubmit` first runs the portable `mem-recall-inject.sh` bridge.
 It emits `hookSpecificOutput.additionalContext` only for bounded active
-current-project/global capsule headline-and-ID candidates (maximum three and
-1,200 UTF-8 bytes), never record bodies. The bridge is fail-open but publishes
+current-project/global capsule headline-and-ID candidates (maximum six and
+2,400 UTF-8 bytes), never record bodies. The bridge is fail-open but publishes
 a same-turn recall-opportunity receipt on a successful probe, including a valid
 zero-hit probe. Main-session material mutation requires that receipt; the
 explicit `recall-gate` path recovers a missing or failed hook. Registered

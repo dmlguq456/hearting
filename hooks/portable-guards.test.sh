@@ -3052,10 +3052,10 @@ if python3 "$ROOT/tools/context-footprint.py" --root "$ROOT" --skip-runtime --sk
   && ! grep -q '^surface=native-bootstrap-agent-modes' "$TMP/context_footprint.out" \
   && { grep -q '^status=ok' "$TMP/context_footprint.out" \
     || { grep -q '^status=warn warnings=19$' "$TMP/context_footprint.out" \
-      && grep -q 'owner worker bootstrap 5846 > 4096 bytes' "$TMP/context_footprint.out" \
-      && grep -q 'stage worker bootstrap 4734 > 4096 bytes' "$TMP/context_footprint.out" \
-      && grep -q 'review worker bootstrap 4227 > 4096 bytes' "$TMP/context_footprint.out" \
-      && grep -q 'support worker bootstrap 4211 > 4096 bytes' "$TMP/context_footprint.out" \
+      && grep -q 'owner worker bootstrap 5953 > 4096 bytes' "$TMP/context_footprint.out" \
+      && grep -q 'stage worker bootstrap 4841 > 4096 bytes' "$TMP/context_footprint.out" \
+      && grep -q 'review worker bootstrap 4334 > 4096 bytes' "$TMP/context_footprint.out" \
+      && grep -q 'support worker bootstrap 4318 > 4096 bytes' "$TMP/context_footprint.out" \
       && grep -q 'bootstrap:claude footprint regression' "$TMP/context_footprint.out" \
       && grep -q 'bootstrap:codex footprint regression' "$TMP/context_footprint.out" \
       && grep -q 'bootstrap:opencode footprint regression' "$TMP/context_footprint.out" \

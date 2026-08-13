@@ -164,8 +164,15 @@ limited to canonical decisions, user corrections, unresolved obligations, and
 artifact pointers. Never copy content already preserved in an artifact.
 Snapshot signals and artifact state are evidence, not automatic commands.
 
+Capsule fields are the retrieval index; an empty array makes the record unfindable.
+- aliases: 2-4 synonyms, including the other language when the body is bilingual.
+- entities: file paths, commit hashes, module names, and IDs that appear in the body.
+- topics: 1-3 broad subject tags.
+Copy the shapes above, not the literal example values; emit [] only when the field
+genuinely has no member.
+
 Output contract: stdout contains JSON objects only, one per line. Allowed shapes:
-  {"action":"add","tier":"working|durable","type":"decision|user-correction|unresolved-obligation|artifact-pointer","body":"<minimal canonical content>","headline":"<retrieval headline>","aliases":[],"entities":[],"topics":[],"artifact_refs":[]}
+  {"action":"add","tier":"working|durable","type":"decision|user-correction|unresolved-obligation|artifact-pointer","body":"<minimal canonical content>","headline":"<retrieval headline>","aliases":["bounded retry","바운디드 재시도"],"entities":["hooks/mem-distill-dispatch.sh","D-41","a7c01b7d"],"topics":["memory-pipeline","dispatch"],"artifact_refs":[]}
   {"action":"reinforce","id":"<snapshot id>"}
   {"action":"merge","ids":["<id>","<id>"],"canonical":"<id>"}
   {"action":"prune","id":"<snapshot id>"}
@@ -204,8 +211,15 @@ Decide contextually whether this delta contains a canonical decision, user
 correction, unresolved obligation, or artifact pointer worth storing. Never
 copy content already preserved in an artifact. This worker is add-only.
 
+Capsule fields are the retrieval index; an empty array makes the record unfindable.
+- aliases: 2-4 synonyms, including the other language when the body is bilingual.
+- entities: file paths, commit hashes, module names, and IDs that appear in the body.
+- topics: 1-3 broad subject tags.
+Copy the shapes above, not the literal example values; emit [] only when the field
+genuinely has no member.
+
 Output contract: stdout contains JSON objects only, one per line:
-  {"tier":"working|durable","type":"decision|user-correction|unresolved-obligation|artifact-pointer","body":"<minimal canonical content>","headline":"<retrieval headline>","aliases":[],"entities":[],"topics":[],"artifact_refs":[]}
+  {"tier":"working|durable","type":"decision|user-correction|unresolved-obligation|artifact-pointer","body":"<minimal canonical content>","headline":"<retrieval headline>","aliases":["bounded retry","바운디드 재시도"],"entities":["hooks/mem-distill-dispatch.sh","D-41","a7c01b7d"],"topics":["memory-pipeline","dispatch"],"artifact_refs":[]}
 
 Choose the tier from its lifecycle: working is finite-lived; durable persists.
 artifact-pointer requires artifact_refs and records only why/when to retrieve

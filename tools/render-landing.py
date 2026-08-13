@@ -754,7 +754,7 @@ GUARD_NOTE = {
 
 MEMORY_STEPS = [
     ("Capsule probe", "Every eligible main prompt runs <code>mem candidates</code> over the "
-     "active capsule index — at most 3 headline+ID hits in 1,200 bytes, bodies untouched."),
+     "active capsule index — at most 6 headline+ID hits in 2,400 bytes, bodies untouched."),
     ("Opportunity receipt", "The probe writes a same-turn receipt even on zero hits. Material "
      "main-session mutation is gated on it, so retrieval can't be silently skipped."),
     ("Agent-owned recall", "No score threshold adopts a hit. The agent reads the full record by "

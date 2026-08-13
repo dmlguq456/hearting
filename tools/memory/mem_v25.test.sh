@@ -28,7 +28,7 @@ old=$(add_a durable decision 'This durable record keeps body-marker-old private.
 (cd "$TMP/project-a" && python3 "$MEM" supersede "$old" --by "$current" >/dev/null)
 foreign=$(add_b durable decision 'This durable record keeps body-marker-foreign private.' --headline 'Foreign automatic candidate recall' \
   --alias 'automatic candidate recall' | sed -n 's/.*→ //p')
-for number in 1 2 3 4; do
+for number in 1 2 3 4 5 6 7; do
   add_a durable decision "This durable record keeps body-marker-cap-$number private." \
     --headline "Candidate cap record $number" --alias 'candidate cap shared' >/dev/null
 done
@@ -46,8 +46,8 @@ PY
   --session-id session-a --turn-id turn-a --runtime test > "$TMP/english.out")
 grep -q "$current" "$TMP/english.out"
 if grep -Eq "$(printf '%s|%s|body-marker' "$old" "$foreign")" "$TMP/english.out"; then exit 1; fi
-[ "$(grep -c '^- \[' "$TMP/english.out")" -le 3 ]
-[ "$(wc -c < "$TMP/english.out")" -le 1201 ]
+[ "$(grep -c '^- \[' "$TMP/english.out")" -le 6 ]
+[ "$(wc -c < "$TMP/english.out")" -le 2401 ]
 
 (cd "$TMP/project-a" && python3 "$MEM" candidates '이전에 과거 결정 회수는 어떻게 했지' \
   --session-id session-a --turn-id turn-b --runtime test > "$TMP/korean.out")
@@ -62,8 +62,8 @@ if grep -q "$body_only" "$TMP/body-only.out"; then exit 1; fi
 (cd "$TMP/project-a" && python3 "$MEM" candidates 'candidate cap shared' \
   --limit 99 --max-bytes 99999 --session-id session-a --turn-id turn-d \
   > "$TMP/cap.out")
-[ "$(grep -c '^- \[' "$TMP/cap.out")" -eq 3 ]
-[ "$(wc -c < "$TMP/cap.out")" -le 1201 ]
+[ "$(grep -c '^- \[' "$TMP/cap.out")" -eq 6 ]
+[ "$(wc -c < "$TMP/cap.out")" -le 2401 ]
 
 after=$(python3 - "$MEM_STORE/memory.db" "$current" <<'PY'
 import sqlite3, sys
@@ -79,13 +79,13 @@ raw = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
 rows = [json.loads(line) for line in raw.splitlines()]
 probes = [row for row in rows if row.get("event") == "candidate-probe"]
 assert len(probes) == 4
-assert all(row["query_sha256"] and row["output_utf8_bytes"] <= 1200 for row in probes)
+assert all(row["query_sha256"] and row["output_utf8_bytes"] <= 2400 for row in probes)
 assert "automatic candidate recall" not in raw and "과거 결정 회수" not in raw
 receipts = list(pathlib.Path(sys.argv[2]).glob("*.json"))
 assert len(receipts) == 1
 receipt = json.loads(receipts[0].read_text())
 assert receipt["schema_version"] == 1 and receipt["turn_digest"]
-assert receipt["source"] == "candidate-probe" and len(receipt["result_ids"]) <= 3
+assert receipt["source"] == "candidate-probe" and len(receipt["result_ids"]) <= 6
 PY
 
 printf '{"hook_event_name":"UserPromptSubmit","prompt":"automatic candidate recall","cwd":"%s","session_id":"hook-session","turn_id":"hook-turn"}\n' "$TMP/project-a" \
