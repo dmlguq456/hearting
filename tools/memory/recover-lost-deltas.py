@@ -219,8 +219,10 @@ def main(argv=None):
     for row in rows:
         state = "rewind" if row["actionable"] else (
             "no-transcript" if not row["located"] else "already-at-target")
+        current = (row["current"] or "")[:8] or "-"
+        target = (row["target"] or "")[:8] or "(start)"
         print(f"  {row['sid']}  {state}  "
-              f"current={row['current'][:8] or '-'} -> target={row['target'][:8] or '(start)'}  "
+              f"current={current} -> target={target}  "
               f"deltas~{row['skipped']}")
 
     if not args.apply:
