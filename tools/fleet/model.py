@@ -414,6 +414,13 @@ class DispatchJob:
                                         # `status` stays the verbatim registry word, the row is
                                         # dim/blinkless, and it counts in no working/idle/job
                                         # census.
+    row_terminal_mismatch: bool = False  # F-64: the registry word is terminal but the row's own
+                                         # authoritative pid identity is still alive — the row
+                                         # survives collection and classification falls through
+                                         # to exact attempt evidence (process truth outranks the
+                                         # registry word; observed 2026-08-14: a supervisor closed
+                                         # a multi-turn codex attempt at its first turn.completed
+                                         # and the still-running dispatch vanished from Fleet).
     liveness: str = "unknown"
     profile: Optional[str] = None       # dispatch profile name (masked config home) — None = main home
     artifact_root: Optional[str] = None  # registry artifact_root meta — a source-only worktree
@@ -1186,14 +1193,26 @@ def classify_job(ev_in, now, key=None):
     # since F-46 (v29): a done row inside the afterglow window survives the merge carrying
     # `afterglow=True`, and lands here to be settled as the tier-1 `done` state. This is a
     # vocabulary contract so the render layer can never reinterpret a raw word.
-    if raw == "done":
+    #
+    # F-64: a terminal word contradicted by the row's own live pid identity (collector-set
+    # `row_terminal_mismatch`) must NOT settle here — the registry lied about a process that
+    # verifiably still runs, so the verdict falls through to the exact attempt evidence
+    # below. The raw word still survives in raw_status for auditability.
+    terminal_contradicted = bool(ev_in.get("row_terminal_mismatch"))
+    if raw == "done" and not terminal_contradicted:
         return out("done", 1, "registry", "jobs.log status=done")
-    if raw == "killed":
+    if raw == "killed" and not terminal_contradicted:
         return out("killed", 1, "registry", "jobs.log status=killed")
-    if raw == "cancelled":
+    if raw == "cancelled" and not terminal_contradicted:
         # fleet's job vocabulary has no `cancelled`; `killed` carries the same
         # "terminated by outside intervention" axis. The distinction survives in raw_status.
         return out("killed", 1, "registry", "jobs.log status=cancelled → killed (raw preserved)")
+    if terminal_contradicted:
+        # The collector set the flag only on positive process evidence (row pid identity
+        # alive, or a live harness process carrying this attempt id) — settle as working
+        # here rather than letting a terminal completion sidecar re-settle the lie.
+        return out("working", 2, "proc",
+                   "live process contradicts terminal registry word (F-64)")
 
     # tier-2: a registry row carrying the canonical (pid, start-time) identity must
     # never be revived by another retry's cwd-wide transcript activity.  A matching

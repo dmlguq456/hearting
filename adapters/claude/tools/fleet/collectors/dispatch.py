@@ -249,6 +249,51 @@ def _authoritative_registry_pid(meta):
     return None, None, None
 
 
+def _terminal_row_process_alive(meta, live_attempt_ids=None):
+    """True when a terminal registry row is contradicted by process truth (F-64).
+
+    Two independent proofs, either suffices:
+    ① the row's own authoritative pid identity is alive with a matching start
+      (namespace-safe; a bare numeric pid never revives a row), or
+    ② a live harness process carries this row's attempt id in its environment —
+      needed because a detached launch records the (already exited) governor
+      wrapper pid, not the worker it detached (observed 2026-08-14: wrapper pid
+      dead, `codex exec` worker alive for hours, row closed done).
+    """
+    pid, start, _source = _authoritative_registry_pid(meta)
+    if pid and start:
+        observed = procscan.read_proc_start(pid)
+        if bool(observed) and str(observed) == str(start):
+            return True
+    attempt = meta.get("attempt_id")
+    return bool(attempt and live_attempt_ids and attempt in live_attempt_ids)
+
+
+def _live_attempt_ids():
+    """Attempt ids carried by live harness processes' environments.
+
+    One ps sweep + one environ read per harness process (the same taps procscan
+    already uses each tick). Unreadable environs contribute nothing — a row is
+    only ever revived on positive evidence.
+    """
+    ids = set()
+    try:
+        for line in procscan._ps_lines():
+            parts = line.strip().split(None, 3)
+            if len(parts) < 3 or parts[1] not in procscan.HARNESSES:
+                continue
+            try:
+                env = procscan.read_environ(int(parts[0]))
+            except (TypeError, ValueError):
+                continue
+            attempt = env.get("AGENT_DISPATCH_ATTEMPT_ID")
+            if attempt:
+                ids.add(attempt)
+    except Exception:
+        return ids
+    return ids
+
+
 def _parse_depth(value):
     try:
         depth = int(value or 1)
@@ -824,6 +869,7 @@ def _dispatch_liveness(job, now, track=True, codex_index=None):
             )
         ),
         "proc_liveness": getattr(job, "_proc_liveness", None),
+        "row_terminal_mismatch": bool(getattr(job, "row_terminal_mismatch", False)),
     }
     state, evidence = model.classify_job(ev_in, now,
                                          key=("j", job.slug) if track else None)
@@ -2387,7 +2433,8 @@ def _iso_elapsed_min(ts):
     return max(0, int((datetime.now(timezone.utc) - dt).total_seconds() // 60))
 
 
-def _scan_jobs_log(path, seen_slugs, seen_keys=None, registry_priority=0):
+def _scan_jobs_log(path, seen_slugs, seen_keys=None, registry_priority=0,
+                   live_attempt_ids=None):
     jobs = []
     malformed = 0
     try:
@@ -2419,15 +2466,26 @@ def _scan_jobs_log(path, seen_slugs, seen_keys=None, registry_priority=0):
         ts, status, repo, worktree, _slug, pipe = fields
         row_age_min = _iso_elapsed_min(ts)
         afterglow = False
+        row_terminal_mismatch = False
         if status not in ("open", "running"):
+            # F-64: before dropping a terminal row, let process truth veto the registry
+            # word — a row whose own authoritative pid identity is still alive is a live
+            # dispatch wearing a wrong state (observed 2026-08-14: a completion supervisor
+            # closed a multi-turn codex attempt at its first turn.completed; the worker ran
+            # on for hours while the session row hid as a dispatch child and the job row
+            # dropped as done — the whole dispatch vanished from the screen).
+            if _terminal_row_process_alive(_parse_pipe_meta(pipe or ""),
+                                           live_attempt_ids=live_attempt_ids):
+                row_terminal_mismatch = True
             # F-46: `done` within the afterglow window survives as a display-only row
             # (status stays the verbatim registry word `done`; `afterglow=True` is the
             # additive display marker — `--json` consumers see no changed key meaning).
             # Every other terminal word — and any `done` older than the window — is dropped
             # exactly as before, so the row self-clears on the next tick past the window.
-            if status != "done" or row_age_min is None or row_age_min > DONE_AFTERGLOW_MIN:
+            elif status != "done" or row_age_min is None or row_age_min > DONE_AFTERGLOW_MIN:
                 continue                      # newest state is terminal → not live
-            afterglow = True
+            else:
+                afterglow = True
         cwd = worktree if worktree not in ("-", "(main-tree)") else ""
         if slug in seen_slugs:
             continue                          # already shown as a live process job
@@ -2514,6 +2572,7 @@ def _scan_jobs_log(path, seen_slugs, seen_keys=None, registry_priority=0):
             registry_order=registry_order,
             registry_priority=registry_priority,
             afterglow=afterglow,
+            row_terminal_mismatch=row_terminal_mismatch,
         )
         job._log_file = meta.get("log_file")
         job._launch_home = meta.get("launch_home")
@@ -2744,9 +2803,11 @@ def collect(jobs_path=None, harness_filter=None):
     seen_keys = set((_norm_cwd(j.cwd), _slug_stem(j.slug)) for j in proc_jobs if j.cwd and j.slug)
     log_jobs = []
     malformed = 0
+    live_attempts = _live_attempt_ids()
     for registry_priority, path in enumerate(paths):
         path_jobs, path_malformed = _scan_jobs_log(
-            path, seen, seen_keys, registry_priority=registry_priority
+            path, seen, seen_keys, registry_priority=registry_priority,
+            live_attempt_ids=live_attempts,
         )
         if path in split_registries:
             for job in path_jobs:

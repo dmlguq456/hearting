@@ -1974,6 +1974,10 @@ def _dispatch_row(j, orphan=False, parent_model=None, parent_harness=None, is_la
     key = j.key or "?"
     depth = max(1, int(getattr(j, "depth", 1) or 1))
     stage = stage_override if stage_override is not None else (j.stage or "")
+    # F-64: the registry word is terminal but the row's own pid identity is alive —
+    # keep the verbatim word and mark the contradiction instead of hiding either side.
+    if getattr(j, "row_terminal_mismatch", False) and stage:
+        stage = stage + " ⚠alive"
     # The dispatched session's own haiku sidecar title is its identity when present
     # (user 2026-07-16: the summary agent attaches to every dispatched session); the
     # slug stays the fallback — same title → name → slug chain as session rows.
