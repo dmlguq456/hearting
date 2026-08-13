@@ -42,8 +42,6 @@ class TestRunner(unittest.TestCase):
         (self.home / "core").mkdir(parents=True)
         (self.home / "core" / "CORE.md").write_text("core\n")
         (self.home / "utilities").symlink_to(ROOT / "utilities", target_is_directory=True)
-        self.route = self.artifacts / ".runtime" / "routes" / "fixture.json"
-        self.route.parent.mkdir(parents=True)
         evidence = self.base / "dispatch-evidence.json"
         evidence.write_text(json.dumps({"tuples": [{
             "harness": "codex", "parent_harness": "codex", "parent_transport": "headless",
@@ -60,9 +58,13 @@ class TestRunner(unittest.TestCase):
             "--dispatch-evidence", str(evidence), "--tracking", "untracked",
             "--spec-read", "not-applicable", "--drift-verdict", "no-project-spec",
             "--workflow-mode", "untracked", "--artifact-guard", "preflight-passed",
-            "--output", str(self.route),
         ], text=True, capture_output=True, env=CLEAN_ENV)
         self.assertEqual(result.returncode, 0, result.stderr)
+        compiled = json.loads(result.stdout)
+        self.route = (
+            self.artifacts / ".runtime" / "routes" / f"{compiled['route_id']}.json"
+        )
+        self.assertTrue(self.route.is_file())
         self.registry = self.base / "registry.json"
         self.index = self.base / "resource-runs.index.json"
         self.log = self.base / "logs" / "run.log"

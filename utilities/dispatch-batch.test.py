@@ -1461,8 +1461,6 @@ class DispatchBatchIntegrationTest(unittest.TestCase):
 
             artifact_root = base / ".agent_reports"
             artifact_root.mkdir()
-            route_path = artifact_root / ".runtime" / "routes" / "integration.json"
-            route_path.parent.mkdir(parents=True)
             evidence_path = base / "dispatch-evidence.json"
             evidence_path.write_text(
                 json.dumps({
@@ -1498,7 +1496,7 @@ class DispatchBatchIntegrationTest(unittest.TestCase):
                     "--tracking", "tracked", "--dispatch-evidence", str(evidence_path),
                     "--spec-read", "integration-fixture",
                     "--drift-verdict", "within-spec", "--workflow-mode", "tracked",
-                    "--artifact-guard", "integration-fixture", "--output", str(route_path),
+                    "--artifact-guard", "integration-fixture",
                 ],
                 text=True,
                 stdout=subprocess.PIPE,
@@ -1509,7 +1507,13 @@ class DispatchBatchIntegrationTest(unittest.TestCase):
             self.assertEqual(
                 compile_result.returncode, 0, compile_result.stdout + compile_result.stderr
             )
-            route = json.loads(route_path.read_text(encoding="utf-8"))
+            route = json.loads(compile_result.stdout)
+            route_path = (
+                artifact_root / ".runtime" / "routes" / f"{route['route_id']}.json"
+            )
+            self.assertEqual(
+                json.loads(route_path.read_text(encoding="utf-8")), route
+            )
             frame_nodes = {
                 node["id"] for node in route["nodes"]
                 if (node.get("parallel_group") or node.get("replica_group")) == "frame"

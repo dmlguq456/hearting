@@ -85,8 +85,8 @@ fixture_route() {
   fixture_capability=$1
   fixture_mode=$2
   fixture_name=$3
-  fixture_output="$TMP/proj/.agent_reports/.runtime/routes/$fixture_name.json"
-  mkdir -p "$(dirname "$fixture_output")"
+  fixture_stdout="$TMP/$fixture_name.route.json"
+  fixture_stderr="$TMP/$fixture_name.route.err"
   python3 "$ROOT/utilities/capability-route.py" compile \
     --capability "$fixture_capability" --capability-mode "$fixture_mode" \
     --intensity direct --cwd "$TMP/proj" \
@@ -97,8 +97,9 @@ fixture_route() {
     --predicate focused-verification --tracking untracked \
     --spec-read not-applicable --drift-verdict no-project-spec \
     --workflow-mode untracked --artifact-guard preflight-passed \
-    --inline-reason atomic-direct --output "$fixture_output" >/dev/null
-  printf '%s\n' "$fixture_output"
+    --inline-reason atomic-direct >"$fixture_stdout" 2>"$fixture_stderr"
+  fixture_route_id=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1],encoding="utf-8"))["route_id"])' "$fixture_stdout")
+  printf '%s\n' "$TMP/proj/.agent_reports/.runtime/routes/$fixture_route_id.json"
 }
 fixture_route_id() {
   python3 -c 'import json,sys; print(json.load(open(sys.argv[1],encoding="utf-8"))["route_id"])' "$1"
@@ -2317,8 +2318,11 @@ if python3 -c 'import json,sys; d=json.loads(sys.argv[1]); assert d["decision"]=
 else
   bad "source-bearing functions.exec_command commit should be denied [$commit_decision]"
 fi
-codex_route="$TMP/repo/.agent_reports/.runtime/routes/codex-route.json"
-codex_compile="$ROOT/adapters/codex/bin/preflight.sh route --capability autopilot-code --capability-mode dev --intensity direct --cwd $TMP/repo --artifact-root $TMP/repo/.agent_reports --predicate atomic-outcome --predicate known-scope --predicate no-shared-contract --predicate no-resource-run --predicate no-artifact-handoff --predicate no-independent-verifier --predicate focused-verification --tracking untracked --spec-read not-applicable --drift-verdict no-project-spec --workflow-mode untracked --artifact-guard preflight-passed --inline-reason atomic-direct --output $codex_route"
+codex_route_args="--capability autopilot-code --capability-mode dev --intensity direct --cwd $TMP/repo --artifact-root $TMP/repo/.agent_reports --predicate atomic-outcome --predicate known-scope --predicate no-shared-contract --predicate no-resource-run --predicate no-artifact-handoff --predicate no-independent-verifier --predicate focused-verification --tracking untracked --spec-read not-applicable --drift-verdict no-project-spec --workflow-mode untracked --artifact-guard preflight-passed --inline-reason atomic-direct"
+"$ROOT/adapters/codex/bin/preflight.sh" route $codex_route_args >"$TMP/codex_route_probe.json" 2>"$TMP/codex_route_probe.err"
+codex_route_id=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1],encoding="utf-8"))["route_id"])' "$TMP/codex_route_probe.json")
+codex_route="$TMP/repo/.agent_reports/.runtime/routes/$codex_route_id.json"
+codex_compile="$ROOT/adapters/codex/bin/preflight.sh route $codex_route_args --output $codex_route"
 mkdir -p "$(dirname "$codex_route")"
 recall_opportunity "$TMP/repo" codex-bind
 if eval "$codex_compile" >"$TMP/codex_compile.out" 2>"$TMP/codex_compile.err" \
@@ -3311,8 +3315,10 @@ fi
 # subsequent material Write; every negative creates no marker while
 # preserving the compiler's own stdout/stderr/exit status.
 mkdir -p "$TMP/repo/.agent_reports/.runtime/routes"
-opencode_route="$TMP/repo/.agent_reports/.runtime/routes/opencode-route.json"
 opencode_route_args="--capability autopilot-code --capability-mode dev --intensity direct --cwd $TMP/repo --artifact-root $TMP/repo/.agent_reports --predicate atomic-outcome --predicate known-scope --predicate no-shared-contract --predicate no-resource-run --predicate no-artifact-handoff --predicate no-independent-verifier --predicate focused-verification --tracking untracked --spec-read not-applicable --drift-verdict no-project-spec --workflow-mode untracked --artifact-guard preflight-passed --inline-reason atomic-direct"
+env -u OPENCODE_SESSION_ID "$OPENCODE" route $opencode_route_args >"$TMP/opencode_route_probe.json" 2>"$TMP/opencode_route_probe.err"
+opencode_route_id=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1],encoding="utf-8"))["route_id"])' "$TMP/opencode_route_probe.json")
+opencode_route="$TMP/repo/.agent_reports/.runtime/routes/$opencode_route_id.json"
 recall_opportunity "$TMP/repo" opencode-bind
 if OPENCODE_SESSION_ID=opencode-bind "$OPENCODE" route $opencode_route_args --output "$opencode_route" >/tmp/opencode_route.out 2>/tmp/opencode_route.err \
   && [ -f "$opencode_route" ] \
@@ -3337,20 +3343,32 @@ else
   [ ! -f "$opencode_route_nooutput" ] && ok "opencode route wrapper: no --output compiles unbound, creates no marker" \
     || bad "opencode route wrapper: no --output should create no marker"
 fi
-opencode_route_multi_a="$TMP/repo/.agent_reports/.runtime/routes/opencode-route-multi-a.json"
-opencode_route_multi_b="$TMP/repo/.agent_reports/.runtime/routes/opencode-route-multi-b.json"
-if OPENCODE_SESSION_ID=opencode-neg-multi "$OPENCODE" route $opencode_route_args --output "$opencode_route_multi_a" --output "$opencode_route_multi_b" >/tmp/opencode_neg_multi.out 2>/tmp/opencode_neg_multi.err; then
+opencode_route_multi_root="$TMP/repo/.agent_reports-opencode-multi"
+opencode_route_multi_args=$(printf '%s\n' "$opencode_route_args" \
+  | sed "s#--artifact-root $TMP/repo/.agent_reports#--artifact-root $opencode_route_multi_root#")
+env -u OPENCODE_SESSION_ID "$OPENCODE" route $opencode_route_multi_args >"$TMP/opencode_route_multi_probe.json" 2>"$TMP/opencode_route_multi_probe.err"
+opencode_route_multi_id=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1],encoding="utf-8"))["route_id"])' "$TMP/opencode_route_multi_probe.json")
+opencode_route_multi_a="$opencode_route_multi_root/.runtime/routes/$opencode_route_multi_id.json"
+opencode_route_multi_b="$opencode_route_multi_root/.runtime/routes/alias-$opencode_route_multi_id.json"
+rm -f "$opencode_route_multi_a" "$opencode_route_multi_b"
+if OPENCODE_SESSION_ID=opencode-neg-multi "$OPENCODE" route $opencode_route_multi_args --output "$opencode_route_multi_a" --output "$opencode_route_multi_b" >/tmp/opencode_neg_multi.out 2>/tmp/opencode_neg_multi.err; then
   :
 fi
 if "$OPENCODE" material-route check --tool Write --file "$opencode_source" --cwd "$TMP/repo" --session opencode-neg-multi >/tmp/opencode_neg_multi_check.out 2>/tmp/opencode_neg_multi_check.err; then
   bad "opencode route wrapper with more than one --output should stay unbound"
 else
-  [ "$?" -eq 2 ] && ok "opencode route wrapper: more than one --output creates no marker" \
+  [ "$?" -eq 2 ] && [ ! -f "$opencode_route_multi_a" ] && [ ! -f "$opencode_route_multi_b" ] \
+    && ok "opencode route wrapper: more than one --output creates no route or marker" \
     || bad "opencode route wrapper: more than one --output wrong denial exit"
 fi
-opencode_route_nosid="$TMP/repo/.agent_reports/.runtime/routes/opencode-route-nosid.json"
+opencode_route_nosid_root="$TMP/repo/.agent_reports-opencode-nosid"
+opencode_route_nosid_args=$(printf '%s\n' "$opencode_route_args" \
+  | sed "s#--artifact-root $TMP/repo/.agent_reports#--artifact-root $opencode_route_nosid_root#")
+env -u OPENCODE_SESSION_ID "$OPENCODE" route $opencode_route_nosid_args >"$TMP/opencode_route_nosid_probe.json" 2>"$TMP/opencode_route_nosid_probe.err"
+opencode_route_nosid_id=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1],encoding="utf-8"))["route_id"])' "$TMP/opencode_route_nosid_probe.json")
+opencode_route_nosid="$opencode_route_nosid_root/.runtime/routes/$opencode_route_nosid_id.json"
 rm -f "$opencode_route_nosid"
-if env -u OPENCODE_SESSION_ID "$OPENCODE" route $opencode_route_args --output "$opencode_route_nosid" >/tmp/opencode_neg_nosid.out 2>/tmp/opencode_neg_nosid.err \
+if env -u OPENCODE_SESSION_ID "$OPENCODE" route $opencode_route_nosid_args --output "$opencode_route_nosid" >/tmp/opencode_neg_nosid.out 2>/tmp/opencode_neg_nosid.err \
   && [ -f "$opencode_route_nosid" ] \
   && "$OPENCODE" material-route check --tool Write --file "$opencode_source" --cwd "$TMP/repo" --session opencode-neg-nosid >/tmp/opencode_neg_nosid_check.out 2>/tmp/opencode_neg_nosid_check.err; then
   bad "opencode route wrapper without OPENCODE_SESSION_ID should stay unbound"

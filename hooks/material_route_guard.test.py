@@ -51,7 +51,6 @@ class MaterialRouteGuardTest(unittest.TestCase):
         subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "initial"], check=True)
         self.artifacts = self.base / "artifacts"
         self.artifacts.mkdir()
-        self.route = self.artifacts / ".runtime" / "routes" / "route.json"
         self.home = self.base / "agent-home"
         (self.home / "core").mkdir(parents=True)
         (self.home / "core" / "CORE.md").write_text("core\n", encoding="utf-8")
@@ -74,11 +73,12 @@ class MaterialRouteGuardTest(unittest.TestCase):
             "--drift-verdict", "no-project-spec",
             "--workflow-mode", "untracked",
             "--artifact-guard", "preflight-passed",
-            "--output", str(self.route),
         ]
         result = subprocess.run(command, text=True, capture_output=True)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.route_id = json.loads(self.route.read_text())["route_id"]
+        self.route_id = json.loads(result.stdout)["route_id"]
+        self.route = self.artifacts / ".runtime" / "routes" / f"{self.route_id}.json"
+        self.assertTrue(self.route.is_file())
         self.receipts = self.base / "recall-opportunities"
 
     def opportunity(
@@ -389,10 +389,11 @@ class MaterialRouteGuardTest(unittest.TestCase):
             "--drift-verdict", "no-project-spec",
             "--workflow-mode", "untracked",
             "--artifact-guard", "preflight-passed",
-            "--output", str(route),
         ]
         compiled = subprocess.run(direct, text=True, capture_output=True)
         self.assertEqual(compiled.returncode, 0, compiled.stderr)
+        route_id = json.loads(compiled.stdout)["route_id"]
+        route = artifacts / ".runtime" / "routes" / f"{route_id}.json"
         bound = subprocess.run(
             [
                 sys.executable, str(GUARD), "--agent-home", str(self.home),
@@ -508,10 +509,11 @@ class MaterialRouteGuardTest(unittest.TestCase):
             "--drift-verdict", "no-project-spec",
             "--workflow-mode", "untracked",
             "--artifact-guard", "preflight-passed",
-            "--output", str(route),
         ]
         compiled = subprocess.run(command, text=True, capture_output=True)
         self.assertEqual(compiled.returncode, 0, compiled.stderr)
+        route_id = json.loads(compiled.stdout)["route_id"]
+        route = artifact_root / ".runtime" / "routes" / f"{route_id}.json"
         bound = subprocess.run(
             [
                 sys.executable, str(GUARD), "--agent-home", str(self.home),
@@ -1029,7 +1031,7 @@ class MaterialRouteGuardTest(unittest.TestCase):
             ((standalone / "route.json").resolve(),),
         )
 
-        def compile_command(target: Path, output: str) -> str:
+        def compile_command(target: Path, output: str | None = None) -> str:
             args = [
                 wrapper_rel, "route", "--capability", "autopilot-code",
                 "--capability-mode", "dev", "--intensity", "direct",
@@ -1041,8 +1043,10 @@ class MaterialRouteGuardTest(unittest.TestCase):
                 "--transport", "interactive", "--inline-reason", "atomic-direct",
                 "--tracking", "untracked", "--spec-read", "not-applicable",
                 "--drift-verdict", "no-project-spec", "--workflow-mode", "untracked",
-                "--artifact-guard", "preflight-passed", "--output", output,
+                "--artifact-guard", "preflight-passed",
             ]
+            if output is not None:
+                args += ["--output", output]
             return shlex.join(args)
 
         def run_bridge(command: str, target: Path, session: str) -> subprocess.CompletedProcess[str]:
@@ -1074,7 +1078,11 @@ class MaterialRouteGuardTest(unittest.TestCase):
         )
         for name, target, executable in cases:
             with self.subTest(case=name):
-                output = f".runtime/routes/route-{name}.json"
+                probe_command = compile_command(target).replace(wrapper_rel, executable, 1)
+                probe = subprocess.run(probe_command, shell=True, cwd=target, text=True, capture_output=True)
+                self.assertEqual(probe.returncode, 0, probe.stderr)
+                route_id = json.loads(probe.stdout)["route_id"]
+                output = f".runtime/routes/{route_id}.json"
                 command = compile_command(target, output).replace(wrapper_rel, executable, 1)
                 result = subprocess.run(command, shell=True, cwd=target, text=True, capture_output=True)
                 self.assertEqual(result.returncode, 0, result.stderr)
@@ -1086,7 +1094,11 @@ class MaterialRouteGuardTest(unittest.TestCase):
                     session = f"{name}-{bridge_name}"
                     bound = runner(command, target, session)
                     self.assertEqual(bound.returncode, 0, bound.stderr)
-                    self.assertTrue(fixture_guard.marker_path(canonical, session).is_file(), session)
+                    marker_file = fixture_guard.marker_path(canonical, session)
+                    self.assertTrue(marker_file.is_file(), session)
+                    marker = json.loads(marker_file.read_text())
+                    sealed_route = json.loads(Path(marker["route_file"]).read_text())
+                    self.assertEqual(Path(sealed_route["cwd"]).resolve(), target.resolve())
                     self.opportunity(session, cwd=target)
                     allowed = subprocess.run(
                         [sys.executable, str(fixture_guard_path), "--agent-home", str(canonical), "check", "--tool", "Edit",
@@ -1096,7 +1108,11 @@ class MaterialRouteGuardTest(unittest.TestCase):
                     )
                     self.assertEqual(allowed.returncode, 0, allowed.stderr)
 
-        cd_command = f"cd {linked} && {compile_command(linked, '.runtime/routes/route-cd.json')}"
+        cd_probe_command = f"cd {linked} && {compile_command(linked)}"
+        cd_probe = subprocess.run(cd_probe_command, shell=True, cwd=canonical, text=True, capture_output=True)
+        self.assertEqual(cd_probe.returncode, 0, cd_probe.stderr)
+        cd_route_id = json.loads(cd_probe.stdout)["route_id"]
+        cd_command = f"cd {linked} && {compile_command(linked, f'.runtime/routes/{cd_route_id}.json')}"
         result = subprocess.run(cd_command, shell=True, cwd=canonical, text=True, capture_output=True)
         self.assertEqual(result.returncode, 0, result.stderr)
         result = run_portable(cd_command, canonical, "preceding-cd-portable")

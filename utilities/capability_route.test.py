@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import contextlib, importlib.util, json, os, tempfile, unittest
+import contextlib, importlib.util, io, json, os, tempfile, unittest
 from pathlib import Path
 
 P=Path(__file__).with_name("capability-route.py")
@@ -834,6 +834,62 @@ class TestRoute(unittest.TestCase):
    self.assertEqual(result.returncode,64,result.stderr)
    self.assertIn("route-output-outside-canonical",result.stderr)
    self.assertFalse(outside.exists())
+ def test_compile_output_alias_basename_inside_canonical_is_rejected(self):
+  with tempfile.TemporaryDirectory() as tmp:
+   artifact_root=Path(tmp)
+   alias=R.canonical_routes_dir(artifact_root)/"autopilot-2026-node.json"
+   result=self._run_compile_cli(self._compile_cli_args(artifact_root,output=alias))
+   self.assertEqual(result.returncode,64,result.stderr)
+   self.assertIn("route-output-alias-basename",result.stderr)
+   self.assertFalse(alias.exists())
+ def test_compile_output_canonical_basename_is_accepted(self):
+  with tempfile.TemporaryDirectory() as tmp:
+   artifact_root=Path(tmp)
+   first=self._run_compile_cli(self._compile_cli_args(artifact_root))
+   self.assertEqual(first.returncode,0,first.stderr)
+   route=json.loads(first.stdout)
+   canonical=R.canonical_route_path(artifact_root,route["route_id"])
+   second=self._run_compile_cli(self._compile_cli_args(artifact_root,output=canonical))
+   self.assertEqual(second.returncode,0,second.stderr)
+   self.assertEqual(json.loads(second.stdout),route)
+ def test_status_reports_alias_basename_drift(self):
+  route=R.compile_route(**self.args())
+  with tempfile.TemporaryDirectory() as tmp:
+   root=Path(tmp); route=dict(route); route["artifact_root"]=str(root)
+   alias=R.canonical_routes_dir(root)/"dated-capability-alias.json"
+   R.write_once(alias,route)
+   row=R.route_status(root)[0]
+   self.assertTrue(row["alias_basename"])
+   self.assertTrue(row["drift"])
+   self.assertFalse(row["read_only"])
+ def test_close_route_publication_absent_keeps_schema_v3(self):
+  route=R.compile_route(**self.args())
+  with tempfile.TemporaryDirectory() as tmp:
+   root=Path(tmp); route=dict(route); route["artifact_root"]=str(root)
+   path=R.canonical_route_path(root,route["route_id"]); R.write_once(path,route)
+   outcome,_=R.close_route(route,path,commit="8"*40)
+   self.assertEqual(outcome["schema_version"],3)
+   self.assertNotIn("publication",outcome)
+ def test_close_route_publication_present_bumps_schema_v4(self):
+  route=R.compile_route(**self.args())
+  with tempfile.TemporaryDirectory() as tmp:
+   root=Path(tmp); route=dict(route); route["artifact_root"]=str(root)
+   path=R.canonical_route_path(root,route["route_id"]); R.write_once(path,route)
+   outcome,_=R.close_route(route,path,commit="9"*40,publication="failed")
+   self.assertEqual(outcome["schema_version"],4)
+   self.assertEqual(outcome["publication"],"failed")
+ def test_close_route_on_alias_record_still_succeeds_with_drift_warning(self):
+  route=R.compile_route(**self.args())
+  with tempfile.TemporaryDirectory() as tmp:
+   root=Path(tmp); route=dict(route); route["artifact_root"]=str(root)
+   alias=R.canonical_routes_dir(root)/"existing-alias.json"; R.write_once(alias,route)
+   stderr=io.StringIO()
+   with contextlib.redirect_stderr(stderr):
+    outcome,created=R.close_route(route,alias,commit="a"*40)
+   self.assertTrue(created)
+   self.assertEqual(outcome["route_location"],"canonical")
+   self.assertTrue(R.outcome_path(alias).is_file())
+   self.assertIn("alias_basename=true",stderr.getvalue())
  def test_status_reports_location_drift_and_duplicate_locations(self):
   route=R.compile_route(**self.args())
   with tempfile.TemporaryDirectory() as tmp:

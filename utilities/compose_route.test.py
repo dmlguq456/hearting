@@ -121,8 +121,7 @@ class TestComposeRoute(unittest.TestCase):
     # --- compose -> compile -> verify round trip -------------------------
     def test_round_trip_seals_and_verifies(self):
         with tempfile.TemporaryDirectory() as out_dir:
-            output = str(Path(out_dir) / ".runtime" / "routes" / "route.json")
-            result = self._run(UNITS, output=output, artifact_root=out_dir)
+            result = self._run(UNITS, artifact_root=out_dir)
             self.assertEqual(result.returncode, 0, result.stderr)
             route = json.loads(result.stdout)
             self.assertIs(route["composed"], True)
@@ -131,7 +130,8 @@ class TestComposeRoute(unittest.TestCase):
             self.assertFalse(route["spec_touch"])
             self.assertEqual([n["id"] for n in route["nodes"]], ["survey", "claim"])
             # the sealed file is byte-identical to stdout and passes verify.
-            self.assertEqual(json.loads(Path(output).read_text()), route)
+            output = Path(out_dir) / ".runtime" / "routes" / f"{route['route_id']}.json"
+            self.assertEqual(json.loads(output.read_text()), route)
             R.verify_route(route, ROOT)
 
     def test_live_probe_refuses_a_path_other_than_final_route_cwd(self):
@@ -248,9 +248,8 @@ class TestComposeRoute(unittest.TestCase):
              "write_scope": ["analysis_project/reviews/**"], "gate": "research-claims"},
         ]
         with tempfile.TemporaryDirectory() as out_dir:
-            output = str(Path(out_dir) / ".runtime" / "routes" / "route.json")
             command_extra = ["--anchor-mode", "literal"]
-            result = self._run_with_anchor_mode(literal_units, output, out_dir, command_extra)
+            result = self._run_with_anchor_mode(literal_units, None, out_dir, command_extra)
             self.assertEqual(result.returncode, 0, result.stderr)
 
         mismatched_units = [
@@ -260,9 +259,8 @@ class TestComposeRoute(unittest.TestCase):
              "write_scope": ["reviews/claims/**"], "gate": "research-claims"},
         ]
         with tempfile.TemporaryDirectory() as out_dir:
-            output = str(Path(out_dir) / ".runtime" / "routes" / "route.json")
             command_extra = ["--anchor-mode", "literal"]
-            result = self._run_with_anchor_mode(mismatched_units, output, out_dir, command_extra)
+            result = self._run_with_anchor_mode(mismatched_units, None, out_dir, command_extra)
             self.assertEqual(result.returncode, 64, result.stdout)
             self.assertIn("matches no declared cycle_anchor", result.stderr)
 
@@ -280,8 +278,9 @@ class TestComposeRoute(unittest.TestCase):
                 "--artifact-guard", "conductor-prechecked",
                 "--dispatch-evidence", str(evidence_path),
                 "--cycle-anchor", "analysis_project", "--review-anchor", "reviews",
-                "--output", output,
             ] + extra_args
+            if output is not None:
+                command += ["--output", output]
             return subprocess.run(command, text=True, capture_output=True, check=False)
 
 
