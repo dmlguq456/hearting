@@ -915,11 +915,17 @@ def classify_attempt_evidence(ev_in, now=None):
     # process/registry conclusion.  ``unverifiable`` is deliberately no verdict:
     # Fleet may still have a stronger local procscan/transcript signal for older
     # current-contract rows that predate namespace metadata.
-    if observed_state in {"alive", "terminal", "reconcile-needed"}:
+    if observed_state in {
+        "alive",
+        "terminal",
+        "reconcile-needed",
+        "parked-supervised",
+    }:
         state = {
             "alive": "working",
             "terminal": "done",
             "reconcile-needed": "stale",
+            "parked-supervised": "idle",
         }[observed_state]
         source = "shared-observer"
         rule = (
