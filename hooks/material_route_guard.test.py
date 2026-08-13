@@ -84,6 +84,7 @@ class MaterialRouteGuardTest(unittest.TestCase):
     def opportunity(
         self, session: str = "session-a", *, turn: str = "", cwd: Path | None = None,
         source: str = "candidate-probe", created_at_ns: int | None = None,
+        result_ids: list[str] | None = None,
     ) -> Path:
         self.receipts.mkdir(parents=True, exist_ok=True)
         path = self.receipts / f"{MATERIAL_GUARD.recall_session_key(session)}.json"
@@ -94,8 +95,8 @@ class MaterialRouteGuardTest(unittest.TestCase):
             "project": "test-project",
             "cwd": str((cwd or self.repo).resolve()),
             "source": source,
-            "result_count": 0,
-            "result_ids": [],
+            "result_count": len(result_ids or []),
+            "result_ids": list(result_ids or []),
             "created_at_ns": created_at_ns if created_at_ns is not None else time.time_ns(),
         }
         path.write_text(json.dumps(value), encoding="utf-8")
@@ -454,6 +455,31 @@ class MaterialRouteGuardTest(unittest.TestCase):
             "--turn", "turn-c", opportunity=False,
         )
         self.assertEqual(recovered.returncode, 0, recovered.stderr)
+
+    def test_full_width_probe_receipt_is_accepted_and_overflow_denied(self) -> None:
+        # Regression: the probe was widened to CANDIDATE_MAX_RESULTS=6 while
+        # this guard still capped result_ids at 3, so every explicit-recall
+        # receipt that actually carried hits was rejected as results-invalid
+        # and only evidence-free skip receipts could pass.
+        self.assertEqual(self.bind().returncode, 0)
+        full = [f"record-{index}" for index in range(6)]
+        self.opportunity(turn="turn-a", source="explicit-recall", result_ids=full)
+        allowed = self.guard(
+            "--tool", "Edit", "--file", str(self.repo / "app.py"),
+            "--turn", "turn-a", opportunity=False,
+        )
+        self.assertEqual(allowed.returncode, 0, allowed.stderr)
+
+        self.opportunity(
+            turn="turn-a", source="explicit-recall",
+            result_ids=[f"record-{index}" for index in range(7)],
+        )
+        overflow = self.guard(
+            "--tool", "Edit", "--file", str(self.repo / "app.py"),
+            "--turn", "turn-a", opportunity=False,
+        )
+        self.assertEqual(overflow.returncode, 2)
+        self.assertIn("recall-opportunity-results-invalid", overflow.stderr)
 
     def test_linked_worktree_route_allows_only_primary_canonical_artifacts(self) -> None:
         linked = self.base / "linked"

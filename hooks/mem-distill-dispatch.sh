@@ -374,7 +374,12 @@ fi
   # Untrusted stdout stays in a file; the applier passes bodies and IDs as argv
   # elements without sh -c/eval. Curate mutations are membership-limited by the
   # snapshot ID file. Invalid actions skip without blocking marker advance.
-  python3 "$APPLIER" \
+  # MEM_DISTILL=1 keeps D-37 actor attribution deterministic: without it the
+  # applier's `mem add` journals every distilled record as actor=manual
+  # (observed 2026-08-13 — recovery-drain output was indistinguishable from
+  # hand-written records). Curate mode still overrides to actor=curator inside
+  # the applier.
+  MEM_DISTILL=1 python3 "$APPLIER" \
     "$OUT" "$MEM" --mode "$WORKER_MODE" --snapshot-ids "$SNAPIDS_FILE" || true
 
   if [ "$MODE" = "periodic-curate" ]; then
@@ -387,6 +392,14 @@ fi
   elif [ "$worker_rc" -eq 0 ]; then
     rm -f "$FAILC" 2>/dev/null || true
     python3 "$MEM" distill "$SID" --source "${MEM_SESSION_SOURCE:-claude}" --advance >/dev/null 2>&1 || true
+  elif [ "$worker_rc" -eq 75 ]; then
+    # Capacity denial (governor class cap / reservation admission, EX_TEMPFAIL).
+    # Nothing is wrong with this delta — counting these toward the strike
+    # ceiling would forced-advance (= lose) a healthy delta after three busy
+    # moments (observed 2026-08-13 during the recovery backlog drain). Log for
+    # observability, leave the marker and the strike counter untouched; a later
+    # trigger retries the same delta under a free slot.
+    _distill_failure_log "$SID" "$MODE" "$worker_rc" "capacity-skip"
   else
     _n=$(cat "$FAILC" 2>/dev/null || printf 0)
     case "$_n" in ''|*[!0-9]*) _n=0 ;; esac

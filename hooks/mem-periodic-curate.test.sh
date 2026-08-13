@@ -28,6 +28,22 @@ mkproject() {  # $1=projects_root $2=real_dir
   mkdir -p "$1/$enc/memory"
 }
 
+# Selection is DB-ranked: a candidate cwd is dispatched only when its origin
+# holds active records in the store. Seed $4 records so the project is eligible
+# (a non-git temp dir's project key is its enc_cwd — the same substitution
+# mkproject applies).
+mkproject_seeded() {  # $1=projects_root $2=real_dir $3=store $4=record_count
+  mkproject "$1" "$2"
+  _seed_i=1
+  while [ "$_seed_i" -le "$4" ]; do
+    # `--cwd-origin=` form: an encoded cwd starts with "-" and would otherwise
+    # be parsed as an option flag.
+    MEM_STORE="$3" python3 "$MEM" add working thread \
+      "seed record $_seed_i for $2" --cwd-origin="$enc" >/dev/null 2>&1
+    _seed_i=$((_seed_i + 1))
+  done
+}
+
 CONC_STUB_BODY='#!/bin/sh
 if [ -d "$CONC_DIR/.active" ]; then
   touch "$CONC_DIR/VIOLATION"
@@ -44,7 +60,7 @@ rmdir "$CONC_DIR/.active" 2>/dev/null || true
 echo "== ① MEM_PERIODIC_CURATE_ENABLE unset → complete no-op =="
 STORE1="$(mktemp -d)"; PROJ1="$(mktemp -d)"; STUB1="$(mktemp -d)"; REALDIR1="$(mktemp -d)"
 CLEANUP+=("$STORE1" "$PROJ1" "$STUB1" "$REALDIR1")
-mkproject "$PROJ1" "$REALDIR1"
+mkproject_seeded "$PROJ1" "$REALDIR1" "$STORE1" 1
 printf '%s' "$CONC_STUB_BODY" > "$STUB1/claude"; chmod +x "$STUB1/claude"
 
 env -u MEM_PERIODIC_CURATE_ENABLE \
@@ -72,9 +88,9 @@ STORE2="$(mktemp -d)"; PROJ2="$(mktemp -d)"; STUB2="$(mktemp -d)"
 CLEANUP+=("$STORE2" "$PROJ2" "$STUB2")
 REALDIR2A="$(mktemp -d)"; REALDIR2B="$(mktemp -d)"; REALDIR2C="$(mktemp -d)"
 CLEANUP+=("$REALDIR2A" "$REALDIR2B" "$REALDIR2C")
-mkproject "$PROJ2" "$REALDIR2A"
-mkproject "$PROJ2" "$REALDIR2B"
-mkproject "$PROJ2" "$REALDIR2C"
+mkproject_seeded "$PROJ2" "$REALDIR2A" "$STORE2" 1
+mkproject_seeded "$PROJ2" "$REALDIR2B" "$STORE2" 1
+mkproject_seeded "$PROJ2" "$REALDIR2C" "$STORE2" 1
 printf '%s' "$CONC_STUB_BODY" > "$STUB2/claude"; chmod +x "$STUB2/claude"
 
 MEM_PERIODIC_CURATE_ENABLE=1 MEM_DISTILL_ENABLE=1 \
@@ -98,7 +114,7 @@ calls2="$(wc -l < "$STORE2/calls" 2>/dev/null || echo 0)"
 echo "== ③ AGENT_SESSION_ROLE=worker → mem-periodic-curate.sh itself no-ops (D-42) =="
 STORE3="$(mktemp -d)"; PROJ3="$(mktemp -d)"; STUB3="$(mktemp -d)"; REALDIR3="$(mktemp -d)"
 CLEANUP+=("$STORE3" "$PROJ3" "$STUB3" "$REALDIR3")
-mkproject "$PROJ3" "$REALDIR3"
+mkproject_seeded "$PROJ3" "$REALDIR3" "$STORE3" 1
 printf '%s' "$CONC_STUB_BODY" > "$STUB3/claude"; chmod +x "$STUB3/claude"
 
 AGENT_SESSION_ROLE=worker MEM_PERIODIC_CURATE_ENABLE=1 MEM_DISTILL_ENABLE=1 \
@@ -116,7 +132,7 @@ AGENT_SESSION_ROLE=worker MEM_PERIODIC_CURATE_ENABLE=1 MEM_DISTILL_ENABLE=1 \
 echo "== ④ MEM_DISTILL_ENABLE unset → periodic-curate dispatch no-ops (double gate) =="
 STORE4="$(mktemp -d)"; PROJ4="$(mktemp -d)"; STUB4="$(mktemp -d)"; REALDIR4="$(mktemp -d)"
 CLEANUP+=("$STORE4" "$PROJ4" "$STUB4" "$REALDIR4")
-mkproject "$PROJ4" "$REALDIR4"
+mkproject_seeded "$PROJ4" "$REALDIR4" "$STORE4" 1
 printf '%s' "$CONC_STUB_BODY" > "$STUB4/claude"; chmod +x "$STUB4/claude"
 
 env -u MEM_DISTILL_ENABLE \
@@ -135,7 +151,7 @@ env -u MEM_DISTILL_ENABLE \
 echo "== ⑤ .distill-disable kill switch → no-op =="
 STORE5="$(mktemp -d)"; PROJ5="$(mktemp -d)"; STUB5="$(mktemp -d)"; REALDIR5="$(mktemp -d)"
 CLEANUP+=("$STORE5" "$PROJ5" "$STUB5" "$REALDIR5")
-mkproject "$PROJ5" "$REALDIR5"
+mkproject_seeded "$PROJ5" "$REALDIR5" "$STORE5" 1
 printf '%s' "$CONC_STUB_BODY" > "$STUB5/claude"; chmod +x "$STUB5/claude"
 mkdir -p "$STORE5"
 touch "$STORE5/.distill-disable"
@@ -171,8 +187,8 @@ STORE6="$(mktemp -d)"; PROJ6="$(mktemp -d)"; STUB6="$(mktemp -d)"
 CLEANUP+=("$STORE6" "$PROJ6" "$STUB6")
 REALDIR6A="$(mktemp -d)"; REALDIR6B="$(mktemp -d)"
 CLEANUP+=("$REALDIR6A" "$REALDIR6B")
-mkproject "$PROJ6" "$REALDIR6A"
-mkproject "$PROJ6" "$REALDIR6B"
+mkproject_seeded "$PROJ6" "$REALDIR6A" "$STORE6" 1
+mkproject_seeded "$PROJ6" "$REALDIR6B" "$STORE6" 1
 cat > "$STUB6/claude" <<EOS
 #!/bin/sh
 if [ -d "\$CONC_DIR/.active" ]; then
@@ -225,8 +241,8 @@ STORE7="$(mktemp -d)"; PROJ7="$(mktemp -d)"; STUB7="$(mktemp -d)"
 CLEANUP+=("$STORE7" "$PROJ7" "$STUB7")
 REALDIR7A="$(mktemp -d)"; REALDIR7B="$(mktemp -d)"
 CLEANUP+=("$REALDIR7A" "$REALDIR7B")
-mkproject "$PROJ7" "$REALDIR7A"
-mkproject "$PROJ7" "$REALDIR7B"
+mkproject_seeded "$PROJ7" "$REALDIR7A" "$STORE7" 1
+mkproject_seeded "$PROJ7" "$REALDIR7B" "$STORE7" 1
 printf '%s' "$CONC_STUB_BODY" > "$STUB7/claude"; chmod +x "$STUB7/claude"
 cat > "$STUB7/sleep" <<'EOS'
 #!/bin/sh
@@ -256,6 +272,54 @@ grep -Eq '^mem-periodic-curate project=.* elapsed=[0-9][0-9]*s status=timeout$' 
   || bad "⑦: timeout log missing or malformed"
 # Let the detached test worker run its EXIT cleanup before fixture teardown.
 /bin/sleep 0.4
+
+# ============================================================
+# ⑧ DB-ranked selection — residue excluded, backlog order, cap by rank
+# ============================================================
+# Regression for the first-field-run defect: alphabetical directory order let
+# record-less worker-session residue pre-empt MAX_PROJECTS while real backlog
+# projects never got dispatched. Three candidate session dirs exist; only two
+# hold active records. With MAX_PROJECTS=2 the record-less residue must never
+# be dispatched, and the two record-backed projects must dispatch in
+# active-count order (heavier backlog first), regardless of path order.
+echo "== ⑧ DB-ranked selection → residue skipped, backlog-first order =="
+STORE8="$(mktemp -d)"; PROJ8="$(mktemp -d)"; STUB8="$(mktemp -d)"
+CLEANUP+=("$STORE8" "$PROJ8" "$STUB8")
+BASE8="$(mktemp -d)"
+CLEANUP+=("$BASE8")
+# aa- prefix sorts the residue FIRST alphabetically — the old implementation
+# would dispatch it; zz- sorts the heaviest backlog LAST alphabetically.
+RESIDUE8="$BASE8/aa-residue"
+LIGHT8="$BASE8/mm-light"
+HEAVY8="$BASE8/zz-heavy"
+mkproject "$PROJ8" "$RESIDUE8"                       # session dir, zero records
+mkproject_seeded "$PROJ8" "$LIGHT8" "$STORE8" 1
+mkproject_seeded "$PROJ8" "$HEAVY8" "$STORE8" 3
+printf '%s' "$CONC_STUB_BODY" > "$STUB8/claude"; chmod +x "$STUB8/claude"
+LOG8="$STORE8/periodic.log"
+
+MEM_PERIODIC_CURATE_ENABLE=1 MEM_DISTILL_ENABLE=1 \
+  MEM_STORE="$STORE8" MEM_PROJECTS="$PROJ8" MEM_PY="$MEM" \
+  MEM_PERIODIC_CURATE_MAX_PROJECTS=2 \
+  MEM_DISTILL_WORKER=claude PATH="$STUB8:$PATH" \
+  AGENT_MODEL_GOVERNOR_ROOT="$STORE8/.test-model-governor" \
+  CONC_DIR="$STORE8" \
+  bash "$UTIL" 2>"$LOG8"
+
+calls8="$(wc -l < "$STORE8/calls" 2>/dev/null || echo 0)"
+[ "${calls8:-0}" = "2" ] \
+  && ok "⑧: cap=2 → exactly the two record-backed projects dispatched" \
+  || bad "⑧: worker call count = ${calls8:-0}, expected 2"
+grep -q "project=$RESIDUE8 " "$LOG8" \
+  && bad "⑧: record-less residue was dispatched despite DB ranking" \
+  || ok "⑧: record-less residue (alphabetically first) never dispatched"
+order8="$(grep -o "project=[^ ]*" "$LOG8" | head -2 | tr '\n' ' ')"
+[ "$order8" = "project=$HEAVY8 project=$LIGHT8 " ] \
+  && ok "⑧: dispatch order follows active record count (3 > 1)" \
+  || bad "⑧: dispatch order '$order8', expected heavy then light"
+grep -q "select origin=.* active=3 durable=0 cwd=$HEAVY8\$" "$LOG8" \
+  && ok "⑧: selection log carries origin/active/durable evidence" \
+  || bad "⑧: selection evidence line missing for heavy project"
 
 echo
 echo "RESULT: PASS=$PASS FAIL=$FAIL"
