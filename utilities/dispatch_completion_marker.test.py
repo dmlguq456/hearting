@@ -133,6 +133,15 @@ class CompletionMarkerTest(unittest.TestCase):
             "OPENCODE_CONFIG_CONTENT": "{}",
         }
         env.pop("AGENT_DISPATCH_JOBS", None)
+        # A depth-1 owner session that launched this test process exports
+        # AGENT_OWNER_ROUTE_FILE/ID/HASH; inherited verbatim, the wrapper
+        # child reads it as a real owner binding and verify_route() fails
+        # closed on the mismatched cwd before the completion-marker gate is
+        # even reached (review Q-4) -- a fixture isolation gap, not a bug in
+        # the wrapper.
+        env.pop("AGENT_OWNER_ROUTE_FILE", None)
+        env.pop("AGENT_OWNER_ROUTE_ID", None)
+        env.pop("AGENT_OWNER_ROUTE_HASH", None)
         return env
 
     def wrapper_command(self, harness, action, route_path, route, node_id):

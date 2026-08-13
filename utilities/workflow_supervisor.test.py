@@ -28,6 +28,7 @@ sys.path.insert(0, str(ROOT / "tools"))
 
 import workflow_state as WS  # noqa: E402
 import capability_topology as TOPO  # noqa: E402
+import dispatch_contract as DC  # noqa: E402
 
 
 def _load(name, relative):
@@ -95,7 +96,6 @@ class WorkflowFixture(unittest.TestCase):
         (self.agent_home / "core").mkdir(parents=True)
         (self.agent_home / "core" / "CORE.md").write_text("fixture\n", encoding="utf-8")
         self._previous_agent_home = os.environ.get("AGENT_HOME")
-        self._previous_dispatch_jobs = os.environ.pop("AGENT_DISPATCH_JOBS", None)
         os.environ["AGENT_HOME"] = str(self.agent_home)
         self.addCleanup(self._restore)
         self.addCleanup(self.tmp.cleanup)
@@ -109,10 +109,6 @@ class WorkflowFixture(unittest.TestCase):
             os.environ.pop("AGENT_HOME", None)
         else:
             os.environ["AGENT_HOME"] = self._previous_agent_home
-        if self._previous_dispatch_jobs is None:
-            os.environ.pop("AGENT_DISPATCH_JOBS", None)
-        else:
-            os.environ["AGENT_DISPATCH_JOBS"] = self._previous_dispatch_jobs
 
     # -- fixtures -------------------------------------------------------------
     def write_route(self, nodes, route_id="rt-fixture0000000", route_hash="sha256:fixture"):
@@ -845,7 +841,7 @@ class TestCapabilityIntegration(WorkflowFixture):
              "write_scope": ["source/**"], "outputs": ["source-diff"],
              "gate": "code-execute"},
             {"id": "verify", "unit": "qa/test", "depends_on": ["act"],
-             "write_scope": ["reviews/monitor-verdict.json"],
+             "write_scope": ["reviews/monitor/**"],
              "outputs": ["reviews/monitor-verdict.json"], "gate": "code-test"},
         ]
         recipe = compose.build_recipe(
@@ -994,8 +990,7 @@ class TestSurveyLedgerRoot(unittest.TestCase):
 
     def setUp(self):
         self._previous = {key: os.environ.get(key)
-                          for key in ("AGENT_WORKFLOW_ROOT", "AGENT_HOME", "CLAUDE_HOME",
-                                      "AGENT_DISPATCH_JOBS", "HOME")}
+                          for key in ("AGENT_WORKFLOW_ROOT", "AGENT_HOME", "CLAUDE_HOME", "HOME")}
         self.addCleanup(self._restore)
 
     def _restore(self):
@@ -1006,8 +1001,7 @@ class TestSurveyLedgerRoot(unittest.TestCase):
                 os.environ[key] = value
 
     def test_default_ledger_root_uses_validated_agent_home(self):
-        for key in ("AGENT_WORKFLOW_ROOT", "AGENT_HOME", "CLAUDE_HOME",
-                    "AGENT_DISPATCH_JOBS"):
+        for key in ("AGENT_WORKFLOW_ROOT", "AGENT_HOME", "CLAUDE_HOME"):
             os.environ.pop(key, None)
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp)
@@ -1016,8 +1010,14 @@ class TestSurveyLedgerRoot(unittest.TestCase):
             os.environ["HOME"] = str(home)
             # Red before P3: the old fallback returned the utility checkout `ROOT`
             # (this repo's own worktree), never the real installed `agent_setting`.
-            self.assertEqual(WS.default_ledger_root(),
-                             home / "agent_setting" / ".dispatch" / "workflow")
+            # The expected root is derived through the same
+            # `resolve_dispatch_state_root(resolve_agent_home())` call
+            # `default_ledger_root()` makes (review N-4): a hardcoded
+            # `.../.dispatch` literal goes stale the moment `AGENT_DISPATCH_JOBS`
+            # is inherited (every registered worker's environment), since that
+            # env var -- not `agent_setting` -- then decides the state root.
+            expected = DC.resolve_dispatch_state_root(home / "agent_setting") / "workflow"
+            self.assertEqual(WS.default_ledger_root(), expected)
             self.assertNotEqual(WS.default_ledger_root(), WS.ROOT / ".dispatch" / "workflow")
 
     def test_agent_workflow_root_override_still_takes_precedence(self):
@@ -1047,8 +1047,15 @@ class TestSurvey(WorkflowFixture):
         self.assertFalse(top["armed"]["run"]["claimed_or_progressed"])
         self.assertIs(top["terminal_gate_proven"], False)
         self.assertEqual(payload["ledger_root"], str(self.workflow_root))
-        self.assertEqual(payload["completion_root"],
-                         str(self.agent_home / ".dispatch" / "completion"))
+        # Derived through the same resolve_dispatch_state_root(resolve_agent_home())
+        # call the survey command makes (review N-4): a hardcoded
+        # `self.agent_home / ".dispatch"` literal goes stale once
+        # AGENT_DISPATCH_JOBS is inherited, since that env var then wins over
+        # AGENT_HOME for the state root.
+        self.assertEqual(
+            payload["completion_root"],
+            str(DC.resolve_dispatch_state_root(self.agent_home) / "completion"),
+        )
 
     def test_survey_false_positive_matrix(self):
         # (a) an open human gate must never rank abandoned, even with an otherwise

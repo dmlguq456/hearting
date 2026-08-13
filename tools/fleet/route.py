@@ -449,11 +449,27 @@ def gate_mark(record, node_id, home=None, state_roots=None):
         "registered_worker": marker.get("registered_worker"),
         "fallback_hop": marker.get("fallback_hop"),
         "evidence_sha256": evidence.get("sha256"),
-        "completion_marker": path,
-        "completion_marker_history": history_path,
     }
     if any(link.get(key) != value for key, value in expected_link.items()):
         return None
+    # The two self-referential paths may be recorded in pointer or resolved
+    # spelling of the same directory (review Q-2, F-2 family); compare by
+    # resolved identity, not verbatim string, so a marker gate verdict does
+    # not flip depending on which spelling AGENT_HOME happens to be. This
+    # module stays stdlib-only (module docstring), so the comparison is
+    # inlined rather than importing dispatch_contract.agent_home_equivalent.
+    for key, value in (
+        ("completion_marker", path),
+        ("completion_marker_history", history_path),
+    ):
+        recorded = link.get(key)
+        if not isinstance(recorded, str):
+            return None
+        try:
+            if Path(recorded).resolve(strict=False) != Path(value).resolve(strict=False):
+                return None
+        except OSError:
+            return None
     return True
 
 

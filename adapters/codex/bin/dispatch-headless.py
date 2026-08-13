@@ -970,14 +970,19 @@ def nested_owner_writable_dirs(args: argparse.Namespace) -> tuple[Path, ...]:
 
 
 def route_bound_worker_writable_dirs(args: argparse.Namespace) -> tuple[Path, ...]:
-    """Grant set for an ordinary registered `dispatch_depth==2` Codex worker,
-    independent of the owner-only `nested_headless_network` gate (plan-check
-    round-1 Finding 1): a route-bound worker still runs the portable core-read
-    guard hook and must be able to record its own `.core-grounding` marker, the
-    same as `.spec-grounding` is already granted unconditionally below. A pure
+    """Grant set for the portable read-guard state directories.
+
+    Two launch shapes need them (review F-3): an ordinary registered
+    `dispatch_depth==2` Codex worker (plan-check round-1 Finding 1), and a
+    standard+ `nested_headless_network` owner launched without a `route_id` --
+    SD-72 grants the owner `.spec-grounding`/`.core-grounding` unconditionally,
+    so gating on `route_id` alone reopened the EROFS this cycle closes. A pure
     query -- see `ensure_owner_writable_dirs`."""
 
-    if not getattr(args, "route_id", None):
+    if not (
+        getattr(args, "route_id", None)
+        or getattr(args, "nested_headless_network", False)
+    ):
         return ()
     return tuple(
         path.resolve() for path in (_core_grounding_dir(args),) if path.is_dir()
@@ -993,7 +998,9 @@ def ensure_owner_writable_dirs(args: argparse.Namespace) -> None:
     to_create = []
     if getattr(args, "nested_headless_network", False):
         to_create.append(owner_root())
-    if getattr(args, "route_id", None):
+    if getattr(args, "route_id", None) or getattr(
+        args, "nested_headless_network", False
+    ):
         to_create.append(_spec_grounding_dir(args))
         to_create.append(_core_grounding_dir(args))
     for path in to_create:
@@ -1140,7 +1147,7 @@ def shell_command(args: argparse.Namespace, prompt_path: Path, log_path: Path) -
             ]
         for writable_dir in nested_owner_writable_dirs(args):
             command += ["--writable-root", str(writable_dir)]
-        if args.route_id:
+        if args.route_id or args.nested_headless_network:
             command += ["--writable-root", str(_spec_grounding_dir(args))]
         for writable_dir in route_bound_worker_writable_dirs(args):
             command += ["--writable-root", str(writable_dir)]
@@ -1178,9 +1185,11 @@ def shell_command(args: argparse.Namespace, prompt_path: Path, log_path: Path) -
         # Core read markers and Claude's Bash pre-exec snapshot are the only
         # home-scoped writes needed by a recursive standard+ Codex owner.
         cmd += ["--add-dir", str(writable_dir)]
-    if args.route_id:
+    if args.route_id or args.nested_headless_network:
         # SD-69: a route-bound worker needs the exact primary spec-grounding
-        # marker directory writable. Codex's workspace-write sandbox keeps
+        # marker directory writable (and SD-72 grants a standard+ owner the
+        # same directory unconditionally, route or not — review F-3).
+        # Codex's workspace-write sandbox keeps
         # .git/the resolved git-common-dir protected even under other
         # writable roots, so this is intentionally narrow — never all of
         # agent home, and never .git. Codex-only: the Claude wrapper commits
@@ -1696,18 +1705,6 @@ def resolve_agent_home() -> Path:
     return _resolve_agent_home(runtime_pointer=Path.home() / ".codex" / "hearting")
 
 
-def resolve_profile_home_root(args) -> Path:
-    """Profile instances are mutable dispatch state, not packaged source."""
-
-    agent_home = resolve_agent_home()
-    jobs = (
-        getattr(args, "jobs", None)
-        or os.environ.get("AGENT_DISPATCH_JOBS")
-        or agent_home / ".dispatch" / "jobs.log"
-    )
-    return dispatch_state_root(jobs) / "homes"
-
-
 def ensure_runtime_home_projection(worktree: Path) -> Path | None:
     """Expose the active Codex session store to Fleet without copying runtime state."""
     runtime_home = Path(os.environ.get("CODEX_HOME", "~/.codex")).expanduser().resolve()
@@ -2124,7 +2121,7 @@ def main(argv: list[str]) -> int:
         if rc != 0:
             return rc
         if args.profile:
-            home_root = resolve_profile_home_root(args)
+            home_root = resolve_agent_home() / ".dispatch" / "homes"
             build_home = resolve_agent_home() / "tools" / "profile" / "build-home.py"
             check_result = subprocess.run(
                 ["python3", str(build_home), args.profile, "--check"],

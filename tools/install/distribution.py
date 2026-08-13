@@ -201,27 +201,6 @@ def is_managed() -> bool:
     return bool(state and state.get("release_root") and state.get("version"))
 
 
-def managed_status() -> Optional[dict]:
-    """Return the validated managed-release identity for status surfaces.
-
-    Runtime projection manifests can predate a managed release activation and
-    therefore cannot identify the installed distribution version. Keep this
-    public view small and derive it from the same validated state that owns
-    install and update decisions.
-    """
-
-    state = _load_state()
-    if state is None:
-        return None
-    return {
-        "channel": "managed-release",
-        "version": state["version"],
-        "release_root": state["release_root"],
-        "runtimes": list(state["runtimes"]),
-        "pinned_version": state.get("pinned_version"),
-    }
-
-
 @contextlib.contextmanager
 def _distribution_lock():
     root = state_root()
@@ -813,6 +792,144 @@ def _write_distribution_state(value: dict) -> None:
     _atomic_json(state_path(), value)
 
 
+def _relative_to_release(value_path: Path, candidate: Path) -> Optional[Path]:
+    """Return `value_path`'s path relative to `candidate`, or None if it is
+    not actually nested under it.
+
+    Tries the literal (pointer-form) spelling first -- a chain-(3) writer
+    records its self-ref paths in AGENT_HOME's pointer form verbatim
+    (`dispatch_contract.resolve_agent_home`'s "stored/compared state paths
+    must keep pointer form"), and `candidate` here carries that same
+    spelling family. Falls back to a resolved-identity comparison
+    (`agent_home_equivalent`'s approach) for a sidecar recorded under a
+    different but equivalent spelling. `Path.relative_to` is a real
+    path-component match, not a string prefix -- unlike the `str.startswith`
+    this replaces, it cannot mistake `.../v0.9.1/...` for a path nested
+    under `.../v0.9` (review round-5 S-1).
+    """
+
+    try:
+        return value_path.relative_to(candidate)
+    except ValueError:
+        pass
+    try:
+        return value_path.resolve(strict=False).relative_to(candidate.resolve(strict=False))
+    except ValueError:
+        return None
+
+
+def _reanchor_succeeded_attempt_links(directory: Path, old_release: Path, new_release: Path) -> bool:
+    """Re-anchor a succeeded sidecar's self-referential paths (review Q-1).
+
+    A `<node>.<attempt>.attempt.json` sidecar records its own location
+    (`completion_marker`, `completion_marker_history`); readers verify that
+    identity, so a byte-for-byte copy at a new root evaluates as missing and
+    a same-attempt republish afterward hard-fails write_once's byte-identity
+    check. Mirrors utilities/capability-route.py's
+    `_rewrite_migrated_attempt_links` in effect -- same two keys, same
+    `json.dumps(..., indent=2, ensure_ascii=False) + "\\n"` serialization
+    (review N-5) -- so a republish comparing against a fresh write_once()
+    call sees identical bytes. Only these two keys are rewritten; everything
+    else, and the origin directory, stays untouched (design constraint 7).
+
+    Returns False if a sidecar could not be read or re-anchored so the
+    caller can withhold the candidate release from deletion instead of
+    treating a silently skipped or partially applied re-anchor as success
+    (review round-5 S-2).
+    """
+
+    ok = True
+    for link_path in directory.glob("*.attempt.json"):
+        try:
+            link = json.loads(link_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            ok = False
+            continue
+        changed = False
+        for key in ("completion_marker", "completion_marker_history"):
+            value = link.get(key)
+            if not isinstance(value, str):
+                continue
+            relative = _relative_to_release(Path(value), old_release)
+            if relative is not None:
+                link[key] = str(new_release / relative)
+                changed = True
+        if changed:
+            try:
+                link_path.write_text(
+                    json.dumps(link, indent=2, ensure_ascii=False) + "\n",
+                    encoding="utf-8",
+                )
+            except OSError:
+                ok = False
+    return ok
+
+
+def _succeed_dispatch_state(candidate: Path) -> bool:
+    """Carry a pruned release's `.dispatch` tree forward into the live
+    release before the candidate is deleted.
+
+    A process that never had `AGENT_DISPATCH_JOBS` in its environment
+    resolves dispatch state (registry, logs, supervisor-state, completion
+    markers) beneath whichever release `current` pointed at when it ran
+    (chain (3) in utilities/dispatch_contract.py). Rotation later retargets
+    `current` and this function's caller deletes the old release outright,
+    which would silently destroy that state -- exactly the loss
+    core/OPERATIONS.md P0 §5.12 says must never happen. Copying is
+    additive-only: anything already present under the live release's
+    `.dispatch` wins, so an in-progress writer on the live release can never
+    be clobbered by a stale copy.
+
+    Returns False if any file failed to copy, so the caller can leave the
+    candidate release in place instead of rmtree-ing state that was never
+    fully carried forward (review Q-6/P-3).
+    """
+
+    stale_dispatch = candidate / ".dispatch"
+    if not stale_dispatch.is_dir():
+        return True
+    try:
+        live_release = current_path().resolve(strict=True)
+    except OSError:
+        return False
+    if live_release == candidate:
+        return True
+    live_dispatch = live_release / ".dispatch"
+    touched_dirs: set[Path] = set()
+    ok = True
+    for source in stale_dispatch.rglob("*"):
+        if not source.is_file():
+            continue
+        destination = live_dispatch / source.relative_to(stale_dispatch)
+        if destination.exists():
+            continue
+        try:
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, destination)
+        except OSError:
+            ok = False
+            continue
+        touched_dirs.add(destination.parent)
+    # Review V-1: a retry pass copies nothing (every destination already
+    # exists), so re-anchor verification must not be derived from the copy
+    # set alone -- that let a first-pass failure (malformed or unwritable
+    # sidecar) turn into success on the next call and release the candidate
+    # for deletion while the live copy was still wrong. Re-inspect every
+    # destination directory that holds attempt links carried from this
+    # candidate: re-anchoring is idempotent for already-correct files, and a
+    # still-broken sidecar keeps the succession False until repaired.
+    for source in stale_dispatch.rglob("*.attempt.json"):
+        if not source.is_file():
+            continue
+        destination = live_dispatch / source.relative_to(stale_dispatch)
+        if destination.exists():
+            touched_dirs.add(destination.parent)
+    for directory in touched_dirs:
+        if not _reanchor_succeeded_attempt_links(directory, candidate, live_release):
+            ok = False
+    return ok
+
+
 def _cleanup_releases(keep: set[Path]) -> None:
     releases = data_root() / "releases"
     if not releases.is_dir() or releases.is_symlink():
@@ -826,6 +943,13 @@ def _cleanup_releases(keep: set[Path]) -> None:
     for candidate in candidates:
         if candidate in keep or retained < 2:
             retained += 1
+            continue
+        if not _succeed_dispatch_state(candidate):
+            print(
+                f"harness release: dispatch state carry-forward incomplete for "
+                f"{candidate}; keeping the release instead of deleting it",
+                file=sys.stderr,
+            )
             continue
         shutil.rmtree(candidate, ignore_errors=True)
 

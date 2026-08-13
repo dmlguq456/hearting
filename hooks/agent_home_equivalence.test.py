@@ -112,6 +112,15 @@ class AgentHomeEquivalenceTest(unittest.TestCase):
         self.assertEqual(shell, python)
         self.assertEqual(shell, str(dot_claude))
 
+    def test_bare_environment_with_no_marked_candidate_still_agrees(self) -> None:
+        """Review F-4: the previously missing matrix cell. When NO candidate
+        carries core/CORE.md the shell chain returns $HOME/.claude
+        unvalidated; the python chain used to return _MODULE_ROOT here, so the
+        two resolvers disagreed exactly where nothing else could catch it."""
+        shell, python = self._resolve_both({})
+        self.assertEqual(shell, python)
+        self.assertEqual(shell, str(self.home / ".claude"))
+
 
 if __name__ == "__main__":
     unittest.main()

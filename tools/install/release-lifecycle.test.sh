@@ -670,15 +670,13 @@ set -e
 
 HARNESS_REPOSITORY=other/harness HARNESS_VERSION=v-other "$INTEGRATION/assets/install.sh" --no-auto-update --json > "$INTEGRATION/install.json"
 "$HARNESS_BIN_DIR/harness" runtime doctor --runtime all --strict --json > "$INTEGRATION/doctor.json"
-"$HARNESS_BIN_DIR/harness" status --json > "$INTEGRATION/status.json"
 "$HARNESS_BIN_DIR/harness" update --json > "$INTEGRATION/update.json"
 
-python3 - "$INTEGRATION/install.json" "$INTEGRATION/doctor.json" "$INTEGRATION/status.json" "$INTEGRATION/update.json" <<'PY'
+python3 - "$INTEGRATION/install.json" "$INTEGRATION/doctor.json" "$INTEGRATION/update.json" <<'PY'
 import json, os, sys
 installed = json.load(open(sys.argv[1]))
 doctor = json.load(open(sys.argv[2]))
-status = json.load(open(sys.argv[3]))
-updated = json.load(open(sys.argv[4]))
+updated = json.load(open(sys.argv[3]))
 state = json.load(
     open(os.path.join(os.environ["XDG_STATE_HOME"], "hearting/distribution.json"))
 )
@@ -687,12 +685,6 @@ assert installed["version"] == "v0.0.0-integration"
 assert state["repository"] == "example/harness"
 assert set(installed["runtimes"]) == {"claude", "codex", "opencode"}
 assert doctor["exit"] == 0
-assert status["exit"] == 0 and status["channel"] == "managed-release"
-assert status["release"]["version"] == "v0.0.0-integration"
-assert all(
-    "channel=managed-release version=v0.0.0-integration" in check["detail"]
-    for check in status["checks"]
-)
 assert updated["release"]["status"] == "up-to-date"
 PY
 
@@ -769,3 +761,274 @@ assert marker_path.is_file(), "completion marker must survive release rotation"
 assert json.loads(marker_path.read_text())["route_id"] == "rt-rotation-fixture"
 PY
 echo "ok - dispatch state root content is unchanged across 3 release rotations"
+
+# N-3 regression (impl-review round 2): a process with no AGENT_DISPATCH_JOBS
+# resolves dispatch state under whichever release `current` pointed at when it
+# ran (chain (3)). The block above never exercises that chain -- it always has
+# AGENT_DISPATCH_JOBS set, so the state root sits outside releases/ from the
+# start and rotation was never the thing under test. This block clears that
+# var, writes chain-(3) state under a release that is about to be pruned, and
+# proves _cleanup_releases carries it into the surviving `current` release
+# instead of rmtree-ing it away.
+python3 - "$ROOT" <<'PY'
+import json, os, sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+sys.path.insert(0, str(root / "tools/install"))
+sys.path.insert(0, str(root / "utilities"))
+import distribution as d
+import dispatch_contract as dc
+
+os.environ.pop("AGENT_DISPATCH_JOBS", None)
+
+releases = d.data_root() / "releases"
+releases.mkdir(parents=True, exist_ok=True)
+
+import time
+future_base = time.time() + 20_000_000
+names = ("v-chain3-1", "v-chain3-2", "v-chain3-3", "v-chain3-4")
+release_dirs = []
+for i, name in enumerate(names):
+    rel = releases / name
+    (rel / "core").mkdir(parents=True)
+    (rel / "core" / "CORE.md").write_text("fixture\n")
+    os.utime(rel, (future_base + i, future_base + i))
+    release_dirs.append(rel)
+
+oldest, newest = release_dirs[0], release_dirs[3]
+
+# A session ran while `current` pointed at the release that is about to
+# rotate away, with no AGENT_DISPATCH_JOBS -- chain (3) puts its dispatch
+# state directly under that release.
+state_root_before = dc.resolve_dispatch_state_root(oldest)
+assert state_root_before == oldest / ".dispatch"
+completion_dir = state_root_before / "completion" / "rt-chain3-fixture"
+completion_dir.mkdir(parents=True)
+marker_path = completion_dir / "plan.json"
+marker_path.write_text(json.dumps({"schema_version": 2, "route_id": "rt-chain3-fixture"}))
+
+# Rotation: `current` now points at the newest release, and cleanup prunes
+# everything but the 2 most recent -- oldest is scheduled for deletion.
+if d.current_path().exists() or d.current_path().is_symlink():
+    d.current_path().unlink()
+d.current_path().symlink_to(newest)
+
+d._cleanup_releases(keep=set())
+
+assert not oldest.exists(), "oldest release should have been rmtree'd"
+migrated = newest / ".dispatch" / "completion" / "rt-chain3-fixture" / "plan.json"
+assert migrated.is_file(), (
+    "chain-(3) dispatch state must be carried into the live release before "
+    "the release holding it is pruned"
+)
+assert json.loads(migrated.read_text())["route_id"] == "rt-chain3-fixture"
+
+# And it must be reachable through the same derivation a later reader with
+# no AGENT_DISPATCH_JOBS would use, resolved via the now-current release.
+state_root_after = dc.resolve_dispatch_state_root(d.current_path().resolve())
+assert state_root_after == newest / ".dispatch"
+assert (state_root_after / "completion" / "rt-chain3-fixture" / "plan.json").is_file()
+PY
+echo "ok - chain-(3) dispatch state survives release rotation via _cleanup_releases succession"
+
+# T-2 regression (impl-review round-4 Q-6/P-3): if _succeed_dispatch_state
+# hits a copy failure partway through, _cleanup_releases must keep the
+# candidate release instead of rmtree-ing it -- losing the release directory
+# is recoverable (a repeat install fetches it again); silently losing
+# dispatch state that was never fully carried forward is not.
+python3 - "$ROOT" <<'PY'
+import contextlib, io, json, os, sys, time
+from pathlib import Path
+
+root = Path(sys.argv[1])
+sys.path.insert(0, str(root / "tools/install"))
+sys.path.insert(0, str(root / "utilities"))
+import distribution as d
+import dispatch_contract as dc
+
+os.environ.pop("AGENT_DISPATCH_JOBS", None)
+
+releases = d.data_root() / "releases"
+releases.mkdir(parents=True, exist_ok=True)
+
+future_base = time.time() + 30_000_000
+names = ("v-fail-1", "v-fail-2", "v-fail-3", "v-fail-4")
+release_dirs = []
+for i, name in enumerate(names):
+    rel = releases / name
+    (rel / "core").mkdir(parents=True)
+    (rel / "core" / "CORE.md").write_text("fixture\n")
+    os.utime(rel, (future_base + i, future_base + i))
+    release_dirs.append(rel)
+
+oldest, newest = release_dirs[0], release_dirs[3]
+
+# chain-(3) dispatch state on the release about to rotate away.
+state_root_before = dc.resolve_dispatch_state_root(oldest)
+completion_dir = state_root_before / "completion" / "rt-fail-fixture"
+completion_dir.mkdir(parents=True)
+marker_path = completion_dir / "plan.json"
+marker_path.write_text(json.dumps({"schema_version": 2, "route_id": "rt-fail-fixture"}))
+
+# Rotation retargets `current` to the newest release...
+if d.current_path().exists() or d.current_path().is_symlink():
+    d.current_path().unlink()
+d.current_path().symlink_to(newest)
+
+# ...but sabotage the copy destination: pre-create the live release's
+# .dispatch/completion as a plain FILE so mkdir(parents=True) for the
+# carried-forward completion dir raises OSError, forcing a partial-copy
+# failure.
+(newest / ".dispatch").mkdir(parents=True)
+(newest / ".dispatch" / "completion").write_text("not a directory\n")
+
+stderr_capture = io.StringIO()
+with contextlib.redirect_stderr(stderr_capture):
+    d._cleanup_releases(keep=set())
+
+assert oldest.exists(), (
+    "a release whose dispatch state failed to carry forward must not be "
+    "deleted -- the state would be lost silently"
+)
+assert marker_path.is_file(), "original marker must survive an incomplete carry-forward"
+diagnostic = stderr_capture.getvalue()
+assert "dispatch state carry-forward incomplete" in diagnostic, (
+    f"expected a carry-forward diagnostic on stderr, got: {diagnostic!r}"
+)
+assert str(oldest) in diagnostic
+PY
+echo "ok - _cleanup_releases keeps a release instead of deleting it when dispatch state carry-forward fails"
+
+# S-2 regression (round-5 review, anchor + codex legs): before the fix,
+# _reanchor_succeeded_attempt_links caught a malformed sidecar's json.loads()
+# failure with a bare `continue` that never touched `ok`, so
+# _succeed_dispatch_state still returned True and _cleanup_releases deleted
+# the only copy of the (unreanchored, still-malformed) state. The candidate
+# must now be preserved, exactly like the copy-failure case above.
+python3 - "$ROOT" <<'PY'
+import contextlib, io, json, os, sys, time
+from pathlib import Path
+
+root = Path(sys.argv[1])
+sys.path.insert(0, str(root / "tools/install"))
+sys.path.insert(0, str(root / "utilities"))
+import distribution as d
+import dispatch_contract as dc
+
+os.environ.pop("AGENT_DISPATCH_JOBS", None)
+
+releases = d.data_root() / "releases"
+releases.mkdir(parents=True, exist_ok=True)
+
+future_base = time.time() + 40_000_000
+names = ("v-malformed-1", "v-malformed-2", "v-malformed-3", "v-malformed-4")
+release_dirs = []
+for i, name in enumerate(names):
+    rel = releases / name
+    (rel / "core").mkdir(parents=True)
+    (rel / "core" / "CORE.md").write_text("fixture\n")
+    os.utime(rel, (future_base + i, future_base + i))
+    release_dirs.append(rel)
+
+oldest, newest = release_dirs[0], release_dirs[3]
+
+state_root_before = dc.resolve_dispatch_state_root(oldest)
+completion_dir = state_root_before / "completion" / "rt-malformed-fixture"
+completion_dir.mkdir(parents=True)
+marker_path = completion_dir / "plan.json"
+marker_path.write_text(json.dumps({"schema_version": 2, "route_id": "rt-malformed-fixture"}))
+# Same directory also holds an unrelated, truncated attempt sidecar --
+# the kind a crashed writer could leave behind.
+malformed_sidecar = completion_dir / "plan.att-malformed.attempt.json"
+malformed_sidecar.write_text("{not valid json")
+
+if d.current_path().exists() or d.current_path().is_symlink():
+    d.current_path().unlink()
+d.current_path().symlink_to(newest)
+
+stderr_capture = io.StringIO()
+with contextlib.redirect_stderr(stderr_capture):
+    d._cleanup_releases(keep=set())
+
+assert oldest.exists(), (
+    "a release whose sidecar could not be re-anchored must not be deleted "
+    "-- a malformed-JSON parse failure is not success"
+)
+assert marker_path.is_file(), "original marker must survive an unreanchored sidecar"
+assert malformed_sidecar.is_file(), "original malformed sidecar must survive too"
+diagnostic = stderr_capture.getvalue()
+assert "dispatch state carry-forward incomplete" in diagnostic, (
+    f"expected a carry-forward diagnostic on stderr, got: {diagnostic!r}"
+)
+assert str(oldest) in diagnostic
+PY
+echo "ok - _cleanup_releases keeps a release instead of deleting it when a migrated sidecar cannot be re-anchored (malformed JSON)"
+
+# S-2 regression (round-5 review, codex leg S-1): a re-anchor WRITE failure
+# (not just a read/parse failure) must also propagate to _succeed_dispatch_state
+# instead of letting the exception escape past _cleanup_releases's caller --
+# and, either way, must not cause the candidate release to be deleted.
+python3 - "$ROOT" <<'PY'
+import contextlib, io, json, os, sys, time
+from pathlib import Path
+
+root = Path(sys.argv[1])
+sys.path.insert(0, str(root / "tools/install"))
+sys.path.insert(0, str(root / "utilities"))
+import distribution as d
+import dispatch_contract as dc
+
+os.environ.pop("AGENT_DISPATCH_JOBS", None)
+
+releases = d.data_root() / "releases"
+releases.mkdir(parents=True, exist_ok=True)
+
+future_base = time.time() + 50_000_000
+names = ("v-reanchor-fail-1", "v-reanchor-fail-2", "v-reanchor-fail-3", "v-reanchor-fail-4")
+release_dirs = []
+for i, name in enumerate(names):
+    rel = releases / name
+    (rel / "core").mkdir(parents=True)
+    (rel / "core" / "CORE.md").write_text("fixture\n")
+    os.utime(rel, (future_base + i, future_base + i))
+    release_dirs.append(rel)
+
+oldest, newest = release_dirs[0], release_dirs[3]
+
+state_root_before = dc.resolve_dispatch_state_root(oldest)
+completion_dir = state_root_before / "completion" / "rt-reanchor-fail-fixture"
+completion_dir.mkdir(parents=True)
+sidecar = completion_dir / "plan.att-reanchor-fail.attempt.json"
+sidecar.write_text(json.dumps({
+    "schema_version": 2, "route_id": "rt-reanchor-fail-fixture",
+    "completion_marker": str(oldest / ".dispatch" / "completion"
+                              / "rt-reanchor-fail-fixture" / "plan.json"),
+}))
+# shutil.copy2 preserves the source file's mode bits at the destination, so
+# a read-only source sidecar becomes a read-only (un-writable) destination
+# sidecar -- the re-anchor write below must fail with PermissionError.
+os.chmod(sidecar, 0o444)
+
+if d.current_path().exists() or d.current_path().is_symlink():
+    d.current_path().unlink()
+d.current_path().symlink_to(newest)
+
+try:
+    stderr_capture = io.StringIO()
+    with contextlib.redirect_stderr(stderr_capture):
+        d._cleanup_releases(keep=set())
+finally:
+    os.chmod(sidecar, 0o644)
+
+assert oldest.exists(), (
+    "a release whose sidecar re-anchor write failed must not be deleted"
+)
+assert sidecar.is_file(), "original sidecar must survive an unwritable re-anchor destination"
+diagnostic = stderr_capture.getvalue()
+assert "dispatch state carry-forward incomplete" in diagnostic, (
+    f"expected a carry-forward diagnostic on stderr, got: {diagnostic!r}"
+)
+assert str(oldest) in diagnostic
+PY
+echo "ok - _cleanup_releases keeps a release instead of deleting it when a re-anchor write fails"
