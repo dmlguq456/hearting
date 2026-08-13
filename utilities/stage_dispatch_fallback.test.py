@@ -48,7 +48,8 @@ class FallbackTest(unittest.TestCase):
  def run_chain(self,path,*extra,seed=True,**envkw):
   if seed:self.seed_parent()
   cmd=[sys.executable,str(ROOT/"utilities/stage-dispatch-fallback.py"),"--route",str(path),"--node","plan","--slug","fallback-plan","--parent","owner","--capability-mode","dev","--worker-mode","plan/plan-author","--model-role","deep maker","--jobs",str(self.jobs),"--dry-run",*extra]
-  env={**os.environ,"AGENT_HOME":str(ROOT),"AGENT_ARTIFACT_ROOT":str(self.art),"AGENT_DISPATCH_JOBS":str(self.jobs),"AGENT_DISPATCH_SELF_SLUG":"owner",**envkw}
+  clean={k:v for k,v in os.environ.items() if not k.startswith("AGENT_DISPATCH_CURRENT_")}
+  env={**clean,"AGENT_HOME":str(ROOT),"AGENT_ARTIFACT_ROOT":str(self.art),"AGENT_MODEL_GOVERNOR_ROOT":str(self.art/".runtime/model-worker-governor"),"AGENT_DISPATCH_JOBS":str(self.jobs),"AGENT_DISPATCH_SELF_SLUG":"owner","AGENT_DISPATCH_ATTEMPT_ID":"att-fallback-parent",**envkw}
   return subprocess.run(cmd,text=True,capture_output=True,env=env)
  def run_register(self,path):
   self.seed_parent()
@@ -133,6 +134,29 @@ class FallbackTest(unittest.TestCase):
   path=self.route(); first=self.run_chain(path); second=self.run_chain(path)
   def attempt(out): return next(line.split("=",1)[1] for line in out.splitlines() if line.startswith("attempt_id="))
   self.assertEqual(attempt(first.stdout),attempt(second.stdout))
+ def test_attempt_identity_includes_exact_parent_generation(self):
+  route={"route_id":"rt-parent-generation"};node={"id":"plan"};row={"child_harness":"codex"}
+  one=SimpleNamespace(slug="stage",parent="owner",parent_attempt_id="att-parent-one")
+  two=SimpleNamespace(slug="stage",parent="owner",parent_attempt_id="att-parent-two")
+  self.assertEqual(F.attempt_identity(one,route,node,row,1),F.attempt_identity(one,route,node,row,1))
+  self.assertNotEqual(F.attempt_identity(one,route,node,row,1),F.attempt_identity(two,route,node,row,1))
+  self.assertNotEqual(
+   F.capacity_attempt_identity(one,route,node,row,1,"model-a"),
+   F.capacity_attempt_identity(two,route,node,row,1,"model-a"),
+  )
+ def test_legacy_parent_generation_conflict_is_typed_without_reusing_identity(self):
+  route={"route_id":"rt-parent-generation"};node={"id":"plan"};row={"child_harness":"codex"}
+  old=SimpleNamespace(slug="stage",parent="owner",parent_attempt_id="att-parent-old")
+  legacy=F.legacy_attempt_identity(old,route,node,row,1)
+  self.jobs.write_text(
+   "2026-08-13T00:00:00Z\tdone\t/repo\t/wt\tstage\t"
+   f"attempt_schema_version=2,attempt_id={legacy},parent_attempt_id=att-parent-old\n",
+   encoding="utf-8",
+  )
+  self.assertEqual(
+   F.legacy_parent_generation_conflict(self.jobs,legacy,"att-parent-new"),
+   "attempt-identity-parent-generation-conflict",
+  )
  def test_parallel_register_is_rejected_without_creating_a_row(self):
   path=self.route(); first=self.run_register(path); second=self.run_register(path)
   self.assertEqual(first.returncode,65,first.stdout+first.stderr)
@@ -180,7 +204,8 @@ class FallbackTest(unittest.TestCase):
  def run_node(self,path,node,action,*extra,**envkw):
   self.seed_parent()
   cmd=[sys.executable,str(ROOT/"utilities/stage-dispatch-fallback.py"),"--route",str(path),"--node",node,"--slug","fallback-"+node,"--parent","owner","--capability-mode","dev","--jobs",str(self.jobs),"--"+action,*extra]
-  env={**os.environ,"AGENT_HOME":str(ROOT),"AGENT_ARTIFACT_ROOT":str(self.art),"AGENT_DISPATCH_JOBS":str(self.jobs),"AGENT_DISPATCH_SELF_SLUG":"owner","AGENT_DISPATCH_ATTEMPT_ID":"att-fallback-parent",**envkw}
+  clean={k:v for k,v in os.environ.items() if not k.startswith("AGENT_DISPATCH_CURRENT_")}
+  env={**clean,"AGENT_HOME":str(ROOT),"AGENT_ARTIFACT_ROOT":str(self.art),"AGENT_MODEL_GOVERNOR_ROOT":str(self.art/".runtime/model-worker-governor"),"AGENT_DISPATCH_JOBS":str(self.jobs),"AGENT_DISPATCH_SELF_SLUG":"owner","AGENT_DISPATCH_ATTEMPT_ID":"att-fallback-parent",**envkw}
   return subprocess.run(cmd,text=True,capture_output=True,env=env)
  def hop(self,result):
   return next((line.split("=",1)[1] for line in result.stdout.splitlines()

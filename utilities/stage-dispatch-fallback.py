@@ -46,6 +46,7 @@ from dispatch_contract import (  # noqa: E402
     PRELAUNCH_PROCESS_BLOCK_REASONS,
     DispatchContractError,
     attempt_process_quiescence,
+    parse_registry_metadata,
     resolve_live_parent_attempt,
     validate_attempt_metadata,
 )
@@ -540,6 +541,7 @@ def attempt_identity(args: argparse.Namespace, route: dict, node: dict, row: dic
         "route_node": node["id"],
         "slug": args.slug,
         "parent": args.parent,
+        "parent_attempt_id": args.parent_attempt_id,
         "target_harness": row["child_harness"],
         "fallback_ordinal": ordinal,
     }
@@ -553,10 +555,93 @@ def capacity_attempt_identity(args, route, node, row, ordinal, model):
     payload = {
         "route_id": route["route_id"], "route_node": node["id"], "slug": args.slug,
         "parent": args.parent, "target_harness": row["child_harness"],
+        "parent_attempt_id": args.parent_attempt_id,
         "fallback_ordinal": ordinal, "capacity_retry": 1, "model": model,
     }
     digest = hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
     return "att-" + digest[:48]
+
+
+def legacy_attempt_identity(
+    args: argparse.Namespace, route: dict, node: dict, row: dict, ordinal: int
+) -> str:
+    """Return the pre-D-5 identity only for typed migration diagnostics."""
+
+    payload = {
+        "route_id": route["route_id"],
+        "route_node": node["id"],
+        "slug": args.slug,
+        "parent": args.parent,
+        "target_harness": row["child_harness"],
+        "fallback_ordinal": ordinal,
+    }
+    digest = hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    return "att-" + digest[:48]
+
+
+def legacy_parent_generation_conflict(
+    jobs: Path, legacy_attempt_id: str, parent_attempt_id: str
+) -> str:
+    """Name a legacy collision without treating it as a duplicate new start."""
+
+    latest = None
+    try:
+        lines = jobs.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return ""
+    for line in lines:
+        fields = line.split("\t")
+        if len(fields) != 6:
+            continue
+        metadata = parse_registry_metadata(fields[5])
+        if metadata.get("attempt_id") == legacy_attempt_id:
+            latest = metadata
+    if latest is not None and latest.get("parent_attempt_id") not in {
+        "",
+        parent_attempt_id,
+    }:
+        return "attempt-identity-parent-generation-conflict"
+    return ""
+
+
+def parent_attempt_generation(
+    jobs: Path, parent_slug: str, route: dict
+) -> str:
+    """Resolve only the exact parent generation; candidate axes stay separate."""
+
+    expected = os.environ.get("AGENT_DISPATCH_ATTEMPT_ID", "")
+    latest: dict[str, tuple[str, str, str, dict[str, str]]] = {}
+    try:
+        lines = jobs.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError as exc:
+        raise DispatchContractError("parent-attempt-not-found", str(exc)) from exc
+    for line in lines:
+        fields = line.split("\t")
+        if len(fields) != 6:
+            continue
+        metadata = parse_registry_metadata(fields[5])
+        attempt = metadata.get("attempt_id", "")
+        if attempt:
+            latest[attempt] = (fields[1], fields[3], fields[4], metadata)
+    candidates = []
+    for attempt, (status, worktree, slug, metadata) in latest.items():
+        if (
+            status in {"open", "running"}
+            and slug == parent_slug
+            and metadata.get("worker_type") == "owner"
+            and Path(worktree).resolve(strict=False)
+            == Path(str(route["cwd"])).resolve(strict=False)
+            and (not expected or attempt == expected)
+        ):
+            candidates.append(attempt)
+    if len(candidates) != 1:
+        raise DispatchContractError(
+            "parent-attempt-not-found" if not candidates else "parent-attempt-ambiguous",
+            parent_slug,
+        )
+    return candidates[0]
 
 
 def _adapter_models_conf(harness: str) -> dict[str, str]:
@@ -1034,6 +1119,13 @@ def main() -> int:
         parent_identity = DISPATCH_NODE.current_parent_identity()
     except DISPATCH_NODE.DispatchNodeError as exc:
         return fail(exc.reason, 73, child_spawned="0", **exc.fields)
+    try:
+        args.parent_attempt_id = parent_attempt_generation(
+            args.jobs, args.parent, route
+        )
+    except DispatchContractError as exc:
+        reason = exc.reason
+        return fail(reason, 73, child_spawned="0")
 
     prior_failures = registry_failures(args.jobs, route["route_id"], node["id"])
     failed_tuples = set(args.failed_tuple) | set(prior_failures)
@@ -1117,6 +1209,15 @@ def main() -> int:
                     failed_tuples.add(key)
                     continue
                 attempt_id = attempt_identity(args, route, node, row, ordinal)
+                legacy_reason = legacy_parent_generation_conflict(
+                    args.jobs,
+                    legacy_attempt_identity(args, route, node, row, ordinal),
+                    args.parent_attempt_id,
+                )
+                if legacy_reason:
+                    attempts.append(
+                        f"{ordinal}:{key}:legacy:{legacy_reason}"
+                    )
                 try:
                     command = wrapper_command(args, route, node, row, ordinal, attempt_id)
                     result = subprocess.run(

@@ -24,7 +24,33 @@ SPEC = importlib.util.spec_from_file_location("dispatch_batch", PATH)
 BATCH = importlib.util.module_from_spec(SPEC)
 assert SPEC.loader is not None
 SPEC.loader.exec_module(BATCH)
-from dispatch_contract import process_launch_identity
+from dispatch_contract import (
+    DispatchContractError,
+    process_launch_identity,
+    validate_dispatch_log_dir,
+)
+
+
+class BatchLogDirAdmissionTest(unittest.TestCase):
+    def test_omitted_and_state_root_log_dirs_are_admitted(self):
+        with tempfile.TemporaryDirectory() as td:
+            jobs = Path(td) / "dispatch" / "jobs.log"
+            self.assertEqual(
+                validate_dispatch_log_dir(jobs, None), jobs.parent / "logs"
+            )
+            self.assertEqual(
+                validate_dispatch_log_dir(jobs, jobs.parent / "nested" / "logs"),
+                jobs.parent / "nested" / "logs",
+            )
+
+    def test_artifact_log_dir_is_rejected_before_creation(self):
+        with tempfile.TemporaryDirectory() as td:
+            jobs = Path(td) / "dispatch" / "jobs.log"
+            outside = Path(td) / "artifacts" / "dispatch-logs"
+            with self.assertRaises(DispatchContractError) as caught:
+                validate_dispatch_log_dir(jobs, outside)
+            self.assertEqual(caught.exception.reason, "log-dir-outside-dispatch-state-root")
+            self.assertFalse(outside.exists())
 
 
 def candidate(adapter: str, hop: str, ordinal: int) -> dict[str, object]:

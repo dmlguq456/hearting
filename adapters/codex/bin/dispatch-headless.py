@@ -417,7 +417,6 @@ def validate_interactive_parent_launch(args: argparse.Namespace) -> None:
         and args.execution_surface == "registered-headless"
         and bool(args.registered_worker)
         and bool(args.parent_session_id)
-        and os.environ.get("AGENT_DISPATCH_CHILD") != "1"
     )
     if not (
         direct_registered
