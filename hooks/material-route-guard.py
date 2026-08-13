@@ -115,6 +115,11 @@ DENIAL = (
 )
 RECALL_RECEIPT_SCHEMA = 1
 RECALL_RECEIPT_MAX_AGE_SECONDS = 24 * 60 * 60
+# Upper bound for receipt result_ids. Must track mem.py CANDIDATE_MAX_RESULTS:
+# when the probe was widened from 3 to 6 candidates, this guard kept rejecting
+# every explicit-recall receipt as results-invalid, forcing skip-receipt
+# workarounds that defeat the recall evidence this proof exists to carry.
+RECALL_RECEIPT_MAX_RESULTS = 6
 
 
 class RouteError(RuntimeError):
@@ -701,7 +706,8 @@ def require_recall_opportunity(session_id: str, turn_id: str, root: Path) -> Non
     if expected_turn and not actual_turn and source == "candidate-probe":
         raise RouteError("recall-opportunity-turn-missing")
     result_ids = receipt.get("result_ids")
-    if (not isinstance(result_ids, list) or len(result_ids) > 3
+    if (not isinstance(result_ids, list)
+            or len(result_ids) > RECALL_RECEIPT_MAX_RESULTS
             or not all(isinstance(item, str) for item in result_ids)):
         raise RouteError("recall-opportunity-results-invalid")
     result_count = receipt.get("result_count")
