@@ -88,6 +88,69 @@ class CapacityPolicyTests(unittest.TestCase):
         self.assertEqual(C.ordering_score({}, "opencode"), 50.0)
         self.assertEqual(C.ordering_score({"opencode": 73}, "opencode"), 73.0)
 
+    def test_balanced_gate_demotes_used_percent_at_or_above_ninety(self):
+        ranked = C.rank_band(
+            ["claude", "codex"], self.states, {"claude": 0, "codex": 1},
+            ["claude", "codex"], {"claude": 5, "codex": 80},
+            strategy="balanced", usage_gate_used_percent=90,
+        )
+        self.assertEqual(ranked, ["codex", "claude"])
+
+    def test_balanced_bias_cannot_lift_a_gated_harness_over_an_ungated_one(self):
+        # Asymmetric, non-round headroom and counts: a unit inversion (percent
+        # vs. headroom) or a naive post-sort "move bias to front" override
+        # would both happen to pass with tidy round numbers, so this uses
+        # uneven values and an uneven count tiebreak (codex has far more
+        # recent attempts yet must still rank first) to make either bug show.
+        states = {**self.states, "claude": "ok", "codex": "ok"}
+        counts = {"claude": 1, "codex": 9}
+        scores = {"claude": 7.5, "codex": 63.2}  # claude 92.5% used (gated), codex 36.8% used (ungated)
+        with mock.patch.dict(os.environ, {"HARNESS_CAPACITY_BIAS": "claude"}):
+            biased = C.rank_band(
+                ["claude", "codex"], states, counts, ["claude", "codex"], scores,
+                strategy="balanced", usage_gate_used_percent=90,
+            )
+        unbiased = C.rank_band(
+            ["claude", "codex"], states, counts, ["claude", "codex"], scores,
+            strategy="balanced", usage_gate_used_percent=90,
+        )
+        self.assertEqual(biased, ["codex", "claude"])
+        self.assertEqual(biased, unbiased)
+
+    def test_balanced_bias_still_reorders_within_the_gated_class(self):
+        # The fix must not neuter bias entirely: within a single gate class it
+        # should still move the biased harness to the front, same as before.
+        states = {**self.states, "claude": "ok", "codex": "ok"}
+        counts = {"claude": 4, "codex": 1}
+        scores = {"claude": 9.0, "codex": 4.5}  # both gated (>= 90% used)
+        unbiased = C.rank_band(
+            ["claude", "codex"], states, counts, ["claude", "codex"], scores,
+            strategy="balanced", usage_gate_used_percent=90,
+        )
+        with mock.patch.dict(os.environ, {"HARNESS_CAPACITY_BIAS": "codex"}):
+            biased = C.rank_band(
+                ["claude", "codex"], states, counts, ["claude", "codex"], scores,
+                strategy="balanced", usage_gate_used_percent=90,
+            )
+        self.assertEqual(unbiased, ["claude", "codex"])
+        self.assertEqual(biased, ["codex", "claude"])
+
+    def test_balanced_all_gated_uses_maximum_headroom(self):
+        ranked = C.rank_band(
+            ["claude", "codex", "opencode"], self.states,
+            {"claude": 0, "codex": 0, "opencode": 0}, C.HARNESSES,
+            {"claude": 9, "codex": 4, "opencode": 1}, strategy="balanced",
+        )
+        self.assertEqual(ranked, ["claude", "codex", "opencode"])
+
+    def test_balanced_unknown_gauge_is_optimistic_pass(self):
+        ranked = C.rank_band(
+            ["claude", "codex"], self.states, {"claude": 3, "codex": 0},
+            ["claude", "codex"], {"claude": 10, "codex": None},
+            strategy="balanced",
+        )
+        self.assertEqual(ranked, ["codex", "claude"])
+
 
 class CodexGaugeReaderTests(unittest.TestCase):
     """The codex gauge must not starve on idle: live probe first, rollout second.

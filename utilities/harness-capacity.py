@@ -194,7 +194,7 @@ def ordering_score(scores, harness, neutral=ORDERING_NEUTRAL_SCORE):
     return float(neutral) if value is None else float(value)
 
 
-def rank_band(candidates, states, counts, declared_order, scores):
+def rank_band(candidates, states, counts, declared_order, scores, *, strategy="capacity-aware", usage_gate_used_percent=90):
     """Rank eligible quality peers by headroom, then recent attempts and config order.
 
     Answers *eligibility*, not ordering: see `ordering_score` for the batch's
@@ -202,6 +202,50 @@ def rank_band(candidates, states, counts, declared_order, scores):
     Do not harmonise the two — an unknown gauge is exclusion here and neutral
     there, deliberately.
     """
+    if strategy == "balanced":
+        cutoff = 100.0 - float(usage_gate_used_percent)
+        candidates = [
+            name for name in candidates
+            if not _limited(states.get(name, "unknown"))
+        ]
+        order = {name: index for index, name in enumerate(declared_order)}
+        known = [scores.get(name) is not None for name in candidates]
+        all_gated = bool(candidates) and all(
+            value is not None and float(value) <= cutoff
+            for value in (scores.get(name) for name in candidates)
+        )
+        if all_gated:
+            key = lambda name: (-float(scores[name]), int(counts.get(name, 0)), order.get(name, len(order)))
+        else:
+            key = lambda name: (
+                1 if scores.get(name) is not None and float(scores[name]) <= cutoff else 0,
+                int(counts.get(name, 0)),
+                order.get(name, len(order)),
+            )
+        ranked = sorted(candidates, key=key)
+        bias = os.environ.get("HARNESS_CAPACITY_BIAS", "").strip().lower()
+        if bias in ranked:
+            if all_gated:
+                # Single gate class: no boundary to protect, free reorder as before.
+                ranked = [bias] + [name for name in ranked if name != bias]
+            else:
+                # Balanced-only constraint: bias may reorder within its own gate
+                # class but must never lift a gated harness above an ungated one
+                # (or vice versa) — that would defeat the usage gate.
+                gated_of = lambda name: (
+                    scores.get(name) is not None and float(scores[name]) <= cutoff
+                )
+                bias_gated = gated_of(bias)
+                bias_group = [name for name in ranked if gated_of(name) == bias_gated]
+                other_group = [name for name in ranked if gated_of(name) != bias_gated]
+                reordered_bias_group = [bias] + [name for name in bias_group if name != bias]
+                ranked = (
+                    (other_group + reordered_bias_group)
+                    if bias_gated
+                    else (reordered_bias_group + other_group)
+                )
+        return ranked
+
     # Automatic recovery needs positive evidence of fresh headroom.  Treating
     # an absent/stale gauge as a neutral 50 silently redirected owners to a
     # user-exhausted harness during the 2026-08-10 incident.
@@ -227,10 +271,13 @@ def rank_band(candidates, states, counts, declared_order, scores):
     return ranked
 
 
-def select(policy, states, counts, declared_order, scores):
+def select(policy, states, counts, declared_order, scores, *, strategy="capacity-aware", usage_gate_used_percent=90):
     """Select one harness without allowing capacity to erase quality boundaries."""
     ranks = {
-        band: rank_band(policy.get(band, []), states, counts, declared_order, scores)
+        band: rank_band(
+            policy.get(band, []), states, counts, declared_order, scores,
+            strategy=strategy, usage_gate_used_percent=usage_gate_used_percent,
+        )
         for band in ("primary", "relief", "last_resort")
     }
     threshold = int(policy.get("promote_relief_below", 0))

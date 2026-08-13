@@ -823,21 +823,28 @@ def verify_route(route, expected_cwd=None, *, allow_stale_registry=False):
         raise ValueError("bare route dispatch-depth fields are forbidden")
     allocation = route.get("dispatch_allocation")
     if allocation is not None:
-        if not isinstance(allocation, dict) or set(allocation) != {
+        if not isinstance(allocation, dict) or set(allocation) not in ({
             "strategy", "window", "harness_order"
-        }:
+        }, {
+            "strategy", "window", "usage_gate_used_percent", "harness_order"
+        }):
             raise ValueError("invalid dispatch_allocation shape")
         if allocation.get("strategy") not in {
-            "config-order", "least-recent-attempts", "capacity-aware"
+            "config-order", "least-recent-attempts", "capacity-aware", "balanced"
         }:
             raise ValueError("invalid dispatch_allocation strategy")
         window = allocation.get("window")
         if (
             not isinstance(window, int)
             or window < 0
-            or (allocation["strategy"] in {"least-recent-attempts", "capacity-aware"} and window < 3)
+            or (allocation["strategy"] in {"least-recent-attempts", "capacity-aware", "balanced"} and window < 3)
         ):
             raise ValueError("invalid dispatch_allocation window")
+        gate = allocation.get("usage_gate_used_percent", 90)
+        if "usage_gate_used_percent" in allocation and (
+            not isinstance(gate, int) or not 0 <= gate <= 100
+        ):
+            raise ValueError("invalid dispatch_allocation usage gate")
         order = allocation.get("harness_order")
         if (
             not isinstance(order, list)

@@ -308,6 +308,7 @@ def _audit(
     if allocation:
         lines.append(f"allocation_strategy={allocation['strategy']}")
         lines.append(f"allocation_window={allocation['window']}")
+        lines.append(f"usage_gate_used_percent={allocation.get('usage_gate_used_percent', 90)}")
     for harness in _allocation.HARNESSES:
         if counts is not None:
             lines.append(f"attempt_count.{harness}={counts.get(harness, 0)}")
@@ -387,7 +388,7 @@ def main(argv):
         )
         counts = (
             _allocation.attempt_counts(jobs, window=allocation["window"])
-            if allocation["strategy"] in {_allocation.STRATEGY, "capacity-aware"}
+            if allocation["strategy"] in {_allocation.STRATEGY, "capacity-aware", "balanced"}
             else {harness: 0 for harness in _allocation.HARNESSES}
         )
 
@@ -417,10 +418,12 @@ def main(argv):
             selected, source, quality_band = explicit, "explicit", "explicit"
         if selected is None and config_version == 3:
             selected, quality_band, _ranks, relief_promoted = _capacity.select(
-                policy, states, counts, allocation["harness_order"], capacity
+                policy, states, counts, allocation["harness_order"], capacity,
+                strategy=allocation["strategy"],
+                usage_gate_used_percent=allocation.get("usage_gate_used_percent", 90),
             )
             if selected:
-                source = "configured-capacity-aware"
+                source = "configured-" + allocation["strategy"]
         if selected is None and config_version != 3:
             for harness in ranked(configured):
                 if automatically_available(harness):

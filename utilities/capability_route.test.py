@@ -562,6 +562,24 @@ class TestRoute(unittest.TestCase):
    route=self._standard()
   with dispatch_defaults_config(DD_CONFIG_B):
    R.verify_route(route,R.ROOT)
+ def test_verify_accepts_legacy_three_key_allocation_and_defaults_gate(self):
+  with dispatch_defaults_config(DD_CONFIG_A):
+   route=self._standard()
+  legacy=json.loads(json.dumps(route))
+  legacy["dispatch_allocation"].pop("usage_gate_used_percent",None)
+  legacy["route_hash"]=R.route_hash(legacy)
+  legacy["route_id"]="rt-"+legacy["route_hash"].split(":",1)[1][:16]
+  R.verify_route(legacy,R.ROOT)
+
+ def test_verify_rejects_short_balanced_window(self):
+  with dispatch_defaults_config(DD_CONFIG_A):
+   route=self._standard()
+  route["dispatch_allocation"]={
+   "strategy":"balanced", "window":2, "harness_order":["claude","codex"]}
+  route["route_hash"]=R.route_hash(route)
+  route["route_id"]="rt-"+route["route_hash"].split(":",1)[1][:16]
+  with self.assertRaisesRegex(ValueError,"invalid dispatch_allocation window"):
+   R.verify_route(route,R.ROOT)
  def test_seal_backcompat_old_route_without_fields(self):
   with dispatch_defaults_config(DD_CONFIG_A):
    route=self._standard()

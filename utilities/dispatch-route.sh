@@ -94,7 +94,7 @@ if [ -z "$choose" ]; then
   case "$config_affinity" in
     claude|codex) choose=$config_affinity;;
     diverse)
-      if [ "$allocation_strategy" = least-recent-attempts ] || [ "$allocation_strategy" = capacity-aware ]; then
+      if [ "$allocation_strategy" = least-recent-attempts ] || [ "$allocation_strategy" = capacity-aware ] || [ "$allocation_strategy" = balanced ]; then
         pool=
         old_ifs=$IFS; IFS=,
         for candidate in $allocation_order; do
@@ -129,7 +129,7 @@ case "$choose" in claude|codex|opencode) ;; *) echo 'dispatch-route: no known ca
 rejected=; fallback=
 if ! eligible "$choose"; then
   s=$(state "$choose"); rejected="$choose:usage-$s"
-  if [ "$allocation_strategy" = least-recent-attempts ] || [ "$allocation_strategy" = capacity-aware ]; then
+  if [ "$allocation_strategy" = least-recent-attempts ] || [ "$allocation_strategy" = capacity-aware ] || [ "$allocation_strategy" = balanced ]; then
     fallback_pool=
     old_ifs=$IFS; IFS=,
     for candidate in $allocation_order; do
@@ -176,6 +176,6 @@ echo "status=$mapped_status"; echo "adapter=$choose"; echo "family=$mapped_famil
 [ -z "$fallback" ] || echo "fallback.1=$fallback"
 echo "trace.1=explicit=${adapter:-none};family=${family:-none};eligibility=usage-$(state "$choose")"
 echo "trace.2=affinity=$affinity;maker_family=${maker_family:-unknown};required=${required:-none};bias=${bias:-unknown}"
-if [ "$allocation_strategy" = least-recent-attempts ] || [ "$allocation_strategy" = capacity-aware ]; then
+if [ "$allocation_strategy" = least-recent-attempts ] || [ "$allocation_strategy" = capacity-aware ] || [ "$allocation_strategy" = balanced ]; then
   allocation_rank "$allocation_order" | sed 's/^rank=/allocation_rank=/'
 fi

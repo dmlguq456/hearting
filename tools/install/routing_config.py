@@ -47,15 +47,16 @@ def render(enabled) -> str:
         light = profile in {"light", "mini"}
         lines += [
             f"  {profile}:",
-            f"    primary: {inline(peers)}",
-            f"    relief: {inline(opencode if light else [])}",
+            f"    primary: {inline(peers + opencode if light else peers)}",
+            f"    relief: {inline([])}",
             f"    last_resort: {inline([] if light else opencode)}",
-            f"    promote_relief_below: {35 if light and opencode else 0}",
+            f"    promote_relief_below: 0",
         ]
     lines += [
         "allocation:",
-        "  strategy: capacity-aware",
+        "  strategy: balanced",
         "  window: 30",
+        "  usage_gate_used_percent: 90",
         # Omitted cells inherit the shipped profiles/dispatch-defaults.yaml
         # capability baseline; a cell written here always wins over it.
         "capabilities:",
@@ -87,7 +88,7 @@ def validate() -> dict:
     if not path.is_file():
         return {"status": "missing", "ok": False, "path": str(path), "detail": "not initialized"}
     result = subprocess.run(
-        [sys.executable, str(paths.agent_home() / "utilities" / "dispatch-defaults.py"),
+        [sys.executable, str(Path(__file__).resolve().parents[2] / "utilities" / "dispatch-defaults.py"),
          "validate", "--config", str(path)],
         text=True,
         capture_output=True,
