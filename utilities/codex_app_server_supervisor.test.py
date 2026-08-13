@@ -97,6 +97,13 @@ class CodexAppServerSupervisorTest(unittest.TestCase):
                         finally:
                             os.close(lease_fd)
                         state_path = os.environ.get('AGENT_DISPATCH_COMPLETION_STATE_FILE')
+                        if '--failure-detail' in prompt:
+                            with open(state_path, encoding='utf-8') as h:
+                                state_value = json.load(h)
+                            state_value.pop('outbox', None)
+                            state_value['phase'] = 'running-turn'
+                            with open(state_path, 'w', encoding='utf-8') as h:
+                                json.dump(state_value, h)
                         with open(state_path, encoding='utf-8') as h:
                             delivered = json.load(h)['delivered_attempt_ids']
                         record('turn-start', turn=turns, prompt=prompt, delivered=delivered,
@@ -135,6 +142,14 @@ class CodexAppServerSupervisorTest(unittest.TestCase):
                         text = ('runtime_wait: registered-children' if dry_first and turns <= 2
                                 else 'artifact: -\\nverdict: PASS\\nblocker: none'
                                 if turns > 1 or final_first else 'runtime_wait: registered-children')
+                        if os.environ.get('FAKE_BREAK_STATE_AUDIT') == '1':
+                            state_path = os.environ['AGENT_DISPATCH_COMPLETION_STATE_FILE']
+                            audit = state_path + '.transitions.jsonl'
+                            try:
+                                os.unlink(audit)
+                            except FileNotFoundError:
+                                pass
+                            os.mkdir(audit)
                         send({'jsonrpc':'2.0','method':'item/completed','params':{
                             'threadId':'thread-1','turnId':turn_id,'completedAtMs':1,
                             'item':{'type':'agentMessage','id':f'msg-{turns}','text':text,
@@ -153,17 +168,21 @@ class CodexAppServerSupervisorTest(unittest.TestCase):
                 jobs = sys.argv[sys.argv.index('--jobs') + 1]
                 parent = sys.argv[sys.argv.index('--parent-attempt-id') + 1]
                 attempts = [sys.argv[i + 1] for i, value in enumerate(sys.argv) if value == '--attempt-id']
-                def record(event):
+                def record(event, **extra):
                     with open(trace, 'a', encoding='utf-8') as h:
-                        h.write(json.dumps({'event':event,'time':time.monotonic()}) + '\\n')
-                record('join-start')
+                        h.write(json.dumps({'event':event,'time':time.monotonic(), **extra}) + '\\n')
+                state_path = os.path.join(os.path.dirname(trace), 'supervisor-state.json')
+                with open(state_path, encoding='utf-8') as state_handle:
+                    phase = json.load(state_handle)['phase']
+                record('join-start', phase=phase)
                 time.sleep(0.2)
                 with open(jobs, 'a', encoding='utf-8') as h:
                     for attempt in attempts:
                         h.write('2026-07-23T00:00:01Z\\tdone\\t/repo\\t/wt\\tchild\\t'
                                 'attempt_schema_version=2,dispatch_depth=2,transport=headless,'
                                 'execution_surface=registered-headless,registered_worker=1,'
-                                f'attempt_id={attempt},parent_attempt_id={parent}\\n')
+                                f'attempt_id={attempt},parent_attempt_id={parent},'
+                                'failure_class=pass,note=completed-supervisor\\n')
                 record('join-end')
                 print(json.dumps({'schema_version':2,'state':'ready','parent_attempt_id':parent,
                     'children':[{'attempt_id':attempt,'status':'done','readiness':'ready',
@@ -220,6 +239,7 @@ class CodexAppServerSupervisorTest(unittest.TestCase):
         )
         self.assertLess(trace[1]["time"], trace[2]["time"])
         self.assertLessEqual(trace[2]["time"], trace[3]["time"])
+        self.assertEqual(trace[1]["phase"], "parked")
         rows = [json.loads(line) for line in result.stdout.splitlines()]
         self.assertEqual(sum(row.get("type") == "turn.completed" for row in rows), 1)
         self.assertEqual(
@@ -287,6 +307,17 @@ class CodexAppServerSupervisorTest(unittest.TestCase):
         )
         self.assertFalse(self.state.exists())
         self.assertFalse(self.lease.exists())
+
+    def test_terminal_state_write_failure_does_not_replace_classified_exit(self):
+        self.jobs.write_text(owner_row(self.lease), encoding="utf-8")
+        result = self.run_supervisor(
+            FAKE_NO_CHILD="1", FAKE_BREAK_STATE_AUDIT="1"
+        )
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertIn(
+            "supervisor-finalize-state-JoinContractError",
+            result.stdout,
+        )
 
     def test_empty_runtime_wait_retries_start_in_same_thread_before_join(self):
         self.jobs.write_text(owner_row(self.lease), encoding="utf-8")
@@ -513,7 +544,7 @@ class CodexAppServerSupervisorTest(unittest.TestCase):
             timeout=10,
         )
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("owned-children-remain-open-after-resume", result.stdout + result.stderr)
+        self.assertIn("continuation-limit-exceeded", result.stdout + result.stderr)
         registry = self.jobs.read_text(encoding="utf-8")
         self.assertIn("\topen\t", registry)
 

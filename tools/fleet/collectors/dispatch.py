@@ -34,10 +34,13 @@ _ROOT = next(
 )
 sys.path.insert(0, str(_ROOT / "utilities"))
 from dispatch_contract import (  # noqa: E402
+    dispatch_state_root,
     dispatch_state_roots,
     observed_attempt_liveness,
+    observed_supervised_owner_liveness,
     resolve_agent_home,
 )
+from dispatch_completion_join import read_supervisor_phase_state  # noqa: E402
 from codex_dispatch_terminal import terminal_envelope_observed  # noqa: E402
 
 from .. import model
@@ -734,14 +737,37 @@ def _dispatch_liveness(job, now, track=True, codex_index=None):
         and job.attempt_contract_status == "current"
         and job.registered_worker is True
     ):
-        common_observation = observed_attempt_liveness(
-            job.status,
-            registry_metadata,
-            terminal_envelope=(
-                bool(terminal_observation)
-                or terminal_envelope_observed(getattr(job, "_log_file", None))
-            ),
+        terminal_seen = bool(terminal_observation) or terminal_envelope_observed(
+            getattr(job, "_log_file", None)
         )
+        registry_path = getattr(job, "_registry_path", None)
+        phase = ""
+        if (
+            registry_path
+            and job.dispatch_depth == 1
+            and job.worker_type == "owner"
+            and job.attempt_id
+        ):
+            state = read_supervisor_phase_state(
+                dispatch_state_root(registry_path)
+                / "supervisor-state"
+                / f"{job.attempt_id}.json",
+                job.attempt_id,
+            )
+            phase = state.phase if state is not None else ""
+            common_observation = observed_supervised_owner_liveness(
+                registry_path,
+                job.status,
+                registry_metadata,
+                supervisor_phase=phase,
+                terminal_envelope=terminal_seen,
+            )
+        else:
+            common_observation = observed_attempt_liveness(
+                job.status,
+                registry_metadata,
+                terminal_envelope=terminal_seen,
+            )
     ev_in = {
         "source": job.source,
         "key": job.key,
@@ -805,6 +831,9 @@ def _dispatch_liveness(job, now, track=True, codex_index=None):
     if common_observation and common_observation.state == "reconcile-needed":
         job.stage = "reconcile-needed"
         job.note = "reconcile-needed"
+    elif common_observation and common_observation.state == "parked-supervised":
+        job.stage = "parked-supervised"
+        job.note = "parked-supervised"
     return state
 
 

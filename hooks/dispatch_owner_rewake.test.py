@@ -115,6 +115,11 @@ class DispatchOwnerRewakeTest(unittest.TestCase):
     def test_receipt_forbids_visible_monitor_rearming(self) -> None:
         launch = rewake.parse_launch(self.payload())
         assert launch is not None
+        self.jobs.write_text(
+            "2026-08-06T00:00:00Z\tdone\t/repo\t/wt\towner\t"
+            "attempt_schema_version=2,attempt_id=att-owner-1,failure_class=pass\n",
+            encoding="utf-8",
+        )
         message = rewake.receipt(launch, "ready", "terminal-quiescent", self.root)
         self.assertIn("attempt_id=att-owner-1", message)
         self.assertIn("Do not start or re-arm Background Bash", message)
@@ -127,7 +132,7 @@ class DispatchOwnerRewakeTest(unittest.TestCase):
         assert launch is not None
         self.jobs.write_text(
             "2026-08-06T00:00:00Z\tdone\t/repo\t/wt\towner\t"
-            "attempt_id=att-owner-1,note=dead-worker-fail\n",
+            "attempt_schema_version=2,attempt_id=att-owner-1,note=dead-worker-fail\n",
             encoding="utf-8",
         )
         message = rewake.receipt(
@@ -138,6 +143,19 @@ class DispatchOwnerRewakeTest(unittest.TestCase):
             "harvest --attempt-id att-owner-1 --status done --failure-detail",
             message,
         )
+
+    def test_stale_ready_snapshot_uses_current_done_failure_action(self) -> None:
+        launch = rewake.parse_launch(self.payload())
+        assert launch is not None
+        self.jobs.write_text(
+            "2026-08-06T00:00:00Z\tdone\t/repo\t/wt\towner\t"
+            "attempt_schema_version=2,attempt_id=att-owner-1,note=dead-worker-fail\n",
+            encoding="utf-8",
+        )
+        message = rewake.receipt(launch, "ready", "terminal-quiescent", self.root)
+        self.assertIn("reason=row-advanced", message)
+        self.assertIn("required_action=inspect-done-failure", message)
+        self.assertNotIn("--status open", message)
 
     def test_unrelated_hook_payload_is_a_silent_noop(self) -> None:
         payload = self.payload(tool_name="Read")

@@ -25,9 +25,11 @@ from dispatch_contract import (  # noqa: E402
 )
 from codex_dispatch_terminal import inspect_terminal_attempt  # noqa: E402
 from dispatch_completion_join import (  # noqa: E402
+    consume_supervisor_outbox_attempts,
     consume_parent_session_attempt,
     JoinContractError,
     parent_session_state_path,
+    read_supervisor_phase_state,
     required_action_for_attempt,
     route_completion_evidence,
 )
@@ -190,6 +192,46 @@ def mark_native_stop_harvest(jobs: Path, attempt_id: str) -> bool:
         return False
 
 
+def default_runtime_jobs(environ: dict[str, str] | os._Environ[str]) -> Path:
+    """Return the Codex runtime registry, never the packaged source root."""
+
+    codex_home = Path(environ.get("CODEX_HOME") or Path.home() / ".codex")
+    return codex_home.expanduser() / ".harness" / "dispatch" / "jobs.log"
+
+
+def consume_supervised_harvest(
+    args: argparse.Namespace,
+    *,
+    matched: int,
+    marked_done: int,
+) -> bool:
+    """Acknowledge one outbox action only after its harvest succeeded."""
+
+    state_file = os.environ.get("AGENT_DISPATCH_COMPLETION_STATE_FILE", "")
+    parent_attempt = os.environ.get("AGENT_DISPATCH_ATTEMPT_ID", "")
+    if not state_file or not parent_attempt or not args.attempt_id:
+        return True
+    state = read_supervisor_phase_state(Path(state_file), parent_attempt)
+    if (
+        state is None
+        or state.outbox is None
+        or args.attempt_id not in state.outbox.attempt_ids
+        or args.attempt_id in state.outbox.consumed_attempt_ids
+    ):
+        return True
+    succeeded = (args.mark_done and marked_done == 1) or (
+        args.failure_detail and matched == 1
+    )
+    if not succeeded:
+        return False
+    try:
+        return consume_supervisor_outbox_attempts(
+            Path(state_file), parent_attempt, {args.attempt_id}
+        )
+    except JoinContractError:
+        return False
+
+
 def main(argv: list[str]) -> int:
     args = parser().parse_args(argv[1:])
     if args.mark_done and not (args.slug or args.attempt_id or args.worktree):
@@ -200,7 +242,7 @@ def main(argv: list[str]) -> int:
 
     agent_home = resolve_agent_home()
     jobs_override = args.jobs or os.environ.get("AGENT_DISPATCH_JOBS")
-    jobs = Path(jobs_override) if jobs_override else resolve_dispatch_state_root(agent_home) / "jobs.log"
+    jobs = Path(jobs_override) if jobs_override else default_runtime_jobs(os.environ)
     args.reconciled = 0
     if args.reconcile_local:
         try:
@@ -302,6 +344,13 @@ def main(argv: list[str]) -> int:
                 if home.exists():
                     shutil.rmtree(home, ignore_errors=True)
 
+
+    if not consume_supervised_harvest(
+        args, matched=len(rows), marked_done=marked_done
+    ):
+        print("check=failed")
+        print("reason=supervisor-outbox-consume-failed")
+        return 70
 
     emit_header(args, jobs, len(rows), marked_done, malformed)
     for fields in rows:

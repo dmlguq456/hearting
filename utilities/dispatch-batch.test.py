@@ -24,7 +24,33 @@ SPEC = importlib.util.spec_from_file_location("dispatch_batch", PATH)
 BATCH = importlib.util.module_from_spec(SPEC)
 assert SPEC.loader is not None
 SPEC.loader.exec_module(BATCH)
-from dispatch_contract import process_launch_identity
+from dispatch_contract import (
+    DispatchContractError,
+    process_launch_identity,
+    validate_dispatch_log_dir,
+)
+
+
+class BatchLogDirAdmissionTest(unittest.TestCase):
+    def test_omitted_and_state_root_log_dirs_are_admitted(self):
+        with tempfile.TemporaryDirectory() as td:
+            jobs = Path(td) / "dispatch" / "jobs.log"
+            self.assertEqual(
+                validate_dispatch_log_dir(jobs, None), jobs.parent / "logs"
+            )
+            self.assertEqual(
+                validate_dispatch_log_dir(jobs, jobs.parent / "nested" / "logs"),
+                jobs.parent / "nested" / "logs",
+            )
+
+    def test_artifact_log_dir_is_rejected_before_creation(self):
+        with tempfile.TemporaryDirectory() as td:
+            jobs = Path(td) / "dispatch" / "jobs.log"
+            outside = Path(td) / "artifacts" / "dispatch-logs"
+            with self.assertRaises(DispatchContractError) as caught:
+                validate_dispatch_log_dir(jobs, outside)
+            self.assertEqual(caught.exception.reason, "log-dir-outside-dispatch-state-root")
+            self.assertFalse(outside.exists())
 
 
 def candidate(adapter: str, hop: str, ordinal: int) -> dict[str, object]:
@@ -170,6 +196,11 @@ def success_receipt(command: list[str], *, started: str = "1", duplicate: str = 
 
 class DispatchBatchTest(unittest.TestCase):
     def setUp(self) -> None:
+        governor_env = mock.patch.dict(
+            os.environ, {"AGENT_MODEL_GOVERNOR_ROOT": ""}
+        )
+        governor_env.start()
+        self.addCleanup(governor_env.stop)
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.base = Path(self.temp.name)
@@ -1785,20 +1816,46 @@ class DispatchBatchIntegrationTest(unittest.TestCase):
                 if row.get("event") == "start" and row.get("node") in plan_nodes
             ))
 
-            status = subprocess.run(
-                [
-                    sys.executable, str(ROOT / "utilities" / "model-worker-governor.py"),
-                    "--root", str(governor_root), "status",
-                ],
-                text=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                check=False,
-            )
-            self.assertEqual(status.returncode, 0, status.stdout + status.stderr)
-            governor = json.loads(status.stdout)
-            self.assertEqual(governor["leases"], {})
-            self.assertEqual(governor["reservations"], {})
+            # Lease/reservation release is asynchronous with wrapper exit, so a
+            # bounded poll keeps the drained-governor assertion deterministic.
+            deadline = time.monotonic() + 30
+            while True:
+                status = subprocess.run(
+                    [
+                        sys.executable, str(ROOT / "utilities" / "model-worker-governor.py"),
+                        "--root", str(governor_root), "status",
+                    ],
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    check=False,
+                )
+                self.assertEqual(status.returncode, 0, status.stdout + status.stderr)
+                governor = json.loads(status.stdout)
+                if not governor["leases"] and not governor["reservations"]:
+                    break
+                if time.monotonic() >= deadline:
+                    self.assertEqual(governor["leases"], {})
+                    self.assertEqual(governor["reservations"], {})
+                time.sleep(0.2)
+
+            # Post-exit watchers detach from the wrapper and may still write
+            # under the fixture; wait for every recorded watcher to exit so
+            # TemporaryDirectory cleanup does not race a live writer.
+            watcher_pids = set()
+            for line in jobs.read_text(encoding="utf-8").splitlines():
+                for token in line.replace("\t", ",").split(","):
+                    if token.startswith(("orphan_watch_pid=", "reap_watch_pid=")):
+                        value = token.split("=", 1)[1]
+                        if value.isdigit():
+                            watcher_pids.add(int(value))
+            deadline = time.monotonic() + 30
+            while watcher_pids and time.monotonic() < deadline:
+                watcher_pids = {
+                    pid for pid in watcher_pids if Path(f"/proc/{pid}").exists()
+                }
+                if watcher_pids:
+                    time.sleep(0.2)
 
 
 if __name__ == "__main__":

@@ -12,12 +12,17 @@ import time
 
 from dispatch_contract import (
     SUPERVISOR_LEASE_KIND,
+    dispatch_state_root,
+    observed_supervised_owner_liveness,
     parse_registry_metadata,
     process_start_ticks,
     remove_supervisor_lease,
     supervisor_lease_path,
 )
-from dispatch_completion_join import remove_supervisor_state
+from dispatch_completion_join import (
+    read_supervisor_phase_state,
+    remove_supervisor_state,
+)
 from dispatch_supervisor_terminal import (
     classify_supervisor_log,
     reconcile_supervisor_terminal,
@@ -71,9 +76,9 @@ def _run_registry(operation: str, args) -> subprocess.CompletedProcess:
 
 def _remove_supervisor_state(args) -> None:
     if re.fullmatch(r"att-[A-Za-z0-9._-]{1,240}", args.attempt_id):
+        state_root = dispatch_state_root(args.jobs)
         remove_supervisor_state(
-            args.agent_home
-            / ".dispatch"
+            state_root
             / "supervisor-state"
             / f"{args.attempt_id}.json"
         )
@@ -84,6 +89,28 @@ def _remove_supervisor_state(args) -> None:
             and metadata.get("supervisor_lease_file") == str(lease)
         ):
             remove_supervisor_lease(lease)
+
+
+def observed_owner_lifecycle(args):
+    """Return the shared exact owner verdict plus its durable phase."""
+
+    status, metadata = attempt_record(args.jobs, args.attempt_id)
+    if status is None:
+        return None, "", metadata
+    state = read_supervisor_phase_state(
+        dispatch_state_root(args.jobs)
+        / "supervisor-state"
+        / f"{args.attempt_id}.json",
+        args.attempt_id,
+    )
+    phase = state.phase if state is not None else ""
+    observed = observed_supervised_owner_liveness(
+        args.jobs,
+        status,
+        metadata,
+        supervisor_phase=phase,
+    )
+    return observed, phase, metadata
 
 
 def reconcile_orphan_cascade(args) -> int:
@@ -141,6 +168,10 @@ def watch(args) -> int:
             # row already typed dead-parent-orphaned.
             return reconcile_orphan_cascade(args) if status == "done" else 0
         if process_start(args.pid) != args.pid_start:
+            observed, _phase, _metadata = observed_owner_lifecycle(args)
+            if observed is not None and observed.state == "parked-supervised":
+                time.sleep(args.interval)
+                continue
             break
         time.sleep(args.interval)
     return reconcile_exact_exit(args)

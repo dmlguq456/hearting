@@ -10,6 +10,7 @@ import hashlib
 import json
 import os
 import re
+import secrets
 import signal
 import shlex
 import shutil
@@ -36,6 +37,7 @@ from dispatch_contract import (  # noqa: E402
     completion_marker_gate,
     dispatch_state_root,
     PRELAUNCH_PROCESS_BLOCK_REASONS,
+    SUPERVISOR_LEASE_KIND,
     ensure_global_registry_writable,
     headless_attempt_policy,
     launch_orphan_watch,
@@ -50,6 +52,7 @@ from dispatch_contract import (  # noqa: E402
     replica_batch_expectation,
     reserve_governor_token,
     spawn_claimed_attempt,
+    supervisor_lease_path,
     validate_nested_eligibility,
     wait_governor_reservation_claim,
 )
@@ -864,6 +867,12 @@ def completion_state_path(args: argparse.Namespace) -> Path:
     return state_root / "supervisor-state" / f"{attempt_id}.json"
 
 
+def completion_lease_path(args: argparse.Namespace) -> Path:
+    if not args.attempt_id:
+        return dispatch_state_root(args.jobs_path) / "supervisor-state" / "preview-only.lease"
+    return supervisor_lease_path(args.jobs_path, args.attempt_id)
+
+
 def shell_command(args: argparse.Namespace, prompt_path: Path, log_path: Path) -> str:
     if getattr(args, "resolved_completion_delivery", "one-shot") == "session-resume-supervised":
         command = [
@@ -873,6 +882,7 @@ def shell_command(args: argparse.Namespace, prompt_path: Path, log_path: Path) -
             "--jobs", str(args.jobs_path),
             "--parent-attempt-id", args.attempt_id or "unassigned",
             "--state-file", str(completion_state_path(args)),
+            "--lease-file", str(completion_lease_path(args)),
             "--add-dir", str(args.artifact_root),
         ]
         if getattr(args, "report_bundle_root", None) is not None:
@@ -1036,6 +1046,12 @@ def append_job(jobs: Path, args: argparse.Namespace) -> bool:
     )
     pipe += f",async_wait_policy={_async_wait_policy(args)}"
     pipe += f",completion_delivery={args.resolved_completion_delivery}"
+    if args.resolved_completion_delivery == "session-resume-supervised":
+        pipe += (
+            f",supervisor_lease={SUPERVISOR_LEASE_KIND}"
+            f",supervisor_lease_file={completion_lease_path(args)}"
+            f",supervisor_lease_nonce={secrets.token_hex(32)}"
+        )
     pipe += (
         f",parent_completion_delivery={args.parent_completion_delivery}"
         f",parent_completion_reason={args.parent_completion_reason}"
@@ -1680,6 +1696,7 @@ def main(argv: list[str]) -> int:
         args.resolved_completion_delivery = resolve_completion_delivery(args)
         if args.resolved_completion_delivery == "session-resume-supervised":
             completion_state_path(args)
+            completion_lease_path(args)
     except DispatchContractError as e:
         return fail(e.reason, 69, detail=e.detail, child_spawned="0")
     log_dir = (
@@ -1881,8 +1898,12 @@ def main(argv: list[str]) -> int:
             env["AGENT_DISPATCH_COMPLETION_STATE_FILE"] = str(
                 completion_state_path(args)
             )
+            env["AGENT_DISPATCH_SUPERVISOR_LEASE_FILE"] = str(
+                completion_lease_path(args)
+            )
         else:
             env.pop("AGENT_DISPATCH_COMPLETION_STATE_FILE", None)
+            env.pop("AGENT_DISPATCH_SUPERVISOR_LEASE_FILE", None)
         launch_parent_completion_sidecar(args, jobs)
         if args.managed_sidecar_state == "launch-failed":
             annotate_attempt_row(

@@ -33,12 +33,14 @@ assert _SPEC.loader is not None
 _SPEC.loader.exec_module(supervisor)
 
 
-def owner_row(status: str = "open") -> str:
+def owner_row(lease: Path, status: str = "open") -> str:
     return (
         f"2026-07-23T00:00:00Z\t{status}\t/repo\t/wt\towner\t"
         "attempt_schema_version=2,dispatch_depth=1,transport=headless,"
         "execution_surface=registered-headless,registered_worker=1,"
         "fallback_hop=same-harness-headless,worker_type=owner,harness=claude,"
+        "completion_delivery=session-resume-supervised,supervisor_lease=flock-v1,"
+        f"supervisor_lease_file={lease},supervisor_lease_nonce={'c' * 64},"
         f"attempt_id={PARENT}\n"
     )
 
@@ -63,6 +65,7 @@ class ClaudeSessionSupervisorTest(unittest.TestCase):
         self.artifact_root.mkdir()
         self.jobs = self.base / "jobs.log"
         self.state = self.base / "supervisor-state.json"
+        self.lease = self.base / "supervisor-state" / f"{PARENT}.lease"
         self.trace = self.base / "trace.jsonl"
         self.claude = self.base / "fake_claude.py"
         self.join = self.base / "fake_join.py"
@@ -76,6 +79,13 @@ class ClaudeSessionSupervisorTest(unittest.TestCase):
                 session = args[args.index(key) + 1]
                 prompt = sys.stdin.read()
                 state_path = os.environ['AGENT_DISPATCH_COMPLETION_STATE_FILE']
+                if '--failure-detail' in prompt:
+                    with open(state_path, encoding='utf-8') as state_handle:
+                        state_value = json.load(state_handle)
+                    state_value.pop('outbox', None)
+                    state_value['phase'] = 'running-turn'
+                    with open(state_path, 'w', encoding='utf-8') as state_handle:
+                        json.dump(state_value, state_handle)
                 with open(state_path, encoding='utf-8') as state_handle:
                     delivered = json.load(state_handle)['delivered_attempt_ids']
                 with open(os.environ['FAKE_TRACE'], 'a', encoding='utf-8') as h:
@@ -94,6 +104,13 @@ class ClaudeSessionSupervisorTest(unittest.TestCase):
                 text = ('runtime_wait: registered-children' if dry_first and not delivered
                         else 'artifact: -\\nverdict: PASS\\nblocker: none'
                         if resume or final_first else 'runtime_wait: registered-children')
+                if os.environ.get('FAKE_BREAK_STATE_AUDIT') == '1':
+                    audit = state_path + '.transitions.jsonl'
+                    try:
+                        os.unlink(audit)
+                    except FileNotFoundError:
+                        pass
+                    os.mkdir(audit)
                 print(json.dumps({'type':'system','subtype':'init',
                                   'private':'RAW_PARENT_CONTEXT_SENTINEL'}))
                 print(json.dumps({'type':'result','subtype':'success','is_error':False,
@@ -118,7 +135,8 @@ class ClaudeSessionSupervisorTest(unittest.TestCase):
                         h.write('2026-07-23T00:00:01Z\\tdone\\t/repo\\t/wt\\tchild\\t'
                                 'attempt_schema_version=2,dispatch_depth=2,transport=headless,'
                                 'execution_surface=registered-headless,registered_worker=1,'
-                                f'attempt_id={attempt},parent_attempt_id={parent}\\n')
+                                f'attempt_id={attempt},parent_attempt_id={parent},'
+                                'failure_class=pass,note=completed-supervisor\\n')
                 with open(trace, 'a', encoding='utf-8') as h:
                     h.write(json.dumps({'event':'join-end','time':time.monotonic()}) + '\\n')
                 print(json.dumps({'schema_version':2,'state':'ready','parent_attempt_id':parent,
@@ -137,6 +155,7 @@ class ClaudeSessionSupervisorTest(unittest.TestCase):
             "--jobs", str(self.jobs),
             "--parent-attempt-id", PARENT,
             "--state-file", str(self.state),
+            "--lease-file", str(self.lease),
             "--add-dir", str(self.base),
             "--claude-command", f"{sys.executable} {claude or self.claude}",
             "--join-command", f"{sys.executable} {self.join}",
@@ -156,7 +175,7 @@ class ClaudeSessionSupervisorTest(unittest.TestCase):
         )
 
     def test_resume_uses_same_session_once_after_join(self):
-        self.jobs.write_text(owner_row() + child_row(), encoding="utf-8")
+        self.jobs.write_text(owner_row(self.lease) + child_row(), encoding="utf-8")
         result = self.run_supervisor()
         self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
         trace = [json.loads(line) for line in self.trace.read_text().splitlines()]
@@ -217,7 +236,7 @@ class ClaudeSessionSupervisorTest(unittest.TestCase):
         text at all — so supervised owners rendered in Fleet with no title and no
         NOW line for their entire run.
         """
-        self.jobs.write_text(owner_row() + child_row(), encoding="utf-8")
+        self.jobs.write_text(owner_row(self.lease) + child_row(), encoding="utf-8")
         result = self.run_supervisor()
         self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
         rows = [json.loads(line) for line in result.stdout.splitlines()]
@@ -242,7 +261,7 @@ class ClaudeSessionSupervisorTest(unittest.TestCase):
         self.assertEqual(sum(row.get("type") == "result" for row in rows), 1)
 
     def test_no_child_finishes_without_resume(self):
-        self.jobs.write_text(owner_row(), encoding="utf-8")
+        self.jobs.write_text(owner_row(self.lease), encoding="utf-8")
         result = self.run_supervisor(FAKE_NO_CHILD="1")
         self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
         trace = [json.loads(line) for line in self.trace.read_text().splitlines()]
@@ -251,7 +270,7 @@ class ClaudeSessionSupervisorTest(unittest.TestCase):
         self.assertFalse(self.state.exists())
 
     def test_empty_runtime_wait_retries_start_in_same_session_before_join(self):
-        self.jobs.write_text(owner_row(), encoding="utf-8")
+        self.jobs.write_text(owner_row(self.lease), encoding="utf-8")
         result = self.run_supervisor(
             FAKE_DRY_RUN_FIRST="1", FAKE_JOBS=str(self.jobs)
         )
@@ -304,7 +323,7 @@ class ClaudeSessionSupervisorTest(unittest.TestCase):
             ),
             encoding="utf-8",
         )
-        self.jobs.write_text(owner_row(), encoding="utf-8")
+        self.jobs.write_text(owner_row(self.lease), encoding="utf-8")
         command = self.command(long_claude) + [
             "--route-file", str(route),
             "--route-id", route_value["route_id"],
@@ -332,7 +351,7 @@ class ClaudeSessionSupervisorTest(unittest.TestCase):
 
     def test_codex_child_uses_same_claude_resume_adapter(self):
         self.jobs.write_text(
-            owner_row() + child_row(harness="codex"), encoding="utf-8"
+            owner_row(self.lease) + child_row(harness="codex"), encoding="utf-8"
         )
         result = self.run_supervisor()
         self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
@@ -396,7 +415,7 @@ class ClaudeSessionSupervisorTest(unittest.TestCase):
     def test_missing_result_has_no_false_terminal(self):
         broken = self.base / "broken.py"
         broken.write_text("print('not-json')\n", encoding="utf-8")
-        self.jobs.write_text(owner_row(), encoding="utf-8")
+        self.jobs.write_text(owner_row(self.lease), encoding="utf-8")
         result = subprocess.run(
             self.command(broken),
             input="initial assignment",
@@ -421,7 +440,7 @@ class ClaudeSessionSupervisorTest(unittest.TestCase):
             "'result':\"You've reached your Fable 5 limit; resets later\"}))\n",
             encoding="utf-8",
         )
-        self.jobs.write_text(owner_row(), encoding="utf-8")
+        self.jobs.write_text(owner_row(self.lease), encoding="utf-8")
         result = subprocess.run(
             self.command(limited),
             input="initial assignment",
@@ -446,7 +465,7 @@ class ClaudeSessionSupervisorTest(unittest.TestCase):
             "'result':'Unauthorized after rate limit check'}))\n",
             encoding="utf-8",
         )
-        self.jobs.write_text(owner_row(), encoding="utf-8")
+        self.jobs.write_text(owner_row(self.lease), encoding="utf-8")
         result = subprocess.run(
             self.command(denied),
             input="initial assignment",
@@ -483,6 +502,128 @@ class ClaudeSessionSupervisorTest(unittest.TestCase):
         )
         return script
 
+    def _timeout_then_ready_join(self, timeouts: int) -> Path:
+        """A join fake that reports `timeout` for the first N calls, then
+        `ready` — reproduces the S-1 owner ordinal-4 timeout incident so the
+        supervisor's repark loop can be exercised without a real 3600s wait."""
+        counter = self.base / "join_calls.count"
+        counter.write_text("0", encoding="utf-8")
+        script = self.base / "fake_join_timeout.py"
+        script.write_text(
+            textwrap.dedent(
+                f"""\
+                import json, os, sys, time
+                trace = os.environ['FAKE_TRACE']
+                counter_path = {str(counter)!r}
+                jobs = sys.argv[sys.argv.index('--jobs') + 1]
+                parent = sys.argv[sys.argv.index('--parent-attempt-id') + 1]
+                attempts = [sys.argv[i + 1] for i, value in enumerate(sys.argv) if value == '--attempt-id']
+                calls = int(open(counter_path, encoding='utf-8').read())
+                calls += 1
+                state_path = os.path.join(os.path.dirname(trace), 'supervisor-state.json')
+                with open(state_path, encoding='utf-8') as state_handle:
+                    phase = json.load(state_handle)['phase']
+                with open(counter_path, 'w', encoding='utf-8') as h:
+                    h.write(str(calls))
+                with open(trace, 'a', encoding='utf-8') as h:
+                    h.write(json.dumps({{'event': 'join-call', 'time': time.monotonic(),
+                                         'ordinal': calls, 'phase': phase}}) + '\\n')
+                if calls <= {timeouts}:
+                    print(json.dumps({{'schema_version': 2, 'state': 'timeout',
+                        'parent_attempt_id': parent,
+                        'children': [{{'attempt_id': attempt, 'status': 'open',
+                                       'readiness': 'pending', 'reason': 'process-alive',
+                                       'required_action': 'complete-open'}} for attempt in attempts]}}))
+                else:
+                    with open(jobs, 'a', encoding='utf-8') as h:
+                        for attempt in attempts:
+                            h.write('2026-07-23T00:00:01Z\\tdone\\t/repo\\t/wt\\tchild\\t'
+                                    'attempt_schema_version=2,dispatch_depth=2,transport=headless,'
+                                    'execution_surface=registered-headless,registered_worker=1,'
+                                    f'attempt_id={{attempt}},parent_attempt_id={{parent}},'
+                                    'failure_class=pass,note=completed-supervisor\\n')
+                    print(json.dumps({{'schema_version': 2, 'state': 'ready',
+                        'parent_attempt_id': parent,
+                        'children': [{{'attempt_id': attempt, 'status': 'done',
+                                       'readiness': 'ready', 'reason': 'registry-closed',
+                                       'required_action': 'advance-completed'}} for attempt in attempts]}}))
+                """
+            ),
+            encoding="utf-8",
+        )
+        return script
+
+    def test_join_timeout_reparks_without_model_turn_or_continuation_spend(self):
+        self.jobs.write_text(owner_row(self.lease) + child_row(), encoding="utf-8")
+        join_script = self._timeout_then_ready_join(timeouts=2)
+        result = subprocess.run(
+            self.command_with_join(join_script),
+            input="initial assignment",
+            text=True,
+            capture_output=True,
+            env={**os.environ, "FAKE_TRACE": str(self.trace)},
+            timeout=10,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        trace = [json.loads(line) for line in self.trace.read_text().splitlines()]
+        turn_starts = [row for row in trace if row["event"] == "turn-start"]
+        join_calls = [row for row in trace if row["event"] == "join-call"]
+        # Two internal timeouts must be reparked in place: exactly one initial
+        # turn and one resume turn total, never a per-timeout model turn.
+        self.assertEqual(len(turn_starts), 2, trace)
+        self.assertFalse(turn_starts[0]["resume"])
+        self.assertTrue(turn_starts[1]["resume"])
+        # The join itself is retried across the timeouts until it resolves.
+        self.assertEqual(len(join_calls), 3, trace)
+        self.assertTrue(all(row["phase"] == "parked" for row in join_calls), trace)
+        # A timeout receipt must never be folded into the delivered set that
+        # is handed to the model — only the eventual `ready` receipt is.
+        self.assertEqual(turn_starts[1]["delivered"], ["att-child"])
+        rows = [json.loads(line) for line in result.stdout.splitlines()]
+        self.assertEqual(sum(row.get("type") == "result" for row in rows), 1)
+        control = [
+            json.loads(line)
+            for line in result.stdout.splitlines()
+            if json.loads(line).get("type", "").startswith("dispatch.supervisor")
+        ]
+        reparked = [row for row in control if row["type"] == "dispatch.supervisor.reparked"]
+        self.assertEqual(len(reparked), 2, control)
+        self.assertEqual([row["repark_ordinal"] for row in reparked], [1, 2])
+
+    def test_terminal_state_write_failure_does_not_replace_classified_exit(self):
+        self.jobs.write_text(owner_row(self.lease), encoding="utf-8")
+        result = self.run_supervisor(
+            FAKE_NO_CHILD="1", FAKE_BREAK_STATE_AUDIT="1"
+        )
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertIn(
+            "supervisor-finalize-state-JoinContractError",
+            result.stdout,
+        )
+
+    def test_join_timeout_repark_bound_trips_without_spurious_model_turn(self):
+        self.jobs.write_text(owner_row(self.lease) + child_row(), encoding="utf-8")
+        # More timeouts than --max-join-reparks allows: the supervisor must
+        # fail closed via the repark bound, never by silently delivering a
+        # timeout receipt to the model as if it were actionable.
+        join_script = self._timeout_then_ready_join(timeouts=10)
+        cmd = self.command_with_join(join_script)
+        idx = cmd.index("--join-timeout")
+        cmd[idx + 1] = "0.05"
+        result = subprocess.run(
+            cmd + ["--max-join-reparks", "2"],
+            input="initial assignment",
+            text=True,
+            capture_output=True,
+            env={**os.environ, "FAKE_TRACE": str(self.trace)},
+            timeout=10,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("join-timeout-repark-exceeded", result.stdout + result.stderr)
+        trace = [json.loads(line) for line in self.trace.read_text().splitlines()]
+        turn_starts = [row for row in trace if row["event"] == "turn-start"]
+        self.assertEqual(len(turn_starts), 1, trace)
+
     def _blocked_child_row(self) -> str:
         log = self.base / "att-child.claude.jsonl"
         artifact = self.artifact_root / "brief.md"
@@ -514,7 +655,7 @@ class ClaudeSessionSupervisorTest(unittest.TestCase):
         return cmd
 
     def test_blocked_child_reconciles_without_owned_children_error(self):
-        self.jobs.write_text(owner_row() + self._blocked_child_row(), encoding="utf-8")
+        self.jobs.write_text(owner_row(self.lease) + self._blocked_child_row(), encoding="utf-8")
         join_script = self._non_closing_join()
         result = subprocess.run(
             self.command_with_join(join_script),
@@ -564,7 +705,7 @@ class ClaudeSessionSupervisorTest(unittest.TestCase):
             f"log_file={log},artifact_root={self.artifact_root},"
             f"route_file={route},route_node=frame\n"
         )
-        self.jobs.write_text(owner_row() + row, encoding="utf-8")
+        self.jobs.write_text(owner_row(self.lease) + row, encoding="utf-8")
         join_script = self._non_closing_join()
         result = subprocess.run(
             self.command_with_join(join_script)
@@ -576,7 +717,7 @@ class ClaudeSessionSupervisorTest(unittest.TestCase):
             timeout=10,
         )
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("owned-children-remain-open-after-resume", result.stdout + result.stderr)
+        self.assertIn("continuation-limit-exceeded", result.stdout + result.stderr)
         registry = self.jobs.read_text(encoding="utf-8")
         self.assertIn("\topen\t", registry)
 

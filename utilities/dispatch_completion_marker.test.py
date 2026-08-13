@@ -7,10 +7,13 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "utilities"))
+import dispatch_contract as D
 spec = importlib.util.spec_from_file_location("route", ROOT / "utilities/capability-route.py")
 ROUTE = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(ROUTE)
@@ -809,6 +812,90 @@ class CompletionMarkerTest(unittest.TestCase):
                                    attempt_id=attempt)
             self.assertNotEqual(result.returncode, 0, attempt)
             self.assertIn("attempt-row-terminal-without-completion", result.stderr, attempt)
+
+    # F-1 fixture ------------------------------------------------------
+    # A detached leg drains with no result file while its exact live parent
+    # conductor has not yet run `complete`. reap-watch must defer the
+    # missing-result closure so the conductor's later, legitimate `complete`
+    # still succeeds -- this is the end-to-end proof for
+    # utilities/dispatch_reap_watch.test.py's unit-level parent fixtures.
+    def test_reap_deferral_lets_the_live_conductor_publish_its_marker(self):
+        route = self.compile_route()
+        route_path = self.write_route(route)
+        evidence = self.base / "plan.md"
+        evidence.write_text("plan body\n", encoding="utf-8")
+
+        parent = subprocess.Popen(["sleep", "5"])
+        leg = subprocess.Popen(
+            ["sleep", "0.05"],
+            env={**os.environ, D.ATTEMPT_DESCENDANT_ENV: "att-leg"},
+            start_new_session=True,
+        )
+        try:
+            parent_identity = D.process_launch_identity(parent.pid)
+            parent_extra = ",".join(
+                f"{k}={v}" for k, v in parent_identity.items() if k != "pid"
+            )
+            parent_line = (
+                f"2026-08-13T00:00:00Z\topen\t{self.repo}\t{self.repo}\towner\t"
+                "attempt_schema_version=2,dispatch_depth=1,transport=headless,"
+                "execution_surface=registered-headless,registered_worker=1,"
+                "fallback_hop=same-harness-headless,worker_type=owner,"
+                f"attempt_id=att-parent,pid={parent.pid},{parent_extra}"
+            )
+            with self.jobs.open("a", encoding="utf-8") as fh:
+                fh.write(parent_line + "\n")
+
+            leg_identity = D.process_launch_identity(leg.pid)
+            leg_extra = ",".join(
+                f"{k}={v}" for k, v in leg_identity.items() if k != "pid"
+            )
+            leg_extra += (
+                f",pid={leg.pid},launch_lifecycle=detached,parent=owner,"
+                "parent_attempt_id=att-parent,"
+                f"log_file={self.base / 'missing.jsonl'}"
+            )
+            self.write_row("open", "leg-slug", "att-leg", extra=leg_extra, node_id="plan")
+
+            watcher = subprocess.Popen(
+                [
+                    sys.executable, str(ROOT / "utilities/dispatch-reap-watch.py"),
+                    "--jobs", str(self.jobs),
+                    "--attempt-id", "att-leg",
+                    "--pid", str(leg.pid),
+                    "--pid-start", leg_identity["pid_start"],
+                    "--pgid", leg_identity["pgid"],
+                    "--interval", "0.02",
+                    "--parent-recheck-interval", "0.05",
+                ]
+            )
+            leg.wait(timeout=5)
+
+            deadline = time.time() + 3
+            status, meta = None, None
+            while time.time() < deadline:
+                status, meta = self.read_row("att-leg")
+                if meta and meta.get("reap_close_deferred") == "parent-live:process":
+                    break
+                time.sleep(0.05)
+            self.assertEqual(status, "open")
+            self.assertEqual(meta.get("reap_close_deferred"), "parent-live:process")
+
+            result = self.complete(
+                route_path, "plan", evidence, jobs=self.jobs, attempt_id="att-leg",
+            )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+            self.assertEqual(watcher.wait(timeout=5), 0)
+            status, meta = self.read_row("att-leg")
+            self.assertEqual(status, "done")
+            self.assertEqual(meta.get("note"), "completed-marker")
+            self.assertNotEqual(meta.get("note"), "dead-missing-result")
+            directory = self.agent_home / ".dispatch" / "completion" / route["route_id"]
+            self.assertTrue((directory / "plan.json").is_file())
+        finally:
+            parent.kill()
+            parent.wait(timeout=5)
 
 
 if __name__ == "__main__":

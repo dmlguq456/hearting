@@ -1276,6 +1276,11 @@ def _collapse_parallel_nodes(nodes):
         elapsed = [m.get("elapsed_min") for m in members
                    if m.get("elapsed_min") is not None]
         merged = dict(members[0])
+        # ``gate_passed`` is the single completion carrier for registered,
+        # native, and inline attempts alike.  It is resolved from the exact
+        # schema-2 completion marker before this pure projection step; a note or
+        # generic ``done`` state must never manufacture a gate pass.
+        member_gates = [bool(m.get("gate_passed")) for m in members]
         merged.update({
             "id": "%s(%d-way)" % (gid, len(members)), "state": state,
             "depends_on": deps,
@@ -1284,7 +1289,7 @@ def _collapse_parallel_nodes(nodes):
             # unit/model represents the group.
             "unit": None, "unit_choices": [], "model": None, "effort": None,
             "elapsed_min": max(elapsed) if elapsed else None,
-            "gate_passed": True if all(m.get("gate_passed") for m in members) else None,
+            "gate_passed": True if all(member_gates) else None,
         })
         merged_by_group[gid] = merged
         for m in members:

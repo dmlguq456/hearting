@@ -17,7 +17,9 @@ from dispatch_completion_join import (  # noqa: E402
     classify_supervised_shell_command,
     current_children,
     pending_attempt_ids,
-    read_supervisor_state,
+    read_supervisor_phase_state,
+    required_action_for_attempt,
+    supervisor_outbox_row_state,
 )
 
 
@@ -78,14 +80,21 @@ def main() -> int:
         row.attempt_id for row in rows if row.status in {"open", "running"}
     }
     open_attempts.update(pending_attempt_ids(rows))
-    if not open_attempts:
-        return 0
-
     raw_state = os.environ.get("AGENT_DISPATCH_COMPLETION_STATE_FILE", "")
-    delivered = read_supervisor_state(
+    state = read_supervisor_phase_state(
         Path(raw_state) if raw_state else None,
         parent_attempt,
     )
+    outbox_attempts = (
+        set(state.outbox.attempt_ids).difference(
+            state.outbox.consumed_attempt_ids
+        )
+        if state is not None and state.outbox is not None
+        else set()
+    )
+    guarded_attempts = open_attempts.union(outbox_attempts)
+    if not guarded_attempts:
+        return 0
     tool_name = payload.get("tool_name")
     tool_args = mapping(payload.get("tool_input"))
     command = tool_args.get("command")
@@ -94,7 +103,7 @@ def main() -> int:
         action = classify_supervised_shell_command(
             base=Path(str(payload.get("cwd") or os.getcwd())),
             command=command,
-            open_attempt_ids=open_attempts,
+            open_attempt_ids=guarded_attempts,
             parent_slug=os.environ.get("AGENT_DISPATCH_SELF_SLUG", ""),
             jobs=registry,
             parent_attempt_id=parent_attempt,
@@ -106,27 +115,67 @@ def main() -> int:
             route_id=os.environ.get("AGENT_ROUTE_ID", ""),
         )
 
-    delivered_open = open_attempts.intersection(delivered or set())
-    if delivered is None:
-        allowed = bool(action and action.kind == "harvest")
+    indexed = {row.attempt_id: row for row in rows}
+    delivered_open = open_attempts.intersection(
+        set(state.delivered_attempt_ids) if state is not None else set()
+    )
+    row_state = supervisor_outbox_row_state(state, rows) if state is not None else "absent"
+    current_actions = {
+        attempt: required_action_for_attempt(
+            indexed[attempt].status, indexed[attempt].metadata
+        )
+        for attempt in outbox_attempts
+        if attempt in indexed
+    }
+    actionable = {
+        attempt: required
+        for attempt, required in current_actions.items()
+        if required != "advance-completed"
+    }
+    if state is None:
+        allowed = bool(
+            action
+            and action.kind == "harvest"
+            and action.attempt_id in open_attempts
+            and action.status in {"open", "all"}
+        )
+    elif state.phase in {"deliverable", "recovery"} and state.outbox is not None:
+        if not actionable:
+            allowed = True
+        else:
+            required = actionable.get(action.attempt_id) if action else None
+            allowed = bool(
+                action
+                and action.kind == "harvest"
+                and required
+                and (
+                    (required == "complete-open" and action.status in {"open", "all"} and action.mark_done)
+                    or (
+                        required == "inspect-done-failure"
+                        and action.status in {"done", "all"}
+                        and action.failure_detail
+                    )
+                )
+            )
     elif delivered_open:
         allowed = bool(
             action
             and action.kind == "harvest"
             and action.attempt_id in delivered_open
+            and action.status in {"open", "all"}
         )
     else:
         allowed = bool(action and action.kind in {"dispatch", "dispatch-batch"})
     if allowed:
         return 0
 
-    attempts = ",".join(sorted(open_attempts))
+    attempts = ",".join(sorted(guarded_attempts))
     return deny(
         "runtime-supervised-parent: open registered child attempt(s) "
         f"{attempts}; a new undelivered batch admits only another exact "
         "parent-bound dispatch-node start or checked dispatch-batch start, "
-        "while a delivered batch admits "
-        "only exact preflight harvest"
+        "while a delivered batch admits only the current exact preflight harvest; "
+        f"outbox_row_state={row_state}"
     )
 
 

@@ -322,6 +322,188 @@ class DispatchCompletionJoinTest(unittest.TestCase):
         JOIN.remove_supervisor_state(state)
         self.assertFalse(state.exists())
 
+    def test_supervisor_outbox_is_idempotent_and_detects_row_advance(self):
+        state_path = self.root / "runtime" / "parent.json"
+        child = JOIN.ChildRow(
+            0,
+            "open",
+            "child",
+            "att-a",
+            row("open", "att-a", "att-parent", "child").rstrip("\n"),
+            {
+                "attempt_schema_version": "2",
+                "attempt_id": "att-a",
+                "parent_attempt_id": "att-parent",
+            },
+        )
+        receipt = {
+            "schema_version": 2,
+            "state": "ready",
+            "parent_attempt_id": "att-parent",
+            "children": [
+                {
+                    "attempt_id": "att-a",
+                    "status": "open",
+                    "required_action": "complete-open",
+                }
+            ],
+        }
+        first = JOIN.prepare_supervisor_outbox(
+            state_path, "att-parent", set(), receipt, [child]
+        )
+        second = JOIN.prepare_supervisor_outbox(
+            state_path, "att-parent", set(), receipt, [child]
+        )
+        self.assertEqual(first.outbox, second.outbox)
+        loaded = JOIN.read_supervisor_phase_state(state_path, "att-parent")
+        self.assertEqual(loaded, first)
+        self.assertEqual(JOIN.supervisor_outbox_row_state(first, [child]), "current")
+        advanced = JOIN.ChildRow(
+            child.order,
+            "done",
+            child.slug,
+            child.attempt_id,
+            child.raw.replace("\topen\t", "\tdone\t"),
+            child.metadata,
+        )
+        self.assertEqual(
+            JOIN.supervisor_outbox_row_state(first, [advanced]), "row-advanced"
+        )
+        self.assertTrue(
+            JOIN.consume_supervisor_outbox_attempts(
+                state_path, "att-parent", {"att-a"}
+            )
+        )
+        consumed = JOIN.read_supervisor_phase_state(state_path, "att-parent")
+        self.assertIsNotNone(consumed)
+        self.assertIsNone(consumed.outbox)
+        self.assertEqual(consumed.phase, "running-turn")
+        self.assertFalse(
+            JOIN.consume_supervisor_outbox_attempts(
+                state_path, "att-parent", {"att-a"}
+            )
+        )
+        transitions = [
+            json.loads(line)
+            for line in state_path.with_name(
+                state_path.name + ".transitions.jsonl"
+            ).read_text(encoding="utf-8").splitlines()
+        ]
+        self.assertEqual(
+            [(event["previous_phase"], event["phase"]) for event in transitions],
+            [("absent", "deliverable"), ("deliverable", "deliverable"),
+             ("deliverable", "running-turn")],
+        )
+        self.assertTrue(all(event["outer_pid"] == os.getpid() for event in transitions))
+        self.assertTrue(all(event["outer_pid_start"] for event in transitions))
+
+    def test_supervisor_outbox_partial_consume_preserves_same_receipt(self):
+        state_path = self.root / "runtime" / "parent-batch.json"
+        children = [
+            JOIN.ChildRow(
+                index,
+                "done",
+                f"child-{index}",
+                attempt,
+                row("done", attempt, "att-parent", f"child-{index}").rstrip("\n"),
+                {
+                    "attempt_schema_version": "2",
+                    "attempt_id": attempt,
+                    "parent_attempt_id": "att-parent",
+                    "failure_class": "fail",
+                },
+            )
+            for index, attempt in enumerate(("att-a", "att-b"))
+        ]
+        receipt = {
+            "schema_version": 2,
+            "state": "ready",
+            "parent_attempt_id": "att-parent",
+            "children": [
+                {
+                    "attempt_id": child.attempt_id,
+                    "status": "done",
+                    "required_action": "inspect-done-failure",
+                }
+                for child in children
+            ],
+        }
+        prepared = JOIN.prepare_supervisor_outbox(
+            state_path, "att-parent", set(), receipt, children
+        )
+        self.assertTrue(
+            JOIN.consume_supervisor_outbox_attempts(
+                state_path, "att-parent", {"att-a"}
+            )
+        )
+        partial = JOIN.read_supervisor_phase_state(state_path, "att-parent")
+        self.assertEqual(partial.outbox.receipt_id, prepared.outbox.receipt_id)
+        self.assertEqual(partial.outbox.receipt_digest, prepared.outbox.receipt_digest)
+        self.assertEqual(partial.outbox.receipt, receipt)
+        self.assertEqual(partial.outbox.consumed_attempt_ids, frozenset({"att-a"}))
+        self.assertFalse(
+            JOIN.consume_supervisor_outbox_attempts(
+                state_path, "att-parent", {"att-a"}
+            )
+        )
+        self.assertTrue(
+            JOIN.consume_supervisor_outbox_attempts(
+                state_path, "att-parent", {"att-b"}
+            )
+        )
+
+    def test_supervisor_outbox_refresh_preserves_identity_and_advances_action(self):
+        state_path = self.root / "runtime" / "parent-refresh.json"
+        child = JOIN.ChildRow(
+            0,
+            "open",
+            "child",
+            "att-a",
+            row("open", "att-a", "att-parent", "child").rstrip("\n"),
+            {
+                "attempt_schema_version": "2",
+                "attempt_id": "att-a",
+                "parent_attempt_id": "att-parent",
+            },
+        )
+        receipt = {
+            "schema_version": 2,
+            "state": "ready",
+            "parent_attempt_id": "att-parent",
+            "children": [{
+                "attempt_id": "att-a",
+                "status": "open",
+                "required_action": "complete-open",
+            }],
+        }
+        prepared = JOIN.prepare_supervisor_outbox(
+            state_path, "att-parent", set(), receipt, [child]
+        )
+        advanced = JOIN.ChildRow(
+            child.order,
+            "done",
+            child.slug,
+            child.attempt_id,
+            child.raw.replace("\topen\t", "\tdone\t") + ",failure_class=fail",
+            {**child.metadata, "failure_class": "fail"},
+        )
+        refreshed = JOIN.refresh_supervisor_outbox_actions(
+            state_path, "att-parent", [advanced]
+        )
+        self.assertEqual(refreshed.outbox.receipt_id, prepared.outbox.receipt_id)
+        self.assertNotEqual(
+            refreshed.outbox.receipt_digest, prepared.outbox.receipt_digest
+        )
+        self.assertNotEqual(
+            refreshed.outbox.row_revisions, prepared.outbox.row_revisions
+        )
+        child_receipt = refreshed.outbox.receipt["children"][0]
+        self.assertEqual(child_receipt["status"], "done")
+        self.assertEqual(
+            child_receipt["required_action"], "inspect-done-failure"
+        )
+        self.assertEqual(child_receipt["reason"], "row-advanced")
+
     def test_session_children_select_only_stamped_exact_direct_rows(self):
         session = "thread-exact"
         depth_two = row("open", "att-depth-two", "att-parent", "depth-two")
@@ -460,7 +642,10 @@ class DispatchCompletionJoinTest(unittest.TestCase):
             open_attempt_ids=open_attempts,
             parent_slug="owner",
         )
-        self.assertEqual(harvest, JOIN.SupervisorShellAction("harvest", "att-a"))
+        self.assertEqual(
+            harvest,
+            JOIN.SupervisorShellAction("harvest", "att-a", status="open"),
+        )
         absolute_harvest = JOIN.classify_supervised_shell_command(
             base=JOIN.ROOT,
             command=(
@@ -472,7 +657,9 @@ class DispatchCompletionJoinTest(unittest.TestCase):
         )
         self.assertEqual(
             absolute_harvest,
-            JOIN.SupervisorShellAction("harvest", "att-b"),
+            JOIN.SupervisorShellAction(
+                "harvest", "att-b", status="open", mark_done=True
+            ),
         )
         harvest_all = JOIN.classify_supervised_shell_command(
             base=JOIN.ROOT,
@@ -483,7 +670,10 @@ class DispatchCompletionJoinTest(unittest.TestCase):
             open_attempt_ids=open_attempts,
             parent_slug="owner",
         )
-        self.assertEqual(harvest_all, JOIN.SupervisorShellAction("harvest", "att-a"))
+        self.assertEqual(
+            harvest_all,
+            JOIN.SupervisorShellAction("harvest", "att-a", status="all"),
+        )
         dispatch = JOIN.classify_supervised_shell_command(
             base=JOIN.ROOT,
             command=(

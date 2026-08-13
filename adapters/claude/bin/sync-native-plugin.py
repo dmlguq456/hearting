@@ -23,9 +23,18 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shutil
+import stat
 import sys
+import tempfile
 from pathlib import Path
+
+# S-5d (owner-supervisor-liveness, core/OPERATIONS.md §5.10): enforce the
+# generated-plugin-JSON mode invariant on every write rather than trusting
+# the platform default, since it is umask-dependent and has been observed
+# drifting off 0644 across regenerate cycles.
+JSON_MODE = 0o644
 
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -146,7 +155,23 @@ def hooks_json() -> dict:
 
 def write_json(path: Path, payload: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    temporary: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            "w", encoding="utf-8", dir=path.parent, prefix=f".{path.name}.", delete=False
+        ) as handle:
+            temporary = Path(handle.name)
+            handle.write(json.dumps(payload, indent=2, ensure_ascii=False) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        temporary.chmod(JSON_MODE)
+        os.replace(temporary, path)
+    finally:
+        if temporary is not None:
+            try:
+                temporary.unlink()
+            except FileNotFoundError:
+                pass
 
 
 def sync() -> None:
@@ -190,6 +215,9 @@ def sync() -> None:
 def check_file(path: Path, expected: str, stale: list[str]) -> None:
     if not path.exists() or path.read_text(encoding="utf-8") != expected:
         stale.append(str(path.relative_to(ROOT)))
+        return
+    if stat.S_IMODE(path.stat().st_mode) != JSON_MODE:
+        stale.append(str(path.relative_to(ROOT)) + " (mode)")
 
 
 def check() -> int:

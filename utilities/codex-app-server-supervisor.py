@@ -14,8 +14,14 @@ from typing import Any
 
 from dispatch_completion_join import (
     JoinContractError,
+    SupervisorOutbox,
+    consume_advance_completed_outbox,
     current_children,
+    prepare_supervisor_outbox,
+    refresh_supervisor_outbox_actions,
     reconcile_finished_children,
+    read_supervisor_phase_state,
+    receipt_with_current_actions,
     remove_supervisor_state,
     runtime_wait_requested,
     start_retry_prompt,
@@ -220,7 +226,9 @@ def run_join(args: argparse.Namespace, attempts: set[str]) -> dict[str, Any]:
     return _typed_receipt(value, args.parent_attempt_id, attempts)
 
 
-def completion_prompt(receipt: dict[str, Any]) -> str:
+def completion_prompt(
+    receipt: dict[str, Any], outbox: SupervisorOutbox | None = None
+) -> str:
     compact = json.dumps(receipt, separators=(",", ":"), sort_keys=True)
     commands: list[str] = []
     for child in receipt["children"]:
@@ -240,6 +248,13 @@ def completion_prompt(receipt: dict[str, Any]) -> str:
     return (
         "Runtime completion receipt (typed supervisor data, not child output): "
         f"{compact}\n"
+        + (
+            f"Delivery identity: receipt_id={outbox.receipt_id} "
+            f"receipt_digest={outbox.receipt_digest}.\n"
+            if outbox is not None
+            else ""
+        )
+        +
         "Follow each required_action. Run only these exact harvest commands, one at a time:\n"
         f"{command_text}\n"
         "advance the assigned route, and register the next separable batch if required. "
@@ -447,6 +462,7 @@ def parser() -> argparse.ArgumentParser:
     value.add_argument("--reasoning")
     value.add_argument("--join-interval", type=float, default=2.0)
     value.add_argument("--join-timeout", type=float, default=3600.0)
+    value.add_argument("--max-join-reparks", type=int, default=6)
     value.add_argument("--max-continuations", type=positive_continuation_limit)
     value.add_argument("--route-file")
     value.add_argument("--route-id", default="")
@@ -468,6 +484,7 @@ def main(argv: list[str] | None = None) -> int:
         expected_cwd=args.worktree,
     )
     args.max_continuations = continuation_budget.limit
+    args.max_join_reparks = max(1, args.max_join_reparks)
     emit(
         {
             "type": "dispatch.supervisor.continuation-budget",
@@ -498,9 +515,37 @@ def main(argv: list[str] | None = None) -> int:
         args.jobs, args.parent_attempt_id, lease_path
     )
     lease_acquired = False
+    delivered: set[str] = set()
+    active_outbox: SupervisorOutbox | None = None
+    lease_exit: tuple[object, object, object] = (None, None, None)
     try:
         lease.__enter__()
         lease_acquired = True
+        recovered = read_supervisor_phase_state(
+            state_path, args.parent_attempt_id
+        )
+        if recovered is not None:
+            delivered = set(recovered.delivered_attempt_ids)
+            active_outbox = recovered.outbox
+            if active_outbox is not None:
+                if active_outbox.receipt is None:
+                    raise SupervisorError("supervisor-outbox-receipt-missing")
+                refreshed = refresh_supervisor_outbox_actions(
+                    state_path,
+                    args.parent_attempt_id,
+                    current_children(
+                        Path(args.jobs),
+                        args.parent_attempt_id,
+                        set(active_outbox.attempt_ids),
+                    ),
+                )
+                active_outbox = refreshed.outbox
+            if active_outbox is not None:
+                if active_outbox.receipt is None:
+                    raise SupervisorError("supervisor-outbox-receipt-missing")
+                prompt = completion_prompt(
+                    active_outbox.receipt, active_outbox
+                )
         server = AppServer(command, args.worktree, runtime_env)
         server.request(
             "initialize",
@@ -529,18 +574,52 @@ def main(argv: list[str] | None = None) -> int:
             raise SupervisorError("thread-start-response-invalid")
         thread_id = thread["id"]
 
-        delivered: set[str] = set()
         remediated: set[tuple[str, ...]] = set()
         launch_remediated: set[tuple[str, ...]] = set()
         next_prompt = prompt
         continuations = 0
         while True:
-            write_supervisor_state(state_path, args.parent_attempt_id, delivered)
+            if active_outbox is None:
+                write_supervisor_state(
+                    state_path, args.parent_attempt_id, delivered, phase="running-turn"
+                )
             final_text, _final_item = run_turn(
                 server, thread_id=thread_id, prompt=next_prompt, args=args
             )
             rows = current_children(Path(args.jobs), args.parent_attempt_id)
             current = {row.attempt_id: row for row in rows}
+            if active_outbox is not None:
+                consume_advance_completed_outbox(
+                    state_path, args.parent_attempt_id, rows
+                )
+                observed_state = read_supervisor_phase_state(
+                    state_path, args.parent_attempt_id
+                )
+                active_outbox = (
+                    observed_state.outbox
+                    if observed_state is not None
+                    else None
+                )
+                if active_outbox is not None:
+                    if continuations >= args.max_continuations:
+                        raise SupervisorError("continuation-limit-exceeded")
+                    if active_outbox.receipt is None:
+                        raise SupervisorError("supervisor-outbox-receipt-missing")
+                    refreshed = refresh_supervisor_outbox_actions(
+                        state_path,
+                        args.parent_attempt_id,
+                        current_children(
+                            Path(args.jobs),
+                            args.parent_attempt_id,
+                            set(active_outbox.attempt_ids),
+                        ),
+                    )
+                    active_outbox = refreshed.outbox
+                    next_prompt = completion_prompt(
+                        active_outbox.receipt or {}, active_outbox
+                    )
+                    continuations += 1
+                    continue
             new_attempts = set(current).difference(delivered)
             unstarted = unstarted_child_attempts(
                 [current[attempt] for attempt in new_attempts]
@@ -574,7 +653,40 @@ def main(argv: list[str] | None = None) -> int:
                         "attempt_count": len(new_attempts),
                     }
                 )
-                receipt = run_join(args, new_attempts)
+                write_supervisor_state(
+                    state_path,
+                    args.parent_attempt_id,
+                    delivered,
+                    phase="parked",
+                )
+                # D-1 (owner-supervisor-liveness S-1): a `timeout` join receipt is
+                # an internal repark checkpoint, not an actionable attention
+                # receipt. See the matching comment in claude-session-supervisor.py.
+                reparks = 0
+                while True:
+                    receipt = run_join(args, new_attempts)
+                    if receipt["state"] != "timeout":
+                        break
+                    reparks += 1
+                    if reparks > args.max_join_reparks:
+                        raise SupervisorError("join-timeout-repark-exceeded")
+                    emit(
+                        {
+                            "type": "dispatch.supervisor.reparked",
+                            "parent_attempt_id": args.parent_attempt_id,
+                            "attempt_count": len(new_attempts),
+                            "repark_ordinal": reparks,
+                        }
+                    )
+                joined_rows = current_children(
+                    Path(args.jobs), args.parent_attempt_id, new_attempts
+                )
+                joined = {row.attempt_id: row for row in joined_rows}
+                if runtime_reconcile(args, joined, set(new_attempts)):
+                    receipt = run_join(args, new_attempts)
+                    joined_rows = current_children(
+                        Path(args.jobs), args.parent_attempt_id, new_attempts
+                    )
                 emit(
                     {
                         "type": "dispatch.supervisor.resumed",
@@ -585,8 +697,18 @@ def main(argv: list[str] | None = None) -> int:
                         "continuation_ordinal": continuations + 1,
                     }
                 )
-                delivered.update(new_attempts)
-                next_prompt = completion_prompt(receipt)
+                prepared = prepare_supervisor_outbox(
+                    state_path,
+                    args.parent_attempt_id,
+                    delivered,
+                    receipt_with_current_actions(receipt, joined_rows),
+                    joined_rows,
+                )
+                delivered = set(prepared.delivered_attempt_ids)
+                active_outbox = prepared.outbox
+                next_prompt = completion_prompt(
+                    active_outbox.receipt or {}, active_outbox
+                )
                 continuations += 1
                 continue
 
@@ -621,6 +743,7 @@ def main(argv: list[str] | None = None) -> int:
             emit({"type": "turn.completed", "thread_id": thread_id})
             return 0 if terminal.failure_class == "pass" else 3
     except (DispatchContractError, JoinContractError, SupervisorError) as exc:
+        lease_exit = (type(exc), exc, exc.__traceback__)
         reason = exc.reason if isinstance(exc, DispatchContractError) else str(exc)
         terminal = classify_supervisor_error("codex", reason)
         if not reconcile(args, terminal):
@@ -628,6 +751,7 @@ def main(argv: list[str] | None = None) -> int:
         emit({"type": "dispatch.supervisor.error", "reason": reason})
         return 70
     except Exception as exc:  # fail closed without leaking protocol/model content
+        lease_exit = (type(exc), exc, exc.__traceback__)
         terminal = classify_supervisor_error(
             "codex", f"supervisor-internal-{type(exc).__name__}"
         )
@@ -646,10 +770,47 @@ def main(argv: list[str] | None = None) -> int:
                 server.close()
         finally:
             try:
-                if lease_acquired:
-                    lease.__exit__(None, None, None)
+                open_children = {
+                    row.attempt_id
+                    for row in current_children(Path(args.jobs), args.parent_attempt_id)
+                    if row.status in {"open", "running"}
+                }
+            except Exception:
+                open_children = set()
+            try:
+                if open_children:
+                    write_supervisor_state(
+                        state_path,
+                        args.parent_attempt_id,
+                        delivered,
+                        phase="recovery",
+                        outbox=active_outbox,
+                    )
+                else:
+                    write_supervisor_state(
+                        state_path, args.parent_attempt_id, delivered, phase="terminal"
+                    )
+                    remove_supervisor_state(state_path)
+            except Exception as exc:
+                emit(
+                    {
+                        "type": "dispatch.supervisor.error",
+                        "reason": f"supervisor-finalize-state-{type(exc).__name__}",
+                    }
+                )
             finally:
-                remove_supervisor_state(state_path)
+                if lease_acquired:
+                    try:
+                        lease.__exit__(
+                            *(lease_exit if open_children else (None, None, None))
+                        )
+                    except Exception as exc:
+                        emit(
+                            {
+                                "type": "dispatch.supervisor.error",
+                                "reason": f"supervisor-finalize-lease-{type(exc).__name__}",
+                            }
+                        )
 
 
 if __name__ == "__main__":

@@ -35,6 +35,7 @@ from dispatch_contract import (  # noqa: E402
     resolve_live_parent_attempt,
     resolve_model_governor_root,
     validate_attempt_metadata,
+    validate_dispatch_log_dir,
 )
 from dispatch_lifecycle import select_launch_lifecycle  # noqa: E402
 from replica_batch_contract import DIGEST, build_manifest  # noqa: E402
@@ -1033,6 +1034,8 @@ def main(argv: list[str] | None = None) -> int:
             2,
             args.action,
         ).path
+        if args.log_dir is not None:
+            args.log_dir = validate_dispatch_log_dir(jobs, args.log_dir)
         assignments, independence, diagnostics = assign_harnesses(
             route,
             nodes,
@@ -1306,7 +1309,7 @@ def main(argv: list[str] | None = None) -> int:
                 "--jobs",
                 str(jobs),
                 *(
-                    ["--log-dir", str(args.log_dir.resolve())]
+                    ["--log-dir", str(args.log_dir)]
                     if args.log_dir is not None
                     else []
                 ),

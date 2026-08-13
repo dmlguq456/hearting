@@ -107,7 +107,9 @@ class SupervisorTerminalIntegrationTest(unittest.TestCase):
                 open_attempt_ids={"att-open"},
                 parent_slug="owner",
             ),
-            JOIN.SupervisorShellAction("harvest", "att-open"),
+            JOIN.SupervisorShellAction(
+                "harvest", "att-open", status="open", mark_done=True
+            ),
         )
         result = subprocess.run(
             [

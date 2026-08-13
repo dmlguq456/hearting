@@ -19,7 +19,7 @@ import sys
 import tempfile
 import time
 import uuid
-from typing import Callable, Iterator
+from typing import Callable, Iterator, NamedTuple
 
 from replica_batch_contract import (
     DIGEST,
@@ -155,6 +155,8 @@ ATTEMPT_MUTABLE_METADATA = {
     "teardown_claimed_at",
     "teardown_claim_pid",
     "teardown_claim_pid_start",
+    "reap_close_deferred",
+    "reap_close_deferred_at",
 }
 ATTEMPT_TERMINAL_EVIDENCE_KEYS = {
     "api_status",
@@ -561,15 +563,20 @@ def _supervisor_lease_metadata_valid(
     jobs: str | Path, metadata: dict[str, str]
 ) -> bool:
     attempt_id = metadata.get("attempt_id", "")
+    delivery_by_harness = {
+        "claude": "session-resume-supervised",
+        "codex": "app-server-supervised",
+    }
+    harness = metadata.get("harness", "")
     if (
         metadata.get("attempt_schema_version") != "2"
         or metadata.get("dispatch_depth") != "1"
         or metadata.get("worker_type") != "owner"
-        or metadata.get("harness") != "codex"
+        or harness not in delivery_by_harness
         or metadata.get("transport") != "headless"
         or metadata.get("execution_surface") != "registered-headless"
         or metadata.get("registered_worker") != "1"
-        or metadata.get("completion_delivery") != "app-server-supervised"
+        or metadata.get("completion_delivery") != delivery_by_harness[harness]
         or metadata.get("supervisor_lease") != SUPERVISOR_LEASE_KIND
         or SUPERVISOR_LEASE_NONCE_RE.fullmatch(
             metadata.get("supervisor_lease_nonce", "")
@@ -723,9 +730,13 @@ def hold_supervisor_lease(
             ) from exc
         yield path
     finally:
+        preserve_recovery_file = sys.exc_info()[0] is not None
         try:
             current = path.lstat()
-            if (current.st_dev, current.st_ino) == (inode.st_dev, inode.st_ino):
+            if (
+                not preserve_recovery_file
+                and (current.st_dev, current.st_ino) == (inode.st_dev, inode.st_ino)
+            ):
                 path.unlink()
         except FileNotFoundError:
             pass
@@ -1375,6 +1386,40 @@ def observed_attempt_liveness(
     )
 
 
+def observed_supervised_owner_liveness(
+    jobs: str | Path,
+    status: str,
+    metadata: dict[str, str],
+    *,
+    supervisor_phase: str = "",
+    terminal_envelope: bool = False,
+) -> ObservedAttemptLiveness:
+    """Classify an owner without confusing an inner turn exit for owner death.
+
+    ``parked`` and ``deliverable`` are runtime-owned phases.  They count as
+    alive only while the exact outer supervisor lease is both well-formed and
+    held; a stale file, foreign nonce, or PID-reused process remains
+    fail-closed.  All other cases retain the ordinary exact-attempt verdict.
+    """
+
+    if (
+        status in {"open", "running"}
+        and supervisor_phase in {"parked", "deliverable", "recovery"}
+        and supervisor_lease_is_held(jobs, metadata)
+    ):
+        return ObservedAttemptLiveness(
+            state="parked-supervised",
+            reason=f"supervisor-{supervisor_phase}",
+            process_state="live",
+            process_reason="supervisor-lease-held",
+        )
+    return observed_attempt_liveness(
+        status,
+        metadata,
+        terminal_envelope=terminal_envelope,
+    )
+
+
 def _governor_json(
     command: list[str],
     *,
@@ -1951,6 +1996,73 @@ def _parent_liveness_evidence(
     ):
         return True, "supervisor-lease", None
     return False, process.reason, None
+
+
+class ParentCompletionWindow(NamedTuple):
+    """Whether an exact live parent still owns delivery of a child's result."""
+
+    deferred: bool
+    source: str
+
+
+def parent_completion_window(
+    jobs: Path, child_fields: list[str], child_metadata: dict[str, str]
+) -> ParentCompletionWindow:
+    """Decide whether a proven-live exact parent still owns this child's completion.
+
+    F-1: extends the S-3 missing-result closure axis with the delivering
+    parent's liveness, so reap-watch does not race a still-live conductor's
+    ``capability-route.py complete``. Never acquires ``<jobs>.lock`` (SD-49) —
+    callers under the lock re-evaluate this as the sole authoritative
+    decision point (see ``still_orphan`` in ``dispatch-registry.py`` for the
+    same unlocked-read precedent).
+    """
+
+    parent_attempt_id = child_metadata.get("parent_attempt_id", "")
+    if not parent_attempt_id:
+        return ParentCompletionWindow(False, "parent-attempt-absent")
+    try:
+        lines = Path(jobs).read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return ParentCompletionWindow(False, "parent-attempt-absent")
+    all_matches: list[tuple[list[str], dict[str, str]]] = []
+    for line in lines:
+        fields = line.split("\t")
+        if len(fields) != 6:
+            continue
+        metadata = parse_registry_metadata(fields[5])
+        if metadata.get("attempt_id") == parent_attempt_id:
+            all_matches.append((fields, metadata))
+    if not all_matches:
+        return ParentCompletionWindow(False, "parent-attempt-absent")
+    open_matches = [m for m in all_matches if m[0][1] in {"open", "running"}]
+    if not open_matches:
+        return ParentCompletionWindow(False, "parent-attempt-not-open")
+    if len(open_matches) > 1:
+        return ParentCompletionWindow(False, "parent-attempt-ambiguous")
+    parent_fields, parent_metadata = open_matches[0]
+    try:
+        validate_attempt_metadata(parent_metadata)
+    except DispatchContractError:
+        return ParentCompletionWindow(False, "parent-contract-invalid")
+    # Strict AND on the same two axes `spawn_claimed_attempt` already treats as
+    # the canonical depth-1 owner identity (dispatch_depth == "1" and
+    # worker_type == "owner"); depth-3 dispatch is forbidden, so no other
+    # parent role exists to widen this against (plan-check round 1, finding 3).
+    same_identity = (
+        parent_metadata.get("dispatch_depth") == "1"
+        and parent_metadata.get("worker_type") == "owner"
+        and parent_fields[3] == child_fields[3]
+        and canonical_repository_identity(parent_fields[2])
+        == canonical_repository_identity(child_fields[2])
+        and parent_fields[4] == child_metadata.get("parent")
+    )
+    if not same_identity:
+        return ParentCompletionWindow(False, "parent-identity-foreign")
+    live, reason, _identity = _parent_liveness_evidence(jobs, parent_metadata)
+    if not live:
+        return ParentCompletionWindow(False, f"parent-not-live:{reason}")
+    return ParentCompletionWindow(True, f"parent-live:{reason}")
 
 
 def _parent_metadata_matches_binding(
@@ -2704,6 +2816,30 @@ def dispatch_state_root(jobs: str | Path) -> Path:
     """The one derivation: dispatch state lives beside its canonical registry."""
 
     return Path(jobs).expanduser().resolve(strict=False).parent
+
+
+def validate_dispatch_log_dir(
+    jobs: str | Path, log_dir: str | Path | None
+) -> Path:
+    """Resolve a launch log directory inside the registry-owned state root."""
+
+    state_root = dispatch_state_root(jobs)
+    candidate = (
+        state_root / "logs"
+        if log_dir is None
+        else Path(log_dir).expanduser().resolve(strict=False)
+    )
+    try:
+        candidate.relative_to(state_root)
+    except ValueError as exc:
+        raise DispatchContractError(
+            "log-dir-outside-dispatch-state-root", str(candidate)
+        ) from exc
+    if candidate == state_root or candidate.is_symlink() or candidate.parent.is_symlink():
+        raise DispatchContractError(
+            "log-dir-outside-dispatch-state-root", str(candidate)
+        )
+    return candidate
 
 
 def resolve_dispatch_state_root(

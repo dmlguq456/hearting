@@ -7,6 +7,7 @@ ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 TMP=$(mktemp -d)
 MANIFEST="$ROOT/harness-manifest.json"
 TARGET="$ROOT/adapters/codex/skills/post-it/SKILL.md"
+PLUGIN_HOOKS_JSON="$ROOT/adapters/claude/plugin-marketplace/plugins/hearting-claude/hooks/hooks.json"
 cp "$MANIFEST" "$TMP/harness-manifest.json"
 
 # A real pre-push hook inherits GIT_DIR.  The hook must clear that local
@@ -64,7 +65,12 @@ grep -q "GENERATOR_ROUTE_SENTINEL" "$ROOT/adapters/codex/plugins/hearting-codex/
 grep -q "GENERATOR_ROUTE_SENTINEL" "$ROOT/adapters/opencode/skills/autopilot-code/SKILL.md"
 
 cp "$TMP/harness-manifest.json" "$MANIFEST"
+chmod 0755 "$PLUGIN_HOOKS_JSON"
 python3 "$ROOT/tools/generate.py" >/dev/null
+[ "$(stat -c '%a' "$PLUGIN_HOOKS_JSON")" = "644" ] || {
+  echo "not ok - generated plugin hooks.json mode was not repaired to 0644" >&2
+  exit 1
+}
 python3 "$ROOT/tools/generate.py" --check >/dev/null
 python3 "$ROOT/tools/entry-skill-layer.test.py" >/dev/null
 

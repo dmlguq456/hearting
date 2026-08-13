@@ -17,6 +17,12 @@ SPEC = importlib.util.spec_from_file_location(
 )
 ROUTE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(ROUTE)
+HARVEST_SPEC = importlib.util.spec_from_file_location(
+    "codex_dispatch_harvest",
+    ROOT / "adapters/codex/bin/dispatch-harvest.py",
+)
+HARVEST = importlib.util.module_from_spec(HARVEST_SPEC)
+HARVEST_SPEC.loader.exec_module(HARVEST)
 
 
 class HarvestTest(unittest.TestCase):
@@ -143,6 +149,99 @@ class HarvestTest(unittest.TestCase):
         return row.rstrip("\n") + (
             f",harness=claude,artifact_root={self.artifact},log_file={log}\n"
         )
+
+    def test_codex_default_registry_uses_runtime_harness_not_packaged_home(self):
+        codex_home = self.base / "codex-home"
+        expected = codex_home / ".harness" / "dispatch" / "jobs.log"
+        self.assertEqual(
+            HARVEST.default_runtime_jobs({"CODEX_HOME": str(codex_home)}),
+            expected,
+        )
+        self.assertNotEqual(expected, self.home / ".dispatch" / "jobs.log")
+
+    def test_successful_failure_detail_consumes_supervisor_outbox_once(self):
+        attempt = "att-supervisor-failure-detail"
+        parent = "att-supervisor-parent"
+        jobs = self.base / "supervisor.jobs.log"
+        current = self.terminal_row(
+            attempt,
+            "FAIL",
+            "fixture failure",
+            status="done",
+            name="supervisor-failure.codex.jsonl",
+        ).rstrip("\n") + ",failure_class=fail,note=dead-worker-fail\n"
+        jobs.write_text(current, encoding="utf-8")
+        receipt = {
+            "schema_version": 2,
+            "state": "ready",
+            "parent_attempt_id": parent,
+            "children": [
+                {
+                    "attempt_id": attempt,
+                    "status": "done",
+                    "required_action": "inspect-done-failure",
+                }
+            ],
+        }
+        receipt_bytes = json.dumps(
+            receipt, separators=(",", ":"), sort_keys=True
+        ).encode("utf-8")
+        state = self.base / "supervisor-state.json"
+        state.write_text(
+            json.dumps(
+                {
+                    "schema_version": 2,
+                    "parent_attempt_id": parent,
+                    "delivered_attempt_ids": [attempt],
+                    "phase": "deliverable",
+                    "outbox": {
+                        "receipt_id": "receipt-test",
+                        "receipt_digest": hashlib.sha256(receipt_bytes).hexdigest(),
+                        "attempt_ids": [attempt],
+                        "row_revisions": {
+                            attempt: hashlib.sha256(
+                                current.rstrip("\n").encode("utf-8")
+                            ).hexdigest()
+                        },
+                        "receipt": receipt,
+                        "consumed_attempt_ids": [],
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        env = self.env()
+        env.update(
+            {
+                "AGENT_DISPATCH_COMPLETION_STATE_FILE": str(state),
+                "AGENT_DISPATCH_ATTEMPT_ID": parent,
+            }
+        )
+        command = [
+            sys.executable,
+            str(ROOT / "adapters/codex/bin/dispatch-harvest.py"),
+            "--jobs",
+            str(jobs),
+            "--attempt-id",
+            attempt,
+            "--status",
+            "done",
+            "--failure-detail",
+        ]
+        result = subprocess.run(
+            command, text=True, capture_output=True, env=env
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        consumed = json.loads(state.read_text(encoding="utf-8"))
+        self.assertEqual(consumed["phase"], "running-turn")
+        self.assertNotIn("outbox", consumed)
+        repeated = subprocess.run(
+            command, text=True, capture_output=True, env=env
+        )
+        self.assertEqual(
+            repeated.returncode, 0, repeated.stdout + repeated.stderr
+        )
+        self.assertEqual(json.loads(state.read_text(encoding="utf-8")), consumed)
 
     def test_routed_harvest_replays_shared_completion_for_one_exact_attempt(self):
         attempt = "att-harvest-exact"

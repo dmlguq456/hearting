@@ -31,7 +31,7 @@ class OrphanWatchTest(unittest.TestCase):
         marker_dir.mkdir(parents=True)
         (marker_dir / "plan.json").write_text(json.dumps({"node_id": "plan"}))
         self.supervisor_state = (
-            self.home / ".dispatch" / "supervisor-state" / "att-watch.json"
+            self.jobs.parent / "supervisor-state" / "att-watch.json"
         )
         self.supervisor_state.parent.mkdir(parents=True)
         self.supervisor_state.write_text("{}", encoding="utf-8")

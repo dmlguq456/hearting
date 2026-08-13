@@ -264,6 +264,72 @@ class GateMarkTest(GateMarkBase):
 
 
 class ResolveGateMarksTest(GateMarkBase):
+    def test_inline_marker_survives_real_resolution_and_parallel_collapse(self):
+        # S-2 additional surface: exercise the production carrier end to end.
+        # One member is rewritten to the exact inline attempt axes, then the
+        # marker resolver, route view, and parallel collapse must all preserve
+        # the group's completed gate.
+        for node in self.record["nodes"][:3]:
+            node["parallel_group"] = "frame"
+        self.record["route_hash"] = route.route_hash(self.record)
+        self.record["route_id"] = (
+            "rt-" + self.record["route_hash"].split(":", 1)[1][:16]
+        )
+        old_cdir = self.cdir
+        self.route_id = self.record["route_id"]
+        self.cdir = os.path.join(
+            self.home, ".dispatch", "completion", self.route_id
+        )
+        os.rename(old_cdir, self.cdir)
+
+        for node in _NODES:
+            attempt_id = "att-fleet-" + node
+            for name in (node + ".1.json", node + ".json"):
+                path = os.path.join(self.cdir, name)
+                with open(path, encoding="utf-8") as handle:
+                    marker = json.load(handle)
+                marker.update({
+                    "route_id": self.route_id,
+                    "route_hash": self.record["route_hash"],
+                })
+                if node == "execute":
+                    marker.update({
+                        "execution_surface": "inline",
+                        "registered_worker": False,
+                        "fallback_hop": "inline",
+                    })
+                self._write(name, marker)
+
+            link_name = node + "." + attempt_id + ".attempt.json"
+            with open(os.path.join(self.cdir, link_name), encoding="utf-8") as handle:
+                link = json.load(handle)
+            link.update({
+                "route_id": self.route_id,
+                "completion_marker": os.path.join(self.cdir, node + ".json"),
+                "completion_marker_history": os.path.join(
+                    self.cdir, node + ".1.json"
+                ),
+            })
+            if node == "execute":
+                link.update({
+                    "execution_surface": "inline",
+                    "registered_worker": False,
+                    "fallback_hop": "inline",
+                })
+            self._write(link_name, link)
+
+        marks = route.resolve_gate_marks(
+            {self.route_id: self.record}, home=self.home
+        )
+        view = route.build_views(
+            [], {}, {self.route_id: self.record}, 1_000_000.0, marks
+        )[0]
+        collapsed = render._collapse_parallel_nodes(view["nodes"])
+        group = next(node for node in collapsed if node["id"] == "frame(3-way)")
+        self.assertEqual(set(marks[self.route_id]), set(_NODES))
+        self.assertEqual(group["state"], "done")
+        self.assertIs(group["gate_passed"], True)
+
     def test_row_registry_state_root_outranks_observer_home(self):
         observer = os.path.join(self._tmp.name, "observer")
         os.makedirs(observer)

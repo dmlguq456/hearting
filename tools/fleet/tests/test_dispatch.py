@@ -77,6 +77,21 @@ class RuntimeRootSeparationTest(unittest.TestCase):
 
 class RenderDispatchPresentationTest(unittest.TestCase):
 
+    def test_inline_marker_gate_counts_as_group_gate_pass(self):
+        nodes = [
+            {"id": "frame-a", "parallel_group": "frame", "gate_passed": True},
+            {
+                "id": "frame-b",
+                "parallel_group": "frame",
+                "gate_passed": True,
+                "execution_surface": "inline",
+            },
+            {"id": "frame-c", "parallel_group": "frame", "gate_passed": True},
+        ]
+        collapsed = render._collapse_parallel_nodes(nodes)
+        group = next(node for node in collapsed if node["id"] == "frame(3-way)")
+        self.assertTrue(group["gate_passed"])
+
     def test_registry_split_is_rendered_as_an_explicit_warning(self):
         job = DispatchJob(
             key="code", slug="split-owner", cwd="/work/repo", harness="codex",
@@ -1542,6 +1557,52 @@ class CodexAttemptIdentityTest(unittest.TestCase):
                 "".join(part for part, _key in line) for line in lines if line
             )
             self.assertIn("stale-owner", text)
+
+    def test_parked_owner_uses_shared_supervisor_liveness_classifier(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            jobs_log = os.path.join(tmp, "jobs.log")
+            state_dir = os.path.join(tmp, "supervisor-state")
+            os.makedirs(state_dir)
+            attempt = "att-parked-owner"
+            with open(os.path.join(state_dir, attempt + ".json"), "w", encoding="utf-8") as out:
+                json.dump(
+                    {
+                        "schema_version": 2,
+                        "parent_attempt_id": attempt,
+                        "delivered_attempt_ids": [],
+                        "phase": "parked",
+                    },
+                    out,
+                )
+            with open(jobs_log, "w", encoding="utf-8") as out:
+                out.write(
+                    "2026-08-13T00:00:00Z\topen\t/repo\t/wt\tparked-owner\t"
+                    "capability=autopilot-code,harness=codex,"
+                    "attempt_schema_version=2,dispatch_depth=1,transport=headless,"
+                    "execution_surface=registered-headless,registered_worker=1,"
+                    "fallback_hop=same-harness-headless,"
+                    "worker_type=owner,attempt_id=att-parked-owner,"
+                    "route_id=rt-parked,route_node=owner\n"
+                )
+            rows, malformed = dispatch._scan_jobs_log(jobs_log, set())
+            self.assertEqual(malformed, 0)
+            observed = mock.Mock(
+                state="parked-supervised",
+                reason="supervisor-parked",
+                process_state="live",
+                process_reason="supervisor-lease-held",
+            )
+            with mock.patch.object(
+                dispatch,
+                "observed_supervised_owner_liveness",
+                return_value=observed,
+            ) as classifier, mock.patch.object(
+                dispatch, "_job_transcript_signal", return_value="dead"
+            ):
+                state = dispatch._dispatch_liveness(rows[0], now=1000.0, track=False)
+            self.assertEqual(state, "idle")
+            self.assertEqual(rows[0].stage, "parked-supervised")
+            self.assertEqual(classifier.call_args.kwargs["supervisor_phase"], "parked")
 
     def test_legacy_row_without_process_identity_keeps_rollout_fallback(self):
         job = DispatchJob(key="code-test", slug="legacy", cwd="/work/wt",

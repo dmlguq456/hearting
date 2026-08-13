@@ -31,6 +31,100 @@ class DispatchContractTest(unittest.TestCase):
           "fallback_hop=same-harness-headless,worker_type=owner,"
           f"attempt_id={attempt},pid={pid},pid_start={start}{extra}")
 
+ def parent_row(self,attempt,pid,start,*,status="open",worktree="/wt",
+                repo="/repo",slug="owner",extra=""):
+  return (f"2026-08-13T00:00:00Z\t{status}\t{repo}\t{worktree}\t{slug}\t"
+          "attempt_schema_version=2,dispatch_depth=1,transport=headless,"
+          "execution_surface=registered-headless,registered_worker=1,"
+          "fallback_hop=same-harness-headless,worker_type=owner,"
+          f"attempt_id={attempt},pid={pid},pid_start={start}{extra}")
+
+ # F-1: parent_completion_window's typed `source` pins the fail-closed axes
+ # (§F-1.2) — one fixture per source value, absent/not-open/ambiguous/
+ # contract-invalid/foreign-slug/foreign-worktree/pid-start-mismatch fail
+ # closed, only live-process/live-supervisor-lease defer.
+ def test_parent_completion_window_source_axes(self):
+  with tempfile.TemporaryDirectory() as td:
+   base=Path(td);jobs=base/"jobs.log"
+   child_fields=["2026-08-13T00:00:00Z","open","/repo","/wt","leg","meta"]
+
+   jobs.write_text("")
+   self.assertEqual(
+    D.parent_completion_window(jobs,child_fields,{}).source,
+    "parent-attempt-absent")
+
+   child_meta={"parent_attempt_id":"att-parent","parent":"owner"}
+   self.assertEqual(
+    D.parent_completion_window(jobs,child_fields,child_meta).source,
+    "parent-attempt-absent")
+
+   jobs.write_text(self.parent_row("att-parent",999999,"1",status="done")+"\n")
+   self.assertEqual(
+    D.parent_completion_window(jobs,child_fields,child_meta).source,
+    "parent-attempt-not-open")
+
+   jobs.write_text(
+    self.parent_row("att-parent",999999,"1")+"\n"+
+    self.parent_row("att-parent",999998,"1")+"\n")
+   self.assertEqual(
+    D.parent_completion_window(jobs,child_fields,child_meta).source,
+    "parent-attempt-ambiguous")
+
+   jobs.write_text(
+    "2026-08-13T00:00:00Z\topen\t/repo\t/wt\towner\t"
+    "attempt_schema_version=1,attempt_id=att-parent\n")
+   self.assertEqual(
+    D.parent_completion_window(jobs,child_fields,child_meta).source,
+    "parent-contract-invalid")
+
+   jobs.write_text(self.parent_row("att-parent",999999,"1",slug="different")+"\n")
+   self.assertEqual(
+    D.parent_completion_window(jobs,child_fields,child_meta).source,
+    "parent-identity-foreign")
+
+   jobs.write_text(
+    self.parent_row("att-parent",999999,"1",worktree="/wt-foreign")+"\n")
+   self.assertEqual(
+    D.parent_completion_window(jobs,child_fields,child_meta).source,
+    "parent-identity-foreign")
+
+   proc=subprocess.Popen(["sleep","30"])
+   try:
+    jobs.write_text(self.parent_row("att-parent",proc.pid,"1")+"\n")
+    window=D.parent_completion_window(jobs,child_fields,child_meta)
+    self.assertFalse(window.deferred)
+    self.assertTrue(window.source.startswith("parent-not-live:"),window.source)
+
+    start=D.process_start_ticks(proc.pid)
+    jobs.write_text(self.parent_row("att-parent",proc.pid,start)+"\n")
+    self.assertEqual(
+     D.parent_completion_window(jobs,child_fields,child_meta),
+     D.ParentCompletionWindow(True,"parent-live:process"))
+   finally:
+    proc.kill();proc.wait(timeout=5)
+
+   lease=D.supervisor_lease_path(jobs,"att-parent")
+   lease.parent.mkdir(parents=True)
+   holder=lease.open("a+")
+   fcntl.flock(holder.fileno(),fcntl.LOCK_EX|fcntl.LOCK_NB)
+   try:
+    nonce="a"*64
+    extra=(",harness=codex,runtime_sandbox=workspace-write,"
+           "completion_delivery=app-server-supervised,"
+           f"supervisor_lease={D.SUPERVISOR_LEASE_KIND},"
+           f"supervisor_lease_file={lease},supervisor_lease_nonce={nonce},"
+           "pid_scope=namespace-local,"
+           "pid_observer_ns=pid:[outer],pid_ns=pid:[outer]")
+    jobs.write_text(self.parent_row("att-parent",424242,"1",extra=extra)+"\n")
+    holder.seek(0);holder.truncate()
+    holder.write(f"kind={D.SUPERVISOR_LEASE_KIND}\nattempt_id=att-parent\nnonce={nonce}\n")
+    holder.flush()
+    with mock.patch.object(D,"process_namespace_identity",return_value="pid:[inner]"):
+     window=D.parent_completion_window(jobs,child_fields,child_meta)
+    self.assertEqual(window,D.ParentCompletionWindow(True,"parent-live:supervisor-lease"))
+   finally:
+    fcntl.flock(holder.fileno(),fcntl.LOCK_UN);holder.close()
+
  def test_live_parent_binding_is_attempt_exact_and_same_slug_safe(self):
   with tempfile.TemporaryDirectory() as td:
    jobs=Path(td)/"jobs.log"
@@ -161,6 +255,54 @@ class DispatchContractTest(unittest.TestCase):
     self.assertEqual(caught.exception.reason,"parent-attempt-not-live")
    finally:
     fcntl.flock(holder.fileno(),fcntl.LOCK_UN);holder.close()
+
+ def test_supervisor_lease_file_is_preserved_for_recovery_exception(self):
+  with tempfile.TemporaryDirectory() as td:
+   base=Path(td);jobs=base/"jobs.log";attempt="att-parent-recovery"
+   lease=D.supervisor_lease_path(jobs,attempt);nonce="d"*64
+   extra=(",harness=codex,runtime_sandbox=workspace-write,"
+          "completion_delivery=app-server-supervised,"
+          f"supervisor_lease={D.SUPERVISOR_LEASE_KIND},"
+          f"supervisor_lease_file={lease},supervisor_lease_nonce={nonce}")
+   jobs.write_text(self.owner_row(attempt,437,"20",extra=extra)+"\n")
+   manager=D.hold_supervisor_lease(jobs,attempt,lease)
+   manager.__enter__()
+   error=RuntimeError("recovery")
+   manager.__exit__(RuntimeError,error,error.__traceback__)
+   self.assertTrue(lease.is_file())
+   self.assertFalse(D.supervisor_lease_is_held(jobs,D.parse_registry_metadata(
+    jobs.read_text().split("\t",5)[5])))
+   self.assertTrue(D.remove_supervisor_lease(lease))
+
+ def test_claude_and_codex_share_parked_supervisor_liveness(self):
+  for harness,delivery in (
+   ("claude","session-resume-supervised"),
+   ("codex","app-server-supervised"),
+  ):
+   with self.subTest(harness=harness), tempfile.TemporaryDirectory() as td:
+    base=Path(td);jobs=base/"jobs.log";attempt=f"att-{harness}-parked"
+    lease=D.supervisor_lease_path(jobs,attempt);lease.parent.mkdir(parents=True)
+    nonce=("a" if harness=="claude" else "b")*64
+    extra=(f",harness={harness},runtime_sandbox=workspace-write,"
+           f"completion_delivery={delivery},"
+           f"supervisor_lease={D.SUPERVISOR_LEASE_KIND},"
+           f"supervisor_lease_file={lease},supervisor_lease_nonce={nonce}")
+    row=self.owner_row(attempt,99999991,"1",extra=extra)
+    jobs.write_text(row+"\n")
+    holder=lease.open("a+")
+    holder.write(f"kind={D.SUPERVISOR_LEASE_KIND}\nattempt_id={attempt}\nnonce={nonce}\n")
+    holder.flush();fcntl.flock(holder.fileno(),fcntl.LOCK_EX|fcntl.LOCK_NB)
+    try:
+     metadata=D.parse_registry_metadata(row.split("\t",5)[5])
+     observed=D.observed_supervised_owner_liveness(
+      jobs,"open",metadata,supervisor_phase="parked")
+     self.assertEqual(observed.state,"parked-supervised")
+     self.assertEqual(observed.reason,"supervisor-parked")
+    finally:
+     fcntl.flock(holder.fileno(),fcntl.LOCK_UN);holder.close()
+    stale=D.observed_supervised_owner_liveness(
+     jobs,"open",metadata,supervisor_phase="parked")
+    self.assertNotEqual(stale.state,"parked-supervised")
 
  def test_parent_repo_identity_canonicalizes_primary_and_linked_but_keeps_worktree_exact(self):
   with tempfile.TemporaryDirectory() as td:
