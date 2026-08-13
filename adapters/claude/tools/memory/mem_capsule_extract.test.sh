@@ -1,0 +1,1 @@
+../../../../tools/memory/mem_capsule_extract.test.sh

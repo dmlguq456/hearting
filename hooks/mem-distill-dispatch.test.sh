@@ -750,6 +750,178 @@ else
   bad "D-35: applier destructive allowlist leak (calls=[$calls])"
 fi
 
+# ============================================================
+# F-3 — bounded worker stderr (.distill-err-<sid>) + GC glob coverage
+# ============================================================
+echo "== F-3: worker stderr is captured, capped at 64 KiB, GC glob includes .distill-err-* =="
+
+for f in "$DISPATCH" "$CLAUDE_DISPATCH"; do
+  grep -q "name '.distill-err-\*'" "$f" \
+    && ok "F-3: 60-minute stale GC glob includes .distill-err-* ($f)" \
+    || bad "F-3: 60-minute stale GC glob missing .distill-err-* ($f)"
+done
+
+STOREf3="$(mktemp -d)"; PROJf3="$(mktemp -d)"; STUBf3="$(mktemp -d)"
+CLEANUP+=("$STOREf3" "$PROJf3" "$STUBf3")
+# Worker stub: writes exactly 65537 bytes of stderr, then fails.
+cat > "$STUBf3/claude" <<'STUBEOF'
+#!/bin/sh
+head -c 65537 /dev/zero | tr '\0' 'x' >&2
+exit 1
+STUBEOF
+chmod +x "$STUBf3/claude"
+
+f3_mkfix() {  # $1=store $2=proj $3=sid
+  enc="$2/-home-fake-$3"; mkdir -p "$enc"
+  cat > "$enc/$3.jsonl" <<JSONL
+{"type":"user","message":{"role":"user","content":"F-3 prompt $3"},"uuid":"${3}u1","timestamp":"t1","isSidechain":false}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"F-3 reply $3"}]},"uuid":"${3}a1","timestamp":"t2","isSidechain":false}
+JSONL
+}
+
+f3_run() {  # $1=dispatcher path $2=store $3=proj $4=sid
+  MEM_STORE="$2" MEM_PROJECTS="$3" MEM_DISTILL_ENABLE=1 PATH="$STUBf3:$PATH" \
+    bash "$1" distill "$4" "/tmp"
+  # detached child — poll for lock release before inspecting the error log
+  for _ in $(seq 1 50); do [ ! -d "$2/.distill-lock-$4" ] && break; sleep 0.1; done
+}
+
+for pair in "$DISPATCH|hooks" "$CLAUDE_DISPATCH|claude-adapter"; do
+  disp="${pair%%|*}"; label="${pair##*|}"
+  sidf3="f3-$label"
+  f3_mkfix "$STOREf3" "$PROJf3" "$sidf3"
+  f3_run "$disp" "$STOREf3" "$PROJf3" "$sidf3"
+  size1="$(wc -c < "$STOREf3/.distill-err-$sidf3" 2>/dev/null || echo -1)"
+  if [ "${size1:--1}" -ge 0 ] 2>/dev/null && [ "$size1" -le 65536 ] 2>/dev/null; then
+    ok "F-3 ($label): single 65537-byte stderr run capped at <= 65536 bytes (size=$size1)"
+  else
+    bad "F-3 ($label): .distill-err-$sidf3 size=$size1, expected 0..65536"
+  fi
+
+  # Same SID, second consecutive failure — must not accumulate past the cap.
+  f3_mkfix "$STOREf3" "$PROJf3" "$sidf3"
+  f3_run "$disp" "$STOREf3" "$PROJf3" "$sidf3"
+  size2="$(wc -c < "$STOREf3/.distill-err-$sidf3" 2>/dev/null || echo -1)"
+  if [ "${size2:--1}" -ge 0 ] 2>/dev/null && [ "$size2" -le 65536 ] 2>/dev/null; then
+    ok "F-3 ($label): two consecutive 65537-byte stderr runs stay <= 65536 bytes (size=$size2)"
+  else
+    bad "F-3 ($label): .distill-err-$sidf3 size=$size2 after 2nd run, expected 0..65536"
+  fi
+done
+
+# ============================================================
+# R-2 — bounded-retry (D): marker advance gated on worker/governor exit code
+# ============================================================
+echo "== R-2: bounded-retry — marker non-advance on failure, forced-advance at 3 strikes =="
+
+for f in "$DISPATCH" "$CLAUDE_DISPATCH"; do
+  grep -q "name '.distill-fail-\*'" "$f" \
+    && ok "R-2: 60-minute stale GC glob includes .distill-fail-* ($f)" \
+    || bad "R-2: 60-minute stale GC glob missing .distill-fail-* ($f)"
+done
+
+r2_mkfix() {  # $1=store $2=proj $3=sid
+  # Each test case is one independent dispatch contract; reset the rolling
+  # start budget so a prior case's leases cannot starve this one (mirrors mkfix).
+  rm -rf "$1"/.distill-budget-* 2>/dev/null || true
+  enc="$2/-home-fake-$3"; mkdir -p "$enc"
+  cat > "$enc/$3.jsonl" <<JSONL
+{"type":"user","message":{"role":"user","content":"R-2 prompt $3"},"uuid":"${3}u1","timestamp":"t1","isSidechain":false}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"R-2 reply $3"}]},"uuid":"${3}a1","timestamp":"t2","isSidechain":false}
+JSONL
+}
+
+r2_run() {  # $1=dispatcher path $2=store $3=proj $4=sid $5=stub-bin-dir $6=cwd
+  # Isolated governor root: R-2 asserts on the real worker_rc, so this block
+  # must not inherit rolling-start-budget exhaustion from earlier cases in
+  # this large test file (a governor rejection is not a worker failure).
+  MEM_STORE="$2" MEM_PROJECTS="$3" MEM_DISTILL_ENABLE=1 PATH="$5:$PATH" \
+    AGENT_MODEL_GOVERNOR_ROOT="$2/.test-model-governor" \
+    bash "$1" distill "$4" "${6:-/tmp}"
+  for _ in $(seq 1 50); do [ ! -d "$2/.distill-lock-$4" ] && break; sleep 0.1; done
+}
+
+STOREr2="$(mktemp -d)"; PROJr2="$(mktemp -d)"
+STUBr2fail="$(mktemp -d)"; STUBr2ok="$(mktemp -d)"
+CLEANUP+=("$STOREr2" "$PROJr2" "$STUBr2fail" "$STUBr2ok")
+printf '#!/bin/sh\nexit 1\n' > "$STUBr2fail/claude"; chmod +x "$STUBr2fail/claude"
+printf '#!/bin/sh\n# empty output, success\n' > "$STUBr2ok/claude"; chmod +x "$STUBr2ok/claude"
+
+for pair in "$DISPATCH|hooks" "$CLAUDE_DISPATCH|claude-adapter"; do
+  disp="${pair%%|*}"; label="${pair##*|}"
+
+  # ① single failure: marker non-advance, counter == 1, one failure-log line
+  sid1="r2-fail1-$label"
+  r2_mkfix "$STOREr2" "$PROJr2" "$sid1"
+  r2_run "$disp" "$STOREr2" "$PROJr2" "$sid1" "$STUBr2fail"
+  [ ! -f "$STOREr2/.distill-state-$sid1" ] \
+    && ok "R-2① ($label): single failure → marker NOT advanced" \
+    || bad "R-2① ($label): marker advanced on a failed worker run"
+  cnt1="$(cat "$STOREr2/.distill-fail-$sid1" 2>/dev/null || echo '?')"
+  [ "$cnt1" = "1" ] \
+    && ok "R-2① ($label): .distill-fail-$sid1 == 1" \
+    || bad "R-2① ($label): .distill-fail-$sid1 = '$cnt1', expected 1"
+  loglines1="$(wc -l < "$STOREr2/.distill-failures.log" 2>/dev/null || echo 0)"
+  [ "${loglines1:-0}" -ge 1 ] 2>/dev/null \
+    && ok "R-2① ($label): .distill-failures.log has >=1 line after first failure" \
+    || bad "R-2① ($label): .distill-failures.log line count = ${loglines1:-0}"
+
+  # ② two more consecutive failures on the same sid → 3rd strike forces the advance
+  r2_run "$disp" "$STOREr2" "$PROJr2" "$sid1" "$STUBr2fail"
+  r2_run "$disp" "$STOREr2" "$PROJr2" "$sid1" "$STUBr2fail"
+  [ -f "$STOREr2/.distill-state-$sid1" ] \
+    && ok "R-2② ($label): 3 consecutive failures → forced marker advance" \
+    || bad "R-2② ($label): marker still not advanced after 3 strikes"
+  [ ! -f "$STOREr2/.distill-fail-$sid1" ] \
+    && ok "R-2② ($label): .distill-fail-$sid1 counter deleted after forced advance" \
+    || bad "R-2② ($label): .distill-fail-$sid1 counter still present after forced advance"
+  grep -q 'forced-advance' "$STOREr2/.distill-failures.log" 2>/dev/null \
+    && ok "R-2② ($label): .distill-failures.log records forced-advance" \
+    || bad "R-2② ($label): .distill-failures.log missing forced-advance entry"
+
+  # ③ exit 0 + empty stdout (normal zero-output) → marker advances, no counter file
+  sid3="r2-zero-$label"
+  r2_mkfix "$STOREr2" "$PROJr2" "$sid3"
+  r2_run "$disp" "$STOREr2" "$PROJr2" "$sid3" "$STUBr2ok"
+  [ -f "$STOREr2/.distill-state-$sid3" ] \
+    && ok "R-2③ ($label): exit0+empty stdout → marker advances (normal zero-output)" \
+    || bad "R-2③ ($label): marker not advanced on normal zero-output"
+  [ ! -f "$STOREr2/.distill-fail-$sid3" ] \
+    && ok "R-2③ ($label): no .distill-fail-* counter created on success" \
+    || bad "R-2③ ($label): .distill-fail-* counter unexpectedly created on success"
+
+  # ④ failure then success on the same sid → counter resets (deleted)
+  sid4="r2-reset-$label"
+  r2_mkfix "$STOREr2" "$PROJr2" "$sid4"
+  r2_run "$disp" "$STOREr2" "$PROJr2" "$sid4" "$STUBr2fail"
+  [ -f "$STOREr2/.distill-fail-$sid4" ] \
+    || bad "R-2④ ($label): counter missing after the setup failure"
+  r2_run "$disp" "$STOREr2" "$PROJr2" "$sid4" "$STUBr2ok"
+  [ ! -f "$STOREr2/.distill-fail-$sid4" ] \
+    && ok "R-2④ ($label): failure then success resets (deletes) the counter" \
+    || bad "R-2④ ($label): .distill-fail-$sid4 still present after a later success"
+  [ -f "$STOREr2/.distill-state-$sid4" ] \
+    && ok "R-2④ ($label): the later successful run advances the marker" \
+    || bad "R-2④ ($label): marker not advanced by the later successful run"
+done
+
+# ⑦ .distill-failures.log rotation — pre-seed past the 256 KiB bound, run once, expect <= 262144
+for pair in "$DISPATCH|hooks" "$CLAUDE_DISPATCH|claude-adapter"; do
+  disp="${pair%%|*}"; label="${pair##*|}"
+  STOREr2rot="$(mktemp -d)"; PROJr2rot="$(mktemp -d)"
+  CLEANUP+=("$STOREr2rot" "$PROJr2rot")
+  head -c 262145 /dev/zero | tr '\0' 'x' > "$STOREr2rot/.distill-failures.log"
+  sidrot="r2-rotate-$label"
+  r2_mkfix "$STOREr2rot" "$PROJr2rot" "$sidrot"
+  r2_run "$disp" "$STOREr2rot" "$PROJr2rot" "$sidrot" "$STUBr2fail"
+  rotsize="$(wc -c < "$STOREr2rot/.distill-failures.log" 2>/dev/null || echo -1)"
+  if [ "${rotsize:--1}" -ge 0 ] 2>/dev/null && [ "$rotsize" -le 262144 ] 2>/dev/null; then
+    ok "R-2⑦ ($label): .distill-failures.log rotated to <= 262144 bytes (size=$rotsize)"
+  else
+    bad "R-2⑦ ($label): .distill-failures.log size=$rotsize, expected 0..262144"
+  fi
+done
+
 echo
 echo "RESULT: PASS=$PASS FAIL=$FAIL"
 [ "$FAIL" = "0" ]

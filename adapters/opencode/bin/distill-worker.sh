@@ -255,8 +255,15 @@ Semantic boundary:
 - artifact-pointer requires artifact_refs and records only why/when to retrieve it.
 - Emit nothing when you judge that no addition is useful.
 
+Capsule fields are the retrieval index; an empty array makes the record unfindable.
+- aliases: 2-4 synonyms, including the other language when the body is bilingual.
+- entities: file paths, commit hashes, module names, and IDs that appear in the body.
+- topics: 1-3 broad subject tags.
+Copy the shapes above, not the literal example values; emit [] only when the field
+genuinely has no member.
+
 Allowed action:
-- {"action":"add","tier":"working|durable","type":"decision|user-correction|unresolved-obligation|artifact-pointer","body":"<minimal canonical content>","headline":"<retrieval headline>","aliases":[],"entities":[],"topics":[],"artifact_refs":[]}
+- {"action":"add","tier":"working|durable","type":"decision|user-correction|unresolved-obligation|artifact-pointer","body":"<minimal canonical content>","headline":"<retrieval headline>","aliases":["bounded retry","바운디드 재시도"],"entities":["hooks/mem-distill-dispatch.sh","D-41","a7c01b7d"],"topics":["memory-pipeline","dispatch"],"artifact_refs":[]}
 
 Transcript delta:
 <<<DELTA

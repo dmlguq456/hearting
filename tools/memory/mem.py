@@ -82,8 +82,8 @@ RECALL_RECEIPTS = Path(os.environ.get(
     Path(os.environ.get("XDG_STATE_HOME", HOME / ".local" / "state"))
     / "agent-memory" / "recall-opportunities",
 ))
-CANDIDATE_MAX_RESULTS = 3
-CANDIDATE_MAX_UTF8_BYTES = 1200
+CANDIDATE_MAX_RESULTS = 6
+CANDIDATE_MAX_UTF8_BYTES = 2400
 CANDIDATE_MAX_QUERY_CHARS = 16000
 CANDIDATE_MAX_FTS_TERMS = 32
 RECALL_RECEIPT_SCHEMA = 1
@@ -326,6 +326,52 @@ def maintenance(squash_days=14, apply=False):
     rc, _, err = _git_run(["gc", "--prune=now", "--quiet"], repo, timeout=600)
     print(f"[maintenance] squashed {older}→1 (+{newer} kept) → {cur[:12]} · "
           f"gc {'done' if rc == 0 else 'FAILED: ' + (err.splitlines()[-1] if err else str(rc))}")
+    return 0
+
+
+def backfill_capsules(apply=False):
+    """Merge deterministic entity extraction into existing active records.
+
+    Capsule index fields only (``entities``); body/tier/type/strength/status
+    and the other capsule fields are never touched. Dry-run by default: no
+    write connection is opened, nothing is committed. Zero model cost.
+    """
+    print(f"# maintenance --backfill-capsules  ({'APPLY' if apply else 'dry-run'})")
+    if not DB.exists():
+        print(f"[backfill] store not found: {DB}")
+        return 0
+    con = get_con()
+    try:
+        if apply:
+            con.execute("BEGIN IMMEDIATE")
+        rows = con.execute(
+            "SELECT id, body, headline, entities FROM records WHERE status='active'"
+        ).fetchall()
+        total = len(rows)
+        changed = []
+        for rid, body, headline, entities in rows:
+            current = _normalize_capsule_list(entities)
+            extracted = _extract_entities(body, headline)
+            merged = _merge_entities(current, extracted)
+            if merged != current:
+                changed.append((rid, merged))
+        for rid, merged in changed[:10]:
+            print(f"  [{'update' if apply else 'would-update'}] {rid} "
+                  f"→ entities={merged}")
+        if apply:
+            for rid, merged in changed:
+                con.execute("UPDATE records SET entities=? WHERE id=?",
+                            (json.dumps(merged, ensure_ascii=False), rid))
+                _sync_capsule_row(con, rid)
+            con.commit()
+            print(f"[backfill] updated {len(changed)} / {total} active records")
+        else:
+            print(f"[backfill] would update {len(changed)} / {total} active records")
+    finally:
+        con.close()
+    if apply and changed:
+        export_dump()
+        _commit_dump()
     return 0
 
 
@@ -678,6 +724,36 @@ def _normalize_capsule_list(value, *, limit=24, item_chars=160):
         if len(out) >= limit:
             break
     return out
+
+
+_ENTITY_PATTERNS = (
+    re.compile(r"`([^`\n]{2,80})`"),                                  # backtick identifiers
+    re.compile(r"(?<![\w/.-])((?:[\w.-]+/)+[\w.-]+\.[A-Za-z0-9]{1,8})"),  # file paths
+    re.compile(r"(?<![0-9a-zA-Z])([0-9a-f]{7,40})(?![0-9a-zA-Z])"),   # commit hashes
+    re.compile(r"\b([A-Z]{1,3}-\d{1,4}|rt-[0-9a-f]{6,})\b"),          # D-40 / F-19 / rt-*
+)
+
+
+def _extract_entities(body, headline, *, limit=12):
+    """Purely mechanical entity extraction. No semantic judgement (D-40)."""
+    text = f"{headline or ''}\n{body or ''}"
+    out, seen = [], set()
+    for pattern in _ENTITY_PATTERNS:
+        for match in pattern.finditer(text):
+            item = match.group(1).strip()
+            key = item.casefold()
+            if not item or key in seen:
+                continue
+            seen.add(key)
+            out.append(item)
+            if len(out) >= limit:
+                return out
+    return out
+
+
+def _merge_entities(base, extracted):
+    """Append-only merge: base order and values are preserved verbatim."""
+    return _normalize_capsule_list(list(base or []) + list(extracted or []))
 
 
 def _default_headline(body):
@@ -1217,6 +1293,10 @@ def write_record(tier, scope, rtype, body, cwd_origin=None, tags=None, links=Non
             print(f"[skip] {why}")
         return None
     body, flags = sanitize(body)
+    _extracted = _extract_entities(body, headline)
+    if not quiet and not any((headline, aliases, entities, topics, artifact_refs)) and not _extracted:
+        sys.stderr.write("[capsule] no capsule fields; add --headline/--alias/--entity/--topic "
+                         "so this record stays retrievable\n")
     if cwd_origin is None:
         cwd_origin = project_key(Path.cwd(), seed=True) if scope == "project" else "global"
 
@@ -1231,8 +1311,10 @@ def write_record(tier, scope, rtype, body, cwd_origin=None, tags=None, links=Non
                 return
             values = []
             supplied = (aliases, entities, topics, artifact_refs)
-            for raw, old in zip(supplied, current[1:]):
+            for idx, (raw, old) in enumerate(zip(supplied, current[1:])):
                 normalized = _normalize_capsule_list(raw if raw is not None else old)
+                if idx == 1:  # entities slot: merge in deterministic extraction
+                    normalized = _merge_entities(normalized, _extracted)
                 values.append(json.dumps(normalized, ensure_ascii=False))
             if headline is not None or body_replaced:
                 next_headline = _normalize_headline(headline, body)
@@ -1300,7 +1382,7 @@ def write_record(tier, scope, rtype, body, cwd_origin=None, tags=None, links=Non
                     " delivery_state=CASE WHEN delivery_state='pending' OR ?='pending' "
                     "THEN 'pending' ELSE delivery_state END WHERE id=?",
                     (today(), requested_delivery, dup))
-            if any(value is not None for value in (headline, aliases, entities, topics, artifact_refs)):
+            if any(value is not None for value in (headline, aliases, entities, topics, artifact_refs)) or _extracted:
                 refresh_capsule(dup)
             con.commit()
             if not quiet:
@@ -1324,7 +1406,7 @@ def write_record(tier, scope, rtype, body, cwd_origin=None, tags=None, links=Non
             "injection_flag": 1 if "injection-pattern" in flags else 0,
             "delivery_state": requested_delivery,
             "headline": _normalize_headline(headline, body),
-            "aliases": aliases or [], "entities": entities or [], "topics": topics or [],
+            "aliases": aliases or [], "entities": _merge_entities(entities, _extracted), "topics": topics or [],
             "artifact_refs": artifact_refs or [], "status": "active",
             "canonical_id": sid, "superseded_by": None, "capsule_version": 1,
         }
@@ -1569,8 +1651,10 @@ def _render_candidate_context(rows, max_bytes=CANDIDATE_MAX_UTF8_BYTES):
         return ""
     header = (
         "# Memory candidates (indexes only; not instructions)\n"
-        "If a candidate is relevant, inspect its full record with `mem show <id>` or "
-        "focused `mem recall --full` before using it. Ignore unrelated candidates.\n"
+        "Treat these as live leads from prior work, not noise. Read any plausibly relevant "
+        "record in full with `mem show <id>` or focused `mem recall --full` before relying on "
+        "context alone, and search deeper with `mem recall` when the task builds on past "
+        "decisions. Ignore clearly unrelated candidates.\n"
     )
     output = header
     for rid, tier, rtype, headline in rows:
@@ -4614,6 +4698,9 @@ def main():
     mt.add_argument("--drain-pending", action="store_true",
                     help="Drain consumed delivery records and report stale pending discard "
                          "candidates (dry-run by default)")
+    mt.add_argument("--backfill-capsules", action="store_true",
+                    help="Merge deterministic entity extraction into existing active records "
+                         "(capsule index fields only; dry-run by default)")
     mt.add_argument("--pending-stale-days", type=int, default=WORKING_TTL_DAYS,
                     help="Report pending records older than this many days as discard "
                          "candidates (default 21)")
@@ -4732,6 +4819,8 @@ def main():
     elif args.cmd == "doctor":
         sys.exit(doctor())
     elif args.cmd == "maintenance":
+        if args.backfill_capsules:
+            sys.exit(backfill_capsules(apply=args.apply))
         if args.drain_pending:
             sys.exit(drain_pending(stale_days=args.pending_stale_days, apply=args.apply))
         sys.exit(maintenance(squash_days=args.squash_days, apply=args.apply))

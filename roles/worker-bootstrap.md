@@ -24,10 +24,12 @@ You are a bounded worker, not the user-facing main session.
   assigned `_internal/state/<attempt_id>.md`; do not reload the full specification
   unless the phase brief names it. If a required edit falls outside the fixed
   list, stop and hand the gap back to the owner instead of widening scope.
-- Keep the state ledger current after at most three material edits and after each
-  verification round trip. Before compaction, flush the current slice, completed
-  items, exact next command, invariants, and forbidden files. After compaction,
-  re-read the ledger before any edit. A missing required ledger is a hard stop.
+- In a declared sub-session, keep the state ledger current after at most three
+  material edits and after each verification round trip. Before compaction, flush
+  the current slice, completed items, exact next command, invariants, and
+  forbidden files. After compaction, re-read the ledger before any edit. A missing
+  required ledger is a hard stop for a declared sub-session; an ordinary route
+  node has no ledger obligation.
 - A sub-session has `stage_authority=0`. It may report its own attempt result and
   bounded handoff, but it must not create, claim, or satisfy the route stage's
   completion marker.
