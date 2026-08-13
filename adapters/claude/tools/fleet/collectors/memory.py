@@ -12,6 +12,7 @@ tools/memory/mem.py (`_append_write_event` / `_graveyard_append`) and
 import datetime
 import json
 import os
+import re
 import sqlite3
 from pathlib import Path
 
@@ -24,6 +25,8 @@ ADDED_ACTIONS = ("add", "note")
 EXPIRED_ACTIONS = ("lifecycle-expire",)
 PRUNED_ACTIONS = ("prune", "delete", "merge")
 DISTILL_ACTORS = ("distiller", "curator")
+_SELECT_RE = re.compile(r"^select\s+origin=\S+\s+active=\d+.*?\bcwd=(.+?)\s*$")
+_DONE_RE = re.compile(r"^project=(.+?)\s+elapsed=(\d+)s\s+status=(\S+)")
 
 
 def _agent_home():
@@ -64,6 +67,45 @@ def _graveyard_path():
 
 def _db_path():
     return _store() / "memory.db"
+
+
+def _periodic_curate(now=None):
+    """Best-effort snapshot of the currently locked periodic curator batch."""
+    try:
+        locks = list(_store().glob(".distill-lock-periodic-*"))
+        if not locks:
+            return None
+        log = Path(os.environ.get(
+            "FLEET_PERIODIC_CURATE_LOG",
+            str(Path(os.environ.get("XDG_STATE_HOME", str(Path.home() / ".local" / "state")))
+                / "hearting" / "periodic-curate.log"),
+        ))
+        selected, completed = [], []
+        with log.open(encoding="utf-8", errors="replace") as fh:
+            for raw in fh:
+                line = raw.strip()
+                if line.startswith("==="):
+                    selected, completed = [], []
+                    continue
+                match = _SELECT_RE.match(line)
+                if match:
+                    selected.append(match.group(1))
+                    continue
+                match = _DONE_RE.match(line)
+                if match:
+                    completed.append(match.group(1))
+        if not selected:
+            return None
+        done = min(len(completed), len(selected))
+        current = selected[min(done, len(selected) - 1)]
+        now_ts = (now.timestamp() if isinstance(now, datetime.datetime) else
+                  float(now) if isinstance(now, (int, float)) else
+                  datetime.datetime.now().timestamp())
+        started = min(lock.stat().st_mtime for lock in locks)
+        return {"done": done, "total": len(selected), "current_cwd": current,
+                "elapsed_s": max(0, int(now_ts - started))}
+    except (OSError, ValueError, TypeError, OverflowError):
+        return None
 
 
 def _read_jsonl_tail(path):
@@ -154,7 +196,8 @@ def collect(now=None):
 
     events, journal_ok = _read_jsonl_tail(_write_events_path())
     graveyard, graveyard_ok = _read_jsonl_tail(_graveyard_path())
-    if not journal_ok and not graveyard_ok:
+    periodic_curate = _periodic_curate(now)
+    if not journal_ok and not graveyard_ok and periodic_curate is None:
         return None
 
     if journal_ok:
@@ -225,4 +268,5 @@ def collect(now=None):
             "durable_over": durable_over,
             "distill_stale": distill_stale,
         },
+        "periodic_curate": periodic_curate,
     }

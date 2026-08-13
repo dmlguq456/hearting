@@ -179,6 +179,7 @@ def main(argv=None):
 
     collector = collect_all
     if args.demo or os.environ.get("FLEET_DEMO"):   # flag OR env (env works through any launcher/alias)
+        os.environ["FLEET_DEMO"] = "1"
         if __package__ in (None, ""):
             from fleet import demo
         else:

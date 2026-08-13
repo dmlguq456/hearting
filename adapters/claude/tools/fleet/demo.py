@@ -69,6 +69,10 @@ def collect(harness_filter=None):
     _seed_route_evidence()
     S, J = Session, DispatchJob
     sessions = [
+        S(harness="codex", pid=89990, cwd="/home/demo/demo-app",
+          session_id="demo-periodic-curator", slug="periodic-curator",
+          title="memory periodic curator", elapsed_min=11, liveness="idle",
+          mem_worker=True),
         # --- project 'demo-app' ---
         S(harness="claude", pid=90001, cwd="/home/demo/demo-app", session_id="demo-claude-1",
           slug="demo-app-a7", model="Opus 4.8 (1M context)", effort="xhigh",
@@ -246,3 +250,16 @@ def collect(harness_filter=None):
     if harness_filter:
         sessions = [s for s in sessions if s.harness in harness_filter]
     return sessions, jobs
+
+
+def memory_snapshot():
+    """Demo-only active periodic batch; never touches the real memory store."""
+    return {
+        "journal_available": False, "graveyard_available": False,
+        "today": {"added_working": 0, "added_durable": 0, "added": 0,
+                  "expired": 0, "pruned": 0},
+        "last_distill_min": None, "recent": [], "by_repo": {},
+        "alerts": {"durable_over": [], "distill_stale": False},
+        "periodic_curate": {"done": 1, "total": 3,
+                             "current_cwd": "/home/demo/demo-lib", "elapsed_s": 687},
+    }

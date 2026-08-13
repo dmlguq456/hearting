@@ -312,12 +312,12 @@ class ExecDetailRender(unittest.TestCase):
         self.assertIn("⚙ python3 12m", self.text_of(rows))
         self.assertEqual(self.keys_of(rows, "⚙"), ["g_work"])
 
-    def test_background_child_under_idle_row_is_dim(self):
+    def test_background_experiment_under_idle_row_is_promoted(self):
         sess = Session(harness="claude", pid=100, liveness="idle", ctx_pct=40,
                        exec_child={"pid": 200, "comm": "python3", "etime_s": 720})
         rows = render._context_detail_row(sess, term_width=200)
         self.assertIn("⚙ python3 12m", self.text_of(rows))
-        self.assertEqual(self.keys_of(rows, "⚙"), ["dim"])
+        self.assertEqual(self.keys_of(rows, "⚙"), ["g_work"])
 
     def test_sub_minute_elapsed_uses_seconds(self):
         sess = Session(harness="claude", pid=100, liveness="working", ctx_pct=40,

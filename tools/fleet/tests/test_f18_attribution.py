@@ -166,14 +166,15 @@ class RenderMemExclusionTest(unittest.TestCase):
     def _text(self, lines):
         return "\n".join("".join(t for t, _k in ln) for ln in lines if ln)
 
-    def test_default_excludes_mem_from_pulse_and_rows(self):
+    def test_default_excludes_mem_from_project_but_shows_system_row(self):
         mem, normal = self._sessions()
         render.set_show_all(False)
         lines = render._build_lines([mem, normal], [], section="fleet", narrow=False,
                                     malformed=0, layout="wide")
         text = self._text(lines)
         self.assertIn("1 working", text)
-        self.assertNotIn("distiller", text)   # mem-worker session row itself not shown
+        self.assertIn("⚙ system", text)
+        self.assertIn("distiller", text)
         self.assertIn("🧠", text)   # legend/group badge summary still present
 
     def test_show_all_reveals_mem_row(self):

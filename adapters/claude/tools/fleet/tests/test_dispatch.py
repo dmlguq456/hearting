@@ -101,7 +101,7 @@ class RenderDispatchPresentationTest(unittest.TestCase):
 
         self.assertEqual(text.count("gpt-5.6-sol"), 1)
 
-    def test_depth_prefixes_arrowless_depth1_and_deeper_depth2_arrow(self):
+    def test_depth_prefixes_are_arrowless_inside_nested_card(self):
         # F-64c (v49, user 2026-08-05 "depth=1을 조금 앞당겨서 들여쓰기 폭을 줄이고
         # 세로선은 그 아래 depth=2에 대해서만"): depth-1 sits arrowless at a shallow
         # 2-cell inset (its unit mark is the hanging rail, painted by the assembler);
@@ -112,7 +112,7 @@ class RenderDispatchPresentationTest(unittest.TestCase):
         nested = DispatchJob(key="code", slug="nested", depth=2)
 
         self.assertEqual(render._dispatch_prefix(top), "    ")
-        self.assertEqual(render._dispatch_prefix(nested), "      ↳ ")
+        self.assertEqual(render._dispatch_prefix(nested), "        ")
         self.assertEqual(len(render._dispatch_prefix(nested)), 8)
         self.assertEqual(render._dispatch_prefix(top, orphan=True), "··  ")
 
@@ -165,7 +165,7 @@ class RenderDispatchPresentationTest(unittest.TestCase):
         self.assertTrue(any(
             render._RAIL_BOT in "".join(p for p, _k in line)
             for line in lines[leg_index + 1:] if line))
-        self.assertIn("↳", leg_txt)               # depth-2 keeps its spawn arrow
+        self.assertNotIn("↳", leg_txt)            # capsule replaces the arrow ladder
 
     def test_f64c_childless_dispatch_card_brackets_its_context_detail(self):
         parent, d1, _d2 = self._rail_fixture()
@@ -176,10 +176,10 @@ class RenderDispatchPresentationTest(unittest.TestCase):
         owner_txt = "".join(p for p, _k in owner)
         self.assertIn(render._RAIL_TOP, owner_txt)
         owner_index = lines.index(owner)
-        self.assertIn(
-            render._RAIL_BOT,
-            "".join(p for p, _k in next(line for line in lines[owner_index + 1:] if line)),
-        )
+        self.assertTrue(any(
+            render._RAIL_BOT in "".join(p for p, _k in line)
+            for line in lines[owner_index + 1:] if line
+        ))
 
     def test_f64c_rail_blinks_in_stage_hue_only_while_working(self):
         for blink, expected in ((True, "stg0_on"), (False, "stg0_off")):
@@ -204,11 +204,12 @@ class RenderDispatchPresentationTest(unittest.TestCase):
         self.assertEqual(render._depth1_rail_color_index("code", "execute", None), 0)
         self.assertEqual(render._depth1_rail_color_index("nope", None, None), 0)
 
-    def test_f64c_rail_is_wide_layout_only(self):
+    def test_f63_capsule_frame_is_present_in_narrow_layout(self):
         lines = self._rail_lines(layout="narrow")
         joined = "".join(p for line in lines if line for p, _k in line)
-        for ch in render._RAIL_CHARS:
-            self.assertNotIn(ch, joined)
+        self.assertIn(render._RAIL_TOP, joined)
+        self.assertIn(render._RAIL_MID, joined)
+        self.assertIn(render._RAIL_BOT, joined)
 
     def test_dispatch_role_suffix_has_no_qa_token(self):
         # qa axis retired (CONVENTIONS §1.1); intensity moved to the dial's paren knob

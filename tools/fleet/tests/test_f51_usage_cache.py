@@ -17,8 +17,16 @@ class F51UsageCacheTest(unittest.TestCase):
         self.old = os.environ.get("FLEET_USAGE_STATE_DIR")
         os.environ["FLEET_USAGE_STATE_DIR"] = self.tmp.name
         self.old_fetchers = dict(usage_cache.FETCHERS)
+        # A prior test/cycle must not retain a worker keyed to a real state directory.
+        for thread in list(usage_cache._THREADS.values()):
+            thread.join(timeout=5)
+        usage_cache._THREADS.clear()
+        self.assertEqual(usage_cache.state_dir(), self.tmp.name)
 
     def tearDown(self):
+        for thread in list(usage_cache._THREADS.values()):
+            thread.join(timeout=5)
+        usage_cache._THREADS.clear()
         usage_cache.FETCHERS.clear(); usage_cache.FETCHERS.update(self.old_fetchers)
         if self.old is None:
             os.environ.pop("FLEET_USAGE_STATE_DIR", None)
@@ -160,11 +168,16 @@ class F51UsageCacheTest(unittest.TestCase):
         index — out of this fix's scope) can never leak a real codex job's os.walk into the
         assertion; the assertion stays about what F-51b actually owns."""
         from fleet import collectors
-        from fleet.collectors import procscan, usage_api
+        from fleet.collectors import procscan, usage_api, dispatch
         from fleet.collectors import codex as codex_mod
         with tempfile.TemporaryDirectory() as jobs_tmp:
             jobs_path = os.path.join(jobs_tmp, "jobs.log")
-            with mock.patch.object(procscan, "scan", return_value=[]), \
+            # An existing empty registry is authoritative. Without the file, dispatch's
+            # tolerant migration fallback may inspect installed runtime registries.
+            open(jobs_path, "w").close()
+            with mock.patch.dict(os.environ, {"AGENT_DISPATCH_JOBS": jobs_path}), \
+                 mock.patch.object(procscan, "scan", return_value=[]), \
+                 mock.patch.object(dispatch, "collect", return_value=[]), \
                  mock.patch.object(usage_api, "account_usage") as api_spy, \
                  mock.patch.object(codex_mod, "account_usage") as codex_spy, \
                  mock.patch("urllib.request.urlopen") as urlopen_spy, \
