@@ -12,6 +12,7 @@ import json
 import os
 from pathlib import Path
 import time
+import urllib.request
 
 
 HARNESSES = ("claude", "codex", "opencode")
@@ -73,6 +74,46 @@ def _claude_score(now: float, stale_after: int) -> float | None:
     return None
 
 
+def _codex_api_score() -> float | None:
+    """Live account headroom via the codex TUI's own `/wham/usage` endpoint.
+
+    Rollout samples update only when a codex session runs, so a rollout-only
+    reader self-reinforces starvation: an idle codex degrades to unknown,
+    capacity-aware placement stops selecting it, and the gauge never refreshes
+    (observed 2026-08-13). The fleet collector already proved this active probe
+    (`tools/fleet/collectors/codex.py account_usage`); the two readers must not
+    drift apart again. A missing/unreadable `auth.json` returns None before any
+    network I/O, which keeps hermetic fixtures (temp `CODEX_HOME`) offline.
+    """
+    home = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex")
+    try:
+        tokens = json.loads((home / "auth.json").read_text(encoding="utf-8")).get("tokens") or {}
+    except (OSError, ValueError, AttributeError):
+        return None
+    token = tokens.get("access_token")
+    if not token:
+        return None
+    request = urllib.request.Request(
+        "https://chatgpt.com/backend-api/wham/usage",
+        headers={
+            "Authorization": "Bearer " + token,
+            "chatgpt-account-id": tokens.get("account_id") or "",
+            "User-Agent": "codex-cli",
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=3) as response:
+            payload = json.load(response)
+    except Exception:
+        return None
+    limits = (payload if isinstance(payload, dict) else {}).get("rate_limit") or {}
+    return _headroom(
+        (limits.get(window) or {}).get("used_percent")
+        for window in ("primary_window", "secondary_window")
+        if isinstance(limits.get(window), dict)
+    )
+
+
 def _codex_score(now: float, stale_after: int) -> float | None:
     home = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex")
     try:
@@ -113,9 +154,17 @@ def capacity_scores(*, stale_after: int = 3600, now: float | None = None) -> dic
     """Return headroom percentages; unknown is ``None`` and never invented."""
     now = time.time() if now is None else now
     manual = _manual_scores()
+    if "codex" in manual:
+        codex = manual["codex"]
+    else:
+        # Active probe first: the rollout gauge only refreshes while codex runs,
+        # so on its own it starves an idle harness into permanent unknown.
+        codex = _codex_api_score()
+        if codex is None:
+            codex = _codex_score(now, stale_after)
     return {
         "claude": manual.get("claude", _claude_score(now, stale_after)),
-        "codex": manual.get("codex", _codex_score(now, stale_after)),
+        "codex": codex,
         # No supported proactive API. Exhaustion still arrives through usage-check.
         "opencode": manual.get("opencode"),
     }

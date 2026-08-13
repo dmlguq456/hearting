@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 import importlib.util
+import io
+import json
 import os
 from pathlib import Path
+import tempfile
 import unittest
 from unittest import mock
 
@@ -84,6 +87,64 @@ class CapacityPolicyTests(unittest.TestCase):
         self.assertEqual(C.ordering_score({}, "opencode"), C.ORDERING_NEUTRAL_SCORE)
         self.assertEqual(C.ordering_score({}, "opencode"), 50.0)
         self.assertEqual(C.ordering_score({"opencode": 73}, "opencode"), 73.0)
+
+
+class CodexGaugeReaderTests(unittest.TestCase):
+    """The codex gauge must not starve on idle: live probe first, rollout second.
+
+    A rollout-only reader self-reinforces (idle codex → stale gauge → unknown →
+    never selected → still idle), which skewed capacity-aware placement to
+    claude on 2026-08-13 while fleet's live probe showed real headroom."""
+
+    def test_api_probe_precedes_rollout_gauge(self):
+        with mock.patch.object(C, "_codex_api_score", return_value=24.0), \
+                mock.patch.object(
+                    C, "_codex_score",
+                    side_effect=AssertionError("rollout must not be read when the probe answers")), \
+                mock.patch.dict(os.environ, {"HARNESS_CAPACITY_SCORES": ""}):
+            self.assertEqual(C.capacity_scores(now=0.0)["codex"], 24.0)
+
+    def test_zero_headroom_probe_answer_does_not_fall_through(self):
+        with mock.patch.object(C, "_codex_api_score", return_value=0.0), \
+                mock.patch.object(
+                    C, "_codex_score",
+                    side_effect=AssertionError("0.0 headroom is an answer, not a miss")), \
+                mock.patch.dict(os.environ, {"HARNESS_CAPACITY_SCORES": ""}):
+            self.assertEqual(C.capacity_scores(now=0.0)["codex"], 0.0)
+
+    def test_probe_failure_falls_back_to_rollout_gauge(self):
+        with mock.patch.object(C, "_codex_api_score", return_value=None), \
+                mock.patch.object(C, "_codex_score", return_value=61.0), \
+                mock.patch.dict(os.environ, {"HARNESS_CAPACITY_SCORES": ""}):
+            self.assertEqual(C.capacity_scores(now=0.0)["codex"], 61.0)
+
+    def test_manual_override_stays_offline(self):
+        with mock.patch.object(
+                C, "_codex_api_score",
+                side_effect=AssertionError("manual override must not probe")), \
+                mock.patch.dict(os.environ, {"HARNESS_CAPACITY_SCORES": "codex:12"}):
+            self.assertEqual(C.capacity_scores(now=0.0)["codex"], 12.0)
+
+    def test_missing_auth_returns_none_before_any_network(self):
+        with tempfile.TemporaryDirectory() as home, \
+                mock.patch.dict(os.environ, {"CODEX_HOME": home}), \
+                mock.patch.object(
+                    C.urllib.request, "urlopen",
+                    side_effect=AssertionError("no network without auth.json")):
+            self.assertIsNone(C._codex_api_score())
+
+    def test_api_payload_parses_wham_rate_limit_windows(self):
+        payload = {"rate_limit": {"primary_window": {"used_percent": 76.0},
+                                  "secondary_window": {"used_percent": 40.0}}}
+        with tempfile.TemporaryDirectory() as home:
+            (Path(home) / "auth.json").write_text(
+                json.dumps({"tokens": {"access_token": "t", "account_id": "a"}}),
+                encoding="utf-8")
+            with mock.patch.dict(os.environ, {"CODEX_HOME": home}), \
+                    mock.patch.object(
+                        C.urllib.request, "urlopen",
+                        return_value=io.BytesIO(json.dumps(payload).encode("utf-8"))):
+                self.assertEqual(C._codex_api_score(), 24.0)
 
 
 if __name__ == "__main__":
