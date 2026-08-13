@@ -161,7 +161,10 @@ MEM_PERIODIC_CURATE_ENABLE=1 MEM_DISTILL_ENABLE=1 \
 # Case ② cannot catch this: its stub sleeps 0.3s, comfortably inside the old
 # window, so it passed vacuously. This case uses a stub that deliberately
 # outlives the old cap, so it fails against the 10s implementation and passes
-# only when the wait actually tracks the curate budget.
+# only when the wait actually tracks the curate completion marker. The sleep
+# command is PATH-stubbed: 12 logical seconds become 0.25 real seconds, while
+# the old implementation's 0.1-second polling sleeps become no-ops. This keeps
+# the regression fast while preserving the ordering that exposed the bug.
 echo "== ⑥ worker slower than the old 10s cap → still strictly sequential =="
 SLOW_SECONDS="${MEM_PERIODIC_CURATE_TEST_SLOW:-12}"
 STORE6="$(mktemp -d)"; PROJ6="$(mktemp -d)"; STUB6="$(mktemp -d)"
@@ -181,6 +184,18 @@ sleep $SLOW_SECONDS
 rmdir "\$CONC_DIR/.active" 2>/dev/null || true
 EOS
 chmod +x "$STUB6/claude"
+cat > "$STUB6/sleep" <<EOS
+#!/bin/sh
+case "\${1:-}" in
+  "$SLOW_SECONDS") exec /bin/sleep 0.25 ;;
+  0.1) exit 0 ;;
+  1) exec /bin/sleep 0.01 ;;
+  *) exec /bin/sleep "\$@" ;;
+esac
+EOS
+chmod +x "$STUB6/sleep"
+
+LOG6="$STORE6/periodic.log"
 
 MEM_PERIODIC_CURATE_ENABLE=1 MEM_DISTILL_ENABLE=1 \
   MEM_STORE="$STORE6" MEM_PROJECTS="$PROJ6" MEM_PY="$MEM" \
@@ -188,7 +203,7 @@ MEM_PERIODIC_CURATE_ENABLE=1 MEM_DISTILL_ENABLE=1 \
   MEM_DISTILL_TIMEOUT_CURATE=600 \
   AGENT_MODEL_GOVERNOR_ROOT="$STORE6/.test-model-governor" \
   CONC_DIR="$STORE6" \
-  bash "$UTIL"
+  bash "$UTIL" 2>"$LOG6"
 
 calls6="$(wc -l < "$STORE6/calls" 2>/dev/null || echo 0)"
 [ "${calls6:-0}" = "2" ] \
@@ -197,6 +212,50 @@ calls6="$(wc -l < "$STORE6/calls" 2>/dev/null || echo 0)"
 [ ! -e "$STORE6/VIOLATION" ] \
   && ok "⑥: ${SLOW_SECONDS}s worker (> old 10s cap) still did not overlap" \
   || bad "⑥: overlap detected — sequential wait gave up before the worker finished"
+logcount6="$(grep -c '^mem-periodic-curate project=.* elapsed=[0-9][0-9]*s status=complete$' "$LOG6" 2>/dev/null || true)"
+[ "${logcount6:-0}" = "2" ] \
+  && ok "⑥: cron log has one elapsed-time line per completed project" \
+  || bad "⑥: cron project log count = ${logcount6:-0}, expected 2"
+
+# ============================================================
+# ⑦ whole-run timeout stops the batch instead of allowing overlap
+# ============================================================
+echo "== ⑦ cron timeout → stop batch with timed project still isolated =="
+STORE7="$(mktemp -d)"; PROJ7="$(mktemp -d)"; STUB7="$(mktemp -d)"
+CLEANUP+=("$STORE7" "$PROJ7" "$STUB7")
+REALDIR7A="$(mktemp -d)"; REALDIR7B="$(mktemp -d)"
+CLEANUP+=("$REALDIR7A" "$REALDIR7B")
+mkproject "$PROJ7" "$REALDIR7A"
+mkproject "$PROJ7" "$REALDIR7B"
+printf '%s' "$CONC_STUB_BODY" > "$STUB7/claude"; chmod +x "$STUB7/claude"
+cat > "$STUB7/sleep" <<'EOS'
+#!/bin/sh
+case "${1:-}" in
+  0.3) exec /bin/sleep 8 ;;
+  1) exec /bin/sleep 0.01 ;;
+  *) exec /bin/sleep "$@" ;;
+esac
+EOS
+chmod +x "$STUB7/sleep"
+LOG7="$STORE7/periodic.log"
+
+MEM_PERIODIC_CURATE_ENABLE=1 MEM_DISTILL_ENABLE=1 \
+  MEM_STORE="$STORE7" MEM_PROJECTS="$PROJ7" MEM_PY="$MEM" \
+  MEM_DISTILL_WORKER=claude PATH="$STUB7:$PATH" \
+  MEM_PERIODIC_CURATE_TIMEOUT=3 MEM_PERIODIC_CURATE_PROJECT_TIMEOUT=30 \
+  AGENT_MODEL_GOVERNOR_ROOT="$STORE7/.test-model-governor" \
+  CONC_DIR="$STORE7" \
+  bash "$UTIL" 2>"$LOG7"
+
+calls7="$(wc -l < "$STORE7/calls" 2>/dev/null || echo 0)"
+[ "${calls7:-0}" = "1" ] \
+  && ok "⑦: whole-run timeout prevents the second project from starting" \
+  || bad "⑦: worker call count = ${calls7:-0}, expected 1"
+grep -Eq '^mem-periodic-curate project=.* elapsed=[0-9][0-9]*s status=timeout$' "$LOG7" \
+  && ok "⑦: timed project emits a bounded one-line timeout log" \
+  || bad "⑦: timeout log missing or malformed"
+# Let the detached test worker run its EXIT cleanup before fixture teardown.
+/bin/sleep 0.4
 
 echo
 echo "RESULT: PASS=$PASS FAIL=$FAIL"
