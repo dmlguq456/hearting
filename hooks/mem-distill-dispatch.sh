@@ -374,7 +374,12 @@ fi
   # Untrusted stdout stays in a file; the applier passes bodies and IDs as argv
   # elements without sh -c/eval. Curate mutations are membership-limited by the
   # snapshot ID file. Invalid actions skip without blocking marker advance.
-  python3 "$APPLIER" \
+  # MEM_DISTILL=1 keeps D-37 actor attribution deterministic: without it the
+  # applier's `mem add` journals every distilled record as actor=manual
+  # (observed 2026-08-13 — recovery-drain output was indistinguishable from
+  # hand-written records). Curate mode still overrides to actor=curator inside
+  # the applier.
+  MEM_DISTILL=1 python3 "$APPLIER" \
     "$OUT" "$MEM" --mode "$WORKER_MODE" --snapshot-ids "$SNAPIDS_FILE" || true
 
   if [ "$MODE" = "periodic-curate" ]; then
