@@ -360,6 +360,10 @@ fi
   printf '%s' "$PROMPT" > "$PROMPT_FILE"
 
   worker_rc=0
+  # A hook may inherit a registered dispatch worker's reservation. That token
+  # belongs to another admission (and possibly another governor root/class).
+  # Distillation owns a fresh admission and must not claim the foreign token.
+  unset AGENT_MODEL_GOVERNOR_RESERVATION_TOKEN
   MEM_DISTILL=1 python3 "$GOVERNOR" \
     run --class distill -- \
     "$WORKER_PATH" "$WORKER_MODE" "$DISTILL_MODEL" "$PROMPT_FILE" \
