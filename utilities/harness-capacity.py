@@ -225,7 +225,25 @@ def rank_band(candidates, states, counts, declared_order, scores, *, strategy="c
         ranked = sorted(candidates, key=key)
         bias = os.environ.get("HARNESS_CAPACITY_BIAS", "").strip().lower()
         if bias in ranked:
-            ranked = [bias] + [name for name in ranked if name != bias]
+            if all_gated:
+                # Single gate class: no boundary to protect, free reorder as before.
+                ranked = [bias] + [name for name in ranked if name != bias]
+            else:
+                # Balanced-only constraint: bias may reorder within its own gate
+                # class but must never lift a gated harness above an ungated one
+                # (or vice versa) — that would defeat the usage gate.
+                gated_of = lambda name: (
+                    scores.get(name) is not None and float(scores[name]) <= cutoff
+                )
+                bias_gated = gated_of(bias)
+                bias_group = [name for name in ranked if gated_of(name) == bias_gated]
+                other_group = [name for name in ranked if gated_of(name) != bias_gated]
+                reordered_bias_group = [bias] + [name for name in bias_group if name != bias]
+                ranked = (
+                    (other_group + reordered_bias_group)
+                    if bias_gated
+                    else (reordered_bias_group + other_group)
+                )
         return ranked
 
     # Automatic recovery needs positive evidence of fresh headroom.  Treating

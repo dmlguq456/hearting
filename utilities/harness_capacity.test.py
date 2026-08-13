@@ -96,6 +96,45 @@ class CapacityPolicyTests(unittest.TestCase):
         )
         self.assertEqual(ranked, ["codex", "claude"])
 
+    def test_balanced_bias_cannot_lift_a_gated_harness_over_an_ungated_one(self):
+        # Asymmetric, non-round headroom and counts: a unit inversion (percent
+        # vs. headroom) or a naive post-sort "move bias to front" override
+        # would both happen to pass with tidy round numbers, so this uses
+        # uneven values and an uneven count tiebreak (codex has far more
+        # recent attempts yet must still rank first) to make either bug show.
+        states = {**self.states, "claude": "ok", "codex": "ok"}
+        counts = {"claude": 1, "codex": 9}
+        scores = {"claude": 7.5, "codex": 63.2}  # claude 92.5% used (gated), codex 36.8% used (ungated)
+        with mock.patch.dict(os.environ, {"HARNESS_CAPACITY_BIAS": "claude"}):
+            biased = C.rank_band(
+                ["claude", "codex"], states, counts, ["claude", "codex"], scores,
+                strategy="balanced", usage_gate_used_percent=90,
+            )
+        unbiased = C.rank_band(
+            ["claude", "codex"], states, counts, ["claude", "codex"], scores,
+            strategy="balanced", usage_gate_used_percent=90,
+        )
+        self.assertEqual(biased, ["codex", "claude"])
+        self.assertEqual(biased, unbiased)
+
+    def test_balanced_bias_still_reorders_within_the_gated_class(self):
+        # The fix must not neuter bias entirely: within a single gate class it
+        # should still move the biased harness to the front, same as before.
+        states = {**self.states, "claude": "ok", "codex": "ok"}
+        counts = {"claude": 4, "codex": 1}
+        scores = {"claude": 9.0, "codex": 4.5}  # both gated (>= 90% used)
+        unbiased = C.rank_band(
+            ["claude", "codex"], states, counts, ["claude", "codex"], scores,
+            strategy="balanced", usage_gate_used_percent=90,
+        )
+        with mock.patch.dict(os.environ, {"HARNESS_CAPACITY_BIAS": "codex"}):
+            biased = C.rank_band(
+                ["claude", "codex"], states, counts, ["claude", "codex"], scores,
+                strategy="balanced", usage_gate_used_percent=90,
+            )
+        self.assertEqual(unbiased, ["claude", "codex"])
+        self.assertEqual(biased, ["codex", "claude"])
+
     def test_balanced_all_gated_uses_maximum_headroom(self):
         ranked = C.rank_band(
             ["claude", "codex", "opencode"], self.states,
