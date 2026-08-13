@@ -305,7 +305,14 @@ def resolve_agent_home(runtime_pointer: str | Path | None = None) -> Path:
     for candidate in candidates:
         if _valid(candidate):
             return Path(candidate)
-    return _MODULE_ROOT
+    # No candidate is marked: converge on utilities/agent-home.sh's final
+    # fallback ($HOME/.claude, unvalidated) so the two resolver chains cannot
+    # silently diverge in a bare environment (review F-4). _MODULE_ROOT stays
+    # only for the pathological case where even $HOME is undefined.
+    try:
+        return Path.home() / ".claude"
+    except RuntimeError:
+        return _MODULE_ROOT
 
 
 def agent_home_equivalent(a: str | Path, b: str | Path) -> bool:
@@ -3101,10 +3108,24 @@ def completion_marker_is_current(
             "registered_worker": marker.get("registered_worker"),
             "fallback_hop": marker.get("fallback_hop"),
             "evidence_sha256": evidence_record.get("sha256"),
-            "completion_marker": str(marker_path),
-            "completion_marker_history": str(history_path),
         }
-        return all(link.get(key) == value for key, value in link_expected.items())
+        if not all(link.get(key) == value for key, value in link_expected.items()):
+            return False
+        # The link records its own absolute location as written by the marker
+        # writer, whose env may spell the same directory in pointer form while
+        # this reader resolved it (or vice versa). Identity, not spelling, is
+        # the contract, so compare through agent_home_equivalent -- the
+        # comparison-site normalizer this module defines for exactly this.
+        for key, expected_path in (
+            ("completion_marker", marker_path),
+            ("completion_marker_history", history_path),
+        ):
+            recorded = link.get(key)
+            if not isinstance(recorded, str) or not agent_home_equivalent(
+                recorded, expected_path
+            ):
+                return False
+        return True
     except (DispatchContractError, KeyError, OSError, TypeError, ValueError):
         return False
 

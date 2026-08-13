@@ -20,6 +20,7 @@ from dispatch_contract import (
     WRAPPER_PARENT_SANDBOXES,
     WRAPPER_TRANSPORTS,
     _atomic_registry_replace,
+    agent_home_equivalent,
     attempt_process_quiescence,
     dispatch_state_roots,
     ensure_global_registry_writable,
@@ -1061,12 +1062,47 @@ def completion_dir(route_id, *, jobs=None):
     return resolve_dispatch_state_root(resolve_agent_home(), jobs)/"completion"/route_id
 
 
+def _rewrite_migrated_attempt_links(directory, old, new):
+    """Re-anchor the self-referential absolute paths inside migrated
+    `<node>.<attempt>.attempt.json` sidecars to the directory they now live
+    in. The sidecar records its own location (`completion_marker`,
+    `completion_marker_history`) and readers verify that identity, so a
+    byte-for-byte copy at a new root would evaluate as missing (review F-1).
+    Only those two keys are rewritten; everything else stays byte-identical,
+    and the origin directory is never touched (design constraint 7)."""
+
+    old_prefix = str(old)
+    new_prefix = str(new)
+    for link_path in directory.glob("*.attempt.json"):
+        try:
+            link = json.loads(link_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        changed = False
+        for key in ("completion_marker", "completion_marker_history"):
+            value = link.get(key)
+            if isinstance(value, str) and value.startswith(old_prefix):
+                link[key] = new_prefix + value[len(old_prefix):]
+                changed = True
+        if changed:
+            # Match write_once's serialization exactly (review N-5): a
+            # re-publish after migration compares this sidecar's bytes
+            # against a fresh write_once() call, which would hard-fail on
+            # any formatting drift even though the content is identical.
+            link_path.write_text(
+                json.dumps(link, indent=2, ensure_ascii=False) + "\n",
+                encoding="utf-8",
+            )
+
+
 def _migrate_completion_dir_forward(route_id, *, jobs=None):
     """One-time, idempotent, origin-preserving copy of a legacy
     agent-home-relative completion dir into the canonical dispatch state
     root, so a route that started writing before this cycle's resolver
     unification keeps its marker/history reachable at the new root the
-    writer now uses exclusively (design constraint 3 / 7)."""
+    writer now uses exclusively (design constraint 3 / 7). The copied
+    attempt sidecars are re-anchored to the new root before the directory
+    becomes visible; the origin stays byte-identical."""
 
     agent_home = resolve_agent_home()
     new = completion_dir(route_id, jobs=jobs)
@@ -1079,6 +1115,7 @@ def _migrate_completion_dir_forward(route_id, *, jobs=None):
         shutil.rmtree(tmp, ignore_errors=True)
     try:
         shutil.copytree(old, tmp)
+        _rewrite_migrated_attempt_links(tmp, old, new)
         os.rename(tmp, new)
     except OSError:
         shutil.rmtree(tmp, ignore_errors=True)
@@ -1457,6 +1494,16 @@ def _publish_completion_locked(
             raise ValueError("immutable attempt completion differs from existing link")
         history_path=Path(existing_link.get("completion_marker_history",""))
         if not history_path.is_file():
+            # The recorded spelling may be a pointer-form path into a state
+            # root that has since rotated away; look for the same basename
+            # across every known state root before declaring it missing
+            # (review N-1 -- identity, not verbatim spelling, is the contract).
+            for root in dispatch_state_roots(resolve_agent_home()):
+                candidate=root/"completion"/route["route_id"]/history_path.name
+                if candidate.is_file():
+                    history_path=candidate
+                    break
+        if not history_path.is_file():
             raise ValueError("immutable attempt completion history is missing")
         marker=json.loads(history_path.read_text(encoding="utf-8"))
         marker_identity={
@@ -1470,7 +1517,7 @@ def _publish_completion_locked(
         if marker_identity != expected_link_identity:
             raise ValueError("immutable attempt completion history differs from link")
         expected_history_path=completion_dir(route["route_id"])/f"{node_id}.{marker.get('sequence')}.json"
-        if history_path!=expected_history_path:
+        if not agent_home_equivalent(history_path, expected_history_path):
             raise ValueError("immutable attempt completion history path differs from link")
         marker_static={
             "route_hash":route["route_hash"],
@@ -1512,7 +1559,30 @@ def _publish_completion_locked(
         "completion_marker":str(canonical_marker_path),
         "completion_marker_history":str(history_marker_path),
     }
-    write_once(attempt_path,attempt_link)
+    # Idempotent republish (review P-1): an existing sidecar whose only
+    # difference from the link we would write is the SPELLING of its two
+    # self-referential paths (pointer vs resolved form of one directory) is
+    # the same publication, not a conflict. write_once compares whole byte
+    # strings, so reaching it with such a sidecar re-raised on every retry;
+    # skip the rewrite and keep the origin bytes exactly as first written.
+    _SELF_REF_KEYS=("completion_marker","completion_marker_history")
+    _skip_rewrite=False
+    if attempt_path.is_file():
+        try:
+            _existing=json.loads(attempt_path.read_text(encoding="utf-8"))
+        except (OSError,ValueError):
+            _existing=None
+        if isinstance(_existing,dict):
+            _skip_rewrite=all(
+                _existing.get(key)==value for key,value in attempt_link.items()
+                if key not in _SELF_REF_KEYS
+            ) and all(
+                isinstance(_existing.get(key),str)
+                and agent_home_equivalent(_existing[key],attempt_link[key])
+                for key in _SELF_REF_KEYS
+            )
+    if not _skip_rewrite:
+        write_once(attempt_path,attempt_link)
     current_marker=json.loads(canonical_marker_path.read_text(encoding="utf-8"))
     if current_marker==marker:
         atomic_write(

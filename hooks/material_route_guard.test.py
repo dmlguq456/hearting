@@ -203,6 +203,96 @@ class MaterialRouteGuardTest(unittest.TestCase):
             MATERIAL_GUARD.marker_path(self.home, "session-env-only"), marker_path,
         )
 
+    def test_bind_and_artifact_guard_check_agree_with_no_agent_home_at_all(self) -> None:
+        """Review F-4: the case above sets AGENT_HOME, so both chains read the
+        same first candidate and any implementation passes. The defect this
+        cycle fixed (artifact-guard.sh pinning --agent-home to its own script
+        location) only fires with AGENT_HOME/CLAUDE_HOME unset, so exercise
+        that exact cell: an isolated $HOME whose only marked candidate is
+        $HOME/.claude — the shared final fallback of utilities/agent-home.sh —
+        must be where BOTH the direct bind and the artifact-guard-mediated
+        check keep their `.route-grounding` state."""
+        self.opportunity("session-no-home")
+        fake_home = self.base / "fakehome"
+        fallback_home = fake_home / ".claude"
+        (fallback_home / "core").mkdir(parents=True)
+        (fallback_home / "core" / "CORE.md").write_text("core\n", encoding="utf-8")
+        (fallback_home / "utilities").symlink_to(
+            ROOT / "utilities", target_is_directory=True
+        )
+        clean = {
+            key: value for key, value in os.environ.items()
+            if key not in {
+                "AGENT_ROUTE_FILE", "AGENT_ROUTE_ID", "AGENT_ROUTE_NODE",
+                "AGENT_HOME", "CLAUDE_HOME", "HOME", "XDG_DATA_HOME",
+            }
+        }
+        env = {
+            **clean,
+            "HOME": str(fake_home),
+            "XDG_DATA_HOME": str(fake_home / ".local" / "share"),
+            "MEM_RECALL_RECEIPTS": str(self.receipts),
+        }
+
+        bind = subprocess.run(
+            [sys.executable, str(GUARD), "bind", "--route", str(self.route),
+             "--cwd", str(self.repo), "--session", "session-no-home"],
+            text=True, capture_output=True, env=env,
+        )
+        self.assertEqual(bind.returncode, 0, bind.stderr)
+        marker_path = MATERIAL_GUARD.marker_path(fallback_home, "session-no-home")
+        self.assertTrue(
+            marker_path.is_file(),
+            "bind without AGENT_HOME must land in the shared $HOME/.claude fallback",
+        )
+
+        # The target must (a) sit inside self.route's own artifact_root, so
+        # the route-artifact-root check doesn't short-circuit first, and (b)
+        # fall under a recognized capability bucket ("plans"), since a bare
+        # `.agent_reports/notes.md` is not classified as material at all and
+        # `check_action` returns before ever resolving a route (review N-2's
+        # underlying gap: the original target defeated the branch it meant to
+        # pin regardless of the AGENT_ROUTE_* env vars below).
+        artifact_root = self.artifacts / ".agent_reports"
+        target = artifact_root / "plans" / "cycle-no-home" / "notes.md"
+        target.parent.mkdir(parents=True)
+        env_check = {**env, "AGENT_ARTIFACT_ROOT": str(artifact_root)}
+
+        # No AGENT_ROUTE_FILE/AGENT_ROUTE_ID/AGENT_ROUTE_NODE here (review
+        # N-2): supplying them makes artifact-guard's `is_worker` branch
+        # true, which skips `_load_session_marker()` entirely and lets this
+        # assertion pass even with the marker deleted. Omitting them forces
+        # the session-marker branch this test is meant to pin.
+        check = subprocess.run(
+            ["bash", str(ROOT / "hooks" / "artifact-guard.sh"),
+             "--file", str(target), "--session", "session-no-home"],
+            text=True, capture_output=True,
+            env=env_check,
+            cwd=str(self.repo),
+        )
+        self.assertEqual(
+            check.returncode, 0,
+            f"artifact-guard check must read the marker bind wrote at "
+            f"{marker_path}: {check.stderr}",
+        )
+
+        # Counter-proof: with the marker gone, the session-marker branch must
+        # fail closed instead of silently agreeing (this is what the original
+        # assertion failed to pin -- it passed with the marker deleted too).
+        marker_path.unlink()
+        check_without_marker = subprocess.run(
+            ["bash", str(ROOT / "hooks" / "artifact-guard.sh"),
+             "--file", str(target), "--session", "session-no-home"],
+            text=True, capture_output=True,
+            env=env_check,
+            cwd=str(self.repo),
+        )
+        self.assertNotEqual(
+            check_without_marker.returncode, 0,
+            "artifact-guard check must fail closed once the session marker "
+            "it is supposed to read is gone",
+        )
+
     def test_non_git_research_exact_worktree_failure_cannot_write_inline_artifacts(self) -> None:
         project = self.base / "samsung-shaped"
         project.mkdir()

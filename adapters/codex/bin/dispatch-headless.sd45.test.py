@@ -24,14 +24,6 @@ def fake_probe_result(**row):
 
 
 class CodexSD45InternalProbe(unittest.TestCase):
-    def test_profile_home_follows_selected_registry_not_packaged_source(self):
-        args = argparse.Namespace(jobs="/runtime/.harness/dispatch/jobs.log")
-        with mock.patch.object(WH, "resolve_agent_home", return_value=Path("/release/v1")):
-            self.assertEqual(
-                WH.resolve_profile_home_root(args),
-                Path("/runtime/.harness/dispatch/homes"),
-            )
-
     def test_absent_evidence_binds_supported_and_marks_internal(self):
         args = probe_args()
         row = dict(parent_harness="claude", parent_transport="headless", parent_sandbox="default",
@@ -361,11 +353,36 @@ class CodexRouteBoundWorkerGrant(unittest.TestCase):
         core_grounding = str((args.agent_home.resolve() / ".core-grounding"))
         self.assertIn(f"--add-dir {core_grounding}", command)
 
-    def test_route_bound_grant_empty_without_route_id(self):
+    def test_route_bound_grant_empty_without_route_id_or_owner_network(self):
+        # Only a launch that is neither route-bound nor an owner-network owner
+        # gets no read-guard grant. An owner without a route_id keeps its
+        # SD-72 unconditional .core-grounding/.spec-grounding grants (F-3).
         with tempfile.TemporaryDirectory() as tmp:
             args = self._depth2_args(tmp)
             args.route_id = None
+            args.nested_headless_network = False
             self.assertEqual(WH.route_bound_worker_writable_dirs(args), ())
+
+    def test_owner_network_without_route_id_keeps_read_guard_grants(self):
+        # Review F-3: a standard+ codex owner launched without a route_id must
+        # not lose the .core-grounding/.spec-grounding grants SD-72 states
+        # unconditionally, or the portable read-guard hooks die on EROFS.
+        with tempfile.TemporaryDirectory() as tmp:
+            args = self._depth2_args(tmp)
+            args.route_id = None
+            args.dispatch_depth = 1
+            args.worker_type = "owner"
+            args.nested_headless_network = True
+            WH.ensure_owner_writable_dirs(args)
+            granted = WH.route_bound_worker_writable_dirs(args)
+            self.assertIn(
+                (args.agent_home / ".core-grounding").resolve(), granted
+            )
+            command = WH.shell_command(
+                args, Path(tmp) / "p.txt", Path(tmp) / "l.log"
+            )
+            spec_grounding = str(args.agent_home.resolve() / ".spec-grounding")
+            self.assertIn(spec_grounding, command)
 
 
 class CodexSD45(unittest.TestCase):

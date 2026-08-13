@@ -18,7 +18,8 @@ import uuid
 ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT), str(ROOT / "utilities")]
 from tools.fleet.model import ATTEMPT_CLASSIFIER_SOURCE, classify_attempt_evidence  # noqa: E402
-from dispatch_contract import (DispatchContractError, annotate_attempt_row_if,
+from dispatch_contract import (DispatchContractError, agent_home_equivalent,
+                               annotate_attempt_row_if,
                                attempt_process_quiescence,
                                attempt_tagged_descendants,
                                authoritative_process_identities,
@@ -270,6 +271,34 @@ def _marker_backed_repair(row, home, jobs=None):
     try:
         linkage = json.loads(linkage_path.read_text(encoding="utf-8"))
         history_path = Path(linkage["completion_marker_history"])
+        if not history_path.is_file():
+            # The recorded spelling may be a pointer-form path into a state
+            # root that has since rotated away; look for the same basename
+            # across every known state root before declaring it missing
+            # (review Q-3, symmetric with capability-route.py:1494-1502's
+            # N-1 fallback for the same dereference).
+            #
+            # Round-5 review (S-4): under this cycle's writer/reader
+            # contract, `completion_marker` and `completion_marker_history`
+            # are always written by the same call with the same directory
+            # spelling, and `tools/install/distribution.py`'s release-rotation
+            # carry-forward copies (and re-anchors) the whole `.dispatch` tree
+            # -- history file, canonical marker, and attempt linkage -- as one
+            # unit, never one without the others. No organically reachable
+            # input has been found where this basename fallback finds a file
+            # the `recorded_marker` identity check below (agent_home_equivalent
+            # against `directory / f"{node}.json"`) does not already accept
+            # through its own spelling tolerance. Kept intentionally
+            # fail-closed rather than removed: it only ever widens what this
+            # function accepts, so an input that reaches it and finds nothing
+            # still falls through to `return False` below, and any future
+            # writer/reader that stops moving these two keys in lockstep would
+            # make this branch reachable again.
+            for root in dispatch_state_roots(home, jobs):
+                candidate = root / "completion" / route_id / history_path.name
+                if candidate.is_file():
+                    history_path = candidate
+                    break
         marker = json.loads(history_path.read_text(encoding="utf-8"))
     except (KeyError, OSError, TypeError, ValueError):
         return False
@@ -287,12 +316,22 @@ def _marker_backed_repair(row, home, jobs=None):
         "node_id": node,
         "attempt_id": attempt_id,
         **expected_axes,
-        "completion_marker": str(directory / f"{node}.json"),
     }
     if any(linkage.get(key) != value for key, value in expected_link.items()):
         return False
+    # Spelling-tolerant path identity (F-2): the linkage records the writer's
+    # spelling of the marker directory, which may be pointer form while this
+    # reader holds the resolved form (or vice versa).
+    recorded_marker = linkage.get("completion_marker")
+    if not isinstance(recorded_marker, str) or not agent_home_equivalent(
+        recorded_marker, directory / f"{node}.json"
+    ):
+        return False
     expected_history = directory / f"{node}.{marker.get('sequence')}.json"
-    if history_path != expected_history or marker.get("schema_version") != 2:
+    if (
+        not agent_home_equivalent(history_path, expected_history)
+        or marker.get("schema_version") != 2
+    ):
         return False
     if (
         marker.get("route_id") != route_id
