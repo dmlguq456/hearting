@@ -927,6 +927,65 @@ class DispatchBatchTest(unittest.TestCase):
             "parent-runtime-identity-missing",
         )
 
+    def _governor_subprocess_result(self, stderr, rc=1):
+        return SimpleNamespace(stdout="", stderr=stderr, returncode=rc)
+
+    def test_ac6_reserve_batch_classifies_shortfall_from_general_denial(self):
+        # AC 6: a capacity/budget shortfall is typed
+        # governor-atomic-admission-shortfall; other governor failures stay
+        # model-worker-governor-denied. Both admit row 0 / model process 0.
+        for marker, expected in (
+            ("rolling model-worker start budget reached", "governor-atomic-admission-shortfall"),
+            ("global model-worker cap reached", "governor-atomic-admission-shortfall"),
+            ("dispatch class cap reached", "governor-atomic-admission-shortfall"),
+            ("kill switch active", "model-worker-governor-denied"),
+            ("", "model-worker-governor-denied"),
+        ):
+            with self.subTest(marker=marker, expected=expected):
+                with mock.patch.object(
+                    BATCH.subprocess, "run",
+                    return_value=self._governor_subprocess_result(stderr=marker),
+                ):
+                    with self.assertRaises(BATCH.BatchError) as ctx:
+                        BATCH.reserve_batch(
+                            Path("/tmp/governor"), Path("/tmp/root"),
+                            [{"attempt_id": "att-x"}],
+                            manifest={"parallel_group": "plan"},
+                            manifest_digest="sha256:" + "a" * 64,
+                        )
+                self.assertEqual(ctx.exception.reason, expected)
+
+    def test_ac6_shortfall_fails_closed_with_no_partial_admit(self):
+        output = io.StringIO()
+        stack = contextlib.ExitStack()
+        stack.enter_context(mock.patch.object(BATCH, "load_route", return_value=self.route))
+        assignments = [
+            (self.route["nodes"][0], "codex", "same-harness-headless", 1),
+            (self.route["nodes"][1], "claude", "cross-harness-headless", 2),
+        ]
+        stack.enter_context(mock.patch.object(BATCH, "assign_harnesses", return_value=(assignments, "cross-harness", {"families_considered": [], "usable_families": [], "family_exclusions": {}, "capacity": {}, "degradation_cause": ""})))
+        stack.enter_context(mock.patch.object(BATCH, "resolve_agent_home", return_value=self.base))
+        stack.enter_context(mock.patch.object(BATCH, "resolve_global_registry", return_value=SimpleNamespace(path=self.jobs)))
+        stack.enter_context(mock.patch.object(BATCH, "resolve_live_parent_attempt"))
+        stack.enter_context(mock.patch.object(BATCH, "completion_marker_gate"))
+        stack.enter_context(mock.patch.object(BATCH.subprocess, "check_output", return_value=str(self.base)))
+        stack.enter_context(mock.patch.object(BATCH, "reserve_batch", side_effect=BATCH.BatchError("governor-atomic-admission-shortfall", "rolling model-worker start budget reached")))
+        popen = stack.enter_context(mock.patch.object(BATCH.subprocess, "Popen"))
+        stack.enter_context(mock.patch.dict(os.environ, {
+            "AGENT_DISPATCH_SELF_SLUG": "owner",
+            "AGENT_DISPATCH_ATTEMPT_ID": "att-parent-fixture",
+            "AGENT_DISPATCH_CURRENT_HARNESS": "codex",
+            "AGENT_DISPATCH_CURRENT_TRANSPORT": "headless",
+            "AGENT_DISPATCH_CURRENT_SANDBOX": "workspace-write",
+        }))
+        with stack, contextlib.redirect_stdout(output):
+            rc = BATCH.main(self.argv())
+        self.assertEqual(rc, 75)
+        popen.assert_not_called()
+        receipt = json.loads(output.getvalue())
+        self.assertEqual((receipt["admitted"], receipt["spawned"]), (0, 0))
+        self.assertEqual(receipt["reason"], "governor-atomic-admission-shortfall")
+
     def test_both_wrappers_exist_before_either_is_joined(self):
         stack, assignments = self.common_patches()
         output = io.StringIO()

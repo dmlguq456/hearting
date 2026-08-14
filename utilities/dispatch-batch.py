@@ -619,6 +619,21 @@ def reserve_batch(
     )
     if result.returncode or not valid_payload:
         detail = (result.stderr or result.stdout).strip()[:512]
+        # AC 6/7: a capacity/budget shortfall is a full-N atomic admission
+        # shortfall (typed reason), not a general governor denial. The batch
+        # never partially admits (row 0 / model process 0) and never narrows
+        # width by dropping an auxiliary leg.
+        if any(
+            marker in detail
+            for marker in (
+                "rolling model-worker start budget reached",
+                "global model-worker cap reached",
+                "class cap reached",
+            )
+        ):
+            raise BatchError(
+                "governor-atomic-admission-shortfall", detail or "atomic-reserve-failed"
+            )
         raise BatchError("model-worker-governor-denied", detail or "atomic-reserve-failed")
     return tokens
 
@@ -1400,6 +1415,19 @@ def main(argv: list[str] | None = None) -> int:
                     peers=peers,
                 )
             except BatchError as exc:
+                if exc.reason == "governor-atomic-admission-shortfall":
+                    # AC 6/7 ledger: the full-N atomic reservation failed with
+                    # row 0 / model process 0 and no partial (width-narrowed)
+                    # admission. The owner's bounded retry then closes the stage
+                    # with the typed failure; this records the reason once.
+                    record_degradation(
+                        route_id=route.get("route_id"), route_node=args.parallel_group,
+                        route_hash=route.get("route_hash"), dispatch_depth=2,
+                        fallback_hop=None, execution_surface="registered-headless",
+                        writer="dispatch-batch.py", kind="degradation",
+                        reason="governor-atomic-admission-shortfall",
+                        detail=str(exc.detail or "")[:512],
+                    )
                 return fail(
                     exc.reason,
                     75,
