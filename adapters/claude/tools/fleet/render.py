@@ -960,8 +960,8 @@ def _drop_past_stages(items, cur_i, max_width):
     dropped_tail = 0
     def marker_cells():
         return _dw("+%d" % (dropped_tail + 1)) if dropped_tail or width() > max_width else 0
-    while (width(marker_cells()) > max_width and len(items) > 2
-           and items[-1][0] > cur_i + 1):
+    while (width(marker_cells()) > max_width and len(items) > 1
+           and items[-1][0] > cur_i):
         items.pop()
         dropped_tail += 1
     if dropped_tail:
@@ -1010,6 +1010,18 @@ def _route_stage_segs(route_seq, working, max_width):
             items.append((i, nid, "stg%d_off" % (i % 5)))
     if max_width is not None:
         items = _drop_past_stages(items, cur_i, max_width)
+        # F-68 floor: when even the folded remainder (typically the lone current
+        # token) exceeds the budget, shorten the LAST label with an ellipsis
+        # instead of letting a hard border tail-cut it mid-glyph.
+        def _total():
+            return (sum(_dw(t) for _i2, t, _k2 in items)
+                    + max(0, len(items) - 1) * 3)
+        if items and _total() > max_width:
+            over = _total() - max_width
+            widest = max(range(len(items)), key=lambda n: _dw(items[n][1]))
+            w_i, w_label, w_key = items[widest]
+            keep = max(1, _dw(w_label) - over - 1)
+            items[widest] = (w_i, w_label[:keep] + "…", w_key)
     out = []
     for n, (_i, label, key_) in enumerate(items):
         if n:
@@ -1077,6 +1089,10 @@ def _stage_segs(key, stage, working=False, max_width=None, route_seq=None):
         if stage == "running":
             preparing_key = ("stg0_on" if _BLINK_ON else "stg0_off") if working else "stg0_off"
             return [("preparing…", preparing_key)]
+        # F-68: the single unknown-stage token honors the zone budget too — inside
+        # a framed card the border is a hard edge and would tail-cut it mid-glyph.
+        if max_width is not None and _dw(stage) > max_width:
+            stage = stage[:max(1, max_width - 1)] + "…"
         return [(stage, _cur_key(0))]
     return [("-", "dim")]
 
@@ -1143,18 +1159,23 @@ def _dispatch_stage_segs(j, key, stage, slug_name, working=False, route_seq=None
         # uses) to humanize it instead of leaking the raw capability token onto the board.
         # When `_entry_skill` already leads the options column with this very token (user
         # 2026-07-20: "code가 표시가 되어있는데"), the prefix is a same-row duplicate — skip.
+        # F-68: a framed card's remaining width (route_zone) caps every fallback
+        # budget too — the border is a hard edge, unlike the open-row flush.
+        zone_max = min(_STAGE_ZONE_MAX, route_zone) if route_zone else _STAGE_ZONE_MAX
         role_label, role_suffix = _stage_role_label(key)
         prefix_text = (role_label + role_suffix) if role_label else key
         prefix_seg = (prefix_text + ": ", "name_dim")
         body = _stage_segs(key, stage, working=working,
-                           max_width=max(0, _STAGE_ZONE_MAX - _dw(prefix_seg[0])))
+                           max_width=max(0, zone_max - _dw(prefix_seg[0])))
         segs = [prefix_seg] + body
-        if sum(_dw(t) for t, _k in segs) > _STAGE_ZONE_MAX:
+        if sum(_dw(t) for t, _k in segs) > zone_max:
             # F-9(c): past stages already folded as far as they can (SD-F2 keeps the active
             # stage) — the next whole component to drop is the role-label prefix itself.
             return body
         return segs
-    return _stage_segs(key, stage, working=working, max_width=_STAGE_ZONE_MAX)
+    return _stage_segs(key, stage, working=working,
+                       max_width=(min(_STAGE_ZONE_MAX, route_zone)
+                                  if route_zone else _STAGE_ZONE_MAX))
 
 
 def _stage_zone_segs(bc):
@@ -1713,8 +1734,13 @@ def _dispatch_box_width(term_width, layout=None):
     return max(_RAIL_COL + 4, width - 6 if _TINT_OK else width - 1)
 
 
-def _frame_dispatch_line(segs, box_width, edge, key):
-    """Add one complete F-66 box row, resolving right flush within the frame."""
+def _frame_dispatch_line(segs, box_width, edge, key, run_key=None):
+    """Add one complete F-66 box row, resolving right flush within the frame.
+
+    F-68 grain contract (user 2026-08-14): horizontal runs — the owner-row gap
+    fill and the bottom rule — wear the STEADY `run_key` hue while corners and
+    verticals wear `key` (the blinking rail hue), so a working card pulses at
+    its edges without strobing a full-width bright bar."""
     left = _overwrite_rail_text(segs, _RAIL_COL,
                                 _RAIL_TOP if edge == "top" else _RAIL_MID, key)
     right = []
@@ -1728,16 +1754,25 @@ def _frame_dispatch_line(segs, box_width, edge, key):
     left, left_w = _clip_segs(left, left_limit)
     pad = max(0, box_width - 1 - left_w - right_w)
     if pad:
-        left.append((" " * pad, None))
+        if edge == "top" and pad >= 3 and not right:
+            # Owner row: fill the trailing gap with a rule so the top edge reads
+            # as the box's horizontal line, breathing one cell on each side.
+            left.append((" ", None))
+            left.append(("─" * (pad - 2), run_key or key))
+            left.append((" ", None))
+        else:
+            left.append((" " * pad, None))
     left.extend(right)
     left.append((_RAIL_TOP_RIGHT if edge == "top" else _RAIL_RIGHT, key))
     return left
 
 
-def _dispatch_box_bottom(box_width, key):
+def _dispatch_box_bottom(box_width, key, run_key=None):
     run = max(0, box_width - _RAIL_COL - 2)
     return [(" " * _RAIL_COL, None),
-            (_RAIL_BOT + "─" * run + _RAIL_BOT_RIGHT, key)]
+            (_RAIL_BOT[0], key),
+            ("─" * (run + len(_RAIL_BOT) - 1), run_key or key),
+            (_RAIL_BOT_RIGHT, key)]
 
 
 _ORPHAN_DIVIDER_LABEL = "  ⌄ orphaned dispatch rows"
@@ -1961,7 +1996,7 @@ def _dispatch_stage_label(j):
     return label + suffix
 
 
-def _opts_segs(j):
+def _opts_segs(j, max_width=None):
     """F-15a options column — HIERARCHICAL dial (user 2026-07-20: "계층적으로
     code (mode inten) / boot 순"). Three axes, three visual levels instead of the flat
     '·' chain that mixed them: the entry skill heads the dial, its behaviour knobs
@@ -1987,9 +2022,8 @@ def _opts_segs(j):
     if role:
         knob_items.append(role)
     knobs = "·".join(knob_items)
-    tail = " / ".join(
-        value for value in (_dispatch_model_profile(j), _dispatch_profile(j)) if value
-    ) or None
+    env_tail = [value for value in
+                (_dispatch_model_profile(j), _dispatch_profile(j)) if value]
     unit = getattr(j, "unit", None)
     projected_unit = unit or (
         None if _is_owner_mode_row(j) else getattr(j, "worker_mode", None)
@@ -1998,14 +2032,26 @@ def _opts_segs(j):
         display_unit = str(projected_unit)
         if display_unit.startswith("_"):
             display_unit = display_unit[1:]
-        tail = " / ".join(value for value in (tail, "unit:" + _compact_dispatch_name(display_unit, _PROFILE_MAX)) if value)
+        env_tail.append("unit:" + _compact_dispatch_name(display_unit, _PROFILE_MAX))
+    warn_tail = []
     if _mode_axis_conflict(j):
-        tail = " / ".join(value for value in (tail, "mode!") if value)
+        warn_tail.append("mode!")
     contract_status = getattr(j, "attempt_contract_status", None)
     if contract_status == "legacy-read-only":
-        tail = " / ".join(value for value in (tail, "legacy") if value)
+        warn_tail.append("legacy")
     elif contract_status and contract_status != "current":
-        tail = " / ".join(value for value in (tail, "contract!") if value)
+        warn_tail.append("contract!")
+    # F-68: inside a framed card the dial folds to whole components instead of
+    # being tail-cut mid-token at the box border — environment components drop
+    # from the end (unit: first, then the profile pair), warnings never drop.
+    if max_width is not None:
+        def _dial_w(env):
+            body = (len(entry) if entry else 0) + (len(knobs) + 2 if knobs else 0)
+            parts_ = env + warn_tail
+            return body + sum(len(v) + 3 for v in parts_)
+        while env_tail and _dial_w(env_tail) > max_width:
+            env_tail.pop()
+    tail = " / ".join(env_tail + warn_tail) or None
     parts = []
     w = 0
 
@@ -2032,7 +2078,8 @@ def _opts_segs(j):
 
 def _dispatch_row(j, orphan=False, parent_model=None, parent_harness=None, is_last=True,
                   parent_effort=None, stage_override=None, name_width=None, route_seq=None,
-                  route_zone=None, in_card=False, unit_working=None):
+                  route_zone=None, in_card=False, unit_working=None,
+                  card_interior=None):
     """A dispatch job rendered as a session-ANALOGUE, mirroring the session columns 1:1:
       harness (model · effort)  |  [stage label] session (branch)  |  stage breadcrumb  |  time
     F-33 (v11): model/effort fold into the harness field (no more separate model column).
@@ -2154,19 +2201,36 @@ def _dispatch_row(j, orphan=False, parent_model=None, parent_harness=None, is_la
         # F-15a options column (fixed-ish gap, dim mode/qa/profile) — a declutter move OUT of
         # the name zone, not a new axis. model/effort now live in the harness field (F-4/SD-F3).
         segs.append((" " * _WIDE_STAGE_GAP, None))
-        opt_segs, optw = _opts_segs(j)
+        opt_segs, optw = _opts_segs(j, max_width=(28 if in_card else None))
         segs += opt_segs
         if optw < _OPTW:
             segs.append((" " * (_OPTW - optw), None))
 
+        # F-68: a framed row has no elastic right-flush — the border is a hard
+        # edge. The open-row zone ledger is tuned for 168 columns and let the
+        # breadcrumb spill into the flush area invisibly; inside a card the real
+        # budget is whatever remains before the border, measured off the segs
+        # actually emitted so far.
+        if in_card and card_interior:
+            consumed = sum(_dw(t) for t, _k in segs)
+            # -4: one border cell plus the ' : ' stage-zone lead-in emitted after
+            # this measurement.
+            card_route_zone = max(8, card_interior - consumed - 4)
+        else:
+            card_route_zone = route_zone
         segs += _stage_zone_segs(
             _dispatch_stage_segs(j, key, stage, slug_name,
                                  working=(unit_working if unit_working is not None
                                           else j.liveness == "working"),
-                                 route_seq=route_seq, route_zone=route_zone))
+                                 route_seq=route_seq, route_zone=card_route_zone))
 
-    segs += [(" " * _WIDE_TIME_GAP, None), (_RFLUSH, None)]
-    segs += [(_CLOCK, "dim"), ("%6s" % fmt_min(j.elapsed_min), "dim")]
+    # F-68 (user 2026-08-14 "time은 빼고 설명 요약쪽처럼 일관성"): a framed row keeps no
+    # right-flushed time column — the box border is the row's right terminus, exactly
+    # like the summary/detail rows, so the frame edge never negotiates with a flush
+    # block over ambiguous-width cells.
+    if not in_card:
+        segs += [(" " * _WIDE_TIME_GAP, None), (_RFLUSH, None)]
+        segs += [(_CLOCK, "dim"), ("%6s" % fmt_min(j.elapsed_min), "dim")]
     return segs
 
 
@@ -4577,7 +4641,9 @@ def _build_lines(sessions, jobs, section, narrow, malformed, layout="wide", memo
                                            stage_override=stage_override,
                                            name_width=card_name_width if in_card else wide_name_width,
                                            route_seq=route_seq, route_zone=wide_route_zone,
-                                           in_card=in_card, unit_working=unit_working))
+                                           in_card=in_card, unit_working=unit_working,
+                                           card_interior=(_dispatch_box_width(term_width, layout) - 1
+                                                          if in_card else None)))
             # 2026-07-24: a dispatch card's second line is its live log summary ONLY —
             # the same "identity row + fresh NOW" shape as a main-session card. The
             # pipeline rides the row's own breadcrumb; dedicated stage rows are a
@@ -4617,13 +4683,18 @@ def _build_lines(sessions, jobs, section, narrow, malformed, layout="wide", memo
                         getattr(job, "key", None),
                         stage_override or getattr(job, "stage", None), route_seq)
                     rail_key = ("stg%d_on" if _BLINK_ON else "stg%d_off") % color_i
+                    # F-68 grain: horizontal runs stay on the steady off-hue so the
+                    # pulse lives in the corners and verticals, not a strobing bar.
+                    run_key = "stg%d_off" % color_i
                 else:
                     rail_key = "dim"
+                    run_key = "dim"
                 box_width = _dispatch_box_width(term_width, layout)
                 for idx in range(block_start, len(lines)):
                     lines[idx] = _frame_dispatch_line(
-                        lines[idx], box_width, "top" if idx == block_start else "mid", rail_key)
-                lines.append(_dispatch_box_bottom(box_width, rail_key))
+                        lines[idx], box_width, "top" if idx == block_start else "mid",
+                        rail_key, run_key=run_key)
+                lines.append(_dispatch_box_bottom(box_width, rail_key, run_key=run_key))
 
         shown = _sort_group_sessions(shown)
         if live_order is not None:

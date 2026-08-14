@@ -147,10 +147,14 @@ class EarlyStageBreadcrumbTailFoldTest(unittest.TestCase):
         self.assertIn("frame(3-way)", text)      # current stage always survives
         self.assertIn("+", text)                  # folded-tail counter is visible
 
-    def test_current_and_successor_survive_any_budget(self):
-        text, _width = self._crumb(10)
-        self.assertIn("frame(3-way)", text)
-        self.assertIn("plan(2-way)", text)
+    def test_current_survives_any_budget_and_totals_stay_bounded(self):
+        # F-68 revision: inside a framed card the border is a hard edge, so the
+        # successor may fold into the +N counter and an oversized current token
+        # ellipsizes — but the fold NEVER exceeds the budget and the current
+        # stage stays recognizable at its head.
+        text, width = self._crumb(10)
+        self.assertLessEqual(width, 10)
+        self.assertTrue(text.startswith("frame") or text.startswith("fra"))
 
     def test_fitting_route_is_untouched(self):
         text, _width = self._crumb(500)
