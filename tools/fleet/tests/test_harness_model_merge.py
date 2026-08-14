@@ -65,8 +65,7 @@ class ColumnHeaderTest(unittest.TestCase):
             head,
             "    " + "harness (model·effort)".ljust(render._HMW)
             + "session (branch)".ljust(28 + render._BRANCH_SUFFIX_W)
-            + " " * render._WIDE_STAGE_GAP + "stages"
-            + " " * render._WIDE_TIME_GAP,
+            + " " * render._WIDE_STAGE_GAP + "stages",
         )
         self.assertNotIn("model".ljust(render._MW), head)
         self.assertNotIn("session".ljust(28) + "branch", head)
@@ -76,16 +75,19 @@ class ColumnHeaderTest(unittest.TestCase):
             render._NAME_COL + 28 + render._BRANCH_SUFFIX_W + render._WIDE_STAGE_GAP,
         )
 
-    def test_wide_board_keeps_time_as_the_fourth_column(self):
+    def test_wide_board_header_ends_at_stages_without_a_time_column(self):
+        # F-68c (user "time 없애라고 했는데 왜 계속 뜨는건데"): the elapsed COLUMN is
+        # retired board-wide — it rides inline after each row's content — so the
+        # header carries no right-flushed `time` label and no flush sentinel.
         lines = render._build_lines([], [], "fleet", False, 0,
                                     layout="wide", term_width=168)
         header = next(line for line in lines if line and
                       any("harness (model·effort)" in text for text, _key in line))
-        self.assertEqual(header[-1][0].strip(), "time")
+        self.assertEqual(len(header), 1)
+        self.assertNotIn(render._RFLUSH, [text for text, _key in header])
         self.assertIn("session (branch)", header[0][0])
-        self.assertIn("stages", header[0][0])
         self.assertNotIn("context / stage", header[0][0])
-        self.assertTrue(header[0][0].endswith("stages "))
+        self.assertTrue(header[0][0].endswith("stages"))
 
 
 class SessionRowMergeTest(unittest.TestCase):
@@ -115,9 +117,9 @@ class SessionRowMergeTest(unittest.TestCase):
             render._NAME_COL + 40 + render._BRANCH_SUFFIX_W + render._WIDE_STAGE_GAP,
         )
         self.assertEqual(segs[stage_i], ("-", "dim"))
-        flush_i = next(i for i, (value, _key) in enumerate(segs)
-                       if value == render._RFLUSH)
-        self.assertEqual(segs[flush_i - 1], (" " * render._WIDE_TIME_GAP, None))
+        # F-68c: no flush sentinel — the row ends with its inline elapsed tag.
+        self.assertNotIn(render._RFLUSH, [value for value, _key in segs])
+        self.assertTrue(segs[-1][0].startswith(render._WAIT_GLYPH))
 
     def test_narrow_empty_stage_also_uses_a_dash(self):
         _l1, l2 = render._session_row_2line(self._session())

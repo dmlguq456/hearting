@@ -799,7 +799,7 @@ def _col_head(name_width):
     # content does too — no more separate "model" header between branch and the gauge.
     return ("    " + "harness (model·effort)".ljust(_HMW)
             + "session (branch)".ljust(name_width + _BRANCH_SUFFIX_W)
-            + " " * _WIDE_STAGE_GAP + "stages" + " " * _WIDE_TIME_GAP)
+            + " " * _WIDE_STAGE_GAP + "stages")
 
 
 def _branch_suffix_segs(cwd, branch, dim=True, optional=False,
@@ -1583,9 +1583,11 @@ def _session_row(s, narrow, is_parent=False, child_count=0, name_width=None,
     if s.orphan:
         segs.append(("  worktree-gone", "g_dead"))
 
-    segs += [(" " * _WIDE_TIME_GAP, None), (_RFLUSH, None)]          # uptime flush right
-    # Cost display intentionally omitted.
-    segs += [(_CLOCK, "dim"), ("%6s" % fmt_min(s.elapsed_min), "dim")]
+    # F-68c (user "time 없애라고 했는데 왜 계속 뜨는건데", "다른 곳에는 다 남아있잖아"):
+    # the right-flushed uptime COLUMN is retired board-wide, not only inside cards.
+    # Elapsed rides inline as a dim `⏳<t>` tag right after the row's content, the
+    # same grammar the summary rows and the in-card dispatch rows use.
+    segs += [("  ", None), (_WAIT_GLYPH + fmt_min(s.elapsed_min), "dim")]
     return segs
 
 
@@ -1756,6 +1758,10 @@ def _frame_dispatch_line(segs, box_width, edge, key, run_key=None):
             left = left[:i]
             break
     tag_w = (sum(_dw(text) for text, _color in tag) + 2) if tag else 0
+    # F-68c (user "우측엔 그냥 너무 딱 붙어있잖아"): the border keeps a two-cell inner
+    # margin on the right, mirroring the rail-side gap, so nothing — content or
+    # the inline tag — ever touches the frame.
+    margin = 2 if tag else 0
     right_w = sum(_dw(text) for text, _color in right)
     # Symmetric breathing: content stops two cells short of the border, matching
     # the rail-side inner margin (user: "우측엔 너무 딱 붙어"). The in-card tail tag
@@ -1763,21 +1769,23 @@ def _frame_dispatch_line(segs, box_width, edge, key, run_key=None):
     # Best-effort margin: the wide-row ledger already reserves the two-cell
     # breathing room; a tight narrow row may use the full interior rather than
     # losing content it historically displayed.
-    left_limit = max(0, box_width - 1 - right_w - tag_w)
+    left_limit = max(0, box_width - 1 - right_w - tag_w - margin)
     kept_w_before = sum(_dw(text) for text, _color in left)
     full = list(left)
     left, left_w = _clip_segs(left, left_limit)
     if tag and left_w < kept_w_before:
         # make the cut visible — unless the fold already ends in its own ellipsis.
         # The marker rides INSIDE the limit: re-clip one cell shorter first.
-        if not (left and left[-1][0].endswith("…")):
+        tail_txt = "".join(t for t, _k in left[-2:])
+        if not tail_txt.rstrip().endswith("…"):
             left, left_w = _clip_segs(full, max(0, left_limit - 1))
             left.append(("…", "dim"))
             left_w += 1
     if tag:
         left.append(("  ", None))
         left.extend(tag)
-        left_w += tag_w
+        left.append((" " * margin, None))
+        left_w += tag_w + margin
     pad = max(0, box_width - 1 - left_w - right_w)
     if pad:
         if edge == "top" and pad >= 3 and not right:
@@ -2268,8 +2276,7 @@ def _dispatch_row(j, orphan=False, parent_model=None, parent_harness=None, is_la
         if in_card_time is not None:
             segs += [(_CARD_TAG, None), (in_card_time, "dim")]
     else:
-        segs += [(" " * _WIDE_TIME_GAP, None), (_RFLUSH, None)]
-        segs += [(_CLOCK, "dim"), ("%6s" % fmt_min(j.elapsed_min), "dim")]
+        segs += [("  ", None), (_WAIT_GLYPH + fmt_min(j.elapsed_min), "dim")]
     return segs
 
 
@@ -4439,10 +4446,9 @@ def _build_lines(sessions, jobs, section, narrow, malformed, layout="wide", memo
         lines.append([(_sh + "  SESSIONS", "head"), (_RFLUSH, None),
                       ("%s · press w to cycle  " % layout, "head")])
     else:
-        # right-flushed 'time' label sits over the (inset) elapsed-time column — trailing
-        # spaces mirror the tint rows' right inset so the label right-aligns with the values.
-        lines.append([(_sh + _col_head(wide_name_width or _NW_S), "head"), (_RFLUSH, None),
-                      ("time" + " " * (_INSET + _PAD_IN + 1), "head")])
+        # F-68c: the elapsed-time COLUMN is retired board-wide (it now rides inline as
+        # a dim tag after each row's content), so the header carries no 'time' label.
+        lines.append([(_sh + _col_head(wide_name_width or _NW_S), "head")])
     first = True
     folded_groups = []       # dormant dirs — aggregated into ONE line at the bottom (user: the
                              # stack of per-dir folded rules at the bottom was visual noise)
@@ -4722,9 +4728,10 @@ def _build_lines(sessions, jobs, section, narrow, malformed, layout="wide", memo
                         getattr(job, "key", None),
                         stage_override or getattr(job, "stage", None), route_seq)
                     rail_key = ("stg%d_on" if _BLINK_ON else "stg%d_off") % color_i
-                    # F-68 grain: horizontal runs stay on the steady off-hue so the
-                    # pulse lives in the corners and verticals, not a strobing bar.
-                    run_key = "stg%d_off" % color_i
+                    # F-68c (user decision): the whole frame breathes as one — the
+                    # horizontal runs share the corner/vertical pulse rather than
+                    # sitting steady against a blinking outline.
+                    run_key = rail_key
                 else:
                     rail_key = "dim"
                     run_key = "dim"
