@@ -189,11 +189,10 @@ _HUE_OF = {
     "frm0_off": ("l", _A_D), "frm1_off": ("c", _A_D), "frm2_off": ("g", _A_D),
     "frm3_off": ("y", _A_D), "frm4_off": ("m", _A_D),
     "frm_idle": ("d", _A_D),
-    # F-69 (user 2026-08-14): a MAIN session's second line is what the session is
-    # doing right now — the board's most-read sentence. It carries the plain (not
-    # dimmed) neutral hue plus bold so it reads a step brighter than the dispatch
-    # subtitles, which stay dim supporting telemetry.
-    "now_main": ("w", _A_B),
+    # F-70 (user 2026-08-14 "볼드만 유지하고 다시 어둡게해"): a MAIN session's second
+    # line keeps the DIM ink of every other subtitle and separates itself by WEIGHT
+    # alone — bold-dim. The brighter hue read as loud next to the dispatch rows.
+    "now_main": ("w", _A_B | _A_D),
 }
 
 
@@ -425,7 +424,7 @@ def _init_colors():
         _COLOR["frm%d_off" % i] = base | curses.A_DIM
     _COLOR["frm_idle"] = curses.A_DIM
     _COLOR["dim"] = curses.A_DIM
-    _COLOR["now_main"] = curses.A_BOLD
+    _COLOR["now_main"] = curses.A_BOLD | curses.A_DIM
     _COLOR["head"] = curses.A_DIM
     _COLOR["unknown"] = curses.A_DIM
 
@@ -4786,9 +4785,12 @@ def _build_lines(sessions, jobs, section, narrow, malformed, layout="wide", memo
                     color_i = _depth1_rail_color_index(
                         getattr(job, "key", None),
                         stage_override or getattr(job, "stage", None), route_seq)
-                    # F-68d: frame hues (frm*) pulse by brightness only — see
-                    # _init_colors. The whole frame breathes as one (F-68c).
-                    rail_key = ("frm%d_on" if _BLINK_ON else "frm%d_off") % color_i
+                    # F-70 (user 2026-08-14 "테두리 점멸은 좀 부산스럽긴 하네. 끄자"):
+                    # the frame is STEADY. An active unit still owns its stage hue —
+                    # the liveness signal lives in the row glyphs and the breadcrumb
+                    # token, which already blink; a whole box outline joining them was
+                    # too busy. `_BLINK_ON` is intentionally not consulted here.
+                    rail_key = "frm%d_on" % color_i
                     run_key = rail_key
                 else:
                     rail_key = "frm_idle"

@@ -2256,9 +2256,15 @@ def _scan_processes():
         # mem-worker path when `a` is enabled.
         if env.get("MEM_DISTILL") == "1" or env.get("FLEET_TITLE_REFRESH") == "1":
             continue
-        if ms and "claude" in args:
+        # F-71 (user-reported misattribution): the gate used to be `"claude" in args`,
+        # so ANY harness worker whose argv/prompt merely mentioned the word claude —
+        # an OpenCode dispatch carrying a hearting prompt, for instance — became a
+        # hardcoded `harness="claude"` proc row and the board showed three Claude
+        # sessions where one was OpenCode. The process's own comm is the identity.
+        proc_harness = _comm if _comm in procscan.HARNESSES else None
+        if ms and (proc_harness or "claude" in args):
             if os.path.basename(args.split(None, 1)[0]) in _SHELLS:
-                continue                      # launcher shell wrapper, not the claude process
+                continue                      # launcher shell wrapper, not the harness process
             try:
                 jcwd = os.readlink("/proc/%s/cwd" % pid_s)
             except OSError:
@@ -2316,7 +2322,7 @@ def _scan_processes():
                 mode_axis_conflict=mode_axis_conflict, qa=q,
                 elapsed_min=etime_to_min(etime), slug=slug, cwd=jcwd,
                 parent_sid=parent_sid, parent_slug=parent_slug, is_child=is_child,
-                qa_source=qsrc, source="proc", harness="claude",
+                qa_source=qsrc, source="proc", harness=proc_harness or "claude",
                 pid=int(pid_s) if pid_s.isdigit() else None,
                 proc_start=procscan.read_proc_start(pid_s) if pid_s.isdigit() else None,
                 model=_claude_job_model(pid_s, jcwd), depth=depth,
@@ -2434,7 +2440,7 @@ def _iso_elapsed_min(ts):
 
 
 def _scan_jobs_log(path, seen_slugs, seen_keys=None, registry_priority=0,
-                   live_attempt_ids=None):
+                   live_attempt_ids=None, canonical_attempts=None):
     jobs = []
     malformed = 0
     try:
@@ -2487,13 +2493,21 @@ def _scan_jobs_log(path, seen_slugs, seen_keys=None, registry_priority=0,
             else:
                 afterglow = True
         cwd = worktree if worktree not in ("-", "(main-tree)") else ""
-        if slug in seen_slugs:
+        row_attempt = _parse_pipe_meta(pipe or "").get("attempt_id")
+        # F-71: when a proc row and this registry row describe the SAME attempt, the
+        # registry row is the canonical identity (it carries the launch's own harness,
+        # unit and route), so it must survive slug dedup — collect() then drops the
+        # proc twin. Without this the proc row's guessed identity won the display.
+        attempt_owned = bool(row_attempt and canonical_attempts is not None
+                             and row_attempt in canonical_attempts)
+        if slug in seen_slugs and not attempt_owned:
             continue                          # already shown as a live process job
         # F-15c: (normalized cwd, slug-stem) dedup — a stage-worker registry row
         # (fleet-ui-v2-execute) reconciles against its already-shown proc job
         # (fleet-ui-v2) ONLY when both cwd and stem match; a different worktree (conductor
         # vs its own dispatch-depth-2 child, OPERATIONS §5.10) never collapses, so both stay visible.
-        if cwd and seen_keys and (_norm_cwd(cwd), _slug_stem(slug)) in seen_keys:
+        if (cwd and seen_keys and not attempt_owned
+                and (_norm_cwd(cwd), _slug_stem(slug)) in seen_keys):
             continue
         seen_slugs.add(slug)
         meta = _parse_pipe_meta(pipe or "")
@@ -2804,10 +2818,12 @@ def collect(jobs_path=None, harness_filter=None):
     log_jobs = []
     malformed = 0
     live_attempts = _live_attempt_ids()
+    proc_attempts = {getattr(j, "attempt_id", None) for j in proc_jobs}
+    proc_attempts.discard(None)
     for registry_priority, path in enumerate(paths):
         path_jobs, path_malformed = _scan_jobs_log(
             path, seen, seen_keys, registry_priority=registry_priority,
-            live_attempt_ids=live_attempts,
+            live_attempt_ids=live_attempts, canonical_attempts=proc_attempts,
         )
         if path in split_registries:
             for job in path_jobs:
@@ -2815,6 +2831,22 @@ def collect(jobs_path=None, harness_filter=None):
                     job.note = "registry-split"
         log_jobs.extend(path_jobs)
         malformed += path_malformed
+    # F-71: one attempt = one row. A registry row that reached us for an attempt a
+    # proc row also claims is the canonical twin; carry the proc row's live pid
+    # identity onto it and drop the guess. Rows without an attempt id are untouched.
+    registry_attempts = {j.attempt_id: j for j in log_jobs if getattr(j, "attempt_id", None)}
+    if registry_attempts:
+        kept_proc = []
+        for job in proc_jobs:
+            twin = registry_attempts.get(getattr(job, "attempt_id", None))
+            if twin is None:
+                kept_proc.append(job)
+                continue
+            if twin.pid is None and job.pid is not None:
+                twin.pid, twin.proc_start = job.pid, job.proc_start
+            if not getattr(twin, "_proc_liveness", None):
+                twin._proc_liveness = getattr(job, "liveness", None)
+        proc_jobs = kept_proc
     jobs = proc_jobs + log_jobs
     # Typed-mode+profile backfill for proc jobs whose argv/env omitted metadata.
     # Legacy mode backfill is read-only; profile=None backfill IS spec §7-mandated —

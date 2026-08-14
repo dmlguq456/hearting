@@ -160,3 +160,42 @@ class EarlyStageBreadcrumbTailFoldTest(unittest.TestCase):
         text, _width = self._crumb(500)
         self.assertIn("report", text)
         self.assertNotIn("+", text.replace("(2-way)", "").replace("(3-way)", ""))
+
+
+class AttemptAttributionTest(unittest.TestCase):
+    """F-71 — one attempt is one row, and a proc row never guesses the harness.
+
+    Observed: an OpenCode dispatch whose prompt merely contained the word
+    "claude" was scanned as a hardcoded `harness="claude"` proc job and shown
+    alongside its own registry row, so the board displayed three Claude
+    sessions where one was OpenCode.
+    """
+
+    def test_proc_row_takes_harness_from_process_identity(self):
+        line = "4242 opencode 05:00 /usr/bin/opencode run /autopilot-code prompt about claude"
+        with mock.patch.object(dispatch.procscan, "_ps_lines", return_value=[line]), \
+             mock.patch.object(dispatch.procscan, "read_environ", return_value={}), \
+             mock.patch.object(dispatch.procscan, "read_proc_start", return_value="777"), \
+             mock.patch.object(dispatch.os, "readlink", return_value="/w/repo"):
+            jobs = dispatch._scan_processes()
+        self.assertEqual([j.harness for j in jobs], ["opencode"])
+
+    def test_registry_row_wins_an_attempt_shared_with_a_proc_row(self):
+        proc = dispatch.DispatchJob(key="code", slug="job-a", cwd="/w/repo", source="proc",
+                                    harness="claude", attempt_id="att-x", pid=11,
+                                    proc_start="777", liveness="working")
+        pipe = ("capability=autopilot-code,harness=opencode,depth=1,"
+                "attempt_id=att-x,unit=_kernel/owner")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "jobs.log")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(_row("running", "job-a", 2, pipe))
+            rows, _malformed = dispatch._scan_jobs_log(
+                path, {"job-a"}, canonical_attempts={"att-x"})
+        self.assertEqual(len(rows), 1)          # slug dedup did not hide the twin
+        self.assertEqual(rows[0].harness, "opencode")
+        self.assertEqual(rows[0].source, "jobs")
+        # and the proc twin's live pid identity carries over in collect()'s merge
+        registry = {rows[0].attempt_id: rows[0]}
+        twin = registry[proc.attempt_id]
+        self.assertIsNotNone(twin)

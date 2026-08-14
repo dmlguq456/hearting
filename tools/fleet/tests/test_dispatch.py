@@ -199,19 +199,21 @@ class RenderDispatchPresentationTest(unittest.TestCase):
         ))
 
     def test_f64c_rail_blinks_in_stage_hue_only_while_working(self):
-        # F-68d: frame hues pulse by brightness only (no bold weight change).
-        for blink, expected in ((True, "frm0_on"), (False, "frm0_off")):
+        # F-70 (user "테두리 점멸은 좀 부산스럽긴 하네. 끄자"): the frame is STEADY.
+        # An active unit still owns its stage hue; the blink lives in the glyphs and
+        # the breadcrumb token, not the outline.
+        for blink in (True, False):
             leg = self._line_with(self._rail_lines(blink=blink), "rail-leg (")
             keys = [k for p, k in leg if p == render._RAIL_MID]
-            self.assertEqual(keys, [expected])
+            self.assertEqual(keys, ["frm0_on"])
         # F-67 (user 2026-08-14 실측): the pulse keys on UNIT activity — a stale
         # owner whose stage worker still works is an ACTIVE unit, so the frame
         # keeps (and blinks in) the stage hue instead of freezing to dim.
-        for blink, expected in ((True, "frm0_on"), (False, "frm0_off")):
+        for blink in (True, False):
             leg = self._line_with(
                 self._rail_lines(blink=blink, owner_liveness="stale"), "rail-leg (")
             keys = [k for p, k in leg if p == render._RAIL_MID]
-            self.assertEqual(keys, [expected])
+            self.assertEqual(keys, ["frm0_on"])
         # No working process anywhere in the unit → dim, never blinking.
         for blink in (True, False):
             leg = self._line_with(
@@ -221,7 +223,7 @@ class RenderDispatchPresentationTest(unittest.TestCase):
             self.assertEqual(keys, ["frm_idle"])
 
     def test_f66_entire_frame_uses_the_owner_rail_color(self):
-        for blink, expected in ((True, "frm0_on"), (False, "frm0_off")):
+        for blink, expected in ((True, "frm0_on"), (False, "frm0_on")):
             lines = self._rail_lines(blink=blink)
             frame_keys = []
             for line in lines:
