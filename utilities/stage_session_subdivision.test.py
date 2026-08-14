@@ -30,7 +30,7 @@ _CR_SPEC.loader.exec_module(CR)
 
 class SubdivisionContractTest(unittest.TestCase):
     def _fixture(self, td, *, mode="parallel", overlap=False, outside=False,
-                 session_count=2, subdivision=True):
+                 session_count=2, subdivision=True, exact_scope=False):
         root = Path(td)
         worktree = root / "worktree"
         worktree.mkdir()
@@ -45,9 +45,10 @@ class SubdivisionContractTest(unittest.TestCase):
             "registry_digest": "sha256:" + "2" * 64,
             "cwd": str(worktree),
         }
+        write_scope = ["checklist.md", "manifest.json"] if exact_scope else ["source/**", "dev_logs/**"]
         node = {
             "id": "execute", "dispatch_depth": 2, "completion_gate": "execute-complete",
-            "kind": "pipeline-stage", "write_scope": ["source/**", "dev_logs/**"],
+            "kind": "pipeline-stage", "write_scope": write_scope,
         }
         if subdivision:
             node["subdivision"] = {
@@ -56,6 +57,7 @@ class SubdivisionContractTest(unittest.TestCase):
         route["nodes"] = [node]
         route_path.write_text(json.dumps(route))
         sessions = []
+        exact_names = ["checklist.md", "manifest.json"]
         for index in range(1, session_count + 1):
             brief = root / f"brief-{index}.md"
             brief.write_text(f"slice {index}\n")
@@ -63,6 +65,9 @@ class SubdivisionContractTest(unittest.TestCase):
                 fixed = worktree / "shared.py"
             elif outside:
                 fixed = worktree.parent / f"outside-{index}.py"
+            elif exact_scope:
+                fixed = worktree / exact_names[(index - 1) % len(exact_names)]
+                fixed.write_text(f"slice {index}\n")
             else:
                 fixed = worktree / f"source/file-{index}.py"
                 fixed.parent.mkdir(exist_ok=True)
@@ -125,6 +130,16 @@ class SubdivisionContractTest(unittest.TestCase):
             worktree, route, node, manifest_path = self._fixture(td, outside=True)
             with self.assertRaises(SSC.StageSessionError):
                 SSC.load_manifest(manifest_path, route=route, node=node)
+
+    def test_g4_exact_file_write_scope_entry_is_admitted(self):
+        # G4: an exact-file write_scope entry (no "/**" suffix) must admit a
+        # fixed_files entry that matches it exactly. The old comparison was
+        # `file == root` where `file` is str and `root` is Path -- always
+        # False -- so every exact-file scope entry rejected every fixed file.
+        with tempfile.TemporaryDirectory() as td:
+            worktree, route, node, manifest_path = self._fixture(td, exact_scope=True)
+            manifest = SSC.load_manifest(manifest_path, route=route, node=node)
+            self.assertEqual(len(manifest["sessions"]), 2)
 
     def test_ac27_marker_requires_all_slices_and_slice_complete_refused(self):
         with tempfile.TemporaryDirectory() as td:

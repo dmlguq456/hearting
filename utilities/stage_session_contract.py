@@ -165,7 +165,7 @@ def load_manifest(
                 sealed_scopes.append((worktree / root).resolve(strict=False))
             for file in sorted(union):
                 if not any(
-                    file == root or file.startswith(str(root) + "/")
+                    file == str(root) or file.startswith(str(root) + "/")
                     for root in sealed_scopes
                 ):
                     raise StageSessionError(
