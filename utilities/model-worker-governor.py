@@ -497,6 +497,7 @@ def _validate_batch_peer(
         completion_marker_is_current,
         dispatch_state_roots,
         parse_registry_metadata,
+        resolve_dispatch_state_root,
         validate_attempt_metadata,
     )
 
@@ -593,7 +594,7 @@ def _validate_batch_peer(
                 )
                 if candidate.is_file()
             ),
-            paths["agent_home"] / ".dispatch" / "completion"
+            resolve_dispatch_state_root(paths["agent_home"], jobs) / "completion"
             / str(manifest["route_id"]) / f"{member['route_node']}.json",
         )
         try:

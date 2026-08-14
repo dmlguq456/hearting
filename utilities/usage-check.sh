@@ -43,7 +43,10 @@ while [ $# -gt 0 ]; do
     *) echo "usage-check: unknown arg '$1'" >&2; exit 64 ;;
   esac
 done
-[ -n "$JOBS" ] || JOBS="${AGENT_DISPATCH_JOBS:-$AGENT_HOME/.dispatch/jobs.log}"
+if [ -z "$JOBS" ]; then
+  STATE_ROOT=$("$SCRIPT_DIR/dispatch-state-root.sh") || exit $?
+  JOBS="$STATE_ROOT/jobs.log"
+fi
 case "$HARNESS" in all) HARNESSES="claude codex opencode" ;; *) HARNESSES="$HARNESS" ;; esac
 
 now=$(date +%s)

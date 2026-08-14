@@ -2757,6 +2757,62 @@ def _absolute(path: str | Path, field: str) -> Path:
     return value.resolve(strict=False)
 
 
+def _versioned_source_layout(path: str | Path) -> tuple[str, Path | None]:
+    """Classify installed immutable source trees without trusting symlink spelling.
+
+    A Codex activation has an unambiguous mutable runtime home immediately before
+    ``.harness/bundles/<id>/source``.  A shared Hearting release does not encode
+    which runtime owns the launch, so selecting a registry from it must fail
+    closed instead of guessing.
+    """
+
+    candidate = Path(path).expanduser().resolve(strict=False)
+    parts = candidate.parts
+    for index, part in enumerate(parts):
+        if (
+            part == ".harness"
+            and index + 3 < len(parts)
+            and parts[index + 1] == "bundles"
+            and parts[index + 3] == "source"
+        ):
+            return "bundle", Path(*parts[:index])
+        if (
+            part == "hearting"
+            and index + 2 < len(parts)
+            and parts[index + 1] == "releases"
+        ):
+            return "shared-release", None
+    return "mutable-or-checkout", None
+
+
+def _validated_registry_path(path: str | Path, field: str) -> Path:
+    candidate = _absolute(path, field)
+    layout, _runtime_home = _versioned_source_layout(candidate)
+    if layout == "bundle":
+        raise DispatchContractError(
+            "versioned-source-registry-fallback",
+            f"{field}={candidate}; set AGENT_DISPATCH_JOBS to activation-owned mutable state",
+        )
+    return candidate
+
+
+def _fallback_registry(agent_home: Path) -> Path:
+    home = Path(agent_home).expanduser()
+    resolved_home = home.resolve(strict=False)
+    layout, runtime_home = _versioned_source_layout(resolved_home)
+    if layout == "bundle":
+        assert runtime_home is not None
+        return (runtime_home / ".harness" / "dispatch" / "jobs.log").resolve(
+            strict=False
+        )
+    if layout == "shared-release":
+        raise DispatchContractError(
+            "versioned-source-registry-fallback",
+            f"agent_home={resolved_home}; set AGENT_DISPATCH_JOBS explicitly",
+        )
+    return home / ".dispatch" / "jobs.log"
+
+
 def resolve_global_registry(
     agent_home: Path,
     explicit_jobs: str | None,
@@ -2773,8 +2829,12 @@ def resolve_global_registry(
 
     env = os.environ if environ is None else environ
     inherited_raw = env.get("AGENT_DISPATCH_JOBS")
-    explicit = _absolute(explicit_jobs, "jobs") if explicit_jobs else None
-    inherited = _absolute(inherited_raw, "agent-dispatch-jobs") if inherited_raw else None
+    explicit = _validated_registry_path(explicit_jobs, "jobs") if explicit_jobs else None
+    inherited = (
+        _validated_registry_path(inherited_raw, "agent-dispatch-jobs")
+        if inherited_raw
+        else None
+    )
 
     managed_parent = (
         env.get("AGENT_CODEX_MANAGED_GATEWAY") == "1"
@@ -2809,7 +2869,9 @@ def resolve_global_registry(
         return RegistrySelection(inherited, "inherited-env", True)
     if explicit:
         return RegistrySelection(explicit, "root-explicit", False)
-    return RegistrySelection((agent_home / ".dispatch" / "jobs.log").resolve(), "agent-home", False)
+    fallback = _fallback_registry(agent_home).resolve(strict=False)
+    source = "activation-runtime" if fallback.parent.name == "dispatch" else "agent-home"
+    return RegistrySelection(fallback, source, False)
 
 
 def dispatch_state_root(jobs: str | Path) -> Path:
@@ -2850,8 +2912,10 @@ def resolve_dispatch_state_root(
     """Resolve the one canonical dispatch state root.
 
     Chain: ① `explicit_jobs` (a `RegistrySelection.path` the caller already
-    holds) -> ② inherited `AGENT_DISPATCH_JOBS` -> ③ `agent_home/.dispatch`
-    (legacy default when no registry has been selected yet). No new env
+    holds) -> ② inherited `AGENT_DISPATCH_JOBS` -> ③ a checked fallback.
+    Maintainer checkouts retain `agent_home/.dispatch`; Codex bundle sources
+    derive activation-owned mutable state, and ambiguous shared releases fail
+    closed. No new env
     var -- the only override surface remains `AGENT_DISPATCH_JOBS`, so marker
     root and registry root cannot structurally diverge. A caller that already
     has a `RegistrySelection` must pass `explicit_jobs=selection.path` so
@@ -2860,12 +2924,14 @@ def resolve_dispatch_state_root(
     """
 
     if explicit_jobs is not None:
-        return dispatch_state_root(explicit_jobs)
+        return dispatch_state_root(_validated_registry_path(explicit_jobs, "jobs"))
     env = os.environ if environ is None else environ
     inherited = env.get("AGENT_DISPATCH_JOBS")
     if inherited:
-        return dispatch_state_root(inherited)
-    return Path(agent_home) / ".dispatch"
+        return dispatch_state_root(
+            _validated_registry_path(inherited, "agent-dispatch-jobs")
+        )
+    return _fallback_registry(agent_home).parent
 
 
 def dispatch_state_roots(

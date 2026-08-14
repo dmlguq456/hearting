@@ -5,7 +5,11 @@ from collections import namedtuple
 from pathlib import Path
 ROOT=Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "utilities"))
-from dispatch_contract import GOVERNOR_RESERVATION_ENV
+from dispatch_contract import (
+    DispatchContractError,
+    GOVERNOR_RESERVATION_ENV,
+    resolve_global_registry,
+)
 from worker_bootstrap import assigned_contract, worker_type_for_kind
 
 _route_spec = importlib.util.spec_from_file_location(
@@ -233,6 +237,34 @@ def strip_leading_separator(adapter_args):
     return adapter_args[1:] if adapter_args[:1] == ["--"] else adapter_args
 
 
+def extract_adapter_jobs(adapter_args):
+    """Accept the historical post-``--`` spelling, then normalize it away."""
+
+    tokens = strip_leading_separator(adapter_args)
+    filtered = []
+    jobs = []
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        if token == "--jobs":
+            if index + 1 >= len(tokens):
+                raise DispatchNodeError("dispatch-jobs-value-missing")
+            jobs.append(tokens[index + 1])
+            index += 2
+            continue
+        if token.startswith("--jobs="):
+            jobs.append(token.split("=", 1)[1])
+            index += 1
+            continue
+        filtered.append(token)
+        index += 1
+    if any(not value for value in jobs):
+        raise DispatchNodeError("dispatch-jobs-value-missing")
+    if len(set(jobs)) > 1:
+        raise DispatchNodeError("dispatch-jobs-conflict", explicit=",".join(jobs))
+    return (jobs[0] if jobs else None), filtered
+
+
 def has_model_selection(adapter_args):
     tokens = strip_leading_separator(adapter_args)
     return any(
@@ -327,7 +359,7 @@ def bind_dispatch_evidence(route, node, adapter, adapter_args, parent_identity=N
 
 
 def main():
- p=argparse.ArgumentParser(); p.add_argument("--route",required=True); p.add_argument("--node",required=True); p.add_argument("--adapter",choices=("claude","codex","opencode"),required=True); p.add_argument("--action",choices=("dry-run","register","start"),default="dry-run"); p.add_argument("--slug",required=True); p.add_argument("--qa",default="standard"); p.add_argument("--parent"); p.add_argument("--prompt-text",default="Execute the selected immutable route node and emit its completion evidence."); p.add_argument("--subsession-id"); p.add_argument("--subsession-index",type=int); p.add_argument("--subsession-count",type=int); p.add_argument("--subsession-mode",choices=("serial","parallel")); p.add_argument("--subsession-purpose",choices=("planned","gap-retry"),default="planned"); p.add_argument("--session-chain-id"); p.add_argument("--phase-brief"); p.add_argument("--stage-authority",choices=(0,1),type=int,default=1); p.add_argument("--fixed-file",action="append",default=[]); p.add_argument("--narrow-verify"); p.add_argument("--expected-round-trips",type=int); p.add_argument("--state-dir"); p.add_argument("--attempt-id"); p.add_argument("adapter_args",nargs=argparse.REMAINDER)
+ p=argparse.ArgumentParser(); p.add_argument("--route",required=True); p.add_argument("--node",required=True); p.add_argument("--adapter",choices=("claude","codex","opencode"),required=True); p.add_argument("--action",choices=("dry-run","register","start"),default="dry-run"); p.add_argument("--slug",required=True); p.add_argument("--qa",default="standard"); p.add_argument("--parent"); p.add_argument("--jobs"); p.add_argument("--prompt-text",default="Execute the selected immutable route node and emit its completion evidence."); p.add_argument("--subsession-id"); p.add_argument("--subsession-index",type=int); p.add_argument("--subsession-count",type=int); p.add_argument("--subsession-mode",choices=("serial","parallel")); p.add_argument("--subsession-purpose",choices=("planned","gap-retry"),default="planned"); p.add_argument("--session-chain-id"); p.add_argument("--phase-brief"); p.add_argument("--stage-authority",choices=(0,1),type=int,default=1); p.add_argument("--fixed-file",action="append",default=[]); p.add_argument("--narrow-verify"); p.add_argument("--expected-round-trips",type=int); p.add_argument("--state-dir"); p.add_argument("--attempt-id"); p.add_argument("adapter_args",nargs=argparse.REMAINDER)
  a=p.parse_args(); route=json.loads(Path(a.route).read_text()); subprocess.run([sys.executable,str(ROOT/"utilities/capability-route.py"),"verify","--route",a.route,"--cwd",route["cwd"]],check=True,stdout=subprocess.DEVNULL)
  node=next((x for x in route["nodes"] if x["id"]==a.node),None)
  if not node: raise SystemExit("unknown route node")
@@ -342,6 +374,10 @@ def main():
  if not a.subsession_id and a.stage_authority != 1:
   print("check=failed\nreason=stage-authority-zero-without-subsession\nchild_spawned=0"); raise SystemExit(64)
  try:
+  trailing_jobs,a.adapter_args=extract_adapter_jobs(a.adapter_args)
+  if a.jobs and trailing_jobs and Path(a.jobs).expanduser().resolve(strict=False) != Path(trailing_jobs).expanduser().resolve(strict=False):
+   raise DispatchNodeError("dispatch-jobs-conflict",explicit=f"{a.jobs},{trailing_jobs}")
+  requested_jobs=a.jobs or trailing_jobs
   reject_generated_argument_overrides(a.adapter_args)
  except DispatchNodeError as e:
   print("check=failed"); print(f"reason={e.reason}")
@@ -356,14 +392,19 @@ def main():
    print("child_spawned=0")
    raise SystemExit(65)
  if node["kind"]=="resource-runner": print("resource_runner="+str(ROOT/"utilities/resource-runner.py")+"\nroute_node="+a.node); return
- print("completion_marker="+str(ROUTE.completion_dir(route["route_id"])/(node["id"]+".json")))
+ try:
+  registry=resolve_global_registry(
+      ROOT,requested_jobs,int(node.get("dispatch_depth",1)),a.action,child_env())
+ except DispatchContractError as e:
+  print("check=failed");print(f"reason={e.reason}");print(f"detail={e.detail}");print("child_spawned=0");raise SystemExit(65)
+ print("completion_marker="+str(ROUTE.completion_dir(route["route_id"],jobs=registry.path)/(node["id"]+".json")))
  wrapper=ROOT/"adapters"/a.adapter/"bin"/"dispatch-headless.py"
  try:
   worker_type=worker_type_for_kind(node["kind"])
  except ValueError as e:
   raise SystemExit(str(e))
  contract=assigned_contract(capability=route["capability"],worker_type=worker_type,route_node=node["id"],completion_gate=node.get("completion_gate"),root=ROOT)
- argv=[sys.executable,str(wrapper),"--"+a.action,"--worktree",route["cwd"],"--slug",a.slug,"--capability",route["capability"],"--capability-mode",route["capability_mode"],"--qa",a.qa,"--intensity",route["effective_intensity"],"--dispatch-depth",str(node.get("dispatch_depth",1)),"--worker-type",worker_type,"--unit",node.get("unit",""),"--assigned-contract",contract,"--owner",route["capability"],"--route-file",str(Path(a.route).resolve()),"--route-id",route["route_id"],"--route-hash",route["route_hash"],"--route-node",node["id"],"--registry-digest",route["registry_digest"],"--write-scope",";".join(node["write_scope"]),"--completion-gate",node["completion_gate"],"--prompt-text",a.prompt_text]
+ argv=[sys.executable,str(wrapper),"--"+a.action,"--worktree",route["cwd"],"--slug",a.slug,"--capability",route["capability"],"--capability-mode",route["capability_mode"],"--qa",a.qa,"--intensity",route["effective_intensity"],"--dispatch-depth",str(node.get("dispatch_depth",1)),"--worker-type",worker_type,"--unit",node.get("unit",""),"--assigned-contract",contract,"--owner",route["capability"],"--route-file",str(Path(a.route).resolve()),"--route-id",route["route_id"],"--route-hash",route["route_hash"],"--route-node",node["id"],"--registry-digest",route["registry_digest"],"--write-scope",";".join(node["write_scope"]),"--completion-gate",node["completion_gate"],"--jobs",str(registry.path),"--prompt-text",a.prompt_text]
  unit=node.get("unit","")
  if unit and not unit.startswith("_kernel/"):
   argv += ["--worker-mode",unit]

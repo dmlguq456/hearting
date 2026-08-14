@@ -61,7 +61,8 @@ eligible() { s=$(state "$1"); [ "$s" != limited ] && [ "${s#limited(}" = "$s" ];
 allocation_jobs=$jobs
 if [ -z "$allocation_jobs" ]; then
   allocation_home=${AGENT_HOME:-$("$self_dir/agent-home.sh")}
-  allocation_jobs="$allocation_home/.dispatch/jobs.log"
+  allocation_root=$(AGENT_HOME="$allocation_home" "$self_dir/dispatch-state-root.sh") || exit $?
+  allocation_jobs="$allocation_root/jobs.log"
 fi
 allocation_rank() {
   python3 "$self_dir/dispatch_allocation.py" rank --jobs "$allocation_jobs" \

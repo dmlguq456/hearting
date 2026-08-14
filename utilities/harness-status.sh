@@ -178,7 +178,7 @@ else
   printf 'worklog_board_wt_exists=0\n'
 fi
 
-# Open headless dispatch jobs (portable .dispatch/jobs.log registry; tab fields:
+# Open headless dispatch jobs (canonical dispatch registry; tab fields:
 # ts, state, repo, worktree, slug, pipe). Surfaces in-flight background work that
 # native status footers do not cover. Override the registry path with
 # AGENT_DISPATCH_JOBS.
@@ -186,10 +186,11 @@ status_home=${AGENT_HOME:-}
 if [ -z "$status_home" ] || [ ! -f "$status_home/core/CORE.md" ]; then
   status_home=$(CDPATH= cd -- "$self_dir/.." && pwd)
 fi
-jobs_log=${AGENT_DISPATCH_JOBS:-$status_home/.dispatch/jobs.log}
+state_root=$(AGENT_HOME="$status_home" "$self_dir/dispatch-state-root.sh" 2>/dev/null) || state_root=""
+jobs_log=${AGENT_DISPATCH_JOBS:-${state_root:+$state_root/jobs.log}}
 headless_open=0
 headless_slugs=""
-if [ -f "$jobs_log" ]; then
+if [ -n "$jobs_log" ] && [ -f "$jobs_log" ]; then
   headless_open=$(awk -F '\t' 'NF==6 && $2=="open"{c++} END{print c+0}' "$jobs_log")
   headless_slugs=$(awk -F '\t' 'NF==6 && $2=="open"{printf "%s%s", sep, $5; sep=","}' "$jobs_log")
 fi
@@ -202,7 +203,7 @@ fi
 # child or ready un-started successor). Fail-open to 0 with no registry.
 orphaned_conductor_jobs=0
 orphaned_resume_boundary=""
-if [ -f "$jobs_log" ]; then
+if [ -n "$jobs_log" ] && [ -f "$jobs_log" ]; then
   scan=$(python3 "$self_dir/dispatch-registry.py" orphan-scan --jobs "$jobs_log" --agent-home "$status_home" 2>/dev/null || true)
   orphaned_conductor_jobs=$(printf '%s\n' "$scan" | awk -F= '$1=="orphaned_conductor_jobs"{print $2; exit}')
   orphaned_resume_boundary=$(printf '%s\n' "$scan" | awk -F= '$1=="orphaned_resume_boundary"{print $2; exit}')

@@ -167,6 +167,18 @@ or terminal-row lease evidence fails closed. Phase edges append outer PID/start
 and before/after phase to the attempt-scoped transition audit. This shared rule
 supersedes the Codex-only lease wording later in this section.
 
+`AGENT_DISPATCH_JOBS` is the sole canonical dispatch registry. When no registry
+has yet been selected, a maintainer checkout may retain its checkout-relative
+`.dispatch/jobs.log` default. An installed Codex bundle source instead derives
+the activation-owned mutable `<runtime-home>/.harness/dispatch/jobs.log` from
+`<runtime-home>/.harness/bundles/<id>/source`. A shared
+`hearting/releases/<version>` source has no unambiguous runtime owner and fails
+closed with `versioned-source-registry-fallback` until the launcher supplies
+`AGENT_DISPATCH_JOBS`. Explicit or inherited registries inside a bundle's
+versioned `source` tree are rejected with the same reason. Completion, logs,
+watchdog, heartbeat, and supervisor state continue to derive only from the
+accepted registry's parent.
+
 Before delivery, the supervisor atomically commits the bounded receipt payload,
 deterministic receipt id and digest, exact attempt set, and row revisions. A
 restart reuses that committed payload and identity. The guard and prompt treat
