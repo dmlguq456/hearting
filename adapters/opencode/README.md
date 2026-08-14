@@ -68,7 +68,7 @@ full masking.
 | stage-session capacity | `dispatch-headless.py` projects the same phase brief, fixed-file fence, ledger, and `stage_authority=0` metadata as Claude/Codex. OpenCode's native-agent surface is not yet route-owned dispatch-depth-2 evidence, so the checked registered/inline fallback remains authoritative and no native parity is claimed. |
 | role profile | Use `roles/README.md` for meaning; use `adapters/opencode/agents/<role>/<role>.md` as OpenCode-native role guidance, and use Claude agent files only as compatibility references |
 | role mode | Run `adapters/opencode/bin/preflight.sh mode-info <family/mode>` before using a `roles/modes/` fragment; portable modes can be used directly, tool-contract modes require equivalent tools, unsupported modes report `fallback=reference-only` when no OpenCode-native runtime surface exists |
-| adapter bootstrap | Add `adapters/opencode/AGENTS.md` to the `instructions` array in `opencode.json`/`opencode.jsonc`; then load `core/CORE.md` plus task-relevant shared docs; do not treat `CLAUDE.md` as portable bootstrap |
+| adapter bootstrap | `adapters/opencode/AGENTS.md` reaches a session as the auto-loaded `AGENTS.md` in the global config home, and must not also be listed in `instructions[]` (`core/ADAPTATION.md §6.1`); then load `core/CORE.md` plus task-relevant shared docs; do not treat `CLAUDE.md` as portable bootstrap |
 | agent home | Set `AGENT_HOME` to the installed harness directory |
 | permission model | Run `adapters/opencode/bin/preflight.sh permissions`; use OpenCode native `permission` config and plugin hooks, not Claude `allowedTools` |
 | MCP config | Run `adapters/opencode/bin/preflight.sh mcp [--check]`; use OpenCode native `opencode mcp`/config surfaces, not Claude `settings.json` MCP payloads |
@@ -239,25 +239,26 @@ $HOME/.local/share/opencode/  # OpenCode data home (DB, logs, snapshots)
 OpenCode runtime state such as `auth.json`, `opencode.db`, logs, snapshots,
 and tool output should stay under `$HOME/.local/share/opencode` and
 `$HOME/.config/opencode`. The neutral harness should be referenced from
-OpenCode through explicit bootstrap instructions and the `instructions` array
-in the config. At minimum, the OpenCode adapter should expose a stable pointer
-back to the neutral repo:
+OpenCode through the auto-loaded bootstrap file described below. At minimum,
+the OpenCode adapter should expose a stable pointer back to the neutral repo:
 
 ```text
 $HOME/.config/opencode/hearting -> $HOME/hearting
 ```
 
-The `instructions` array in `opencode.json`/`opencode.jsonc` should include the
-projected bootstrap file:
+OpenCode auto-loads `AGENTS.md` from the global config home, so the bootstrap
+is delivered by that link and the config carries no `instructions` entry for it:
 
-```jsonc
-{
-  "$schema": "https://opencode.ai/config.json",
-  "instructions": [
-    "$HOME/hearting/opencode_setting/AGENTS.md"
-  ]
-}
+```text
+$HOME/.config/opencode/AGENTS.md -> <active harness source>/adapters/opencode/AGENTS.md
 ```
+
+`harness runtime activate` owns that link and points it at the active immutable
+release/snapshot. Adding the same bootstrap to `instructions[]` as well loads it
+twice — OpenCode dedupes instruction sources by resolved path, so the projection
+and the link count as two different sources (`core/ADAPTATION.md §6.1`). Only a
+config home without that link needs the entry, which is why
+`harness install opencode` merges it only when the link is absent.
 
 Further OpenCode-specific files can be added under `adapters/opencode/` and
 symlinked or generated into the config home as the adapter matures.

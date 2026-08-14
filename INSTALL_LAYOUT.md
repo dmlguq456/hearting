@@ -306,13 +306,19 @@ credentials, logs, sessions, or SQLite state into the repo.
 ## OpenCode Projection
 
 OpenCode loads config from `opencode.json` / `opencode.jsonc` (project or
-global `~/.config/opencode/`) and reads instruction files listed in the
-`instructions` array. Keep `$HOME/.config/opencode` and
-`$HOME/.local/share/opencode` runtime-owned; the harness merges its
-instruction/skill entries into the existing config **non-destructively**
-(existing user config preserved, conflicts reported and the run stopped
-rather than resolved by guessed intent) and projects adapter-owned surfaces
-through a stable pointer:
+global `~/.config/opencode/`), auto-loads `AGENTS.md` from the global config
+home, and reads instruction files listed in the `instructions` array. The
+bootstrap uses exactly one of those two carriers: `runtime activate` owns the
+`AGENTS.md` link, and `harness install opencode` merges the `instructions[]`
+entry only when that link is absent. Both at once inject the bootstrap twice —
+OpenCode dedupes instruction sources by resolved path, so a projection and the
+link count as two sources (`core/ADAPTATION.md §6.1`).
+
+Keep `$HOME/.config/opencode` and `$HOME/.local/share/opencode` runtime-owned;
+the harness merges its skill entries — and the fallback instruction entry — into
+the existing config **non-destructively** (existing user config preserved,
+conflicts reported and the run stopped rather than resolved by guessed intent)
+and projects adapter-owned surfaces through a stable pointer:
 
 ```bash
 harness install opencode
@@ -325,7 +331,8 @@ harness install opencode
 | `AGENTS.md`/core/capabilities/roles/bin/tools/utilities | symlink using `agent-*` pointer names | Routes through generated projections under `opencode_setting/` |
 | OpenCode-native skills/agents/commands | symlink fan-out (`skills/*`, `agents/*.md`, `commands/*.md`) | Uses the current official plural discovery paths |
 | guard plugin | `opencode_setting/opencode-plugins/hearting-guards.js` | JS/TS plugin hook surface; OpenCode has no marketplace or bundle format, so installer symlinks are the only channel |
-| `opencode.json`/`opencode.jsonc` `instructions[]`/`plugin[]` | non-destructive merge | Preserves user config; reports conflicts and stops instead of guessing an automatic merge |
+| `opencode.json`/`opencode.jsonc` `skills.paths` | non-destructive merge | Preserves user config; reports conflicts and stops instead of guessing an automatic merge |
+| `opencode.json`/`opencode.jsonc` `instructions[]` | conditional merge | Bootstrap carrier of last resort: added only when the config-home `AGENTS.md` auto-load is missing, and a previously installed entry is dropped once that link exists. User entries are never touched |
 
 `runtime activate` uses the official plural convention directories. Singular
 projections from the legacy `harness install opencode` path remain for

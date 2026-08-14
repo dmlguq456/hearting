@@ -1,7 +1,9 @@
 # AGENTS.md — OpenCode Adapter Bootstrap
 
-This is an OpenCode adapter router, loaded through the `instructions` array in
-`opencode.json(c)`. The semantic hierarchy is
+This is an OpenCode adapter router, auto-loaded as `AGENTS.md` from the global
+OpenCode config home. It is deliberately not also listed in the
+`opencode.json(c)` `instructions` array: that would deliver the same bootstrap
+twice (`core/ADAPTATION.md §6.1`). The semantic hierarchy is
 `core/capabilities/roles -> {Claude, Codex, OpenCode}`; adapters are siblings.
 Edit portable sources first.
 

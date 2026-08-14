@@ -101,6 +101,10 @@ _CODEX_TABLE = (
 
 _OPENCODE_FIXED_SYMLINKS = [
     ("hearting", ""),
+    # Deliberately not projected as `AGENTS.md`: that exact name is what OpenCode
+    # auto-loads from the global config home, and `runtime activate` owns it as
+    # an immutable snapshot link. Claiming it here would overwrite that with a
+    # mutable checkout path (INST-D-34/35).
     ("agent-agents.md", "opencode_setting/AGENTS.md"),
     ("hearting-readme.md", "opencode_setting/README.md"),
     ("agent-core", "opencode_setting/core"),
@@ -141,7 +145,9 @@ _OPENCODE_TABLE = (
         {
             "action": "merge",
             "note": (
-                "non-destructive opencode.json instructions[]/skills.paths merge; "
+                "non-destructive opencode.json skills.paths merge, plus the "
+                "instructions[] bootstrap entry only when the config-home "
+                "AGENTS.md auto-load is absent; "
                 "drivers/opencode.py performs the merge and projector only emits intent."
             ),
         },

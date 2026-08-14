@@ -51,9 +51,10 @@ documentation.
 
 | OpenCode runtime surface | Native? | Adapter source / projection |
 |---|---|---|
-| Project config (`opencode.json` / `opencode.jsonc` / `.opencode/opencode.json`) | yes | user-owned; adapter documents the `instructions` entry that loads `AGENTS.md` |
+| Project config (`opencode.json` / `opencode.jsonc` / `.opencode/opencode.json`) | yes | user-owned; adapter merges `skills.paths`, and the bootstrap `instructions` entry only when the config-home `AGENTS.md` auto-load is absent |
 | Global config (`~/.config/opencode/opencode.json`) | yes | user-owned; adapter documents projection entries |
-| Instruction files (`instructions` array in config) | yes | `adapters/opencode/AGENTS.md` projected through `opencode_setting/AGENTS.md` |
+| Bootstrap auto-load (`<config-home>/AGENTS.md`) | yes | `adapters/opencode/AGENTS.md`, linked by `harness runtime activate`; the single bootstrap carrier (`core/ADAPTATION.md §6.1`) |
+| Instruction files (`instructions` array in config) | yes | user-owned; carries `adapters/opencode/AGENTS.md` through `opencode_setting/AGENTS.md` only as the fallback carrier when the auto-load link is absent — never alongside it |
 | Commands (`.opencode/command/<name>.md` or `.opencode/commands/<name>.md`) | yes | `adapters/opencode/commands/<name>.md` generated from `capabilities/` |
 | Skills (`.opencode/skill/<name>/SKILL.md` or `.opencode/skills/<name>/SKILL.md`) | yes | `adapters/opencode/skills/<name>/SKILL.md` generated from `capabilities/` |
 | External skill autoload (`~/.claude/skills/<name>/SKILL.md`, `~/.agents/skills/<name>/SKILL.md`) | yes (compat) | not relied on; adapter must generate its own skills, not depend on Claude skill autoload |

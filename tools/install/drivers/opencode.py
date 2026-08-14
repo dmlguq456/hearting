@@ -6,6 +6,7 @@ Merge harness entries into ``opencode.json`` without overwriting user config;
 report incompatible types instead of resolving them automatically.
 """
 
+import hashlib
 import json
 import os
 import shutil
@@ -34,17 +35,64 @@ def _skills_path():
     return str(paths.resolve_source("opencode_setting/opencode-skills"))
 
 
+def _digest(path):
+    """Return a file's SHA-256, or ``None`` when it cannot be read."""
+    try:
+        return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+    except OSError:
+        return None
+
+
+def _auto_loaded_bootstrap():
+    """Return the config-home ``AGENTS.md`` when it already carries our bootstrap.
+
+    OpenCode auto-loads exactly one instruction file by name: ``AGENTS.md`` in
+    the *global* config home, regardless of install scope. ``runtime activate``
+    owns that link, so when it is present the bootstrap is already delivered and
+    an ``instructions[]`` entry would deliver it a second time — OpenCode dedupes
+    instruction sources by resolved path, not by inode or content, so the same
+    file reached through two absolute paths is injected twice.
+
+    Return ``None`` when that link is absent; the config entry is then the only
+    load path and must stay. The symlink may point at an immutable snapshot
+    whose bytes trail this checkout, so the target path counts as well.
+    """
+    path = paths.xdg_config_home() / "opencode" / "AGENTS.md"
+    if not path.exists():
+        return None
+    if path.is_symlink() and os.path.realpath(path).endswith(
+        "/adapters/opencode/AGENTS.md"
+    ):
+        return path
+    if _digest(path) == _digest(_instructions_path()):
+        return path
+    return None
+
+
 def _merge_config(existing, our_instructions, our_skills_path):
-    """Merge harness instruction and skill paths without modifying conflicts.
+    """Merge harness skill paths, and the bootstrap only when nothing else loads it.
 
     Return ``(merged, changed, blocked, detail)``. Create missing keys, append
     missing values to valid lists, and block on incompatible existing types.
+    ``our_instructions=None`` means the bootstrap already arrives by auto-load; a
+    previously installed entry is then removed so it stops double-loading.
     """
     merged = dict(existing)
     changed = False
 
     # instructions[]
-    if "instructions" not in merged:
+    if our_instructions is None:
+        instructions = merged.get("instructions")
+        if isinstance(instructions, list) and _instructions_path() in instructions:
+            remaining = [
+                entry for entry in instructions if entry != _instructions_path()
+            ]
+            if remaining:
+                merged["instructions"] = remaining
+            else:
+                merged.pop("instructions")
+            changed = True
+    elif "instructions" not in merged:
         merged["instructions"] = [our_instructions]
         changed = True
     else:
@@ -212,16 +260,19 @@ def install(scope="global", plugin=False, dry_run=False):
 
         if action == "merge":
             cfg_path = _config_path(scope)
-            our_instructions = _instructions_path()
+            auto_loaded = _auto_loaded_bootstrap()
+            our_instructions = None if auto_loaded else _instructions_path()
             our_skills_path = _skills_path()
 
             if dry_run:
+                planned = (
+                    "would add skills.paths if missing and drop a duplicate "
+                    f"instructions[] bootstrap entry ({auto_loaded} auto-loads it)"
+                    if auto_loaded
+                    else "would add skills.paths and instructions[] entries if missing"
+                )
                 actions.append(
-                    {
-                        "action": "merge",
-                        "status": "planned",
-                        "detail": "would add instructions[]/skills.paths entries if missing",
-                    }
+                    {"action": "merge", "status": "planned", "detail": planned}
                 )
                 continue
 
@@ -355,58 +406,72 @@ def checks(scope="global"):
 
     check_list.append(_drift_watch_sentinel)
 
-    def _bootstrap_smoke():
-        oc_bin = shutil.which("opencode")
-        if oc_bin is None:
+    def _bootstrap_load_path():
+        """Exactly one copy of the bootstrap may reach an OpenCode session.
+
+        `opencode debug config` prints only the config file, never the resolved
+        instruction set, so the load path is checked from the files themselves.
+        OpenCode dedupes instruction sources by resolved path, so two different
+        absolute paths holding the same bootstrap bytes are injected twice.
+        """
+        check_id = "opencode.bootstrap-load-path"
+        expected = _digest(_instructions_path())
+        if expected is None:
             return {
-                "id": "opencode.bootstrap-smoke",
-                "ok": True,
-                "detail": "SKIP(opencode): bootstrap smoke — opencode CLI absent",
-            }
-
-        import tempfile
-
-        with tempfile.TemporaryDirectory() as tmp_home:
-            config_content = json.dumps(
-                {
-                    "instructions": [_instructions_path()],
-                    "skills": {"paths": [_skills_path()]},
-                }
-            )
-            env = dict(os.environ)
-            env["HOME"] = tmp_home
-            env["XDG_CONFIG_HOME"] = str(Path(tmp_home) / ".config")
-            env["XDG_DATA_HOME"] = str(Path(tmp_home) / ".local" / "share")
-            env["OPENCODE_CONFIG_CONTENT"] = config_content
-
-            try:
-                result = subprocess.run(
-                    [oc_bin, "debug", "config", "--pure"],
-                    capture_output=True,
-                    text=True,
-                    env=env,
-                    timeout=30,
-                )
-            except Exception as exc:
-                return {
-                    "id": "opencode.bootstrap-smoke",
-                    "ok": False,
-                    "detail": f"opencode debug config failed: {exc}",
-                }
-
-            if "opencode_setting/AGENTS.md" in result.stdout:
-                return {
-                    "id": "opencode.bootstrap-smoke",
-                    "ok": True,
-                    "detail": "found opencode_setting/AGENTS.md in opencode debug config --pure output",
-                }
-            return {
-                "id": "opencode.bootstrap-smoke",
+                "id": check_id,
                 "ok": False,
-                "detail": f"opencode_setting/AGENTS.md not found (stdout excerpt: {result.stdout[:300]!r})",
+                "detail": f"harness bootstrap unreadable: {_instructions_path()}",
             }
 
-    check_list.append(_bootstrap_smoke)
+        carriers = []
+
+        auto_load = _auto_loaded_bootstrap()
+        if auto_load is not None:
+            carriers.append(f"config-home auto-load ({auto_load})")
+
+        cfg_path = _config_path(scope)
+        if cfg_path.exists():
+            try:
+                with open(cfg_path, "r", encoding="utf-8") as f:
+                    cfg = json.load(f)
+            except (json.JSONDecodeError, OSError) as exc:
+                return {"id": check_id, "ok": False, "detail": f"{cfg_path}: {exc}"}
+            entries = cfg.get("instructions", [])
+            if isinstance(entries, list):
+                for entry in entries:
+                    if not isinstance(entry, str) or entry.startswith(
+                        ("http://", "https://")
+                    ):
+                        continue
+                    if _digest(Path(entry).expanduser()) == expected:
+                        carriers.append(f"instructions[] entry ({entry})")
+
+        if len(carriers) == 1:
+            return {
+                "id": check_id,
+                "ok": True,
+                "detail": f"bootstrap loads exactly once via {carriers[0]}",
+            }
+        if not carriers:
+            return {
+                "id": check_id,
+                "ok": False,
+                "detail": (
+                    "no bootstrap load path — expected either the config-home "
+                    "AGENTS.md auto-load link from `runtime activate`, or an "
+                    "instructions[] entry from `harness install opencode`"
+                ),
+            }
+        return {
+            "id": check_id,
+            "ok": False,
+            "detail": (
+                f"bootstrap loads {len(carriers)} times, inflating every session's "
+                f"system prompt: {'; '.join(carriers)}"
+            ),
+        }
+
+    check_list.append(_bootstrap_load_path)
 
     return check_list
 
@@ -427,9 +492,16 @@ def status(scope="global"):
                 cfg = json.load(f)
             instructions = cfg.get("instructions", [])
             skills_paths = cfg.get("skills", {}).get("paths", [])
+            entry_present = (
+                isinstance(instructions, list) and _instructions_path() in instructions
+            )
+            # With the auto-load link present the entry is a duplicate, not a
+            # merge; without it the entry is the only bootstrap load path.
+            instructions_ok = (
+                not entry_present if _auto_loaded_bootstrap() else entry_present
+            )
             config_merged = (
-                isinstance(instructions, list)
-                and _instructions_path() in instructions
+                instructions_ok
                 and isinstance(skills_paths, list)
                 and _skills_path() in skills_paths
             )

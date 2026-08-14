@@ -231,6 +231,13 @@ help loaded on demand.
   growth.
 - Activating two surfaces with the same Skill names is a duplicate-discovery
   failure, not extra assurance.
+- The same always-loaded bootstrap must reach a session exactly once. When a
+  runtime both auto-loads a bootstrap filename and reads a configured
+  instruction list, an adapter picks one carrier and keeps the other empty;
+  runtimes commonly dedupe instruction sources by resolved path, so one file
+  behind two absolute paths — a symlink and its target, or two projections of
+  it — is injected twice rather than deduped. Verification asserts the number
+  of carriers, not merely that some carrier exists.
 - A stored surface baseline rejects growth greater than five percent unless the
   same change records a reviewed rationale and updates the budget.
 - Ordinary, unknown, and repeated hook states inject zero bytes. A verified
