@@ -121,3 +121,38 @@ class TerminalRowMismatchClassifierTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class EarlyStageBreadcrumbTailFoldTest(unittest.TestCase):
+    """F-65 — an early-stage long route must fold FUTURE stages to its zone budget.
+
+    A 7-node strong route at its first node has no past stages to fold, overflowed
+    its zone by ~45 cells, and the wrapped row visually severed the capsule card's
+    ╰─── close rail (user 2026-08-14)."""
+
+    def _crumb(self, max_width, cur=0):
+        from fleet import render
+        seq = [("frame(3-way)", "active" if cur == 0 else "done"),
+               ("plan(2-way)", "active" if cur == 1 else "pending"),
+               ("plan-check", "pending"), ("execute", "pending"),
+               ("impl-review(2-way)", "pending"), ("test", "pending"),
+               ("report", "pending")]
+        segs = render._route_stage_segs(seq, working=False, max_width=max_width)
+        text = "".join(t for t, _k in segs)
+        return text, sum(render._dw(t) for t, _k in segs)
+
+    def test_early_stage_folds_future_to_budget(self):
+        text, width = self._crumb(42)
+        self.assertLessEqual(width, 42)
+        self.assertIn("frame(3-way)", text)      # current stage always survives
+        self.assertIn("+", text)                  # folded-tail counter is visible
+
+    def test_current_and_successor_survive_any_budget(self):
+        text, _width = self._crumb(10)
+        self.assertIn("frame(3-way)", text)
+        self.assertIn("plan(2-way)", text)
+
+    def test_fitting_route_is_untouched(self):
+        text, _width = self._crumb(500)
+        self.assertIn("report", text)
+        self.assertNotIn("+", text.replace("(2-way)", "").replace("(3-way)", ""))

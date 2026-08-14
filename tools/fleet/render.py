@@ -942,13 +942,30 @@ def _drop_past_stages(items, cur_i, max_width):
     """SD-F2 (prd.md:164) — a breadcrumb's information value is "where now", not "where
     I've been": fold PAST stages (i < cur_i) first, earliest first, so the active stage (and
     anything after it) survives longest. Whole-component drop (a stage + its separator, F-9(c)
-    idiom) — never a mid-token tail-cut."""
+    idiom) — never a mid-token tail-cut.
+
+    Tail fold (F-65): an EARLY-stage long route has no past to fold — a 7-node strong
+    route at its first node overflowed its zone by ~45 cells, the wide row wrapped in the
+    terminal, and the wrap shifted every following screen line so the card's ╰─── close
+    rail visually vanished (user 2026-08-14 "경계선이 하단에 안 떠서"). When past-folding
+    alone cannot fit, drop FUTURE stages from the END — never the current one or its
+    immediate successor — and account a dim `+N` counter in the same width ledger."""
     items = list(items)
-    def width():
-        w = sum(_dw(t) for _i, t, _k in items)
-        return w + max(0, len(items) - 1) * 3   # " › " separators, _dw == 3
+    def width(extra_cells=0):
+        w = sum(_dw(t) for _i, t, _k in items) + extra_cells
+        n = len(items) + (1 if extra_cells else 0)
+        return w + max(0, n - 1) * 3   # " › " separators, _dw == 3
     while width() > max_width and items and items[0][0] < cur_i:
         items = items[1:]
+    dropped_tail = 0
+    def marker_cells():
+        return _dw("+%d" % (dropped_tail + 1)) if dropped_tail or width() > max_width else 0
+    while (width(marker_cells()) > max_width and len(items) > 2
+           and items[-1][0] > cur_i + 1):
+        items.pop()
+        dropped_tail += 1
+    if dropped_tail:
+        items.append((items[-1][0] + 1, "+%d" % dropped_tail, "dim"))
     return items
 
 
