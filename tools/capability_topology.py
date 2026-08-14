@@ -842,10 +842,11 @@ def _validate_recipe(recipe, registry, standard_plus_owner_profile):
             "id", "node", "kind", "min_intensity", "width_by_intensity",
             "join_policy", "independence_axes", "legs",
         }
-        required_leg = {"suffix", "perspective", "model_profile"}
         anchored, group_ids = set(), set()
         tiers = registry["intensities"]
         max_allowed = registry["parallel_group_max_width"]
+        leg_classes = registry["leg_classes"]
+        auxiliary_checks = registry["auxiliary_checks"]
         for group in parallel_groups:
             if not isinstance(group, dict) or set(group) != required_group:
                 raise TopologyError(
@@ -892,22 +893,80 @@ def _validate_recipe(recipe, registry, standard_plus_owner_profile):
                 )
             values = list(widths.values())
             if (any(isinstance(value, bool) or not isinstance(value, int)
-                    or value < 2 or value > max_allowed for value in values)
+                    or value < 2 for value in values)
                     or values != sorted(values)):
                 raise TopologyError(
                     f"{recipe['capability']}:{group_id}: widths must be monotonic integers in 2..{max_allowed}"
                 )
             legs = group["legs"]
-            if not isinstance(legs, list) or len(legs) != max(values):
+            if not isinstance(legs, list):
+                raise TopologyError(
+                    f"{recipe['capability']}:{group_id}: legs must be a list"
+                )
+            # AC 4: single merged rejection when declared peers + auxiliaries exceed
+            # the schema cap. Every leg is either a peer or an auxiliary, so the
+            # total declared leg count is the merged count (plan.md W1a step 5).
+            if len(legs) > max_allowed:
+                raise TopologyError(
+                    f"{recipe['capability']}:{group_id}: legs exceed parallel_group_max_width {max_allowed}"
+                )
+            if len(legs) != max(values):
                 raise TopologyError(
                     f"{recipe['capability']}:{group_id}: legs must equal maximum declared width"
                 )
             suffixes, perspectives, profiles = [], [], []
+            peers_in_prefix, auxiliary_count = 0, 0
+            auxiliary_kinds, saw_auxiliary = set(), False
             for leg in legs:
-                if not isinstance(leg, dict) or set(leg) != required_leg:
+                # 1: leg_class missing is a distinct single-assertion rejection.
+                if not isinstance(leg, dict) or "leg_class" not in leg:
                     raise TopologyError(
-                        f"{recipe['capability']}:{group_id}: legs require exactly {sorted(required_leg)}"
+                        f"{recipe['capability']}:{group_id}: leg requires leg_class"
                     )
+                leg_class = leg["leg_class"]
+                # 2: vocabulary-external leg_class is a distinct rejection.
+                if leg_class not in leg_classes:
+                    raise TopologyError(
+                        f"{recipe['capability']}:{group_id}: invalid leg_class {leg_class!r}"
+                    )
+                if leg_class == "peer":
+                    # 6: an auxiliary before a later peer violates peer-first ordering.
+                    if saw_auxiliary:
+                        raise TopologyError(
+                            f"{recipe['capability']}:{group_id}: auxiliary leg must not precede a peer leg"
+                        )
+                    # 4: a peer leg must not carry an auxiliary_check.
+                    if "auxiliary_check" in leg:
+                        raise TopologyError(
+                            f"{recipe['capability']}:{group_id}: peer leg must not carry auxiliary_check"
+                        )
+                    if set(leg) != {"suffix", "perspective", "model_profile", "leg_class"}:
+                        raise TopologyError(
+                            f"{recipe['capability']}:{group_id}: peer legs require exactly "
+                            "suffix, perspective, model_profile, leg_class"
+                        )
+                    peers_in_prefix += 1
+                else:
+                    if set(leg) != {"suffix", "perspective", "model_profile",
+                                    "leg_class", "auxiliary_check"}:
+                        raise TopologyError(
+                            f"{recipe['capability']}:{group_id}: auxiliary legs require exactly "
+                            "suffix, perspective, model_profile, leg_class, auxiliary_check"
+                        )
+                    # 3: an auxiliary leg without an auxiliary_check is a distinct rejection.
+                    check = leg["auxiliary_check"]
+                    if check not in auxiliary_checks:
+                        raise TopologyError(
+                            f"{recipe['capability']}:{group_id}: invalid auxiliary_check {check!r}"
+                        )
+                    # 5: non-light auxiliary is a distinct rejection (AC 1 case).
+                    if leg["model_profile"] != "light":
+                        raise TopologyError(
+                            f"{recipe['capability']}:{group_id}: auxiliary leg must use model_profile light"
+                        )
+                    saw_auxiliary = True
+                    auxiliary_count += 1
+                    auxiliary_kinds.add(check)
                 suffix, perspective, profile = (
                     leg["suffix"], leg["perspective"], leg["model_profile"]
                 )
@@ -919,6 +978,28 @@ def _validate_recipe(recipe, registry, standard_plus_owner_profile):
                     registry, profile, f"{recipe['capability']}:{group_id}:{suffix}"
                 )
                 suffixes.append(suffix); perspectives.append(perspective); profiles.append(profile)
+            # Every declared width prefix must carry at least two peer legs.
+            for width in values:
+                if sum(leg.get("leg_class") == "peer" for leg in legs[:width]) < 2:
+                    raise TopologyError(
+                        f"{recipe['capability']}:{group_id}: each declared width must hold at least two peer legs"
+                    )
+            # AC 3: auxiliary check kinds are unique within one group.
+            if len(auxiliary_kinds) != auxiliary_count:
+                raise TopologyError(
+                    f"{recipe['capability']}:{group_id}: auxiliary_check kinds must be unique"
+                )
+            # AC 4: single merged rejection when peers + auxiliaries exceed the schema cap.
+            if peers_in_prefix + auxiliary_count > max_allowed:
+                raise TopologyError(
+                    f"{recipe['capability']}:{group_id}: legs exceed parallel_group_max_width {max_allowed}"
+                )
+            # AC 23 / D6: an auxiliary-bearing group's declared maximum width is at most 3,
+            # while parallel_group_max_width stays the schema-level cap.
+            if auxiliary_count and max(values) > 3:
+                raise TopologyError(
+                    f"{recipe['capability']}:{group_id}: auxiliary groups must keep declared width at most 3"
+                )
             if suffixes[0] != "anchor" or len(suffixes) != len(set(suffixes)):
                 raise TopologyError(f"{recipe['capability']}:{group_id}: ordered unique suffixes must start with anchor")
             if "perspective" in axes and len(perspectives) != len(set(perspectives)):
@@ -990,7 +1071,7 @@ def _validate_recipe(recipe, registry, standard_plus_owner_profile):
 
 
 def validate_registry(registry, manifest=None):
-    if registry.get("schema_version") != 8:
+    if registry.get("schema_version") != 9:
         raise TopologyError("legacy topology registry is read-only")
     _validate_activation_conditions(registry)
     _validate_workflow_vocabulary(registry)
@@ -1023,6 +1104,13 @@ def validate_registry(registry, manifest=None):
         raise TopologyError("parallel independence-axis vocabulary mismatch")
     if registry.get("parallel_group_max_width") != 4:
         raise TopologyError("parallel_group_max_width must be 4")
+    if registry.get("leg_classes") != ["peer", "auxiliary"]:
+        raise TopologyError("leg_classes must declare exactly peer and auxiliary")
+    if registry.get("auxiliary_checks") != [
+        "assumption-check", "edge-case-check", "failure-mode-check",
+        "simplicity-check", "test-gap-check",
+    ]:
+        raise TopologyError("auxiliary_checks must declare the closed five checks")
     if set(registry.get("transports", [])) != WRAPPER_TRANSPORTS:
         raise TopologyError("transport vocabulary differs from portable dispatch contract")
     if set(registry.get("execution_surfaces", [])) != EXECUTION_SURFACES:

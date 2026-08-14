@@ -419,6 +419,9 @@ def _expand_parallel_groups(nodes, parallel_groups, effective_intensity):
                 ]
             leg["model_profile"] = leg_spec["model_profile"]
             leg["perspective"] = leg_spec["perspective"]
+            leg["leg_class"] = leg_spec["leg_class"]
+            if leg_spec["leg_class"] == "auxiliary":
+                leg["auxiliary_check"] = leg_spec["auxiliary_check"]
             leg["parallel_group"] = group["id"]
             leg["parallel_group_kind"] = group["kind"]
             leg["parallel_join_policy"] = group["join_policy"]

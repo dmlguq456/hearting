@@ -1,5 +1,5 @@
 {
- "schema_version": 8,
+ "schema_version": 9,
  "intensities": [
   "direct",
   "quick",
@@ -221,12 +221,14 @@
        {
         "suffix": "anchor",
         "perspective": "primary-verify",
-        "model_profile": "light"
+        "model_profile": "light",
+        "leg_class": "peer"
        },
        {
         "suffix": "alternative",
         "perspective": "independent-verify",
-        "model_profile": "balanced-deep"
+        "model_profile": "balanced-deep",
+        "leg_class": "peer"
        }
       ]
      }
@@ -565,17 +567,20 @@
        {
         "suffix": "anchor",
         "perspective": "primary-framing",
-        "model_profile": "balanced-deep"
+        "model_profile": "balanced-deep",
+        "leg_class": "peer"
        },
        {
         "suffix": "alternative",
         "perspective": "cross-harness-alternative",
-        "model_profile": "light"
+        "model_profile": "light",
+        "leg_class": "peer"
        },
        {
         "suffix": "contrarian",
         "perspective": "contrarian-framing",
-        "model_profile": "deep"
+        "model_profile": "deep",
+        "leg_class": "peer"
        }
       ]
      },
@@ -599,17 +604,20 @@
        {
         "suffix": "anchor",
         "perspective": "primary-plan",
-        "model_profile": "deep"
+        "model_profile": "deep",
+        "leg_class": "peer"
        },
        {
         "suffix": "alternative",
         "perspective": "independent-plan",
-        "model_profile": "balanced-deep"
+        "model_profile": "balanced-deep",
+        "leg_class": "peer"
        },
        {
         "suffix": "implementation-risk",
         "perspective": "implementation-risk-scout",
-        "model_profile": "light"
+        "model_profile": "light",
+        "leg_class": "peer"
        }
       ]
      },
@@ -633,17 +641,20 @@
        {
         "suffix": "anchor",
         "perspective": "primary-code-review",
-        "model_profile": "balanced-deep"
+        "model_profile": "balanced-deep",
+        "leg_class": "peer"
        },
        {
         "suffix": "alternative",
         "perspective": "independent-code-review",
-        "model_profile": "light"
+        "model_profile": "light",
+        "leg_class": "peer"
        },
        {
         "suffix": "failure-mode",
         "perspective": "failure-mode-review",
-        "model_profile": "deep"
+        "model_profile": "deep",
+        "leg_class": "peer"
        }
       ]
      }
@@ -931,12 +942,14 @@
        {
         "suffix": "anchor",
         "perspective": "primary-refs",
-        "model_profile": "light"
+        "model_profile": "light",
+        "leg_class": "peer"
        },
        {
         "suffix": "alternative",
         "perspective": "independent-refs",
-        "model_profile": "balanced-deep"
+        "model_profile": "balanced-deep",
+        "leg_class": "peer"
        }
       ]
      },
@@ -960,12 +973,14 @@
        {
         "suffix": "anchor",
         "perspective": "primary-critic-review",
-        "model_profile": "light"
+        "model_profile": "light",
+        "leg_class": "peer"
        },
        {
         "suffix": "alternative",
         "perspective": "independent-critic-review",
-        "model_profile": "balanced-deep"
+        "model_profile": "balanced-deep",
+        "leg_class": "peer"
        }
       ]
      }
@@ -1259,12 +1274,14 @@
        {
         "suffix": "anchor",
         "perspective": "primary-material-strategy",
-        "model_profile": "balanced-deep"
+        "model_profile": "balanced-deep",
+        "leg_class": "peer"
        },
        {
         "suffix": "alternative",
         "perspective": "independent-material-strategy",
-        "model_profile": "light"
+        "model_profile": "light",
+        "leg_class": "peer"
        }
       ]
      },
@@ -1288,12 +1305,14 @@
        {
         "suffix": "anchor",
         "perspective": "primary-fact-verify",
-        "model_profile": "light"
+        "model_profile": "light",
+        "leg_class": "peer"
        },
        {
         "suffix": "alternative",
         "perspective": "independent-fact-verify",
-        "model_profile": "balanced-deep"
+        "model_profile": "balanced-deep",
+        "leg_class": "peer"
        }
       ]
      }
@@ -1571,12 +1590,14 @@
        {
         "suffix": "anchor",
         "perspective": "primary-smoke",
-        "model_profile": "balanced-deep"
+        "model_profile": "balanced-deep",
+        "leg_class": "peer"
        },
        {
         "suffix": "alternative",
         "perspective": "independent-smoke",
-        "model_profile": "deep"
+        "model_profile": "deep",
+        "leg_class": "peer"
        }
       ]
      }
@@ -1916,12 +1937,14 @@
        {
         "suffix": "anchor",
         "perspective": "primary-independent-verify",
-        "model_profile": "light"
+        "model_profile": "light",
+        "leg_class": "peer"
        },
        {
         "suffix": "alternative",
         "perspective": "independent-independent-verify",
-        "model_profile": "balanced-deep"
+        "model_profile": "balanced-deep",
+        "leg_class": "peer"
        }
       ]
      }
@@ -2101,12 +2124,14 @@
        {
         "suffix": "anchor",
         "perspective": "primary-review",
-        "model_profile": "light"
+        "model_profile": "light",
+        "leg_class": "peer"
        },
        {
         "suffix": "alternative",
         "perspective": "independent-review",
-        "model_profile": "balanced-deep"
+        "model_profile": "balanced-deep",
+        "leg_class": "peer"
        }
       ]
      }
@@ -2342,12 +2367,14 @@
        {
         "suffix": "anchor",
         "perspective": "primary-retrieval",
-        "model_profile": "balanced-deep"
+        "model_profile": "balanced-deep",
+        "leg_class": "peer"
        },
        {
         "suffix": "alternative",
         "perspective": "independent-retrieval",
-        "model_profile": "light"
+        "model_profile": "light",
+        "leg_class": "peer"
        }
       ]
      },
@@ -2371,12 +2398,14 @@
        {
         "suffix": "anchor",
         "perspective": "primary-claim-verify",
-        "model_profile": "light"
+        "model_profile": "light",
+        "leg_class": "peer"
        },
        {
         "suffix": "alternative",
         "perspective": "independent-claim-verify",
-        "model_profile": "balanced-deep"
+        "model_profile": "balanced-deep",
+        "leg_class": "peer"
        }
       ]
      }
@@ -2644,12 +2673,14 @@
        {
         "suffix": "anchor",
         "perspective": "primary-release-review",
-        "model_profile": "light"
+        "model_profile": "light",
+        "leg_class": "peer"
        },
        {
         "suffix": "alternative",
         "perspective": "independent-release-review",
-        "model_profile": "balanced-deep"
+        "model_profile": "balanced-deep",
+        "leg_class": "peer"
        }
       ]
      }
@@ -2856,12 +2887,14 @@
        {
         "suffix": "anchor",
         "perspective": "primary-research",
-        "model_profile": "balanced-deep"
+        "model_profile": "balanced-deep",
+        "leg_class": "peer"
        },
        {
         "suffix": "alternative",
         "perspective": "independent-research",
-        "model_profile": "light"
+        "model_profile": "light",
+        "leg_class": "peer"
        }
       ]
      },
@@ -2885,12 +2918,14 @@
        {
         "suffix": "anchor",
         "perspective": "primary-review",
-        "model_profile": "balanced-deep"
+        "model_profile": "balanced-deep",
+        "leg_class": "peer"
        },
        {
         "suffix": "alternative",
         "perspective": "independent-review",
-        "model_profile": "deep"
+        "model_profile": "deep",
+        "leg_class": "peer"
        }
       ]
      }
@@ -3221,6 +3256,17 @@
   "perspective"
  ],
  "parallel_group_max_width": 4,
+ "leg_classes": [
+  "peer",
+  "auxiliary"
+ ],
+ "auxiliary_checks": [
+  "assumption-check",
+  "edge-case-check",
+  "failure-mode-check",
+  "simplicity-check",
+  "test-gap-check"
+ ],
  "workflow_states": [
   "CREATED",
   "READY",

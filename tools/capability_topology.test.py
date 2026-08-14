@@ -8,43 +8,43 @@ S = importlib.util.spec_from_file_location("topology", P); T = importlib.util.mo
 PRESERVED_FULL_FIELD_DIGESTS = {
     ("autopilot-apply", ('default',)): (
         "8b5adb03d56bf8b6e68c4ff78f35cde2e0076dcc3db46841658f4cb85645bf8b",
-        "ef01f5c116d199aaee0f86d845921face1f7a7a5095ac73d30ad9a40d4b0233f",
+        "926c9eff35134529d23574f9052da464493b09fd52cb98da03785ff7798669d7",
     ),
     ("autopilot-code", ('audit', 'debug', 'dev')): (
         "812f7acba3c4adf1ebbc0f279206577b31e2b6131ba102f2bb9ba556ee3f831c",
-        "1eb37bfd5ab71fc7e9edc437503624f991cc585d7806dc46af7e2910911fb9f4",
+        "876f94f33c8ab50d391adce3161602bd147427a91627bb0ca324baf12226d8ac",
     ),
     ("autopilot-design", ('default',)): (
         "c75c56b11affed41560aebf57faba71a07b9903e2f24224ce3207cbf290c9168",
-        "55e3c44a67bba7579e3805464b8ba464951c9edc2cb05356aa696bfcb864281b",
+        "a21c38f2bede9dc250043c2e9bc66b93a60e87c6dea4a26ec919b2833d0fce58",
     ),
     ("autopilot-draft", ('doc', 'paper', 'presentation')): (
         "962db29f856dd3f6a9a8aa9743fc57bc8aa691dad014a9cef7a432e50cea32c5",
-        "24338ba81e05c0bc6ccad3ee5af02dfb9a1ec6b49dbd9e2302ae49147296ce13",
+        "3ad4a882afaa9f4e1af1a1bcd1fba99f9b23917ca99bf1520039ced2846bbdbb",
     ),
     ("autopilot-lab", ('setup',)): (
         "502f66344295ad67f2d3e09499efcc91d47d1caf8ef3b03863f0c3b37549c2a5",
-        "9a26c0fea9a635d94f784379941c90a25d35ad7d2bcf1c3f21a1fcd5fad57183",
+        "e060a2626135140d1a26b58e1e97ecaad2b4f937c915683f6e6410ac16a23370",
     ),
     ("autopilot-lab", ('eval',)): (
         "f3b5dbd108b70b96c29f0af3e76c4cb10f9ce31aed215aa6f0f4ea2f1edac920",
-        "47160a6d9acf73cf29ff137dcb90c1af3036148530af2a1628162692078f1e24",
+        "07c9f4e193ff843ba33a1da2a7d4af662070b4d3ebf235f07173802d2e928b51",
     ),
     ("autopilot-refine", ('default',)): (
         "74d2f582f1395d07caf42fb3c4f849f2cca00e9f81f19e7b051a15fc83ca829f",
-        "d39b4446e7c7fca7def4629560d9ee10a342b536fa644ffee8023c5f06326203",
+        "17e5d03f2aaba86c476743ee29b453e0961455973c3c347cac6a9634c217b529",
     ),
     ("autopilot-research", ('academic', 'market', 'technology')): (
         "31a34e00fc4a58cd8e2f2b7f2daf1dd380ec41d681aa9ad2660367ced6f86571",
-        "1c314d9a1c578256757109a35b0f08548d22391b3f079df0a790fe3534bfc057",
+        "df7e2d118abcf7affb201159b8b9e14c08c2cc3372f86437ea4d134006c20816",
     ),
     ("autopilot-ship", ('default',)): (
         "ea42832e8e0ebb85f2f07487921b4ff7502ed8ce5da0d8f72c7d062db8701593",
-        "57f7c9ab1e362f246f0056927122c19163479334380cf84ab9a8785e620dcbf4",
+        "c56318c9201667046297a0dc7c0788fae86651b48e382266325ccf759d7e68ea",
     ),
     ("autopilot-spec", ('api', 'app', 'cli', 'library', 'research', 'update')): (
         "096a33a46adf1886561c032019301c7dbc64ec94729acee715c74ed3f4af302a",
-        "8b421239d9a414c5d0ce1b91e9314ceee13b9fa9ac075d374fb92eb59e8437af",
+        "a628941aafb66bdffb0f2fab092ef9177355d237f7b1bf42fb74e552b4f3c66b",
     ),
 }
 
@@ -115,7 +115,7 @@ class TestTopology(unittest.TestCase):
         self.assertRaisesRegex(T.TopologyError,"enforced",T.validate_registry,r)
         r=copy.deepcopy(self.r); r["rollout"]["legacy_low_level_dispatch"]=True
         self.assertRaisesRegex(T.TopologyError,"retired",T.validate_registry,r)
-        for legacy in (2,3,4,5,6,7):
+        for legacy in (2,3,4,5,6,7,8):
             r=copy.deepcopy(self.r); r["schema_version"]=legacy
             self.assertRaisesRegex(T.TopologyError,"read-only",T.validate_registry,r)
     def test_conditional_artifact_sink_coverage(self):
@@ -254,6 +254,114 @@ class TestTopology(unittest.TestCase):
         r=copy.deepcopy(self.r)
         r["recipes"][0]["standard_plus"]["nodes"][0]["model_profile"]="mini"
         self.assertRaisesRegex(T.TopologyError,"mini/unregistered",T.validate_registry,r)
+    def test_leg_class_schema_rejections_single_assertion(self):
+        # AC 1: six rejection cases, each a distinct single-assertion fixture.
+        # The plan group is peer legs [anchor(deep), alternative(balanced-deep),
+        # implementation-risk(light)] at widths [2,3,3]; fixtures that change leg
+        # shape are built from those real legs so unrelated axis checks stay silent.
+        def broken(mutate,capability="autopilot-code"):
+            r=copy.deepcopy(self.r)
+            recipe=next(x for x in r["recipes"] if x["capability"]==capability)
+            mutate(recipe["standard_plus"])
+            return r
+        def plan_group(g):
+            return next(group for group in g["parallel_groups"] if group["id"]=="plan")
+        def peer_legs(g):
+            return [dict(leg) for leg in plan_group(g)["legs"]]
+        def aux(suffix,check="simplicity-check",profile="light"):
+            return {"suffix":suffix,"perspective":f"{suffix}-check","model_profile":profile,
+                    "leg_class":"auxiliary","auxiliary_check":check}
+        # 1: leg_class missing
+        self.assertRaisesRegex(T.TopologyError,"leg requires leg_class",
+            T.validate_registry,
+            broken(lambda g: plan_group(g)["legs"][1].pop("leg_class")))
+        # 2: leg_class outside vocabulary
+        self.assertRaisesRegex(T.TopologyError,"invalid leg_class",
+            T.validate_registry,
+            broken(lambda g: plan_group(g)["legs"][1].update(leg_class="scout")))
+        # 3: auxiliary without auxiliary_check
+        self.assertRaisesRegex(T.TopologyError,"auxiliary legs require exactly",
+            T.validate_registry,
+            broken(lambda g: plan_group(g).update(legs=peer_legs(g)[:2]+[
+                {"suffix":"simplicity","perspective":"simplicity-check","model_profile":"light",
+                 "leg_class":"auxiliary"}])))
+        # 4: peer with auxiliary_check
+        self.assertRaisesRegex(T.TopologyError,"peer leg must not carry auxiliary_check",
+            T.validate_registry,
+            broken(lambda g: plan_group(g)["legs"][1].update(auxiliary_check="simplicity-check")))
+        # 5: non-light auxiliary
+        self.assertRaisesRegex(T.TopologyError,"must use model_profile light",
+            T.validate_registry,
+            broken(lambda g: plan_group(g).update(legs=peer_legs(g)[:2]+
+                [aux("simplicity",profile="balanced-deep")])))
+        # 6: auxiliary before a peer
+        self.assertRaisesRegex(T.TopologyError,"must not precede a peer",
+            T.validate_registry,
+            broken(lambda g: plan_group(g).update(legs=[aux("simplicity")]+peer_legs(g)[:2])))
+        # AC 3: duplicate auxiliary_check kinds inside one group (2 peers + 2 aux
+        # with the same check; adversarial width widened to 4).
+        def dup_aux(g):
+            group=plan_group(g)
+            group.update(legs=peer_legs(g)[:2]+[aux("simplicity"),aux("edge-case",check="simplicity-check")])
+            group["width_by_intensity"]["adversarial"]=4
+        self.assertRaisesRegex(T.TopologyError,"auxiliary_check kinds must be unique",
+            T.validate_registry,broken(dup_aux))
+        # AC 4: single merged rejection when declared peers + auxiliaries exceed
+        # parallel_group_max_width (2 peers + 3 auxiliaries = 5 legs).
+        def over_max(g):
+            plan_group(g).update(legs=peer_legs(g)[:2]+
+                [aux("simplicity"),aux("edge-case"),aux("failure-mode")])
+        self.assertRaisesRegex(T.TopologyError,"legs exceed parallel_group_max_width",
+            T.validate_registry,broken(over_max))
+    def test_auxiliary_group_width_cap_and_peer_floor(self):
+        # AC 23 / D6: auxiliary-bearing groups keep declared max width <= 3 even
+        # though parallel_group_max_width stays 4 at the schema level.
+        def broken(mutate,capability="autopilot-code"):
+            r=copy.deepcopy(self.r)
+            recipe=next(x for x in r["recipes"] if x["capability"]==capability)
+            mutate(recipe["standard_plus"])
+            return r
+        def aux(suffix,check="simplicity-check",profile="light"):
+            return {"suffix":suffix,"perspective":f"{suffix}-check","model_profile":profile,
+                    "leg_class":"auxiliary","auxiliary_check":check}
+        def plan_group(g):
+            return next(x for x in g["parallel_groups"] if x["id"]=="plan")
+        # widen the plan group to adversarial width 4 with one auxiliary leg
+        def widen(g):
+            group=plan_group(g)
+            group["width_by_intensity"]["adversarial"]=4
+            group["legs"]=group["legs"]+[aux("simplicity")]
+        r=broken(widen)
+        self.assertRaisesRegex(T.TopologyError,"declared width at most 3",T.validate_registry,r)
+        # a valid 2-peer + 1-auxiliary 3-way compiles
+        def add_three(g):
+            group=plan_group(g)
+            group["width_by_intensity"]["thorough"]=3
+            group["legs"]=group["legs"][:2]+[aux("simplicity")]
+        r=broken(add_three)
+        T.validate_registry(r)
+        # a single-peer group violates the declared-width peer floor
+        def single_peer(g):
+            group=plan_group(g)
+            group["legs"]=group["legs"][:1]+[aux("simplicity"),aux("edge-case")]
+        r=broken(single_peer)
+        self.assertRaisesRegex(T.TopologyError,"at least two peer legs",T.validate_registry,r)
+    def test_leg_class_stamped_on_realized_nodes(self):
+        # The compiler stamps leg_class (and auxiliary_check for auxiliary legs)
+        # onto realized nodes in _expand_parallel_groups.
+        r=copy.deepcopy(self.r); T.validate_registry(r)
+        code=next(x for x in r["recipes"] if x["capability"]=="autopilot-code")
+        nodes=json.loads(json.dumps(code["standard_plus"]["nodes"]))
+        from pathlib import Path as _P
+        _S=importlib.util.spec_from_file_location("capability_route",_P(__file__).resolve().parents[1]/"utilities"/"capability-route.py")
+        _CR=importlib.util.module_from_spec(_S); _S.loader.exec_module(_CR)
+        nodes=_CR._expand_parallel_groups(nodes,code["standard_plus"]["parallel_groups"],"strong")
+        stamped={n["id"]:n.get("leg_class") for n in nodes if "parallel_group" in n}
+        self.assertEqual(stamped["plan"],"peer")
+        self.assertEqual(stamped["plan-alternative"],"peer")
+        for group in code["standard_plus"]["parallel_groups"]:
+            for leg in group["legs"]:
+                self.assertEqual(leg["leg_class"],"peer")
     def test_owner_profile_policy_and_semantic_owner_census(self):
         self.assertEqual(self.r["owner_profile_by_intensity"], {
             "quick": "balanced-deep", "standard": "deep", "strong": "deep",
