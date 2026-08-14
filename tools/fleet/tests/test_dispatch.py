@@ -199,14 +199,15 @@ class RenderDispatchPresentationTest(unittest.TestCase):
         ))
 
     def test_f64c_rail_blinks_in_stage_hue_only_while_working(self):
-        for blink, expected in ((True, "stg0_on"), (False, "stg0_off")):
+        # F-68d: frame hues pulse by brightness only (no bold weight change).
+        for blink, expected in ((True, "frm0_on"), (False, "frm0_off")):
             leg = self._line_with(self._rail_lines(blink=blink), "rail-leg (")
             keys = [k for p, k in leg if p == render._RAIL_MID]
             self.assertEqual(keys, [expected])
         # F-67 (user 2026-08-14 실측): the pulse keys on UNIT activity — a stale
         # owner whose stage worker still works is an ACTIVE unit, so the frame
         # keeps (and blinks in) the stage hue instead of freezing to dim.
-        for blink, expected in ((True, "stg0_on"), (False, "stg0_off")):
+        for blink, expected in ((True, "frm0_on"), (False, "frm0_off")):
             leg = self._line_with(
                 self._rail_lines(blink=blink, owner_liveness="stale"), "rail-leg (")
             keys = [k for p, k in leg if p == render._RAIL_MID]
@@ -217,10 +218,10 @@ class RenderDispatchPresentationTest(unittest.TestCase):
                 self._rail_lines(blink=blink, owner_liveness="stale",
                                  leg_liveness="idle"), "rail-leg (")
             keys = [k for p, k in leg if p == render._RAIL_MID]
-            self.assertEqual(keys, ["dim"])
+            self.assertEqual(keys, ["frm_idle"])
 
     def test_f66_entire_frame_uses_the_owner_rail_color(self):
-        for blink, expected in ((True, "stg0_on"), (False, "stg0_off")):
+        for blink, expected in ((True, "frm0_on"), (False, "frm0_off")):
             lines = self._rail_lines(blink=blink)
             frame_keys = []
             for line in lines:
@@ -312,7 +313,10 @@ class RenderDispatchPresentationTest(unittest.TestCase):
 
         right = next((col, part) for _row, col, part, _attr in screen.calls
                      if part == render._RAIL_TOP_RIGHT)
-        self.assertEqual(right[0], width - render._INSET - 1)
+        # F-68d: the border keeps a symmetric gap off the band edge instead of
+        # sitting flush on its last column.
+        self.assertEqual(right[0],
+                         width - render._INSET - 1 - render._CARD_EDGE_GAP)
         self.assertEqual(render._dw(right[1]), 1)
 
     def test_dispatch_role_suffix_has_no_qa_token(self):

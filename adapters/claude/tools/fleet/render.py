@@ -400,6 +400,14 @@ def _init_colors():
     for i, base in enumerate(_stage_raw):
         _COLOR["stg%d_on" % i] = base | curses.A_BOLD
         _COLOR["stg%d_off" % i] = base | curses.A_DIM
+        # F-68d (user "볼드로 바뀌는 게 거슬린다"): the box frame pulses in BRIGHTNESS
+        # only. Box-drawing glyphs change apparent stroke weight (and, in some
+        # terminals, advance width) under A_BOLD, so a bold/dim blink made the
+        # horizontal runs and the verticals read as different patterns. Frame keys
+        # keep one weight and swap plain <-> dim instead.
+        _COLOR["frm%d_on" % i] = base
+        _COLOR["frm%d_off" % i] = base | curses.A_DIM
+    _COLOR["frm_idle"] = curses.A_DIM
     _COLOR["dim"] = curses.A_DIM
     _COLOR["head"] = curses.A_DIM
     _COLOR["unknown"] = curses.A_DIM
@@ -1645,6 +1653,7 @@ _RAIL_BOT_RIGHT = "╯"
 _RAIL_SOLO = "❙"
 _RAIL_CHARS = (_RAIL_TOP, _RAIL_MID, _RAIL_MID.strip(), _RAIL_BOT, _RAIL_SOLO)
 _RAIL_COL = 2      # capsule begins at the dispatch unit's own inset in every layout
+_CARD_EDGE_GAP = 2  # cells the box border keeps clear of the group card's right edge
 
 
 def _depth1_rail_color_index(key, stage, route_seq):
@@ -1731,9 +1740,18 @@ def _dispatch_box_width(term_width, layout=None):
     # real viewport at this width is routed to narrow by `_layout_mode`.
     if layout == "wide" and term_width and term_width < _TWO_LINE_CUTOFF:
         width = 200
-    # Tinted curses rows gain the outer inset and inner padding in `_addline`.
-    # The 8-color/plain path has no such shift and retains its one-cell edge guard.
-    return max(_RAIL_COL + 4, width - 6 if _TINT_OK else width - 1)
+    # Tinted curses rows gain the outer inset and inner padding in `_addline`, so a
+    # raw index lands at screen col `_INSET + _PAD_IN + index` and the tint band's
+    # last paintable column is `width - _INSET - 1`. F-68d (user "우측은 시종일관
+    # 그대로"): the earlier budget put the right border ON that last band column
+    # while the left border sat four cells inside it — the asymmetry the user kept
+    # seeing. Pull the border two cells off the band edge so both sides breathe.
+    # F-68d (user "우측은 시종일관 그대로"): the original contract put the right border
+    # ON the tint band's last column — flush against the card edge while the left
+    # side breathed. The border now stops `_CARD_EDGE_GAP` cells short of that edge.
+    return max(_RAIL_COL + 4,
+               width - (_INSET + _PAD_IN + 2 + _CARD_EDGE_GAP) if _TINT_OK
+               else width - 1)   # plain/8-color path keeps its one-cell edge guard
 
 
 def _frame_dispatch_line(segs, box_width, edge, key, run_key=None):
@@ -4727,14 +4745,13 @@ def _build_lines(sessions, jobs, section, narrow, malformed, layout="wide", memo
                     color_i = _depth1_rail_color_index(
                         getattr(job, "key", None),
                         stage_override or getattr(job, "stage", None), route_seq)
-                    rail_key = ("stg%d_on" if _BLINK_ON else "stg%d_off") % color_i
-                    # F-68c (user decision): the whole frame breathes as one — the
-                    # horizontal runs share the corner/vertical pulse rather than
-                    # sitting steady against a blinking outline.
+                    # F-68d: frame hues (frm*) pulse by brightness only — see
+                    # _init_colors. The whole frame breathes as one (F-68c).
+                    rail_key = ("frm%d_on" if _BLINK_ON else "frm%d_off") % color_i
                     run_key = rail_key
                 else:
-                    rail_key = "dim"
-                    run_key = "dim"
+                    rail_key = "frm_idle"
+                    run_key = rail_key
                 box_width = _dispatch_box_width(term_width, layout)
                 for idx in range(block_start, len(lines)):
                     lines[idx] = _frame_dispatch_line(
