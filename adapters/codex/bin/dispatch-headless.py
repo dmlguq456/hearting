@@ -1333,6 +1333,31 @@ def _effective_parent_cwd(args):
     return cwd
 
 
+def _route_node_leg_fields(args):
+    """Read the sealed leg_class/auxiliary_check off this wrapper's route node.
+
+    W1c projection source: the fields are stamped by the compiler during
+    parallel-group expansion, so the wrapper reads its own sealed node instead
+    of trusting a second, independently-produced value. Missing node/fields
+    project the explicit absence marker `-`.
+    """
+    route_file = getattr(args, "route_file", None)
+    route_node = getattr(args, "route_node", None)
+    if not route_file or not route_node:
+        return "-", "-"
+    try:
+        route = json.loads(Path(route_file).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return "-", "-"
+    for node in route.get("nodes", []):
+        if isinstance(node, dict) and node.get("id") == route_node:
+            return (
+                str(node.get("leg_class") or "-"),
+                str(node.get("auxiliary_check") or "-"),
+            )
+    return "-", "-"
+
+
 def append_job(jobs: Path, args: argparse.Namespace) -> bool:
     repo = subprocess.check_output(["git", "-C", args.worktree, "rev-parse", "--show-toplevel"], text=True).strip()
     pipe = (
@@ -1439,6 +1464,8 @@ def append_job(jobs: Path, args: argparse.Namespace) -> bool:
         for key in REPLICA_RESERVATION_ROW_KEYS:
             if key in replica_reservation:
                 pipe += f",{key}={replica_reservation[key]}"
+    leg_class, auxiliary_check = _route_node_leg_fields(args)
+    pipe += f",leg_class={leg_class},auxiliary_check={auxiliary_check}"
     if args.capacity_retry:
         pipe += (
             f",capacity_retry=1,prior_attempt_id={args.prior_attempt_id}"
@@ -2747,6 +2774,9 @@ def main(argv: list[str]) -> int:
     print(f"model={settings['model']}")
     print(f"reasoning={settings['reasoning']}")
     print(f"approval={args.approval}")
+    leg_class, auxiliary_check = _route_node_leg_fields(args)
+    print(f"leg_class={leg_class}")
+    print(f"auxiliary_check={auxiliary_check}")
     print(f"profile={args.profile or '-'}")
     print(f"runtime_home_projection={runtime_home_projection or '-'}")
     print(f"job_registry={jobs}")

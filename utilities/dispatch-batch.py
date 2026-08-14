@@ -1225,6 +1225,12 @@ def main(argv: list[str] | None = None) -> int:
                 "model_profile": str(node.get("model_profile")),
                 "perspective": str(node.get("perspective")),
                 "parallel_leg_index": int(node.get("parallel_leg_index", len(legs))),
+                "leg_class": str(node.get("leg_class") or "peer"),
+                "auxiliary_check": (
+                    str(node["auxiliary_check"])
+                    if node.get("leg_class") == "auxiliary"
+                    else None
+                ),
             }
         )
     manifest, manifest_digest, leg_digests = build_manifest(

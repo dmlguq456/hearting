@@ -120,6 +120,20 @@ class OpenCodeSD45(unittest.TestCase):
    bad=dry.copy(); bad[bad.index("autopilot-code")]="autopilot-lab"; bad[bad.index("dev")]="eval"; denied=subprocess.run(bad,text=True,capture_output=True,env=env); self.assertEqual(denied.returncode,65); self.assertIn("route-capability-mode-mismatch",denied.stdout+denied.stderr)
    legacy=[sys.executable,str(ROOT/"adapters/opencode/bin/dispatch-headless.py"),"--dry-run","--worktree",str(repo),"--slug","opencode-legacy-scope","--capability","autopilot-code","--mode","dev","--qa","standard","--write-scope","source/**","--model","provider/test","--variant","low"]
    compatible=subprocess.run(legacy,text=True,capture_output=True,env=env); self.assertEqual(compatible.returncode,0,compatible.stderr); self.assertIn("status=dry-run",compatible.stdout)
+
+ def test_w1c_leg_class_projection(self):
+  with tempfile.TemporaryDirectory() as td:
+   base=Path(td); route_file=base/"route.json"
+   route_file.write_text(json.dumps({"nodes":[
+    {"id":"plan","leg_class":"peer","auxiliary_check":None},
+    {"id":"plan-simplicity","leg_class":"auxiliary","auxiliary_check":"simplicity-check"},
+   ]}))
+   peer=argparse.Namespace(route_file=str(route_file),route_node="plan")
+   aux=argparse.Namespace(route_file=str(route_file),route_node="plan-simplicity")
+   missing=argparse.Namespace(route_file=None,route_node="plan")
+   self.assertEqual(WH._route_node_leg_fields(peer),("peer","-"))
+   self.assertEqual(WH._route_node_leg_fields(aux),("auxiliary","simplicity-check"))
+   self.assertEqual(WH._route_node_leg_fields(missing),("-","-"))
 def delivery_args(**overrides):
     base = dict(
         action="start", dispatch_depth=1, launch_lifecycle=WH.DETACHED,

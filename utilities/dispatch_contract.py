@@ -225,6 +225,8 @@ REPLICA_RESERVATION_ROW_KEYS = (
     "batch_peer_proof_sha256",
     "batch_manifest_sha256",
     "batch_leg_sha256",
+    "batch_leg_class",
+    "batch_auxiliary_check",
 )
 
 
