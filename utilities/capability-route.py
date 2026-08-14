@@ -390,8 +390,21 @@ def _validate_output_scopes(nodes):
                 f"node {node.get('id')} outputs outside write_scope {sorted(uncovered)}"
             )
 
+# G6 (AC 21 declaration-level gate): a parallel_group's non-anchor legs always
+# have `terminal`/`terminal_gate` stripped during expansion (D3), which makes
+# the downstream "2+ realized nodes share one terminal_gate" check in
+# `_workflow_contract` structurally unreachable for any group declared on a
+# terminal node -- it can never fire, so it silently permits peer expansion of
+# ANY terminal node. The real gate has to run at declaration time, before that
+# stripping happens. `autopilot-research claim-verify` already ships this
+# pattern (D3′, `plan.md` D3/D3-a) and is preserved as a recorded, non-silent
+# grandfather rather than a silent exception; no other recipe may add this
+# pattern going forward.
+_TERMINAL_PARALLEL_GROUP_GRANDFATHER = {("autopilot-research", "claim-verify")}
+
+
 def _expand_parallel_groups(nodes, parallel_groups, effective_intensity,
-                            auxiliary_check_units=None):
+                            auxiliary_check_units=None, capability=None):
     """Expand registry-v6 groups into ordered 2..4-way sibling nodes.
 
     The first leg keeps the anchor id for stable downstream references. Extra
@@ -399,6 +412,10 @@ def _expand_parallel_groups(nodes, parallel_groups, effective_intensity,
     depend on every realized leg; non-review consumers also receive every leg's
     output. `replica_group`/`independence_axis` remain one-window read aliases,
     while `parallel_group` and the plural axes are canonical.
+
+    A group declared on a node whose recipe declaration carries `terminal:
+    true` is rejected (G6/AC 21) unless the (capability, group id) pair is
+    named in `_TERMINAL_PARALLEL_GROUP_GRANDFATHER`.
     """
     if not parallel_groups:
         return nodes
@@ -409,6 +426,12 @@ def _expand_parallel_groups(nodes, parallel_groups, effective_intensity,
             continue
         width = group["width_by_intensity"][effective_intensity]
         base = next(n for n in nodes if n["id"] == group["node"])
+        if base.get("terminal") is True and (capability, group["id"]) not in _TERMINAL_PARALLEL_GROUP_GRANDFATHER:
+            raise ValueError(
+                f"parallel group {group['id']!r} is declared on terminal node "
+                f"{base['id']!r}; peer expansion of a terminal node is rejected "
+                "at declaration (G6/AC 21) unless explicitly grandfathered"
+            )
         members = []
         for index, leg_spec in enumerate(group["legs"][:width]):
             leg = base if index == 0 else json.loads(json.dumps(base))
@@ -682,6 +705,7 @@ def _compile_from_recipe(registry, recipe, capability, capability_mode, requeste
         nodes=_expand_parallel_groups(
             nodes, recipe["standard_plus"].get("parallel_groups"), effective,
             auxiliary_check_units=registry.get("auxiliary_check_units"),
+            capability=capability,
         )
         for node in nodes:
             node.pop("fallback_hops", None)
@@ -804,7 +828,8 @@ def verify_route(route, expected_cwd=None, *, allow_stale_registry=False):
         expected_nodes=_expand_parallel_groups(
             expected_nodes, composed_recipe["standard_plus"].get("parallel_groups"),
             route.get("effective_intensity"),
-            auxiliary_check_units=registry.get("auxiliary_check_units"))
+            auxiliary_check_units=registry.get("auxiliary_check_units"),
+            capability=route.get("capability"))
         if ([_node_identity(n) for n in route.get("nodes",[])]
                 != [_node_identity(n) for n in expected_nodes]):
             raise ValueError("composed route nodes differ from embedded composed recipe")
@@ -818,7 +843,8 @@ def verify_route(route, expected_cwd=None, *, allow_stale_registry=False):
             expected_nodes=_expand_parallel_groups(
                 expected_nodes, route_recipe["standard_plus"].get("parallel_groups"),
                 route.get("effective_intensity"),
-                auxiliary_check_units=registry.get("auxiliary_check_units"))
+                auxiliary_check_units=registry.get("auxiliary_check_units"),
+                capability=route.get("capability"))
             # The remaining verifier owns field-level diagnostics.  This
             # census closes only the undeclared fanout hole: a rehashed route
             # may not add, remove, reorder, or rename recipe nodes.

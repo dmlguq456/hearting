@@ -226,13 +226,21 @@ class TestTopology(unittest.TestCase):
             mutate(recipe["standard_plus"])
             return r
         def legacy_singular(g): g["replication"]=g.pop("parallel_groups")[2]
+        def report_as_non_terminal_anchor(g):
+            # "report" is the only node in this graph with no dependents, but
+            # it is also `terminal: true`, and G6/AC 21 now rejects a parallel
+            # group on a terminal node before this check ever runs. Strip the
+            # terminal flag on this deep copy so the fixture still isolates
+            # the "requires a downstream consumer" rule it targets.
+            next(n for n in g["nodes"] if n["id"]=="report").pop("terminal",None)
+            g["parallel_groups"][0].update(node="report")
         code_cases={
             "legacy replication keys": legacy_singular,
             "non-empty list": lambda g: g.update(parallel_groups=[]),
             "require exactly": lambda g: g["parallel_groups"][2].update(extra=True),
             "duplicate parallel group/anchor": lambda g: g["parallel_groups"].append(dict(g["parallel_groups"][0])),
             "not in graph": lambda g: g["parallel_groups"][2].update(node="missing-node"),
-            "requires a downstream consumer": lambda g: g["parallel_groups"][0].update(node="report"),
+            "requires a downstream consumer": report_as_non_terminal_anchor,
             "requires a direct review arbiter": lambda g: g["parallel_groups"][0].update(node="test"),
             "standard\\+ tier": lambda g: g["parallel_groups"][2].update(min_intensity="quick"),
             "widths must be monotonic integers": lambda g: g["parallel_groups"][2]["width_by_intensity"].update(strong=5),

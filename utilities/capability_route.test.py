@@ -216,7 +216,8 @@ class TestRoute(unittest.TestCase):
       expected=json.loads(json.dumps(recipe["standard_plus"]["nodes"]))
       expected=R._expand_parallel_groups(
        expected,recipe["standard_plus"].get("parallel_groups"),intensity,
-       auxiliary_check_units=registry.get("auxiliary_check_units"))
+       auxiliary_check_units=registry.get("auxiliary_check_units"),
+       capability=recipe["capability"])
       for node in expected: node.pop("fallback_hops",None)
       def stable(nodes):
        return [
@@ -429,8 +430,10 @@ class TestRoute(unittest.TestCase):
    tracking="tracked",tracked_gate_evidence=self.args()["tracked_gate_evidence"],dispatch_evidence=evidence)
   self.assertEqual(research["workflow_contract"]["terminal_nodes"],["claim-verify"])
  def test_ac22_terminal_anchor_auxiliary_and_pipeline_rejects(self):
-  # post-deploy-verify is terminal:true; an auxiliary leg on its group has no
-  # arbiter (D4) and must compile-reject.
+  # post-deploy-verify is terminal:true. G6/AC 21 now rejects ANY parallel
+  # group declared on a non-grandfathered terminal node at declaration, which
+  # strictly subsumes D4's narrower "terminal anchor has no arbiter for
+  # auxiliary findings" case -- the G6 message fires first.
   r=R.TOPO.load_registry()
   broken=json.loads(json.dumps(r))
   ship=next(x for x in broken["recipes"] if x["capability"]=="autopilot-ship")
@@ -443,8 +446,41 @@ class TestRoute(unittest.TestCase):
     {"suffix":"alternative","perspective":"independent-post-deploy-verify","model_profile":"balanced-deep","leg_class":"peer"},
     {"suffix":"failure-mode","perspective":"failure-mode-check","model_profile":"light","leg_class":"auxiliary","auxiliary_check":"failure-mode-check"},
    ]})
-  with self.assertRaisesRegex(R.TOPO.TopologyError,"no arbiter for auxiliary findings"):
+  with self.assertRaisesRegex(R.TOPO.TopologyError,"parallel group on terminal node"):
    R.TOPO.validate_registry(broken)
+ def test_g6_parallel_group_on_terminal_node_rejected_unless_grandfathered(self):
+  # G6/AC 21: a parallel group on a terminal node compile-rejects unless the
+  # (capability, group id) pair is the recorded autopilot-research claim-verify
+  # grandfather. Declaring one on report (autopilot-code) must reject.
+  r=R.TOPO.load_registry()
+  broken=json.loads(json.dumps(r))
+  code=next(x for x in broken["recipes"] if x["capability"]=="autopilot-code")
+  self.assertTrue(next(n for n in code["standard_plus"]["nodes"] if n["id"]=="report").get("terminal"))
+  code["standard_plus"]["parallel_groups"].append({
+   "id":"report","node":"report","kind":"verify","min_intensity":"strong",
+   "width_by_intensity":{"strong":2,"thorough":2,"adversarial":2},"join_policy":"all",
+   "independence_axes":["cross-harness","model-profile","perspective"],
+   "legs":[
+    {"suffix":"anchor","perspective":"primary-report","model_profile":"light","leg_class":"peer"},
+    {"suffix":"alternative","perspective":"independent-report","model_profile":"balanced-deep","leg_class":"peer"},
+   ]})
+  with self.assertRaisesRegex(R.TOPO.TopologyError,"parallel group on terminal node 'report' is rejected"):
+   R.TOPO.validate_registry(broken)
+  # The grandfathered claim-verify group itself must still validate and compile.
+  registry=R.TOPO.load_registry(); R.TOPO.validate_registry(registry)
+  evidence=self.dispatch(self.nested())
+  route=R.compile_route(
+   "autopilot-research","market","strong",R.ROOT,R.ROOT,predicates=[],
+   transport="headless",tracking="tracked",
+   tracked_gate_evidence=self.args()["tracked_gate_evidence"],
+   dispatch_evidence=evidence)
+  ids=[node["id"] for node in route["nodes"]]
+  self.assertIn("claim-verify",ids)
+  self.assertIn("claim-verify-alternative",ids)
+  anchor=next(n for n in route["nodes"] if n["id"]=="claim-verify")
+  alt=next(n for n in route["nodes"] if n["id"]=="claim-verify-alternative")
+  self.assertTrue(anchor.get("terminal"))
+  self.assertNotIn("terminal",alt)
   # autopilot-code test / autopilot-research synthesis: pipeline-stage anchor
   # without a direct downstream review-worker arbiter already rejects the group.
   for capability,node in (("autopilot-code","test"),("autopilot-research","synthesis")):

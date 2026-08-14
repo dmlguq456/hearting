@@ -18,6 +18,10 @@ MANIFEST = ROOT / "harness-manifest.json"
 UNITS = ROOT / "roles" / "units"
 UNIT_REF_RE = re.compile(r"^[a-z-]+/[a-z-]+$")
 PARALLEL_ID_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
+# G6 / AC 21: recorded, non-silent exception to "no parallel group on a
+# terminal node" -- keep in sync with capability-route.py's
+# `_TERMINAL_PARALLEL_GROUP_GRANDFATHER`.
+TERMINAL_PARALLEL_GROUP_GRANDFATHER = {("autopilot-research", "claim-verify")}
 # D9 / AC 5: an auxiliary leg's verdict enum may not carry any unconditionally
 # blocking token. `findings` is deliberately absent because the five auxiliary
 # units use it as their non-blocking finding carrier.
@@ -931,6 +935,19 @@ def _validate_recipe(recipe, registry, standard_plus_owner_profile):
             if kind not in ("review-worker", "map-worker", "pipeline-stage"):
                 raise TopologyError(
                     f"{recipe['capability']}: parallel target {target_id} must be a review, map, or pipeline worker"
+                )
+            # G6 / AC 21: a parallel group on a `terminal: true` node is rejected
+            # at declaration -- the realized-graph check further downstream
+            # (`_workflow_contract`'s duplicate-terminal_gate rejection) can never
+            # fire for a group, because the expansion step (D3) always strips
+            # `terminal`/`terminal_gate` from every non-anchor leg first. Without
+            # this declaration-level gate a terminal node's peer expansion is
+            # silently permitted. `autopilot-research claim-verify` already ships
+            # this pattern and is kept as a recorded, non-silent grandfather.
+            if target.get("terminal") is True and (recipe["capability"], group_id) not in TERMINAL_PARALLEL_GROUP_GRANDFATHER:
+                raise TopologyError(
+                    f"{recipe['capability']}:{group_id}: parallel group on terminal node "
+                    f"{target_id!r} is rejected unless explicitly grandfathered"
                 )
             if group["kind"] not in registry["parallel_group_kinds"]:
                 raise TopologyError(f"{recipe['capability']}:{group_id}: invalid parallel group kind")
