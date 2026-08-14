@@ -1140,8 +1140,49 @@ def _is_plugin_agent(job):
             or getattr(job, "source", None) == "plugin-queue")
 
 
+_ROUTE_STATE_MARK = {"failed": ("✕", "lvl_r"), "degraded": ("◐", "lvl_y"),
+                     "reconciling": ("…", "lvl_y"), "recovering": ("…", "lvl_y"),
+                     "done": ("✓", None)}
+
+
+def _route_compact_segs(j, route_seq, working, max_width=None):
+    """F-75: the depth-1 owner row's stage slot, now that the full breadcrumb rides the card's
+    close rail. Short form `<node><mark> <done>/<total>` — the same shape a main session's row
+    has always shown (`_projection_stage_text`), so both altitudes read alike.
+
+    Shares `_route_current_index` and the per-state hue table with `_route_stage_segs`: the
+    owner row and the rail below it can never disagree about which node is current."""
+    cur_i = _route_current_index(route_seq)
+    nid, st = route_seq[cur_i]
+    mark, state_key = _ROUTE_STATE_MARK.get(st, ("", None))
+    if state_key is not None:
+        key = state_key
+    elif st == "done":
+        key = "stg%d_off" % (cur_i % 5)
+    elif st == "active" and working and not _BLINK_ON:
+        key = "stg%d_off" % (cur_i % 5)
+    elif st == "active":
+        key = "stg%d_on" % (cur_i % 5)
+    else:
+        key = "stg%d_off" % (cur_i % 5)
+    progress = getattr(getattr(j, "work_projection", None), "progress", None)
+    if progress is not None:
+        done, total = progress.done, progress.total
+    else:
+        done = sum(1 for _nid, state in route_seq if state == "done")
+        total = len(route_seq)
+    node_seg = (nid + mark, key)
+    count_seg = ("%d/%d" % (done, total), "dim")
+    # F-9(c) whole-component fold, never a mid-token tail-cut: when the slot cannot hold
+    # both, the COUNT survives alone — the node name is still lit on the close rail below,
+    # while `7/13` exists nowhere else on the card.
+    if max_width is not None and _dw(node_seg[0]) + 1 + _dw(count_seg[0]) > max_width:
+        return [count_seg]
+    return [node_seg, (" ", None), count_seg]
+
+
 def _dispatch_stage_segs(j, key, stage, slug_name, working=False, route_seq=None,
-                         route_zone=None):
+                         route_zone=None, compact_route=False):
     if getattr(j, "source", None) == "plugin-queue":
         # F-50e: a plugin-queue row has no fleet pipeline at all — its micro-status is the
         # plugin's verbatim phase (same display rank as a dispatch-depth-2 worker's "running"), and
@@ -1166,6 +1207,12 @@ def _dispatch_stage_segs(j, key, stage, slug_name, working=False, route_seq=None
             return [(stage, "stg0_off")]
         return []
     if route_seq:
+        # F-75: inside a card the whole pipeline now rides the close rail, so this slot keeps
+        # only "where now" — that is what freed the owner row from clipping to `re…` at 140
+        # columns. Outside a card (orphan/unframed rows) there is no rail to move it to, so
+        # the full breadcrumb stays here exactly as F-28b/2026-07-21 established.
+        if compact_route:
+            return _route_compact_segs(j, route_seq, working, max_width=route_zone)
         # F-28b (v10): a resolved route replaces the whole breadcrumb — record nodes are the
         # real pipeline shape, not a role-label prefix over the hardcoded 3-stage table.
         # user 2026-07-21: CONDUCTOR breadcrumb shows the whole pipeline (wider bound than the
@@ -1870,12 +1917,51 @@ def _frame_dispatch_line(segs, box_width, edge, key, run_key=None):
     return left
 
 
-def _dispatch_box_bottom(box_width, key, run_key=None):
+_BOT_LABEL_TAIL = 3      # rule cells kept to the RIGHT of the close-rail label, so the
+                         # breadcrumb never touches `╯` and every card's label ends on the
+                         # same column (F-75: the right flush the user chose over centering —
+                         # a centered label had no shared baseline across stacked cards and
+                         # left a short route floating mid-rule).
+_BOT_LABEL_MIN_LEAD = 2  # minimum rule left of the label — below this the line stops
+                         # reading as a border, so the label is dropped whole instead.
+
+
+def bottom_label_budget(box_width):
+    """Display cells a close-rail label may occupy on a card of `box_width`.
+
+    ONE ledger, read the same way by the caller that BUILDS the breadcrumb and by
+    `_dispatch_box_bottom` which places it — a label wider than this is folded by
+    `_route_stage_segs`'s own `_drop_past_stages` at build time, never tail-cut
+    against the corner."""
     run = max(0, box_width - _RAIL_COL - 2)
-    return [(" " * _RAIL_COL, None),
-            (_RAIL_BOT[0], key),
-            ("─" * (run + len(_RAIL_BOT) - 1), run_key or key),
-            (_RAIL_BOT_RIGHT, key)]
+    return max(0, run - _BOT_LABEL_TAIL - _BOT_LABEL_MIN_LEAD - 2)   # 2 = the label's own spaces
+
+
+def _dispatch_box_bottom(box_width, key, run_key=None, label_segs=None):
+    """The card's close rail, optionally carrying the owner's route breadcrumb.
+
+    F-75 (user 2026-08-14 "박스를 만들면서 하단 가로줄이 한줄을 잡아먹는데, 거기에 …
+    우측 정렬 같은걸 해서 놓는건 어떨까"): the bottom rule was pure decoration while the
+    depth-1 conductor breadcrumb had nowhere to go but the owner row, where it clipped to
+    `re…` at 140 columns and shoved the frame around at 200. The rule now hosts it
+    right-flushed — the same text-inside-a-rule idiom the owner row already uses for its
+    padding-run fill — so the box reads as identity on top, pipeline on the bottom, and
+    gains no line.
+
+    F-68's grain contract still holds: the RULE stays steady (`run_key`) while corners keep
+    `key`. Only the breadcrumb's own current token blinks, exactly as it did on the owner
+    row — F-70 kept that pulse on the token and off the outline."""
+    run = max(0, box_width - _RAIL_COL - 2)
+    lead = [(" " * _RAIL_COL, None), (_RAIL_BOT[0], key)]
+    rule_key = run_key or key
+    label_w = sum(_dw(text) for text, _k in (label_segs or ()))
+    if not label_w or label_w > bottom_label_budget(box_width):
+        return lead + [("─" * run, rule_key), (_RAIL_BOT_RIGHT, key)]
+    lead_run = run - label_w - 2 - _BOT_LABEL_TAIL
+    return (lead
+            + [("─" * lead_run, rule_key), (" ", None)]
+            + list(label_segs)
+            + [(" ", None), ("─" * _BOT_LABEL_TAIL, rule_key), (_RAIL_BOT_RIGHT, key)])
 
 
 _ORPHAN_DIVIDER_LABEL = "  ⌄ orphaned dispatch rows"
@@ -2320,7 +2406,8 @@ def _dispatch_row(j, orphan=False, parent_model=None, parent_harness=None, is_la
                 _dispatch_stage_segs(j, key, stage, slug_name,
                                      working=(unit_working if unit_working is not None
                                               else j.liveness == "working"),
-                                     route_seq=route_seq, route_zone=budget))
+                                     route_seq=route_seq, route_zone=budget,
+                                     compact_route=in_card))
         if in_card and card_interior:
             consumed = sum(_dw(t) for t, _k in segs)
             # F-68b (user): the box keeps its elapsed, but as an inline `⏳<t>` tag
@@ -2520,7 +2607,7 @@ def _dispatch_row_2line(j, orphan=False, parent_model=None, parent_effort=None, 
             l2.append((" " * (_OPTW - optw), None))
         l2 += _stage_zone_segs(
             _dispatch_stage_segs(j, key, stage, slug_name, working=(j.liveness == "working"),
-                                 route_seq=route_seq))
+                                 route_seq=route_seq, compact_route=in_card))
     if _split:
         return l1, l2, br_segs
     return l1, l2
@@ -4813,7 +4900,21 @@ def _build_lines(sessions, jobs, section, narrow, malformed, layout="wide", memo
                     lines[idx] = _frame_dispatch_line(
                         lines[idx], box_width, "top" if idx == block_start else "mid",
                         rail_key, run_key=run_key)
-                lines.append(_dispatch_box_bottom(box_width, rail_key, run_key=run_key))
+                # F-75: the close rail carries the owner's WHOLE pipeline, built against the
+                # rail's own budget so a long route folds through `_drop_past_stages` (SD-F2
+                # order: past first, current last) instead of clipping at the corner. Only a
+                # sealed route qualifies — a legacy/pre-boot row keeps its short token on the
+                # owner line and leaves the rule bare, never a fabricated track (F-3/F-42a).
+                # A ONE-node route is not a pipeline: its breadcrumb is the owner row's own
+                # compact token spelled identically, so the rail stays bare rather than
+                # printing `one-shot` twice on one card (the F-37 single-render contract).
+                bottom_label = None
+                if route_seq and len(route_seq) > 1:
+                    bottom_label = _route_stage_segs(
+                        route_seq, unit_working or job.liveness == "working",
+                        bottom_label_budget(box_width))
+                lines.append(_dispatch_box_bottom(box_width, rail_key, run_key=run_key,
+                                                  label_segs=bottom_label))
 
         shown = _sort_group_sessions(shown)
         if live_order is not None:
