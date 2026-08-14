@@ -27,13 +27,16 @@ class DispatchContractTest(unittest.TestCase):
     D.resolve_dispatch_state_root(bundle,environ={}),
     runtime/".harness"/"dispatch")
 
-   for resolver in (
-    lambda: D.resolve_global_registry(release,None,1,"start",{}),
-    lambda: D.resolve_dispatch_state_root(release,environ={}),
-   ):
-    with self.assertRaises(D.DispatchContractError) as caught:
-     resolver()
-    self.assertEqual(caught.exception.reason,"versioned-source-registry-fallback")
+   # State-root chain (3): the shared managed release keeps its release-relative
+   # registry — rotation succession (_cleanup_releases, release-lifecycle T-1/T-2)
+   # carries that state into the successor release, so fail-closing here would
+   # break the established succession contract.
+   self.assertEqual(
+    D.resolve_global_registry(release,None,1,"start",{}).path,
+    (release/".dispatch"/"jobs.log").resolve())
+   self.assertEqual(
+    D.resolve_dispatch_state_root(release,environ={}),
+    (release/".dispatch").resolve())
 
    internal=bundle/".dispatch"/"jobs.log"
    for resolver in (

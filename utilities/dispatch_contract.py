@@ -2806,10 +2806,14 @@ def _fallback_registry(agent_home: Path) -> Path:
             strict=False
         )
     if layout == "shared-release":
-        raise DispatchContractError(
-            "versioned-source-registry-fallback",
-            f"agent_home={resolved_home}; set AGENT_DISPATCH_JOBS explicitly",
-        )
+        # State-root chain (3): a shared managed release is user-writable and its
+        # dispatch state is carried into the successor release by the
+        # _cleanup_releases succession before pruning (release-lifecycle T-1/T-2),
+        # so an env-less session under `hearting/releases/<v>` keeps the
+        # release-relative registry instead of failing closed. Only bundle-source
+        # trees — which no reader accepts as registry authority — are redirected
+        # or rejected above.
+        return resolved_home / ".dispatch" / "jobs.log"
     return home / ".dispatch" / "jobs.log"
 
 
