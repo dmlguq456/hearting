@@ -52,7 +52,10 @@ while [ $# -gt 0 ]; do
   esac
 done
 if [ -z "$JOBS" ]; then
-  STATE_ROOT=$("$SCRIPT_DIR/dispatch-state-root.sh") || exit $?
+  # Explicit AGENT_DISPATCH_JOBS forwarding: the canonical-registry override must
+  # stay visible at this call site (deterministic boundary guard greps for it),
+  # not only inside dispatch-state-root.sh's own fallback chain.
+  STATE_ROOT=$("$SCRIPT_DIR/dispatch-state-root.sh" "${AGENT_DISPATCH_JOBS:-}") || exit $?
   JOBS="$STATE_ROOT/jobs.log"
 fi
 # Clamp to a single shell-call timeout budget.

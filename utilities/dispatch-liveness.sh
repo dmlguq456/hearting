@@ -25,7 +25,10 @@ if [ "$#" -gt 0 ] && [ "${1#--}" = "$1" ]; then
   JOBS=$1
   shift
 fi
-STATE_ROOT=$("$SCRIPT_DIR/dispatch-state-root.sh" "$JOBS") || exit $?
+# Explicit AGENT_DISPATCH_JOBS forwarding: the canonical-registry override must
+# stay visible at this call site (deterministic boundary guard greps for it),
+# not only inside dispatch-state-root.sh's own fallback chain.
+STATE_ROOT=$("$SCRIPT_DIR/dispatch-state-root.sh" "${JOBS:-${AGENT_DISPATCH_JOBS:-}}") || exit $?
 [ -n "$JOBS" ] || JOBS="$STATE_ROOT/jobs.log"
 STALE_MIN="${DISPATCH_STALE_MIN:-15}"   # Suspect hang/death after N quiet minutes.
 # Runtime root (HLS-6): session transcripts/state live under the runtime, not
