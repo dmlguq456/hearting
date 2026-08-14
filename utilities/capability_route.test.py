@@ -215,7 +215,8 @@ class TestRoute(unittest.TestCase):
        self.assertEqual(owner["role"],"deep orchestrator")
       expected=json.loads(json.dumps(recipe["standard_plus"]["nodes"]))
       expected=R._expand_parallel_groups(
-       expected,recipe["standard_plus"].get("parallel_groups"),intensity)
+       expected,recipe["standard_plus"].get("parallel_groups"),intensity,
+       auxiliary_check_units=registry.get("auxiliary_check_units"))
       for node in expected: node.pop("fallback_hops",None)
       def stable(nodes):
        return [
@@ -267,7 +268,7 @@ class TestRoute(unittest.TestCase):
   self.assertNotIn("plan-alternative",[x["id"] for x in standard["nodes"]])
   strong=self.compile_v3(evidence)
   self.assertEqual([x["id"] for x in strong["nodes"]],
-   ["frame","frame-alternative","frame-contrarian","plan","plan-alternative","plan-check","execute","impl-review","impl-review-alternative","test","report"])
+   ["frame","frame-alternative","frame-contrarian","plan","plan-alternative","plan-check","plan-check-alternative","execute","impl-review","impl-review-alternative","test","report"])
   base=next(n for n in strong["nodes"] if n["id"]=="impl-review")
   alternative=next(n for n in strong["nodes"] if n["id"]=="impl-review-alternative")
   self.assertEqual(base["parallel_group"],"impl-review")
@@ -357,12 +358,161 @@ class TestRoute(unittest.TestCase):
   self.assertEqual(units,{
    "frame":"plan/frame","frame-alternative":"plan/frame","frame-contrarian":"plan/frame",
    "plan":"plan/plan-author","plan-alternative":"plan/plan-author",
-   "plan-check":"qa/plan-review","execute":"dev/backend",
+   "plan-check":"qa/plan-review","plan-check-alternative":"qa/plan-review","execute":"dev/backend",
    "impl-review":"qa/code-review","impl-review-alternative":"qa/code-review",
    "test":"qa/test","report":"editorial/report"})
   tampered=json.loads(json.dumps(route)); tampered["nodes"][0]["unit"]="dev/backend"
   with self.assertRaisesRegex(ValueError,"stale or modified route hash"):
    R.verify_route(tampered,R.ROOT)
+ def test_ac20_new_groups_realize_exactly_declared_legs(self):
+  evidence=self.dispatch(self.nested())
+  expectations={
+   ("autopilot-code","dev","strong"):["plan-check","plan-check-alternative"],
+   ("autopilot-code","dev","thorough"):["plan-check","plan-check-alternative","plan-check-simplicity"],
+   ("autopilot-design","default","strong"):["visual-verify","visual-verify-alternative"],
+   ("autopilot-draft","doc","strong"):["strategy-review","strategy-review-alternative","quality-review","quality-review-alternative"],
+   ("autopilot-draft","doc","thorough"):["strategy-review","strategy-review-alternative","quality-review","quality-review-alternative","quality-review-assumption"],
+   ("autopilot-lab","setup","strong"):["run-verify","run-verify-alternative"],
+   ("autopilot-ship","default","strong"):["security-review","security-review-alternative"],
+   ("autopilot-ship","default","adversarial"):["security-review","security-review-alternative","security-review-failure-mode"],
+  }
+  for (cap,mode,intensity),ids in expectations.items():
+   with self.subTest(capability=cap,mode=mode,intensity=intensity):
+    route=R.compile_route(cap,mode,intensity,R.ROOT,R.ROOT,predicates=[],transport="headless",
+     tracking="tracked",tracked_gate_evidence=self.args()["tracked_gate_evidence"],dispatch_evidence=evidence)
+    realized=[n["id"] for n in route["nodes"]]
+    for node_id in ids:
+     self.assertIn(node_id,realized)
+    # exactly the declared legs realize for the new groups — no extra siblings
+    suffixes=("anchor","alternative","simplicity","assumption","test-gap","edge-case","failure-mode")
+    new_group_ids={node_id for node_id in ids for _ in [0]}
+    derived=set()
+    for node_id in ids:
+     base=node_id
+     for suffix in suffixes:
+      if node_id.endswith("-"+suffix):
+       base=node_id[:-(len(suffix)+1)]
+       break
+     derived.add(base)
+    for n in route["nodes"]:
+     if n.get("parallel_group") in derived:
+      self.assertIn(n["id"],ids)
+ def test_ac2_width_two_and_three_realize_disjoint_peer_and_aux(self):
+  evidence=self.dispatch(self.nested())
+  strong=R.compile_route(**self.args(requested_intensity="strong",predicates=[],signals=["shared-contract"],transport="headless",inline_reason=None,dispatch_evidence=evidence))
+  thorough=R.compile_route(**self.args(requested_intensity="thorough",predicates=[],signals=["shared-contract"],transport="headless",inline_reason=None,dispatch_evidence=evidence))
+  strong_ids={n["id"] for n in strong["nodes"] if n.get("parallel_group")=="plan-check"}
+  thorough_ids={n["id"] for n in thorough["nodes"] if n.get("parallel_group")=="plan-check"}
+  self.assertEqual(strong_ids,{"plan-check","plan-check-alternative"})
+  self.assertEqual(thorough_ids,{"plan-check","plan-check-alternative","plan-check-simplicity"})
+  peer=[n for n in thorough["nodes"] if n["id"] in ("plan-check","plan-check-alternative")]
+  aux=[n for n in thorough["nodes"] if n["id"]=="plan-check-simplicity"]
+  self.assertEqual({n.get("leg_class") for n in peer},{"peer"})
+  self.assertEqual(aux[0]["leg_class"],"auxiliary")
+  self.assertEqual(aux[0]["auxiliary_check"],"simplicity-check")
+  scopes=[set(n["write_scope"]) for n in peer+aux]
+  for i,left in enumerate(scopes):
+   for right in scopes[i+1:]:
+    self.assertTrue(left.isdisjoint(right),f"overlap {left} {right}")
+  recompiled=R.compile_route(**self.args(requested_intensity="thorough",predicates=[],signals=["shared-contract"],transport="headless",inline_reason=None,dispatch_evidence=evidence))
+  self.assertEqual(thorough["route_hash"],recompiled["route_hash"])
+ def test_ac21_terminal_gate_duplication_is_rejected(self):
+  registry=R.TOPO.load_registry()
+  recipe=R.TOPO.resolve_recipe(registry,"autopilot-code","dev")
+  nodes=json.loads(json.dumps(recipe["standard_plus"]["nodes"]))
+  nodes[0]["terminal"]=True; nodes[0]["terminal_gate"]="dup-terminal"
+  nodes[1]["terminal"]=True; nodes[1]["terminal_gate"]="dup-terminal"
+  with self.assertRaisesRegex(ValueError,"terminal gate dup-terminal held by both"):
+   R._workflow_contract(registry,nodes,[])
+  evidence=self.dispatch(self.nested())
+  research=R.compile_route("autopilot-research","academic","thorough",R.ROOT,R.ROOT,predicates=[],transport="headless",
+   tracking="tracked",tracked_gate_evidence=self.args()["tracked_gate_evidence"],dispatch_evidence=evidence)
+  self.assertEqual(research["workflow_contract"]["terminal_nodes"],["claim-verify"])
+ def test_ac22_terminal_anchor_auxiliary_and_pipeline_rejects(self):
+  # post-deploy-verify is terminal:true; an auxiliary leg on its group has no
+  # arbiter (D4) and must compile-reject.
+  r=R.TOPO.load_registry()
+  broken=json.loads(json.dumps(r))
+  ship=next(x for x in broken["recipes"] if x["capability"]=="autopilot-ship")
+  ship["standard_plus"]["parallel_groups"].append({
+   "id":"post-deploy-verify","node":"post-deploy-verify","kind":"verify","min_intensity":"strong",
+   "width_by_intensity":{"strong":2,"thorough":3,"adversarial":3},"join_policy":"all",
+   "independence_axes":["cross-harness","model-profile","perspective"],
+   "legs":[
+    {"suffix":"anchor","perspective":"primary-post-deploy-verify","model_profile":"light","leg_class":"peer"},
+    {"suffix":"alternative","perspective":"independent-post-deploy-verify","model_profile":"balanced-deep","leg_class":"peer"},
+    {"suffix":"failure-mode","perspective":"failure-mode-check","model_profile":"light","leg_class":"auxiliary","auxiliary_check":"failure-mode-check"},
+   ]})
+  with self.assertRaisesRegex(R.TOPO.TopologyError,"no arbiter for auxiliary findings"):
+   R.TOPO.validate_registry(broken)
+  # autopilot-code test / autopilot-research synthesis: pipeline-stage anchor
+  # without a direct downstream review-worker arbiter already rejects the group.
+  for capability,node in (("autopilot-code","test"),("autopilot-research","synthesis")):
+   broken=json.loads(json.dumps(r))
+   recipe=next(x for x in broken["recipes"] if x["capability"]==capability)
+   recipe["standard_plus"]["parallel_groups"].append({
+    "id":node,"node":node,"kind":"verify","min_intensity":"strong",
+    "width_by_intensity":{"strong":2,"thorough":2,"adversarial":2},"join_policy":"all",
+    "independence_axes":["cross-harness","model-profile","perspective"],
+    "legs":[
+     {"suffix":"anchor","perspective":"primary-"+node,"model_profile":"light","leg_class":"peer"},
+     {"suffix":"alternative","perspective":"independent-"+node,"model_profile":"balanced-deep","leg_class":"peer"},
+    ]})
+   with self.subTest(capability=capability):
+    with self.assertRaisesRegex(R.TOPO.TopologyError,"requires a direct review arbiter"):
+     R.TOPO.validate_registry(broken)
+  # registry-level guard: no new group may target post-deploy-verify at all.
+  for recipe in r["recipes"]:
+   for group in recipe["standard_plus"].get("parallel_groups",[]):
+    self.assertNotEqual(group.get("node"),"post-deploy-verify")
+ def test_ac24_plan_check_two_way_is_read_only_arbiter(self):
+  # AC 24: the 2-way plan-check group merges under the stricter-wins review
+  # merge contract; the check itself stays read-only (writes only its own
+  # review bucket, never plan.md) and its unit is read_only.
+  evidence=self.dispatch(self.nested())
+  strong=R.compile_route(**self.args(requested_intensity="strong",predicates=[],signals=["shared-contract"],transport="headless",inline_reason=None,dispatch_evidence=evidence))
+  plan_checks=[n for n in strong["nodes"] if n.get("parallel_group")=="plan-check"]
+  self.assertEqual({n["id"] for n in plan_checks},{"plan-check","plan-check-alternative"})
+  for n in plan_checks:
+   self.assertEqual(n["unit"],"qa/plan-review")
+   self.assertNotIn("plan.md",n["write_scope"])
+   self.assertEqual(n.get("leg_class"),"peer")
+ def test_ac5_auxiliary_arbiter_verdict_length_gate(self):
+  # AC 5 (front half): the anchor verdict of an auxiliary-bearing group must
+  # carry auxiliary_findings_considered with one entry per realized auxiliary leg.
+  evidence=self.dispatch(self.nested())
+  thorough=R.compile_route(**self.args(requested_intensity="thorough",predicates=[],signals=["shared-contract"],transport="headless",inline_reason=None,dispatch_evidence=evidence))
+  anchor=next(n for n in thorough["nodes"] if n["id"]=="plan-check")
+  import tempfile
+  with tempfile.TemporaryDirectory() as td:
+   good=Path(td)/"evidence.json"
+   good.write_text(json.dumps({"auxiliary_findings_considered":["accepted"]}),encoding="utf-8")
+   R._validate_auxiliary_arbiter(thorough,anchor,good)
+   bad=Path(td)/"bad.json"
+   bad.write_text(json.dumps({"auxiliary_findings_considered":["accepted","missing"]}),encoding="utf-8")
+   with self.assertRaisesRegex(ValueError,"auxiliary_findings_considered length 1"):
+    R._validate_auxiliary_arbiter(thorough,anchor,bad)
+   missing=Path(td)/"missing.json"
+   missing.write_text(json.dumps({"verdict":"clean"}),encoding="utf-8")
+   with self.assertRaisesRegex(ValueError,"auxiliary_findings_considered"):
+    R._validate_auxiliary_arbiter(thorough,anchor,missing)
+ def test_d3a_terminal_and_continuation_regressions(self):
+  # resource-runner terminal stays forbidden under the new classification, and a
+  # non-terminal node without a continuation still fails closed.
+  registry=R.TOPO.load_registry()
+  recipe=R.TOPO.resolve_recipe(registry,"autopilot-code","dev")
+  nodes=json.loads(json.dumps(recipe["standard_plus"]["nodes"]))
+  runner=dict(id="detached",kind="resource-runner",dispatch_depth=0,resource_transport="detached-process",
+   terminal=True,terminal_gate="detached-gate",inputs=["x"],outputs=["y"],write_scope=["source/**"],
+   completion_gate="detached-gate")
+  with self.assertRaisesRegex(ValueError,"detached resource run"):
+   R._workflow_contract(registry,nodes+[runner],[])
+  stripped=json.loads(json.dumps(nodes))
+  for node in stripped:
+   if node.get("kind") not in ("capability-owner","resource-runner"):
+    node["continuation"]=None
+  with self.assertRaisesRegex(ValueError,"declares no valid continuation"):
+   R._workflow_contract(registry,stripped,[])
  def test_standard_plus_without_checked_headless_evidence_fails_closed(self):
   with self.assertRaisesRegex(ValueError,"checked dispatch evidence required"):
    R.compile_route(**self.args(signals=["public-api"],inline_reason=None))

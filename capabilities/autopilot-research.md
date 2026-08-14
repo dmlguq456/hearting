@@ -75,6 +75,7 @@ Additional research-entry gates:
 - treat native-subagent availability or prohibition as surface-local evidence only. At `standard+`, it never authorizes main-session execution or bypasses the registered-headless owner;
 - if checked evidence reports `failure_scope=exact-worktree` with `retry_on_isolated_worktree=1`, re-isolate and re-probe or stop without writing research artifacts; a non-Git workspace does not turn the failure into inline authority;
 - realize search/analyze/report breadth only from the compiled recipe and its sealed `parallel_group` members. Never invent topical axes, reviewers, or native helpers after a route failure;
+- the `retrieval` and `claim-verify` groups may widen to a closed auxiliary leg at higher intensity: `retrieval` adds an `assumption-check` and `claim-verify` adds an `edge-case-check`. Auxiliary legs are advisory (non-blocking `findings`/`none`, `light` budget) and feed the arbiter's `auxiliary_findings_considered`; they never hold the stage gate alone, and at least one realized `peer` leg still carries the quality-peer gate authority;
 - ask one scope-clarification round when the query is too broad, too short, or matches multiple modes, unless `--no-clarify` or resume mode is active;
 - keep raw source metadata in `_internal/`; public reports should cite or summarize, not expose noisy scrape output;
 - stop with a failed `pipeline_summary.md` when search returns no useful sources;

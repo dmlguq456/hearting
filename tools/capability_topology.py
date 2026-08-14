@@ -18,6 +18,13 @@ MANIFEST = ROOT / "harness-manifest.json"
 UNITS = ROOT / "roles" / "units"
 UNIT_REF_RE = re.compile(r"^[a-z-]+/[a-z-]+$")
 PARALLEL_ID_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
+# D9 / AC 5: an auxiliary leg's verdict enum may not carry any unconditionally
+# blocking token. `findings` is deliberately absent because the five auxiliary
+# units use it as their non-blocking finding carrier.
+_BLOCKING_VERDICT_TOKENS = frozenset({
+    "issues", "changes-required", "blocked", "BLOCKED", "fail", "FAIL",
+    "failed", "FAILED", "needs_work", "killed", "conflicts-found",
+})
 _UNIT_CACHE: dict = {}
 
 
@@ -371,6 +378,12 @@ def _unit_frontmatter(unit):
         raise TopologyError(f"unit {unit}: invalid worker_type {fields['worker_type']!r}")
     if fields["read_only"] not in ("true", "false"):
         raise TopologyError(f"unit {unit}: read_only must be true or false")
+    verdict = re.search(r"^io:\s*\n\s+verdict:\s*\[([^\]]*)\]", block, re.MULTILINE)
+    fields["verdict"] = (
+        [token.strip() for token in verdict.group(1).split(",") if token.strip()]
+        if verdict
+        else []
+    )
     _UNIT_CACHE[key] = fields
     return fields
 
@@ -459,6 +472,23 @@ def _validate_gate_contracts(recipe, registry):
                 raise TopologyError(f"{recipe['capability']}: custom gate {gate} requires a recorded reason")
         else:
             raise TopologyError(f"{recipe['capability']}: unknown gate contract kind {kind!r} for {gate}")
+    # AC 5 (front half): every auxiliary-bearing group's anchor gate must be an
+    # auxiliary arbiter — its verdict carries `auxiliary_findings_considered`
+    # and the completion gate compares its length to the realized auxiliary count.
+    nodes_by_id = {node.get("id"): node for node in recipe["standard_plus"].get("nodes", [])}
+    for group in recipe["standard_plus"].get("parallel_groups", []):
+        if not any(leg.get("leg_class") == "auxiliary" for leg in group.get("legs", [])):
+            continue
+        anchor_node = nodes_by_id.get(group.get("node"))
+        if anchor_node is None:
+            continue
+        gate = anchor_node.get("completion_gate")
+        entry = contracts.get(gate)
+        if not isinstance(entry, dict) or entry.get("auxiliary_arbiter") is not True:
+            raise TopologyError(
+                f"{recipe['capability']}: auxiliary group {group.get('id')} anchor gate "
+                f"{gate} must declare auxiliary_arbiter"
+            )
 
 
 def _validate_activation_conditions(registry):
@@ -973,6 +1003,21 @@ def _validate_recipe(recipe, registry, standard_plus_owner_profile):
                     saw_auxiliary = True
                     auxiliary_count += 1
                     auxiliary_kinds.add(check)
+                    # D9 / AC 5 (back half): an auxiliary leg's verdict enum is
+                    # structurally non-blocking — its unit may not carry any
+                    # unconditionally blocking verdict token.
+                    aux_units = registry.get("auxiliary_check_units") or {}
+                    unit = aux_units.get(check)
+                    if not isinstance(unit, str) or not unit:
+                        raise TopologyError(
+                            f"{recipe['capability']}:{group_id}: no auxiliary unit mapping for {check!r}"
+                        )
+                    verdict = _unit_frontmatter(unit).get("verdict") or []
+                    if set(token.lower() for token in verdict) & _BLOCKING_VERDICT_TOKENS:
+                        raise TopologyError(
+                            f"{recipe['capability']}:{group_id}: auxiliary unit {unit} "
+                            "carries a blocking verdict token"
+                        )
                 suffix, perspective, profile = (
                     leg["suffix"], leg["perspective"], leg["model_profile"]
                 )
@@ -1022,6 +1067,15 @@ def _validate_recipe(recipe, registry, standard_plus_owner_profile):
             ):
                 raise TopologyError(
                     f"{recipe['capability']}:{group_id}: pipeline anchor requires a direct review arbiter"
+                )
+            # AC 22 / D4: an auxiliary-bearing group's anchor needs an arbiter for
+            # `auxiliary_findings_considered`. A `terminal: true` anchor has no
+            # downstream verdict to carry the array, so it structurally has no
+            # arbiter — declaring an auxiliary leg on such a group compiles-rejects.
+            if auxiliary_count and target.get("terminal") is True:
+                raise TopologyError(
+                    f"{recipe['capability']}:{group_id}: terminal anchor {target_id} "
+                    "has no arbiter for auxiliary findings"
                 )
             for out in target.get("outputs", []):
                 if "*" not in out:
@@ -1117,6 +1171,14 @@ def validate_registry(registry, manifest=None):
         "simplicity-check", "test-gap-check",
     ]:
         raise TopologyError("auxiliary_checks must declare the closed five checks")
+    if registry.get("auxiliary_check_units") != {
+        "assumption-check": "qa/assumption-check",
+        "edge-case-check": "qa/edge-case-check",
+        "failure-mode-check": "qa/failure-mode-check",
+        "simplicity-check": "qa/simplicity-check",
+        "test-gap-check": "qa/test-gap-check",
+    }:
+        raise TopologyError("auxiliary_check_units must map each check to its qa unit")
     if set(registry.get("transports", [])) != WRAPPER_TRANSPORTS:
         raise TopologyError("transport vocabulary differs from portable dispatch contract")
     if set(registry.get("execution_surfaces", [])) != EXECUTION_SURFACES:

@@ -38,6 +38,7 @@ class GovernorTest(unittest.TestCase):
                     "model_profile": "balanced-deep",
                     "perspective": "primary-plan",
                     "parallel_leg_index": 0,
+                    "leg_class": "peer",
                 },
                 {
                     "assignment_sha256": "sha256:" + "a" * 64,
@@ -49,6 +50,7 @@ class GovernorTest(unittest.TestCase):
                     "model_profile": "light",
                     "perspective": "independent-plan",
                     "parallel_leg_index": 1,
+                    "leg_class": "peer",
                 },
             ],
             required_independence_axes=["cross-harness", "model-profile", "perspective"],
@@ -267,6 +269,7 @@ class GovernorTest(unittest.TestCase):
                 "batch_fallback_hop=same-harness-headless,batch_fallback_ordinal=1,"
                 "batch_model_profile=balanced-deep,batch_perspective=primary-plan,"
                 "batch_parallel_leg_index=0,"
+                "batch_leg_class=peer,batch_auxiliary_check=-,"
                 "batch_independence=cross-harness,batch_assignment_sha256=sha256:" + "a" * 64 + ","
                 f"batch_manifest_sha256={digest},batch_leg_sha256={legs['att-plan-one']},"
                 f"pid={os.getpid()},pid_start={start},"

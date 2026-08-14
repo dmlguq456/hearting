@@ -1252,6 +1252,12 @@ def main(argv: list[str] | None = None) -> int:
                 "model_profile": str(leg["model_profile"]),
                 "perspective": str(leg["perspective"]),
                 "parallel_leg_index": int(leg["parallel_leg_index"]),
+                "leg_class": str(leg["leg_class"]),
+                **(
+                    {"auxiliary_check": str(leg["auxiliary_check"])}
+                    if leg.get("leg_class") == "auxiliary"
+                    else {}
+                ),
             }
             for leg in legs
         ],

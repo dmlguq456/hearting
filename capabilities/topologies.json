@@ -658,6 +658,44 @@
         "leg_class": "peer"
        }
       ]
+     },
+     {
+      "id": "plan-check",
+      "node": "plan-check",
+      "kind": "verify",
+      "min_intensity": "strong",
+      "width_by_intensity": {
+       "strong": 2,
+       "thorough": 3,
+       "adversarial": 3
+      },
+      "join_policy": "all",
+      "independence_axes": [
+       "cross-harness",
+       "model-profile",
+       "perspective"
+      ],
+      "legs": [
+       {
+        "suffix": "anchor",
+        "perspective": "primary-plan-check",
+        "model_profile": "light",
+        "leg_class": "peer"
+       },
+       {
+        "suffix": "alternative",
+        "perspective": "independent-plan-check",
+        "model_profile": "balanced-deep",
+        "leg_class": "peer"
+       },
+       {
+        "suffix": "simplicity",
+        "perspective": "simplicity-check",
+        "model_profile": "light",
+        "leg_class": "auxiliary",
+        "auxiliary_check": "simplicity-check"
+       }
+      ]
      }
     ]
    },
@@ -980,6 +1018,37 @@
        {
         "suffix": "alternative",
         "perspective": "independent-critic-review",
+        "model_profile": "balanced-deep",
+        "leg_class": "peer"
+       }
+      ]
+     },
+     {
+      "id": "visual-verify",
+      "node": "visual-verify",
+      "kind": "verify",
+      "min_intensity": "strong",
+      "width_by_intensity": {
+       "strong": 2,
+       "thorough": 2,
+       "adversarial": 2
+      },
+      "join_policy": "all",
+      "independence_axes": [
+       "cross-harness",
+       "model-profile",
+       "perspective"
+      ],
+      "legs": [
+       {
+        "suffix": "anchor",
+        "perspective": "primary-visual-verify",
+        "model_profile": "light",
+        "leg_class": "peer"
+       },
+       {
+        "suffix": "alternative",
+        "perspective": "independent-visual-verify",
         "model_profile": "balanced-deep",
         "leg_class": "peer"
        }
@@ -1316,6 +1385,75 @@
         "leg_class": "peer"
        }
       ]
+     },
+     {
+      "id": "strategy-review",
+      "node": "strategy-review",
+      "kind": "verify",
+      "min_intensity": "strong",
+      "width_by_intensity": {
+       "strong": 2,
+       "thorough": 2,
+       "adversarial": 2
+      },
+      "join_policy": "all",
+      "independence_axes": [
+       "cross-harness",
+       "model-profile",
+       "perspective"
+      ],
+      "legs": [
+       {
+        "suffix": "anchor",
+        "perspective": "primary-strategy-review",
+        "model_profile": "light",
+        "leg_class": "peer"
+       },
+       {
+        "suffix": "alternative",
+        "perspective": "independent-strategy-review",
+        "model_profile": "balanced-deep",
+        "leg_class": "peer"
+       }
+      ]
+     },
+     {
+      "id": "quality-review",
+      "node": "quality-review",
+      "kind": "verify",
+      "min_intensity": "strong",
+      "width_by_intensity": {
+       "strong": 2,
+       "thorough": 3,
+       "adversarial": 3
+      },
+      "join_policy": "all",
+      "independence_axes": [
+       "cross-harness",
+       "model-profile",
+       "perspective"
+      ],
+      "legs": [
+       {
+        "suffix": "anchor",
+        "perspective": "primary-quality-review",
+        "model_profile": "light",
+        "leg_class": "peer"
+       },
+       {
+        "suffix": "alternative",
+        "perspective": "independent-quality-review",
+        "model_profile": "balanced-deep",
+        "leg_class": "peer"
+       },
+       {
+        "suffix": "assumption",
+        "perspective": "assumption-check",
+        "model_profile": "light",
+        "leg_class": "auxiliary",
+        "auxiliary_check": "assumption-check"
+       }
+      ]
      }
     ]
    },
@@ -1598,6 +1736,37 @@
         "suffix": "alternative",
         "perspective": "independent-smoke",
         "model_profile": "deep",
+        "leg_class": "peer"
+       }
+      ]
+     },
+     {
+      "id": "run-verify",
+      "node": "run-verify",
+      "kind": "verify",
+      "min_intensity": "strong",
+      "width_by_intensity": {
+       "strong": 2,
+       "thorough": 2,
+       "adversarial": 2
+      },
+      "join_policy": "all",
+      "independence_axes": [
+       "cross-harness",
+       "model-profile",
+       "perspective"
+      ],
+      "legs": [
+       {
+        "suffix": "anchor",
+        "perspective": "primary-run-verify",
+        "model_profile": "balanced-deep",
+        "leg_class": "peer"
+       },
+       {
+        "suffix": "alternative",
+        "perspective": "independent-run-verify",
+        "model_profile": "light",
         "leg_class": "peer"
        }
       ]
@@ -2356,8 +2525,8 @@
       "width_by_intensity": {
        "standard": 2,
        "strong": 2,
-       "thorough": 2,
-       "adversarial": 2
+       "thorough": 3,
+       "adversarial": 3
       },
       "join_policy": "all",
       "independence_axes": [
@@ -2377,6 +2546,13 @@
         "perspective": "independent-retrieval",
         "model_profile": "light",
         "leg_class": "peer"
+       },
+       {
+        "suffix": "assumption",
+        "perspective": "assumption-check",
+        "model_profile": "light",
+        "leg_class": "auxiliary",
+        "auxiliary_check": "assumption-check"
        }
       ]
      },
@@ -2686,6 +2862,44 @@
         "leg_class": "peer"
        }
       ]
+     },
+     {
+      "id": "security-review",
+      "node": "security-review",
+      "kind": "verify",
+      "min_intensity": "strong",
+      "width_by_intensity": {
+       "strong": 2,
+       "thorough": 2,
+       "adversarial": 3
+      },
+      "join_policy": "all",
+      "independence_axes": [
+       "cross-harness",
+       "model-profile",
+       "perspective"
+      ],
+      "legs": [
+       {
+        "suffix": "anchor",
+        "perspective": "primary-security-review",
+        "model_profile": "balanced-deep",
+        "leg_class": "peer"
+       },
+       {
+        "suffix": "alternative",
+        "perspective": "independent-security-review",
+        "model_profile": "deep",
+        "leg_class": "peer"
+       },
+       {
+        "suffix": "failure-mode",
+        "perspective": "failure-mode-check",
+        "model_profile": "light",
+        "leg_class": "auxiliary",
+        "auxiliary_check": "failure-mode-check"
+       }
+      ]
      }
     ]
    },
@@ -2877,8 +3091,8 @@
       "width_by_intensity": {
        "standard": 2,
        "strong": 2,
-       "thorough": 2,
-       "adversarial": 2
+       "thorough": 3,
+       "adversarial": 3
       },
       "join_policy": "all",
       "independence_axes": [
@@ -2898,6 +3112,13 @@
         "perspective": "independent-research",
         "model_profile": "light",
         "leg_class": "peer"
+       },
+       {
+        "suffix": "assumption",
+        "perspective": "assumption-check",
+        "model_profile": "light",
+        "leg_class": "auxiliary",
+        "auxiliary_check": "assumption-check"
        }
       ]
      },
@@ -2908,8 +3129,8 @@
       "min_intensity": "strong",
       "width_by_intensity": {
        "strong": 2,
-       "thorough": 2,
-       "adversarial": 2
+       "thorough": 3,
+       "adversarial": 3
       },
       "join_policy": "all",
       "independence_axes": [
@@ -2929,6 +3150,13 @@
         "perspective": "independent-review",
         "model_profile": "deep",
         "leg_class": "peer"
+       },
+       {
+        "suffix": "test-gap",
+        "perspective": "test-gap-check",
+        "model_profile": "light",
+        "leg_class": "auxiliary",
+        "auxiliary_check": "test-gap-check"
        }
       ]
      }
@@ -3036,7 +3264,8 @@
   },
   "code-plan-check": {
    "kind": "unit-io",
-   "unit": "qa/plan-review"
+   "unit": "qa/plan-review",
+   "auxiliary_arbiter": true
   },
   "code-execute": {
    "kind": "capability-doc",
@@ -3088,7 +3317,8 @@
   },
   "draft-quality-review": {
    "kind": "unit-io",
-   "unit": "editorial/review"
+   "unit": "editorial/review",
+   "auxiliary_arbiter": true
   },
   "draft-fact-verify": {
    "kind": "unit-io",
@@ -3156,7 +3386,8 @@
   },
   "research-retrieval": {
    "kind": "unit-io",
-   "unit": "research/research-survey"
+   "unit": "research/research-survey",
+   "auxiliary_arbiter": true
   },
   "research-synthesis": {
    "kind": "unit-io",
@@ -3176,7 +3407,8 @@
   },
   "ship-security": {
    "kind": "unit-io",
-   "unit": "qa/security-review"
+   "unit": "qa/security-review",
+   "auxiliary_arbiter": true
   },
   "ship-release": {
    "kind": "unit-io",
@@ -3184,11 +3416,13 @@
   },
   "spec-research": {
    "kind": "unit-io",
-   "unit": "research/research-survey"
+   "unit": "research/research-survey",
+   "auxiliary_arbiter": true
   },
   "spec-review": {
    "kind": "unit-io",
-   "unit": "research/plan-review"
+   "unit": "research/plan-review",
+   "auxiliary_arbiter": true
   },
   "spec-atomic-transaction": {
    "kind": "custom",
@@ -3270,6 +3504,13 @@
   "simplicity-check",
   "test-gap-check"
  ],
+ "auxiliary_check_units": {
+  "assumption-check": "qa/assumption-check",
+  "edge-case-check": "qa/edge-case-check",
+  "failure-mode-check": "qa/failure-mode-check",
+  "simplicity-check": "qa/simplicity-check",
+  "test-gap-check": "qa/test-gap-check"
+ },
  "workflow_states": [
   "CREATED",
   "READY",

@@ -389,7 +389,8 @@ def _validate_output_scopes(nodes):
                 f"node {node.get('id')} outputs outside write_scope {sorted(uncovered)}"
             )
 
-def _expand_parallel_groups(nodes, parallel_groups, effective_intensity):
+def _expand_parallel_groups(nodes, parallel_groups, effective_intensity,
+                            auxiliary_check_units=None):
     """Expand registry-v6 groups into ordered 2..4-way sibling nodes.
 
     The first leg keeps the anchor id for stable downstream references. Extra
@@ -420,8 +421,19 @@ def _expand_parallel_groups(nodes, parallel_groups, effective_intensity):
             leg["model_profile"] = leg_spec["model_profile"]
             leg["perspective"] = leg_spec["perspective"]
             leg["leg_class"] = leg_spec["leg_class"]
+            if index:
+                # D3: only the anchor holds the workflow terminal gate; a
+                # realized sibling is a continuation leg, never a terminal.
+                leg.pop("terminal", None)
+                leg.pop("terminal_gate", None)
+                if "continuation" not in leg:
+                    leg["continuation"] = {"kind": "inline-next"}
             if leg_spec["leg_class"] == "auxiliary":
                 leg["auxiliary_check"] = leg_spec["auxiliary_check"]
+                unit = (auxiliary_check_units or {}).get(leg_spec["auxiliary_check"])
+                if unit:
+                    leg["unit"] = unit
+                    leg["role"] = TOPO._unit_frontmatter(unit)["role"]
             leg["parallel_group"] = group["id"]
             leg["parallel_group_kind"] = group["kind"]
             leg["parallel_join_policy"] = group["join_policy"]
@@ -481,22 +493,29 @@ def _workflow_contract(registry, nodes, human_gate_bindings):
     the route alone, instead of inferring completion from a process that exited.
     """
     ids = [node["id"] for node in nodes]
-    dependents = {node_id: [] for node_id in ids}
-    for node in nodes:
-        for dep in node.get("depends_on", []) or []:
-            if dep in dependents:
-                dependents[dep].append(node["id"])
     terminal, continuations = [], {}
+    terminal_gates: dict[str, str] = {}
     for node in nodes:
         node_id = node["id"]
-        if not dependents[node_id]:
-            if node.get("terminal") is not True or not node.get("terminal_gate"):
+        if node.get("terminal") is True:
+            # D3-a: terminal classification is by the `terminal: true` flag, not
+            # by "has no downstream dependents". A realized parallel sibling that
+            # carries no flag is a continuation leg even when nothing depends on it.
+            if not node.get("terminal_gate"):
                 raise ValueError(f"terminal node {node_id} lacks a sealed terminal gate")
             if node.get("kind") == "resource-runner":
                 raise ValueError(
                     f"terminal node {node_id} is a detached resource run; a workflow cannot "
                     "end on a process exit"
                 )
+            gate = node["terminal_gate"]
+            # AC 21 (D3 retyping): one terminal_gate may be held by at most one
+            # realized node — a second holder would duplicate the workflow end.
+            if gate in terminal_gates:
+                raise ValueError(
+                    f"terminal gate {gate} held by both {terminal_gates[gate]} and {node_id}"
+                )
+            terminal_gates[gate] = node_id
             terminal.append(node_id)
             continue
         continuation = node.get("continuation")
@@ -660,7 +679,8 @@ def _compile_from_recipe(registry, recipe, capability, capability_mode, requeste
         owner_model_profile=registry["owner_profile_by_intensity"][effective]
         nodes=json.loads(json.dumps(recipe["standard_plus"]["nodes"])); gates=recipe["completion_gates"]
         nodes=_expand_parallel_groups(
-            nodes, recipe["standard_plus"].get("parallel_groups"), effective
+            nodes, recipe["standard_plus"].get("parallel_groups"), effective,
+            auxiliary_check_units=registry.get("auxiliary_check_units"),
         )
         for node in nodes:
             node.pop("fallback_hops", None)
@@ -782,7 +802,8 @@ def verify_route(route, expected_cwd=None, *, allow_stale_registry=False):
         expected_nodes=json.loads(json.dumps(composed_recipe["standard_plus"]["nodes"]))
         expected_nodes=_expand_parallel_groups(
             expected_nodes, composed_recipe["standard_plus"].get("parallel_groups"),
-            route.get("effective_intensity"))
+            route.get("effective_intensity"),
+            auxiliary_check_units=registry.get("auxiliary_check_units"))
         if ([_node_identity(n) for n in route.get("nodes",[])]
                 != [_node_identity(n) for n in expected_nodes]):
             raise ValueError("composed route nodes differ from embedded composed recipe")
@@ -795,7 +816,8 @@ def verify_route(route, expected_cwd=None, *, allow_stale_registry=False):
             expected_nodes=json.loads(json.dumps(route_recipe["standard_plus"]["nodes"]))
             expected_nodes=_expand_parallel_groups(
                 expected_nodes, route_recipe["standard_plus"].get("parallel_groups"),
-                route.get("effective_intensity"))
+                route.get("effective_intensity"),
+                auxiliary_check_units=registry.get("auxiliary_check_units"))
             # The remaining verifier owns field-level diagnostics.  This
             # census closes only the undeclared fanout hole: a rehashed route
             # may not add, remove, reorder, or rename recipe nodes.
@@ -1490,6 +1512,38 @@ def _attempt_completion_path(route, node_id, attempt_id):
     )
     return completion_dir(route["route_id"])/f"{node_id}.{safe_attempt}.attempt.json"
 
+def _validate_auxiliary_arbiter(route, node, evidence):
+    """AC 5 (front half): an auxiliary-bearing group's anchor verdict must carry
+    `auxiliary_findings_considered` with exactly one entry per realized auxiliary
+    leg; otherwise the completion gate is not met."""
+    group = node.get("parallel_group")
+    if not group:
+        return
+    members = [
+        candidate for candidate in route.get("nodes", [])
+        if isinstance(candidate, dict)
+        and candidate.get("parallel_group") == group
+    ]
+    aux_count = sum(
+        1 for member in members if member.get("leg_class") == "auxiliary"
+    )
+    if not aux_count:
+        return
+    try:
+        payload = json.loads(evidence.read_bytes().decode("utf-8"))
+    except (OSError, ValueError):
+        raise ValueError(
+            f"auxiliary arbiter gate {node.get('id')} requires parseable evidence"
+        )
+    considered = payload.get("auxiliary_findings_considered")
+    if not isinstance(considered, list) or len(considered) != aux_count:
+        raise ValueError(
+            f"auxiliary arbiter gate {node.get('id')} requires "
+            f"auxiliary_findings_considered length {aux_count}, "
+            f"got {len(considered) if isinstance(considered, list) else 'none'}"
+        )
+
+
 def _publish_completion_locked(
     route,
     node,
@@ -1502,6 +1556,7 @@ def _publish_completion_locked(
 ):
     """Publish marker history, exact-attempt link, and canonical marker under one node lock."""
 
+    _validate_auxiliary_arbiter(route, node, evidence)
     axes=_marker_attempt_axes(node,attempt_id,attempt_metadata)
     evidence_sha=hashlib.sha256(evidence.read_bytes()).hexdigest()
     attempt_path=(

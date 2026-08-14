@@ -674,11 +674,13 @@ class DispatchContractTest(unittest.TestCase):
      {"assignment_sha256":"sha256:"+"a"*64,"attempt_id":"att-replica-start",
      "route_node":"plan","harness":"codex",
       "fallback_hop":"same-harness-headless","fallback_ordinal":1,
-      "model_profile":"deep","perspective":"primary-plan","parallel_leg_index":0},
+      "model_profile":"deep","perspective":"primary-plan","parallel_leg_index":0,
+      "leg_class":"peer"},
      {"assignment_sha256":"sha256:"+"a"*64,"attempt_id":"att-replica-peer",
       "route_node":"plan-alternative","harness":"opencode",
       "fallback_hop":"cross-harness-headless","fallback_ordinal":2,
-      "model_profile":"balanced-deep","perspective":"independent-plan","parallel_leg_index":1},
+      "model_profile":"balanced-deep","perspective":"independent-plan","parallel_leg_index":1,
+      "leg_class":"peer"},
     ],required_independence_axes=["cross-harness","model-profile","perspective"],
     realized_independence_axes=["cross-harness","model-profile","perspective"])
    expected=D.replica_batch_expectation(

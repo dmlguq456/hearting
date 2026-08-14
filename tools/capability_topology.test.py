@@ -12,19 +12,19 @@ PRESERVED_FULL_FIELD_DIGESTS = {
     ),
     ("autopilot-code", ('audit', 'debug', 'dev')): (
         "85b8615ac98fb3dad9fedb44f621c292eb9dc26a4104f055e55e41cc3288e2f7",
-        "876f94f33c8ab50d391adce3161602bd147427a91627bb0ca324baf12226d8ac",
+        "6999e2b826a3f458169cf5d54906f4da79e33090815b7439504a39aa6d4cf341",
     ),
     ("autopilot-design", ('default',)): (
         "c75c56b11affed41560aebf57faba71a07b9903e2f24224ce3207cbf290c9168",
-        "a21c38f2bede9dc250043c2e9bc66b93a60e87c6dea4a26ec919b2833d0fce58",
+        "523b32502063400fd601697545d5cd4ae859308588b7176c0fa648f525e5be5e",
     ),
     ("autopilot-draft", ('doc', 'paper', 'presentation')): (
         "962db29f856dd3f6a9a8aa9743fc57bc8aa691dad014a9cef7a432e50cea32c5",
-        "3ad4a882afaa9f4e1af1a1bcd1fba99f9b23917ca99bf1520039ced2846bbdbb",
+        "1bb17c28bdb34877667242530f1f0af2c3a330caa77620f1b60734f663f5f72f",
     ),
     ("autopilot-lab", ('setup',)): (
         "502f66344295ad67f2d3e09499efcc91d47d1caf8ef3b03863f0c3b37549c2a5",
-        "e060a2626135140d1a26b58e1e97ecaad2b4f937c915683f6e6410ac16a23370",
+        "dd5e1116e2b49489adc69f022cc69f8f91337688de5ab08e4963a70c20e1f85a",
     ),
     ("autopilot-lab", ('eval',)): (
         "f3b5dbd108b70b96c29f0af3e76c4cb10f9ce31aed215aa6f0f4ea2f1edac920",
@@ -36,15 +36,15 @@ PRESERVED_FULL_FIELD_DIGESTS = {
     ),
     ("autopilot-research", ('academic', 'market', 'technology')): (
         "aeca7dd3b3a3557038b8033a80ce66a23ad4be647f1bc1efc4a2314eddb2bf57",
-        "df7e2d118abcf7affb201159b8b9e14c08c2cc3372f86437ea4d134006c20816",
+        "637d726f855db89ed54a3fd48362488d5e90a4d3a1b59919447f5b040075807f",
     ),
     ("autopilot-ship", ('default',)): (
         "648616df104927558bc5cca6a65e9455f48b30be63d16d9b7b47adc26d80a313",
-        "c56318c9201667046297a0dc7c0788fae86651b48e382266325ccf759d7e68ea",
+        "913de8c5f6200a539e6fe19ec488c42120dc6e4e0a0cb2149f33a3aa8cd4f326",
     ),
     ("autopilot-spec", ('api', 'app', 'cli', 'library', 'research', 'update')): (
         "096a33a46adf1886561c032019301c7dbc64ec94729acee715c74ed3f4af302a",
-        "a628941aafb66bdffb0f2fab092ef9177355d237f7b1bf42fb74e552b4f3c66b",
+        "f7bf589ba369a08a7031c71db8a2523b250af84be5ef6e0e4d9b00a1cdcb897c",
     ),
 }
 
@@ -194,12 +194,14 @@ class TestTopology(unittest.TestCase):
     def test_parallel_group_declarations(self):
         code=next(x for x in self.r["recipes"] if x["capability"]=="autopilot-code")
         groups=code["standard_plus"]["parallel_groups"]
-        self.assertEqual([g["id"] for g in groups],["frame","plan","impl-review"])
+        self.assertEqual([g["id"] for g in groups],["frame","plan","impl-review","plan-check"])
         self.assertEqual(groups[0]["width_by_intensity"],{
             "standard":2,"strong":3,"thorough":3,"adversarial":3})
         self.assertEqual(groups[1]["width_by_intensity"],{
             "strong":2,"thorough":3,"adversarial":3})
         self.assertEqual(groups[2]["width_by_intensity"],{
+            "strong":2,"thorough":3,"adversarial":3})
+        self.assertEqual(groups[3]["width_by_intensity"],{
             "strong":2,"thorough":3,"adversarial":3})
         for group in groups:
             self.assertEqual(group["join_policy"],"all")
@@ -333,12 +335,15 @@ class TestTopology(unittest.TestCase):
             group["legs"]=group["legs"]+[aux("simplicity")]
         r=broken(widen)
         self.assertRaisesRegex(T.TopologyError,"declared width at most 3",T.validate_registry,r)
-        # a valid 2-peer + 1-auxiliary 3-way compiles
+        # a valid 2-peer + 1-auxiliary 3-way compiles (AC 5 requires the anchor
+        # gate to be an auxiliary arbiter)
         def add_three(g):
             group=plan_group(g)
             group["width_by_intensity"]["thorough"]=3
             group["legs"]=group["legs"][:2]+[aux("simplicity")]
         r=broken(add_three)
+        recipe=next(x for x in r["recipes"] if x["capability"]=="autopilot-code")
+        r["completion_gate_contracts"]["code-plan"]["auxiliary_arbiter"]=True
         T.validate_registry(r)
         # a single-peer group violates the declared-width peer floor
         def single_peer(g):
@@ -355,13 +360,22 @@ class TestTopology(unittest.TestCase):
         from pathlib import Path as _P
         _S=importlib.util.spec_from_file_location("capability_route",_P(__file__).resolve().parents[1]/"utilities"/"capability-route.py")
         _CR=importlib.util.module_from_spec(_S); _S.loader.exec_module(_CR)
-        nodes=_CR._expand_parallel_groups(nodes,code["standard_plus"]["parallel_groups"],"strong")
+        nodes=_CR._expand_parallel_groups(nodes,code["standard_plus"]["parallel_groups"],"strong",
+            auxiliary_check_units=r.get("auxiliary_check_units"))
         stamped={n["id"]:n.get("leg_class") for n in nodes if "parallel_group" in n}
         self.assertEqual(stamped["plan"],"peer")
         self.assertEqual(stamped["plan-alternative"],"peer")
         for group in code["standard_plus"]["parallel_groups"]:
             for leg in group["legs"]:
-                self.assertEqual(leg["leg_class"],"peer")
+                self.assertIn(leg["leg_class"],("peer","auxiliary"))
+        aux_nodes=_CR._expand_parallel_groups(
+            json.loads(json.dumps(code["standard_plus"]["nodes"])),
+            code["standard_plus"]["parallel_groups"], "thorough",
+            auxiliary_check_units=r.get("auxiliary_check_units"))
+        aux_nodes={n["id"]:n for n in aux_nodes if n.get("leg_class")=="auxiliary"}
+        self.assertEqual(aux_nodes["plan-check-simplicity"]["auxiliary_check"],"simplicity-check")
+        self.assertEqual(aux_nodes["plan-check-simplicity"]["unit"],"qa/simplicity-check")
+        self.assertEqual(aux_nodes["plan-check-simplicity"]["role"],"fast reviewer")
     def test_owner_profile_policy_and_semantic_owner_census(self):
         self.assertEqual(self.r["owner_profile_by_intensity"], {
             "quick": "balanced-deep", "standard": "deep", "strong": "deep",
