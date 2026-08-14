@@ -75,11 +75,17 @@ def validate_manifest_mode_axes(
     if not isinstance(row, dict):
         raise _error("invalid-dispatch-capability", capability=capability)
     modes = row.get("modes")
-    if not isinstance(modes, list) or not modes:
+    if not isinstance(modes, list):
         raise _error(
             "capability-mode-contract-missing",
             capability=capability,
         )
+    if not modes:
+        # A modeless capability ("Supported modes: none") is a single-mode
+        # contract: the topology registry declares modes=["default"] for it
+        # and compiled routes carry capability_mode="default". Interpret the
+        # manifest's empty list the same way instead of rejecting dispatch.
+        modes = ["default"]
     validate_capability_mode(
         capability,
         capability_mode,
