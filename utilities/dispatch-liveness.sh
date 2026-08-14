@@ -20,13 +20,13 @@
 set -uo pipefail
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 AGENT_HOME="${AGENT_HOME:-$("$SCRIPT_DIR/agent-home.sh")}"
+JOBS=""
 if [ "$#" -gt 0 ] && [ "${1#--}" = "$1" ]; then
   JOBS=$1
   shift
-else
-  JOBS=${AGENT_DISPATCH_JOBS:-$AGENT_HOME/.dispatch/jobs.log}
 fi
-STATE_ROOT=$("$SCRIPT_DIR/dispatch-state-root.sh" "$JOBS")
+STATE_ROOT=$("$SCRIPT_DIR/dispatch-state-root.sh" "$JOBS") || exit $?
+[ -n "$JOBS" ] || JOBS="$STATE_ROOT/jobs.log"
 STALE_MIN="${DISPATCH_STALE_MIN:-15}"   # Suspect hang/death after N quiet minutes.
 # Runtime root (HLS-6): session transcripts/state live under the runtime, not
 # the harness source repository. Claude defaults to CLAUDE_CONFIG_DIR; other

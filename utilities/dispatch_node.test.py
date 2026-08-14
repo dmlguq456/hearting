@@ -384,8 +384,12 @@ class DryRunCompletionMarkerPathTest(unittest.TestCase):
                     N.main()
                 except SystemExit:
                     pass
+                jobs = N.resolve_global_registry(
+                    N.ROOT, None, 1, "dry-run", {}
+                ).path
                 expected = str(
-                    N.ROUTE.completion_dir(route["route_id"]) / (node["id"] + ".json")
+                    N.ROUTE.completion_dir(route["route_id"], jobs=jobs)
+                    / (node["id"] + ".json")
                 )
         lines = captured_stdout.getvalue().splitlines()
         marker_lines = [line for line in lines if line.startswith("completion_marker=")]

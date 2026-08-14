@@ -31,6 +31,7 @@ from dispatch_contract import (  # noqa: E402
     parse_registry_metadata,
     recover_unstarted_attempt,
     resolve_agent_home,
+    resolve_dispatch_state_root,
     resolve_global_registry,
     resolve_live_parent_attempt,
     resolve_model_governor_root,
@@ -875,7 +876,8 @@ def existing_leg_result(
                 )
                 if candidate.is_file()
             ),
-            agent_home / ".dispatch" / "completion" / str(route["route_id"]) / f"{leg['node']}.json",
+            resolve_dispatch_state_root(agent_home, jobs)
+            / "completion" / str(route["route_id"]) / f"{leg['node']}.json",
         )
         try:
             marker = json.loads(marker_path.read_text(encoding="utf-8"))
@@ -1303,11 +1305,11 @@ def main(argv: list[str] | None = None) -> int:
                 args.prompt_text,
                 "--attempt-id",
                 str(leg["attempt_id"]),
+                "--jobs",
+                str(jobs),
                 "--",
                 "--parent-attempt-id",
                 parent_attempt,
-                "--jobs",
-                str(jobs),
                 *(
                     ["--log-dir", str(args.log_dir)]
                     if args.log_dir is not None

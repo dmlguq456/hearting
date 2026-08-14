@@ -10,7 +10,7 @@
 #     --parent     Limit open rows to children with parent=<slug>; otherwise use all.
 #     --slug       Limit to the row whose own slug (field 5) exactly matches.
 #     --attempt-id Limit to the row whose attempt_id=<id> kv field exactly matches.
-#     --jobs       jobs.log path (default: $AGENT_HOME/.dispatch/jobs.log).
+#     --jobs       jobs.log path (default: canonical dispatch state root).
 #     --interval   Poll interval in seconds (default 20).
 #     --max        Maximum wait for this call (default and cap: 600).
 #   --parent/--slug/--attempt-id combine with AND when more than one is given.
@@ -51,7 +51,10 @@ while [ $# -gt 0 ]; do
     *) echo "dispatch-wait: unknown arg '$1'" >&2; exit 64 ;;
   esac
 done
-[ -n "$JOBS" ] || JOBS="${AGENT_DISPATCH_JOBS:-$AGENT_HOME/.dispatch/jobs.log}"
+if [ -z "$JOBS" ]; then
+  STATE_ROOT=$("$SCRIPT_DIR/dispatch-state-root.sh") || exit $?
+  JOBS="$STATE_ROOT/jobs.log"
+fi
 # Clamp to a single shell-call timeout budget.
 [ "$MAX" -gt 600 ] 2>/dev/null && MAX=600
 [ "$INTERVAL" -ge 1 ] 2>/dev/null || INTERVAL=20

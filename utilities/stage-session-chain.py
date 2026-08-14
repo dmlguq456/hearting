@@ -14,6 +14,10 @@ import time
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "utilities"))
 from stage_session_contract import StageSessionError, load_manifest  # noqa: E402
+from dispatch_contract import (  # noqa: E402
+    DispatchContractError,
+    resolve_global_registry,
+)
 
 
 def continuation_metrics(session_count: int) -> dict[str, int]:
@@ -32,7 +36,9 @@ def node_for(route: dict, node_id: str) -> dict:
     return found[0]
 
 
-def dispatch_command(manifest: dict, session: dict, action: str, parent: str) -> list[str]:
+def dispatch_command(
+    manifest: dict, session: dict, action: str, parent: str, jobs: Path
+) -> list[str]:
     command = [
         sys.executable, str(ROOT / "utilities" / "dispatch-node.py"),
         "--route", manifest["route_file"],
@@ -41,6 +47,7 @@ def dispatch_command(manifest: dict, session: dict, action: str, parent: str) ->
         "--action", action,
         "--slug", session["slug"],
         "--parent", parent,
+        "--jobs", str(jobs),
         "--prompt-text", (
             f"Execute sub-session {session['subsession_id']} from phase brief "
             f"{session['phase_brief']}. Run only: {session['narrow_verify']}"
@@ -83,7 +90,9 @@ def supervise(manifest: dict, parent: str, jobs: Path, max_seconds: int) -> int:
     deadline = time.monotonic() + max_seconds
     receipt = {"schema_version": 1, "chain_id": manifest["chain_id"], "sessions": []}
     for session in manifest["sessions"]:
-        result = run_checked(dispatch_command(manifest, session, "start", parent))
+        result = run_checked(
+            dispatch_command(manifest, session, "start", parent, jobs)
+        )
         if result.returncode != 0:
             receipt["sessions"].append({
                 "attempt_id": session["attempt_id"], "state": "launch-failed",
@@ -119,7 +128,7 @@ def main() -> int:
     p.add_argument("action", choices=("check", "register", "start", "run"))
     p.add_argument("--manifest", required=True)
     p.add_argument("--parent", required=True)
-    p.add_argument("--jobs", default=os.environ.get("AGENT_DISPATCH_JOBS", str(ROOT / ".dispatch/jobs.log")))
+    p.add_argument("--jobs")
     p.add_argument("--max-seconds", type=int, default=3600)
     args = p.parse_args()
     try:
@@ -145,11 +154,21 @@ def main() -> int:
                 "manifest_sha256": manifest["_manifest_sha256"],
             }, sort_keys=True))
             return 0
+        args.jobs = resolve_global_registry(
+            ROOT,
+            args.jobs,
+            2,
+            "start" if args.action == "run" else args.action,
+        ).path
         if manifest["mode"] != "serial":
             raise StageSessionError("parallel-subsession-use-dispatch-batch")
         if args.action in {"register", "start"}:
             for session in manifest["sessions"]:
-                result = run_checked(dispatch_command(manifest, session, "register", args.parent))
+                result = run_checked(
+                    dispatch_command(
+                        manifest, session, "register", args.parent, args.jobs
+                    )
+                )
                 if result.returncode:
                     print(result.stdout, end="")
                     print(result.stderr, end="", file=sys.stderr)
@@ -167,7 +186,7 @@ def main() -> int:
             print(f"chain_receipt={receipt_path}")
             return result
         return supervise(manifest, args.parent, Path(args.jobs), args.max_seconds)
-    except (OSError, ValueError, StageSessionError) as exc:
+    except (OSError, ValueError, StageSessionError, DispatchContractError) as exc:
         print(f"stage-session-chain: {exc}", file=sys.stderr)
         return 65
 

@@ -11,6 +11,49 @@ from replica_batch_contract import build_manifest
 CURRENT="attempt_schema_version=2,dispatch_depth=2,transport=headless,execution_surface=registered-headless,registered_worker=1,fallback_hop=same-harness-headless"
 
 class DispatchContractTest(unittest.TestCase):
+ def test_versioned_source_registry_fallback_matrix(self):
+  with tempfile.TemporaryDirectory() as td:
+   base=Path(td)
+   runtime=base/"runtime"
+   bundle=runtime/".harness"/"bundles"/"bundle-id"/"source"
+   release=base/".local"/"share"/"hearting"/"releases"/"v2.41.0"
+   checkout=base/"hearting-checkout"
+   bundle.mkdir(parents=True);release.mkdir(parents=True);checkout.mkdir()
+
+   selected=D.resolve_global_registry(bundle,None,1,"start",{})
+   self.assertEqual(selected.path,runtime/".harness"/"dispatch"/"jobs.log")
+   self.assertEqual(selected.source,"activation-runtime")
+   self.assertEqual(
+    D.resolve_dispatch_state_root(bundle,environ={}),
+    runtime/".harness"/"dispatch")
+
+   for resolver in (
+    lambda: D.resolve_global_registry(release,None,1,"start",{}),
+    lambda: D.resolve_dispatch_state_root(release,environ={}),
+   ):
+    with self.assertRaises(D.DispatchContractError) as caught:
+     resolver()
+    self.assertEqual(caught.exception.reason,"versioned-source-registry-fallback")
+
+   internal=bundle/".dispatch"/"jobs.log"
+   for resolver in (
+    lambda: D.resolve_global_registry(checkout,str(internal),1,"start",{}),
+    lambda: D.resolve_global_registry(
+     checkout,None,1,"start",{"AGENT_DISPATCH_JOBS":str(internal)}),
+    lambda: D.resolve_dispatch_state_root(checkout,explicit_jobs=internal,environ={}),
+    lambda: D.resolve_dispatch_state_root(
+     checkout,environ={"AGENT_DISPATCH_JOBS":str(internal)}),
+   ):
+    with self.assertRaises(D.DispatchContractError) as caught:
+     resolver()
+    self.assertEqual(caught.exception.reason,"versioned-source-registry-fallback")
+
+   maintained=checkout/".dispatch"/"jobs.log"
+   self.assertEqual(
+    D.resolve_global_registry(checkout,None,1,"start",{}).path,maintained)
+   self.assertEqual(
+    D.resolve_dispatch_state_root(checkout,environ={}),maintained.parent)
+
  def test_codex_standard_owner_network_profile_is_exactly_scoped(self):
   self.assertTrue(D.codex_standard_owner_network_enabled(
    dispatch_depth=1, worker_type="owner", intensity="standard",

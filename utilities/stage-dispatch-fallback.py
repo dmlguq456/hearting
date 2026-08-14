@@ -47,6 +47,7 @@ from dispatch_contract import (  # noqa: E402
     DispatchContractError,
     attempt_process_quiescence,
     parse_registry_metadata,
+    resolve_global_registry,
     resolve_live_parent_attempt,
     validate_attempt_metadata,
 )
@@ -1112,11 +1113,15 @@ def main() -> int:
 
     inherited_jobs = os.environ.get("AGENT_DISPATCH_JOBS")
     args.inherited_jobs = inherited_jobs
-    args.jobs = (args.jobs or Path(inherited_jobs or ROOT / ".dispatch/jobs.log")).resolve()
-    if inherited_jobs and args.jobs != Path(inherited_jobs).resolve():
-        return fail("noncanonical-nested-jobs", 73, explicit=str(args.jobs), inherited=str(Path(inherited_jobs).resolve()))
-    if args.action in {"register", "start"} and not inherited_jobs:
-        return fail("global-registry-unset", 73, child_spawned="0")
+    try:
+        args.jobs = resolve_global_registry(
+            ROOT,
+            str(args.jobs) if args.jobs else None,
+            int(node.get("dispatch_depth", 2)),
+            args.action,
+        ).path
+    except DispatchContractError as exc:
+        return fail(exc.reason, 73, detail=exc.detail, child_spawned="0")
 
     try:
         parent_identity = DISPATCH_NODE.current_parent_identity()

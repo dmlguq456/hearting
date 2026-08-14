@@ -25,6 +25,7 @@ from dispatch_contract import (
     dispatch_state_root,
     parse_registry_metadata,
     resolve_agent_home as _resolve_agent_home,
+    resolve_dispatch_state_root,
     validate_attempt_metadata,
 )
 
@@ -496,9 +497,7 @@ def main(argv: list[str]) -> int:
     apply = bool(args.apply)
     agent_home = resolve_agent_home()
     jobs = normalize(
-        args.jobs
-        or os.environ.get("AGENT_DISPATCH_JOBS")
-        or agent_home / ".dispatch" / "jobs.log"
+        resolve_dispatch_state_root(agent_home, explicit_jobs=args.jobs) / "jobs.log"
     )
     audit = normalize(args.audit or dispatch_state_root(jobs) / "worktree-cleanup.jsonl")
 

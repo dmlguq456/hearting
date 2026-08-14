@@ -46,6 +46,7 @@ from dispatch_contract import (  # noqa: E402
     parse_registry_metadata,
     parent_attempt_binding_is_live,
     resolve_global_registry,
+    resolve_dispatch_state_root,
     resolve_agent_home as _resolve_agent_home,
     resolve_live_parent_attempt,
     resolve_model_governor_root,
@@ -1222,7 +1223,9 @@ def write_reset_cache(agent_home: Path, harness: str, reason: str, reset: str, j
     Best-effort — a cache write failure never blocks dispatch bookkeeping.
     """
     try:
-        cache = (dispatch_state_root(jobs) if jobs else agent_home / ".dispatch") / f"usage-reset.{harness}"
+        cache = resolve_dispatch_state_root(
+            agent_home, explicit_jobs=jobs
+        ) / f"usage-reset.{harness}"
         cache.parent.mkdir(parents=True, exist_ok=True)
         ts = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
         cache.write_text(f"{ts} {reason} {reset}\n", encoding="utf-8")
@@ -1421,12 +1424,11 @@ def validate_route_record(args: argparse.Namespace) -> int:
     args.route_validation=result.stdout.strip()
     # Preserve dependency failure ordering, then recheck with the validated
     # global registry immediately before the attempt claim.
-    early_jobs = Path(
-        args.jobs
-        or os.environ.get("AGENT_DISPATCH_JOBS", "")
-        or args.agent_home / ".dispatch" / "jobs.log"
-    )
     try:
+        early_jobs = (
+            resolve_dispatch_state_root(args.agent_home, explicit_jobs=args.jobs)
+            / "jobs.log"
+        )
         completion_marker_gate(
             args.route_file, args.route_node, args.action, args.agent_home,
             early_jobs, attempt_id=args.attempt_id,
