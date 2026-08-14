@@ -126,11 +126,18 @@ class RenderDispatchPresentationTest(unittest.TestCase):
         top = DispatchJob(key="code", slug="top", depth=1)
         nested = DispatchJob(key="code", slug="nested", depth=2)
 
-        self.assertEqual(render._dispatch_prefix(top), "    ")
+        # user 2026-08-14 "테두리를 좌우 한칸씩 여백을 더": a BOXED row (depth-1 owner
+        # and everything inside its card) carries `_CARD_INSET` extra columns so the
+        # frame lands one cell inside a plain group row.
+        boxed = 4 + render._CARD_INSET
+        self.assertEqual(render._dispatch_prefix(top), " " * boxed)
+        self.assertEqual(render._dispatch_prefix(nested, in_card=True), " " * boxed)
+        # Un-boxed rows keep the legacy ladder: an orphan is never framed, so its `··`
+        # mark stays on the original 4-cell seat, and an out-of-card depth-2 row keeps
+        # the 8-cell step.
         self.assertEqual(render._dispatch_prefix(nested), "        ")
         self.assertEqual(len(render._dispatch_prefix(nested)), 8)
         self.assertEqual(render._dispatch_prefix(top, orphan=True), "··  ")
-        self.assertEqual(render._dispatch_prefix(nested, in_card=True), "    ")
 
     def _rail_fixture(self, owner_liveness="working", leg_liveness="working"):
         parent = Session(harness="claude", pid=1, cwd="/work/repo", session_id="sid-1",
@@ -248,6 +255,45 @@ class RenderDispatchPresentationTest(unittest.TestCase):
             self.assertTrue(attr & render._A_DIM, "frame is dim")
             self.assertFalse(attr & render._A_BOLD, "frame is never bold")
         self.assertTrue(render._HUE_OF["frm_idle"][1] & render._A_DIM)
+
+    def test_card_border_keeps_equal_air_on_both_sides(self):
+        # user 2026-08-14 "테두리를 좌우 한칸씩 여백을 더 넣어서 메인세션의 하위로 보이게
+        # 강조해보자". The user has reported an asymmetric right edge twice, so the
+        # contract is measured, not assumed: the gap from the band's left edge to the
+        # left border must equal the gap from the right border to the band's right edge.
+        self.assertEqual(render._RAIL_COL, 2 + render._CARD_INSET)
+        width = 175
+        old = render._TINT_OK
+        render._TINT_OK = True
+        try:
+            box_width = render._dispatch_box_width(width, "wide")
+        finally:
+            render._TINT_OK = old
+        # `_addline` shifts a tinted row by _INSET + _PAD_IN, and the band's last
+        # paintable screen column is width - _INSET - 1.
+        last_raw = width - 2 * render._INSET - render._PAD_IN - 1
+        self.assertEqual(last_raw - (box_width - 1), render._RAIL_COL)
+
+    def test_card_rows_ride_the_recessed_tint(self):
+        # user 2026-08-14 "박스 테두리 내부는 틴트를 어둡게 해볼까": boxed rows drop a
+        # level below their group body, so the unit reads as a recess in the panel.
+        old = render._TINT_OK
+        render._TINT_OK = True
+        try:
+            lines = self._rail_lines()
+        finally:
+            render._TINT_OK = old
+        framed = [ln for ln in lines
+                  if ln and any(g in "".join(p for p, _k in ln) for g in "╭│╰")]
+        self.assertTrue(framed)
+        for ln in framed:
+            self.assertEqual(ln[0][0], render._TINT_CARD)
+        body = [ln for ln in lines
+                if ln and render._is_fill(ln[0][0]) and ln[0][0][1] in render._TINT_CHARS
+                and ln[0][0] != render._TINT_CARD]
+        self.assertTrue(body, "the surrounding group still rides its own body tint")
+        self.assertLess(render._TINT_LVL[render._TINT_CARD[1]],
+                        min(render._TINT_LVL[ln[0][0][1]] for ln in body))
 
     def test_f64c_rail_hue_mirrors_the_breadcrumb_current_token(self):
         # user 2026-08-05 "컬러 안맞는데": the rail must share the exact index the lit

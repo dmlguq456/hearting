@@ -79,6 +79,7 @@ _RICHER_RGB_1000 = {
 # Keep each panel rung dark and restrained while giving the near-black
 # backgrounds a slightly richer shared slate cast.
 _TINT_RGB_1000 = {
+    232: (38, 43, 61),     # #0a0b10 — card interior, one step below the body
     233: (63, 71, 102),    # #10121a
     234: (108, 127, 188),  # #1c2030
     236: (169, 182, 235),  # #2b2e3c
@@ -1624,6 +1625,14 @@ def _compact_dispatch_name(name, max_width=_DISPATCH_NAME_MAX):
     return name[: max_width - 1] + "…"
 
 
+# Card inset (user 2026-08-14 "테두리를 좌우 한칸씩 여백을 더 넣어서 메인세션의 하위로
+# 보이게 강조해보자"): the box is pulled this many columns in on BOTH sides relative to
+# a plain group row, so a dispatch unit visibly sits inside the main session's column
+# rather than beside it. One constant drives all three edges — the rail column, the
+# boxed-row prefix and the right-edge budget — so the two sides can never drift apart.
+_CARD_INSET = 1
+
+
 def _dispatch_prefix(j, orphan=False, in_card=False):
     # F-64c (v49, user 2026-08-05 연쇄 "depth=1을 조금 앞당겨서" → "세로선은 좀 더 들여쓰게"
     # → "아주 조금만 더 + depth=2의 들여쓰기를 완화"): dispatch-depth-1 sheds its ↳ arrow and sits at
@@ -1644,12 +1653,17 @@ def _dispatch_prefix(j, orphan=False, in_card=False):
     # sourcing working-memory note carried no requester) and found it noisy. Depth
     # readability improvements, if any, go through explicit user direction.
     depth = max(1, min(3, int(getattr(j, "depth", 1) or 1)))
+    # A boxed row carries `_CARD_INSET` extra columns so the frame drawn over this
+    # prefix lands one cell inside a plain group row. Orphans are never boxed
+    # and keep the original 4-cell seat, which is what keeps their `··` mark aligned
+    # with the session column.
+    boxed = " " * (4 + _CARD_INSET)
     if in_card and not orphan:
         # F-66: the box already carries hierarchy. Every row inside it therefore
         # starts at the owner's content column; depth must not add a second ladder.
-        return "    "
+        return boxed
     if depth == 1:
-        return "··  " if orphan else "    "
+        return "··  " if orphan else boxed
     marker = "··" if orphan else "  "
     return "    " + "  " * (depth - 1) + marker
 
@@ -1666,8 +1680,8 @@ _RAIL_RIGHT = "│"
 _RAIL_BOT_RIGHT = "╯"
 _RAIL_SOLO = "❙"
 _RAIL_CHARS = (_RAIL_TOP, _RAIL_MID, _RAIL_MID.strip(), _RAIL_BOT, _RAIL_SOLO)
-_RAIL_COL = 2      # capsule begins at the dispatch unit's own inset in every layout
-_CARD_EDGE_GAP = 2  # cells the box border keeps clear of the group card's right edge
+_RAIL_COL = 2 + _CARD_INSET   # capsule's left edge, in raw (pre-tint-band) columns
+_CARD_EDGE_GAP = 2 + _CARD_INSET  # cells the box border keeps clear of the card's right edge
 
 
 def _depth1_rail_color_index(key, stage, route_seq):
@@ -4700,6 +4714,9 @@ def _build_lines(sessions, jobs, section, narrow, malformed, layout="wide", memo
         # Use font weight rather than brightening the entire row background.
         # carries the distinction). Excludes stale/dead/app-server/detached (already faded dim).
         _sess_bold_ids = set()
+        # Rows enclosed by a dispatch box — the body-tint pass below gives these the
+        # recessed card level instead of the group's own body level.
+        _card_row_ids = set()
 
         def _emit_dispatch_tree(job, parent_model=None, parent_harness=None, parent_effort=None,
                                 orphan=False, is_last=True, in_card=False):
@@ -4801,6 +4818,7 @@ def _build_lines(sessions, jobs, section, narrow, malformed, layout="wide", memo
                         lines[idx], box_width, "top" if idx == block_start else "mid",
                         rail_key, run_key=run_key)
                 lines.append(_dispatch_box_bottom(box_width, rail_key, run_key=run_key))
+                _card_row_ids.update(range(block_start, len(lines)))
 
         shown = _sort_group_sessions(shown)
         if live_order is not None:
@@ -4924,7 +4942,7 @@ def _build_lines(sessions, jobs, section, narrow, malformed, layout="wide", memo
             if not ln or _is_fill(ln[0][0]):
                 continue
             if _TINT_OK:
-                lines[_i] = [(_body_tint, None)] + ln
+                lines[_i] = [(_TINT_CARD if _i in _card_row_ids else _body_tint, None)] + ln
             elif ln[0][1] in (None, "dim") and ln[0][0].startswith(" "):
                 lines[_i] = [("▍", _rail_key), (ln[0][0][1:], ln[0][1])] + ln[1:]
         for _i in _sess_bold_ids:
@@ -5140,7 +5158,13 @@ _TINT_BODY, _TINT_CAP = "\x00b\x00", "\x00c\x00"
 _TINT_BODY_HOT, _TINT_CAP_HOT = "\x00B\x00", "\x00C\x00"
 _TINT_BODY_COOL = "\x00k\x00"    # Cooling body between active blue and inactive grey.
 _TINT_INTEL = "\x00i\x00"
-_TINT_CHARS = {"b", "c", "B", "C", "k", "i"}
+# Card interior (user 2026-08-14 "박스 테두리 내부는 틴트를 어둡게 해볼까"): rows that
+# belong to a dispatch box drop one step BELOW their group's body level, so the unit
+# reads as a recess set into the main session's panel instead of a block sitting on
+# top of it. Row-level like every other tint — the band still spans the card, and the
+# `_CARD_INSET` border sits one cell inside it.
+_TINT_CARD = "\x00x\x00"
+_TINT_CHARS = {"b", "c", "B", "C", "k", "i", "x"}
 
 # row-bold marker (user 2026-07-03, after the whole-row tint-brightening attempt was rejected —
 # Main-session rows use bold rather than brightening the entire background.
@@ -5150,7 +5174,7 @@ _ROW_BOLD = "\x00!\x00"
 # 256-color background levels per sentinel char. Base panels retain the
 # established range; the whole ladder moves down another restrained step while the
 # cap remains visible and hot stays slightly above the base body.
-_TINT_LVL = {"b": 233, "c": 236, "B": 234, "C": 234, "k": 233, "i": 233}
+_TINT_LVL = {"b": 233, "c": 236, "B": 234, "C": 234, "k": 233, "i": 233, "x": 232}
 
 
 def _is_fill(t):
