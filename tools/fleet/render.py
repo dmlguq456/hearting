@@ -178,6 +178,17 @@ _HUE_OF = {
     "stg3_on": ("y", _A_B), "stg4_on": ("m", _A_B),
     "stg0_off": ("l", _A_D), "stg1_off": ("c", _A_D), "stg2_off": ("g", _A_D),
     "stg3_off": ("y", _A_D), "stg4_off": ("m", _A_D),
+    # F-68d box frame: the same five hues at ONE stroke weight — the pulse is
+    # plain <-> dim, never bold, so box-drawing glyphs keep a constant stroke.
+    # Tinted rows resolve color through THIS table (never _COLOR), so a frame key
+    # missing here silently collapses to the default dim hue and the blink
+    # disappears — which is exactly what happened when frm* landed in _init_colors
+    # alone (user 2026-08-14 "박스 점멸은 그냥 없애버린 거야?").
+    "frm0_on": ("l", 0), "frm1_on": ("c", 0), "frm2_on": ("g", 0),
+    "frm3_on": ("y", 0), "frm4_on": ("m", 0),
+    "frm0_off": ("l", _A_D), "frm1_off": ("c", _A_D), "frm2_off": ("g", _A_D),
+    "frm3_off": ("y", _A_D), "frm4_off": ("m", _A_D),
+    "frm_idle": ("d", _A_D),
 }
 
 
