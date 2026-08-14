@@ -480,14 +480,33 @@ class TestRoute(unittest.TestCase):
  def test_ac5_auxiliary_arbiter_verdict_length_gate(self):
   # AC 5 (front half): the anchor verdict of an auxiliary-bearing group must
   # carry auxiliary_findings_considered with one entry per realized auxiliary leg.
+  # G1: the gate fires on the anchor only (a peer sibling runs concurrently with
+  # the auxiliary and cannot have considered its findings) and accepts the sealed
+  # markdown output surface via frontmatter, not only JSON.
   evidence=self.dispatch(self.nested())
   thorough=R.compile_route(**self.args(requested_intensity="thorough",predicates=[],signals=["shared-contract"],transport="headless",inline_reason=None,dispatch_evidence=evidence))
   anchor=next(n for n in thorough["nodes"] if n["id"]=="plan-check")
+  siblings={n["id"] for n in thorough["nodes"] if n.get("parallel_group")=="plan-check"}
   import tempfile
   with tempfile.TemporaryDirectory() as td:
    good=Path(td)/"evidence.json"
    good.write_text(json.dumps({"auxiliary_findings_considered":["accepted"]}),encoding="utf-8")
    R._validate_auxiliary_arbiter(thorough,anchor,good)
+   # markdown frontmatter (inline list) is the real sealed output surface
+   md_inline=Path(td)/"round_1.md"
+   md_inline.write_text("---\nauxiliary_findings_considered: [accepted]\n---\n# plan review\n\nverdict: clean\n",encoding="utf-8")
+   R._validate_auxiliary_arbiter(thorough,anchor,md_inline)
+   # markdown frontmatter (yaml block list) is accepted as well
+   md_block=Path(td)/"round_block.md"
+   md_block.write_text("---\nauxiliary_findings_considered:\n  - accepted\n  - noted\n---\nbody\n",encoding="utf-8")
+   with self.assertRaisesRegex(ValueError,"auxiliary_findings_considered length 1"):
+    R._validate_auxiliary_arbiter(thorough,anchor,md_block)
+   # only the anchor is gated: peer and auxiliary siblings pass regardless of
+   # their evidence surface
+   for node in thorough["nodes"]:
+    if node.get("parallel_group")=="plan-check" and node["id"]!="plan-check":
+     R._validate_auxiliary_arbiter(thorough,node,md_inline)
+   self.assertIn("plan-check-alternative",siblings)
    bad=Path(td)/"bad.json"
    bad.write_text(json.dumps({"auxiliary_findings_considered":["accepted","missing"]}),encoding="utf-8")
    with self.assertRaisesRegex(ValueError,"auxiliary_findings_considered length 1"):

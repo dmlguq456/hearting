@@ -1513,12 +1513,66 @@ def _attempt_completion_path(route, node_id, attempt_id):
     )
     return completion_dir(route["route_id"])/f"{node_id}.{safe_attempt}.attempt.json"
 
+def _parse_auxiliary_findings(evidence: Path):
+    """Extract `auxiliary_findings_considered` from JSON or markdown frontmatter.
+
+    A review unit's sealed output is a markdown review file, not a JSON verdict;
+    the anchor of an auxiliary-bearing group records which auxiliary findings it
+    considered in that file's frontmatter (G1). Returns None when the field is
+    absent from both surfaces.
+    """
+    try:
+        text = evidence.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    try:
+        payload = json.loads(text)
+        considered = payload.get("auxiliary_findings_considered")
+        if isinstance(considered, list):
+            return considered
+    except (ValueError, TypeError):
+        pass
+    match = re.match(r"\A---\n(.*?\n)---\n", text, re.DOTALL)
+    if not match:
+        return None
+    block = match.group(1)
+    inline = re.search(
+        r"^auxiliary_findings_considered:\s*\[([^\]]*)\]", block, re.MULTILINE
+    )
+    if inline:
+        return [
+            token.strip()
+            for token in inline.group(1).split(",")
+            if token.strip()
+        ]
+    found = re.search(
+        r"^auxiliary_findings_considered:\s*(?:#.*)?$", block, re.MULTILINE
+    )
+    if found:
+        items = []
+        for line in block[found.end():].lstrip("\n").splitlines():
+            item = re.match(r"^\s+-\s+(.*?)\s*$", line)
+            if not item:
+                break
+            items.append(item.group(1))
+        if items:
+            return items
+    return None
+
+
 def _validate_auxiliary_arbiter(route, node, evidence):
-    """AC 5 (front half): an auxiliary-bearing group's anchor verdict must carry
-    `auxiliary_findings_considered` with exactly one entry per realized auxiliary
-    leg; otherwise the completion gate is not met."""
+    """AC 5 (front half): the arbiter verdict of an auxiliary-bearing group must
+    carry `auxiliary_findings_considered` with exactly one entry per realized
+    auxiliary leg; otherwise the completion gate is not met.
+
+    Only the group's anchor is gated (G1): a peer sibling runs concurrently with
+    the auxiliary and structurally cannot have considered its findings, and an
+    auxiliary leg is advisory output, not a verdict that adopts or rejects its
+    own findings (13.30.1). The evidence surface is the sealed output -- a review
+    unit's markdown review file -- so the list is read from JSON or from the
+    markdown frontmatter rather than forced to JSON."""
     group = node.get("parallel_group")
-    if not group:
+    if not group or node.get("parallel_leg_index") != 0:
         return
     members = [
         candidate for candidate in route.get("nodes", [])
@@ -1530,18 +1584,16 @@ def _validate_auxiliary_arbiter(route, node, evidence):
     )
     if not aux_count:
         return
-    try:
-        payload = json.loads(evidence.read_bytes().decode("utf-8"))
-    except (OSError, ValueError):
-        raise ValueError(
-            f"auxiliary arbiter gate {node.get('id')} requires parseable evidence"
-        )
-    considered = payload.get("auxiliary_findings_considered")
-    if not isinstance(considered, list) or len(considered) != aux_count:
+    considered = _parse_auxiliary_findings(evidence)
+    if considered is None:
         raise ValueError(
             f"auxiliary arbiter gate {node.get('id')} requires "
-            f"auxiliary_findings_considered length {aux_count}, "
-            f"got {len(considered) if isinstance(considered, list) else 'none'}"
+            "auxiliary_findings_considered in evidence or frontmatter"
+        )
+    if len(considered) != aux_count:
+        raise ValueError(
+            f"auxiliary arbiter gate {node.get('id')} requires "
+            f"auxiliary_findings_considered length {aux_count}, got {len(considered)}"
         )
 
 
