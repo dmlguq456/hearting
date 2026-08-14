@@ -220,8 +220,10 @@ class FallbackTest(unittest.TestCase):
   wrong={"AGENT_DISPATCH_CURRENT_HARNESS":"claude",
          "AGENT_DISPATCH_CURRENT_TRANSPORT":"headless",
          "AGENT_DISPATCH_CURRENT_SANDBOX":"adapter-default"}
-  dry=self.run_node(path,"plan-check","dry-run",**wrong)
-  reg=self.run_node(path,"plan-check","register",**wrong)
+  # plan-check is now a parallel-group anchor (W3); use the non-group `test`
+  # node so register/dry-run parity is exercised on a plain single checker.
+  dry=self.run_node(path,"test","dry-run",**wrong)
+  reg=self.run_node(path,"test","register",**wrong)
   self.assertEqual((dry.returncode,self.hop(dry)),(reg.returncode,self.hop(reg)),
                    dry.stdout+reg.stdout)
   self.assertEqual(dry.returncode,79,dry.stdout+dry.stderr)

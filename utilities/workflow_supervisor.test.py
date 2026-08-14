@@ -619,6 +619,12 @@ class TestGraphContract(unittest.TestCase):
         nodes = recipe["standard_plus"]["nodes"]
         recipe["standard_plus"]["nodes"] = [n for n in nodes
                                             if n["id"] not in ("run-verify", "handoff")]
+        # run-verify became a parallel-group anchor (W3); drop its group too
+        # so the registry validates down to the terminal-shape assertion.
+        recipe["standard_plus"]["parallel_groups"] = [
+            g for g in recipe["standard_plus"].get("parallel_groups", [])
+            if g.get("node") != "run-verify"
+        ]
         full_run = next(n for n in recipe["standard_plus"]["nodes"] if n["id"] == "full-run")
         full_run.pop("continuation", None)
         full_run["terminal"] = True

@@ -31,12 +31,17 @@ through adapter-owned wrappers or native agent surfaces.
 | `material` | `material/web-image-search` | `fast tool worker` | `support` | `near-zero` | `roles/units/material/web-image-search.md` |
 | `plan` | `plan/frame` | `deep maker` | `stage` | `highest` | `roles/units/plan/frame.md` |
 | `plan` | `plan/plan-author` | `deep maker` | `stage` | `highest` | `roles/units/plan/plan-author.md` |
+| `qa` | `qa/assumption-check` | `fast reviewer` | `review` | `moderate` | `roles/units/qa/assumption-check.md` |
 | `qa` | `qa/code-review` | `fast reviewer` | `review` | `moderate` | `roles/units/qa/code-review.md` |
 | `qa` | `qa/data-curate` | `fast reviewer` | `review` | `low` | `roles/units/qa/data-curate.md` |
+| `qa` | `qa/edge-case-check` | `fast reviewer` | `review` | `moderate` | `roles/units/qa/edge-case-check.md` |
+| `qa` | `qa/failure-mode-check` | `fast reviewer` | `review` | `moderate` | `roles/units/qa/failure-mode-check.md` |
 | `qa` | `qa/ml-debug` | `deep reviewer` | `review` | `high` | `roles/units/qa/ml-debug.md` |
 | `qa` | `qa/plan-review` | `fast reviewer` | `review` | `moderate` | `roles/units/qa/plan-review.md` |
 | `qa` | `qa/security-review` | `deep reviewer` | `review` | `moderate` | `roles/units/qa/security-review.md` |
+| `qa` | `qa/simplicity-check` | `fast reviewer` | `review` | `moderate` | `roles/units/qa/simplicity-check.md` |
 | `qa` | `qa/test` | `fast reviewer` | `review` | `near-zero` | `roles/units/qa/test.md` |
+| `qa` | `qa/test-gap-check` | `fast reviewer` | `review` | `moderate` | `roles/units/qa/test-gap-check.md` |
 | `research` | `research/claim-verify` | `fast fact-checker` | `review` | `high` | `roles/units/research/claim-verify.md` |
 | `research` | `research/fact-check` | `fast fact-checker` | `review` | `near-zero` | `roles/units/research/fact-check.md` |
 | `research` | `research/plan-review` | `deep reviewer` | `review` | `highest` | `roles/units/research/plan-review.md` |
