@@ -41,6 +41,7 @@ from dispatch_contract import (  # noqa: E402
 from dispatch_lifecycle import select_launch_lifecycle  # noqa: E402
 from replica_batch_contract import DIGEST, build_manifest  # noqa: E402
 from dispatch_degradation import record_degradation  # noqa: E402
+from dispatch_quality_peer import quality_peer_families  # noqa: E402
 from dispatch_allocation import (  # noqa: E402
     STRATEGY as ALLOCATION_STRATEGY,
     attempt_counts,
@@ -242,6 +243,58 @@ def _persist_launched_degradation(
     )
 
 
+def _persist_sole_gate_degradation(
+    agent_home: Path,
+    route: dict[str, object],
+    diagnostics: dict[str, object],
+    results: list[dict[str, object]],
+) -> None:
+    """Persist one sole-gate degradation after a validated new child start.
+
+    Mirrors `_persist_launched_degradation`'s realization gate: the ledger only
+    records a dispatched outcome, so retries resolving to existing attempts or
+    prelaunch failures must not add a row. `leg_class` and `sole_gate` ride the
+    record so SD-100 typed reasons keep their distinguishing fields (D7).
+    """
+    if diagnostics.get("sole_gate") != "degraded":
+        return
+    if not any(row.get("launch_state") == "started" for row in results):
+        return
+    record_degradation(
+        route_id=route.get("route_id"), route_node=None,
+        route_hash=route.get("route_hash"), dispatch_depth=2,
+        fallback_hop=None, execution_surface="registered-headless",
+        writer="dispatch-batch.py", kind="degradation",
+        agent_home=agent_home,
+        reason="sole-gate-non-peer-harness",
+        detail=(
+            "no hard-eligible quality-peer family; group proceeded with "
+            "gate authority off the quality-peer set"
+        )[:512],
+        sole_gate="degraded",
+    )
+
+
+def _policy_by_profile(route, nodes):
+    """Collect sealed per-profile harness policies for the quality-peer derivation.
+
+    The owner policy (always deep for standard+ routes) plus every realized
+    node's own `harness_policy` keyed by its model_profile. Returns an empty
+    dict when no config-derived policy is present, which the caller treats as
+    not-applicable (D8-①).
+    """
+    by_profile: dict[str, object] = {}
+    owner = route.get("owner_harness_policy")
+    if isinstance(owner, dict):
+        by_profile.setdefault("deep", owner)
+    for node in nodes:
+        policy = node.get("harness_policy")
+        profile = node.get("model_profile")
+        if isinstance(policy, dict) and isinstance(profile, str) and profile:
+            by_profile.setdefault(profile, policy)
+    return by_profile
+
+
 def assign_harnesses(
     route: dict[str, object],
     nodes: list[dict[str, object]],
@@ -293,6 +346,44 @@ def assign_harnesses(
 
     combinations = list(itertools.product(*options))
     distinct = [rows for rows in combinations if len({row[0] for row in rows}) >= 2]
+    # SD-100 ① peer-gate (W1b): a realized peer leg must land on a quality-peer
+    # family, otherwise the group's gate authority would rest entirely on
+    # non-quality-peer harnesses with zero ledger evidence (plan.md 1.2
+    # regression window). Placed between the `distinct` computation and the
+    # `elif allow_degraded:` branch; `allow_degraded` never bypasses it (AC 11).
+    # With no sealed harness_policy the gate is not-applicable (D8-①).
+    policy_by_profile = _policy_by_profile(route, nodes)
+    quality_peer = (
+        quality_peer_families(policy_by_profile) if policy_by_profile else None
+    )
+    sole_gate = "not-applicable" if quality_peer is None else "ok"
+    if quality_peer is not None:
+        peer_indices = [
+            index for index, node in enumerate(nodes)
+            if node.get("leg_class") == "peer"
+        ]
+        if peer_indices:
+            gated = [
+                rows for rows in combinations
+                if any(rows[index][0] in quality_peer for index in peer_indices)
+            ]
+            if gated:
+                combinations = gated
+                distinct = [
+                    rows for rows in gated
+                    if len({row[0] for row in rows}) >= 2
+                ]
+            elif usable and (set(usable) & quality_peer):
+                raise BatchError(
+                    "parallel-cross-harness-unavailable",
+                    "peer-gate:no-peer-leg-on-quality-peer-family",
+                    degradation_reason="sole-gate-non-peer-harness",
+                )
+            else:
+                # No hard-eligible quality-peer family at all: the assignment
+                # proceeds but records reason=sole-gate-non-peer-harness
+                # (spec 13.30.2 proviso).
+                sole_gate = "degraded"
     independence = "cross-harness"
     if len(usable) >= 2:
         # Group width is >= 2 and every leg holds >= 1 option, so two usable
@@ -309,6 +400,13 @@ def assign_harnesses(
                 f"usable={','.join(usable)}",
             )
         combinations = distinct
+    elif sole_gate == "degraded":
+        # SD-100 proviso (13.30.2): no quality-peer family is hard-eligible, so
+        # the group may proceed on non-peer harnesses without the
+        # --allow-degraded-independence flag. The sole-gate degradation is
+        # recorded separately by the caller; the generic single-family
+        # degradation_cause stays empty so the two reasons never double-write.
+        independence = "degraded-same-harness"
     elif allow_degraded:
         independence = "degraded-same-harness"
     else:
@@ -322,6 +420,8 @@ def assign_harnesses(
         )
 
     degradation_cause = "" if independence == "cross-harness" else "single-usable-harness-family"
+    if sole_gate == "degraded":
+        degradation_cause = ""
     if degradation_cause and degradation_cause not in DEGRADATION_CAUSES:
         # defensive: unreachable -- degradation_cause is only ever assigned
         # the literal "single-usable-harness-family" two lines above.
@@ -399,6 +499,8 @@ def assign_harnesses(
     diagnostics = {
         "families_considered": list(SUPPORTED_BATCH_HARNESSES),
         "usable_families": usable,
+        "quality_peer_families": sorted(quality_peer) if quality_peer is not None else None,
+        "sole_gate": sole_gate,
         "family_exclusions": {
             adapter: sorted(reasons)
             for adapter, reasons in sorted(exclusions.items())
@@ -1428,6 +1530,7 @@ def main(argv: list[str] | None = None) -> int:
         selection_diagnostics=diagnostics,
     )
     _persist_launched_degradation(agent_home, route, diagnostics, results)
+    _persist_sole_gate_degradation(agent_home, route, diagnostics, results)
     receipt["degradation_ledger"] = _record_failed_legs(route, results, agent_home) or "-"
     print(json.dumps(receipt, separators=(",", ":"), sort_keys=True))
     if interrupted_signal:

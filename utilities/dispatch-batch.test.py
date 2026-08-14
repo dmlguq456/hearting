@@ -559,6 +559,137 @@ class DispatchBatchTest(unittest.TestCase):
         self.assertIn("usable=claude", ctx.exception.detail)
         self.assertIn("codex=unsupported", ctx.exception.detail)
 
+    def _quality_peer_nodes(self, peer_families, aux_families):
+        """Build a 2-peer + 1-auxiliary group whose policies derive
+        quality-peer = {claude, codex}, with per-family eligibility lists."""
+        def node(node_id, profile, families, leg_class):
+            return {
+                "id": node_id,
+                "dispatch_depth": 2,
+                "model_profile": profile,
+                "leg_class": leg_class,
+                "harness_affinity": "diverse",
+                "harness_policy": {
+                    "primary": ["claude", "codex"],
+                    "relief": ["opencode"],
+                    "last_resort": [],
+                    "promote_relief_below": 0,
+                },
+                "fallback_hops": [
+                    {"ordinal": 1, "fallback_hop": "cross-harness-headless", "candidates": [
+                        {"child_harness": a, "status": "supported" if a in families else "unsupported"}
+                        for a in BATCH.SUPPORTED_BATCH_HARNESSES
+                    ]},
+                ],
+            }
+        return [
+            node("x", "deep", peer_families, "peer"),
+            node("x-alternative", "balanced-deep", peer_families, "peer"),
+            node("x-simplicity", "light", aux_families, "auxiliary"),
+        ]
+
+    def test_ac11_peer_gate_fails_closed_without_bypass_flag(self):
+        # AC 11 negative: peer legs are only opencode-eligible while the
+        # auxiliary leg is claude-eligible, so usable & quality_peer is
+        # non-empty and no combination puts a peer on a quality-peer family.
+        # The peer-gate hard filter must reject even under
+        # --allow-degraded-independence (no escape), leaving row 0/process 0.
+        nodes = self._quality_peer_nodes(
+            peer_families=["opencode"], aux_families=["claude"]
+        )
+        route = {
+            "route_id": "rt-fixture", "route_hash": "sha256:fixture",
+            "owner_harness_policy": {
+                "primary": ["claude", "codex"], "relief": ["opencode"],
+                "last_resort": [], "promote_relief_below": 0,
+            },
+        }
+        for allow_degraded in (False, True):
+            with self.subTest(allow_degraded=allow_degraded):
+                with mock.patch.object(
+                    BATCH.DISPATCH_NODE, "resolve_checked_tuple", side_effect=resolve_side_effect
+                ), self.assertRaises(BATCH.BatchError) as ctx:
+                    BATCH.assign_harnesses(
+                        route, nodes, allow_degraded=allow_degraded
+                    )
+                self.assertEqual(
+                    ctx.exception.reason, "parallel-cross-harness-unavailable"
+                )
+                self.assertEqual(
+                    ctx.exception.degradation_reason, "sole-gate-non-peer-harness"
+                )
+
+    def test_ac11_peer_gate_positive_assigns_quality_peer_and_aux_opencode(self):
+        # AC 11 positive: peer legs are claude/codex-eligible and the auxiliary
+        # leg is opencode-eligible; the group may mix opencode on the auxiliary
+        # while the gate authority stays on quality-peer families.
+        nodes = self._quality_peer_nodes(
+            peer_families=["claude", "codex"], aux_families=["opencode"]
+        )
+        route = {
+            "route_id": "rt-fixture", "route_hash": "sha256:fixture",
+            "owner_harness_policy": {
+                "primary": ["claude", "codex"], "relief": ["opencode"],
+                "last_resort": [], "promote_relief_below": 0,
+            },
+        }
+        with mock.patch.object(
+            BATCH.DISPATCH_NODE, "resolve_checked_tuple", side_effect=resolve_side_effect
+        ):
+            rows, independence, diagnostics = BATCH.assign_harnesses(
+                route, nodes, allow_degraded=False
+            )
+        self.assertEqual(independence, "cross-harness")
+        peer_rows = [row for row in rows if row[0]["leg_class"] == "peer"]
+        aux_rows = [row for row in rows if row[0]["leg_class"] == "auxiliary"]
+        self.assertTrue(
+            all(row[1] in {"claude", "codex"} for row in peer_rows),
+            peer_rows,
+        )
+        self.assertEqual([row[1] for row in aux_rows], ["opencode"])
+        self.assertEqual(diagnostics["sole_gate"], "ok")
+        self.assertEqual(
+            diagnostics["quality_peer_families"], ["claude", "codex"]
+        )
+
+    def test_ac11_sole_gate_degradation_when_quality_peer_is_ineligible(self):
+        # When no quality-peer family is hard-eligible at all, the proviso
+        # (spec 13.30.2) lets the assignment proceed but records
+        # sole-gate-non-peer-harness.
+        nodes = self._quality_peer_nodes(
+            peer_families=["opencode"], aux_families=["opencode"]
+        )
+        route = {
+            "route_id": "rt-fixture", "route_hash": "sha256:fixture",
+            "owner_harness_policy": {
+                "primary": ["claude", "codex"], "relief": ["opencode"],
+                "last_resort": [], "promote_relief_below": 0,
+            },
+        }
+        with mock.patch.object(
+            BATCH.DISPATCH_NODE, "resolve_checked_tuple", side_effect=resolve_side_effect
+        ):
+            rows, independence, diagnostics = BATCH.assign_harnesses(
+                route, nodes, allow_degraded=False
+            )
+        self.assertEqual(diagnostics["sole_gate"], "degraded")
+        self.assertEqual(diagnostics["usable_families"], ["opencode"])
+        self.assertEqual({row[1] for row in rows}, {"opencode"})
+
+    def test_harness_policy_absent_marks_sole_gate_not_applicable(self):
+        # D8-①: no sealed harness_policy anywhere -> the peer-gate is
+        # not-applicable and the filter is skipped entirely.
+        nodes = [replica_node("plan", "diverse"), replica_node("plan-replica", "diverse")]
+        route = {"route_id": "rt-fixture", "route_hash": "sha256:fixture"}
+        with mock.patch.object(
+            BATCH.DISPATCH_NODE, "resolve_checked_tuple", side_effect=resolve_side_effect
+        ):
+            rows, independence, diagnostics = BATCH.assign_harnesses(
+                route, nodes, allow_degraded=False
+            )
+        self.assertEqual(diagnostics["sole_gate"], "not-applicable")
+        self.assertIsNone(diagnostics["quality_peer_families"])
+
     def test_exclusion_detail_renders_every_reason_for_a_multi_reason_adapter(self):
         # G1: codex fails with a *different* typed reason on each leg
         # (candidate-unsupported on "plan", no-eligible-fallback on the

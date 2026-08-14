@@ -305,6 +305,16 @@ def validate(config, capmap):
                     errors.append(
                         f"profiles.{name}.promote_relief_below must be an integer from 0 to 100"
                     )
+            # AC 9 band placement gate (D8-③): OpenCode is a light-tier harness and
+            # must never be placed in a deep/balanced-deep primary band; that would
+            # silently push the quality-peer gate authority onto a non-quality-peer
+            # family. light.primary may legitimately include opencode.
+            for deep_band in ("deep", "balanced-deep"):
+                if "opencode" in (profiles.get(deep_band) or {}).get("primary", []):
+                    errors.append(
+                        f"profiles.{deep_band}.primary must not include opencode "
+                        "(quality-peer bands require claude/codex)"
+                    )
 
     allocation = config.get("allocation")
     if version in {2, 3}:

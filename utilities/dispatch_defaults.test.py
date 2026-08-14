@@ -52,6 +52,49 @@ class DispatchDefaultsV3Tests(unittest.TestCase):
                 os.environ.pop("DISPATCH_DEFAULTS_CONFIG", None)
                 self.assertEqual(Path(D.default_config_path()), path)
 
+    def test_ac9_opencode_rejected_in_deep_quality_bands(self):
+        # AC 9 band placement gate: opencode in deep/balanced-deep primary is a
+        # validation error; opencode in light.primary stays legal.
+        capmap = D.load_topology_capabilities(D.default_topology_path())
+        for band in ("deep", "balanced-deep"):
+            config = self.config()
+            config["profiles"][band]["primary"] = ["claude", "codex", "opencode"]
+            config["profiles"][band]["last_resort"] = []
+            errors = D.validate(config, capmap)
+            self.assertTrue(
+                any(band in error and "must not include opencode" in error for error in errors),
+                f"missing AC 9 rejection for {band}: {errors}",
+            )
+        config = self.config()
+        config["profiles"]["light"]["primary"] = ["claude", "codex", "opencode"]
+        config["profiles"]["light"]["relief"] = []
+        self.assertEqual(D.validate(config, capmap), [])
+
+    def test_ac10_quality_peer_set_follows_the_config(self):
+        # AC 10: the quality-peer derivation is config-driven, never hardcoded.
+        # Moving a family out of a deep band moves the derived set with it.
+        self.assertEqual(
+            D.query_profile_policy(self.config(), "deep")["primary"], ["claude", "codex"]
+        )
+        self.assertEqual(
+            D.query_profile_policy(self.config(), "balanced-deep")["primary"], ["claude", "codex"]
+        )
+        peer = importlib.util.spec_from_file_location(
+            "dispatch_quality_peer_under_test",
+            Path(__file__).with_name("dispatch_quality_peer.py"),
+        )
+        QP = importlib.util.module_from_spec(peer)
+        peer.loader.exec_module(QP)
+        config = self.config()
+        by_profile = {name: D.query_profile_policy(config, name) for name in ("deep", "balanced-deep", "light")}
+        self.assertEqual(QP.quality_peer_families(by_profile), frozenset({"claude", "codex"}))
+        config["profiles"]["deep"]["primary"] = ["claude"]
+        config["profiles"]["deep"]["relief"] = ["codex", "opencode"]
+        config["profiles"]["deep"]["last_resort"] = []
+        by_profile = {name: D.query_profile_policy(config, name) for name in ("deep", "balanced-deep", "light")}
+        self.assertEqual(QP.quality_peer_families(by_profile), frozenset({"claude"}))
+        self.assertIsNone(QP.quality_peer_families(None))
+
 
 class ShippedBaselineMergeTests(unittest.TestCase):
     def sparse_v3_text(self):

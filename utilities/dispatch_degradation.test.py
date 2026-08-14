@@ -131,6 +131,49 @@ record_degradation(agent_home=sys.argv[1], route_id='rt-race', route_node='execu
                 self.assertTrue(line.endswith(b"\n"))
                 self.assertEqual(json.loads(line)["route_id"], "rt-race")
 
+    def test_new_optional_fields_survive_into_ledger_content(self):
+        # R6/D7: every new typed-reason field added in v43 must be carried into
+        # the ledger row verbatim, not silently dropped by the closed allowlist.
+        with tempfile.TemporaryDirectory() as home:
+            path = record_degradation(agent_home=home, route_id="rt-v43", route_node="execute",
+                                      route_hash="sha256:v43", dispatch_depth=2,
+                                      fallback_hop="cross-harness-headless",
+                                      execution_surface="registered-headless",
+                                      writer="capability-route.py",
+                                      reason="parent-cross-same-harness",
+                                      leg_class="peer", auxiliary_check="-",
+                                      parent_cross="degraded", cause="affinity-pinned",
+                                      sole_gate="degraded",
+                                      subsession_id="ss-v43-w1c-claude",
+                                      slice_manifest_sha256="sha256:slice")
+            self.assertIsNotNone(path)
+            with open(path, encoding="utf-8") as stream:
+                row = json.loads(stream.readline())
+            self.assertEqual(row["writer"], "capability-route.py")
+            self.assertEqual(row["leg_class"], "peer")
+            self.assertEqual(row["auxiliary_check"], "-")
+            self.assertEqual(row["parent_cross"], "degraded")
+            self.assertEqual(row["cause"], "affinity-pinned")
+            self.assertEqual(row["sole_gate"], "degraded")
+            self.assertEqual(row["subsession_id"], "ss-v43-w1c-claude")
+            self.assertEqual(row["slice_manifest_sha256"], "sha256:slice")
+            self.assertEqual(row["reason"], "parent-cross-same-harness")
+
+    def test_capability_route_writer_is_authorized(self):
+        # D7: without capability-route.py on the writer allowlist the SD-103
+        # owner-side record would silently produce no row at all.
+        with tempfile.TemporaryDirectory() as home:
+            path = record_degradation(agent_home=home, route_id="rt-owner", route_node="execute",
+                                      route_hash="sha256:owner", dispatch_depth=2,
+                                      fallback_hop=None, execution_surface="registered-headless",
+                                      writer="capability-route.py",
+                                      reason="subdivision-scope-violation")
+            self.assertIsNotNone(path)
+            with open(path, encoding="utf-8") as stream:
+                row = json.loads(stream.readline())
+            self.assertEqual(row["writer"], "capability-route.py")
+            self.assertEqual(row["reason"], "subdivision-scope-violation")
+
 
 if __name__ == "__main__":
     unittest.main()

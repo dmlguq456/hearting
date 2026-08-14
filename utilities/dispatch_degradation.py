@@ -15,7 +15,7 @@ from dispatch_contract import resolve_dispatch_state_root as _resolve_dispatch_s
 _KINDS = {"degradation", "chain-exhausted", "leg-failure"}
 _HOPS = {"same-harness-headless", "cross-harness-headless", "native-subagent", "inline"}
 _SURFACES = {"registered-headless", "codex-native-subagent", "claude-subagent", "inline"}
-_OPTIONAL = {"fallback_ordinal", "fleet_visibility", "reason", "detail", "registered_worker", "capability", "completion_gate", "route_file", "parent", "parent_attempt_id", "parent_pid", "parent_pid_start", "harness", "attempt_trace", "prior_attempt_ids", "last_direct_failure", "child_proof", "parallel_group", "parallel_leg_index", "parallel_leg_count", "attempt_id", "exit_code", "launch_state", "event_id"}
+_OPTIONAL = {"fallback_ordinal", "fleet_visibility", "reason", "detail", "registered_worker", "capability", "completion_gate", "route_file", "parent", "parent_attempt_id", "parent_pid", "parent_pid_start", "harness", "attempt_trace", "prior_attempt_ids", "last_direct_failure", "child_proof", "parallel_group", "parallel_leg_index", "parallel_leg_count", "attempt_id", "exit_code", "launch_state", "event_id", "leg_class", "auxiliary_check", "parent_cross", "cause", "sole_gate", "subsession_id", "slice_manifest_sha256"}
 
 def _home():
     return str(_resolve_agent_home())
@@ -34,7 +34,7 @@ def record_degradation(*, route_id=None, route_node=None, route_hash=None, dispa
     """Append one bounded record; every failure is intentionally swallowed."""
     try:
         depth = int(dispatch_depth)
-        if depth not in {1, 2} or kind not in _KINDS or writer not in {"stage-dispatch-fallback.py", "dispatch-batch.py"} or (fallback_hop is not None and fallback_hop not in _HOPS):
+        if depth not in {1, 2} or kind not in _KINDS or writer not in {"stage-dispatch-fallback.py", "dispatch-batch.py", "capability-route.py"} or (fallback_hop is not None and fallback_hop not in _HOPS):
             return None
         row = {"schema_version": 1, "kind": kind, "ts": time.time(), "route_id": route_id if isinstance(route_id, str) else None, "route_node": route_node if isinstance(route_node, str) else None, "route_hash": route_hash if isinstance(route_hash, str) else None, "dispatch_depth": depth, "fallback_hop": fallback_hop, "execution_surface": execution_surface if execution_surface in _SURFACES else None, "writer": writer}
         for key in _OPTIONAL:
