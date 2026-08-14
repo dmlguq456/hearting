@@ -1164,6 +1164,32 @@ def main(argv: list[str] | None = None) -> int:
                 args.subdivision_manifest, route=route, node=node, record=_record
             )
             args.subdivision_fallback = _reason is not None
+            if args.subdivision_fallback:
+                # G7: typed single-session descent. The manifest could not be
+                # proven disjoint/in-scope (the fallback ledger row was already
+                # recorded above); this admission never becomes a 2..4-way
+                # replica batch. dispatch-batch.py's whole pipeline (build_manifest,
+                # independence axes, quality-peer gating) is structurally a
+                # 2..4-way contract, so a fallback exits here with a typed
+                # receipt instead of forcing a 1-leg batch through it -- the
+                # caller runs the node as one ordinary (non-batch) session.
+                print(json.dumps({
+                    "schema_version": 2,
+                    "state": "single-session-required",
+                    "action": args.action,
+                    "parallel_group": args.parallel_group,
+                    "replica_group": args.parallel_group,
+                    "reason": "subdivision-disjointness-unproven",
+                }, separators=(",", ":"), sort_keys=True))
+                return 0
+            else:
+                manifest_sessions = _manifest["sessions"]
+                if len(manifest_sessions) != len(nodes):
+                    raise BatchError(
+                        "subdivision-manifest-session-count-mismatch",
+                        f"sessions={len(manifest_sessions)}:legs={len(nodes)}",
+                    )
+                args.subdivision_manifest_sessions = manifest_sessions
         parent_identity = DISPATCH_NODE.current_parent_identity()
         if parent_identity is None:
             raise BatchError("parent-runtime-identity-missing")
@@ -1235,8 +1261,9 @@ def main(argv: list[str] | None = None) -> int:
     assignment_digest = "sha256:" + hashlib.sha256(
         args.prompt_text.encode("utf-8")
     ).hexdigest()
+    manifest_sessions = getattr(args, "subdivision_manifest_sessions", None)
     legs = []
-    for node, adapter, hop, ordinal in assignments:
+    for leg_index, (node, adapter, hop, ordinal) in enumerate(assignments):
         node_id = str(node["id"])
         slug = parallel_slug(args.slug_prefix, node_id)
         attempt_id = stable_attempt_id(
@@ -1248,27 +1275,33 @@ def main(argv: list[str] | None = None) -> int:
             adapter,
             ordinal,
         )
-        legs.append(
-            {
-                "node": node_id,
-                "adapter": adapter,
-                "hop": hop,
-                "ordinal": ordinal,
-                "slug": slug,
-                "attempt_id": attempt_id,
-                "assignment_sha256": assignment_digest,
-                "independence": independence,
-                "model_profile": str(node.get("model_profile")),
-                "perspective": str(node.get("perspective")),
-                "parallel_leg_index": int(node.get("parallel_leg_index", len(legs))),
-                "leg_class": str(node.get("leg_class") or "peer"),
-                "auxiliary_check": (
-                    str(node["auxiliary_check"])
-                    if node.get("leg_class") == "auxiliary"
-                    else None
-                ),
-            }
-        )
+        leg = {
+            "node": node_id,
+            "adapter": adapter,
+            "hop": hop,
+            "ordinal": ordinal,
+            "slug": slug,
+            "attempt_id": attempt_id,
+            "assignment_sha256": assignment_digest,
+            "independence": independence,
+            "model_profile": str(node.get("model_profile")),
+            "perspective": str(node.get("perspective")),
+            "parallel_leg_index": int(node.get("parallel_leg_index", leg_index)),
+            "leg_class": str(node.get("leg_class") or "peer"),
+            "auxiliary_check": (
+                str(node["auxiliary_check"])
+                if node.get("leg_class") == "auxiliary"
+                else None
+            ),
+        }
+        if manifest_sessions is not None:
+            # G7: consume the validated SD-103 subdivision manifest instead of
+            # discarding it -- each leg carries the exact sub-session identity
+            # and disjoint fixed_files the admission check already proved safe.
+            session = manifest_sessions[leg_index]
+            leg["subsession_id"] = str(session["subsession_id"])
+            leg["fixed_files"] = list(session["fixed_files"])
+        legs.append(leg)
     manifest, manifest_digest, leg_digests = build_manifest(
         parallel_group=args.parallel_group,
         route_id=str(route["route_id"]),

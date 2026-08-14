@@ -1608,6 +1608,137 @@ class DispatchBatchTest(unittest.TestCase):
         self.assertTrue(stdout.rstrip().endswith("OUT"))
         self.assertTrue(stderr.rstrip().endswith("ERR"))
 
+    def _subdivision_route_and_manifest(self, sessions):
+        node = dict(replica_node("plan", "codex"))
+        node["completion_gate"] = "code-plan-check"
+        node["subdivision"] = {
+            "min_intensity": "strong", "max_slices": 4, "disjointness": "exact-fixed-files",
+        }
+        node["write_scope"] = ["source/**"]
+        node2 = dict(replica_node("plan-replica", "claude"))
+        node2["completion_gate"] = "code-plan-check"
+        route = dict(self.route)
+        route["nodes"] = [node, node2]
+        for session in sessions:
+            Path(session["phase_brief"]).write_text("slice brief\n", encoding="utf-8")
+        manifest_path = self.base / "chain.json"
+        manifest = {
+            "schema_version": 1,
+            "kind": "stage-session-chain",
+            "chain_id": "ssc-fixture",
+            "mode": "parallel",
+            "worktree": str(self.base),
+            "route_file": str(self.route_path),
+            "route_id": route["route_id"],
+            "route_hash": route["route_hash"],
+            "route_node": "plan",
+            "completion_gate": "code-plan-check",
+            "sessions": sessions,
+        }
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+        return route, manifest_path
+
+    def _subdivision_dry_run(self, route, manifest_path):
+        output = io.StringIO()
+        def fake_assign_harnesses(_route, nodes, **_kw):
+            harnesses = ["codex", "claude", "opencode", "codex"]
+            assignments = [
+                (node, harnesses[index % len(harnesses)], "same-harness-headless", 1)
+                for index, node in enumerate(nodes)
+            ]
+            diagnostics = {
+                "families_considered": ["codex", "claude", "opencode"],
+                "usable_families": ["codex"],
+                "family_exclusions": {},
+                "capacity": {"codex": None, "claude": None, "opencode": None},
+                "degradation_cause": "",
+            }
+            return assignments, "cross-harness", diagnostics
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(mock.patch.object(BATCH, "load_route", return_value=route))
+            stack.enter_context(mock.patch.object(BATCH, "assign_harnesses", side_effect=fake_assign_harnesses))
+            stack.enter_context(mock.patch.object(BATCH, "resolve_agent_home", return_value=self.base))
+            stack.enter_context(mock.patch.object(BATCH, "resolve_global_registry", return_value=SimpleNamespace(path=self.jobs)))
+            stack.enter_context(mock.patch.object(BATCH, "resolve_live_parent_attempt"))
+            stack.enter_context(mock.patch.object(BATCH, "completion_marker_gate"))
+            stack.enter_context(mock.patch.object(BATCH.subprocess, "check_output", return_value=str(self.base)))
+            stack.enter_context(mock.patch.dict(os.environ, {
+                "AGENT_DISPATCH_SELF_SLUG": "owner",
+                "AGENT_DISPATCH_ATTEMPT_ID": "att-parent-fixture",
+                "AGENT_DISPATCH_CURRENT_HARNESS": "codex",
+                "AGENT_DISPATCH_CURRENT_TRANSPORT": "headless",
+                "AGENT_DISPATCH_CURRENT_SANDBOX": "workspace-write",
+            }))
+            argv = self.argv("dry-run") + ["--subdivision-manifest", str(manifest_path)]
+            with contextlib.redirect_stdout(output):
+                rc = BATCH.main(argv)
+        return rc, output.getvalue()
+
+    def test_g7_subdivision_fallback_descends_to_a_single_session(self):
+        # An overlapping fixed_files pair cannot be proven disjoint, so
+        # validate_subdivision_or_fallback returns the typed fallback reason.
+        # G7: that must actually change what gets launched -- one leg, not two.
+        shared = str(self.base / "source" / "shared.py")
+        sessions = [
+            {"subsession_id": "ss-slice-1", "attempt_id": "att-slice-aaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+             "adapter": "codex", "slug": "slice-1", "phase_brief": str(self.base / "b1.md"),
+             "fixed_files": [shared], "narrow_verify": "true", "expected_round_trips": 2},
+            {"subsession_id": "ss-slice-2", "attempt_id": "att-slice-bbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+             "adapter": "codex", "slug": "slice-2", "phase_brief": str(self.base / "b2.md"),
+             "fixed_files": [shared], "narrow_verify": "true", "expected_round_trips": 2},
+        ]
+        route, manifest_path = self._subdivision_route_and_manifest(sessions)
+        with mock.patch.object(BATCH, "record_degradation") as record:
+            rc, out = self._subdivision_dry_run(route, manifest_path)
+        self.assertEqual(rc, 0, out)
+        receipt = json.loads(out)
+        self.assertEqual(receipt["state"], "single-session-required")
+        self.assertEqual(receipt["reason"], "subdivision-disjointness-unproven")
+        record.assert_called_once()
+        self.assertEqual(record.call_args.kwargs["reason"], "subdivision-disjointness-unproven")
+
+    def test_g7_subdivision_manifest_is_consumed_into_legs(self):
+        # A disjoint, in-scope, exactly-sized manifest validates successfully;
+        # G7: its sessions must be consumed, not discarded -- each launched
+        # leg carries the exact subsession_id/fixed_files the check proved safe.
+        sessions = [
+            {"subsession_id": "ss-slice-1", "attempt_id": "att-slice-aaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+             "adapter": "codex", "slug": "slice-1", "phase_brief": str(self.base / "b1.md"),
+             "fixed_files": [str(self.base / "source" / "a.py")],
+             "narrow_verify": "true", "expected_round_trips": 2},
+            {"subsession_id": "ss-slice-2", "attempt_id": "att-slice-bbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+             "adapter": "codex", "slug": "slice-2", "phase_brief": str(self.base / "b2.md"),
+             "fixed_files": [str(self.base / "source" / "b.py")],
+             "narrow_verify": "true", "expected_round_trips": 2},
+        ]
+        route, manifest_path = self._subdivision_route_and_manifest(sessions)
+        with mock.patch.object(BATCH, "record_degradation") as record:
+            rc, out = self._subdivision_dry_run(route, manifest_path)
+        self.assertEqual(rc, 0, out)
+        receipt = json.loads(out)
+        self.assertEqual(len(receipt["legs"]), 2)
+        record.assert_not_called()
+        got = {leg["subsession_id"]: leg["fixed_files"] for leg in receipt["legs"]}
+        self.assertEqual(got["ss-slice-1"], [str(self.base / "source" / "a.py")])
+        self.assertEqual(got["ss-slice-2"], [str(self.base / "source" / "b.py")])
+
+    def test_g7_subdivision_manifest_session_count_must_match_group_width(self):
+        # A manifest that itself validates (3 disjoint, in-scope sessions, within
+        # the node's declared max_slices=4) but does not match the realized
+        # 2-way group width is a distinct typed rejection, not a silent
+        # partial launch or an arbitrary pick of the first 2 sessions.
+        sessions = [
+            {"subsession_id": f"ss-slice-{n}", "attempt_id": f"att-slice-{n}{'a' * 26}",
+             "adapter": "codex", "slug": f"slice-{n}", "phase_brief": str(self.base / f"b{n}.md"),
+             "fixed_files": [str(self.base / "source" / f"{n}.py")],
+             "narrow_verify": "true", "expected_round_trips": 2}
+            for n in (1, 2, 3)
+        ]
+        route, manifest_path = self._subdivision_route_and_manifest(sessions)
+        rc, out = self._subdivision_dry_run(route, manifest_path)
+        self.assertNotEqual(rc, 0)
+        self.assertIn("subdivision-manifest-session-count-mismatch", out)
+
 
 class DispatchBatchIntegrationTest(unittest.TestCase):
     """Exercise the full checked two-way launch path with local fake CLIs."""

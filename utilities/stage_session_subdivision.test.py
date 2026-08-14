@@ -12,6 +12,7 @@ import os
 from pathlib import Path
 import tempfile
 import unittest
+from unittest import mock
 
 import importlib.util
 
@@ -141,26 +142,109 @@ class SubdivisionContractTest(unittest.TestCase):
             manifest = SSC.load_manifest(manifest_path, route=route, node=node)
             self.assertEqual(len(manifest["sessions"]), 2)
 
+    def _attempt_row(self, *, route, manifest, session, index, count, timestamp="2026-08-14T00:00:00Z"):
+        fake_sha = "a" * 64
+        fields = {
+            "attempt_schema_version": "2",
+            "attempt_id": session["attempt_id"],
+            "dispatch_depth": "2",
+            "transport": "interactive",
+            "execution_surface": "inline",
+            "registered_worker": "0",
+            "fallback_hop": "inline",
+            "note": "completed-marker",
+            "failure_class": "pass",
+            "launch_outcome": "reaped-before-publish",
+            "route_id": route["route_id"],
+            "route_hash": route["route_hash"],
+            "route_node": manifest["route_node"],
+            "subsession_id": session["subsession_id"],
+            "stage_authority": "0",
+            "session_chain_id": manifest["chain_id"],
+            "subsession_index": str(index),
+            "subsession_count": str(count),
+            "subsession_mode": "parallel",
+            "subsession_purpose": "planned",
+            "parallel_group": manifest["route_node"],
+            "phase_brief": session["phase_brief"],
+            "phase_brief_sha256": fake_sha,
+            "state_ledger": str(Path(session["phase_brief"]).with_suffix(".ledger.json")),
+            "fixed_files_sha256": fake_sha,
+            "narrow_verify_sha256": fake_sha,
+            "expected_round_trips": str(session["expected_round_trips"]),
+        }
+        blob = ",".join(f"{key}={value}" for key, value in fields.items())
+        return "\t".join([timestamp, "done", "/repo", str(Path(manifest["worktree"])), session["slug"], blob])
+
+    def _write_jobs(self, jobs_path, route, manifest):
+        sessions = manifest["sessions"]
+        lines = [
+            self._attempt_row(route=route, manifest=manifest, session=session, index=i + 1, count=len(sessions))
+            for i, session in enumerate(sessions)
+        ]
+        jobs_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
     def test_ac27_marker_requires_all_slices_and_slice_complete_refused(self):
+        # G7: exercise complete_subsession_stage through production code --
+        # exactly one aggregated marker for the two slices, and an attempt to
+        # complete the stage gate directly off one slice's own attempt row
+        # (stage_authority=0) is refused, not silently accepted.
         with tempfile.TemporaryDirectory() as td:
             worktree, route, node, manifest_path = self._fixture(td)
             manifest = SSC.load_manifest(manifest_path, route=route, node=node)
-            self.assertEqual(manifest["_manifest_sha256"],
-                             SSC.sha256_file(manifest_path))
-            # a parallel subdivision keeps the single stage gate: the manifest
-            # declares every slice under the same chain/gate identity
-            self.assertEqual(len(manifest["sessions"]), 2)
-            self.assertEqual(manifest["completion_gate"], "execute-complete")
+            jobs_path = Path(td) / "jobs.log"
+            self._write_jobs(jobs_path, route, manifest)
+            evidence = Path(td) / "evidence.md"
+            evidence.write_text("execute done\n", encoding="utf-8")
+            with mock.patch.dict(os.environ, {"AGENT_DISPATCH_JOBS": str(jobs_path)}):
+                marker, status = CR.complete_subsession_stage(
+                    route, node, "execute", evidence, manifest_path, jobs_path,
+                )
+                self.assertEqual(status["status"], "stage-gate-aggregated")
+                self.assertEqual(status["sessions"], 2)
+                self.assertEqual(marker["node_id"], "execute")
+                self.assertTrue(str(marker["attempt_id"]).startswith("att-stage-"))
+                completion_dir = CR.completion_dir(route["route_id"])
+                canonical_marker = completion_dir / "execute.json"
+                self.assertTrue(canonical_marker.is_file())
+                history_markers = list(completion_dir.glob("execute.*.json"))
+                self.assertEqual(len(history_markers), 1)
+                # A second aggregation call with the same manifest/jobs must stay
+                # exactly one canonical marker + one history entry (idempotent
+                # resume by manifest hash), not fan out a duplicate.
+                CR.complete_subsession_stage(route, node, "execute", evidence, manifest_path, jobs_path)
+                history_markers_again = list(completion_dir.glob("execute.*.json"))
+                self.assertEqual(len(history_markers_again), 1)
+                # A slice's own attempt row carries no stage-gate authority: a
+                # direct `complete` off it must be refused, not silently accepted.
+                slice_attempt_id = manifest["sessions"][0]["attempt_id"]
+                with self.assertRaisesRegex(ValueError, "subsession-has-no-stage-gate-authority"):
+                    CR.complete_node(route, node, "execute", evidence, jobs=jobs_path, attempt_id=slice_attempt_id)
 
     def test_ac28_diff_scope_violation_refuses_marker(self):
+        # G7: an unplanned change outside the declared fixed_files union must
+        # be caught by complete_subsession_stage itself -- typed rejection,
+        # subdivision-scope-violation ledger row, and no marker written --
+        # not merely detected by the raw git-diff helper in isolation.
         with tempfile.TemporaryDirectory() as td:
             worktree, route, node, manifest_path = self._fixture(td)
             manifest = SSC.load_manifest(manifest_path, route=route, node=node)
-            # an unplanned change outside the declared union must be flagged
+            jobs_path = Path(td) / "jobs.log"
+            self._write_jobs(jobs_path, route, manifest)
+            evidence = Path(td) / "evidence.md"
+            evidence.write_text("execute done\n", encoding="utf-8")
             rogue = worktree / "rogue.py"
-            rogue.write_text("x")
-            changed = CR._git_changed_files(worktree)
-            self.assertIn(rogue.resolve(), changed)
+            rogue.write_text("unplanned change\n", encoding="utf-8")
+            recorded = []
+            with mock.patch.dict(os.environ, {"AGENT_DISPATCH_JOBS": str(jobs_path)}):
+                with mock.patch.object(CR, "record_degradation", side_effect=lambda **kw: recorded.append(kw)):
+                    with self.assertRaisesRegex(ValueError, "subdivision-scope-violation"):
+                        CR.complete_subsession_stage(route, node, "execute", evidence, manifest_path, jobs_path)
+                self.assertEqual(len(recorded), 1)
+                self.assertEqual(recorded[0]["reason"], "subdivision-scope-violation")
+                completion_dir = CR.completion_dir(route["route_id"])
+                canonical_marker = completion_dir / "execute.json"
+                self.assertFalse(canonical_marker.is_file())
 
     def test_ac29_gap_retry_uses_only_failed_slice_files(self):
         with tempfile.TemporaryDirectory() as td:
