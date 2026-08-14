@@ -108,17 +108,18 @@ class SummaryRowRenderTest(unittest.TestCase):
         return render._build_lines(sessions, jobs or [], section="fleet", narrow=False,
                                    malformed=0, term_width=term_width)
 
-    def test_summary_renders_as_its_own_dim_row(self):
+    def test_summary_renders_as_its_own_main_session_row(self):
         summary = "지금 render.py 그룹 루프의 틴트 적용 경로를 분석 중"
         s = self._session(summary=summary)
         lines = self._lines_for([s])
         hits = [ln for ln in lines if ln and summary in "".join(t for t, _k in ln)]
         self.assertEqual(len(hits), 1)
-        # the segment carrying the summary text itself must be dim — leading segments
-        # (tint fill / rail marker / indent) are excluded since they carry the panel's
-        # own coloring, not the subtitle's (mirrors test_f29's tint-stripping pattern).
+        # F-69 (user 2026-08-14): a MAIN session's NOW sentence is the board's
+        # most-read line — it carries the brighter bold `now_main` key while
+        # dispatch subtitles keep the dim supporting weight. Leading segments
+        # (tint fill / rail marker / indent) are excluded as before.
         text_seg = next((t, k) for t, k in hits[0] if summary in t)
-        self.assertEqual(text_seg[1], "dim")
+        self.assertEqual(text_seg[1], "now_main")
 
     def test_summary_absent_still_renders_one_context_dash_row(self):
         # The combined subtitle/context detail row is mandatory on every live identity card —

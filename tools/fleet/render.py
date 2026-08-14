@@ -189,6 +189,11 @@ _HUE_OF = {
     "frm0_off": ("l", _A_D), "frm1_off": ("c", _A_D), "frm2_off": ("g", _A_D),
     "frm3_off": ("y", _A_D), "frm4_off": ("m", _A_D),
     "frm_idle": ("d", _A_D),
+    # F-69 (user 2026-08-14): a MAIN session's second line is what the session is
+    # doing right now — the board's most-read sentence. It carries the plain (not
+    # dimmed) neutral hue plus bold so it reads a step brighter than the dispatch
+    # subtitles, which stay dim supporting telemetry.
+    "now_main": ("w", _A_B),
 }
 
 
@@ -420,6 +425,7 @@ def _init_colors():
         _COLOR["frm%d_off" % i] = base | curses.A_DIM
     _COLOR["frm_idle"] = curses.A_DIM
     _COLOR["dim"] = curses.A_DIM
+    _COLOR["now_main"] = curses.A_BOLD
     _COLOR["head"] = curses.A_DIM
     _COLOR["unknown"] = curses.A_DIM
 
@@ -1774,6 +1780,30 @@ def _frame_dispatch_line(segs, box_width, edge, key, run_key=None):
     its edges without strobing a full-width bright bar."""
     left = _overwrite_rail_text(segs, _RAIL_COL,
                                 _RAIL_TOP if edge == "top" else _RAIL_MID, key)
+    if edge == "top":
+        # F-69 (user): the owner row IS the box's top edge — its interior padding
+        # runs (harness -> session -> stage) become rule, so the line reads as one
+        # continuous border instead of a row that happens to sit under a corner.
+        # Only genuine layout padding is converted: a run of 3+ spaces owned by no
+        # segment key, kept one cell clear on each side so text never touches it.
+        merged = []
+        for text, color in left:
+            if (color is None and text.strip() == "" and text != _CARD_TAG
+                    and merged and merged[-1][1] is None
+                    and merged[-1][0].strip() == "" and merged[-1][0] != _CARD_TAG):
+                merged[-1] = (merged[-1][0] + text, None)   # join adjacent padding runs
+            else:
+                merged.append((text, color))
+        filled = []
+        for text, color in merged:
+            if (color is None and len(text) >= 5 and text.strip() == ""
+                    and text != _CARD_TAG):
+                filled.append((" ", None))
+                filled.append(("─" * (len(text) - 2), run_key or key))
+                filled.append((" ", None))
+            else:
+                filled.append((text, color))
+        left = filled
     right = []
     for i, (text, color) in enumerate(left):
         if text == _RFLUSH:
@@ -3197,7 +3227,7 @@ def _context_lead_cell(state, dim=False, degrade=False):
 
 
 def _context_detail_row(entity, depth=0, term_width=None, dim=False,
-                        indent_width=None, muted=False):
+                        indent_width=None, muted=False, now_key="dim"):
     """One ``<liveness> <gauge> <value>   NOW`` row for every live card.
 
     The lead cell names the session's state in words (F-55) using the SAME `_state_key()` color
@@ -3268,7 +3298,7 @@ def _context_detail_row(entity, depth=0, term_width=None, dim=False,
             if clipped:
                 if sep:
                     tail.append((sep, None))
-                tail.append((clipped, "dim"))
+                tail.append((clipped, now_key))
                 if tag:
                     tail.append((" " + tag, "dim"))
         if tail:
@@ -4840,7 +4870,9 @@ def _build_lines(sessions, jobs, section, narrow, malformed, layout="wide", memo
                                           stage_zone=wide_route_zone))
             if not (s.liveness in ("stale", "dead") or s.app_server or s.detached):
                 _sess_bold_ids.update(range(_n0, len(lines)))
-            detail = _context_detail_row(s, term_width=term_width)
+            # F-69: main-session rows get the brighter, bold NOW sentence; dispatch
+            # subtitles keep the dim supporting weight (see _dispatch_summary_detail_row).
+            detail = _context_detail_row(s, term_width=term_width, now_key="now_main")
             if detail:
                 lines.extend(detail)
             stage_rows = ([] if suppress_session_stage else
