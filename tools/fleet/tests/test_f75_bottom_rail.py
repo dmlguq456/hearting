@@ -96,9 +96,41 @@ class BottomRailGeometryTest(unittest.TestCase):
         self.assertEqual(corner_keys, {"frm3"})
 
 
+class RouteShownExactlyOnceTest(unittest.TestCase):
+    """F-75b — one card, one place for the route (user: "위아래로 동시에 뜨니까 어지럽네")."""
+
+    def test_multi_node_route_leaves_the_owner_slot_to_the_rail(self):
+        self.assertTrue(render._route_rides_the_rail(_owner(), LONG_ROUTE, in_card=True))
+
+    def test_one_node_route_stays_on_the_owner_row(self):
+        """The rail suppresses a one-node breadcrumb, so the row must keep it — otherwise
+        the node would appear nowhere at all."""
+        seq = [("one-shot", "active")]
+        job = _owner(route_seq=seq, done=0, total=1)
+        self.assertFalse(render._route_rides_the_rail(job, seq, in_card=True))
+        segs = render._dispatch_stage_segs(job, "code", "one-shot", "f75-owner",
+                                           working=True, route_seq=seq,
+                                           route_zone=40, compact_route=True)
+        self.assertEqual(_text(segs), "one-shot 0/1")
+
+    def test_unframed_owner_keeps_its_route_on_the_row(self):
+        self.assertFalse(render._route_rides_the_rail(_owner(), LONG_ROUTE, in_card=False))
+
+    def test_depth2_micro_status_is_never_suppressed(self):
+        """A child row's slot holds its OWN status (`running`), which the rail does not
+        carry — suppressing it would delete information, not relocate it."""
+        child = DispatchJob(key="code-execute", slug="f75-child", cwd="/tmp/f75",
+                            harness="opencode", depth=2, liveness="working")
+        self.assertFalse(render._route_rides_the_rail(child, LONG_ROUTE, in_card=True))
+        segs = render._dispatch_stage_segs(child, "code-execute", "exec", "f75-child",
+                                           working=True, route_seq=LONG_ROUTE,
+                                           compact_route=True)
+        self.assertEqual(_text(segs), "running")
+
+
 class OwnerRowCompactTest(unittest.TestCase):
 
-    def test_owner_row_in_card_shows_only_where_now(self):
+    def test_compact_form_is_where_now_only(self):
         job = _owner()
         segs = render._dispatch_stage_segs(job, "code", "execute", "f75-owner",
                                            working=True, route_seq=LONG_ROUTE,
@@ -174,6 +206,25 @@ class CardIntegrationTest(unittest.TestCase):
         self.assertIn("plan-check✓", rail[0])
         self.assertIn("report", rail[0])
         self.assertNotIn("›", owner[0])
+        # F-75b: the owner row shows NO stage cell at all — not the compact token and not
+        # the bare ` : -` lead-in, which would read as absent rather than relocated.
+        self.assertNotIn("execute", owner[0])
+        self.assertNotIn(" : ", owner[0])
+
+    def test_child_row_keeps_its_own_status_inside_the_card(self):
+        job = _owner()
+        child = DispatchJob(key="code-execute", slug="f75-child", cwd="/tmp/f75",
+                            harness="opencode", depth=2, liveness="working",
+                            parent_slug="f75-owner", is_child=True)
+        from fleet.model import Session
+        session = Session(harness="claude", pid=911, proc_start="root", cwd="/tmp/f75",
+                          session_id="sid-f75b", slug="f75-parent", liveness="working")
+        job.parent_sid, job.is_child = "sid-f75b", True
+        rows = [_text(l) for l in render._build_lines(
+            [session], [job, child], "both", False, 0, layout="wide", term_width=180) if l]
+        child_rows = [r for r in rows if "f75-child" in r]
+        self.assertTrue(child_rows)
+        self.assertIn("running", child_rows[0])
 
     def test_no_card_row_overruns_its_frame(self):
         """The frame is a hard edge — this is the regression F-65 chased when a wrapped row
@@ -202,6 +253,44 @@ class CardIntegrationTest(unittest.TestCase):
         rail = [r for r in rows if "╰" in r]
         self.assertTrue(rail)
         self.assertEqual(set(self._rail_run(rail[0])), {"─"})
+
+
+class FinishedRowNameHueTest(unittest.TestCase):
+    """F-75b — user 2026-08-14: "done worker의 session에 컬러는 유지하는게 좋겠어 회색이니까
+    설명이랑 구분이 안되네".
+
+    The harness hue exists on dispatch titles precisely so a title line does not read the
+    same as the grey summary under it (user 2026-07-20). A finished row needs that contrast
+    just as much as a live one, and F-64b already settled the principle for model/effort:
+    afterglow/stale keep the attempt's static identity; only DEAD collapses (F-13)."""
+
+    def _name_key(self, **kw):
+        job = DispatchJob(key="code", slug="finished-worker", cwd="/tmp/f75",
+                          harness="opencode", depth=2, **kw)
+        segs = render._dispatch_row(job, name_width=40)
+        return next(k for t, k in segs if "finished-worker" in t)
+
+    def test_afterglow_keeps_the_harness_hue(self):
+        self.assertEqual(self._name_key(liveness="idle", afterglow=True),
+                         render._BADGE_KEY["opencode"])
+
+    def test_stale_keeps_the_harness_hue(self):
+        self.assertEqual(self._name_key(liveness="stale"),
+                         render._BADGE_KEY["opencode"])
+
+    def test_dead_still_collapses_to_colorless(self):
+        self.assertEqual(self._name_key(liveness="dead"), "name_dim")
+
+    def test_narrow_row_follows_the_same_rule(self):
+        for liveness, kw, expected in (("idle", {"afterglow": True},
+                                        render._BADGE_KEY["opencode"]),
+                                       ("stale", {}, render._BADGE_KEY["opencode"]),
+                                       ("dead", {}, "name_dim")):
+            job = DispatchJob(key="code", slug="finished-worker", cwd="/tmp/f75",
+                              harness="opencode", depth=2, liveness=liveness, **kw)
+            l1, _l2 = render._dispatch_row_2line(job)
+            key = next(k for t, k in l1 if "finished-worker" in t)
+            self.assertEqual(key, expected, liveness)
 
 
 if __name__ == "__main__":

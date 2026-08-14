@@ -1145,6 +1145,25 @@ _ROUTE_STATE_MARK = {"failed": ("✕", "lvl_r"), "degraded": ("◐", "lvl_y"),
                      "done": ("✓", None)}
 
 
+def _route_rides_the_rail(j, route_seq, in_card):
+    """Does this row's pipeline live on the card's close rail instead of the row itself?
+
+    F-75b (user 2026-08-14 "위쪽에 현재 프로세스는 없애도 되겠는데? 위아래로 동시에 뜨니까
+    어지럽네"): the route is shown in exactly ONE place per card. When the rail carries the
+    whole breadcrumb the OWNER row's stage slot goes empty — not even the ` : -` lead-in,
+    which would read as missing information rather than relocated information.
+
+    The single judge for both halves, so the row and the rail can never both show the route
+    or both hide it. Two carve-outs:
+    - A ONE-node route stays on the row: the rail suppresses it (its breadcrumb would spell
+      the owner's own token twice), so the row is the only place left.
+    - dispatch-depth-2 rows are untouched. Their slot never held the conductor breadcrumb —
+      it holds their OWN micro-status (`running` / their stage), which the rail does not
+      carry and which no other cell on the card repeats."""
+    depth = max(1, int(getattr(j, "depth", 1) or 1))
+    return bool(in_card and depth == 1 and route_seq and len(route_seq) > 1)
+
+
 def _route_compact_segs(j, route_seq, working, max_width=None):
     """F-75: the depth-1 owner row's stage slot, now that the full breadcrumb rides the card's
     close rail. Short form `<node><mark> <done>/<total>` — the same shape a main session's row
@@ -2338,7 +2357,14 @@ def _dispatch_row(j, orphan=False, parent_model=None, parent_harness=None, is_la
     # user 2026-07-20: 분사 행 제목도 컬러 — the dim HARNESS hue, so the title row stays
     # dark but no longer reads identical to its grey subtitle line underneath. Dead/stale
     # rows keep the colorless dim (F-13: no live telemetry, nothing to tint).
-    name_key_j = "name_dim" if dead_stale_j else _BADGE_KEY.get(j.harness, "name_dim")
+    # F-75b (user 2026-08-14 "done worker의 session에 컬러는 유지하는게 좋겠어 회색이니까
+    # 설명이랑 구분이 안되네"): a FINISHED row keeps its harness hue for exactly the reason
+    # the hue was introduced — a colorless title reads identical to the grey summary line
+    # under it. This is F-64b's rule applied to the name: afterglow/stale keep the attempt's
+    # static identity, and only a DEAD row collapses to colorless dim (F-13 honest-collapse,
+    # where the row actually crashed and there is nothing left to identify).
+    name_key_j = ("name_dim" if j.liveness == "dead"
+                  else _BADGE_KEY.get(j.harness, "name_dim"))
     segs.append((nm, name_key_j))
     if otag and used + len(otag) <= avail:
         segs.append((otag, "g_dead" if registry_split else "gate_u")); used += len(otag)
@@ -2402,6 +2428,8 @@ def _dispatch_row(j, orphan=False, parent_model=None, parent_harness=None, is_la
         # budget is whatever remains before the border, measured off the segs
         # actually emitted so far.
         def _stage_part(budget):
+            if _route_rides_the_rail(j, route_seq, in_card):
+                return []
             return _stage_zone_segs(
                 _dispatch_stage_segs(j, key, stage, slug_name,
                                      working=(unit_working if unit_working is not None
@@ -2571,8 +2599,9 @@ def _dispatch_row_2line(j, orphan=False, parent_model=None, parent_effort=None, 
         shown_name = label + " " + _compact_dispatch_name(slug_name, slug_room)
     else:
         shown_name = _compact_dispatch_name(slug_name)
-    # user 2026-07-20: 분사 행 제목도 컬러 (dim harness hue) — same rule as the wide row.
-    name_key_j = ("name_dim" if (j.liveness in ("dead", "stale") or afterglow_j)
+    # user 2026-07-20: 분사 행 제목도 컬러 (dim harness hue) — same rule as the wide row,
+    # including F-75b's finished-row carve-out (only DEAD collapses to colorless).
+    name_key_j = ("name_dim" if j.liveness == "dead"
                   else _BADGE_KEY.get(j.harness, "name_dim"))
     l1 = [("  ", None), (prefix, "dim"), (gch, gkey), (" ", None),
           (_pad(hn, max(1, _HW - len(prefix))), _BADGE_KEY.get(j.harness, "dim")), (shown_name, name_key_j)]
@@ -2605,9 +2634,11 @@ def _dispatch_row_2line(j, orphan=False, parent_model=None, parent_effort=None, 
         l2 += opt_segs
         if optw < _OPTW:
             l2.append((" " * (_OPTW - optw), None))
-        l2 += _stage_zone_segs(
-            _dispatch_stage_segs(j, key, stage, slug_name, working=(j.liveness == "working"),
-                                 route_seq=route_seq, compact_route=in_card))
+        if not _route_rides_the_rail(j, route_seq, in_card):
+            l2 += _stage_zone_segs(
+                _dispatch_stage_segs(j, key, stage, slug_name,
+                                     working=(j.liveness == "working"),
+                                     route_seq=route_seq, compact_route=in_card))
     if _split:
         return l1, l2, br_segs
     return l1, l2
