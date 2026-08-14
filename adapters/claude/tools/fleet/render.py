@@ -178,16 +178,17 @@ _HUE_OF = {
     "stg3_on": ("y", _A_B), "stg4_on": ("m", _A_B),
     "stg0_off": ("l", _A_D), "stg1_off": ("c", _A_D), "stg2_off": ("g", _A_D),
     "stg3_off": ("y", _A_D), "stg4_off": ("m", _A_D),
-    # F-68d box frame: the same five hues at ONE stroke weight — the pulse is
-    # plain <-> dim, never bold, so box-drawing glyphs keep a constant stroke.
-    # Tinted rows resolve color through THIS table (never _COLOR), so a frame key
-    # missing here silently collapses to the default dim hue and the blink
-    # disappears — which is exactly what happened when frm* landed in _init_colors
-    # alone (user 2026-08-14 "박스 점멸은 그냥 없애버린 거야?").
-    "frm0_on": ("l", 0), "frm1_on": ("c", 0), "frm2_on": ("g", 0),
-    "frm3_on": ("y", 0), "frm4_on": ("m", 0),
-    "frm0_off": ("l", _A_D), "frm1_off": ("c", _A_D), "frm2_off": ("g", _A_D),
-    "frm3_off": ("y", _A_D), "frm4_off": ("m", _A_D),
+    # Box frame: the five stage hues at ONE stroke weight (never bold — box-drawing
+    # glyphs change apparent stroke, and in some terminals advance width, under
+    # A_BOLD) and now permanently DIMMED. F-72 (user 2026-08-14 "메인 세션이 가장
+    # 주인인데 서브 세션이 화려해서 구분감이 줄어든다" → "일단 테두리 dim만 하자"):
+    # a dispatch box drew MORE ink than the main session it sits beside, inverting
+    # the ownership hierarchy. The hue still says which stage owns the unit; the
+    # brightness no longer competes with the session that spawned it.
+    # F-68d note kept: tinted rows resolve color through THIS table (never _COLOR),
+    # so a frame key missing here silently collapses to the default dim hue.
+    "frm0": ("l", _A_D), "frm1": ("c", _A_D), "frm2": ("g", _A_D),
+    "frm3": ("y", _A_D), "frm4": ("m", _A_D),
     "frm_idle": ("d", _A_D),
     # F-70 (user 2026-08-14 "볼드만 유지하고 다시 어둡게해"): a MAIN session's second
     # line keeps the DIM ink of every other subtitle and separates itself by WEIGHT
@@ -415,13 +416,10 @@ def _init_colors():
     for i, base in enumerate(_stage_raw):
         _COLOR["stg%d_on" % i] = base | curses.A_BOLD
         _COLOR["stg%d_off" % i] = base | curses.A_DIM
-        # F-68d (user "볼드로 바뀌는 게 거슬린다"): the box frame pulses in BRIGHTNESS
-        # only. Box-drawing glyphs change apparent stroke weight (and, in some
-        # terminals, advance width) under A_BOLD, so a bold/dim blink made the
-        # horizontal runs and the verticals read as different patterns. Frame keys
-        # keep one weight and swap plain <-> dim instead.
-        _COLOR["frm%d_on" % i] = base
-        _COLOR["frm%d_off" % i] = base | curses.A_DIM
+        # F-68d/F-72: one frame key per stage hue, always dim and never bold. The
+        # blink is gone (F-70) and the brightness with it (F-72) — the box carries
+        # hue for identity only, so it stops out-inking the main session row.
+        _COLOR["frm%d" % i] = base | curses.A_DIM
     _COLOR["frm_idle"] = curses.A_DIM
     _COLOR["dim"] = curses.A_DIM
     _COLOR["now_main"] = curses.A_BOLD | curses.A_DIM
@@ -4790,7 +4788,9 @@ def _build_lines(sessions, jobs, section, narrow, malformed, layout="wide", memo
                     # the liveness signal lives in the row glyphs and the breadcrumb
                     # token, which already blink; a whole box outline joining them was
                     # too busy. `_BLINK_ON` is intentionally not consulted here.
-                    rail_key = "frm%d_on" % color_i
+                    # F-72: and that hue is drawn DIM, so an active unit reads as
+                    # active without the box out-inking the session that owns it.
+                    rail_key = "frm%d" % color_i
                     run_key = rail_key
                 else:
                     rail_key = "frm_idle"

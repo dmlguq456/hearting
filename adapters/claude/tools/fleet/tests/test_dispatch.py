@@ -205,15 +205,15 @@ class RenderDispatchPresentationTest(unittest.TestCase):
         for blink in (True, False):
             leg = self._line_with(self._rail_lines(blink=blink), "rail-leg (")
             keys = [k for p, k in leg if p == render._RAIL_MID]
-            self.assertEqual(keys, ["frm0_on"])
+            self.assertEqual(keys, ["frm0"])
         # F-67 (user 2026-08-14 실측): the pulse keys on UNIT activity — a stale
         # owner whose stage worker still works is an ACTIVE unit, so the frame
-        # keeps (and blinks in) the stage hue instead of freezing to dim.
+        # keeps the stage hue instead of freezing to dim.
         for blink in (True, False):
             leg = self._line_with(
                 self._rail_lines(blink=blink, owner_liveness="stale"), "rail-leg (")
             keys = [k for p, k in leg if p == render._RAIL_MID]
-            self.assertEqual(keys, ["frm0_on"])
+            self.assertEqual(keys, ["frm0"])
         # No working process anywhere in the unit → dim, never blinking.
         for blink in (True, False):
             leg = self._line_with(
@@ -223,7 +223,7 @@ class RenderDispatchPresentationTest(unittest.TestCase):
             self.assertEqual(keys, ["frm_idle"])
 
     def test_f66_entire_frame_uses_the_owner_rail_color(self):
-        for blink, expected in ((True, "frm0_on"), (False, "frm0_on")):
+        for blink, expected in ((True, "frm0"), (False, "frm0")):
             lines = self._rail_lines(blink=blink)
             frame_keys = []
             for line in lines:
@@ -235,6 +235,19 @@ class RenderDispatchPresentationTest(unittest.TestCase):
                         frame_keys.append(key)
             self.assertTrue(frame_keys)
             self.assertEqual(set(frame_keys), {expected})
+
+    def test_f72_frame_hue_is_dim_and_never_bold(self):
+        # F-72 (user 2026-08-14 "일단 테두리 dim만 하자"): the dispatch box must not
+        # out-ink the main session it sits beside. Every frame key keeps its stage
+        # hue but is drawn dim — and never bold, which would also change the
+        # box-drawing stroke (F-68d).
+        for i in range(5):
+            hue, attr = render._HUE_OF["frm%d" % i]
+            self.assertEqual(hue, render._HUE_OF["stg%d_on" % i][0],
+                             "frame keeps the stage hue")
+            self.assertTrue(attr & render._A_DIM, "frame is dim")
+            self.assertFalse(attr & render._A_BOLD, "frame is never bold")
+        self.assertTrue(render._HUE_OF["frm_idle"][1] & render._A_DIM)
 
     def test_f64c_rail_hue_mirrors_the_breadcrumb_current_token(self):
         # user 2026-08-05 "컬러 안맞는데": the rail must share the exact index the lit
