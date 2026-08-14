@@ -30,6 +30,7 @@ from dispatch_contract import (
     validate_attempt_metadata,
 )
 from stage_session_contract import load_manifest
+from dispatch_degradation import record_degradation  # noqa: E402
 ORDER = {"direct":0,"quick":1,"standard":2,"strong":3,"thorough":4,"adversarial":5}
 TRACKING = {"tracked", "untracked"}
 GATE_FIELDS = {"spec_read", "drift_verdict", "workflow_mode", "artifact_guard"}
@@ -1813,6 +1814,27 @@ def complete_node(
                 "status":"marker-appended" if marker_eligible else "closed",
             }
 
+def _git_changed_files(worktree):
+    """Return the worktree's git-visible changed file paths (AC 28 audit)."""
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(worktree), "status", "--porcelain"],
+            text=True, capture_output=True, check=False,
+        )
+    except (OSError, ValueError):
+        return set()
+    changed = set()
+    for line in result.stdout.splitlines():
+        if not line:
+            continue
+        # status code is the first two chars; a rename shows 'R  old -> new'
+        rest = line[3:].strip()
+        path = rest.split(" -> ")[-1].strip()
+        if path:
+            changed.add((Path(worktree) / path).resolve(strict=False))
+    return changed
+
+
 def complete_subsession_stage(route, node, node_id, evidence, manifest_path, jobs):
     """Aggregate exact PASS sub-sessions into the route node's one stage marker."""
 
@@ -1859,6 +1881,28 @@ def complete_subsession_stage(route, node, node_id, evidence, manifest_path, job
         process=attempt_process_quiescence(metadata)
         if process.state!="quiescent":
             raise ValueError(f"subsession process not quiescent:{session['attempt_id']}:{process.reason}")
+    # AC 28 post-hoc diff-scope audit: every git-visible change the slices made
+    # must fall inside the union of their declared fixed_files. A violation
+    # records subdivision-scope-violation and refuses the marker.
+    worktree = Path(manifest["worktree"])
+    declared_union = {
+        Path(path).resolve(strict=False)
+        for session in manifest["sessions"]
+        for path in session["fixed_files"]
+    }
+    changed = _git_changed_files(worktree)
+    outside = changed - declared_union
+    if outside:
+        record_degradation(
+            route_id=route.get("route_id"), route_node=node_id,
+            route_hash=route.get("route_hash"), dispatch_depth=2,
+            fallback_hop=None, execution_surface="registered-headless",
+            writer="capability-route.py", kind="degradation",
+            reason="subdivision-scope-violation",
+            detail=";".join(str(path) for path in sorted(outside))[:512],
+            slice_manifest_sha256=manifest["_manifest_sha256"],
+        )
+        raise ValueError("subdivision-scope-violation")
     digest=manifest["_manifest_sha256"]
     attempt_id="att-stage-"+digest[:32]
     metadata={

@@ -438,6 +438,11 @@
       "model_profile": "light",
       "continuation": {
        "kind": "inline-next"
+      },
+      "subdivision": {
+       "min_intensity": "strong",
+       "max_slices": 4,
+       "disjointness": "exact-fixed-files"
       }
      },
      {

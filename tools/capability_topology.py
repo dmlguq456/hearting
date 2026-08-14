@@ -839,6 +839,32 @@ def _validate_recipe(recipe, registry, standard_plus_owner_profile):
             raise TopologyError(
                 f"{recipe['capability']}:{node['id']}: parent_cross_preference must be a boolean"
             )
+        if "subdivision" in node:
+            subdivision = node["subdivision"]
+            if not isinstance(subdivision, dict):
+                raise TopologyError(
+                    f"{recipe['capability']}:{node['id']}: subdivision must be an object"
+                )
+            max_slices = subdivision.get("max_slices")
+            if isinstance(max_slices, bool) or not isinstance(max_slices, int) or not 2 <= max_slices <= 4:
+                raise TopologyError(
+                    f"{recipe['capability']}:{node['id']}: subdivision.max_slices must be in 2..4"
+                )
+            if subdivision.get("disjointness") != "exact-fixed-files":
+                raise TopologyError(
+                    f"{recipe['capability']}:{node['id']}: subdivision.disjointness must be exact-fixed-files"
+                )
+            minimum = subdivision.get("min_intensity")
+            if minimum not in registry.get("intensities", []) or (
+                registry["intensities"].index(minimum) < registry["intensities"].index("standard")
+            ):
+                raise TopologyError(
+                    f"{recipe['capability']}:{node['id']}: subdivision.min_intensity must be a standard+ tier"
+                )
+            if node.get("kind") != "pipeline-stage":
+                raise TopologyError(
+                    f"{recipe['capability']}:{node['id']}: subdivision requires a pipeline-stage node"
+                )
         if node.get("completion_gate") not in gates:
             raise TopologyError(f"{recipe['capability']}:{node['id']}: missing completion gate")
         if not set(node.get("depends_on", [])) <= set(ids):

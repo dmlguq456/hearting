@@ -20,6 +20,46 @@ class StageSessionError(ValueError):
     """Raised when a stage-session manifest is unsafe or incomplete."""
 
 
+def validate_subdivision_or_fallback(
+    path: Path | str,
+    *,
+    route: dict[str, Any],
+    node: dict[str, Any],
+    record=None,
+) -> tuple[dict[str, Any] | None, str | None]:
+    """Validate a parallel subdivision at batch admission; on violation fall back
+    to a single session with a `subdivision-disjointness-unproven` ledger row.
+
+    Returns (manifest, None) on success and (None, reason) when the subdivision
+    cannot be proven disjoint/safe — the caller then runs the node as one
+    ordinary session instead of raising (the typed fallback of SD-103). `record`
+    is a callable(route_id, route_node, detail) that writes the SD-93 ledger.
+    """
+    try:
+        manifest = load_manifest(path, route=route, node=node)
+    except StageSessionError as exc:
+        if record is not None:
+            record(route.get("route_id"), node.get("id"), str(exc))
+        return None, "subdivision-disjointness-unproven"
+    if manifest.get("mode") != "parallel":
+        return manifest, None
+    permission = node.get("subdivision")
+    if not isinstance(permission, dict):
+        if record is not None:
+            record(route.get("route_id"), node.get("id"), "no subdivision permission")
+        return None, "subdivision-disjointness-unproven"
+    declared = {
+        Path(value).resolve(strict=False)
+        for session in manifest["sessions"]
+        for value in session["fixed_files"]
+    }
+    if len(declared) != sum(len(s["fixed_files"]) for s in manifest["sessions"]):
+        if record is not None:
+            record(route.get("route_id"), node.get("id"), "parallel-fixed-file-overlap")
+        return None, "subdivision-disjointness-unproven"
+    return manifest, None
+
+
 def sha256_file(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
@@ -91,6 +131,46 @@ def load_manifest(
     sessions = raw.get("sessions")
     if not isinstance(sessions, list) or not 1 <= len(sessions) <= 16:
         raise StageSessionError("session-count-invalid")
+    if mode == "parallel":
+        # SD-103: a parallel subdivision's session count is capped by the
+        # registry permission block (2..max_slices), never the generic 1..16.
+        permission = None
+        if node is not None:
+            permission = node.get("subdivision")
+        elif route is not None:
+            for candidate in route.get("nodes", []):
+                if isinstance(candidate, dict) and candidate.get("id") == raw.get("route_node"):
+                    permission = candidate.get("subdivision")
+                    break
+        cap = permission.get("max_slices", 4) if isinstance(permission, dict) else 4
+        if not 2 <= len(sessions) <= cap:
+            raise StageSessionError(
+                f"parallel-session-count-invalid:{2}:{cap}"
+            )
+        if not isinstance(permission, dict) or permission.get("disjointness") != "exact-fixed-files":
+            raise StageSessionError("parallel-subdivision-not-permitted")
+        union = set()
+        for item in sessions:
+            fixed = _fixed_files(
+                item.get("fixed_files"), worktree=worktree,
+                session_id=item.get("subsession_id") or f"index-{sessions.index(item) + 1}",
+            )
+            union |= set(fixed)
+        if route is not None and node is not None:
+            sealed_scopes = []
+            for scope in (node.get("write_scope") or []):
+                if not isinstance(scope, str) or not scope:
+                    continue
+                root = scope[:-3] if scope.endswith("/**") else scope
+                sealed_scopes.append((worktree / root).resolve(strict=False))
+            for file in sorted(union):
+                if not any(
+                    file == root or file.startswith(str(root) + "/")
+                    for root in sealed_scopes
+                ):
+                    raise StageSessionError(
+                        f"parallel-fixed-file-outside-write-scope:{file}"
+                    )
     normalized: list[dict[str, Any]] = []
     seen_ids: set[str] = set()
     seen_attempts: set[str] = set()

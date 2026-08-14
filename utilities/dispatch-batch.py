@@ -42,6 +42,7 @@ from dispatch_lifecycle import select_launch_lifecycle  # noqa: E402
 from replica_batch_contract import DIGEST, build_manifest  # noqa: E402
 from dispatch_degradation import record_degradation  # noqa: E402
 from dispatch_quality_peer import quality_peer_families  # noqa: E402
+from stage_session_contract import validate_subdivision_or_fallback  # noqa: E402
 from dispatch_allocation import (  # noqa: E402
     STRATEGY as ALLOCATION_STRATEGY,
     attempt_counts,
@@ -1114,6 +1115,11 @@ def main(argv: list[str] | None = None) -> int:
         default=DEFAULT_PROMPT,
     )
     parser.add_argument("--allow-degraded-independence", action="store_true")
+    parser.add_argument(
+        "--subdivision-manifest",
+        help="optional SD-103 parallel subdivision manifest; a disjointness "
+        "violation falls back to a single session instead of raising",
+    )
     args = parser.parse_args(argv)
     if args.parallel_group and args.replica_group and args.parallel_group != args.replica_group:
         parser.error("--parallel-group and --replica-group aliases must match")
@@ -1128,6 +1134,24 @@ def main(argv: list[str] | None = None) -> int:
         route_path = args.route.resolve()
         route = load_route(route_path)
         nodes = parallel_nodes(route, args.parallel_group)
+        if getattr(args, "subdivision_manifest", None):
+            node = next(
+                (candidate for candidate in nodes if candidate.get("id") == args.parallel_group),
+                None,
+            ) or nodes[0]
+            def _record(route_id, route_node, detail):
+                record_degradation(
+                    route_id=route_id, route_node=route_node,
+                    route_hash=route.get("route_hash"), dispatch_depth=2,
+                    fallback_hop=None, execution_surface="registered-headless",
+                    writer="dispatch-batch.py", kind="degradation",
+                    reason="subdivision-disjointness-unproven",
+                    detail=str(detail)[:512],
+                )
+            _manifest, _reason = validate_subdivision_or_fallback(
+                args.subdivision_manifest, route=route, node=node, record=_record
+            )
+            args.subdivision_fallback = _reason is not None
         parent_identity = DISPATCH_NODE.current_parent_identity()
         if parent_identity is None:
             raise BatchError("parent-runtime-identity-missing")
