@@ -1579,7 +1579,7 @@ def _compact_dispatch_name(name, max_width=_DISPATCH_NAME_MAX):
     return name[: max_width - 1] + "…"
 
 
-def _dispatch_prefix(j, orphan=False):
+def _dispatch_prefix(j, orphan=False, in_card=False):
     # F-64c (v49, user 2026-08-05 연쇄 "depth=1을 조금 앞당겨서" → "세로선은 좀 더 들여쓰게"
     # → "아주 조금만 더 + depth=2의 들여쓰기를 완화"): dispatch-depth-1 sheds its ↳ arrow and sits at
     # a 4-cell inset — the capsule rail (assembler post-pass at `_RAIL_COL`) is what marks
@@ -1599,30 +1599,26 @@ def _dispatch_prefix(j, orphan=False):
     # sourcing working-memory note carried no requester) and found it noisy. Depth
     # readability improvements, if any, go through explicit user direction.
     depth = max(1, min(3, int(getattr(j, "depth", 1) or 1)))
+    if in_card and not orphan:
+        # F-66: the box already carries hierarchy. Every row inside it therefore
+        # starts at the owner's content column; depth must not add a second ladder.
+        return "    "
     if depth == 1:
         return "··  " if orphan else "    "
     marker = "··" if orphan else "  "
     return "    " + "  " * (depth - 1) + marker
 
 
-# F-64c (v49, user 2026-08-05 "depth=1에서는 화살표를 안쓰고 쭉 세로줄로 … 점멸하도록",
-# 정정 "depth=1을 조금 앞당겨서 들여쓰기 폭을 줄이고 세로선은 그 아래 depth=2에 대해서만"):
-# a dispatch-depth-1 dispatch unit renders arrowless at a shallow 2-cell inset, and a vertical rail
-# hangs UNDER it — through the NOW subtitle, ⚡strips, dispatch-depth-2 rows and their details, but
-# never on the owner row itself. The rail BLINKS in the owner's stage hue while the owner
-# is working (same _BLINK_ON phase as the running token — blink changes brightness, never
-# hue) and sits steady dim otherwise. dispatch-depth-2 rows keep their ↳ arrows — rail + arrow is
-# what tells a dispatch unit apart from a native sub-agent strip, which carries neither.
-# Wide layout only; narrow/stack cards keep prefixes as-is, and orphan rows keep their
-# flat `··` (a rail with no on-screen parent would imply lineage F-26 forbids guessing).
-# Rail glyphs (user 2026-08-05 "세로바의 가장 위와 가장 아래만 각각 위와 아래가 짧은
-# 바"): the run stays a CONNECTED line — full `┃` through the middle — but its first cell
-# is the top-short `╻` and its last the bottom-short `╹`, so the capsule has open ends and
-# never fuses with the rows above/below the unit. A one-row run uses the standalone short
-# bar `❙` (both ends open; box-drawing has no middle-only heavy segment).
+# F-66 evolves F-64c/F-63's left rail into a complete dispatch box in every layout.
+# The owner keeps its `╭─` cap; every interior row has both vertical edges; the close
+# spans the card width. The whole frame shares the owner's breadcrumb tint while live
+# and stays dim otherwise. Orphans remain outside this structure and retain `··`.
 _RAIL_TOP = "╭─"
 _RAIL_MID = "│ "
-_RAIL_BOT = "╰───"
+_RAIL_BOT = "╰"
+_RAIL_TOP_RIGHT = "╮"
+_RAIL_RIGHT = "│"
+_RAIL_BOT_RIGHT = "╯"
 _RAIL_SOLO = "❙"
 _RAIL_CHARS = (_RAIL_TOP, _RAIL_MID, _RAIL_MID.strip(), _RAIL_BOT, _RAIL_SOLO)
 _RAIL_COL = 2      # capsule begins at the dispatch unit's own inset in every layout
@@ -1685,6 +1681,63 @@ def _overwrite_rail_text(segs, col, mark, key):
         out.append((text, old_key))
         pos += width
     return segs
+
+
+def _clip_segs(segs, max_width):
+    """Display-width clip that preserves segment color boundaries."""
+    out, used = [], 0
+    for text, key in segs:
+        if used >= max_width:
+            break
+        piece = _clip_w(text, max_width - used, ellipsis="")
+        if piece:
+            out.append((piece, key))
+            used += _dw(piece)
+        if _dw(piece) < _dw(text):
+            break
+    return out, used
+
+
+def _dispatch_box_width(term_width, layout=None):
+    """Raw segment width whose right edge lands inside the group tint band."""
+    # No-width calls are hermetic component tests, not a real viewport. Keep the
+    # historical no-clipping behavior while still returning a deterministic box.
+    width = int(term_width) if term_width else 200
+    # A few hermetic truth-table tests deliberately force the wide renderer below
+    # its supported 138-column cutoff. Preserve that component-test behavior; a
+    # real viewport at this width is routed to narrow by `_layout_mode`.
+    if layout == "wide" and term_width and term_width < _TWO_LINE_CUTOFF:
+        width = 200
+    # Tinted curses rows gain the outer inset and inner padding in `_addline`.
+    # The 8-color/plain path has no such shift and retains its one-cell edge guard.
+    return max(_RAIL_COL + 4, width - 6 if _TINT_OK else width - 1)
+
+
+def _frame_dispatch_line(segs, box_width, edge, key):
+    """Add one complete F-66 box row, resolving right flush within the frame."""
+    left = _overwrite_rail_text(segs, _RAIL_COL,
+                                _RAIL_TOP if edge == "top" else _RAIL_MID, key)
+    right = []
+    for i, (text, color) in enumerate(left):
+        if text == _RFLUSH:
+            right = left[i + 1:]
+            left = left[:i]
+            break
+    right_w = sum(_dw(text) for text, _color in right)
+    left_limit = max(0, box_width - 1 - right_w)
+    left, left_w = _clip_segs(left, left_limit)
+    pad = max(0, box_width - 1 - left_w - right_w)
+    if pad:
+        left.append((" " * pad, None))
+    left.extend(right)
+    left.append((_RAIL_TOP_RIGHT if edge == "top" else _RAIL_RIGHT, key))
+    return left
+
+
+def _dispatch_box_bottom(box_width, key):
+    run = max(0, box_width - _RAIL_COL - 2)
+    return [(" " * _RAIL_COL, None),
+            (_RAIL_BOT + "─" * run + _RAIL_BOT_RIGHT, key)]
 
 
 _ORPHAN_DIVIDER_LABEL = "  ⌄ orphaned dispatch rows"
@@ -1979,7 +2032,7 @@ def _opts_segs(j):
 
 def _dispatch_row(j, orphan=False, parent_model=None, parent_harness=None, is_last=True,
                   parent_effort=None, stage_override=None, name_width=None, route_seq=None,
-                  route_zone=None):
+                  route_zone=None, in_card=False, unit_working=None):
     """A dispatch job rendered as a session-ANALOGUE, mirroring the session columns 1:1:
       harness (model · effort)  |  [stage label] session (branch)  |  stage breadcrumb  |  time
     F-33 (v11): model/effort fold into the harness field (no more separate model column).
@@ -2020,7 +2073,7 @@ def _dispatch_row(j, orphan=False, parent_model=None, parent_harness=None, is_la
     # the NAME still lands at the shared _NAME_COL — name onward aligns with sessions. DIM =
     # spawned. F-33 (v11): the widened field also carries the job's own model/effort as a
     # parenthetical (SD-F3).
-    prefix = _dispatch_prefix(j, orphan=orphan)
+    prefix = _dispatch_prefix(j, orphan=orphan, in_card=in_card)
     segs = [("  ", None), (prefix, "dim"), (gch, gkey), (" ", None)]
     segs += _harness_model_cell(j.harness,
                                 None if j.liveness == "dead" else
@@ -2107,7 +2160,9 @@ def _dispatch_row(j, orphan=False, parent_model=None, parent_harness=None, is_la
             segs.append((" " * (_OPTW - optw), None))
 
         segs += _stage_zone_segs(
-            _dispatch_stage_segs(j, key, stage, slug_name, working=(j.liveness == "working"),
+            _dispatch_stage_segs(j, key, stage, slug_name,
+                                 working=(unit_working if unit_working is not None
+                                          else j.liveness == "working"),
                                  route_seq=route_seq, route_zone=route_zone))
 
     segs += [(" " * _WIDE_TIME_GAP, None), (_RFLUSH, None)]
@@ -2219,16 +2274,16 @@ def _session_row_stack(s, is_parent=False, child_count=0, term_width=None,
 
 
 def _dispatch_row_stack(j, orphan=False, parent_model=None, parent_effort=None, stage_override=None,
-                        route_seq=None):
+                        route_seq=None, in_card=False):
     l1, l2 = _dispatch_row_2line(j, orphan=orphan, parent_model=parent_model,
                                  parent_effort=parent_effort, stage_override=stage_override,
-                                 route_seq=route_seq)
+                                 route_seq=route_seq, in_card=in_card)
     gi = _stack_split(l2)
     return [l1, l2[:gi], [(" " * (4 + _HW), None)] + l2[gi:]]
 
 
 def _dispatch_row_2line(j, orphan=False, parent_model=None, parent_effort=None, _split=False,
-                        stage_override=None, route_seq=None):
+                        stage_override=None, route_seq=None, in_card=False):
     """F-15a narrow card — L1 = identity ONLY (stage label + slug, no mode/qa tag); L2 =
     elapsed · model · options (relocated from L1) · breadcrumb/micro-status."""
     key = j.key or "?"
@@ -2243,7 +2298,7 @@ def _dispatch_row_2line(j, orphan=False, parent_model=None, parent_effort=None, 
         gch, gkey = _LIVE_GLYPH["done"], "dim"   # F-46 parity with the wide row
     hn = _BADGE_TEXT.get(j.harness, "—") if j.harness else "—"
 
-    prefix = _dispatch_prefix(j, orphan=orphan)
+    prefix = _dispatch_prefix(j, orphan=orphan, in_card=in_card)
     label = _dispatch_stage_label(j)
     if label:
         slug_room = max(1, _DISPATCH_NAME_MAX - len(label) - 1)
@@ -2732,7 +2787,7 @@ def _subagent_idle_min(sa):
     return max(0, int((time.time() - ended) / 60))
 
 
-def _subagent_strip(subs, depth=0):
+def _subagent_strip(subs, depth=0, in_card=False):
     """One horizontal strip per OWNER ROW (session or dispatch job): `⚡<type> (<Model>·<ef>)
     <glyph> <elapsed> · …` — replaces the old one-row-per-subagent `├⚡`/`└⚡` stack
     (adopted from the discarded two-plane demo's `_agents_strip`, prd.md:290-295).
@@ -2753,7 +2808,8 @@ def _subagent_strip(subs, depth=0):
     no tail). `depth` = the owning dispatch row's
     depth (0 for a session row): each level pushes the strip 2 more cells inward so it
     stays visibly inside its own owner (사용자 2026-07-16 "서브 세션에 서브 에이전트도")."""
-    segs = [(_SUBAGENT_IND + "  " * max(0, depth), None), (_ICON_SUBAGENT, "dim")]
+    shown_depth = min(depth, 1) if in_card else depth
+    segs = [(_SUBAGENT_IND + "  " * max(0, shown_depth), None), (_ICON_SUBAGENT, "dim")]
     for i, sa in enumerate(subs):
         if i:
             segs.append((" · ", "dim"))
@@ -2868,7 +2924,7 @@ def _summary_row(summary, depth=0, term_width=None, start_col=None, summary_ts=N
     return [segs]
 
 
-def _dispatch_summary_detail_row(job, depth=1, term_width=None, orphan=False):
+def _dispatch_summary_detail_row(job, depth=1, term_width=None, orphan=False, in_card=False):
     """Use the main-session detail grammar for every live model dispatch."""
     if _is_plugin_agent(job):
         return []
@@ -2885,14 +2941,16 @@ def _dispatch_summary_detail_row(job, depth=1, term_width=None, orphan=False):
         # Dispatch rows retain their dim visual weight and sit two cells AFTER their own
         # spinner, matching the main row's ``spinner + 2`` relationship without flattening
         # the hierarchy back onto the main-session detail column.
-        indicator_col = _dw("  " + _dispatch_prefix(job, orphan=orphan))
+        shown_depth = min(depth, 1) if in_card else depth
+        indicator_col = _dw("  " + _dispatch_prefix(job, orphan=orphan, in_card=in_card))
         return _context_detail_row(
-            job, depth=depth, term_width=term_width, dim=True,
+            job, depth=shown_depth, term_width=term_width, dim=True,
             indent_width=indicator_col + 2, muted=True)
     summary = getattr(job, "summary", None)
     if not summary:
         return []
-    return _summary_row(str(summary), depth=depth, term_width=term_width,
+    shown_depth = min(depth, 1) if in_card else depth
+    return _summary_row(str(summary), depth=shown_depth, term_width=term_width,
                         start_col=_NAME_COL,
                         summary_ts=getattr(job, "summary_ts", None))
 
@@ -4148,6 +4206,11 @@ def _build_lines(sessions, jobs, section, narrow, malformed, layout="wide", memo
     wide_name_width = _wide_name_width(term_width) if layout == "wide" else None
     wide_route_zone = (_route_zone_width(term_width, wide_name_width)
                        if layout == "wide" else None)
+    # F-66 width ledger: the complete box consumes the former two-cell slack at
+    # the right edge. Spend that loss in the dispatch name zone; keep F-65's
+    # breadcrumb tail-fold budget based on the original terminal ledger.
+    card_name_width = (max(3, wide_name_width - 2)
+                       if wide_name_width is not None else None)
     n_mem_total = sum(1 for s in sessions if getattr(s, "mem_worker", False))
     mem_by_group = {_SYSTEM_GROUP: n_mem_total} if n_mem_total else {}
     # F-19 repo rows: session-id -> display title, resolved on the ORIGINAL (unfiltered) list
@@ -4474,10 +4537,12 @@ def _build_lines(sessions, jobs, section, narrow, malformed, layout="wide", memo
         _sess_bold_ids = set()
 
         def _emit_dispatch_tree(job, parent_model=None, parent_harness=None, parent_effort=None,
-                                orphan=False, is_last=True):
+                                orphan=False, is_last=True, in_card=False):
             # Row authority is the attached WorkProjection.  No first-child or
             # first-route selection is allowed in this render-local tree walk.
             block_start = len(lines)   # F-64c: the dispatch-depth-1 rail spans everything emitted below
+            depth = max(1, int(getattr(job, "depth", 1) or 1))
+            in_card = in_card or (not orphan and depth == 1)
             stage_override = _projection_stage_for_dispatch(job)
             route_seq = _projection_route_seq(job)
             if job.liveness == "stale":
@@ -4489,27 +4554,37 @@ def _build_lines(sessions, jobs, section, narrow, malformed, layout="wide", memo
             same_runtime = not job.harness or not parent_harness or job.harness == parent_harness
             row_parent_model = parent_model if same_runtime else None
             row_parent_effort = parent_effort if same_runtime else None
+            # F-67 (user 2026-08-14 실측): the card pulses on UNIT activity. A standard+
+            # owner idles while its depth-2 stage workers do the work, so gating the
+            # frame and the current breadcrumb token on the owner's own liveness froze
+            # an actively working card. Owner OR any nested descendant working = unit works.
+            unit_working = None
+            if max(1, int(getattr(job, "depth", 1) or 1)) == 1:
+                unit_working = (job.liveness == "working"
+                                or any(s2.liveness == "working"
+                                       for s2 in job_children.get(job.slug, [])))
             # F-27: a job row is a target only with an exact pid to verify (prd.md:253).
             if job.pid:
                 _SELECTABLE.append(_select_entry_job(job, len(lines)))
             if _jrow:
                 lines.extend(_jrow(job, orphan=orphan, parent_model=row_parent_model,
                                    parent_effort=row_parent_effort, stage_override=stage_override,
-                                   route_seq=route_seq))
+                                   route_seq=route_seq, in_card=in_card))
             else:
                 lines.append(_dispatch_row(job, orphan=orphan, parent_model=row_parent_model,
                                            parent_harness=parent_harness,
                                            parent_effort=row_parent_effort, is_last=is_last,
                                            stage_override=stage_override,
-                                           name_width=wide_name_width, route_seq=route_seq,
-                                           route_zone=wide_route_zone))
+                                           name_width=card_name_width if in_card else wide_name_width,
+                                           route_seq=route_seq, route_zone=wide_route_zone,
+                                           in_card=in_card, unit_working=unit_working))
             # 2026-07-24: a dispatch card's second line is its live log summary ONLY —
             # the same "identity row + fresh NOW" shape as a main-session card. The
             # pipeline rides the row's own breadcrumb; dedicated stage rows are a
             # session-card surface.
             detail = _dispatch_summary_detail_row(
                 job, depth=max(1, int(getattr(job, "depth", 1) or 1)), term_width=term_width,
-                orphan=orphan)
+                orphan=orphan, in_card=in_card)
             if detail:
                 lines.extend(detail)
             # F-29 — the child session's own sub-agents, one strip directly under the
@@ -4521,7 +4596,7 @@ def _build_lines(sessions, jobs, section, narrow, malformed, layout="wide", memo
             shown_job_subs = [sa for sa in (job_subs or []) if sa.active or _SHOW_ALL]
             if shown_job_subs:
                 lines.extend(_subagent_strip(
-                    shown_job_subs, depth=max(1, int(getattr(job, "depth", 1) or 1))))
+                    shown_job_subs, depth=depth, in_card=in_card))
             for sub in _sort_group_jobs(job_children.get(job.slug, [])):
                 # F-15b P0-2: only a completed stage is absorbed into the
                 # conductor breadcrumb. A registered queued/idle/unknown child
@@ -4531,28 +4606,24 @@ def _build_lines(sessions, jobs, section, narrow, malformed, layout="wide", memo
                     continue
                 _emit_dispatch_tree(sub, parent_model=job.model or parent_model,
                                     parent_harness=job.harness or parent_harness,
-                                    parent_effort=parent_effort, orphan=False)
-            # F-63: a depth-1 owner and all descendants form one nested capsule card.
-            # The owner opens with ╭─, every body row shares a │ rail, and a dedicated
-            # ╰─── line closes the unit. Depth remains positional; no d1/d2 labels.
+                                    parent_effort=parent_effort, orphan=False,
+                                    in_card=in_card)
+            # F-66: a depth-1 owner and all descendants form one complete box. The
+            # frame itself carries hierarchy, so descendants share the owner's body
+            # column and every row reaches the same right edge.
             if (not orphan and max(1, int(getattr(job, "depth", 1) or 1)) == 1):
-                if job.liveness == "working":
+                if unit_working or job.liveness == "working":
                     color_i = _depth1_rail_color_index(
                         getattr(job, "key", None),
                         stage_override or getattr(job, "stage", None), route_seq)
                     rail_key = ("stg%d_on" if _BLINK_ON else "stg%d_off") % color_i
                 else:
                     rail_key = "dim"
-                lines.append([(" " * (_RAIL_COL + len(_RAIL_BOT)), None)])
-                first, last = block_start, len(lines) - 1
-                for idx in range(first, len(lines)):
-                    if idx == first:
-                        char = _RAIL_TOP
-                    elif idx == last:
-                        char = _RAIL_BOT
-                    else:
-                        char = _RAIL_MID
-                    lines[idx] = _overwrite_rail_text(lines[idx], _RAIL_COL, char, rail_key)
+                box_width = _dispatch_box_width(term_width, layout)
+                for idx in range(block_start, len(lines)):
+                    lines[idx] = _frame_dispatch_line(
+                        lines[idx], box_width, "top" if idx == block_start else "mid", rail_key)
+                lines.append(_dispatch_box_bottom(box_width, rail_key))
 
         shown = _sort_group_sessions(shown)
         if live_order is not None:

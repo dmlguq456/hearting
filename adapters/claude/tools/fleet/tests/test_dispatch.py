@@ -116,7 +116,7 @@ class RenderDispatchPresentationTest(unittest.TestCase):
 
         self.assertEqual(text.count("gpt-5.6-sol"), 1)
 
-    def test_depth_prefixes_are_arrowless_inside_nested_card(self):
+    def test_depth_prefixes_keep_legacy_shape_outside_nested_card(self):
         # F-64c (v49, user 2026-08-05 "depth=1을 조금 앞당겨서 들여쓰기 폭을 줄이고
         # 세로선은 그 아래 depth=2에 대해서만"): depth-1 sits arrowless at a shallow
         # 2-cell inset (its unit mark is the hanging rail, painted by the assembler);
@@ -130,8 +130,9 @@ class RenderDispatchPresentationTest(unittest.TestCase):
         self.assertEqual(render._dispatch_prefix(nested), "        ")
         self.assertEqual(len(render._dispatch_prefix(nested)), 8)
         self.assertEqual(render._dispatch_prefix(top, orphan=True), "··  ")
+        self.assertEqual(render._dispatch_prefix(nested, in_card=True), "    ")
 
-    def _rail_fixture(self, owner_liveness="working"):
+    def _rail_fixture(self, owner_liveness="working", leg_liveness="working"):
         parent = Session(harness="claude", pid=1, cwd="/work/repo", session_id="sid-1",
                          slug="repo", model="Fable 5", effort="xhigh", liveness="working")
         d1 = DispatchJob(key="code", slug="rail-owner", cwd="/work/repo",
@@ -141,12 +142,13 @@ class RenderDispatchPresentationTest(unittest.TestCase):
                          summary="harvesting", summary_ts=None)
         d2 = DispatchJob(key="code", slug="rail-leg", cwd="/work/repo",
                          parent_slug="rail-owner", harness="claude", depth=2,
-                         model="Opus 5", effort="xhigh", liveness="working",
+                         model="Opus 5", effort="xhigh", liveness=leg_liveness,
                          stage="running", elapsed_min=5)
         return parent, d1, d2
 
-    def _rail_lines(self, blink=True, owner_liveness="working", layout="wide"):
-        parent, d1, d2 = self._rail_fixture(owner_liveness)
+    def _rail_lines(self, blink=True, owner_liveness="working", layout="wide",
+                    leg_liveness="working"):
+        parent, d1, d2 = self._rail_fixture(owner_liveness, leg_liveness)
         old = render._BLINK_ON
         render._BLINK_ON = blink
         try:
@@ -199,13 +201,37 @@ class RenderDispatchPresentationTest(unittest.TestCase):
     def test_f64c_rail_blinks_in_stage_hue_only_while_working(self):
         for blink, expected in ((True, "stg0_on"), (False, "stg0_off")):
             leg = self._line_with(self._rail_lines(blink=blink), "rail-leg (")
-            keys = [k for p, k in leg if p in render._RAIL_CHARS]
+            keys = [k for p, k in leg if p == render._RAIL_MID]
             self.assertEqual(keys, [expected])
-        for blink in (True, False):
+        # F-67 (user 2026-08-14 실측): the pulse keys on UNIT activity — a stale
+        # owner whose stage worker still works is an ACTIVE unit, so the frame
+        # keeps (and blinks in) the stage hue instead of freezing to dim.
+        for blink, expected in ((True, "stg0_on"), (False, "stg0_off")):
             leg = self._line_with(
                 self._rail_lines(blink=blink, owner_liveness="stale"), "rail-leg (")
-            keys = [k for p, k in leg if p in render._RAIL_CHARS]
-            self.assertEqual(keys, ["dim"])       # finished units never blink
+            keys = [k for p, k in leg if p == render._RAIL_MID]
+            self.assertEqual(keys, [expected])
+        # No working process anywhere in the unit → dim, never blinking.
+        for blink in (True, False):
+            leg = self._line_with(
+                self._rail_lines(blink=blink, owner_liveness="stale",
+                                 leg_liveness="idle"), "rail-leg (")
+            keys = [k for p, k in leg if p == render._RAIL_MID]
+            self.assertEqual(keys, ["dim"])
+
+    def test_f66_entire_frame_uses_the_owner_rail_color(self):
+        for blink, expected in ((True, "stg0_on"), (False, "stg0_off")):
+            lines = self._rail_lines(blink=blink)
+            frame_keys = []
+            for line in lines:
+                for part, key in line or []:
+                    if (part in (render._RAIL_TOP, render._RAIL_MID,
+                                 render._RAIL_TOP_RIGHT, render._RAIL_RIGHT)
+                            or (part.startswith(render._RAIL_BOT)
+                                and part.endswith(render._RAIL_BOT_RIGHT))):
+                        frame_keys.append(key)
+            self.assertTrue(frame_keys)
+            self.assertEqual(set(frame_keys), {expected})
 
     def test_f64c_rail_hue_mirrors_the_breadcrumb_current_token(self):
         # user 2026-08-05 "컬러 안맞는데": the rail must share the exact index the lit
@@ -225,6 +251,69 @@ class RenderDispatchPresentationTest(unittest.TestCase):
         self.assertIn(render._RAIL_TOP, joined)
         self.assertIn(render._RAIL_MID, joined)
         self.assertIn(render._RAIL_BOT, joined)
+
+    def test_f66_box_edges_align_and_depth_two_shares_owner_column(self):
+        for width, layout in ((60, "stack"), (80, "narrow"), (140, "wide")):
+            with self.subTest(width=width, layout=layout):
+                parent, d1, d2 = self._rail_fixture()
+                lines = render._build_lines(
+                    [parent], [d1, d2], section="both", narrow=False,
+                    malformed=0, layout=layout, term_width=width)
+                text_lines = [render._plain(line) for line in lines if line]
+                top_i = next(i for i, text in enumerate(text_lines) if "╭─" in text)
+                bot_i = next(i for i, text in enumerate(text_lines[top_i:], top_i)
+                             if "╰" in text and text.endswith("╯"))
+                card = text_lines[top_i:bot_i + 1]
+
+                right_cols = [render._dw(text) for text in card]
+                self.assertEqual(len(set(right_cols)), 1)
+                self.assertLessEqual(right_cols[0], width)
+                self.assertTrue(card[0].endswith("╮"))
+                self.assertTrue(all(text.endswith("│") for text in card[1:-1]))
+                self.assertTrue(card[-1].endswith("╯"))
+
+                owner = next(text for text in card if "rail-owner" in text)
+                child = next(text for text in card if "rail-leg" in text)
+                self.assertEqual(owner.index("claude code"), child.index("claude code"))
+
+    def test_f66_80_and_140_have_no_overwidth_box_lines(self):
+        for width, layout in ((80, "narrow"), (140, "wide")):
+            with self.subTest(width=width):
+                parent, d1, d2 = self._rail_fixture()
+                lines = render._build_lines(
+                    [parent], [d1, d2], section="both", narrow=False,
+                    malformed=0, layout=layout, term_width=width)
+                framed = [render._plain(line) for line in lines if line
+                          if any(mark in render._plain(line)
+                                 for mark in ("╭─", "│", "╰"))]
+                self.assertTrue(framed)
+                self.assertFalse([text for text in framed if render._dw(text) > width])
+
+    def test_f66_curses_painter_places_right_edge_inside_tint_band(self):
+        class Screen:
+            def __init__(self):
+                self.calls = []
+
+            def addstr(self, row, col, text, attr):
+                self.calls.append((row, col, text, attr))
+
+        old_tint = render._TINT_OK
+        render._TINT_OK = True
+        try:
+            width = 140
+            box_width = render._dispatch_box_width(width, "wide")
+            framed = render._frame_dispatch_line(
+                [(" " * 6 + "owner", None)], box_width, "top", "dim")
+            screen = Screen()
+            render._addline(
+                screen, 0, [(render._TINT_BODY, None)] + framed, width)
+        finally:
+            render._TINT_OK = old_tint
+
+        right = next((col, part) for _row, col, part, _attr in screen.calls
+                     if part == render._RAIL_TOP_RIGHT)
+        self.assertEqual(right[0], width - render._INSET - 1)
+        self.assertEqual(render._dw(right[1]), 1)
 
     def test_dispatch_role_suffix_has_no_qa_token(self):
         # qa axis retired (CONVENTIONS §1.1); intensity moved to the dial's paren knob
@@ -2139,8 +2228,11 @@ class ConductorBreadcrumbTest(unittest.TestCase):
         with mock.patch.object(render, "_BLINK_ON", True):
             lines = render._build_lines([], [conductor, child], section="both", narrow=False,
                                         malformed=0, layout="wide")
+        # F-67: the working exec child makes the UNIT active, so the owner's
+        # honest preparing token now pulses with the shared blink instead of
+        # sitting steady-lit while the card visibly works.
         self.assertEqual([k for line in lines if line for t, k in line if t == "preparing…"],
-                         ["stg0_off"])
+                         ["stg0_on"])
         self.assertEqual([k for line in lines if line for t, k in line if t == "running"],
                          ["stg1_on"])
         self.assertEqual(self._stage_keys(lines, "owner"), {})
