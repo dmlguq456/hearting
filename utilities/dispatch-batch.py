@@ -401,16 +401,15 @@ def assign_harnesses(
                 f"usable={','.join(usable)}",
             )
         combinations = distinct
-    elif sole_gate == "degraded":
-        # SD-100 proviso (13.30.2): no quality-peer family is hard-eligible, so
-        # the group may proceed on non-peer harnesses without the
-        # --allow-degraded-independence flag. The sole-gate degradation is
-        # recorded separately by the caller; the generic single-family
-        # degradation_cause stays empty so the two reasons never double-write.
-        independence = "degraded-same-harness"
     elif allow_degraded:
         independence = "degraded-same-harness"
     else:
+        # G2: the sole-gate proviso permits a non-quality-peer assignment, but
+        # it never bypasses the cross-family admission gate. With fewer than
+        # two usable families the group cannot stay cross-harness; same-family
+        # placement is refused unless --allow-degraded-independence is given
+        # (spec 13.30.2 "현행 거동 정정"), and `sole_gate == "degraded"` must
+        # not short-circuit that fail-closed order (AC 11).
         detail = f"usable={','.join(usable) or '-'}"
         codes = _exclusion_codes(exclusions, exclude=set(usable))
         if codes:
@@ -421,8 +420,6 @@ def assign_harnesses(
         )
 
     degradation_cause = "" if independence == "cross-harness" else "single-usable-harness-family"
-    if sole_gate == "degraded":
-        degradation_cause = ""
     if degradation_cause and degradation_cause not in DEGRADATION_CAUSES:
         # defensive: unreachable -- degradation_cause is only ever assigned
         # the literal "single-usable-harness-family" two lines above.

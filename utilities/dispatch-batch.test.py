@@ -653,10 +653,13 @@ class DispatchBatchTest(unittest.TestCase):
             diagnostics["quality_peer_families"], ["claude", "codex"]
         )
 
-    def test_ac11_sole_gate_degradation_when_quality_peer_is_ineligible(self):
-        # When no quality-peer family is hard-eligible at all, the proviso
-        # (spec 13.30.2) lets the assignment proceed but records
-        # sole-gate-non-peer-harness.
+    def test_ac11_sole_gate_degradation_fails_closed_without_flag(self):
+        # No quality-peer family is hard-eligible at all (only opencode is
+        # usable), so sole_gate degrades -- but the proviso (spec 13.30.2)
+        # never bypasses the cross-family admission gate. Same-family placement
+        # is refused without --allow-degraded-independence (AC 11: peer-only
+        # opencode -> row 0 / process 0) and keeps the single-usable-harness-family
+        # diagnosis; only the explicit flag reaches degraded-same-harness (G2).
         nodes = self._quality_peer_nodes(
             peer_families=["opencode"], aux_families=["opencode"]
         )
@@ -669,11 +672,23 @@ class DispatchBatchTest(unittest.TestCase):
         }
         with mock.patch.object(
             BATCH.DISPATCH_NODE, "resolve_checked_tuple", side_effect=resolve_side_effect
+        ), self.assertRaises(BATCH.BatchError) as ctx:
+            BATCH.assign_harnesses(route, nodes, allow_degraded=False)
+        self.assertEqual(ctx.exception.reason, "parallel-cross-harness-unavailable")
+        self.assertEqual(
+            ctx.exception.degradation_reason, "single-usable-harness-family"
+        )
+        with mock.patch.object(
+            BATCH.DISPATCH_NODE, "resolve_checked_tuple", side_effect=resolve_side_effect
         ):
             rows, independence, diagnostics = BATCH.assign_harnesses(
-                route, nodes, allow_degraded=False
+                route, nodes, allow_degraded=True
             )
+        self.assertEqual(independence, "degraded-same-harness")
         self.assertEqual(diagnostics["sole_gate"], "degraded")
+        self.assertEqual(
+            diagnostics["degradation_cause"], "single-usable-harness-family"
+        )
         self.assertEqual(diagnostics["usable_families"], ["opencode"])
         self.assertEqual({row[1] for row in rows}, {"opencode"})
 
