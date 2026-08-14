@@ -803,6 +803,12 @@ def _validate_recipe(recipe, registry, standard_plus_owner_profile):
                 )
         if not node.get("inputs") or not node.get("outputs") or not node.get("write_scope"):
             raise TopologyError(f"{recipe['capability']}:{node['id']}: inputs/outputs/write_scope required")
+        if node.get("parent_cross_preference") is not None and not isinstance(
+            node.get("parent_cross_preference"), bool
+        ):
+            raise TopologyError(
+                f"{recipe['capability']}:{node['id']}: parent_cross_preference must be a boolean"
+            )
         if node.get("completion_gate") not in gates:
             raise TopologyError(f"{recipe['capability']}:{node['id']}: missing completion gate")
         if not set(node.get("depends_on", [])) <= set(ids):

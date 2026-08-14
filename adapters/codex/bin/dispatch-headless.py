@@ -2777,6 +2777,8 @@ def main(argv: list[str]) -> int:
     leg_class, auxiliary_check = _route_node_leg_fields(args)
     print(f"leg_class={leg_class}")
     print(f"auxiliary_check={auxiliary_check}")
+    print(f"parent_cross={os.environ.get('AGENT_DISPATCH_PARENT_CROSS', '-')}")
+    print(f"sole_gate={os.environ.get('AGENT_DISPATCH_SOLE_GATE', '-')}")
     print(f"profile={args.profile or '-'}")
     print(f"runtime_home_projection={runtime_home_projection or '-'}")
     print(f"job_registry={jobs}")

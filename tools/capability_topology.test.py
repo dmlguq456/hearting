@@ -11,7 +11,7 @@ PRESERVED_FULL_FIELD_DIGESTS = {
         "926c9eff35134529d23574f9052da464493b09fd52cb98da03785ff7798669d7",
     ),
     ("autopilot-code", ('audit', 'debug', 'dev')): (
-        "812f7acba3c4adf1ebbc0f279206577b31e2b6131ba102f2bb9ba556ee3f831c",
+        "85b8615ac98fb3dad9fedb44f621c292eb9dc26a4104f055e55e41cc3288e2f7",
         "876f94f33c8ab50d391adce3161602bd147427a91627bb0ca324baf12226d8ac",
     ),
     ("autopilot-design", ('default',)): (
@@ -35,11 +35,11 @@ PRESERVED_FULL_FIELD_DIGESTS = {
         "17e5d03f2aaba86c476743ee29b453e0961455973c3c347cac6a9634c217b529",
     ),
     ("autopilot-research", ('academic', 'market', 'technology')): (
-        "31a34e00fc4a58cd8e2f2b7f2daf1dd380ec41d681aa9ad2660367ced6f86571",
+        "aeca7dd3b3a3557038b8033a80ce66a23ad4be647f1bc1efc4a2314eddb2bf57",
         "df7e2d118abcf7affb201159b8b9e14c08c2cc3372f86437ea4d134006c20816",
     ),
     ("autopilot-ship", ('default',)): (
-        "ea42832e8e0ebb85f2f07487921b4ff7502ed8ce5da0d8f72c7d062db8701593",
+        "648616df104927558bc5cca6a65e9455f48b30be63d16d9b7b47adc26d80a313",
         "c56318c9201667046297a0dc7c0788fae86651b48e382266325ccf759d7e68ea",
     ),
     ("autopilot-spec", ('api', 'app', 'cli', 'library', 'research', 'update')): (

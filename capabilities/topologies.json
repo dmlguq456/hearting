@@ -505,7 +505,8 @@
       "model_profile": "light",
       "continuation": {
        "kind": "inline-next"
-      }
+      },
+      "parent_cross_preference": true
      },
      {
       "id": "report",
@@ -2276,7 +2277,8 @@
       "model_profile": "balanced-deep",
       "continuation": {
        "kind": "inline-next"
-      }
+      },
+      "parent_cross_preference": true
      },
      {
       "id": "report",
@@ -2647,7 +2649,8 @@
       "unit": "qa/test",
       "model_profile": "light",
       "terminal": true,
-      "terminal_gate": "ship-post-deploy-verify"
+      "terminal_gate": "ship-post-deploy-verify",
+      "parent_cross_preference": true
      }
     ],
     "owner_dispatch_depth": 1,
