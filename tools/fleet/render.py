@@ -204,6 +204,12 @@ _HUE_OF = {
     # row names now wearing the harness hue (F-76b above), color separates identity
     # from prose and WEIGHT separates main (bold-dim `now_main`) from spawned.
     "now_sub": ("w", _A_D),
+    # F-77: the product name. The palette reserves its hues by MEANING —
+    # green/yellow/red are status, cyan/magenta/blue are harness identity, soft-white
+    # bold is a row's focal point — so the board's own name takes `v` (vanilla), the one
+    # hue on no such axis. It shares that hue with the working spinner, which is a
+    # per-row glyph and can never be confused with a word on the first line.
+    "hearting_name": ("v", _A_B),
 }
 
 # F-76b — the NAME zone wears the harness hue, but on its OWN keys rather than reusing
@@ -354,6 +360,8 @@ def _init_colors():
     # session name = THE left pillar of every row (design r2): bright bold for any live session —
     # the eye lands here first; only stale/dead recede. working is distinguished by its dot blink.
     _COLOR["nm_dead"] = _COLOR.get("soft", 0) | curses.A_DIM
+    _COLOR["hearting_name"] = (_COLOR.get("vanilla", _COLOR.get("yellow", 0))
+                               | curses.A_BOLD)
     _COLOR["name_dim"] = _COLOR.get("soft", 0) | curses.A_DIM
     # gate words · cost alarm · structure
     _COLOR["gate_t"] = _COLOR.get("green", 0) | curses.A_DIM
@@ -859,18 +867,6 @@ def _wide_name_width(term_width):
         return _NW_S
     surplus = max(0, raw - _NW_S)
     return _NW_S + min(_NAME_WIDE_MAX - _NW_S, surplus)
-
-
-def _col_head(name_width):
-    # F-33 (v11): the model/effort header folds into the harness column now that the row
-    # content does too — no more separate "model" header between branch and the gauge.
-    # F-77 (user 2026-08-14 "위에 column 헤더도 제거해버리자"): the third column lost its
-    # "stages" label along with the stage semantics. It has not held a pipeline stage for a
-    # while — depth-1 shows `code(dev·thr·owner)`, depth-2 `code-execute(thr)`, a main session
-    # its capability — and since F-75 the actual route breadcrumb lives on the card's close
-    # rail. A header naming one of the several things the column can hold was worse than none.
-    return ("    " + "harness (model·effort)".ljust(_HMW)
-            + "session (branch)")
 
 
 def _branch_suffix_segs(cwd, branch, dim=True, optional=False,
@@ -3686,7 +3682,12 @@ def _hearting_header_row():
     value = _HEARTING or {}
     version = str(value.get("version") or "unknown")
     method = str(value.get("install_method") or "unmanaged")
-    return ([("  hearting ", "head")] + _hearting_version_segments(version)
+    # F-77 (user 2026-08-14 "hearting이라는 글자에 컬러 넣어줘"): the product name is the one
+    # piece of identity on the board that is not a session, a harness, or a route — with the
+    # wide column header gone it is also the board's first line. It gets its own hue instead
+    # of the generic `head` grey; the version and install method stay quiet beside it.
+    return ([("  ", None), ("hearting", "hearting_name"), (" ", None)]
+            + _hearting_version_segments(version)
             + [(" · ", "dim"), (method, "version_method")])
 
 
@@ -4693,12 +4694,16 @@ def _build_lines(sessions, jobs, section, narrow, malformed, layout="wide", memo
     lines.append(None)
     _sh = " " * (_INSET + _PAD_IN) if _TINT_OK else ""   # shift matches panel content columns
     if layout != "wide":
+        # narrow/stack keeps its band: that line is not a column header — it names the
+        # layout and tells the reader how to change it.
         lines.append([(_sh + "  SESSIONS", "head"), (_RFLUSH, None),
                       ("%s · press w to cycle  " % layout, "head")])
-    else:
-        # F-68c: the elapsed-time COLUMN is retired board-wide (it now rides inline as
-        # a dim tag after each row's content), so the header carries no 'time' label.
-        lines.append([(_sh + _col_head(wide_name_width or _NW_S), "head")])
+    # F-77 (user 2026-08-14 "아니 헤더 자체를 통째로 날려"): the WIDE board carries no column
+    # header row at all. It named three columns and by now only two were columns — F-68c
+    # retired the time column, and F-77 left the third holding a unit/capability/node token
+    # that no single word covers. What remained labelled the two self-evident fields (a
+    # harness name, a session name) and spent a line of every screen doing it. The group
+    # cards carry the visual grouping.
     first = True
     folded_groups = []       # dormant dirs — aggregated into ONE line at the bottom (user: the
                              # stack of per-dir folded rules at the bottom was visual noise)

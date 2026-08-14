@@ -58,36 +58,32 @@ class HarnessModelCellTest(unittest.TestCase):
         self.assertIn(render._eff_key("xhigh", False), keys)  # effort reuses the heat-ramp color
 
 
-class ColumnHeaderTest(unittest.TestCase):
-    def test_header_shows_merged_harness_model_label(self):
-        head = render._col_head(28)
-        # F-77 dropped the third column's "stages" label: the column holds a unit/capability/
-        # node token depending on the row, and naming it after only one of those read as a
-        # promise the board no longer keeps.
-        self.assertEqual(
-            head,
-            "    " + "harness (model·effort)".ljust(render._HMW) + "session (branch)",
-        )
-        self.assertNotIn("model".ljust(render._MW), head)
-        self.assertNotIn("session".ljust(28) + "branch", head)
-        self.assertNotIn("stages", head)
-        self.assertEqual(head.index("session"), render._NAME_COL)
+class NoColumnHeaderTest(unittest.TestCase):
+    """F-77 (user "아니 헤더 자체를 통째로 날려") — the WIDE board has no column header row.
 
-    def test_wide_board_header_ends_at_the_session_label(self):
-        # F-68c (user "time 없애라고 했는데 왜 계속 뜨는건데"): the elapsed COLUMN is
-        # retired board-wide — it rides inline after each row's content — so the
-        # header carries no right-flushed `time` label and no flush sentinel.
+    It named three columns and only two were still columns: F-68c retired the time column,
+    and the third holds a unit/capability/node token no single word covers. What remained
+    labelled a harness name and a session name — both self-evident — for a line per screen.
+    """
+
+    def test_wide_board_emits_no_column_header(self):
         lines = render._build_lines([], [], "fleet", False, 0,
                                     layout="wide", term_width=168)
-        header = next(line for line in lines if line and
-                      any("harness (model·effort)" in text for text, _key in line))
-        self.assertEqual(len(header), 1)
-        self.assertNotIn(render._RFLUSH, [text for text, _key in header])
-        self.assertIn("session (branch)", header[0][0])
-        self.assertNotIn("context / stage", header[0][0])
-        # F-77: the header now ENDS at the session label — no third-column name, and no
-        # trailing padding standing in for one.
-        self.assertTrue(header[0][0].endswith("session (branch)"))
+        text = "\n".join("".join(t for t, _k in ln) for ln in lines if ln)
+        self.assertNotIn("harness (model·effort)", text)
+        self.assertNotIn("session (branch)", text)
+        self.assertNotIn("stages", text)
+
+    def test_narrow_keeps_its_layout_band(self):
+        """That line is not a column header — it names the layout and how to change it."""
+        lines = render._build_lines([], [], "fleet", True, 0,
+                                    layout="narrow", term_width=100)
+        text = "\n".join("".join(t for t, _k in ln) for ln in lines if ln)
+        self.assertIn("SESSIONS", text)
+        self.assertIn("press w to cycle", text)
+
+    def test_col_head_helper_is_gone(self):
+        self.assertFalse(hasattr(render, "_col_head"))
 
 
 class SessionRowMergeTest(unittest.TestCase):

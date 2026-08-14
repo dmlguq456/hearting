@@ -272,7 +272,10 @@ class InstallInfoTest(unittest.TestCase):
         render.set_hearting({"version": "v7.0.0-6-g0abc1234-dirty",
                              "install_method": "linked"})
         self.assertEqual(render._hearting_header_row(), [
-            ("  hearting ", "head"),
+            # F-77 gave the product name its own hue, so it is its own segment now.
+            ("  ", None),
+            ("hearting", "hearting_name"),
+            (" ", None),
             ("v7.0.0", "version_release"),
             ("-6-g0abc1234", "version_build"),
             ("-dirty", "version_dirty"),

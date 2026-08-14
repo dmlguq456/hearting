@@ -76,16 +76,30 @@ class SkillOnlyCellTest(unittest.TestCase):
         self.assertEqual(self._cell({}), "-")
 
 
-class ColumnHeaderTest(unittest.TestCase):
+class NoColumnHeaderTest(unittest.TestCase):
+    """The column lost its label and then the whole header row (user: "위에 column 헤더도
+    제거해버리자" → "아니 헤더 자체를 통째로 날려")."""
 
-    def test_header_has_no_stages_label(self):
-        head = render._col_head(40)
-        self.assertNotIn("stages", head)
-        self.assertIn("harness (model·effort)", head)
-        self.assertIn("session (branch)", head)
+    def test_wide_board_has_no_header_row(self):
+        lines = render._build_lines([], [], "fleet", False, 0,
+                                    layout="wide", term_width=168)
+        text = "\n".join("".join(t for t, _k in ln) for ln in lines if ln)
+        for label in ("stages", "harness (model·effort)", "session (branch)"):
+            self.assertNotIn(label, text)
 
-    def test_header_does_not_pad_past_its_last_label(self):
-        self.assertEqual(render._col_head(40), render._col_head(40).rstrip())
+    def test_product_name_carries_its_own_hue(self):
+        """F-77 (user "hearting이라는 글자에 컬러 넣어줘"): with the header gone the board's
+        own name is its first line, and it is no longer generic `head` grey."""
+        render.set_hearting({"version": "v1.2.3", "install_method": "packaged"})
+        try:
+            row = render._hearting_header_row()
+        finally:
+            render.set_hearting(None)
+        name_key = next(k for t, k in row if t == "hearting")
+        self.assertEqual(name_key, "hearting_name")
+        # The palette reserves green/yellow/red for status and cyan/magenta/blue for
+        # harness identity, so the product name must sit on neither axis.
+        self.assertEqual(render._HUE_OF["hearting_name"][0], "v")
 
 
 class ArtifactStageRecencyTest(unittest.TestCase):
