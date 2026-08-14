@@ -205,6 +205,19 @@ for origin, cwd in ranked[:limit]:
     print(f"mem-periodic-curate select origin={origin} active={active}"
           f" durable={durable} cwd={cwd}", file=sys.stderr)
     print(cwd)
+
+# Silent omission is the failure mode this selector exists to kill, so make the
+# inverse visible too: record-holding origins that got NO reachable candidate
+# cwd this run (checkout gone, session dir missing, or — observed at the first
+# 04:00 cron firing, 2026-08-14 — an NFS mount briefly unreachable made every
+# top-backlog candidate vanish without a trace). Bounded to the heaviest few.
+reachable = set(best)
+unreachable = sorted(
+    ((origin, c) for origin, c in counts.items() if origin not in reachable),
+    key=lambda kv: -kv[1][0])
+for origin, (active, durable) in unreachable[:5]:
+    print(f"mem-periodic-curate unreachable origin={origin} active={active}"
+          f" durable={durable}", file=sys.stderr)
 PYEOF
 }
 

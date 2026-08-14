@@ -424,6 +424,36 @@ grep -q "skip reattribute: denied in periodic curation" "$STORE11/stderr" \
   && ok "⑪: denial is logged as an explicit skip" \
   || bad "⑪: denial skip message missing"
 
+# ============================================================
+# ⑫ record-holding origins without a reachable cwd are logged, not silent
+# ============================================================
+# First 04:00 cron firing (2026-08-14): an NFS blip made every top-backlog
+# candidate dir unresolvable and the batch silently curated only local-home
+# leftovers. Selection loss must leave bounded evidence in the cron log.
+echo "== ⑫ unreachable record-holding origin → bounded stderr diagnostic =="
+STORE12="$(mktemp -d)"; PROJ12="$(mktemp -d)"; STUB12="$(mktemp -d)"; REALDIR12="$(mktemp -d)"
+CLEANUP+=("$STORE12" "$PROJ12" "$STUB12" "$REALDIR12")
+mkproject_seeded "$PROJ12" "$REALDIR12" "$STORE12" 1
+# Backlog origin with records but no session dir / no existing checkout at all.
+MEM_STORE="$STORE12" python3 "$MEM" add working thread "stranded backlog record" \
+  --cwd-origin="git:example.com/stranded/backlog" >/dev/null 2>&1
+printf '%s' "$CONC_STUB_BODY" > "$STUB12/claude"; chmod +x "$STUB12/claude"
+LOG12="$STORE12/periodic.log"
+
+MEM_PERIODIC_CURATE_ENABLE=1 MEM_DISTILL_ENABLE=1 \
+  MEM_STORE="$STORE12" MEM_PROJECTS="$PROJ12" MEM_PY="$MEM" \
+  MEM_DISTILL_WORKER=claude PATH="$STUB12:$PATH" \
+  AGENT_MODEL_GOVERNOR_ROOT="$STORE12/.test-model-governor" \
+  CONC_DIR="$STORE12" \
+  bash "$UTIL" 2>"$LOG12"
+
+grep -q "unreachable origin=git:example.com/stranded/backlog active=1" "$LOG12" \
+  && ok "⑫: stranded origin surfaces as an unreachable diagnostic" \
+  || bad "⑫: unreachable diagnostic missing"
+grep -q "project=$REALDIR12 " "$LOG12" \
+  && ok "⑫: reachable project still dispatched alongside the diagnostic" \
+  || bad "⑫: reachable project was not dispatched"
+
 echo
 echo "RESULT: PASS=$PASS FAIL=$FAIL"
 [ "$FAIL" = "0" ]
