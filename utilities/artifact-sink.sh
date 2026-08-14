@@ -35,6 +35,14 @@ case "${1:-}" in
     bundle_id=""
     bundle_version=""
     entrypoint=""
+    artifact_root=""
+    repository_id=""
+    campaign_id=""
+    cycle_id=""
+    artifact_id=""
+    artifact_revision_id=""
+    manifest_id=""
+    manifest_revision_id=""
     while [ "$#" -gt 0 ]; do
       case "$1" in
         --source) [ "$#" -ge 2 ] || exit 64; source_path=$2; shift 2 ;;
@@ -44,12 +52,42 @@ case "${1:-}" in
         --bundle-id) [ "$#" -ge 2 ] || exit 64; bundle_id=$2; shift 2 ;;
         --bundle-version) [ "$#" -ge 2 ] || exit 64; bundle_version=$2; shift 2 ;;
         --entrypoint) [ "$#" -ge 2 ] || exit 64; entrypoint=$2; shift 2 ;;
+        --artifact-root) [ "$#" -ge 2 ] || exit 64; artifact_root=$2; shift 2 ;;
+        --repository-id) [ "$#" -ge 2 ] || exit 64; repository_id=$2; shift 2 ;;
+        --campaign-id) [ "$#" -ge 2 ] || exit 64; campaign_id=$2; shift 2 ;;
+        --cycle-id) [ "$#" -ge 2 ] || exit 64; cycle_id=$2; shift 2 ;;
+        --artifact-id) [ "$#" -ge 2 ] || exit 64; artifact_id=$2; shift 2 ;;
+        --artifact-revision-id) [ "$#" -ge 2 ] || exit 64; artifact_revision_id=$2; shift 2 ;;
+        --manifest-id) [ "$#" -ge 2 ] || exit 64; manifest_id=$2; shift 2 ;;
+        --manifest-revision-id) [ "$#" -ge 2 ] || exit 64; manifest_revision_id=$2; shift 2 ;;
         *) exit 64 ;;
       esac
     done
     ;;
   *) exit 64 ;;
 esac
+
+# v3 (manifest-native) emit. Placed above the v1/v2 branch and always exiting,
+# so the frozen v1/v2 emit path below is byte-unchanged and unreachable here.
+if [ -n "$artifact_root$repository_id$campaign_id$cycle_id$artifact_id$artifact_revision_id$manifest_id$manifest_revision_id" ]; then
+  [ -n "$artifact_root" ] && [ -n "$repository_id" ] && [ -n "$campaign_id" ] \
+    && [ -n "$cycle_id" ] && [ -n "$artifact_id" ] && [ -n "$artifact_revision_id" ] \
+    && [ -n "$manifest_id" ] && [ -n "$manifest_revision_id" ] || exit 64
+  [ -z "$bundle_id$bundle_version$entrypoint$source_path$source_capability$project_root" ] || exit 64
+  [ -n "$completed_at" ] || exit 64
+  sink_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd) || exit 70
+  umask 077
+  receipt=$(mktemp "${TMPDIR:-/tmp}/artifact-receipt.XXXXXX") || exit 70
+  trap 'rm -f -- "$receipt"' EXIT HUP INT TERM
+  python3 "$sink_dir/artifact_receipt.py" --emit-v3 --out "$receipt" \
+    --artifact-root "$artifact_root" --completed-at "$completed_at" \
+    --repository-id "$repository_id" --campaign-id "$campaign_id" \
+    --cycle-id "$cycle_id" --artifact-id "$artifact_id" \
+    --artifact-revision-id "$artifact_revision_id" \
+    --manifest-id "$manifest_id" --manifest-revision-id "$manifest_revision_id" 1>&2 || exit "$?"
+  "$handler" --receipt "$receipt"
+  exit "$?"
+fi
 
 bundle_fields=0
 [ -n "$bundle_id" ] && bundle_fields=$((bundle_fields + 1))

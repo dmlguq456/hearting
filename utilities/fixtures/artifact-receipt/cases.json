@@ -1,0 +1,652 @@
+[
+  {
+    "name": "partial-bundle-missing-version",
+    "a4_row": "partial bundle field reject",
+    "ladder_branch": "R2b-partial-bundle",
+    "expected_missing": [
+      "version"
+    ],
+    "expected_extra": [],
+    "input": {
+      "schema_version": 2,
+      "event": "artifact.completed",
+      "status": "completed",
+      "completed_at": "2026-08-11T00:00:00Z",
+      "bundle_id": "project/experiment",
+      "entrypoint": "report/index.html"
+    },
+    "expected_state": "rejected",
+    "expected_reason": "partial-bundle-identity"
+  },
+  {
+    "name": "partial-bundle-missing-entrypoint",
+    "a4_row": "partial bundle field reject",
+    "ladder_branch": "R2b-partial-bundle",
+    "expected_missing": [
+      "entrypoint"
+    ],
+    "expected_extra": [],
+    "input": {
+      "schema_version": 2,
+      "event": "artifact.completed",
+      "status": "completed",
+      "completed_at": "2026-08-11T00:00:00Z",
+      "bundle_id": "project/experiment",
+      "version": "v1"
+    },
+    "expected_state": "rejected",
+    "expected_reason": "partial-bundle-identity"
+  },
+  {
+    "name": "partial-bundle-only-id",
+    "a4_row": "partial bundle field reject",
+    "ladder_branch": "R2b-partial-bundle",
+    "expected_missing": [
+      "entrypoint",
+      "version"
+    ],
+    "expected_extra": [],
+    "input": {
+      "schema_version": 2,
+      "event": "artifact.completed",
+      "status": "completed",
+      "completed_at": "2026-08-11T00:00:00Z",
+      "bundle_id": "project/experiment"
+    },
+    "expected_state": "rejected",
+    "expected_reason": "partial-bundle-identity"
+  },
+  {
+    "name": "partial-manifest-missing-arev",
+    "a4_row": "partial manifest identity reject",
+    "ladder_branch": "R2b-partial-manifest",
+    "expected_missing": [
+      "artifact_revision_id"
+    ],
+    "expected_extra": [],
+    "input": {
+      "schema_version": 3,
+      "event": "artifact.completed",
+      "status": "completed",
+      "completed_at": "2026-08-11T00:00:00Z",
+      "repository_id": "repo_11111111111111111111111111111111",
+      "campaign_id": "camp_22222222222222222222222222222222",
+      "cycle_id": "cyc_33333333333333333333333333333333",
+      "artifact_id": "art_44444444444444444444444444444444",
+      "manifest_id": "man_66666666666666666666666666666666",
+      "manifest_revision_id": "mrev_77777777777777777777777777777777"
+    },
+    "expected_state": "rejected",
+    "expected_reason": "partial-manifest-identity"
+  },
+  {
+    "name": "partial-manifest-missing-three-ids",
+    "a4_row": "partial manifest identity reject",
+    "ladder_branch": "R2b-partial-manifest",
+    "expected_missing": [
+      "artifact_revision_id",
+      "manifest_id",
+      "manifest_revision_id"
+    ],
+    "expected_extra": [],
+    "input": {
+      "schema_version": 3,
+      "event": "artifact.completed",
+      "status": "completed",
+      "completed_at": "2026-08-11T00:00:00Z",
+      "repository_id": "repo_11111111111111111111111111111111",
+      "campaign_id": "camp_22222222222222222222222222222222",
+      "cycle_id": "cyc_33333333333333333333333333333333",
+      "artifact_id": "art_44444444444444444444444444444444"
+    },
+    "expected_state": "rejected",
+    "expected_reason": "partial-manifest-identity"
+  },
+  {
+    "name": "partial-v1-missing-status",
+    "a4_row": "wrong version/key set reject",
+    "ladder_branch": "R2b-else",
+    "expected_missing": [
+      "status"
+    ],
+    "expected_extra": [],
+    "input": {
+      "schema_version": 1,
+      "event": "artifact.completed",
+      "source_path": "/tmp/artifact-receipt-fixtures/project/report.md",
+      "source_capability": "dev-backend",
+      "project_root": "/tmp/artifact-receipt-fixtures/project",
+      "completed_at": "2026-08-11T00:00:00Z"
+    },
+    "expected_state": "rejected",
+    "expected_reason": "key-set-mismatch"
+  },
+  {
+    "name": "partial-v3-missing-status-only",
+    "a4_row": "wrong version/key set reject",
+    "ladder_branch": "R2b-else",
+    "expected_missing": [
+      "status"
+    ],
+    "expected_extra": [],
+    "input": {
+      "schema_version": 3,
+      "event": "artifact.completed",
+      "completed_at": "2026-08-11T00:00:00Z",
+      "repository_id": "repo_11111111111111111111111111111111",
+      "campaign_id": "camp_22222222222222222222222222222222",
+      "cycle_id": "cyc_33333333333333333333333333333333",
+      "artifact_id": "art_44444444444444444444444444444444",
+      "artifact_revision_id": "arev_55555555555555555555555555555555",
+      "manifest_id": "man_66666666666666666666666666666666",
+      "manifest_revision_id": "mrev_77777777777777777777777777777777"
+    },
+    "expected_state": "rejected",
+    "expected_reason": "key-set-mismatch"
+  },
+  {
+    "name": "mixed-v2-plus-v1-source-path",
+    "a4_row": "v1/v2/v3 mixed reject",
+    "ladder_branch": "R2c-mixed",
+    "expected_missing": [],
+    "expected_extra": [
+      "source_path"
+    ],
+    "input": {
+      "schema_version": 2,
+      "event": "artifact.completed",
+      "status": "completed",
+      "completed_at": "2026-08-11T00:00:00Z",
+      "bundle_id": "project/experiment",
+      "version": "v1",
+      "entrypoint": "report/index.html",
+      "source_path": "/tmp/x"
+    },
+    "expected_state": "rejected",
+    "expected_reason": "mixed-version-fields"
+  },
+  {
+    "name": "mixed-v1-plus-v2-bundle-id",
+    "a4_row": "v1/v2/v3 mixed reject",
+    "ladder_branch": "R2c-mixed",
+    "expected_missing": [],
+    "expected_extra": [
+      "bundle_id"
+    ],
+    "input": {
+      "schema_version": 1,
+      "event": "artifact.completed",
+      "source_path": "/tmp/artifact-receipt-fixtures/project/report.md",
+      "source_capability": "dev-backend",
+      "project_root": "/tmp/artifact-receipt-fixtures/project",
+      "status": "completed",
+      "completed_at": "2026-08-11T00:00:00Z",
+      "bundle_id": "project/experiment"
+    },
+    "expected_state": "rejected",
+    "expected_reason": "mixed-version-fields"
+  },
+  {
+    "name": "mixed-v3-plus-v2-bundle-id",
+    "a4_row": "v1/v2/v3 mixed reject",
+    "ladder_branch": "R2c-mixed",
+    "expected_missing": [],
+    "expected_extra": [
+      "bundle_id"
+    ],
+    "input": {
+      "schema_version": 3,
+      "event": "artifact.completed",
+      "status": "completed",
+      "completed_at": "2026-08-11T00:00:00Z",
+      "repository_id": "repo_11111111111111111111111111111111",
+      "campaign_id": "camp_22222222222222222222222222222222",
+      "cycle_id": "cyc_33333333333333333333333333333333",
+      "artifact_id": "art_44444444444444444444444444444444",
+      "artifact_revision_id": "arev_55555555555555555555555555555555",
+      "manifest_id": "man_66666666666666666666666666666666",
+      "manifest_revision_id": "mrev_77777777777777777777777777777777",
+      "bundle_id": "project/experiment"
+    },
+    "expected_state": "rejected",
+    "expected_reason": "mixed-version-fields"
+  },
+  {
+    "name": "unknown-field-on-v1",
+    "a4_row": "unknown/extra field reject",
+    "ladder_branch": "R2c-unknown-field",
+    "expected_missing": [],
+    "expected_extra": [
+      "foo"
+    ],
+    "input": {
+      "schema_version": 1,
+      "event": "artifact.completed",
+      "source_path": "/tmp/artifact-receipt-fixtures/project/report.md",
+      "source_capability": "dev-backend",
+      "project_root": "/tmp/artifact-receipt-fixtures/project",
+      "status": "completed",
+      "completed_at": "2026-08-11T00:00:00Z",
+      "foo": "bar"
+    },
+    "expected_state": "rejected",
+    "expected_reason": "unknown-field"
+  },
+  {
+    "name": "unknown-field-on-v2",
+    "a4_row": "unknown/extra field reject",
+    "ladder_branch": "R2c-unknown-field",
+    "expected_missing": [],
+    "expected_extra": [
+      "foo"
+    ],
+    "input": {
+      "schema_version": 2,
+      "event": "artifact.completed",
+      "status": "completed",
+      "completed_at": "2026-08-11T00:00:00Z",
+      "bundle_id": "project/experiment",
+      "version": "v1",
+      "entrypoint": "report/index.html",
+      "foo": "bar"
+    },
+    "expected_state": "rejected",
+    "expected_reason": "unknown-field"
+  },
+  {
+    "name": "extra-field-on-v3",
+    "a4_row": "unknown/extra field reject",
+    "ladder_branch": "R2c-unknown-field",
+    "expected_missing": [],
+    "expected_extra": [
+      "foo"
+    ],
+    "input": {
+      "schema_version": 3,
+      "event": "artifact.completed",
+      "status": "completed",
+      "completed_at": "2026-08-11T00:00:00Z",
+      "repository_id": "repo_11111111111111111111111111111111",
+      "campaign_id": "camp_22222222222222222222222222222222",
+      "cycle_id": "cyc_33333333333333333333333333333333",
+      "artifact_id": "art_44444444444444444444444444444444",
+      "artifact_revision_id": "arev_55555555555555555555555555555555",
+      "manifest_id": "man_66666666666666666666666666666666",
+      "manifest_revision_id": "mrev_77777777777777777777777777777777",
+      "foo": "bar"
+    },
+    "expected_state": "rejected",
+    "expected_reason": "unknown-field"
+  },
+  {
+    "name": "v3-declared-with-v2-body",
+    "a4_row": "wrong version/key set reject",
+    "ladder_branch": "R2a-exact-version-swap",
+    "expected_missing": [
+      "artifact_id",
+      "artifact_revision_id",
+      "campaign_id",
+      "cycle_id",
+      "manifest_id",
+      "manifest_revision_id",
+      "repository_id"
+    ],
+    "expected_extra": [
+      "bundle_id",
+      "entrypoint",
+      "version"
+    ],
+    "input": {
+      "event": "artifact.completed",
+      "status": "completed",
+      "completed_at": "2026-08-11T00:00:00Z",
+      "bundle_id": "project/experiment",
+      "version": "v1",
+      "entrypoint": "report/index.html",
+      "schema_version": 3
+    },
+    "expected_state": "rejected",
+    "expected_reason": "key-set-mismatch"
+  },
+  {
+    "name": "v1-declared-with-v2-body",
+    "a4_row": "wrong version/key set reject",
+    "ladder_branch": "R2a-exact-version-swap",
+    "expected_missing": [
+      "project_root",
+      "source_capability",
+      "source_path"
+    ],
+    "expected_extra": [
+      "bundle_id",
+      "entrypoint",
+      "version"
+    ],
+    "input": {
+      "event": "artifact.completed",
+      "status": "completed",
+      "completed_at": "2026-08-11T00:00:00Z",
+      "bundle_id": "project/experiment",
+      "version": "v1",
+      "entrypoint": "report/index.html",
+      "schema_version": 1
+    },
+    "expected_state": "rejected",
+    "expected_reason": "key-set-mismatch"
+  },
+  {
+    "name": "v2-declared-with-v1-body",
+    "a4_row": "wrong version/key set reject",
+    "ladder_branch": "R2a-exact-version-swap",
+    "expected_missing": [
+      "bundle_id",
+      "entrypoint",
+      "version"
+    ],
+    "expected_extra": [
+      "project_root",
+      "source_capability",
+      "source_path"
+    ],
+    "input": {
+      "event": "artifact.completed",
+      "source_path": "/tmp/artifact-receipt-fixtures/project/report.md",
+      "source_capability": "dev-backend",
+      "project_root": "/tmp/artifact-receipt-fixtures/project",
+      "status": "completed",
+      "completed_at": "2026-08-11T00:00:00Z",
+      "schema_version": 2
+    },
+    "expected_state": "rejected",
+    "expected_reason": "key-set-mismatch"
+  },
+  {
+    "name": "r2a-mixed-foreign-v2-missing-version-plus-source-path",
+    "a4_row": "wrong version/key set reject",
+    "ladder_branch": "R2a-mixed-foreign",
+    "expected_missing": [
+      "version"
+    ],
+    "expected_extra": [
+      "source_path"
+    ],
+    "input": {
+      "schema_version": 2,
+      "event": "artifact.completed",
+      "status": "completed",
+      "completed_at": "2026-08-11T00:00:00Z",
+      "bundle_id": "project/experiment",
+      "entrypoint": "report/index.html",
+      "source_path": "/tmp/x"
+    },
+    "expected_state": "rejected",
+    "expected_reason": "mixed-version-fields"
+  },
+  {
+    "name": "r2a-else-v2-missing-version-plus-foo",
+    "a4_row": "wrong version/key set reject",
+    "ladder_branch": "R2a-else",
+    "expected_missing": [
+      "version"
+    ],
+    "expected_extra": [
+      "foo"
+    ],
+    "input": {
+      "schema_version": 2,
+      "event": "artifact.completed",
+      "status": "completed",
+      "completed_at": "2026-08-11T00:00:00Z",
+      "bundle_id": "project/experiment",
+      "entrypoint": "report/index.html",
+      "foo": "x"
+    },
+    "expected_state": "rejected",
+    "expected_reason": "key-set-mismatch"
+  },
+  {
+    "name": "r2a-else-v1-missing-project-root-plus-foo",
+    "a4_row": "wrong version/key set reject",
+    "ladder_branch": "R2a-else",
+    "expected_missing": [
+      "project_root"
+    ],
+    "expected_extra": [
+      "foo"
+    ],
+    "input": {
+      "schema_version": 1,
+      "event": "artifact.completed",
+      "source_path": "/tmp/artifact-receipt-fixtures/project/report.md",
+      "source_capability": "dev-backend",
+      "status": "completed",
+      "completed_at": "2026-08-11T00:00:00Z",
+      "foo": "x"
+    },
+    "expected_state": "rejected",
+    "expected_reason": "key-set-mismatch"
+  },
+  {
+    "name": "r2a-else-v3-missing-manifest-revision-id-plus-foo",
+    "a4_row": "wrong version/key set reject",
+    "ladder_branch": "R2a-else",
+    "expected_missing": [
+      "manifest_revision_id"
+    ],
+    "expected_extra": [
+      "foo"
+    ],
+    "input": {
+      "schema_version": 3,
+      "event": "artifact.completed",
+      "status": "completed",
+      "completed_at": "2026-08-11T00:00:00Z",
+      "repository_id": "repo_11111111111111111111111111111111",
+      "campaign_id": "camp_22222222222222222222222222222222",
+      "cycle_id": "cyc_33333333333333333333333333333333",
+      "artifact_id": "art_44444444444444444444444444444444",
+      "artifact_revision_id": "arev_55555555555555555555555555555555",
+      "manifest_id": "man_66666666666666666666666666666666",
+      "foo": "x"
+    },
+    "expected_state": "rejected",
+    "expected_reason": "key-set-mismatch"
+  },
+  {
+    "name": "schema-version-4",
+    "a4_row": "wrong version/key set reject",
+    "ladder_branch": "R1",
+    "expected_missing": null,
+    "expected_extra": null,
+    "input": {
+      "schema_version": 4,
+      "event": "artifact.completed",
+      "status": "completed",
+      "completed_at": "2026-08-11T00:00:00Z",
+      "bundle_id": "project/experiment",
+      "version": "v1",
+      "entrypoint": "report/index.html"
+    },
+    "expected_state": "rejected",
+    "expected_reason": "unknown-schema-version"
+  },
+  {
+    "name": "schema-version-missing",
+    "a4_row": "wrong version/key set reject",
+    "ladder_branch": "R1",
+    "expected_missing": null,
+    "expected_extra": null,
+    "input": {
+      "event": "artifact.completed",
+      "status": "completed",
+      "completed_at": "2026-08-11T00:00:00Z",
+      "bundle_id": "project/experiment",
+      "version": "v1",
+      "entrypoint": "report/index.html"
+    },
+    "expected_state": "rejected",
+    "expected_reason": "unknown-schema-version"
+  },
+  {
+    "name": "schema-version-string",
+    "a4_row": "wrong version/key set reject",
+    "ladder_branch": "R1",
+    "expected_missing": null,
+    "expected_extra": null,
+    "input": {
+      "schema_version": "2",
+      "event": "artifact.completed",
+      "status": "completed",
+      "completed_at": "2026-08-11T00:00:00Z",
+      "bundle_id": "project/experiment",
+      "version": "v1",
+      "entrypoint": "report/index.html"
+    },
+    "expected_state": "rejected",
+    "expected_reason": "unknown-schema-version"
+  },
+  {
+    "name": "bad-event-literal",
+    "a4_row": "value-invalid",
+    "ladder_branch": "R3",
+    "expected_missing": [],
+    "expected_extra": [],
+    "input": {
+      "schema_version": 2,
+      "event": "artifact.started",
+      "status": "completed",
+      "completed_at": "2026-08-11T00:00:00Z",
+      "bundle_id": "project/experiment",
+      "version": "v1",
+      "entrypoint": "report/index.html"
+    },
+    "expected_state": "rejected",
+    "expected_reason": "value-invalid"
+  },
+  {
+    "name": "bad-status-literal",
+    "a4_row": "value-invalid",
+    "ladder_branch": "R3",
+    "expected_missing": [],
+    "expected_extra": [],
+    "input": {
+      "schema_version": 1,
+      "event": "artifact.completed",
+      "source_path": "/tmp/artifact-receipt-fixtures/project/report.md",
+      "source_capability": "dev-backend",
+      "project_root": "/tmp/artifact-receipt-fixtures/project",
+      "status": "pending",
+      "completed_at": "2026-08-11T00:00:00Z"
+    },
+    "expected_state": "rejected",
+    "expected_reason": "value-invalid"
+  },
+  {
+    "name": "naive-completed-at",
+    "a4_row": "value-invalid",
+    "ladder_branch": "R3",
+    "expected_missing": [],
+    "expected_extra": [],
+    "input": {
+      "schema_version": 2,
+      "event": "artifact.completed",
+      "status": "completed",
+      "completed_at": "2026-08-11T00:00:00",
+      "bundle_id": "project/experiment",
+      "version": "v1",
+      "entrypoint": "report/index.html"
+    },
+    "expected_state": "rejected",
+    "expected_reason": "value-invalid"
+  },
+  {
+    "name": "malformed-v3-id",
+    "a4_row": "value-invalid",
+    "ladder_branch": "R3",
+    "expected_missing": [],
+    "expected_extra": [],
+    "input": {
+      "schema_version": 3,
+      "event": "artifact.completed",
+      "status": "completed",
+      "completed_at": "2026-08-11T00:00:00Z",
+      "repository_id": "repo_11111111111111111111111111111111",
+      "campaign_id": "camp_22222222222222222222222222222222",
+      "cycle_id": "cyc_33333333333333333333333333333333",
+      "artifact_id": "not-a-well-formed-id",
+      "artifact_revision_id": "arev_55555555555555555555555555555555",
+      "manifest_id": "man_66666666666666666666666666666666",
+      "manifest_revision_id": "mrev_77777777777777777777777777777777"
+    },
+    "expected_state": "rejected",
+    "expected_reason": "value-invalid"
+  },
+  {
+    "name": "relative-source-path",
+    "a4_row": "value-invalid",
+    "ladder_branch": "R3",
+    "expected_missing": [],
+    "expected_extra": [],
+    "input": {
+      "schema_version": 1,
+      "event": "artifact.completed",
+      "source_path": "relative/path.md",
+      "source_capability": "dev-backend",
+      "project_root": "/tmp/artifact-receipt-fixtures/project",
+      "status": "completed",
+      "completed_at": "2026-08-11T00:00:00Z"
+    },
+    "expected_state": "rejected",
+    "expected_reason": "value-invalid"
+  },
+  {
+    "name": "absolute-entrypoint",
+    "a4_row": "value-invalid",
+    "ladder_branch": "R3",
+    "expected_missing": [],
+    "expected_extra": [],
+    "input": {
+      "schema_version": 2,
+      "event": "artifact.completed",
+      "status": "completed",
+      "completed_at": "2026-08-11T00:00:00Z",
+      "bundle_id": "project/experiment",
+      "version": "v1",
+      "entrypoint": "/report/index.html"
+    },
+    "expected_state": "rejected",
+    "expected_reason": "value-invalid"
+  },
+  {
+    "name": "not-an-object",
+    "a4_row": "value-invalid",
+    "ladder_branch": "R0",
+    "expected_missing": null,
+    "expected_extra": null,
+    "input": [
+      "not",
+      "an",
+      "object"
+    ],
+    "expected_state": "rejected",
+    "expected_reason": "value-invalid"
+  },
+  {
+    "name": "v1-source-path-lone-surrogate",
+    "a4_row": "value refusal stays typed",
+    "ladder_branch": "R3",
+    "expected_missing": [],
+    "expected_extra": [],
+    "input": {
+      "schema_version": 1,
+      "event": "artifact.completed",
+      "source_path": "/tmp/\ud800",
+      "source_capability": "autopilot-code",
+      "project_root": "/canonical/project",
+      "status": "completed",
+      "completed_at": "2026-08-11T00:00:00Z"
+    },
+    "expected_state": "rejected",
+    "expected_reason": "value-invalid"
+  }
+]

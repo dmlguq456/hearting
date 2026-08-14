@@ -1,0 +1,23 @@
+[
+  {"name": "s1-root-identity-missing", "a4_row": "resolve() S1", "step": "S1", "action": "delete-root-identity", "expected_state": "rejected", "expected_reason": "local-manifest-unregistered"},
+  {"name": "s1-root-identity-corrupt", "a4_row": "resolve() S1", "step": "S1", "action": "corrupt-root-identity", "expected_state": "unavailable", "expected_reason": "local-state-unreadable"},
+  {"name": "s2-repository-id-mismatch", "a4_row": "resolve() S2", "step": "S2", "action": "foreign-repository-id", "expected_state": "rejected", "expected_reason": "local-lineage-mismatch"},
+  {"name": "s3-index-missing", "a4_row": "resolve() S3", "step": "S3", "action": "delete-index", "expected_state": "rejected", "expected_reason": "local-manifest-unregistered"},
+  {"name": "s3-index-corrupt", "a4_row": "resolve() S3", "step": "S3", "action": "corrupt-index", "expected_state": "unavailable", "expected_reason": "local-state-unreadable"},
+  {"name": "s4-index-artifact-root-id-mismatch", "a4_row": "resolve() S4", "step": "S4", "action": "tamper-index-artifact-root-id", "expected_state": "rejected", "expected_reason": "local-lineage-mismatch"},
+  {"name": "s5-stable-id-unregistered", "a4_row": "resolve() S5", "step": "S5", "action": "unregistered-artifact-id", "expected_state": "rejected", "expected_reason": "local-manifest-unregistered"},
+  {"name": "s5-stable-id-kind-mismatch", "a4_row": "resolve() S5", "step": "S5", "action": "swap-cycle-id-with-manifest-id", "expected_state": "rejected", "expected_reason": "local-lineage-mismatch"},
+  {"name": "s6-cycle-manifest-combo-mismatch", "a4_row": "resolve() S6", "step": "S6", "action": "cross-document-cycle-id", "expected_state": "rejected", "expected_reason": "local-lineage-mismatch"},
+  {"name": "s7-campaign-mismatch", "a4_row": "resolve() S7", "step": "S7", "action": "foreign-campaign-id", "expected_state": "rejected", "expected_reason": "local-lineage-mismatch"},
+  {"name": "s8-manifest-triple-unregistered", "a4_row": "resolve() S8", "step": "S8", "action": "unregistered-manifest-revision-id", "expected_state": "rejected", "expected_reason": "local-manifest-unregistered"},
+  {"name": "s8-manifest-triple-duplicate", "a4_row": "resolve() S8", "step": "S8", "action": "duplicate-manifest-triple", "expected_state": "rejected", "expected_reason": "local-lineage-mismatch"},
+  {"name": "s9-manifest-digest-drift", "a4_row": "resolve() S9", "step": "S9", "action": "tamper-cycle-manifest-digest", "expected_state": "rejected", "expected_reason": "local-lineage-mismatch"},
+  {"name": "s10-manifest-file-missing", "a4_row": "resolve() S10", "step": "S10", "action": "delete-manifest-file", "expected_state": "rejected", "expected_reason": "local-manifest-unregistered"},
+  {"name": "s10-manifest-file-corrupt", "a4_row": "resolve() S10", "step": "S10", "action": "corrupt-manifest-file", "expected_state": "unavailable", "expected_reason": "local-state-unreadable"},
+  {"name": "s11-manifest-shape-invalid", "a4_row": "resolve() S11", "step": "S11", "action": "strip-manifest-top-level-key", "expected_state": "rejected", "expected_reason": "local-lineage-mismatch"},
+  {"name": "s12-manifest-digest-mismatch", "a4_row": "resolve() S12", "step": "S12", "action": "tamper-manifest-content-only", "expected_state": "rejected", "expected_reason": "local-lineage-mismatch"},
+  {"name": "s13-manifest-field-mismatch", "a4_row": "resolve() S13", "step": "S13", "action": "resync-repository-id-mismatch", "expected_state": "rejected", "expected_reason": "local-lineage-mismatch"},
+  {"name": "s14-artifact-row-missing", "a4_row": "resolve() S14", "step": "S14", "action": "resync-drop-artifact-row", "expected_state": "rejected", "expected_reason": "local-lineage-mismatch"},
+  {"name": "s15-artifact-revision-row-missing", "a4_row": "resolve() S15", "step": "S15", "action": "resync-drop-artifact-revision-row", "expected_state": "rejected", "expected_reason": "local-lineage-mismatch"},
+  {"name": "s10-cycle-path-non-str", "a4_row": "resolve() S10", "step": "S10", "action": "tamper-cycle-path-non-str", "expected_state": "rejected", "expected_reason": "local-lineage-mismatch"}
+]
