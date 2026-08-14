@@ -1749,9 +1749,35 @@ def _frame_dispatch_line(segs, box_width, edge, key, run_key=None):
             right = left[i + 1:]
             left = left[:i]
             break
+    tag = []
+    for i, (text, _color) in enumerate(left):
+        if text == _CARD_TAG:
+            tag = left[i + 1:]
+            left = left[:i]
+            break
+    tag_w = (sum(_dw(text) for text, _color in tag) + 2) if tag else 0
     right_w = sum(_dw(text) for text, _color in right)
-    left_limit = max(0, box_width - 1 - right_w)
+    # Symmetric breathing: content stops two cells short of the border, matching
+    # the rail-side inner margin (user: "우측엔 너무 딱 붙어"). The in-card tail tag
+    # (elapsed) is protected: the CONTENT ellipsizes first, the tag never drops.
+    # Best-effort margin: the wide-row ledger already reserves the two-cell
+    # breathing room; a tight narrow row may use the full interior rather than
+    # losing content it historically displayed.
+    left_limit = max(0, box_width - 1 - right_w - tag_w)
+    kept_w_before = sum(_dw(text) for text, _color in left)
+    full = list(left)
     left, left_w = _clip_segs(left, left_limit)
+    if tag and left_w < kept_w_before:
+        # make the cut visible — unless the fold already ends in its own ellipsis.
+        # The marker rides INSIDE the limit: re-clip one cell shorter first.
+        if not (left and left[-1][0].endswith("…")):
+            left, left_w = _clip_segs(full, max(0, left_limit - 1))
+            left.append(("…", "dim"))
+            left_w += 1
+    if tag:
+        left.append(("  ", None))
+        left.extend(tag)
+        left_w += tag_w
     pad = max(0, box_width - 1 - left_w - right_w)
     if pad:
         if edge == "top" and pad >= 3 and not right:
@@ -2090,6 +2116,7 @@ def _dispatch_row(j, orphan=False, parent_model=None, parent_harness=None, is_la
     """
     key = j.key or "?"
     depth = max(1, int(getattr(j, "depth", 1) or 1))
+    in_card_time = None
     stage = stage_override if stage_override is not None else (j.stage or "")
     # F-64: the registry word is terminal but the row's own pid identity is alive —
     # keep the verbatim word and mark the contradiction instead of hiding either side.
@@ -2183,7 +2210,7 @@ def _dispatch_row(j, orphan=False, parent_model=None, parent_harness=None, is_la
         # right-flushed time column); dispatch-depth-1 afterglow keeps its counting-up elapsed (F-46)
         # and dispatch-depth-1 stale its age (`done <age>`, the v49 "last seen" successor).
         segs.append((" " * _WIDE_STAGE_GAP, None))
-        opt_segs, optw = _opts_segs(j)
+        opt_segs, optw = _opts_segs(j, max_width=(28 if in_card else None))
         segs += opt_segs
         if optw < _OPTW:
             segs.append((" " * (_OPTW - optw), None))
@@ -2211,24 +2238,36 @@ def _dispatch_row(j, orphan=False, parent_model=None, parent_harness=None, is_la
         # breadcrumb spill into the flush area invisibly; inside a card the real
         # budget is whatever remains before the border, measured off the segs
         # actually emitted so far.
+        def _stage_part(budget):
+            return _stage_zone_segs(
+                _dispatch_stage_segs(j, key, stage, slug_name,
+                                     working=(unit_working if unit_working is not None
+                                              else j.liveness == "working"),
+                                     route_seq=route_seq, route_zone=budget))
         if in_card and card_interior:
             consumed = sum(_dw(t) for t, _k in segs)
-            # -4: one border cell plus the ' : ' stage-zone lead-in emitted after
-            # this measurement.
-            card_route_zone = max(8, card_interior - consumed - 4)
+            # F-68b (user): the box keeps its elapsed, but as an inline `⏳<t>` tag
+            # right after the content — summary-row style — never a reserved
+            # column. Reserve its cells in the same ledger.
+            in_card_time = _WAIT_GLYPH + fmt_min(j.elapsed_min)
+            time_w = _dw(in_card_time) + 2
+            # Rough fold budget only — the frame's tag-aware elastic clip is the
+            # final authority, so a path with a wider lead-in degrades to an
+            # ellipsis instead of losing the tag or the border.
+            segs += _stage_part(max(8, card_interior - consumed - 5 - time_w))
         else:
-            card_route_zone = route_zone
-        segs += _stage_zone_segs(
-            _dispatch_stage_segs(j, key, stage, slug_name,
-                                 working=(unit_working if unit_working is not None
-                                          else j.liveness == "working"),
-                                 route_seq=route_seq, route_zone=card_route_zone))
+            segs += _stage_part(route_zone)
 
-    # F-68 (user 2026-08-14 "time은 빼고 설명 요약쪽처럼 일관성"): a framed row keeps no
-    # right-flushed time column — the box border is the row's right terminus, exactly
-    # like the summary/detail rows, so the frame edge never negotiates with a flush
-    # block over ambiguous-width cells.
-    if not in_card:
+    # F-68 (user 2026-08-14 "time은 빼고 설명 요약쪽처럼 일관성", "열 자체를 없애라",
+    # "박스 내부에도 time 표시는 하고"): a framed row keeps no right-flushed time
+    # COLUMN — the elapsed rides inline as a dim `⏳<t>` tag right after the row's
+    # content, summary-row style, and the border stays the hard right terminus.
+    if in_card:
+        if in_card_time is None and card_interior:
+            in_card_time = _WAIT_GLYPH + fmt_min(j.elapsed_min)
+        if in_card_time is not None:
+            segs += [(_CARD_TAG, None), (in_card_time, "dim")]
+    else:
         segs += [(" " * _WIDE_TIME_GAP, None), (_RFLUSH, None)]
         segs += [(_CLOCK, "dim"), ("%6s" % fmt_min(j.elapsed_min), "dim")]
     return segs
@@ -5021,6 +5060,9 @@ _BAR_ROLES = ("hdr_bar", "hdr_warn")
 
 _RFLUSH = "\x00 \x00"
 _HFILL = "\x00─\x00"
+# F-68b: marks an in-card inline tail tag (the elapsed). The frame keeps the
+# tag whole and ellipsizes the CONTENT when the row runs long.
+_CARD_TAG = "\x00t\x00"
 
 # row-tint sentinels (round-5 — herdr-style panel tints): a LEADING sentinel marks the whole
 # row's background level. b/c = group body/cap · B/C = the ACTIVE-group variants (brighter,
