@@ -521,6 +521,69 @@ class FallbackTest(unittest.TestCase):
      parent_identity={"parent_harness":"opencode","parent_transport":"headless","parent_sandbox":"workspace-write"})
   self.assertEqual(context["quality_peer_families"],[])
   self.assertEqual(context["sole_gate"],"degraded")
+ def test_g3_parent_cross_verdict_taken_after_sole_gate_reorder(self):
+  # G3: the parent-cross verdict must describe the FINAL head after the SD-100
+  # ② quality-peer reorder. Least-recent favors opencode, so the pre-reorder
+  # head is opencode (owner=claude, codex unsupported) and the old code froze
+  # parent_cross="ok" before the hoist moved claude (the owner family) to the
+  # head. The verdict must be "degraded" with a closed cause.
+  parent={"parent_harness":"claude","parent_transport":"headless","parent_sandbox":"workspace-write"}
+  node={
+   "kind":"review-worker",
+   "harness_affinity":"diverse",
+   "harness_policy":{"primary":["claude","codex"],"relief":["opencode"],
+                     "last_resort":[],"promote_relief_below":35},
+   "fallback_hops":[
+    {"ordinal":1,"fallback_hop":"same-harness-headless","candidates":[
+     {**parent,"child_harness":"claude","status":"supported"}]},
+    {"ordinal":2,"fallback_hop":"cross-harness-headless","candidates":[
+     {**parent,"child_harness":"opencode","status":"supported"}]},
+    {"ordinal":3,"fallback_hop":"native-subagent","candidates":[]},
+    {"ordinal":4,"fallback_hop":"inline","candidates":[]},
+   ],
+  }
+  route={"dispatch_allocation":{
+    "strategy":"least-recent-attempts","window":30,
+    "harness_order":["claude","codex","opencode"],
+   },
+   "owner_harness_policy":{"primary":["claude","codex"],"relief":["opencode"],
+                           "last_resort":[],"promote_relief_below":35},
+   "nodes":[
+    {"id":"plan","model_profile":"balanced-deep",
+     "harness_policy":{"primary":["claude","codex"],"relief":["opencode"],
+                       "last_resort":[],"promote_relief_below":35}},
+   ]}
+  self.jobs.write_text(
+   "2026-08-09T00:00:00Z\tdone\t/r\t/w\ta\t"
+   "attempt_schema_version=2,registered_worker=1,attempt_id=att-claude,harness=claude\n",
+   encoding="utf-8")
+  with mock.patch.object(F,"_usage_states",return_value=self._usage_states()):
+   hops,context=F.ordered_fallback_hops(route,node,self.jobs,parent_identity=parent)
+  self.assertEqual(hops[0]["candidates"][0]["child_harness"],"claude")
+  self.assertEqual(context["parent_cross"],"degraded")
+  self.assertEqual(context["parent_cross_cause"],"cross-family-eligible-none")
+  self.assertEqual(context["sole_gate"],"ok")
+ def test_g3_verdicts_recomputed_for_actual_launched_child(self):
+  # G3: the receipt and ledger must describe the actually launched child, not
+  # the ranked head. A head whose launch-tuple dies and a later hop that wins
+  # (opencode -- non-quality-peer, or claude -- the owner family) must flip
+  # sole_gate / parent_cross accordingly.
+  context={
+   "parent_cross":"ok","parent_cross_cause":"-","sole_gate":"ok",
+   "affinity":None,"rank":["claude","codex"],
+   "eligible":["claude","codex"],"limited":[],
+   "owner_family":"claude","quality_peer_set":frozenset({"claude","codex"}),
+  }
+  reopened=F._recompute_verdicts_for_child(context,"opencode")
+  self.assertEqual(reopened["parent_cross"],"ok")
+  self.assertEqual(reopened["sole_gate"],"degraded")
+  same_family=F._recompute_verdicts_for_child(context,"claude")
+  self.assertEqual(same_family["parent_cross"],"degraded")
+  self.assertEqual(same_family["sole_gate"],"ok")
+  self.assertEqual(same_family["parent_cross_cause"],"owner-family-only-peer")
+  cross=F._recompute_verdicts_for_child(context,"codex")
+  self.assertEqual(cross["parent_cross"],"ok")
+  self.assertEqual(cross["sole_gate"],"ok")
  def test_foreign_only_evidence_still_traces_the_parent_runtime_mismatch(self):
   # Keeping the foreign row in the trailing band (rather than dropping it) is
   # what keeps this trace meaningful: the sealed evidence is for parent codex,

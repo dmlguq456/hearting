@@ -320,11 +320,12 @@ def ordered_fallback_hops(
     # so usage-limited harnesses stay out of the partition (spec 13.30.3 ④).
     parent_cross = "not-applicable"
     parent_cross_cause = "-"
-    sole_gate = "ok"
+    sole_gate = "not-applicable"
     quality_peer = None
+    owner_family = (parent_identity or {}).get("parent_harness")
     if node.get("kind") == "review-worker" or node.get("parent_cross_preference") is True:
         quality_peer = quality_peer_families(_policy_by_profile(route, node))
-        owner_family = (parent_identity or {}).get("parent_harness")
+        sole_gate = "ok"
         if quality_peer is not None and owner_family:
             tail = ranked[1:] if affinity in ranked else ranked
 
@@ -341,6 +342,27 @@ def ordered_fallback_hops(
             else:
                 ranked = tail
             head = ranked[0] if ranked else None
+            # SD-100 ②: a gate-holding single checker must land on a quality-peer
+            # family when one is hard-eligible; otherwise the assignment proceeds
+            # but records sole-gate-non-peer-harness (13.30.2 proviso). A sealed
+            # literal affinity naming the head is a user override that is honored
+            # and degrades instead of being reordered (13.30.2). The reorder is
+            # derived from the sealed `ranked` order, not `eligible`, so a
+            # candidate outside the sealed band cannot be hoisted over it (G3).
+            if head is not None and head not in quality_peer:
+                affinity_pinned_head = affinity in ranked and affinity == head
+                if affinity_pinned_head:
+                    sole_gate = "degraded"
+                else:
+                    qp_eligible = [h for h in ranked if h in quality_peer]
+                    if qp_eligible:
+                        ranked = qp_eligible + [h for h in ranked if h not in qp_eligible]
+                    else:
+                        sole_gate = "degraded"
+            # G3: the parent-cross verdict is taken from the FINAL head after the
+            # SD-100 ② reorder -- the head before it can be replaced by a
+            # quality-peer hoist, leaving a stale "ok" on an owner-family pick.
+            head = ranked[0] if ranked else None
             if head is not None and head == owner_family:
                 parent_cross = "degraded"
                 parent_cross_cause = _parent_cross_cause(
@@ -348,21 +370,6 @@ def ordered_fallback_hops(
                 )
             else:
                 parent_cross = "ok"
-            # SD-100 ②: a gate-holding single checker must land on a quality-peer
-            # family when one is hard-eligible; otherwise the assignment proceeds
-            # but records sole-gate-non-peer-harness (13.30.2 proviso). A sealed
-            # literal affinity naming the head is a user override that is honored
-            # and degrades instead of being reordered (13.30.2).
-            if head is not None and head not in quality_peer:
-                affinity_pinned_head = affinity in ranked and affinity == head
-                if affinity_pinned_head:
-                    sole_gate = "degraded"
-                else:
-                    qp_eligible = [h for h in eligible if h in quality_peer]
-                    if qp_eligible:
-                        ranked = qp_eligible + [h for h in ranked if h not in qp_eligible]
-                    else:
-                        sole_gate = "degraded"
     ranked += limited
     ordered = []
     for harness in ranked:
@@ -387,7 +394,67 @@ def ordered_fallback_hops(
         "parent_cross_cause": parent_cross_cause,
         "sole_gate": sole_gate,
         "quality_peer_families": sorted(quality_peer) if quality_peer is not None else None,
+        "eligible": list(eligible),
+        "limited": list(limited),
+        "affinity": affinity,
+        "owner_family": owner_family,
+        "quality_peer_set": quality_peer,
     }
+
+
+def _recompute_verdicts_for_child(context, child_harness):
+    """Recompute the receipt verdicts for the actually launched child (G3).
+
+    The pre-loop context describes the ranked head; the fallback cascade may
+    launch a later hop instead, so `parent_cross`/`sole_gate` are recomputed
+    from the real `child_harness` before the receipt is emitted and the ledger
+    is written. Returns a shallow copy of the context with updated verdicts,
+    or the context unchanged when the gate does not apply.
+    """
+    if context is None:
+        return context
+    owner_family = context.get("owner_family")
+    quality_peer = context.get("quality_peer_set")
+    if owner_family is None or quality_peer is None:
+        return context
+    updated = dict(context)
+    if child_harness == owner_family:
+        updated["parent_cross"] = "degraded"
+        updated["parent_cross_cause"] = _parent_cross_cause(
+            context.get("affinity"),
+            context.get("rank"),
+            context.get("eligible"),
+            context.get("limited"),
+            owner_family,
+            quality_peer,
+        )
+    else:
+        updated["parent_cross"] = "ok"
+        updated["parent_cross_cause"] = "-"
+    updated["sole_gate"] = (
+        "degraded" if child_harness not in quality_peer else "ok"
+    )
+    return updated
+
+
+def _emit_child_success(args, route, node, context, row):
+    """Emit the allocation receipt and persist degradations for the actual child.
+
+    Recomputes `parent_cross`/`sole_gate` from the launched
+    `row['child_harness']` (G3): the fallback cascade can win with a later hop,
+    and the pre-loop context would then mislabel the receipt and skip the
+    ledger row entirely.
+    """
+    context = _recompute_verdicts_for_child(context, row.get("child_harness"))
+    if context is not None:
+        os.environ["AGENT_DISPATCH_PARENT_CROSS"] = str(
+            context.get("parent_cross") or "not-applicable"
+        )
+        os.environ["AGENT_DISPATCH_SOLE_GATE"] = str(
+            context.get("sole_gate") or "ok"
+        )
+    emit_allocation(context)
+    _persist_parent_cross_ledger(args, route, node, context)
 
 
 def emit_allocation(context: dict | None) -> None:
@@ -1347,8 +1414,7 @@ def main() -> int:
                     )
                     if retry_state in {"success", "existing"}:
                         print("check=ok")
-                        emit_allocation(allocation_context)
-                        _persist_parent_cross_ledger(args, route, node, allocation_context)
+                        _emit_child_success(args, route, node, allocation_context, row)
                         print(f"selected_hop={hop['fallback_hop']}")
                         print(f"fallback_ordinal={ordinal}")
                         print(f"child_harness={row['child_harness']}")
@@ -1449,8 +1515,7 @@ def main() -> int:
                                         attempt_trace="|".join(attempts))
                     if early != "capacity":
                         print("check=ok")
-                        emit_allocation(allocation_context)
-                        _persist_parent_cross_ledger(args, route, node, allocation_context)
+                        _emit_child_success(args, route, node, allocation_context, row)
                         print(f"selected_hop={hop['fallback_hop']}")
                         print(f"fallback_ordinal={ordinal}")
                         print(f"child_harness={row['child_harness']}")
@@ -1473,8 +1538,7 @@ def main() -> int:
                     )
                     if retry_state in {"success", "existing"}:
                         print("check=ok")
-                        emit_allocation(allocation_context)
-                        _persist_parent_cross_ledger(args, route, node, allocation_context)
+                        _emit_child_success(args, route, node, allocation_context, row)
                         print(f"selected_hop={hop['fallback_hop']}")
                         print(f"fallback_ordinal={ordinal}")
                         print(f"child_harness={row['child_harness']}")
