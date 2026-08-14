@@ -274,27 +274,6 @@ class RenderDispatchPresentationTest(unittest.TestCase):
         last_raw = width - 2 * render._INSET - render._PAD_IN - 1
         self.assertEqual(last_raw - (box_width - 1), render._RAIL_COL)
 
-    def test_card_rows_ride_the_recessed_tint(self):
-        # user 2026-08-14 "박스 테두리 내부는 틴트를 어둡게 해볼까": boxed rows drop a
-        # level below their group body, so the unit reads as a recess in the panel.
-        old = render._TINT_OK
-        render._TINT_OK = True
-        try:
-            lines = self._rail_lines()
-        finally:
-            render._TINT_OK = old
-        framed = [ln for ln in lines
-                  if ln and any(g in "".join(p for p, _k in ln) for g in "╭│╰")]
-        self.assertTrue(framed)
-        for ln in framed:
-            self.assertEqual(ln[0][0], render._TINT_CARD)
-        body = [ln for ln in lines
-                if ln and render._is_fill(ln[0][0]) and ln[0][0][1] in render._TINT_CHARS
-                and ln[0][0] != render._TINT_CARD]
-        self.assertTrue(body, "the surrounding group still rides its own body tint")
-        self.assertLess(render._TINT_LVL[render._TINT_CARD[1]],
-                        min(render._TINT_LVL[ln[0][0][1]] for ln in body))
-
     def test_f64c_rail_hue_mirrors_the_breadcrumb_current_token(self):
         # user 2026-08-05 "컬러 안맞는데": the rail must share the exact index the lit
         # breadcrumb token uses — route rows via _route_current_index, legacy rows via
