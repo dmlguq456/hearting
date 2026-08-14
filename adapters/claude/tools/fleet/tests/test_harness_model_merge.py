@@ -9,7 +9,7 @@ import unittest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 from fleet import render                                     # noqa: E402
-from fleet.model import DispatchJob, Session                 # noqa: E402
+from fleet.model import DispatchJob, Session, fmt_min        # noqa: E402
 
 
 class HarnessModelCellTest(unittest.TestCase):
@@ -119,7 +119,11 @@ class SessionRowMergeTest(unittest.TestCase):
         self.assertEqual(segs[stage_i], ("-", "dim"))
         # F-68c: no flush sentinel — the row ends with its inline elapsed tag.
         self.assertNotIn(render._RFLUSH, [value for value, _key in segs])
-        self.assertTrue(segs[-1][0].startswith(render._WAIT_GLYPH))
+        # F-76: that tag is the bare duration (no glyph) — asserting on `_ELAPSED_GLYPH`
+        # alone would be vacuous now that it is empty, so pin the VALUE and its dim key.
+        self.assertEqual(segs[-1], (render._ELAPSED_GLYPH + fmt_min(self._session().elapsed_min),
+                                    "dim"))
+        self.assertNotIn(render._WAIT_GLYPH, segs[-1][0])   # ⏳ is F-47's badge, not elapsed
 
     def test_narrow_empty_stage_also_uses_a_dash(self):
         _l1, l2 = render._session_row_2line(self._session())

@@ -272,20 +272,25 @@ class FinishedRowNameHueTest(unittest.TestCase):
 
     def test_afterglow_keeps_the_harness_hue(self):
         self.assertEqual(self._name_key(liveness="idle", afterglow=True),
-                         render._BADGE_KEY["opencode"])
+                         render._NAME_KEY_DIM["opencode"])
 
     def test_stale_keeps_the_harness_hue(self):
         self.assertEqual(self._name_key(liveness="stale"),
-                         render._BADGE_KEY["opencode"])
+                         render._NAME_KEY_DIM["opencode"])
+
+    def test_finished_name_hue_matches_the_harness(self):
+        """The key changed under F-76b; what the user asked for is the HUE."""
+        key = self._name_key(liveness="stale")
+        self.assertEqual(render._HUE_OF[key][0], render._HUE_OF["h_opencode"][0])
 
     def test_dead_still_collapses_to_colorless(self):
-        self.assertEqual(self._name_key(liveness="dead"), "name_dim")
+        self.assertEqual(self._name_key(liveness="dead"), "nm_dead")
 
     def test_narrow_row_follows_the_same_rule(self):
         for liveness, kw, expected in (("idle", {"afterglow": True},
-                                        render._BADGE_KEY["opencode"]),
-                                       ("stale", {}, render._BADGE_KEY["opencode"]),
-                                       ("dead", {}, "name_dim")):
+                                        render._NAME_KEY_DIM["opencode"]),
+                                       ("stale", {}, render._NAME_KEY_DIM["opencode"]),
+                                       ("dead", {}, "nm_dead")):
             job = DispatchJob(key="code", slug="finished-worker", cwd="/tmp/f75",
                               harness="opencode", depth=2, liveness=liveness, **kw)
             l1, _l2 = render._dispatch_row_2line(job)

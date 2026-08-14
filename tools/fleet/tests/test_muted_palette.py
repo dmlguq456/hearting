@@ -88,7 +88,13 @@ class MutedPaletteTest(unittest.TestCase):
         self.assertEqual(render._HUE_OF["g_dead"][0], "r")
         badge_hues = [render._HUE_OF[key][0] for key in render._BADGE_KEY.values()]
         self.assertEqual(badge_hues, ["c", "m", "l"])
-        self.assertEqual(render._HUE_OF["name_work"][0], "w")
+        # F-76b: the NAME zone moved onto the harness hue (own `nm_*` keys, same colors
+        # as the badges above) so a row reads as one color system; only an unknown
+        # harness keeps the historical soft white.
+        name_hues = [render._HUE_OF[render._NAME_KEY[h]][0]
+                     for h in ("claude", "codex", "opencode")]
+        self.assertEqual(name_hues, ["c", "m", "l"])
+        self.assertEqual(render._HUE_OF["nm_other"][0], "w")
 
 
 if __name__ == "__main__":

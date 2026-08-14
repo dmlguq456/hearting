@@ -36,7 +36,13 @@ def etime_to_min(et):
 
 
 def fmt_min(m):
-    """minutes → '20m' / '5h20m' / '19d4h' (rolls over to days past 24h); None/invalid → '—'."""
+    """minutes → '20m' / '5h 20m' / '19d 4h' (rolls over to days past 24h); None/invalid → '—'.
+
+    F-76 (user 2026-08-14 "시간 분 초 사이에 한칸 띄우자"): the units are separated by a
+    space. This carries real weight now that the elapsed value lost its `⏳` prefix — the
+    space is what still reads the value as a DURATION rather than a bare identifier, so it
+    is part of the same change, not cosmetics.
+    """
     if m is None:
         return "—"
     try:
@@ -49,9 +55,9 @@ def fmt_min(m):
         return f"{m}m"
     h, mm = divmod(m, 60)
     if h < 24:
-        return f"{h}h{mm:02d}m"
+        return f"{h}h {mm:02d}m"
     d, hh = divmod(h, 24)
-    return f"{d}d{hh}h"
+    return f"{d}d {hh}h"
 
 
 def dash(v, fmt=None):

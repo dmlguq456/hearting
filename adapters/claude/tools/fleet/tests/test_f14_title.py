@@ -72,7 +72,7 @@ class SessionRowTitleTest(unittest.TestCase):
         # Select by segment KEY — index 4 is the harness-field padding, not the name
         # (it merely happened to satisfy this bound while _HMW was 33).
         name_seg = next(t for t, k in segs
-                        if k in ("name_idle", "name_work", "name_dim"))
+                        if k in render.NAME_KEYS)
         self.assertLessEqual(render._dw(name_seg), render._NW_S - 1)
 
     def test_session_row_2line_title_clipped_to_name2_max(self):
@@ -80,7 +80,7 @@ class SessionRowTitleTest(unittest.TestCase):
         sess = Session(harness="claude", pid=1, cwd="",
                         slug="s", title=long_title, liveness="idle")
         l1 = render._session_row_2line(sess)[0]
-        name_seg = next(t for t, k in l1 if k in ("name_work", "name_dim", "name_idle"))
+        name_seg = next(t for t, k in l1 if k in render.NAME_KEYS)
         self.assertLessEqual(render._dw(name_seg), render._NAME2_MAX)
 
 

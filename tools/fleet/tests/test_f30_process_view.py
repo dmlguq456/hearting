@@ -405,14 +405,18 @@ class MutationCoverageGapTest(ProcessViewEnv):
     suite green). Both fixes are otherwise real and already live-verified — these two tests
     exist solely so a future silent revert fails the suite."""
 
-    def test_l1_elapsed_uses_the_hourglass_glyph_not_bare_clock(self):
-        # M3 — _route_card_l1 must use the SAME "⏳" convention _route_job_row already
-        # established for this card, not the bare _CLOCK convention (a different context:
-        # session/dispatch GRID rows, render.py:540).
+    def test_l1_elapsed_matches_the_board_wide_convention(self):
+        # M3 (rewritten by F-76) — the card's L1 elapsed must follow `_ELAPSED_GLYPH`, the
+        # ONE board-wide convention, rather than a card-local icon. The original M3 pinned
+        # "⏳" here because `_route_job_row` used it; F-76 removed the glyph from every
+        # elapsed at once, so matching the board IS the invariant now — what must never
+        # come back is a card that decides its own elapsed shape.
         segs = render._route_card_l1(["code", "dev"], "rt-abc12345", 1, 4, 15, False, "▾", None)
         text = "".join(t for t, _k in segs)
-        self.assertIn("⏳15m", text)
-        self.assertNotIn("  15m", text)   # the pre-fix bare-number shape (no glyph before it)
+        self.assertIn(render._ELAPSED_GLYPH + "15m", text)
+        # The v10 critic's real worry survives the glyph: the value must stay visibly
+        # detached from "n/m nodes" rather than reading as a number glued onto it.
+        self.assertIn("nodes  ", text)
 
     def test_demo_seeds_lab_setup_node_as_done(self):
         # M4 — demo._seed_route_evidence() must seed _LAB_RID's `setup` node (not just

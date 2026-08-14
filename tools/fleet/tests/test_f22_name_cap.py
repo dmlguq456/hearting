@@ -84,7 +84,7 @@ class PreservedInvariantsTest(unittest.TestCase):
         txt = "".join(t for t, _k in render._session_row(s, narrow=False, name_width=None))
         self.assertIn("…", txt)
         long_seg = max((t for t, k in render._session_row(s, narrow=False, name_width=None)
-                        if k in ("name_idle", "name_work", "name_dim")), key=render._dw)
+                        if k in render.NAME_KEYS), key=render._dw)
         self.assertLessEqual(render._dw(long_seg), render._TITLE_MAX)
 
     def test_dispatch_name_keeps_its_own_24_cell_compact_cap(self):
@@ -106,7 +106,7 @@ class PreservedInvariantsTest(unittest.TestCase):
                     title="x" * 120, liveness="idle")
         nw = render._wide_name_width(168)
         segs = render._session_row(s, narrow=False, name_width=nw)
-        name_seg = max((t for t, k in segs if k in ("name_idle", "name_work", "name_dim")),
+        name_seg = max((t for t, k in segs if k in render.NAME_KEYS),
                        key=render._dw)
         self.assertLessEqual(render._dw(name_seg), nw)
         self.assertLessEqual(render._dw(name_seg), render._NAME_WIDE_MAX)

@@ -139,7 +139,10 @@ _HUE_OF = {
     None: ("d", 0), "dim": ("d", _A_D), "head": ("d", _A_D), "unknown": ("d", _A_D),
     "version_release": ("l", _A_D), "version_build": ("d", _A_D),
     "version_dirty": ("y", _A_D), "version_method": ("d", _A_D),
-    "name_work": ("w", _A_B), "name_idle": ("w", _A_B), "name_dim": ("w", _A_D),
+    # F-76b retired "name_work"/"name_idle": names wear the harness hue now (`nm_*`).
+    # `name_dim` stays, but as the general DIM-LABEL key it always also was (options
+    # dial, stage prefixes) — it is not a name key and is absent from `NAME_KEYS`.
+    "name_dim": ("w", _A_D), "nm_dead": ("w", _A_D),
     "grp": ("w", _A_B), "branch_s": ("d", 0), "cost_hi": ("w", _A_B),
     "qa_quick": ("d", _A_D), "qa_light": ("d", _A_D), "qa_standard": ("d", 0),
     "qa_thorough": ("d", _A_B), "qa_adversarial": ("d", _A_B),
@@ -194,7 +197,31 @@ _HUE_OF = {
     # line keeps the DIM ink of every other subtitle and separates itself by WEIGHT
     # alone — bold-dim. The brighter hue read as loud next to the dispatch rows.
     "now_main": ("w", _A_B | _A_D),
+    # F-76b (user 2026-08-14 "설명을 흰색으로 바꾸고"): the subtitle/NOW sentence is
+    # WHITE-hued like the main session's own second line, not the default grey. With
+    # row names now wearing the harness hue (F-76b above), color separates identity
+    # from prose and WEIGHT separates main (bold-dim `now_main`) from spawned.
+    "now_sub": ("w", _A_D),
 }
+
+# F-76b — the NAME zone wears the harness hue, but on its OWN keys rather than reusing
+# `hb_*`/`h_*`. The color is identical; the separate key is what keeps a row's name
+# distinguishable from its harness cell, which several consumers (`_stack_split`, the
+# width suites) resolve by color key alone. Bright = a live top-level session, dim =
+# a dispatch row or lost telemetry — the same brightness axis the harness cell uses.
+_NAME_HUE = {"claude": "c", "codex": "m", "opencode": "l"}
+for _h, _hue_ch in _NAME_HUE.items():
+    _HUE_OF["nm_" + _h] = (_hue_ch, 0)
+    _HUE_OF["nmd_" + _h] = (_hue_ch, _A_D)
+_HUE_OF["nm_other"] = ("w", _A_B)      # unknown harness keeps the historical white name
+_HUE_OF["nmd_other"] = ("w", _A_D)
+_NAME_KEY = {h: "nm_" + h for h in _NAME_HUE}
+_NAME_KEY_DIM = {h: "nmd_" + h for h in _NAME_HUE}
+# Every key a row's NAME zone can carry. Consumers that locate the name segment by color
+# key (the width/title suites, `_stack_split`) read THIS instead of listing keys inline —
+# F-76b broke a dozen such lists at once by moving names onto the harness hue.
+NAME_KEYS = frozenset(list(_NAME_KEY.values()) + list(_NAME_KEY_DIM.values())
+                      + ["nm_other", "nmd_other", "nm_dead"])
 
 
 def _key_attr(key, tint=None):
@@ -324,8 +351,7 @@ def _init_colors():
     _COLOR["version_method"] = curses.A_DIM
     # session name = THE left pillar of every row (design r2): bright bold for any live session —
     # the eye lands here first; only stale/dead recede. working is distinguished by its dot blink.
-    _COLOR["name_work"] = _COLOR.get("soft", 0) | curses.A_BOLD
-    _COLOR["name_idle"] = _COLOR.get("soft", 0) | curses.A_BOLD
+    _COLOR["nm_dead"] = _COLOR.get("soft", 0) | curses.A_DIM
     _COLOR["name_dim"] = _COLOR.get("soft", 0) | curses.A_DIM
     # gate words · cost alarm · structure
     _COLOR["gate_t"] = _COLOR.get("green", 0) | curses.A_DIM
@@ -423,6 +449,13 @@ def _init_colors():
     _COLOR["frm_idle"] = curses.A_DIM
     _COLOR["dim"] = curses.A_DIM
     _COLOR["now_main"] = curses.A_BOLD | curses.A_DIM
+    _COLOR["now_sub"] = _COLOR.get("soft", 0) | curses.A_DIM
+    # F-76b: name keys mirror the harness pair exactly — bright `hb_*`, dim `h_*`.
+    for h in _NAME_HUE:
+        _COLOR["nm_" + h] = _COLOR.get("hb_" + h, 0)
+        _COLOR["nmd_" + h] = _COLOR.get("h_" + h, 0)
+    _COLOR["nm_other"] = _COLOR.get("soft", 0) | curses.A_BOLD
+    _COLOR["nmd_other"] = _COLOR.get("soft", 0) | curses.A_DIM
     _COLOR["head"] = curses.A_DIM
     _COLOR["unknown"] = curses.A_DIM
 
@@ -724,7 +757,17 @@ _EFW = 7                      # effort subfield ("medium"=6 +1 gap) — FIXED wi
 # (F-57, v41) `_CTX_W = 24` lived here: the wide main row's INLINE context gauge. F-37a (v16)
 # replaced that gauge with the dedicated context detail row, but the reservation stayed in the
 # ledger and kept 24 cells of the main row permanently blank. Removed, not zeroed.
-_CLOCK = ""                   # Bare elapsed value; icons caused width and readability issues.
+_ELAPSED_GLYPH = ""           # F-76 (user 2026-08-14 "경과 시간을 나타내는 아이콘이 좀 정신
+                              # 사나운데"): the elapsed value carries NO glyph. This restores
+                              # the original `_CLOCK` convention ("icons caused width and
+                              # readability issues") that F-68b broke when it gave the in-card
+                              # elapsed a `⏳` tag and the rest of the board followed: a
+                              # 129-line demo board printed 44 of them, two cells and a color
+                              # emoji each. Crucially it also un-overloads `_WAIT_GLYPH` — ⏳
+                              # meant "this session is deliberately WAITING" (F-47) long before
+                              # it meant "elapsed", and with elapsed silent the badge is a
+                              # signal again instead of wallpaper. `fmt_min`'s unit spacing
+                              # ('5h 20m') is what keeps the bare value reading as a duration.
 
 # known pipeline stage sequences → the stage breadcrumb (process viz). Unknown keys/stages fall
 # back to a single lit stage token (never a fabricated track). Keyed by the dispatch `key`.
@@ -1573,8 +1616,6 @@ def _session_row(s, narrow, is_parent=False, child_count=0, name_width=None,
     slug = s.slug or (s.cwd.rsplit("/", 1)[-1] if s.cwd else "?")
     dim_tel = live in ("stale", "dead") or s.app_server or s.detached
     dead_stale = live in ("stale", "dead")   # F-13: telemetry gone, replaced with a single age cell
-    name_key = ("name_work" if live == "working"
-                else ("name_dim" if dim_tel else "name_idle"))
     gch, gkey = _glyph(live)
     if s.detached and live not in ("stale", "dead"):
         gch, gkey = _DETACHED_GLYPH, "g_work_off"   # detached: loading axis, dim-green
@@ -1583,6 +1624,15 @@ def _session_row(s, narrow, is_parent=False, child_count=0, name_width=None,
     # to dim. Dispatch rows use the DIM harness color (see _dispatch_row).
     hkey = (_BADGE_KEY.get(s.harness, "dim") if dim_tel
             else ("hb_" + s.harness if s.harness in _BADGE_TEXT else "hb_other"))
+    # F-76b (user 2026-08-14 "메인세션은 세션 명이 흰색이고 서브 세션은 컬러네? 이거 톤을
+    # 맞춰야겠네"): a dispatch row already paints its harness cell and its NAME with one key;
+    # only the session row split them — harness hue on the left, plain white in the name zone
+    # — so the two altitudes read as different color SYSTEMS rather than two weights of one.
+    # The name takes the harness hue on its OWN key (`nm_*`/`nmd_*`, same color as `hkey`),
+    # which leaves the main↔spawned hierarchy exactly where it already lived: bright harness
+    # hue for a live session, dim for a dispatch row.
+    name_key = (_NAME_KEY_DIM.get(s.harness, "nmd_other") if dim_tel
+                else _NAME_KEY.get(s.harness, "nm_other"))
     # F-33 (v11): harness field carries model/effort as a parenthetical — a dead/stale row has
     # no live telemetry to show (F-13), so it renders the bare harness name only.
     segs = [("  ", None), (gch, gkey), (" ", None)]
@@ -1673,9 +1723,9 @@ def _session_row(s, narrow, is_parent=False, child_count=0, name_width=None,
 
     # F-68c (user "time 없애라고 했는데 왜 계속 뜨는건데", "다른 곳에는 다 남아있잖아"):
     # the right-flushed uptime COLUMN is retired board-wide, not only inside cards.
-    # Elapsed rides inline as a dim `⏳<t>` tag right after the row's content, the
+    # Elapsed rides inline as a dim bare `<t>` value right after the row's content, the
     # same grammar the summary rows and the in-card dispatch rows use.
-    segs += [("  ", None), (_WAIT_GLYPH + fmt_min(s.elapsed_min), "dim")]
+    segs += [("  ", None), (_ELAPSED_GLYPH + fmt_min(s.elapsed_min), "dim")]
     return segs
 
 
@@ -2363,8 +2413,8 @@ def _dispatch_row(j, orphan=False, parent_model=None, parent_harness=None, is_la
     # under it. This is F-64b's rule applied to the name: afterglow/stale keep the attempt's
     # static identity, and only a DEAD row collapses to colorless dim (F-13 honest-collapse,
     # where the row actually crashed and there is nothing left to identify).
-    name_key_j = ("name_dim" if j.liveness == "dead"
-                  else _BADGE_KEY.get(j.harness, "name_dim"))
+    name_key_j = ("nm_dead" if j.liveness == "dead"
+                  else _NAME_KEY_DIM.get(j.harness, "nmd_other"))
     segs.append((nm, name_key_j))
     if otag and used + len(otag) <= avail:
         segs.append((otag, "g_dead" if registry_split else "gate_u")); used += len(otag)
@@ -2438,10 +2488,10 @@ def _dispatch_row(j, orphan=False, parent_model=None, parent_harness=None, is_la
                                      compact_route=in_card))
         if in_card and card_interior:
             consumed = sum(_dw(t) for t, _k in segs)
-            # F-68b (user): the box keeps its elapsed, but as an inline `⏳<t>` tag
+            # F-68b (user): the box keeps its elapsed, but as an inline bare `<t>` value
             # right after the content — summary-row style — never a reserved
             # column. Reserve its cells in the same ledger.
-            in_card_time = _WAIT_GLYPH + fmt_min(j.elapsed_min)
+            in_card_time = _ELAPSED_GLYPH + fmt_min(j.elapsed_min)
             time_w = _dw(in_card_time) + 2
             # Rough fold budget only — the frame's tag-aware elastic clip is the
             # final authority, so a path with a wider lead-in degrades to an
@@ -2452,15 +2502,15 @@ def _dispatch_row(j, orphan=False, parent_model=None, parent_harness=None, is_la
 
     # F-68 (user 2026-08-14 "time은 빼고 설명 요약쪽처럼 일관성", "열 자체를 없애라",
     # "박스 내부에도 time 표시는 하고"): a framed row keeps no right-flushed time
-    # COLUMN — the elapsed rides inline as a dim `⏳<t>` tag right after the row's
+    # COLUMN — the elapsed rides inline as a dim bare `<t>` value right after the row's
     # content, summary-row style, and the border stays the hard right terminus.
     if in_card:
         if in_card_time is None and card_interior:
-            in_card_time = _WAIT_GLYPH + fmt_min(j.elapsed_min)
+            in_card_time = _ELAPSED_GLYPH + fmt_min(j.elapsed_min)
         if in_card_time is not None:
             segs += [(_CARD_TAG, None), (in_card_time, "dim")]
     else:
-        segs += [("  ", None), (_WAIT_GLYPH + fmt_min(j.elapsed_min), "dim")]
+        segs += [("  ", None), (_ELAPSED_GLYPH + fmt_min(j.elapsed_min), "dim")]
     return segs
 
 
@@ -2473,14 +2523,14 @@ def _session_row_2line(s, is_parent=False, child_count=0, _split=False, term_wid
     live = s.liveness
     slug = s.slug or (s.cwd.rsplit("/", 1)[-1] if s.cwd else "?")
     dim_tel = live in ("stale", "dead") or s.app_server or s.detached
-    name_key = ("name_work" if live == "working"
-                else ("name_dim" if dim_tel else "name_idle"))
     gch, gkey = _glyph(live)
     if s.detached and live not in ("stale", "dead"):
         gch, gkey = _DETACHED_GLYPH, "g_work_off"
     hn = _BADGE_TEXT.get(s.harness, "?")
     hkey = (_BADGE_KEY.get(s.harness, "dim") if dim_tel
             else ("hb_" + s.harness if s.harness in _BADGE_TEXT else "hb_other"))
+    name_key = (_NAME_KEY_DIM.get(s.harness, "nmd_other") if dim_tel
+                else _NAME_KEY.get(s.harness, "nm_other"))   # F-76b, see `_session_row`
     l1 = [("  ", None), (gch, gkey), (" ", None), (_pad(hn, _HW), hkey)]
     suffix = []
     if is_parent and child_count:
@@ -2601,8 +2651,8 @@ def _dispatch_row_2line(j, orphan=False, parent_model=None, parent_effort=None, 
         shown_name = _compact_dispatch_name(slug_name)
     # user 2026-07-20: 분사 행 제목도 컬러 (dim harness hue) — same rule as the wide row,
     # including F-75b's finished-row carve-out (only DEAD collapses to colorless).
-    name_key_j = ("name_dim" if j.liveness == "dead"
-                  else _BADGE_KEY.get(j.harness, "name_dim"))
+    name_key_j = ("nm_dead" if j.liveness == "dead"
+                  else _NAME_KEY_DIM.get(j.harness, "nmd_other"))
     l1 = [("  ", None), (prefix, "dim"), (gch, gkey), (" ", None),
           (_pad(hn, max(1, _HW - len(prefix))), _BADGE_KEY.get(j.harness, "dim")), (shown_name, name_key_j)]
     if orphan:
@@ -3175,20 +3225,24 @@ _SUMMARY_FALLBACK_W = 60   # hermetic/no-terminal-width callers (mirrors the dim
 
 
 # F-63: a summary younger than this reads as "now" and carries no tag; past it the
-# text stays (24h sidecar window, titles.py) and this dim `⏳<elapsed>` age tag keeps
+# text stays (24h sidecar window, titles.py) and this dim `(<elapsed>)` age tag keeps
 # it honest. 15 minutes is the pre-F-63 freshness cutoff, kept as the live threshold.
 _SUMMARY_AGE_TAG_SEC = 15 * 60
 
 
 def _summary_age_tag(summary_ts, now=None):
-    """`⏳<elapsed>` for a summary older than the live window, else None."""
+    """`(<elapsed>)` for a summary older than the live window, else None.
+
+    F-76: the only elapsed on the board that does NOT sit in a column of its own — it
+    trails a Korean sentence, where a bare `38m` would read as a number glued onto the
+    prose. Parentheses do the separating that `⏳` used to, without an icon."""
     if not isinstance(summary_ts, (int, float)) or isinstance(summary_ts, bool):
         return None
     now = time.time() if now is None else now
     age = now - summary_ts
     if age < _SUMMARY_AGE_TAG_SEC:
         return None
-    return "⏳%s" % fmt_min(int(age // 60))
+    return "(%s)" % fmt_min(int(age // 60))
 
 
 def _summary_row(summary, depth=0, term_width=None, start_col=None, summary_ts=None):
@@ -3214,10 +3268,10 @@ def _summary_row(summary, depth=0, term_width=None, start_col=None, summary_ts=N
     tag = _summary_age_tag(summary_ts)
     tag_w = (_dw(tag) + 1) if tag else 0
     if tag and maxw > tag_w:
-        segs.append((_clip_w(summary, maxw - tag_w), "dim"))
+        segs.append((_clip_w(summary, maxw - tag_w), "now_sub"))
         segs.append((" " + tag, "dim"))
     else:
-        segs.append((_clip_w(summary, maxw), "dim"))
+        segs.append((_clip_w(summary, maxw), "now_sub"))
     return [segs]
 
 
@@ -3355,7 +3409,7 @@ def _context_lead_cell(state, dim=False, degrade=False):
 
 
 def _context_detail_row(entity, depth=0, term_width=None, dim=False,
-                        indent_width=None, muted=False, now_key="dim"):
+                        indent_width=None, muted=False, now_key="now_sub"):
     """One ``<liveness> <gauge> <value>   NOW`` row for every live card.
 
     The lead cell names the session's state in words (F-55) using the SAME `_state_key()` color
@@ -3843,7 +3897,7 @@ def _route_card_l2(view, max_width=None):
 
 def _route_job_row(job, max_width=None):
     """The active node's owning job, one compact row (prd.md:308's `└▸🚀 <slug> <harness>
-    <model> ⏳<elapsed>` shape) — NOT the group view's full `_dispatch_row` grid (a route card
+    <model> <elapsed>` shape) — NOT the group view's full `_dispatch_row` grid (a route card
     is not a project group; its columns don't line up with one, and forcing them to would need
     a second name-width negotiation this view doesn't have). `max_width` (§5.5): the slug is
     the one field with no fixed budget elsewhere, so it yields first — same "the variable-width
@@ -3851,7 +3905,7 @@ def _route_job_row(job, max_width=None):
     hn = _BADGE_TEXT.get(job.harness, "—") if job.harness else "—"
     model_txt = _clean_model(dash(_dispatch_display_model(job.model))) or "—"
     eff = ("(%s)" % job.effort) if job.effort else ""
-    tail = "⏳%s" % fmt_min(job.elapsed_min) if job.elapsed_min is not None else ""
+    tail = _ELAPSED_GLYPH + fmt_min(job.elapsed_min) if job.elapsed_min is not None else ""
     prefix = "     └▸🚀 "
     slug = job.slug or job.key or "?"
     fixed_bits = [b for b in (hn, model_txt, eff, tail) if b]
@@ -3872,13 +3926,12 @@ def _route_card_l1(tag_bits, rid, done, total, route_elapsed, any_failed, arrow,
                 (rid, "lvl_r" if any_failed else "dim"),
                 (" — %d/%d nodes" % (done, total), "dim")]
         if show_elapsed and route_elapsed is not None:
-            # design_review_round_1.md 🟡2 / prd.md:307 literal ("<n/m nodes> ⏳<경과>") — the
-            # bare `_CLOCK` convention (session/dispatch GRID rows, render.py:540) is the wrong
-            # precedent here: `_route_job_row` already established "⏳" as THIS card's own
-            # elapsed glyph (the child row below reads `⏳8m`), so the L1 header must match it —
-            # a bare "  15m" both drops the spec's glyph AND reads as a stray number glued onto
-            # "n/m nodes" (the exact critic misreading).
-            segs += [("  ⏳", "dim"), (fmt_min(route_elapsed), "dim")]
+            # prd.md:307 wrote this as "<n/m nodes> ⏳<경과>", and the v10 critic's worry
+            # was that a bare "  15m" reads as a stray number glued onto "n/m nodes".
+            # F-76 resolves that without the glyph: `_ELAPSED_GLYPH` is board-wide, so this
+            # header now matches every other elapsed instead of matching a card-local icon,
+            # and `fmt_min`'s spaced units ("5h 20m") are what mark it as a duration.
+            segs += [("  " + _ELAPSED_GLYPH, "dim"), (fmt_min(route_elapsed), "dim")]
         if show_failed and any_failed:
             segs.append((" ⚠ failed node", "lvl_r"))
         return segs

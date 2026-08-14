@@ -172,7 +172,7 @@ class WideRowNoParentheticalTagTest(unittest.TestCase):
         job = DispatchJob(key="code", slug="top-conductor", depth=1, liveness="working",
                           mode="dev", qa="standard", qa_source="argv")
         segs = render._dispatch_row(job)
-        name_text = next(text for text, key in segs if key == "name_dim")
+        name_text = next(text for text, key in segs if key in render.NAME_KEYS)
         self.assertNotIn("(", name_text)
         self.assertNotIn(")", name_text)
 
@@ -330,7 +330,7 @@ class TitleCapTest(unittest.TestCase):
         # under _TITLE_MAX by accident. F-54 widened it to 27 and exposed the mis-index —
         # the legacy 24-cell title cap itself never moved.
         name_seg = next(t for t, k in segs
-                        if k in ("name_idle", "name_work", "name_dim"))
+                        if k in render.NAME_KEYS)
         self.assertLessEqual(render._dw(name_seg), render._TITLE_MAX)
 
     def test_wide_session_title_expands_with_terminal_width(self):
@@ -340,7 +340,7 @@ class TitleCapTest(unittest.TestCase):
         name_width = render._wide_name_width(168)
         segs = render._session_row(sess, narrow=False, name_width=name_width)
         name_text = next(t for t, k in segs
-                         if k in ("name_idle", "name_work", "name_dim"))
+                         if k in render.NAME_KEYS)
         self.assertGreater(name_width, render._NW_S)
         self.assertGreater(render._dw(name_text), render._TITLE_MAX)
         self.assertLessEqual(render._dw(name_text), name_width)
@@ -351,7 +351,7 @@ class TitleCapTest(unittest.TestCase):
         name_width = render._wide_name_width(168)
         segs = render._session_row(sess, narrow=False, name_width=name_width)
         name_text = next(t for t, k in segs
-                         if k in ("name_idle", "name_work", "name_dim"))
+                         if k in render.NAME_KEYS)
         self.assertLessEqual(render._dw(name_text), name_width)
         self.assertNotEqual(name_text[-1:], "")
 
@@ -373,7 +373,7 @@ class TitleCapTest(unittest.TestCase):
                           liveness="working")
         nw = render._wide_name_width(168)
         segs = render._dispatch_row(job, name_width=nw)
-        name_text = next(text for text, key in segs if key == "name_dim")
+        name_text = next(text for text, key in segs if key in render.NAME_KEYS)
         self.assertLessEqual(len(name_text), nw)
         self.assertGreater(len(name_text), render._TITLE_MAX)
 
@@ -383,7 +383,7 @@ class TitleCapTest(unittest.TestCase):
                           depth=2, parent_slug="p", worker_role="code-execute",
                           liveness="working")
         segs = render._dispatch_row(job)
-        name_text = next(text for text, key in segs if key == "name_dim")
+        name_text = next(text for text, key in segs if key in render.NAME_KEYS)
         self.assertLessEqual(len(name_text), render._TITLE_MAX)
 
 

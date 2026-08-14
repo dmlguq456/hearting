@@ -85,7 +85,7 @@ class F63VisibilityTest(unittest.TestCase):
                           slug="experiment", title="calibration", liveness="idle",
                           exec_child={"comm": "python", "etime_s": 11520})
         segs = render._exec_detail_segs(session)
-        self.assertEqual(segs, [("⚙ python 3h12m", "g_work")])
+        self.assertEqual(segs, [("⚙ python 3h 12m", "g_work")])
         self.assertNotIn("python", render._session_name(session))
 
 

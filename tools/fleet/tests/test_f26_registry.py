@@ -233,7 +233,7 @@ class UnusedRowRenderTest(unittest.TestCase):
         txt = self._row(name_width=40)
         self.assertIn("agent-setting-17", txt)
         self.assertIn("unused", txt)
-        self.assertIn("3h45m", txt)              # 225 min
+        self.assertIn("3h 45m", txt)             # 225 min
 
     def test_glyph_is_the_unused_glyph(self):
         self.assertIn("◌", self._row(name_width=40))
@@ -300,13 +300,14 @@ class DegradationLadderTest(unittest.TestCase):
         txt = "".join(t for t, _k in render._session_row(
             s, narrow=False, name_width=render._wide_name_width(168)))
         self.assertIn(name, txt)                     # full name — never anonymous
-        self.assertIn("unused 3h45m", txt)          # full badge — prd.md:248 shape
+        self.assertIn("unused 3h 45m", txt)         # full badge — prd.md:248 shape
         self.assertNotIn("terminal", txt)           # provenance yielded first
 
     def test_badge_age_yields_before_the_name(self):
         """A name sized into the window where shedding the age is exactly what saves it.
 
-        Full badge ` unused 3h45m` (13) plus the 1-cell gap leaves the name `zone - 14` cells;
+        Full badge ` unused 3h 45m` (14 since F-76 spaced the units) plus the 1-cell gap
+        leaves the name `zone - 15` cells;
         the compact ` unused` (7) leaves it `zone - 8`. A name in between therefore has to clip
         with the age present, and survives whole once the age yields. The sample is SIZED FROM
         the zone rather than typed in, so every 168-col zone change moves it automatically
@@ -325,7 +326,7 @@ class DegradationLadderTest(unittest.TestCase):
         self.assertEqual(badge, " unused")           # age shed from the BADGE...
         txt = "".join(t for t, _k in segs)
         self.assertIn(name, txt)                     # ...so the name stays whole
-        self.assertIn("3h45m", txt)                  # age still on the row, in the time cell
+        self.assertIn("3h 45m", txt)                 # age still on the row, in the time cell
 
     def test_full_badge_is_kept_when_the_name_already_fits(self):
         """The ladder only sheds under pressure — a short name keeps prd.md:248's shape."""
@@ -333,7 +334,7 @@ class DegradationLadderTest(unittest.TestCase):
         segs = render._session_row(s, narrow=False,
                                    name_width=render._wide_name_width(168))
         badge = next(t for t, k in segs if k == "g_unused_b")
-        self.assertEqual(badge, " unused 3h45m")
+        self.assertEqual(badge, " unused 3h 45m")
 
     def test_name_clips_only_when_nothing_else_is_left_to_shed(self):
         s = self._ghost(registry_name="z" * 90, provenance=None)

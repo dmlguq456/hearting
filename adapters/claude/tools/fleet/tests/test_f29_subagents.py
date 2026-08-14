@@ -1038,7 +1038,7 @@ class NoRegressionTest(unittest.TestCase):
         lines = render._build_lines(self._rows(subagents=subs), [], section="fleet",
                                     narrow=False, malformed=0, term_width=168)
         name_lines = [ln for ln in lines
-                     if ln and any(k == "name_work" for _t, k in ln)]
+                     if ln and any(k in render.NAME_KEYS for _t, k in ln)]
         self.assertEqual(len(name_lines), 1)
         name_text = "".join(t for t, _k in name_lines[0])
         self.assertNotIn("⚡2", name_text)
