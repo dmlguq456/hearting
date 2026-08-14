@@ -150,7 +150,7 @@ class RecoveringRendersWithoutTheFailureGlyphTest(unittest.TestCase):
         segs = render._route_stage_segs([("r3", "recovering"), ("r4", "pending")],
                                         working=False, max_width=None)
         text = "".join(t for t, _k in segs)
-        self.assertIn("r3…", text)
+        self.assertIn("r3 …", text)
         self.assertNotIn("✕", text)
 
     def test_breadcrumb_current_index_points_at_the_recovering_node(self):

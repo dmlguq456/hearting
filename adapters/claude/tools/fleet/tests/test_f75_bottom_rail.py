@@ -163,7 +163,7 @@ class OwnerRowCompactTest(unittest.TestCase):
         segs = render._dispatch_stage_segs(job, "code", "execute", "f75-owner",
                                            working=False, route_seq=seq,
                                            route_zone=40, compact_route=True)
-        self.assertEqual(_text(segs), "execute✕ 1/3")
+        self.assertEqual(_text(segs), "execute ✕ 1/3")
         self.assertIn("lvl_r", [k for _t, k in segs])
 
     def test_owner_row_and_rail_agree_on_the_current_node(self):
@@ -203,7 +203,7 @@ class CardIntegrationTest(unittest.TestCase):
         rail = [r for r in rows if "╰" in r]
         owner = [r for r in rows if "╭" in r]
         self.assertTrue(rail and owner)
-        self.assertIn("plan-check✓", rail[0])
+        self.assertIn("plan-check ✓", rail[0])
         self.assertIn("report", rail[0])
         self.assertNotIn("›", owner[0])
         # F-75b: the owner row shows NO stage cell at all — not the compact token and not

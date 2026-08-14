@@ -193,10 +193,12 @@ _HUE_OF = {
     "frm0": ("l", _A_D), "frm1": ("c", _A_D), "frm2": ("g", _A_D),
     "frm3": ("y", _A_D), "frm4": ("m", _A_D),
     "frm_idle": ("d", _A_D),
-    # F-70 (user 2026-08-14 "볼드만 유지하고 다시 어둡게해"): a MAIN session's second
-    # line keeps the DIM ink of every other subtitle and separates itself by WEIGHT
-    # alone — bold-dim. The brighter hue read as loud next to the dispatch rows.
-    "now_main": ("w", _A_B | _A_D),
+    # F-76c (user 2026-08-14 "메인세션의 설명을 밝은 흰색으로 하라는거야"): a MAIN
+    # session's second line is BRIGHT white. F-70 had dimmed it ("볼드만 유지하고 다시
+    # 어둡게해") because it read as loud beside the dispatch rows — but that was before
+    # F-72 dimmed the card frames and F-76b moved names onto the harness hue. With the
+    # surroundings quieted, the owner's own sentence is the thing that should carry ink.
+    "now_main": ("w", _A_B),
     # F-76b (user 2026-08-14 "설명을 흰색으로 바꾸고"): the subtitle/NOW sentence is
     # WHITE-hued like the main session's own second line, not the default grey. With
     # row names now wearing the harness hue (F-76b above), color separates identity
@@ -448,7 +450,7 @@ def _init_colors():
         _COLOR["frm%d" % i] = base | curses.A_DIM
     _COLOR["frm_idle"] = curses.A_DIM
     _COLOR["dim"] = curses.A_DIM
-    _COLOR["now_main"] = curses.A_BOLD | curses.A_DIM
+    _COLOR["now_main"] = _COLOR.get("soft", 0) | curses.A_BOLD
     _COLOR["now_sub"] = _COLOR.get("soft", 0) | curses.A_DIM
     # F-76b: name keys mirror the harness pair exactly — bright `hb_*`, dim `h_*`.
     for h in _NAME_HUE:
@@ -862,9 +864,13 @@ def _wide_name_width(term_width):
 def _col_head(name_width):
     # F-33 (v11): the model/effort header folds into the harness column now that the row
     # content does too — no more separate "model" header between branch and the gauge.
+    # F-77 (user 2026-08-14 "위에 column 헤더도 제거해버리자"): the third column lost its
+    # "stages" label along with the stage semantics. It has not held a pipeline stage for a
+    # while — depth-1 shows `code(dev·thr·owner)`, depth-2 `code-execute(thr)`, a main session
+    # its capability — and since F-75 the actual route breadcrumb lives on the card's close
+    # rail. A header naming one of the several things the column can hold was worse than none.
     return ("    " + "harness (model·effort)".ljust(_HMW)
-            + "session (branch)".ljust(name_width + _BRANCH_SUFFIX_W)
-            + " " * _WIDE_STAGE_GAP + "stages")
+            + "session (branch)")
 
 
 def _branch_suffix_segs(cwd, branch, dim=True, optional=False,
@@ -1057,15 +1063,17 @@ def _route_stage_segs(route_seq, working, max_width):
         return "stg%d_on" % (i % 5)
     cur_i = _route_current_index(route_seq)
     items = []
+    # F-77 (user 2026-08-14 "체크나 X 표시랑 글자사이에 간격 하나 띄워줘"): one space between
+    # a node name and its state mark. Flush (`execute✕`) the glyph read as part of the word.
     for i, (nid, st) in enumerate(route_seq):
         if st == "failed":
-            items.append((i, nid + "✕", "lvl_r"))
+            items.append((i, nid + " ✕", "lvl_r"))
         elif st == "degraded":
-            items.append((i, nid + "◐", "lvl_y"))
+            items.append((i, nid + " ◐", "lvl_y"))
         elif st in ("reconciling", "recovering"):
-            items.append((i, nid + "…", "lvl_y"))
+            items.append((i, nid + " …", "lvl_y"))
         elif st == "done":
-            items.append((i, nid + "✓", "stg%d_off" % (i % 5)))
+            items.append((i, nid + " ✓", "stg%d_off" % (i % 5)))
         elif st == "active":
             items.append((i, nid, _cur_key(i)))
         else:
@@ -1233,7 +1241,7 @@ def _route_compact_segs(j, route_seq, working, max_width=None):
     else:
         done = sum(1 for _nid, state in route_seq if state == "done")
         total = len(route_seq)
-    node_seg = (nid + mark, key)
+    node_seg = (nid + (" " + mark if mark else ""), key)
     count_seg = ("%d/%d" % (done, total), "dim")
     # F-9(c) whole-component fold, never a mid-token tail-cut: when the slot cannot hold
     # both, the COUNT survives alone — the node name is still lit on the close rail below,
@@ -1395,21 +1403,23 @@ def _session_stage_segs(entity, working, max_width):
     if cap.get("capability"):
         # Inline entry work with no route/dispatch/spec projection: `capability(mode·intensity)`,
         # the same syntax the dispatch options column uses (user 2026-07-24 "다른 인라인도 메인
-        # 세션에 떠야"). A known inferred stage, when present, trails after the dim ` : ` lead-in.
+        # 세션에 떠야").
+        #
+        # F-77 (user 2026-08-14: "정확히는 무슨 skill 지금 쓰는 중인지 정도로만 … 이미 stages의
+        # 위치가 가지는 의미가 fleet에서 모호해졌고, depth=1,2도 그 자리에 stage라기 보다는
+        # unit, capa, node 정보를 남고 있으니까"): this cell stopped being a STAGE column some
+        # time ago — depth-1 shows `code(dev·thr·owner)`, depth-2 shows `code-execute(thr)`, so
+        # what it actually answers is "which unit of work is this". A main session answers the
+        # same question with the capability it is inside, and stops there. No inferred stage
+        # trails it: the only inline stage signal available was artifact FILENAMES, whose
+        # vocabulary is the code cycle's, so an autopilot-spec session rendered `spec(direct) :
+        # exec` — a code-pipeline stage word under a spec capability (observed live). A tag that
+        # can contradict its own capability is worse than no tag.
         name = cap["capability"].replace("autopilot-", "")
         knob_items = [k for k in (cap.get("mode"), cap_intensity) if k]
         segs = [(name, "name_dim")]
         if knob_items:
             segs += [("(", "dim"), ("·".join(knob_items), "dim"), (")", "dim")]
-        projection = getattr(entity, "work_projection", None)
-        stage = getattr(projection, "stage_label", None)
-        # Defensive F-43 boundary: even a manually injected/mixed projection
-        # must not trail stale spec phases after a non-spec capability tag.
-        if (getattr(projection, "_route_view", None) or {}).get("spec_phases"):
-            stage = None
-        if stage:
-            segs += [(" : ", "dim"), (_clip_w(str(stage), max(4, max_width - sum(_dw(t) for t, _k in segs) - 3)),
-                                      "g_work" if working else "dim")]
         return segs
     text = _projection_stage_text(entity, max_width=max_width)
     return [(text or "-", "g_work" if text and working else "dim")]

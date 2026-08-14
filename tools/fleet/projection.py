@@ -324,19 +324,54 @@ def exact_artifact_candidates(entity, artifact_root=None):
     return _artifact_candidates(entity, artifact_root=artifact_root)
 
 
-def _artifact_stage(path):
-    names = set()
-    for item in glob.glob(os.path.join(path, "*")):
-        name = os.path.basename(item)
-        if os.path.isdir(item) and name in {"dev_logs", "test_logs", "shards", "_internal"} and not _has_entries(item):
-            continue
-        names.add(name)
-    for label, markers in (("report", ("report", "verification")),
-                           ("test", ("test",)), ("exec", ("execute",)),
-                           ("plan", ("plan",))):
-        if any(any(marker in name.lower() for marker in markers) for name in names):
+_ARTIFACT_STAGE_MARKERS = (("report", ("report", "verification", "pipeline_summary")),
+                           ("test", ("test",)),
+                           ("exec", ("execute", "dev_log", "checklist")),
+                           ("plan", ("plan",)))
+
+
+def _artifact_stage_label(name):
+    lowered = name.lower()
+    for label, markers in _ARTIFACT_STAGE_MARKERS:
+        if any(marker in lowered for marker in markers):
             return label
     return None
+
+
+def _artifact_stage(path):
+    """The stage this plan directory is CURRENTLY at — the one most recently written to.
+
+    F-77 (user 2026-08-14, "메인에서 inline으로 도는 stages … 틀리는 경우도 종종 있고"):
+    this used to answer from mere EXISTENCE, in a fixed report>test>exec>plan order. Every
+    artifact of a finished stage survives into the next one, so a directory that had ever
+    produced a `report` name reported `report` forever after — and a cycle that pre-created
+    its output files reported its LAST stage from its first minute. Recency is the honest
+    signal: whichever stage's files were touched last is where the work actually is.
+    """
+    best_label, best_mtime = None, None
+    for item in glob.glob(os.path.join(path, "*")):
+        name = os.path.basename(item)
+        is_dir = os.path.isdir(item)
+        if is_dir and name in {"dev_logs", "test_logs", "shards", "_internal"} and not _has_entries(item):
+            continue
+        label = _artifact_stage_label(name)
+        if label is None:
+            continue
+        # A stage directory's recency is its CONTENT's recency: `dev_logs/` keeps the mtime
+        # of the day it was created, while the log written into it just now is the evidence.
+        mtime = _artifact_latest_mtime(item) if is_dir else _safe_mtime(item)
+        if mtime is None:
+            continue
+        if best_mtime is None or mtime > best_mtime:
+            best_label, best_mtime = label, mtime
+    return best_label
+
+
+def _safe_mtime(path):
+    try:
+        return os.path.getmtime(path)
+    except OSError:
+        return None
 
 
 def _has_entries(path):

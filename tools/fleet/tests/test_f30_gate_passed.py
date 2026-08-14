@@ -702,7 +702,7 @@ class ReconciliationRenderTest(unittest.TestCase):
     def test_breadcrumb_and_detail_use_yellow_ellipsis(self):
         breadcrumb = render._route_stage_segs([("frame", "reconciling"),
                                                 ("plan", "pending")], True, 80)
-        self.assertIn(("frame…", "lvl_y"), breadcrumb)
+        self.assertIn(("frame …", "lvl_y"), breadcrumb)
         for width in (168, 120, 100, 60):
             with self.subTest(width=width):
                 detail = render._stage_detail_rows([self._node()], term_width=width)

@@ -61,21 +61,19 @@ class HarnessModelCellTest(unittest.TestCase):
 class ColumnHeaderTest(unittest.TestCase):
     def test_header_shows_merged_harness_model_label(self):
         head = render._col_head(28)
+        # F-77 dropped the third column's "stages" label: the column holds a unit/capability/
+        # node token depending on the row, and naming it after only one of those read as a
+        # promise the board no longer keeps.
         self.assertEqual(
             head,
-            "    " + "harness (model·effort)".ljust(render._HMW)
-            + "session (branch)".ljust(28 + render._BRANCH_SUFFIX_W)
-            + " " * render._WIDE_STAGE_GAP + "stages",
+            "    " + "harness (model·effort)".ljust(render._HMW) + "session (branch)",
         )
         self.assertNotIn("model".ljust(render._MW), head)
         self.assertNotIn("session".ljust(28) + "branch", head)
+        self.assertNotIn("stages", head)
         self.assertEqual(head.index("session"), render._NAME_COL)
-        self.assertEqual(
-            head.index("stages"),
-            render._NAME_COL + 28 + render._BRANCH_SUFFIX_W + render._WIDE_STAGE_GAP,
-        )
 
-    def test_wide_board_header_ends_at_stages_without_a_time_column(self):
+    def test_wide_board_header_ends_at_the_session_label(self):
         # F-68c (user "time 없애라고 했는데 왜 계속 뜨는건데"): the elapsed COLUMN is
         # retired board-wide — it rides inline after each row's content — so the
         # header carries no right-flushed `time` label and no flush sentinel.
@@ -87,7 +85,9 @@ class ColumnHeaderTest(unittest.TestCase):
         self.assertNotIn(render._RFLUSH, [text for text, _key in header])
         self.assertIn("session (branch)", header[0][0])
         self.assertNotIn("context / stage", header[0][0])
-        self.assertTrue(header[0][0].endswith("stages"))
+        # F-77: the header now ENDS at the session label — no third-column name, and no
+        # trailing padding standing in for one.
+        self.assertTrue(header[0][0].endswith("session (branch)"))
 
 
 class SessionRowMergeTest(unittest.TestCase):

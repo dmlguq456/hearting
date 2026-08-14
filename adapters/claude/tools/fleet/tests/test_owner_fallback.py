@@ -110,7 +110,7 @@ class OwnerFallbackTest(unittest.TestCase):
         rendered = self._render([parent], [owner, stage])
         self.assertIn("visible-owner", rendered)
         self.assertEqual(rendered.count("stage-execute"), 1)
-        self.assertIn("plan✓", rendered)
+        self.assertIn("plan ✓", rendered)
 
     def test_drill_unresolved_root_remains_standalone(self):
         work = self._route_projection("rt-drill")

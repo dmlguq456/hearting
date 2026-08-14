@@ -280,7 +280,7 @@ class ContextDetailTruthTableTest(unittest.TestCase):
         # collapsed route stays visible instead of folding its early stages.
         wide = text(render._build_lines([session], [owner], "both", False, 0,
                                         layout="wide", term_width=256))
-        self.assertIn("plan✓ › execute✓ › impl-review(2-way) › test", wide)
+        self.assertIn("plan ✓ › execute ✓ › impl-review(2-way) › test", wide)
 
     def test_quick_one_shot_is_rendered_once_on_owner_not_parent_or_detail(self):
         node = {"id": "one-shot", "state": "active", "level": 0, "depends_on": []}

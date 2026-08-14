@@ -393,7 +393,7 @@ class SpecPhaseSequenceTest(unittest.TestCase):
             self.assertNotIn("[cli]", text)               # square brackets never used
             self.assertNotIn("spec-cli", text)            # mode is a paren knob, not a name suffix
             self.assertNotIn("topic-a", text)             # topic dropped
-            self.assertIn("spec✓", text)                  # done glyph
+            self.assertIn("spec ✓", text)                  # done glyph
             self.assertNotIn("scaffolding", text)         # deferred phase filtered out (no ⊘)
             self.assertNotIn("⊘", text)                   # skip glyph never rendered
             self.assertIn("dev", text)                    # active phase present
@@ -445,7 +445,7 @@ class SpecPhaseSequenceTest(unittest.TestCase):
                                         layout="wide", term_width=220)
             text = "\n".join("".join(t for t, _k in ln) for ln in lines if ln)
             # The full 6-phase breadcrumb survives on a wide terminal (no early `…` clip).
-            for phase in ("spec✓", "scaffolding✓", "skeleton✓", "design✓", "ship_setup"):
+            for phase in ("spec ✓", "scaffolding ✓", "skeleton ✓", "design ✓", "ship_setup"):
                 self.assertIn(phase, text)
 
 
@@ -457,7 +457,7 @@ class RouteStageSkippedGlyphTest(unittest.TestCase):
         segs = render._route_stage_segs([("a", "done"), ("b", "skipped"), ("c", "active")],
                                         working=False, max_width=60)
         rendered = "".join(t for t, _k in segs)
-        self.assertIn("a✓", rendered)
+        self.assertIn("a ✓", rendered)
         self.assertIn(" b ", " %s " % rendered)   # plain name, no glyph
         self.assertNotIn("⊘", rendered)
 
