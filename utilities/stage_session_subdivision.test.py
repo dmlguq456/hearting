@@ -142,7 +142,7 @@ class SubdivisionContractTest(unittest.TestCase):
             manifest = SSC.load_manifest(manifest_path, route=route, node=node)
             self.assertEqual(len(manifest["sessions"]), 2)
 
-    def _attempt_row(self, *, route, manifest, session, index, count, timestamp="2026-08-14T00:00:00Z"):
+    def _attempt_row(self, *, route, manifest, session, index, count, mode="parallel", timestamp="2026-08-14T00:00:00Z"):
         fake_sha = "a" * 64
         fields = {
             "attempt_schema_version": "2",
@@ -163,7 +163,7 @@ class SubdivisionContractTest(unittest.TestCase):
             "session_chain_id": manifest["chain_id"],
             "subsession_index": str(index),
             "subsession_count": str(count),
-            "subsession_mode": "parallel",
+            "subsession_mode": mode,
             "subsession_purpose": "planned",
             "parallel_group": manifest["route_node"],
             "phase_brief": session["phase_brief"],
@@ -176,10 +176,11 @@ class SubdivisionContractTest(unittest.TestCase):
         blob = ",".join(f"{key}={value}" for key, value in fields.items())
         return "\t".join([timestamp, "done", "/repo", str(Path(manifest["worktree"])), session["slug"], blob])
 
-    def _write_jobs(self, jobs_path, route, manifest):
+    def _write_jobs(self, jobs_path, route, manifest, mode="parallel"):
         sessions = manifest["sessions"]
         lines = [
-            self._attempt_row(route=route, manifest=manifest, session=session, index=i + 1, count=len(sessions))
+            self._attempt_row(route=route, manifest=manifest, session=session,
+                              index=i + 1, count=len(sessions), mode=mode)
             for i, session in enumerate(sessions)
         ]
         jobs_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -325,8 +326,11 @@ class SubdivisionContractTest(unittest.TestCase):
                 )
 
     def test_missing_admission_baseline_fails_closed(self):
-        # Without a baseline the audit is not slice attribution at all, so it
-        # refuses rather than silently widening back to the whole worktree.
+        # For a PARALLEL subdivision, an absent baseline means the audit is not
+        # slice attribution at all, so it refuses rather than silently widening
+        # back to the whole worktree. A `serial` SD-96 chain is admitted through
+        # a path that records no baseline, so it keeps the pre-existing
+        # whole-worktree measurement instead of becoming uncompletable.
         with tempfile.TemporaryDirectory() as td:
             worktree, route, node, manifest_path = self._fixture(td)
             manifest = SSC.load_manifest(manifest_path, route=route, node=node)
@@ -339,6 +343,18 @@ class SubdivisionContractTest(unittest.TestCase):
                     CR.complete_subsession_stage(
                         route, node, "execute", evidence, manifest_path, jobs_path,
                     )
+        with tempfile.TemporaryDirectory() as td:
+            worktree, route, node, manifest_path = self._fixture(td, mode="serial")
+            manifest = SSC.load_manifest(manifest_path, route=route, node=node)
+            jobs_path = Path(td) / "jobs.log"
+            self._write_jobs(jobs_path, route, manifest, mode="serial")
+            evidence = Path(td) / "evidence.md"
+            evidence.write_text("execute done\n", encoding="utf-8")
+            with mock.patch.dict(os.environ, {"AGENT_DISPATCH_JOBS": str(jobs_path)}):
+                _marker, status = CR.complete_subsession_stage(
+                    route, node, "execute", evidence, manifest_path, jobs_path,
+                )
+            self.assertEqual(status["status"], "stage-gate-aggregated")
 
     def test_ac29_gap_retry_uses_only_failed_slice_files(self):
         # AC 29: the retry manifest is DERIVED by production code from the

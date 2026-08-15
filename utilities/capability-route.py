@@ -2335,7 +2335,15 @@ def complete_subsession_stage(route, node, node_id, evidence, manifest_path, job
         )
         raise ValueError(reason)
 
-    if baseline is None:
+    # The baseline is required for a PARALLEL subdivision -- SD-103's admission
+    # path records one, and its absence there means the audit would not be slice
+    # attribution at all. A `serial` SD-96 chain is admitted through a different
+    # path that records no baseline, so demanding one would make every serial
+    # chain uncompletable; it keeps the pre-existing whole-worktree measurement
+    # instead. That residual is real and is recorded as such: the serial path's
+    # audit still cannot attribute a change to a session.
+    parallel = manifest.get("mode") == "parallel"
+    if baseline is None and parallel:
         _refuse(
             "subdivision-baseline-missing",
             f"no admission baseline for manifest {manifest['_manifest_sha256'][:16]}",
@@ -2343,12 +2351,13 @@ def complete_subsession_stage(route, node, node_id, evidence, manifest_path, job
     # AC 30: parallel slices are no-commit workers (SD-103). index and HEAD are
     # shared state that fixed_files disjointness cannot protect, so a HEAD that
     # moved between admission and the stage gate is a slice that committed.
-    head = _head_commit(worktree)
-    if head != baseline.get("head_commit"):
-        _refuse(
-            "subdivision-commit-attempted",
-            f"head {baseline.get('head_commit')} -> {head}",
-        )
+    if baseline is not None:
+        head = _head_commit(worktree)
+        if head != baseline.get("head_commit"):
+            _refuse(
+                "subdivision-commit-attempted",
+                f"head {baseline.get('head_commit')} -> {head}",
+            )
     declared_union = {
         Path(path).resolve(strict=False)
         for session in manifest["sessions"]
@@ -2356,7 +2365,7 @@ def complete_subsession_stage(route, node, node_id, evidence, manifest_path, job
     }
     preexisting = {
         Path(path).resolve(strict=False)
-        for path in baseline.get("changed_files", [])
+        for path in (baseline or {}).get("changed_files", [])
     }
     changed = _git_changed_files(worktree)
     outside = changed - declared_union - preexisting
