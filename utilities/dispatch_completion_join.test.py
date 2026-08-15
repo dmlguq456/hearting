@@ -11,6 +11,7 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest import mock
 import sys
 
 
@@ -281,6 +282,174 @@ class DispatchCompletionJoinTest(unittest.TestCase):
             liveness_command=[str(self.live)],
         )
         self.assertEqual(ready["state"], "ready")
+
+    def test_done_namespace_local_row_polls_until_post_exit_receipt_is_complete(self):
+        attempt = "att-namespace-receipt"
+        parent = "att-parent"
+        metadata = {
+            "pid": "999999",
+            "pid_start": "42",
+            "pgid": "999999",
+            "pid_scope": "namespace-local",
+            "pid_ns": os.readlink("/proc/self/ns/pid"),
+            "pid_observer_ns": os.readlink("/proc/self/ns/pid"),
+        }
+        self.jobs.write_text(
+            row("done", attempt, parent, "a", process_metadata=metadata),
+            encoding="utf-8",
+        )
+
+        def publish_receipt() -> None:
+            time.sleep(0.12)
+            complete = dict(
+                metadata,
+                launch_lifecycle="foreground-scoped",
+                launch_outcome="governed-process-reaped",
+                group_reap_proof="pgid-empty-v1",
+                group_reap_pgid="999999",
+            )
+            with self.jobs.open("a", encoding="utf-8") as handle:
+                handle.write(row("done", attempt, parent, "a", process_metadata=complete))
+
+        thread = threading.Thread(target=publish_receipt)
+        thread.start()
+        started = time.monotonic()
+        receipt = JOIN.join_batch(
+            jobs=self.jobs,
+            parent_attempt_id=parent,
+            interval=0.02,
+            timeout=1,
+            liveness_command=[str(self.live)],
+        )
+        thread.join(timeout=1)
+        self.assertGreaterEqual(time.monotonic() - started, 0.1)
+        self.assertEqual(receipt["state"], "ready")
+        self.assertEqual(receipt["children"][0]["reason"], "registry-closed")
+
+    def test_open_namespace_terminal_envelope_cannot_bypass_receipt_gate(self):
+        attempt = "att-open-namespace-receipt"
+        parent = "att-parent"
+        log = self.root / "worker.codex.jsonl"
+        log.write_text(
+            "\n".join(json.dumps(event) for event in [
+                {
+                    "type": "item.completed",
+                    "item": {
+                        "type": "agent_message",
+                        "text": "artifact: -\nverdict: PASS\nblocker: none",
+                    },
+                },
+                {"type": "turn.completed"},
+            ]) + "\n",
+            encoding="utf-8",
+        )
+        namespace = os.readlink("/proc/self/ns/pid")
+        metadata = {
+            "pid": "999999",
+            "pid_start": "42",
+            "pgid": "999999",
+            "pid_scope": "namespace-local",
+            "pid_ns": namespace,
+            "pid_observer_ns": namespace,
+            "log_file": str(log),
+        }
+        self.jobs.write_text(
+            row("open", attempt, parent, "a", process_metadata=metadata),
+            encoding="utf-8",
+        )
+        blocked = JOIN.join_batch(
+            jobs=self.jobs,
+            parent_attempt_id=parent,
+            interval=0.02,
+            timeout=0.08,
+            liveness_command=[str(self.live)],
+        )
+        self.assertEqual(blocked["state"], "timeout")
+        self.assertEqual(blocked["children"][0]["reason"], "process-unverifiable")
+
+        complete = dict(
+            metadata,
+            launch_lifecycle="foreground-scoped",
+            launch_outcome="governed-process-reaped",
+            group_reap_proof="pgid-empty-v1",
+            group_reap_pgid="999999",
+        )
+        with self.jobs.open("a", encoding="utf-8") as handle:
+            handle.write(row("open", attempt, parent, "a", process_metadata=complete))
+        ready = JOIN.join_batch(
+            jobs=self.jobs,
+            parent_attempt_id=parent,
+            interval=0.02,
+            timeout=0.5,
+            liveness_command=[str(self.live)],
+        )
+        self.assertEqual(ready["state"], "ready")
+        self.assertEqual(ready["children"][0]["reason"], "terminal-observed")
+
+    def test_open_namespace_terminal_probe_cannot_bypass_receipt_gate(self):
+        terminal = self.root / "terminal.sh"
+        terminal.write_text("#!/bin/sh\nexit 3\n", encoding="utf-8")
+        terminal.chmod(0o755)
+        namespace = os.readlink("/proc/self/ns/pid")
+        metadata = {
+            "pid": "999999",
+            "pid_start": "42",
+            "pgid": "999999",
+            "pid_scope": "namespace-local",
+            "pid_ns": namespace,
+            "pid_observer_ns": namespace,
+        }
+        self.jobs.write_text(
+            row(
+                "open",
+                "att-open-namespace-probe",
+                "att-parent",
+                "a",
+                process_metadata=metadata,
+            ),
+            encoding="utf-8",
+        )
+        receipt = JOIN.join_batch(
+            jobs=self.jobs,
+            parent_attempt_id="att-parent",
+            interval=0.02,
+            timeout=0.08,
+            liveness_command=[str(terminal)],
+        )
+        self.assertEqual(receipt["state"], "timeout")
+        self.assertEqual(
+            receipt["children"][0]["reason"], "process-unverifiable"
+        )
+
+    def test_done_namespace_local_row_with_partial_receipt_stays_pending(self):
+        metadata = {
+            "pid": "999999",
+            "pid_start": "42",
+            "pgid": "999999",
+            "pid_scope": "namespace-local",
+            "pid_ns": os.readlink("/proc/self/ns/pid"),
+            "pid_observer_ns": os.readlink("/proc/self/ns/pid"),
+            "launch_outcome": "governed-process-reaped",
+        }
+        self.jobs.write_text(
+            row(
+                "done",
+                "att-partial-receipt",
+                "att-parent",
+                "a",
+                process_metadata=metadata,
+            ),
+            encoding="utf-8",
+        )
+        receipt = JOIN.join_batch(
+            jobs=self.jobs,
+            parent_attempt_id="att-parent",
+            interval=0.02,
+            timeout=0.08,
+            liveness_command=[str(self.live)],
+        )
+        self.assertEqual(receipt["state"], "timeout")
+        self.assertEqual(receipt["children"][0]["reason"], "process-unverifiable")
 
     def test_timeout_is_one_bounded_receipt(self):
         self.jobs.write_text(
@@ -888,6 +1057,17 @@ class FinishedChildClosure(unittest.TestCase):
         # fixture must present a real one rather than an arbitrary directory.
         self.artifact = self.base / ".agent_reports"
         self.artifact.mkdir()
+        self.environment = mock.patch.dict(
+            os.environ,
+            {
+                "AGENT_ARTIFACT_ROOT": str(self.artifact),
+                "AGENT_MODEL_GOVERNOR_ROOT": str(
+                    self.artifact / ".runtime" / "model-worker-governor"
+                ),
+            },
+        )
+        self.environment.start()
+        self.addCleanup(self.environment.stop)
         self.jobs = self.base / "jobs.log"
         self.jobs.touch()
 
@@ -985,6 +1165,24 @@ class FinishedChildClosure(unittest.TestCase):
         finally:
             JOIN.run_route_completion = real
         self.assertEqual(outcomes, {"att-child": "completion-rejected"})
+
+    def test_wrapper_reaped_pass_failure_closes_typed_instead_of_ghosting(self):
+        child = self.child(quiescent=True)
+        self.jobs.write_text(child.raw + "\n", encoding="utf-8")
+        calls = []
+        real = JOIN.run_route_completion
+        JOIN.run_route_completion = lambda command: calls.append(command) or "completion-rejected"
+        try:
+            reason = JOIN.close_wrapper_pass(child, jobs=self.jobs)
+        finally:
+            JOIN.run_route_completion = real
+        self.assertEqual(reason, "completion-rejected")
+        self.assertEqual(len(calls), 2)
+        text = self.jobs.read_text(encoding="utf-8")
+        self.assertIn("\tdone\t", text)
+        self.assertIn("note=dead-route-completion-rejected", text)
+        self.assertIn("failure_class=contract", text)
+        self.assertNotIn("completed-marker", text)
 
     # -- Phase 3 (plan.md, round_1 finding 1): typed BLOCKED/FAIL closure ----
 

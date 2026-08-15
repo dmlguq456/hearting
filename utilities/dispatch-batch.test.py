@@ -181,15 +181,28 @@ def three_family_excluded_node(node_id: str) -> dict[str, object]:
     }
 
 
-def success_receipt(command: list[str], *, started: str = "1", duplicate: str = "0") -> str:
+def success_receipt(
+    command: list[str],
+    *,
+    registered: str | None = None,
+    started: str = "1",
+    child_spawned: str | None = None,
+    duplicate: str = "0",
+) -> str:
     adapter = command[command.index("--adapter") + 1]
     attempt_id = command[command.index("--attempt-id") + 1]
+    if registered is None:
+        registered = "1" if started == "1" else "0"
+    if child_spawned is None:
+        child_spawned = started
     return (
         "check=ok\n"
         f"adapter={adapter}\n"
         "status=start\n"
         f"attempt_id={attempt_id}\n"
+        f"registered={registered}\n"
         f"started={started}\n"
+        f"child_spawned={child_spawned}\n"
         f"duplicate_attempt={duplicate}\n"
     )
 
@@ -1269,6 +1282,9 @@ class DispatchBatchTest(unittest.TestCase):
         )
         receipt = json.loads(output.getvalue())
         self.assertEqual(receipt["state"], "launched")
+        self.assertEqual(receipt["registered"], 1)
+        self.assertEqual(receipt["started"], 1)
+        self.assertEqual(receipt["child_spawned"], 1)
         self.assertEqual(receipt["concurrent_launch"], 1)
         self.assertEqual(receipt["newly_started"], 2)
         self.assertEqual(
@@ -1276,6 +1292,9 @@ class DispatchBatchTest(unittest.TestCase):
             {"opencode", "claude"},
         )
         self.assertTrue(all(leg["check"] == "ok" for leg in receipt["legs"]))
+        self.assertTrue(all(leg["registered"] == "1" for leg in receipt["legs"]))
+        self.assertTrue(all(leg["started"] == "1" for leg in receipt["legs"]))
+        self.assertTrue(all(leg["child_spawned"] == "1" for leg in receipt["legs"]))
 
     def test_second_wrapper_spawn_failure_preserves_started_sibling(self):
         stack, assignments = self.common_patches()
@@ -1366,6 +1385,29 @@ class DispatchBatchTest(unittest.TestCase):
         )
         self.assertEqual(result["launch_state"], "existing")
 
+    def test_wrapper_receipt_missing_literal_launch_triplet_fails_closed(self):
+        leg = {
+            "node": "plan",
+            "adapter": "codex",
+            "attempt_id": "att-missing-triplet-fixture",
+        }
+        command = [
+            "dispatch-node.py", "--adapter", "codex",
+            "--attempt-id", "att-missing-triplet-fixture",
+        ]
+        for field in ("registered", "started", "child_spawned"):
+            with self.subTest(field=field):
+                incomplete = success_receipt(command).replace(f"{field}=1\n", "")
+                result = BATCH.wrapper_result(
+                    leg,
+                    SimpleNamespace(returncode=0),
+                    incomplete,
+                    "",
+                )
+                self.assertEqual(result["launch_state"], "failed")
+                self.assertEqual(result[field], "unknown")
+                self.assertEqual(result["reason"], "invalid-wrapper-receipt")
+
     def test_duplicate_batch_state_does_not_claim_concurrent_launch(self):
         stack, assignments = self.common_patches()
         output = io.StringIO()
@@ -1395,6 +1437,9 @@ class DispatchBatchTest(unittest.TestCase):
         self.assertEqual(rc, 0)
         receipt = json.loads(output.getvalue())
         self.assertEqual(receipt["state"], "idempotent-existing")
+        self.assertEqual(receipt["registered"], 0)
+        self.assertEqual(receipt["started"], 0)
+        self.assertEqual(receipt["child_spawned"], 0)
         self.assertEqual(receipt["concurrent_launch"], 0)
         self.assertEqual(receipt["newly_started"], 0)
         self.assertEqual(receipt["existing"], 2)

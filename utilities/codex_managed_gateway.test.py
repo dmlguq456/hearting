@@ -514,6 +514,35 @@ class ManagedGatewayTest(unittest.TestCase):
         self.assertEqual(status["thread_id"], "thread-2")
         self.assertEqual(status["thread_ancestors"], ["thread-1"])
 
+    def test_foreign_turn_started_does_not_replace_witnessed_ingress(self) -> None:
+        assert self.server.current is not None
+        notification = {
+            "jsonrpc": "2.0",
+            "method": "turn/started",
+            "params": {
+                "threadId": "thread-native-subagent",
+                "turn": {
+                    "id": "turn-native-subagent",
+                    "items": [],
+                    "status": "inProgress",
+                },
+            },
+        }
+        self.server.current.write_json(notification)
+        self.assertEqual(
+            self.client.wait_for(lambda value: value == notification),
+            notification,
+        )
+        status = control(
+            self.control, {"schema_version": 1, "op": "status"}
+        )
+        self.assertEqual(status["thread_id"], "thread-1")
+        self.assertEqual(status["thread_ancestors"], [])
+        self.assertEqual(
+            self.gateway._threads["thread-native-subagent"].active_turn_id,
+            "turn-native-subagent",
+        )
+
     def test_idle_completion_starts_once_and_duplicate_replays(self) -> None:
         first = control(self.control, receipt_request())
         second = control(self.control, receipt_request())

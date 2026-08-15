@@ -22,9 +22,18 @@ import fcntl
 import json
 import os
 import signal
+import sys
 import time
+from pathlib import Path
 
 from .collectors.procscan import read_environ, read_proc_start  # noqa: F401  (re-export)
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT / "utilities"))
+from dispatch_contract import (  # noqa: E402
+    DispatchContractError,
+    reconcile_attempt_terminal,
+)
 
 # SIGTERM → wait → (ASK AGAIN) → SIGKILL. This is the wait, not an auto-escalation timer:
 # nothing escalates when it expires; the UI re-prompts and the user decides again.
@@ -284,69 +293,22 @@ def kill_target(pid, proc_start, sid, state, approval, registry_status=None,
 # touches the registry.
 # ---------------------------------------------------------------------------
 
-def close_registry_row(jobs, slug, worktree):
-    """Flip this job's own `open` row to `done` with `note=fleet-kill`. → True if a row changed.
+def close_registry_row(jobs, attempt_id):
+    """Close exactly the user-terminated attempt as a typed cancellation."""
 
-    Isomorphic to dispatch-headless.py's close_job_row (prd.md:255). "Isomorphic" here is
-    scoped to the CONCURRENCY AND CONSISTENCY discipline, which is what makes this safe
-    rather than an arbitrary write:
-      (1) the same <jobs>.lock flock, so a concurrent conductor is serialized against us
-      (2) the same 3-part match key: status == "open" AND slug AND worktree
-      (3) first match wins, then break — a duplicate row is never also closed
-      (4) idempotent: no match → False, file untouched
-      (5) the same 6-field reassembly (fields past the 6th are dropped, exactly as upstream)
-
-    The note token is deliberately NOT isomorphic: upstream hardcodes `note=dead-<reason>`
-    meaning "the dispatch died on its own", while this is `note=fleet-kill` meaning "an
-    external console terminated it under user approval". Those are different acts, and
-    collapsing them would make the audit trail unable to tell them apart — which is exactly
-    why prd.md:255 names `fleet-kill`. `reset` is likewise absent: it records a rate-limit
-    reset time, a concept a user-initiated kill does not have.
-
-    tests/test_f27_control.py::TestRegistryCloseParity pins (2)-(5) against the real upstream
-    function by running both on identical fixtures and normalizing only that one note token.
-    Axis (1) is NOT provable that way — both implementations run sequentially in one process,
-    so an absent flock would still produce identical bytes; it gets its own canary instead
-    (`test_close_registry_row_actually_holds_the_flock`), which blocks this function behind a
-    lock held by another process.
-    """
-    if not os.path.isfile(jobs):
+    if not attempt_id or not os.path.isfile(jobs):
         return False
-    lock_path = str(jobs) + ".lock"
     try:
-        os.makedirs(os.path.dirname(lock_path) or ".", exist_ok=True)
-    except OSError:
-        pass
-    with open(lock_path, "a", encoding="utf-8") as lock:
-        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
-        try:
-            with open(jobs, encoding="utf-8") as f:
-                lines = f.read().splitlines(keepends=True)
-            changed = False
-            for i, line in enumerate(lines):
-                if not line.strip():
-                    continue
-                parts = line.rstrip("\n").split("\t")
-                if len(parts) < 6:
-                    continue
-                ts, status, repo, wt, row_slug, pipe = (parts[0], parts[1], parts[2],
-                                                        parts[3], parts[4], parts[5])
-                if status != "open" or row_slug != slug or wt != worktree:
-                    continue
-                metadata = dict(
-                    item.split("=", 1) for item in pipe.split(",") if "=" in item
-                )
-                if metadata.get("attempt_schema_version") != "2":
-                    # Historical rows remain diagnostic-only; control actions
-                    # never promote them into the current attempt contract.
-                    continue
-                pipe += ",note=fleet-kill"
-                lines[i] = "%s\tdone\t%s\t%s\t%s\t%s\n" % (ts, repo, wt, row_slug, pipe)
-                changed = True
-                break
-            if changed:
-                with open(jobs, "w", encoding="utf-8") as f:
-                    f.write("".join(lines))
-            return changed
-        finally:
-            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+        result = reconcile_attempt_terminal(
+            Path(jobs),
+            attempt_id,
+            "fleet-kill",
+            evidence={
+                "failure_class": "cancelled",
+                "classifier_source": "fleet-cancel-v1",
+                "reconcile_reason": "user-terminated",
+            },
+        )
+    except (DispatchContractError, OSError):
+        return False
+    return result == "closed"

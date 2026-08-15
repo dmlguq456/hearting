@@ -821,7 +821,14 @@ class ManagedGateway:
                 state.active_turn_id = turn_id
                 state.active_turn = turn_from_message(message)
                 state.steer_ready = True
-                self._current_thread_id = thread_id
+                # App Server notifications cover every thread sharing the
+                # upstream connection, including native subagents.  They are
+                # useful per-thread state, but are not ingress-lineage proof.
+                # Only a witnessed thread start/resume/fork response may move
+                # an established parent binding; the first notification stays
+                # a bootstrap fallback for older servers.
+                if not self._current_thread_id:
+                    self._current_thread_id = thread_id
                 self.trace(
                     "turn-started", thread_id=thread_id, turn_id=turn_id
                 )

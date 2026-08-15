@@ -31,6 +31,7 @@ from dispatch_contract import (  # noqa: E402
     DispatchContractError,
     close_attempt_row,
     observed_attempt_liveness,
+    reconcile_attempt_terminal,
 )
 from codex_dispatch_terminal import (  # noqa: E402
     inspect_terminal_attempt,
@@ -1604,6 +1605,40 @@ def current_children(
     return sorted(latest.values(), key=lambda row: row.order)
 
 
+def exact_attempt_row(jobs: Path, attempt_id: str) -> ChildRow:
+    """Read one unique current registry row by immutable attempt identity."""
+
+    if not attempt_id:
+        raise JoinContractError("attempt-id-missing")
+    try:
+        lines = jobs.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError as exc:
+        raise JoinContractError("registry-unreadable") from exc
+    matches: list[ChildRow] = []
+    for order, line in enumerate(lines):
+        fields = line.split("\t")
+        if len(fields) != 6:
+            continue
+        metadata = _metadata(fields[5])
+        if metadata.get("attempt_id") != attempt_id:
+            continue
+        if metadata.get("attempt_schema_version") != "2":
+            raise JoinContractError("attempt-row-schema-invalid")
+        matches.append(
+            ChildRow(
+                order=order,
+                status=fields[1],
+                slug=fields[4],
+                attempt_id=attempt_id,
+                raw=line,
+                metadata=metadata,
+            )
+        )
+    if len(matches) != 1:
+        raise JoinContractError("attempt-row-not-unique")
+    return matches[0]
+
+
 def current_attempt_row(jobs: Path, attempt_id: str) -> ChildRow | None:
     """Return the latest exact registry row for one attempt identity."""
 
@@ -1798,6 +1833,11 @@ def _join_snapshot(
                 terminal_envelope=terminal_envelope_observed(
                     row.metadata.get("log_file")
                 ),
+                # A join is itself a terminal gate.  Namespace-local workers
+                # must therefore carry the wrapper-issued portable post-exit
+                # receipt before any liveness fallback may make them ready,
+                # even when their final runtime envelope is not visible yet.
+                terminal_receipt_gate=True,
             )
             if row.status == "done":
                 if observed.state == "terminal":
@@ -1816,6 +1856,11 @@ def _join_snapshot(
                     pending = True
                 elif observed.state == "reconcile-needed":
                     readiness, reason = "ready", "terminal-observed"
+                elif observed.process_reason == "post-exit-receipt-incomplete":
+                    # A namespace-local fallback probe cannot replace the
+                    # wrapper-issued portable receipt.
+                    readiness, reason = "pending", "process-unverifiable"
+                    pending = True
                 else:
                     probe = _liveness_state(
                         row, command, runtime_env, liveness_probe_timeout
@@ -2147,7 +2192,43 @@ def close_finished_child(row: ChildRow, *, jobs: str | Path) -> str:
         value = metadata.get(key)
         if value:
             command += [flag, str(value)]
-    return run_route_completion(command)
+    completion = run_route_completion(command)
+    if completion:
+        # `complete` is exact-attempt idempotent.  One bounded retry recovers
+        # the marker-written/row-not-yet-closed publication window.
+        completion = run_route_completion(command)
+    return completion
+
+
+def close_wrapper_pass(row: ChildRow, *, jobs: str | Path) -> str:
+    """Complete one wrapper-reaped PASS or close a typed contract failure."""
+
+    reason = close_finished_child(row, jobs=jobs)
+    if not reason:
+        return ""
+    try:
+        current = exact_attempt_row(Path(jobs), row.attempt_id)
+    except JoinContractError:
+        return reason
+    if (
+        current.status == "done"
+        and current.metadata.get("note") in {"completed-marker", "completed-supervisor"}
+    ):
+        return ""
+    try:
+        reconcile_attempt_terminal(
+            Path(jobs),
+            row.attempt_id,
+            "dead-route-completion-rejected",
+            evidence={
+                "failure_class": "contract",
+                "classifier_source": "registered-wrapper-completion-v1",
+                "reconcile_reason": reason,
+            },
+        )
+    except DispatchContractError:
+        return reason
+    return reason
 
 
 def _close_invalid_envelope_child(

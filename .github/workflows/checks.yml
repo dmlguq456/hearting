@@ -59,3 +59,23 @@ jobs:
           ./tools/install/projection-completeness.test.sh
           ./tools/install/release-lifecycle.test.sh
           ./tools/install/extension-lifecycle.test.sh
+
+  dispatch-pid-namespace:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the source
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install PID namespace fixture
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes bubblewrap
+
+      - name: Verify Codex detached receipt and marker ordering
+        env:
+          HEARTING_REQUIRE_PIDNS: "1"
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: python3 utilities/dispatch_namespace_e2e.test.py -v
