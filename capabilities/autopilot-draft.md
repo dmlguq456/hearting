@@ -53,6 +53,18 @@ Pipeline intensity follows `core/CONVENTIONS.md §1`: `direct` has no plan stage
 
 ## Guard Requirements
 
+At `thorough+` the `quality-review` parallel group realizes a third
+`assumption-check` leg with `leg_class: auxiliary`. Its arbiter is the **owner**,
+not the group's anchor — the anchor runs concurrently with it. After the group
+joins, the owner puts `auxiliary_findings_considered` in the merge record's
+frontmatter with exactly one entry per realized auxiliary leg (adopted or
+rejected, with the reason) and registers it with
+`capability-route.py arbitrate --group quality-review`. Until that record exists,
+`finalize` is refused at the start-gate with `auxiliary-arbitration-missing` and
+the route's terminal-gate observation carries a failed
+`parallel_group:quality-review` row. `core/OPERATIONS.md §5.10` owns the
+transaction and its typed refusals.
+
 When a draft consumes lab media, it consumes the shared `report_manifest.json` and
 preserves its declared bundle roles, primary representation, and summary-stat bindings; for
 a manifest with no `bundle` it preserves the legacy Markdown/HTML link bindings unchanged.

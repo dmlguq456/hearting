@@ -52,6 +52,134 @@ class DispatchDefaultsV3Tests(unittest.TestCase):
                 os.environ.pop("DISPATCH_DEFAULTS_CONFIG", None)
                 self.assertEqual(Path(D.default_config_path()), path)
 
+    def test_ac9_opencode_rejected_in_deep_quality_bands(self):
+        # AC 9 band placement gate: opencode in deep/balanced-deep primary is a
+        # validation error; opencode in light.primary stays legal.
+        capmap = D.load_topology_capabilities(D.default_topology_path())
+        for band in ("deep", "balanced-deep"):
+            config = self.config()
+            config["profiles"][band]["primary"] = ["claude", "codex", "opencode"]
+            config["profiles"][band]["last_resort"] = []
+            errors = D.validate(config, capmap)
+            self.assertTrue(
+                any(band in error and "must not include opencode" in error for error in errors),
+                f"missing AC 9 rejection for {band}: {errors}",
+            )
+        config = self.config()
+        config["profiles"]["light"]["primary"] = ["claude", "codex", "opencode"]
+        config["profiles"]["light"]["relief"] = []
+        self.assertEqual(D.validate(config, capmap), [])
+
+    def test_empty_deep_primary_band_is_rejected(self):
+        # fm M3 / anchor M2: the quality-peer set is
+        # `deep.primary & balanced-deep.primary`, so an EMPTY primary band makes
+        # it empty and nullifies the very gate the config is supposed to define.
+        # Such a config passed validation before -- every enabled harness still
+        # appears exactly once, just in relief/last_resort -- so the rule has to
+        # live here, where the band is defined, not at its two consumers.
+        capmap = D.load_topology_capabilities(D.default_topology_path())
+        for band in ("deep", "balanced-deep"):
+            config = self.config()
+            config["profiles"][band]["relief"] = ["claude", "codex"]
+            config["profiles"][band]["primary"] = []
+            errors = D.validate(config, capmap)
+            # the coverage rule alone would have accepted this
+            self.assertFalse(
+                any("every enabled harness exactly once" in error for error in errors),
+                errors,
+            )
+            self.assertTrue(
+                any(band in error and "must name at least one harness" in error
+                    for error in errors),
+                f"empty {band}.primary accepted: {errors}",
+            )
+        # `light` may legitimately empty its primary band; it is not a
+        # quality-peer band.
+        config = self.config()
+        config["profiles"]["light"]["relief"] = ["claude", "codex", "opencode"]
+        config["profiles"]["light"]["primary"] = []
+        self.assertEqual(D.validate(config, capmap), [])
+
+    def test_disjoint_deep_primary_bands_are_rejected(self):
+        # M6: rejecting the EMPTY band closed one spelling of the hole. The
+        # quality-peer set is the INTERSECTION of the two bands, so two
+        # non-empty but DISJOINT bands nullify it just as completely and pass
+        # the coverage rule identically. After the AC 11 fix that is worse than
+        # before: the derived set is an empty frozenset rather than None, so
+        # `sole_gate` starts "ok", the gated list empties, and every
+        # peer-bearing parallel group is refused route-wide with a message that
+        # blames harness availability instead of this config.
+        capmap = D.load_topology_capabilities(D.default_topology_path())
+        config = self.config()
+        threshold = config["profiles"]["deep"]["promote_relief_below"]
+        config["profiles"]["deep"] = {
+            "primary": ["claude"], "relief": ["codex"], "last_resort": ["opencode"],
+            "promote_relief_below": threshold,
+        }
+        config["profiles"]["balanced-deep"] = {
+            "primary": ["codex"], "relief": ["claude"], "last_resort": ["opencode"],
+            "promote_relief_below": threshold,
+        }
+        errors = D.validate(config, capmap)
+        # neither existing rule sees it: every harness still appears exactly
+        # once, and neither band is empty
+        self.assertFalse(
+            any("every enabled harness exactly once" in error for error in errors),
+            errors,
+        )
+        self.assertFalse(
+            any("must name at least one harness" in error for error in errors), errors
+        )
+        self.assertTrue(
+            any("must share at least one harness" in error for error in errors),
+            f"disjoint deep bands accepted: {errors}",
+        )
+        # and this is what the accepted config would have derived
+        peer = importlib.util.spec_from_file_location(
+            "dispatch_quality_peer_under_test",
+            Path(__file__).with_name("dispatch_quality_peer.py"),
+        )
+        QP = importlib.util.module_from_spec(peer)
+        peer.loader.exec_module(QP)
+        self.assertEqual(
+            QP.quality_peer_families({
+                "deep": config["profiles"]["deep"],
+                "balanced-deep": config["profiles"]["balanced-deep"],
+            }),
+            frozenset(),
+        )
+        # one shared harness is enough; asymmetric bands stay legal
+        config["profiles"]["balanced-deep"] = {
+            "primary": ["claude", "codex"], "relief": [], "last_resort": ["opencode"],
+            "promote_relief_below": threshold,
+        }
+        self.assertEqual(D.validate(config, capmap), [])
+
+    def test_ac10_quality_peer_set_follows_the_config(self):
+        # AC 10: the quality-peer derivation is config-driven, never hardcoded.
+        # Moving a family out of a deep band moves the derived set with it.
+        self.assertEqual(
+            D.query_profile_policy(self.config(), "deep")["primary"], ["claude", "codex"]
+        )
+        self.assertEqual(
+            D.query_profile_policy(self.config(), "balanced-deep")["primary"], ["claude", "codex"]
+        )
+        peer = importlib.util.spec_from_file_location(
+            "dispatch_quality_peer_under_test",
+            Path(__file__).with_name("dispatch_quality_peer.py"),
+        )
+        QP = importlib.util.module_from_spec(peer)
+        peer.loader.exec_module(QP)
+        config = self.config()
+        by_profile = {name: D.query_profile_policy(config, name) for name in ("deep", "balanced-deep", "light")}
+        self.assertEqual(QP.quality_peer_families(by_profile), frozenset({"claude", "codex"}))
+        config["profiles"]["deep"]["primary"] = ["claude"]
+        config["profiles"]["deep"]["relief"] = ["codex", "opencode"]
+        config["profiles"]["deep"]["last_resort"] = []
+        by_profile = {name: D.query_profile_policy(config, name) for name in ("deep", "balanced-deep", "light")}
+        self.assertEqual(QP.quality_peer_families(by_profile), frozenset({"claude"}))
+        self.assertIsNone(QP.quality_peer_families(None))
+
 
 class ShippedBaselineMergeTests(unittest.TestCase):
     def sparse_v3_text(self):

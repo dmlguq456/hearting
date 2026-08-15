@@ -1,5 +1,5 @@
 {
- "schema_version": 8,
+ "schema_version": 9,
  "intensities": [
   "direct",
   "quick",
@@ -221,12 +221,14 @@
        {
         "suffix": "anchor",
         "perspective": "primary-verify",
-        "model_profile": "light"
+        "model_profile": "light",
+        "leg_class": "peer"
        },
        {
         "suffix": "alternative",
         "perspective": "independent-verify",
-        "model_profile": "balanced-deep"
+        "model_profile": "balanced-deep",
+        "leg_class": "peer"
        }
       ]
      }
@@ -436,6 +438,11 @@
       "model_profile": "light",
       "continuation": {
        "kind": "inline-next"
+      },
+      "subdivision": {
+       "min_intensity": "strong",
+       "max_slices": 4,
+       "disjointness": "exact-fixed-files"
       }
      },
      {
@@ -503,7 +510,8 @@
       "model_profile": "light",
       "continuation": {
        "kind": "inline-next"
-      }
+      },
+      "parent_cross_preference": true
      },
      {
       "id": "report",
@@ -565,17 +573,20 @@
        {
         "suffix": "anchor",
         "perspective": "primary-framing",
-        "model_profile": "balanced-deep"
+        "model_profile": "balanced-deep",
+        "leg_class": "peer"
        },
        {
         "suffix": "alternative",
         "perspective": "cross-harness-alternative",
-        "model_profile": "light"
+        "model_profile": "light",
+        "leg_class": "peer"
        },
        {
         "suffix": "contrarian",
         "perspective": "contrarian-framing",
-        "model_profile": "deep"
+        "model_profile": "deep",
+        "leg_class": "peer"
        }
       ]
      },
@@ -599,17 +610,20 @@
        {
         "suffix": "anchor",
         "perspective": "primary-plan",
-        "model_profile": "deep"
+        "model_profile": "deep",
+        "leg_class": "peer"
        },
        {
         "suffix": "alternative",
         "perspective": "independent-plan",
-        "model_profile": "balanced-deep"
+        "model_profile": "balanced-deep",
+        "leg_class": "peer"
        },
        {
         "suffix": "implementation-risk",
         "perspective": "implementation-risk-scout",
-        "model_profile": "light"
+        "model_profile": "light",
+        "leg_class": "peer"
        }
       ]
      },
@@ -633,17 +647,58 @@
        {
         "suffix": "anchor",
         "perspective": "primary-code-review",
-        "model_profile": "balanced-deep"
+        "model_profile": "balanced-deep",
+        "leg_class": "peer"
        },
        {
         "suffix": "alternative",
         "perspective": "independent-code-review",
-        "model_profile": "light"
+        "model_profile": "light",
+        "leg_class": "peer"
        },
        {
         "suffix": "failure-mode",
         "perspective": "failure-mode-review",
-        "model_profile": "deep"
+        "model_profile": "deep",
+        "leg_class": "peer"
+       }
+      ]
+     },
+     {
+      "id": "plan-check",
+      "node": "plan-check",
+      "kind": "verify",
+      "min_intensity": "strong",
+      "width_by_intensity": {
+       "strong": 2,
+       "thorough": 3,
+       "adversarial": 3
+      },
+      "join_policy": "all",
+      "independence_axes": [
+       "cross-harness",
+       "model-profile",
+       "perspective"
+      ],
+      "legs": [
+       {
+        "suffix": "anchor",
+        "perspective": "primary-plan-check",
+        "model_profile": "light",
+        "leg_class": "peer"
+       },
+       {
+        "suffix": "alternative",
+        "perspective": "independent-plan-check",
+        "model_profile": "balanced-deep",
+        "leg_class": "peer"
+       },
+       {
+        "suffix": "simplicity",
+        "perspective": "simplicity-check",
+        "model_profile": "light",
+        "leg_class": "auxiliary",
+        "auxiliary_check": "simplicity-check"
        }
       ]
      }
@@ -931,12 +986,14 @@
        {
         "suffix": "anchor",
         "perspective": "primary-refs",
-        "model_profile": "light"
+        "model_profile": "light",
+        "leg_class": "peer"
        },
        {
         "suffix": "alternative",
         "perspective": "independent-refs",
-        "model_profile": "balanced-deep"
+        "model_profile": "balanced-deep",
+        "leg_class": "peer"
        }
       ]
      },
@@ -960,12 +1017,45 @@
        {
         "suffix": "anchor",
         "perspective": "primary-critic-review",
-        "model_profile": "light"
+        "model_profile": "light",
+        "leg_class": "peer"
        },
        {
         "suffix": "alternative",
         "perspective": "independent-critic-review",
-        "model_profile": "balanced-deep"
+        "model_profile": "balanced-deep",
+        "leg_class": "peer"
+       }
+      ]
+     },
+     {
+      "id": "visual-verify",
+      "node": "visual-verify",
+      "kind": "verify",
+      "min_intensity": "strong",
+      "width_by_intensity": {
+       "strong": 2,
+       "thorough": 2,
+       "adversarial": 2
+      },
+      "join_policy": "all",
+      "independence_axes": [
+       "cross-harness",
+       "model-profile",
+       "perspective"
+      ],
+      "legs": [
+       {
+        "suffix": "anchor",
+        "perspective": "primary-visual-verify",
+        "model_profile": "light",
+        "leg_class": "peer"
+       },
+       {
+        "suffix": "alternative",
+        "perspective": "independent-visual-verify",
+        "model_profile": "balanced-deep",
+        "leg_class": "peer"
        }
       ]
      }
@@ -1259,12 +1349,14 @@
        {
         "suffix": "anchor",
         "perspective": "primary-material-strategy",
-        "model_profile": "balanced-deep"
+        "model_profile": "balanced-deep",
+        "leg_class": "peer"
        },
        {
         "suffix": "alternative",
         "perspective": "independent-material-strategy",
-        "model_profile": "light"
+        "model_profile": "light",
+        "leg_class": "peer"
        }
       ]
      },
@@ -1288,12 +1380,83 @@
        {
         "suffix": "anchor",
         "perspective": "primary-fact-verify",
-        "model_profile": "light"
+        "model_profile": "light",
+        "leg_class": "peer"
        },
        {
         "suffix": "alternative",
         "perspective": "independent-fact-verify",
-        "model_profile": "balanced-deep"
+        "model_profile": "balanced-deep",
+        "leg_class": "peer"
+       }
+      ]
+     },
+     {
+      "id": "strategy-review",
+      "node": "strategy-review",
+      "kind": "verify",
+      "min_intensity": "strong",
+      "width_by_intensity": {
+       "strong": 2,
+       "thorough": 2,
+       "adversarial": 2
+      },
+      "join_policy": "all",
+      "independence_axes": [
+       "cross-harness",
+       "model-profile",
+       "perspective"
+      ],
+      "legs": [
+       {
+        "suffix": "anchor",
+        "perspective": "primary-strategy-review",
+        "model_profile": "light",
+        "leg_class": "peer"
+       },
+       {
+        "suffix": "alternative",
+        "perspective": "independent-strategy-review",
+        "model_profile": "balanced-deep",
+        "leg_class": "peer"
+       }
+      ]
+     },
+     {
+      "id": "quality-review",
+      "node": "quality-review",
+      "kind": "verify",
+      "min_intensity": "strong",
+      "width_by_intensity": {
+       "strong": 2,
+       "thorough": 3,
+       "adversarial": 3
+      },
+      "join_policy": "all",
+      "independence_axes": [
+       "cross-harness",
+       "model-profile",
+       "perspective"
+      ],
+      "legs": [
+       {
+        "suffix": "anchor",
+        "perspective": "primary-quality-review",
+        "model_profile": "light",
+        "leg_class": "peer"
+       },
+       {
+        "suffix": "alternative",
+        "perspective": "independent-quality-review",
+        "model_profile": "balanced-deep",
+        "leg_class": "peer"
+       },
+       {
+        "suffix": "assumption",
+        "perspective": "assumption-check",
+        "model_profile": "light",
+        "leg_class": "auxiliary",
+        "auxiliary_check": "assumption-check"
        }
       ]
      }
@@ -1571,12 +1734,45 @@
        {
         "suffix": "anchor",
         "perspective": "primary-smoke",
-        "model_profile": "balanced-deep"
+        "model_profile": "balanced-deep",
+        "leg_class": "peer"
        },
        {
         "suffix": "alternative",
         "perspective": "independent-smoke",
-        "model_profile": "deep"
+        "model_profile": "deep",
+        "leg_class": "peer"
+       }
+      ]
+     },
+     {
+      "id": "run-verify",
+      "node": "run-verify",
+      "kind": "verify",
+      "min_intensity": "strong",
+      "width_by_intensity": {
+       "strong": 2,
+       "thorough": 2,
+       "adversarial": 2
+      },
+      "join_policy": "all",
+      "independence_axes": [
+       "cross-harness",
+       "model-profile",
+       "perspective"
+      ],
+      "legs": [
+       {
+        "suffix": "anchor",
+        "perspective": "primary-run-verify",
+        "model_profile": "balanced-deep",
+        "leg_class": "peer"
+       },
+       {
+        "suffix": "alternative",
+        "perspective": "independent-run-verify",
+        "model_profile": "light",
+        "leg_class": "peer"
        }
       ]
      }
@@ -1916,12 +2112,14 @@
        {
         "suffix": "anchor",
         "perspective": "primary-independent-verify",
-        "model_profile": "light"
+        "model_profile": "light",
+        "leg_class": "peer"
        },
        {
         "suffix": "alternative",
         "perspective": "independent-independent-verify",
-        "model_profile": "balanced-deep"
+        "model_profile": "balanced-deep",
+        "leg_class": "peer"
        }
       ]
      }
@@ -2101,12 +2299,14 @@
        {
         "suffix": "anchor",
         "perspective": "primary-review",
-        "model_profile": "light"
+        "model_profile": "light",
+        "leg_class": "peer"
        },
        {
         "suffix": "alternative",
         "perspective": "independent-review",
-        "model_profile": "balanced-deep"
+        "model_profile": "balanced-deep",
+        "leg_class": "peer"
        }
       ]
      }
@@ -2251,7 +2451,8 @@
       "model_profile": "balanced-deep",
       "continuation": {
        "kind": "inline-next"
-      }
+      },
+      "parent_cross_preference": true
      },
      {
       "id": "report",
@@ -2329,8 +2530,8 @@
       "width_by_intensity": {
        "standard": 2,
        "strong": 2,
-       "thorough": 2,
-       "adversarial": 2
+       "thorough": 3,
+       "adversarial": 3
       },
       "join_policy": "all",
       "independence_axes": [
@@ -2342,12 +2543,21 @@
        {
         "suffix": "anchor",
         "perspective": "primary-retrieval",
-        "model_profile": "balanced-deep"
+        "model_profile": "balanced-deep",
+        "leg_class": "peer"
        },
        {
         "suffix": "alternative",
         "perspective": "independent-retrieval",
-        "model_profile": "light"
+        "model_profile": "light",
+        "leg_class": "peer"
+       },
+       {
+        "suffix": "assumption",
+        "perspective": "assumption-check",
+        "model_profile": "light",
+        "leg_class": "auxiliary",
+        "auxiliary_check": "assumption-check"
        }
       ]
      },
@@ -2371,12 +2581,14 @@
        {
         "suffix": "anchor",
         "perspective": "primary-claim-verify",
-        "model_profile": "light"
+        "model_profile": "light",
+        "leg_class": "peer"
        },
        {
         "suffix": "alternative",
         "perspective": "independent-claim-verify",
-        "model_profile": "balanced-deep"
+        "model_profile": "balanced-deep",
+        "leg_class": "peer"
        }
       ]
      }
@@ -2618,7 +2830,8 @@
       "unit": "qa/test",
       "model_profile": "light",
       "terminal": true,
-      "terminal_gate": "ship-post-deploy-verify"
+      "terminal_gate": "ship-post-deploy-verify",
+      "parent_cross_preference": true
      }
     ],
     "owner_dispatch_depth": 1,
@@ -2644,12 +2857,52 @@
        {
         "suffix": "anchor",
         "perspective": "primary-release-review",
-        "model_profile": "light"
+        "model_profile": "light",
+        "leg_class": "peer"
        },
        {
         "suffix": "alternative",
         "perspective": "independent-release-review",
-        "model_profile": "balanced-deep"
+        "model_profile": "balanced-deep",
+        "leg_class": "peer"
+       }
+      ]
+     },
+     {
+      "id": "security-review",
+      "node": "security-review",
+      "kind": "verify",
+      "min_intensity": "strong",
+      "width_by_intensity": {
+       "strong": 2,
+       "thorough": 2,
+       "adversarial": 3
+      },
+      "join_policy": "all",
+      "independence_axes": [
+       "cross-harness",
+       "model-profile",
+       "perspective"
+      ],
+      "legs": [
+       {
+        "suffix": "anchor",
+        "perspective": "primary-security-review",
+        "model_profile": "balanced-deep",
+        "leg_class": "peer"
+       },
+       {
+        "suffix": "alternative",
+        "perspective": "independent-security-review",
+        "model_profile": "deep",
+        "leg_class": "peer"
+       },
+       {
+        "suffix": "failure-mode",
+        "perspective": "failure-mode-check",
+        "model_profile": "light",
+        "leg_class": "auxiliary",
+        "auxiliary_check": "failure-mode-check"
        }
       ]
      }
@@ -2843,8 +3096,8 @@
       "width_by_intensity": {
        "standard": 2,
        "strong": 2,
-       "thorough": 2,
-       "adversarial": 2
+       "thorough": 3,
+       "adversarial": 3
       },
       "join_policy": "all",
       "independence_axes": [
@@ -2856,12 +3109,21 @@
        {
         "suffix": "anchor",
         "perspective": "primary-research",
-        "model_profile": "balanced-deep"
+        "model_profile": "balanced-deep",
+        "leg_class": "peer"
        },
        {
         "suffix": "alternative",
         "perspective": "independent-research",
-        "model_profile": "light"
+        "model_profile": "light",
+        "leg_class": "peer"
+       },
+       {
+        "suffix": "assumption",
+        "perspective": "assumption-check",
+        "model_profile": "light",
+        "leg_class": "auxiliary",
+        "auxiliary_check": "assumption-check"
        }
       ]
      },
@@ -2872,8 +3134,8 @@
       "min_intensity": "strong",
       "width_by_intensity": {
        "strong": 2,
-       "thorough": 2,
-       "adversarial": 2
+       "thorough": 3,
+       "adversarial": 3
       },
       "join_policy": "all",
       "independence_axes": [
@@ -2885,12 +3147,21 @@
        {
         "suffix": "anchor",
         "perspective": "primary-review",
-        "model_profile": "balanced-deep"
+        "model_profile": "balanced-deep",
+        "leg_class": "peer"
        },
        {
         "suffix": "alternative",
         "perspective": "independent-review",
-        "model_profile": "deep"
+        "model_profile": "deep",
+        "leg_class": "peer"
+       },
+       {
+        "suffix": "test-gap",
+        "perspective": "test-gap-check",
+        "model_profile": "light",
+        "leg_class": "auxiliary",
+        "auxiliary_check": "test-gap-check"
        }
       ]
      }
@@ -3122,7 +3393,8 @@
   },
   "research-synthesis": {
    "kind": "unit-io",
-   "unit": "research/research-survey"
+   "unit": "research/research-survey",
+   "auxiliary_arbiter": true
   },
   "research-report": {
    "kind": "unit-io",
@@ -3150,7 +3422,8 @@
   },
   "spec-review": {
    "kind": "unit-io",
-   "unit": "research/plan-review"
+   "unit": "research/plan-review",
+   "auxiliary_arbiter": true
   },
   "spec-atomic-transaction": {
    "kind": "custom",
@@ -3221,6 +3494,24 @@
   "perspective"
  ],
  "parallel_group_max_width": 4,
+ "leg_classes": [
+  "peer",
+  "auxiliary"
+ ],
+ "auxiliary_checks": [
+  "assumption-check",
+  "edge-case-check",
+  "failure-mode-check",
+  "simplicity-check",
+  "test-gap-check"
+ ],
+ "auxiliary_check_units": {
+  "assumption-check": "qa/assumption-check",
+  "edge-case-check": "qa/edge-case-check",
+  "failure-mode-check": "qa/failure-mode-check",
+  "simplicity-check": "qa/simplicity-check",
+  "test-gap-check": "qa/test-gap-check"
+ },
  "workflow_states": [
   "CREATED",
   "READY",

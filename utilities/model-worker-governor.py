@@ -54,6 +54,8 @@ BATCH_RESERVATION_KEYS = (
     "batch_manifest",
     "batch_manifest_sha256",
     "batch_leg_sha256",
+    "batch_leg_class",
+    "batch_auxiliary_check",
 )
 _BATCH_ISSUER_SEAL = object()
 
@@ -525,7 +527,7 @@ def _validate_batch_peer(
         raise ValueError(f"parallel batch peer row invalid: {exc.reason}") from exc
     member = members[attempt_id]
     schema_version = int(manifest.get("schema_version", 1))
-    reservation_kind = "parallel-batch" if schema_version == 2 else "replica-batch"
+    reservation_kind = "parallel-batch" if schema_version in (2, 3) else "replica-batch"
     expected = {
         "attempt_id": attempt_id,
         "route_id": str(manifest["route_id"]),
@@ -558,6 +560,20 @@ def _validate_batch_peer(
             "batch_model_profile": str(member["model_profile"]),
             "batch_perspective": str(member["perspective"]),
             "batch_parallel_leg_index": str(member["parallel_leg_index"]),
+        })
+    elif schema_version == 3:
+        expected.update({
+            "parallel_group": str(group),
+            "replica_group": str(group),
+            "batch_model_profile": str(member["model_profile"]),
+            "batch_perspective": str(member["perspective"]),
+            "batch_parallel_leg_index": str(member["parallel_leg_index"]),
+            "batch_leg_class": str(member.get("leg_class", "peer")),
+            "batch_auxiliary_check": (
+                str(member["auxiliary_check"])
+                if member.get("leg_class") == "auxiliary"
+                else "-"
+            ),
         })
     mismatches = [
         key for key, value in expected.items() if metadata.get(key) != value
@@ -727,7 +743,7 @@ def reserve(
         group = manifest.get("parallel_group") or manifest.get("replica_group")
         batch_common = {
             "reservation_kind": (
-                "parallel-batch" if int(manifest.get("schema_version", 1)) == 2
+                "parallel-batch" if int(manifest.get("schema_version", 1)) in (2, 3)
                 else "replica-batch"
             ),
             "batch_declared_size": manifest["declared_size"],
@@ -770,6 +786,18 @@ def reserve(
                         "batch_model_profile": members[index]["model_profile"],
                         "batch_perspective": members[index]["perspective"],
                         "batch_parallel_leg_index": members[index]["parallel_leg_index"],
+                    })
+                elif int(manifest.get("schema_version", 1)) == 3:
+                    reservation.update({
+                        "batch_model_profile": members[index]["model_profile"],
+                        "batch_perspective": members[index]["perspective"],
+                        "batch_parallel_leg_index": members[index]["parallel_leg_index"],
+                        "batch_leg_class": members[index].get("leg_class", "peer"),
+                        "batch_auxiliary_check": (
+                            members[index]["auxiliary_check"]
+                            if members[index].get("leg_class") == "auxiliary"
+                            else "-"
+                        ),
                     })
             data["reservations"][token] = reservation
             tokens.append(token)

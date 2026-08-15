@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Canonical immutable identity for one bounded parallel dispatch batch.
 
-Schema v2 seals 2..4 asymmetric legs. Schema v1 remains verify-only for the
-one-window fixed two-way migration; new manifests are always v2.
+Schema v3 seals 2..4 asymmetric legs with the leg_class/auxiliary_check split.
+Schema v2 remains verify-only for the migration window; schema v1 is verify-only
+for the one-window fixed two-way migration. New manifests are always v3.
 """
 
 from __future__ import annotations
@@ -71,11 +72,20 @@ def build_manifest(
     required_member = {
         "assignment_sha256", "attempt_id", "route_node", "harness",
         "fallback_hop", "fallback_ordinal", "model_profile", "perspective",
-        "parallel_leg_index",
+        "parallel_leg_index", "leg_class",
     }
     normalized: list[dict[str, object]] = []
     for raw in members:
-        if not isinstance(raw, dict) or set(raw) != required_member:
+        if not isinstance(raw, dict):
+            raise ReplicaBatchContractError("invalid parallel batch member shape")
+        if "leg_class" not in raw or raw.get("leg_class") not in ("peer", "auxiliary"):
+            raise ReplicaBatchContractError("invalid parallel batch leg_class")
+        leg_class = raw["leg_class"]
+        expected_shape = (
+            required_member | {"auxiliary_check"}
+            if leg_class == "auxiliary" else required_member
+        )
+        if set(raw) != expected_shape:
             raise ReplicaBatchContractError("invalid parallel batch member shape")
         for key in (
             "assignment_sha256", "attempt_id", "route_node", "harness",
@@ -95,7 +105,10 @@ def build_manifest(
             raise ReplicaBatchContractError("unsupported parallel batch harness")
         if raw["model_profile"] not in SUPPORTED_PROFILES:
             raise ReplicaBatchContractError("unsupported substantive model profile")
-        normalized.append({key: raw[key] for key in sorted(required_member)})
+        if leg_class == "auxiliary":
+            if not isinstance(raw["auxiliary_check"], str) or not raw["auxiliary_check"]:
+                raise ReplicaBatchContractError("auxiliary member requires auxiliary_check")
+        normalized.append({key: raw[key] for key in sorted(expected_shape)})
 
     size = len(normalized)
     if len({str(member["attempt_id"]) for member in normalized}) != size:
@@ -125,7 +138,7 @@ def build_manifest(
 
     normalized.sort(key=lambda member: int(member["parallel_leg_index"]))
     common = {
-        "schema_version": 2,
+        "schema_version": 3,
         "kind": "parallel-batch",
         "declared_size": size,
         "parallel_group": group,
@@ -176,18 +189,48 @@ def _verify_v1(manifest: dict[str, object]):
     }
 
 
-def verify_manifest(manifest: object) -> tuple[dict[str, object], str, dict[str, str]]:
-    if not isinstance(manifest, dict):
-        raise ReplicaBatchContractError("parallel batch manifest must be an object")
-    if manifest.get("schema_version") == 1:
-        return _verify_v1(manifest)
+def _verify_v2(manifest: dict[str, object]):
+    """Verify-only read path for schema-v2 manifests in the migration window."""
     expected_keys = {
         "schema_version", "kind", "declared_size", "parallel_group",
         "replica_group", "route_id", "parent_attempt_id", "independence",
         "required_independence_axes", "realized_independence_axes",
         "degradation_reason", "members",
     }
-    if set(manifest) != expected_keys or manifest.get("schema_version") != 2 or manifest.get("kind") != "parallel-batch":
+    if (set(manifest) != expected_keys or manifest.get("schema_version") != 2
+            or manifest.get("kind") != "parallel-batch"):
+        raise ReplicaBatchContractError("invalid v2 parallel batch manifest shape")
+    required = {
+        "assignment_sha256", "attempt_id", "route_node", "harness",
+        "fallback_hop", "fallback_ordinal", "model_profile", "perspective",
+        "parallel_leg_index",
+    }
+    members = manifest.get("members")
+    if not isinstance(members, list) or not MIN_WIDTH <= len(members) <= MAX_WIDTH:
+        raise ReplicaBatchContractError("v2 parallel batch must declare 2..4 members")
+    for member in members:
+        if not isinstance(member, dict) or set(member) != required:
+            raise ReplicaBatchContractError("invalid v2 parallel batch member")
+    return manifest, _digest(manifest), {
+        str(member["attempt_id"]): _digest({**{k: v for k, v in manifest.items() if k != "members"}, "member": member})
+        for member in members
+    }
+
+
+def verify_manifest(manifest: object) -> tuple[dict[str, object], str, dict[str, str]]:
+    if not isinstance(manifest, dict):
+        raise ReplicaBatchContractError("parallel batch manifest must be an object")
+    if manifest.get("schema_version") == 1:
+        return _verify_v1(manifest)
+    if manifest.get("schema_version") == 2:
+        return _verify_v2(manifest)
+    expected_keys = {
+        "schema_version", "kind", "declared_size", "parallel_group",
+        "replica_group", "route_id", "parent_attempt_id", "independence",
+        "required_independence_axes", "realized_independence_axes",
+        "degradation_reason", "members",
+    }
+    if set(manifest) != expected_keys or manifest.get("schema_version") != 3 or manifest.get("kind") != "parallel-batch":
         raise ReplicaBatchContractError("invalid parallel batch manifest shape")
     rebuilt, digest, legs = build_manifest(
         parallel_group=manifest.get("parallel_group"),

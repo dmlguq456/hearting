@@ -164,7 +164,9 @@ class WorkerCapacityContractTest(unittest.TestCase):
             "registry_digest": "sha256:" + "2" * 64,
             "cwd": str(worktree),
         }
-        node = {"id": "execute", "dispatch_depth": 2, "completion_gate": "tests-pass", "kind": "agent"}
+        node = {"id": "execute", "dispatch_depth": 2, "completion_gate": "tests-pass", "kind": "agent",
+                "write_scope": ["./**"],
+                "subdivision": {"min_intensity": "strong", "max_slices": 4, "disjointness": "exact-fixed-files"}}
         route["nodes"] = [node]
         route_path.write_text(json.dumps(route))
         sessions = []

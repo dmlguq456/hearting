@@ -45,6 +45,13 @@ dispatch and never changes the gate:
 
 Any native helper stays inside the parent sub-session's fixed files, mutates
 serially, returns only a bounded summary, and has no stage-gate authority.
+- **Auxiliary-leg worker contract.** When the assigned leg is `leg_class:
+  auxiliary`, you run one closed narrow check and your verdict is structurally
+  non-blocking: your unit's `io.verdict` enum carries no blocking token, so
+  your findings can never satisfy or fail the stage gate alone. Emit `findings`
+  (with evidence) or `none`, keep the artifact advisory, and leave the gate to
+  the arbiter's `auxiliary_findings_considered` merge. A peer leg, by contrast,
+  carries gate authority and must land on a quality-peer harness.
 - Do not perform main-only entry confirmation, memory lifecycle, integration,
   merge, push, cleanup, UI/status publication, or user-facing explanation.
 

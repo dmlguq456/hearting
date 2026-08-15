@@ -22,6 +22,7 @@ from dispatch_contract import (
     _atomic_registry_replace,
     agent_home_equivalent,
     attempt_process_quiescence,
+    completion_marker_is_current,
     dispatch_state_roots,
     ensure_global_registry_writable,
     parse_registry_metadata,
@@ -30,6 +31,7 @@ from dispatch_contract import (
     validate_attempt_metadata,
 )
 from stage_session_contract import load_manifest
+from dispatch_degradation import record_degradation  # noqa: E402
 ORDER = {"direct":0,"quick":1,"standard":2,"strong":3,"thorough":4,"adversarial":5}
 TRACKING = {"tracked", "untracked"}
 GATE_FIELDS = {"spec_read", "drift_verdict", "workflow_mode", "artifact_guard"}
@@ -389,14 +391,38 @@ def _validate_output_scopes(nodes):
                 f"node {node.get('id')} outputs outside write_scope {sorted(uncovered)}"
             )
 
-def _expand_parallel_groups(nodes, parallel_groups, effective_intensity):
+# G6 (AC 21 declaration-level gate): a parallel_group's non-anchor legs always
+# have `terminal`/`terminal_gate` stripped during expansion (D3), which makes
+# the downstream "2+ realized nodes share one terminal_gate" check in
+# `_workflow_contract` structurally unreachable for any group declared on a
+# terminal node -- it can never fire, so it silently permits peer expansion of
+# ANY terminal node. The real gate has to run at declaration time, before that
+# stripping happens. `autopilot-research claim-verify` already ships this
+# pattern (D3′, `plan.md` D3/D3-a) and is preserved as a recorded, non-silent
+# grandfather rather than a silent exception; no other recipe may add this
+# pattern going forward.
+_TERMINAL_PARALLEL_GROUP_GRANDFATHER = {("autopilot-research", "claim-verify")}
+
+
+def _expand_parallel_groups(nodes, parallel_groups, effective_intensity,
+                            capability, *, auxiliary_check_units=None):
     """Expand registry-v6 groups into ordered 2..4-way sibling nodes.
+
+    `capability` is required (N2). It was an optional kwarg defaulting to
+    `None`, and the grandfather lookup is keyed on `(capability, group id)` --
+    so a caller that simply forgot the argument silently rejected the shipped
+    `autopilot-research claim-verify` group instead of failing at the call.
+    A required parameter turns that into a TypeError at the call site.
 
     The first leg keeps the anchor id for stable downstream references. Extra
     legs get suffix-specific ids, outputs, and write scopes. Direct consumers
     depend on every realized leg; non-review consumers also receive every leg's
     output. `replica_group`/`independence_axis` remain one-window read aliases,
     while `parallel_group` and the plural axes are canonical.
+
+    A group declared on a node whose recipe declaration carries `terminal:
+    true` is rejected (G6/AC 21) unless the (capability, group id) pair is
+    named in `_TERMINAL_PARALLEL_GROUP_GRANDFATHER`.
     """
     if not parallel_groups:
         return nodes
@@ -407,6 +433,12 @@ def _expand_parallel_groups(nodes, parallel_groups, effective_intensity):
             continue
         width = group["width_by_intensity"][effective_intensity]
         base = next(n for n in nodes if n["id"] == group["node"])
+        if base.get("terminal") is True and (capability, group["id"]) not in _TERMINAL_PARALLEL_GROUP_GRANDFATHER:
+            raise ValueError(
+                f"parallel group {group['id']!r} is declared on terminal node "
+                f"{base['id']!r}; peer expansion of a terminal node is rejected "
+                "at declaration (G6/AC 21) unless explicitly grandfathered"
+            )
         members = []
         for index, leg_spec in enumerate(group["legs"][:width]):
             leg = base if index == 0 else json.loads(json.dumps(base))
@@ -419,6 +451,20 @@ def _expand_parallel_groups(nodes, parallel_groups, effective_intensity):
                 ]
             leg["model_profile"] = leg_spec["model_profile"]
             leg["perspective"] = leg_spec["perspective"]
+            leg["leg_class"] = leg_spec["leg_class"]
+            if index:
+                # D3: only the anchor holds the workflow terminal gate; a
+                # realized sibling is a continuation leg, never a terminal.
+                leg.pop("terminal", None)
+                leg.pop("terminal_gate", None)
+                if "continuation" not in leg:
+                    leg["continuation"] = {"kind": "inline-next"}
+            if leg_spec["leg_class"] == "auxiliary":
+                leg["auxiliary_check"] = leg_spec["auxiliary_check"]
+                unit = (auxiliary_check_units or {}).get(leg_spec["auxiliary_check"])
+                if unit:
+                    leg["unit"] = unit
+                    leg["role"] = TOPO._unit_frontmatter(unit)["role"]
             leg["parallel_group"] = group["id"]
             leg["parallel_group_kind"] = group["kind"]
             leg["parallel_join_policy"] = group["join_policy"]
@@ -478,22 +524,29 @@ def _workflow_contract(registry, nodes, human_gate_bindings):
     the route alone, instead of inferring completion from a process that exited.
     """
     ids = [node["id"] for node in nodes]
-    dependents = {node_id: [] for node_id in ids}
-    for node in nodes:
-        for dep in node.get("depends_on", []) or []:
-            if dep in dependents:
-                dependents[dep].append(node["id"])
     terminal, continuations = [], {}
+    terminal_gates: dict[str, str] = {}
     for node in nodes:
         node_id = node["id"]
-        if not dependents[node_id]:
-            if node.get("terminal") is not True or not node.get("terminal_gate"):
+        if node.get("terminal") is True:
+            # D3-a: terminal classification is by the `terminal: true` flag, not
+            # by "has no downstream dependents". A realized parallel sibling that
+            # carries no flag is a continuation leg even when nothing depends on it.
+            if not node.get("terminal_gate"):
                 raise ValueError(f"terminal node {node_id} lacks a sealed terminal gate")
             if node.get("kind") == "resource-runner":
                 raise ValueError(
                     f"terminal node {node_id} is a detached resource run; a workflow cannot "
                     "end on a process exit"
                 )
+            gate = node["terminal_gate"]
+            # AC 21 (D3 retyping): one terminal_gate may be held by at most one
+            # realized node — a second holder would duplicate the workflow end.
+            if gate in terminal_gates:
+                raise ValueError(
+                    f"terminal gate {gate} held by both {terminal_gates[gate]} and {node_id}"
+                )
+            terminal_gates[gate] = node_id
             terminal.append(node_id)
             continue
         continuation = node.get("continuation")
@@ -657,7 +710,9 @@ def _compile_from_recipe(registry, recipe, capability, capability_mode, requeste
         owner_model_profile=registry["owner_profile_by_intensity"][effective]
         nodes=json.loads(json.dumps(recipe["standard_plus"]["nodes"])); gates=recipe["completion_gates"]
         nodes=_expand_parallel_groups(
-            nodes, recipe["standard_plus"].get("parallel_groups"), effective
+            nodes, recipe["standard_plus"].get("parallel_groups"), effective,
+            capability,
+            auxiliary_check_units=registry.get("auxiliary_check_units"),
         )
         for node in nodes:
             node.pop("fallback_hops", None)
@@ -779,7 +834,8 @@ def verify_route(route, expected_cwd=None, *, allow_stale_registry=False):
         expected_nodes=json.loads(json.dumps(composed_recipe["standard_plus"]["nodes"]))
         expected_nodes=_expand_parallel_groups(
             expected_nodes, composed_recipe["standard_plus"].get("parallel_groups"),
-            route.get("effective_intensity"))
+            route.get("effective_intensity"), route.get("capability"),
+            auxiliary_check_units=registry.get("auxiliary_check_units"))
         if ([_node_identity(n) for n in route.get("nodes",[])]
                 != [_node_identity(n) for n in expected_nodes]):
             raise ValueError("composed route nodes differ from embedded composed recipe")
@@ -792,7 +848,8 @@ def verify_route(route, expected_cwd=None, *, allow_stale_registry=False):
             expected_nodes=json.loads(json.dumps(route_recipe["standard_plus"]["nodes"]))
             expected_nodes=_expand_parallel_groups(
                 expected_nodes, route_recipe["standard_plus"].get("parallel_groups"),
-                route.get("effective_intensity"))
+                route.get("effective_intensity"), route.get("capability"),
+                auxiliary_check_units=registry.get("auxiliary_check_units"))
             # The remaining verifier owns field-level diagnostics.  This
             # census closes only the undeclared fanout hole: a rehashed route
             # may not add, remove, reorder, or rename recipe nodes.
@@ -1133,35 +1190,24 @@ def _migrate_completion_dir_forward(route_id, *, jobs=None):
 # lives once here and `workflow-supervisor.py` dynamically loads this module rather than
 # re-deriving it -- the dependency stays one-way (supervisor -> capability-route).
 def terminal_gate_observation(route):
-    """Per declared-terminal-node completion-gate truth, verified fresh from disk."""
+    """Per declared-terminal-node completion-gate truth, verified fresh from disk.
+
+    An owner-merge auxiliary-bearing group contributes one extra row keyed
+    `parallel_group:<group_id>` (G1/AC 5). Its downstream consumer is a
+    `capability-owner` in two of the six realized groups, so nothing that node
+    starts passes the wrapper start-gate -- without this row an unarbitrated
+    group would leave no trace at all in the route's completion truth. Rows are
+    judged in the same vocabulary as node rows, and no branch raises:
+    `close_route` must stay able to close a failed route honestly.
+    """
     nodes={node.get("id"):node for node in route.get("nodes",[])}
     terminal_ids=[node_id for node_id,node in nodes.items() if node.get("terminal") is True]
     rows={}
     for node_id in terminal_ids:
         node=nodes[node_id]
-        path=completion_dir(route["route_id"])/f"{node_id}.json"
-        try:
-            marker=json.loads(path.read_text(encoding="utf-8"))
-        except (OSError,ValueError):
-            rows[node_id]={"passed":False,"reason":"completion-marker-absent"}
-            continue
-        if (marker.get("route_id") != route.get("route_id")
-                or marker.get("route_hash") != route.get("route_hash")
-                or marker.get("node_id") != node_id
-                or marker.get("completion_gate") != node.get("terminal_gate")):
-            rows[node_id]={"passed":False,"reason":"completion-marker-identity-mismatch"}
-            continue
-        evidence=marker.get("evidence") or {}
-        try:
-            digest=hashlib.sha256(Path(evidence["path"]).read_bytes()).hexdigest()
-        except (OSError,KeyError,TypeError):
-            rows[node_id]={"passed":False,"reason":"completion-evidence-unreadable"}
-            continue
-        if digest != evidence.get("sha256"):
-            rows[node_id]={"passed":False,"reason":"completion-evidence-hash-mismatch"}
-            continue
-        rows[node_id]={"passed":True,"reason":"completion-marker-verified",
-                       "evidence":evidence.get("path")}
+        rows[node_id]=_marker_identity_row(route,node,node_id,node.get("terminal_gate"))
+    for group_id,error in sorted(owner_merge_auxiliary_groups(route).items()):
+        rows[f"parallel_group:{group_id}"]=_arbitration_observation(route,group_id,error)
     return rows
 
 def terminal_gate_proven(gates):
@@ -1393,40 +1439,62 @@ def _next_marker_sequence(directory, node_id):
                 maximum=max(maximum,int(middle))
     return maximum+1
 
+def _completion_marker_replay(route, node, node_id, evidence, axes, directory):
+    """The one answer to "is this call a replay of the marker already on disk?".
+
+    N2: this used to live only inside `write_completion_marker`, and the
+    owner-chain resume path carried a hand-copied version of it that reproduced
+    the identity FIELDS but not the history-file check below. In the state where
+    the immutable history sibling is missing or has drifted, the original
+    refused and the copy reported the gate resumed -- so the copy's claim to
+    recognize "exactly what `write_completion_marker` recognizes" was false.
+    Both callers now take this same branch, which makes that claim structural
+    instead of maintained by hand.
+
+    Returns the existing marker for a replay, `None` when this is a new gate,
+    and raises when the marker on disk contradicts itself.
+    """
+    canonical_path=directory/f"{node_id}.json"
+    if not canonical_path.is_file():
+        return None
+    existing=json.loads(canonical_path.read_text(encoding="utf-8"))
+    identity={
+        "evidence_sha256":hashlib.sha256(evidence.read_bytes()).hexdigest(),
+        **axes,
+    }
+    existing_identity={
+        "evidence_sha256":existing.get("evidence",{}).get("sha256"),
+        **{key:existing.get(key) for key in axes},
+    }
+    if existing_identity!=identity:
+        return None
+    static_identity={
+        "schema_version":2,
+        "route_id":route["route_id"],
+        "route_hash":route["route_hash"],
+        "registry_digest":route["registry_digest"],
+        "node_id":node_id,
+        "completion_gate":node["completion_gate"],
+    }
+    if any(existing.get(key)!=value for key,value in static_identity.items()):
+        raise ValueError("canonical completion marker identity conflict")
+    history_path=directory/f"{node_id}.{existing.get('sequence')}.json"
+    if (
+        not history_path.is_file()
+        or json.loads(history_path.read_text(encoding="utf-8"))!=existing
+    ):
+        raise ValueError("canonical completion marker history conflict")
+    return existing
+
 def write_completion_marker(route, node, node_id, evidence, *, attempt_id=None, attempt_metadata=None):
     _migrate_completion_dir_forward(route["route_id"])
     directory=completion_dir(route["route_id"])
     canonical_path=directory/f"{node_id}.json"
     sha=hashlib.sha256(evidence.read_bytes()).hexdigest()
     axes=_marker_attempt_axes(node, attempt_id, attempt_metadata)
-    identity={
-        "evidence_sha256":sha,
-        **axes,
-    }
-    if canonical_path.is_file():
-        existing=json.loads(canonical_path.read_text(encoding="utf-8"))
-        existing_identity={
-            "evidence_sha256":existing.get("evidence",{}).get("sha256"),
-            **{key:existing.get(key) for key in axes},
-        }
-        if existing_identity==identity:
-            static_identity={
-                "schema_version":2,
-                "route_id":route["route_id"],
-                "route_hash":route["route_hash"],
-                "registry_digest":route["registry_digest"],
-                "node_id":node_id,
-                "completion_gate":node["completion_gate"],
-            }
-            if any(existing.get(key)!=value for key,value in static_identity.items()):
-                raise ValueError("canonical completion marker identity conflict")
-            history_path=directory/f"{node_id}.{existing.get('sequence')}.json"
-            if (
-                not history_path.is_file()
-                or json.loads(history_path.read_text(encoding="utf-8"))!=existing
-            ):
-                raise ValueError("canonical completion marker history conflict")
-            return existing
+    replayed=_completion_marker_replay(route,node,node_id,evidence,axes,directory)
+    if replayed is not None:
+        return replayed
     sequence=_next_marker_sequence(directory,node_id)
     marker={
         "schema_version":2,
@@ -1487,6 +1555,396 @@ def _attempt_completion_path(route, node_id, attempt_id):
     )
     return completion_dir(route["route_id"])/f"{node_id}.{safe_attempt}.attempt.json"
 
+def _parse_auxiliary_findings(evidence: Path):
+    """Extract `auxiliary_findings_considered` from JSON or markdown frontmatter.
+
+    A review unit's sealed output is a markdown review file, not a JSON verdict;
+    the anchor of an auxiliary-bearing group records which auxiliary findings it
+    considered in that file's frontmatter (G1). Returns None when the field is
+    absent from both surfaces.
+    """
+    try:
+        text = evidence.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    try:
+        payload = json.loads(text)
+        considered = payload.get("auxiliary_findings_considered")
+        if isinstance(considered, list):
+            return considered
+    except (ValueError, TypeError):
+        pass
+    match = re.match(r"\A---\n(.*?\n)---\n", text, re.DOTALL)
+    if not match:
+        return None
+    block = match.group(1)
+    inline = re.search(
+        r"^auxiliary_findings_considered:\s*\[([^\]]*)\]", block, re.MULTILINE
+    )
+    if inline:
+        return [
+            token.strip()
+            for token in inline.group(1).split(",")
+            if token.strip()
+        ]
+    found = re.search(
+        r"^auxiliary_findings_considered:\s*(?:#.*)?$", block, re.MULTILINE
+    )
+    if found:
+        items = []
+        for line in block[found.end():].lstrip("\n").splitlines():
+            item = re.match(r"^\s+-\s+(.*?)\s*$", line)
+            if not item:
+                break
+            items.append(item.group(1))
+        if items:
+            return items
+    return None
+
+
+AUXILIARY_ARBITER_OWNER_MERGE = "owner-merge"
+AUXILIARY_ARBITER_NODE = "node"
+ARBITRATION_SCHEMA_VERSION = 1
+
+
+def _group_members(route, group_id):
+    """Every realized leg of one parallel group, in route order."""
+    return [
+        candidate for candidate in route.get("nodes", [])
+        if isinstance(candidate, dict)
+        and candidate.get("parallel_group") == group_id
+    ]
+
+
+def _realized_auxiliary_nodes(route, group_id):
+    return [
+        member for member in _group_members(route, group_id)
+        if member.get("leg_class") == "auxiliary"
+    ]
+
+
+def _realized_group_ids(route):
+    return sorted({
+        candidate["parallel_group"] for candidate in route.get("nodes", [])
+        if isinstance(candidate, dict) and candidate.get("parallel_group")
+    })
+
+
+def _resolve_auxiliary_arbiter(route, group_id):
+    """Who arbitrates one group's auxiliary findings, read off the compiled route.
+
+    PRD 13.30.4 names an arbiter for each anchor kind that may declare an
+    auxiliary leg, and in none of the three is it the anchor itself: a
+    `review-worker` anchor's findings are merged by the conductor (the owner), a
+    `map-worker` anchor's are read by its declared downstream consumer, and a
+    `pipeline-stage` anchor's by its direct downstream `review-worker`. Gating
+    the anchor (G1) demanded that a leg which runs *concurrently* with the
+    auxiliary have already considered its output, which no anchor can satisfy.
+
+    Returns `("owner-merge", None)` or `("node", <node_id>)`. Every undecidable
+    case raises a typed error rather than defaulting to a pass -- an unresolvable
+    arbiter is an integrity failure of the route, not an absent obligation.
+    """
+    members = _group_members(route, group_id)
+    if not members:
+        raise ValueError(f"auxiliary-group-unknown:{group_id}")
+    anchor = next(
+        (member for member in members if member.get("parallel_leg_index") == 0),
+        None,
+    )
+    if anchor is None:
+        raise ValueError(f"auxiliary-group-anchor-unknown:{group_id}")
+    if anchor.get("terminal") is True:
+        # Unreachable through a compiled route: `_expand_parallel_groups`
+        # rejects a group declared on a terminal node (G6/AC 21) and
+        # `capability_topology` rejects it again at declaration. Kept as a
+        # typed error so a hand-built route cannot reach the gate silently.
+        raise ValueError(f"auxiliary-arbiter-anchor-terminal:{anchor.get('id')}")
+    if anchor.get("kind") == "review-worker":
+        return AUXILIARY_ARBITER_OWNER_MERGE, None
+    member_ids = {member.get("id") for member in members}
+    consumers = [
+        candidate for candidate in route.get("nodes", [])
+        if isinstance(candidate, dict)
+        and candidate.get("id") not in member_ids
+        and anchor.get("id") in (candidate.get("depends_on") or [])
+    ]
+    if anchor.get("kind") == "pipeline-stage":
+        # SD-82's pipeline-anchor arbiter requirement is unrevised: the arbiter
+        # of a pipeline-stage anchor is its direct downstream review-worker.
+        consumers = [
+            candidate for candidate in consumers
+            if candidate.get("kind") == "review-worker"
+        ]
+    # A consumer that is itself a realized parallel group appears here as every
+    # one of its legs (D3 copies `depends_on` into each leg). They are one
+    # arbiter, not three: collapse each leg onto its own anchor, which is the
+    # node PRD 13.30.4 names ("autopilot-spec research" -> node `review`).
+    arbiters = sorted({
+        str(item.get("parallel_anchor") or item.get("id"))
+        for item in consumers
+    })
+    if not arbiters:
+        raise ValueError(f"auxiliary-arbiter-absent:{group_id}")
+    if len(arbiters) > 1:
+        raise ValueError(
+            "auxiliary-arbiter-ambiguous:{}:{}".format(group_id, ",".join(arbiters))
+        )
+    return AUXILIARY_ARBITER_NODE, arbiters[0]
+
+
+def owner_merge_auxiliary_groups(route):
+    """Realized auxiliary-bearing groups whose arbiter is the owner's merge record.
+
+    Returns `{group_id: error_or_None}` so a read-only observer can report an
+    unresolvable arbiter as a failed row instead of raising -- `close_route`
+    must be able to close a failed route.
+    """
+    rows = {}
+    for group_id in _realized_group_ids(route):
+        if not _realized_auxiliary_nodes(route, group_id):
+            continue
+        try:
+            kind, _arbiter = _resolve_auxiliary_arbiter(route, group_id)
+        except ValueError as exc:
+            rows[group_id] = str(exc)
+            continue
+        if kind == AUXILIARY_ARBITER_OWNER_MERGE:
+            rows[group_id] = None
+    return rows
+
+
+def _auxiliary_groups_arbitrated_by(route, node_id):
+    """(group ids, required considered-entry count) for one node arbiter.
+
+    A single node can arbitrate more than one group, so the required length is
+    the SUM of those groups' realized auxiliary legs, not any one group's count.
+
+    A group whose arbiter cannot be resolved is skipped rather than raised
+    through: its arbiter is unknown, so it is not arbitrated by THIS node or by
+    any other, and letting the error out here made one group's declaration
+    error refuse the completion of every unrelated node on the route. The
+    read-only observer (`owner_merge_auxiliary_groups`) already degrades those
+    groups to a failing row, and both gates surface them as
+    `auxiliary-arbiter-unresolved`; the asymmetry between the reader and the
+    writer was the defect.
+    """
+    groups = []
+    required = 0
+    for group_id in _realized_group_ids(route):
+        auxiliary = _realized_auxiliary_nodes(route, group_id)
+        if not auxiliary:
+            continue
+        try:
+            kind, arbiter = _resolve_auxiliary_arbiter(route, group_id)
+        except ValueError:
+            continue
+        if kind == AUXILIARY_ARBITER_NODE and arbiter == node_id:
+            groups.append(group_id)
+            required += len(auxiliary)
+    return groups, required
+
+
+def _validate_auxiliary_arbiter(route, node, evidence):
+    """AC 5 (front half): the arbiter verdict of an auxiliary-bearing group must
+    carry `auxiliary_findings_considered` with exactly one entry per realized
+    auxiliary leg; otherwise the completion gate is not met.
+
+    Only a *node* arbiter is gated here (see `_resolve_auxiliary_arbiter`). The
+    anchor is never gated by being the anchor -- it is a concurrent sibling of
+    the auxiliary leg. Owner-merge arbitration is a separate transaction
+    (`arbitrate`) that can only run after the group has joined.
+
+    The evidence surface is the sealed output -- a review unit's markdown file --
+    so the list is read from JSON or from markdown frontmatter, not forced to JSON.
+    """
+    groups, required = _auxiliary_groups_arbitrated_by(route, node.get("id"))
+    if not groups:
+        return
+    considered = _parse_auxiliary_findings(evidence)
+    if considered is None:
+        raise ValueError(
+            f"auxiliary arbiter gate {node.get('id')} requires "
+            "auxiliary_findings_considered in evidence or frontmatter"
+        )
+    if len(considered) != required:
+        raise ValueError(
+            f"auxiliary arbiter gate {node.get('id')} requires "
+            f"auxiliary_findings_considered length {required}, got {len(considered)}"
+        )
+
+
+def _safe_group_id(group_id):
+    return "".join(
+        character if character.isalnum() or character in "._-" else "_"
+        for character in str(group_id)
+    )
+
+
+def arbitration_path(route_id, group_id):
+    return completion_dir(route_id)/f"{_safe_group_id(group_id)}.arbitration.json"
+
+
+def _marker_identity_row(route, node, node_id, gate):
+    """One completion marker's on-disk truth, in the shared gate vocabulary."""
+    path = completion_dir(route["route_id"])/f"{node_id}.json"
+    try:
+        marker = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {"passed": False, "reason": "completion-marker-absent"}
+    if (marker.get("route_id") != route.get("route_id")
+            or marker.get("route_hash") != route.get("route_hash")
+            or marker.get("node_id") != node_id
+            or marker.get("completion_gate") != gate):
+        return {"passed": False, "reason": "completion-marker-identity-mismatch"}
+    evidence = marker.get("evidence") or {}
+    try:
+        digest = hashlib.sha256(Path(evidence["path"]).read_bytes()).hexdigest()
+    except (OSError, KeyError, TypeError):
+        return {"passed": False, "reason": "completion-evidence-unreadable"}
+    if digest != evidence.get("sha256"):
+        return {"passed": False, "reason": "completion-evidence-hash-mismatch"}
+    return {"passed": True, "reason": "completion-marker-verified",
+            "evidence": evidence.get("path")}
+
+
+def _arbitration_observation(route, group_id, error=None, *, path=None):
+    """Read-only truth for one owner-merge group's arbitration record.
+
+    `path` lets a caller that resolved its own dispatch state root (the wrapper
+    start-gate, which is handed `agent_home`/`jobs` explicitly rather than
+    re-reading the environment) name the exact record it found.
+    """
+    if error is not None:
+        return {"passed": False, "reason": "auxiliary-arbiter-unresolved",
+                "detail": error}
+    path = Path(path) if path else arbitration_path(route["route_id"], group_id)
+    try:
+        record = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {"passed": False, "reason": "completion-marker-absent"}
+    expected_auxiliary = sorted(
+        str(member.get("id"))
+        for member in _realized_auxiliary_nodes(route, group_id)
+    )
+    if (record.get("route_id") != route.get("route_id")
+            or record.get("route_hash") != route.get("route_hash")
+            or record.get("group_id") != group_id
+            or record.get("arbiter") != AUXILIARY_ARBITER_OWNER_MERGE
+            or sorted(record.get("auxiliary_nodes") or []) != expected_auxiliary
+            or len(record.get("auxiliary_findings_considered") or [])
+            != len(expected_auxiliary)):
+        return {"passed": False, "reason": "completion-marker-identity-mismatch"}
+    evidence = record.get("evidence") or {}
+    try:
+        digest = hashlib.sha256(Path(evidence["path"]).read_bytes()).hexdigest()
+    except (OSError, KeyError, TypeError):
+        return {"passed": False, "reason": "completion-evidence-unreadable"}
+    if digest != evidence.get("sha256"):
+        return {"passed": False, "reason": "completion-evidence-hash-mismatch"}
+    return {"passed": True, "reason": "completion-marker-verified",
+            "evidence": evidence.get("path")}
+
+
+def arbitrate_group(route, group_id, evidence):
+    """Register the owner's merge record as one auxiliary-bearing group's arbitration.
+
+    Fail-closed in declaration order; every refusal has its own typed reason.
+    Step 4 is what makes G1 structurally impossible to reintroduce: the whole
+    group must already hold canonical completion markers, so this transaction
+    cannot be satisfied at the moment a concurrent sibling publishes its own.
+    """
+    members = _group_members(route, group_id)
+    if not members:
+        raise ValueError(f"auxiliary-group-unknown:{group_id}")
+    auxiliary = _realized_auxiliary_nodes(route, group_id)
+    if not auxiliary:
+        raise ValueError(f"auxiliary-group-has-no-auxiliary-leg:{group_id}")
+    kind, arbiter = _resolve_auxiliary_arbiter(route, group_id)
+    if kind != AUXILIARY_ARBITER_OWNER_MERGE:
+        raise ValueError(
+            f"auxiliary-arbiter-is-node:{arbiter}; record "
+            "auxiliary_findings_considered in that node's completion evidence"
+        )
+    _migrate_completion_dir_forward(route["route_id"])
+    # M7: "joined" here has to mean the same thing it means downstream. The
+    # identity row checks route/node/gate identity and the evidence digest;
+    # `completion_marker_is_current` additionally requires schema v2, a real
+    # sequence, the immutable history file, and the attempt linkage. Proving only
+    # the weaker one let the arbitration record be written over a marker that a
+    # dependent's start-gate then refuses as an absent canonical marker -- not
+    # fail-open, since the dependent is blocked either way, but it makes the
+    # arbitration record mean less than the join it claims to attest. (Spell
+    # that refusal reason in prose, not as its literal token: the static
+    # guardian in `dispatch_completion_marker.test.py` keeps the literal inside
+    # `dispatch_contract.py` and the adapters' relay, and every allowlist entry
+    # added to quiet a comment blunts it for the next real violation.)
+    directory = completion_dir(route["route_id"])
+    unjoined = sorted(
+        str(member.get("id")) for member in members
+        if not (
+            _marker_identity_row(
+                route, member, str(member.get("id")), member.get("completion_gate")
+            )["passed"]
+            and completion_marker_is_current(
+                route, member, directory / f"{member.get('id')}.json"
+            )
+        )
+    )
+    if unjoined:
+        raise ValueError("auxiliary-arbitration-before-join:" + ",".join(unjoined))
+    considered = _parse_auxiliary_findings(evidence)
+    if considered is None:
+        raise ValueError(
+            f"auxiliary arbiter gate {group_id} requires "
+            "auxiliary_findings_considered in evidence or frontmatter"
+        )
+    if len(considered) != len(auxiliary):
+        raise ValueError(
+            f"auxiliary arbiter gate {group_id} requires "
+            f"auxiliary_findings_considered length {len(auxiliary)}, "
+            f"got {len(considered)}"
+        )
+    anchor = next(member for member in members if member.get("parallel_leg_index") == 0)
+    record = {
+        "schema_version": ARBITRATION_SCHEMA_VERSION,
+        "route_id": route["route_id"],
+        "route_hash": route["route_hash"],
+        "registry_digest": route["registry_digest"],
+        "group_id": group_id,
+        "anchor_node": str(anchor.get("id")),
+        "arbiter": AUXILIARY_ARBITER_OWNER_MERGE,
+        "member_nodes": [str(member.get("id")) for member in members],
+        "auxiliary_nodes": sorted(str(member.get("id")) for member in auxiliary),
+        "auxiliary_findings_considered": list(considered),
+        "evidence": {
+            "path": str(evidence),
+            "sha256": hashlib.sha256(evidence.read_bytes()).hexdigest(),
+        },
+    }
+    path = arbitration_path(route["route_id"], group_id)
+    directory = completion_dir(route["route_id"])
+    # Same normalization as `arbitration_path`: the record path escapes an unsafe
+    # group id and the lock used the raw one, so two spellings of one identity
+    # could name different files. Today's group ids are safe either way.
+    with _exclusive_lock(directory/f".{_safe_group_id(group_id)}.arbitration.lock"):
+        if path.is_file():
+            # Same immutability contract as `write_completion_marker`: an
+            # identical re-registration is idempotent, a different one conflicts.
+            # `arbitrated_at` is excluded from identity because a wall clock
+            # reading is not part of what was decided.
+            existing = json.loads(path.read_text(encoding="utf-8"))
+            if {key: existing.get(key) for key in record} == record:
+                return existing
+            raise ValueError(f"auxiliary-arbitration-identity-conflict:{group_id}")
+        from datetime import datetime, timezone
+        record["arbitrated_at"] = (
+            datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        )
+        write_once(path, record)
+    return record
+
+
 def _publish_completion_locked(
     route,
     node,
@@ -1499,6 +1957,7 @@ def _publish_completion_locked(
 ):
     """Publish marker history, exact-attempt link, and canonical marker under one node lock."""
 
+    _validate_auxiliary_arbiter(route, node, evidence)
     axes=_marker_attempt_axes(node,attempt_id,attempt_metadata)
     evidence_sha=hashlib.sha256(evidence.read_bytes()).hexdigest()
     attempt_path=(
@@ -1755,6 +2214,243 @@ def complete_node(
                 "status":"marker-appended" if marker_eligible else "closed",
             }
 
+def _git_changed_files(worktree):
+    """Return the worktree's git-visible changed file paths (AC 28 audit)."""
+    try:
+        result = subprocess.run(
+            # `-uall`: the default collapses an untracked directory to one
+            # `dir/` entry, which can never match a `fixed_files` path and made
+            # every slice that created a new directory look like an escape.
+            # The audit compares files, so it has to be given files.
+            ["git", "-C", str(worktree), "status", "--porcelain", "-uall"],
+            text=True, capture_output=True, check=False,
+        )
+    except (OSError, ValueError):
+        return set()
+    changed = set()
+    for line in result.stdout.splitlines():
+        if not line:
+            continue
+        # status code is the first two chars; a rename shows 'R  old -> new'
+        rest = line[3:].strip()
+        path = rest.split(" -> ")[-1].strip()
+        if path:
+            changed.add((Path(worktree) / path).resolve(strict=False))
+    return changed
+
+
+def _content_digest(path):
+    """sha256 of a worktree path's bytes, or None when it is not a readable file.
+
+    None is a real state, not an error: a path that `git status` reported as
+    deleted has no content, and "still deleted" has to compare equal to itself.
+    """
+    try:
+        return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+    except (OSError, ValueError):
+        return None
+
+
+def _baseline_content_map(baseline):
+    """The admission snapshot as {resolved path: content digest at admission}.
+
+    Records written before this became a content snapshot carry a bare list of
+    paths. Those are read back as "unknown digest" so they keep the behaviour
+    they were written under instead of being silently re-judged.
+    """
+    changed = (baseline or {}).get("changed_files") or {}
+    if isinstance(changed, dict):
+        return {
+            Path(path).resolve(strict=False): digest
+            for path, digest in changed.items()
+        }
+    return {Path(path).resolve(strict=False): _LEGACY_BASELINE_DIGEST for path in changed}
+
+
+_LEGACY_BASELINE_DIGEST = "legacy-path-only-baseline"
+
+
+def _published_owner_chain_marker(route, node, node_id, evidence, *, attempt_id, attempt_metadata):
+    """Return the canonical marker when this exact aggregation already published one.
+
+    "Exact" is `write_completion_marker`'s own replay branch, called here --
+    the evidence digest plus every attempt axis (which for an owner-chain gate
+    includes the manifest sha256), the static route/node identity, AND the
+    immutable history sibling. A different manifest, different evidence, or a
+    marker written by any other authority is not a replay and falls through to
+    the full audit; a marker that contradicts its own history raises here
+    exactly as it does there. N2: the second half of that used to be a
+    hand-copied subset, so this path resumed a gate the writer refused.
+
+    A missing attempt axis is not a replay decision this path can make, so it
+    falls through to the audit, which ends at `write_completion_marker` and the
+    same refusal.
+    """
+    _migrate_completion_dir_forward(route["route_id"])
+    try:
+        axes = _marker_attempt_axes(node, attempt_id, attempt_metadata)
+    except ValueError:
+        return None
+    return _completion_marker_replay(
+        route, node, node_id, evidence, axes, completion_dir(route["route_id"])
+    )
+
+
+def _first_parent_descends_from(worktree, ancestor, head):
+    """True when `head` reaches `ancestor` along first parents only.
+
+    `core/OPERATIONS.md` §5.10 states the lineage proof for a declared
+    sub-session chain in exactly these terms, so the stage gate asks the same
+    question rather than a stricter one of its own. `merge-base --is-ancestor`
+    would also accept a side branch merged in; the contract says first-parent.
+    """
+    if not ancestor or not head:
+        return False
+    try:
+        probe = subprocess.run(
+            ["git", "-C", str(worktree), "rev-list", "--first-parent", str(head)],
+            text=True, capture_output=True, check=False,
+        )
+    except (OSError, ValueError):
+        return False
+    if probe.returncode != 0:
+        return False
+    return str(ancestor) in probe.stdout.split()
+
+
+def _git_committed_files(worktree, ancestor, head):
+    """Paths whose content differs between two commits (AC 28/30 audit).
+
+    A commit takes its files out of `git status`, so a gate that accepts the
+    commit has to read them back out of history or it stops measuring them.
+    """
+    if not ancestor or not head:
+        return set()
+    try:
+        probe = subprocess.run(
+            ["git", "-C", str(worktree), "diff", "--name-only", str(ancestor), str(head)],
+            text=True, capture_output=True, check=False,
+        )
+    except (OSError, ValueError):
+        return set()
+    if probe.returncode != 0:
+        return set()
+    return {
+        (Path(worktree) / line.strip()).resolve(strict=False)
+        for line in probe.stdout.splitlines()
+        if line.strip()
+    }
+
+
+SUBDIVISION_BASELINE_SCHEMA_VERSION = 1
+
+
+def subdivision_baseline_path(route_id, node_id, manifest_sha256):
+    """Keyed by the manifest hash so a resumed admission finds its own baseline.
+
+    Kept in its own subdirectory: the completion directory's own filenames are
+    read back by `<node_id>.*.json` globs, and a sibling file matching that
+    shape would be counted as marker history by any reader less careful than
+    `_next_marker_sequence`.
+    """
+    return (
+        completion_dir(route_id)
+        / "subdivision"
+        / f"{node_id}.{str(manifest_sha256)[:32]}.json"
+    )
+
+
+def record_subdivision_baseline(route, node_id, manifest):
+    """Snapshot the worktree at subdivision admission (anchor M3 / AC 30).
+
+    The post-hoc diff-scope audit is a statement about what the SLICES changed,
+    but `git status` reports the whole worktree. Without a start-of-subdivision
+    baseline, work the stage legitimately did outside the slices' `fixed_files`
+    -- its own dev log, its checklist, anything inside `write_scope` but outside
+    the slice union -- is indistinguishable from a slice escaping its fence, and
+    the marker is refused for changes no slice made.
+
+    `head_commit` rides along because SD-103 makes parallel slices no-commit
+    workers: index and HEAD are shared state that `fixed_files` disjointness
+    cannot protect, so a moved HEAD is the evidence that some slice committed.
+
+    Write-once and idempotent by identity, so a resumed admission with the same
+    manifest recovers the original baseline instead of snapshotting the
+    half-finished worktree as if it were the start state.
+    """
+    digest = manifest["_manifest_sha256"]
+    worktree = Path(manifest["worktree"])
+    path = subdivision_baseline_path(route["route_id"], node_id, digest)
+    identity = {
+        "schema_version": SUBDIVISION_BASELINE_SCHEMA_VERSION,
+        "route_id": route["route_id"],
+        "route_hash": route["route_hash"],
+        "node_id": node_id,
+        "manifest_sha256": digest,
+        "worktree": str(worktree),
+    }
+    if path.is_file():
+        existing = json.loads(path.read_text(encoding="utf-8"))
+        if {key: existing.get(key) for key in identity} != identity:
+            raise ValueError(f"subdivision-baseline-identity-conflict:{node_id}")
+        return existing
+    from datetime import datetime, timezone
+    record = {
+        **identity,
+        "head_commit": _head_commit(worktree),
+        # anchor M3 / B5: path -> content digest, not a path list. A path list
+        # is a permanent exemption: a file dirty at admission became invisible
+        # to the audit for the whole subdivision, and those are exactly the
+        # files the baseline exists to excuse (the stage's own dev log and
+        # checklist), so in practice they are always dirty. Digests make the
+        # subtraction a real delta -- unchanged since admission stays exempt,
+        # changed again does not.
+        "changed_files": {
+            str(item): _content_digest(item)
+            for item in sorted(_git_changed_files(worktree))
+        },
+        "recorded_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+    }
+    try:
+        write_once(path, record)
+    except ValueError:
+        # A concurrent admission won the race with byte-different content
+        # (differing `recorded_at`); its record is equally valid as the start
+        # state, so adopt it rather than failing the admission.
+        return json.loads(path.read_text(encoding="utf-8"))
+    return record
+
+
+def load_subdivision_baseline(route, node_id, manifest):
+    """Resume the admission-time baseline by manifest hash; None when absent.
+
+    Read across every dispatch state root, the same order completion markers use.
+    Reading only the canonical root meant a state-root rotation kept the markers
+    (which iterate the roots, and have `_migrate_completion_dir_forward`) while
+    losing the baseline, and for a parallel subdivision a missing baseline is a
+    permanent `subdivision-baseline-missing`. The writer still uses one root.
+    """
+    digest = manifest["_manifest_sha256"]
+    canonical = subdivision_baseline_path(route["route_id"], node_id, digest)
+    candidates = [canonical] + [
+        root / "completion" / route["route_id"] / "subdivision" / canonical.name
+        for root in dispatch_state_roots(resolve_agent_home())
+    ]
+    path = next((item for item in candidates if item.is_file()), canonical)
+    try:
+        record = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if (
+        record.get("route_id") != route.get("route_id")
+        or record.get("route_hash") != route.get("route_hash")
+        or record.get("node_id") != node_id
+        or record.get("manifest_sha256") != manifest["_manifest_sha256"]
+    ):
+        return None
+    return record
+
+
 def complete_subsession_stage(route, node, node_id, evidence, manifest_path, jobs):
     """Aggregate exact PASS sub-sessions into the route node's one stage marker."""
 
@@ -1801,14 +2497,131 @@ def complete_subsession_stage(route, node, node_id, evidence, manifest_path, job
         process=attempt_process_quiescence(metadata)
         if process.state!="quiescent":
             raise ValueError(f"subsession process not quiescent:{session['attempt_id']}:{process.reason}")
-    digest=manifest["_manifest_sha256"]
-    attempt_id="att-stage-"+digest[:32]
-    metadata={
-        "stage_authority":"owner-chain",
-        "subsession_manifest":str(Path(manifest_path).resolve()),
-        "subsession_manifest_sha256":digest,
-        "session_chain_id":manifest["chain_id"],
+    # AC 28 post-hoc diff-scope audit, measured against the subdivision's own
+    # start state (anchor M3). `git status` sees the whole worktree, so the
+    # audit subtracts the admission-time baseline first; what remains is what
+    # the slices actually did, which is the only thing their `fixed_files`
+    # fence can be held to. Without a baseline the measurement is not slice
+    # attribution at all, so its absence fails closed rather than silently
+    # widening the audit back to the whole worktree.
+    worktree = Path(manifest["worktree"])
+    baseline = load_subdivision_baseline(route, node_id, manifest)
+    digest = manifest["_manifest_sha256"]
+    attempt_id = "att-stage-" + digest[:32]
+    metadata = {
+        "stage_authority": "owner-chain",
+        "subsession_manifest": str(Path(manifest_path).resolve()),
+        "subsession_manifest_sha256": digest,
+        "session_chain_id": manifest["chain_id"],
     }
+    # AC 30 resume. The audit below measures a mutation window that CLOSED when
+    # this exact aggregation published its marker, and SD-103 has the owner
+    # commit after that gate -- so re-measuring a worktree that has legitimately
+    # moved on since would refuse a gate that is already closed, permanently,
+    # against a write-once baseline and an unrewindable HEAD. An idempotent
+    # replay of an already-published marker therefore returns it. This weakens
+    # nothing: no audit run after publication can un-publish the marker, and the
+    # identity below is the same exact one `write_completion_marker` would
+    # require to treat the call as a replay rather than a new gate.
+    published = _published_owner_chain_marker(
+        route, node, node_id, evidence, attempt_id=attempt_id, attempt_metadata=metadata
+    )
+    if published is not None:
+        return published, {
+            "status": "stage-gate-aggregated",
+            "sessions": len(manifest["sessions"]),
+            "resumed": True,
+        }
+
+    def _refuse(reason, detail):
+        record_degradation(
+            route_id=route.get("route_id"), route_node=node_id,
+            route_hash=route.get("route_hash"), dispatch_depth=2,
+            fallback_hop=None, execution_surface="registered-headless",
+            writer="capability-route.py", kind="degradation",
+            reason=reason, detail=detail[:512],
+            slice_manifest_sha256=manifest["_manifest_sha256"],
+        )
+        raise ValueError(reason)
+
+    # The baseline is required for a PARALLEL subdivision -- SD-103's admission
+    # path records one, and its absence there means the audit would not be slice
+    # attribution at all. A `serial` SD-96 chain is admitted through a different
+    # path that records no baseline, so demanding one would make every serial
+    # chain uncompletable; it keeps the pre-existing whole-worktree measurement
+    # instead. That residual is real and is recorded as such: the serial path's
+    # audit still cannot attribute a change to a session.
+    parallel = manifest.get("mode") == "parallel"
+    if baseline is None and parallel:
+        _refuse(
+            "subdivision-baseline-missing",
+            f"no admission baseline for manifest {manifest['_manifest_sha256'][:16]}",
+        )
+    declared_union = {
+        Path(path).resolve(strict=False)
+        for session in manifest["sessions"]
+        for path in session["fixed_files"]
+    }
+    # AC 30: parallel slices are no-commit workers (SD-103). index and HEAD are
+    # shared state that `fixed_files` disjointness cannot protect, so a slice
+    # that commits is a real integrity break.
+    #
+    # "HEAD moved at all" is a stricter proposition than the one this repo's own
+    # contract states, and it is the wrong one. `core/OPERATIONS.md` §5.10
+    # already accepts first-parent descendant HEAD movement during a declared
+    # sub-session chain under the same lineage proof as an in-place retry, and
+    # SD-103 makes the owner commit once after quiescence. Judging by movement
+    # alone therefore refused the owner's OWN commit -- and with a write-once
+    # baseline and an unrewindable HEAD that refusal had no recovery path.
+    #
+    # So the judgement is lineage first, then content: history that is not a
+    # first-parent descendant of the baseline commit was rewound or diverged and
+    # is refused outright, and a lineage-clean descent is a slice commit only
+    # when it actually carries a slice's `fixed_files`.
+    committed = set()
+    if baseline is not None:
+        head = _head_commit(worktree)
+        baseline_head = baseline.get("head_commit")
+        if head != baseline_head:
+            if not _first_parent_descends_from(worktree, baseline_head, head):
+                _refuse(
+                    "subdivision-commit-attempted",
+                    f"head {baseline_head} -> {head} is not a first-parent descendant",
+                )
+            committed = _git_committed_files(worktree, baseline_head, head)
+            slice_commits = sorted(committed & declared_union)
+            if slice_commits:
+                _refuse(
+                    "subdivision-commit-attempted",
+                    f"head {baseline_head} -> {head} carries "
+                    + ";".join(str(path) for path in slice_commits),
+                )
+    # Exempt a baseline-dirty path only while its CONTENT still matches the
+    # admission snapshot. Subtracting the path itself would excuse every later
+    # change to that file too, which is why AC 28 did not hold for the stage's
+    # own artifacts. A record written before the baseline carried digests keeps
+    # its original path-set meaning rather than being re-judged retroactively.
+    preexisting = {
+        path
+        for path, digest in _baseline_content_map(baseline).items()
+        if digest == _LEGACY_BASELINE_DIGEST or _content_digest(path) == digest
+    }
+    # A lineage-clean commit moves its files out of `git status` and into
+    # history, so the audit has to add them back or accepting the commit would
+    # silently blind the very measurement it just passed.
+    changed = _git_changed_files(worktree) | committed
+    outside = changed - declared_union - preexisting
+    if outside:
+        _refuse(
+            "subdivision-scope-violation",
+            ";".join(str(path) for path in sorted(outside)),
+        )
+    # The arbiter gate has two marker writers, and this is the second one:
+    # `_publish_completion_locked` calls this, and until now this path reached
+    # `write_completion_marker` directly. No SD-103 node currently arbitrates any
+    # group, so nothing escapes today -- but a gate that lives at one of two
+    # entrances is not a gate. One defensive call closes it.
+    _validate_auxiliary_arbiter(route, node, evidence)
     directory=completion_dir(route["route_id"])
     with _exclusive_lock(directory/f".{node_id}.completion.lock"):
         marker=write_completion_marker(
@@ -1841,6 +2654,10 @@ def main():
     d.add_argument("--registered-worker",choices=("0","1","false","true"))
     d.add_argument("--fallback-hop")
     d.add_argument("--subsession-manifest",help="aggregate declared sub-sessions into this one stage gate")
+    ar=sub.add_parser("arbitrate"); ar.add_argument("--route",required=True)
+    ar.add_argument("--group",required=True,help="realized auxiliary-bearing parallel group id")
+    ar.add_argument("--evidence",required=True,help="owner merge record carrying auxiliary_findings_considered")
+    ar.add_argument("--output")
     cl=sub.add_parser("close"); cl.add_argument("--route",required=True)
     cl.add_argument("--commit",help="result commit; defaults to HEAD in the route cwd")
     cl.add_argument("--summary",help="one line naming what the route produced")
@@ -1896,6 +2713,12 @@ def main():
             allow_stale_registry=a.command=="close",
         )
         if a.command=="verify": print(f"route_id={route['route_id']}\nroute_hash={route['route_hash']}")
+        elif a.command=="arbitrate":
+            evidence=Path(a.evidence).resolve()
+            if not evidence.is_file(): raise SystemExit("arbitration evidence missing")
+            record=arbitrate_group(route,a.group,evidence)
+            if a.output: atomic_write(a.output, record)
+            print(json.dumps(record,sort_keys=True))
         elif a.command=="close":
             outcome,created=close_route(route,a.route,a.commit,a.summary)
             print(json.dumps(outcome,sort_keys=True))

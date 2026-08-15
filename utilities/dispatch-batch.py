@@ -41,6 +41,8 @@ from dispatch_contract import (  # noqa: E402
 from dispatch_lifecycle import select_launch_lifecycle  # noqa: E402
 from replica_batch_contract import DIGEST, build_manifest  # noqa: E402
 from dispatch_degradation import record_degradation  # noqa: E402
+from dispatch_quality_peer import quality_peer_families  # noqa: E402
+from stage_session_contract import validate_subdivision_or_fallback  # noqa: E402
 from dispatch_allocation import (  # noqa: E402
     STRATEGY as ALLOCATION_STRATEGY,
     attempt_counts,
@@ -53,6 +55,14 @@ if CAPACITY_SPEC is None or CAPACITY_SPEC.loader is None:
     raise RuntimeError("harness-capacity loader unavailable")
 CAPACITY = importlib.util.module_from_spec(CAPACITY_SPEC)
 CAPACITY_SPEC.loader.exec_module(CAPACITY)
+
+ROUTE_SPEC = importlib.util.spec_from_file_location(
+    "capability_route_batch", ROOT / "utilities" / "capability-route.py"
+)
+if ROUTE_SPEC is None or ROUTE_SPEC.loader is None:
+    raise RuntimeError("capability-route loader unavailable")
+ROUTE_MODULE = importlib.util.module_from_spec(ROUTE_SPEC)
+ROUTE_SPEC.loader.exec_module(ROUTE_MODULE)
 
 NODE_SPEC = importlib.util.spec_from_file_location(
     "dispatch_node", ROOT / "utilities" / "dispatch-node.py"
@@ -242,6 +252,58 @@ def _persist_launched_degradation(
     )
 
 
+def _persist_sole_gate_degradation(
+    agent_home: Path,
+    route: dict[str, object],
+    diagnostics: dict[str, object],
+    results: list[dict[str, object]],
+) -> None:
+    """Persist one sole-gate degradation after a validated new child start.
+
+    Mirrors `_persist_launched_degradation`'s realization gate: the ledger only
+    records a dispatched outcome, so retries resolving to existing attempts or
+    prelaunch failures must not add a row. `leg_class` and `sole_gate` ride the
+    record so SD-100 typed reasons keep their distinguishing fields (D7).
+    """
+    if diagnostics.get("sole_gate") != "degraded":
+        return
+    if not any(row.get("launch_state") == "started" for row in results):
+        return
+    record_degradation(
+        route_id=route.get("route_id"), route_node=None,
+        route_hash=route.get("route_hash"), dispatch_depth=2,
+        fallback_hop=None, execution_surface="registered-headless",
+        writer="dispatch-batch.py", kind="degradation",
+        agent_home=agent_home,
+        reason="sole-gate-non-peer-harness",
+        detail=(
+            "no hard-eligible quality-peer family; group proceeded with "
+            "gate authority off the quality-peer set"
+        )[:512],
+        sole_gate="degraded",
+    )
+
+
+def _policy_by_profile(route, nodes):
+    """Collect sealed per-profile harness policies for the quality-peer derivation.
+
+    The owner policy (always deep for standard+ routes) plus every realized
+    node's own `harness_policy` keyed by its model_profile. Returns an empty
+    dict when no config-derived policy is present, which the caller treats as
+    not-applicable (D8-①).
+    """
+    by_profile: dict[str, object] = {}
+    owner = route.get("owner_harness_policy")
+    if isinstance(owner, dict):
+        by_profile.setdefault("deep", owner)
+    for node in nodes:
+        policy = node.get("harness_policy")
+        profile = node.get("model_profile")
+        if isinstance(policy, dict) and isinstance(profile, str) and profile:
+            by_profile.setdefault(profile, policy)
+    return by_profile
+
+
 def assign_harnesses(
     route: dict[str, object],
     nodes: list[dict[str, object]],
@@ -293,6 +355,60 @@ def assign_harnesses(
 
     combinations = list(itertools.product(*options))
     distinct = [rows for rows in combinations if len({row[0] for row in rows}) >= 2]
+    # SD-100 ① peer-gate (W1b): a realized peer leg must land on a quality-peer
+    # family, otherwise the group's gate authority would rest entirely on
+    # non-quality-peer harnesses with zero ledger evidence (plan.md 1.2
+    # regression window). Placed between the `distinct` computation and the
+    # `elif allow_degraded:` branch; `allow_degraded` never bypasses it (AC 11).
+    # With no sealed harness_policy the gate is not-applicable (D8-①).
+    policy_by_profile = _policy_by_profile(route, nodes)
+    quality_peer = (
+        quality_peer_families(policy_by_profile) if policy_by_profile else None
+    )
+    sole_gate = "not-applicable" if quality_peer is None else "ok"
+    if quality_peer is not None:
+        peer_indices = [
+            index for index, node in enumerate(nodes)
+            if node.get("leg_class") == "peer"
+        ]
+        if peer_indices:
+            gated = [
+                rows for rows in combinations
+                if any(rows[index][0] in quality_peer for index in peer_indices)
+            ]
+            if gated:
+                combinations = gated
+                distinct = [
+                    rows for rows in gated
+                    if len({row[0] for row in rows}) >= 2
+                ]
+            elif usable and (set(usable) & quality_peer):
+                raise BatchError(
+                    "parallel-cross-harness-unavailable",
+                    "peer-gate:no-peer-leg-on-quality-peer-family",
+                    degradation_reason="sole-gate-non-peer-harness",
+                )
+            else:
+                # No hard-eligible quality-peer family at all, so every realized
+                # peer leg would land outside the quality-peer set and this
+                # stage's whole gate authority would rest on a non-peer harness.
+                # AC 11 is explicit that this is row 0 / model process 0 "even
+                # with --allow-degraded-independence", and SD-100 13.30.2 says
+                # a general flag does not relax the sole-gate rule -- the only
+                # user override is an explicit per-node harness pinned into the
+                # route record at compile time. So the refusal is raised here,
+                # BEFORE the `allow_degraded` branch below can reach it, and it
+                # carries the sole-gate reason rather than the usable-family
+                # one: the cause is the rule, not a shortage of families.
+                # (no `sole_gate = "degraded"` here: the raise on the next line
+                # makes it unreachable, and a refusal produces the blocked
+                # receipt below, never the `selection_diagnostics` one. The
+                # typed record of this refusal is `degradation_reason`.)
+                raise BatchError(
+                    "parallel-cross-harness-unavailable",
+                    "peer-gate:no-quality-peer-family-hard-eligible",
+                    degradation_reason="sole-gate-non-peer-harness",
+                )
     independence = "cross-harness"
     if len(usable) >= 2:
         # Group width is >= 2 and every leg holds >= 1 option, so two usable
@@ -312,6 +428,12 @@ def assign_harnesses(
     elif allow_degraded:
         independence = "degraded-same-harness"
     else:
+        # G2: the sole-gate proviso permits a non-quality-peer assignment, but
+        # it never bypasses the cross-family admission gate. With fewer than
+        # two usable families the group cannot stay cross-harness; same-family
+        # placement is refused unless --allow-degraded-independence is given
+        # (spec 13.30.2 "현행 거동 정정"), and `sole_gate == "degraded"` must
+        # not short-circuit that fail-closed order (AC 11).
         detail = f"usable={','.join(usable) or '-'}"
         codes = _exclusion_codes(exclusions, exclude=set(usable))
         if codes:
@@ -399,6 +521,8 @@ def assign_harnesses(
     diagnostics = {
         "families_considered": list(SUPPORTED_BATCH_HARNESSES),
         "usable_families": usable,
+        "quality_peer_families": sorted(quality_peer) if quality_peer is not None else None,
+        "sole_gate": sole_gate,
         "family_exclusions": {
             adapter: sorted(reasons)
             for adapter, reasons in sorted(exclusions.items())
@@ -516,6 +640,21 @@ def reserve_batch(
     )
     if result.returncode or not valid_payload:
         detail = (result.stderr or result.stdout).strip()[:512]
+        # AC 6/7: a capacity/budget shortfall is a full-N atomic admission
+        # shortfall (typed reason), not a general governor denial. The batch
+        # never partially admits (row 0 / model process 0) and never narrows
+        # width by dropping an auxiliary leg.
+        if any(
+            marker in detail
+            for marker in (
+                "rolling model-worker start budget reached",
+                "global model-worker cap reached",
+                "class cap reached",
+            )
+        ):
+            raise BatchError(
+                "governor-atomic-admission-shortfall", detail or "atomic-reserve-failed"
+            )
         raise BatchError("model-worker-governor-denied", detail or "atomic-reserve-failed")
     return tokens
 
@@ -965,12 +1104,73 @@ def batch_receipt(
         "newly_started": started_count,
         "existing": existing_count,
         "legs": results,
+        # fm M5 / alt M3 symmetry: `stage-dispatch-fallback.py` prints
+        # `sole_gate=<value>` as a top-level receipt field, so a consumer must
+        # be able to read the same key at the same level here instead of
+        # digging into `selection_diagnostics`. A group with no sealed
+        # harness_policy reports `not-applicable`, the same word the fallback
+        # path uses (D8-①/④), never a silently optimistic "ok".
+        "sole_gate": str(
+            (selection_diagnostics or {}).get("sole_gate") or "not-applicable"
+        ),
     }
     if selection_diagnostics is not None:
         receipt["selection_diagnostics"] = selection_diagnostics
     if interrupted_signal:
         receipt["signal"] = interrupted_signal
     return receipt, success
+
+
+def _bind_subdivision_sessions(
+    manifest_sessions: list[dict[str, object]],
+    nodes: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    """Bind each slice to its leg by declared key, never by list position (N1).
+
+    `assign_harnesses` returns legs in `nodes` order while the manifest's session
+    order is whatever its author wrote. Zipping the two by index means a manifest
+    written in a different order silently hands a slice's `fixed_files` to the
+    wrong leg -- a disjointness proof that no longer describes what will run.
+    A count check cannot see this. Every session must therefore name its leg
+    (`node`, or `leg_index` as the positional spelling), and a session that
+    names neither is a typed refusal rather than an assumed position.
+    """
+    node_ids = [str(node["id"]) for node in nodes]
+    bound: dict[str, dict[str, object]] = {}
+    for offset, session in enumerate(manifest_sessions):
+        declared = session.get("node")
+        if declared is None:
+            index = session.get("leg_index")
+            if isinstance(index, bool) or not isinstance(index, int):
+                raise BatchError(
+                    "subdivision-manifest-session-leg-unbound",
+                    f"session={session.get('subsession_id') or offset}",
+                )
+            if not 0 <= index < len(node_ids):
+                raise BatchError(
+                    "subdivision-manifest-session-leg-unknown",
+                    f"leg_index={index}:legs={len(node_ids)}",
+                )
+            declared = node_ids[index]
+        declared = str(declared)
+        if declared not in node_ids:
+            raise BatchError(
+                "subdivision-manifest-session-leg-unknown",
+                f"node={declared}",
+            )
+        if declared in bound:
+            raise BatchError(
+                "subdivision-manifest-session-leg-duplicate",
+                f"node={declared}",
+            )
+        bound[declared] = session
+    missing = [node_id for node_id in node_ids if node_id not in bound]
+    if missing:
+        raise BatchError(
+            "subdivision-manifest-session-leg-unbound",
+            f"legs={','.join(missing)}",
+        )
+    return [bound[node_id] for node_id in node_ids]
 
 
 def _record_failed_legs(route, results, agent_home):
@@ -1012,6 +1212,11 @@ def main(argv: list[str] | None = None) -> int:
         default=DEFAULT_PROMPT,
     )
     parser.add_argument("--allow-degraded-independence", action="store_true")
+    parser.add_argument(
+        "--subdivision-manifest",
+        help="optional SD-103 parallel subdivision manifest; a disjointness "
+        "violation falls back to a single session instead of raising",
+    )
     args = parser.parse_args(argv)
     if args.parallel_group and args.replica_group and args.parallel_group != args.replica_group:
         parser.error("--parallel-group and --replica-group aliases must match")
@@ -1026,6 +1231,59 @@ def main(argv: list[str] | None = None) -> int:
         route_path = args.route.resolve()
         route = load_route(route_path)
         nodes = parallel_nodes(route, args.parallel_group)
+        if getattr(args, "subdivision_manifest", None):
+            node = next(
+                (candidate for candidate in nodes if candidate.get("id") == args.parallel_group),
+                None,
+            ) or nodes[0]
+            def _record(route_id, route_node, detail):
+                record_degradation(
+                    route_id=route_id, route_node=route_node,
+                    route_hash=route.get("route_hash"), dispatch_depth=2,
+                    fallback_hop=None, execution_surface="registered-headless",
+                    writer="dispatch-batch.py", kind="degradation",
+                    reason="subdivision-disjointness-unproven",
+                    detail=str(detail)[:512],
+                )
+            _manifest, _reason = validate_subdivision_or_fallback(
+                args.subdivision_manifest, route=route, node=node, record=_record
+            )
+            args.subdivision_fallback = _reason is not None
+            if args.subdivision_fallback:
+                # G7: typed single-session descent. The manifest could not be
+                # proven disjoint/in-scope (the fallback ledger row was already
+                # recorded above); this admission never becomes a 2..4-way
+                # replica batch. dispatch-batch.py's whole pipeline (build_manifest,
+                # independence axes, quality-peer gating) is structurally a
+                # 2..4-way contract, so a fallback exits here with a typed
+                # receipt instead of forcing a 1-leg batch through it -- the
+                # caller runs the node as one ordinary (non-batch) session.
+                print(json.dumps({
+                    "schema_version": 2,
+                    "state": "single-session-required",
+                    "action": args.action,
+                    "parallel_group": args.parallel_group,
+                    "replica_group": args.parallel_group,
+                    "reason": "subdivision-disjointness-unproven",
+                }, separators=(",", ":"), sort_keys=True))
+                return 0
+            else:
+                manifest_sessions = _manifest["sessions"]
+                if len(manifest_sessions) != len(nodes):
+                    raise BatchError(
+                        "subdivision-manifest-session-count-mismatch",
+                        f"sessions={len(manifest_sessions)}:legs={len(nodes)}",
+                    )
+                args.subdivision_manifest_sessions = _bind_subdivision_sessions(
+                    manifest_sessions, nodes
+                )
+                # anchor M3: the post-hoc diff-scope audit at the stage gate is
+                # only slice attribution if it can subtract the worktree state
+                # at admission. Record it here, keyed by manifest hash, so a
+                # resumed admission recovers the original start state.
+                ROUTE_MODULE.record_subdivision_baseline(
+                    route, str(node["id"]), _manifest
+                )
         parent_identity = DISPATCH_NODE.current_parent_identity()
         if parent_identity is None:
             raise BatchError("parent-runtime-identity-missing")
@@ -1076,7 +1334,22 @@ def main(argv: list[str] | None = None) -> int:
     ) as exc:
         reason = getattr(exc, "reason", "batch-validation-failed")
         detail = getattr(exc, "detail", str(exc))
-        return fail(reason, 78 if reason in PRELAUNCH_PROCESS_BLOCK_REASONS else 65, detail=detail)
+        # M4: `degradation_reason` is the typed record of WHY a refusal happened
+        # when the reason word alone does not say. AC 11's sole-gate refusal
+        # raises `parallel-cross-harness-unavailable`, which reads as a shortage
+        # of harness families; the sole-gate rule that actually refused it lived
+        # only on the exception object and died here, leaving PRD 13.30.2's "no
+        # silent path" with nothing typed anywhere in the cycle.
+        extra = {}
+        degradation_reason = getattr(exc, "degradation_reason", None)
+        if degradation_reason:
+            extra["degradation_reason"] = degradation_reason
+        return fail(
+            reason,
+            78 if reason in PRELAUNCH_PROCESS_BLOCK_REASONS else 65,
+            detail=detail,
+            **extra,
+        )
 
     lifecycle = select_launch_lifecycle()
     required_axes = list(nodes[0].get("parallel_independence_axes", ["cross-harness"]))
@@ -1097,8 +1370,9 @@ def main(argv: list[str] | None = None) -> int:
     assignment_digest = "sha256:" + hashlib.sha256(
         args.prompt_text.encode("utf-8")
     ).hexdigest()
+    manifest_sessions = getattr(args, "subdivision_manifest_sessions", None)
     legs = []
-    for node, adapter, hop, ordinal in assignments:
+    for leg_index, (node, adapter, hop, ordinal) in enumerate(assignments):
         node_id = str(node["id"])
         slug = parallel_slug(args.slug_prefix, node_id)
         attempt_id = stable_attempt_id(
@@ -1110,21 +1384,37 @@ def main(argv: list[str] | None = None) -> int:
             adapter,
             ordinal,
         )
-        legs.append(
-            {
-                "node": node_id,
-                "adapter": adapter,
-                "hop": hop,
-                "ordinal": ordinal,
-                "slug": slug,
-                "attempt_id": attempt_id,
-                "assignment_sha256": assignment_digest,
-                "independence": independence,
-                "model_profile": str(node.get("model_profile")),
-                "perspective": str(node.get("perspective")),
-                "parallel_leg_index": int(node.get("parallel_leg_index", len(legs))),
-            }
-        )
+        leg = {
+            "node": node_id,
+            "adapter": adapter,
+            "hop": hop,
+            "ordinal": ordinal,
+            "slug": slug,
+            "attempt_id": attempt_id,
+            "assignment_sha256": assignment_digest,
+            "independence": independence,
+            "model_profile": str(node.get("model_profile")),
+            "perspective": str(node.get("perspective")),
+            "parallel_leg_index": int(node.get("parallel_leg_index", leg_index)),
+            "leg_class": str(node.get("leg_class") or "peer"),
+            "auxiliary_check": (
+                str(node["auxiliary_check"])
+                if node.get("leg_class") == "auxiliary"
+                else None
+            ),
+        }
+        if manifest_sessions is not None:
+            # G7: consume the validated SD-103 subdivision manifest instead of
+            # discarding it -- each leg carries the exact sub-session identity
+            # and disjoint fixed_files the admission check already proved safe.
+            # N1: `_bind_subdivision_sessions` re-ordered the sessions onto
+            # `nodes` by each session's declared `node`/`leg_index` key inside
+            # the pre-launch gate, and `assignments` preserves `nodes` order --
+            # so this index is leg identity, not an assumed manifest ordering.
+            session = manifest_sessions[leg_index]
+            leg["subsession_id"] = str(session["subsession_id"])
+            leg["fixed_files"] = list(session["fixed_files"])
+        legs.append(leg)
     manifest, manifest_digest, leg_digests = build_manifest(
         parallel_group=args.parallel_group,
         route_id=str(route["route_id"]),
@@ -1144,6 +1434,12 @@ def main(argv: list[str] | None = None) -> int:
                 "model_profile": str(leg["model_profile"]),
                 "perspective": str(leg["perspective"]),
                 "parallel_leg_index": int(leg["parallel_leg_index"]),
+                "leg_class": str(leg["leg_class"]),
+                **(
+                    {"auxiliary_check": str(leg["auxiliary_check"])}
+                    if leg.get("leg_class") == "auxiliary"
+                    else {}
+                ),
             }
             for leg in legs
         ],
@@ -1262,6 +1558,19 @@ def main(argv: list[str] | None = None) -> int:
                     peers=peers,
                 )
             except BatchError as exc:
+                if exc.reason == "governor-atomic-admission-shortfall":
+                    # AC 6/7 ledger: the full-N atomic reservation failed with
+                    # row 0 / model process 0 and no partial (width-narrowed)
+                    # admission. The owner's bounded retry then closes the stage
+                    # with the typed failure; this records the reason once.
+                    record_degradation(
+                        route_id=route.get("route_id"), route_node=args.parallel_group,
+                        route_hash=route.get("route_hash"), dispatch_depth=2,
+                        fallback_hop=None, execution_surface="registered-headless",
+                        writer="dispatch-batch.py", kind="degradation",
+                        reason="governor-atomic-admission-shortfall",
+                        detail=str(exc.detail or "")[:512],
+                    )
                 return fail(
                     exc.reason,
                     75,
@@ -1428,6 +1737,7 @@ def main(argv: list[str] | None = None) -> int:
         selection_diagnostics=diagnostics,
     )
     _persist_launched_degradation(agent_home, route, diagnostics, results)
+    _persist_sole_gate_degradation(agent_home, route, diagnostics, results)
     receipt["degradation_ledger"] = _record_failed_legs(route, results, agent_home) or "-"
     print(json.dumps(receipt, separators=(",", ":"), sort_keys=True))
     if interrupted_signal:

@@ -215,7 +215,9 @@ class TestRoute(unittest.TestCase):
        self.assertEqual(owner["role"],"deep orchestrator")
       expected=json.loads(json.dumps(recipe["standard_plus"]["nodes"]))
       expected=R._expand_parallel_groups(
-       expected,recipe["standard_plus"].get("parallel_groups"),intensity)
+       expected,recipe["standard_plus"].get("parallel_groups"),intensity,
+       recipe["capability"],
+       auxiliary_check_units=registry.get("auxiliary_check_units"))
       for node in expected: node.pop("fallback_hops",None)
       def stable(nodes):
        return [
@@ -267,7 +269,7 @@ class TestRoute(unittest.TestCase):
   self.assertNotIn("plan-alternative",[x["id"] for x in standard["nodes"]])
   strong=self.compile_v3(evidence)
   self.assertEqual([x["id"] for x in strong["nodes"]],
-   ["frame","frame-alternative","frame-contrarian","plan","plan-alternative","plan-check","execute","impl-review","impl-review-alternative","test","report"])
+   ["frame","frame-alternative","frame-contrarian","plan","plan-alternative","plan-check","plan-check-alternative","execute","impl-review","impl-review-alternative","test","report"])
   base=next(n for n in strong["nodes"] if n["id"]=="impl-review")
   alternative=next(n for n in strong["nodes"] if n["id"]=="impl-review-alternative")
   self.assertEqual(base["parallel_group"],"impl-review")
@@ -357,12 +359,486 @@ class TestRoute(unittest.TestCase):
   self.assertEqual(units,{
    "frame":"plan/frame","frame-alternative":"plan/frame","frame-contrarian":"plan/frame",
    "plan":"plan/plan-author","plan-alternative":"plan/plan-author",
-   "plan-check":"qa/plan-review","execute":"dev/backend",
+   "plan-check":"qa/plan-review","plan-check-alternative":"qa/plan-review","execute":"dev/backend",
    "impl-review":"qa/code-review","impl-review-alternative":"qa/code-review",
    "test":"qa/test","report":"editorial/report"})
   tampered=json.loads(json.dumps(route)); tampered["nodes"][0]["unit"]="dev/backend"
   with self.assertRaisesRegex(ValueError,"stale or modified route hash"):
    R.verify_route(tampered,R.ROOT)
+ def test_ac20_new_groups_realize_exactly_declared_legs(self):
+  evidence=self.dispatch(self.nested())
+  expectations={
+   ("autopilot-code","dev","strong"):["plan-check","plan-check-alternative"],
+   ("autopilot-code","dev","thorough"):["plan-check","plan-check-alternative","plan-check-simplicity"],
+   ("autopilot-design","default","strong"):["visual-verify","visual-verify-alternative"],
+   ("autopilot-draft","doc","strong"):["strategy-review","strategy-review-alternative","quality-review","quality-review-alternative"],
+   ("autopilot-draft","doc","thorough"):["strategy-review","strategy-review-alternative","quality-review","quality-review-alternative","quality-review-assumption"],
+   ("autopilot-lab","setup","strong"):["run-verify","run-verify-alternative"],
+   ("autopilot-ship","default","strong"):["security-review","security-review-alternative"],
+   ("autopilot-ship","default","adversarial"):["security-review","security-review-alternative","security-review-failure-mode"],
+  }
+  for (cap,mode,intensity),ids in expectations.items():
+   with self.subTest(capability=cap,mode=mode,intensity=intensity):
+    route=R.compile_route(cap,mode,intensity,R.ROOT,R.ROOT,predicates=[],transport="headless",
+     tracking="tracked",tracked_gate_evidence=self.args()["tracked_gate_evidence"],dispatch_evidence=evidence)
+    realized=[n["id"] for n in route["nodes"]]
+    for node_id in ids:
+     self.assertIn(node_id,realized)
+    # exactly the declared legs realize for the new groups — no extra siblings
+    suffixes=("anchor","alternative","simplicity","assumption","test-gap","edge-case","failure-mode")
+    new_group_ids={node_id for node_id in ids for _ in [0]}
+    derived=set()
+    for node_id in ids:
+     base=node_id
+     for suffix in suffixes:
+      if node_id.endswith("-"+suffix):
+       base=node_id[:-(len(suffix)+1)]
+       break
+     derived.add(base)
+    for n in route["nodes"]:
+     if n.get("parallel_group") in derived:
+      self.assertIn(n["id"],ids)
+ def test_ac2_width_two_and_three_realize_disjoint_peer_and_aux(self):
+  evidence=self.dispatch(self.nested())
+  strong=R.compile_route(**self.args(requested_intensity="strong",predicates=[],signals=["shared-contract"],transport="headless",inline_reason=None,dispatch_evidence=evidence))
+  thorough=R.compile_route(**self.args(requested_intensity="thorough",predicates=[],signals=["shared-contract"],transport="headless",inline_reason=None,dispatch_evidence=evidence))
+  strong_ids={n["id"] for n in strong["nodes"] if n.get("parallel_group")=="plan-check"}
+  thorough_ids={n["id"] for n in thorough["nodes"] if n.get("parallel_group")=="plan-check"}
+  self.assertEqual(strong_ids,{"plan-check","plan-check-alternative"})
+  self.assertEqual(thorough_ids,{"plan-check","plan-check-alternative","plan-check-simplicity"})
+  peer=[n for n in thorough["nodes"] if n["id"] in ("plan-check","plan-check-alternative")]
+  aux=[n for n in thorough["nodes"] if n["id"]=="plan-check-simplicity"]
+  self.assertEqual({n.get("leg_class") for n in peer},{"peer"})
+  self.assertEqual(aux[0]["leg_class"],"auxiliary")
+  self.assertEqual(aux[0]["auxiliary_check"],"simplicity-check")
+  scopes=[set(n["write_scope"]) for n in peer+aux]
+  for i,left in enumerate(scopes):
+   for right in scopes[i+1:]:
+    self.assertTrue(left.isdisjoint(right),f"overlap {left} {right}")
+  recompiled=R.compile_route(**self.args(requested_intensity="thorough",predicates=[],signals=["shared-contract"],transport="headless",inline_reason=None,dispatch_evidence=evidence))
+  self.assertEqual(thorough["route_hash"],recompiled["route_hash"])
+ def test_ac21_terminal_gate_duplication_is_rejected(self):
+  registry=R.TOPO.load_registry()
+  recipe=R.TOPO.resolve_recipe(registry,"autopilot-code","dev")
+  nodes=json.loads(json.dumps(recipe["standard_plus"]["nodes"]))
+  nodes[0]["terminal"]=True; nodes[0]["terminal_gate"]="dup-terminal"
+  nodes[1]["terminal"]=True; nodes[1]["terminal_gate"]="dup-terminal"
+  with self.assertRaisesRegex(ValueError,"terminal gate dup-terminal held by both"):
+   R._workflow_contract(registry,nodes,[])
+  evidence=self.dispatch(self.nested())
+  research=R.compile_route("autopilot-research","academic","thorough",R.ROOT,R.ROOT,predicates=[],transport="headless",
+   tracking="tracked",tracked_gate_evidence=self.args()["tracked_gate_evidence"],dispatch_evidence=evidence)
+  self.assertEqual(research["workflow_contract"]["terminal_nodes"],["claim-verify"])
+ def test_ac22_terminal_anchor_auxiliary_and_pipeline_rejects(self):
+  # post-deploy-verify is terminal:true. G6/AC 21 now rejects ANY parallel
+  # group declared on a non-grandfathered terminal node at declaration, which
+  # strictly subsumes D4's narrower "terminal anchor has no arbiter for
+  # auxiliary findings" case -- the G6 message fires first.
+  r=R.TOPO.load_registry()
+  broken=json.loads(json.dumps(r))
+  ship=next(x for x in broken["recipes"] if x["capability"]=="autopilot-ship")
+  ship["standard_plus"]["parallel_groups"].append({
+   "id":"post-deploy-verify","node":"post-deploy-verify","kind":"verify","min_intensity":"strong",
+   "width_by_intensity":{"strong":2,"thorough":3,"adversarial":3},"join_policy":"all",
+   "independence_axes":["cross-harness","model-profile","perspective"],
+   "legs":[
+    {"suffix":"anchor","perspective":"primary-post-deploy-verify","model_profile":"light","leg_class":"peer"},
+    {"suffix":"alternative","perspective":"independent-post-deploy-verify","model_profile":"balanced-deep","leg_class":"peer"},
+    {"suffix":"failure-mode","perspective":"failure-mode-check","model_profile":"light","leg_class":"auxiliary","auxiliary_check":"failure-mode-check"},
+   ]})
+  with self.assertRaisesRegex(R.TOPO.TopologyError,"parallel group on terminal node"):
+   R.TOPO.validate_registry(broken)
+ def test_d4_terminal_anchor_cannot_arbitrate_auxiliary_findings(self):
+  # D4 replacement fixture. The assertion above was repurposed to G6's
+  # message, leaving nothing guarding D4's own rule: a terminal anchor has no
+  # downstream verdict that can carry `auxiliary_findings_considered`, so it
+  # structurally has no arbiter. G6 masks it for every ordinary terminal node,
+  # but NOT for the recorded `autopilot-research claim-verify` grandfather --
+  # which is precisely where the rule still has to bite on its own. That is
+  # also why PRD 13.30.4's `edge-case-check` placement has zero realized slot.
+  r=R.TOPO.load_registry()
+  broken=json.loads(json.dumps(r))
+  research=next(x for x in broken["recipes"] if x["capability"]=="autopilot-research")
+  self.assertTrue(next(n for n in research["standard_plus"]["nodes"]
+                       if n["id"]=="claim-verify").get("terminal"))
+  group=next(g for g in research["standard_plus"]["parallel_groups"]
+             if g["id"]=="claim-verify")
+  group["width_by_intensity"]["thorough"]=3
+  group["width_by_intensity"]["adversarial"]=3
+  group["legs"]=group["legs"]+[{
+   "suffix":"edge-case","perspective":"edge-case-check","model_profile":"light",
+   "leg_class":"auxiliary","auxiliary_check":"edge-case-check"}]
+  with self.assertRaisesRegex(
+   R.TOPO.TopologyError,
+   r"terminal anchor claim-verify has no arbiter for auxiliary findings"):
+   R.TOPO.validate_registry(broken)
+  # the grandfather without an auxiliary leg still validates and compiles
+  R.TOPO.validate_registry(R.TOPO.load_registry())
+ def test_g6_parallel_group_on_terminal_node_rejected_unless_grandfathered(self):
+  # G6/AC 21: a parallel group on a terminal node compile-rejects unless the
+  # (capability, group id) pair is the recorded autopilot-research claim-verify
+  # grandfather. Declaring one on report (autopilot-code) must reject.
+  r=R.TOPO.load_registry()
+  broken=json.loads(json.dumps(r))
+  code=next(x for x in broken["recipes"] if x["capability"]=="autopilot-code")
+  self.assertTrue(next(n for n in code["standard_plus"]["nodes"] if n["id"]=="report").get("terminal"))
+  code["standard_plus"]["parallel_groups"].append({
+   "id":"report","node":"report","kind":"verify","min_intensity":"strong",
+   "width_by_intensity":{"strong":2,"thorough":2,"adversarial":2},"join_policy":"all",
+   "independence_axes":["cross-harness","model-profile","perspective"],
+   "legs":[
+    {"suffix":"anchor","perspective":"primary-report","model_profile":"light","leg_class":"peer"},
+    {"suffix":"alternative","perspective":"independent-report","model_profile":"balanced-deep","leg_class":"peer"},
+   ]})
+  with self.assertRaisesRegex(R.TOPO.TopologyError,"parallel group on terminal node 'report' is rejected"):
+   R.TOPO.validate_registry(broken)
+  # The grandfathered claim-verify group itself must still validate and compile.
+  registry=R.TOPO.load_registry(); R.TOPO.validate_registry(registry)
+  evidence=self.dispatch(self.nested())
+  route=R.compile_route(
+   "autopilot-research","market","strong",R.ROOT,R.ROOT,predicates=[],
+   transport="headless",tracking="tracked",
+   tracked_gate_evidence=self.args()["tracked_gate_evidence"],
+   dispatch_evidence=evidence)
+  ids=[node["id"] for node in route["nodes"]]
+  self.assertIn("claim-verify",ids)
+  self.assertIn("claim-verify-alternative",ids)
+  anchor=next(n for n in route["nodes"] if n["id"]=="claim-verify")
+  alt=next(n for n in route["nodes"] if n["id"]=="claim-verify-alternative")
+  self.assertTrue(anchor.get("terminal"))
+  self.assertNotIn("terminal",alt)
+  # autopilot-code test / autopilot-research synthesis: pipeline-stage anchor
+  # without a direct downstream review-worker arbiter already rejects the group.
+  for capability,node in (("autopilot-code","test"),("autopilot-research","synthesis")):
+   broken=json.loads(json.dumps(r))
+   recipe=next(x for x in broken["recipes"] if x["capability"]==capability)
+   recipe["standard_plus"]["parallel_groups"].append({
+    "id":node,"node":node,"kind":"verify","min_intensity":"strong",
+    "width_by_intensity":{"strong":2,"thorough":2,"adversarial":2},"join_policy":"all",
+    "independence_axes":["cross-harness","model-profile","perspective"],
+    "legs":[
+     {"suffix":"anchor","perspective":"primary-"+node,"model_profile":"light","leg_class":"peer"},
+     {"suffix":"alternative","perspective":"independent-"+node,"model_profile":"balanced-deep","leg_class":"peer"},
+    ]})
+   with self.subTest(capability=capability):
+    with self.assertRaisesRegex(R.TOPO.TopologyError,"requires a direct review arbiter"):
+     R.TOPO.validate_registry(broken)
+  # registry-level guard: no new group may target post-deploy-verify at all.
+  for recipe in r["recipes"]:
+   for group in recipe["standard_plus"].get("parallel_groups",[]):
+    self.assertNotEqual(group.get("node"),"post-deploy-verify")
+ def test_ac24_plan_check_two_way_is_read_only_arbiter(self):
+  # AC 24: the 2-way plan-check group merges under the stricter-wins review
+  # merge contract; the check itself stays read-only (writes only its own
+  # review bucket, never plan.md) and its unit is read_only.
+  evidence=self.dispatch(self.nested())
+  strong=R.compile_route(**self.args(requested_intensity="strong",predicates=[],signals=["shared-contract"],transport="headless",inline_reason=None,dispatch_evidence=evidence))
+  plan_checks=[n for n in strong["nodes"] if n.get("parallel_group")=="plan-check"]
+  self.assertEqual({n["id"] for n in plan_checks},{"plan-check","plan-check-alternative"})
+  for n in plan_checks:
+   self.assertEqual(n["unit"],"qa/plan-review")
+   self.assertNotIn("plan.md",n["write_scope"])
+   self.assertEqual(n.get("leg_class"),"peer")
+ def research_route(self,intensity="thorough"):
+  return R.compile_route(
+   "autopilot-research","market",intensity,R.ROOT,R.ROOT,predicates=[],
+   transport="headless",tracking="tracked",
+   tracked_gate_evidence=self.args()["tracked_gate_evidence"],
+   dispatch_evidence=self.dispatch(self.nested()))
+ def test_g1_auxiliary_arbiter_is_never_the_anchor(self):
+  # G1 root cause: the gate used to fire on the group's ANCHOR, a leg that runs
+  # concurrently with the auxiliary and therefore cannot have considered its
+  # findings. PRD 13.30.4 names a different arbiter per anchor kind, and in no
+  # case is it the anchor. All six realized auxiliary-bearing groups must
+  # resolve -- an unresolvable arbiter is a typed failure, never a silent pass.
+  expected={
+   ("autopilot-code","dev","thorough","plan-check"):("owner-merge",None),
+   ("autopilot-draft","paper","thorough","quality-review"):("owner-merge",None),
+   ("autopilot-ship","default","adversarial","security-review"):("owner-merge",None),
+   ("autopilot-spec","app","thorough","review"):("owner-merge",None),
+   ("autopilot-research","market","thorough","retrieval"):("node","synthesis"),
+   ("autopilot-spec","app","thorough","research"):("node","review"),
+  }
+  evidence=self.dispatch(self.nested())
+  seen=set()
+  for (capability,mode,intensity,group),arbiter in expected.items():
+   with self.subTest(capability=capability,group=group):
+    route=R.compile_route(
+     capability,mode,intensity,R.ROOT,R.ROOT,predicates=[],transport="headless",
+     tracking="tracked",tracked_gate_evidence=self.args()["tracked_gate_evidence"],
+     dispatch_evidence=evidence)
+    self.assertTrue(R._realized_auxiliary_nodes(route,group))
+    self.assertEqual(R._resolve_auxiliary_arbiter(route,group),arbiter)
+    anchor=next(n for n in route["nodes"]
+                if n.get("parallel_group")==group and n.get("parallel_leg_index")==0)
+    self.assertNotEqual(arbiter,("node",anchor["id"]))
+    # M1: the registry's `auxiliary_arbiter` declaration must sit where this
+    # resolution says the arbiter is, not on the anchor. The topology guard and
+    # the runtime resolver are two implementations of the same proposition, and
+    # a registry that declares the pre-G1 world reads as the pre-G1 world even
+    # when the runtime no longer does.
+    contracts=R.TOPO.load_registry()["completion_gate_contracts"]
+    anchor_gate=contracts.get(anchor["completion_gate"],{})
+    if arbiter[0]=="owner-merge":
+     # no route node arbitrates THIS group, so its anchor's gate carries the
+     # flag only if that same node arbitrates some OTHER group. `spec-review`
+     # is exactly that overlap: node `review` anchors the owner-merge `review`
+     # group and is the node arbiter of `research`.
+     if anchor_gate.get("auxiliary_arbiter") is True:
+      self.assertTrue(R._auxiliary_groups_arbitrated_by(route,anchor["id"]),
+                      f"{anchor['completion_gate']} declares auxiliary_arbiter "
+                      "but that node arbitrates no group")
+    else:
+     arbiter_node=next(n for n in route["nodes"] if n["id"]==arbiter[1])
+     self.assertIs(contracts[arbiter_node["completion_gate"]].get("auxiliary_arbiter"),
+                   True)
+    seen.add((capability,group))
+  # F1: `len(seen)` compared this dict against itself, so a SEVENTH
+  # auxiliary-bearing group added to the registry would have passed in silence.
+  # Ask the registry for the set instead and hold the expectation to it.
+  declared={
+   (recipe["capability"],group["id"])
+   for recipe in R.TOPO.load_registry()["recipes"]
+   for group in (recipe.get("standard_plus") or {}).get("parallel_groups",[])
+   if any(leg.get("leg_class")=="auxiliary" for leg in group.get("legs",[]))
+  }
+  self.assertEqual(seen,declared)
+ def unresolvable_arbiter_route(self):
+  # SD-102 does not cap a map-worker anchor's consumer count and the topology
+  # check does not count it, so one registry edit reaches this shape.
+  def leg(i,node_id,cls):
+   return {"id":node_id,"depends_on":["seed"],"kind":"map-worker",
+           "completion_gate":f"gate-{node_id}","dispatch_depth":2,
+           "parallel_group":"map","parallel_leg_index":i,"parallel_anchor":"map",
+           "leg_class":cls}
+  return {"dispatch_contract_version":3,"route_id":"rt-m3",
+          "route_hash":"sha256:"+"c"*64,"registry_digest":"sha256:"+"d"*64,
+          "nodes":[
+           {"id":"seed","depends_on":[],"kind":"pipeline-stage",
+            "completion_gate":"gate-seed","dispatch_depth":2},
+           leg(0,"map","peer"),leg(1,"map-alt","peer"),leg(2,"map-aux","auxiliary"),
+           {"id":"consumer-a","depends_on":["map"],"kind":"pipeline-stage",
+            "completion_gate":"gate-a","dispatch_depth":2},
+           {"id":"consumer-b","depends_on":["map"],"kind":"pipeline-stage",
+            "completion_gate":"gate-b","dispatch_depth":2},
+           {"id":"unrelated","depends_on":["seed"],"kind":"pipeline-stage",
+            "completion_gate":"gate-u","dispatch_depth":2}]}
+ def test_m3_unresolvable_arbiter_does_not_block_unrelated_completions(self):
+  # M3: `_validate_auxiliary_arbiter` runs on EVERY node's completion, so a
+  # single group's declaration error used to refuse the completion of nodes that
+  # arbitrate nothing -- one local error became a route-wide halt. The read-only
+  # observer already degraded it to a failing row; only the writer raised, and
+  # that asymmetry was the defect.
+  route=self.unresolvable_arbiter_route()
+  with self.assertRaisesRegex(ValueError,"auxiliary-arbiter-ambiguous"):
+   R._resolve_auxiliary_arbiter(route,"map")
+  self.assertIn("map",R.owner_merge_auxiliary_groups(route))
+  with tempfile.TemporaryDirectory() as td:
+   evidence=Path(td)/"out.md"; evidence.write_text("done\n",encoding="utf-8")
+   for node_id in ("unrelated","consumer-a"):
+    with self.subTest(node=node_id):
+     node=next(n for n in route["nodes"] if n["id"]==node_id)
+     R._validate_auxiliary_arbiter(route,node,evidence)
+   # a group with no resolvable arbiter is arbitrated by nobody
+   self.assertEqual(R._auxiliary_groups_arbitrated_by(route,"consumer-a"),([],0))
+   # and a RESOLVABLE node arbiter is still gated, so this narrowed the raise
+   # rather than removing it
+   good=self.research_route()
+   synthesis=next(n for n in good["nodes"] if n["id"]=="synthesis")
+   with self.assertRaisesRegex(ValueError,"auxiliary_findings_considered"):
+    R._validate_auxiliary_arbiter(good,synthesis,evidence)
+ def test_ac5_auxiliary_arbiter_verdict_length_gate(self):
+  # AC 5 (front half): a NODE arbiter's verdict must carry
+  # auxiliary_findings_considered with one entry per realized auxiliary leg it
+  # arbitrates. G1 regression assertion: the group's own anchor is NOT gated --
+  # it is a concurrent sibling of the auxiliary, and gating it made all six
+  # realized groups uncompletable. The evidence surface is the sealed markdown
+  # output, so frontmatter is read as well as JSON.
+  route=self.research_route()
+  arbiter=next(n for n in route["nodes"] if n["id"]=="synthesis")
+  anchor=next(n for n in route["nodes"] if n["id"]=="retrieval")
+  auxiliary=next(n for n in route["nodes"] if n["id"]=="retrieval-assumption")
+  import tempfile
+  with tempfile.TemporaryDirectory() as td:
+   good=Path(td)/"evidence.json"
+   good.write_text(json.dumps({"auxiliary_findings_considered":["accepted"]}),encoding="utf-8")
+   R._validate_auxiliary_arbiter(route,arbiter,good)
+   # markdown frontmatter (inline list) is the real sealed output surface
+   md_inline=Path(td)/"round_1.md"
+   md_inline.write_text("---\nauxiliary_findings_considered: [accepted]\n---\n# synthesis\n\nverdict: clean\n",encoding="utf-8")
+   R._validate_auxiliary_arbiter(route,arbiter,md_inline)
+   # markdown frontmatter (yaml block list) is accepted as well; length still counts
+   md_block=Path(td)/"round_block.md"
+   md_block.write_text("---\nauxiliary_findings_considered:\n  - accepted\n  - noted\n---\nbody\n",encoding="utf-8")
+   with self.assertRaisesRegex(ValueError,"auxiliary_findings_considered length 1"):
+    R._validate_auxiliary_arbiter(route,arbiter,md_block)
+   bad=Path(td)/"bad.json"
+   bad.write_text(json.dumps({"auxiliary_findings_considered":["accepted","missing"]}),encoding="utf-8")
+   with self.assertRaisesRegex(ValueError,"auxiliary_findings_considered length 1"):
+    R._validate_auxiliary_arbiter(route,arbiter,bad)
+   missing=Path(td)/"missing.json"
+   missing.write_text(json.dumps({"verdict":"clean"}),encoding="utf-8")
+   with self.assertRaisesRegex(ValueError,"auxiliary_findings_considered"):
+    R._validate_auxiliary_arbiter(route,arbiter,missing)
+   # G1 regression: the anchor and every other leg of the arbitrated group
+   # complete with NO key at all. This is the assertion that fails if the gate
+   # is ever moved back onto the anchor.
+   for node in (anchor,auxiliary):
+    R._validate_auxiliary_arbiter(route,node,missing)
+   for node in route["nodes"]:
+    if node.get("parallel_group")=="retrieval":
+     R._validate_auxiliary_arbiter(route,node,missing)
+ def _arbitration_evidence(self,directory,name,entries):
+  path=Path(directory)/name
+  body="".join(f"  - {item}\n" for item in entries)
+  path.write_text(f"---\nauxiliary_findings_considered:\n{body}---\nowner merge record\n",encoding="utf-8")
+  return path
+ def _join_group(self,route,group_id,directory,*,skip=(),link=True):
+  """Publish a canonical completion marker for every realized leg of a group.
+
+  M7: `write_completion_marker` alone leaves a marker that passes the identity
+  row but NOT `completion_marker_is_current` -- no attempt-link sidecar. That is
+  exactly the gap `arbitrate` used to accept, so the join here publishes the
+  sidecar too and `link=False` reproduces the weaker marker on demand.
+  """
+  markers=[]
+  for node in route["nodes"]:
+   if node.get("parallel_group")!=group_id or node["id"] in skip: continue
+   evidence=Path(directory)/f"{node['id']}.md"
+   evidence.write_text(f"{node['id']} leg output\n",encoding="utf-8")
+   attempt_id=f"att-fixture-{node['id']}"
+   metadata={
+     "attempt_schema_version":2,
+     "dispatch_depth":node["dispatch_depth"],
+     "transport":"headless",
+     "execution_surface":"registered-headless",
+     "registered_worker":"1",
+     "fallback_hop":"same-harness-headless",
+   }
+   marker=R.write_completion_marker(
+    route,node,node["id"],evidence,attempt_id=attempt_id,attempt_metadata=metadata)
+   markers.append(marker)
+   if not link: continue
+   completion=R.completion_dir(route["route_id"])
+   safe="".join(c if c.isalnum() or c in "._-" else "_" for c in attempt_id)
+   R.atomic_write(completion/f"{node['id']}.{safe}.attempt.json",{
+    "schema_version":2,"route_id":route["route_id"],"node_id":node["id"],
+    "attempt_id":attempt_id,"dispatch_depth":marker["dispatch_depth"],
+    "transport":marker["transport"],"execution_surface":marker["execution_surface"],
+    "registered_worker":marker["registered_worker"],"fallback_hop":marker["fallback_hop"],
+    "evidence_sha256":marker["evidence"]["sha256"],
+    "completion_marker":str(completion/f"{node['id']}.json"),
+    "completion_marker_history":str(completion/f"{node['id']}.{marker['sequence']}.json"),
+   })
+  return markers
+ def test_ac5_owner_merge_arbitration_transaction(self):
+  # G1 (c)/(f): the owner-merge arbiter registers the merge record through the
+  # `arbitrate` transaction, and it is structurally impossible to satisfy while
+  # the group's legs are still running -- which is exactly why gating the
+  # concurrently-running anchor could never work.
+  route=R.compile_route(**self.args(requested_intensity="thorough",predicates=[],signals=["shared-contract"],transport="headless",inline_reason=None,dispatch_evidence=self.dispatch(self.nested())))
+  self.assertEqual(R._resolve_auxiliary_arbiter(route,"plan-check"),("owner-merge",None))
+  import tempfile
+  with tempfile.TemporaryDirectory() as td:
+   merge=self._arbitration_evidence(td,"merge_record.md",["simplicity finding adopted"])
+   # 4. before join: some leg has no canonical completion marker yet
+   with self.assertRaisesRegex(ValueError,"auxiliary-arbitration-before-join:"):
+    R.arbitrate_group(route,"plan-check",merge)
+   # M7: a marker that passes the identity row but NOT the canonical
+   # `completion_marker_is_current` contract is not a join either. Accepting it
+   # let the arbitration record be written over a marker a dependent's
+   # start-gate then refuses as an absent canonical marker, so the record
+   # attested a join that downstream did not recognize. (Prose, not the literal
+   # refusal token -- `dispatch_completion_marker.test.py`'s static guardian
+   # scans this tree for it and each allowlist entry weakens that guardian.)
+   self._join_group(route,"plan-check",td,link=False)
+   for member in R._group_members(route,"plan-check"):
+    node_id=str(member["id"])
+    self.assertTrue(R._marker_identity_row(
+     route,member,node_id,member.get("completion_gate"))["passed"])
+    self.assertFalse(R.completion_marker_is_current(
+     route,member,R.completion_dir(route["route_id"])/f"{node_id}.json"))
+   with self.assertRaisesRegex(ValueError,"auxiliary-arbitration-before-join:"):
+    R.arbitrate_group(route,"plan-check",merge)
+   self._join_group(route,"plan-check",td)
+   # 5. length mismatch and key absence are each their own refusal
+   wrong=self._arbitration_evidence(td,"wrong.md",["a","b"])
+   with self.assertRaisesRegex(ValueError,"auxiliary_findings_considered length 1"):
+    R.arbitrate_group(route,"plan-check",wrong)
+   keyless=Path(td)/"keyless.md"; keyless.write_text("no frontmatter\n",encoding="utf-8")
+   with self.assertRaisesRegex(ValueError,"auxiliary_findings_considered"):
+    R.arbitrate_group(route,"plan-check",keyless)
+   # 6. write-once: one record, and an identical re-call is idempotent
+   record=R.arbitrate_group(route,"plan-check",merge)
+   self.assertEqual(record["arbiter"],"owner-merge")
+   self.assertEqual(record["anchor_node"],"plan-check")
+   self.assertEqual(record["auxiliary_nodes"],["plan-check-simplicity"])
+   self.assertEqual(record["auxiliary_findings_considered"],["simplicity finding adopted"])
+   path=R.arbitration_path(route["route_id"],"plan-check")
+   self.assertTrue(path.is_file())
+   again=R.arbitrate_group(route,"plan-check",merge)
+   self.assertEqual(again,record)
+   self.assertEqual(len(list(path.parent.glob("*.arbitration.json"))),1)
+   # a different merge record for the same group is a conflict, never a rewrite
+   other=self._arbitration_evidence(td,"other.md",["different judgement"])
+   with self.assertRaisesRegex(ValueError,"auxiliary-arbitration-identity-conflict"):
+    R.arbitrate_group(route,"plan-check",other)
+ def test_ac5_arbitrate_refuses_unknown_and_node_arbiter_groups(self):
+  # G1 (c) 1..3: each precondition has its own typed refusal.
+  route=self.research_route()
+  import tempfile
+  with tempfile.TemporaryDirectory() as td:
+   merge=self._arbitration_evidence(td,"merge_record.md",["x"])
+   with self.assertRaisesRegex(ValueError,"auxiliary-group-unknown:not-a-group"):
+    R.arbitrate_group(route,"not-a-group",merge)
+   # `claim-verify` is a realized group with no auxiliary leg
+   self.assertTrue(R._group_members(route,"claim-verify"))
+   self.assertFalse(R._realized_auxiliary_nodes(route,"claim-verify"))
+   with self.assertRaisesRegex(ValueError,"auxiliary-group-has-no-auxiliary-leg:claim-verify"):
+    R.arbitrate_group(route,"claim-verify",merge)
+   # a node-arbitrated group refuses the owner transaction and says who owns it
+   with self.assertRaisesRegex(ValueError,"auxiliary-arbiter-is-node:synthesis"):
+    R.arbitrate_group(route,"retrieval",merge)
+ def test_ac5_terminal_gate_observation_covers_unarbitrated_groups(self):
+  # G1 (d) 2: an owner-merge group that was never arbitrated lands as a failed
+  # row in the route's completion truth, so `terminal_gate_proven` is false --
+  # and `close_route` still closes, honestly, without raising.
+  route=R.compile_route(**self.args(requested_intensity="thorough",predicates=[],signals=["shared-contract"],transport="headless",inline_reason=None,dispatch_evidence=self.dispatch(self.nested())))
+  gates=R.terminal_gate_observation(route)
+  self.assertIn("parallel_group:plan-check",gates)
+  self.assertFalse(gates["parallel_group:plan-check"]["passed"])
+  self.assertEqual(gates["parallel_group:plan-check"]["reason"],"completion-marker-absent")
+  self.assertIs(R.terminal_gate_proven(gates),False)
+  import tempfile
+  with tempfile.TemporaryDirectory() as td:
+   self._join_group(route,"plan-check",td)
+   merge=self._arbitration_evidence(td,"merge_record.md",["adopted"])
+   R.arbitrate_group(route,"plan-check",merge)
+   passed=R.terminal_gate_observation(route)["parallel_group:plan-check"]
+   self.assertTrue(passed["passed"])
+   self.assertEqual(passed["reason"],"completion-marker-verified")
+   # tampering with the merge record after registration is caught by hash
+   merge.write_text("---\nauxiliary_findings_considered:\n  - rewritten\n---\n",encoding="utf-8")
+   tampered=R.terminal_gate_observation(route)["parallel_group:plan-check"]
+   self.assertFalse(tampered["passed"])
+   self.assertEqual(tampered["reason"],"completion-evidence-hash-mismatch")
+ def test_d3a_terminal_and_continuation_regressions(self):
+  # resource-runner terminal stays forbidden under the new classification, and a
+  # non-terminal node without a continuation still fails closed.
+  registry=R.TOPO.load_registry()
+  recipe=R.TOPO.resolve_recipe(registry,"autopilot-code","dev")
+  nodes=json.loads(json.dumps(recipe["standard_plus"]["nodes"]))
+  runner=dict(id="detached",kind="resource-runner",dispatch_depth=0,resource_transport="detached-process",
+   terminal=True,terminal_gate="detached-gate",inputs=["x"],outputs=["y"],write_scope=["source/**"],
+   completion_gate="detached-gate")
+  with self.assertRaisesRegex(ValueError,"detached resource run"):
+   R._workflow_contract(registry,nodes+[runner],[])
+  stripped=json.loads(json.dumps(nodes))
+  for node in stripped:
+   if node.get("kind") not in ("capability-owner","resource-runner"):
+    node["continuation"]=None
+  with self.assertRaisesRegex(ValueError,"declares no valid continuation"):
+   R._workflow_contract(registry,stripped,[])
  def test_standard_plus_without_checked_headless_evidence_fails_closed(self):
   with self.assertRaisesRegex(ValueError,"checked dispatch evidence required"):
    R.compile_route(**self.args(signals=["public-api"],inline_reason=None))

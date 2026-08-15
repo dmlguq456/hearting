@@ -75,6 +75,25 @@ Adapters must preserve the portable invariants relevant to this capability:
 - enforce spec-read gating when this capability changes spec-backed code or specs;
 - use DB memory paths, not runtime-native memory files.
 
+At `thorough+` two groups realize an auxiliary leg, and they are arbitrated
+differently. The `research` group's `assumption-check` leg has a **node**
+arbiter: the downstream `review` node records `auxiliary_findings_considered` in
+its own review log frontmatter, one entry per realized auxiliary leg, and its
+completion marker is refused without it. Nothing in the runtime tells that node
+it holds the role, so the owner must: **a node arbiter's dispatch prompt names
+the group it arbitrates and how many auxiliary legs were realized.** The unit
+clauses that require the key are written on the premise that the prompt says so,
+and a worker that is never told writes a keyless artifact and is refused at its
+own completion gate — a satisfiable condition nobody disclosed. The `review` group's `test-gap-check`
+leg has an **owner-merge** arbiter: after that group joins, the owner puts the
+same key in the merge record's frontmatter and registers it with
+`capability-route.py arbitrate --group review`. `prd-transaction` is a
+`capability-owner` node, so it does not pass a wrapper start-gate: there the
+enforcement is the route's terminal-gate observation, which carries a failed
+`parallel_group:review` row until the record exists. In neither case is the
+group's own anchor the arbiter — it runs concurrently with the auxiliary leg.
+`core/OPERATIONS.md §5.10` owns the transaction and its typed refusals.
+
 Additional spec-entry gates:
 
 - if user input lacks irreversible-decision coverage, ask one structured intake round before drafting;

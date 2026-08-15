@@ -290,6 +290,7 @@ class DispatchBatchTest(unittest.TestCase):
                 "model_profile": str(item["model_profile"]),
                 "perspective": str(item["perspective"]),
                 "parallel_leg_index": int(item["parallel_leg_index"]),
+                "leg_class": str(item.get("leg_class", "peer")),
             } for item in all_legs],
             required_independence_axes=["cross-harness", "model-profile", "perspective"],
             realized_independence_axes=["cross-harness", "model-profile", "perspective"],
@@ -559,6 +560,203 @@ class DispatchBatchTest(unittest.TestCase):
         self.assertIn("usable=claude", ctx.exception.detail)
         self.assertIn("codex=unsupported", ctx.exception.detail)
 
+    def _quality_peer_nodes(self, peer_families, aux_families):
+        """Build a 2-peer + 1-auxiliary group whose policies derive
+        quality-peer = {claude, codex}, with per-family eligibility lists."""
+        def node(node_id, profile, families, leg_class):
+            return {
+                "id": node_id,
+                "dispatch_depth": 2,
+                "model_profile": profile,
+                "leg_class": leg_class,
+                "harness_affinity": "diverse",
+                "harness_policy": {
+                    "primary": ["claude", "codex"],
+                    "relief": ["opencode"],
+                    "last_resort": [],
+                    "promote_relief_below": 0,
+                },
+                "fallback_hops": [
+                    {"ordinal": 1, "fallback_hop": "cross-harness-headless", "candidates": [
+                        {"child_harness": a, "status": "supported" if a in families else "unsupported"}
+                        for a in BATCH.SUPPORTED_BATCH_HARNESSES
+                    ]},
+                ],
+            }
+        return [
+            node("x", "deep", peer_families, "peer"),
+            node("x-alternative", "balanced-deep", peer_families, "peer"),
+            node("x-simplicity", "light", aux_families, "auxiliary"),
+        ]
+
+    def test_ac11_peer_gate_fails_closed_without_bypass_flag(self):
+        # AC 11 negative: peer legs are only opencode-eligible while the
+        # auxiliary leg is claude-eligible, so usable & quality_peer is
+        # non-empty and no combination puts a peer on a quality-peer family.
+        # The peer-gate hard filter must reject even under
+        # --allow-degraded-independence (no escape), leaving row 0/process 0.
+        nodes = self._quality_peer_nodes(
+            peer_families=["opencode"], aux_families=["claude"]
+        )
+        route = {
+            "route_id": "rt-fixture", "route_hash": "sha256:fixture",
+            "owner_harness_policy": {
+                "primary": ["claude", "codex"], "relief": ["opencode"],
+                "last_resort": [], "promote_relief_below": 0,
+            },
+        }
+        for allow_degraded in (False, True):
+            with self.subTest(allow_degraded=allow_degraded):
+                with mock.patch.object(
+                    BATCH.DISPATCH_NODE, "resolve_checked_tuple", side_effect=resolve_side_effect
+                ), self.assertRaises(BATCH.BatchError) as ctx:
+                    BATCH.assign_harnesses(
+                        route, nodes, allow_degraded=allow_degraded
+                    )
+                self.assertEqual(
+                    ctx.exception.reason, "parallel-cross-harness-unavailable"
+                )
+                self.assertEqual(
+                    ctx.exception.degradation_reason, "sole-gate-non-peer-harness"
+                )
+
+    def test_ac11_peer_gate_positive_assigns_quality_peer_and_aux_opencode(self):
+        # AC 11 positive: peer legs are claude/codex-eligible and the auxiliary
+        # leg is opencode-eligible; the group may mix opencode on the auxiliary
+        # while the gate authority stays on quality-peer families.
+        nodes = self._quality_peer_nodes(
+            peer_families=["claude", "codex"], aux_families=["opencode"]
+        )
+        route = {
+            "route_id": "rt-fixture", "route_hash": "sha256:fixture",
+            "owner_harness_policy": {
+                "primary": ["claude", "codex"], "relief": ["opencode"],
+                "last_resort": [], "promote_relief_below": 0,
+            },
+        }
+        with mock.patch.object(
+            BATCH.DISPATCH_NODE, "resolve_checked_tuple", side_effect=resolve_side_effect
+        ):
+            rows, independence, diagnostics = BATCH.assign_harnesses(
+                route, nodes, allow_degraded=False
+            )
+        self.assertEqual(independence, "cross-harness")
+        peer_rows = [row for row in rows if row[0]["leg_class"] == "peer"]
+        aux_rows = [row for row in rows if row[0]["leg_class"] == "auxiliary"]
+        self.assertTrue(
+            all(row[1] in {"claude", "codex"} for row in peer_rows),
+            peer_rows,
+        )
+        self.assertEqual([row[1] for row in aux_rows], ["opencode"])
+        self.assertEqual(diagnostics["sole_gate"], "ok")
+        self.assertEqual(
+            diagnostics["quality_peer_families"], ["claude", "codex"]
+        )
+
+    def test_ac11_sole_gate_degradation_fails_closed_with_or_without_flag(self):
+        # AC 11, second half: "peer leg에 배정 가능한 family가 opencode뿐이면
+        # row 0 ... --allow-degraded-independence를 주어도 동일." No
+        # quality-peer family is hard-eligible at all, so the sole-gate rule
+        # itself refuses the assignment and the blanket flag does not relax it
+        # (SD-100 13.30.2). Both flag values must reach the SAME refusal, and
+        # its degradation_reason names the sole-gate rule, not a family
+        # shortage. The previous fixture asserted rows={"opencode"} under the
+        # flag -- sealing the exact behaviour the spec forbids.
+        nodes = self._quality_peer_nodes(
+            peer_families=["opencode"], aux_families=["opencode"]
+        )
+        route = {
+            "route_id": "rt-fixture", "route_hash": "sha256:fixture",
+            "owner_harness_policy": {
+                "primary": ["claude", "codex"], "relief": ["opencode"],
+                "last_resort": [], "promote_relief_below": 0,
+            },
+        }
+        for allow_degraded in (False, True):
+            with self.subTest(allow_degraded=allow_degraded):
+                with mock.patch.object(
+                    BATCH.DISPATCH_NODE, "resolve_checked_tuple",
+                    side_effect=resolve_side_effect,
+                ), self.assertRaises(BATCH.BatchError) as ctx:
+                    BATCH.assign_harnesses(
+                        route, nodes, allow_degraded=allow_degraded
+                    )
+                self.assertEqual(
+                    ctx.exception.reason, "parallel-cross-harness-unavailable"
+                )
+                self.assertEqual(
+                    ctx.exception.degradation_reason, "sole-gate-non-peer-harness"
+                )
+                self.assertEqual(
+                    ctx.exception.detail,
+                    "peer-gate:no-quality-peer-family-hard-eligible",
+                )
+
+    def test_single_usable_family_still_degrades_when_the_sole_gate_is_satisfied(self):
+        # The AC 11 refusal above must not swallow the ordinary G2 path: with a
+        # quality-peer family on the peer legs but only ONE usable family in the
+        # whole group, `sole_gate` stays "ok" and --allow-degraded-independence
+        # still reaches degraded-same-harness with the family-shortage cause.
+        nodes = self._quality_peer_nodes(
+            peer_families=["claude"], aux_families=["claude"]
+        )
+        route = {
+            "route_id": "rt-fixture", "route_hash": "sha256:fixture",
+            "owner_harness_policy": {
+                "primary": ["claude", "codex"], "relief": ["opencode"],
+                "last_resort": [], "promote_relief_below": 0,
+            },
+        }
+        with mock.patch.object(
+            BATCH.DISPATCH_NODE, "resolve_checked_tuple", side_effect=resolve_side_effect
+        ), self.assertRaises(BATCH.BatchError) as ctx:
+            BATCH.assign_harnesses(route, nodes, allow_degraded=False)
+        self.assertEqual(
+            ctx.exception.degradation_reason, "single-usable-harness-family"
+        )
+        with mock.patch.object(
+            BATCH.DISPATCH_NODE, "resolve_checked_tuple", side_effect=resolve_side_effect
+        ):
+            rows, independence, diagnostics = BATCH.assign_harnesses(
+                route, nodes, allow_degraded=True
+            )
+        self.assertEqual(independence, "degraded-same-harness")
+        self.assertEqual(diagnostics["sole_gate"], "ok")
+        self.assertEqual(
+            diagnostics["degradation_cause"], "single-usable-harness-family"
+        )
+        self.assertEqual(diagnostics["usable_families"], ["claude"])
+        self.assertEqual({row[1] for row in rows}, {"claude"})
+
+    def test_harness_policy_absent_marks_sole_gate_not_applicable(self):
+        # D8-①: no sealed harness_policy anywhere -> the peer-gate is
+        # not-applicable and the filter is skipped entirely.
+        nodes = [replica_node("plan", "diverse"), replica_node("plan-replica", "diverse")]
+        route = {"route_id": "rt-fixture", "route_hash": "sha256:fixture"}
+        with mock.patch.object(
+            BATCH.DISPATCH_NODE, "resolve_checked_tuple", side_effect=resolve_side_effect
+        ):
+            rows, independence, diagnostics = BATCH.assign_harnesses(
+                route, nodes, allow_degraded=False
+            )
+        self.assertEqual(diagnostics["sole_gate"], "not-applicable")
+        self.assertIsNone(diagnostics["quality_peer_families"])
+        # fm M5 / alt M3: the batch receipt exposes `sole_gate` at the same
+        # top level as the fallback receipt, carrying the same word.
+        receipt, _ = BATCH.batch_receipt(
+            args=SimpleNamespace(parallel_group="plan"), lifecycle="concurrent",
+            independence="cross-harness", required_axes=[], realized_axes=[],
+            degradation_reason="", legs=[], results=[], admitted=0,
+            selection_diagnostics=diagnostics,
+        )
+        self.assertEqual(receipt["sole_gate"], "not-applicable")
+        bare, _ = BATCH.batch_receipt(
+            args=SimpleNamespace(parallel_group="plan"), lifecycle="concurrent",
+            independence="cross-harness", required_axes=[], realized_axes=[],
+            degradation_reason="", legs=[], results=[], admitted=0,
+        )
+        self.assertEqual(bare["sole_gate"], "not-applicable")
+
     def test_exclusion_detail_renders_every_reason_for_a_multi_reason_adapter(self):
         # G1: codex fails with a *different* typed reason on each leg
         # (candidate-unsupported on "plan", no-eligible-fallback on the
@@ -681,6 +879,83 @@ class DispatchBatchTest(unittest.TestCase):
                 rc = BATCH.main(self.argv("dry-run") + ["--allow-degraded-independence"])
         return rc, json.loads(output.getvalue())
 
+    def test_ac11_sole_gate_refusal_carries_its_reason_into_the_cli_receipt(self):
+        # M4: the AC 11 refusal's typed cause lived only on the exception object
+        # and `fail()` dropped it, so an operator saw
+        # `parallel-cross-harness-unavailable /
+        # peer-gate:no-quality-peer-family-hard-eligible` -- which reads as a
+        # shortage of harness families -- and nothing in the cycle recorded that
+        # the SOLE-GATE rule is what refused the stage. PRD 13.30.2 says there is
+        # no silent path. The AC 11 assertion is promoted from the exception
+        # object to the CLI receipt a consumer actually reads.
+        for allow_degraded in (False, True):
+            with self.subTest(allow_degraded=allow_degraded):
+                output = io.StringIO()
+                error = BATCH.BatchError(
+                    "parallel-cross-harness-unavailable",
+                    "peer-gate:no-quality-peer-family-hard-eligible",
+                    degradation_reason="sole-gate-non-peer-harness",
+                )
+                argv = self.argv("dry-run")
+                if allow_degraded:
+                    argv = argv + ["--allow-degraded-independence"]
+                with contextlib.ExitStack() as stack:
+                    stack.enter_context(mock.patch.object(
+                        BATCH, "load_route", return_value=self.route))
+                    stack.enter_context(mock.patch.object(
+                        BATCH, "assign_harnesses", side_effect=error))
+                    stack.enter_context(mock.patch.object(
+                        BATCH, "resolve_agent_home", return_value=self.base))
+                    stack.enter_context(mock.patch.object(
+                        BATCH, "resolve_global_registry",
+                        return_value=SimpleNamespace(path=self.jobs)))
+                    stack.enter_context(mock.patch.object(
+                        BATCH.subprocess, "check_output", return_value=str(self.base)))
+                    stack.enter_context(mock.patch.dict(os.environ, {
+                        "AGENT_DISPATCH_SELF_SLUG": "owner",
+                        "AGENT_DISPATCH_ATTEMPT_ID": "att-parent-fixture",
+                        "AGENT_DISPATCH_CURRENT_HARNESS": "codex",
+                        "AGENT_DISPATCH_CURRENT_TRANSPORT": "headless",
+                        "AGENT_DISPATCH_CURRENT_SANDBOX": "workspace-write",
+                    }))
+                    with contextlib.redirect_stdout(output):
+                        rc = BATCH.main(argv)
+                receipt = json.loads(output.getvalue())
+                self.assertNotEqual(rc, 0)
+                self.assertEqual(receipt["state"], "blocked")
+                self.assertEqual(receipt["reason"], "parallel-cross-harness-unavailable")
+                self.assertEqual(
+                    receipt["degradation_reason"], "sole-gate-non-peer-harness"
+                )
+                self.assertEqual(
+                    receipt["detail"], "peer-gate:no-quality-peer-family-hard-eligible"
+                )
+        # a refusal that carries no typed cause does not grow an empty field
+        output = io.StringIO()
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(mock.patch.object(
+                BATCH, "load_route", return_value=self.route))
+            stack.enter_context(mock.patch.object(
+                BATCH, "assign_harnesses",
+                side_effect=BATCH.BatchError("route-record-invalid", "fixture")))
+            stack.enter_context(mock.patch.object(
+                BATCH, "resolve_agent_home", return_value=self.base))
+            stack.enter_context(mock.patch.object(
+                BATCH, "resolve_global_registry",
+                return_value=SimpleNamespace(path=self.jobs)))
+            stack.enter_context(mock.patch.object(
+                BATCH.subprocess, "check_output", return_value=str(self.base)))
+            stack.enter_context(mock.patch.dict(os.environ, {
+                "AGENT_DISPATCH_SELF_SLUG": "owner",
+                "AGENT_DISPATCH_ATTEMPT_ID": "att-parent-fixture",
+                "AGENT_DISPATCH_CURRENT_HARNESS": "codex",
+                "AGENT_DISPATCH_CURRENT_TRANSPORT": "headless",
+                "AGENT_DISPATCH_CURRENT_SANDBOX": "workspace-write",
+            }))
+            with contextlib.redirect_stdout(output):
+                BATCH.main(self.argv("dry-run"))
+        self.assertNotIn("degradation_reason", json.loads(output.getvalue()))
+
     def test_degraded_batch_keeps_the_manifest_stable_degradation_reason(self):
         output = io.StringIO()
         rc, receipt = self._degraded_dry_run_receipt(output)
@@ -794,6 +1069,65 @@ class DispatchBatchTest(unittest.TestCase):
             json.loads(output.getvalue())["reason"],
             "parent-runtime-identity-missing",
         )
+
+    def _governor_subprocess_result(self, stderr, rc=1):
+        return SimpleNamespace(stdout="", stderr=stderr, returncode=rc)
+
+    def test_ac6_reserve_batch_classifies_shortfall_from_general_denial(self):
+        # AC 6: a capacity/budget shortfall is typed
+        # governor-atomic-admission-shortfall; other governor failures stay
+        # model-worker-governor-denied. Both admit row 0 / model process 0.
+        for marker, expected in (
+            ("rolling model-worker start budget reached", "governor-atomic-admission-shortfall"),
+            ("global model-worker cap reached", "governor-atomic-admission-shortfall"),
+            ("dispatch class cap reached", "governor-atomic-admission-shortfall"),
+            ("kill switch active", "model-worker-governor-denied"),
+            ("", "model-worker-governor-denied"),
+        ):
+            with self.subTest(marker=marker, expected=expected):
+                with mock.patch.object(
+                    BATCH.subprocess, "run",
+                    return_value=self._governor_subprocess_result(stderr=marker),
+                ):
+                    with self.assertRaises(BATCH.BatchError) as ctx:
+                        BATCH.reserve_batch(
+                            Path("/tmp/governor"), Path("/tmp/root"),
+                            [{"attempt_id": "att-x"}],
+                            manifest={"parallel_group": "plan"},
+                            manifest_digest="sha256:" + "a" * 64,
+                        )
+                self.assertEqual(ctx.exception.reason, expected)
+
+    def test_ac6_shortfall_fails_closed_with_no_partial_admit(self):
+        output = io.StringIO()
+        stack = contextlib.ExitStack()
+        stack.enter_context(mock.patch.object(BATCH, "load_route", return_value=self.route))
+        assignments = [
+            (self.route["nodes"][0], "codex", "same-harness-headless", 1),
+            (self.route["nodes"][1], "claude", "cross-harness-headless", 2),
+        ]
+        stack.enter_context(mock.patch.object(BATCH, "assign_harnesses", return_value=(assignments, "cross-harness", {"families_considered": [], "usable_families": [], "family_exclusions": {}, "capacity": {}, "degradation_cause": ""})))
+        stack.enter_context(mock.patch.object(BATCH, "resolve_agent_home", return_value=self.base))
+        stack.enter_context(mock.patch.object(BATCH, "resolve_global_registry", return_value=SimpleNamespace(path=self.jobs)))
+        stack.enter_context(mock.patch.object(BATCH, "resolve_live_parent_attempt"))
+        stack.enter_context(mock.patch.object(BATCH, "completion_marker_gate"))
+        stack.enter_context(mock.patch.object(BATCH.subprocess, "check_output", return_value=str(self.base)))
+        stack.enter_context(mock.patch.object(BATCH, "reserve_batch", side_effect=BATCH.BatchError("governor-atomic-admission-shortfall", "rolling model-worker start budget reached")))
+        popen = stack.enter_context(mock.patch.object(BATCH.subprocess, "Popen"))
+        stack.enter_context(mock.patch.dict(os.environ, {
+            "AGENT_DISPATCH_SELF_SLUG": "owner",
+            "AGENT_DISPATCH_ATTEMPT_ID": "att-parent-fixture",
+            "AGENT_DISPATCH_CURRENT_HARNESS": "codex",
+            "AGENT_DISPATCH_CURRENT_TRANSPORT": "headless",
+            "AGENT_DISPATCH_CURRENT_SANDBOX": "workspace-write",
+        }))
+        with stack, contextlib.redirect_stdout(output):
+            rc = BATCH.main(self.argv())
+        self.assertEqual(rc, 75)
+        popen.assert_not_called()
+        receipt = json.loads(output.getvalue())
+        self.assertEqual((receipt["admitted"], receipt["spawned"]), (0, 0))
+        self.assertEqual(receipt["reason"], "governor-atomic-admission-shortfall")
 
     def test_both_wrappers_exist_before_either_is_joined(self):
         stack, assignments = self.common_patches()
@@ -1291,6 +1625,7 @@ class DispatchBatchTest(unittest.TestCase):
                 "model_profile": str(leg["model_profile"]),
                 "perspective": str(leg["perspective"]),
                 "parallel_leg_index": int(leg["parallel_leg_index"]),
+                "leg_class": str(leg.get("leg_class", "peer")),
             } for leg in self.legs()],
             required_independence_axes=["cross-harness", "model-profile", "perspective"],
             realized_independence_axes=["cross-harness", "model-profile", "perspective"],
@@ -1400,6 +1735,215 @@ class DispatchBatchTest(unittest.TestCase):
         self.assertLessEqual(len(stderr.encode()), BATCH.OUTPUT_TAIL_BYTES)
         self.assertTrue(stdout.rstrip().endswith("OUT"))
         self.assertTrue(stderr.rstrip().endswith("ERR"))
+
+    def _subdivision_route_and_manifest(self, sessions):
+        node = dict(replica_node("plan", "codex"))
+        node["completion_gate"] = "code-plan-check"
+        node["subdivision"] = {
+            "min_intensity": "strong", "max_slices": 4, "disjointness": "exact-fixed-files",
+        }
+        node["write_scope"] = ["source/**"]
+        node2 = dict(replica_node("plan-replica", "claude"))
+        node2["completion_gate"] = "code-plan-check"
+        route = dict(self.route)
+        route["nodes"] = [node, node2]
+        for session in sessions:
+            Path(session["phase_brief"]).write_text("slice brief\n", encoding="utf-8")
+        manifest_path = self.base / "chain.json"
+        manifest = {
+            "schema_version": 1,
+            "kind": "stage-session-chain",
+            "chain_id": "ssc-fixture",
+            "mode": "parallel",
+            "worktree": str(self.base),
+            "route_file": str(self.route_path),
+            "route_id": route["route_id"],
+            "route_hash": route["route_hash"],
+            "route_node": "plan",
+            "completion_gate": "code-plan-check",
+            "sessions": sessions,
+        }
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+        return route, manifest_path
+
+    def _subdivision_dry_run(self, route, manifest_path):
+        output = io.StringIO()
+        def fake_assign_harnesses(_route, nodes, **_kw):
+            harnesses = ["codex", "claude", "opencode", "codex"]
+            assignments = [
+                (node, harnesses[index % len(harnesses)], "same-harness-headless", 1)
+                for index, node in enumerate(nodes)
+            ]
+            diagnostics = {
+                "families_considered": ["codex", "claude", "opencode"],
+                "usable_families": ["codex"],
+                "family_exclusions": {},
+                "capacity": {"codex": None, "claude": None, "opencode": None},
+                "degradation_cause": "",
+            }
+            return assignments, "cross-harness", diagnostics
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(mock.patch.object(BATCH, "load_route", return_value=route))
+            stack.enter_context(mock.patch.object(BATCH, "assign_harnesses", side_effect=fake_assign_harnesses))
+            stack.enter_context(mock.patch.object(BATCH, "resolve_agent_home", return_value=self.base))
+            stack.enter_context(mock.patch.object(BATCH, "resolve_global_registry", return_value=SimpleNamespace(path=self.jobs)))
+            stack.enter_context(mock.patch.object(BATCH, "resolve_live_parent_attempt"))
+            stack.enter_context(mock.patch.object(BATCH, "completion_marker_gate"))
+            stack.enter_context(mock.patch.object(BATCH.subprocess, "check_output", return_value=str(self.base)))
+            stack.enter_context(mock.patch.dict(os.environ, {
+                "AGENT_DISPATCH_SELF_SLUG": "owner",
+                "AGENT_DISPATCH_ATTEMPT_ID": "att-parent-fixture",
+                "AGENT_DISPATCH_CURRENT_HARNESS": "codex",
+                "AGENT_DISPATCH_CURRENT_TRANSPORT": "headless",
+                "AGENT_DISPATCH_CURRENT_SANDBOX": "workspace-write",
+            }))
+            argv = self.argv("dry-run") + ["--subdivision-manifest", str(manifest_path)]
+            with contextlib.redirect_stdout(output):
+                rc = BATCH.main(argv)
+        return rc, output.getvalue()
+
+    def test_g7_subdivision_fallback_descends_to_a_single_session(self):
+        # An overlapping fixed_files pair cannot be proven disjoint, so
+        # validate_subdivision_or_fallback returns the typed fallback reason.
+        # G7: that must actually change what gets launched -- one leg, not two.
+        shared = str(self.base / "source" / "shared.py")
+        sessions = [
+            {"subsession_id": "ss-slice-1", "attempt_id": "att-slice-aaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+             "adapter": "codex", "slug": "slice-1", "phase_brief": str(self.base / "b1.md"),
+             "node": "plan",
+             "fixed_files": [shared], "narrow_verify": "true", "expected_round_trips": 2},
+            {"subsession_id": "ss-slice-2", "attempt_id": "att-slice-bbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+             "adapter": "codex", "slug": "slice-2", "phase_brief": str(self.base / "b2.md"),
+             "node": "plan-replica",
+             "fixed_files": [shared], "narrow_verify": "true", "expected_round_trips": 2},
+        ]
+        route, manifest_path = self._subdivision_route_and_manifest(sessions)
+        with mock.patch.object(BATCH, "record_degradation") as record:
+            rc, out = self._subdivision_dry_run(route, manifest_path)
+        self.assertEqual(rc, 0, out)
+        receipt = json.loads(out)
+        self.assertEqual(receipt["state"], "single-session-required")
+        self.assertEqual(receipt["reason"], "subdivision-disjointness-unproven")
+        record.assert_called_once()
+        self.assertEqual(record.call_args.kwargs["reason"], "subdivision-disjointness-unproven")
+
+    def test_g7_subdivision_manifest_is_consumed_into_legs(self):
+        # A disjoint, in-scope, exactly-sized manifest validates successfully;
+        # G7: its sessions must be consumed, not discarded -- each launched
+        # leg carries the exact subsession_id/fixed_files the check proved safe.
+        sessions = [
+            {"subsession_id": "ss-slice-1", "attempt_id": "att-slice-aaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+             "adapter": "codex", "slug": "slice-1", "phase_brief": str(self.base / "b1.md"),
+             "node": "plan",
+             "fixed_files": [str(self.base / "source" / "a.py")],
+             "narrow_verify": "true", "expected_round_trips": 2},
+            {"subsession_id": "ss-slice-2", "attempt_id": "att-slice-bbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+             "adapter": "codex", "slug": "slice-2", "phase_brief": str(self.base / "b2.md"),
+             "node": "plan-replica",
+             "fixed_files": [str(self.base / "source" / "b.py")],
+             "narrow_verify": "true", "expected_round_trips": 2},
+        ]
+        route, manifest_path = self._subdivision_route_and_manifest(sessions)
+        with mock.patch.object(BATCH, "record_degradation") as record:
+            rc, out = self._subdivision_dry_run(route, manifest_path)
+        self.assertEqual(rc, 0, out)
+        receipt = json.loads(out)
+        self.assertEqual(len(receipt["legs"]), 2)
+        record.assert_not_called()
+        got = {leg["subsession_id"]: leg["fixed_files"] for leg in receipt["legs"]}
+        self.assertEqual(got["ss-slice-1"], [str(self.base / "source" / "a.py")])
+        self.assertEqual(got["ss-slice-2"], [str(self.base / "source" / "b.py")])
+        by_node = {leg["node"]: leg["subsession_id"] for leg in receipt["legs"]}
+        self.assertEqual(by_node, {"plan": "ss-slice-1", "plan-replica": "ss-slice-2"})
+
+    def test_n1_slice_binds_by_declared_key_not_manifest_order(self):
+        # N1: `assign_harnesses` returns legs in `nodes` order while the
+        # manifest's session order is whatever its author wrote. Binding by
+        # position hands a slice's fixed_files to the wrong leg the moment the
+        # two orders differ, and only the count is checked -- so the proven
+        # disjointness stops describing what actually runs. Here the manifest
+        # is written in the REVERSE order and each slice must still land on the
+        # leg it names.
+        sessions = [
+            {"subsession_id": "ss-slice-2", "attempt_id": "att-slice-bbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+             "adapter": "codex", "slug": "slice-2", "phase_brief": str(self.base / "b2.md"),
+             "node": "plan-replica",
+             "fixed_files": [str(self.base / "source" / "b.py")],
+             "narrow_verify": "true", "expected_round_trips": 2},
+            {"subsession_id": "ss-slice-1", "attempt_id": "att-slice-aaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+             "adapter": "codex", "slug": "slice-1", "phase_brief": str(self.base / "b1.md"),
+             "node": "plan",
+             "fixed_files": [str(self.base / "source" / "a.py")],
+             "narrow_verify": "true", "expected_round_trips": 2},
+        ]
+        route, manifest_path = self._subdivision_route_and_manifest(sessions)
+        rc, out = self._subdivision_dry_run(route, manifest_path)
+        self.assertEqual(rc, 0, out)
+        legs = {leg["node"]: leg for leg in json.loads(out)["legs"]}
+        self.assertEqual(legs["plan"]["subsession_id"], "ss-slice-1")
+        self.assertEqual(legs["plan"]["fixed_files"], [str(self.base / "source" / "a.py")])
+        self.assertEqual(legs["plan-replica"]["subsession_id"], "ss-slice-2")
+        self.assertEqual(legs["plan-replica"]["fixed_files"], [str(self.base / "source" / "b.py")])
+        # `leg_index` is the accepted positional spelling of the same key
+        indexed = json.loads(json.dumps(sessions))
+        for session in indexed:
+            session["leg_index"] = 0 if session["node"] == "plan" else 1
+            del session["node"]
+        route, manifest_path = self._subdivision_route_and_manifest(indexed)
+        rc, out = self._subdivision_dry_run(route, manifest_path)
+        self.assertEqual(rc, 0, out)
+        legs = {leg["node"]: leg["subsession_id"] for leg in json.loads(out)["legs"]}
+        self.assertEqual(legs, {"plan": "ss-slice-1", "plan-replica": "ss-slice-2"})
+
+    def test_n1_unbound_or_conflicting_slice_keys_are_typed_refusals(self):
+        # A session naming no leg is refused rather than assumed to be at its
+        # own list position, and two sessions naming the same leg is a refusal
+        # rather than a silent last-writer-wins.
+        def build(mutate):
+            sessions = [
+                {"subsession_id": "ss-slice-1", "attempt_id": "att-slice-aaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                 "adapter": "codex", "slug": "slice-1", "phase_brief": str(self.base / "b1.md"),
+                 "node": "plan",
+                 "fixed_files": [str(self.base / "source" / "a.py")],
+                 "narrow_verify": "true", "expected_round_trips": 2},
+                {"subsession_id": "ss-slice-2", "attempt_id": "att-slice-bbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                 "adapter": "codex", "slug": "slice-2", "phase_brief": str(self.base / "b2.md"),
+                 "node": "plan-replica",
+                 "fixed_files": [str(self.base / "source" / "b.py")],
+                 "narrow_verify": "true", "expected_round_trips": 2},
+            ]
+            mutate(sessions)
+            return self._subdivision_route_and_manifest(sessions)
+        for mutate, reason in (
+            (lambda s: s[1].pop("node"), "subdivision-manifest-session-leg-unbound"),
+            (lambda s: s[1].update(node="plan"), "subdivision-manifest-session-leg-duplicate"),
+            (lambda s: s[1].update(node="not-a-leg"), "subdivision-manifest-session-leg-unknown"),
+            (lambda s: [(x.pop("node"), x.update(leg_index=9)) for x in s],
+             "subdivision-manifest-session-leg-unknown"),
+        ):
+            with self.subTest(reason=reason):
+                route, manifest_path = build(mutate)
+                rc, out = self._subdivision_dry_run(route, manifest_path)
+                self.assertEqual(rc, 65, out)
+                self.assertEqual(json.loads(out)["reason"], reason)
+
+    def test_g7_subdivision_manifest_session_count_must_match_group_width(self):
+        # A manifest that itself validates (3 disjoint, in-scope sessions, within
+        # the node's declared max_slices=4) but does not match the realized
+        # 2-way group width is a distinct typed rejection, not a silent
+        # partial launch or an arbitrary pick of the first 2 sessions.
+        sessions = [
+            {"subsession_id": f"ss-slice-{n}", "attempt_id": f"att-slice-{n}{'a' * 26}",
+             "adapter": "codex", "slug": f"slice-{n}", "phase_brief": str(self.base / f"b{n}.md"),
+             "node": "plan" if n == 1 else f"plan-replica-{n}",
+             "fixed_files": [str(self.base / "source" / f"{n}.py")],
+             "narrow_verify": "true", "expected_round_trips": 2}
+            for n in (1, 2, 3)
+        ]
+        route, manifest_path = self._subdivision_route_and_manifest(sessions)
+        rc, out = self._subdivision_dry_run(route, manifest_path)
+        self.assertNotEqual(rc, 0)
+        self.assertIn("subdivision-manifest-session-count-mismatch", out)
 
 
 class DispatchBatchIntegrationTest(unittest.TestCase):

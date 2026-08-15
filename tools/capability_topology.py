@@ -18,6 +18,17 @@ MANIFEST = ROOT / "harness-manifest.json"
 UNITS = ROOT / "roles" / "units"
 UNIT_REF_RE = re.compile(r"^[a-z-]+/[a-z-]+$")
 PARALLEL_ID_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
+# G6 / AC 21: recorded, non-silent exception to "no parallel group on a
+# terminal node" -- keep in sync with capability-route.py's
+# `_TERMINAL_PARALLEL_GROUP_GRANDFATHER`.
+TERMINAL_PARALLEL_GROUP_GRANDFATHER = {("autopilot-research", "claim-verify")}
+# D9 / AC 5: an auxiliary leg's verdict enum may not carry any unconditionally
+# blocking token. `findings` is deliberately absent because the five auxiliary
+# units use it as their non-blocking finding carrier.
+_BLOCKING_VERDICT_TOKENS = frozenset({
+    "issues", "changes-required", "blocked", "BLOCKED", "fail", "FAIL",
+    "failed", "FAILED", "needs_work", "killed", "conflicts-found",
+})
 _UNIT_CACHE: dict = {}
 
 
@@ -371,6 +382,12 @@ def _unit_frontmatter(unit):
         raise TopologyError(f"unit {unit}: invalid worker_type {fields['worker_type']!r}")
     if fields["read_only"] not in ("true", "false"):
         raise TopologyError(f"unit {unit}: read_only must be true or false")
+    verdict = re.search(r"^io:\s*\n\s+verdict:\s*\[([^\]]*)\]", block, re.MULTILINE)
+    fields["verdict"] = (
+        [token.strip() for token in verdict.group(1).split(",") if token.strip()]
+        if verdict
+        else []
+    )
     _UNIT_CACHE[key] = fields
     return fields
 
@@ -459,6 +476,70 @@ def _validate_gate_contracts(recipe, registry):
                 raise TopologyError(f"{recipe['capability']}: custom gate {gate} requires a recorded reason")
         else:
             raise TopologyError(f"{recipe['capability']}: unknown gate contract kind {kind!r} for {gate}")
+    # AC 5 (front half): every auxiliary-bearing group's ARBITER gate declares
+    # `auxiliary_arbiter` — its verdict carries `auxiliary_findings_considered`
+    # and the completion gate compares its length to the realized auxiliary count.
+    #
+    # This used to demand the declaration on the ANCHOR gate, which is the
+    # proposition G1 disproved: PRD 13.30.4 names an arbiter for each anchor kind
+    # and in none of the three is it the anchor. Leaving the old rule in place
+    # kept the registry asserting, and this guard enforcing, a world the runtime
+    # no longer lives in. `_resolve_auxiliary_arbiter` is still the one
+    # implementation of the rule; it reads a compiled route, so this reads the
+    # same three facts off the recipe, and
+    # `capability_topology.test.py` pins the two to agree on every realized group.
+    nodes_by_id = {node.get("id"): node for node in recipe["standard_plus"].get("nodes", [])}
+    expected_arbiter_gates = set()
+    for group in recipe["standard_plus"].get("parallel_groups", []):
+        if not any(leg.get("leg_class") == "auxiliary" for leg in group.get("legs", [])):
+            continue
+        anchor_node = nodes_by_id.get(group.get("node"))
+        if anchor_node is None:
+            continue
+        consumers = [
+            node for node in recipe["standard_plus"].get("nodes", [])
+            if group.get("node") in (node.get("depends_on") or [])
+        ]
+        kind = anchor_node.get("kind")
+        if kind == "review-worker":
+            # the conductor merges; no route node is the arbiter, so no gate
+            # declares it
+            continue
+        if kind == "pipeline-stage":
+            consumers = [node for node in consumers if node.get("kind") == "review-worker"]
+        if len(consumers) != 1:
+            raise TopologyError(
+                f"{recipe['capability']}: auxiliary group {group.get('id')} anchor "
+                f"{group.get('node')} ({kind}) needs exactly one declared arbiter "
+                f"consumer, found {len(consumers)}"
+            )
+        gate = consumers[0].get("completion_gate")
+        expected_arbiter_gates.add(gate)
+        entry = contracts.get(gate)
+        if not isinstance(entry, dict) or entry.get("auxiliary_arbiter") is not True:
+            raise TopologyError(
+                f"{recipe['capability']}: auxiliary group {group.get('id')} arbiter gate "
+                f"{gate} must declare auxiliary_arbiter"
+            )
+    for gate in sorted(
+        gate for gate, entry in contracts.items()
+        if isinstance(entry, dict) and entry.get("auxiliary_arbiter") is True
+    ):
+        owner = nodes_by_id.get(
+            next(
+                (
+                    node.get("id") for node in recipe["standard_plus"].get("nodes", [])
+                    if node.get("completion_gate") == gate
+                ),
+                None,
+            )
+        )
+        if owner is None or gate in expected_arbiter_gates:
+            continue
+        raise TopologyError(
+            f"{recipe['capability']}: gate {gate} declares auxiliary_arbiter but "
+            "arbitrates no auxiliary-bearing group in this recipe"
+        )
 
 
 def _validate_activation_conditions(registry):
@@ -803,6 +884,38 @@ def _validate_recipe(recipe, registry, standard_plus_owner_profile):
                 )
         if not node.get("inputs") or not node.get("outputs") or not node.get("write_scope"):
             raise TopologyError(f"{recipe['capability']}:{node['id']}: inputs/outputs/write_scope required")
+        if node.get("parent_cross_preference") is not None and not isinstance(
+            node.get("parent_cross_preference"), bool
+        ):
+            raise TopologyError(
+                f"{recipe['capability']}:{node['id']}: parent_cross_preference must be a boolean"
+            )
+        if "subdivision" in node:
+            subdivision = node["subdivision"]
+            if not isinstance(subdivision, dict):
+                raise TopologyError(
+                    f"{recipe['capability']}:{node['id']}: subdivision must be an object"
+                )
+            max_slices = subdivision.get("max_slices")
+            if isinstance(max_slices, bool) or not isinstance(max_slices, int) or not 2 <= max_slices <= 4:
+                raise TopologyError(
+                    f"{recipe['capability']}:{node['id']}: subdivision.max_slices must be in 2..4"
+                )
+            if subdivision.get("disjointness") != "exact-fixed-files":
+                raise TopologyError(
+                    f"{recipe['capability']}:{node['id']}: subdivision.disjointness must be exact-fixed-files"
+                )
+            minimum = subdivision.get("min_intensity")
+            if minimum not in registry.get("intensities", []) or (
+                registry["intensities"].index(minimum) < registry["intensities"].index("standard")
+            ):
+                raise TopologyError(
+                    f"{recipe['capability']}:{node['id']}: subdivision.min_intensity must be a standard+ tier"
+                )
+            if node.get("kind") != "pipeline-stage":
+                raise TopologyError(
+                    f"{recipe['capability']}:{node['id']}: subdivision requires a pipeline-stage node"
+                )
         if node.get("completion_gate") not in gates:
             raise TopologyError(f"{recipe['capability']}:{node['id']}: missing completion gate")
         if not set(node.get("depends_on", [])) <= set(ids):
@@ -842,10 +955,11 @@ def _validate_recipe(recipe, registry, standard_plus_owner_profile):
             "id", "node", "kind", "min_intensity", "width_by_intensity",
             "join_policy", "independence_axes", "legs",
         }
-        required_leg = {"suffix", "perspective", "model_profile"}
         anchored, group_ids = set(), set()
         tiers = registry["intensities"]
         max_allowed = registry["parallel_group_max_width"]
+        leg_classes = registry["leg_classes"]
+        auxiliary_checks = registry["auxiliary_checks"]
         for group in parallel_groups:
             if not isinstance(group, dict) or set(group) != required_group:
                 raise TopologyError(
@@ -868,6 +982,19 @@ def _validate_recipe(recipe, registry, standard_plus_owner_profile):
             if kind not in ("review-worker", "map-worker", "pipeline-stage"):
                 raise TopologyError(
                     f"{recipe['capability']}: parallel target {target_id} must be a review, map, or pipeline worker"
+                )
+            # G6 / AC 21: a parallel group on a `terminal: true` node is rejected
+            # at declaration -- the realized-graph check further downstream
+            # (`_workflow_contract`'s duplicate-terminal_gate rejection) can never
+            # fire for a group, because the expansion step (D3) always strips
+            # `terminal`/`terminal_gate` from every non-anchor leg first. Without
+            # this declaration-level gate a terminal node's peer expansion is
+            # silently permitted. `autopilot-research claim-verify` already ships
+            # this pattern and is kept as a recorded, non-silent grandfather.
+            if target.get("terminal") is True and (recipe["capability"], group_id) not in TERMINAL_PARALLEL_GROUP_GRANDFATHER:
+                raise TopologyError(
+                    f"{recipe['capability']}:{group_id}: parallel group on terminal node "
+                    f"{target_id!r} is rejected unless explicitly grandfathered"
                 )
             if group["kind"] not in registry["parallel_group_kinds"]:
                 raise TopologyError(f"{recipe['capability']}:{group_id}: invalid parallel group kind")
@@ -892,22 +1019,95 @@ def _validate_recipe(recipe, registry, standard_plus_owner_profile):
                 )
             values = list(widths.values())
             if (any(isinstance(value, bool) or not isinstance(value, int)
-                    or value < 2 or value > max_allowed for value in values)
+                    or value < 2 for value in values)
                     or values != sorted(values)):
                 raise TopologyError(
                     f"{recipe['capability']}:{group_id}: widths must be monotonic integers in 2..{max_allowed}"
                 )
             legs = group["legs"]
-            if not isinstance(legs, list) or len(legs) != max(values):
+            if not isinstance(legs, list):
+                raise TopologyError(
+                    f"{recipe['capability']}:{group_id}: legs must be a list"
+                )
+            # AC 4: single merged rejection when declared peers + auxiliaries exceed
+            # the schema cap. Every leg is either a peer or an auxiliary, so the
+            # total declared leg count is the merged count (plan.md W1a step 5).
+            if len(legs) > max_allowed:
+                raise TopologyError(
+                    f"{recipe['capability']}:{group_id}: legs exceed parallel_group_max_width {max_allowed}"
+                )
+            if len(legs) != max(values):
                 raise TopologyError(
                     f"{recipe['capability']}:{group_id}: legs must equal maximum declared width"
                 )
             suffixes, perspectives, profiles = [], [], []
+            peers_in_prefix, auxiliary_count = 0, 0
+            auxiliary_kinds, saw_auxiliary = set(), False
             for leg in legs:
-                if not isinstance(leg, dict) or set(leg) != required_leg:
+                # 1: leg_class missing is a distinct single-assertion rejection.
+                if not isinstance(leg, dict) or "leg_class" not in leg:
                     raise TopologyError(
-                        f"{recipe['capability']}:{group_id}: legs require exactly {sorted(required_leg)}"
+                        f"{recipe['capability']}:{group_id}: leg requires leg_class"
                     )
+                leg_class = leg["leg_class"]
+                # 2: vocabulary-external leg_class is a distinct rejection.
+                if leg_class not in leg_classes:
+                    raise TopologyError(
+                        f"{recipe['capability']}:{group_id}: invalid leg_class {leg_class!r}"
+                    )
+                if leg_class == "peer":
+                    # 6: an auxiliary before a later peer violates peer-first ordering.
+                    if saw_auxiliary:
+                        raise TopologyError(
+                            f"{recipe['capability']}:{group_id}: auxiliary leg must not precede a peer leg"
+                        )
+                    # 4: a peer leg must not carry an auxiliary_check.
+                    if "auxiliary_check" in leg:
+                        raise TopologyError(
+                            f"{recipe['capability']}:{group_id}: peer leg must not carry auxiliary_check"
+                        )
+                    if set(leg) != {"suffix", "perspective", "model_profile", "leg_class"}:
+                        raise TopologyError(
+                            f"{recipe['capability']}:{group_id}: peer legs require exactly "
+                            "suffix, perspective, model_profile, leg_class"
+                        )
+                    peers_in_prefix += 1
+                else:
+                    if set(leg) != {"suffix", "perspective", "model_profile",
+                                    "leg_class", "auxiliary_check"}:
+                        raise TopologyError(
+                            f"{recipe['capability']}:{group_id}: auxiliary legs require exactly "
+                            "suffix, perspective, model_profile, leg_class, auxiliary_check"
+                        )
+                    # 3: an auxiliary leg without an auxiliary_check is a distinct rejection.
+                    check = leg["auxiliary_check"]
+                    if check not in auxiliary_checks:
+                        raise TopologyError(
+                            f"{recipe['capability']}:{group_id}: invalid auxiliary_check {check!r}"
+                        )
+                    # 5: non-light auxiliary is a distinct rejection (AC 1 case).
+                    if leg["model_profile"] != "light":
+                        raise TopologyError(
+                            f"{recipe['capability']}:{group_id}: auxiliary leg must use model_profile light"
+                        )
+                    saw_auxiliary = True
+                    auxiliary_count += 1
+                    auxiliary_kinds.add(check)
+                    # D9 / AC 5 (back half): an auxiliary leg's verdict enum is
+                    # structurally non-blocking — its unit may not carry any
+                    # unconditionally blocking verdict token.
+                    aux_units = registry.get("auxiliary_check_units") or {}
+                    unit = aux_units.get(check)
+                    if not isinstance(unit, str) or not unit:
+                        raise TopologyError(
+                            f"{recipe['capability']}:{group_id}: no auxiliary unit mapping for {check!r}"
+                        )
+                    verdict = _unit_frontmatter(unit).get("verdict") or []
+                    if set(token.lower() for token in verdict) & _BLOCKING_VERDICT_TOKENS:
+                        raise TopologyError(
+                            f"{recipe['capability']}:{group_id}: auxiliary unit {unit} "
+                            "carries a blocking verdict token"
+                        )
                 suffix, perspective, profile = (
                     leg["suffix"], leg["perspective"], leg["model_profile"]
                 )
@@ -919,6 +1119,28 @@ def _validate_recipe(recipe, registry, standard_plus_owner_profile):
                     registry, profile, f"{recipe['capability']}:{group_id}:{suffix}"
                 )
                 suffixes.append(suffix); perspectives.append(perspective); profiles.append(profile)
+            # Every declared width prefix must carry at least two peer legs.
+            for width in values:
+                if sum(leg.get("leg_class") == "peer" for leg in legs[:width]) < 2:
+                    raise TopologyError(
+                        f"{recipe['capability']}:{group_id}: each declared width must hold at least two peer legs"
+                    )
+            # AC 3: auxiliary check kinds are unique within one group.
+            if len(auxiliary_kinds) != auxiliary_count:
+                raise TopologyError(
+                    f"{recipe['capability']}:{group_id}: auxiliary_check kinds must be unique"
+                )
+            # AC 4: single merged rejection when peers + auxiliaries exceed the schema cap.
+            if peers_in_prefix + auxiliary_count > max_allowed:
+                raise TopologyError(
+                    f"{recipe['capability']}:{group_id}: legs exceed parallel_group_max_width {max_allowed}"
+                )
+            # AC 23 / D6: an auxiliary-bearing group's declared maximum width is at most 3,
+            # while parallel_group_max_width stays the schema-level cap.
+            if auxiliary_count and max(values) > 3:
+                raise TopologyError(
+                    f"{recipe['capability']}:{group_id}: auxiliary groups must keep declared width at most 3"
+                )
             if suffixes[0] != "anchor" or len(suffixes) != len(set(suffixes)):
                 raise TopologyError(f"{recipe['capability']}:{group_id}: ordered unique suffixes must start with anchor")
             if "perspective" in axes and len(perspectives) != len(set(perspectives)):
@@ -935,6 +1157,15 @@ def _validate_recipe(recipe, registry, standard_plus_owner_profile):
             ):
                 raise TopologyError(
                     f"{recipe['capability']}:{group_id}: pipeline anchor requires a direct review arbiter"
+                )
+            # AC 22 / D4: an auxiliary-bearing group's anchor needs an arbiter for
+            # `auxiliary_findings_considered`. A `terminal: true` anchor has no
+            # downstream verdict to carry the array, so it structurally has no
+            # arbiter — declaring an auxiliary leg on such a group compiles-rejects.
+            if auxiliary_count and target.get("terminal") is True:
+                raise TopologyError(
+                    f"{recipe['capability']}:{group_id}: terminal anchor {target_id} "
+                    "has no arbiter for auxiliary findings"
                 )
             for out in target.get("outputs", []):
                 if "*" not in out:
@@ -990,7 +1221,7 @@ def _validate_recipe(recipe, registry, standard_plus_owner_profile):
 
 
 def validate_registry(registry, manifest=None):
-    if registry.get("schema_version") != 8:
+    if registry.get("schema_version") != 9:
         raise TopologyError("legacy topology registry is read-only")
     _validate_activation_conditions(registry)
     _validate_workflow_vocabulary(registry)
@@ -1023,6 +1254,21 @@ def validate_registry(registry, manifest=None):
         raise TopologyError("parallel independence-axis vocabulary mismatch")
     if registry.get("parallel_group_max_width") != 4:
         raise TopologyError("parallel_group_max_width must be 4")
+    if registry.get("leg_classes") != ["peer", "auxiliary"]:
+        raise TopologyError("leg_classes must declare exactly peer and auxiliary")
+    if registry.get("auxiliary_checks") != [
+        "assumption-check", "edge-case-check", "failure-mode-check",
+        "simplicity-check", "test-gap-check",
+    ]:
+        raise TopologyError("auxiliary_checks must declare the closed five checks")
+    if registry.get("auxiliary_check_units") != {
+        "assumption-check": "qa/assumption-check",
+        "edge-case-check": "qa/edge-case-check",
+        "failure-mode-check": "qa/failure-mode-check",
+        "simplicity-check": "qa/simplicity-check",
+        "test-gap-check": "qa/test-gap-check",
+    }:
+        raise TopologyError("auxiliary_check_units must map each check to its qa unit")
     if set(registry.get("transports", [])) != WRAPPER_TRANSPORTS:
         raise TopologyError("transport vocabulary differs from portable dispatch contract")
     if set(registry.get("execution_surfaces", [])) != EXECUTION_SURFACES:

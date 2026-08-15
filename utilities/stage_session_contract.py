@@ -20,8 +20,130 @@ class StageSessionError(ValueError):
     """Raised when a stage-session manifest is unsafe or incomplete."""
 
 
+def validate_subdivision_or_fallback(
+    path: Path | str,
+    *,
+    route: dict[str, Any],
+    node: dict[str, Any],
+    record=None,
+) -> tuple[dict[str, Any] | None, str | None]:
+    """Validate a parallel subdivision at batch admission; on violation fall back
+    to a single session with a `subdivision-disjointness-unproven` ledger row.
+
+    Returns (manifest, None) on success and (None, reason) when the subdivision
+    cannot be proven disjoint/safe — the caller then runs the node as one
+    ordinary session instead of raising (the typed fallback of SD-103). `record`
+    is a callable(route_id, route_node, detail) that writes the SD-93 ledger.
+    """
+    try:
+        manifest = load_manifest(path, route=route, node=node)
+    except StageSessionError as exc:
+        if record is not None:
+            record(route.get("route_id"), node.get("id"), str(exc))
+        return None, "subdivision-disjointness-unproven"
+    if manifest.get("mode") != "parallel":
+        return manifest, None
+    permission = node.get("subdivision")
+    if not isinstance(permission, dict):
+        if record is not None:
+            record(route.get("route_id"), node.get("id"), "no subdivision permission")
+        return None, "subdivision-disjointness-unproven"
+    declared = {
+        Path(value).resolve(strict=False)
+        for session in manifest["sessions"]
+        for value in session["fixed_files"]
+    }
+    if len(declared) != sum(len(s["fixed_files"]) for s in manifest["sessions"]):
+        if record is not None:
+            record(route.get("route_id"), node.get("id"), "parallel-fixed-file-overlap")
+        return None, "subdivision-disjointness-unproven"
+    return manifest, None
+
+
 def sha256_file(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+GAP_RETRY_PURPOSE = "gap-retry"
+
+
+def derive_gap_retry_manifest(
+    manifest: dict[str, Any], failed_subsession_ids
+) -> dict[str, Any]:
+    """AC 29: derive the gap-retry chain from ONLY the failed slices.
+
+    SD-103: a failed slice does not roll back its successful siblings; the owner
+    opens a `gap-retry` sub-session carrying the failed slices' `fixed_files` and
+    nothing else. Deriving that manifest here — instead of hand-copying it at the
+    call site — is what makes "exactly the failed slice's files" a property of
+    the production path rather than of one fixture's assignment statement.
+
+    Identities are derived deterministically from the parent manifest's hash and
+    the failed slice id, so re-deriving the same retry is byte-identical and
+    resumable. A retry of one slice is a `serial` chain (a parallel subdivision
+    is a 2..N contract); two or more stay `parallel`.
+
+    The parent's leg binding (`node`, or `leg_index` as the positional spelling)
+    is carried through unchanged. A gap-retry is a SUBSET of the parent's slices,
+    never a re-partition, so the failed slice's leg name stays valid -- and
+    `dispatch-batch._bind_subdivision_sessions` (N1) refuses any manifest session
+    that names neither. Dropping the key here would make the one recovery path
+    SD-103 13.30.5 declares refusable at admission the moment two slices fail
+    (a single failure falls to `serial` and never reaches the binding gate,
+    which is why the seam stayed invisible).
+    """
+    if "_manifest_sha256" not in manifest:
+        raise StageSessionError("gap-retry-source-manifest-not-loaded")
+    wanted = list(dict.fromkeys(failed_subsession_ids))
+    if not wanted:
+        raise StageSessionError("gap-retry-requires-a-failed-slice")
+    by_id = {session["subsession_id"]: session for session in manifest["sessions"]}
+    unknown = [item for item in wanted if item not in by_id]
+    if unknown:
+        raise StageSessionError("gap-retry-unknown-slice:" + ",".join(sorted(unknown)))
+    parent = manifest["_manifest_sha256"]
+    sessions = []
+    for offset, session_id in enumerate(wanted, 1):
+        source = by_id[session_id]
+        derived = {
+            "subsession_id": f"ss-gap-{parent[:16]}-{offset}",
+            "attempt_id": f"att-gap-{parent[:16]}-{offset}",
+            "adapter": source["adapter"],
+            "slug": f"gap-{parent[:8]}-{offset}",
+            "phase_brief": source["phase_brief"],
+            # The whole point of the derivation: the retry's fence is exactly
+            # the failed slice's, never widened to the parent union.
+            "fixed_files": list(source["fixed_files"]),
+            "narrow_verify": source["narrow_verify"],
+            "expected_round_trips": source["expected_round_trips"],
+            "subsession_purpose": GAP_RETRY_PURPOSE,
+            "gap_retry_of": session_id,
+        }
+        if "node" in source:
+            # The stable spelling: a leg name survives subsetting unchanged.
+            derived["node"] = source["node"]
+        elif "leg_index" in source:
+            # The positional spelling cannot survive subsetting verbatim --
+            # `_bind_subdivision_sessions` indexes into the RETRY's leg list,
+            # which is as long as the retry (the admission count check pairs
+            # sessions with legs 1:1). Re-index onto the retry's own ordering,
+            # which is `wanted` order, so the key still names one leg.
+            derived["leg_index"] = offset - 1
+        sessions.append(derived)
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "kind": "stage-session-chain",
+        "chain_id": f"ssc-gap-{parent[:16]}",
+        "mode": "parallel" if len(sessions) > 1 else "serial",
+        "worktree": manifest["worktree"],
+        "route_file": manifest["route_file"],
+        "route_id": manifest["route_id"],
+        "route_hash": manifest["route_hash"],
+        "route_node": manifest["route_node"],
+        "completion_gate": manifest["completion_gate"],
+        "gap_retry_of_manifest_sha256": parent,
+        "sessions": sessions,
+    }
 
 
 def _absolute(value: object, *, base: Path, field: str) -> Path:
@@ -91,6 +213,46 @@ def load_manifest(
     sessions = raw.get("sessions")
     if not isinstance(sessions, list) or not 1 <= len(sessions) <= 16:
         raise StageSessionError("session-count-invalid")
+    if mode == "parallel":
+        # SD-103: a parallel subdivision's session count is capped by the
+        # registry permission block (2..max_slices), never the generic 1..16.
+        permission = None
+        if node is not None:
+            permission = node.get("subdivision")
+        elif route is not None:
+            for candidate in route.get("nodes", []):
+                if isinstance(candidate, dict) and candidate.get("id") == raw.get("route_node"):
+                    permission = candidate.get("subdivision")
+                    break
+        cap = permission.get("max_slices", 4) if isinstance(permission, dict) else 4
+        if not 2 <= len(sessions) <= cap:
+            raise StageSessionError(
+                f"parallel-session-count-invalid:{2}:{cap}"
+            )
+        if not isinstance(permission, dict) or permission.get("disjointness") != "exact-fixed-files":
+            raise StageSessionError("parallel-subdivision-not-permitted")
+        union = set()
+        for item in sessions:
+            fixed = _fixed_files(
+                item.get("fixed_files"), worktree=worktree,
+                session_id=item.get("subsession_id") or f"index-{sessions.index(item) + 1}",
+            )
+            union |= set(fixed)
+        if route is not None and node is not None:
+            sealed_scopes = []
+            for scope in (node.get("write_scope") or []):
+                if not isinstance(scope, str) or not scope:
+                    continue
+                root = scope[:-3] if scope.endswith("/**") else scope
+                sealed_scopes.append((worktree / root).resolve(strict=False))
+            for file in sorted(union):
+                if not any(
+                    file == str(root) or file.startswith(str(root) + "/")
+                    for root in sealed_scopes
+                ):
+                    raise StageSessionError(
+                        f"parallel-fixed-file-outside-write-scope:{file}"
+                    )
     normalized: list[dict[str, Any]] = []
     seen_ids: set[str] = set()
     seen_attempts: set[str] = set()

@@ -48,6 +48,32 @@ authorized deployment, and `post-deploy-verify` is the terminal node — the
 workflow is not complete when the deploy command returns, only when the
 post-deploy verification gate holds.
 
+At `adversarial` the `security-review` group realizes a third
+`failure-mode-check` leg with `leg_class: auxiliary`. Its arbiter is the
+**owner**, not the group's anchor — the anchor runs concurrently with it. After
+the group joins, the owner puts `auxiliary_findings_considered` in the merge
+record's frontmatter with exactly one entry per realized auxiliary leg (adopted
+or rejected, with the reason) and registers it with
+`capability-route.py arbitrate --group security-review`. `deploy` is a
+`capability-owner` node, so it does not pass a wrapper start-gate: here the
+enforcement is the route's terminal-gate observation, which carries a failed
+`parallel_group:security-review` row and holds `terminal_gate_proven` false
+until the record exists. The human `deploy-authorization` gate is a separate
+axis and does not substitute for it. `core/OPERATIONS.md §5.10` owns the
+transaction and its typed refusals.
+
+**Open, and owned by the spec, not by this document.** `deploy` is the one node
+in the registry that takes an irreversible external action, and the terminal-gate
+row is a POST-HOC observation, not a pre-action gate: an unarbitrated
+`security-review` leaves `terminal_gate_proven` false and blocks publication
+*after* the deploy has already gone out. Nothing reads the `failure-mode-check`
+findings before the irreversible step. Closing that needs a gate shape the
+current contract does not have — a `capability-owner` node passes no wrapper
+start-gate — so it is a spec decision about gate authority, not something to
+invent here. Until it is decided, the owner checks the arbitration record itself
+before running `deploy`; that is procedure, and this paragraph says plainly that
+it is not enforcement.
+
 Before this graph existed, `deploy-authorization` was declared with no node that
 realized it and both readiness reviews were terminal, so a ship route could
 "complete" with nothing deployed and nothing verified. `core/WORKFLOW.md §0.6`

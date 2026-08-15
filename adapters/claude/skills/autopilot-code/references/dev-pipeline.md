@@ -230,8 +230,29 @@ others. When a non-anchor leg wins or a graft is required, materialize the final
 
 1. Resolve `en_plan_path`, `ko_plan_path`, and `log_dir`.
 2. Run the route-bound dispatch transaction with `NODE_ID=plan-check`: the node reads `plan.md` and `checklist.md` and writes `_internal/plan_reviews/round_1.md`. Poll, then publish exact completion from the review memo.
-3. Read only the memo verdict. If it reports blocking findings, pause when `--user-refine` is set; otherwise run one `code-refine` within the correction budget.
-4. On a clean memo (or after the bounded refinement), continue to Step 3.
+3. **At `thorough` and above, arbitrate the `plan-check` group after the join.** The
+   compiled route carries auxiliary check legs beside `plan-check`, and `execute`
+   cannot start until someone has been recorded as having read them. Do this only
+   once every leg of the group holds its completion marker — the transaction is
+   refused as `auxiliary-arbitration-before-join` while any sibling is still open,
+   which is what makes it impossible to satisfy from inside a concurrent leg.
+   1. Put `auxiliary_findings_considered` in the merge memo's frontmatter, with
+      **exactly one entry per realized auxiliary leg** (`adopted`, `rejected`, or
+      the equally short word that says what the merge did with that leg's
+      findings). A wrong count is refused with the count it wanted.
+   2. Register it:
+      ```bash
+      python3 "$AGENT_HOME/utilities/capability-route.py" arbitrate \
+        --route "$ROUTE_FILE" --group plan-check --evidence <merge-memo path>
+      ```
+   The receipt names the resolved arbiter. `auxiliary-arbiter-is-node:<node>` means
+   this group's arbiter is a route node, not the owner: that node records
+   `auxiliary_findings_considered` in its own completion evidence instead, and its
+   dispatch prompt must name the group it arbitrates and how many auxiliary legs
+   were realized. Skipping this step does not fail here — it fails later, when
+   `execute` refuses to start with `auxiliary-arbitration-missing`.
+4. Read only the memo verdict. If it reports blocking findings, pause when `--user-refine` is set; otherwise run one `code-refine` within the correction budget.
+5. On a clean memo (or after the bounded refinement), continue to Step 3.
 
 ### Step 3: code-execute
 

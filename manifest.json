@@ -3,7 +3,7 @@
   "canonical_manifest": "harness-manifest.json",
   "topology_registry": {
     "source": "capabilities/topologies.json",
-    "digest": "sha256:6e840a6df8cb4ba9e635d0e66cdf56618f80de08806c8b48cc0521c0db0957e3",
+    "digest": "sha256:ed0cef470d619a9fd1d29290a791d8de5802a36f6a863a78d39a5b540bf56c11",
     "capabilities": 9,
     "recipes": 21
   },
@@ -476,6 +476,12 @@
       "worker_type": "stage",
       "floor": "highest"
     },
+    "qa/assumption-check": {
+      "family": "qa",
+      "role": "fast reviewer",
+      "worker_type": "review",
+      "floor": "moderate"
+    },
     "qa/code-review": {
       "family": "qa",
       "role": "fast reviewer",
@@ -487,6 +493,18 @@
       "role": "fast reviewer",
       "worker_type": "review",
       "floor": "low"
+    },
+    "qa/edge-case-check": {
+      "family": "qa",
+      "role": "fast reviewer",
+      "worker_type": "review",
+      "floor": "moderate"
+    },
+    "qa/failure-mode-check": {
+      "family": "qa",
+      "role": "fast reviewer",
+      "worker_type": "review",
+      "floor": "moderate"
     },
     "qa/ml-debug": {
       "family": "qa",
@@ -506,11 +524,23 @@
       "worker_type": "review",
       "floor": "moderate"
     },
+    "qa/simplicity-check": {
+      "family": "qa",
+      "role": "fast reviewer",
+      "worker_type": "review",
+      "floor": "moderate"
+    },
     "qa/test": {
       "family": "qa",
       "role": "fast reviewer",
       "worker_type": "review",
       "floor": "near-zero"
+    },
+    "qa/test-gap-check": {
+      "family": "qa",
+      "role": "fast reviewer",
+      "worker_type": "review",
+      "floor": "moderate"
     },
     "research/claim-verify": {
       "family": "research",
@@ -614,12 +644,24 @@
       "unit": "plan/plan-author",
       "status": "portable-persona"
     },
+    "qa/assumption-check": {
+      "unit": "qa/assumption-check",
+      "status": "portable-persona"
+    },
     "qa/code-review": {
       "unit": "qa/code-review",
       "status": "portable-persona"
     },
     "qa/data-curate": {
       "unit": "qa/data-curate",
+      "status": "portable-persona"
+    },
+    "qa/edge-case-check": {
+      "unit": "qa/edge-case-check",
+      "status": "portable-persona"
+    },
+    "qa/failure-mode-check": {
+      "unit": "qa/failure-mode-check",
       "status": "portable-persona"
     },
     "qa/ml-debug": {
@@ -634,9 +676,17 @@
       "unit": "qa/security-review",
       "status": "portable-with-tool-contract"
     },
+    "qa/simplicity-check": {
+      "unit": "qa/simplicity-check",
+      "status": "portable-persona"
+    },
     "qa/test": {
       "unit": "qa/test",
       "status": "portable-with-tool-contract"
+    },
+    "qa/test-gap-check": {
+      "unit": "qa/test-gap-check",
+      "status": "portable-persona"
     },
     "research/claim-verify": {
       "unit": "research/claim-verify",
