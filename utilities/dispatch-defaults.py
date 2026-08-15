@@ -310,10 +310,24 @@ def validate(config, capmap):
             # silently push the quality-peer gate authority onto a non-quality-peer
             # family. light.primary may legitimately include opencode.
             for deep_band in ("deep", "balanced-deep"):
-                if "opencode" in (profiles.get(deep_band) or {}).get("primary", []):
+                band_primary = (profiles.get(deep_band) or {}).get("primary", [])
+                if "opencode" in band_primary:
                     errors.append(
                         f"profiles.{deep_band}.primary must not include opencode "
                         "(quality-peer bands require claude/codex)"
+                    )
+                # fm M3 / anchor M2: the quality-peer set is
+                # `deep.primary & balanced-deep.primary`. An empty primary band
+                # validates under the coverage rule above (every enabled harness
+                # still appears exactly once, just in relief/last_resort) and
+                # makes that intersection empty -- a config that silently
+                # nullifies the gate it is supposed to define. The gate has to
+                # be defined at the layer that defines the band, not repaired at
+                # each of its two consumers.
+                if isinstance(band_primary, list) and not band_primary:
+                    errors.append(
+                        f"profiles.{deep_band}.primary must name at least one "
+                        "harness (an empty band nullifies the quality-peer set)"
                     )
 
     allocation = config.get("allocation")

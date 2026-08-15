@@ -70,6 +70,36 @@ class DispatchDefaultsV3Tests(unittest.TestCase):
         config["profiles"]["light"]["relief"] = []
         self.assertEqual(D.validate(config, capmap), [])
 
+    def test_empty_deep_primary_band_is_rejected(self):
+        # fm M3 / anchor M2: the quality-peer set is
+        # `deep.primary & balanced-deep.primary`, so an EMPTY primary band makes
+        # it empty and nullifies the very gate the config is supposed to define.
+        # Such a config passed validation before -- every enabled harness still
+        # appears exactly once, just in relief/last_resort -- so the rule has to
+        # live here, where the band is defined, not at its two consumers.
+        capmap = D.load_topology_capabilities(D.default_topology_path())
+        for band in ("deep", "balanced-deep"):
+            config = self.config()
+            config["profiles"][band]["relief"] = ["claude", "codex"]
+            config["profiles"][band]["primary"] = []
+            errors = D.validate(config, capmap)
+            # the coverage rule alone would have accepted this
+            self.assertFalse(
+                any("every enabled harness exactly once" in error for error in errors),
+                errors,
+            )
+            self.assertTrue(
+                any(band in error and "must name at least one harness" in error
+                    for error in errors),
+                f"empty {band}.primary accepted: {errors}",
+            )
+        # `light` may legitimately empty its primary band; it is not a
+        # quality-peer band.
+        config = self.config()
+        config["profiles"]["light"]["relief"] = ["claude", "codex", "opencode"]
+        config["profiles"]["light"]["primary"] = []
+        self.assertEqual(D.validate(config, capmap), [])
+
     def test_ac10_quality_peer_set_follows_the_config(self):
         # AC 10: the quality-peer derivation is config-driven, never hardcoded.
         # Moving a family out of a deep band moves the derived set with it.
