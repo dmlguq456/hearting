@@ -572,6 +572,26 @@ class TestRoute(unittest.TestCase):
     anchor=next(n for n in route["nodes"]
                 if n.get("parallel_group")==group and n.get("parallel_leg_index")==0)
     self.assertNotEqual(arbiter,("node",anchor["id"]))
+    # M1: the registry's `auxiliary_arbiter` declaration must sit where this
+    # resolution says the arbiter is, not on the anchor. The topology guard and
+    # the runtime resolver are two implementations of the same proposition, and
+    # a registry that declares the pre-G1 world reads as the pre-G1 world even
+    # when the runtime no longer does.
+    contracts=R.TOPO.load_registry()["completion_gate_contracts"]
+    anchor_gate=contracts.get(anchor["completion_gate"],{})
+    if arbiter[0]=="owner-merge":
+     # no route node arbitrates THIS group, so its anchor's gate carries the
+     # flag only if that same node arbitrates some OTHER group. `spec-review`
+     # is exactly that overlap: node `review` anchors the owner-merge `review`
+     # group and is the node arbiter of `research`.
+     if anchor_gate.get("auxiliary_arbiter") is True:
+      self.assertTrue(R._auxiliary_groups_arbitrated_by(route,anchor["id"]),
+                      f"{anchor['completion_gate']} declares auxiliary_arbiter "
+                      "but that node arbitrates no group")
+    else:
+     arbiter_node=next(n for n in route["nodes"] if n["id"]==arbiter[1])
+     self.assertIs(contracts[arbiter_node["completion_gate"]].get("auxiliary_arbiter"),
+                   True)
     seen.add(group)
   self.assertEqual(len(seen),6)  # every realized auxiliary-bearing group in the registry
  def test_ac5_auxiliary_arbiter_verdict_length_gate(self):

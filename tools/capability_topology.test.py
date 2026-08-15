@@ -343,16 +343,23 @@ class TestTopology(unittest.TestCase):
             group["legs"]=group["legs"]+[aux("simplicity")]
         r=broken(widen)
         self.assertRaisesRegex(T.TopologyError,"declared width at most 3",T.validate_registry,r)
-        # a valid 2-peer + 1-auxiliary 3-way compiles (AC 5 requires the anchor
-        # gate to be an auxiliary arbiter)
+        # a valid 2-peer + 1-auxiliary 3-way compiles. AC 5 requires the
+        # ARBITER's gate to declare it, and `plan` is a pipeline-stage anchor,
+        # so that is its downstream review-worker `plan-check` -- never `plan`'s
+        # own gate, which is the proposition G1 disproved.
         def add_three(g):
             group=plan_group(g)
             group["width_by_intensity"]["thorough"]=3
             group["legs"]=group["legs"][:2]+[aux("simplicity")]
         r=broken(add_three)
         recipe=next(x for x in r["recipes"] if x["capability"]=="autopilot-code")
-        r["completion_gate_contracts"]["code-plan"]["auxiliary_arbiter"]=True
+        r["completion_gate_contracts"]["code-plan-check"]["auxiliary_arbiter"]=True
         T.validate_registry(r)
+        # and declaring it on the anchor's own gate does not satisfy the rule
+        r=broken(add_three)
+        r["completion_gate_contracts"]["code-plan"]["auxiliary_arbiter"]=True
+        self.assertRaisesRegex(T.TopologyError,"must declare auxiliary_arbiter",
+                               T.validate_registry,r)
         # a single-peer group violates the declared-width peer floor
         def single_peer(g):
             group=plan_group(g)

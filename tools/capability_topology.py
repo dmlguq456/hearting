@@ -476,23 +476,70 @@ def _validate_gate_contracts(recipe, registry):
                 raise TopologyError(f"{recipe['capability']}: custom gate {gate} requires a recorded reason")
         else:
             raise TopologyError(f"{recipe['capability']}: unknown gate contract kind {kind!r} for {gate}")
-    # AC 5 (front half): every auxiliary-bearing group's anchor gate must be an
-    # auxiliary arbiter — its verdict carries `auxiliary_findings_considered`
+    # AC 5 (front half): every auxiliary-bearing group's ARBITER gate declares
+    # `auxiliary_arbiter` — its verdict carries `auxiliary_findings_considered`
     # and the completion gate compares its length to the realized auxiliary count.
+    #
+    # This used to demand the declaration on the ANCHOR gate, which is the
+    # proposition G1 disproved: PRD 13.30.4 names an arbiter for each anchor kind
+    # and in none of the three is it the anchor. Leaving the old rule in place
+    # kept the registry asserting, and this guard enforcing, a world the runtime
+    # no longer lives in. `_resolve_auxiliary_arbiter` is still the one
+    # implementation of the rule; it reads a compiled route, so this reads the
+    # same three facts off the recipe, and
+    # `capability_topology.test.py` pins the two to agree on every realized group.
     nodes_by_id = {node.get("id"): node for node in recipe["standard_plus"].get("nodes", [])}
+    expected_arbiter_gates = set()
     for group in recipe["standard_plus"].get("parallel_groups", []):
         if not any(leg.get("leg_class") == "auxiliary" for leg in group.get("legs", [])):
             continue
         anchor_node = nodes_by_id.get(group.get("node"))
         if anchor_node is None:
             continue
-        gate = anchor_node.get("completion_gate")
+        consumers = [
+            node for node in recipe["standard_plus"].get("nodes", [])
+            if group.get("node") in (node.get("depends_on") or [])
+        ]
+        kind = anchor_node.get("kind")
+        if kind == "review-worker":
+            # the conductor merges; no route node is the arbiter, so no gate
+            # declares it
+            continue
+        if kind == "pipeline-stage":
+            consumers = [node for node in consumers if node.get("kind") == "review-worker"]
+        if len(consumers) != 1:
+            raise TopologyError(
+                f"{recipe['capability']}: auxiliary group {group.get('id')} anchor "
+                f"{group.get('node')} ({kind}) needs exactly one declared arbiter "
+                f"consumer, found {len(consumers)}"
+            )
+        gate = consumers[0].get("completion_gate")
+        expected_arbiter_gates.add(gate)
         entry = contracts.get(gate)
         if not isinstance(entry, dict) or entry.get("auxiliary_arbiter") is not True:
             raise TopologyError(
-                f"{recipe['capability']}: auxiliary group {group.get('id')} anchor gate "
+                f"{recipe['capability']}: auxiliary group {group.get('id')} arbiter gate "
                 f"{gate} must declare auxiliary_arbiter"
             )
+    for gate in sorted(
+        gate for gate, entry in contracts.items()
+        if isinstance(entry, dict) and entry.get("auxiliary_arbiter") is True
+    ):
+        owner = nodes_by_id.get(
+            next(
+                (
+                    node.get("id") for node in recipe["standard_plus"].get("nodes", [])
+                    if node.get("completion_gate") == gate
+                ),
+                None,
+            )
+        )
+        if owner is None or gate in expected_arbiter_gates:
+            continue
+        raise TopologyError(
+            f"{recipe['capability']}: gate {gate} declares auxiliary_arbiter but "
+            "arbitrates no auxiliary-bearing group in this recipe"
+        )
 
 
 def _validate_activation_conditions(registry):

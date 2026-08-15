@@ -3269,8 +3269,7 @@
   },
   "code-plan-check": {
    "kind": "unit-io",
-   "unit": "qa/plan-review",
-   "auxiliary_arbiter": true
+   "unit": "qa/plan-review"
   },
   "code-execute": {
    "kind": "capability-doc",
@@ -3322,8 +3321,7 @@
   },
   "draft-quality-review": {
    "kind": "unit-io",
-   "unit": "editorial/review",
-   "auxiliary_arbiter": true
+   "unit": "editorial/review"
   },
   "draft-fact-verify": {
    "kind": "unit-io",
@@ -3391,12 +3389,12 @@
   },
   "research-retrieval": {
    "kind": "unit-io",
-   "unit": "research/research-survey",
-   "auxiliary_arbiter": true
+   "unit": "research/research-survey"
   },
   "research-synthesis": {
    "kind": "unit-io",
-   "unit": "research/research-survey"
+   "unit": "research/research-survey",
+   "auxiliary_arbiter": true
   },
   "research-report": {
    "kind": "unit-io",
@@ -3412,8 +3410,7 @@
   },
   "ship-security": {
    "kind": "unit-io",
-   "unit": "qa/security-review",
-   "auxiliary_arbiter": true
+   "unit": "qa/security-review"
   },
   "ship-release": {
    "kind": "unit-io",
@@ -3421,8 +3418,7 @@
   },
   "spec-research": {
    "kind": "unit-io",
-   "unit": "research/research-survey",
-   "auxiliary_arbiter": true
+   "unit": "research/research-survey"
   },
   "spec-review": {
    "kind": "unit-io",
