@@ -1439,6 +1439,46 @@ def _session_stage_segs(entity, working, max_width):
     return [(text or "-", "g_work" if text and working else "dim")]
 
 
+def _untagged_parallel_groups(nodes):
+    """Recover legs whose route record never carried `parallel_group`.
+
+    F-79 (user 2026-08-14 "review가 3-way로 안뜨고 전부 직렬로 뜨는데"). The compiler seals
+    the tag correctly — `_expand_parallel_groups` writes it on every leg — but a hand-built
+    partial route (a recovery route naming only the nodes left to run) can reach the board
+    without it, and the three `impl-review*` legs then drew as three serial stages while all
+    three were `active` at once. Fleet was drawing the record faithfully; the record was
+    short an attribute.
+
+    Recovery uses the SHAPE the compiler itself produces: legs share one `depends_on` set,
+    and their ids are the anchor's id plus a `-<suffix>` (`_expand_parallel_groups`:
+    `leg["id"] = f"{base['id']}-{suffix}"`). Measured against every tagged group on the live
+    board, this reproduces the tag exactly and finds no group the record disagrees with — so
+    it is a read of the compiler's own convention, not a guess about what looks parallel.
+    The tag stays authoritative: this only fills in where there is none.
+    """
+    by_deps = {}
+    for node in nodes:
+        if node.get("parallel_group") or node.get("replica_group"):
+            continue
+        nid = node.get("id")
+        if not isinstance(nid, str) or not nid:
+            continue
+        by_deps.setdefault(tuple(node.get("depends_on") or ()), []).append(node)
+    recovered = {}
+    for siblings in by_deps.values():
+        if len(siblings) < 2:
+            continue
+        ids = [n["id"] for n in siblings]
+        # The anchor keeps the bare group id; every other leg is `<anchor>-<suffix>`.
+        anchors = [candidate for candidate in ids
+                   if all(other == candidate or other.startswith(candidate + "-")
+                          for other in ids)]
+        if len(anchors) != 1:
+            continue
+        recovered[anchors[0]] = siblings
+    return recovered
+
+
 def _collapse_parallel_nodes(nodes):
     """Fold parallel legs into one ``<group>(N-way)`` node.
 
@@ -1459,9 +1499,19 @@ def _collapse_parallel_nodes(nodes):
         if isinstance(group, str) and group:
             groups.setdefault(group, []).append(node)
     groups = {gid: members for gid, members in groups.items() if len(members) > 1}
+    for gid, members in _untagged_parallel_groups(nodes).items():
+        groups.setdefault(gid, members)
     if not groups:
         return nodes
     merged_by_group, merged_id_of = {}, {}
+    # Membership is resolved by node ID, not by re-reading the tag: a group recovered by
+    # `_untagged_parallel_groups` has no tag on its members, and reading the field again
+    # here would silently drop it back into serial nodes.
+    group_of_id = {}
+    for gid, members in groups.items():
+        for member in members:
+            if member.get("id"):
+                group_of_id[member["id"]] = gid
     for gid, members in groups.items():
         states = [m.get("state") for m in members]
         state = next(
@@ -1500,7 +1550,7 @@ def _collapse_parallel_nodes(nodes):
                 merged_id_of[m["id"]] = merged["id"]
     out, emitted = [], set()
     for node in nodes:
-        group = node.get("parallel_group") or node.get("replica_group")
+        group = group_of_id.get(node.get("id"))
         if group in merged_by_group:
             if group not in emitted:
                 emitted.add(group)
