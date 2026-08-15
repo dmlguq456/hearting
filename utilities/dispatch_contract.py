@@ -3215,6 +3215,18 @@ def _auxiliary_arbitration_gate(
             ),
             None,
         )
+        if error is None and found is None:
+            # Absent under the handed root means refused. `_arbitration_observation`
+            # falls back to `arbitration_path()`, which re-resolves the state root
+            # from the environment, so passing `path=None` here would open the
+            # spawn on a record this gate was never handed -- fail-open, and the
+            # exact opposite of the one-root discipline this call site exists to
+            # keep. `agent_home`/`jobs` are explicit arguments precisely so the
+            # writer and every reader are structurally forced to agree on one
+            # root, and `dispatch_state_root_rotation` makes rotation real rather
+            # than theoretical.
+            unarbitrated.append(group_id)
+            continue
         row = route_module._arbitration_observation(
             route, group_id, error, path=found
         )

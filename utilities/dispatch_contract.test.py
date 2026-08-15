@@ -1793,6 +1793,53 @@ class DispatchContractTest(unittest.TestCase):
     D.completion_marker_gate(str(path),"execute","start",base,base/"jobs.log",
                              registry_lines=[],attempt_id="att-execute-new")
 
+ # B4: the gate is HANDED its state root so the writer and every reader are
+ # structurally forced onto one root. A record it was never handed must not open
+ # the spawn -- `_arbitration_observation`'s `path=None` fallback re-resolves the
+ # root from the environment, which made the gate fail OPEN across a state-root
+ # rotation (`dispatch_state_root_rotation` makes that rotation real).
+ def test_arbitration_under_another_state_root_does_not_open_the_start(self):
+  def probe(where):
+   with tempfile.TemporaryDirectory() as td:
+    gate_home=Path(td)/"gate_home"; env_home=Path(td)/"env_home"
+    gate_home.mkdir(); env_home.mkdir()
+    gate_jobs=gate_home/".dispatch"/"jobs.log"
+    gate_jobs.parent.mkdir(parents=True,exist_ok=True); gate_jobs.touch()
+    env_jobs=env_home/".dispatch"/"jobs.log"
+    env_jobs.parent.mkdir(parents=True,exist_ok=True); env_jobs.touch()
+    route,path,_marker_dir=self._auxiliary_group_route(gate_home)
+    target=(gate_home if where=="handed" else env_home)/".dispatch"/"completion"/route["route_id"]
+    target.mkdir(parents=True,exist_ok=True)
+    evidence=Path(td)/"merge_record.md"
+    evidence.write_text("---\nauxiliary_findings_considered:\n  - adopted\n---\n",
+                        encoding="utf-8")
+    record={"schema_version":1,"route_id":route["route_id"],
+            "route_hash":route["route_hash"],
+            "registry_digest":route["registry_digest"],
+            "group_id":"plan-check","anchor_node":"plan-check","arbiter":"owner-merge",
+            "member_nodes":["plan-check","plan-check-alternative","plan-check-simplicity"],
+            "auxiliary_nodes":["plan-check-simplicity"],
+            "auxiliary_findings_considered":["adopted"],
+            "evidence":{"path":str(evidence),
+                        "sha256":hashlib.sha256(evidence.read_bytes()).hexdigest()}}
+    (target/"plan-check.arbitration.json").write_text(json.dumps(record,indent=2),
+                                                      encoding="utf-8")
+    ready=D.AttemptReadiness("ready","fixture-ready","att-predecessor")
+    # the environment points at a DIFFERENT dispatch state root than the one
+    # the gate was handed -- exactly what a rotation leaves behind
+    with mock.patch.dict(os.environ,{"AGENT_DISPATCH_JOBS":str(env_jobs)}), \
+         mock.patch.object(D,"completion_marker_is_current",return_value=True), \
+         mock.patch.object(D,"completion_attempt_readiness",return_value=ready), \
+         mock.patch.object(D,"_sibling_attempt_gate"):
+     D.completion_marker_gate(str(path),"execute","start",gate_home,gate_jobs,
+                              registry_lines=[],attempt_id="att-execute-new")
+  with self.assertRaises(D.DispatchContractError) as caught:
+   probe("env")
+  self.assertEqual(caught.exception.reason,"auxiliary-arbitration-missing")
+  # and the same gate still opens on a record under the root it WAS handed,
+  # so this is a one-root rule and not a blanket refusal
+  probe("handed")
+
  # A row that never recorded a governed process cannot have leaked one, and
  # judging it unverifiable would wedge the node permanently.
  def test_sibling_row_without_a_recorded_process_is_not_a_claimant(self):
