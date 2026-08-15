@@ -381,10 +381,23 @@ def assign_harnesses(
                     degradation_reason="sole-gate-non-peer-harness",
                 )
             else:
-                # No hard-eligible quality-peer family at all: the assignment
-                # proceeds but records reason=sole-gate-non-peer-harness
-                # (spec 13.30.2 proviso).
+                # No hard-eligible quality-peer family at all, so every realized
+                # peer leg would land outside the quality-peer set and this
+                # stage's whole gate authority would rest on a non-peer harness.
+                # AC 11 is explicit that this is row 0 / model process 0 "even
+                # with --allow-degraded-independence", and SD-100 13.30.2 says
+                # a general flag does not relax the sole-gate rule -- the only
+                # user override is an explicit per-node harness pinned into the
+                # route record at compile time. So the refusal is raised here,
+                # BEFORE the `allow_degraded` branch below can reach it, and it
+                # carries the sole-gate reason rather than the usable-family
+                # one: the cause is the rule, not a shortage of families.
                 sole_gate = "degraded"
+                raise BatchError(
+                    "parallel-cross-harness-unavailable",
+                    "peer-gate:no-quality-peer-family-hard-eligible",
+                    degradation_reason="sole-gate-non-peer-harness",
+                )
     independence = "cross-harness"
     if len(usable) >= 2:
         # Group width is >= 2 and every leg holds >= 1 option, so two usable
@@ -1080,6 +1093,15 @@ def batch_receipt(
         "newly_started": started_count,
         "existing": existing_count,
         "legs": results,
+        # fm M5 / alt M3 symmetry: `stage-dispatch-fallback.py` prints
+        # `sole_gate=<value>` as a top-level receipt field, so a consumer must
+        # be able to read the same key at the same level here instead of
+        # digging into `selection_diagnostics`. A group with no sealed
+        # harness_policy reports `not-applicable`, the same word the fallback
+        # path uses (D8-①/④), never a silently optimistic "ok".
+        "sole_gate": str(
+            (selection_diagnostics or {}).get("sole_gate") or "not-applicable"
+        ),
     }
     if selection_diagnostics is not None:
         receipt["selection_diagnostics"] = selection_diagnostics

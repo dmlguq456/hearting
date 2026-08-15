@@ -653,15 +653,52 @@ class DispatchBatchTest(unittest.TestCase):
             diagnostics["quality_peer_families"], ["claude", "codex"]
         )
 
-    def test_ac11_sole_gate_degradation_fails_closed_without_flag(self):
-        # No quality-peer family is hard-eligible at all (only opencode is
-        # usable), so sole_gate degrades -- but the proviso (spec 13.30.2)
-        # never bypasses the cross-family admission gate. Same-family placement
-        # is refused without --allow-degraded-independence (AC 11: peer-only
-        # opencode -> row 0 / process 0) and keeps the single-usable-harness-family
-        # diagnosis; only the explicit flag reaches degraded-same-harness (G2).
+    def test_ac11_sole_gate_degradation_fails_closed_with_or_without_flag(self):
+        # AC 11, second half: "peer leg에 배정 가능한 family가 opencode뿐이면
+        # row 0 ... --allow-degraded-independence를 주어도 동일." No
+        # quality-peer family is hard-eligible at all, so the sole-gate rule
+        # itself refuses the assignment and the blanket flag does not relax it
+        # (SD-100 13.30.2). Both flag values must reach the SAME refusal, and
+        # its degradation_reason names the sole-gate rule, not a family
+        # shortage. The previous fixture asserted rows={"opencode"} under the
+        # flag -- sealing the exact behaviour the spec forbids.
         nodes = self._quality_peer_nodes(
             peer_families=["opencode"], aux_families=["opencode"]
+        )
+        route = {
+            "route_id": "rt-fixture", "route_hash": "sha256:fixture",
+            "owner_harness_policy": {
+                "primary": ["claude", "codex"], "relief": ["opencode"],
+                "last_resort": [], "promote_relief_below": 0,
+            },
+        }
+        for allow_degraded in (False, True):
+            with self.subTest(allow_degraded=allow_degraded):
+                with mock.patch.object(
+                    BATCH.DISPATCH_NODE, "resolve_checked_tuple",
+                    side_effect=resolve_side_effect,
+                ), self.assertRaises(BATCH.BatchError) as ctx:
+                    BATCH.assign_harnesses(
+                        route, nodes, allow_degraded=allow_degraded
+                    )
+                self.assertEqual(
+                    ctx.exception.reason, "parallel-cross-harness-unavailable"
+                )
+                self.assertEqual(
+                    ctx.exception.degradation_reason, "sole-gate-non-peer-harness"
+                )
+                self.assertEqual(
+                    ctx.exception.detail,
+                    "peer-gate:no-quality-peer-family-hard-eligible",
+                )
+
+    def test_single_usable_family_still_degrades_when_the_sole_gate_is_satisfied(self):
+        # The AC 11 refusal above must not swallow the ordinary G2 path: with a
+        # quality-peer family on the peer legs but only ONE usable family in the
+        # whole group, `sole_gate` stays "ok" and --allow-degraded-independence
+        # still reaches degraded-same-harness with the family-shortage cause.
+        nodes = self._quality_peer_nodes(
+            peer_families=["claude"], aux_families=["claude"]
         )
         route = {
             "route_id": "rt-fixture", "route_hash": "sha256:fixture",
@@ -674,7 +711,6 @@ class DispatchBatchTest(unittest.TestCase):
             BATCH.DISPATCH_NODE, "resolve_checked_tuple", side_effect=resolve_side_effect
         ), self.assertRaises(BATCH.BatchError) as ctx:
             BATCH.assign_harnesses(route, nodes, allow_degraded=False)
-        self.assertEqual(ctx.exception.reason, "parallel-cross-harness-unavailable")
         self.assertEqual(
             ctx.exception.degradation_reason, "single-usable-harness-family"
         )
@@ -685,12 +721,12 @@ class DispatchBatchTest(unittest.TestCase):
                 route, nodes, allow_degraded=True
             )
         self.assertEqual(independence, "degraded-same-harness")
-        self.assertEqual(diagnostics["sole_gate"], "degraded")
+        self.assertEqual(diagnostics["sole_gate"], "ok")
         self.assertEqual(
             diagnostics["degradation_cause"], "single-usable-harness-family"
         )
-        self.assertEqual(diagnostics["usable_families"], ["opencode"])
-        self.assertEqual({row[1] for row in rows}, {"opencode"})
+        self.assertEqual(diagnostics["usable_families"], ["claude"])
+        self.assertEqual({row[1] for row in rows}, {"claude"})
 
     def test_harness_policy_absent_marks_sole_gate_not_applicable(self):
         # D8-①: no sealed harness_policy anywhere -> the peer-gate is
@@ -705,6 +741,21 @@ class DispatchBatchTest(unittest.TestCase):
             )
         self.assertEqual(diagnostics["sole_gate"], "not-applicable")
         self.assertIsNone(diagnostics["quality_peer_families"])
+        # fm M5 / alt M3: the batch receipt exposes `sole_gate` at the same
+        # top level as the fallback receipt, carrying the same word.
+        receipt, _ = BATCH.batch_receipt(
+            args=SimpleNamespace(parallel_group="plan"), lifecycle="concurrent",
+            independence="cross-harness", required_axes=[], realized_axes=[],
+            degradation_reason="", legs=[], results=[], admitted=0,
+            selection_diagnostics=diagnostics,
+        )
+        self.assertEqual(receipt["sole_gate"], "not-applicable")
+        bare, _ = BATCH.batch_receipt(
+            args=SimpleNamespace(parallel_group="plan"), lifecycle="concurrent",
+            independence="cross-harness", required_axes=[], realized_axes=[],
+            degradation_reason="", legs=[], results=[], admitted=0,
+        )
+        self.assertEqual(bare["sole_gate"], "not-applicable")
 
     def test_exclusion_detail_renders_every_reason_for_a_multi_reason_adapter(self):
         # G1: codex fails with a *different* typed reason on each leg
