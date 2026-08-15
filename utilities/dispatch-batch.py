@@ -400,7 +400,10 @@ def assign_harnesses(
                 # BEFORE the `allow_degraded` branch below can reach it, and it
                 # carries the sole-gate reason rather than the usable-family
                 # one: the cause is the rule, not a shortage of families.
-                sole_gate = "degraded"
+                # (no `sole_gate = "degraded"` here: the raise on the next line
+                # makes it unreachable, and a refusal produces the blocked
+                # receipt below, never the `selection_diagnostics` one. The
+                # typed record of this refusal is `degradation_reason`.)
                 raise BatchError(
                     "parallel-cross-harness-unavailable",
                     "peer-gate:no-quality-peer-family-hard-eligible",
@@ -1331,7 +1334,22 @@ def main(argv: list[str] | None = None) -> int:
     ) as exc:
         reason = getattr(exc, "reason", "batch-validation-failed")
         detail = getattr(exc, "detail", str(exc))
-        return fail(reason, 78 if reason in PRELAUNCH_PROCESS_BLOCK_REASONS else 65, detail=detail)
+        # M4: `degradation_reason` is the typed record of WHY a refusal happened
+        # when the reason word alone does not say. AC 11's sole-gate refusal
+        # raises `parallel-cross-harness-unavailable`, which reads as a shortage
+        # of harness families; the sole-gate rule that actually refused it lived
+        # only on the exception object and died here, leaving PRD 13.30.2's "no
+        # silent path" with nothing typed anywhere in the cycle.
+        extra = {}
+        degradation_reason = getattr(exc, "degradation_reason", None)
+        if degradation_reason:
+            extra["degradation_reason"] = degradation_reason
+        return fail(
+            reason,
+            78 if reason in PRELAUNCH_PROCESS_BLOCK_REASONS else 65,
+            detail=detail,
+            **extra,
+        )
 
     lifecycle = select_launch_lifecycle()
     required_axes = list(nodes[0].get("parallel_independence_axes", ["cross-harness"]))

@@ -879,6 +879,83 @@ class DispatchBatchTest(unittest.TestCase):
                 rc = BATCH.main(self.argv("dry-run") + ["--allow-degraded-independence"])
         return rc, json.loads(output.getvalue())
 
+    def test_ac11_sole_gate_refusal_carries_its_reason_into_the_cli_receipt(self):
+        # M4: the AC 11 refusal's typed cause lived only on the exception object
+        # and `fail()` dropped it, so an operator saw
+        # `parallel-cross-harness-unavailable /
+        # peer-gate:no-quality-peer-family-hard-eligible` -- which reads as a
+        # shortage of harness families -- and nothing in the cycle recorded that
+        # the SOLE-GATE rule is what refused the stage. PRD 13.30.2 says there is
+        # no silent path. The AC 11 assertion is promoted from the exception
+        # object to the CLI receipt a consumer actually reads.
+        for allow_degraded in (False, True):
+            with self.subTest(allow_degraded=allow_degraded):
+                output = io.StringIO()
+                error = BATCH.BatchError(
+                    "parallel-cross-harness-unavailable",
+                    "peer-gate:no-quality-peer-family-hard-eligible",
+                    degradation_reason="sole-gate-non-peer-harness",
+                )
+                argv = self.argv("dry-run")
+                if allow_degraded:
+                    argv = argv + ["--allow-degraded-independence"]
+                with contextlib.ExitStack() as stack:
+                    stack.enter_context(mock.patch.object(
+                        BATCH, "load_route", return_value=self.route))
+                    stack.enter_context(mock.patch.object(
+                        BATCH, "assign_harnesses", side_effect=error))
+                    stack.enter_context(mock.patch.object(
+                        BATCH, "resolve_agent_home", return_value=self.base))
+                    stack.enter_context(mock.patch.object(
+                        BATCH, "resolve_global_registry",
+                        return_value=SimpleNamespace(path=self.jobs)))
+                    stack.enter_context(mock.patch.object(
+                        BATCH.subprocess, "check_output", return_value=str(self.base)))
+                    stack.enter_context(mock.patch.dict(os.environ, {
+                        "AGENT_DISPATCH_SELF_SLUG": "owner",
+                        "AGENT_DISPATCH_ATTEMPT_ID": "att-parent-fixture",
+                        "AGENT_DISPATCH_CURRENT_HARNESS": "codex",
+                        "AGENT_DISPATCH_CURRENT_TRANSPORT": "headless",
+                        "AGENT_DISPATCH_CURRENT_SANDBOX": "workspace-write",
+                    }))
+                    with contextlib.redirect_stdout(output):
+                        rc = BATCH.main(argv)
+                receipt = json.loads(output.getvalue())
+                self.assertNotEqual(rc, 0)
+                self.assertEqual(receipt["state"], "blocked")
+                self.assertEqual(receipt["reason"], "parallel-cross-harness-unavailable")
+                self.assertEqual(
+                    receipt["degradation_reason"], "sole-gate-non-peer-harness"
+                )
+                self.assertEqual(
+                    receipt["detail"], "peer-gate:no-quality-peer-family-hard-eligible"
+                )
+        # a refusal that carries no typed cause does not grow an empty field
+        output = io.StringIO()
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(mock.patch.object(
+                BATCH, "load_route", return_value=self.route))
+            stack.enter_context(mock.patch.object(
+                BATCH, "assign_harnesses",
+                side_effect=BATCH.BatchError("route-record-invalid", "fixture")))
+            stack.enter_context(mock.patch.object(
+                BATCH, "resolve_agent_home", return_value=self.base))
+            stack.enter_context(mock.patch.object(
+                BATCH, "resolve_global_registry",
+                return_value=SimpleNamespace(path=self.jobs)))
+            stack.enter_context(mock.patch.object(
+                BATCH.subprocess, "check_output", return_value=str(self.base)))
+            stack.enter_context(mock.patch.dict(os.environ, {
+                "AGENT_DISPATCH_SELF_SLUG": "owner",
+                "AGENT_DISPATCH_ATTEMPT_ID": "att-parent-fixture",
+                "AGENT_DISPATCH_CURRENT_HARNESS": "codex",
+                "AGENT_DISPATCH_CURRENT_TRANSPORT": "headless",
+                "AGENT_DISPATCH_CURRENT_SANDBOX": "workspace-write",
+            }))
+            with contextlib.redirect_stdout(output):
+                BATCH.main(self.argv("dry-run"))
+        self.assertNotIn("degradation_reason", json.loads(output.getvalue()))
+
     def test_degraded_batch_keeps_the_manifest_stable_degradation_reason(self):
         output = io.StringIO()
         rc, receipt = self._degraded_dry_run_receipt(output)
