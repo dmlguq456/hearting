@@ -1840,6 +1840,41 @@ class DispatchContractTest(unittest.TestCase):
   # so this is a one-root rule and not a blanket refusal
   probe("handed")
 
+ # M3: a route-integrity failure and "the owner has not merged yet" are different
+ # events with different responses -- `arbitrate` resolves the second and raises
+ # on the first at the same point with the same error. The start gate used to
+ # call both `auxiliary-arbitration-missing`, sending the operator to a command
+ # that cannot help, while `terminal_gate_observation` already used the accurate
+ # name. The two consumers now agree.
+ def test_unresolvable_arbiter_is_named_apart_from_an_unmerged_group(self):
+  with tempfile.TemporaryDirectory() as td:
+   base=Path(td)
+   route,path,_marker_dir=self._auxiliary_group_route(base)
+   ready=D.AttemptReadiness("ready","fixture-ready","att-predecessor")
+   with mock.patch.object(D,"completion_marker_is_current",return_value=True), \
+        mock.patch.object(D,"completion_attempt_readiness",return_value=ready), \
+        mock.patch.object(D,"_sibling_attempt_gate"):
+    # a resolvable group that nobody has arbitrated yet
+    with self.assertRaises(D.DispatchContractError) as caught:
+     D.completion_marker_gate(str(path),"execute","start",base,base/"jobs.log",
+                              registry_lines=[],attempt_id="att-execute-new")
+    self.assertEqual(caught.exception.reason,"auxiliary-arbitration-missing")
+    # the same group, but its arbiter cannot be resolved at all
+    route_module=D._route_module()
+    with mock.patch.object(route_module,"owner_merge_auxiliary_groups",
+                           return_value={"plan-check":
+                                         "auxiliary-arbiter-ambiguous:plan-check:a,b"}):
+     with self.assertRaises(D.DispatchContractError) as caught:
+      D.completion_marker_gate(str(path),"execute","start",base,base/"jobs.log",
+                               registry_lines=[],attempt_id="att-execute-new")
+    self.assertEqual(caught.exception.reason,"auxiliary-arbiter-unresolved")
+    self.assertIn("auxiliary-arbiter-ambiguous",caught.exception.detail)
+    # the name matches the one the terminal gate already publishes
+    self.assertEqual(
+     route_module._arbitration_observation(
+      route,"plan-check","auxiliary-arbiter-ambiguous:plan-check:a,b")["reason"],
+     "auxiliary-arbiter-unresolved")
+
  # A row that never recorded a governed process cannot have leaked one, and
  # judging it unverifiable would wedge the node permanently.
  def test_sibling_row_without_a_recorded_process_is_not_a_claimant(self):

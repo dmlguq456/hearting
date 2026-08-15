@@ -1696,6 +1696,15 @@ def _auxiliary_groups_arbitrated_by(route, node_id):
 
     A single node can arbitrate more than one group, so the required length is
     the SUM of those groups' realized auxiliary legs, not any one group's count.
+
+    A group whose arbiter cannot be resolved is skipped rather than raised
+    through: its arbiter is unknown, so it is not arbitrated by THIS node or by
+    any other, and letting the error out here made one group's declaration
+    error refuse the completion of every unrelated node on the route. The
+    read-only observer (`owner_merge_auxiliary_groups`) already degrades those
+    groups to a failing row, and both gates surface them as
+    `auxiliary-arbiter-unresolved`; the asymmetry between the reader and the
+    writer was the defect.
     """
     groups = []
     required = 0
@@ -1703,7 +1712,10 @@ def _auxiliary_groups_arbitrated_by(route, node_id):
         auxiliary = _realized_auxiliary_nodes(route, group_id)
         if not auxiliary:
             continue
-        kind, arbiter = _resolve_auxiliary_arbiter(route, group_id)
+        try:
+            kind, arbiter = _resolve_auxiliary_arbiter(route, group_id)
+        except ValueError:
+            continue
         if kind == AUXILIARY_ARBITER_NODE and arbiter == node_id:
             groups.append(group_id)
             required += len(auxiliary)

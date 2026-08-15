@@ -594,6 +594,50 @@ class TestRoute(unittest.TestCase):
                    True)
     seen.add(group)
   self.assertEqual(len(seen),6)  # every realized auxiliary-bearing group in the registry
+ def unresolvable_arbiter_route(self):
+  # SD-102 does not cap a map-worker anchor's consumer count and the topology
+  # check does not count it, so one registry edit reaches this shape.
+  def leg(i,node_id,cls):
+   return {"id":node_id,"depends_on":["seed"],"kind":"map-worker",
+           "completion_gate":f"gate-{node_id}","dispatch_depth":2,
+           "parallel_group":"map","parallel_leg_index":i,"parallel_anchor":"map",
+           "leg_class":cls}
+  return {"dispatch_contract_version":3,"route_id":"rt-m3",
+          "route_hash":"sha256:"+"c"*64,"registry_digest":"sha256:"+"d"*64,
+          "nodes":[
+           {"id":"seed","depends_on":[],"kind":"pipeline-stage",
+            "completion_gate":"gate-seed","dispatch_depth":2},
+           leg(0,"map","peer"),leg(1,"map-alt","peer"),leg(2,"map-aux","auxiliary"),
+           {"id":"consumer-a","depends_on":["map"],"kind":"pipeline-stage",
+            "completion_gate":"gate-a","dispatch_depth":2},
+           {"id":"consumer-b","depends_on":["map"],"kind":"pipeline-stage",
+            "completion_gate":"gate-b","dispatch_depth":2},
+           {"id":"unrelated","depends_on":["seed"],"kind":"pipeline-stage",
+            "completion_gate":"gate-u","dispatch_depth":2}]}
+ def test_m3_unresolvable_arbiter_does_not_block_unrelated_completions(self):
+  # M3: `_validate_auxiliary_arbiter` runs on EVERY node's completion, so a
+  # single group's declaration error used to refuse the completion of nodes that
+  # arbitrate nothing -- one local error became a route-wide halt. The read-only
+  # observer already degraded it to a failing row; only the writer raised, and
+  # that asymmetry was the defect.
+  route=self.unresolvable_arbiter_route()
+  with self.assertRaisesRegex(ValueError,"auxiliary-arbiter-ambiguous"):
+   R._resolve_auxiliary_arbiter(route,"map")
+  self.assertIn("map",R.owner_merge_auxiliary_groups(route))
+  with tempfile.TemporaryDirectory() as td:
+   evidence=Path(td)/"out.md"; evidence.write_text("done\n",encoding="utf-8")
+   for node_id in ("unrelated","consumer-a"):
+    with self.subTest(node=node_id):
+     node=next(n for n in route["nodes"] if n["id"]==node_id)
+     R._validate_auxiliary_arbiter(route,node,evidence)
+   # a group with no resolvable arbiter is arbitrated by nobody
+   self.assertEqual(R._auxiliary_groups_arbitrated_by(route,"consumer-a"),([],0))
+   # and a RESOLVABLE node arbiter is still gated, so this narrowed the raise
+   # rather than removing it
+   good=self.research_route()
+   synthesis=next(n for n in good["nodes"] if n["id"]=="synthesis")
+   with self.assertRaisesRegex(ValueError,"auxiliary_findings_considered"):
+    R._validate_auxiliary_arbiter(good,synthesis,evidence)
  def test_ac5_auxiliary_arbiter_verdict_length_gate(self):
   # AC 5 (front half): a NODE arbiter's verdict must carry
   # auxiliary_findings_considered with one entry per realized auxiliary leg it

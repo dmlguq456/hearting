@@ -3198,8 +3198,18 @@ def _auxiliary_arbitration_gate(
         and row.get("parallel_group")
     }
     unarbitrated = []
+    unresolved = []
     for group_id, error in sorted(owner_merge.items()):
         if group_id not in dependency_groups:
+            continue
+        if error is not None:
+            # M3: a route-integrity failure is a different event from "the owner
+            # has not merged yet", and `arbitrate` cannot resolve it -- it raises
+            # at the same point with the same error. Naming it
+            # `auxiliary-arbitration-missing` sent the operator to a command that
+            # cannot help. `terminal_gate_observation` already calls this state
+            # `auxiliary-arbiter-unresolved`; the two consumers now agree.
+            unresolved.append(f"{group_id}:{error}")
             continue
         basename = Path(
             str(route_module.arbitration_path(route["route_id"], group_id))
@@ -3215,7 +3225,7 @@ def _auxiliary_arbitration_gate(
             ),
             None,
         )
-        if error is None and found is None:
+        if found is None:
             # Absent under the handed root means refused. `_arbitration_observation`
             # falls back to `arbitration_path()`, which re-resolves the state root
             # from the environment, so passing `path=None` here would open the
@@ -3232,6 +3242,10 @@ def _auxiliary_arbitration_gate(
         )
         if not row["passed"]:
             unarbitrated.append(group_id)
+    if unresolved:
+        raise DispatchContractError(
+            "auxiliary-arbiter-unresolved", ",".join(unresolved)
+        )
     if unarbitrated:
         raise DispatchContractError(
             "auxiliary-arbitration-missing", ",".join(unarbitrated)
