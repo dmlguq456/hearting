@@ -145,7 +145,11 @@ class CompilerStillTagsTest(unittest.TestCase):
         recipe = next(r for r in registry["recipes"]
                       if r.get("capability") == "autopilot-code")["standard_plus"]
         nodes = json.loads(json.dumps(recipe["nodes"]))
-        return module._expand_parallel_groups(nodes, recipe.get("parallel_groups"), intensity)
+        # `capability` became required (a caller that omitted it silently rejected the
+        # shipped groups), so pass it positionally and let a future signature change fail
+        # loudly here rather than quietly stop verifying anything.
+        return module._expand_parallel_groups(nodes, recipe.get("parallel_groups"),
+                                              intensity, "autopilot-code")
 
     def test_thorough_expansion_tags_every_review_leg(self):
         legs = [n for n in self._expand("thorough") if n["id"].startswith("impl-review")]

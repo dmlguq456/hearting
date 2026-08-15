@@ -100,6 +100,24 @@ def _symlink_destination(target):
         return None
 
 
+def _managed_release_roots(home):
+    """Release trees this installer itself extracted under the Hearting data home.
+
+    F-80b: `~/.local/share/hearting/{current,releases/*}`. These are installer-owned, so a
+    launcher pointing into one is ours to re-point — unlike a genuinely foreign path, which
+    the collision guard must keep refusing to touch.
+    """
+    raw = os.environ.get("XDG_DATA_HOME")
+    data_home = Path(raw) if raw and Path(raw).is_absolute() else home / ".local" / "share"
+    hearting = data_home / "hearting"
+    roots = [hearting / "current"]
+    try:
+        roots.extend(entry for entry in (hearting / "releases").iterdir() if entry.is_dir())
+    except OSError:
+        pass
+    return roots
+
+
 def _is_prior_linked_launcher(target, home, rel_source):
     """Recognize exact launchers from legacy or activated Hearting sources."""
     destination = _symlink_destination(target)
@@ -110,6 +128,13 @@ def _is_prior_linked_launcher(target, home, rel_source):
             (home / checkout / rel_source).resolve(strict=False)
             for checkout in ("hearting", "agent_setting")
         }
+        # F-80b (user 2026-08-16 "그럼 전부 고쳐"): a launcher already pointing into a
+        # managed release snapshot never self-corrected — the snapshot path was in no
+        # `prior` set, so the collision guard treated the installer's own artifact as a
+        # foreign file and preserved it. That is how `hearting`/`harness`/`mem` stayed
+        # pinned to v2.49.0 while `fleet` had to be repointed by hand.
+        prior.update((root / rel_source).resolve(strict=False)
+                     for root in _managed_release_roots(home))
     except (OSError, RuntimeError):
         return False
     activation_paths = (

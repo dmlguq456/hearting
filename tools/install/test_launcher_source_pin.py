@@ -22,8 +22,10 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import bootstrap  # noqa: E402
 import paths  # noqa: E402
 
 
@@ -122,6 +124,74 @@ class LauncherSourceTest(unittest.TestCase):
         os.environ["AGENT_HOME"] = str(self.main)
         self.assertEqual(paths.resolve_launcher_source("tools/fleet/fleet.sh"),
                          paths.resolve_source("tools/fleet/fleet.sh"))
+
+
+class ManagedReleaseMigrationTest(unittest.TestCase):
+    """F-80b — a launcher already pointing into a release snapshot self-corrects.
+
+    The collision guard never overwrites a link it does not recognize, which is right for a
+    foreign file and wrong for the installer's own release tree: the snapshot path was in no
+    `prior` set, so `hearting`/`harness`/`mem` stayed pinned to v2.49.0 while `fleet` had to
+    be repointed by hand (user: "그럼 전부 고쳐").
+    """
+
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name).resolve()
+        self.home = self.root / "home"
+        self.bin_dir = self.home / ".local" / "bin"
+        self.bin_dir.mkdir(parents=True)
+        self.source = self.root / "checkout"
+        self.release = (self.home / ".local" / "share" / "hearting"
+                        / "releases" / "v1.0.0")
+        for tree in (self.source, self.release):
+            for _name, rel in bootstrap.LAUNCHERS:
+                path = tree / rel
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("#!/bin/sh\n", encoding="utf-8")
+        self.resolve = mock.patch.object(
+            bootstrap.paths, "resolve_launcher_source",
+            side_effect=lambda rel: self.source / rel,
+        )
+        self.resolve.start()
+        self.addCleanup(self.resolve.stop)
+
+    def _link_all_to_release(self):
+        for name, rel in bootstrap.LAUNCHERS:
+            (self.bin_dir / name).symlink_to(self.release / rel)
+
+    def test_release_snapshot_links_migrate_to_the_checkout(self):
+        self._link_all_to_release()
+        rows = {r["name"]: r for r in bootstrap.install_launchers(home=self.home)}
+        for name, rel in bootstrap.LAUNCHERS:
+            self.assertEqual(rows[name]["status"], "migrated-legacy", name)
+            self.assertEqual((self.bin_dir / name).resolve(), (self.source / rel).resolve())
+
+    def test_the_current_symlink_tree_is_recognized_too(self):
+        """Installs point `current` at the live release; a launcher may name either."""
+        current = self.home / ".local" / "share" / "hearting" / "current"
+        current.symlink_to(self.release)
+        for name, rel in bootstrap.LAUNCHERS:
+            (self.bin_dir / name).symlink_to(current / rel)
+        rows = {r["name"]: r["status"] for r in bootstrap.install_launchers(home=self.home)}
+        self.assertEqual(set(rows.values()), {"migrated-legacy"})
+
+    def test_a_foreign_link_is_still_preserved(self):
+        """The guard's whole purpose survives: only installer-owned trees are re-pointed."""
+        foreign = self.root / "elsewhere" / "fleet.sh"
+        foreign.parent.mkdir(parents=True)
+        foreign.write_text("#!/bin/sh\n", encoding="utf-8")
+        (self.bin_dir / "fleet").symlink_to(foreign)
+        rows = {r["name"]: r["status"] for r in bootstrap.install_launchers(home=self.home)}
+        self.assertEqual(rows["fleet"], "skipped-collision")
+        self.assertEqual((self.bin_dir / "fleet").resolve(), foreign.resolve())
+
+    def test_an_already_correct_link_is_left_alone(self):
+        for name, rel in bootstrap.LAUNCHERS:
+            (self.bin_dir / name).symlink_to(self.source / rel)
+        rows = {r["name"]: r["status"] for r in bootstrap.install_launchers(home=self.home)}
+        self.assertEqual(set(rows.values()), {"unchanged"})
 
 
 if __name__ == "__main__":
