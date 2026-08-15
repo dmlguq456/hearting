@@ -808,19 +808,24 @@ def wrapper_result(
     leg: dict[str, object], proc: subprocess.Popen, stdout: str, stderr: str
 ) -> dict[str, object]:
     fields = output_fields(stdout + stderr)
-    started = fields.get("started", fields.get("child_spawned", "unknown"))
+    registered = fields.get("registered", "unknown")
+    started = fields.get("started", "unknown")
+    child_spawned = fields.get("child_spawned", "unknown")
     duplicate = fields.get("duplicate_attempt", "unknown")
     runtime_failure = fields.get("worker_failure", "-") not in {"", "-"}
     early_death = fields.get("early_death", "-") not in {"", "-"}
+    launch_triplet = (registered, started, child_spawned, duplicate)
     receipt_valid = (
         proc.returncode == 0
         and fields.get("check") == "ok"
         and fields.get("adapter") == leg["adapter"]
         and fields.get("status") == "start"
         and fields.get("attempt_id") == leg["attempt_id"]
-        and started in {"0", "1"}
-        and duplicate in {"0", "1"}
-        and (started, duplicate) in {("1", "0"), ("0", "1")}
+        and launch_triplet
+        in {
+            ("1", "1", "1", "0"),
+            ("0", "0", "0", "1"),
+        }
         and not runtime_failure
         and not early_death
     )
@@ -833,7 +838,9 @@ def wrapper_result(
     return {
         **leg,
         "exit_code": proc.returncode,
-        "child_spawned": started,
+        "registered": registered,
+        "started": started,
+        "child_spawned": child_spawned,
         "duplicate_attempt": duplicate,
         "check": fields.get("check", "invalid"),
         "launch_state": launch_state,
@@ -967,6 +974,8 @@ def existing_leg_result(
     common = {
         **leg,
         "exit_code": 0,
+        "registered": "0",
+        "started": "0",
         "child_spawned": "0",
         "duplicate_attempt": "1",
     }
@@ -1091,6 +1100,19 @@ def batch_receipt(
         "schema_version": 2,
         "state": state,
         "action": "start",
+        # Mirror the direct start receipt at the batch boundary.  A freshly
+        # launched batch is resumable only when every exact child wrapper
+        # supplied the complete literal launch triplet; registry metadata and
+        # aggregate counts are corroboration, never substitutes.
+        "registered": int(
+            success and all(leg.get("registered") == "1" for leg in results)
+        ),
+        "started": int(
+            success and all(leg.get("started") == "1" for leg in results)
+        ),
+        "child_spawned": int(
+            success and all(leg.get("child_spawned") == "1" for leg in results)
+        ),
         "parallel_group": args.parallel_group,
         "replica_group": args.parallel_group,
         "independence": independence,
