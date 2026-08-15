@@ -1439,40 +1439,62 @@ def _next_marker_sequence(directory, node_id):
                 maximum=max(maximum,int(middle))
     return maximum+1
 
+def _completion_marker_replay(route, node, node_id, evidence, axes, directory):
+    """The one answer to "is this call a replay of the marker already on disk?".
+
+    N2: this used to live only inside `write_completion_marker`, and the
+    owner-chain resume path carried a hand-copied version of it that reproduced
+    the identity FIELDS but not the history-file check below. In the state where
+    the immutable history sibling is missing or has drifted, the original
+    refused and the copy reported the gate resumed -- so the copy's claim to
+    recognize "exactly what `write_completion_marker` recognizes" was false.
+    Both callers now take this same branch, which makes that claim structural
+    instead of maintained by hand.
+
+    Returns the existing marker for a replay, `None` when this is a new gate,
+    and raises when the marker on disk contradicts itself.
+    """
+    canonical_path=directory/f"{node_id}.json"
+    if not canonical_path.is_file():
+        return None
+    existing=json.loads(canonical_path.read_text(encoding="utf-8"))
+    identity={
+        "evidence_sha256":hashlib.sha256(evidence.read_bytes()).hexdigest(),
+        **axes,
+    }
+    existing_identity={
+        "evidence_sha256":existing.get("evidence",{}).get("sha256"),
+        **{key:existing.get(key) for key in axes},
+    }
+    if existing_identity!=identity:
+        return None
+    static_identity={
+        "schema_version":2,
+        "route_id":route["route_id"],
+        "route_hash":route["route_hash"],
+        "registry_digest":route["registry_digest"],
+        "node_id":node_id,
+        "completion_gate":node["completion_gate"],
+    }
+    if any(existing.get(key)!=value for key,value in static_identity.items()):
+        raise ValueError("canonical completion marker identity conflict")
+    history_path=directory/f"{node_id}.{existing.get('sequence')}.json"
+    if (
+        not history_path.is_file()
+        or json.loads(history_path.read_text(encoding="utf-8"))!=existing
+    ):
+        raise ValueError("canonical completion marker history conflict")
+    return existing
+
 def write_completion_marker(route, node, node_id, evidence, *, attempt_id=None, attempt_metadata=None):
     _migrate_completion_dir_forward(route["route_id"])
     directory=completion_dir(route["route_id"])
     canonical_path=directory/f"{node_id}.json"
     sha=hashlib.sha256(evidence.read_bytes()).hexdigest()
     axes=_marker_attempt_axes(node, attempt_id, attempt_metadata)
-    identity={
-        "evidence_sha256":sha,
-        **axes,
-    }
-    if canonical_path.is_file():
-        existing=json.loads(canonical_path.read_text(encoding="utf-8"))
-        existing_identity={
-            "evidence_sha256":existing.get("evidence",{}).get("sha256"),
-            **{key:existing.get(key) for key in axes},
-        }
-        if existing_identity==identity:
-            static_identity={
-                "schema_version":2,
-                "route_id":route["route_id"],
-                "route_hash":route["route_hash"],
-                "registry_digest":route["registry_digest"],
-                "node_id":node_id,
-                "completion_gate":node["completion_gate"],
-            }
-            if any(existing.get(key)!=value for key,value in static_identity.items()):
-                raise ValueError("canonical completion marker identity conflict")
-            history_path=directory/f"{node_id}.{existing.get('sequence')}.json"
-            if (
-                not history_path.is_file()
-                or json.loads(history_path.read_text(encoding="utf-8"))!=existing
-            ):
-                raise ValueError("canonical completion marker history conflict")
-            return existing
+    replayed=_completion_marker_replay(route,node,node_id,evidence,axes,directory)
+    if replayed is not None:
+        return replayed
     sequence=_next_marker_sequence(directory,node_id)
     marker={
         "schema_version":2,
@@ -2251,43 +2273,27 @@ _LEGACY_BASELINE_DIGEST = "legacy-path-only-baseline"
 def _published_owner_chain_marker(route, node, node_id, evidence, *, attempt_id, attempt_metadata):
     """Return the canonical marker when this exact aggregation already published one.
 
-    "Exact" is `write_completion_marker`'s own replay identity -- the evidence
-    digest plus every attempt axis, which for an owner-chain gate includes the
-    manifest sha256 -- so this recognizes a replay of the same stage gate and
-    nothing else. A different manifest, different evidence, or a marker written
-    by any other authority is not a replay and falls through to the full audit.
+    "Exact" is `write_completion_marker`'s own replay branch, called here --
+    the evidence digest plus every attempt axis (which for an owner-chain gate
+    includes the manifest sha256), the static route/node identity, AND the
+    immutable history sibling. A different manifest, different evidence, or a
+    marker written by any other authority is not a replay and falls through to
+    the full audit; a marker that contradicts its own history raises here
+    exactly as it does there. N2: the second half of that used to be a
+    hand-copied subset, so this path resumed a gate the writer refused.
+
+    A missing attempt axis is not a replay decision this path can make, so it
+    falls through to the audit, which ends at `write_completion_marker` and the
+    same refusal.
     """
     _migrate_completion_dir_forward(route["route_id"])
-    path = completion_dir(route["route_id"]) / f"{node_id}.json"
-    try:
-        existing = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return None
     try:
         axes = _marker_attempt_axes(node, attempt_id, attempt_metadata)
     except ValueError:
         return None
-    identity = {
-        "evidence_sha256": hashlib.sha256(evidence.read_bytes()).hexdigest(),
-        **axes,
-    }
-    observed = {
-        "evidence_sha256": existing.get("evidence", {}).get("sha256"),
-        **{key: existing.get(key) for key in axes},
-    }
-    if observed != identity:
-        return None
-    static_identity = {
-        "schema_version": 2,
-        "route_id": route["route_id"],
-        "route_hash": route["route_hash"],
-        "registry_digest": route["registry_digest"],
-        "node_id": node_id,
-        "completion_gate": node["completion_gate"],
-    }
-    if any(existing.get(key) != value for key, value in static_identity.items()):
-        return None
-    return existing
+    return _completion_marker_replay(
+        route, node, node_id, evidence, axes, completion_dir(route["route_id"])
+    )
 
 
 def _first_parent_descends_from(worktree, ancestor, head):

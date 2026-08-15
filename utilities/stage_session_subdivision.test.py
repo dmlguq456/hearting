@@ -462,6 +462,45 @@ class SubdivisionContractTest(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "subdivision-scope-violation"):
                     CR.complete_subsession_stage(route, node, "execute", evidence, mp, jobs)
 
+        # 5. the resume path claims it recognizes a replay of THIS stage gate and
+        #    nothing else -- i.e. exactly what `write_completion_marker` treats as
+        #    a replay. Pin that claim in the one state where the two could drift:
+        #    the canonical marker's immutable history sibling is gone, which
+        #    `write_completion_marker` refuses. The stage gate must refuse
+        #    identically rather than report the gate resumed.
+        with tempfile.TemporaryDirectory() as td:
+            worktree, route, node, manifest, mp, jobs, evidence = _staged(td)
+            with mock.patch.dict(os.environ, {"AGENT_DISPATCH_JOBS": str(jobs)}):
+                self._admit(route, node, manifest)
+                for session in manifest["sessions"]:
+                    Path(session["fixed_files"][0]).write_text("slice edit\n", encoding="utf-8")
+                marker, _status = CR.complete_subsession_stage(
+                    route, node, "execute", evidence, mp, jobs
+                )
+                history = (
+                    CR.completion_dir(route["route_id"])
+                    / f"execute.{marker['sequence']}.json"
+                )
+                self.assertTrue(history.is_file())
+                history.unlink()
+                metadata = {
+                    "stage_authority": "owner-chain",
+                    "subsession_manifest": marker["subsession_manifest"],
+                    "subsession_manifest_sha256": marker["subsession_manifest_sha256"],
+                    "session_chain_id": marker["session_chain_id"],
+                }
+                with self.assertRaisesRegex(
+                    ValueError, "canonical completion marker history conflict"
+                ):
+                    CR.write_completion_marker(
+                        route, node, "execute", evidence,
+                        attempt_id=marker["attempt_id"], attempt_metadata=metadata,
+                    )
+                with self.assertRaisesRegex(
+                    ValueError, "canonical completion marker history conflict"
+                ):
+                    CR.complete_subsession_stage(route, node, "execute", evidence, mp, jobs)
+
     def test_missing_admission_baseline_fails_closed(self):
         # For a PARALLEL subdivision, an absent baseline means the audit is not
         # slice attribution at all, so it refuses rather than silently widening
