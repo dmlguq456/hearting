@@ -597,6 +597,63 @@ class FallbackTest(unittest.TestCase):
   self.assertEqual(cross[0]["cause"],receipt["parent_cross_cause"])
   self.assertEqual(cross[0]["route_node"],"plan-check")
   self.assertEqual(cross[0]["writer"],"stage-dispatch-fallback.py")
+ def test_ac12_sole_gate_receipt_and_ledger_evidence_pair_at_the_cli(self):
+  # M5 / AC 12: the CLI evidence pair for the SOLE-GATE degradation was never
+  # actually created -- the fixture above asserts `parent_cross`, which is AC 16.
+  # AC 12 requires the `sole_gate` receipt field and the
+  # `sole-gate-non-peer-harness` SD-93 record TOGETHER ("두 증거가 모두 없으면
+  # 실패"), and every existing sole_gate assertion is on the `context` dict a
+  # function returns, never on what a process leaves behind. This drives the
+  # real process: only opencode is hard-eligible while the derived quality-peer
+  # set is {claude, codex}, so the single gate-holding checker lands off the
+  # quality-peer families and the assignment proceeds with the degradation
+  # recorded (13.30.2 ② proviso). The owner family stays codex so the head is
+  # NOT the owner and `parent_cross` reads "ok" -- this pins the sole-gate pair
+  # on its own, not on the back of AC 16's.
+  gate={"spec_read":{"satisfied":True,"source":"fixture"},"drift_verdict":"within-spec",
+        "workflow_mode":"tracked","artifact_guard":{"satisfied":True,"source":"fixture"}}
+  evidence={"tuples":[self.tuple("opencode","supported"),
+                      self.tuple("codex","unsupported"),
+                      self.tuple("claude","unsupported")],
+            "native_subagent":[{"harness":"codex","transport":"headless",
+                                "execution_surface":"codex-native-subagent",
+                                "registered_worker":False,"status":"unsupported",
+                                "check_source":"fixture"}]}
+  route=R.compile_route("autopilot-code","dev","strong",self.repo,self.art,
+    signals=["shared-contract"],transport="headless",tracking="tracked",
+    tracked_gate_evidence=gate,dispatch_evidence=evidence)
+  path=Path(self.tmp.name)/"sole-gate-route.json"
+  path.write_text(json.dumps(route),encoding="utf-8")
+  self.seed_parent()
+  cmd=[sys.executable,str(ROOT/"utilities/stage-dispatch-fallback.py"),
+       "--route",str(path),"--node","plan-check","--slug","fb-sole-gate",
+       "--parent","owner","--capability-mode","dev","--worker-mode","qa/plan-review",
+       "--model-role","fast reviewer","--jobs",str(self.jobs),"--dry-run"]
+  env={**os.environ,"AGENT_HOME":str(ROOT),"AGENT_ARTIFACT_ROOT":str(self.art),
+       "AGENT_MODEL_GOVERNOR_ROOT":str(self.art/".runtime/model-worker-governor"),
+       "AGENT_DISPATCH_JOBS":str(self.jobs),"AGENT_DISPATCH_SELF_SLUG":"owner",
+       "AGENT_DISPATCH_ATTEMPT_ID":"att-fallback-parent",
+       "AGENT_DISPATCH_CURRENT_HARNESS":"codex",
+       "AGENT_DISPATCH_CURRENT_TRANSPORT":"headless",
+       "AGENT_DISPATCH_CURRENT_SANDBOX":"workspace-write"}
+  result=subprocess.run(cmd,text=True,capture_output=True,env=env)
+  self.assertEqual(result.returncode,0,result.stdout+result.stderr)
+  receipt=dict(line.split("=",1) for line in result.stdout.splitlines() if "=" in line)
+  # evidence 1: the stdout receipt field
+  self.assertEqual(receipt["sole_gate"],"degraded")
+  self.assertEqual(receipt["child_harness"],"opencode")
+  self.assertEqual(receipt["parent_cross"],"ok")
+  # evidence 2: the SD-93 ledger record left by the SAME process run
+  ledger=Path(self.tmp.name)/"degradations"/f"{route['route_id']}.jsonl"
+  self.assertTrue(ledger.is_file(),result.stdout)
+  rows=[json.loads(line) for line in ledger.read_text(encoding="utf-8").splitlines()
+        if line.strip()]
+  sole=[row for row in rows if row.get("reason")=="sole-gate-non-peer-harness"]
+  self.assertEqual(len(sole),1,rows)
+  self.assertEqual(sole[0]["sole_gate"],"degraded")
+  self.assertEqual(sole[0]["leg_class"],"peer")
+  self.assertEqual(sole[0]["route_node"],"plan-check")
+  self.assertEqual(sole[0]["writer"],"stage-dispatch-fallback.py")
  def test_ac17_parent_identity_absent_marks_not_applicable(self):
   node=self._gate_node()
   route=self._gate_route(owner="opencode")
