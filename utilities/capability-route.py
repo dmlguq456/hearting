@@ -1850,9 +1850,13 @@ def arbitrate_group(route, group_id, evidence):
     # `completion_marker_is_current` additionally requires schema v2, a real
     # sequence, the immutable history file, and the attempt linkage. Proving only
     # the weaker one let the arbitration record be written over a marker that a
-    # dependent's start-gate then rejects as `completion-marker-missing` -- not
+    # dependent's start-gate then refuses as an absent canonical marker -- not
     # fail-open, since the dependent is blocked either way, but it makes the
-    # arbitration record mean less than the join it claims to attest.
+    # arbitration record mean less than the join it claims to attest. (Spell
+    # that refusal reason in prose, not as its literal token: the static
+    # guardian in `dispatch_completion_marker.test.py` keeps the literal inside
+    # `dispatch_contract.py` and the adapters' relay, and every allowlist entry
+    # added to quiet a comment blunts it for the next real violation.)
     directory = completion_dir(route["route_id"])
     unjoined = sorted(
         str(member.get("id")) for member in members

@@ -738,8 +738,10 @@ class TestRoute(unittest.TestCase):
    # M7: a marker that passes the identity row but NOT the canonical
    # `completion_marker_is_current` contract is not a join either. Accepting it
    # let the arbitration record be written over a marker a dependent's
-   # start-gate then rejects as `completion-marker-missing`, so the record
-   # attested a join that downstream did not recognize.
+   # start-gate then refuses as an absent canonical marker, so the record
+   # attested a join that downstream did not recognize. (Prose, not the literal
+   # refusal token -- `dispatch_completion_marker.test.py`'s static guardian
+   # scans this tree for it and each allowlist entry weakens that guardian.)
    self._join_group(route,"plan-check",td,link=False)
    for member in R._group_members(route,"plan-check"):
     node_id=str(member["id"])
