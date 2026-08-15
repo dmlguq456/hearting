@@ -11,6 +11,7 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest import mock
 import sys
 
 
@@ -1056,6 +1057,17 @@ class FinishedChildClosure(unittest.TestCase):
         # fixture must present a real one rather than an arbitrary directory.
         self.artifact = self.base / ".agent_reports"
         self.artifact.mkdir()
+        self.environment = mock.patch.dict(
+            os.environ,
+            {
+                "AGENT_ARTIFACT_ROOT": str(self.artifact),
+                "AGENT_MODEL_GOVERNOR_ROOT": str(
+                    self.artifact / ".runtime" / "model-worker-governor"
+                ),
+            },
+        )
+        self.environment.start()
+        self.addCleanup(self.environment.stop)
         self.jobs = self.base / "jobs.log"
         self.jobs.touch()
 

@@ -551,7 +551,11 @@ class CodexAppServerSupervisorTest(unittest.TestCase):
             input="initial assignment",
             text=True,
             capture_output=True,
-            env={**os.environ, "FAKE_TRACE": str(self.trace)},
+            env={
+                **os.environ,
+                "FAKE_TRACE": str(self.trace),
+                "AGENT_ARTIFACT_ROOT": str(self.artifact_root),
+            },
             timeout=10,
         )
         self.assertEqual(result.returncode, 0, result.stderr + result.stdout)

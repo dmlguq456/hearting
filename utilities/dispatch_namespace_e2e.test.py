@@ -108,6 +108,7 @@ class CodexNamespaceE2E(unittest.TestCase):
 
             artifact_root = base / ".agent_reports"
             artifact_root.mkdir()
+            model_governor_root = artifact_root / ".runtime" / "model-worker-governor"
             evidence = artifact_root / "pass.md"
             evidence.write_text("codex namespace PASS\n", encoding="utf-8")
             agent_home = base / "agent-home"
@@ -156,6 +157,7 @@ class CodexNamespaceE2E(unittest.TestCase):
                 **os.environ,
                 "AGENT_HOME": str(agent_home),
                 "AGENT_ARTIFACT_ROOT": str(artifact_root),
+                "AGENT_MODEL_GOVERNOR_ROOT": str(model_governor_root),
             }
             fixture_env.pop("AGENT_DISPATCH_JOBS", None)
             for predecessor in node.get("depends_on", []):
@@ -251,6 +253,7 @@ class CodexNamespaceE2E(unittest.TestCase):
                 "PATH": str(fakebin) + os.pathsep + os.environ.get("PATH", ""),
                 "AGENT_HOME": str(agent_home),
                 "AGENT_ARTIFACT_ROOT": str(artifact_root),
+                "AGENT_MODEL_GOVERNOR_ROOT": str(model_governor_root),
                 "AGENT_DISPATCH_JOBS": str(jobs),
                 "AGENT_DISPATCH_CHILD": "1",
                 "AGENT_DISPATCH_ATTEMPT_ID": "att-parent-pidns",
