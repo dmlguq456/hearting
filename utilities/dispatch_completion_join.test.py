@@ -282,6 +282,79 @@ class DispatchCompletionJoinTest(unittest.TestCase):
         )
         self.assertEqual(ready["state"], "ready")
 
+    def test_done_namespace_local_row_polls_until_post_exit_receipt_is_complete(self):
+        attempt = "att-namespace-receipt"
+        parent = "att-parent"
+        metadata = {
+            "pid": "999999",
+            "pid_start": "42",
+            "pgid": "999999",
+            "pid_scope": "namespace-local",
+            "pid_ns": os.readlink("/proc/self/ns/pid"),
+            "pid_observer_ns": os.readlink("/proc/self/ns/pid"),
+        }
+        self.jobs.write_text(
+            row("done", attempt, parent, "a", process_metadata=metadata),
+            encoding="utf-8",
+        )
+
+        def publish_receipt() -> None:
+            time.sleep(0.12)
+            complete = dict(
+                metadata,
+                launch_lifecycle="foreground-scoped",
+                launch_outcome="governed-process-reaped",
+                group_reap_proof="pgid-empty-v1",
+                group_reap_pgid="999999",
+            )
+            with self.jobs.open("a", encoding="utf-8") as handle:
+                handle.write(row("done", attempt, parent, "a", process_metadata=complete))
+
+        thread = threading.Thread(target=publish_receipt)
+        thread.start()
+        started = time.monotonic()
+        receipt = JOIN.join_batch(
+            jobs=self.jobs,
+            parent_attempt_id=parent,
+            interval=0.02,
+            timeout=1,
+            liveness_command=[str(self.live)],
+        )
+        thread.join(timeout=1)
+        self.assertGreaterEqual(time.monotonic() - started, 0.1)
+        self.assertEqual(receipt["state"], "ready")
+        self.assertEqual(receipt["children"][0]["reason"], "registry-closed")
+
+    def test_done_namespace_local_row_with_partial_receipt_stays_pending(self):
+        metadata = {
+            "pid": "999999",
+            "pid_start": "42",
+            "pgid": "999999",
+            "pid_scope": "namespace-local",
+            "pid_ns": os.readlink("/proc/self/ns/pid"),
+            "pid_observer_ns": os.readlink("/proc/self/ns/pid"),
+            "launch_outcome": "governed-process-reaped",
+        }
+        self.jobs.write_text(
+            row(
+                "done",
+                "att-partial-receipt",
+                "att-parent",
+                "a",
+                process_metadata=metadata,
+            ),
+            encoding="utf-8",
+        )
+        receipt = JOIN.join_batch(
+            jobs=self.jobs,
+            parent_attempt_id="att-parent",
+            interval=0.02,
+            timeout=0.08,
+            liveness_command=[str(self.live)],
+        )
+        self.assertEqual(receipt["state"], "timeout")
+        self.assertEqual(receipt["children"][0]["reason"], "process-unverifiable")
+
     def test_timeout_is_one_bounded_receipt(self):
         self.jobs.write_text(
             row("open", "att-a", "att-parent", "a", "RAW_TIMEOUT_SENTINEL"),

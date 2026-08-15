@@ -1206,6 +1206,19 @@ def attempt_process_quiescence(
     result = _attempt_process_quiescence_impl(metadata)
     if result.state != "quiescent":
         return result
+    # A terminal namespace-local row can become visible before its wrapper has
+    # finished publishing the portable post-exit receipt.  Local PID/group and
+    # tagged-descendant observations prove that the process is quiet *here*,
+    # but that evidence disappears with the namespace.  Keep the terminal gate
+    # pending until the existing receipt validator recognizes complete durable
+    # evidence.  Host-visible rows retain their established behavior.
+    if (
+        terminal_receipt
+        and metadata.get("registered_worker") == "1"
+        and metadata.get("pid_scope") == "namespace-local"
+        and not _post_exit_receipt_reason(metadata)
+    ):
+        return ProcessQuiescence("unverifiable", "post-exit-receipt-incomplete")
     # D-1: a legacy row records no attempt id, so there is no tag to scan for.
     # Answering `unverifiable` for all of them would retroactively freeze every
     # successor, join, wait, and cleanup gate that reads an old row, so they
