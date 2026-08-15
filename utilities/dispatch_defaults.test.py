@@ -100,6 +100,61 @@ class DispatchDefaultsV3Tests(unittest.TestCase):
         config["profiles"]["light"]["primary"] = []
         self.assertEqual(D.validate(config, capmap), [])
 
+    def test_disjoint_deep_primary_bands_are_rejected(self):
+        # M6: rejecting the EMPTY band closed one spelling of the hole. The
+        # quality-peer set is the INTERSECTION of the two bands, so two
+        # non-empty but DISJOINT bands nullify it just as completely and pass
+        # the coverage rule identically. After the AC 11 fix that is worse than
+        # before: the derived set is an empty frozenset rather than None, so
+        # `sole_gate` starts "ok", the gated list empties, and every
+        # peer-bearing parallel group is refused route-wide with a message that
+        # blames harness availability instead of this config.
+        capmap = D.load_topology_capabilities(D.default_topology_path())
+        config = self.config()
+        threshold = config["profiles"]["deep"]["promote_relief_below"]
+        config["profiles"]["deep"] = {
+            "primary": ["claude"], "relief": ["codex"], "last_resort": ["opencode"],
+            "promote_relief_below": threshold,
+        }
+        config["profiles"]["balanced-deep"] = {
+            "primary": ["codex"], "relief": ["claude"], "last_resort": ["opencode"],
+            "promote_relief_below": threshold,
+        }
+        errors = D.validate(config, capmap)
+        # neither existing rule sees it: every harness still appears exactly
+        # once, and neither band is empty
+        self.assertFalse(
+            any("every enabled harness exactly once" in error for error in errors),
+            errors,
+        )
+        self.assertFalse(
+            any("must name at least one harness" in error for error in errors), errors
+        )
+        self.assertTrue(
+            any("must share at least one harness" in error for error in errors),
+            f"disjoint deep bands accepted: {errors}",
+        )
+        # and this is what the accepted config would have derived
+        peer = importlib.util.spec_from_file_location(
+            "dispatch_quality_peer_under_test",
+            Path(__file__).with_name("dispatch_quality_peer.py"),
+        )
+        QP = importlib.util.module_from_spec(peer)
+        peer.loader.exec_module(QP)
+        self.assertEqual(
+            QP.quality_peer_families({
+                "deep": config["profiles"]["deep"],
+                "balanced-deep": config["profiles"]["balanced-deep"],
+            }),
+            frozenset(),
+        )
+        # one shared harness is enough; asymmetric bands stay legal
+        config["profiles"]["balanced-deep"] = {
+            "primary": ["claude", "codex"], "relief": [], "last_resort": ["opencode"],
+            "promote_relief_below": threshold,
+        }
+        self.assertEqual(D.validate(config, capmap), [])
+
     def test_ac10_quality_peer_set_follows_the_config(self):
         # AC 10: the quality-peer derivation is config-driven, never hardcoded.
         # Moving a family out of a deep band moves the derived set with it.

@@ -329,6 +329,27 @@ def validate(config, capmap):
                         f"profiles.{deep_band}.primary must name at least one "
                         "harness (an empty band nullifies the quality-peer set)"
                     )
+            # M6: closing the EMPTY band closed only one spelling of the same
+            # hole. The quality-peer set is the INTERSECTION of the two bands, so
+            # two non-empty but disjoint bands nullify it just as completely and
+            # pass the coverage rule identically. After the AC 11 fix that is
+            # strictly worse than it was: `quality_peer` is an empty set rather
+            # than `None`, so `sole_gate` starts at "ok", the gated list comes out
+            # empty, and every peer-bearing parallel group route-wide is refused
+            # with `peer-gate:no-quality-peer-family-hard-eligible` -- a
+            # config error diagnosed as a harness-availability shortage.
+            deep_primary = (profiles.get("deep") or {}).get("primary")
+            balanced_primary = (profiles.get("balanced-deep") or {}).get("primary")
+            if (
+                isinstance(deep_primary, list) and deep_primary
+                and isinstance(balanced_primary, list) and balanced_primary
+                and not (set(deep_primary) & set(balanced_primary))
+            ):
+                errors.append(
+                    "profiles.deep.primary and profiles.balanced-deep.primary "
+                    "must share at least one harness (their intersection is the "
+                    "quality-peer set; disjoint bands nullify it)"
+                )
 
     allocation = config.get("allocation")
     if version in {2, 3}:
