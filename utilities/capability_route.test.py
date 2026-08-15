@@ -684,24 +684,43 @@ class TestRoute(unittest.TestCase):
   body="".join(f"  - {item}\n" for item in entries)
   path.write_text(f"---\nauxiliary_findings_considered:\n{body}---\nowner merge record\n",encoding="utf-8")
   return path
- def _join_group(self,route,group_id,directory,*,skip=()):
-  """Publish a canonical completion marker for every realized leg of a group."""
+ def _join_group(self,route,group_id,directory,*,skip=(),link=True):
+  """Publish a canonical completion marker for every realized leg of a group.
+
+  M7: `write_completion_marker` alone leaves a marker that passes the identity
+  row but NOT `completion_marker_is_current` -- no attempt-link sidecar. That is
+  exactly the gap `arbitrate` used to accept, so the join here publishes the
+  sidecar too and `link=False` reproduces the weaker marker on demand.
+  """
   markers=[]
   for node in route["nodes"]:
    if node.get("parallel_group")!=group_id or node["id"] in skip: continue
    evidence=Path(directory)/f"{node['id']}.md"
    evidence.write_text(f"{node['id']} leg output\n",encoding="utf-8")
-   markers.append(R.write_completion_marker(
-    route,node,node["id"],evidence,
-    attempt_id=f"att-fixture-{node['id']}",
-    attempt_metadata={
+   attempt_id=f"att-fixture-{node['id']}"
+   metadata={
      "attempt_schema_version":2,
      "dispatch_depth":node["dispatch_depth"],
      "transport":"headless",
      "execution_surface":"registered-headless",
      "registered_worker":"1",
      "fallback_hop":"same-harness-headless",
-    }))
+   }
+   marker=R.write_completion_marker(
+    route,node,node["id"],evidence,attempt_id=attempt_id,attempt_metadata=metadata)
+   markers.append(marker)
+   if not link: continue
+   completion=R.completion_dir(route["route_id"])
+   safe="".join(c if c.isalnum() or c in "._-" else "_" for c in attempt_id)
+   R.atomic_write(completion/f"{node['id']}.{safe}.attempt.json",{
+    "schema_version":2,"route_id":route["route_id"],"node_id":node["id"],
+    "attempt_id":attempt_id,"dispatch_depth":marker["dispatch_depth"],
+    "transport":marker["transport"],"execution_surface":marker["execution_surface"],
+    "registered_worker":marker["registered_worker"],"fallback_hop":marker["fallback_hop"],
+    "evidence_sha256":marker["evidence"]["sha256"],
+    "completion_marker":str(completion/f"{node['id']}.json"),
+    "completion_marker_history":str(completion/f"{node['id']}.{marker['sequence']}.json"),
+   })
   return markers
  def test_ac5_owner_merge_arbitration_transaction(self):
   # G1 (c)/(f): the owner-merge arbiter registers the merge record through the
@@ -714,6 +733,20 @@ class TestRoute(unittest.TestCase):
   with tempfile.TemporaryDirectory() as td:
    merge=self._arbitration_evidence(td,"merge_record.md",["simplicity finding adopted"])
    # 4. before join: some leg has no canonical completion marker yet
+   with self.assertRaisesRegex(ValueError,"auxiliary-arbitration-before-join:"):
+    R.arbitrate_group(route,"plan-check",merge)
+   # M7: a marker that passes the identity row but NOT the canonical
+   # `completion_marker_is_current` contract is not a join either. Accepting it
+   # let the arbitration record be written over a marker a dependent's
+   # start-gate then rejects as `completion-marker-missing`, so the record
+   # attested a join that downstream did not recognize.
+   self._join_group(route,"plan-check",td,link=False)
+   for member in R._group_members(route,"plan-check"):
+    node_id=str(member["id"])
+    self.assertTrue(R._marker_identity_row(
+     route,member,node_id,member.get("completion_gate"))["passed"])
+    self.assertFalse(R.completion_marker_is_current(
+     route,member,R.completion_dir(route["route_id"])/f"{node_id}.json"))
    with self.assertRaisesRegex(ValueError,"auxiliary-arbitration-before-join:"):
     R.arbitrate_group(route,"plan-check",merge)
    self._join_group(route,"plan-check",td)

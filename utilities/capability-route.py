@@ -22,6 +22,7 @@ from dispatch_contract import (
     _atomic_registry_replace,
     agent_home_equivalent,
     attempt_process_quiescence,
+    completion_marker_is_current,
     dispatch_state_roots,
     ensure_global_registry_writable,
     parse_registry_metadata,
@@ -1841,11 +1842,25 @@ def arbitrate_group(route, group_id, evidence):
             "auxiliary_findings_considered in that node's completion evidence"
         )
     _migrate_completion_dir_forward(route["route_id"])
+    # M7: "joined" here has to mean the same thing it means downstream. The
+    # identity row checks route/node/gate identity and the evidence digest;
+    # `completion_marker_is_current` additionally requires schema v2, a real
+    # sequence, the immutable history file, and the attempt linkage. Proving only
+    # the weaker one let the arbitration record be written over a marker that a
+    # dependent's start-gate then rejects as `completion-marker-missing` -- not
+    # fail-open, since the dependent is blocked either way, but it makes the
+    # arbitration record mean less than the join it claims to attest.
+    directory = completion_dir(route["route_id"])
     unjoined = sorted(
         str(member.get("id")) for member in members
-        if not _marker_identity_row(
-            route, member, str(member.get("id")), member.get("completion_gate")
-        )["passed"]
+        if not (
+            _marker_identity_row(
+                route, member, str(member.get("id")), member.get("completion_gate")
+            )["passed"]
+            and completion_marker_is_current(
+                route, member, directory / f"{member.get('id')}.json"
+            )
+        )
     )
     if unjoined:
         raise ValueError("auxiliary-arbitration-before-join:" + ",".join(unjoined))
