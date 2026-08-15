@@ -80,6 +80,8 @@ Stage-local gates must not become full independent QA loops after every sub-stag
 
 A declared `plan-check` parallel group is a 2-way read-only review: two plan-check verdicts merge under the existing review-anchor merge contract (stricter-wins plus the union of blocking findings). When the two legs nominate different plan legs as winner, `plan.md` materialization is blocked unless the owner writes a bounded merge-arbitration memo, which is the only path into the existing bounded `code-refine` flow. `plan-check` itself never mutates the plan.
 
+At `thorough+` the group realizes a third `simplicity-check` leg with `leg_class: auxiliary`. Its arbiter is the **owner**, not the group's anchor — the anchor runs concurrently with it. After the group joins, the owner puts `auxiliary_findings_considered` in the merge memo's frontmatter with exactly one entry per realized auxiliary leg (adopted or rejected, with the reason) and registers it with `capability-route.py arbitrate --group plan-check`. Until that record exists, `code-execute` is refused at the start-gate with `auxiliary-arbitration-missing` and the route's terminal-gate observation carries a failed `parallel_group:plan-check` row. `core/OPERATIONS.md §5.10` owns the transaction and its typed refusals.
+
 ## Guard Requirements
 
 Adapters must preserve the portable invariants relevant to this capability:

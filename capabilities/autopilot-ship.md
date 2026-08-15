@@ -48,6 +48,20 @@ authorized deployment, and `post-deploy-verify` is the terminal node — the
 workflow is not complete when the deploy command returns, only when the
 post-deploy verification gate holds.
 
+At `adversarial` the `security-review` group realizes a third
+`failure-mode-check` leg with `leg_class: auxiliary`. Its arbiter is the
+**owner**, not the group's anchor — the anchor runs concurrently with it. After
+the group joins, the owner puts `auxiliary_findings_considered` in the merge
+record's frontmatter with exactly one entry per realized auxiliary leg (adopted
+or rejected, with the reason) and registers it with
+`capability-route.py arbitrate --group security-review`. `deploy` is a
+`capability-owner` node, so it does not pass a wrapper start-gate: here the
+enforcement is the route's terminal-gate observation, which carries a failed
+`parallel_group:security-review` row and holds `terminal_gate_proven` false
+until the record exists. The human `deploy-authorization` gate is a separate
+axis and does not substitute for it. `core/OPERATIONS.md §5.10` owns the
+transaction and its typed refusals.
+
 Before this graph existed, `deploy-authorization` was declared with no node that
 realized it and both readiness reviews were terminal, so a ship route could
 "complete" with nothing deployed and nothing verified. `core/WORKFLOW.md §0.6`

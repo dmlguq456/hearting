@@ -3125,6 +3125,7 @@ def completion_marker_gate(
             blocked.append((dep, readiness))
     if missing:
         raise DispatchContractError("completion-marker-missing", ",".join(missing))
+    _auxiliary_arbitration_gate(route, node, agent_home, jobs)
     if blocked:
         reason = (
             "predecessor-process-draining"
@@ -3142,6 +3143,87 @@ def completion_marker_gate(
         registry_lines=registry_lines,
         attempt_id=attempt_id,
     )
+
+
+_ROUTE_MODULE: object | None = None
+
+
+def _route_module():
+    """Load `capability-route.py` lazily.
+
+    The dependency has to stay one-way at import time -- capability-route
+    imports this module at module scope -- so it is resolved on first call,
+    when this module is fully initialized. There is exactly one implementation
+    of the arbiter-resolution rule and both the writer and this gate read it.
+    """
+    global _ROUTE_MODULE
+    if _ROUTE_MODULE is None:
+        import importlib.util
+
+        path = Path(__file__).resolve().parent / "capability-route.py"
+        spec = importlib.util.spec_from_file_location("capability_route_gate", path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        _ROUTE_MODULE = module
+    return _ROUTE_MODULE
+
+
+def _auxiliary_arbitration_gate(
+    route: dict[str, object],
+    node: dict[str, object],
+    agent_home: Path,
+    jobs: Path | None,
+) -> None:
+    """G1/AC 5: no node starts over an unarbitrated owner-merge group.
+
+    A predecessor that is a member of an auxiliary-bearing group whose arbiter
+    is the owner's merge record carries a second obligation beyond its own
+    completion marker: the owner must have registered the merge record with
+    `capability-route.py arbitrate` after the group joined. Without this the
+    auxiliary findings are advisory output nobody is required to have read, and
+    `autopilot-code`'s `execute` would start on an unmerged `plan-check`.
+    """
+    dependencies = [dep for dep in node.get("depends_on", [])]
+    if not dependencies:
+        return
+    route_module = _route_module()
+    owner_merge = route_module.owner_merge_auxiliary_groups(route)
+    if not owner_merge:
+        return
+    dependency_groups = {
+        row.get("parallel_group")
+        for row in route.get("nodes", [])
+        if isinstance(row, dict)
+        and row.get("id") in dependencies
+        and row.get("parallel_group")
+    }
+    unarbitrated = []
+    for group_id, error in sorted(owner_merge.items()):
+        if group_id not in dependency_groups:
+            continue
+        basename = Path(
+            str(route_module.arbitration_path(route["route_id"], group_id))
+        ).name
+        found = next(
+            (
+                candidate
+                for candidate in (
+                    root / "completion" / route["route_id"] / basename
+                    for root in dispatch_state_roots(agent_home, jobs)
+                )
+                if candidate.is_file()
+            ),
+            None,
+        )
+        row = route_module._arbitration_observation(
+            route, group_id, error, path=found
+        )
+        if not row["passed"]:
+            unarbitrated.append(group_id)
+    if unarbitrated:
+        raise DispatchContractError(
+            "auxiliary-arbitration-missing", ",".join(unarbitrated)
+        )
 
 
 def _sibling_attempt_gate(

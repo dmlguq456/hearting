@@ -359,6 +359,34 @@ class TestTopology(unittest.TestCase):
             group["legs"]=group["legs"][:1]+[aux("simplicity"),aux("edge-case")]
         r=broken(single_peer)
         self.assertRaisesRegex(T.TopologyError,"at least two peer legs",T.validate_registry,r)
+    def test_ac5_auxiliary_verdict_enum_cannot_hold_a_blocking_value(self):
+        # AC 5 (back half): an auxiliary leg's advisory semantics are enforced by
+        # the SHAPE of its verdict enum, not by convention. Every registered
+        # auxiliary-check unit may only say "findings"/"none"; nothing in its
+        # vocabulary can hold a stage's gate. Contrast with the arbiter units,
+        # whose enums do carry a blocking-capable value.
+        import re as _re
+        from pathlib import Path as _P
+        units=_P(__file__).resolve().parents[1]/"roles"/"units"
+        blocking={"issues","changes-required","blocked","fail","failed","error",
+                  "partial","reject","rejected","memos-added"}
+        registered=self.r["auxiliary_check_units"]
+        self.assertEqual(sorted(registered),
+            ["assumption-check","edge-case-check","failure-mode-check",
+             "simplicity-check","test-gap-check"])
+        for check,unit in sorted(registered.items()):
+            with self.subTest(auxiliary_check=check):
+                text=(units/f"{unit}.md").read_text(encoding="utf-8")
+                found=_re.search(r"^  verdict:\s*\[([^\]]*)\]",text,_re.MULTILINE)
+                self.assertIsNotNone(found,f"{unit} declares no verdict enum")
+                values={token.strip() for token in found.group(1).split(",") if token.strip()}
+                self.assertEqual(values,{"findings","none"})
+                self.assertFalse(values & blocking)
+        for arbiter in ("qa/plan-review","research/plan-review"):
+            text=(units/f"{arbiter}.md").read_text(encoding="utf-8")
+            found=_re.search(r"^  verdict:\s*\[([^\]]*)\]",text,_re.MULTILINE)
+            values={token.strip() for token in found.group(1).split(",") if token.strip()}
+            self.assertTrue(values & blocking,f"{arbiter} carries no blocking verdict")
     def test_leg_class_stamped_on_realized_nodes(self):
         # The compiler stamps leg_class (and auxiliary_check for auxiliary legs)
         # onto realized nodes in _expand_parallel_groups.

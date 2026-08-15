@@ -136,6 +136,25 @@ Preload per `_shared/profile-preload.md`:
 7. Return per `_shared/dual-io.md`. Verdict semantics: `no-issues`
    (e.g. "✅ No issues found") or `memos-added` with count (e.g. "📝 N memos
    added").
+8. **When this node is a declared auxiliary arbiter** — the prompt names it as
+   the arbiter of an upstream `parallel_group` with `leg_class: auxiliary` legs
+   (autopilot-spec `review` arbitrating the fanned-out `research` group) — put
+   `auxiliary_findings_considered` in the review log's frontmatter with exactly
+   one entry per realized auxiliary leg, each recording adoption or rejection
+   and the reason:
+
+   ```yaml
+   ---
+   auxiliary_findings_considered:
+     - "assumption-check: unstated latency budget — adopted, memo added at §3"
+   ---
+   ```
+
+   This is conditional, not unconditional: the same unit runs in positions where
+   it arbitrates nothing, and there the key is absent. When the node arbitrates
+   more than one group the entries are the **sum** across them. The completion
+   gate compares the array length against the realized auxiliary leg count, so a
+   wrong length or a missing key is a gate failure, not a warning.
 
 ## Branch: focus-axis (multi-axis parallel)
 

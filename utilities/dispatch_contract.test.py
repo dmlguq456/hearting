@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import fcntl, json, os, subprocess, sys, tempfile, time, unittest
+import fcntl, hashlib, json, os, subprocess, sys, tempfile, time, unittest
 from unittest import mock
 from pathlib import Path
 
@@ -1725,6 +1725,73 @@ class DispatchContractTest(unittest.TestCase):
    with self.assertRaises(D.DispatchContractError) as caught:
     self.sibling_gate_case(td,"completed-marker",sibling,status="open")
   self.assertEqual(caught.exception.reason,"prior-attempt-unverifiable")
+
+ def _auxiliary_group_route(self,base,route_id="rt-aux-arbitration"):
+  """A realized auxiliary-bearing group (owner-merge arbiter) plus one consumer."""
+  def leg(index,suffix,leg_class):
+   node_id="plan-check" if index==0 else f"plan-check-{suffix}"
+   return {"id":node_id,"depends_on":["plan"],"kind":"review-worker",
+           "completion_gate":"code-plan","dispatch_depth":2,
+           "parallel_group":"plan-check","parallel_leg_index":index,
+           "parallel_anchor":"plan-check","leg_class":leg_class}
+  route={"dispatch_contract_version":3,"route_id":route_id,
+         "route_hash":"sha256:"+"7"*64,"registry_digest":"sha256:"+"8"*64,
+         "nodes":[{"id":"plan","depends_on":[],"kind":"pipeline-stage",
+                   "completion_gate":"code-plan-draft","dispatch_depth":2},
+                  leg(0,"anchor","peer"),leg(1,"alternative","peer"),
+                  leg(2,"simplicity","auxiliary"),
+                  {"id":"execute","kind":"pipeline-stage","dispatch_depth":2,
+                   "completion_gate":"code-execute",
+                   "depends_on":["plan-check","plan-check-alternative",
+                                 "plan-check-simplicity"]}]}
+  path=base/"route.json"; path.write_text(json.dumps(route),encoding="utf-8")
+  marker_dir=base/".dispatch"/"completion"/route_id
+  marker_dir.mkdir(parents=True,exist_ok=True)
+  for node in route["nodes"]:
+   (marker_dir/f"{node['id']}.json").write_text(json.dumps({
+    "attempt_id":f"att-{node['id']}","registered_worker":True,
+   }),encoding="utf-8")
+  return route,path,marker_dir
+
+ # G1 (d) 1: `execute` depends on every leg of an auxiliary-bearing group whose
+ # arbiter is the owner's merge record. Completion markers alone are not the
+ # whole gate -- without a registered arbitration the start is refused with its
+ # own typed reason, before the wrapper spawns anything.
+ def test_unarbitrated_auxiliary_group_refuses_the_dependent_start(self):
+  with tempfile.TemporaryDirectory() as td:
+   base=Path(td)
+   route,path,marker_dir=self._auxiliary_group_route(base)
+   ready=D.AttemptReadiness("ready","fixture-ready","att-predecessor")
+   with mock.patch.object(D,"completion_marker_is_current",return_value=True), \
+        mock.patch.object(D,"completion_attempt_readiness",return_value=ready), \
+        mock.patch.object(D,"_sibling_attempt_gate"):
+    with self.assertRaises(D.DispatchContractError) as caught:
+     D.completion_marker_gate(str(path),"execute","start",base,base/"jobs.log",
+                              registry_lines=[],attempt_id="att-execute-new")
+    self.assertEqual(caught.exception.reason,"auxiliary-arbitration-missing")
+    self.assertEqual(caught.exception.detail,"plan-check")
+    # a member's OWN start is not gated by its group's arbitration: the
+    # arbitration cannot exist until the group has joined (G1 regression).
+    D.completion_marker_gate(str(path),"plan-check","start",base,base/"jobs.log",
+                             registry_lines=[],attempt_id="att-anchor-new")
+    # registering the owner merge record opens the dependent start
+    evidence=base/"merge_record.md"
+    evidence.write_text("---\nauxiliary_findings_considered:\n  - adopted\n---\n",
+                        encoding="utf-8")
+    record={"schema_version":1,"route_id":route["route_id"],
+            "route_hash":route["route_hash"],
+            "registry_digest":route["registry_digest"],
+            "group_id":"plan-check","anchor_node":"plan-check",
+            "arbiter":"owner-merge",
+            "member_nodes":["plan-check","plan-check-alternative","plan-check-simplicity"],
+            "auxiliary_nodes":["plan-check-simplicity"],
+            "auxiliary_findings_considered":["adopted"],
+            "evidence":{"path":str(evidence),
+                        "sha256":hashlib.sha256(evidence.read_bytes()).hexdigest()}}
+    (marker_dir/"plan-check.arbitration.json").write_text(
+     json.dumps(record,indent=2),encoding="utf-8")
+    D.completion_marker_gate(str(path),"execute","start",base,base/"jobs.log",
+                             registry_lines=[],attempt_id="att-execute-new")
 
  # A row that never recorded a governed process cannot have leaked one, and
  # judging it unverifiable would wedge the node permanently.

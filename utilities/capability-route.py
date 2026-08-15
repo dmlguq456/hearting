@@ -1185,35 +1185,24 @@ def _migrate_completion_dir_forward(route_id, *, jobs=None):
 # lives once here and `workflow-supervisor.py` dynamically loads this module rather than
 # re-deriving it -- the dependency stays one-way (supervisor -> capability-route).
 def terminal_gate_observation(route):
-    """Per declared-terminal-node completion-gate truth, verified fresh from disk."""
+    """Per declared-terminal-node completion-gate truth, verified fresh from disk.
+
+    An owner-merge auxiliary-bearing group contributes one extra row keyed
+    `parallel_group:<group_id>` (G1/AC 5). Its downstream consumer is a
+    `capability-owner` in two of the six realized groups, so nothing that node
+    starts passes the wrapper start-gate -- without this row an unarbitrated
+    group would leave no trace at all in the route's completion truth. Rows are
+    judged in the same vocabulary as node rows, and no branch raises:
+    `close_route` must stay able to close a failed route honestly.
+    """
     nodes={node.get("id"):node for node in route.get("nodes",[])}
     terminal_ids=[node_id for node_id,node in nodes.items() if node.get("terminal") is True]
     rows={}
     for node_id in terminal_ids:
         node=nodes[node_id]
-        path=completion_dir(route["route_id"])/f"{node_id}.json"
-        try:
-            marker=json.loads(path.read_text(encoding="utf-8"))
-        except (OSError,ValueError):
-            rows[node_id]={"passed":False,"reason":"completion-marker-absent"}
-            continue
-        if (marker.get("route_id") != route.get("route_id")
-                or marker.get("route_hash") != route.get("route_hash")
-                or marker.get("node_id") != node_id
-                or marker.get("completion_gate") != node.get("terminal_gate")):
-            rows[node_id]={"passed":False,"reason":"completion-marker-identity-mismatch"}
-            continue
-        evidence=marker.get("evidence") or {}
-        try:
-            digest=hashlib.sha256(Path(evidence["path"]).read_bytes()).hexdigest()
-        except (OSError,KeyError,TypeError):
-            rows[node_id]={"passed":False,"reason":"completion-evidence-unreadable"}
-            continue
-        if digest != evidence.get("sha256"):
-            rows[node_id]={"passed":False,"reason":"completion-evidence-hash-mismatch"}
-            continue
-        rows[node_id]={"passed":True,"reason":"completion-marker-verified",
-                       "evidence":evidence.get("path")}
+        rows[node_id]=_marker_identity_row(route,node,node_id,node.get("terminal_gate"))
+    for group_id,error in sorted(owner_merge_auxiliary_groups(route).items()):
+        rows[f"parallel_group:{group_id}"]=_arbitration_observation(route,group_id,error)
     return rows
 
 def terminal_gate_proven(gates):
@@ -1586,29 +1575,152 @@ def _parse_auxiliary_findings(evidence: Path):
     return None
 
 
+AUXILIARY_ARBITER_OWNER_MERGE = "owner-merge"
+AUXILIARY_ARBITER_NODE = "node"
+ARBITRATION_SCHEMA_VERSION = 1
+
+
+def _group_members(route, group_id):
+    """Every realized leg of one parallel group, in route order."""
+    return [
+        candidate for candidate in route.get("nodes", [])
+        if isinstance(candidate, dict)
+        and candidate.get("parallel_group") == group_id
+    ]
+
+
+def _realized_auxiliary_nodes(route, group_id):
+    return [
+        member for member in _group_members(route, group_id)
+        if member.get("leg_class") == "auxiliary"
+    ]
+
+
+def _realized_group_ids(route):
+    return sorted({
+        candidate["parallel_group"] for candidate in route.get("nodes", [])
+        if isinstance(candidate, dict) and candidate.get("parallel_group")
+    })
+
+
+def _resolve_auxiliary_arbiter(route, group_id):
+    """Who arbitrates one group's auxiliary findings, read off the compiled route.
+
+    PRD 13.30.4 names an arbiter for each anchor kind that may declare an
+    auxiliary leg, and in none of the three is it the anchor itself: a
+    `review-worker` anchor's findings are merged by the conductor (the owner), a
+    `map-worker` anchor's are read by its declared downstream consumer, and a
+    `pipeline-stage` anchor's by its direct downstream `review-worker`. Gating
+    the anchor (G1) demanded that a leg which runs *concurrently* with the
+    auxiliary have already considered its output, which no anchor can satisfy.
+
+    Returns `("owner-merge", None)` or `("node", <node_id>)`. Every undecidable
+    case raises a typed error rather than defaulting to a pass -- an unresolvable
+    arbiter is an integrity failure of the route, not an absent obligation.
+    """
+    members = _group_members(route, group_id)
+    if not members:
+        raise ValueError(f"auxiliary-group-unknown:{group_id}")
+    anchor = next(
+        (member for member in members if member.get("parallel_leg_index") == 0),
+        None,
+    )
+    if anchor is None:
+        raise ValueError(f"auxiliary-group-anchor-unknown:{group_id}")
+    if anchor.get("terminal") is True:
+        # Unreachable through a compiled route: `_expand_parallel_groups`
+        # rejects a group declared on a terminal node (G6/AC 21) and
+        # `capability_topology` rejects it again at declaration. Kept as a
+        # typed error so a hand-built route cannot reach the gate silently.
+        raise ValueError(f"auxiliary-arbiter-anchor-terminal:{anchor.get('id')}")
+    if anchor.get("kind") == "review-worker":
+        return AUXILIARY_ARBITER_OWNER_MERGE, None
+    member_ids = {member.get("id") for member in members}
+    consumers = [
+        candidate for candidate in route.get("nodes", [])
+        if isinstance(candidate, dict)
+        and candidate.get("id") not in member_ids
+        and anchor.get("id") in (candidate.get("depends_on") or [])
+    ]
+    if anchor.get("kind") == "pipeline-stage":
+        # SD-82's pipeline-anchor arbiter requirement is unrevised: the arbiter
+        # of a pipeline-stage anchor is its direct downstream review-worker.
+        consumers = [
+            candidate for candidate in consumers
+            if candidate.get("kind") == "review-worker"
+        ]
+    # A consumer that is itself a realized parallel group appears here as every
+    # one of its legs (D3 copies `depends_on` into each leg). They are one
+    # arbiter, not three: collapse each leg onto its own anchor, which is the
+    # node PRD 13.30.4 names ("autopilot-spec research" -> node `review`).
+    arbiters = sorted({
+        str(item.get("parallel_anchor") or item.get("id"))
+        for item in consumers
+    })
+    if not arbiters:
+        raise ValueError(f"auxiliary-arbiter-absent:{group_id}")
+    if len(arbiters) > 1:
+        raise ValueError(
+            "auxiliary-arbiter-ambiguous:{}:{}".format(group_id, ",".join(arbiters))
+        )
+    return AUXILIARY_ARBITER_NODE, arbiters[0]
+
+
+def owner_merge_auxiliary_groups(route):
+    """Realized auxiliary-bearing groups whose arbiter is the owner's merge record.
+
+    Returns `{group_id: error_or_None}` so a read-only observer can report an
+    unresolvable arbiter as a failed row instead of raising -- `close_route`
+    must be able to close a failed route.
+    """
+    rows = {}
+    for group_id in _realized_group_ids(route):
+        if not _realized_auxiliary_nodes(route, group_id):
+            continue
+        try:
+            kind, _arbiter = _resolve_auxiliary_arbiter(route, group_id)
+        except ValueError as exc:
+            rows[group_id] = str(exc)
+            continue
+        if kind == AUXILIARY_ARBITER_OWNER_MERGE:
+            rows[group_id] = None
+    return rows
+
+
+def _auxiliary_groups_arbitrated_by(route, node_id):
+    """(group ids, required considered-entry count) for one node arbiter.
+
+    A single node can arbitrate more than one group, so the required length is
+    the SUM of those groups' realized auxiliary legs, not any one group's count.
+    """
+    groups = []
+    required = 0
+    for group_id in _realized_group_ids(route):
+        auxiliary = _realized_auxiliary_nodes(route, group_id)
+        if not auxiliary:
+            continue
+        kind, arbiter = _resolve_auxiliary_arbiter(route, group_id)
+        if kind == AUXILIARY_ARBITER_NODE and arbiter == node_id:
+            groups.append(group_id)
+            required += len(auxiliary)
+    return groups, required
+
+
 def _validate_auxiliary_arbiter(route, node, evidence):
     """AC 5 (front half): the arbiter verdict of an auxiliary-bearing group must
     carry `auxiliary_findings_considered` with exactly one entry per realized
     auxiliary leg; otherwise the completion gate is not met.
 
-    Only the group's anchor is gated (G1): a peer sibling runs concurrently with
-    the auxiliary and structurally cannot have considered its findings, and an
-    auxiliary leg is advisory output, not a verdict that adopts or rejects its
-    own findings (13.30.1). The evidence surface is the sealed output -- a review
-    unit's markdown review file -- so the list is read from JSON or from the
-    markdown frontmatter rather than forced to JSON."""
-    group = node.get("parallel_group")
-    if not group or node.get("parallel_leg_index") != 0:
-        return
-    members = [
-        candidate for candidate in route.get("nodes", [])
-        if isinstance(candidate, dict)
-        and candidate.get("parallel_group") == group
-    ]
-    aux_count = sum(
-        1 for member in members if member.get("leg_class") == "auxiliary"
-    )
-    if not aux_count:
+    Only a *node* arbiter is gated here (see `_resolve_auxiliary_arbiter`). The
+    anchor is never gated by being the anchor -- it is a concurrent sibling of
+    the auxiliary leg. Owner-merge arbitration is a separate transaction
+    (`arbitrate`) that can only run after the group has joined.
+
+    The evidence surface is the sealed output -- a review unit's markdown file --
+    so the list is read from JSON or from markdown frontmatter, not forced to JSON.
+    """
+    groups, required = _auxiliary_groups_arbitrated_by(route, node.get("id"))
+    if not groups:
         return
     considered = _parse_auxiliary_findings(evidence)
     if considered is None:
@@ -1616,11 +1728,158 @@ def _validate_auxiliary_arbiter(route, node, evidence):
             f"auxiliary arbiter gate {node.get('id')} requires "
             "auxiliary_findings_considered in evidence or frontmatter"
         )
-    if len(considered) != aux_count:
+    if len(considered) != required:
         raise ValueError(
             f"auxiliary arbiter gate {node.get('id')} requires "
-            f"auxiliary_findings_considered length {aux_count}, got {len(considered)}"
+            f"auxiliary_findings_considered length {required}, got {len(considered)}"
         )
+
+
+def arbitration_path(route_id, group_id):
+    safe = "".join(
+        character if character.isalnum() or character in "._-" else "_"
+        for character in str(group_id)
+    )
+    return completion_dir(route_id)/f"{safe}.arbitration.json"
+
+
+def _marker_identity_row(route, node, node_id, gate):
+    """One completion marker's on-disk truth, in the shared gate vocabulary."""
+    path = completion_dir(route["route_id"])/f"{node_id}.json"
+    try:
+        marker = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {"passed": False, "reason": "completion-marker-absent"}
+    if (marker.get("route_id") != route.get("route_id")
+            or marker.get("route_hash") != route.get("route_hash")
+            or marker.get("node_id") != node_id
+            or marker.get("completion_gate") != gate):
+        return {"passed": False, "reason": "completion-marker-identity-mismatch"}
+    evidence = marker.get("evidence") or {}
+    try:
+        digest = hashlib.sha256(Path(evidence["path"]).read_bytes()).hexdigest()
+    except (OSError, KeyError, TypeError):
+        return {"passed": False, "reason": "completion-evidence-unreadable"}
+    if digest != evidence.get("sha256"):
+        return {"passed": False, "reason": "completion-evidence-hash-mismatch"}
+    return {"passed": True, "reason": "completion-marker-verified",
+            "evidence": evidence.get("path")}
+
+
+def _arbitration_observation(route, group_id, error=None, *, path=None):
+    """Read-only truth for one owner-merge group's arbitration record.
+
+    `path` lets a caller that resolved its own dispatch state root (the wrapper
+    start-gate, which is handed `agent_home`/`jobs` explicitly rather than
+    re-reading the environment) name the exact record it found.
+    """
+    if error is not None:
+        return {"passed": False, "reason": "auxiliary-arbiter-unresolved",
+                "detail": error}
+    path = Path(path) if path else arbitration_path(route["route_id"], group_id)
+    try:
+        record = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {"passed": False, "reason": "completion-marker-absent"}
+    expected_auxiliary = sorted(
+        str(member.get("id"))
+        for member in _realized_auxiliary_nodes(route, group_id)
+    )
+    if (record.get("route_id") != route.get("route_id")
+            or record.get("route_hash") != route.get("route_hash")
+            or record.get("group_id") != group_id
+            or record.get("arbiter") != AUXILIARY_ARBITER_OWNER_MERGE
+            or sorted(record.get("auxiliary_nodes") or []) != expected_auxiliary
+            or len(record.get("auxiliary_findings_considered") or [])
+            != len(expected_auxiliary)):
+        return {"passed": False, "reason": "completion-marker-identity-mismatch"}
+    evidence = record.get("evidence") or {}
+    try:
+        digest = hashlib.sha256(Path(evidence["path"]).read_bytes()).hexdigest()
+    except (OSError, KeyError, TypeError):
+        return {"passed": False, "reason": "completion-evidence-unreadable"}
+    if digest != evidence.get("sha256"):
+        return {"passed": False, "reason": "completion-evidence-hash-mismatch"}
+    return {"passed": True, "reason": "completion-marker-verified",
+            "evidence": evidence.get("path")}
+
+
+def arbitrate_group(route, group_id, evidence):
+    """Register the owner's merge record as one auxiliary-bearing group's arbitration.
+
+    Fail-closed in declaration order; every refusal has its own typed reason.
+    Step 4 is what makes G1 structurally impossible to reintroduce: the whole
+    group must already hold canonical completion markers, so this transaction
+    cannot be satisfied at the moment a concurrent sibling publishes its own.
+    """
+    members = _group_members(route, group_id)
+    if not members:
+        raise ValueError(f"auxiliary-group-unknown:{group_id}")
+    auxiliary = _realized_auxiliary_nodes(route, group_id)
+    if not auxiliary:
+        raise ValueError(f"auxiliary-group-has-no-auxiliary-leg:{group_id}")
+    kind, arbiter = _resolve_auxiliary_arbiter(route, group_id)
+    if kind != AUXILIARY_ARBITER_OWNER_MERGE:
+        raise ValueError(
+            f"auxiliary-arbiter-is-node:{arbiter}; record "
+            "auxiliary_findings_considered in that node's completion evidence"
+        )
+    _migrate_completion_dir_forward(route["route_id"])
+    unjoined = sorted(
+        str(member.get("id")) for member in members
+        if not _marker_identity_row(
+            route, member, str(member.get("id")), member.get("completion_gate")
+        )["passed"]
+    )
+    if unjoined:
+        raise ValueError("auxiliary-arbitration-before-join:" + ",".join(unjoined))
+    considered = _parse_auxiliary_findings(evidence)
+    if considered is None:
+        raise ValueError(
+            f"auxiliary arbiter gate {group_id} requires "
+            "auxiliary_findings_considered in evidence or frontmatter"
+        )
+    if len(considered) != len(auxiliary):
+        raise ValueError(
+            f"auxiliary arbiter gate {group_id} requires "
+            f"auxiliary_findings_considered length {len(auxiliary)}, "
+            f"got {len(considered)}"
+        )
+    anchor = next(member for member in members if member.get("parallel_leg_index") == 0)
+    record = {
+        "schema_version": ARBITRATION_SCHEMA_VERSION,
+        "route_id": route["route_id"],
+        "route_hash": route["route_hash"],
+        "registry_digest": route["registry_digest"],
+        "group_id": group_id,
+        "anchor_node": str(anchor.get("id")),
+        "arbiter": AUXILIARY_ARBITER_OWNER_MERGE,
+        "member_nodes": [str(member.get("id")) for member in members],
+        "auxiliary_nodes": sorted(str(member.get("id")) for member in auxiliary),
+        "auxiliary_findings_considered": list(considered),
+        "evidence": {
+            "path": str(evidence),
+            "sha256": hashlib.sha256(evidence.read_bytes()).hexdigest(),
+        },
+    }
+    path = arbitration_path(route["route_id"], group_id)
+    directory = completion_dir(route["route_id"])
+    with _exclusive_lock(directory/f".{group_id}.arbitration.lock"):
+        if path.is_file():
+            # Same immutability contract as `write_completion_marker`: an
+            # identical re-registration is idempotent, a different one conflicts.
+            # `arbitrated_at` is excluded from identity because a wall clock
+            # reading is not part of what was decided.
+            existing = json.loads(path.read_text(encoding="utf-8"))
+            if {key: existing.get(key) for key in record} == record:
+                return existing
+            raise ValueError(f"auxiliary-arbitration-identity-conflict:{group_id}")
+        from datetime import datetime, timezone
+        record["arbitrated_at"] = (
+            datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        )
+        write_once(path, record)
+    return record
 
 
 def _publish_completion_locked(
@@ -2021,6 +2280,10 @@ def main():
     d.add_argument("--registered-worker",choices=("0","1","false","true"))
     d.add_argument("--fallback-hop")
     d.add_argument("--subsession-manifest",help="aggregate declared sub-sessions into this one stage gate")
+    ar=sub.add_parser("arbitrate"); ar.add_argument("--route",required=True)
+    ar.add_argument("--group",required=True,help="realized auxiliary-bearing parallel group id")
+    ar.add_argument("--evidence",required=True,help="owner merge record carrying auxiliary_findings_considered")
+    ar.add_argument("--output")
     cl=sub.add_parser("close"); cl.add_argument("--route",required=True)
     cl.add_argument("--commit",help="result commit; defaults to HEAD in the route cwd")
     cl.add_argument("--summary",help="one line naming what the route produced")
@@ -2076,6 +2339,12 @@ def main():
             allow_stale_registry=a.command=="close",
         )
         if a.command=="verify": print(f"route_id={route['route_id']}\nroute_hash={route['route_hash']}")
+        elif a.command=="arbitrate":
+            evidence=Path(a.evidence).resolve()
+            if not evidence.is_file(): raise SystemExit("arbitration evidence missing")
+            record=arbitrate_group(route,a.group,evidence)
+            if a.output: atomic_write(a.output, record)
+            print(json.dumps(record,sort_keys=True))
         elif a.command=="close":
             outcome,created=close_route(route,a.route,a.commit,a.summary)
             print(json.dumps(outcome,sort_keys=True))

@@ -261,6 +261,25 @@ Per `_shared/dual-io.md`. Return concise completion verdicts with paper counts
 and artifact paths (e.g. "✅ search complete (N papers)", "✅ analysis
 complete"); `error` when a branch could produce no results.
 
+**When this node is a declared auxiliary arbiter** — the prompt names it as the
+arbiter of an upstream `parallel_group` with `leg_class: auxiliary` legs (the
+`compile`/`report` branches downstream of a fanned-out `retrieval`) — the
+artifact's frontmatter carries `auxiliary_findings_considered` with exactly one
+entry per realized auxiliary leg, each saying whether that leg's finding was
+adopted or rejected and why:
+
+```yaml
+---
+auxiliary_findings_considered:
+  - "assumption-check: authority scope narrowed to peer-reviewed venues — adopted"
+---
+```
+
+This is conditional, not unconditional: the same unit runs in positions where it
+arbitrates nothing, and there the key is absent. The completion gate compares the
+array length against the realized auxiliary leg count, so a wrong length or a
+missing key is a gate failure, not a warning.
+
 ## Memory
 
 Per `_shared/memory-flow.md`. Retention targets: key papers, core methods, and
