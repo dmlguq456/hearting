@@ -695,6 +695,8 @@ assert calls[0] >= 2, calls
         payload = json.loads(result.stdout)
         self.assertEqual(payload["status_schema"], 1)
         self.assertIn("sync", payload)
+        self.assertIn("migration", payload["sync"])
+        self.assertIn("last_failure", payload["sync"]["migration"])
         self.assertIn("sync-v2", {item["name"] for item in payload["diagnostics"]})
         connection = sqlite3.connect(legacy_store / "memory.db")
         try:

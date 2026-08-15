@@ -228,7 +228,7 @@ MEM_STORE="$legacy" python3 "$MEM" stats >/dev/null
 python3 - "$legacy/memory.db" <<'PY'
 import sqlite3, sys
 con = sqlite3.connect(sys.argv[1])
-assert con.execute("pragma user_version").fetchone()[0] == 8
+assert con.execute("pragma user_version").fetchone()[0] == 10
 row = con.execute("select status,canonical_id,headline from records where id='legacy-id'").fetchone()
 assert row == ("active", "legacy-id", "Legacy body becomes a retrieval headline."), row
 assert con.execute("select count(*) from records_capsule_fts").fetchone()[0] == 1

@@ -76,6 +76,7 @@ python3 <agent-home>/tools/memory/mem.py <command>
 | `import <dump.jsonl>` | Compatibility import of the materialized v1 view. It cannot recreate v2 frontiers/conflicts/tombstones/quarantine or peer/outbox state, so normal and recovery imports both refuse once any v2 protocol state exists. |
 | `project [--cwd]` | Build the compatibility projection. Session context uses `inject`, not this command. |
 | `migrate [--apply] [--all-projects]` | Scan only the current logical project by default. `--all-projects` is the explicit cross-project/global recovery path required for runtime-memory cleanup; this command is not a live multi-server seed/cutover executor. |
+| `migration <phase> … --epoch <id> [--json]` | Inspect or orchestrate the sealed existing-store protocol-v2 cutover. Artifact/ref/store mutations are dry-run by default and require both `--apply` and a matching `--expect` state digest. See “Existing-store migration” below. |
 | `lifecycle [--apply]` | Apply working expiry and expose durable duplicate/capacity candidates. Pending delivery records remain protected. |
 | `stats` | Print a grouped store snapshot. |
 | `log [--limit 20] [--action] [--tier] [--actor] [--json]` | Read the bounded write-event timeline (D-38), complementing the `stats` snapshot. |
@@ -101,6 +102,69 @@ python3 <agent-home>/tools/memory/mem.py <command>
 | `supersede <old> --by <new>` | Preserve the older row as historical and route its canonical id to the newer active record. Cross-scope/project, pending, profile, and cycle cases fail closed. |
 | `activate <id>` | Guardedly reactivate a historical row only when its successor is no longer active and no canonical ambiguity exists. |
 | `register-postit <path>` | Deprecated legacy-migration-only registry command. Current post-its write DB working records directly. |
+
+## Existing-store migration
+
+`mem migration` is an operator protocol, not an automatic sync mode. It exposes
+`status`, `inspect`, `capabilities`, two-seal `roster` operations, consistent
+`snapshot`, deterministic `seed`, `fence`/`barrier`, captured `delta`,
+`no-tail`, `fold`, `compare`, `activate`, and complete rollback-bundle phases. Use
+`--json` for canonical machine output. Every mutating phase prints a
+deterministic plan and writes nothing unless `--apply` is present; an applied
+transition also requires `--expect` to match the current durable state digest.
+`migration status` and `doctor --json` expose bounded membership/evidence
+digests, each replica's latest sealed evidence phase, capture/outbox tail,
+writer mode, equality timestamp/digest, rollback coverage, and the last applied
+phase failure. They never include record bodies, credentials, or artifact paths.
+
+A snapshot seed includes the complete captured causal closure present in the
+snapshot, and every seeded operation must stay inside its author replica's
+sealed logical-project keys. Seed counter reservation and durable operation
+binding share one `BEGIN IMMEDIATE` transaction. A write after snapshot seal
+but before that transaction fails seed construction with
+`snapshot-tail-before-seed` before reserving counters or writing artifacts;
+the operator must take a new checked snapshot rather than accept a partial
+seed. Delta drain writes both the exact captured-delta manifest and its
+`delta-seed` manifest, so publication, no-tail proof, and rollback inventory
+refer to the same immutable operation bytes.
+
+Snapshot creation also seals the exact local `deleted-records.jsonl` bytes and
+a normalized `graveyard-source` manifest beneath the snapshot output. Seed
+construction reads only that sealed copy. An absent graveyard entry never
+creates a deletion; a proven entry for an ID absent from the snapshot produces
+one complete prior-state operation followed by its exact tombstone. Existing
+v2 transactional graveyard rows must already match tombstones in the snapshot's
+captured causal closure. A store containing only deletion history and no live
+records is therefore still migratable without inventing state.
+
+Snapshots use SQLite backup artifacts in an explicit contained output
+directory. They never exchange `memory.db`, WAL, or SHM files between servers.
+After the old-writer fence is activated, unsupported and legacy writers fail
+closed while reads remain available; protocol-v2 writes become available only
+after equality is proven and the v2-only activation receipt is committed. A
+production run still needs a separate operator plan naming the real roster,
+backups, maintenance window, credentials, protected ref, rollback duration, and
+human approvals. The test suite uses only temporary stores and local fake Git
+repositories.
+
+`rollback prepare` first establishes a durable writer barrier, then collects a
+fresh protected-ref view plus every registered snapshot, snapshot/delta seed,
+captured delta, no-tail proof, fence receipt, activation receipt, operation,
+and normalized state section. It creates only a `complete=true` verified
+bundle; a missing local artifact fails before bundle or rollback-identity
+writes. `rollback export-v1` also requires that complete bundle and refuses a
+lossy projection. `rollback apply` accepts only a self-digested local
+`rollback-target-request` that binds the epoch, replica, absolute store,
+verified projection, and install output. It durably seals a target manifest,
+backs up the target, installs the projection in one guarded SQLite transaction,
+and reuses the same target/install evidence after a crash. Each active replica
+publishes its canonical apply receipt. `rollback close` requires exactly one
+`--apply-receipt` for every active sealed replica, imports that receipt set in
+the closing transaction, commits the complete bundle digest, and removes the
+persistent old-writer triggers only from DB-issued closed rollback evidence.
+The terminal state deliberately remains `writer_mode=fenced`: a verified old
+v1 binary without the v2 guard can resume after trigger removal, while this v2
+binary remains fail-closed until a new checked cutover.
 
 ## Protocol-v2 synchronization
 
@@ -128,10 +192,11 @@ also requires a store that is either provably fresh v2 or has a completed sealed
 seed epoch, **and** a verifiably active v2-only old-writer fence in
 `sync_migration_epoch`.
 A nonempty legacy, partially seeded, or unfenced store exits 2 before render,
-fold, push, confirmation, or watermark change. This release validates and
-reports that gate but exposes no command that performs a live all-server
-migration or activates the fence; bootstrap/cutover remains a separately
-reviewed operator procedure.
+fold, push, confirmation, or watermark change. `mem migration` executes only
+the checked local phase named by the operator, with sealed input manifests,
+explicit `--apply`, and a matching `--expect` digest. It never discovers or
+self-authorizes a live roster, credentials, protected ref, or all-server
+rollout; those remain a separately reviewed operator procedure.
 
 `mem sync --json` uses the versioned status enum
 `not-configured|local-only|queued-offline|fetched|folded|conflict|quarantined|push-retry-exhausted|remote-confirmed|hard-failure`
@@ -251,9 +316,10 @@ and confidence thresholds never substitute for that judgment.
 ## Operational contract
 
 - Schema v7 adds bounded retrieval capsules, normalized topics, and non-destructive
-  temporal supersession to the v6 record contract. The v27 additive migration
-  adds local replica/outbox/applied/frontier/conflict/peer/quarantine/migration
-  tables without exchanging rebuildable indexes.
+  temporal supersession to the v6 record contract. The v27 schema-v8 migration
+  adds local replica/outbox/applied/frontier/conflict/peer/quarantine tables;
+  v28 schema v10 adds sealed migration receipts, the writer-fence contract,
+  and bounded last-failure/status evidence without exchanging rebuildable indexes.
 - `dump.jsonl` is ID-sorted with `sort_keys=True`, one record per line, and
   explicit JSON `null` values. It is a v1-compatible materialized view only;
   exact v2 recovery requires protected immutable objects plus a consistent

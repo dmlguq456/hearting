@@ -22,6 +22,7 @@ if str(MEM_MODULE_DIR) not in sys.path:
     sys.path.insert(0, str(MEM_MODULE_DIR))
 
 import git_exchange_v2
+import migration_v2
 import protocol_v2
 import sync_v2
 
@@ -61,8 +62,10 @@ SCOPES = ("project", "global")
 WORKING_TTL_DAYS = 21
 # v2 strength/access, v3 cwd remap, v4 injection, v5 delivery,
 # v6 legacy cwd_origin re-normalization, v7 retrieval capsules and temporal state,
-# v8 immutable operation/outbox/frontier/peer state.
-SCHEMA_VERSION = 8
+# v8 immutable operation/outbox/frontier/peer state; v9 sealed migration
+# receipts and the durable old-writer capability fence; v10 bounded migration
+# failure/status evidence.
+SCHEMA_VERSION = 10
 FM_ORDER = ["id", "tier", "scope", "type", "cwd_origin", "created", "updated",
             "expires", "source", "tags", "links", "strength", "last_accessed", "injection_flag",
             "delivery_state", "headline", "aliases", "entities", "topics", "artifact_refs",
@@ -1174,6 +1177,22 @@ def _migrate_v8(con, installation_fingerprint):
     )
 
 
+def _migrate_v9(con, installation_fingerprint):
+    """Add v28 migration receipts/fence storage without rewriting v2 state."""
+    sync_v2.ensure_sync_schema(con)
+    sync_v2.ensure_replica_identity(
+        con, installation_fingerprint=installation_fingerprint
+    )
+
+
+def _migrate_v10(con, installation_fingerprint):
+    """Add bounded cutover failure/status evidence without rewriting state."""
+    sync_v2.ensure_sync_schema(con)
+    sync_v2.ensure_replica_identity(
+        con, installation_fingerprint=installation_fingerprint
+    )
+
+
 def _run_migrations(con, installation_fingerprint):
     """Run schema migrations based on ``PRAGMA user_version``.
 
@@ -1229,6 +1248,10 @@ def _run_migrations(con, installation_fingerprint):
             _migrate_v7(con)
         if cur2 < 8:
             _migrate_v8(con, installation_fingerprint)
+        if cur2 < 9:
+            _migrate_v9(con, installation_fingerprint)
+        if cur2 < 10:
+            _migrate_v10(con, installation_fingerprint)
         con.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
         con.execute("COMMIT")
     except Exception:
@@ -1254,6 +1277,13 @@ def get_con():
         raise SystemExit(2)
     STORE.mkdir(parents=True, exist_ok=True)
     con = sqlite3.connect(DB)
+    # Fence triggers intentionally call these connection-local functions.
+    # Current protocol-v2 writers advertise their generation; ordinary calls
+    # never receive cutover authority.  Older binaries do not register either
+    # function, so a durable fence trigger fails them closed.
+    sync_v2.register_writer_functions(
+        con, protocol_major=2, cutover_authority=False
+    )
     con.execute("PRAGMA journal_mode=WAL")
     con.execute("PRAGMA synchronous=NORMAL")
     con.execute("PRAGMA foreign_keys=ON")
@@ -1379,6 +1409,9 @@ def _capture_v2_operation(con, kind, *, post_ids=(), tombstones=None,
         raise sync_v2.SyncInvariantError(
             "semantic operation capture requires BEGIN IMMEDIATE"
         )
+    # Keep a Python-level typed failure in front of the durable SQL trigger.
+    # The trigger remains authoritative against old or bypassing binaries.
+    sync_v2.require_writer_allowed(con, protocol_major=2)
     tombstones = dict(tombstones or {})
     edges = dict(edges or {})
     target_ops = dict(target_ops or {})
@@ -2794,6 +2827,7 @@ def import_dump(path, recovery=False):
     n = 0
     try:
         con.execute("BEGIN IMMEDIATE")
+        sync_v2.require_writer_allowed(con, protocol_major=2)
         sync_v2.ensure_replica_identity(
             con, installation_fingerprint=_installation_fingerprint()
         )
@@ -2802,6 +2836,10 @@ def import_dump(path, recovery=False):
             "sync_conflicts", "sync_peer_state", "sync_quarantine",
             "sync_migration_epoch", "sync_parents", "sync_graveyard",
             "sync_transactional_graveyard",
+            "sync_migration_state", "sync_migration_receipts",
+            "sync_migration_seals", "sync_migration_attestations",
+            "sync_migration_seed_reservations", "sync_migration_seed_map",
+            "sync_migration_equality", "sync_migration_rollback",
         )
         state_counts = {
             table: int(con.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()[0])
@@ -4584,6 +4622,7 @@ def rotate_replica(reason):
     con = get_con()
     try:
         con.execute("BEGIN IMMEDIATE")
+        sync_v2.require_writer_allowed(con, protocol_major=2)
         row = con.execute(
             "SELECT replica_id FROM sync_replica WHERE active=1"
         ).fetchone()
@@ -5446,10 +5485,14 @@ def _apply_fold(con, result, remote_tip, remote_ref, *, record_peer=True):
         )
 
 
-def _ingest_and_fold_snapshot(snapshot, remote_ref, *, record_peer=True):
+def _ingest_and_fold_snapshot(snapshot, remote_ref, *, record_peer=True,
+                              cutover_authority=False):
     """Ingest briefly, fold without a writer lock, then apply optimistically."""
 
     con = get_con()
+    if cutover_authority:
+        sync_v2.register_writer_functions(con, protocol_major=2,
+                                          cutover_authority=True)
     try:
         con.execute("BEGIN IMMEDIATE")
         _ingest_remote_objects(con, snapshot)
@@ -5458,12 +5501,18 @@ def _ingest_and_fold_snapshot(snapshot, remote_ref, *, record_peer=True):
         con.close()
     for _attempt in range(3):
         con = get_con()
+        if cutover_authority:
+            sync_v2.register_writer_functions(con, protocol_major=2,
+                                              cutover_authority=True)
         try:
             envelopes = _sync_envelopes(con)
         finally:
             con.close()
         result = protocol_v2.fold_operations(envelopes)
         con = get_con()
+        if cutover_authority:
+            sync_v2.register_writer_functions(con, protocol_major=2,
+                                              cutover_authority=True)
         try:
             con.execute("BEGIN IMMEDIATE")
             current_count = int(
@@ -5916,6 +5965,2302 @@ def _recall_limit(value):
     return parsed
 
 
+def _migration_leaf(parser, *, mutating=False, epoch=True):
+    """Attach the D-71 common contract to one exact migration leaf."""
+    if epoch:
+        parser.add_argument("--epoch", required=True)
+    parser.add_argument("--json", dest="json_output", action="store_true")
+    if mutating:
+        parser.add_argument("--expect", required=True,
+                            help="Current durable migration state digest")
+        parser.add_argument("--apply", action="store_true",
+                            help="Apply the CAS transition (default: deterministic dry-run)")
+    return parser
+
+
+def _configure_migration_parser(sub):
+    """Install the exact public ``mem migration`` namespace from D-71–D-77."""
+    migration = sub.add_parser(
+        "migration", help="Operate a sealed existing-store protocol-v2 cutover"
+    )
+    phases = migration.add_subparsers(dest="migration_cmd", required=True)
+
+    status = _migration_leaf(phases.add_parser("status", help="Read migration state"))
+    status.add_argument("--store")
+    inspect = _migration_leaf(phases.add_parser("inspect", help="Inspect a store read-only"))
+    inspect.add_argument("--store", required=True)
+    _migration_leaf(phases.add_parser(
+        "capabilities", help="Report writer/fence capability read-only"
+    ))
+
+    roster = phases.add_parser("roster", help="Seal membership or final evidence")
+    roster_phases = roster.add_subparsers(dest="migration_roster_cmd", required=True)
+    member = _migration_leaf(roster_phases.add_parser("membership-seal"), mutating=True)
+    member.add_argument("--member", action="append", default=[], required=True)
+    member.add_argument("--retirement", action="append", default=[])
+    member.add_argument("--out", required=True)
+    evidence = _migration_leaf(roster_phases.add_parser("evidence-seal"), mutating=True)
+    evidence.add_argument("--membership", required=True)
+    evidence.add_argument("--replica-evidence", action="append", default=[], required=True)
+    evidence.add_argument("--out", required=True)
+
+    # ``snapshot`` is both a mutating leaf and the parent of read-only
+    # ``snapshot verify`` in the normative grammar.  Keep its leaf arguments
+    # optional here and validate the create form in the dispatcher.
+    snapshot = phases.add_parser("snapshot", help="Create or verify a snapshot")
+    snapshot.add_argument("--epoch")
+    snapshot.add_argument("--json", dest="json_output", action="store_true")
+    snapshot.add_argument("--expect")
+    snapshot.add_argument("--apply", action="store_true")
+    snapshot_phases = snapshot.add_subparsers(dest="migration_snapshot_cmd")
+    snapshot_verify = _migration_leaf(snapshot_phases.add_parser("verify"), epoch=False)
+    snapshot_verify.add_argument("--manifest", required=True)
+    snapshot.add_argument("--membership")
+    snapshot.add_argument("--replica")
+    snapshot.add_argument("--store")
+    snapshot.add_argument("--out")
+
+    seed = phases.add_parser("seed", help="Plan, build, verify, or publish seed objects")
+    seed_phases = seed.add_subparsers(dest="migration_seed_cmd", required=True)
+    seed_plan = _migration_leaf(seed_phases.add_parser("plan"))
+    seed_plan.add_argument("--snapshot", required=True)
+    seed_plan.add_argument("--kind", choices=("snapshot", "delta"), required=True)
+    seed_build = _migration_leaf(seed_phases.add_parser("build"), mutating=True)
+    seed_build.add_argument("--membership", required=True)
+    seed_build.add_argument("--snapshot", required=True)
+    seed_build.add_argument("--kind", choices=("snapshot", "delta"), required=True)
+    seed_build.add_argument("--source", required=True)
+    seed_build.add_argument("--out", required=True)
+    seed_verify = _migration_leaf(seed_phases.add_parser("verify"))
+    seed_verify.add_argument("--seed-manifest", required=True)
+    seed_publish = _migration_leaf(seed_phases.add_parser("publish"), mutating=True)
+    seed_publish.add_argument("--evidence", required=True)
+    seed_publish.add_argument("--seed-manifest", action="append", default=[], required=True)
+    seed_publish.add_argument("--checkout", required=True)
+    seed_publish.add_argument("--ref", required=True)
+
+    fence = phases.add_parser("fence", help="Plan, arm, or activate old-writer fence")
+    fence_phases = fence.add_subparsers(dest="migration_fence_cmd", required=True)
+    fence_plan = _migration_leaf(fence_phases.add_parser("plan"))
+    fence_plan.add_argument("--membership", required=True)
+    fence_arm = _migration_leaf(fence_phases.add_parser("arm"), mutating=True)
+    fence_arm.add_argument("--membership", required=True)
+    fence_arm.add_argument("--capabilities", action="append", default=[], required=True)
+    fence_activate = _migration_leaf(fence_phases.add_parser("activate"), mutating=True)
+    fence_activate.add_argument("--membership", required=True)
+    fence_activate.add_argument("--barrier-receipt", action="append", default=[], required=True)
+
+    barrier = phases.add_parser("barrier", help="Enter the final semantic-writer barrier")
+    barrier_phases = barrier.add_subparsers(dest="migration_barrier_cmd", required=True)
+    barrier_enter = _migration_leaf(barrier_phases.add_parser("enter"), mutating=True)
+    barrier_enter.add_argument("--replica", required=True)
+
+    delta = phases.add_parser("delta", help="Drain the captured post-snapshot tail")
+    delta_phases = delta.add_subparsers(dest="migration_delta_cmd", required=True)
+    delta_drain = _migration_leaf(delta_phases.add_parser("drain"), mutating=True)
+    delta_drain.add_argument("--replica", required=True)
+    delta_drain.add_argument("--snapshot", required=True)
+    delta_drain.add_argument("--fence-receipt", required=True)
+    delta_drain.add_argument("--out", required=True)
+
+    no_tail = phases.add_parser("no-tail", help="Verify captured-tail completeness")
+    no_tail_phases = no_tail.add_subparsers(dest="migration_no_tail_cmd", required=True)
+    no_tail_verify = _migration_leaf(no_tail_phases.add_parser("verify"))
+    no_tail_verify.add_argument("--replica", required=True)
+    no_tail_verify.add_argument("--snapshot", required=True)
+    no_tail_verify.add_argument("--delta", required=True)
+    no_tail_verify.add_argument("--fence-receipt", required=True)
+
+    fold = _migration_leaf(phases.add_parser("fold"), mutating=True)
+    fold.add_argument("--evidence", required=True)
+    fold.add_argument("--checkout", required=True)
+    compare = _migration_leaf(phases.add_parser("compare"))
+    compare.add_argument("--evidence", required=True)
+    compare.add_argument("--report", action="append", default=[], required=True)
+    compare.add_argument("--ref", required=True)
+    activate = _migration_leaf(phases.add_parser("activate"), mutating=True)
+    activate.add_argument("--equality", required=True)
+    activate.add_argument("--fence-receipt", action="append", default=[], required=True)
+
+    rollback = phases.add_parser("rollback", help="Prepare, verify, apply, or close rollback")
+    rollback_phases = rollback.add_subparsers(dest="migration_rollback_cmd", required=True)
+    rollback_prepare = _migration_leaf(rollback_phases.add_parser("prepare"), mutating=True)
+    rollback_prepare.add_argument("--equality", required=True)
+    rollback_prepare.add_argument("--out", required=True)
+    rollback_verify = _migration_leaf(rollback_phases.add_parser("verify"))
+    rollback_verify.add_argument("--bundle", required=True)
+    rollback_export = _migration_leaf(rollback_phases.add_parser("export-v1"), mutating=True)
+    rollback_export.add_argument("--bundle", required=True)
+    rollback_export.add_argument("--out", required=True)
+    rollback_apply = _migration_leaf(rollback_phases.add_parser("apply"), mutating=True)
+    rollback_apply.add_argument("--bundle", required=True)
+    rollback_apply.add_argument("--target", required=True)
+    rollback_close = _migration_leaf(rollback_phases.add_parser("close"), mutating=True)
+    rollback_close.add_argument("--bundle", required=True)
+    rollback_close.add_argument(
+        "--apply-receipt", action="append", default=[], required=True)
+
+
+def _migration_store_db(value=None):
+    path = Path(value).expanduser() if value else DB
+    return path / "memory.db" if path.is_dir() else path
+
+
+class _MigrationReadConnection(sqlite3.Connection):
+    """Connection that removes an optional WAL-safe private read clone."""
+
+    _migration_clone_root = None
+
+    def close(self):
+        clone_root = self._migration_clone_root
+        try:
+            super().close()
+        finally:
+            if clone_root is not None:
+                shutil.rmtree(clone_root, ignore_errors=True)
+                self._migration_clone_root = None
+
+
+def _migration_read_connection(value=None):
+    """Open an existing migration store with a zero-write SQLite URI."""
+    path = _migration_store_db(value)
+    if not path.exists() or not path.is_file():
+        raise sync_v2.SyncInvariantError("migration store is missing")
+    wal = Path(str(path) + "-wal")
+    if not wal.exists() or wal.stat().st_size == 0:
+        con = sqlite3.connect(path.resolve().as_uri()
+            + "?mode=ro&immutable=1", uri=True,
+            factory=_MigrationReadConnection)
+    else:
+        # Opening a live WAL database read-only may create or rewrite -shm.
+        # Read a private DB+WAL clone instead so operational probes see WAL
+        # commits while the serving store remains byte-for-byte untouched.
+        clone_root = Path(tempfile.mkdtemp(prefix="hearting-migration-ro-"))
+        clone = clone_root / "memory.db"
+        try:
+            shutil.copyfile(path, clone)
+            shutil.copyfile(wal, Path(str(clone) + "-wal"))
+            con = sqlite3.connect(clone.as_uri() + "?mode=ro", uri=True,
+                factory=_MigrationReadConnection)
+            con._migration_clone_root = clone_root
+            con.execute("SELECT 1").fetchone()
+        except Exception:
+            shutil.rmtree(clone_root, ignore_errors=True)
+            raise
+    con.execute("PRAGMA query_only=ON")
+    return con
+
+
+def _migration_emit(payload, *, json_output=False):
+    result = dict(payload)
+    # A receipt's canonical bytes are durable authority. Never append display
+    # defaults after its digest has been computed.
+    if "receipt_digest" not in result and "manifest_digest" not in result:
+        result.setdefault("schema_version", 1)
+        result.setdefault("protocol_major", 2)
+        result.setdefault("changed", False)
+        result.setdefault("status", "local-only")
+        result.setdefault("reason", "ok")
+        result.setdefault("blocker_ids", [])
+        result.setdefault("required_action", "none")
+    if json_output:
+        print(json.dumps(result, sort_keys=True, ensure_ascii=False,
+                         separators=(",", ":"), allow_nan=False))
+    else:
+        print(f"[migration] {result.get('phase', 'status')}: "
+              f"{result.get('status', 'local-only')} "
+              f"({result.get('reason', 'ok')})")
+        print(f"  state={result.get('migration_state', 'legacy')} "
+              f"changed={str(bool(result.get('changed', False))).lower()}")
+        if result.get("state_digest"):
+            print(f"  state_digest={result['state_digest']}")
+        if result.get("receipt_digest"):
+            print(f"  receipt_digest={result['receipt_digest']}")
+        if result.get("required_action") not in (None, "", "none"):
+            print(f"  required_action={result['required_action']}")
+    if "exit_code" in result:
+        return int(result["exit_code"])
+    status = result.get("status", "local-only")
+    if status == "planned":
+        return 0
+    return 2 if status == "hard-failure" else (
+        1 if status not in ("local-only", "remote-confirmed") else 0
+    )
+
+
+def _migration_operation(args):
+    command = args.migration_cmd
+    child = getattr(args, f"migration_{command.replace('-', '_')}_cmd", None)
+    return f"{command}.{child}" if child else command
+
+
+def _migration_require_snapshot_create(args):
+    if args.migration_snapshot_cmd == "verify":
+        return
+    missing = [name for name in ("epoch", "expect", "membership", "replica", "store", "out")
+               if not getattr(args, name, None)]
+    if missing:
+        raise sync_v2.SyncInvariantError(
+            "snapshot creation requires " + ",".join(f"--{name}" for name in missing)
+        )
+
+
+def _migration_manifest(module, path):
+    return module.load_manifest(Path(path))
+
+
+def _migration_current(module, epoch, *, writable=False, store=None):
+    con = get_con() if writable else _migration_read_connection(store)
+    try:
+        return module.MigrationEngine(con, epoch).current()
+    finally:
+        con.close()
+
+
+def _migration_failure(args, exc):
+    reason = (getattr(exc, "reason", None) or getattr(exc, "code", None)
+              or str(exc).strip() or "unsafe-migration")
+    reason = re.sub(r"[^a-z0-9_.:-]+", "-", reason.lower()).strip("-")
+    reason = reason[:160] or "unsafe-migration"
+    epoch = getattr(args, "epoch", None)
+    if (getattr(args, "apply", False) and isinstance(epoch, str)
+            and re.fullmatch(r"[0-9a-f]{32}", epoch) and DB.exists()):
+        con = None
+        try:
+            con = get_con()
+            con.execute("BEGIN IMMEDIATE")
+            sync_v2.record_migration_failure(
+                con, epoch_id=epoch, phase=_migration_operation(args),
+                reason=reason)
+            con.commit()
+        except Exception:
+            if con is not None and con.in_transaction:
+                con.rollback()
+        finally:
+            if con is not None:
+                con.close()
+    payload = {
+        "epoch_id": epoch,
+        "phase": _migration_operation(args),
+        "migration_state": "unknown",
+        "status": "hard-failure",
+        "reason": reason,
+        "changed": False,
+        "exit_code": 2,
+        "required_action": "repair-input-and-retry",
+    }
+    return _migration_emit(payload, json_output=getattr(args, "json_output", False))
+
+
+def _migration_input_digest(inputs):
+    normalized = {
+        str(key): (value if isinstance(value, str)
+                   and re.fullmatch(r"[0-9a-f]{64}", value)
+                   else migration_v2.digest_json(value))
+        for key, value in sorted(inputs.items())
+    }
+    return migration_v2.digest_json(normalized)
+
+
+def _migration_transition(args, *, phase, target, inputs,
+                          membership_digest=None, evidence_digest=None,
+                          writer_mode=None, fence_capture_seq=None,
+                          equality_digest=None, rollback_bundle_digest=None,
+                          transaction_callback=None, receipt_transform=None):
+    """Plan or atomically commit one authoritative sync_v2 state transition."""
+    if not args.apply:
+        con = _migration_read_connection()
+        try:
+            result = migration_v2.MigrationEngine(con, args.epoch).transition(
+                phase, target, inputs, expect=args.expect, apply=False,
+                membership_digest=membership_digest,
+                evidence_digest=evidence_digest,
+                writer_mode=writer_mode,
+                fence_capture_seq=fence_capture_seq,
+                equality_digest=equality_digest,
+                rollback_bundle_digest=rollback_bundle_digest,
+            )
+        finally:
+            con.close()
+        return _migration_emit(result, json_output=args.json_output)
+
+    con = get_con()
+    try:
+        con.execute("BEGIN IMMEDIATE")
+        result = sync_v2.migration_transition(
+            con, epoch_id=args.epoch, phase=phase, target_state=target,
+            expect_digest=args.expect, input_digest=_migration_input_digest(inputs),
+            membership_digest=membership_digest,
+            evidence_digest=evidence_digest, writer_mode=writer_mode,
+            fence_capture_seq=fence_capture_seq,
+            equality_digest=equality_digest,
+            rollback_bundle_digest=rollback_bundle_digest,
+        )
+        if transaction_callback is not None:
+            transaction_callback(con, result)
+        con.commit()
+    except Exception:
+        con.rollback()
+        raise
+    finally:
+        con.close()
+    if receipt_transform is not None:
+        result = receipt_transform(result)
+    return _migration_emit(result, json_output=args.json_output)
+
+
+def _migration_phase_receipt(epoch, replica_id, phase, membership_digest,
+                             state_receipt, *, extra=None):
+    details = {"state_receipt": state_receipt,
+               "state_digest": state_receipt["state_digest"]}
+    details.update(dict(extra or {}))
+    return migration_v2.create_phase_receipt(epoch_id=epoch,
+        replica_id=replica_id, phase=phase,
+        membership_digest=membership_digest, state_receipt=state_receipt,
+        extra=details)
+
+
+def _migration_write_local_manifest(epoch, kind, replica_id, value):
+    """Durably store one operator artifact under the private store root."""
+    root = STORE.resolve() / "migration-v2-artifacts" / epoch / kind
+    root.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if STORE.resolve() not in root.resolve().parents:
+        raise migration_v2.MigrationError("migration-artifact-path-unsafe")
+    path = root / f"{replica_id}.json"
+    raw = migration_v2.canonical_bytes(value)
+    if path.exists() or path.is_symlink():
+        if path.is_symlink() or not path.is_file() or path.read_bytes() != raw:
+            raise migration_v2.MigrationError("migration-artifact-equivocation")
+        return path
+    fd, temporary_name = tempfile.mkstemp(prefix=f".{replica_id}.", dir=root)
+    temporary = Path(temporary_name)
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(raw); handle.flush(); os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        directory_fd = os.open(root, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    finally:
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+    return path
+
+
+def _migration_write_exact(path, raw):
+    path = Path(path)
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if path.exists() or path.is_symlink():
+        if path.is_symlink() or not path.is_file() or path.read_bytes() != raw:
+            raise migration_v2.MigrationError("migration-artifact-equivocation")
+        return False
+    fd, name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    temporary = Path(name)
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(raw); handle.flush(); os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        directory_fd = os.open(
+            path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    finally:
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+    return True
+
+
+def _migration_legacy_graveyard_bytes():
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(GRAVEYARD, flags)
+    except FileNotFoundError:
+        return b""
+    except OSError as exc:
+        raise migration_v2.MigrationError(
+            "legacy-graveyard-source-unsafe") from exc
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode):
+            raise migration_v2.MigrationError("legacy-graveyard-source-unsafe")
+        chunks = []
+        while True:
+            chunk = os.read(fd, 1024 * 1024)
+            if not chunk:
+                return b"".join(chunks)
+            chunks.append(chunk)
+    finally:
+        os.close(fd)
+
+
+def _migration_graveyard_source(raw, snapshot_path):
+    snapshot = migration_v2.verify_snapshot(snapshot_path)
+    backup = Path(snapshot_path).resolve().parent / snapshot["backup"]["path"]
+    con = sqlite3.connect(backup.as_uri() + "?mode=ro&immutable=1", uri=True)
+    try:
+        live = {str(row[0]) for row in con.execute("SELECT id FROM records")}
+    finally:
+        con.close()
+    latest = {}
+    for line in raw.splitlines():
+        if not line.strip():
+            continue
+        try:
+            source = json.loads(line)
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise migration_v2.MigrationError(
+                "legacy-graveyard-json-invalid", str(exc)) from exc
+        record_id = source.get("id") if isinstance(source, dict) else None
+        if not isinstance(record_id, str) or not record_id:
+            raise migration_v2.MigrationError("legacy-graveyard-record-invalid")
+        latest[record_id] = (source, line)
+    entries = []
+    for record_id, (source, line) in sorted(latest.items()):
+        if record_id in live:
+            continue
+        prior = _canonical_record_state(
+            {key: source.get(key) for key in RECORD_COLS})
+        tombstone = {"action": str(source.get("_action") or "legacy-delete"),
+            "pending": prior.get("delivery_state") == "pending",
+            "prior_digest": hashlib.sha256(
+                protocol_v2.canonical_bytes(prior)).hexdigest(),
+            "record_id": record_id}
+        payload = {"schema_version": 1, "record_id": record_id,
+            "prior_state": prior, "tombstone": tombstone,
+            "recovery_evidence_digest": hashlib.sha256(line).hexdigest()}
+        entries.append({**payload,
+            "entry_digest": migration_v2.digest_json(payload)})
+    return b"".join(migration_v2.canonical_bytes(item) for item in entries)
+
+
+def _migration_validate_snapshot_graveyard(con, operations):
+    """Prove every v2 graveyard row is already covered by a sealed object."""
+    by_id = {item["op_id"]: item["payload"] for item in operations}
+
+    def tombstone(op_id, record_id):
+        payload = by_id.get(str(op_id))
+        if payload is None:
+            raise migration_v2.MigrationError("unseeded-graveyard-evidence")
+        matches = [mutation.get("tombstone")
+                   for mutation in payload.get("mutations", ())
+                   if mutation.get("record_id") == str(record_id)
+                   and mutation.get("tombstone") is not None]
+        if len(matches) != 1:
+            raise migration_v2.MigrationError("unseeded-graveyard-evidence")
+        return matches[0]
+
+    tables = {str(row[0]) for row in con.execute(
+        "SELECT name FROM sqlite_master WHERE type='table'")}
+    if "sync_transactional_graveyard" in tables:
+        for op_id, record_id, action, prior_raw, evidence in con.execute(
+                "SELECT destructive_op_id,record_id,action,prior_state_bytes,"
+                "evidence_digest FROM sync_transactional_graveyard "
+                "ORDER BY destructive_op_id,record_id"):
+            raw = bytes(prior_raw)
+            try:
+                prior = protocol_v2.canonical_loads(raw)
+            except Exception as exc:
+                raise migration_v2.MigrationError(
+                    "unseeded-graveyard-evidence", str(exc)) from exc
+            sealed = tombstone(op_id, record_id)
+            if protocol_v2.canonical_bytes(prior) != raw \
+                    or hashlib.sha256(raw).hexdigest() != str(evidence) \
+                    or prior.get("id") != str(record_id) \
+                    or sealed.get("action") != str(action) \
+                    or sealed.get("prior_digest") != str(evidence):
+                raise migration_v2.MigrationError("unseeded-graveyard-evidence")
+    if "sync_graveyard" in tables:
+        for op_id, record_id, tombstone_raw in con.execute(
+                "SELECT destructive_op_id,record_id,tombstone_bytes "
+                "FROM sync_graveyard ORDER BY destructive_op_id,record_id"):
+            raw = bytes(tombstone_raw)
+            try:
+                decoded = protocol_v2.canonical_loads(raw)
+            except Exception as exc:
+                raise migration_v2.MigrationError(
+                    "unseeded-graveyard-evidence", str(exc)) from exc
+            if protocol_v2.canonical_bytes(decoded) != raw \
+                    or decoded != tombstone(op_id, record_id):
+                raise migration_v2.MigrationError("unseeded-graveyard-evidence")
+
+
+def _migration_register_artifact(con, *, epoch, kind, digest, path, receipt,
+                                 replica=None):
+    sync_v2.record_migration_artifact(con, epoch_id=epoch,
+        artifact_kind=kind, manifest_digest=digest,
+        local_path=Path(path).resolve(strict=True), replica_id=replica,
+        receipt_digest=receipt["receipt_digest"])
+
+
+def _migration_verify_phase_receipts(values, *, epoch, phase, membership):
+    expected = [row["replica_id"] for row in membership["members"]]
+    receipts = migration_v2.verify_phase_receipts(values, epoch_id=epoch,
+        phase=phase, membership_digest=membership["manifest_digest"],
+        expected_replica_ids=expected)
+    for receipt in receipts:
+        state = receipt.get("extra", {}).get("state_receipt")
+        if not isinstance(state, dict):
+            raise migration_v2.MigrationError("phase-state-receipt-missing")
+        migration_v2.verify_phase_receipt(receipt, state_receipt=state)
+    return receipts
+
+
+def _migration_file_inputs(args):
+    values = {}
+    for name, value in vars(args).items():
+        if name.startswith("_"):
+            continue
+        if name in {"apply", "expect", "json_output", "cmd"} or value in (None, [], False):
+            continue
+        if name.startswith("migration_"):
+            continue
+        if name in {"checkout", "store", "out", "target"}:
+            values[name] = migration_v2.digest_json(str(value))
+            continue
+        sequence = value if isinstance(value, list) else [value]
+        if name in {"member", "retirement", "replica_evidence", "capabilities",
+                    "barrier_receipt", "seed_manifest", "report",
+                    "apply_receipt"} or name in {
+                        "membership", "manifest", "snapshot", "source", "evidence",
+                        "fence_receipt", "delta", "equality", "bundle"}:
+            manifests = [migration_v2.load_manifest(item) for item in sequence]
+            digests = [item.get("manifest_digest") or item.get("receipt_digest")
+                       or migration_v2.digest_json(item) for item in manifests]
+            values[name] = digests if isinstance(value, list) else digests[0]
+        else:
+            values[name] = value
+    return values
+
+
+def _migration_status(args):
+    con = _migration_read_connection(args.store)
+    try:
+        state = sync_v2.migration_status(con, args.epoch)
+        capability = sync_v2.writer_capability(con, protocol_major=2)
+        rollback = sync_v2.rollback_apply_status(con, args.epoch)
+        migration = sync_v2.migration_diagnostic_status(con, args.epoch)
+        outbox = 0
+        if "sync_outbox" in {row[0] for row in con.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'")}:
+            outbox = int(con.execute(
+                "SELECT COUNT(*) FROM sync_outbox WHERE state<>'confirmed'"
+            ).fetchone()[0])
+    finally:
+        con.close()
+    closed = state["migration_state"] == "closed"
+    return _migration_emit({**state, "phase": "status", "changed": False,
+        "writer_mode": capability["writer_mode"], "writer_allowed": capability["allowed"],
+        "capture_outbox_tail": outbox, "rollback": rollback,
+        "migration": migration,
+        "exit_code": 0 if closed else capability["exit_code"],
+        "status": "local-only" if closed else capability["status"],
+        "reason": ("rollback-closed-v1-only" if closed
+                   else capability["reason"] or "ok")},
+        json_output=args.json_output)
+
+
+def _migration_capabilities(args):
+    con = _migration_read_connection()
+    try:
+        capability = sync_v2.writer_capability(con, protocol_major=2)
+        replica = con.execute(
+            "SELECT replica_id FROM sync_replica WHERE active=1"
+        ).fetchone()
+    finally:
+        con.close()
+    contract = {
+        "protocol_major": 2,
+        "semantic_funnel": "_capture_v2_operation",
+        "sqlite_functions": ["hearting_cutover_authority", "hearting_writer_protocol_major"],
+        "fence_triggers": ["records:insert", "records:update", "records:delete"],
+        "legacy_import_guard": True,
+        "replica_rotation_guard": True,
+    }
+    payload = {**capability, "schema_version": 1, "phase": "capabilities",
+        "epoch_id": args.epoch, "changed": False, "writer_capability_hash":
+        migration_v2.digest_json(contract), "writer_contract": contract,
+        "replica_id": replica[0] if replica else None,
+        "reason": capability.get("reason") or "ok",
+        "required_action": "none" if capability["allowed"] else "complete-or-rollback-cutover"}
+    return _migration_emit(payload, json_output=args.json_output)
+
+
+def _migration_verify_capability(value):
+    report = migration_v2.load_manifest(value)
+    contract = report.get("writer_contract")
+    if not isinstance(contract, dict) \
+            or report.get("schema_version") != 1 \
+            or report.get("writer_protocol_major") != 2 \
+            or report.get("writer_capability_hash") != migration_v2.digest_json(contract) \
+            or not isinstance(report.get("replica_id"), str) \
+            or not report["replica_id"]:
+        raise migration_v2.MigrationError("writer-capability-report-invalid")
+    required = {
+        "protocol_major": 2,
+        "semantic_funnel": "_capture_v2_operation",
+        "sqlite_functions": ["hearting_cutover_authority",
+                             "hearting_writer_protocol_major"],
+        "fence_triggers": ["records:insert", "records:update", "records:delete"],
+        "legacy_import_guard": True,
+        "replica_rotation_guard": True,
+    }
+    if contract != required:
+        raise migration_v2.MigrationError("writer-capability-contract-unsupported")
+    return report
+
+
+def _migration_verify_replica_evidence(values, membership):
+    rows, no_tail = [], {}
+    for value in values:
+        row = migration_v2.load_manifest(value)
+        source = row.get("no_tail_report")
+        if source is None:
+            raise migration_v2.MigrationError("evidence-no-tail-report-missing")
+        report = migration_v2.load_manifest(source)
+        claimed = report.get("manifest_digest")
+        payload = dict(report)
+        payload.pop("manifest_digest", None)
+        replica = row.get("replica_id")
+        if claimed != migration_v2.digest_json(payload) \
+                or claimed != row.get("no_tail_digest") \
+                or report.get("kind") != "no-tail" \
+                or report.get("proven") is not True \
+                or report.get("epoch_id") != membership["epoch_id"] \
+                or report.get("membership_digest") != membership["manifest_digest"] \
+                or report.get("replica_id") != replica:
+            raise migration_v2.MigrationError("evidence-no-tail-report-invalid")
+        if replica in no_tail:
+            raise migration_v2.MigrationError("evidence-replica-duplicate")
+        rows.append(row)
+        no_tail[replica] = (report, source if isinstance(source, str) else None)
+    expected = {item["replica_id"] for item in membership["members"]}
+    if set(no_tail) != expected:
+        raise migration_v2.MigrationError("evidence-roster-incomplete")
+    return rows, no_tail
+
+
+def _migration_inspect(args):
+    con = _migration_read_connection(args.store)
+    try:
+        integrity = str(con.execute("PRAGMA integrity_check").fetchone()[0])
+        user_version = int(con.execute("PRAGMA user_version").fetchone()[0])
+        names = {row[0] for row in con.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'")}
+        records = int(con.execute("SELECT COUNT(*) FROM records").fetchone()[0]) \
+            if "records" in names else 0
+        capture_seq = sync_v2.capture_frontier(con) if "sync_capture_clock" in names else 0
+        state = sync_v2.migration_status(con, args.epoch)
+        capability = sync_v2.writer_capability(con, protocol_major=2)
+    finally:
+        con.close()
+    ok = integrity == "ok" and user_version <= SCHEMA_VERSION
+    return _migration_emit({**state, "phase": "inspect", "changed": False,
+        "integrity": integrity, "schema_user_version": user_version,
+        "record_count": records, "capture_frontier": capture_seq,
+        "writer_mode": capability["writer_mode"],
+        "status": "local-only" if ok else "hard-failure",
+        "reason": "ok" if ok else "store-integrity-or-version-failure",
+        "exit_code": 0 if ok else 2}, json_output=args.json_output)
+
+
+def _migration_preflight_expect(epoch, expect, phases):
+    """Reject stale artifact creation while allowing an exact phase retry."""
+    con = _migration_read_connection()
+    try:
+        current = sync_v2.migration_status(con, epoch)
+        if current["state_digest"] == expect:
+            return current, None
+        names = {row[0] for row in con.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'")}
+        if "sync_migration_receipts" in names:
+            placeholders = ",".join("?" for _ in phases)
+            row = con.execute(
+                f"SELECT phase FROM sync_migration_receipts WHERE epoch_id=? "
+                f"AND expect_digest=? AND phase IN ({placeholders}) LIMIT 1",
+                (epoch, expect, *phases),
+            ).fetchone()
+            if row is not None:
+                return current, str(row[0])
+    finally:
+        con.close()
+    raise migration_v2.MigrationError("stale-state")
+
+
+def _migration_require_exact_retry(epoch, expect, phase, inputs):
+    con = _migration_read_connection()
+    try:
+        receipt = sync_v2.migration_receipt(con, epoch, phase=phase)
+    finally:
+        con.close()
+    if receipt is None or receipt.get("previous_state_digest") != expect \
+            or receipt.get("input_digest") != _migration_input_digest(inputs):
+        raise migration_v2.MigrationError("stale-state")
+
+
+def _migration_seed_operations(snapshot_path, snapshot, source, *, apply):
+    """Build deterministic snapshot put operations; reserve only on apply."""
+    backup = Path(snapshot_path).resolve().parent / snapshot["backup"]["path"]
+    con = sqlite3.connect(backup.as_uri() + "?mode=ro&immutable=1", uri=True)
+    try:
+        available = [str(row[0]) for row in con.execute(
+            "SELECT id FROM records ORDER BY id")]
+        requested_identities = source.get("source_identities")
+        identities = (available if requested_identities is None
+                      else requested_identities)
+        if not isinstance(identities, list) \
+                or any(value not in available for value in identities):
+            raise migration_v2.MigrationError("seed-source-identities-invalid")
+        states = {}
+        for rid in identities:
+            row = con.execute(
+                f"SELECT {', '.join(RECORD_COLS)} FROM records WHERE id=?", (rid,)
+            ).fetchone()
+            meta, body = _row_to_meta(row)
+            states[rid] = _canonical_record_state({**meta, "body": body})
+        tables = {row[0] for row in con.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'")}
+        existing_operations = []
+        if "sync_objects" in tables:
+            for op_id, payload_bytes in con.execute(
+                    "SELECT op_id,payload_bytes FROM sync_objects ORDER BY op_id"):
+                raw = bytes(payload_bytes)
+                if hashlib.sha256(raw).hexdigest() != str(op_id):
+                    raise migration_v2.MigrationError(
+                        "snapshot-object-digest-mismatch")
+                existing_operations.append({"op_id": str(op_id),
+                    "payload": protocol_v2.canonical_loads(raw)})
+        existing_ids = {item["op_id"] for item in existing_operations}
+        if any(parent not in existing_ids for item in existing_operations
+               for parent in item["payload"]["parents"]):
+            raise migration_v2.MigrationError("snapshot-causal-closure-missing")
+        frontier_by_record = {}
+        if "sync_frontier" in tables:
+            for record_id, op_id in con.execute(
+                    "SELECT record_id,op_id FROM sync_frontier "
+                    "ORDER BY record_id,op_id"):
+                frontier_by_record.setdefault(str(record_id), []).append(str(op_id))
+        if any(head not in existing_ids for heads in frontier_by_record.values()
+               for head in heads):
+            raise migration_v2.MigrationError("snapshot-frontier-closure-missing")
+        _migration_validate_snapshot_graveyard(con, existing_operations)
+    finally:
+        con.close()
+    graveyard_path = (Path(snapshot_path).resolve().parent / "graveyard"
+                      / "graveyard.json")
+    if not graveyard_path.is_file() or graveyard_path.is_symlink():
+        raise migration_v2.MigrationError("graveyard-source-missing")
+    graveyard = migration_v2.verify_graveyard_source(graveyard_path)
+    if graveyard.get("epoch_id") != snapshot["epoch_id"] \
+            or graveyard.get("membership_digest") \
+            != snapshot["membership_digest"] \
+            or graveyard.get("snapshot_digest") \
+            != snapshot["manifest_digest"] \
+            or graveyard.get("replica_id") != snapshot["replica_id"]:
+        raise migration_v2.MigrationError("graveyard-source-binding-mismatch")
+    graveyard_identities = migration_v2.graveyard_source_identities(
+        graveyard_path)
+    reservation_identities = list(identities) + graveyard_identities
+    if not reservation_identities:
+        raise migration_v2.MigrationError("seed-source-identities-invalid")
+    raw_source_digest = (source.get("manifest_digest")
+                         or migration_v2.digest_json(source))
+    source_digest = migration_v2.digest_json({
+        "kind": "snapshot", "snapshot_digest": snapshot["manifest_digest"],
+        "source_digest": raw_source_digest,
+        "graveyard_digest": graveyard["manifest_digest"]})
+    allowed_namespaces = set(map(str, snapshot.get("logical_project_keys", ())))
+    if any(_state_namespace(state) not in allowed_namespaces
+           for state in states.values()) or any(
+               item["payload"].get("replica_id") != snapshot["replica_id"]
+               or item["payload"].get("project_key") not in allowed_namespaces
+               for item in existing_operations):
+        raise migration_v2.MigrationError("seed-namespace-outside-membership")
+
+    def assemble(reserved):
+        operations = list(existing_operations)
+        mappings = [{"source_identity": f"captured:{item['op_id']}",
+                     "counter": item["payload"]["counter"],
+                     "op_id": item["op_id"]}
+                    for item in existing_operations]
+        by_identity = {item["source_identity"]: item for item in reserved}
+        seeded = []
+        for rid in sorted(identities):
+            mapping = by_identity[rid]
+            # Pre-snapshot capture remains valid causal ancestry. The seed
+            # union includes its complete immutable closure.
+            parents = frontier_by_record.get(rid, [])
+            operation = protocol_v2.build_operation({
+                "protocol_major": 2, "schema_minor": 0,
+                "replica_id": snapshot["replica_id"],
+                "counter": mapping["counter"], "parents": parents,
+                "project_key": _state_namespace(states[rid]), "kind": "put",
+                "frontiers": [{"record_id": rid, "heads": parents}],
+                "mutations": [{"record_id": rid, "mutation_ordinal": 0,
+                               "post_state": states[rid]}],
+                "provenance": {"actor": "migration",
+                    "reason": "snapshot-seed", "source": "mem.py"},
+            })
+            operations.append(operation); seeded.append((rid, operation))
+            mappings.append({"source_identity": rid,
+                             "counter": mapping["counter"],
+                             "op_id": operation["op_id"]})
+        if graveyard_identities:
+            graveyard_seed = migration_v2.build_graveyard_seed_operations(
+                graveyard=graveyard_path,
+                counter_mappings=[by_identity[identity]
+                                  for identity in graveyard_identities])
+            operations.extend(graveyard_seed["operations"])
+            mappings.extend(graveyard_seed["mappings"])
+            by_op = {item["op_id"]: item
+                     for item in graveyard_seed["operations"]}
+            seeded.extend((mapping["source_identity"],
+                           by_op[mapping["op_id"]])
+                          for mapping in graveyard_seed["mappings"])
+        return operations, mappings, seeded
+
+    local = get_con() if apply else _migration_read_connection()
+    try:
+        row = local.execute(
+            "SELECT replica_id,counter FROM sync_replica WHERE active=1"
+        ).fetchone()
+        if row is None or row[0] != snapshot["replica_id"]:
+            raise migration_v2.MigrationError("seed-replica-not-local")
+        if apply:
+            local.execute("BEGIN IMMEDIATE")
+            if sync_v2.capture_frontier(local) != snapshot["snapshot_capture_seq"]:
+                raise migration_v2.MigrationError("snapshot-tail-before-seed")
+            existing_reservation = local.execute(
+                "SELECT 1 FROM sync_migration_seed_reservations WHERE epoch_id=? "
+                "AND replica_id=? AND seed_kind='snapshot' AND source_digest=?",
+                (snapshot["epoch_id"], row[0], source_digest)).fetchone()
+            live_frontiers = {rid: [str(item[0]) for item in local.execute(
+                "SELECT op_id FROM sync_frontier WHERE record_id=? ORDER BY op_id",
+                (rid,))] for rid in identities}
+            if existing_reservation is None and any(
+                    live_frontiers[rid] != frontier_by_record.get(rid, [])
+                    for rid in identities):
+                raise migration_v2.MigrationError("snapshot-tail-before-seed")
+            reservation = sync_v2.reserve_seed_counters(local,
+                epoch_id=snapshot["epoch_id"], replica_id=row[0],
+                seed_kind="snapshot", source_digest=source_digest,
+                source_identities=reservation_identities,
+                membership_digest=snapshot["membership_digest"],
+                activation_boundary=snapshot["manifest_digest"],
+                canonicalizer_version=str(migration_v2.CANONICALIZER_VERSION))
+            reserved = reservation["mappings"]
+            operations, mappings, seeded = assemble(reserved)
+            if existing_reservation is not None and any(
+                    live_frontiers[rid] not in (
+                        frontier_by_record.get(rid, []), [operation["op_id"]])
+                    for rid, operation in seeded if rid in states):
+                raise migration_v2.MigrationError("snapshot-tail-before-seed")
+            for rid, operation in seeded:
+                sync_v2.record_reserved_seed_operation(local, operation,
+                    epoch_id=snapshot["epoch_id"], seed_kind="snapshot",
+                    source_digest=source_digest, source_identity=rid)
+            local.commit()
+        else:
+            start = int(row[1]) + 1
+            reserved = [{"source_identity": rid, "counter": start + offset,
+                         "dot": f"{row[0]}:{start + offset}"}
+                        for offset, rid in enumerate(reservation_identities)]
+            operations, mappings, _seeded = assemble(reserved)
+    except Exception:
+        local.rollback()
+        raise
+    finally:
+        local.close()
+    return source_digest, mappings, operations
+
+
+def _migration_validate_seed_namespaces(membership, operations):
+    """Keep every sealed operation inside its author replica's roster keys."""
+    keys_by_replica = {
+        str(member["replica_id"]): set(map(str, member["logical_project_keys"]))
+        for member in membership["members"]
+    }
+    for operation in operations:
+        payload = operation.get("payload") if isinstance(operation, dict) else None
+        if not isinstance(payload, dict):
+            raise migration_v2.MigrationError("seed-operation-invalid")
+        allowed = keys_by_replica.get(str(payload.get("replica_id", "")))
+        if allowed is None or str(payload.get("project_key", "")) not in allowed:
+            raise migration_v2.MigrationError("seed-namespace-outside-membership")
+
+
+def _migration_exchange(checkout, ref):
+    root = Path(checkout).expanduser()
+    if not root.is_absolute():
+        raise migration_v2.MigrationError("checkout-must-be-absolute")
+    remote = os.environ.get("MEM_SYNC_REMOTE_URL", "").strip()
+    if not remote and root.is_dir():
+        remote = _git_out(["remote", "get-url", "origin"], root)
+    if not remote:
+        raise migration_v2.MigrationError("migration-remote-unavailable")
+    return git_exchange_v2.GitExchange(root, remote, ref=ref,
+        forbidden_roots=_synchronized_project_roots())
+
+
+def _migration_operation_tree(snapshot):
+    return migration_v2.digest_json({"objects": [
+        {"op_id": op_id,
+         "sha256": hashlib.sha256(
+             snapshot.raw_objects[protocol_v2.operation_path(op_id)]).hexdigest()}
+        for op_id in sorted(snapshot.operations)
+    ]})
+
+
+def _migration_publish_envelopes(paths):
+    """Re-read sealed seed/delta objects once with no-follow digest checks."""
+    envelopes, manifests = [], []
+    for path in paths:
+        try:
+            manifest = migration_v2.verify_seed_manifest(path)
+        except migration_v2.MigrationError:
+            manifest = migration_v2.verify_delta_manifest(path)
+        manifests.append(manifest)
+        root = Path(path).resolve().parent
+        for row in manifest["objects"]:
+            object_path = root / row["path"]
+            fd = os.open(object_path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+            try:
+                info = os.fstat(fd)
+                if not stat.S_ISREG(info.st_mode):
+                    raise migration_v2.MigrationError("seed-object-not-regular")
+                chunks = []
+                while True:
+                    chunk = os.read(fd, 1024 * 1024)
+                    if not chunk:
+                        break
+                    chunks.append(chunk)
+            finally:
+                os.close(fd)
+            raw = b"".join(chunks)
+            envelope = protocol_v2.canonical_loads(raw)
+            if len(raw) != row["bytes"] \
+                    or hashlib.sha256(raw).hexdigest() != row["sha256"] \
+                    or envelope.get("op_id") != row["op_id"]:
+                raise migration_v2.MigrationError("publish-object-raced")
+            envelopes.append(envelope)
+    return manifests, envelopes
+
+
+def _migration_bundle_artifact_files(artifacts):
+    """Re-verify registered local artifact identities and copy exact bytes."""
+    files = {}
+    for artifact in artifacts:
+        root = Path(artifact["local_path"])
+        candidates = [root] if root.is_file() else sorted(root.rglob("*"))
+        matched = False
+        owner = artifact["replica_id"] or "shared"
+        for path in candidates:
+            if path.is_symlink():
+                raise migration_v2.MigrationError("rollback-artifact-symlink")
+            if not path.is_file():
+                continue
+            relative = path.name if root.is_file() else path.relative_to(root).as_posix()
+            fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+            try:
+                raw = b""
+                while True:
+                    chunk = os.read(fd, 1024 * 1024)
+                    if not chunk:
+                        break
+                    raw += chunk
+            finally:
+                os.close(fd)
+            if path.suffix == ".json":
+                try:
+                    value = json.loads(raw)
+                except (UnicodeDecodeError, json.JSONDecodeError):
+                    value = None
+                if isinstance(value, dict) and (
+                        value.get("manifest_digest") == artifact["manifest_digest"]
+                        or value.get("receipt_digest") == artifact["manifest_digest"]):
+                    matched = True
+            target = (f"artifacts/{artifact['artifact_kind']}/"
+                      f"{owner}/{relative}")
+            if target in files and files[target] != raw:
+                raise migration_v2.MigrationError("rollback-artifact-collision")
+            files[target] = raw
+        if not matched:
+            raise migration_v2.MigrationError("rollback-artifact-identity-missing")
+    return files
+
+
+def _migration_artifact_manifest_path(artifact, name):
+    try:
+        root = Path(artifact["local_path"]).resolve(strict=True)
+    except OSError as exc:
+        raise migration_v2.MigrationError(
+            "rollback-artifact-file-missing", str(exc)) from exc
+    path = root if root.is_file() else root / name
+    if path.is_symlink() or not path.is_file():
+        raise migration_v2.MigrationError("rollback-artifact-file-missing")
+    return path
+
+
+def _migration_snapshot_v1_dump(snapshot_path):
+    snapshot = migration_v2.verify_snapshot(snapshot_path)
+    backup = Path(snapshot_path).resolve().parent / snapshot["backup"]["path"]
+    con = sqlite3.connect(backup.as_uri() + "?mode=ro&immutable=1", uri=True)
+    try:
+        rows = con.execute(
+            f"SELECT {', '.join(RECORD_COLS)} FROM records ORDER BY id"
+        ).fetchall()
+    finally:
+        con.close()
+    chunks = []
+    for row in rows:
+        meta, body = _row_to_meta(row)
+        chunks.append(migration_v2.canonical_bytes(
+            _canonical_record_state({**meta, "body": body})))
+    return b"".join(chunks)
+
+
+def _migration_table_rows(con, table):
+    names = [str(row[1]) for row in con.execute(f'PRAGMA table_info("{table}")')]
+    if not names:
+        return []
+    result = []
+    for row in con.execute(f'SELECT * FROM "{table}" ORDER BY 1'):
+        normalized = {}
+        for name, value in zip(names, row):
+            if isinstance(value, bytes):
+                normalized[name] = {"bytes": len(value),
+                    "sha256": hashlib.sha256(value).hexdigest()}
+            else:
+                normalized[name] = value
+        result.append(normalized)
+    return result
+
+
+def _migration_install_v1_rows(con, rows):
+    """Install the verified v1 projection without owning the transaction."""
+    con.execute("DELETE FROM records")
+    names = {str(row[0]) for row in con.execute(
+        "SELECT name FROM sqlite_master WHERE type IN ('table','view')")}
+    for name in ("records_fts", "records_cjk", "records_capsule_fts",
+                 "record_topics"):
+        if name in names:
+            con.execute(f'DELETE FROM "{name}"')
+    for row in rows:
+        body = row.get("body", "")
+        meta = {key: row.get(key) for key in RECORD_COLS if key != "body"}
+        con.execute(
+            f"INSERT INTO records VALUES({','.join(['?'] * len(RECORD_COLS))})",
+            _meta_to_params(meta, body))
+        record_id = meta["id"]
+        if "records_fts" in names:
+            con.execute("INSERT INTO records_fts(id,body) VALUES(?,?)",
+                        (record_id, body))
+        if "records_cjk" in names:
+            con.execute("INSERT INTO records_cjk(id,body) VALUES(?,?)",
+                        (record_id, _cjk_shadow_text(body)))
+        _sync_capsule_row(con, record_id)
+
+
+def _migration_membership_from_store(epoch):
+    con = _migration_read_connection()
+    try:
+        row = con.execute(
+            "SELECT manifest_bytes FROM sync_migration_seals "
+            "WHERE epoch_id=? AND seal_kind='membership'", (epoch,)
+        ).fetchone()
+    finally:
+        con.close()
+    if row is None:
+        raise migration_v2.MigrationError("membership-seal-missing")
+    return migration_v2.load_manifest(json.loads(bytes(row[0])))
+
+
+def migration_command(args):
+    """Serialize applied cutover actions across their full side-effect window."""
+    if getattr(args, "apply", False):
+        with _sync_process_lock():
+            return _migration_command_locked(args)
+    return _migration_command_locked(args)
+
+
+def _migration_command_locked(args):
+    """Execute one exact D-71–D-77 migration leaf."""
+    try:
+        operation = _migration_operation(args)
+        if operation == "snapshot.verify":
+            result = migration_v2.verify_snapshot(args.manifest)
+            return _migration_emit({**result, "phase": operation, "migration_state": "verified",
+                "changed": False}, json_output=args.json_output)
+        migration_v2.state_digest(args.epoch, "legacy")  # validates the epoch identity
+        if operation == "status":
+            return _migration_status(args)
+        if operation == "inspect":
+            return _migration_inspect(args)
+        if operation == "capabilities":
+            return _migration_capabilities(args)
+        if operation == "seed.verify":
+            result = migration_v2.verify_seed_manifest(args.seed_manifest)
+            return _migration_emit({**result, "phase": operation,
+                "migration_state": "verified", "changed": False},
+                json_output=args.json_output)
+        if operation == "rollback.verify":
+            result = migration_v2.verify_rollback_bundle(
+                args.bundle, require_complete=True)
+            return _migration_emit({**result, "phase": operation,
+                "migration_state": "verified", "changed": False},
+                json_output=args.json_output)
+
+        if hasattr(args, "expect"):
+            if not args.expect:
+                raise migration_v2.MigrationError("expected-state-digest-required")
+            retry_phases = {
+                "snapshot": ("snapshot.capture-enable", "snapshot.seal"),
+                "roster.evidence-seal": ("roster.no-tail-proven", "roster.evidence-seal"),
+                "activate": ("activate.equality", "activate.v2-only", "activate"),
+                "rollback.prepare": ("rollback.barrier", "rollback.prepare"),
+            }.get(operation, (operation,))
+            _observed, args._migration_retry_phase = _migration_preflight_expect(
+                args.epoch, args.expect, retry_phases)
+
+        if operation == "roster.membership-seal":
+            current = _migration_current(migration_v2, args.epoch)
+            if current["migration_state"] != "legacy" and not args._migration_retry_phase:
+                raise migration_v2.MigrationError("membership-predecessor-invalid")
+            members = [migration_v2.load_manifest(path) for path in args.member]
+            retirements = [migration_v2.load_manifest(path) for path in args.retirement]
+            planned = migration_v2.seal_membership(
+                epoch_id=args.epoch, member_manifests=members,
+                retirement_manifests=retirements)
+            retry_inputs = {"membership": planned["manifest_digest"],
+                            "out": migration_v2.digest_json(str(args.out))}
+            if args._migration_retry_phase:
+                _migration_require_exact_retry(args.epoch, args.expect,
+                    "roster.membership-seal", retry_inputs)
+            artifact = (migration_v2.seal_membership(
+                epoch_id=args.epoch, member_manifests=members,
+                retirement_manifests=retirements, out=args.out, apply=True)
+                if args.apply else planned)
+            manifest = {key: value for key, value in artifact.items() if key != "changed"}
+            inputs = retry_inputs
+            def record(con, receipt):
+                normalized = [{"replica_id": item["replica_id"], "retired": False,
+                    "manifest_digest": item["manifest_digest"]}
+                    for item in manifest["members"]]
+                normalized.extend({"replica_id": item["replica_id"], "retired": True,
+                    "manifest_digest": item["retirement_digest"],
+                    "retirement_digest": item["retirement_digest"]}
+                    for item in manifest["retirements"])
+                sync_v2.record_migration_seal(con, epoch_id=args.epoch,
+                    seal_kind="membership", manifest_bytes=migration_v2.canonical_bytes(manifest),
+                    receipt_digest=receipt["receipt_digest"], members=normalized)
+                _migration_register_artifact(con, epoch=args.epoch,
+                    kind="membership", digest=manifest["manifest_digest"],
+                    path=args.out, receipt=receipt)
+            return _migration_transition(args, phase="roster.membership-seal",
+                target="membership-sealed", inputs=inputs,
+                membership_digest=manifest["manifest_digest"],
+                transaction_callback=record)
+
+        if operation == "snapshot":
+            _migration_require_snapshot_create(args)
+            if _migration_store_db(args.store).resolve() != DB.resolve():
+                raise migration_v2.MigrationError("snapshot-store-not-active")
+            membership = migration_v2.verify_membership(args.membership)
+            current = _migration_current(migration_v2, args.epoch)
+            if (current["migration_state"] == "membership-sealed"
+                    or args._migration_retry_phase == "snapshot.capture-enable"):
+                return _migration_transition(args, phase="snapshot.capture-enable",
+                    target="capture-enabled",
+                    inputs={"membership": membership["manifest_digest"],
+                            "replica": args.replica})
+            if (current["migration_state"] != "capture-enabled"
+                    and args._migration_retry_phase != "snapshot.seal"):
+                raise migration_v2.MigrationError("snapshot-predecessor-invalid")
+            read = _migration_read_connection(args.store)
+            try:
+                capture_seq = sync_v2.capture_frontier(read)
+                row = read.execute("SELECT replica_id,counter FROM sync_replica WHERE active=1").fetchone()
+            finally:
+                read.close()
+            if row is None or row[0] != args.replica:
+                raise migration_v2.MigrationError("snapshot-replica-not-local")
+            artifact = migration_v2.create_snapshot(db_path=_migration_store_db(args.store),
+                epoch_id=args.epoch, membership=membership, replica_id=args.replica,
+                out=args.out, apply=args.apply, capture_enabled=True,
+                snapshot_capture_seq=capture_seq, outbox_counter=int(row[1]),
+                db_high_watermark=capture_seq)
+            graveyard = None
+            graveyard_root = Path(args.out).resolve() / "graveyard"
+            if args.apply:
+                legacy_raw = _migration_legacy_graveyard_bytes()
+                source_raw = _migration_graveyard_source(
+                    legacy_raw, Path(args.out) / "snapshot.json")
+                graveyard = migration_v2.seal_graveyard_source(
+                    epoch_id=args.epoch,
+                    membership_digest=membership["manifest_digest"],
+                    snapshot_digest=artifact["manifest_digest"],
+                    replica_id=args.replica, source=source_raw,
+                    out=graveyard_root, apply=True)
+                _migration_write_exact(
+                    graveyard_root / "legacy-deleted-records.jsonl", legacy_raw)
+                if _migration_legacy_graveyard_bytes() != legacy_raw:
+                    raise migration_v2.MigrationError(
+                        "snapshot-graveyard-source-raced")
+            if args._migration_retry_phase == "snapshot.seal":
+                target, phase = "snapshots-sealed", "snapshot.seal"
+            else:
+                target, phase = "snapshots-sealed", "snapshot.seal"
+            def record_snapshot(con, receipt):
+                _migration_register_artifact(con, epoch=args.epoch,
+                    kind="snapshot", digest=artifact["manifest_digest"],
+                    path=args.out, receipt=receipt, replica=args.replica)
+                if graveyard is not None:
+                    _migration_register_artifact(con, epoch=args.epoch,
+                        kind="graveyard", digest=graveyard["manifest_digest"],
+                        path=graveyard_root, receipt=receipt,
+                        replica=args.replica)
+            return _migration_transition(args, phase=phase, target=target,
+                inputs={"snapshot": artifact.get("manifest_digest")
+                        or artifact["plan_digest"],
+                        "graveyard": (graveyard or {}).get("manifest_digest",
+                            migration_v2.digest_json("dry-run"))},
+                transaction_callback=record_snapshot)
+
+        if operation == "seed.plan":
+            snapshot = migration_v2.load_manifest(args.snapshot)
+            return _migration_emit({"epoch_id": args.epoch, "phase": operation,
+                "migration_state": "snapshots-sealed", "kind": args.kind,
+                "snapshot_digest": snapshot.get("manifest_digest"), "changed": False,
+                "status": "local-only", "reason": "ok"}, json_output=args.json_output)
+
+        if operation == "fence.plan":
+            membership = migration_v2.verify_membership(args.membership)
+            return _migration_emit({"schema_version": 1, "protocol_major": 2,
+                "epoch_id": args.epoch, "phase": operation,
+                "migration_state": "seeds-built", "changed": False,
+                "membership_digest": membership["manifest_digest"],
+                "required_replica_ids": [row["replica_id"]
+                    for row in membership["members"]],
+                "writer_capability_hash": membership["writer_capability_hash"],
+                "status": "local-only", "reason": "ok"},
+                json_output=args.json_output)
+
+        if operation == "fence.arm":
+            membership = migration_v2.verify_membership(args.membership)
+            reports = [_migration_verify_capability(path)
+                       for path in args.capabilities]
+            expected = {row["replica_id"] for row in membership["members"]}
+            seen = {row.get("replica_id") for row in reports}
+            if seen != expected or any(
+                    row.get("writer_capability_hash")
+                    != membership["writer_capability_hash"] for row in reports):
+                raise migration_v2.MigrationError("fence-capability-roster-mismatch")
+            return _migration_transition(args, phase=operation, target="fence-armed",
+                inputs={"membership": membership["manifest_digest"],
+                        "capabilities": sorted(row["writer_capability_hash"]
+                                               for row in reports)})
+
+        if operation == "barrier.enter":
+            membership = _migration_membership_from_store(args.epoch)
+            members = {row["replica_id"] for row in membership["members"]}
+            read = _migration_read_connection()
+            try:
+                local = read.execute(
+                    "SELECT replica_id FROM sync_replica WHERE active=1"
+                ).fetchone()
+                fence_seq = sync_v2.capture_frontier(read)
+            finally:
+                read.close()
+            if local is None or local[0] != args.replica or args.replica not in members:
+                raise migration_v2.MigrationError("barrier-replica-not-local-member")
+            def install_fence(con, _receipt):
+                sync_v2.install_writer_fence(con, args.epoch,
+                    semantic_tables=("records",))
+            return _migration_transition(args, phase=operation,
+                target="barrier-held",
+                inputs={"membership": membership["manifest_digest"],
+                        "replica": args.replica, "fence_capture_seq": fence_seq},
+                writer_mode="fenced", fence_capture_seq=fence_seq,
+                transaction_callback=install_fence,
+                receipt_transform=lambda receipt: _migration_phase_receipt(
+                    args.epoch, args.replica, operation,
+                    membership["manifest_digest"], receipt,
+                    extra={"fence_capture_seq": fence_seq}))
+
+        if operation == "fence.activate":
+            membership = migration_v2.verify_membership(args.membership)
+            barriers = _migration_verify_phase_receipts(args.barrier_receipt,
+                epoch=args.epoch, phase="barrier.enter", membership=membership)
+            if any(row["migration_state"] != "barrier-held"
+                   for row in barriers):
+                raise migration_v2.MigrationError("barrier-receipt-state-invalid")
+            read = _migration_read_connection()
+            try:
+                current = sync_v2.migration_status(read, args.epoch)
+                local = read.execute(
+                    "SELECT replica_id FROM sync_replica WHERE active=1"
+                ).fetchone()
+                frontier = sync_v2.capture_frontier(read)
+            finally:
+                read.close()
+            if local is None or current["migration_state"] != "barrier-held" \
+                    or current["writer_mode"] != "fenced" \
+                    or frontier != current.get("fence_capture_seq"):
+                raise migration_v2.MigrationError("barrier-local-state-invalid")
+            local_barrier = next((row for row in barriers
+                if row["replica_id"] == local[0]), None)
+            if local_barrier is None or local_barrier["state_receipt_digest"] \
+                    != current.get("last_receipt_digest"):
+                raise migration_v2.MigrationError("barrier-local-receipt-mismatch")
+            barrier_digests = [row["receipt_digest"] for row in barriers]
+            local_barrier_path = next(path for path in args.barrier_receipt
+                if migration_v2.verify_phase_receipt(path)["replica_id"] == local[0])
+            def record_fence(con, _receipt):
+                sync_v2.record_migration_attestation(con,
+                    epoch_id=args.epoch, replica_id=local[0], kind="fence",
+                    payload_bytes=migration_v2.canonical_bytes(local_barrier))
+                _migration_register_artifact(con, epoch=args.epoch,
+                    kind="barrier", digest=local_barrier["receipt_digest"],
+                    path=local_barrier_path, receipt=_receipt, replica=local[0])
+            return _migration_transition(args, phase=operation,
+                target="old-writers-fenced",
+                inputs={"membership": membership["manifest_digest"],
+                        "barrier_receipts": barrier_digests},
+                writer_mode="fenced",
+                fence_capture_seq=current["fence_capture_seq"],
+                transaction_callback=record_fence,
+                receipt_transform=lambda receipt: _migration_phase_receipt(
+                    args.epoch, local[0], operation,
+                    membership["manifest_digest"], receipt,
+                    extra={"fence_capture_seq": current["fence_capture_seq"],
+                           "barrier_receipt_digest":
+                               local_barrier["receipt_digest"]}))
+
+        if operation == "delta.drain":
+            snapshot = migration_v2.verify_snapshot(args.snapshot)
+            fence_phase = migration_v2.verify_phase_receipt(args.fence_receipt,
+                epoch_id=args.epoch, replica_id=args.replica,
+                phase="fence.activate",
+                membership_digest=snapshot["membership_digest"])
+            fence = fence_phase.get("extra", {}).get("state_receipt")
+            if not isinstance(fence, dict):
+                raise migration_v2.MigrationError("phase-state-receipt-missing")
+            migration_v2.verify_phase_receipt(fence_phase, state_receipt=fence)
+            read = _migration_read_connection()
+            try:
+                state = sync_v2.migration_status(read, args.epoch)
+                fence_seq = state.get("fence_capture_seq")
+                if state["migration_state"] != "old-writers-fenced" \
+                        or not isinstance(fence_seq, int):
+                    raise migration_v2.MigrationError("delta-fence-not-active")
+                entries = sync_v2.captured_operations(read,
+                    after=snapshot["snapshot_capture_seq"], through=fence_seq)
+                operations = []
+                for entry in entries:
+                    row = read.execute(
+                        "SELECT payload_bytes FROM sync_objects WHERE op_id=?",
+                        (entry["op_id"],)).fetchone()
+                    if row is None:
+                        raise migration_v2.MigrationError("delta-operation-missing")
+                    raw = bytes(row[0])
+                    if hashlib.sha256(raw).hexdigest() != entry["op_id"]:
+                        raise migration_v2.MigrationError(
+                            "delta-operation-digest-mismatch")
+                    operations.append({"op_id": entry["op_id"],
+                        "payload": protocol_v2.canonical_loads(raw)})
+            finally:
+                read.close()
+            artifact = migration_v2.create_delta_manifest(epoch_id=args.epoch,
+                membership_digest=snapshot["membership_digest"], snapshot=snapshot,
+                fence_receipt=fence, replica_id=args.replica,
+                fence_capture_seq=fence_seq, capture_entries=entries,
+                operations=operations, out=args.out, apply=args.apply)
+            operation_by_id = {item["op_id"]: item for item in operations}
+            delta_mappings = [{
+                "source_identity": (entry.get("source_identity")
+                    or f"capture:{entry['capture_seq']}:{entry['op_id']}"),
+                "counter": operation_by_id[entry["op_id"]]["payload"]["counter"],
+                "op_id": entry["op_id"],
+            } for entry in entries]
+            delta_seed_out = str(Path(args.out).resolve() / "seed")
+            delta_seed = migration_v2.build_seed_manifest(
+                epoch_id=args.epoch,
+                membership_digest=snapshot["membership_digest"],
+                snapshot_digest=snapshot["manifest_digest"],
+                source_digest=artifact["manifest_digest"],
+                replica_id=args.replica, kind="delta",
+                mappings=delta_mappings, operations=operations,
+                out=delta_seed_out, apply=args.apply)
+            def register_delta(con, _receipt):
+                if not args.apply:
+                    return
+                for entry in entries:
+                    sync_v2.record_captured_delta_operation(con,
+                        epoch_id=args.epoch, capture_seq=entry["capture_seq"],
+                        captured_op_id=entry["op_id"],
+                        source_digest=artifact["manifest_digest"])
+                    row = con.execute(
+                        "SELECT state FROM sync_outbox WHERE op_id=?",
+                        (entry["op_id"],)).fetchone()
+                    if row is None:
+                        raise migration_v2.MigrationError(
+                            "delta-outbox-operation-missing")
+                    if row[0] == "queued":
+                        sync_v2.transition_outbox(con, entry["op_id"], "rendered",
+                            {"rendered_path": protocol_v2.operation_path(entry["op_id"]),
+                             "rendered_commit": artifact["manifest_digest"]})
+                _migration_register_artifact(con, epoch=args.epoch,
+                    kind="delta", digest=artifact["manifest_digest"],
+                    path=args.out, receipt=_receipt, replica=args.replica)
+                _migration_register_artifact(con, epoch=args.epoch,
+                    kind="delta-seed", digest=delta_seed["manifest_digest"],
+                    path=delta_seed_out, receipt=_receipt, replica=args.replica)
+                _migration_register_artifact(con, epoch=args.epoch,
+                    kind="fence", digest=fence_phase["receipt_digest"],
+                    path=args.fence_receipt, receipt=_receipt,
+                    replica=args.replica)
+            return _migration_transition(args, phase=operation, target="deltas-drained",
+                inputs={"delta": artifact["manifest_digest"],
+                        "delta_seed": delta_seed["manifest_digest"]},
+                transaction_callback=register_delta)
+
+        if operation == "no-tail.verify":
+            snapshot = migration_v2.verify_snapshot(args.snapshot)
+            delta = migration_v2.verify_delta_manifest(args.delta)
+            fence_phase = migration_v2.verify_phase_receipt(args.fence_receipt,
+                epoch_id=args.epoch, replica_id=args.replica,
+                phase="fence.activate",
+                membership_digest=snapshot["membership_digest"])
+            fence = fence_phase.get("extra", {}).get("state_receipt")
+            if not isinstance(fence, dict):
+                raise migration_v2.MigrationError("phase-state-receipt-missing")
+            migration_v2.verify_phase_receipt(fence_phase, state_receipt=fence)
+            read = _migration_read_connection()
+            try:
+                state = sync_v2.migration_status(read, args.epoch)
+                current_seq = sync_v2.capture_frontier(read)
+                fence_seq = state.get("fence_capture_seq")
+                if not isinstance(fence_seq, int):
+                    raise migration_v2.MigrationError("no-tail-fence-missing")
+                checked = sync_v2.no_tail_status(read, epoch_id=args.epoch,
+                    after=snapshot["snapshot_capture_seq"], through=fence_seq)
+            finally:
+                read.close()
+            if not checked["proved"]:
+                reason = "no-tail-capture-gap" if checked["missing_capture_count"] \
+                    else "no-tail-work-remains"
+                raise migration_v2.MigrationError(reason)
+            report = migration_v2.create_no_tail_report(epoch_id=args.epoch,
+                snapshot=snapshot, fence_receipt=fence, delta=delta,
+                current_capture_seq=current_seq,
+                unbound_capture_count=checked["unbound_capture_count"],
+                unrendered_outbox_count=checked["unready_seed_count"],
+                fence_active=checked["writer_fenced"])
+            manifest = {key: value for key, value in report.items() if key != "changed"}
+            return _migration_emit(manifest, json_output=args.json_output)
+
+        if operation == "seed.build":
+            current = _migration_current(migration_v2, args.epoch)
+            if current["migration_state"] != "snapshots-sealed" \
+                    and not args._migration_retry_phase:
+                raise migration_v2.MigrationError("seed-predecessor-invalid")
+            membership = migration_v2.verify_membership(args.membership)
+            snapshot = migration_v2.verify_snapshot(args.snapshot)
+            read = _migration_read_connection()
+            try:
+                current_capture = sync_v2.capture_frontier(read)
+            finally:
+                read.close()
+            if current_capture != snapshot["snapshot_capture_seq"]:
+                raise migration_v2.MigrationError("snapshot-tail-before-seed")
+            source = migration_v2.load_manifest(args.source)
+            mappings, operations = source.get("mappings"), source.get("operations")
+            if not mappings or not operations:
+                if args.kind != "snapshot":
+                    raise migration_v2.MigrationError("delta-seed-source-incomplete")
+                source_digest, mappings, operations = _migration_seed_operations(
+                    args.snapshot, snapshot, source, apply=args.apply)
+            else:
+                source_digest = source.get("manifest_digest") \
+                    or migration_v2.digest_json(source)
+            _migration_validate_seed_namespaces(membership, operations)
+            artifact = migration_v2.build_seed_manifest(epoch_id=args.epoch,
+                membership_digest=membership["manifest_digest"],
+                snapshot_digest=snapshot["manifest_digest"],
+                source_digest=source_digest,
+                replica_id=snapshot["replica_id"], kind=args.kind,
+                mappings=mappings, operations=operations,
+                out=args.out, apply=args.apply)
+            def bind_seed(con, _receipt):
+                if not args.apply or source.get("mappings"):
+                    if args.apply:
+                        _migration_register_artifact(con, epoch=args.epoch,
+                            kind=f"{args.kind}-seed",
+                            digest=artifact["manifest_digest"], path=args.out,
+                            receipt=_receipt, replica=snapshot["replica_id"])
+                    return
+                by_id = {operation["op_id"]: operation for operation in operations}
+                for mapping in mappings:
+                    reserved = con.execute(
+                        "SELECT 1 FROM sync_migration_seed_map WHERE epoch_id=? "
+                        "AND seed_kind=? AND source_digest=? AND source_identity=?",
+                        (args.epoch, args.kind, source_digest,
+                         mapping["source_identity"])).fetchone()
+                    if reserved is not None:
+                        sync_v2.record_reserved_seed_operation(con,
+                            by_id[mapping["op_id"]], epoch_id=args.epoch,
+                            seed_kind=args.kind,
+                            source_digest=source_digest,
+                            source_identity=mapping["source_identity"],
+                        )
+                    else:
+                        existing = con.execute(
+                            "SELECT payload_bytes FROM sync_objects WHERE op_id=?",
+                            (mapping["op_id"],)).fetchone()
+                        if existing is None or bytes(existing[0]) \
+                                != protocol_v2.canonical_bytes(
+                                    by_id[mapping["op_id"]]["payload"]):
+                            raise migration_v2.MigrationError(
+                                "snapshot-captured-object-mismatch")
+                    # The sealed seed object is already durably rendered. Git
+                    # publication later advances it through commit and fresh
+                    # remote confirmation without creating a capture tail.
+                    outbox = con.execute(
+                        "SELECT state FROM sync_outbox WHERE op_id=?",
+                        (mapping["op_id"],)).fetchone()
+                    if outbox is None:
+                        raise migration_v2.MigrationError("snapshot-seed-outbox-missing")
+                    if outbox[0] == "queued":
+                        sync_v2.transition_outbox(con, mapping["op_id"], "rendered",
+                            {"rendered_path": protocol_v2.operation_path(mapping["op_id"]),
+                             "rendered_commit": artifact["manifest_digest"]})
+                _migration_register_artifact(con, epoch=args.epoch,
+                    kind=f"{args.kind}-seed", digest=artifact["manifest_digest"],
+                    path=args.out, receipt=_receipt,
+                    replica=snapshot["replica_id"])
+            return _migration_transition(args, phase=operation, target="seeds-built",
+                inputs={"seed": artifact["manifest_digest"]},
+                transaction_callback=bind_seed)
+
+        if operation == "seed.publish":
+            membership = _migration_membership_from_store(args.epoch)
+            evidence = migration_v2.verify_evidence(args.evidence, membership)
+            current = _migration_current(migration_v2, args.epoch)
+            if evidence.get("epoch_id") != args.epoch \
+                    or current.get("evidence_digest") != evidence["manifest_digest"] \
+                    or args.ref != membership["protected_ref"]:
+                raise migration_v2.MigrationError("publish-evidence-invalid")
+            publish_manifests, publish_envelopes = _migration_publish_envelopes(
+                args.seed_manifest)
+            seed_digests = [manifest["manifest_digest"]
+                            for manifest in publish_manifests]
+            inputs = {"evidence": evidence["manifest_digest"],
+                      "seeds": seed_digests, "ref": args.ref}
+            if args.apply:
+                _migration_preflight_expect(args.epoch, args.expect,
+                                            (operation,))
+                exchange = _migration_exchange(args.checkout, args.ref)
+                phases = {}
+                def record_phase(phase, commit, op_ids):
+                    phases[phase] = (commit, tuple(op_ids))
+                published = exchange.publish_operations(
+                    publish_envelopes, phase_callback=record_phase)
+                if not published.tip or len(published.confirmed) != sum(
+                        len(manifest["objects"])
+                        for manifest in publish_manifests):
+                    raise migration_v2.MigrationError("seed-publish-unconfirmed")
+                inputs["authoritative_tip"] = published.tip
+                def confirm_seed(con, _receipt):
+                    committed = phases.get("committed")
+                    if committed is None:
+                        raise migration_v2.MigrationError(
+                            "seed-publish-commit-evidence-missing")
+                    commit, op_ids = committed
+                    confirmed = set(published.confirmed)
+                    for op_id in op_ids:
+                        row = con.execute(
+                            "SELECT state FROM sync_outbox WHERE op_id=?", (op_id,)
+                        ).fetchone()
+                        if row is None:
+                            raise migration_v2.MigrationError(
+                                "seed-publish-outbox-missing")
+                        if row[0] == "queued":
+                            rendered = phases.get("rendered")
+                            if rendered is None:
+                                raise migration_v2.MigrationError(
+                                    "seed-publish-render-evidence-missing")
+                            sync_v2.transition_outbox(con, op_id, "rendered",
+                                {"rendered_path": protocol_v2.operation_path(op_id),
+                                 "rendered_commit": rendered[0]})
+                            row = ("rendered",)
+                        if row[0] == "rendered":
+                            sync_v2.transition_outbox(con, op_id, "committed",
+                                {"local_commit": commit})
+                            row = ("committed",)
+                        if row[0] == "committed" and op_id in confirmed:
+                            sync_v2.transition_outbox(con, op_id, "confirmed",
+                                {"remote_tip": published.tip, "fresh_fetch": True,
+                                 "fetched_at": datetime.datetime.now(
+                                     datetime.timezone.utc).isoformat()})
+                    if confirmed != set(op_ids):
+                        raise migration_v2.MigrationError(
+                            "seed-publish-confirmation-incomplete")
+            else:
+                confirm_seed = None
+            return _migration_transition(args, phase=operation,
+                target="seeds-published", inputs=inputs,
+                transaction_callback=confirm_seed)
+
+        if operation == "fold":
+            membership = _migration_membership_from_store(args.epoch)
+            evidence = migration_v2.verify_evidence(args.evidence, membership)
+            current = _migration_current(migration_v2, args.epoch)
+            if current.get("evidence_digest") != evidence["manifest_digest"]:
+                raise migration_v2.MigrationError("fold-evidence-not-durable")
+            inputs = {"evidence": evidence.get("manifest_digest"),
+                      "membership": membership["manifest_digest"]}
+            if args.apply:
+                _migration_preflight_expect(args.epoch, args.expect,
+                                            (operation,))
+                exchange = _migration_exchange(args.checkout,
+                    membership["protected_ref"])
+                snapshot = exchange.fetch_validate()
+                result = _ingest_and_fold_snapshot(snapshot,
+                    membership["protected_ref"], cutover_authority=True)
+                operation_tree = _migration_operation_tree(snapshot)
+                inputs.update({"accepted_set": result.accepted_set_digest,
+                               "operation_tree": operation_tree,
+                               "materialized": result.materialized_digest,
+                               "authoritative_tip": snapshot.tip or "0" * 40})
+                def record_fold(con, _receipt):
+                    sync_v2.record_fold_identity(con, epoch_id=args.epoch,
+                        evidence_digest=evidence["manifest_digest"],
+                        accepted_set_digest=result.accepted_set_digest,
+                        operation_tree_digest=operation_tree,
+                        materialized_digest=result.materialized_digest,
+                        reducer_version="protocol-v2")
+            else:
+                record_fold = None
+            return _migration_transition(args, phase=operation,
+                target="folded", inputs=inputs,
+                transaction_callback=record_fold)
+
+        if operation == "rollback.prepare":
+            equality = migration_v2.verify_equality_report(args.equality)
+            membership = _migration_membership_from_store(args.epoch)
+            read = _migration_read_connection()
+            try:
+                current = sync_v2.migration_status(read, args.epoch)
+                durable_equality = read.execute(
+                    "SELECT equality_digest,evidence_digest,accepted_set_digest,"
+                    "operation_tree_digest,materialized_digest "
+                    "FROM sync_migration_equality WHERE epoch_id=?",
+                    (args.epoch,)).fetchone()
+            finally:
+                read.close()
+            shared = equality["shared"]
+            if durable_equality is None \
+                    or current.get("equality_digest") != durable_equality[0] \
+                    or equality["evidence_digest"] != durable_equality[1] \
+                    or tuple(durable_equality[2:]) != (
+                        shared["accepted_operation_set_digest"],
+                        shared["operation_tree_digest"],
+                        shared["materialized_digest"]):
+                raise migration_v2.MigrationError("rollback-equality-not-durable")
+            if args._migration_retry_phase == "rollback.barrier":
+                read = _migration_read_connection()
+                try:
+                    receipt = sync_v2.migration_receipt(read, args.epoch,
+                                                        phase="rollback.barrier")
+                finally:
+                    read.close()
+                if receipt is None:
+                    raise migration_v2.MigrationError("rollback-barrier-receipt-missing")
+                return _migration_emit(receipt, json_output=args.json_output)
+            if current["migration_state"] == "v2-only-enabled":
+                def rollback_fence(con, _receipt):
+                    sync_v2.install_writer_fence(con, args.epoch,
+                        semantic_tables=("records",))
+                return _migration_transition(args, phase="rollback.barrier",
+                    target="rollback-window",
+                    inputs={"equality": equality["manifest_digest"],
+                            "membership": membership["manifest_digest"]},
+                    writer_mode="fenced", transaction_callback=rollback_fence)
+            if current["migration_state"] != "rollback-window" \
+                    or current["writer_mode"] != "fenced":
+                raise migration_v2.MigrationError("rollback-barrier-not-held")
+
+            root, remote, configured_ref, dump_repo = _sync_exchange_config()
+            if not remote or configured_ref != membership["protected_ref"]:
+                raise migration_v2.MigrationError("rollback-authoritative-ref-invalid")
+            exchange = git_exchange_v2.GitExchange(root, remote,
+                ref=membership["protected_ref"],
+                forbidden_roots=(*_synchronized_project_roots(), dump_repo))
+            authoritative = exchange.fetch_validate()
+            if not authoritative.tip:
+                raise migration_v2.MigrationError("rollback-authoritative-ref-empty")
+
+            read = _migration_read_connection()
+            try:
+                evidence_row = read.execute(
+                    "SELECT manifest_bytes FROM sync_migration_seals "
+                    "WHERE epoch_id=? AND seal_kind='evidence'", (args.epoch,)
+                ).fetchone()
+                local_envelopes = _sync_envelopes(read)
+                artifacts = sync_v2.migration_artifacts(read, args.epoch)
+                required_artifacts = {"snapshot", "snapshot-seed", "delta-seed",
+                    "fence", "delta", "no-tail", "evidence", "equality",
+                    "activation", "graveyard"}
+                if not required_artifacts <= {
+                        item["artifact_kind"] for item in artifacts}:
+                    raise migration_v2.MigrationError(
+                        "rollback-artifact-inventory-incomplete")
+                unconfirmed = [str(row[0]) for row in read.execute(
+                    "SELECT op_id FROM sync_outbox WHERE state<>'confirmed' "
+                    "ORDER BY op_id")]
+                table_sections = {
+                    "graveyard": _migration_table_rows(read, "sync_graveyard"),
+                    "applied_matrix": _migration_table_rows(read, "sync_applied"),
+                    "outbox_matrix": _migration_table_rows(read, "sync_outbox"),
+                    "peer_matrix": _migration_table_rows(read, "sync_peer_state"),
+                }
+                pending_consumed = [str(row[0]) for row in read.execute(
+                    "SELECT id FROM records WHERE delivery_state IN "
+                    "('pending','consumed') ORDER BY id")]
+            finally:
+                read.close()
+            if evidence_row is None:
+                raise migration_v2.MigrationError("rollback-evidence-seal-missing")
+            evidence = migration_v2.load_manifest(json.loads(bytes(evidence_row[0])))
+            by_kind = {}
+            for item in artifacts:
+                by_kind.setdefault(item["artifact_kind"], []).append(item)
+            snapshot_paths = [_migration_artifact_manifest_path(item,
+                "snapshot.json") for item in by_kind["snapshot"]]
+            seed_paths = [_migration_artifact_manifest_path(item, "seed.json")
+                for kind in ("snapshot-seed", "delta-seed")
+                for item in by_kind[kind]]
+            delta_paths = [_migration_artifact_manifest_path(item, "delta.json")
+                for item in by_kind["delta"]]
+            no_tail_paths = [_migration_artifact_manifest_path(item, "no-tail.json")
+                for item in by_kind["no-tail"]]
+            fence_paths = [_migration_artifact_manifest_path(item, "receipt.json")
+                for item in by_kind["fence"]]
+            activation_paths = [_migration_artifact_manifest_path(item,
+                "receipt.json") for item in by_kind["activation"]]
+            graveyard_sources = []
+            for item in by_kind["graveyard"]:
+                graveyard_path = _migration_artifact_manifest_path(
+                    item, "graveyard.json")
+                graveyard = migration_v2.verify_graveyard_source(graveyard_path)
+                if graveyard["manifest_digest"] != item["manifest_digest"]:
+                    raise migration_v2.MigrationError(
+                        "rollback-graveyard-artifact-mismatch")
+                raw_path = Path(item["local_path"]) / \
+                    "legacy-deleted-records.jsonl"
+                fd = os.open(raw_path,
+                    os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+                try:
+                    raw = b""
+                    while True:
+                        chunk = os.read(fd, 1024 * 1024)
+                        if not chunk:
+                            break
+                        raw += chunk
+                finally:
+                    os.close(fd)
+                graveyard_sources.append({
+                    "replica_id": item["replica_id"],
+                    "manifest_digest": graveyard["manifest_digest"],
+                    "raw_sha256": hashlib.sha256(raw).hexdigest(),
+                    "raw_bytes": len(raw), "raw_hex": raw.hex(),
+                })
+            precutover = []
+            for path in snapshot_paths:
+                snapshot = migration_v2.verify_snapshot(path)
+                old_tip = snapshot.get("local_v1_git_tip")
+                precutover.append({"replica_id": snapshot["replica_id"],
+                    "snapshot": path,
+                    "v1_dump": _migration_snapshot_v1_dump(path),
+                    "v1_ref_evidence": {
+                        "ref_oid": old_tip or "0" * 40,
+                        "ref_absent": old_tip is None,
+                    }})
+            union = {item["op_id"]: item for item in local_envelopes}
+            for op_id, operation in authoritative.operations.items():
+                envelope = {"op_id": op_id, "payload": operation.payload}
+                existing = union.get(op_id)
+                if existing is not None \
+                        and protocol_v2.canonical_bytes(existing) \
+                        != protocol_v2.canonical_bytes(envelope):
+                    raise migration_v2.MigrationError("rollback-object-equivocation")
+                union[op_id] = envelope
+            folded = protocol_v2.fold_operations(union.values())
+            classifications = {op_id: "accepted" for op_id in folded.accepted}
+            classifications.update({op_id: "blocked" for op_id in folded.blocked})
+            classifications.update({op_id: "deferred" for op_id in folded.deferred})
+            classifications.update({op_id: "quarantined"
+                                    for op_id in folded.quarantined})
+            classifications.update({op_id: "quarantined" for op_id in union
+                                    if op_id not in classifications})
+            accepted_ids = sorted(op_id for op_id, value in classifications.items()
+                                  if value in {"accepted", "blocked"})
+            state_sections = {
+                "accepted_set": {"operation_ids": accepted_ids},
+                "frontiers": {key: list(value)
+                              for key, value in sorted(folded.frontiers.items())},
+                "conflicts": {key: value.as_dict()
+                              for key, value in sorted(folded.conflicts.items())},
+                "pending_consumed": {"record_ids": pending_consumed},
+                "tombstones": dict(sorted(folded.tombstones.items())),
+                "graveyard": {"database_rows": table_sections["graveyard"],
+                    "legacy_sources": sorted(graveyard_sources,
+                        key=lambda row: row["replica_id"])},
+                "supersession": dict(sorted(folded.supersession_graph.items())),
+                "applied_matrix": table_sections["applied_matrix"],
+                "outbox_matrix": table_sections["outbox_matrix"],
+                "peer_matrix": table_sections["peer_matrix"],
+            }
+            materialized_dump = b"".join(
+                migration_v2.canonical_bytes(folded.records[record_id]) + b"\n"
+                for record_id in sorted(folded.records))
+            diagnostics = {
+                "blocked": {key: value.as_dict()
+                            for key, value in sorted(folded.blocked.items())},
+                "deferred": {key: value.as_dict()
+                             for key, value in sorted(folded.deferred.items())},
+                "quarantined": {key: value.as_dict()
+                                for key, value in sorted(folded.quarantined.items())},
+            }
+            collected = migration_v2.collect_rollback_bundle_inputs(
+                epoch_id=args.epoch, membership=membership, evidence=evidence,
+                equality=equality, protected_ref_evidence={
+                    "protected_ref": membership["protected_ref"],
+                    "fresh_fetch": True, "ref_oid": authoritative.tip,
+                    "operation_tree_digest": _migration_operation_tree(authoritative)},
+                precutover_replicas=precutover, seed_manifests=seed_paths,
+                delta_manifests=delta_paths, no_tail_reports=no_tail_paths,
+                fence_receipts=fence_paths,
+                activation_receipts=activation_paths,
+                operation_objects={op_id: protocol_v2.canonical_bytes(item)
+                    for op_id, item in union.items()},
+                classifications=classifications,
+                unconfirmed_operation_ids=unconfirmed,
+                state_sections=state_sections,
+                materialized_dump=materialized_dump,
+                diagnostics=diagnostics,
+                post_cutover_delta_index={"operation_ids": unconfirmed})
+            artifact = migration_v2.create_rollback_bundle(epoch_id=args.epoch,
+                membership_digest=membership["manifest_digest"],
+                evidence_digest=evidence["manifest_digest"],
+                equality_digest=equality["manifest_digest"],
+                out=args.out, apply=args.apply, require_complete=True, **collected)
+            inventory_digest = migration_v2.digest_json(
+                {"inventory": artifact["inventory"]})
+            def record_rollback(con, _receipt):
+                state = sync_v2.migration_status(con, args.epoch)
+                if state["state_digest"] != args.expect \
+                        or state["migration_state"] != "rollback-window" \
+                        or state["writer_mode"] != "fenced":
+                    raise migration_v2.MigrationError("rollback-state-raced")
+                sync_v2.record_rollback_identity(con, epoch_id=args.epoch,
+                    equality_digest=durable_equality[0],
+                    bundle_digest=artifact["manifest_digest"],
+                    inventory_digest=inventory_digest)
+                _migration_register_artifact(con, epoch=args.epoch,
+                    kind="rollback", digest=artifact["manifest_digest"],
+                    path=args.out, receipt={"receipt_digest":
+                        state["last_receipt_digest"]})
+            if args.apply:
+                con = get_con()
+                try:
+                    con.execute("BEGIN IMMEDIATE")
+                    record_rollback(con, None)
+                    con.commit()
+                except Exception:
+                    con.rollback()
+                    raise
+                finally:
+                    con.close()
+            return _migration_emit(artifact, json_output=args.json_output)
+
+        if operation == "rollback.export-v1":
+            bundle = migration_v2.verify_rollback_bundle(
+                args.bundle, require_complete=True)
+            con = _migration_read_connection()
+            try:
+                state = sync_v2.migration_status(con, args.epoch)
+                prepared = con.execute(
+                    "SELECT bundle_digest,state FROM sync_migration_rollback "
+                    "WHERE epoch_id=?", (args.epoch,)).fetchone()
+                if state["state_digest"] != args.expect \
+                        or state["migration_state"] != "rollback-window" \
+                        or state["writer_mode"] != "fenced" \
+                        or prepared is None \
+                        or prepared[0] != bundle["manifest_digest"] \
+                        or prepared[1] not in {"prepared", "applied"}:
+                    raise migration_v2.MigrationError(
+                        "rollback-export-state-invalid")
+                records = [_canonical_record_state({**meta, "body": body})
+                           for meta, body in db_iter_records(con)]
+                losses = {
+                    "unresolved-conflicts": [str(row[0]) for row in con.execute(
+                        "SELECT DISTINCT record_id FROM sync_conflicts "
+                        "WHERE resolved_by IS NULL ORDER BY record_id")],
+                    "quarantined": [str(row[0]) for row in con.execute(
+                        "SELECT op_id FROM sync_quarantine WHERE cleared_by IS NULL "
+                        "ORDER BY op_id")],
+                }
+            finally:
+                con.close()
+            result = migration_v2.export_v1_projection(epoch_id=args.epoch,
+                bundle=args.bundle, records=records, loss_items=losses,
+                out=args.out, apply=args.apply)
+            manifest = {key: value for key, value in result.items()
+                        if key != "changed"}
+            return _migration_emit(manifest, json_output=args.json_output)
+
+        if operation == "rollback.apply":
+            bundle = migration_v2.verify_rollback_bundle(
+                args.bundle, require_complete=True)
+            request = migration_v2.verify_rollback_target_request(args.target)
+            store_path = _migration_store_db(request["store"]).resolve()
+            if request["epoch_id"] != args.epoch \
+                    or store_path != DB.resolve() \
+                    or bundle["epoch_id"] != args.epoch:
+                raise migration_v2.MigrationError(
+                    "rollback-target-request-binding-mismatch")
+            read = _migration_read_connection()
+            try:
+                state = sync_v2.migration_status(read, args.epoch)
+                prepared = read.execute(
+                    "SELECT bundle_digest,state FROM sync_migration_rollback "
+                    "WHERE epoch_id=?", (args.epoch,)).fetchone()
+            finally:
+                read.close()
+            if state["state_digest"] != args.expect \
+                    or state["migration_state"] != "rollback-window" \
+                    or state["writer_mode"] != "fenced" \
+                    or prepared is None or prepared[0] != bundle["manifest_digest"] \
+                    or prepared[1] not in {"prepared", "applied"}:
+                raise migration_v2.MigrationError("rollback-apply-state-invalid")
+            install_out = Path(request["install_out"])
+            target_out = install_out.parent / f"{install_out.name}.target"
+            target_path = target_out / "target.json"
+            if args.apply and target_path.is_file() and not target_path.is_symlink():
+                target = migration_v2.verify_rollback_target_manifest(target_path)
+            else:
+                target = migration_v2.create_rollback_target_manifest(
+                    epoch_id=args.epoch, replica_id=request["replica_id"],
+                    db_path=store_path, bundle=args.bundle,
+                    projection=request["projection"], out=target_out,
+                    apply=args.apply)
+            installed = migration_v2.install_rollback_projection(
+                epoch_id=args.epoch, db_path=store_path, bundle=args.bundle,
+                projection=request["projection"], target=target,
+                out=request["install_out"], apply=args.apply,
+                installer=_migration_install_v1_rows if args.apply else None)
+            if not args.apply:
+                return _migration_emit(installed, json_output=args.json_output)
+            proof = migration_v2.verify_rollback_install(
+                request["install_out"], require_installed=True)
+            install = proof["install_manifest"]
+            con = get_con()
+            try:
+                con.execute("BEGIN IMMEDIATE")
+                receipt = sync_v2.record_rollback_apply(con,
+                    epoch_id=args.epoch, expect_digest=args.expect,
+                    bundle_digest=bundle["manifest_digest"],
+                    target_replica_id=request["replica_id"],
+                    target_manifest_digest=install["target_manifest_digest"],
+                    backup_digest=install["fresh_target_backup"]["sha256"],
+                    projection_digest=install["projection_digest"])
+                con.commit()
+            except Exception:
+                con.rollback()
+                raise
+            finally:
+                con.close()
+            return _migration_emit(receipt, json_output=args.json_output)
+
+        if operation == "rollback.close":
+            bundle = migration_v2.verify_rollback_bundle(
+                args.bundle, require_complete=True)
+            receipt_values = [migration_v2.load_manifest(path)
+                              for path in args.apply_receipt]
+            replica_ids = [str(value.get("replica_id", ""))
+                           for value in receipt_values]
+            membership = _migration_membership_from_store(args.epoch)
+            expected_replicas = sorted(
+                row["replica_id"] for row in membership["members"])
+            if len(replica_ids) != len(set(replica_ids)) \
+                    or sorted(replica_ids) != expected_replicas \
+                    or bundle.get("epoch_id") != args.epoch:
+                raise migration_v2.MigrationError(
+                    "rollback-close-receipt-roster-mismatch")
+            inputs = {"bundle": bundle["manifest_digest"],
+                "apply_receipts": sorted(str(value.get("receipt_digest", ""))
+                                         for value in receipt_values)}
+
+            if args.apply:
+                con = get_con()
+            else:
+                source = _migration_read_connection()
+                con = sqlite3.connect(":memory:")
+                try:
+                    source.backup(con)
+                finally:
+                    source.close()
+                sync_v2.register_writer_functions(
+                    con, protocol_major=2, cutover_authority=True)
+            try:
+                con.execute("BEGIN IMMEDIATE")
+                current = sync_v2.migration_status(con, args.epoch)
+                retry = current["migration_state"] == "closed"
+                if not retry:
+                    if current["state_digest"] != args.expect \
+                            or current["migration_state"] != "rollback-window" \
+                            or current["writer_mode"] != "fenced":
+                        raise migration_v2.MigrationError(
+                            "rollback-close-state-invalid")
+                    for value in receipt_values:
+                        sync_v2.record_rollback_apply_receipt(con,
+                            epoch_id=args.epoch, receipt=value)
+                result = sync_v2.migration_transition(con,
+                    epoch_id=args.epoch, phase="rollback.close",
+                    target_state="closed", expect_digest=args.expect,
+                    input_digest=_migration_input_digest(inputs),
+                    rollback_bundle_digest=bundle["manifest_digest"])
+                evidence = sync_v2.trusted_migration_evidence(
+                    con, args.epoch, kind="rollback")
+                sync_v2.remove_writer_fence(
+                    con, evidence, semantic_tables=("records",))
+                if args.apply:
+                    con.commit()
+                else:
+                    con.rollback()
+            except Exception:
+                con.rollback()
+                raise
+            finally:
+                con.close()
+            if not args.apply:
+                result = {**result, "changed": False, "status": "planned",
+                    "planned_state": "closed"}
+            return _migration_emit(result, json_output=args.json_output)
+
+        if operation == "roster.evidence-seal":
+            membership = migration_v2.verify_membership(args.membership)
+            current = _migration_current(migration_v2, args.epoch)
+            if current["migration_state"] not in {"deltas-drained", "no-tail-proven"} \
+                    and args._migration_retry_phase not in {
+                        "roster.no-tail-proven", "roster.evidence-seal"}:
+                raise migration_v2.MigrationError("evidence-predecessor-invalid")
+            evidence_rows, no_tail_reports = _migration_verify_replica_evidence(
+                args.replica_evidence, membership)
+            evidence_input = migration_v2.digest_json(evidence_rows)
+            if (current["migration_state"] == "deltas-drained"
+                    or args._migration_retry_phase == "roster.no-tail-proven"):
+                def record_no_tail(con, _receipt):
+                    for replica, (report, source_path) in sorted(
+                            no_tail_reports.items()):
+                        sync_v2.record_migration_attestation(con,
+                            epoch_id=args.epoch, replica_id=replica,
+                            kind="no-tail",
+                            payload_bytes=migration_v2.canonical_bytes(report))
+                        if source_path is not None:
+                            _migration_register_artifact(con, epoch=args.epoch,
+                                kind="no-tail", digest=report["manifest_digest"],
+                                path=source_path, receipt=_receipt,
+                                replica=replica)
+                return _migration_transition(args, phase="roster.no-tail-proven",
+                    target="no-tail-proven", inputs={"evidence_rows": evidence_input,
+                    "membership": membership["manifest_digest"]},
+                    transaction_callback=record_no_tail)
+            artifact = migration_v2.seal_evidence(epoch_id=args.epoch,
+                membership=membership, replica_evidence=evidence_rows,
+                out=args.out, apply=args.apply)
+            target, phase = "evidence-sealed", operation
+            manifest = {key: value for key, value in artifact.items()
+                        if key != "changed"}
+            def record_evidence(con, receipt):
+                sync_v2.record_migration_seal(con, epoch_id=args.epoch,
+                    seal_kind="evidence",
+                    manifest_bytes=migration_v2.canonical_bytes(manifest),
+                    receipt_digest=receipt["receipt_digest"])
+                _migration_register_artifact(con, epoch=args.epoch,
+                    kind="evidence", digest=manifest["manifest_digest"],
+                    path=args.out, receipt=receipt)
+            return _migration_transition(args, phase=phase, target=target,
+                inputs={"evidence": artifact["manifest_digest"]},
+                evidence_digest=artifact["manifest_digest"],
+                transaction_callback=record_evidence)
+
+        if operation == "compare":
+            membership = _migration_membership_from_store(args.epoch)
+            evidence = migration_v2.verify_evidence(args.evidence, membership)
+            reports = [migration_v2.load_manifest(path) for path in args.report]
+            read = _migration_read_connection()
+            try:
+                state = sync_v2.migration_status(read, args.epoch)
+                folded = read.execute(
+                    "SELECT accepted_set_digest,operation_tree_digest,"
+                    "materialized_digest FROM sync_migration_fold WHERE epoch_id=?",
+                    (args.epoch,)).fetchone()
+            finally:
+                read.close()
+            if state["migration_state"] != "folded" \
+                    or state.get("evidence_digest") != evidence["manifest_digest"] \
+                    or folded is None:
+                raise migration_v2.MigrationError("compare-fold-evidence-missing")
+            root, remote, configured_ref, dump_repo = _sync_exchange_config()
+            if not remote or args.ref != membership["protected_ref"] \
+                    or configured_ref != args.ref:
+                raise migration_v2.MigrationError("compare-authoritative-ref-invalid")
+            exchange = git_exchange_v2.GitExchange(root, remote, ref=args.ref,
+                forbidden_roots=(*_synchronized_project_roots(), dump_repo))
+            authoritative = exchange.fetch_validate()
+            if not authoritative.tip:
+                raise migration_v2.MigrationError("compare-authoritative-ref-empty")
+            tree_digest = _migration_operation_tree(authoritative)
+            if tree_digest != folded[1] \
+                    or any(row.get("fresh_remote_ref_oid") != authoritative.tip
+                           or row.get("remote_operation_tree_digest") != tree_digest
+                           or row.get("local_materialized_digest") != folded[2]
+                           or row.get("accepted_operation_set_digest") != folded[0]
+                           for row in reports):
+                raise migration_v2.MigrationError("compare-fresh-proof-mismatch")
+            result = migration_v2.create_equality_report(epoch_id=args.epoch,
+                evidence_digest=evidence["manifest_digest"], replica_reports=reports,
+                authoritative_ref=args.ref,
+                expected_replica_ids=[item["replica_id"]
+                                      for item in membership["members"]])
+            manifest = {key: value for key, value in result.items()
+                        if key != "changed"}
+            return _migration_emit(manifest, json_output=args.json_output)
+
+        current = _migration_current(migration_v2, args.epoch)
+        target_by_operation = {
+            "rollback.close": "closed",
+        }
+        target = target_by_operation.get(operation)
+        equality_digest = rollback_digest = None
+        writer_mode = None
+        fence_seq = None
+        callback = None
+        receipt_transform = None
+        if operation == "activate":
+            equality = migration_v2.verify_equality_report(args.equality)
+            membership = _migration_membership_from_store(args.epoch)
+            fence_receipts = _migration_verify_phase_receipts(args.fence_receipt,
+                epoch=args.epoch, phase="fence.activate", membership=membership)
+            if any(row.get("migration_state") != "old-writers-fenced"
+                   for row in fence_receipts):
+                raise migration_v2.MigrationError("activation-fence-roster-incomplete")
+            shared = equality["shared"]
+            report_digests = sorted(row["report_digest"]
+                                    for row in equality["replica_matrix"])
+            report_set_digest = migration_v2.digest_json(
+                {"report_digests": report_digests})
+            equality_digest = migration_v2.digest_json({
+                "accepted_set_digest": shared["accepted_operation_set_digest"],
+                "authoritative_ref_oid": equality["authoritative_ref_oid"],
+                "epoch_id": args.epoch,
+                "evidence_digest": equality["evidence_digest"],
+                "materialized_digest": shared["materialized_digest"],
+                "operation_tree_digest": shared["operation_tree_digest"],
+                "report_set_digest": report_set_digest,
+            })
+            read = _migration_read_connection()
+            try:
+                fold = read.execute(
+                    "SELECT evidence_digest,accepted_set_digest,operation_tree_digest,"
+                    "materialized_digest FROM sync_migration_fold WHERE epoch_id=?",
+                    (args.epoch,)).fetchone()
+                local_replica_row = read.execute(
+                    "SELECT replica_id FROM sync_replica WHERE active=1"
+                ).fetchone()
+            finally:
+                read.close()
+            if equality["epoch_id"] != args.epoch \
+                    or equality["authoritative_ref"] != membership["protected_ref"] \
+                    or equality["evidence_digest"] != current.get("evidence_digest") \
+                    or fold is None or tuple(fold) != (
+                        equality["evidence_digest"],
+                        shared["accepted_operation_set_digest"],
+                        shared["operation_tree_digest"],
+                        shared["materialized_digest"]):
+                raise migration_v2.MigrationError("activation-equality-not-durable")
+            if args._migration_retry_phase == "activate.equality":
+                target, transition_phase = "equality-proven", "activate.equality"
+            elif args._migration_retry_phase == "activate.v2-only":
+                target, transition_phase = "v2-only-enabled", "activate.v2-only"
+            else:
+                target = "equality-proven" if current["migration_state"] == "folded" \
+                    else "v2-only-enabled"
+                transition_phase = "activate.equality" if target == "equality-proven" \
+                    else "activate.v2-only"
+            writer_mode = "v2" if target == "v2-only-enabled" else None
+            if target == "equality-proven":
+                def record_equality(con, _receipt):
+                    recorded = sync_v2.record_equality_identity(con,
+                        epoch_id=args.epoch,
+                        evidence_digest=equality["evidence_digest"],
+                        report_digests=report_digests,
+                        accepted_set_digest=shared["accepted_operation_set_digest"],
+                        operation_tree_digest=shared["operation_tree_digest"],
+                        materialized_digest=shared["materialized_digest"],
+                        authoritative_ref_oid=equality["authoritative_ref_oid"])
+                    if recorded["equality_digest"] != equality_digest:
+                        raise migration_v2.MigrationError(
+                            "activation-equality-identity-mismatch")
+                    _migration_register_artifact(con, epoch=args.epoch,
+                        kind="equality", digest=equality["manifest_digest"],
+                        path=args.equality, receipt=_receipt)
+                callback = record_equality
+            else:
+                if local_replica_row is None:
+                    raise migration_v2.MigrationError(
+                        "activation-local-replica-missing")
+                local_replica = str(local_replica_row[0])
+                if local_replica not in {
+                        row["replica_id"] for row in membership["members"]}:
+                    raise migration_v2.MigrationError(
+                        "activation-local-replica-not-member")
+                def activation_phase_receipt(receipt):
+                    return _migration_phase_receipt(args.epoch, local_replica,
+                        "activate.v2-only", membership["manifest_digest"], receipt)
+                def record_activation(con, _receipt):
+                    phase_receipt = activation_phase_receipt(_receipt)
+                    path = _migration_write_local_manifest(args.epoch,
+                        "activation", local_replica, phase_receipt)
+                    _migration_register_artifact(con, epoch=args.epoch,
+                        kind="activation", digest=phase_receipt["receipt_digest"],
+                        path=path, receipt=_receipt, replica=local_replica)
+                callback = record_activation
+                receipt_transform = activation_phase_receipt
+        if target is None:
+            raise migration_v2.MigrationError("migration-phase-not-implemented")
+        return _migration_transition(args,
+            phase=transition_phase if operation == "activate" else operation, target=target,
+            inputs=_migration_file_inputs(args), writer_mode=writer_mode,
+            fence_capture_seq=fence_seq, equality_digest=equality_digest,
+            rollback_bundle_digest=rollback_digest, transaction_callback=callback,
+            receipt_transform=receipt_transform)
+    except (migration_v2.MigrationError, sync_v2.SyncError, sqlite3.Error,
+            OSError, ValueError, TypeError, KeyError) as exc:
+        return _migration_failure(args, exc)
+
+
 def main():
     ap = argparse.ArgumentParser(prog="mem", description="Unified Memory System")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -6024,6 +8369,8 @@ def main():
     replica_show.add_argument("--json", dest="json_output", action="store_true")
     replica_rotate = replica_sub.add_parser("rotate", help="Start a new replica identity boundary")
     replica_rotate.add_argument("--reason", required=True)
+
+    _configure_migration_parser(sub)
 
     rs = sub.add_parser("restore", help="Restore the latest graveyard entry for one record")
     rs.add_argument("id")
@@ -6199,6 +8546,8 @@ def main():
         if args.replica_cmd == "status":
             sys.exit(replica_status(json_output=args.json_output))
         sys.exit(0 if rotate_replica(args.reason) else 1)
+    elif args.cmd == "migration":
+        sys.exit(migration_command(args))
     elif args.cmd == "restore":
         sys.exit(0 if restore(args.id) else 1)
     elif args.cmd == "index":
@@ -6272,6 +8621,6 @@ def main():
 if __name__ == "__main__":
     try:
         main()
-    except (UnsupportedSchemaError, sync_v2.SyncError) as exc:
+    except (UnsupportedSchemaError, sync_v2.SyncError, sqlite3.Error) as exc:
         sys.stderr.write(f"[mem] hard-failure: {exc}\n")
         sys.exit(2)

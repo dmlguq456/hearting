@@ -70,7 +70,7 @@ python3 "$MEM" stats >/dev/null 2>"$TMP/mig6.err"
 grep -q "\[migrate v6\] applied" "$TMP/mig6.err" \
   && ok "v6 migration ran and logged its apply line" || bad "v6 log missing: $(cat "$TMP/mig6.err")"
 DB="$STORE/memory.db"
-[ "$(q "$DB" "PRAGMA user_version")" = 8 ] && ok "user_version advanced to 8" || bad "user_version not 8"
+[ "$(q "$DB" "PRAGMA user_version")" = 10 ] && ok "user_version advanced to 10" || bad "user_version not 10"
 [ "$(q "$DB" "SELECT cwd_origin FROM records WHERE id='leg_enc'")" = "$CANON" ] \
   && ok "encoded key remapped to canonical project key" || bad "leg_enc not remapped"
 [ "$(q "$DB" "SELECT cwd_origin FROM records WHERE id='leg_raw'")" = "$CANON" ] \
@@ -106,7 +106,7 @@ PY
 python3 "$MEM" stats >/dev/null 2>"$TMP/mig6b.err"
 SNAP2="$(python3 -c "import sqlite3,sys;print('|'.join(f'{a}:{b}' for a,b in sqlite3.connect(sys.argv[1]).execute('SELECT id,cwd_origin FROM records ORDER BY id')))" "$DB")"
 [ "$SNAP1" = "$SNAP2" ] && ok "forced rerun changes nothing (idempotent)" || bad "rerun drifted: $SNAP2"
-[ "$(q "$DB" "PRAGMA user_version")" = 8 ] && ok "user_version restored to 8 after rerun" || bad "rerun version wrong"
+[ "$(q "$DB" "PRAGMA user_version")" = 10 ] && ok "user_version restored to 10 after rerun" || bad "rerun version wrong"
 
 echo "== repair 1c: absorb path emits canonical keys (regeneration fix) =="
 STORE2="$TMP/store-absorb"; PROJECTS="$TMP/projects"
