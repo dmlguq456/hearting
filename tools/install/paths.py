@@ -4,6 +4,7 @@ Honor ``AGENT_HOME`` and ``HOME`` overrides so tests can use temporary homes.
 """
 
 import os
+import subprocess
 from pathlib import Path
 
 
@@ -101,3 +102,56 @@ def resolve_source(relpath):
 def source_exists(relpath):
     """Return whether a source exists, following directory symlinks."""
     return resolve_source(relpath).exists()
+
+
+def primary_checkout(root=None):
+    """The repository's PRIMARY worktree, or `root` unchanged when it is not one.
+
+    F-80: linked task worktrees are source-only execution surfaces — the same rule
+    `utilities/artifact-root.sh` applies to artifact roots, resolved the same way (the
+    first `git worktree list --porcelain` entry is the primary). A non-Git tree, an
+    extracted release, or an unavailable `git` all return `root` untouched, so a managed
+    release keeps resolving to itself.
+    """
+    root = Path(root) if root is not None else agent_home()
+    try:
+        inside = subprocess.run(
+            ["git", "-C", str(root), "rev-parse", "--is-inside-work-tree"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if inside.returncode != 0 or (inside.stdout or "").strip() != "true":
+            return root
+        listing = subprocess.run(
+            ["git", "-C", str(root), "worktree", "list", "--porcelain"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if listing.returncode != 0:
+            return root
+        for line in (listing.stdout or "").splitlines():
+            if line.startswith("worktree "):
+                primary = Path(line[len("worktree "):].strip())
+                if not primary.is_dir():
+                    return root
+                # Git reports the primary using whatever path the caller reached it by, so
+                # the same checkout can be named `/home/<u>/nas_<u>/…` from one worktree and
+                # `/home/nas/user/<u>/…` from another. Normalize like `artifact-root.sh`'s
+                # `pwd -P`, or the launcher target would depend on where install ran.
+                try:
+                    return primary.resolve(strict=True)
+                except (OSError, RuntimeError):
+                    return primary
+    except (OSError, subprocess.SubprocessError):
+        return root
+    return root
+
+
+def resolve_launcher_source(relpath):
+    """Resolve a launcher's source, pinned to the primary checkout.
+
+    F-80 (user 2026-08-16, on the symlink fix being "땜빵의 성격"): `~/.local/bin/*` held
+    whatever tree last ran `install`, so the launchers followed a release snapshot on
+    2026-08-15 and would have followed a task worktree just as readily — codex was activated
+    from one at the time. A launcher outlives any worktree; pinning it to the primary
+    checkout is what makes it stop tracking whoever installed last.
+    """
+    return primary_checkout() / relpath

@@ -29,9 +29,11 @@ class LauncherMigrationTest(unittest.TestCase):
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text("#!/bin/sh\n", encoding="utf-8")
             path.chmod(0o755)
+        # F-80: launchers resolve through `resolve_launcher_source` (primary checkout),
+        # not `resolve_source` (whichever tree is running install).
         self.resolve = mock.patch.object(
             bootstrap.paths,
-            "resolve_source",
+            "resolve_launcher_source",
             side_effect=lambda relpath: self.source / relpath,
         )
         self.resolve.start()

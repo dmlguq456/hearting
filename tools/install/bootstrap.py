@@ -175,7 +175,9 @@ def install_launchers(home=None, dry_run=False):
         bin_dir.mkdir(parents=True, exist_ok=True)
 
     for name, rel_source in LAUNCHERS:
-        source = paths.resolve_source(rel_source)
+        # F-80: pinned to the primary checkout, never to whichever tree happens to be
+        # running this install. A launcher outlives the worktree an install was run from.
+        source = paths.resolve_launcher_source(rel_source)
         target = bin_dir / name
         common = {"name": name, "target": str(target), "source": str(source)}
 
