@@ -338,6 +338,14 @@ class SubdivisionContractTest(unittest.TestCase):
         import subprocess
         with tempfile.TemporaryDirectory() as td:
             worktree, route, node, manifest_path = self._fixture(td)
+            # F2: the fixture's bare `git init` leaves HEAD unborn, and after B2
+            # that alone refuses -- for a missing lineage anchor, not for a slice
+            # commit. Give it a real base so the refusal below is the one this
+            # test's name claims; the detail assertion pins which one it was.
+            subprocess.run(
+                ["git", "-C", str(worktree), "commit", "-q", "--allow-empty", "-m", "base"],
+                check=True,
+            )
             manifest = SSC.load_manifest(manifest_path, route=route, node=node)
             jobs_path = Path(td) / "jobs.log"
             self._write_jobs(jobs_path, route, manifest)
@@ -360,6 +368,7 @@ class SubdivisionContractTest(unittest.TestCase):
                         )
                 self.assertEqual(len(recorded), 1)
                 self.assertEqual(recorded[0]["reason"], "subdivision-commit-attempted")
+                self.assertIn("carries", recorded[0]["detail"])
                 self.assertFalse(
                     (CR.completion_dir(route["route_id"]) / "execute.json").is_file()
                 )
