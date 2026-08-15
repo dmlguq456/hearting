@@ -973,6 +973,17 @@ def _harness_model_cell(harness, model, effort, width, hkey, dim=False, unknown=
     return segs
 
 
+_DIAL_MAX = 34                # F-78 (user 2026-08-14 "뜰때 안뜰때가 일관성이 없고 …
+                              # 전부 다 뜰때 가로로 너무 길어지는데"): ONE options-dial budget
+                              # for every dispatch row. It used to be `28 if in_card else None`
+                              # — framed rows folded their env components away while unframed
+                              # ones printed everything, so the same information appeared on
+                              # one row and not the row above it, for a reason invisible to the
+                              # reader. Measured cost of the unbounded side: a parentless
+                              # depth-2 row at 140 columns rendered 177 cells wide.
+                              # 34, not the old in-card 28: the widest real dial that still
+                              # carries its unit is `code-execute(strong) / dev/backend`,
+                              # and 28 folded that unit away on every row that had one.
 _STAGE_ZONE_MAX = 30          # D3 (v9) — one constant, one place, same idiom as
                                # _NAME_WIDE_MAX(:523)/_DISPATCH_NAME_MAX(:887)/_PROFILE_MAX(:944).
                                # 168-col zero-overflow was previously incidental (a measured
@@ -1270,6 +1281,13 @@ def _dispatch_stage_segs(j, key, stage, slug_name, working=False, route_seq=None
             return [("running", "stg%d_on" % color_i if _BLINK_ON
                                 else "stg%d_off" % color_i)]
         if stage and stage not in ("open", "running"):
+            # F-78 (measured: `code-execute(strong) / … : code-execute`): a non-live worker
+            # falls back to its raw `stage`, which for a registered stage worker IS its
+            # assigned contract — the same token the options dial already leads with. Echoing
+            # it says nothing and costs the row real width, so the slot stays empty and the
+            # dial keeps the identity (same same-row-duplicate rule the SD-F1 prefix follows).
+            if _entry_skill(j) == stage:
+                return []
             return [(stage, "stg0_off")]
         return []
     if route_seq:
@@ -2286,8 +2304,17 @@ def _opts_segs(j, max_width=None):
     if role:
         knob_items.append(role)
     knobs = "·".join(knob_items)
-    env_tail = [value for value in
-                (_dispatch_model_profile(j), _dispatch_profile(j)) if value]
+    # F-78 (user 2026-08-14 "unit, node, profile 등이 좋긴 좋은데 … 전부 다 뜰때 가로로 너무
+    # 길어지는데"). Measured at 50-54 cells. Two of those cells' worth of content was not
+    # information:
+    #  · the MODEL PROFILE is the policy that picked a model, and the model it picked is
+    #    already on this very row, in the harness cell (`codex (gpt-5.6-luna·medium)`).
+    #    A derived value sitting beside its own result earns nothing, so it goes.
+    #  · the `unit:`/`mp:` prefixes cost 5-6 cells to say what the shape already says —
+    #    a unit is always `<group>/<name>`.
+    # `_dispatch_profile` (the profile HOME, not the model profile) stays: nothing else on
+    # the row carries it.
+    env_tail = [value for value in (_dispatch_profile(j),) if value]
     unit = getattr(j, "unit", None)
     projected_unit = unit or (
         None if _is_owner_mode_row(j) else getattr(j, "worker_mode", None)
@@ -2296,7 +2323,17 @@ def _opts_segs(j, max_width=None):
         display_unit = str(projected_unit)
         if display_unit.startswith("_"):
             display_unit = display_unit[1:]
-        env_tail.append("unit:" + _compact_dispatch_name(display_unit, _PROFILE_MAX))
+        group, _sep, leaf = display_unit.partition("/")
+        entry_words = entry.split("-") if entry else []
+        # A unit whose LEAF merely restates a knob is the row saying the same thing twice
+        # (`_kernel/owner` beside `·owner`), so it drops whole. A unit whose GROUP restates
+        # a knob or the entry skill keeps only its leaf (`code-plan … plan/frame` -> `frame`).
+        if leaf and leaf in knob_items:
+            display_unit = ""
+        elif leaf and (group in knob_items or group in entry_words):
+            display_unit = leaf
+        if display_unit:
+            env_tail.append(_compact_dispatch_name(display_unit, _PROFILE_MAX))
     warn_tail = []
     if _mode_axis_conflict(j):
         warn_tail.append("mode!")
@@ -2455,25 +2492,25 @@ def _dispatch_row(j, orphan=False, parent_model=None, parent_harness=None, is_la
         # right-flushed time column); dispatch-depth-1 afterglow keeps its counting-up elapsed (F-46)
         # and dispatch-depth-1 stale its age (`done <age>`, the v49 "last seen" successor).
         segs.append((" " * _WIDE_STAGE_GAP, None))
-        opt_segs, optw = _opts_segs(j, max_width=(28 if in_card else None))
+        opt_segs, optw = _opts_segs(j, max_width=_DIAL_MAX)
         segs += opt_segs
         if optw < _OPTW:
             segs.append((" " * (_OPTW - optw), None))
         # user 2026-08-05 "done 앞에 콜론은 그대로 있어야지 체크 표시는 done 뒤로": the
         # done token rides the same ` : ` stage-zone lead-in the running token uses, and
         # the check TRAILS the word — `: done ✓`, mirroring `: running`.
-        if int(getattr(j, "depth", 1) or 1) >= 2:
-            token = "done %s" % _LIVE_GLYPH["done"]
-        elif afterglow_j:
-            token = "done %s %s" % (_LIVE_GLYPH["done"], fmt_min(j.elapsed_min))
-        else:
-            token = "done %s" % fmt_min(j.elapsed_min)
+        # F-78 (measured 2026-08-14 at 200 columns: `: done ✓ 8m  8m`): every row now ends
+        # with F-68's inline elapsed tag, and these tokens still carried the SAME
+        # `j.elapsed_min` from back when only F-46's depth-1 rows had a clock of their own.
+        # One elapsed per row — the tag — so the token is the state word alone. At 140
+        # columns the duplicate had been costing the token itself, clipping it to `done …`.
+        token = "done %s" % _LIVE_GLYPH["done"]
         segs += _stage_zone_segs([(token, "dim")])
     else:
         # F-15a options column (fixed-ish gap, dim mode/qa/profile) — a declutter move OUT of
         # the name zone, not a new axis. model/effort now live in the harness field (F-4/SD-F3).
         segs.append((" " * _WIDE_STAGE_GAP, None))
-        opt_segs, optw = _opts_segs(j, max_width=(28 if in_card else None))
+        opt_segs, optw = _opts_segs(j, max_width=_DIAL_MAX)
         segs += opt_segs
         if optw < _OPTW:
             segs.append((" " * (_OPTW - optw), None))

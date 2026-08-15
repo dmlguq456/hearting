@@ -453,7 +453,9 @@ class OptsDialHierarchyTest(unittest.TestCase):
             capability_owner="autopilot-code",
             route_node="test",
         )
-        self.assertEqual(self._dial(child), "code-test(strong) / unit:verify")
+        # F-78 dropped the `unit:` prefix — a unit is recognizable by its own shape, and
+        # the five cells bought nothing on a dial measured at 50+ cells.
+        self.assertEqual(self._dial(child), "code-test(strong) / verify")
         self.assertEqual(render._dispatch_stage_label(child), "test")
 
     def test_reserved_unit_namespace_underscore_is_hidden_only_in_display(self):
@@ -467,7 +469,10 @@ class OptsDialHierarchyTest(unittest.TestCase):
             unit="_kernel/owner",
             capability_owner="autopilot-code",
         )
-        self.assertEqual(self._dial(owner), "code(dev·owner) / unit:kernel/owner")
+        # F-78: `_kernel/owner` beside the `·owner` knob is the row saying "owner" twice,
+        # so the unit drops from the DISPLAY entirely. The reserved `_` namespace is still
+        # never rewritten in the data — which is what this case exists to pin.
+        self.assertEqual(self._dial(owner), "code(dev·owner)")
         self.assertEqual(owner.unit, "_kernel/owner")
         self.assertEqual(owner.to_dict()["unit"], "_kernel/owner")
 

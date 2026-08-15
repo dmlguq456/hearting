@@ -62,7 +62,11 @@ class DispatchModeAxesTest(unittest.TestCase):
         self.assertFalse(job.mode_axis_conflict)
         rendered = self._opts_text(job)
         self.assertNotIn("(dev", rendered)
-        self.assertEqual(1, rendered.count("plan/plan-author"))
+        # F-78: the unit's GROUP (`plan`) already appears in the entry skill (`code-plan`),
+        # so the dial keeps only the leaf. Both axes still survive — this case exists to pin
+        # that the worker mode is not swallowed by the owner knob, and it is not.
+        self.assertEqual(1, rendered.count("plan-author"))
+        self.assertNotIn("plan/plan-author", rendered)
 
     def test_legacy_owner_stage_mode_is_conflict_not_capability(self):
         job = self._registry_job(
@@ -96,7 +100,7 @@ class DispatchModeAxesTest(unittest.TestCase):
         self.assertEqual("plan/plan-author", job.worker_mode)
         self.assertFalse(job.mode_axis_conflict)
         rendered = self._opts_text(job)
-        self.assertEqual(1, rendered.count("plan/plan-author"))
+        self.assertEqual(1, rendered.count("plan-author"))   # F-78: leaf only, see above
 
     def test_proc_env_typed_axes_override_legacy_argv_absence(self):
         lines = ["123 claude 00:08 claude -p /autopilot-code"]

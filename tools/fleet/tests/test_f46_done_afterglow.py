@@ -86,7 +86,11 @@ class DoneAfterglowRenderTest(unittest.TestCase):
     def test_wide_row_shows_dim_done_with_elapsed_and_no_blink(self):
         segs = render._dispatch_row(self._job())
         text = "".join(part for part, _key in segs)
-        self.assertIn("done ✓ 4m", text)
+        # F-78: the state token is the word alone; the elapsed rides F-68's inline tag at
+        # the end of the row, so it appears exactly once instead of twice.
+        self.assertIn("done ✓", text)
+        self.assertNotIn("done ✓ 4m", text)
+        self.assertEqual(text.count("4m"), 1)
         status_keys = [key for part, key in segs if "done" in part]
         self.assertEqual(status_keys, ["dim"])
         # the glyph cell is the dim ✓, never a spinner frame or the live green key
@@ -124,8 +128,14 @@ class DoneAfterglowRenderTest(unittest.TestCase):
         self.assertNotIn("done 4m", text)
 
     def test_depth1_afterglow_keeps_its_elapsed(self):
+        """F-46 gave a finished depth-1 row its own counting-up clock, back when only such
+        rows had one. F-68 later gave EVERY row an inline elapsed tag, so carrying it in the
+        token too printed it twice (measured at 200 columns: `: done ✓ 8m  8m`) and, at 140,
+        clipped the token itself to `done …`. The elapsed is kept — as the row's one tag."""
         segs = render._dispatch_row(self._job())
-        self.assertIn("done ✓ 4m", "".join(part for part, _key in segs))
+        text = "".join(part for part, _key in segs)
+        self.assertEqual(text.count("4m"), 1)
+        self.assertTrue(text.rstrip().endswith("4m"))
 
     def test_depth2_narrow_card_drops_the_elapsed_too(self):
         job = self._depth2_job(status="done", afterglow=True, liveness="done")

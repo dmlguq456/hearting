@@ -307,10 +307,21 @@ def collect(root=None, env=None, runner=subprocess.run, refresh_remote=False, no
             head = _head_oid(root)
             dirty = bool(head and _git_dirty(root, runner, head, observed))
             version = remote_version + ("-dirty" if dirty else "")
+    # F-78 (user 2026-08-14 "version unkown 뜨는데"): the git fallbacks were gated on the
+    # install METHOD, but the method describes how a runtime was activated — not whether the
+    # code being read has git metadata. A checkout can be activated `packaged` (this repo:
+    # the codex runtime pins a snapshot while `fleet` runs straight out of the source tree),
+    # and the whole board then reported `unknown` while `git describe` in that very directory
+    # answered v2.51.0. Ask the tree itself instead: a release snapshot carries no `.git`, so
+    # `_git_dirs` separates the two cases exactly, and a genuine snapshot still skips the
+    # subprocess and falls through to its activation revision below.
+    is_checkout = _git_dirs(root)[0] is not None
     local_version = _release_version(root)
-    if local_version is None and not fast_local and method in {"linked", "unmanaged"}:
+    if local_version is None and not fast_local and (is_checkout
+                                                     or method in {"linked", "unmanaged"}):
         local_version = _git_version(root, runner)
-    head_version = _head_version(root) if method in {"linked", "unmanaged"} else None
+    head_version = _head_version(root) if (is_checkout
+                                           or method in {"linked", "unmanaged"}) else None
     revisions = {revision for _runtime, mode, revision in matches
                  if mode == "packaged" and revision}
     activation_version = next(iter(revisions))[:8] if method == "packaged" and len(revisions) == 1 else None
