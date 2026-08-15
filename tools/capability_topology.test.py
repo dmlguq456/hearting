@@ -389,7 +389,13 @@ class TestTopology(unittest.TestCase):
                 values={token.strip() for token in found.group(1).split(",") if token.strip()}
                 self.assertEqual(values,{"findings","none"})
                 self.assertFalse(values & blocking)
-        for arbiter in ("qa/plan-review","research/plan-review"):
+        # The control group must be units that really ARE arbiters. `qa/plan-review`
+        # is the `plan-check` ANCHOR, and after G1 an anchor is never the arbiter;
+        # using it made the contrast say less than it looked like it said. These
+        # two are the units bound to the registry's only node arbiters --
+        # `research/research-survey` on `synthesis`, `research/plan-review` on
+        # `review`.
+        for arbiter in ("research/research-survey","research/plan-review"):
             text=(units/f"{arbiter}.md").read_text(encoding="utf-8")
             found=_re.search(r"^  verdict:\s*\[([^\]]*)\]",text,_re.MULTILINE)
             values={token.strip() for token in found.group(1).split(",") if token.strip()}

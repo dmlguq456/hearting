@@ -440,76 +440,97 @@ class FallbackTest(unittest.TestCase):
 
   # 1 explicit target: an explicit per-node harness pin in dispatch-defaults is
   # sealed into the route as a literal `harness_affinity` at compile time, and
-  # is the only user override SD-100 recognizes. Nothing downstream unseals it.
-  with dispatch_defaults_config_text(
-    "schema_version: 1\ndepth1_owner: [claude, codex]\nopencode:\n  relief_only: true\n"
-    "capabilities:\n  autopilot-code:\n    plan: codex\n    execute: diverse\n"
-    "    test: diverse\n    report: claude\n"):
-   nodes=[{"id":"plan","dispatch_depth":2,"model_profile":"deep"}]
-   R._seal_dispatch_defaults(nodes,"autopilot-code")
-   self.assertEqual(nodes[0]["harness_affinity"],"codex")
+  # is the only user override SD-100 recognizes. This asserts PRECEDENCE, not
+  # just that sealing happened: the pinned family stays the head while every
+  # lower step -- band, capacity, least-recent, declared order -- is set to
+  # prefer a different one, and the same node WITHOUT the pin follows them.
+  with self.subTest(step=1,rule="explicit target"):
+   with dispatch_defaults_config_text(
+     "schema_version: 1\ndepth1_owner: [claude, codex]\nopencode:\n  relief_only: true\n"
+     "capabilities:\n  autopilot-code:\n    plan: codex\n    execute: diverse\n"
+     "    test: diverse\n    report: claude\n"):
+    nodes=[{"id":"plan","dispatch_depth":2,"model_profile":"deep"}]
+    R._seal_dispatch_defaults(nodes,"autopilot-code")
+    self.assertEqual(nodes[0]["harness_affinity"],"codex")
+   pinned=self._gate_node(affinity="codex")
+   pinned["harness_policy"]={"primary":["claude"],"relief":["opencode"],
+                             "last_resort":["codex"],"promote_relief_below":0}
+   lower=self._counts(claude=1,codex=9,opencode=0)
+   context=ranked(pinned,self._gate_route(),counts=lower,identity=None)
+   self.assertEqual(context["rank"][0],"codex")
+   # discriminating: without the seal the lower steps really do choose another
+   unpinned=self._gate_node()
+   unpinned["harness_policy"]=pinned["harness_policy"]
+   context=ranked(unpinned,self._gate_route(),counts=lower,identity=None)
+   self.assertNotEqual(context["rank"][0],"codex")
 
-  # 2 hard eligibility over everything below it: a harness whose checked tuple
-  # is not `supported` is not a candidate at all, so neither a sealed affinity
-  # naming it nor the parent-cross partition can hoist it into the band.
-  node=self._gate_node(affinity="codex")
-  node["fallback_hops"][1]["candidates"][0]["status"]="unsupported"
-  context=ranked(node,self._gate_route())
-  self.assertNotIn("codex",context["rank"])
-  self.assertEqual(context["rank"][0],"claude")
+  with self.subTest(step=2,rule="hard eligibility"):
+   # 2 hard eligibility over everything below it: a harness whose checked tuple
+   # is not `supported` is not a candidate at all, so neither a sealed affinity
+   # naming it nor the parent-cross partition can hoist it into the band.
+   node=self._gate_node(affinity="codex")
+   node["fallback_hops"][1]["candidates"][0]["status"]="unsupported"
+   context=ranked(node,self._gate_route())
+   self.assertNotIn("codex",context["rank"])
+   self.assertEqual(context["rank"][0],"claude")
 
-  # 3 sealed literal affinity over parent-cross: the affinity names the OWNER
-  # family, which step 4 would move to the tail; the head is kept and the
-  # degradation is recorded instead of being reordered away.
-  context=ranked(self._gate_node(affinity="opencode"),self._gate_route())
-  self.assertEqual(context["rank"][0],"opencode")
-  self.assertEqual(context["parent_cross"],"degraded")
-  self.assertEqual(context["parent_cross_cause"],"affinity-pinned")
+  with self.subTest(step=3,rule="affinity over parent-cross"):
+   # 3 sealed literal affinity over parent-cross: the affinity names the OWNER
+   # family, which step 4 would move to the tail; the head is kept and the
+   # degradation is recorded instead of being reordered away.
+   context=ranked(self._gate_node(affinity="opencode"),self._gate_route())
+   self.assertEqual(context["rank"][0],"opencode")
+   self.assertEqual(context["parent_cross"],"degraded")
+   self.assertEqual(context["parent_cross_cause"],"affinity-pinned")
 
-  # 4 parent-cross over quality band / capacity and least-recent: claude and
-  # codex are both cross+quality-peer, opencode is the owner family. Even with
-  # opencode holding the fewest recent attempts (step 6 would put it first),
-  # the cross block stays ahead of it.
-  context=ranked(self._gate_node(),self._gate_route(),
-                 counts=self._counts(claude=5,codex=6,opencode=0))
-  self.assertEqual(context["rank"],["claude","codex","opencode"])
-  self.assertEqual(context["parent_cross"],"ok")
+  with self.subTest(step=4,rule="parent-cross over band"):
+   # 4 parent-cross over quality band / capacity and least-recent: claude and
+   # codex are both cross+quality-peer, opencode is the owner family. Even with
+   # opencode holding the fewest recent attempts (step 6 would put it first),
+   # the cross block stays ahead of it.
+   context=ranked(self._gate_node(),self._gate_route(),
+                  counts=self._counts(claude=5,codex=6,opencode=0))
+   self.assertEqual(context["rank"],["claude","codex","opencode"])
+   self.assertEqual(context["parent_cross"],"ok")
 
-  # 5 quality band / capacity over least-recent: under the capacity-aware
-  # strategy the node's own band is consulted before attempt counts, so a
-  # last_resort harness with zero recent attempts stays behind the band.
-  # `identity=None` removes step 4 from the picture so this isolates 5 vs 6 --
-  # least-recent alone would rank [opencode, codex, claude].
-  node=self._gate_node()
-  node["harness_policy"]={"primary":["claude"],"relief":["codex"],
-                          "last_resort":["opencode"],"promote_relief_below":0}
-  route=self._gate_route()
-  route["dispatch_allocation"]["strategy"]="capacity-aware"
-  with mock.patch.object(F.CAPACITY,"capacity_scores",
-                         return_value={"claude":90.0,"codex":90.0,"opencode":90.0}):
-   context=ranked(node,route,counts=self._counts(claude=9,codex=4,opencode=0),
+  with self.subTest(step=5,rule="band over least-recent"):
+   # 5 quality band / capacity over least-recent: under the capacity-aware
+   # strategy the node's own band is consulted before attempt counts, so a
+   # last_resort harness with zero recent attempts stays behind the band.
+   # `identity=None` removes step 4 from the picture so this isolates 5 vs 6 --
+   # least-recent alone would rank [opencode, codex, claude].
+   node=self._gate_node()
+   node["harness_policy"]={"primary":["claude"],"relief":["codex"],
+                           "last_resort":["opencode"],"promote_relief_below":0}
+   route=self._gate_route()
+   route["dispatch_allocation"]["strategy"]="capacity-aware"
+   with mock.patch.object(F.CAPACITY,"capacity_scores",
+                          return_value={"claude":90.0,"codex":90.0,"opencode":90.0}):
+    context=ranked(node,route,counts=self._counts(claude=9,codex=4,opencode=0),
+                   identity=None)
+   self.assertEqual(context["rank"],["claude","codex","opencode"])
+   self.assertEqual(context["quality_band"],"primary")
+
+  with self.subTest(step=6,rule="least-recent over declared order"):
+   # 6 least-recent over declared order: the declared order is
+   # [claude, codex, opencode], so codex only precedes claude because it holds
+   # fewer recent attempts. Step 7 alone would have kept claude first.
+   node=self._gate_node()
+   context=ranked(node,self._gate_route(),
+                  counts=self._counts(claude=3,codex=1,opencode=0),
                   identity=None)
-  self.assertEqual(context["rank"],["claude","codex","opencode"])
-  self.assertEqual(context["quality_band"],"primary")
+   self.assertEqual(context["rank"],["opencode","codex","claude"])
 
-  # 6 least-recent over declared order: the declared order is
-  # [claude, codex, opencode], so codex only precedes claude because it holds
-  # fewer recent attempts. Step 7 alone would have kept claude first.
-  node=self._gate_node()
-  context=ranked(node,self._gate_route(),
-                 counts=self._counts(claude=3,codex=1,opencode=0),
-                 identity=None)
-  self.assertEqual(context["rank"],["opencode","codex","claude"])
-
-  # 7 declared order as the final tie-break: with every count equal, only the
-  # declared order decides, and reversing it reverses the rank.
-  route=self._gate_route()
-  context=ranked(node,route,identity=None)
-  self.assertEqual(context["rank"],["claude","codex","opencode"])
-  route=self._gate_route()
-  route["dispatch_allocation"]["harness_order"]=["opencode","codex","claude"]
-  context=ranked(node,route,identity=None)
-  self.assertEqual(context["rank"],["opencode","codex","claude"])
+  with self.subTest(step=7,rule="declared order tie-break"):
+   # 7 declared order as the final tie-break: with every count equal, only the
+   # declared order decides, and reversing it reverses the rank.
+   route=self._gate_route()
+   context=ranked(node,route,identity=None)
+   self.assertEqual(context["rank"],["claude","codex","opencode"])
+   route=self._gate_route()
+   route["dispatch_allocation"]["harness_order"]=["opencode","codex","claude"]
+   context=ranked(node,route,identity=None)
+   self.assertEqual(context["rank"],["opencode","codex","claude"])
  def test_ac14_stable_partition_preserves_block_internal_order(self):
   # Cross block [claude, codex] and non-cross [opencode] keep their internal
   # least-recent order; only the two blocks are concatenated.

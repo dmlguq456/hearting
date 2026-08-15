@@ -1752,12 +1752,15 @@ def _validate_auxiliary_arbiter(route, node, evidence):
         )
 
 
-def arbitration_path(route_id, group_id):
-    safe = "".join(
+def _safe_group_id(group_id):
+    return "".join(
         character if character.isalnum() or character in "._-" else "_"
         for character in str(group_id)
     )
-    return completion_dir(route_id)/f"{safe}.arbitration.json"
+
+
+def arbitration_path(route_id, group_id):
+    return completion_dir(route_id)/f"{_safe_group_id(group_id)}.arbitration.json"
 
 
 def _marker_identity_row(route, node, node_id, gate):
@@ -1895,7 +1898,10 @@ def arbitrate_group(route, group_id, evidence):
     }
     path = arbitration_path(route["route_id"], group_id)
     directory = completion_dir(route["route_id"])
-    with _exclusive_lock(directory/f".{group_id}.arbitration.lock"):
+    # Same normalization as `arbitration_path`: the record path escapes an unsafe
+    # group id and the lock used the raw one, so two spellings of one identity
+    # could name different files. Today's group ids are safe either way.
+    with _exclusive_lock(directory/f".{_safe_group_id(group_id)}.arbitration.lock"):
         if path.is_file():
             # Same immutability contract as `write_completion_marker`: an
             # identical re-registration is idempotent, a different one conflicts.
@@ -2406,10 +2412,21 @@ def record_subdivision_baseline(route, node_id, manifest):
 
 
 def load_subdivision_baseline(route, node_id, manifest):
-    """Resume the admission-time baseline by manifest hash; None when absent."""
-    path = subdivision_baseline_path(
-        route["route_id"], node_id, manifest["_manifest_sha256"]
-    )
+    """Resume the admission-time baseline by manifest hash; None when absent.
+
+    Read across every dispatch state root, the same order completion markers use.
+    Reading only the canonical root meant a state-root rotation kept the markers
+    (which iterate the roots, and have `_migrate_completion_dir_forward`) while
+    losing the baseline, and for a parallel subdivision a missing baseline is a
+    permanent `subdivision-baseline-missing`. The writer still uses one root.
+    """
+    digest = manifest["_manifest_sha256"]
+    canonical = subdivision_baseline_path(route["route_id"], node_id, digest)
+    candidates = [canonical] + [
+        root / "completion" / route["route_id"] / "subdivision" / canonical.name
+        for root in dispatch_state_roots(resolve_agent_home())
+    ]
+    path = next((item for item in candidates if item.is_file()), canonical)
     try:
         record = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
@@ -2589,6 +2606,12 @@ def complete_subsession_stage(route, node, node_id, evidence, manifest_path, job
             "subdivision-scope-violation",
             ";".join(str(path) for path in sorted(outside)),
         )
+    # The arbiter gate has two marker writers, and this is the second one:
+    # `_publish_completion_locked` calls this, and until now this path reached
+    # `write_completion_marker` directly. No SD-103 node currently arbitrates any
+    # group, so nothing escapes today -- but a gate that lives at one of two
+    # entrances is not a gate. One defensive call closes it.
+    _validate_auxiliary_arbiter(route, node, evidence)
     directory=completion_dir(route["route_id"])
     with _exclusive_lock(directory/f".{node_id}.completion.lock"):
         marker=write_completion_marker(
