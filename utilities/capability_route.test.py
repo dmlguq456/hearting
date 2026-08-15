@@ -592,8 +592,17 @@ class TestRoute(unittest.TestCase):
      arbiter_node=next(n for n in route["nodes"] if n["id"]==arbiter[1])
      self.assertIs(contracts[arbiter_node["completion_gate"]].get("auxiliary_arbiter"),
                    True)
-    seen.add(group)
-  self.assertEqual(len(seen),6)  # every realized auxiliary-bearing group in the registry
+    seen.add((capability,group))
+  # F1: `len(seen)` compared this dict against itself, so a SEVENTH
+  # auxiliary-bearing group added to the registry would have passed in silence.
+  # Ask the registry for the set instead and hold the expectation to it.
+  declared={
+   (recipe["capability"],group["id"])
+   for recipe in R.TOPO.load_registry()["recipes"]
+   for group in (recipe.get("standard_plus") or {}).get("parallel_groups",[])
+   if any(leg.get("leg_class")=="auxiliary" for leg in group.get("legs",[]))
+  }
+  self.assertEqual(seen,declared)
  def unresolvable_arbiter_route(self):
   # SD-102 does not cap a map-worker anchor's consumer count and the topology
   # check does not count it, so one registry edit reaches this shape.
