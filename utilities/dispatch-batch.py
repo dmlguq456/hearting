@@ -56,6 +56,14 @@ if CAPACITY_SPEC is None or CAPACITY_SPEC.loader is None:
 CAPACITY = importlib.util.module_from_spec(CAPACITY_SPEC)
 CAPACITY_SPEC.loader.exec_module(CAPACITY)
 
+ROUTE_SPEC = importlib.util.spec_from_file_location(
+    "capability_route_batch", ROOT / "utilities" / "capability-route.py"
+)
+if ROUTE_SPEC is None or ROUTE_SPEC.loader is None:
+    raise RuntimeError("capability-route loader unavailable")
+ROUTE_MODULE = importlib.util.module_from_spec(ROUTE_SPEC)
+ROUTE_SPEC.loader.exec_module(ROUTE_MODULE)
+
 NODE_SPEC = importlib.util.spec_from_file_location(
     "dispatch_node", ROOT / "utilities" / "dispatch-node.py"
 )
@@ -1110,6 +1118,58 @@ def batch_receipt(
     return receipt, success
 
 
+def _bind_subdivision_sessions(
+    manifest_sessions: list[dict[str, object]],
+    nodes: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    """Bind each slice to its leg by declared key, never by list position (N1).
+
+    `assign_harnesses` returns legs in `nodes` order while the manifest's session
+    order is whatever its author wrote. Zipping the two by index means a manifest
+    written in a different order silently hands a slice's `fixed_files` to the
+    wrong leg -- a disjointness proof that no longer describes what will run.
+    A count check cannot see this. Every session must therefore name its leg
+    (`node`, or `leg_index` as the positional spelling), and a session that
+    names neither is a typed refusal rather than an assumed position.
+    """
+    node_ids = [str(node["id"]) for node in nodes]
+    bound: dict[str, dict[str, object]] = {}
+    for offset, session in enumerate(manifest_sessions):
+        declared = session.get("node")
+        if declared is None:
+            index = session.get("leg_index")
+            if isinstance(index, bool) or not isinstance(index, int):
+                raise BatchError(
+                    "subdivision-manifest-session-leg-unbound",
+                    f"session={session.get('subsession_id') or offset}",
+                )
+            if not 0 <= index < len(node_ids):
+                raise BatchError(
+                    "subdivision-manifest-session-leg-unknown",
+                    f"leg_index={index}:legs={len(node_ids)}",
+                )
+            declared = node_ids[index]
+        declared = str(declared)
+        if declared not in node_ids:
+            raise BatchError(
+                "subdivision-manifest-session-leg-unknown",
+                f"node={declared}",
+            )
+        if declared in bound:
+            raise BatchError(
+                "subdivision-manifest-session-leg-duplicate",
+                f"node={declared}",
+            )
+        bound[declared] = session
+    missing = [node_id for node_id in node_ids if node_id not in bound]
+    if missing:
+        raise BatchError(
+            "subdivision-manifest-session-leg-unbound",
+            f"legs={','.join(missing)}",
+        )
+    return [bound[node_id] for node_id in node_ids]
+
+
 def _record_failed_legs(route, results, agent_home):
     """Record failed receipt legs once, after receipt assembly, without changing it."""
     paths = []
@@ -1211,7 +1271,16 @@ def main(argv: list[str] | None = None) -> int:
                         "subdivision-manifest-session-count-mismatch",
                         f"sessions={len(manifest_sessions)}:legs={len(nodes)}",
                     )
-                args.subdivision_manifest_sessions = manifest_sessions
+                args.subdivision_manifest_sessions = _bind_subdivision_sessions(
+                    manifest_sessions, nodes
+                )
+                # anchor M3: the post-hoc diff-scope audit at the stage gate is
+                # only slice attribution if it can subtract the worktree state
+                # at admission. Record it here, keyed by manifest hash, so a
+                # resumed admission recovers the original start state.
+                ROUTE_MODULE.record_subdivision_baseline(
+                    route, str(node["id"]), _manifest
+                )
         parent_identity = DISPATCH_NODE.current_parent_identity()
         if parent_identity is None:
             raise BatchError("parent-runtime-identity-missing")
@@ -1320,6 +1389,10 @@ def main(argv: list[str] | None = None) -> int:
             # G7: consume the validated SD-103 subdivision manifest instead of
             # discarding it -- each leg carries the exact sub-session identity
             # and disjoint fixed_files the admission check already proved safe.
+            # N1: `_bind_subdivision_sessions` re-ordered the sessions onto
+            # `nodes` by each session's declared `node`/`leg_index` key inside
+            # the pre-launch gate, and `assignments` preserves `nodes` order --
+            # so this index is leg identity, not an assumed manifest ordering.
             session = manifest_sessions[leg_index]
             leg["subsession_id"] = str(session["subsession_id"])
             leg["fixed_files"] = list(session["fixed_files"])

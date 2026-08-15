@@ -64,6 +64,68 @@ def sha256_file(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+GAP_RETRY_PURPOSE = "gap-retry"
+
+
+def derive_gap_retry_manifest(
+    manifest: dict[str, Any], failed_subsession_ids
+) -> dict[str, Any]:
+    """AC 29: derive the gap-retry chain from ONLY the failed slices.
+
+    SD-103: a failed slice does not roll back its successful siblings; the owner
+    opens a `gap-retry` sub-session carrying the failed slices' `fixed_files` and
+    nothing else. Deriving that manifest here — instead of hand-copying it at the
+    call site — is what makes "exactly the failed slice's files" a property of
+    the production path rather than of one fixture's assignment statement.
+
+    Identities are derived deterministically from the parent manifest's hash and
+    the failed slice id, so re-deriving the same retry is byte-identical and
+    resumable. A retry of one slice is a `serial` chain (a parallel subdivision
+    is a 2..N contract); two or more stay `parallel`.
+    """
+    if "_manifest_sha256" not in manifest:
+        raise StageSessionError("gap-retry-source-manifest-not-loaded")
+    wanted = list(dict.fromkeys(failed_subsession_ids))
+    if not wanted:
+        raise StageSessionError("gap-retry-requires-a-failed-slice")
+    by_id = {session["subsession_id"]: session for session in manifest["sessions"]}
+    unknown = [item for item in wanted if item not in by_id]
+    if unknown:
+        raise StageSessionError("gap-retry-unknown-slice:" + ",".join(sorted(unknown)))
+    parent = manifest["_manifest_sha256"]
+    sessions = []
+    for offset, session_id in enumerate(wanted, 1):
+        source = by_id[session_id]
+        sessions.append({
+            "subsession_id": f"ss-gap-{parent[:16]}-{offset}",
+            "attempt_id": f"att-gap-{parent[:16]}-{offset}",
+            "adapter": source["adapter"],
+            "slug": f"gap-{parent[:8]}-{offset}",
+            "phase_brief": source["phase_brief"],
+            # The whole point of the derivation: the retry's fence is exactly
+            # the failed slice's, never widened to the parent union.
+            "fixed_files": list(source["fixed_files"]),
+            "narrow_verify": source["narrow_verify"],
+            "expected_round_trips": source["expected_round_trips"],
+            "subsession_purpose": GAP_RETRY_PURPOSE,
+            "gap_retry_of": session_id,
+        })
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "kind": "stage-session-chain",
+        "chain_id": f"ssc-gap-{parent[:16]}",
+        "mode": "parallel" if len(sessions) > 1 else "serial",
+        "worktree": manifest["worktree"],
+        "route_file": manifest["route_file"],
+        "route_id": manifest["route_id"],
+        "route_hash": manifest["route_hash"],
+        "route_node": manifest["route_node"],
+        "completion_gate": manifest["completion_gate"],
+        "gap_retry_of_manifest_sha256": parent,
+        "sessions": sessions,
+    }
+
+
 def _absolute(value: object, *, base: Path, field: str) -> Path:
     if not isinstance(value, str) or not value:
         raise StageSessionError(f"{field}-missing")

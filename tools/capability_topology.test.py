@@ -397,6 +397,7 @@ class TestTopology(unittest.TestCase):
         _S=importlib.util.spec_from_file_location("capability_route",_P(__file__).resolve().parents[1]/"utilities"/"capability-route.py")
         _CR=importlib.util.module_from_spec(_S); _S.loader.exec_module(_CR)
         nodes=_CR._expand_parallel_groups(nodes,code["standard_plus"]["parallel_groups"],"strong",
+            code["capability"],
             auxiliary_check_units=r.get("auxiliary_check_units"))
         stamped={n["id"]:n.get("leg_class") for n in nodes if "parallel_group" in n}
         self.assertEqual(stamped["plan"],"peer")
@@ -406,7 +407,7 @@ class TestTopology(unittest.TestCase):
                 self.assertIn(leg["leg_class"],("peer","auxiliary"))
         aux_nodes=_CR._expand_parallel_groups(
             json.loads(json.dumps(code["standard_plus"]["nodes"])),
-            code["standard_plus"]["parallel_groups"], "thorough",
+            code["standard_plus"]["parallel_groups"], "thorough", code["capability"],
             auxiliary_check_units=r.get("auxiliary_check_units"))
         aux_nodes={n["id"]:n for n in aux_nodes if n.get("leg_class")=="auxiliary"}
         self.assertEqual(aux_nodes["plan-check-simplicity"]["auxiliary_check"],"simplicity-check")

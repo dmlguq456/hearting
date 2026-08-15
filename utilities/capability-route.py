@@ -404,8 +404,14 @@ _TERMINAL_PARALLEL_GROUP_GRANDFATHER = {("autopilot-research", "claim-verify")}
 
 
 def _expand_parallel_groups(nodes, parallel_groups, effective_intensity,
-                            auxiliary_check_units=None, capability=None):
+                            capability, *, auxiliary_check_units=None):
     """Expand registry-v6 groups into ordered 2..4-way sibling nodes.
+
+    `capability` is required (N2). It was an optional kwarg defaulting to
+    `None`, and the grandfather lookup is keyed on `(capability, group id)` --
+    so a caller that simply forgot the argument silently rejected the shipped
+    `autopilot-research claim-verify` group instead of failing at the call.
+    A required parameter turns that into a TypeError at the call site.
 
     The first leg keeps the anchor id for stable downstream references. Extra
     legs get suffix-specific ids, outputs, and write scopes. Direct consumers
@@ -704,8 +710,8 @@ def _compile_from_recipe(registry, recipe, capability, capability_mode, requeste
         nodes=json.loads(json.dumps(recipe["standard_plus"]["nodes"])); gates=recipe["completion_gates"]
         nodes=_expand_parallel_groups(
             nodes, recipe["standard_plus"].get("parallel_groups"), effective,
+            capability,
             auxiliary_check_units=registry.get("auxiliary_check_units"),
-            capability=capability,
         )
         for node in nodes:
             node.pop("fallback_hops", None)
@@ -827,9 +833,8 @@ def verify_route(route, expected_cwd=None, *, allow_stale_registry=False):
         expected_nodes=json.loads(json.dumps(composed_recipe["standard_plus"]["nodes"]))
         expected_nodes=_expand_parallel_groups(
             expected_nodes, composed_recipe["standard_plus"].get("parallel_groups"),
-            route.get("effective_intensity"),
-            auxiliary_check_units=registry.get("auxiliary_check_units"),
-            capability=route.get("capability"))
+            route.get("effective_intensity"), route.get("capability"),
+            auxiliary_check_units=registry.get("auxiliary_check_units"))
         if ([_node_identity(n) for n in route.get("nodes",[])]
                 != [_node_identity(n) for n in expected_nodes]):
             raise ValueError("composed route nodes differ from embedded composed recipe")
@@ -842,9 +847,8 @@ def verify_route(route, expected_cwd=None, *, allow_stale_registry=False):
             expected_nodes=json.loads(json.dumps(route_recipe["standard_plus"]["nodes"]))
             expected_nodes=_expand_parallel_groups(
                 expected_nodes, route_recipe["standard_plus"].get("parallel_groups"),
-                route.get("effective_intensity"),
-                auxiliary_check_units=registry.get("auxiliary_check_units"),
-                capability=route.get("capability"))
+                route.get("effective_intensity"), route.get("capability"),
+                auxiliary_check_units=registry.get("auxiliary_check_units"))
             # The remaining verifier owns field-level diagnostics.  This
             # census closes only the undeclared fanout hole: a rehashed route
             # may not add, remove, reorder, or rename recipe nodes.
@@ -2155,7 +2159,11 @@ def _git_changed_files(worktree):
     """Return the worktree's git-visible changed file paths (AC 28 audit)."""
     try:
         result = subprocess.run(
-            ["git", "-C", str(worktree), "status", "--porcelain"],
+            # `-uall`: the default collapses an untracked directory to one
+            # `dir/` entry, which can never match a `fixed_files` path and made
+            # every slice that created a new directory look like an escape.
+            # The audit compares files, so it has to be given files.
+            ["git", "-C", str(worktree), "status", "--porcelain", "-uall"],
             text=True, capture_output=True, check=False,
         )
     except (OSError, ValueError):
@@ -2170,6 +2178,94 @@ def _git_changed_files(worktree):
         if path:
             changed.add((Path(worktree) / path).resolve(strict=False))
     return changed
+
+
+SUBDIVISION_BASELINE_SCHEMA_VERSION = 1
+
+
+def subdivision_baseline_path(route_id, node_id, manifest_sha256):
+    """Keyed by the manifest hash so a resumed admission finds its own baseline.
+
+    Kept in its own subdirectory: the completion directory's own filenames are
+    read back by `<node_id>.*.json` globs, and a sibling file matching that
+    shape would be counted as marker history by any reader less careful than
+    `_next_marker_sequence`.
+    """
+    return (
+        completion_dir(route_id)
+        / "subdivision"
+        / f"{node_id}.{str(manifest_sha256)[:32]}.json"
+    )
+
+
+def record_subdivision_baseline(route, node_id, manifest):
+    """Snapshot the worktree at subdivision admission (anchor M3 / AC 30).
+
+    The post-hoc diff-scope audit is a statement about what the SLICES changed,
+    but `git status` reports the whole worktree. Without a start-of-subdivision
+    baseline, work the stage legitimately did outside the slices' `fixed_files`
+    -- its own dev log, its checklist, anything inside `write_scope` but outside
+    the slice union -- is indistinguishable from a slice escaping its fence, and
+    the marker is refused for changes no slice made.
+
+    `head_commit` rides along because SD-103 makes parallel slices no-commit
+    workers: index and HEAD are shared state that `fixed_files` disjointness
+    cannot protect, so a moved HEAD is the evidence that some slice committed.
+
+    Write-once and idempotent by identity, so a resumed admission with the same
+    manifest recovers the original baseline instead of snapshotting the
+    half-finished worktree as if it were the start state.
+    """
+    digest = manifest["_manifest_sha256"]
+    worktree = Path(manifest["worktree"])
+    path = subdivision_baseline_path(route["route_id"], node_id, digest)
+    identity = {
+        "schema_version": SUBDIVISION_BASELINE_SCHEMA_VERSION,
+        "route_id": route["route_id"],
+        "route_hash": route["route_hash"],
+        "node_id": node_id,
+        "manifest_sha256": digest,
+        "worktree": str(worktree),
+    }
+    if path.is_file():
+        existing = json.loads(path.read_text(encoding="utf-8"))
+        if {key: existing.get(key) for key in identity} != identity:
+            raise ValueError(f"subdivision-baseline-identity-conflict:{node_id}")
+        return existing
+    from datetime import datetime, timezone
+    record = {
+        **identity,
+        "head_commit": _head_commit(worktree),
+        "changed_files": sorted(str(item) for item in _git_changed_files(worktree)),
+        "recorded_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+    }
+    try:
+        write_once(path, record)
+    except ValueError:
+        # A concurrent admission won the race with byte-different content
+        # (differing `recorded_at`); its record is equally valid as the start
+        # state, so adopt it rather than failing the admission.
+        return json.loads(path.read_text(encoding="utf-8"))
+    return record
+
+
+def load_subdivision_baseline(route, node_id, manifest):
+    """Resume the admission-time baseline by manifest hash; None when absent."""
+    path = subdivision_baseline_path(
+        route["route_id"], node_id, manifest["_manifest_sha256"]
+    )
+    try:
+        record = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if (
+        record.get("route_id") != route.get("route_id")
+        or record.get("route_hash") != route.get("route_hash")
+        or record.get("node_id") != node_id
+        or record.get("manifest_sha256") != manifest["_manifest_sha256"]
+    ):
+        return None
+    return record
 
 
 def complete_subsession_stage(route, node, node_id, evidence, manifest_path, jobs):
@@ -2218,28 +2314,57 @@ def complete_subsession_stage(route, node, node_id, evidence, manifest_path, job
         process=attempt_process_quiescence(metadata)
         if process.state!="quiescent":
             raise ValueError(f"subsession process not quiescent:{session['attempt_id']}:{process.reason}")
-    # AC 28 post-hoc diff-scope audit: every git-visible change the slices made
-    # must fall inside the union of their declared fixed_files. A violation
-    # records subdivision-scope-violation and refuses the marker.
+    # AC 28 post-hoc diff-scope audit, measured against the subdivision's own
+    # start state (anchor M3). `git status` sees the whole worktree, so the
+    # audit subtracts the admission-time baseline first; what remains is what
+    # the slices actually did, which is the only thing their `fixed_files`
+    # fence can be held to. Without a baseline the measurement is not slice
+    # attribution at all, so its absence fails closed rather than silently
+    # widening the audit back to the whole worktree.
     worktree = Path(manifest["worktree"])
-    declared_union = {
-        Path(path).resolve(strict=False)
-        for session in manifest["sessions"]
-        for path in session["fixed_files"]
-    }
-    changed = _git_changed_files(worktree)
-    outside = changed - declared_union
-    if outside:
+    baseline = load_subdivision_baseline(route, node_id, manifest)
+
+    def _refuse(reason, detail):
         record_degradation(
             route_id=route.get("route_id"), route_node=node_id,
             route_hash=route.get("route_hash"), dispatch_depth=2,
             fallback_hop=None, execution_surface="registered-headless",
             writer="capability-route.py", kind="degradation",
-            reason="subdivision-scope-violation",
-            detail=";".join(str(path) for path in sorted(outside))[:512],
+            reason=reason, detail=detail[:512],
             slice_manifest_sha256=manifest["_manifest_sha256"],
         )
-        raise ValueError("subdivision-scope-violation")
+        raise ValueError(reason)
+
+    if baseline is None:
+        _refuse(
+            "subdivision-baseline-missing",
+            f"no admission baseline for manifest {manifest['_manifest_sha256'][:16]}",
+        )
+    # AC 30: parallel slices are no-commit workers (SD-103). index and HEAD are
+    # shared state that fixed_files disjointness cannot protect, so a HEAD that
+    # moved between admission and the stage gate is a slice that committed.
+    head = _head_commit(worktree)
+    if head != baseline.get("head_commit"):
+        _refuse(
+            "subdivision-commit-attempted",
+            f"head {baseline.get('head_commit')} -> {head}",
+        )
+    declared_union = {
+        Path(path).resolve(strict=False)
+        for session in manifest["sessions"]
+        for path in session["fixed_files"]
+    }
+    preexisting = {
+        Path(path).resolve(strict=False)
+        for path in baseline.get("changed_files", [])
+    }
+    changed = _git_changed_files(worktree)
+    outside = changed - declared_union - preexisting
+    if outside:
+        _refuse(
+            "subdivision-scope-violation",
+            ";".join(str(path) for path in sorted(outside)),
+        )
     digest=manifest["_manifest_sha256"]
     attempt_id="att-stage-"+digest[:32]
     metadata={

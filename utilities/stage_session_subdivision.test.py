@@ -184,6 +184,10 @@ class SubdivisionContractTest(unittest.TestCase):
         ]
         jobs_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
+    def _admit(self, route, node, manifest):
+        """Record the admission-time baseline exactly as dispatch-batch does."""
+        return CR.record_subdivision_baseline(route, node["id"], manifest)
+
     def test_ac27_marker_requires_all_slices_and_slice_complete_refused(self):
         # G7: exercise complete_subsession_stage through production code --
         # exactly one aggregated marker for the two slices, and an attempt to
@@ -197,6 +201,7 @@ class SubdivisionContractTest(unittest.TestCase):
             evidence = Path(td) / "evidence.md"
             evidence.write_text("execute done\n", encoding="utf-8")
             with mock.patch.dict(os.environ, {"AGENT_DISPATCH_JOBS": str(jobs_path)}):
+                self._admit(route, node, manifest)
                 marker, status = CR.complete_subsession_stage(
                     route, node, "execute", evidence, manifest_path, jobs_path,
                 )
@@ -233,40 +238,200 @@ class SubdivisionContractTest(unittest.TestCase):
             self._write_jobs(jobs_path, route, manifest)
             evidence = Path(td) / "evidence.md"
             evidence.write_text("execute done\n", encoding="utf-8")
-            rogue = worktree / "rogue.py"
-            rogue.write_text("unplanned change\n", encoding="utf-8")
             recorded = []
             with mock.patch.dict(os.environ, {"AGENT_DISPATCH_JOBS": str(jobs_path)}):
+                self._admit(route, node, manifest)
+                rogue = worktree / "rogue.py"
+                rogue.write_text("unplanned change\n", encoding="utf-8")
                 with mock.patch.object(CR, "record_degradation", side_effect=lambda **kw: recorded.append(kw)):
                     with self.assertRaisesRegex(ValueError, "subdivision-scope-violation"):
                         CR.complete_subsession_stage(route, node, "execute", evidence, manifest_path, jobs_path)
                 self.assertEqual(len(recorded), 1)
                 self.assertEqual(recorded[0]["reason"], "subdivision-scope-violation")
+                self.assertIn("rogue.py", recorded[0]["detail"])
                 completion_dir = CR.completion_dir(route["route_id"])
                 canonical_marker = completion_dir / "execute.json"
                 self.assertFalse(canonical_marker.is_file())
 
-    def test_ac29_gap_retry_uses_only_failed_slice_files(self):
+    def test_anchor_m3_audit_measures_the_slice_delta_not_the_whole_worktree(self):
+        # anchor M3: `git status` reports the whole worktree, so a change the
+        # stage made BEFORE the subdivision opened -- inside write_scope but
+        # outside the slices' fixed_files union, e.g. its own dev log -- used to
+        # be indistinguishable from a slice escaping its fence and refused the
+        # marker for work no slice did. The audit now subtracts the
+        # admission-time baseline. A change made AFTER admission still fails.
         with tempfile.TemporaryDirectory() as td:
             worktree, route, node, manifest_path = self._fixture(td)
             manifest = SSC.load_manifest(manifest_path, route=route, node=node)
-            failed = manifest["sessions"][1]
-            gap = {"subsession_id": "ss-gap1", "attempt_id": "att-gap-1",
-                   "adapter": "codex", "slug": "gap-1",
-                   "phase_brief": failed["phase_brief"],
-                   "fixed_files": failed["fixed_files"],
-                   "narrow_verify": failed["narrow_verify"],
-                   "expected_round_trips": 2}
-            self.assertEqual(sorted(gap["fixed_files"]), sorted(failed["fixed_files"]))
+            jobs_path = Path(td) / "jobs.log"
+            self._write_jobs(jobs_path, route, manifest)
+            evidence = Path(td) / "evidence.md"
+            evidence.write_text("execute done\n", encoding="utf-8")
+            devlog = worktree / "dev_logs"
+            devlog.mkdir()
+            (devlog / "implementation.md").write_text("pre-subdivision\n", encoding="utf-8")
+            with mock.patch.dict(os.environ, {"AGENT_DISPATCH_JOBS": str(jobs_path)}):
+                baseline = self._admit(route, node, manifest)
+                self.assertIn(
+                    str(devlog / "implementation.md"), baseline["changed_files"]
+                )
+                marker, status = CR.complete_subsession_stage(
+                    route, node, "execute", evidence, manifest_path, jobs_path,
+                )
+                self.assertEqual(status["status"], "stage-gate-aggregated")
+                # the same file changing again after admission is still a
+                # violation: the baseline is a start state, not a permanent
+                # exemption list -- so this asserts the delta, not the path.
+                CR.completion_dir(route["route_id"]).joinpath("execute.json").unlink()
+                rogue = worktree / "unplanned.py"
+                rogue.write_text("after admission\n", encoding="utf-8")
+                with self.assertRaisesRegex(ValueError, "subdivision-scope-violation"):
+                    CR.complete_subsession_stage(
+                        route, node, "execute", evidence, manifest_path, jobs_path,
+                    )
+
+    def test_ac30_slice_commit_is_refused(self):
+        # AC 30 / SD-103: parallel slices are no-commit workers. index and HEAD
+        # are shared state that fixed_files disjointness cannot protect, so a
+        # HEAD that moved between admission and the stage gate is a slice that
+        # committed -- typed refusal, ledger row, and no marker.
+        import subprocess
+        with tempfile.TemporaryDirectory() as td:
+            worktree, route, node, manifest_path = self._fixture(td)
+            manifest = SSC.load_manifest(manifest_path, route=route, node=node)
+            jobs_path = Path(td) / "jobs.log"
+            self._write_jobs(jobs_path, route, manifest)
+            evidence = Path(td) / "evidence.md"
+            evidence.write_text("execute done\n", encoding="utf-8")
+            recorded = []
+            with mock.patch.dict(os.environ, {"AGENT_DISPATCH_JOBS": str(jobs_path)}):
+                self._admit(route, node, manifest)
+                for session in manifest["sessions"]:
+                    Path(session["fixed_files"][0]).write_text("slice edit\n", encoding="utf-8")
+                subprocess.run(["git", "-C", str(worktree), "add", "-A"], check=True)
+                subprocess.run(
+                    ["git", "-C", str(worktree), "commit", "-q", "-m", "slice commit"],
+                    check=True,
+                )
+                with mock.patch.object(CR, "record_degradation", side_effect=lambda **kw: recorded.append(kw)):
+                    with self.assertRaisesRegex(ValueError, "subdivision-commit-attempted"):
+                        CR.complete_subsession_stage(
+                            route, node, "execute", evidence, manifest_path, jobs_path,
+                        )
+                self.assertEqual(len(recorded), 1)
+                self.assertEqual(recorded[0]["reason"], "subdivision-commit-attempted")
+                self.assertFalse(
+                    (CR.completion_dir(route["route_id"]) / "execute.json").is_file()
+                )
+
+    def test_missing_admission_baseline_fails_closed(self):
+        # Without a baseline the audit is not slice attribution at all, so it
+        # refuses rather than silently widening back to the whole worktree.
+        with tempfile.TemporaryDirectory() as td:
+            worktree, route, node, manifest_path = self._fixture(td)
+            manifest = SSC.load_manifest(manifest_path, route=route, node=node)
+            jobs_path = Path(td) / "jobs.log"
+            self._write_jobs(jobs_path, route, manifest)
+            evidence = Path(td) / "evidence.md"
+            evidence.write_text("execute done\n", encoding="utf-8")
+            with mock.patch.dict(os.environ, {"AGENT_DISPATCH_JOBS": str(jobs_path)}):
+                with self.assertRaisesRegex(ValueError, "subdivision-baseline-missing"):
+                    CR.complete_subsession_stage(
+                        route, node, "execute", evidence, manifest_path, jobs_path,
+                    )
+
+    def test_ac29_gap_retry_uses_only_failed_slice_files(self):
+        # AC 29: the retry manifest is DERIVED by production code from the
+        # failed slice, then validated by the real loader. The previous fixture
+        # assigned `gap["fixed_files"] = failed["fixed_files"]` and compared the
+        # result with itself, which no production path could ever contradict.
+        with tempfile.TemporaryDirectory() as td:
+            worktree, route, node, manifest_path = self._fixture(td)
+            manifest = SSC.load_manifest(manifest_path, route=route, node=node)
+            failed, succeeded = manifest["sessions"][1], manifest["sessions"][0]
+            gap = SSC.derive_gap_retry_manifest(manifest, [failed["subsession_id"]])
+            gap_path = Path(td) / "gap.json"
+            gap_path.write_text(json.dumps(gap, indent=2), encoding="utf-8")
+            loaded = SSC.load_manifest(gap_path, route=route, node=node)
+            self.assertEqual(len(loaded["sessions"]), 1)
+            self.assertEqual(loaded["mode"], "serial")
+            self.assertEqual(
+                loaded["sessions"][0]["fixed_files"], failed["fixed_files"]
+            )
+            self.assertEqual(
+                loaded["sessions"][0]["subsession_purpose"], SSC.GAP_RETRY_PURPOSE
+            )
+            self.assertEqual(loaded["sessions"][0]["gap_retry_of"], failed["subsession_id"])
+            # the successful sibling's files are NOT re-opened by the retry
+            for path in succeeded["fixed_files"]:
+                self.assertNotIn(path, loaded["sessions"][0]["fixed_files"])
+            # identities are derived from the parent hash, so re-deriving the
+            # same retry is byte-identical (resumable, not a fresh chain)
+            self.assertEqual(
+                SSC.derive_gap_retry_manifest(manifest, [failed["subsession_id"]]), gap
+            )
+            # two failed slices stay a parallel chain and carry exactly their
+            # own two fences
+            both = SSC.derive_gap_retry_manifest(
+                manifest, [s["subsession_id"] for s in manifest["sessions"]]
+            )
+            self.assertEqual(both["mode"], "parallel")
+            self.assertEqual(
+                sorted(f for s in both["sessions"] for f in s["fixed_files"]),
+                sorted(f for s in manifest["sessions"] for f in s["fixed_files"]),
+            )
+            with self.assertRaisesRegex(SSC.StageSessionError, "gap-retry-unknown-slice"):
+                SSC.derive_gap_retry_manifest(manifest, ["ss-not-a-slice"])
+            with self.assertRaisesRegex(SSC.StageSessionError, "gap-retry-requires-a-failed-slice"):
+                SSC.derive_gap_retry_manifest(manifest, [])
 
     def test_ac30_resume_by_manifest_hash(self):
+        # AC 30: the resume identity is recovered FROM the manifest hash by the
+        # real aggregation path -- a second call finds the prior marker instead
+        # of writing a new one, and the admission baseline is looked up by the
+        # same key. The previous fixture asserted sha256_file(p) == sha256_file(p).
         with tempfile.TemporaryDirectory() as td:
             worktree, route, node, manifest_path = self._fixture(td)
             manifest = SSC.load_manifest(manifest_path, route=route, node=node)
-            digest = manifest["_manifest_sha256"]
-            self.assertEqual(digest, SSC.sha256_file(manifest_path))
-            # same content -> same hash (deterministic resume identity)
-            self.assertEqual(digest, SSC.sha256_file(manifest_path))
+            jobs_path = Path(td) / "jobs.log"
+            self._write_jobs(jobs_path, route, manifest)
+            evidence = Path(td) / "evidence.md"
+            evidence.write_text("execute done\n", encoding="utf-8")
+            with mock.patch.dict(os.environ, {"AGENT_DISPATCH_JOBS": str(jobs_path)}):
+                baseline = self._admit(route, node, manifest)
+                # the baseline is addressed by the manifest hash, so a resumed
+                # admission recovers the ORIGINAL start state rather than
+                # snapshotting the half-finished worktree
+                (worktree / "source" / "file-1.py").write_text("slice work\n", encoding="utf-8")
+                resumed = self._admit(route, node, manifest)
+                self.assertEqual(resumed, baseline)
+                self.assertEqual(
+                    CR.load_subdivision_baseline(route, "execute", manifest), baseline
+                )
+                first, _ = CR.complete_subsession_stage(
+                    route, node, "execute", evidence, manifest_path, jobs_path,
+                )
+                again, _ = CR.complete_subsession_stage(
+                    route, node, "execute", evidence, manifest_path, jobs_path,
+                )
+                self.assertEqual(first, again)
+                self.assertEqual(
+                    first["attempt_id"],
+                    "att-stage-" + manifest["_manifest_sha256"][:32],
+                )
+                # a materially different manifest is a different stage identity,
+                # not a resume of this one
+                other = json.loads(manifest_path.read_text())
+                other["sessions"][0]["expected_round_trips"] = 3
+                other_path = Path(td) / "chain-2.json"
+                other_path.write_text(json.dumps(other, indent=2), encoding="utf-8")
+                other_manifest = SSC.load_manifest(other_path, route=route, node=node)
+                self.assertNotEqual(
+                    other_manifest["_manifest_sha256"], manifest["_manifest_sha256"]
+                )
+                self.assertIsNone(
+                    CR.load_subdivision_baseline(route, "execute", other_manifest)
+                )
 
 
 if __name__ == "__main__":

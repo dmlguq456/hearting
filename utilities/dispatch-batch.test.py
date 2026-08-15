@@ -1733,9 +1733,11 @@ class DispatchBatchTest(unittest.TestCase):
         sessions = [
             {"subsession_id": "ss-slice-1", "attempt_id": "att-slice-aaaaaaaaaaaaaaaaaaaaaaaaaaaa",
              "adapter": "codex", "slug": "slice-1", "phase_brief": str(self.base / "b1.md"),
+             "node": "plan",
              "fixed_files": [shared], "narrow_verify": "true", "expected_round_trips": 2},
             {"subsession_id": "ss-slice-2", "attempt_id": "att-slice-bbbbbbbbbbbbbbbbbbbbbbbbbbbb",
              "adapter": "codex", "slug": "slice-2", "phase_brief": str(self.base / "b2.md"),
+             "node": "plan-replica",
              "fixed_files": [shared], "narrow_verify": "true", "expected_round_trips": 2},
         ]
         route, manifest_path = self._subdivision_route_and_manifest(sessions)
@@ -1755,10 +1757,12 @@ class DispatchBatchTest(unittest.TestCase):
         sessions = [
             {"subsession_id": "ss-slice-1", "attempt_id": "att-slice-aaaaaaaaaaaaaaaaaaaaaaaaaaaa",
              "adapter": "codex", "slug": "slice-1", "phase_brief": str(self.base / "b1.md"),
+             "node": "plan",
              "fixed_files": [str(self.base / "source" / "a.py")],
              "narrow_verify": "true", "expected_round_trips": 2},
             {"subsession_id": "ss-slice-2", "attempt_id": "att-slice-bbbbbbbbbbbbbbbbbbbbbbbbbbbb",
              "adapter": "codex", "slug": "slice-2", "phase_brief": str(self.base / "b2.md"),
+             "node": "plan-replica",
              "fixed_files": [str(self.base / "source" / "b.py")],
              "narrow_verify": "true", "expected_round_trips": 2},
         ]
@@ -1772,6 +1776,79 @@ class DispatchBatchTest(unittest.TestCase):
         got = {leg["subsession_id"]: leg["fixed_files"] for leg in receipt["legs"]}
         self.assertEqual(got["ss-slice-1"], [str(self.base / "source" / "a.py")])
         self.assertEqual(got["ss-slice-2"], [str(self.base / "source" / "b.py")])
+        by_node = {leg["node"]: leg["subsession_id"] for leg in receipt["legs"]}
+        self.assertEqual(by_node, {"plan": "ss-slice-1", "plan-replica": "ss-slice-2"})
+
+    def test_n1_slice_binds_by_declared_key_not_manifest_order(self):
+        # N1: `assign_harnesses` returns legs in `nodes` order while the
+        # manifest's session order is whatever its author wrote. Binding by
+        # position hands a slice's fixed_files to the wrong leg the moment the
+        # two orders differ, and only the count is checked -- so the proven
+        # disjointness stops describing what actually runs. Here the manifest
+        # is written in the REVERSE order and each slice must still land on the
+        # leg it names.
+        sessions = [
+            {"subsession_id": "ss-slice-2", "attempt_id": "att-slice-bbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+             "adapter": "codex", "slug": "slice-2", "phase_brief": str(self.base / "b2.md"),
+             "node": "plan-replica",
+             "fixed_files": [str(self.base / "source" / "b.py")],
+             "narrow_verify": "true", "expected_round_trips": 2},
+            {"subsession_id": "ss-slice-1", "attempt_id": "att-slice-aaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+             "adapter": "codex", "slug": "slice-1", "phase_brief": str(self.base / "b1.md"),
+             "node": "plan",
+             "fixed_files": [str(self.base / "source" / "a.py")],
+             "narrow_verify": "true", "expected_round_trips": 2},
+        ]
+        route, manifest_path = self._subdivision_route_and_manifest(sessions)
+        rc, out = self._subdivision_dry_run(route, manifest_path)
+        self.assertEqual(rc, 0, out)
+        legs = {leg["node"]: leg for leg in json.loads(out)["legs"]}
+        self.assertEqual(legs["plan"]["subsession_id"], "ss-slice-1")
+        self.assertEqual(legs["plan"]["fixed_files"], [str(self.base / "source" / "a.py")])
+        self.assertEqual(legs["plan-replica"]["subsession_id"], "ss-slice-2")
+        self.assertEqual(legs["plan-replica"]["fixed_files"], [str(self.base / "source" / "b.py")])
+        # `leg_index` is the accepted positional spelling of the same key
+        indexed = json.loads(json.dumps(sessions))
+        for session in indexed:
+            session["leg_index"] = 0 if session["node"] == "plan" else 1
+            del session["node"]
+        route, manifest_path = self._subdivision_route_and_manifest(indexed)
+        rc, out = self._subdivision_dry_run(route, manifest_path)
+        self.assertEqual(rc, 0, out)
+        legs = {leg["node"]: leg["subsession_id"] for leg in json.loads(out)["legs"]}
+        self.assertEqual(legs, {"plan": "ss-slice-1", "plan-replica": "ss-slice-2"})
+
+    def test_n1_unbound_or_conflicting_slice_keys_are_typed_refusals(self):
+        # A session naming no leg is refused rather than assumed to be at its
+        # own list position, and two sessions naming the same leg is a refusal
+        # rather than a silent last-writer-wins.
+        def build(mutate):
+            sessions = [
+                {"subsession_id": "ss-slice-1", "attempt_id": "att-slice-aaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                 "adapter": "codex", "slug": "slice-1", "phase_brief": str(self.base / "b1.md"),
+                 "node": "plan",
+                 "fixed_files": [str(self.base / "source" / "a.py")],
+                 "narrow_verify": "true", "expected_round_trips": 2},
+                {"subsession_id": "ss-slice-2", "attempt_id": "att-slice-bbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                 "adapter": "codex", "slug": "slice-2", "phase_brief": str(self.base / "b2.md"),
+                 "node": "plan-replica",
+                 "fixed_files": [str(self.base / "source" / "b.py")],
+                 "narrow_verify": "true", "expected_round_trips": 2},
+            ]
+            mutate(sessions)
+            return self._subdivision_route_and_manifest(sessions)
+        for mutate, reason in (
+            (lambda s: s[1].pop("node"), "subdivision-manifest-session-leg-unbound"),
+            (lambda s: s[1].update(node="plan"), "subdivision-manifest-session-leg-duplicate"),
+            (lambda s: s[1].update(node="not-a-leg"), "subdivision-manifest-session-leg-unknown"),
+            (lambda s: [(x.pop("node"), x.update(leg_index=9)) for x in s],
+             "subdivision-manifest-session-leg-unknown"),
+        ):
+            with self.subTest(reason=reason):
+                route, manifest_path = build(mutate)
+                rc, out = self._subdivision_dry_run(route, manifest_path)
+                self.assertEqual(rc, 65, out)
+                self.assertEqual(json.loads(out)["reason"], reason)
 
     def test_g7_subdivision_manifest_session_count_must_match_group_width(self):
         # A manifest that itself validates (3 disjoint, in-scope sessions, within
@@ -1781,6 +1858,7 @@ class DispatchBatchTest(unittest.TestCase):
         sessions = [
             {"subsession_id": f"ss-slice-{n}", "attempt_id": f"att-slice-{n}{'a' * 26}",
              "adapter": "codex", "slug": f"slice-{n}", "phase_brief": str(self.base / f"b{n}.md"),
+             "node": "plan" if n == 1 else f"plan-replica-{n}",
              "fixed_files": [str(self.base / "source" / f"{n}.py")],
              "narrow_verify": "true", "expected_round_trips": 2}
             for n in (1, 2, 3)

@@ -216,8 +216,8 @@ class TestRoute(unittest.TestCase):
       expected=json.loads(json.dumps(recipe["standard_plus"]["nodes"]))
       expected=R._expand_parallel_groups(
        expected,recipe["standard_plus"].get("parallel_groups"),intensity,
-       auxiliary_check_units=registry.get("auxiliary_check_units"),
-       capability=recipe["capability"])
+       recipe["capability"],
+       auxiliary_check_units=registry.get("auxiliary_check_units"))
       for node in expected: node.pop("fallback_hops",None)
       def stable(nodes):
        return [
@@ -448,6 +448,32 @@ class TestRoute(unittest.TestCase):
    ]})
   with self.assertRaisesRegex(R.TOPO.TopologyError,"parallel group on terminal node"):
    R.TOPO.validate_registry(broken)
+ def test_d4_terminal_anchor_cannot_arbitrate_auxiliary_findings(self):
+  # D4 replacement fixture. The assertion above was repurposed to G6's
+  # message, leaving nothing guarding D4's own rule: a terminal anchor has no
+  # downstream verdict that can carry `auxiliary_findings_considered`, so it
+  # structurally has no arbiter. G6 masks it for every ordinary terminal node,
+  # but NOT for the recorded `autopilot-research claim-verify` grandfather --
+  # which is precisely where the rule still has to bite on its own. That is
+  # also why PRD 13.30.4's `edge-case-check` placement has zero realized slot.
+  r=R.TOPO.load_registry()
+  broken=json.loads(json.dumps(r))
+  research=next(x for x in broken["recipes"] if x["capability"]=="autopilot-research")
+  self.assertTrue(next(n for n in research["standard_plus"]["nodes"]
+                       if n["id"]=="claim-verify").get("terminal"))
+  group=next(g for g in research["standard_plus"]["parallel_groups"]
+             if g["id"]=="claim-verify")
+  group["width_by_intensity"]["thorough"]=3
+  group["width_by_intensity"]["adversarial"]=3
+  group["legs"]=group["legs"]+[{
+   "suffix":"edge-case","perspective":"edge-case-check","model_profile":"light",
+   "leg_class":"auxiliary","auxiliary_check":"edge-case-check"}]
+  with self.assertRaisesRegex(
+   R.TOPO.TopologyError,
+   r"terminal anchor claim-verify has no arbiter for auxiliary findings"):
+   R.TOPO.validate_registry(broken)
+  # the grandfather without an auxiliary leg still validates and compiles
+  R.TOPO.validate_registry(R.TOPO.load_registry())
  def test_g6_parallel_group_on_terminal_node_rejected_unless_grandfathered(self):
   # G6/AC 21: a parallel group on a terminal node compile-rejects unless the
   # (capability, group id) pair is the recorded autopilot-research claim-verify
