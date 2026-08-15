@@ -65,7 +65,7 @@ class CodexAppServerSupervisorTest(unittest.TestCase):
         self.app.write_text(
             textwrap.dedent(
                 """\
-                import fcntl, json, os, sys, time
+                import fcntl, json, os, sys, threading, time
                 trace = os.environ['FAKE_TRACE']
                 turns = 0
                 def record(event, **extra):
@@ -131,6 +131,27 @@ class CodexAppServerSupervisorTest(unittest.TestCase):
                                 'aggregatedOutput':'MUST_NOT_REACH_FLEET','exitCode':0,
                                 'status':'completed'}}})
                         dry_first = os.environ.get('FAKE_DRY_RUN_FIRST') == '1'
+                        launch_race = os.environ.get('FAKE_LAUNCH_STARTED_RACE') == '1'
+                        if launch_race and turns == 1:
+                            jobs = os.environ['FAKE_JOBS']
+                            with open(jobs, 'a', encoding='utf-8') as h:
+                                for suffix in ('a', 'b'):
+                                    h.write(f'2026-08-11T00:00:00Z\\topen\\t/repo\\t/wt\\tchild-race-{suffix}\\t'
+                                            'attempt_schema_version=2,dispatch_depth=2,transport=headless,'
+                                            'execution_surface=registered-headless,registered_worker=1,'
+                                            f'launch_started=0,attempt_id=att-child-race-{suffix},'
+                                            'parent_attempt_id=att-parent\\n')
+                            def publish_started():
+                                time.sleep(0.05)
+                                for suffix in ('a', 'b'):
+                                    with open(jobs, 'a', encoding='utf-8') as h:
+                                        h.write(f'2026-08-11T00:00:01Z\\topen\\t/repo\\t/wt\\tchild-race-{suffix}\\t'
+                                                'attempt_schema_version=2,dispatch_depth=2,transport=headless,'
+                                                'execution_surface=registered-headless,registered_worker=1,'
+                                                f'launch_started=1,attempt_id=att-child-race-{suffix},'
+                                                'parent_attempt_id=att-parent\\n')
+                                    time.sleep(0.03)
+                            threading.Thread(target=publish_started, daemon=True).start()
                         if dry_first and turns == 2:
                             with open(os.environ['FAKE_JOBS'], 'a', encoding='utf-8') as h:
                                 h.write('2026-08-11T00:00:00Z\\topen\\t/repo\\t/wt\\tchild\\t'
@@ -336,6 +357,33 @@ class CodexAppServerSupervisorTest(unittest.TestCase):
             if row.get("continuation_reason") == "runtime-wait-without-started-child"
         )
         self.assertEqual(correction["state"], "registration-required")
+
+    def test_runtime_wait_settles_launch_started_race_without_retry(self):
+        self.jobs.write_text(owner_row(self.lease), encoding="utf-8")
+        result = self.run_supervisor(
+            FAKE_LAUNCH_STARTED_RACE="1", FAKE_JOBS=str(self.jobs)
+        )
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        trace = [json.loads(line) for line in self.trace.read_text().splitlines()]
+        turns = [row for row in trace if row["event"] == "turn-start"]
+        self.assertEqual(len(turns), 2)
+        rows = [json.loads(line) for line in result.stdout.splitlines()]
+        self.assertFalse(any(
+            row.get("continuation_reason") == "runtime-wait-without-started-child"
+            for row in rows
+        ))
+        settled = [
+            row for row in rows
+            if row.get("type") == "dispatch.supervisor.launch-settled"
+        ]
+        self.assertEqual(len(settled), 1)
+        self.assertEqual(settled[0]["attempt_count"], 2)
+        parked = [
+            row for row in rows
+            if row.get("type") == "dispatch.supervisor.parked"
+        ]
+        self.assertEqual(len(parked), 1)
+        self.assertEqual(parked[0]["attempt_count"], 2)
 
     def test_bound_long_route_survives_thirteen_continuations_and_completes(self):
         route = self.base / "long-route.json"
