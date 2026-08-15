@@ -84,9 +84,9 @@ python3 "$MEM" stats >/dev/null 2>&1
 rc1=$?
 [ "$rc1" = "0" ] && ok "①: mem stats exit 0 (first run)" || bad "①: mem stats failed (rc=$rc1)"
 
-# Assert user_version == 8 (v7 retrieval state + v8 sync ledgers)
+# Assert user_version == 10 (v7 retrieval + v8 sync + v9 cutover + v10 status evidence)
 uv=$(python3 -c "import sqlite3; con=sqlite3.connect('$STORE_1/memory.db'); print(con.execute('PRAGMA user_version').fetchone()[0])")
-[ "$uv" = "8" ] && ok "①: PRAGMA user_version == 8 after migration" || bad "①: user_version=$uv (expected 8)"
+[ "$uv" = "10" ] && ok "①: PRAGMA user_version == 10 after migration" || bad "①: user_version=$uv (expected 10)"
 
 # Export dump run-1
 DUMP_1A="$(mktemp)"

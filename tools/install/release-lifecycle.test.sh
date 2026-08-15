@@ -88,6 +88,7 @@ required = {
     "hearting/tools/memory/protocol_v2.py": "#!/usr/bin/env python3\n",
     "hearting/tools/memory/git_exchange_v2.py": "#!/usr/bin/env python3\n",
     "hearting/tools/memory/sync_v2.py": "#!/usr/bin/env python3\n",
+    "hearting/tools/memory/migration_v2.py": "#!/usr/bin/env python3\n",
 }
 
 def make_release(version, attack=None, wrong_checksum=False):
