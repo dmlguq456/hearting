@@ -338,6 +338,104 @@ class SubdivisionContractTest(unittest.TestCase):
                     (CR.completion_dir(route["route_id"]) / "execute.json").is_file()
                 )
 
+    def test_b2_owner_post_quiescence_commit_is_not_a_slice_commit(self):
+        # B2: judging "a slice committed" from "HEAD moved at all" refused the
+        # OWNER's own commit. SD-103 has the owner commit once after quiescence
+        # and `core/OPERATIONS.md` §5.10 already accepts first-parent descendant
+        # HEAD movement under the same lineage proof as an in-place retry, so
+        # movement alone was the wrong proposition -- and with a write-once
+        # baseline and an unrewindable HEAD the refusal had no recovery path.
+        import subprocess
+
+        def _commit(worktree, message, *paths):
+            subprocess.run(["git", "-C", str(worktree), "add", *paths], check=True)
+            subprocess.run(
+                ["git", "-C", str(worktree), "commit", "-q", "-m", message], check=True
+            )
+
+        def _staged(td):
+            # a real worktree has history; the fixture's bare `git init` leaves
+            # HEAD unborn, which is the separate no-lineage-anchor case below
+            worktree, route, node, manifest_path = self._fixture(td)
+            subprocess.run(
+                ["git", "-C", str(worktree), "commit", "-q", "--allow-empty", "-m", "base"],
+                check=True,
+            )
+            manifest = SSC.load_manifest(manifest_path, route=route, node=node)
+            jobs_path = Path(td) / "jobs.log"
+            self._write_jobs(jobs_path, route, manifest)
+            evidence = Path(td) / "evidence.md"
+            evidence.write_text("execute done\n", encoding="utf-8")
+            return worktree, route, node, manifest, manifest_path, jobs_path, evidence
+
+        # 1. the sanctioned order -- close the stage gate, THEN commit -- and the
+        #    idempotent replay of that same gate afterwards
+        with tempfile.TemporaryDirectory() as td:
+            worktree, route, node, manifest, mp, jobs, evidence = _staged(td)
+            with mock.patch.dict(os.environ, {"AGENT_DISPATCH_JOBS": str(jobs)}):
+                self._admit(route, node, manifest)
+                for session in manifest["sessions"]:
+                    Path(session["fixed_files"][0]).write_text("slice edit\n", encoding="utf-8")
+                _marker, status = CR.complete_subsession_stage(
+                    route, node, "execute", evidence, mp, jobs
+                )
+                self.assertEqual(status["status"], "stage-gate-aggregated")
+                self.assertNotIn("resumed", status)
+                _commit(worktree, "owner post-quiescence commit", "-A")
+                _marker, resumed = CR.complete_subsession_stage(
+                    route, node, "execute", evidence, mp, jobs
+                )
+                self.assertEqual(resumed["status"], "stage-gate-aggregated")
+                self.assertTrue(resumed["resumed"])
+
+        # 2. a slice that commits its own fence is still refused (AC 30 stands)
+        with tempfile.TemporaryDirectory() as td:
+            worktree, route, node, manifest, mp, jobs, evidence = _staged(td)
+            recorded = []
+            with mock.patch.dict(os.environ, {"AGENT_DISPATCH_JOBS": str(jobs)}):
+                self._admit(route, node, manifest)
+                for session in manifest["sessions"]:
+                    Path(session["fixed_files"][0]).write_text("slice edit\n", encoding="utf-8")
+                _commit(worktree, "slice commit", "-A")
+                with mock.patch.object(
+                    CR, "record_degradation", side_effect=lambda **kw: recorded.append(kw)
+                ):
+                    with self.assertRaisesRegex(ValueError, "subdivision-commit-attempted"):
+                        CR.complete_subsession_stage(
+                            route, node, "execute", evidence, mp, jobs
+                        )
+                self.assertIn("carries", recorded[0]["detail"])
+
+        # 3. history that is NOT a first-parent descendant is refused outright --
+        #    that is the lineage break `OPERATIONS.md` §5.10 does not accept
+        with tempfile.TemporaryDirectory() as td:
+            worktree, route, node, manifest, mp, jobs, evidence = _staged(td)
+            with mock.patch.dict(os.environ, {"AGENT_DISPATCH_JOBS": str(jobs)}):
+                self._admit(route, node, manifest)
+                subprocess.run(
+                    ["git", "-C", str(worktree), "checkout", "-q", "--orphan", "diverged"],
+                    check=True,
+                )
+                subprocess.run(
+                    ["git", "-C", str(worktree), "commit", "-q", "--allow-empty",
+                     "-m", "diverged"],
+                    check=True,
+                )
+                with self.assertRaisesRegex(ValueError, "subdivision-commit-attempted"):
+                    CR.complete_subsession_stage(route, node, "execute", evidence, mp, jobs)
+
+        # 4. accepting a lineage-clean commit must not blind the scope audit: a
+        #    commit takes its files OUT of `git status`, so an out-of-fence file
+        #    hidden in one is still caught
+        with tempfile.TemporaryDirectory() as td:
+            worktree, route, node, manifest, mp, jobs, evidence = _staged(td)
+            with mock.patch.dict(os.environ, {"AGENT_DISPATCH_JOBS": str(jobs)}):
+                self._admit(route, node, manifest)
+                (worktree / "rogue.py").write_text("in no fence\n", encoding="utf-8")
+                _commit(worktree, "rogue commit", "rogue.py")
+                with self.assertRaisesRegex(ValueError, "subdivision-scope-violation"):
+                    CR.complete_subsession_stage(route, node, "execute", evidence, mp, jobs)
+
     def test_missing_admission_baseline_fails_closed(self):
         # For a PARALLEL subdivision, an absent baseline means the audit is not
         # slice attribution at all, so it refuses rather than silently widening

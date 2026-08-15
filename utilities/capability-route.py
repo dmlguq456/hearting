@@ -2180,6 +2180,94 @@ def _git_changed_files(worktree):
     return changed
 
 
+def _published_owner_chain_marker(route, node, node_id, evidence, *, attempt_id, attempt_metadata):
+    """Return the canonical marker when this exact aggregation already published one.
+
+    "Exact" is `write_completion_marker`'s own replay identity -- the evidence
+    digest plus every attempt axis, which for an owner-chain gate includes the
+    manifest sha256 -- so this recognizes a replay of the same stage gate and
+    nothing else. A different manifest, different evidence, or a marker written
+    by any other authority is not a replay and falls through to the full audit.
+    """
+    _migrate_completion_dir_forward(route["route_id"])
+    path = completion_dir(route["route_id"]) / f"{node_id}.json"
+    try:
+        existing = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    try:
+        axes = _marker_attempt_axes(node, attempt_id, attempt_metadata)
+    except ValueError:
+        return None
+    identity = {
+        "evidence_sha256": hashlib.sha256(evidence.read_bytes()).hexdigest(),
+        **axes,
+    }
+    observed = {
+        "evidence_sha256": existing.get("evidence", {}).get("sha256"),
+        **{key: existing.get(key) for key in axes},
+    }
+    if observed != identity:
+        return None
+    static_identity = {
+        "schema_version": 2,
+        "route_id": route["route_id"],
+        "route_hash": route["route_hash"],
+        "registry_digest": route["registry_digest"],
+        "node_id": node_id,
+        "completion_gate": node["completion_gate"],
+    }
+    if any(existing.get(key) != value for key, value in static_identity.items()):
+        return None
+    return existing
+
+
+def _first_parent_descends_from(worktree, ancestor, head):
+    """True when `head` reaches `ancestor` along first parents only.
+
+    `core/OPERATIONS.md` §5.10 states the lineage proof for a declared
+    sub-session chain in exactly these terms, so the stage gate asks the same
+    question rather than a stricter one of its own. `merge-base --is-ancestor`
+    would also accept a side branch merged in; the contract says first-parent.
+    """
+    if not ancestor or not head:
+        return False
+    try:
+        probe = subprocess.run(
+            ["git", "-C", str(worktree), "rev-list", "--first-parent", str(head)],
+            text=True, capture_output=True, check=False,
+        )
+    except (OSError, ValueError):
+        return False
+    if probe.returncode != 0:
+        return False
+    return str(ancestor) in probe.stdout.split()
+
+
+def _git_committed_files(worktree, ancestor, head):
+    """Paths whose content differs between two commits (AC 28/30 audit).
+
+    A commit takes its files out of `git status`, so a gate that accepts the
+    commit has to read them back out of history or it stops measuring them.
+    """
+    if not ancestor or not head:
+        return set()
+    try:
+        probe = subprocess.run(
+            ["git", "-C", str(worktree), "diff", "--name-only", str(ancestor), str(head)],
+            text=True, capture_output=True, check=False,
+        )
+    except (OSError, ValueError):
+        return set()
+    if probe.returncode != 0:
+        return set()
+    return {
+        (Path(worktree) / line.strip()).resolve(strict=False)
+        for line in probe.stdout.splitlines()
+        if line.strip()
+    }
+
+
 SUBDIVISION_BASELINE_SCHEMA_VERSION = 1
 
 
@@ -2323,6 +2411,32 @@ def complete_subsession_stage(route, node, node_id, evidence, manifest_path, job
     # widening the audit back to the whole worktree.
     worktree = Path(manifest["worktree"])
     baseline = load_subdivision_baseline(route, node_id, manifest)
+    digest = manifest["_manifest_sha256"]
+    attempt_id = "att-stage-" + digest[:32]
+    metadata = {
+        "stage_authority": "owner-chain",
+        "subsession_manifest": str(Path(manifest_path).resolve()),
+        "subsession_manifest_sha256": digest,
+        "session_chain_id": manifest["chain_id"],
+    }
+    # AC 30 resume. The audit below measures a mutation window that CLOSED when
+    # this exact aggregation published its marker, and SD-103 has the owner
+    # commit after that gate -- so re-measuring a worktree that has legitimately
+    # moved on since would refuse a gate that is already closed, permanently,
+    # against a write-once baseline and an unrewindable HEAD. An idempotent
+    # replay of an already-published marker therefore returns it. This weakens
+    # nothing: no audit run after publication can un-publish the marker, and the
+    # identity below is the same exact one `write_completion_marker` would
+    # require to treat the call as a replay rather than a new gate.
+    published = _published_owner_chain_marker(
+        route, node, node_id, evidence, attempt_id=attempt_id, attempt_metadata=metadata
+    )
+    if published is not None:
+        return published, {
+            "status": "stage-gate-aggregated",
+            "sessions": len(manifest["sessions"]),
+            "resumed": True,
+        }
 
     def _refuse(reason, detail):
         record_degradation(
@@ -2348,40 +2462,59 @@ def complete_subsession_stage(route, node, node_id, evidence, manifest_path, job
             "subdivision-baseline-missing",
             f"no admission baseline for manifest {manifest['_manifest_sha256'][:16]}",
         )
-    # AC 30: parallel slices are no-commit workers (SD-103). index and HEAD are
-    # shared state that fixed_files disjointness cannot protect, so a HEAD that
-    # moved between admission and the stage gate is a slice that committed.
-    if baseline is not None:
-        head = _head_commit(worktree)
-        if head != baseline.get("head_commit"):
-            _refuse(
-                "subdivision-commit-attempted",
-                f"head {baseline.get('head_commit')} -> {head}",
-            )
     declared_union = {
         Path(path).resolve(strict=False)
         for session in manifest["sessions"]
         for path in session["fixed_files"]
     }
+    # AC 30: parallel slices are no-commit workers (SD-103). index and HEAD are
+    # shared state that `fixed_files` disjointness cannot protect, so a slice
+    # that commits is a real integrity break.
+    #
+    # "HEAD moved at all" is a stricter proposition than the one this repo's own
+    # contract states, and it is the wrong one. `core/OPERATIONS.md` §5.10
+    # already accepts first-parent descendant HEAD movement during a declared
+    # sub-session chain under the same lineage proof as an in-place retry, and
+    # SD-103 makes the owner commit once after quiescence. Judging by movement
+    # alone therefore refused the owner's OWN commit -- and with a write-once
+    # baseline and an unrewindable HEAD that refusal had no recovery path.
+    #
+    # So the judgement is lineage first, then content: history that is not a
+    # first-parent descendant of the baseline commit was rewound or diverged and
+    # is refused outright, and a lineage-clean descent is a slice commit only
+    # when it actually carries a slice's `fixed_files`.
+    committed = set()
+    if baseline is not None:
+        head = _head_commit(worktree)
+        baseline_head = baseline.get("head_commit")
+        if head != baseline_head:
+            if not _first_parent_descends_from(worktree, baseline_head, head):
+                _refuse(
+                    "subdivision-commit-attempted",
+                    f"head {baseline_head} -> {head} is not a first-parent descendant",
+                )
+            committed = _git_committed_files(worktree, baseline_head, head)
+            slice_commits = sorted(committed & declared_union)
+            if slice_commits:
+                _refuse(
+                    "subdivision-commit-attempted",
+                    f"head {baseline_head} -> {head} carries "
+                    + ";".join(str(path) for path in slice_commits),
+                )
     preexisting = {
         Path(path).resolve(strict=False)
         for path in (baseline or {}).get("changed_files", [])
     }
-    changed = _git_changed_files(worktree)
+    # A lineage-clean commit moves its files out of `git status` and into
+    # history, so the audit has to add them back or accepting the commit would
+    # silently blind the very measurement it just passed.
+    changed = _git_changed_files(worktree) | committed
     outside = changed - declared_union - preexisting
     if outside:
         _refuse(
             "subdivision-scope-violation",
             ";".join(str(path) for path in sorted(outside)),
         )
-    digest=manifest["_manifest_sha256"]
-    attempt_id="att-stage-"+digest[:32]
-    metadata={
-        "stage_authority":"owner-chain",
-        "subsession_manifest":str(Path(manifest_path).resolve()),
-        "subsession_manifest_sha256":digest,
-        "session_chain_id":manifest["chain_id"],
-    }
     directory=completion_dir(route["route_id"])
     with _exclusive_lock(directory/f".{node_id}.completion.lock"):
         marker=write_completion_marker(
