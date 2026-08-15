@@ -8,6 +8,22 @@ ROOT=Path(__file__).resolve().parents[1]
 S=importlib.util.spec_from_file_location("route",ROOT/"utilities/capability-route.py"); R=importlib.util.module_from_spec(S); S.loader.exec_module(R)
 F_SPEC=importlib.util.spec_from_file_location("fallback",ROOT/"utilities/stage-dispatch-fallback.py"); F=importlib.util.module_from_spec(F_SPEC); F_SPEC.loader.exec_module(F)
 
+import contextlib
+
+
+@contextlib.contextmanager
+def dispatch_defaults_config_text(text):
+ """Point the sealed dispatch-defaults loader at a fixture config."""
+ with tempfile.TemporaryDirectory() as td:
+  path=Path(td)/"dispatch-defaults.yaml"; path.write_text(text,encoding="utf-8")
+  previous=os.environ.get("DISPATCH_DEFAULTS_CONFIG")
+  os.environ["DISPATCH_DEFAULTS_CONFIG"]=str(path)
+  try: yield path
+  finally:
+   if previous is None: os.environ.pop("DISPATCH_DEFAULTS_CONFIG",None)
+   else: os.environ["DISPATCH_DEFAULTS_CONFIG"]=previous
+
+
 class FallbackTest(unittest.TestCase):
  def setUp(self):
   self.tmp=tempfile.TemporaryDirectory(); base=Path(self.tmp.name); self.repo=base/"repo"; self.repo.mkdir()
@@ -406,6 +422,94 @@ class FallbackTest(unittest.TestCase):
   self.assertEqual(hops[0]["candidates"][0]["child_harness"],"opencode")
   self.assertEqual(context["parent_cross"],"degraded")
   self.assertEqual(context["parent_cross_cause"],"affinity-pinned")
+ def _counts(self,**counts):
+  return {h:counts.get(h,0) for h in ("claude","codex","opencode")}
+ def test_ac13_selection_precedence_seven_steps(self):
+  # AC 13: SD-101 declares seven ordered selection steps and the fixture set
+  # only ever covered step 3 beating step 4. Each subtest below sets a LOWER
+  # step to prefer a different harness and asserts the higher step still wins.
+  parent={"parent_harness":"opencode","parent_transport":"headless",
+          "parent_sandbox":"workspace-write"}
+  def ranked(node,route,*,counts=None,identity=parent,states=None):
+   with mock.patch.object(F,"_usage_states",
+                          return_value=states or self._usage_states()), \
+        mock.patch.object(F,"attempt_counts",
+                          return_value=counts or self._counts()):
+    _hops,context=F.ordered_fallback_hops(route,node,self.jobs,parent_identity=identity)
+   return context
+
+  # 1 explicit target: an explicit per-node harness pin in dispatch-defaults is
+  # sealed into the route as a literal `harness_affinity` at compile time, and
+  # is the only user override SD-100 recognizes. Nothing downstream unseals it.
+  with dispatch_defaults_config_text(
+    "schema_version: 1\ndepth1_owner: [claude, codex]\nopencode:\n  relief_only: true\n"
+    "capabilities:\n  autopilot-code:\n    plan: codex\n    execute: diverse\n"
+    "    test: diverse\n    report: claude\n"):
+   nodes=[{"id":"plan","dispatch_depth":2,"model_profile":"deep"}]
+   R._seal_dispatch_defaults(nodes,"autopilot-code")
+   self.assertEqual(nodes[0]["harness_affinity"],"codex")
+
+  # 2 hard eligibility over everything below it: a harness whose checked tuple
+  # is not `supported` is not a candidate at all, so neither a sealed affinity
+  # naming it nor the parent-cross partition can hoist it into the band.
+  node=self._gate_node(affinity="codex")
+  node["fallback_hops"][1]["candidates"][0]["status"]="unsupported"
+  context=ranked(node,self._gate_route())
+  self.assertNotIn("codex",context["rank"])
+  self.assertEqual(context["rank"][0],"claude")
+
+  # 3 sealed literal affinity over parent-cross: the affinity names the OWNER
+  # family, which step 4 would move to the tail; the head is kept and the
+  # degradation is recorded instead of being reordered away.
+  context=ranked(self._gate_node(affinity="opencode"),self._gate_route())
+  self.assertEqual(context["rank"][0],"opencode")
+  self.assertEqual(context["parent_cross"],"degraded")
+  self.assertEqual(context["parent_cross_cause"],"affinity-pinned")
+
+  # 4 parent-cross over quality band / capacity and least-recent: claude and
+  # codex are both cross+quality-peer, opencode is the owner family. Even with
+  # opencode holding the fewest recent attempts (step 6 would put it first),
+  # the cross block stays ahead of it.
+  context=ranked(self._gate_node(),self._gate_route(),
+                 counts=self._counts(claude=5,codex=6,opencode=0))
+  self.assertEqual(context["rank"],["claude","codex","opencode"])
+  self.assertEqual(context["parent_cross"],"ok")
+
+  # 5 quality band / capacity over least-recent: under the capacity-aware
+  # strategy the node's own band is consulted before attempt counts, so a
+  # last_resort harness with zero recent attempts stays behind the band.
+  # `identity=None` removes step 4 from the picture so this isolates 5 vs 6 --
+  # least-recent alone would rank [opencode, codex, claude].
+  node=self._gate_node()
+  node["harness_policy"]={"primary":["claude"],"relief":["codex"],
+                          "last_resort":["opencode"],"promote_relief_below":0}
+  route=self._gate_route()
+  route["dispatch_allocation"]["strategy"]="capacity-aware"
+  with mock.patch.object(F.CAPACITY,"capacity_scores",
+                         return_value={"claude":90.0,"codex":90.0,"opencode":90.0}):
+   context=ranked(node,route,counts=self._counts(claude=9,codex=4,opencode=0),
+                  identity=None)
+  self.assertEqual(context["rank"],["claude","codex","opencode"])
+  self.assertEqual(context["quality_band"],"primary")
+
+  # 6 least-recent over declared order: the declared order is
+  # [claude, codex, opencode], so codex only precedes claude because it holds
+  # fewer recent attempts. Step 7 alone would have kept claude first.
+  node=self._gate_node()
+  context=ranked(node,self._gate_route(),
+                 counts=self._counts(claude=3,codex=1,opencode=0),
+                 identity=None)
+  self.assertEqual(context["rank"],["opencode","codex","claude"])
+
+  # 7 declared order as the final tie-break: with every count equal, only the
+  # declared order decides, and reversing it reverses the rank.
+  route=self._gate_route()
+  context=ranked(node,route,identity=None)
+  self.assertEqual(context["rank"],["claude","codex","opencode"])
+  route=self._gate_route()
+  route["dispatch_allocation"]["harness_order"]=["opencode","codex","claude"]
+  context=ranked(node,route,identity=None)
+  self.assertEqual(context["rank"],["opencode","codex","claude"])
  def test_ac14_stable_partition_preserves_block_internal_order(self):
   # Cross block [claude, codex] and non-cross [opencode] keep their internal
   # least-recent order; only the two blocks are concatenated.
@@ -442,6 +546,57 @@ class FallbackTest(unittest.TestCase):
     {"affinity-pinned","cross-family-eligible-none",
      "cross-family-usage-limited","owner-family-only-peer"})
   self.assertEqual(context["parent_cross_cause"],"cross-family-usage-limited")
+ def test_ac12_16_receipt_and_ledger_evidence_pair_at_the_cli(self):
+  # AC 12/16 say a degradation must leave BOTH a receipt field and an SD-93
+  # ledger record, and "두 증거가 모두 없으면 실패". The two existing fixtures
+  # check `ordered_fallback_hops` and `_recompute_verdicts_for_child` as
+  # functions; neither runs the CLI, so nothing held the PAIR together. This
+  # drives the real process: only codex is hard-eligible and codex is also the
+  # owner family, so the single gate-holding checker lands on the owner family.
+  gate={"spec_read":{"satisfied":True,"source":"fixture"},"drift_verdict":"within-spec",
+        "workflow_mode":"tracked","artifact_guard":{"satisfied":True,"source":"fixture"}}
+  evidence={"tuples":[self.tuple("codex","supported"),self.tuple("claude","unsupported")],
+            "native_subagent":[{"harness":"codex","transport":"headless",
+                                "execution_surface":"codex-native-subagent",
+                                "registered_worker":False,"status":"unsupported",
+                                "check_source":"fixture"}]}
+  route=R.compile_route("autopilot-code","dev","strong",self.repo,self.art,
+    signals=["shared-contract"],transport="headless",tracking="tracked",
+    tracked_gate_evidence=gate,dispatch_evidence=evidence)
+  path=Path(self.tmp.name)/"evidence-pair-route.json"
+  path.write_text(json.dumps(route),encoding="utf-8")
+  self.seed_parent()
+  cmd=[sys.executable,str(ROOT/"utilities/stage-dispatch-fallback.py"),
+       "--route",str(path),"--node","plan-check","--slug","fb-evidence-pair",
+       "--parent","owner","--capability-mode","dev","--worker-mode","qa/plan-review",
+       "--model-role","fast reviewer","--jobs",str(self.jobs),"--dry-run"]
+  env={**os.environ,"AGENT_HOME":str(ROOT),"AGENT_ARTIFACT_ROOT":str(self.art),
+       "AGENT_MODEL_GOVERNOR_ROOT":str(self.art/".runtime/model-worker-governor"),
+       "AGENT_DISPATCH_JOBS":str(self.jobs),"AGENT_DISPATCH_SELF_SLUG":"owner",
+       "AGENT_DISPATCH_ATTEMPT_ID":"att-fallback-parent",
+       "AGENT_DISPATCH_CURRENT_HARNESS":"codex",
+       "AGENT_DISPATCH_CURRENT_TRANSPORT":"headless",
+       "AGENT_DISPATCH_CURRENT_SANDBOX":"workspace-write"}
+  result=subprocess.run(cmd,text=True,capture_output=True,env=env)
+  self.assertEqual(result.returncode,0,result.stdout+result.stderr)
+  receipt=dict(line.split("=",1) for line in result.stdout.splitlines() if "=" in line)
+  # evidence 1: the stdout receipt fields
+  self.assertEqual(receipt["child_harness"],"codex")
+  self.assertEqual(receipt["parent_cross"],"degraded")
+  self.assertEqual(receipt["parent_cross_cause"],"cross-family-eligible-none")
+  self.assertIn(receipt["parent_cross_cause"],
+    {"affinity-pinned","cross-family-eligible-none",
+     "cross-family-usage-limited","owner-family-only-peer"})
+  # evidence 2: the SD-93 ledger record left by the SAME process run
+  ledger=Path(self.tmp.name)/"degradations"/f"{route['route_id']}.jsonl"
+  self.assertTrue(ledger.is_file(),sorted(p.name for p in (Path(self.tmp.name)/"degradations").glob("*")) if (Path(self.tmp.name)/"degradations").is_dir() else "no ledger dir")
+  rows=[json.loads(line) for line in ledger.read_text(encoding="utf-8").splitlines() if line.strip()]
+  cross=[row for row in rows if row.get("reason")=="parent-cross-same-harness"]
+  self.assertEqual(len(cross),1,rows)
+  self.assertEqual(cross[0]["parent_cross"],"degraded")
+  self.assertEqual(cross[0]["cause"],receipt["parent_cross_cause"])
+  self.assertEqual(cross[0]["route_node"],"plan-check")
+  self.assertEqual(cross[0]["writer"],"stage-dispatch-fallback.py")
  def test_ac17_parent_identity_absent_marks_not_applicable(self):
   node=self._gate_node()
   route=self._gate_route(owner="opencode")
