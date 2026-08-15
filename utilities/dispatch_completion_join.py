@@ -1833,6 +1833,11 @@ def _join_snapshot(
                 terminal_envelope=terminal_envelope_observed(
                     row.metadata.get("log_file")
                 ),
+                # A join is itself a terminal gate.  Namespace-local workers
+                # must therefore carry the wrapper-issued portable post-exit
+                # receipt before any liveness fallback may make them ready,
+                # even when their final runtime envelope is not visible yet.
+                terminal_receipt_gate=True,
             )
             if row.status == "done":
                 if observed.state == "terminal":

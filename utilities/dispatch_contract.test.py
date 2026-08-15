@@ -625,6 +625,19 @@ class DispatchContractTest(unittest.TestCase):
   self.assertEqual((complete.state,complete.reason),
                    ("quiescent","governed-process-group-reaped"))
 
+ def test_terminal_receipt_gate_dominates_namespace_unavailability(self):
+  metadata={
+   "pid":"437","pid_start":"42","pgid":"437",
+   "pid_scope":"namespace-local","pid_observer_ns":"pid:[source]",
+   "pid_ns":"pid:[source]","attempt_id":"att-receipt-unavailable",
+   "registered_worker":"1",
+  }
+  with mock.patch.object(D,"_proc_observation",
+                         return_value=("inaccessible","", "")):
+   result=D.attempt_process_quiescence(metadata,terminal_receipt=True)
+  self.assertEqual((result.state,result.reason),
+                   ("unverifiable","post-exit-receipt-incomplete"))
+
  def test_host_visible_terminal_quiescence_does_not_require_portable_receipt(self):
   metadata={"pid":"437","pid_start":"42","pgid":"437",
             "pid_scope":"host-visible","attempt_id":"att-host-visible",

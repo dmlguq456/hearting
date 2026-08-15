@@ -1203,22 +1203,26 @@ def attempt_process_quiescence(
     previous meaning to the letter.
     """
 
-    result = _attempt_process_quiescence_impl(metadata)
-    if result.state != "quiescent":
-        return result
     # A terminal namespace-local row can become visible before its wrapper has
     # finished publishing the portable post-exit receipt.  Local PID/group and
     # tagged-descendant observations prove that the process is quiet *here*,
-    # but that evidence disappears with the namespace.  Keep the terminal gate
-    # pending until the existing receipt validator recognizes complete durable
-    # evidence.  Host-visible rows retain their established behavior.
+    # but that evidence disappears with the namespace.  A namespace mismatch
+    # can also make the governed process unverifiable from this observer.  Keep
+    # either non-live result behind the same durable receipt gate; otherwise a
+    # generic terminal fallback can resume the owner before the wrapper drains
+    # and publishes its receipt.  Host-visible rows retain their established
+    # behavior, and an actually live process remains live.
+    result = _attempt_process_quiescence_impl(metadata)
     if (
         terminal_receipt
         and metadata.get("registered_worker") == "1"
         and metadata.get("pid_scope") == "namespace-local"
         and not _post_exit_receipt_reason(metadata)
+        and result.state != "live"
     ):
         return ProcessQuiescence("unverifiable", "post-exit-receipt-incomplete")
+    if result.state != "quiescent":
+        return result
     # D-1: a legacy row records no attempt id, so there is no tag to scan for.
     # Answering `unverifiable` for all of them would retroactively freeze every
     # successor, join, wait, and cleanup gate that reads an old row, so they
@@ -1363,6 +1367,7 @@ def observed_attempt_liveness(
     metadata: dict[str, str],
     *,
     terminal_envelope: bool = False,
+    terminal_receipt_gate: bool = False,
 ) -> ObservedAttemptLiveness:
     """Combine registry state and exact process evidence without mutation.
 
@@ -1379,7 +1384,9 @@ def observed_attempt_liveness(
         # receipt gate: a namespace-local PID may disappear while its outer
         # wrapper is still publishing the durable reap receipt and marker.
         terminal_receipt=(
-            status in {"done", "killed", "cancelled"} or terminal_envelope
+            status in {"done", "killed", "cancelled"}
+            or terminal_envelope
+            or terminal_receipt_gate
         ),
     )
     if status in {"open", "running"}:

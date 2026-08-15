@@ -385,6 +385,41 @@ class DispatchCompletionJoinTest(unittest.TestCase):
         self.assertEqual(ready["state"], "ready")
         self.assertEqual(ready["children"][0]["reason"], "terminal-observed")
 
+    def test_open_namespace_terminal_probe_cannot_bypass_receipt_gate(self):
+        terminal = self.root / "terminal.sh"
+        terminal.write_text("#!/bin/sh\nexit 3\n", encoding="utf-8")
+        terminal.chmod(0o755)
+        namespace = os.readlink("/proc/self/ns/pid")
+        metadata = {
+            "pid": "999999",
+            "pid_start": "42",
+            "pgid": "999999",
+            "pid_scope": "namespace-local",
+            "pid_ns": namespace,
+            "pid_observer_ns": namespace,
+        }
+        self.jobs.write_text(
+            row(
+                "open",
+                "att-open-namespace-probe",
+                "att-parent",
+                "a",
+                process_metadata=metadata,
+            ),
+            encoding="utf-8",
+        )
+        receipt = JOIN.join_batch(
+            jobs=self.jobs,
+            parent_attempt_id="att-parent",
+            interval=0.02,
+            timeout=0.08,
+            liveness_command=[str(terminal)],
+        )
+        self.assertEqual(receipt["state"], "timeout")
+        self.assertEqual(
+            receipt["children"][0]["reason"], "process-unverifiable"
+        )
+
     def test_done_namespace_local_row_with_partial_receipt_stays_pending(self):
         metadata = {
             "pid": "999999",
