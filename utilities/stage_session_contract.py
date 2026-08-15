@@ -82,6 +82,15 @@ def derive_gap_retry_manifest(
     the failed slice id, so re-deriving the same retry is byte-identical and
     resumable. A retry of one slice is a `serial` chain (a parallel subdivision
     is a 2..N contract); two or more stay `parallel`.
+
+    The parent's leg binding (`node`, or `leg_index` as the positional spelling)
+    is carried through unchanged. A gap-retry is a SUBSET of the parent's slices,
+    never a re-partition, so the failed slice's leg name stays valid -- and
+    `dispatch-batch._bind_subdivision_sessions` (N1) refuses any manifest session
+    that names neither. Dropping the key here would make the one recovery path
+    SD-103 13.30.5 declares refusable at admission the moment two slices fail
+    (a single failure falls to `serial` and never reaches the binding gate,
+    which is why the seam stayed invisible).
     """
     if "_manifest_sha256" not in manifest:
         raise StageSessionError("gap-retry-source-manifest-not-loaded")
@@ -96,7 +105,7 @@ def derive_gap_retry_manifest(
     sessions = []
     for offset, session_id in enumerate(wanted, 1):
         source = by_id[session_id]
-        sessions.append({
+        derived = {
             "subsession_id": f"ss-gap-{parent[:16]}-{offset}",
             "attempt_id": f"att-gap-{parent[:16]}-{offset}",
             "adapter": source["adapter"],
@@ -109,7 +118,18 @@ def derive_gap_retry_manifest(
             "expected_round_trips": source["expected_round_trips"],
             "subsession_purpose": GAP_RETRY_PURPOSE,
             "gap_retry_of": session_id,
-        })
+        }
+        if "node" in source:
+            # The stable spelling: a leg name survives subsetting unchanged.
+            derived["node"] = source["node"]
+        elif "leg_index" in source:
+            # The positional spelling cannot survive subsetting verbatim --
+            # `_bind_subdivision_sessions` indexes into the RETRY's leg list,
+            # which is as long as the retry (the admission count check pairs
+            # sessions with legs 1:1). Re-index onto the retry's own ordering,
+            # which is `wanted` order, so the key still names one leg.
+            derived["leg_index"] = offset - 1
+        sessions.append(derived)
     return {
         "schema_version": SCHEMA_VERSION,
         "kind": "stage-session-chain",

@@ -28,6 +28,15 @@ _CR_SPEC = importlib.util.spec_from_file_location(
 CR = importlib.util.module_from_spec(_CR_SPEC)
 _CR_SPEC.loader.exec_module(CR)
 
+# AC 29 has to cross the admission seam, not stop one step short of it: the
+# binding gate (N1) lives in `dispatch-batch`, so a derived manifest that never
+# reaches it proves nothing about whether the recovery path can be admitted.
+_DB_SPEC = importlib.util.spec_from_file_location(
+    "dispatch_batch", Path(__file__).with_name("dispatch-batch.py")
+)
+DB = importlib.util.module_from_spec(_DB_SPEC)
+_DB_SPEC.loader.exec_module(DB)
+
 
 class SubdivisionContractTest(unittest.TestCase):
     def _fixture(self, td, *, mode="parallel", overlap=False, outside=False,
@@ -81,6 +90,10 @@ class SubdivisionContractTest(unittest.TestCase):
                 "fixed_files": [str(fixed)],
                 "narrow_verify": f"python -m unittest slice_{index}",
                 "expected_round_trips": 2,
+                # N1: an admitted manifest names its leg. The fixture carries it
+                # so a derived gap-retry can be measured against the same gate
+                # the parent had to pass.
+                "node": f"{node['id']}-slice-{index}",
             })
         manifest = {
             "schema_version": 1,
@@ -396,6 +409,41 @@ class SubdivisionContractTest(unittest.TestCase):
                 sorted(f for s in both["sessions"] for f in s["fixed_files"]),
                 sorted(f for s in manifest["sessions"] for f in s["fixed_files"]),
             )
+            # B1: the derived manifest has to survive the SAME admission seam the
+            # parent did -- derive -> load_manifest -> _bind_subdivision_sessions
+            # in one chain. Stopping at `load_manifest` is what hid the fact that
+            # the derivation dropped the N1 leg key and made 13.30.5's only
+            # recovery path refusable at admission whenever two slices fail.
+            legs = [{"id": s["node"]} for s in manifest["sessions"]]
+            both_path = Path(td) / "gap-both.json"
+            both_path.write_text(json.dumps(both, indent=2), encoding="utf-8")
+            both_loaded = SSC.load_manifest(both_path, route=route, node=node)
+            bound = DB._bind_subdivision_sessions(both_loaded["sessions"], legs)
+            self.assertEqual([s["node"] for s in bound], [leg["id"] for leg in legs])
+            for slice_, source in zip(bound, manifest["sessions"]):
+                self.assertEqual(slice_["fixed_files"], source["fixed_files"])
+                self.assertEqual(slice_["gap_retry_of"], source["subsession_id"])
+            # and the binding is by NAME, not position: a leg list in the other
+            # order still hands each slice its own fence
+            reversed_bound = DB._bind_subdivision_sessions(
+                both_loaded["sessions"], list(reversed(legs))
+            )
+            self.assertEqual(
+                [s["node"] for s in reversed_bound],
+                [leg["id"] for leg in reversed(legs)],
+            )
+            # a derivation that dropped the leg key would be refused here
+            stripped = json.loads(json.dumps(both))
+            for session in stripped["sessions"]:
+                session.pop("node", None)
+            stripped_path = Path(td) / "gap-unbound.json"
+            stripped_path.write_text(json.dumps(stripped, indent=2), encoding="utf-8")
+            with self.assertRaises(DB.BatchError) as ctx:
+                DB._bind_subdivision_sessions(
+                    SSC.load_manifest(stripped_path, route=route, node=node)["sessions"],
+                    legs,
+                )
+            self.assertEqual(ctx.exception.reason, "subdivision-manifest-session-leg-unbound")
             with self.assertRaisesRegex(SSC.StageSessionError, "gap-retry-unknown-slice"):
                 SSC.derive_gap_retry_manifest(manifest, ["ss-not-a-slice"])
             with self.assertRaisesRegex(SSC.StageSessionError, "gap-retry-requires-a-failed-slice"):
