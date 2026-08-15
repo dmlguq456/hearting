@@ -7,24 +7,41 @@ Portable storage and retrieval layer. The specification lives at
 ## Boundary
 
 Short-lived post-its, durable learned memory, and the global profile share one
-SQLite store. The acting agent decides contextually what to store, retrieve,
+SQLite store per server. Each local WAL database is that server's serving
+truth; no SQLite, WAL, SHM, lock, or derived-index file is shared. The acting
+agent decides contextually what to store, retrieve,
 promote, merge, or prune. Code owns mechanical integrity, scope isolation,
 pending protection, lifecycle execution, bounded telemetry, and recovery.
-`memory.db` is the source of truth; `dump.jsonl` is its text mirror.
+Servers converge asynchronously by exchanging immutable protocol-v2 operation
+objects and pure-folding the validated operation set. `dump.jsonl` is only a
+v1-compatible materialized projection, not the convergence or complete-recovery
+source.
 
 ## Storage layout
 
 | Layer | Location | Git | Purpose |
 |---|---|---|---|
-| Source of truth | `${XDG_DATA_HOME:-~/.local/share}/hearting/memory/memory.db` (SQLite WAL; existing `<agent-home>/memory` remains compatible) | ignored binary | `records`, body/CJK FTS, retrieval-capsule FTS, and normalized topic index |
-| Git mirror | `<memory-store>/dump.jsonl` (one ID-sorted record per line) | tracked in the memory repository or linked to it | deterministic text export and exact `mem import` recovery source |
+| Local serving truth | `${XDG_DATA_HOME:-$HOME/.local/share}/hearting/memory/memory.db` (SQLite WAL; existing `<agent-home>/memory` remains compatible) | ignored binary; never exchanged | semantic records, transactional outbox/applied/frontier/conflict state, local replica identity and counter, peer/migration evidence, graveyard, and rebuildable indexes |
+| Immutable exchange | Bare repository at `${XDG_STATE_HOME:-$HOME/.local/state}/hearting/memory-sync/exchange`; Git tree path `protocol/v2/ops/<prefix>/<op_id>.json` | private dedicated Git repository, never checked out | canonical operation objects only; one semantic transaction per immutable path |
+| Compatibility projection | `<memory-store>/dump.jsonl` (one ID-sorted record per line) | optionally tracked for old readers | materialized v1-compatible view; never a routine v2 push/fold input and not a complete v2 recovery source |
 | Harness projection | `<agent-home>/projects/<cwd>/memory/` | ignored | compatibility surface for stray auto-memory writes absorbed by `mem sync`; `mem project` can rebuild the projection |
 
-`memory.db` and the mirror checkout may be split across filesystems. Keep the
-live store on a local filesystem, place the `agent-memory` checkout elsewhere,
-and make `<memory-store>/dump.jsonl` a symlink to that checkout's tracked
-`dump.jsonl`. Export, commit, push, doctor, and maintenance follow the mirror
-target without replacing the symlink; the SQLite WAL files remain local.
+Keep `memory.db` on a local filesystem. `MEM_SYNC_DIR` may choose another
+absolute private exchange repository, but its real path must remain outside all
+synchronized project trees and the local configuration root. The transport
+validates existing exchange paths without following symlinks, disables hooks
+and repository-provided attributes/filter/merge behavior, and allowlists only
+the protocol data tree.
+It never uses the exchange checkout as an instruction-discovery cwd. An
+unexpected path, symlink/traversal escape, immutable-object byte mismatch, or
+executable/policy file is a hard failure before fold or push.
+
+`MEM_SYNC_REMOTE_URL` may explicitly select the transport remote; otherwise the
+implementation may derive `origin` from an existing compatibility-dump mirror
+repository. `MEM_SYNC_REF` selects the full protected ref and defaults to
+`refs/heads/hearting-memory-v2`. Routine synchronization stages only immutable
+v2 objects, integrates without force-push, and confirms an outbox item only
+after a fresh fetch proves reachability from that protected ref.
 
 A record combines `tier` (`working|durable`), `scope` (`project|global`),
 `type`, `delivery_state` (`ordinary|pending|consumed`), a retrieval capsule, and
@@ -56,16 +73,21 @@ python3 <agent-home>/tools/memory/mem.py <command>
 | `restore <id>` | Restore one record from the graveyard while preserving action/canonical metadata. |
 | `index [--rebuild]` | Rebuild the FTS5 tables embedded in `memory.db`. |
 | `export [--target dump\|profile] [--apply]` | Export `dump.jsonl` or an on-demand human-readable profile cache. Profile export is dry-run unless `--apply` is supplied. |
-| `import <dump.jsonl>` | Recreate the DB exactly from a dump: delete existing records, replay the mirror, and rebuild FTS in the same connection. |
+| `import <dump.jsonl>` | Compatibility import of the materialized v1 view. It cannot recreate v2 frontiers/conflicts/tombstones/quarantine or peer/outbox state, so normal and recovery imports both refuse once any v2 protocol state exists. |
 | `project [--cwd]` | Build the compatibility projection. Session context uses `inject`, not this command. |
-| `migrate [--apply] [--all-projects]` | Scan only the current logical project by default. `--all-projects` is the explicit cross-project/global recovery path and is required for runtime-memory cleanup. |
+| `migrate [--apply] [--all-projects]` | Scan only the current logical project by default. `--all-projects` is the explicit cross-project/global recovery path required for runtime-memory cleanup; this command is not a live multi-server seed/cutover executor. |
 | `lifecycle [--apply]` | Apply working expiry and expose durable duplicate/capacity candidates. Pending delivery records remain protected. |
 | `stats` | Print a grouped store snapshot. |
 | `log [--limit 20] [--action] [--tier] [--actor] [--json]` | Read the bounded write-event timeline (D-38), complementing the `stats` snapshot. |
-| `doctor` | Run nine read-only checks covering integrity, FTS/schema invariants, working growth, stale pending, durable capacity, graveyard/dump consistency, and worker health. Exit 0 is clean, 1 is WARN, and 2 is FAIL. |
+| `doctor` | Run bounded read-only local and v2 protocol checks covering integrity, schema/index invariants, pending/capacity/graveyard/dump consistency, outbox/peer/migration state, and worker health. Exit 0 is clean, 1 is WARN, and 2 is FAIL. |
 | `inject [--hook]` | Build bounded SessionStart context from working, durable, and profile records. Defaults to 2,000 characters and 15 bullets; `--hook` emits `additionalContext` JSON. |
-| `sync` | Absorb only current-project stray projection writes, rebuild indexes, export, and append the bounded mirror commit. |
-| `maintenance [--squash-days 14] [--apply]` | Operator-run compaction for the plain-commit dump history: squash first-parent auto-sync commits older than N days into one root, then `git gc`. Dry-run by default; never pushes (a mirror needs an explicit force-push afterwards). |
+| `sync [--json]` | Absorb only current-project stray projection writes, rebuild indexes, and write the compatibility projection. With remote sync explicitly enabled, finalize/render/fetch/validate/integrate/fold/export/push/fresh-confirm immutable operations. `--json` emits the versioned status and phase outcomes described below. |
+| `conflicts` | List bounded unresolved conflict identities without adopting a provisional body. |
+| `show-conflict <id>` | Show every full concurrent variant with explicit labels. |
+| `resolve <id> …` | Create a new agent-authored operation that descends every current maximal head; field-wise automatic semantic merge is forbidden. |
+| `replica status [--json]` | Show the active replica counter and whether copied-state detection requires rotation; install-secret bytes are never printed. |
+| `replica rotate --reason <text>` | Explicitly start a new replica-ID boundary after copying/moving local state. Existing operation IDs and predecessor history are preserved. |
+| `maintenance [--squash-days 14] [--apply]` | Compatibility-only operator maintenance for a separately tracked legacy dump history. It is not v2 operation compaction and is never run or pushed by routine sync. |
 | `distill <sid> [--advance]` | Print normalized transcript text after the shared session marker and optionally advance that marker. |
 | `curate-snapshot` | Print a read-only current-project snapshot, mechanical signals, and destructive `IDS:` membership. Pending records appear under `PROTECTED PENDING` but never in destructive IDs. |
 | `curate-artifacts` | Print read-only git, plan, and spec evidence for the curator agent. |
@@ -79,6 +101,56 @@ python3 <agent-home>/tools/memory/mem.py <command>
 | `supersede <old> --by <new>` | Preserve the older row as historical and route its canonical id to the newer active record. Cross-scope/project, pending, profile, and cycle cases fail closed. |
 | `activate <id>` | Guardedly reactivate a historical row only when its successor is no longer active and no canonical ambiguity exists. |
 | `register-postit <path>` | Deprecated legacy-migration-only registry command. Current post-its write DB working records directly. |
+
+## Protocol-v2 synchronization
+
+Every supported semantic writer commits its local record/graveyard effect,
+replica counter, exact canonical operation, `sync_applied(result=local)`, and
+queued outbox row in one `BEGIN IMMEDIATE` transaction. The command succeeds at
+that local durability boundary. An offline, rejected, or failed remote exchange
+does not roll back the local write; later sync retries the same operation ID.
+The outbox advances monotonically through
+`queued → rendered → committed → confirmed`, where confirmation requires a
+fresh fetch and protected-ref reachability rather than a push response or stale
+remote-tracking ref.
+
+The active replica is bound to a private installation marker at
+`${XDG_STATE_HOME:-$HOME/.local/state}/hearting/memory-sync/installation-id`
+plus local machine/store evidence. Copying `memory.db` to another server makes
+semantic writes and remote sync fail closed until the operator runs
+`mem replica rotate --reason …`; rotation never rewrites predecessor objects.
+
+`MEM_SYNC_REMOTE=1` is the canonical opt-in. If it is unset and
+`MEM_DUMP_PUSH=1`, sync enables the same immutable v2 exchange and emits one
+bounded deprecation warning; this alias never pushes or overwrites
+`dump.jsonl`. If both are unset or `0`, sync is local only. Remote enablement
+also requires a store that is either provably fresh v2 or has a completed sealed
+seed epoch, **and** a verifiably active v2-only old-writer fence in
+`sync_migration_epoch`.
+A nonempty legacy, partially seeded, or unfenced store exits 2 before render,
+fold, push, confirmation, or watermark change. This release validates and
+reports that gate but exposes no command that performs a live all-server
+migration or activates the fence; bootstrap/cutover remains a separately
+reviewed operator procedure.
+
+`mem sync --json` uses the versioned status enum
+`not-configured|local-only|queued-offline|fetched|folded|conflict|quarantined|push-retry-exhausted|remote-confirmed|hard-failure`
+with bounded phase outcomes and identifiers, never bodies, prompts, secrets, or
+host paths. Its exit classes are:
+
+| Exit | Meaning |
+|---|---|
+| `0` | Local state is healthy and remote sync is explicitly disabled with no obligation, or every current outbox operation is freshly confirmed; no warning remains. |
+| `1` | Local writes are safe, but offline/deferred/conflict/quarantine/retry-exhausted work remains. |
+| `2` | Local integrity/schema, immutable protocol, equivocation, remote rewind, unexpected path, or migration-safety failure. |
+
+Concurrent live variants are preserved in full. A deterministic order may
+select a provisional internal service projection but never resolves the
+conflict: default injection, candidates, and recall exclude the conflicted body
+and expose only bounded conflict identity/index evidence. Tombstones, restore,
+supersession, merge removal, and pending consumption remain effective only when
+their operation causally covers the required complete frontier. First-release
+v2 operation/tombstone compaction and physical deletion are unsupported.
 
 ## Curator safety invariant (D-18/D-35/D-40)
 
@@ -118,7 +190,8 @@ and confidence thresholds never substitute for that judgment.
   `consume`.
 - Telemetry defaults to
   `$XDG_STATE_HOME/agent-memory/recall-events.jsonl` (fallback:
-  `~/.local/state/agent-memory/`) outside the memory Git mirror.
+  `~/.local/state/agent-memory/`) outside both the compatibility-dump location
+  and immutable operation exchange.
   `MEM_RECALL_EVENTS` overrides the path.
 
 ## Write telemetry and diagnostics (Cluster J)
@@ -139,6 +212,18 @@ and confidence thresholds never substitute for that judgment.
 ## Environment overrides
 
 - `MEM_STORE` controls both `memory.db` and `dump.jsonl` location.
+- `MEM_SYNC_REMOTE=1` is the canonical explicit opt-in for immutable protocol-v2
+  remote exchange. Unset or `0` keeps synchronization local.
+- `MEM_DUMP_PUSH=1` is a deprecated compatibility alias used only when
+  `MEM_SYNC_REMOTE` is unset. It selects v2 exchange with a bounded warning and
+  never pushes or overwrites the compatibility dump.
+- `MEM_SYNC_DIR` selects the absolute private dedicated exchange repository;
+  the default is
+  `${XDG_STATE_HOME:-$HOME/.local/state}/hearting/memory-sync/exchange`.
+- `MEM_SYNC_REMOTE_URL` optionally selects its remote URL. Otherwise sync may
+  derive `origin` from the compatibility-dump mirror repository.
+- `MEM_SYNC_REF` selects the full protected v2 ref and defaults to
+  `refs/heads/hearting-memory-v2`.
 - `MEM_PROFILE` controls the human-readable profile export directory.
 - `MEM_INJECT_MAX_CHARS`, `MEM_INJECT_MAX_BULLETS`,
   `MEM_INJECT_MAX_WORKING`, `MEM_INJECT_MAX_DURABLE`,
@@ -166,12 +251,17 @@ and confidence thresholds never substitute for that judgment.
 ## Operational contract
 
 - Schema v7 adds bounded retrieval capsules, normalized topics, and non-destructive
-  temporal supersession to the v6 record contract.
+  temporal supersession to the v6 record contract. The v27 additive migration
+  adds local replica/outbox/applied/frontier/conflict/peer/quarantine/migration
+  tables without exchanging rebuildable indexes.
 - `dump.jsonl` is ID-sorted with `sort_keys=True`, one record per line, and
-  explicit JSON `null` values. `mem import dump.jsonl` performs exact recovery.
+  explicit JSON `null` values. It is a v1-compatible materialized view only;
+  exact v2 recovery requires protected immutable objects plus a consistent
+  local backup or a separate lossless v2 bundle.
 - SessionStart injection may remain adapter opt-in when start events repeat on
-  resume or compact. SessionEnd uses `mem sync`; optional distillation exits
-  early on empty delta and spawns detached so it does not block lifecycle hooks.
+  resume or compact. SessionEnd uses `mem sync`; adapters pass the user's remote
+  opt-in environment unchanged, report the bounded sync exit class, and still
+  run their bounded curator fallback before returning a nonzero sync status.
 - `recall.sh` is a thin wrapper over explicit `mem recall`.
 - `register-postit` and `.postit-roots` exist only for legacy Markdown migration.
 

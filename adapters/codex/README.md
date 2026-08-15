@@ -127,7 +127,7 @@ Registry writes and harvest rewrites are serialized with a `.lock` file; `_kerne
 | git safety gate | `core/HOOKS.md` defines the invariant; included in `adapters/codex/bin/preflight.sh write <file> [session-id]` |
 | memory write guard | `core/HOOKS.md` defines the invariant; included in `adapters/codex/bin/preflight.sh write <file> [session-id]` |
 | memory injection | Codex `SessionStart` hook bridge keeps memory injection off by default because `SessionStart` can run on startup, resume, clear, and compact; set `CODEX_SESSION_MEMORY_INJECT=1` to emit `adapters/codex/bin/preflight.sh memory [cwd]` through `hookSpecificOutput.additionalContext`, or run it manually when needed |
-| memory sync | Codex `SessionEnd` runs `adapters/codex/bin/preflight.sh session-end [cwd] [session-id]`, which performs `mem sync` and then runs automatic distillation by default (the read-only `codex exec` worker is verified tool-free). Codex `Stop` never starts this lifecycle; its only side effect is clearing the exact Fleet interaction marker. Opt out with `CODEX_DISTILL_ENABLE=0` |
+| memory sync | Codex `SessionEnd` runs `adapters/codex/bin/preflight.sh session-end [cwd] [session-id]`, which performs `mem sync --json` and then runs automatic distillation by default (the read-only `codex exec` worker is verified tool-free). Local sync is the default. The adapter passes the user's `MEM_SYNC_REMOTE` and deprecated `MEM_DUMP_PUSH` environment unchanged and never forces remote exchange; the alias selects immutable v2 exchange with a warning and never pushes `dump.jsonl`. A sync exit 1/2 is reported and returned only after the bounded curator fallback runs. Codex `Stop` never starts this lifecycle; its only side effect is clearing the exact Fleet interaction marker. Opt out of distillation with `CODEX_DISTILL_ENABLE=0` |
 | memory turn nudge | Codex `UserPromptSubmit` hook bridge runs `adapters/codex/bin/preflight.sh turn-nudge [cwd] [session-id]`; it is deterministic and launches distillation when the configured interval is reached. Automatic distillation is on by default (`CODEX_DISTILL_ENABLE` defaults to `1`); opt out with `CODEX_DISTILL_ENABLE=0` |
 | memory candidate exposure and deeper retrieval | Codex `UserPromptSubmit` runs the fail-open capsule-only candidate bridge and adds at most six headline-and-ID candidates within 2,400 UTF-8 bytes. The bridge publishes a same-turn receipt; `PreToolUse` requires it before main-session material mutation. The model ignores unrelated candidates and reads relevant records in full. Use `preflight.sh recall <query> [cwd] [session-id]` for deeper search or `recall-gate` as the hook-failure recovery path. No prompt classifier or body injection is attached |
 | oncall briefing injection | Codex `UserPromptSubmit` hook bridge runs `adapters/codex/bin/preflight.sh briefing [cwd]` and aggregates matching output into `hookSpecificOutput.additionalContext`; run it manually when hooks are unavailable |
@@ -139,7 +139,7 @@ Registry writes and harvest rewrites are serialized with a `.lock` file; `_kerne
 | QA policy mapping | `adapters/codex/bin/preflight.sh qa-policy <level> [code|research|doc|general]` maps portable QA levels from `core/CONVENTIONS.md` to Codex assurance scope, selected-pass reviewer budgets, external-adversary requirements, max rounds, and inline fallback reporting. `stage_graph_selector=intensity-not-qa` means these budgets do not open stages or depth by themselves |
 | memory distill delta | Codex session transcript extraction is available through `adapters/codex/bin/preflight.sh distill-delta <session-id>` |
 | memory distill proposal | `adapters/codex/bin/preflight.sh distill-propose <session-id> [cwd]` reports `status=tool-contract` and exits 69 until `CODEX_DISTILL_ENABLE=1` is explicit. Enabled runs use a constrained Codex exec proposal worker; memory mutates only when both `CODEX_DISTILL_APPLY=1` and `CODEX_DISTILL_CONTRACT_ACCEPTED=1` are explicit |
-| memory store | `tools/memory/mem.py` is runtime-neutral; detached distillation worker execution remains adapter-specific |
+| memory store | `tools/memory/mem.py` plus `protocol_v2.py`, `sync_v2.py`, and `git_exchange_v2.py` are runtime-neutral. Each server keeps its SQLite/WAL/replica state local; an explicitly enabled remote sync uses immutable operations in a private dedicated exchange repository outside project/config trees and requires both an active old-writer fence and either a fresh store or a sealed seed epoch. The adapter never runs live migration/fence activation. `dump.jsonl` is compatibility output only. Detached distillation worker execution remains adapter-specific |
 
 ## Tool Projection
 
@@ -290,8 +290,10 @@ entrypoints are represented by Codex-native Skills and the installable
 
 `adapters/codex/hooks/` contains a Codex-native `hooks.json`, a validated
 `run-hook.sh` launcher, and concrete adapter-owned hook bridges. The
-`SessionEnd` bridge runs `mem sync` and automatic distillation (on by
-default; opt out with `CODEX_DISTILL_ENABLE=0`). `Stop` silently clears only an
+`SessionEnd` bridge runs `mem sync --json` and automatic distillation (on by
+default; opt out with `CODEX_DISTILL_ENABLE=0`). It leaves remote synchronization
+off unless the user enables `MEM_SYNC_REMOTE=1` (or the deprecated alias), and
+preserves a nonzero typed sync result after the curator fallback. `Stop` silently clears only an
 exact Fleet interaction marker; it neither schedules lifecycle work nor
 inspects the registry, waits for a child, or emits `decision=block`.
 The `UserPromptSubmit` bridge extracts the runtime's prompt field for a bounded

@@ -48,6 +48,9 @@ REQUIRED_RELEASE_FILES = (
     "tools/install/distribution.py",
     "tools/fleet/fleet.sh",
     "tools/memory/mem.py",
+    "tools/memory/protocol_v2.py",
+    "tools/memory/git_exchange_v2.py",
+    "tools/memory/sync_v2.py",
 )
 TOOL_LAUNCHERS = (
     ("fleet", "tools/fleet/fleet.sh"),

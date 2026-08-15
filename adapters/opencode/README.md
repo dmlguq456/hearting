@@ -105,7 +105,7 @@ full masking.
 | memory distill delta | Supported through `tools/memory/mem.py --source opencode`, backed by `opencode export <session-id>` (captured to a temp file — piped export stdout truncates) |
 | memory distill proposal | Implemented — `distill-worker.sh` runs a no-tools `opencode run --pure --agent <distiller>` worker (verified: no shell exec, no hang, timeout-guarded) |
 | memory auto-distillation | Enabled by default — plugin `event`/`session.idle` → detached `preflight session-end` (debounced) → worker → apply. Opt out `OPENCODE_DISTILL_ENABLE=0`; set `OPENCODE_DISTILL_MODEL` for quality |
-| memory store | `tools/memory/mem.py` is runtime-neutral; detached distillation worker execution remains adapter-specific |
+| memory store | `tools/memory/{mem.py,protocol_v2.py,git_exchange_v2.py,sync_v2.py}` are runtime-neutral; detached distillation worker execution remains adapter-specific |
 | permission model | OpenCode native `permission` config (`allow`/`ask`/`deny` per tool, per-agent override); adapter documents recommended rules, not a harness guard replacement |
 | statusline | OpenCode TUI footer is native; no user shell statusline surface in config schema; harness status signals stay instruction-only/preflight |
 

@@ -335,6 +335,9 @@ def checks(scope="global"):
                 "import sys; [compile(open(f,encoding='utf-8').read(), f, 'exec') for f in sys.argv[1:]]",
                 "tools/build-manifest.py",
                 "tools/memory/mem.py",
+                "tools/memory/protocol_v2.py",
+                "tools/memory/git_exchange_v2.py",
+                "tools/memory/sync_v2.py",
             ],
             cwd=agent_home,
         )

@@ -252,6 +252,23 @@ def checks(scope="global"):
 
     check_list.append(
         verifier.check_cmd(
+            "codex.compile-smoke",
+            [
+                "python3",
+                "-c",
+                "import sys; [compile(open(f,encoding='utf-8').read(), f, 'exec') for f in sys.argv[1:]]",
+                "tools/build-manifest.py",
+                "tools/memory/mem.py",
+                "tools/memory/protocol_v2.py",
+                "tools/memory/git_exchange_v2.py",
+                "tools/memory/sync_v2.py",
+            ],
+            cwd=agent_home,
+        )
+    )
+
+    check_list.append(
+        verifier.check_cmd(
             "codex.preflight.capability-info",
             ["adapters/codex/bin/preflight.sh", "capability-info", "autopilot-code"],
             must_match=[r"^native_skill_path="],

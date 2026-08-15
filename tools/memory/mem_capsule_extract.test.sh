@@ -108,9 +108,13 @@ echo 'mem capsule-extract regressions 1/3/4/5/6/7: PASS'
 # --- 2: export -> import -> export byte-identical ---
 python3 "$MEM" export --target dump >/dev/null
 cp "$MEM_STORE/dump.jsonl" "$TMP/dump-first.jsonl"
+ORIGINAL_STORE="$MEM_STORE"
+export MEM_STORE="$TMP/import-store"
+mkdir -p "$MEM_STORE"
 python3 "$MEM" import "$TMP/dump-first.jsonl" >/dev/null
 python3 "$MEM" export --target dump >/dev/null
 cmp "$TMP/dump-first.jsonl" "$MEM_STORE/dump.jsonl"
+export MEM_STORE="$ORIGINAL_STORE"
 echo 'mem capsule-extract regression 2 (export/import/export byte-identical): PASS'
 
 # --- 8: backfill dry-run touches nothing ---

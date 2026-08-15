@@ -72,8 +72,8 @@ Both paths are separate views of one `memory.db` store.
 
 | Path | Store location | Update |
 |---|---|---|
-| `<agent-home>/projects/*/memory/`, the harness auto-memory write surface | SessionEnd `mem sync` mirrors into the durable store | Harness automatic write → sync |
-| DB working tier used by this skill through `mem note`/`mem add` | Direct `memory.db` working records plus git mirror `dump.jsonl` | Only through user invocation of `/post-it` |
+| `<agent-home>/projects/*/memory/`, the harness auto-memory write surface | SessionEnd `mem sync --json` absorbs into the local durable store; remote v2 exchange remains explicit opt-in | Harness automatic write → sync |
+| DB working tier used by this skill through `mem note`/`mem add` | Direct local `memory.db` records plus a compatibility-only `dump.jsonl` projection | Only through user invocation of `/post-it` |
 
 Use `--scope project` for facts specific to the current repository. Use durable auto-memory or `--scope user` with `mem profile <stem>` for cross-project user/work preferences. `mem recall` searches both surfaces together.
 

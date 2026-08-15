@@ -281,8 +281,14 @@ as the orchestration root.
 The `SessionStart` bridge keeps memory injection off by
 default because Codex `SessionStart` can run on startup, resume, clear, and
 compact; `CODEX_SESSION_MEMORY_INJECT=1` restores `memory` output as
-`hookSpecificOutput.additionalContext`. The `SessionEnd` bridge calls `session-end` for `mem sync` plus the verified automatic distill worker
-(default on; `CODEX_DISTILL_ENABLE=0` opt-out). The separate `Stop` bridge
+`hookSpecificOutput.additionalContext`. The `SessionEnd` bridge calls
+`session-end` for typed `mem sync --json` plus the verified automatic distill
+worker (default on; `CODEX_DISTILL_ENABLE=0` opt-out). It does not synthesize
+`MEM_DUMP_PUSH=1`: local sync remains the default, the user's
+`MEM_SYNC_REMOTE`/deprecated-alias environment passes through unchanged, and
+the alias can select only immutable protocol-v2 exchange, never a dump push.
+A nonzero sync class is reported and preserved after the bounded curator
+fallback rather than suppressing that fallback. The separate `Stop` bridge
 silently clears only an exact Fleet interaction marker. It never starts
 distillation, reads the dispatch registry, joins a child, or emits a blocking continuation. The
 `UserPromptSubmit` bridge calls the portable capsule-only candidate bridge and
@@ -438,6 +444,7 @@ is observed.
 | routing-contract signal | `adapters/codex/bin/preflight.sh prompt-signal [cwd] [session-id]` is the worker-startup/manual subcommand carrying the full routing contract; run it manually when no automatic hook is attached |
 | token/context pressure | `preflight.sh token-budget [cwd] [session-id] [kv|json|hook]` reads an exact Codex rollout session and keeps active context, exact directive bytes, and cumulative raw counters separate. `kv`/`json` are read-only L2 accounting diagnostics. Unknown/degraded signals fail open. `hook` remains transition-only and byte-identical; its parent lifecycle is the single exactly-once accounting authority for success/timeout/error and writes only a bounded content-free sha256-session aggregate under XDG state. `utilities/token-budget-experiment.py` is an explicit isolated `offline-forecast-v1` replay/evaluator: production hooks/preflight do not import or activate it, its maximum verdict is `eligible_for_user_review`, adoption stays `pending_user_decision`, and it never writes config. Native rollout-budget ownership requires `AGENT_TOKEN_BUDGET_NATIVE_VALIDATED=1` only after feature + no-side-effect config probes pass; local Codex 0.144.3 reports the feature under development and disabled, so exact-session rollout observation remains the fallback. The adapter never writes `$CODEX_HOME/config.toml` |
 | memory inject | Run `adapters/codex/bin/preflight.sh memory [cwd]` for plain-text memory injection; Codex SessionStart hook emission is opt-in via `CODEX_SESSION_MEMORY_INJECT=1` |
+| memory sync | `preflight.sh session-end [cwd] [session-id]` runs `mem sync --json` against the local per-server SQLite source of serving truth. Remote operation exchange is canonical opt-in through `MEM_SYNC_REMOTE=1`; `MEM_DUMP_PUSH=1` is a warned deprecated alias only when the canonical flag is unset and never pushes the compatibility dump. The runtime passes `MEM_SYNC_DIR`, `MEM_SYNC_REMOTE_URL`, and `MEM_SYNC_REF` through to the portable implementation, which requires a private dedicated exchange path outside project/config trees, an active old-writer fence, and either a fresh store or sealed seed epoch. The adapter performs no live migration/fence activation. Exit 1/2 remains visible after bounded curation |
 | memory candidate exposure / recall | Every eligible main `UserPromptSubmit` invokes `mem candidates` through the portable bridge using prompt, cwd, session, and native turn/message ID when available. Only active current-project/global capsule headlines and IDs are exposed (maximum six / 2,400 UTF-8 bytes), with no body read, touch, or semantic classifier. `PreToolUse` requires its same-turn receipt for main-session material mutation. The model reads a relevant record in full; `preflight.sh recall <query> [cwd] [session-id]` remains the deeper-search path and explicit `recall-gate` recovers a failed or unavailable hook |
 | oncall briefing | Run `adapters/codex/bin/preflight.sh briefing [cwd]` before prompt handling on the dedicated agent desk |
 | loop guidance | Run `adapters/codex/bin/preflight.sh loop-info <oncall|note|study|drill|runtime-watch>` before following loop guides; Codex reports manual contracts, missing implementations, and drill auto-run restrictions without executing loop scripts. The `note` loop and note semantics are application-owned; the harness exposes only the optional app-neutral `artifact-sink` port |

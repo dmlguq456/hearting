@@ -375,11 +375,16 @@ case "$cmd" in
     sid=${3:-codex}
     # D-42 defense in depth: worker exit owns no sync/curator lifecycle.
     is_worker_session && exit 0
-    # SessionEnd sync contract (core/MEMORY.md §7, D-31): mem sync plus a
-    # dump.jsonl git-mirror push. Omitting MEM_DUMP_PUSH lets Codex-session
-    # memory drift from the remote mirror. mem.py bounds the push to five
-    # seconds and treats failure as non-fatal.
-    (cd "$cwd" && AGENT_HOME="$AGENT_ROOT" MEM_DUMP_PUSH="${MEM_DUMP_PUSH:-1}" python3 "$ROOT/tools/memory/mem.py" sync)
+    # SessionEnd sync contract (core/MEMORY.md §7): local sync is the default.
+    # Pass the user's MEM_SYNC_REMOTE / deprecated MEM_DUMP_PUSH environment
+    # unchanged; the adapter never opts the session into remote exchange and
+    # the compatibility flag never means dump push. Preserve the typed sync
+    # exit after the bounded curator fallback has had its chance to run.
+    sync_status=0
+    (cd "$cwd" && AGENT_HOME="$AGENT_ROOT" python3 "$ROOT/tools/memory/mem.py" sync --json) || sync_status=$?
+    if [ "$sync_status" -ne 0 ]; then
+      printf 'codex preflight: session-end memory sync status=%s; continuing bounded curator fallback\n' "$sync_status" >&2
+    fi
     # Automatic session-end distillation is enabled: the codex exec read-only
     # sandbox was verified tool-free (adapters/codex/ADAPTATION.md Distillation
     # Boundary), so default the worker to apply mode. Opt out with
@@ -387,11 +392,14 @@ case "$cmd" in
     # snapshot-grounded prune/merge/graduate via the shared curate-snapshot +
     # whitelist applier (D-30/D-32); turn-nudge runs increment. Synchronous so the
     # headless codex exec captures memory before it exits (curate timeout-bounded).
+    curator_status=0
     AGENT_HOME="$AGENT_ROOT" \
       CODEX_DISTILL_ENABLE="${CODEX_DISTILL_ENABLE:-1}" \
       CODEX_DISTILL_APPLY="${CODEX_DISTILL_APPLY:-1}" \
       CODEX_DISTILL_CONTRACT_ACCEPTED="${CODEX_DISTILL_CONTRACT_ACCEPTED:-1}" \
-      "$ROOT/adapters/codex/bin/distill-worker.sh" "$sid" "$cwd" curate
+      "$ROOT/adapters/codex/bin/distill-worker.sh" "$sid" "$cwd" curate || curator_status=$?
+    [ "$sync_status" -eq 0 ] || exit "$sync_status"
+    exit "$curator_status"
     ;;
   prompt-signal)
     cwd=${2:-$PWD}

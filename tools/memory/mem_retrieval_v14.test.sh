@@ -31,7 +31,7 @@ c=sqlite3.connect(sys.argv[1]); print(c.execute('pragma user_version').fetchone(
 print(' '.join(f'{a}:{b}' for a,b in c.execute('select id,delivery_state from records order by id')))
 PY
 )"
-grep -q '^7$' <<<"$STATE" && grep -q 'old_h:pending' <<<"$STATE" \
+grep -q '^8$' <<<"$STATE" && grep -q 'old_h:pending' <<<"$STATE" \
   && grep -q 'old_hint:pending' <<<"$STATE" && grep -q 'old_body:pending' <<<"$STATE" \
   && grep -q 'old_plain:ordinary' <<<"$STATE" && ok "migration v5 backfills only handoff shapes" \
   || bad "migration/backfill: $STATE"

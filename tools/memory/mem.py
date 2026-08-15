@@ -1,20 +1,29 @@
 #!/usr/bin/env python3
 """Unified Memory System — `mem`.
 
-SQLite ``memory.db`` in WAL mode is the source of truth. ``dump.jsonl`` is the
-tracked text mirror. FTS5 includes unicode61 and a CJK bigram shadow index
+Each server's SQLite ``memory.db`` in WAL mode is its local serving truth.
+``dump.jsonl`` is a v1-compatible materialized projection; immutable protocol-v2
+operations are the only remote convergence input. FTS5 includes unicode61 and a CJK bigram shadow index
 (ranked substring matching without the SQLite ≥3.34 trigram tokenizer).
 spec: <agent-home>/.agent_reports/spec/prd.md (legacy: .claude_reports/spec/prd.md).
 
 Design boundary:
-  - SQLite is the source of truth; dump.jsonl is a deterministic text mirror.
+  - SQLite is local serving truth; dump.jsonl is compatibility output only.
   - Agents make semantic memory decisions. This module enforces mechanical
     storage, retrieval, scope, lifecycle, telemetry, and recovery contracts.
   - No external Python dependencies; rg accelerates session retrieval when present.
 """
-import argparse, datetime, hashlib, json, os, re, shutil, sqlite3, subprocess, sys, tarfile, tempfile, time
+import argparse, contextlib, datetime, fcntl, hashlib, io, json, os, re, shutil, sqlite3, stat, subprocess, sys, tarfile, tempfile, time
 from collections import namedtuple
 from pathlib import Path
+
+MEM_MODULE_DIR = Path(__file__).resolve().parent
+if str(MEM_MODULE_DIR) not in sys.path:
+    sys.path.insert(0, str(MEM_MODULE_DIR))
+
+import git_exchange_v2
+import protocol_v2
+import sync_v2
 
 HOME = Path.home()
 def default_agent_home() -> Path:
@@ -51,8 +60,9 @@ TIERS = ("working", "durable")
 SCOPES = ("project", "global")
 WORKING_TTL_DAYS = 21
 # v2 strength/access, v3 cwd remap, v4 injection, v5 delivery,
-# v6 legacy cwd_origin re-normalization, v7 retrieval capsules and temporal state.
-SCHEMA_VERSION = 7
+# v6 legacy cwd_origin re-normalization, v7 retrieval capsules and temporal state,
+# v8 immutable operation/outbox/frontier/peer state.
+SCHEMA_VERSION = 8
 FM_ORDER = ["id", "tier", "scope", "type", "cwd_origin", "created", "updated",
             "expires", "source", "tags", "links", "strength", "last_accessed", "injection_flag",
             "delivery_state", "headline", "aliases", "entities", "topics", "artifact_refs",
@@ -101,6 +111,16 @@ else:
         / "agent-memory" / "write-events.jsonl"
     )
 WRITE_ACTORS = ("manual", "distiller", "curator", "lifecycle", "sync", "restore")
+INSTALLATION_STATE = (
+    Path(os.environ.get("XDG_STATE_HOME", HOME / ".local" / "state"))
+    / "hearting" / "memory-sync"
+)
+INSTALLATION_ID = INSTALLATION_STATE / "installation-id"
+_INSTALLATION_FINGERPRINT_CACHE = None
+
+
+class UnsupportedSchemaError(RuntimeError):
+    """The on-disk schema is newer than this writer understands."""
 # A distinct sentinel lets callers intentionally omit event cwd without
 # changing the ambient fallback retained by existing journal callers.
 _WRITE_EVENT_CWD_UNSET = object()
@@ -207,7 +227,8 @@ def _commit_dump():
     History compaction is an explicit operator action: ``mem maintenance
     [--squash-days N] [--apply]`` squashes old auto-sync history and gcs (see
     ``maintenance()``); it is run by the session finalizer or the user, never
-    a daemon. Pushing remains opt-in through ``MEM_DUMP_PUSH=1``.
+    a daemon. Routine sync never pushes this compatibility projection;
+    ``MEM_DUMP_PUSH=1`` is only a deprecated alias for immutable v2 exchange.
     """
     if os.environ.get("MEM_DUMP_COMMIT") == "0":
         return  # Explicit escape hatch.
@@ -234,10 +255,6 @@ def _commit_dump():
     if rc != 0:
         _warn("git-commit", rc, err)
         return
-    if os.environ.get("MEM_DUMP_PUSH") == "1":
-        rc, _, err = _git_run(["push"], repo)
-        if rc != 0:
-            _warn("git-push", rc, err)
 
 
 def maintenance(squash_days=14, apply=False):
@@ -363,6 +380,19 @@ def backfill_capsules(apply=False):
                 con.execute("UPDATE records SET entities=? WHERE id=?",
                             (json.dumps(merged, ensure_ascii=False), rid))
                 _sync_capsule_row(con, rid)
+            by_namespace = {}
+            for rid, _merged in changed:
+                state = _record_state(con, rid)
+                by_namespace.setdefault(_state_namespace(state), []).append(rid)
+            for namespace, ids in sorted(by_namespace.items()):
+                for offset in range(0, len(ids), protocol_v2.MAX_MUTATIONS):
+                    _capture_v2_operation(
+                        con,
+                        "put",
+                        post_ids=ids[offset:offset + protocol_v2.MAX_MUTATIONS],
+                        project_namespace=namespace,
+                        reason="capsule-backfill",
+                    )
             con.commit()
             print(f"[backfill] updated {len(changed)} / {total} active records")
         else:
@@ -1068,14 +1098,95 @@ def _migrate_v7(con):
     _rebuild_capsules(con)
 
 
-def _run_migrations(con):
+def _installation_fingerprint():
+    """Return a private, stable install fingerprint kept outside memory.db."""
+    global _INSTALLATION_FINGERPRINT_CACHE
+    if _INSTALLATION_FINGERPRINT_CACHE is not None:
+        return _INSTALLATION_FINGERPRINT_CACHE
+    INSTALLATION_STATE.mkdir(mode=0o700, parents=True, exist_ok=True)
+    os.chmod(INSTALLATION_STATE, 0o700)
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(INSTALLATION_ID, flags)
+    except FileNotFoundError:
+        token = os.urandom(16).hex().encode("ascii") + b"\n"
+        temp_path = INSTALLATION_STATE / (
+            f".installation-id.{os.getpid()}.{os.urandom(8).hex()}.tmp"
+        )
+        create_flags = (os.O_WRONLY | os.O_CREAT | os.O_EXCL |
+                        getattr(os, "O_NOFOLLOW", 0))
+        try:
+            created = os.open(temp_path, create_flags, 0o600)
+            try:
+                if os.write(created, token) != len(token):
+                    raise sync_v2.SyncInvariantError(
+                        "installation identity write was incomplete"
+                    )
+                os.fsync(created)
+            finally:
+                os.close(created)
+            try:
+                os.link(temp_path, INSTALLATION_ID, follow_symlinks=False)
+            except FileExistsError:
+                pass
+            directory_fd = os.open(
+                INSTALLATION_STATE,
+                os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
+            )
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+        finally:
+            try:
+                temp_path.unlink()
+            except FileNotFoundError:
+                pass
+        fd = os.open(INSTALLATION_ID, flags)
+    try:
+        info = os.fstat(fd)
+        if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or
+                stat.S_IMODE(info.st_mode) & 0o077):
+            raise sync_v2.SyncInvariantError(
+                "installation identity must be one private regular file"
+            )
+        raw = os.read(fd, 128)
+    finally:
+        os.close(fd)
+    if not re.fullmatch(rb"[0-9a-f]{32}\n", raw):
+        raise sync_v2.SyncInvariantError("installation identity file is malformed")
+    machine = b""
+    try:
+        machine = Path("/etc/machine-id").read_bytes()[:256].strip()
+    except OSError:
+        pass
+    material = b"\0".join((raw.strip(), machine,
+                             str(STORE.resolve(strict=False)).encode("utf-8")))
+    _INSTALLATION_FINGERPRINT_CACHE = hashlib.sha256(material).hexdigest()
+    return _INSTALLATION_FINGERPRINT_CACHE
+
+
+def _migrate_v8(con, installation_fingerprint):
+    """Add local protocol-v2 ledgers and one active replica identity."""
+    sync_v2.ensure_sync_schema(con)
+    sync_v2.ensure_replica_identity(
+        con, installation_fingerprint=installation_fingerprint
+    )
+
+
+def _run_migrations(con, installation_fingerprint):
     """Run schema migrations based on ``PRAGMA user_version``.
 
     Prepare backups and filesystem data before locking, then apply pure SQL under
     the lock. This is separate from legacy Markdown-to-DB migration.
     """
     cur = con.execute("PRAGMA user_version").fetchone()[0]
-    if cur >= SCHEMA_VERSION:
+    if cur > SCHEMA_VERSION:
+        raise UnsupportedSchemaError(
+            f"memory schema v{cur} is newer than supported v{SCHEMA_VERSION}; "
+            "refusing a down-level writer"
+        )
+    if cur == SCHEMA_VERSION:
         return                       # idempotent no-op
     has_records = con.execute("SELECT 1 FROM records LIMIT 1").fetchone() is not None
     # --- BACKUP (lock-free; source MUST be clean — see invariant below) ---
@@ -1098,7 +1209,11 @@ def _run_migrations(con):
     con.execute("BEGIN IMMEDIATE")
     try:
         cur2 = con.execute("PRAGMA user_version").fetchone()[0]  # re-read under lock
-        if cur2 >= SCHEMA_VERSION:
+        if cur2 > SCHEMA_VERSION:
+            raise UnsupportedSchemaError(
+                f"memory schema v{cur2} is newer than supported v{SCHEMA_VERSION}"
+            )
+        if cur2 == SCHEMA_VERSION:
             con.execute("ROLLBACK"); return   # another process already migrated
         if cur2 < 2:
             _migrate_v2(con)
@@ -1112,6 +1227,8 @@ def _run_migrations(con):
             _migrate_v6_apply(con, v6_plan)
         if cur2 < 7:
             _migrate_v7(con)
+        if cur2 < 8:
+            _migrate_v8(con, installation_fingerprint)
         con.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
         con.execute("COMMIT")
     except Exception:
@@ -1142,8 +1259,15 @@ def get_con():
     con.execute("PRAGMA foreign_keys=ON")
     # Let parent sync and distiller writes contend safely under WAL.
     con.execute("PRAGMA busy_timeout=5000")
+    stored_version = con.execute("PRAGMA user_version").fetchone()[0]
+    if stored_version > SCHEMA_VERSION:
+        con.close()
+        raise UnsupportedSchemaError(
+            f"memory schema v{stored_version} is newer than supported "
+            f"v{SCHEMA_VERSION}; refusing to mutate it"
+        )
     _ensure_schema(con)
-    _run_migrations(con)
+    _run_migrations(con, _installation_fingerprint())
     return con
 
 
@@ -1210,6 +1334,172 @@ def _meta_to_params(meta, body):
         meta.get("superseded_by"),
         int(meta.get("capsule_version") or 1),
     )
+
+
+def _canonical_record_state(state):
+    """Return one wire-canonical complete record snapshot."""
+    normalized = dict(state)
+    for key in ("tags", "links", *CAPSULE_LIST_FIELDS):
+        normalized[key] = sorted(
+            set(normalized.get(key) or []),
+            key=protocol_v2.canonical_bytes,
+        )
+    return normalized
+
+
+def _record_state(con, rid):
+    """Return one complete RECORD_COLS post-state as protocol JSON data."""
+    row = con.execute(
+        f"SELECT {', '.join(RECORD_COLS)} FROM records WHERE id=?", (rid,)
+    ).fetchone()
+    if row is None:
+        return None
+    meta, body = _row_to_meta(row)
+    return _canonical_record_state({**meta, "body": body})
+
+
+def _state_namespace(state):
+    if not state:
+        return None
+    return "global" if state.get("scope") == "global" else state.get("cwd_origin")
+
+
+def _capture_v2_operation(con, kind, *, post_ids=(), tombstones=None,
+                          edges=None, target_ops=None, reason=None,
+                          prior_states=None, project_namespace=None):
+    """Capture one semantic command in the caller's open transaction.
+
+    Semantic rows/derived mirrors must already hold their final state. The
+    helper snapshots complete ``RECORD_COLS`` post-states, binds the exact
+    current frontiers, authors one canonical operation, and queues it before
+    the caller's existing commit. Access touches and index-only maintenance do
+    not call this funnel.
+    """
+    if not con.in_transaction:
+        raise sync_v2.SyncInvariantError(
+            "semantic operation capture requires BEGIN IMMEDIATE"
+        )
+    tombstones = dict(tombstones or {})
+    edges = dict(edges or {})
+    target_ops = dict(target_ops or {})
+    prior_states = {
+        rid: _canonical_record_state(state)
+        for rid, state in dict(prior_states or {}).items()
+    }
+    post = {rid: _record_state(con, rid) for rid in set(post_ids)}
+    if any(state is None for state in post.values()):
+        missing = sorted(rid for rid, state in post.items() if state is None)
+        raise sync_v2.SyncInvariantError(
+            f"semantic post-state is missing for: {','.join(missing)}"
+        )
+    record_ids = sorted(set(post) | set(tombstones) | set(edges) | set(target_ops))
+    if not record_ids:
+        raise sync_v2.SyncInvariantError("semantic operation has no affected records")
+    namespaces = {
+        value for value in (
+            _state_namespace(post.get(rid) or prior_states.get(rid))
+            for rid in record_ids
+        ) if value
+    }
+    if project_namespace:
+        namespaces.add(project_namespace)
+    if len(namespaces) != 1:
+        raise sync_v2.SyncInvariantError(
+            "semantic operation must stay inside one logical project namespace"
+        )
+    namespace = next(iter(namespaces))
+    frontiers = []
+    parents = set()
+    mutations = []
+    for ordinal, rid in enumerate(record_ids):
+        heads = [row[0] for row in con.execute(
+            "SELECT op_id FROM sync_frontier WHERE project_key=? AND record_id=? "
+            "ORDER BY op_id", (namespace, rid)
+        ).fetchall()]
+        frontiers.append({"record_id": rid, "heads": heads})
+        parents.update(heads)
+        mutation = {"record_id": rid, "mutation_ordinal": ordinal}
+        if rid in tombstones:
+            prior = prior_states.get(rid) or {}
+            prior_bytes = protocol_v2.canonical_bytes(prior)
+            mutation["tombstone"] = {
+                "action": str(tombstones[rid]),
+                "pending": prior.get("delivery_state") == "pending",
+                "prior_digest": hashlib.sha256(prior_bytes).hexdigest(),
+                "record_id": rid,
+            }
+        else:
+            mutation["post_state"] = post.get(rid) or prior_states.get(rid)
+        if rid in edges:
+            mutation["edge"] = dict(edges[rid])
+        if rid in target_ops:
+            mutation["target_op_id"] = target_ops[rid]
+        mutations.append(mutation)
+    installation_fingerprint = _installation_fingerprint()
+    replica_id = sync_v2.ensure_replica_identity(
+        con, installation_fingerprint=installation_fingerprint
+    )
+    counter = sync_v2.allocate_counter(
+        con, replica_id, installation_fingerprint=installation_fingerprint
+    )
+    provenance = {
+        "actor": str(os.environ.get("MEM_ACTOR") or "manual"),
+        "reason": str(reason or kind),
+        "source": "mem.py",
+    }
+    if kind == "force-tombstone":
+        evidence = [mutations[record_ids.index(rid)]["tombstone"]["prior_digest"]
+                    for rid in record_ids if rid in tombstones]
+        provenance.update({
+            "authority": str(os.environ.get("MEM_ACTOR") or "manual"),
+            "graveyard_evidence": hashlib.sha256(
+                protocol_v2.canonical_bytes(sorted(evidence))
+            ).hexdigest(),
+        })
+    operation = protocol_v2.build_operation({
+        "protocol_major": 2,
+        "schema_minor": 0,
+        "replica_id": replica_id,
+        "counter": counter,
+        "parents": sorted(parents),
+        "project_key": namespace,
+        "kind": kind,
+        "frontiers": frontiers,
+        "mutations": mutations,
+        "provenance": provenance,
+    })
+    sync_v2.record_local_operation(
+        con, operation, installation_fingerprint=installation_fingerprint
+    )
+    for rid, action in tombstones.items():
+        prior_bytes = protocol_v2.canonical_bytes(prior_states.get(rid) or {})
+        tombstone = next(item["tombstone"] for item in mutations
+                         if item["record_id"] == rid)
+        sync_v2.record_graveyard_evidence(
+            con, operation["op_id"], rid, str(action), prior_bytes,
+            protocol_v2.canonical_bytes(tombstone),
+        )
+    return operation
+
+
+def _capture_tombstone_groups(con, kind, prior_states, *, action, reason):
+    """Capture a multi-project maintenance deletion as one op per namespace."""
+    groups = {}
+    for rid, state in prior_states.items():
+        groups.setdefault(_state_namespace(state), {})[rid] = state
+    operations = []
+    for namespace, states in sorted(groups.items()):
+        items = sorted(states.items())
+        for offset in range(0, len(items), protocol_v2.MAX_MUTATIONS):
+            chunk = dict(items[offset:offset + protocol_v2.MAX_MUTATIONS])
+            operations.append(_capture_v2_operation(
+                con, kind,
+                tombstones={rid: action for rid in chunk},
+                prior_states=chunk,
+                project_namespace=namespace,
+                reason=reason,
+            ))
+    return operations
 
 
 def db_iter_records(con=None, where=None, params=()):
@@ -1303,6 +1593,7 @@ def write_record(tier, scope, rtype, body, cwd_origin=None, tags=None, links=Non
     # Keep deduplication, INSERT, and FTS mirrors in one transaction.
     con = get_con()
     try:
+        con.execute("BEGIN IMMEDIATE")
         def refresh_capsule(rid, *, body_replaced=False):
             current = con.execute(
                 "SELECT headline,aliases,entities,topics,artifact_refs FROM records WHERE id=?",
@@ -1355,6 +1646,9 @@ def write_record(tier, scope, rtype, body, cwd_origin=None, tags=None, links=Non
                 con.execute("INSERT INTO records_cjk(id, body) VALUES(?,?)",
                             (existing, _cjk_shadow_text(body)))
             refresh_capsule(existing, body_replaced=True)
+            _capture_v2_operation(
+                con, "put", post_ids=[existing], reason="source-upsert"
+            )
             con.commit()
             if not quiet:
                 print(f"[upsert] {tier}/{scope} source={source} → {existing}")
@@ -1384,6 +1678,9 @@ def write_record(tier, scope, rtype, body, cwd_origin=None, tags=None, links=Non
                     (today(), requested_delivery, dup))
             if any(value is not None for value in (headline, aliases, entities, topics, artifact_refs)) or _extracted:
                 refresh_capsule(dup)
+            _capture_v2_operation(
+                con, "put", post_ids=[dup], reason="dedup-reinforce"
+            )
             con.commit()
             if not quiet:
                 print(f"[reinforce] existing record recurred; incremented strength: {dup}")
@@ -1427,6 +1724,7 @@ def write_record(tier, scope, rtype, body, cwd_origin=None, tags=None, links=Non
             con.execute("INSERT INTO records_cjk(id, body) VALUES(?,?)",
                         (sid, _cjk_shadow_text(body)))
         _sync_capsule_row(con, sid)
+        _capture_v2_operation(con, "put", post_ids=[sid], reason="record-write")
         con.commit()
         if not quiet:
             fl = f"  ({'·'.join(flags)})" if flags else ""
@@ -2488,13 +2786,41 @@ def export_dump(target_path=None):
     return len(rows)
 
 
-def import_dump(path):
-    """Restore the DB exactly from dump.jsonl, including FTS mirrors."""
+def import_dump(path, recovery=False):
+    """Restore the compatibility dump, with an explicit recovery safety gate."""
     global _FTS_OK, _CJK_OK
     path = Path(path)
     con = get_con()
     n = 0
     try:
+        con.execute("BEGIN IMMEDIATE")
+        sync_v2.ensure_replica_identity(
+            con, installation_fingerprint=_installation_fingerprint()
+        )
+        state_tables = (
+            "sync_objects", "sync_outbox", "sync_applied", "sync_frontier",
+            "sync_conflicts", "sync_peer_state", "sync_quarantine",
+            "sync_migration_epoch", "sync_parents", "sync_graveyard",
+            "sync_transactional_graveyard",
+        )
+        state_counts = {
+            table: int(con.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()[0])
+            for table in state_tables
+        }
+        object_count = state_counts["sync_objects"]
+        outbox_count, unconfirmed = con.execute(
+            "SELECT COUNT(*),COALESCE(SUM(state<>'confirmed'),0) FROM sync_outbox"
+        ).fetchone()
+        active_state = [
+            f"{table}={count}" for table, count in state_counts.items() if count
+        ]
+        if active_state:
+            detail = (f"{object_count} v2 object(s), {unconfirmed} unconfirmed "
+                      f"outbox operation(s); state: {', '.join(active_state)}")
+            raise sync_v2.SyncInvariantError(
+                f"{'recovery ' if recovery else ''}import refused: {detail}; "
+                "use a lossless v2 recovery bundle and preserve/confirm the outbox"
+            )
         # Clear records and actual sqlite_master-backed mirrors before replay.
         con.execute("DELETE FROM records")
         if con.execute("SELECT name FROM sqlite_master WHERE name='records_fts'").fetchone():
@@ -3125,6 +3451,7 @@ def consume(rid):
             "UPDATE records SET delivery_state='consumed', expires=?, updated=?, last_accessed=? "
             "WHERE id=?",
             (expires, today(), today(), rid))
+        _capture_v2_operation(con, "consume", post_ids=[rid], reason="consume")
         con.commit()
         print(f"[consume] {rid} pending→consumed")
         _append_recall_event({
@@ -3181,6 +3508,12 @@ def supersede(rid, by_rid):
             "UPDATE records SET status='superseded',canonical_id=?,superseded_by=?,updated=? WHERE id=?",
             (target, target, today(), rid))
         _sync_capsule_row(con, rid)
+        namespace = _state_namespace(_record_state(con, rid))
+        _capture_v2_operation(
+            con, "supersede", post_ids=[rid, by_rid],
+            edges={rid: {"source": rid, "target": target, "scope": namespace}},
+            reason="supersede",
+        )
         con.commit()
         print(f"[supersede] {rid} → {target}")
         _append_write_event("supersede", rid, tier=old_meta.get("tier"),
@@ -3221,6 +3554,7 @@ def activate(rid):
             "UPDATE records SET status='active',canonical_id=id,superseded_by=NULL,updated=? WHERE id=?",
             (today(), rid))
         _sync_capsule_row(con, rid)
+        _capture_v2_operation(con, "put", post_ids=[rid], reason="activate")
         con.commit()
         print(f"[activate] {rid}")
         _append_write_event("activate", rid, tier=meta.get("tier"), scope=meta.get("scope"),
@@ -3245,6 +3579,7 @@ def lifecycle(apply=False):
         protected = []
         deleted = 0
         expired_ok = []
+        graveyard_lines = []
         for meta, body in expired_rows:
             if meta.get("delivery_state") == "pending":
                 protected.append(meta["id"])
@@ -3253,17 +3588,31 @@ def lifecycle(apply=False):
             print(f"  [expire] {meta['id']} (expires {meta.get('expires')})")
             if apply:
                 try:
-                    if not _graveyard_append(con, meta["id"], action="lifecycle-expire"):
+                    line = _graveyard_prepare(
+                        con, meta["id"], action="lifecycle-expire"
+                    )
+                    if line is None:
                         sys.stderr.write(
                             f"[lifecycle] graveyard failed; deletion stopped: {meta['id']}\n")
                         continue
+                    graveyard_lines.append(line)
                     _delete_rows(con, meta["id"])
                     deleted += 1
                     expired_ok.append((meta, body))
                 except Exception as e:
                     sys.stderr.write(f"[lifecycle] deletion failed; continuing: {meta['id']}: {e}\n")
         if apply:
+            prior_states = {
+                meta["id"]: {**meta, "body": body}
+                for meta, body in expired_ok
+            }
+            if prior_states:
+                _capture_tombstone_groups(
+                    con, "tombstone", prior_states,
+                    action="lifecycle-expire", reason="lifecycle-expire",
+                )
             con.commit()
+            _graveyard_flush(graveyard_lines)
             actor = _write_actor(default="lifecycle")
             for meta, body in expired_ok:
                 _append_write_event("lifecycle-expire", meta["id"], tier=meta.get("tier"),
@@ -3318,12 +3667,22 @@ def delete_record(rid, quiet=False, force=False):
             if not quiet:
                 print(f"[delete] refused pending record; consume first or use --force: {rid}")
             return False
-        if not _graveyard_append(con, rid, action="delete-force" if force else "delete"):
+        graveyard_line = _graveyard_prepare(
+            con, rid, action="delete-force" if force else "delete"
+        )
+        if graveyard_line is None:
             if not quiet:
                 print(f"[delete] graveyard failed; deletion stopped: {rid}")
             return False
+        prior = _record_state(con, rid)
         _delete_rows(con, rid)
+        _capture_v2_operation(
+            con, "force-tombstone" if force else "tombstone",
+            tombstones={rid: "delete-force" if force else "delete"},
+            prior_states={rid: prior}, reason="delete-force" if force else "delete",
+        )
         con.commit()
+        _graveyard_flush((graveyard_line,))
         if not quiet:
             print(f"[delete] {rid}")
         _append_write_event("delete", rid, tier=row[2], scope=row[3], rtype=row[4])
@@ -3336,16 +3695,12 @@ def delete_record(rid, quiet=False, force=False):
 GRAVEYARD = STORE / "deleted-records.jsonl"
 
 
-def _graveyard_append(con, rid, action="prune", canonical=None):
-    """Append a full record to graveyard before deletion.
-
-    Return true only after write, flush, and fsync. Never raise; callers abort
-    destructive operations on failure.
-    """
+def _graveyard_prepare(con, rid, action="prune", canonical=None):
+    """Prepare one compatibility graveyard line inside the DB transaction."""
     row = con.execute(
         f"SELECT {', '.join(RECORD_COLS)} FROM records WHERE id=?", (rid,)).fetchone()
     if row is None:
-        return False
+        return None
     rec = {}
     for k, v in zip(RECORD_COLS, row):
         if k in ("tags", "links", *CAPSULE_LIST_FIELDS):
@@ -3355,25 +3710,38 @@ def _graveyard_append(con, rid, action="prune", canonical=None):
     rec["_deleted_at"] = datetime.datetime.now().isoformat(timespec="seconds")
     rec["_action"] = action
     rec["_canonical"] = canonical
-    line = json.dumps(rec, sort_keys=True, ensure_ascii=False)
+    return json.dumps(rec, sort_keys=True, ensure_ascii=False)
+
+
+def _graveyard_flush(lines):
+    """Append compatibility lines only after the semantic transaction commits.
+
+    The SQLite transactional graveyard and immutable tombstone operation are
+    authoritative. This projection is deliberately post-commit so a rollback
+    can never leave phantom deletion evidence in the legacy JSONL file.
+    """
+
+    lines = tuple(line for line in lines if line)
+    if not lines:
+        return True
     try:
         GRAVEYARD.parent.mkdir(parents=True, exist_ok=True)
-        # O_APPEND plus one bounded write keeps each line atomic on POSIX.
+        # One append+fsync publishes the committed transaction's projection.
         with GRAVEYARD.open("a", encoding="utf-8") as f:
-            f.write(line + "\n")
+            f.write("".join(line + "\n" for line in lines))
             f.flush()
-            os.fsync(f.fileno())   # Prevent buffered false success.
+            os.fsync(f.fileno())
         return True
     except OSError as e:
-        sys.stderr.write(f"[graveyard] append failed; deletion must stop: {rid}: {e}\n")
+        sys.stderr.write(
+            "[graveyard] compatibility projection append failed after the "
+            f"transaction committed: {e}\n"
+        )
         return False
 
 
-def restore(rid):
-    """Restore the newest visible graveyard entry for one id; graveyard remains append-only."""
-    if not GRAVEYARD.exists():
-        print(f"[restore] visible graveyard record not found: {rid}")
-        return False
+def _compat_restore_candidate(rid):
+    """Return the newest compatibility graveyard row, if locally present."""
     found = None
     try:
         with GRAVEYARD.open(encoding="utf-8") as f:
@@ -3384,19 +3752,102 @@ def restore(rid):
                     continue
                 if rec.get("id") == rid:
                     found = rec
-    except OSError:
-        found = None
-    if found is None:
-        print(f"[restore] visible graveyard record not found: {rid}")
-        return False
+    except (FileNotFoundError, OSError):
+        return None
+    return found
+
+
+def _v2_restore_candidate(con, rid):
+    """Reconstruct an effective tombstone's exact prior state from its DAG."""
+    envelopes = [
+        {"op_id": op_id,
+         "payload": protocol_v2.canonical_loads(bytes(payload))}
+        for op_id, payload in con.execute(
+            "SELECT op_id,payload_bytes FROM sync_objects ORDER BY op_id")
+    ]
+    if not envelopes:
+        return None
+    folded = protocol_v2.fold_operations(envelopes)
+    if folded.classification.hard_failures:
+        raise sync_v2.SyncInvariantError(
+            "cannot restore through a protocol hard failure"
+        )
+    tombstone_id = folded.tombstones.get(rid)
+    if tombstone_id is None:
+        return None
+    tombstone_op = folded.classification.operations[tombstone_id]
+    mutation = tombstone_op.mutation_for(rid)
+    frontier = next(
+        (item["heads"] for item in tombstone_op.payload["frontiers"]
+         if item["record_id"] == rid),
+        None,
+    )
+    if mutation is None or "tombstone" not in mutation or frontier is None:
+        raise sync_v2.SyncInvariantError(
+            "effective tombstone lacks restore evidence"
+        )
+    if not frontier:
+        # A pre-v2 row can be deleted after the schema migration but before an
+        # operator seed. Its compatibility graveyard is the only complete
+        # prior state; retain the causal tombstone ID without inventing a
+        # predecessor operation. The remote gate prevents this unseeded object
+        # from being exchanged.
+        return None, tombstone_id, tombstone_op.payload["project_key"]
+    closure = set()
+    stack = list(frontier)
+    while stack:
+        op_id = stack.pop()
+        if op_id in closure:
+            continue
+        operation = folded.classification.operations.get(op_id)
+        if operation is None:
+            raise sync_v2.SyncInvariantError(
+                "restore frontier is missing a causal operation"
+            )
+        closure.add(op_id)
+        stack.extend(operation.parents)
+    prior = protocol_v2.fold_operations(
+        [folded.classification.operations[op_id] for op_id in sorted(closure)]
+    )
+    if (prior.classification.hard_failures or prior.deferred or prior.quarantined
+            or rid in prior.conflicts or rid not in prior.records):
+        raise sync_v2.SyncInvariantError(
+            "restore frontier does not materialize one complete prior state"
+        )
+    state = dict(prior.records[rid])
+    expected = mutation["tombstone"]["prior_digest"]
+    actual = hashlib.sha256(protocol_v2.canonical_bytes(state)).hexdigest()
+    if actual != expected:
+        raise sync_v2.SyncInvariantError(
+            "restore prior state does not match tombstone evidence"
+        )
+    return state, tombstone_id, tombstone_op.payload["project_key"]
+
+
+def restore(rid):
+    """Restore one effective tombstone; keep compatibility graveyard append-only."""
+    found = _compat_restore_candidate(rid)
     pkey = project_key(Path.cwd())
-    if found.get("scope") != "global" and found.get("cwd_origin") != pkey:
-        print(f"[restore] visible graveyard record not found: {rid}")
-        return False
     con = get_con()
     try:
+        con.execute("BEGIN IMMEDIATE")
         if con.execute("SELECT 1 FROM records WHERE id=?", (rid,)).fetchone():
             print(f"[restore] refused; live ID already exists: {rid}")
+            return False
+        causal = _v2_restore_candidate(con, rid)
+        target_op_id = None
+        if causal is not None:
+            causal_state, target_op_id, namespace = causal
+            if causal_state is not None:
+                if namespace != _state_namespace(causal_state):
+                    raise sync_v2.SyncInvariantError(
+                        "restore state namespace differs from tombstone project"
+                    )
+                found = causal_state
+        if found is None or (
+            found.get("scope") != "global" and found.get("cwd_origin") != pkey
+        ):
+            print(f"[restore] visible graveyard record not found: {rid}")
             return False
         body = found.get("body", "")
         meta = {k: found.get(k) for k in RECORD_COLS if k != "body"}
@@ -3416,6 +3867,24 @@ def restore(rid):
             con.execute("INSERT INTO records_cjk(id, body) VALUES(?,?)",
                         (rid, _cjk_shadow_text(body)))
         _sync_capsule_row(con, rid)
+        if target_op_id is None:
+            prior_op = con.execute(
+                "SELECT destructive_op_id FROM sync_transactional_graveyard "
+                "WHERE record_id=? ORDER BY recorded_at DESC, destructive_op_id DESC LIMIT 1",
+                (rid,),
+            ).fetchone()
+            target_op_id = prior_op[0] if prior_op else None
+        if target_op_id:
+            _capture_v2_operation(
+                con, "restore", post_ids=[rid], target_ops={rid: target_op_id},
+                reason="restore",
+            )
+        else:
+            # A v1 graveyard entry has no causal tombstone to target. Preserve
+            # the explicit recovery action as a new put; never invent ancestry.
+            _capture_v2_operation(
+                con, "put", post_ids=[rid], reason="legacy-graveyard-restore",
+            )
         con.commit()
         print(f"[restore] {rid} ({meta['delivery_state']})")
         _append_write_event("restore", rid, tier=meta.get("tier"), scope=meta.get("scope"),
@@ -3448,6 +3917,7 @@ def reinforce(rid):
     """Reinforce recurrence by incrementing strength and updating last access."""
     con = get_con()
     try:
+        con.execute("BEGIN IMMEDIATE")
         ok, reason = _in_current_project(con, rid)
         if not ok:
             print(f"[reinforce] refused ({reason}): {rid}")
@@ -3456,6 +3926,7 @@ def reinforce(rid):
         con.execute(
             "UPDATE records SET strength=COALESCE(strength,1)+1, last_accessed=? WHERE id=?",
             (today(), rid))
+        _capture_v2_operation(con, "put", post_ids=[rid], reason="reinforce")
         con.commit()
         n = con.execute("SELECT strength FROM records WHERE id=?", (rid,)).fetchone()[0]
         print(f"[reinforce] {rid} strength→{n}")
@@ -3482,11 +3953,18 @@ def prune(rid):
         if state == "pending":
             print(f"[prune] refused pending record; consume first: {rid}")
             return False
-        if not _graveyard_append(con, rid, action="prune"):
+        graveyard_line = _graveyard_prepare(con, rid, action="prune")
+        if graveyard_line is None:
             print(f"[prune] graveyard failed; deletion stopped: {rid}")
             return False
+        prior = _record_state(con, rid)
         _delete_rows(con, rid)
+        _capture_v2_operation(
+            con, "tombstone", tombstones={rid: "prune"},
+            prior_states={rid: prior}, reason="prune",
+        )
         con.commit()                 # One terminal commit; close rolls back on exception.
+        _graveyard_flush((graveyard_line,))
         print(f"[prune] {rid} (graveyarded)")
         _append_write_event("prune", rid, tier=row[1], scope=row[2], rtype=row[3])
         return True
@@ -3518,22 +3996,34 @@ def merge(canonical, ids):
             print(f"[merge] refused pending records: {pending}; no deletion or strength change")
             return False
         # Sum strength once per deduplicated ID.
+        prior_states = {rid: _record_state(con, rid) for rid in ids}
         total = 0
         for i in ids:
             total += con.execute(
                 "SELECT COALESCE(strength,1) FROM records WHERE id=?", (i,)).fetchone()[0]
         # Delete only after every non-canonical graveyard write succeeds.
+        graveyard_lines = []
         for i in non_canonical:
-            if not _graveyard_append(con, i, action="merge", canonical=canonical):
+            line = _graveyard_prepare(con, i, action="merge", canonical=canonical)
+            if line is None:
                 print(f"[merge] graveyard failed; merge stopped with no deletion: {i}")
                 return False
+            graveyard_lines.append(line)
         canon_row = con.execute(
             "SELECT tier, scope, type FROM records WHERE id=?", (canonical,)).fetchone()
         con.execute("UPDATE records SET strength=?, last_accessed=? WHERE id=?",
                     (total, today(), canonical))
         for i in non_canonical:
             _delete_rows(con, i)
+        _capture_v2_operation(
+            con, "merge", post_ids=[canonical],
+            tombstones={rid: "merge" for rid in non_canonical},
+            edges={rid: {"source": rid, "target": canonical, "scope": pkey}
+                   for rid in non_canonical},
+            prior_states=prior_states, reason="merge",
+        )
         con.commit()                 # One terminal commit preserves atomicity.
+        _graveyard_flush(graveyard_lines)
         print(f"[merge] {canonical} ← {non_canonical} strength→{total}")
         _append_write_event("merge", canonical, tier=canon_row[0], scope=canon_row[1],
                              rtype=canon_row[2], snippet=f"← {','.join(non_canonical)}")
@@ -3546,6 +4036,7 @@ def graduate(rid, to="durable"):
     """Graduate a project-owned working record to durable."""
     con = get_con()
     try:
+        con.execute("BEGIN IMMEDIATE")
         ok, reason = _in_current_project(con, rid)
         if not ok:
             print(f"[graduate] refused ({reason}): {rid}")
@@ -3557,6 +4048,7 @@ def graduate(rid, to="durable"):
         con.execute(
             "UPDATE records SET tier='durable', scope='project', expires=NULL, "
             "updated=?, last_accessed=? WHERE id=?", (today(), today(), rid))
+        _capture_v2_operation(con, "put", post_ids=[rid], reason="graduate")
         con.commit()
         print(f"[graduate] {rid} working→durable")
         rtype = con.execute("SELECT type FROM records WHERE id=?", (rid,)).fetchone()[0]
@@ -3570,6 +4062,7 @@ def reattribute(rid):
     """Reattribute an orphan record to the current project without data loss."""
     con = get_con()
     try:
+        con.execute("BEGIN IMMEDIATE")
         row = con.execute(
             "SELECT scope, type, cwd_origin FROM records WHERE id=?", (rid,)).fetchone()
         if row is None:
@@ -3591,7 +4084,20 @@ def reattribute(rid):
         if d is not None and d.is_dir():
             print(f"[reattribute] refused record belonging to a live project: {rid}")
             return False
+        frontier_projects = {
+            row[0] for row in con.execute(
+                "SELECT DISTINCT project_key FROM sync_frontier WHERE record_id=?",
+                (rid,),
+            )
+        }
+        if frontier_projects and frontier_projects != {pkey}:
+            print(f"[reattribute] refused (v2-frontier-cutover-required): {rid}")
+            return False
         con.execute("UPDATE records SET cwd_origin=? WHERE id=?", (pkey, rid))
+        _capture_v2_operation(
+            con, "put", post_ids=[rid], project_namespace=pkey,
+            reason="reattribute",
+        )
         con.commit()
         print(f"[reattribute] {rid} {cwd_origin}→{pkey}")
         _append_write_event("reattribute", rid, scope=scope, rtype=rtype,
@@ -3868,21 +4374,234 @@ def log(limit=20, action=None, tier=None, actor=None, json_output=False):
         events = [e for e in events if e.get("tier") == tier]
     if actor:
         events = [e for e in events if e.get("actor") == actor]
-    limit = max(1, min(limit, 500))
+    limit = max(1, min(limit, 500 if not json_output else 20))
     events = events[-limit:]
     if json_output:
-        print(json.dumps({"count": len(events), "events": events}, sort_keys=True,
-                          ensure_ascii=False))
-        return
+        allowed = {
+            "ts": 64, "action": 64, "id": 256, "tier": 32,
+            "scope": 32, "type": 64, "actor": 64,
+        }
+        safe_events = []
+        for event in events:
+            safe = {}
+            for key, max_chars in allowed.items():
+                value = event.get(key)
+                if value is not None:
+                    safe[key] = str(value)[:max_chars]
+            safe_events.append(safe)
+        payload = {
+            "status_schema": 1,
+            "status": "local-only",
+            "exit_code": 0,
+            "reason": None,
+            "count": len(safe_events),
+            "events": safe_events,
+            "phases": {"journal-read": "ok", "sync-status": "not-applicable"},
+        }
+        if DB.exists():
+            con = get_con()
+            try:
+                policy = sync_v2.remote_policy(os.environ, connection=con)
+                payload["sync"] = sync_v2.sync_status(con, policy=policy)
+                payload["phases"]["sync-status"] = "ok"
+                payload.update(
+                    status=payload["sync"]["status"],
+                    exit_code=payload["sync"]["exit_code"],
+                    reason=payload["sync"]["reason"],
+                )
+            finally:
+                con.close()
+        print(json.dumps(payload, sort_keys=True, ensure_ascii=False))
+        return int(payload["exit_code"])
     print(f"# write log ({len(events)} most recent)")
     if not events:
         print(f"  (no records: {WRITE_EVENTS})")
-        return
+        return 0
     for e in events:
         snip = f"  {e['snippet']}" if e.get("snippet") else ""
         print(f"  {e.get('ts','?')}  {e.get('action','?'):<16} {e.get('id','?'):<40} "
               f"{e.get('tier') or '-'}/{e.get('scope') or '-'}/{e.get('type') or '-'}  "
               f"actor={e.get('actor','?')}{snip}")
+    return 0
+
+
+def conflicts(json_output=False):
+    """List unresolved variants visible to the current project."""
+    con = get_con()
+    try:
+        pkey = project_key(Path.cwd())
+        rows = con.execute(
+            "SELECT project_key,record_id,COUNT(*),"
+            "SUM(CASE WHEN provisional=1 THEN 1 ELSE 0 END) "
+            "FROM sync_conflicts WHERE resolved_by IS NULL "
+            "AND (project_key=? OR project_key='global') "
+            "GROUP BY project_key,record_id ORDER BY project_key,record_id",
+            (pkey,),
+        ).fetchall()
+    finally:
+        con.close()
+    data = [{"project_key": row[0], "record_id": row[1],
+             "variants": row[2], "provisional_variants": row[3]} for row in rows]
+    if json_output:
+        print(json.dumps({"count": len(data), "conflicts": data},
+                         sort_keys=True, ensure_ascii=False))
+    else:
+        print(f"# unresolved conflicts ({len(data)})")
+        for item in data:
+            print(f"  {item['record_id']}  variants={item['variants']}  "
+                  f"project={item['project_key']}")
+    return len(data)
+
+
+def show_conflict(rid, json_output=False):
+    """Show complete retained conflict variants; never auto-merge them."""
+    con = get_con()
+    try:
+        pkey = project_key(Path.cwd())
+        rows = con.execute(
+            "SELECT project_key,op_id,diagnostic_id,provisional,variant_bytes "
+            "FROM sync_conflicts WHERE record_id=? AND resolved_by IS NULL "
+            "AND (project_key=? OR project_key='global') ORDER BY op_id",
+            (rid, pkey),
+        ).fetchall()
+    finally:
+        con.close()
+    variants = [{"project_key": row[0], "op_id": row[1],
+                 "diagnostic_id": row[2], "provisional": bool(row[3]),
+                 "state": protocol_v2.canonical_loads(bytes(row[4]))}
+                for row in rows]
+    if not variants:
+        print(f"[conflict] unresolved visible conflict not found: {rid}")
+        return False
+    if json_output:
+        print(json.dumps({"record_id": rid, "variants": variants},
+                         sort_keys=True, ensure_ascii=False))
+    else:
+        print(f"# conflict {rid}")
+        for item in variants:
+            marker = "provisional" if item["provisional"] else "variant"
+            print(f"\n## {marker} {item['op_id']}\n")
+            print(json.dumps(item["state"], sort_keys=True, ensure_ascii=False,
+                             indent=2))
+    return True
+
+
+def resolve_conflict(rid, body=None, *, parents=None, headline=None, aliases=None,
+                     entities=None, topics=None, artifact_refs=None):
+    """Author an explicit resolution from the provisional variant."""
+    con = get_con()
+    try:
+        con.execute("BEGIN IMMEDIATE")
+        pkey = project_key(Path.cwd())
+        rows = con.execute(
+            "SELECT project_key,op_id,provisional,variant_bytes FROM sync_conflicts "
+            "WHERE record_id=? AND resolved_by IS NULL "
+            "AND (project_key=? OR project_key='global') ORDER BY op_id",
+            (rid, pkey),
+        ).fetchall()
+        if not rows:
+            print(f"[resolve] unresolved visible conflict not found: {rid}")
+            return False
+        projects = {item[0] for item in rows}
+        if len(projects) != 1:
+            print(f"[resolve] refused (ambiguous-project-namespace): {rid}")
+            return False
+        observed = sorted(row[1] for row in rows)
+        if sorted(set(parents or [])) != observed:
+            print(f"[resolve] refused (complete-frontier-required): {rid}")
+            return False
+        row = next((item for item in rows if item[2]), rows[-1])
+        state = dict(protocol_v2.canonical_loads(bytes(row[3])))
+        old_body = state["body"]
+        body = old_body if body is None else body
+        state.update({"body": body, "updated": today(), "last_accessed": today(),
+                      "status": "active", "canonical_id": rid,
+                      "superseded_by": None})
+        if headline is not None:
+            state["headline"] = headline
+        elif body != old_body:
+            state["headline"] = _default_headline(body)
+        for name, value in (("aliases", aliases), ("entities", entities),
+                            ("topics", topics), ("artifact_refs", artifact_refs)):
+            if value is not None:
+                state[name] = sorted(set(value))
+        _materialize_fold_state(con, rid, state)
+        operation = _capture_v2_operation(
+            con, "resolve", post_ids=[rid], project_namespace=row[0],
+            reason="explicit-conflict-resolution",
+        )
+        con.execute(
+            "UPDATE sync_conflicts SET resolved_by=? WHERE record_id=? "
+            "AND project_key=? AND resolved_by IS NULL",
+            (operation["op_id"], rid, row[0]),
+        )
+        con.commit()
+        print(f"[resolve] {rid} → {operation['op_id']}")
+        return True
+    finally:
+        con.close()
+
+
+def replica_status(json_output=False):
+    """Report the active local replica without exposing install-secret bytes."""
+    con = get_con()
+    try:
+        rows = con.execute(
+            "SELECT replica_id,counter,predecessor_replica_id,"
+            "installation_fingerprint FROM sync_replica WHERE active=1"
+        ).fetchall()
+    finally:
+        con.close()
+    if len(rows) != 1:
+        raise sync_v2.SyncInvariantError("exactly one active replica is required")
+    row = rows[0]
+    current = _installation_fingerprint()
+    payload = {
+        "status_schema": 1,
+        "replica_id": row[0],
+        "counter": int(row[1]),
+        "predecessor_replica_id": row[2],
+        "installation_match": row[3] in (None, current),
+        "rotation_required": row[3] not in (None, current),
+    }
+    if json_output:
+        print(json.dumps(payload, sort_keys=True))
+    else:
+        print(f"replica_id={payload['replica_id']}")
+        print(f"counter={payload['counter']}")
+        print(f"installation_match={int(payload['installation_match'])}")
+        print(f"rotation_required={int(payload['rotation_required'])}")
+    return 2 if payload["rotation_required"] else 0
+
+
+def rotate_replica(reason):
+    """Explicitly rotate copied/local replica identity without rewriting history."""
+    reason = (reason or "").strip()
+    if not reason or len(reason.encode("utf-8")) > 512:
+        raise sync_v2.SyncInvariantError(
+            "replica rotation requires a reason of at most 512 UTF-8 bytes"
+        )
+    con = get_con()
+    try:
+        con.execute("BEGIN IMMEDIATE")
+        row = con.execute(
+            "SELECT replica_id FROM sync_replica WHERE active=1"
+        ).fetchone()
+        if row is None:
+            raise sync_v2.SyncInvariantError("active replica identity is missing")
+        new_id = sync_v2.rotate_replica_identity(
+            con,
+            row[0],
+            installation_fingerprint=_installation_fingerprint(),
+        )
+        con.commit()
+    finally:
+        con.close()
+    _append_write_event(
+        "replica-rotate", new_id, actor="manual", snippet=_first_line(reason)
+    )
+    print(f"[replica] rotated {row[0]} → {new_id}")
+    return True
 
 
 # ---------- pending drain (maintenance --drain-pending) ----------
@@ -3909,22 +4628,33 @@ def drain_pending(stale_days=WORKING_TTL_DAYS, apply=False):
 
         n_deleted = 0
         deleted_ok = []
+        deleted_prior = {}
+        graveyard_lines = []
         for rid, tier, scope, rtype, updated in consumed_rows:
             print(f"  [consumed] {rid} (tier={tier}, updated {updated}) — "
                   f"{'deleting' if apply else 'would delete'}")
             if apply:
                 try:
-                    if not _graveyard_append(con, rid, action="drain-consumed"):
+                    line = _graveyard_prepare(con, rid, action="drain-consumed")
+                    if line is None:
                         sys.stderr.write(
                             f"[maintenance] graveyard failed; deletion stopped: {rid}\n")
                         continue
+                    graveyard_lines.append(line)
+                    deleted_prior[rid] = _record_state(con, rid)
                     _delete_rows(con, rid)
                     n_deleted += 1
                     deleted_ok.append((rid, tier, scope, rtype))
                 except Exception as e:
                     sys.stderr.write(f"[maintenance] deletion failed; continuing: {rid}: {e}\n")
         if apply:
+            if deleted_prior:
+                _capture_tombstone_groups(
+                    con, "tombstone", deleted_prior,
+                    action="drain-consumed", reason="drain-consumed",
+                )
             con.commit()
+            _graveyard_flush(graveyard_lines)
             actor = _write_actor(default="manual")
             for rid, tier, scope, rtype in deleted_ok:
                 _append_write_event("drain-consumed", rid, tier=tier, scope=scope,
@@ -3961,17 +4691,51 @@ def _doctor_check(results, name, status, message):
     results.append((name, status, message))
 
 
-def doctor():
-    """Run nine read-only diagnostics and return 0 clean, 1 warning, or 2 failure."""
-    print("# doctor (comprehensive read-only diagnostics)")
+def _doctor_connection():
+    """Open the existing store read-only without migration or identity writes."""
+    global _FTS_OK, _CJK_OK, _CAPSULE_OK
+    con = sqlite3.connect(DB.resolve().as_uri() + "?mode=ro", uri=True)
+    con.execute("PRAGMA query_only=ON")
+    names = {
+        row[0] for row in con.execute(
+            "SELECT name FROM sqlite_master WHERE type IN ('table','view')"
+        )
+    }
+    _FTS_OK = "records_fts" in names
+    _CJK_OK = "records_cjk" in names
+    _CAPSULE_OK = "records_capsule_fts" in names
+    return con
+
+
+def doctor(json_output=False):
+    """Run one read-only local+v2 diagnostic set in text or versioned JSON."""
+    if not json_output:
+        print("# doctor (comprehensive read-only diagnostics)")
     results = []  # list of (name, status, message)
 
     if not DB.exists():
-        print(f"  (DB missing: {DB})")
+        if json_output:
+            print(json.dumps({"status_schema": 1, "status": "hard-failure",
+                              "exit_code": 2, "reason": "database-missing"},
+                             sort_keys=True))
+        else:
+            print(f"  (DB missing: {DB})")
         return 2
 
-    con = get_con()
+    con = _doctor_connection()
     try:
+        schema_version = con.execute("PRAGMA user_version").fetchone()[0]
+        if schema_version < 7:
+            payload = {"status_schema": 1, "status": "hard-failure",
+                       "exit_code": 2, "reason": "schema-upgrade-required",
+                       "schema_version": schema_version}
+            if json_output:
+                print(json.dumps(payload, sort_keys=True))
+            else:
+                print(f"  [FAIL] schema-version: v{schema_version}; upgrade required")
+            return 2
+        policy = sync_v2.remote_policy(os.environ, connection=con)
+        sync_snapshot = sync_v2.sync_status(con, policy=policy)
         # ① PRAGMA integrity_check
         rows = con.execute("PRAGMA integrity_check").fetchall()
         verdict = rows[0][0] if rows else "unknown"
@@ -4106,7 +4870,7 @@ def doctor():
                       f"{len(revived)} records (review mem restore legitimacy): " + ",".join(revived[:10]))
 
     # dump.jsonl freshness against DB max(updated).
-    con = get_con()
+    con = _doctor_connection()
     try:
         db_max = con.execute("SELECT MAX(updated) FROM records").fetchone()[0]
     finally:
@@ -4141,7 +4905,7 @@ def doctor():
 
     # Worker health from latest per-project distill and curate journal activity.
     events = _read_write_events()
-    con = get_con()
+    con = _doctor_connection()
     try:
         cwd_by_id = {r[0]: r[1] for r in con.execute(
             "SELECT id, cwd_origin FROM records WHERE scope='project'").fetchall()}
@@ -4174,13 +4938,42 @@ def doctor():
         _doctor_check(results, "worker-health", "WARN",
                       f"{len(silent)} silent-death candidates: " + ",".join(silent[:10]))
 
+    sync_level = int(sync_snapshot.get("exit_code", 2))
+    _doctor_check(
+        results,
+        "sync-v2",
+        "OK" if sync_level == 0 else "WARN" if sync_level == 1 else "FAIL",
+        f"{sync_snapshot.get('status')}: {sync_snapshot.get('reason') or 'ok'}",
+    )
     max_level = 0
     for name, status, message in results:
         level = {"OK": 0, "WARN": 1, "FAIL": 2}.get(status, 2)
         max_level = max(max_level, level)
-        print(f"  [{status}] {name}: {message}")
-    print(f"  → {'clean' if max_level == 0 else 'WARN' if max_level == 1 else 'FAIL'}"
-          f" ({len(results)} checks)")
+        if not json_output:
+            print(f"  [{status}] {name}: {message}")
+    if json_output:
+        top_status = (
+            "hard-failure" if max_level == 2
+            else sync_snapshot.get("status", "local-only")
+            if sync_level == 1
+            else "local-only" if max_level == 1
+            else sync_snapshot.get("status", "not-configured")
+        )
+        print(json.dumps({
+            "status_schema": 1,
+            "protocol_major": 2,
+            "schema_version": schema_version,
+            "status": top_status,
+            "exit_code": max_level,
+            "diagnostics": [
+                {"name": name, "status": status.lower()}
+                for name, status, _message in results
+            ],
+            "sync": sync_snapshot,
+        }, sort_keys=True, ensure_ascii=False))
+    else:
+        print(f"  → {'clean' if max_level == 0 else 'WARN' if max_level == 1 else 'FAIL'}"
+              f" ({len(results)} checks)")
     return max_level
 
 
@@ -4478,31 +5271,638 @@ def inject(max_working=None, max_durable=None, hook=False):
 
 
 # ---------- sync ----------
-def sync():
-    """SessionEnd migration, lifecycle, FTS rebuild, and dump export."""
-    print("# sync (projects → store mirror)")
+def _sync_envelopes(con):
+    return [
+        {"op_id": op_id,
+         "payload": protocol_v2.canonical_loads(bytes(payload))}
+        for op_id, payload in con.execute(
+            "SELECT op_id,payload_bytes FROM sync_objects ORDER BY op_id")
+    ]
+
+
+def _ingest_remote_objects(con, snapshot):
+    for op_id, item in sorted(snapshot.operations.items()):
+        op = protocol_v2.validate_operation(item)
+        payload = protocol_v2.canonical_bytes(op.payload)
+        prior = con.execute(
+            "SELECT payload_bytes FROM sync_objects WHERE op_id=?", (op_id,)
+        ).fetchone()
+        if prior:
+            if bytes(prior[0]) != payload:
+                raise sync_v2.SyncInvariantError(f"immutable operation collision: {op_id}")
+            continue
+        con.execute(
+            "INSERT INTO sync_objects(op_id,replica_id,counter,project_key,kind,"
+            "object_path,payload_bytes,classification) VALUES(?,?,?,?,?,?,?,?)",
+            (op_id, op.payload["replica_id"], str(op.payload["counter"]),
+             op.payload["project_key"], op.payload["kind"], op.path,
+             sqlite3.Binary(payload), "remote"),
+        )
+        for ordinal, parent in enumerate(op.parents):
+            con.execute(
+                "INSERT INTO sync_parents(op_id,parent_op_id,parent_ordinal) VALUES(?,?,?)",
+                (op_id, parent, ordinal),
+            )
+
+
+def _materialize_fold_state(con, rid, source):
+    if set(source) != set(RECORD_COLS) or source.get("id") != rid:
+        raise sync_v2.SyncInvariantError(
+            f"incomplete or mismatched RECORD_COLS snapshot: {rid}"
+        )
+    state = dict(source)
+    existing = con.execute(
+        "SELECT last_accessed FROM records WHERE id=?", (rid,)
+    ).fetchone()
+    if existing is not None:
+        state["last_accessed"] = existing[0]
+    body = state.pop("body")
+    _delete_rows(con, rid)
+    con.execute(
+        f"INSERT INTO records VALUES({','.join(['?'] * len(RECORD_COLS))})",
+        _meta_to_params(state, body),
+    )
+    if _FTS_OK:
+        con.execute("INSERT INTO records_fts(id,body) VALUES(?,?)", (rid, body))
+    if _CJK_OK:
+        con.execute("INSERT INTO records_cjk(id,body) VALUES(?,?)",
+                    (rid, _cjk_shadow_text(body)))
+    _sync_capsule_row(con, rid)
+
+
+def _resolved_blocked_map(result):
+    """Resolve blocked evidence from final single-head explicit decisions in O(V+E)."""
+    return protocol_v2.resolved_blocked_by(result)
+
+
+def _apply_fold(con, result, remote_tip, remote_ref, *, record_peer=True):
+    if result.classification.hard_failures:
+        raise sync_v2.SyncInvariantError(
+            "protocol hard failure: " + ",".join(
+                item.diagnostic_id for item in result.classification.hard_failures)
+        )
+    con.execute("DELETE FROM sync_frontier")
+    for rid, heads in sorted(result.frontiers.items()):
+        project = (result.classification.operations[heads[0]].payload["project_key"]
+                   if heads else "")
+        for head in heads:
+            con.execute(
+                "INSERT INTO sync_frontier(project_key,record_id,op_id,source) "
+                "VALUES(?,?,?,?)", (project, rid, head, "folded"),
+            )
+    con.execute("DELETE FROM sync_conflicts WHERE resolved_by IS NULL")
+    con.execute("DELETE FROM sync_quarantine WHERE cleared_by IS NULL")
+    for rid in sorted(set(result.tombstones) | set(result.conflicts)):
+        _delete_rows(con, rid)
+    for rid, state in sorted(result.records.items()):
+        if rid not in result.conflicts:
+            _materialize_fold_state(con, rid, state)
+    for rid, conflict in sorted(result.conflicts.items()):
+        for op_id, state in sorted(conflict.variants.items()):
+            op = result.classification.operations[op_id]
+            diagnostic = protocol_v2.Diagnostic(
+                "concurrent-record-variants", op_id, tuple(conflict.variants)
+            )
+            con.execute(
+                "INSERT INTO sync_conflicts(project_key,record_id,op_id,diagnostic_id,"
+                "provisional,variant_bytes) VALUES(?,?,?,?,?,?)",
+                (op.payload["project_key"], rid, op_id, diagnostic.diagnostic_id,
+                 int(op_id == conflict.provisional_op_id),
+                 sqlite3.Binary(protocol_v2.canonical_bytes(state))),
+            )
+    for op_id, disposition in sorted(result.classification.dispositions.items()):
+        con.execute("UPDATE sync_objects SET classification=? WHERE op_id=?",
+                    (disposition, op_id))
+    resolved_blocked = _resolved_blocked_map(result)
+    for op_id in result.accepted:
+        diagnostic = result.blocked.get(op_id)
+        resolved_by = resolved_blocked.get(op_id) if diagnostic else None
+        applied_result = (
+            f"blocked-resolved:{diagnostic.code}:{resolved_by}"
+            if resolved_by else
+            (f"blocked:{diagnostic.code}" if diagnostic else "folded")
+        )
+        con.execute(
+            "INSERT INTO sync_applied(op_id,result,diagnostic_id) VALUES(?,?,?) "
+            "ON CONFLICT(op_id) DO UPDATE SET result=excluded.result,"
+            "diagnostic_id=excluded.diagnostic_id,applied_at=datetime('now')",
+            (op_id, applied_result,
+             diagnostic.diagnostic_id if diagnostic else None),
+        )
+    for op_id in result.accepted:
+        op = result.classification.operations[op_id]
+        effective = int(op_id not in result.blocked)
+        for mutation in op.payload["mutations"]:
+            tombstone = mutation.get("tombstone")
+            if tombstone is None:
+                continue
+            con.execute(
+                "INSERT INTO sync_graveyard(destructive_op_id,record_id,"
+                "tombstone_bytes,effective,restored_by) VALUES(?,?,?,?,NULL) "
+                "ON CONFLICT(destructive_op_id,record_id) DO UPDATE SET "
+                "tombstone_bytes=excluded.tombstone_bytes,"
+                "effective=excluded.effective,restored_by=NULL",
+                (op_id, mutation["record_id"],
+                 sqlite3.Binary(protocol_v2.canonical_bytes(tombstone)), effective),
+            )
+    for op_id in result.accepted:
+        if op_id in result.blocked:
+            continue
+        op = result.classification.operations[op_id]
+        if op.payload["kind"] != "restore":
+            continue
+        for mutation in op.payload["mutations"]:
+            con.execute(
+                "UPDATE sync_graveyard SET restored_by=? "
+                "WHERE destructive_op_id=? AND record_id=?",
+                (op_id, mutation["target_op_id"], mutation["record_id"]),
+            )
+    for op_id, diagnostic in sorted(result.quarantined.items()):
+        raw = con.execute(
+            "SELECT payload_bytes FROM sync_objects WHERE op_id=?", (op_id,)
+        ).fetchone()
+        con.execute(
+            "INSERT INTO sync_quarantine(op_id,classification,diagnostic_id,detail_code,"
+            "payload_bytes) VALUES(?,?,?,?,?)",
+            (op_id, "quarantined-unsupported", diagnostic.diagnostic_id,
+             diagnostic.code, sqlite3.Binary(bytes(raw[0])) if raw else None),
+        )
+    if record_peer:
+        state = "quarantined" if result.quarantined else (
+            "deferred" if result.deferred else (
+                "conflict" if result.conflicts else "folded"))
+        con.execute(
+            "INSERT INTO sync_peer_state(peer_id,remote_ref,fetched_tip,folded_tip,"
+            "object_set_digest,materialized_digest,status,fetched_at,folded_at) "
+            "VALUES('origin',?,?,?,?,?,?,datetime('now'),datetime('now')) "
+            "ON CONFLICT(peer_id) DO UPDATE SET remote_ref=excluded.remote_ref,"
+            "fetched_tip=excluded.fetched_tip,folded_tip=excluded.folded_tip,"
+            "object_set_digest=excluded.object_set_digest,"
+            "materialized_digest=excluded.materialized_digest,status=excluded.status,"
+            "fetched_at=excluded.fetched_at,folded_at=excluded.folded_at,"
+            "updated_at=datetime('now')",
+            (remote_ref, remote_tip, remote_tip, result.accepted_set_digest,
+             result.materialized_digest, state),
+        )
+
+
+def _ingest_and_fold_snapshot(snapshot, remote_ref, *, record_peer=True):
+    """Ingest briefly, fold without a writer lock, then apply optimistically."""
+
+    con = get_con()
+    try:
+        con.execute("BEGIN IMMEDIATE")
+        _ingest_remote_objects(con, snapshot)
+        con.commit()
+    finally:
+        con.close()
+    for _attempt in range(3):
+        con = get_con()
+        try:
+            envelopes = _sync_envelopes(con)
+        finally:
+            con.close()
+        result = protocol_v2.fold_operations(envelopes)
+        con = get_con()
+        try:
+            con.execute("BEGIN IMMEDIATE")
+            current_count = int(
+                con.execute("SELECT COUNT(*) FROM sync_objects").fetchone()[0]
+            )
+            if current_count != len(envelopes):
+                con.rollback()
+                continue
+            _apply_fold(
+                con,
+                result,
+                snapshot.tip,
+                remote_ref,
+                record_peer=record_peer,
+            )
+            con.commit()
+            return result
+        finally:
+            con.close()
+    raise sync_v2.SyncInvariantError(
+        "local operations changed throughout three optimistic fold attempts"
+    )
+
+
+def _sync_exchange_config():
+    dump = _dump_worktree_path()
+    remote = os.environ.get("MEM_SYNC_REMOTE_URL", "").strip()
+    if not remote:
+        remote = _git_out(["remote", "get-url", "origin"], dump.parent)
+    configured = os.environ.get("MEM_SYNC_DIR")
+    root = (Path(configured).expanduser() if configured else
+            Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local/state")) /
+            "hearting" / "memory-sync" / "exchange")
+    ref = os.environ.get("MEM_SYNC_REF", git_exchange_v2.DEFAULT_REF)
+    return root, remote, ref, dump.parent
+
+
+def _synchronized_project_roots():
+    """Return local project roots known through the runtime project registry."""
+
+    roots = {Path.cwd(), PROJECTS}
+    try:
+        entries = tuple(PROJECTS.iterdir()) if PROJECTS.is_dir() else ()
+    except OSError:
+        entries = ()
+    for entry in entries:
+        decoded = _decode_enc_cwd(entry.name)
+        if decoded is not None:
+            roots.add(decoded)
+    return tuple(sorted(roots, key=lambda path: os.fsencode(str(path))))
+
+
+def _persistent_remote_guard(ref):
+    """Load DB-backed rewind evidence independently of the exchange cache."""
+    con = get_con()
+    try:
+        row = con.execute(
+            "SELECT remote_ref,last_confirmed_tip FROM sync_peer_state "
+            "WHERE peer_id='origin'"
+        ).fetchone()
+    finally:
+        con.close()
+    if row is None or not row[1]:
+        return None
+    if row[0] != ref:
+        raise sync_v2.SyncInvariantError(
+            "configured remote ref differs from the last confirmed peer ref"
+        )
+    return str(row[1])
+
+
+def _emit_sync(status, json_output):
+    if json_output:
+        print(json.dumps(status, sort_keys=True, ensure_ascii=False))
+    else:
+        if status.get("warning"):
+            sys.stderr.write(f"[sync] warning: {status['warning']}\n")
+        print(f"[sync] {status['status']}: {status.get('reason') or 'ok'}")
+    return int(status.get("exit_code", 2))
+
+
+def _record_outbox_exchange_phase(phase, commit, op_ids):
+    """Persist a Git-proved outbox phase immediately after its durable evidence."""
+    con = get_con()
+    try:
+        con.execute("BEGIN IMMEDIATE")
+        for op_id in op_ids:
+            row = con.execute(
+                "SELECT state FROM sync_outbox WHERE op_id=?", (op_id,)
+            ).fetchone()
+            if row is None or row[0] == "confirmed":
+                continue
+            if phase == "rendered" and row[0] == "queued":
+                sync_v2.transition_outbox(
+                    con, op_id, "rendered",
+                    {"rendered_path": protocol_v2.operation_path(op_id),
+                     "rendered_commit": commit},
+                )
+            elif phase == "committed" and row[0] == "rendered":
+                sync_v2.transition_outbox(
+                    con, op_id, "committed", {"local_commit": commit}
+                )
+        con.commit()
+    finally:
+        con.close()
+
+
+class _SyncLockBusy(RuntimeError):
+    pass
+
+
+@contextlib.contextmanager
+def _sync_process_lock(timeout=30.0):
+    """Serialize one server's complete local/fetch/fold/push/confirm sequence."""
+    STORE.mkdir(mode=0o700, parents=True, exist_ok=True)
+    flags = os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(STORE / ".sync-v2.lock", flags, 0o600)
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+            raise sync_v2.SyncInvariantError("unsafe local sync lock file")
+        deadline = time.monotonic() + float(timeout)
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise _SyncLockBusy("another local sync still owns the lock")
+                time.sleep(0.1)
+        yield
+    finally:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
+
+
+def sync(json_output=False):
+    try:
+        with _sync_process_lock():
+            return _sync_locked(json_output=json_output)
+    except _SyncLockBusy as exc:
+        return _emit_sync({
+            "status_schema": 1,
+            "status": "queued-offline",
+            "exit_code": 1,
+            "reason": str(exc),
+            "transport": "v2",
+            "dump_push": False,
+        }, json_output)
+    except (OSError, sync_v2.SyncError) as exc:
+        reason = (
+            "local-io-failure" if isinstance(exc, OSError)
+            else "local-sync-invariant-failed"
+        )
+        return _emit_sync({
+            "status_schema": 1,
+            "status": "hard-failure",
+            "exit_code": 2,
+            "reason": reason,
+            "transport": "v2",
+            "dump_push": False,
+        }, json_output)
+
+
+def _sync_locked(json_output=False):
+    """Run local maintenance and an optional, safety-gated immutable exchange."""
+    identity_con = get_con()
+    try:
+        identity_con.execute("BEGIN IMMEDIATE")
+        sync_v2.ensure_replica_identity(
+            identity_con,
+            installation_fingerprint=_installation_fingerprint(),
+        )
+        identity_con.commit()
+    finally:
+        identity_con.close()
+    if not json_output:
+        print("# sync (local store + immutable operation exchange)")
+    sink = io.StringIO() if json_output else sys.stdout
     n = 0
+    phases = {
+        "migrate": "pending",
+        "lifecycle": "pending",
+        "index": "pending",
+        "compatibility-export": "pending",
+        "remote-fetch-validate": "pending",
+        "remote-fold": "pending",
+        "remote-render": "pending",
+        "remote-commit": "pending",
+        "remote-push": "pending",
+        "remote-confirm": "pending",
+    }
+    with contextlib.redirect_stdout(sink):
+        try:
+            n = migrate(apply=True)
+            phases["migrate"] = "ok"
+        except Exception as e:
+            phases["migrate"] = "failed"
+            sys.stderr.write(f"[sync] migrate failed; continuing: {e}\n")
+        try:
+            lifecycle(apply=True)
+            phases["lifecycle"] = "ok"
+        except Exception as e:
+            phases["lifecycle"] = "failed"
+            sys.stderr.write(f"[sync] lifecycle failed; continuing: {e}\n")
+        try:
+            index_build(rebuild=True)
+            phases["index"] = "ok"
+        except Exception as e:
+            phases["index"] = "failed"
+            sys.stderr.write(f"[sync] index failed: {e}\n")
+        try:
+            export_dump()
+            _commit_dump()
+            phases["compatibility-export"] = "ok"
+        except Exception as e:
+            phases["compatibility-export"] = "failed"
+            sys.stderr.write(f"[sync] compatibility export failed; continuing: {e}\n")
+
+    con = get_con()
     try:
-        n = migrate(apply=True)
-    except Exception as e:
-        sys.stderr.write(f"[sync] migrate failed; continuing: {e}\n")
+        policy = sync_v2.remote_policy(os.environ, connection=con)
+        status = sync_v2.sync_status(con, policy=policy)
+    finally:
+        con.close()
+    common = {"status_schema": 1,
+              "warning": policy.get("warning"), "migration_count": n,
+              "transport": "v2", "dump_push": False, "phases": phases}
+    if any(outcome == "failed" for outcome in phases.values()):
+        for phase in phases:
+            if phase.startswith("remote-") and phases[phase] == "pending":
+                phases[phase] = "not-reached"
+        status.update(common, status="hard-failure", reason="local-phase-failed",
+                      exit_code=2)
+        return _emit_sync(status, json_output)
+    if not policy["enabled"] and policy.get("reason"):
+        for phase in phases:
+            if phase.startswith("remote-"):
+                phases[phase] = "blocked"
+        status.update(common, status="hard-failure", reason=policy["reason"],
+                      exit_code=2)
+        return _emit_sync(status, json_output)
+    if not policy["enabled"]:
+        for phase in phases:
+            if phase.startswith("remote-"):
+                phases[phase] = "disabled"
+        status.update(common)
+        if int(status.get("exit_code", 0)) == 0:
+            status.update(status="local-only", reason=None, exit_code=0)
+        return _emit_sync(status, json_output)
+    if not policy["allowed"]:
+        for phase in phases:
+            if phase.startswith("remote-"):
+                phases[phase] = "blocked"
+        status.update(common)
+        return _emit_sync(status, json_output)
+
+    root, remote, ref, dump_repo = _sync_exchange_config()
+    if not remote:
+        return _emit_sync({**common, "status": "hard-failure", "exit_code": 2,
+                           "reason": "remote-url-unavailable"}, json_output)
     try:
-        lifecycle(apply=True)
-    except Exception as e:
-        sys.stderr.write(f"[sync] lifecycle failed; continuing: {e}\n")
-    try:
-        index_build(rebuild=True)
-    except Exception as e:
-        sys.stderr.write(f"[sync] index failed: {e}\n")
-    try:
-        export_dump()
-    except Exception as e:
-        sys.stderr.write(f"[sync] export failed; continuing: {e}\n")
-    try:
-        _commit_dump()
-    except Exception as e:
-        sys.stderr.write(f"[sync] dump commit failed; continuing: {e}\n")
-    return n
+        guard_tip = _persistent_remote_guard(ref)
+        exchange = git_exchange_v2.GitExchange(
+            root,
+            remote,
+            ref=ref,
+            forbidden_roots=(*_synchronized_project_roots(), dump_repo),
+            guard_tip=guard_tip,
+        )
+        con = get_con()
+        try:
+            pending = [
+                {"op_id": op_id,
+                 "payload": protocol_v2.canonical_loads(bytes(payload))}
+                for op_id, payload in con.execute(
+                    "SELECT o.op_id,o.payload_bytes FROM sync_outbox b "
+                    "JOIN sync_objects o ON o.op_id=b.op_id "
+                    "WHERE b.state<>'confirmed' ORDER BY b.queued_at,o.op_id")
+            ]
+        finally:
+            con.close()
+
+        def record_phase(phase, commit, op_ids):
+            _record_outbox_exchange_phase(phase, commit, op_ids)
+            phase_key = {"rendered": "remote-render", "committed": "remote-commit"}[phase]
+            phases[phase_key] = "ok"
+
+        if pending:
+            exchange.render_operations(pending, phase_callback=record_phase)
+        else:
+            phases["remote-render"] = "not-applicable"
+            phases["remote-commit"] = "not-applicable"
+        snapshot = exchange.fetch_validate()
+        phases["remote-fetch-validate"] = "ok"
+        result = _ingest_and_fold_snapshot(snapshot, ref)
+        phases["remote-fold"] = "ok"
+        with contextlib.redirect_stdout(sink):
+            export_dump()
+            _commit_dump()
+        if result.quarantined or result.deferred:
+            for phase in ("remote-commit", "remote-push", "remote-confirm"):
+                phases[phase] = "blocked"
+            con = get_con()
+            try:
+                status = sync_v2.sync_status(con, policy=policy)
+            finally:
+                con.close()
+            status.update(common)
+            if result.deferred and not result.quarantined:
+                status.update(status="fetched", exit_code=1,
+                              reason="deferred-operations",
+                              deferred_ids=sorted(result.deferred)[:100])
+            return _emit_sync(status, json_output)
+
+        def fold_integration(integration):
+            # The integration commit is local until a later authoritative
+            # fetch proves it reached the protected ref. Materialize the
+            # deterministic union for retry safety, but do not overstate it
+            # as fetched/folded peer evidence.
+            _ingest_and_fold_snapshot(integration, ref, record_peer=False)
+            phases["remote-fold"] = "ok"
+
+        if pending:
+            published = exchange.publish_operations(
+                pending,
+                phase_callback=record_phase,
+                fold_callback=fold_integration,
+                initial_snapshot=snapshot,
+            )
+            final_snapshot = published.snapshot
+        else:
+            final_snapshot = snapshot
+        phases["remote-push"] = "ok" if pending else "not-applicable"
+        # Publish returns the same fresh authoritative snapshot used for its
+        # reachability confirmation. A push retry may have integrated concurrent
+        # remote objects after the pre-push fold, so fold that exact snapshot
+        # before advancing peer/outbox evidence without another whole-tree scan.
+        if final_snapshot is None:
+            raise sync_v2.SyncInvariantError(
+                "publish completed without an authoritative confirmation snapshot"
+            )
+        phases["remote-fetch-validate"] = "ok"
+        confirmed = {
+            envelope["op_id"] for envelope in pending
+            if envelope["op_id"] in final_snapshot.operations
+        }
+        result = _ingest_and_fold_snapshot(final_snapshot, ref)
+        phases["remote-fold"] = "ok"
+        with contextlib.redirect_stdout(sink):
+            export_dump()
+            _commit_dump()
+        if result.quarantined or result.deferred:
+            con = get_con()
+            try:
+                status = sync_v2.sync_status(con, policy=policy)
+            finally:
+                con.close()
+            status.update(common, remote_tip=final_snapshot.tip)
+            if result.deferred and not result.quarantined:
+                status.update(status="fetched", exit_code=1,
+                              reason="deferred-operations",
+                              deferred_ids=sorted(result.deferred)[:100])
+            return _emit_sync(status, json_output)
+        exchange.confirm_validated_snapshot(final_snapshot)
+        con = get_con()
+        try:
+            con.execute("BEGIN IMMEDIATE")
+            for envelope in pending:
+                op_id = envelope["op_id"]
+                row = con.execute(
+                    "SELECT state FROM sync_outbox WHERE op_id=?", (op_id,)
+                ).fetchone()
+                state = row[0] if row else "confirmed"
+                if state == "committed" and op_id in confirmed:
+                    sync_v2.transition_outbox(con, op_id, "confirmed",
+                                              {"remote_tip": final_snapshot.tip,
+                                               "fresh_fetch": True,
+                                               "fetched_at": datetime.datetime.now(
+                                                   datetime.timezone.utc).isoformat()})
+            con.execute(
+                "UPDATE sync_peer_state SET last_confirmed_tip=?,confirmed_at=datetime('now'),"
+                "updated_at=datetime('now') WHERE peer_id='origin'",
+                (final_snapshot.tip,),
+            )
+            con.commit()
+            status = sync_v2.sync_status(con, policy=policy)
+        finally:
+            con.close()
+        phases["remote-confirm"] = "ok"
+        status.update(common, remote_tip=final_snapshot.tip)
+        return _emit_sync(status, json_output)
+    except git_exchange_v2.ExchangeError as exc:
+        failure_marked = False
+        for phase in ("remote-render", "remote-fetch-validate", "remote-fold",
+                      "remote-commit", "remote-push", "remote-confirm"):
+            if phases[phase] == "pending":
+                phases[phase] = "failed" if not failure_marked else "not-reached"
+                failure_marked = True
+        con = get_con()
+        try:
+            status = sync_v2.sync_status(con, policy=policy)
+        finally:
+            con.close()
+        if isinstance(exc, git_exchange_v2.ExchangeUnavailable):
+            exchange_status = "queued-offline"
+            reason = "remote-unavailable"
+        elif isinstance(exc, git_exchange_v2.PushRetryExhausted):
+            exchange_status = "push-retry-exhausted"
+            reason = "push-retry-exhausted"
+        elif isinstance(exc, git_exchange_v2.ExchangeBlocked):
+            exchange_status = "fetched"
+            reason = "dependency-blocked"
+        elif isinstance(exc, git_exchange_v2.RemoteRewind):
+            exchange_status = "hard-failure"
+            reason = "remote-rewind"
+        else:
+            exchange_status = "hard-failure"
+            reason = "exchange-validation-failed"
+        status.update(common, status=exchange_status, reason=reason,
+                      exit_code=exc.exit_code)
+        return _emit_sync(status, json_output)
+    except (protocol_v2.ProtocolError, sync_v2.SyncError, sqlite3.Error) as exc:
+        failure_marked = False
+        for phase in ("remote-render", "remote-fetch-validate", "remote-fold",
+                      "remote-commit", "remote-push", "remote-confirm"):
+            if phases[phase] == "pending":
+                phases[phase] = "failed" if not failure_marked else "not-reached"
+                failure_marked = True
+        if isinstance(exc, protocol_v2.ProtocolError):
+            reason = f"protocol-error:{exc.code}"
+        elif isinstance(exc, sqlite3.Error):
+            reason = "sqlite-sync-failure"
+        else:
+            reason = "sync-invariant-failure"
+        return _emit_sync({**common, "status": "hard-failure", "exit_code": 2,
+                           "reason": reason}, json_output)
 
 
 # ---------- CLI ----------
@@ -4600,6 +6000,31 @@ def main():
     ac = sub.add_parser("activate", help="Guardedly reactivate a superseded record")
     ac.add_argument("id")
 
+    cf = sub.add_parser("conflicts", help="List unresolved protocol-v2 variants")
+    cf.add_argument("--json", dest="json_output", action="store_true")
+
+    sc = sub.add_parser("show-conflict", help="Show retained variants for one record")
+    sc.add_argument("id")
+    sc.add_argument("--json", dest="json_output", action="store_true")
+
+    rv = sub.add_parser("resolve", help="Explicitly resolve one conflicted record")
+    rv.add_argument("id")
+    rv.add_argument("body", nargs="?", help="Optional replacement body; default keeps provisional")
+    rv.add_argument("--parents", nargs="+", required=True,
+                    help="Exact maximal conflict operation IDs being resolved")
+    rv.add_argument("--headline")
+    rv.add_argument("--alias", action="append", default=None)
+    rv.add_argument("--entity", action="append", default=None)
+    rv.add_argument("--topic", action="append", default=None)
+    rv.add_argument("--artifact-ref", action="append", default=None)
+
+    replica = sub.add_parser("replica", help="Inspect or explicitly rotate local replica identity")
+    replica_sub = replica.add_subparsers(dest="replica_cmd", required=True)
+    replica_show = replica_sub.add_parser("status", help="Show copy-detection status")
+    replica_show.add_argument("--json", dest="json_output", action="store_true")
+    replica_rotate = replica_sub.add_parser("rotate", help="Start a new replica identity boundary")
+    replica_rotate.add_argument("--reason", required=True)
+
     rs = sub.add_parser("restore", help="Restore the latest graveyard entry for one record")
     rs.add_argument("id")
 
@@ -4653,7 +6078,8 @@ def main():
                    help="visible durable records for agent-owned review (read-only, D-28/D-40)")
 
     sub.add_parser("stats", help="Show store statistics")
-    sub.add_parser("sync", help="Idempotently mirror projects into the store, index, and dump")
+    sy = sub.add_parser("sync", help="Run local maintenance and optional immutable v2 exchange")
+    sy.add_argument("--json", dest="json_output", action="store_true")
 
     ij = sub.add_parser("inject", help="Build the SessionStart injection block")
     ij.add_argument("--hook", action="store_true", help="SessionStart additionalContext JSON")
@@ -4667,6 +6093,8 @@ def main():
 
     im = sub.add_parser("import", help="Restore the DB from dump.jsonl")
     im.add_argument("path")
+    im.add_argument("--recovery", action="store_true",
+                    help="Recovery import; refuses once any v2 protocol state exists")
 
     pf = sub.add_parser("profile", help="Print a profile aspect body (read-only)")
     pf.add_argument("aspect", nargs="?", help="Stem '07_coding_convention', number '07', or alias 'coding'")
@@ -4687,7 +6115,8 @@ def main():
     lg.add_argument("--actor", choices=WRITE_ACTORS, default=None)
     lg.add_argument("--json", dest="json_output", action="store_true")
 
-    sub.add_parser("doctor", help="Run comprehensive read-only diagnostics (exit 0/1/2)")
+    dc = sub.add_parser("doctor", help="Run comprehensive read-only diagnostics (exit 0/1/2)")
+    dc.add_argument("--json", dest="json_output", action="store_true")
 
     mt = sub.add_parser(
         "maintenance",
@@ -4756,6 +6185,20 @@ def main():
         sys.exit(0 if supersede(args.id, args.by_id) else 1)
     elif args.cmd == "activate":
         sys.exit(0 if activate(args.id) else 1)
+    elif args.cmd == "conflicts":
+        conflicts(json_output=args.json_output)
+    elif args.cmd == "show-conflict":
+        sys.exit(0 if show_conflict(args.id, json_output=args.json_output) else 1)
+    elif args.cmd == "resolve":
+        sys.exit(0 if resolve_conflict(
+            args.id, args.body, parents=args.parents, headline=args.headline, aliases=args.alias,
+            entities=args.entity, topics=args.topic,
+            artifact_refs=args.artifact_ref,
+        ) else 1)
+    elif args.cmd == "replica":
+        if args.replica_cmd == "status":
+            sys.exit(replica_status(json_output=args.json_output))
+        sys.exit(0 if rotate_replica(args.reason) else 1)
     elif args.cmd == "restore":
         sys.exit(0 if restore(args.id) else 1)
     elif args.cmd == "index":
@@ -4795,7 +6238,7 @@ def main():
     elif args.cmd == "stats":
         stats()
     elif args.cmd == "sync":
-        sync()
+        sys.exit(sync(json_output=args.json_output))
     elif args.cmd == "inject":
         inject(hook=args.hook)
     elif args.cmd == "register-postit":
@@ -4806,7 +6249,7 @@ def main():
         else:
             export_profile(apply=args.apply)
     elif args.cmd == "import":
-        import_dump(args.path)
+        import_dump(args.path, recovery=args.recovery)
     elif args.cmd == "profile":
         profile(args.aspect, list_mode=args.list)
     elif args.cmd == "distill":
@@ -4814,10 +6257,10 @@ def main():
     elif args.cmd == "orphans":
         orphans()
     elif args.cmd == "log":
-        log(limit=args.limit, action=args.action, tier=args.tier, actor=args.actor,
-            json_output=args.json_output)
+        sys.exit(log(limit=args.limit, action=args.action, tier=args.tier, actor=args.actor,
+                     json_output=args.json_output))
     elif args.cmd == "doctor":
-        sys.exit(doctor())
+        sys.exit(doctor(json_output=args.json_output))
     elif args.cmd == "maintenance":
         if args.backfill_capsules:
             sys.exit(backfill_capsules(apply=args.apply))
@@ -4827,4 +6270,8 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except (UnsupportedSchemaError, sync_v2.SyncError) as exc:
+        sys.stderr.write(f"[mem] hard-failure: {exc}\n")
+        sys.exit(2)
