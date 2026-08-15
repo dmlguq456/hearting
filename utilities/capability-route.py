@@ -2180,6 +2180,37 @@ def _git_changed_files(worktree):
     return changed
 
 
+def _content_digest(path):
+    """sha256 of a worktree path's bytes, or None when it is not a readable file.
+
+    None is a real state, not an error: a path that `git status` reported as
+    deleted has no content, and "still deleted" has to compare equal to itself.
+    """
+    try:
+        return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+    except (OSError, ValueError):
+        return None
+
+
+def _baseline_content_map(baseline):
+    """The admission snapshot as {resolved path: content digest at admission}.
+
+    Records written before this became a content snapshot carry a bare list of
+    paths. Those are read back as "unknown digest" so they keep the behaviour
+    they were written under instead of being silently re-judged.
+    """
+    changed = (baseline or {}).get("changed_files") or {}
+    if isinstance(changed, dict):
+        return {
+            Path(path).resolve(strict=False): digest
+            for path, digest in changed.items()
+        }
+    return {Path(path).resolve(strict=False): _LEGACY_BASELINE_DIGEST for path in changed}
+
+
+_LEGACY_BASELINE_DIGEST = "legacy-path-only-baseline"
+
+
 def _published_owner_chain_marker(route, node, node_id, evidence, *, attempt_id, attempt_metadata):
     """Return the canonical marker when this exact aggregation already published one.
 
@@ -2324,7 +2355,17 @@ def record_subdivision_baseline(route, node_id, manifest):
     record = {
         **identity,
         "head_commit": _head_commit(worktree),
-        "changed_files": sorted(str(item) for item in _git_changed_files(worktree)),
+        # anchor M3 / B5: path -> content digest, not a path list. A path list
+        # is a permanent exemption: a file dirty at admission became invisible
+        # to the audit for the whole subdivision, and those are exactly the
+        # files the baseline exists to excuse (the stage's own dev log and
+        # checklist), so in practice they are always dirty. Digests make the
+        # subtraction a real delta -- unchanged since admission stays exempt,
+        # changed again does not.
+        "changed_files": {
+            str(item): _content_digest(item)
+            for item in sorted(_git_changed_files(worktree))
+        },
         "recorded_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
     }
     try:
@@ -2501,9 +2542,15 @@ def complete_subsession_stage(route, node, node_id, evidence, manifest_path, job
                     f"head {baseline_head} -> {head} carries "
                     + ";".join(str(path) for path in slice_commits),
                 )
+    # Exempt a baseline-dirty path only while its CONTENT still matches the
+    # admission snapshot. Subtracting the path itself would excuse every later
+    # change to that file too, which is why AC 28 did not hold for the stage's
+    # own artifacts. A record written before the baseline carried digests keeps
+    # its original path-set meaning rather than being re-judged retroactively.
     preexisting = {
-        Path(path).resolve(strict=False)
-        for path in (baseline or {}).get("changed_files", [])
+        path
+        for path, digest in _baseline_content_map(baseline).items()
+        if digest == _LEGACY_BASELINE_DIGEST or _content_digest(path) == digest
     }
     # A lineage-clean commit moves its files out of `git status` and into
     # history, so the audit has to add them back or accepting the commit would
