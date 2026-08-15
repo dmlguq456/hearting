@@ -24,6 +24,12 @@ from dispatch_contract import (
     process_start_ticks,
 )
 from codex_dispatch_terminal import terminal_envelope_observed
+from dispatch_completion_join import (
+    JoinContractError,
+    close_finished_child,
+    close_wrapper_pass,
+    exact_attempt_row,
+)
 
 
 def attempt_record(
@@ -108,11 +114,21 @@ def watch(args: argparse.Namespace) -> int:
         # additionally defers the close while an exact live parent conductor
         # still owns delivery of `capability-route.py complete` for this row.
         record = attempt_record(args.jobs, args.attempt_id)
-        if (
-            record is None
-            or record[0][1] not in {"open", "running"}
-            or terminal_envelope_observed(record[1].get("log_file"))
-        ):
+        if record is None or record[0][1] not in {"open", "running"}:
+            return 0
+        if terminal_envelope_observed(record[1].get("log_file")):
+            # Detached registered workers cannot write their own marker after
+            # exit.  This wrapper-launched watcher owns the durable drain
+            # receipt, so it also performs the exact evidence-backed closure
+            # before any supervisor may resume the parent.
+            if record[1].get("route_file") and record[1].get("route_node"):
+                try:
+                    row = exact_attempt_row(args.jobs, args.attempt_id)
+                    reason = close_finished_child(row, jobs=args.jobs)
+                    if reason.startswith("completion-"):
+                        close_wrapper_pass(row, jobs=args.jobs)
+                except JoinContractError:
+                    return 65
             return 0
 
         fields, metadata = record

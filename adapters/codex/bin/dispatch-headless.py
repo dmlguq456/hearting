@@ -98,6 +98,11 @@ from model_profile import (  # noqa: E402
     validate_registered_profile,
 )
 from codex_dispatch_terminal import inspect_terminal_attempt  # noqa: E402
+from dispatch_completion_join import (  # noqa: E402
+    JoinContractError,
+    close_wrapper_pass,
+    exact_attempt_row,
+)
 from codex_managed_dispatch import (  # noqa: E402
     MANAGED_PARENT_DELIVERY,
     ManagedDispatchError,
@@ -2713,6 +2718,25 @@ def main(argv: list[str]) -> int:
                 close_job_row(
                     jobs, args.slug, args.worktree, outcome.failure, "", args.attempt_id
                 )
+            elif (
+                not outcome.failure
+                and not terminal_closed
+                and args.registered_worker
+                and args.route_file
+                and args.route_node
+                and terminal.get("state") == "valid"
+                and terminal.get("verdict") == "PASS"
+                and terminal.get("artifact_state") == "readable"
+            ):
+                # Only this outer wrapper can prove its governed process group
+                # reaped.  Complete after that receipt, before returning.
+                try:
+                    wrapper_row = exact_attempt_row(jobs, args.attempt_id)
+                    completion_reason = close_wrapper_pass(wrapper_row, jobs=jobs)
+                except JoinContractError as exc:
+                    completion_reason = str(exc)
+                if completion_reason:
+                    args.worker_failure = "route-completion-rejected"
         else:
             # SD-15: detached launches retain the short early-death watch.
             death = watch_early_death(proc, log_path, args.early_exit_watch)

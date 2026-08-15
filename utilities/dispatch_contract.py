@@ -1374,7 +1374,13 @@ def observed_attempt_liveness(
 
     process = attempt_process_quiescence(
         metadata,
-        terminal_receipt=status in {"done", "killed", "cancelled"},
+        # Route rows intentionally stay open until their completion marker is
+        # written.  The exact terminal envelope is therefore also a terminal
+        # receipt gate: a namespace-local PID may disappear while its outer
+        # wrapper is still publishing the durable reap receipt and marker.
+        terminal_receipt=(
+            status in {"done", "killed", "cancelled"} or terminal_envelope
+        ),
     )
     if status in {"open", "running"}:
         if process.state == "live":

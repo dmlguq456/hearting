@@ -3188,6 +3188,7 @@ def _select_entry_job(j, line_idx):
             "proc_start": getattr(j, "proc_start", None),
             "sid": None, "state": j.liveness, "status": j.status,
             "cwd": j.cwd, "slug": j.slug,
+            "attempt_id": getattr(j, "attempt_id", None),
             "label": j.slug or j.key, "harness": j.harness, "source": j.source,
             "is_worker": bool(getattr(j, "is_child", False))}
 _FOLD_CHILD_LIVENESS = {"done"}   # Completed depth-2 rows fold into the owner breadcrumb.
@@ -5995,12 +5996,12 @@ def _close_job_row_if_registry(entry):
     from . import control
     if entry.get("kind") != "job" or entry.get("source") != "jobs":
         return
-    if entry.get("status") != "open" or not entry.get("slug"):
+    if entry.get("status") not in {"open", "running"} or not entry.get("attempt_id"):
         return
     try:
         from .collectors import dispatch as _dispatch
         for jobs_path in _dispatch._candidate_jobs_paths(None):
-            if control.close_registry_row(jobs_path, entry["slug"], entry.get("cwd") or ""):
+            if control.close_registry_row(jobs_path, entry["attempt_id"]):
                 control.log_action(action="close_row", pid=entry.get("pid"), sid=None,
                                    state=entry.get("state"), approval="single",
                                    result="ok", reason=entry["slug"])

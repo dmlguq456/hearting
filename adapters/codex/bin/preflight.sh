@@ -85,7 +85,7 @@ usage: preflight.sh write <file> [session-id] [turn-id]
        preflight.sh stage-heartbeat --attempt-id <id> --route-id <id> --route-node <id> --jobs <jobs.log> --phase <phase> --kind <kind> --evidence <ref>
        preflight.sh dispatch-wait --attempt-id <id> [--interval <seconds>] [--max <seconds>]
        preflight.sh dispatch-current --jobs <jobs.log> (--session <id>|--route <id>|--node <id>|--attempt <id>|--job <slug>) [--all]
-       preflight.sh dispatch-reconcile --jobs <jobs.log> (--session <id>|--route <id>|--node <id>|--attempt <id>|--job <slug>) [--apply]
+       preflight.sh dispatch-reconcile --jobs <jobs.log> (--session <id>|--route <id>|--node <id>|--attempt <id>|--job <slug>) [--apply] [--cancel-receiptless-namespace  # exact --attempt only]
        preflight.sh qa-policy <quick|light|standard|thorough|adversarial> [code|research|doc|general]
        preflight.sh liveness [jobs.log] [--session <id>|--route <id>|--node <id>|--attempt <id>|--job <slug>] [--all]
        preflight.sh harvest [--jobs <jobs.log>] [--reconcile-local <legacy-jobs.log>] [--attempt-id <id>|--slug <slug>|--worktree <path>] [--status open|done|all] [--mark-done]

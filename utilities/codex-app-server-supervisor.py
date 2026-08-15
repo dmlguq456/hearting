@@ -16,7 +16,9 @@ from dispatch_completion_join import (
     JoinContractError,
     SupervisorOutbox,
     consume_advance_completed_outbox,
+    close_wrapper_pass,
     current_children,
+    exact_attempt_row,
     prepare_supervisor_outbox,
     refresh_supervisor_outbox_actions,
     reconcile_finished_children,
@@ -271,12 +273,24 @@ def runtime_reconcile(args: argparse.Namespace, rows: dict[str, Any],
     for attempt, reason in reconcile_finished_children(
         rows, unresolved, jobs=args.jobs
     ).items():
+        if reason.startswith("completion-") and attempt in rows:
+            # A wrapper normally owns this path.  If it vanished after
+            # publishing the post-exit receipt, finish the same bounded exact
+            # closure here rather than delivering an open-row action to the
+            # owner model.
+            reason = close_wrapper_pass(rows[attempt], jobs=args.jobs)
+            try:
+                current = exact_attempt_row(Path(args.jobs), attempt)
+            except JoinContractError:
+                current = None
+            if current is not None and current.status == "done":
+                closed.add(attempt)
         emit(
             {
                 "type": "dispatch.supervisor.reconciled",
                 "parent_attempt_id": args.parent_attempt_id,
                 "attempt_id": attempt,
-                "outcome": "closed" if not reason else "skipped",
+                "outcome": "closed" if attempt in closed or not reason else "skipped",
                 **({} if not reason else {"reason": reason}),
             }
         )

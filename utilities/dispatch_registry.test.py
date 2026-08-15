@@ -458,6 +458,79 @@ class RegistryTest(unittest.TestCase):
   self.assertEqual(record["closed"],0)
   self.assertNotIn("note=dead-namespace-absent",self.jobs.read_text())
 
+ def test_explicit_receiptless_namespace_cancel_is_typed_not_completion(self):
+  attempt="att-receiptless-cancel"
+  empty_log=self.base/"receiptless.codex.jsonl"
+  empty_log.write_text(json.dumps({"type":"system","subtype":"init"})+"\n")
+  self.jobs.write_text(self.ghost_row(
+   attempt,
+   extra=(",pgid=99999996,pid_ns=pid:[extinct],"
+          "pid_observer_ns=pid:[extinct],harness=codex,"
+          f"log_file={empty_log}"),
+  )+"\n")
+  heartbeat=self.base/".dispatch/heartbeats"/f"{attempt}.json"
+  heartbeat_value=json.loads(heartbeat.read_text())
+  heartbeat_value["updated_at"]=time.time()-3600
+  heartbeat.write_text(json.dumps(heartbeat_value))
+  dry=json.loads(self.invoke(
+   "reconcile","--attempt",attempt,"--cancel-receiptless-namespace").stdout)
+  self.assertEqual(dry["closed"],0)
+  self.assertTrue(dry["decisions"][0]["eligible"],dry)
+  applied=json.loads(self.invoke(
+   "reconcile","--attempt",attempt,"--cancel-receiptless-namespace","--apply").stdout)
+  self.assertEqual(applied["closed"],1,applied)
+  text=self.jobs.read_text()
+  self.assertIn("note=cancelled-receipt-unavailable",text)
+  self.assertIn("failure_class=cancelled",text)
+  self.assertIn("operator-receiptless-cancel-v1",text)
+  self.assertNotIn("completed-marker",text)
+  self.assertNotIn("group_reap_proof",text)
+  self.assertNotIn("launch_outcome",text)
+
+ def test_receiptless_cancel_refuses_fresh_exact_heartbeat(self):
+  attempt="att-receiptless-heartbeat"
+  empty_log=self.base/"receiptless-heartbeat.codex.jsonl"
+  empty_log.write_text(json.dumps({"type":"system","subtype":"init"})+"\n")
+  self.jobs.write_text(self.ghost_row(
+   attempt,
+   extra=(",pgid=99999996,pid_ns=pid:[extinct],"
+          "pid_observer_ns=pid:[extinct],harness=codex,"
+          f"log_file={empty_log}"),
+  )+"\n")
+  applied=json.loads(self.invoke(
+   "reconcile","--attempt",attempt,"--cancel-receiptless-namespace","--apply").stdout)
+  self.assertEqual(applied["closed"],0)
+  self.assertEqual(applied["decisions"][0]["reason"],"attempt-evidence-active")
+  self.assertIn("\topen\t",self.jobs.read_text())
+
+ def test_receiptless_cancel_refuses_live_tagged_attempt(self):
+  attempt="att-receiptless-live"
+  empty_log=self.base/"receiptless-live.codex.jsonl"
+  empty_log.write_text(json.dumps({"type":"system","subtype":"init"})+"\n")
+  child=subprocess.Popen(
+   [sys.executable,"-c","import time; time.sleep(30)"],
+   env={**os.environ,"AGENT_DISPATCH_ATTEMPT_ID":attempt},
+  )
+  try:
+   self.jobs.write_text(self.ghost_row(
+    attempt,
+    extra=(",pgid=99999996,pid_ns=pid:[extinct],"
+           "pid_observer_ns=pid:[extinct],harness=codex,"
+           f"log_file={empty_log}"),
+   )+"\n")
+   applied=json.loads(self.invoke(
+    "reconcile","--attempt",attempt,"--cancel-receiptless-namespace","--apply").stdout)
+   self.assertEqual(applied["closed"],0)
+   self.assertEqual(applied["decisions"][0]["reason"],"attempt-descendant-live")
+   self.assertIn("\topen\t",self.jobs.read_text())
+  finally:
+   child.terminate();child.wait(timeout=5)
+
+ def test_receiptless_cancel_requires_exact_attempt_filter(self):
+  result=self.invoke("reconcile","--route","r-ghost","--cancel-receiptless-namespace","--apply")
+  self.assertEqual(result.returncode,64)
+  self.assertIn("exact-attempt-cancel-required",result.stdout)
+
 
 class MixedRegistryTest(unittest.TestCase):
  def setUp(self):

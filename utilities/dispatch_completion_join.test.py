@@ -325,6 +325,66 @@ class DispatchCompletionJoinTest(unittest.TestCase):
         self.assertEqual(receipt["state"], "ready")
         self.assertEqual(receipt["children"][0]["reason"], "registry-closed")
 
+    def test_open_namespace_terminal_envelope_cannot_bypass_receipt_gate(self):
+        attempt = "att-open-namespace-receipt"
+        parent = "att-parent"
+        log = self.root / "worker.codex.jsonl"
+        log.write_text(
+            "\n".join(json.dumps(event) for event in [
+                {
+                    "type": "item.completed",
+                    "item": {
+                        "type": "agent_message",
+                        "text": "artifact: -\nverdict: PASS\nblocker: none",
+                    },
+                },
+                {"type": "turn.completed"},
+            ]) + "\n",
+            encoding="utf-8",
+        )
+        namespace = os.readlink("/proc/self/ns/pid")
+        metadata = {
+            "pid": "999999",
+            "pid_start": "42",
+            "pgid": "999999",
+            "pid_scope": "namespace-local",
+            "pid_ns": namespace,
+            "pid_observer_ns": namespace,
+            "log_file": str(log),
+        }
+        self.jobs.write_text(
+            row("open", attempt, parent, "a", process_metadata=metadata),
+            encoding="utf-8",
+        )
+        blocked = JOIN.join_batch(
+            jobs=self.jobs,
+            parent_attempt_id=parent,
+            interval=0.02,
+            timeout=0.08,
+            liveness_command=[str(self.live)],
+        )
+        self.assertEqual(blocked["state"], "timeout")
+        self.assertEqual(blocked["children"][0]["reason"], "process-unverifiable")
+
+        complete = dict(
+            metadata,
+            launch_lifecycle="foreground-scoped",
+            launch_outcome="governed-process-reaped",
+            group_reap_proof="pgid-empty-v1",
+            group_reap_pgid="999999",
+        )
+        with self.jobs.open("a", encoding="utf-8") as handle:
+            handle.write(row("open", attempt, parent, "a", process_metadata=complete))
+        ready = JOIN.join_batch(
+            jobs=self.jobs,
+            parent_attempt_id=parent,
+            interval=0.02,
+            timeout=0.5,
+            liveness_command=[str(self.live)],
+        )
+        self.assertEqual(ready["state"], "ready")
+        self.assertEqual(ready["children"][0]["reason"], "terminal-observed")
+
     def test_done_namespace_local_row_with_partial_receipt_stays_pending(self):
         metadata = {
             "pid": "999999",
@@ -1058,6 +1118,24 @@ class FinishedChildClosure(unittest.TestCase):
         finally:
             JOIN.run_route_completion = real
         self.assertEqual(outcomes, {"att-child": "completion-rejected"})
+
+    def test_wrapper_reaped_pass_failure_closes_typed_instead_of_ghosting(self):
+        child = self.child(quiescent=True)
+        self.jobs.write_text(child.raw + "\n", encoding="utf-8")
+        calls = []
+        real = JOIN.run_route_completion
+        JOIN.run_route_completion = lambda command: calls.append(command) or "completion-rejected"
+        try:
+            reason = JOIN.close_wrapper_pass(child, jobs=self.jobs)
+        finally:
+            JOIN.run_route_completion = real
+        self.assertEqual(reason, "completion-rejected")
+        self.assertEqual(len(calls), 2)
+        text = self.jobs.read_text(encoding="utf-8")
+        self.assertIn("\tdone\t", text)
+        self.assertIn("note=dead-route-completion-rejected", text)
+        self.assertIn("failure_class=contract", text)
+        self.assertNotIn("completed-marker", text)
 
     # -- Phase 3 (plan.md, round_1 finding 1): typed BLOCKED/FAIL closure ----
 

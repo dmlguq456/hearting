@@ -30,6 +30,7 @@ from dispatch_contract import (DispatchContractError, agent_home_equivalent,
                                process_observation,
                                process_state,
                                process_start_ticks,
+                               observed_attempt_liveness,
                                dispatch_state_roots,
                                reconcile_local_registry, resolve_agent_home,
                                signal_exact_process_group,
@@ -508,10 +509,12 @@ def classify(row, args, newest_orders, rows=None):
         # never `completed-*`.
         if _marker_backed_repair(row, args.agent_home, args.jobs):
             return "marker-backed-stale", "completed-marker-linkage", "completed-marker"
-        exact = classify_attempt_evidence(proc_inputs(row, args.agent_home, args.jobs), args.now)
-        if exact and exact["state"] == "working":
-            return "active", exact["rule"], None
-        if exact and exact["state"] in {"done", "dead"}:
+        observed = observed_attempt_liveness(
+            row["status"], meta, terminal_envelope=True
+        )
+        if observed.state == "alive":
+            return "active", observed.reason, None
+        if observed.state == "reconcile-needed":
             attempt_view = inspect_terminal_attempt(
                 meta.get("log_file"),
                 worktree=row.get("worktree"),
@@ -523,7 +526,7 @@ def classify(row, args, newest_orders, rows=None):
                 else "dead-invalid-envelope"
             )
             return "terminal-handoff", f"{reason}:marker-missing", note
-        return "terminal-draining", f"{reason}:marker-missing-quiescence-unverifiable", None
+        return "terminal-draining", f"{reason}:marker-missing-{observed.reason}", None
     exact = classify_attempt_evidence(proc_inputs(row, args.agent_home, args.jobs), args.now)
     if exact and exact["state"] == "working": return "active", exact["rule"], None
     if exact and exact["state"] == "done": return "terminal-heartbeat", exact["rule"], "completed-terminal-heartbeat"
@@ -632,6 +635,118 @@ def reconcile(rows, args):
     if args.audit:
         cleanup.append_audit(args.audit, record)
     print(json.dumps(record, sort_keys=True)); return 0
+
+
+def _receiptless_namespace_cancel_reason(row, args):
+    """Return ``""`` only for an explicit, extinct receiptless namespace row."""
+
+    if row["status"] not in OPEN:
+        return "attempt-already-terminal"
+    if row.get("attempt_contract_status") != "current":
+        return "attempt-contract-invalid"
+    meta = row["meta"]
+    if meta.get("registered_worker") != "1" or meta.get("pid_scope") != "namespace-local":
+        return "not-registered-namespace-local"
+    if not meta.get("pid", "").isdigit() or not meta.get("pid_start"):
+        return "exact-process-identity-missing"
+    try:
+        observer_namespace = os.readlink("/proc/self/ns/pid")
+    except OSError:
+        return "observer-namespace-unavailable"
+    if meta.get("pid_observer_ns") in {None, "", observer_namespace}:
+        return "namespace-not-foreign"
+    if _marker_backed_repair(row, args.agent_home, args.jobs):
+        return "completion-marker-present"
+    terminal = inspect_terminal_attempt(
+        meta.get("log_file"),
+        worktree=row.get("worktree"),
+        artifact_root_metadata=meta.get("artifact_root"),
+    )
+    if terminal.get("state") != "absent":
+        return f"terminal-envelope-{terminal.get('state') or 'unknown'}"
+    descendants = attempt_tagged_descendants(meta)
+    if descendants.state == "populated":
+        return "attempt-descendant-live"
+    process = attempt_process_quiescence(meta, terminal_receipt=True)
+    if process.state == "live":
+        return "process-alive"
+    if process.state != "unverifiable":
+        return "receiptless-namespace-not-proved"
+    exact = classify_attempt_evidence(
+        proc_inputs(row, args.agent_home, args.jobs), args.now
+    )
+    if exact and exact["state"] == "working":
+        return "attempt-evidence-active"
+    if exact and (
+        exact["state"] == "done" or exact.get("source") == "terminal-observation"
+    ):
+        return "attempt-evidence-terminal"
+    return ""
+
+
+def cancel_receiptless_namespace(rows, args):
+    """Operator-only exact cancellation for extinct pre-receipt namespaces.
+
+    This is deliberately not completion: it writes no marker, PASS verdict, or
+    reap proof.  The terminal row disappears from Fleet's active set while
+    successor readiness remains fail-closed on the missing receipt.
+    """
+
+    selected = [row for row in rows if matches(row, args)]
+    if len(selected) != 1:
+        reason = "attempt-row-not-unique"
+        row = selected[0] if selected else None
+    else:
+        row = selected[0]
+        reason = _receiptless_namespace_cancel_reason(row, args)
+    closed = False
+    revalidated = None
+    if args.apply and row is not None and not reason:
+        attempt_id = row["meta"].get("attempt_id", "")
+
+        def still_receiptless(fields):
+            fresh_meta = parse_registry_metadata(fields[5])
+            fresh = {
+                "status": fields[1],
+                "repo": fields[2],
+                "worktree": fields[3],
+                "slug": fields[4],
+                "meta": fresh_meta,
+                "attempt_contract_status": "current",
+            }
+            return not _receiptless_namespace_cancel_reason(fresh, args)
+
+        closed = close_attempt_row_if(
+            args.jobs,
+            attempt_id,
+            "cancelled-receipt-unavailable",
+            still_receiptless,
+            evidence={
+                "failure_class": "cancelled",
+                "classifier_source": "operator-receiptless-cancel-v1",
+                "reconcile_reason": "legacy-namespace-receipt-unavailable",
+            },
+        )
+        revalidated = bool(closed)
+        if not closed:
+            reason = "revalidation-veto"
+    decision = {
+        "attempt_id": row["meta"].get("attempt_id") if row else args.attempt,
+        "eligible": bool(row is not None and not reason),
+        "reason": reason or "legacy-namespace-receipt-unavailable",
+        "proposed_note": "cancelled-receipt-unavailable",
+        "revalidated": revalidated,
+        "closed": closed,
+    }
+    print(json.dumps({
+        "at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "apply": args.apply,
+        "classifier_source": "operator-receiptless-cancel-v1",
+        "attempted": len(selected),
+        "closed": int(closed),
+        "decisions": [decision],
+    }, sort_keys=True))
+    return 0
 
 
 _CASCADE_TERMINAL_CATEGORIES = {
@@ -1182,6 +1297,7 @@ def main(argv):
     p.add_argument("--session"); p.add_argument("--route")
     p.add_argument("--node"); p.add_argument("--attempt"); p.add_argument("--job"); p.add_argument("--all", action="store_true")
     p.add_argument("--apply", action="store_true"); p.add_argument("--audit", type=Path); p.add_argument("--integration-ref")
+    p.add_argument("--cancel-receiptless-namespace", action="store_true")
     p.add_argument("--agent-home", type=Path); p.add_argument("--now", type=float, default=time.time(), help=argparse.SUPPRESS)
     p.add_argument("--pid", type=int); p.add_argument("--pid-start"); p.add_argument("--pid-scope")
     p.add_argument("--cascade-grace", type=float, default=2.0, help=argparse.SUPPRESS)
@@ -1218,6 +1334,12 @@ def main(argv):
     args.jobs = args.jobs.resolve()
     if args.operation not in ("liveness", "orphan-scan") and not any((args.session, args.route, args.node, args.attempt, args.job)):
         print("check=failed\nreason=current-filter-required"); return 64
+    if args.cancel_receiptless_namespace and (
+        args.operation != "reconcile"
+        or not args.attempt
+        or any((args.session, args.route, args.node, args.job, args.all))
+    ):
+        print("check=failed\nreason=exact-attempt-cancel-required"); return 64
     rows = read_rows(args.jobs)
     if args.operation == "current":
         return emit_current(rows, args)
@@ -1227,6 +1349,8 @@ def main(argv):
         return emit_orphan_status(rows, args)
     if args.operation == "orphan-scan":
         return emit_orphan_scan(rows, args)
+    if args.cancel_receiptless_namespace:
+        return cancel_receiptless_namespace(rows, args)
     return reconcile(rows, args)
 
 
