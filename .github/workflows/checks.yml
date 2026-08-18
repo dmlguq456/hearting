@@ -17,6 +17,7 @@ concurrency:
 jobs:
   adaptation-boundary:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - name: Check out the source
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -41,6 +42,7 @@ jobs:
 
   install-lifecycle:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - name: Check out the source
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -62,6 +64,7 @@ jobs:
 
   dispatch-pid-namespace:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - name: Check out the source
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -71,8 +74,10 @@ jobs:
 
       - name: Install PID namespace fixture
         run: |
-          sudo apt-get update
-          sudo apt-get install --yes bubblewrap
+          # A stalled mirror once hung apt for the full 6h job budget; keep
+          # the fetch bounded and retried instead.
+          sudo timeout 300 apt-get -o Acquire::Retries=3 update
+          sudo timeout 300 apt-get -o Acquire::Retries=3 install --yes bubblewrap
           # Ubuntu 24.04 runners confine unprivileged user namespaces via
           # AppArmor, so bwrap dies with "setting up uid map: Permission
           # denied" before the suite starts.
