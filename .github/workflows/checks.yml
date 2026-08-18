@@ -73,6 +73,10 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install --yes bubblewrap
+          # Ubuntu 24.04 runners confine unprivileged user namespaces via
+          # AppArmor, so bwrap dies with "setting up uid map: Permission
+          # denied" before the suite starts.
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
 
       - name: Verify Codex detached receipt and marker ordering
         env:
