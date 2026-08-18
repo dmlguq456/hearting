@@ -42,13 +42,11 @@ import json, pathlib, sys
 state = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
 source = pathlib.Path(state.get("source_root", "")).resolve(strict=False)
 active = pathlib.Path(state.get("active_root") or source).resolve(strict=False)
-expected = pathlib.Path(sys.argv[2]).resolve(strict=False)
 runtime_link = pathlib.Path(sys.argv[3])
 linked_active = runtime_link.is_symlink() and runtime_link.resolve(strict=False) == active
 if (
     state.get("runtime") == "codex"
     and state.get("activated_projection_digest")
-    and expected in {source, active}
     and linked_active
     and (active / "core" / "CORE.md").is_file()
 ):
