@@ -13,6 +13,6 @@
 #
 adapters/claude/hooks/core-first-guard.sh	wrapper	exec-delegates to $AGENT_HOME/hooks/core-first-guard.sh (repo-root portable guard); full-copy 시 SCRIPT_DIR/.. 의 빈 .core-grounding 를 읽어 항상 deny 하던 회귀를 정합(S6 2026-07-09).	-
 adapters/claude/hooks/core-read-marker.sh	wrapper	exec-delegates to $AGENT_HOME/hooks/core-read-marker.sh (core-first-guard 짝 마커 writer, 동형 wrapper).	-
-adapters/claude/hooks/mem-distill-dispatch.sh	delta	Claude 어댑터가 no-tools worker 를 bin/mem-distill-worker.sh 로 기본 바인딩(ADAPTER_DIR 심링크 unwrap 경로). canonical 은 MEM_DISTILL_WORKER 미설정 시 exit 0. settings.json MEM_DISTILL_ENABLE=1 이라 worker 기본값이 load-bearing — collapse 시 distill 무력화.	faa1cb09fea930c33acaeb265a7aa9c41e9c95d852617c176817cfad6f1fd6c3
+adapters/claude/hooks/mem-distill-dispatch.sh	delta	Claude 어댑터가 no-tools worker 를 bin/mem-distill-worker.sh 로 기본 바인딩(ADAPTER_DIR 심링크 unwrap 경로). canonical 은 MEM_DISTILL_WORKER 미설정 시 exit 0. settings.json MEM_DISTILL_ENABLE=1 이라 worker 기본값이 load-bearing — collapse 시 distill 무력화.	2bdaf70ff0c1f013806489bbf573873bf1b669b9c2aee8cc575fb1777e5f4e82
 adapters/claude/hooks/registered-parent-park.py	wrapper	exec-delegates to $AGENT_HOME/hooks/registered-parent-park.py; Claude receives this PreToolUse bridge through the supervised command's additional --settings payload without mutating user-owned runtime settings.	-
 adapters/claude/hooks/worker-state-compact.py	wrapper	exec-delegates to $AGENT_HOME/hooks/worker-state-compact.py; Claude hook registration remains adapter-owned while ledger and compaction semantics stay portable.	-
