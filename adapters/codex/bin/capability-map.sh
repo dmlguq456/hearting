@@ -167,7 +167,8 @@ manifest_path, capability = sys.argv[1:]
 with open(manifest_path, encoding="utf-8") as handle:
     manifest = json.load(handle)
 modes = manifest.get("capabilities", {}).get(capability, {}).get("modes", [])
-if modes:
-    print("capability_modes=" + ",".join(sorted(modes)))
+# An empty list is the manifest encoding of a modeless capability, which is
+# a single-"default"-mode contract (see utilities/dispatch_mode_contract.py).
+print("capability_modes=" + (",".join(sorted(modes)) if modes else "default"))
 PY
 fi
