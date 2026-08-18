@@ -443,7 +443,19 @@ def verify_route(
     if result.returncode:
         if _verifier_crashed(result):
             raise RouteError("route-verifier-crashed")
-        raise RouteError("route-record-verification-failed")
+        # Carry the verifier's own verdict line: the bare enum hid a
+        # registry-digest mismatch (route compiled by the repo checkout, verified
+        # by the installed harness) for a full diagnosis pass on 2026-08-18.
+        verdict = next(
+            (
+                line.split(":", 1)[1].strip()
+                for line in (result.stderr or "").splitlines()
+                if line.startswith("capability-route:")
+            ),
+            "",
+        )
+        suffix = f" [verifier={verdict[:160]}]" if verdict else ""
+        raise RouteError(f"route-record-verification-failed{suffix}")
     head = current_commit(expected_root)
     if route.get("source_commit") != head and not _first_parent_descendant(
         expected_root, str(route.get("source_commit") or ""), head

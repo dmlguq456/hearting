@@ -1311,10 +1311,22 @@ def validate_registry(registry, manifest=None):
 
 
 def resolve_recipe(registry, capability, capability_mode="default"):
+    known_modes = []
     for recipe in registry["recipes"]:
-        if recipe["capability"] == capability and capability_mode in recipe["modes"]:
-            return recipe
-    raise TopologyError(f"unknown capability/mode: {capability}/{capability_mode}")
+        if recipe["capability"] == capability:
+            if capability_mode in recipe["modes"]:
+                return recipe
+            known_modes.extend(recipe["modes"])
+    if known_modes:
+        raise TopologyError(
+            f"unknown capability/mode: {capability}/{capability_mode}"
+            f" (valid modes: {', '.join(sorted(set(known_modes)))})"
+        )
+    known = ", ".join(sorted({r["capability"] for r in registry["recipes"]}))
+    raise TopologyError(
+        f"unknown capability/mode: {capability}/{capability_mode}"
+        f" (unknown capability; known: {known})"
+    )
 
 
 def capability_summary(registry, capability):
