@@ -160,7 +160,7 @@ else
   # when nothing is pending, so a whitespace-only value exits before acquiring
   # a lock.
   delta=$(python3 "$MEM" distill "$SID" --source "${MEM_SESSION_SOURCE:-claude}" 2>/dev/null || true)
-  [ -n "${delta//[[:space:]]/}" ] || exit 0
+  case "$delta" in *[![:space:]]*) ;; *) exit 0 ;; esac
 fi
 
 # Acquire the per-session lock only after confirming a delta (D3). Atomic mkdir
