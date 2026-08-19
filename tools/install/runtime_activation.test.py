@@ -141,6 +141,47 @@ class SurfaceSkewTest(unittest.TestCase):
             self.assertIn(sorted(activation.RUNTIMES), groups)
             self.assertIn("release", report["compared"])
 
+    def test_loop_runtime_logs_do_not_read_as_skew(self):
+        """A bundle copied from a checkout carries git-ignored loop logs; a release never
+        does. Digesting them reported permanent `adapters` skew with identical code."""
+        with tempfile.TemporaryDirectory() as temporary:
+            release = self._surface(Path(temporary) / "release", "same\n", marker="v1.0.0")
+            bundle = self._surface(Path(temporary) / "bundle", "same\n")
+            # `loops/` itself is tracked (README, .gitignore, drill cases), so it exists in
+            # BOTH trees; only the run output inside it is ephemeral and bundle-only.
+            for root in (release, bundle):
+                (root / "adapters" / "loops").mkdir(parents=True)
+                (root / "adapters" / "loops" / "README.md").write_text(
+                    "tracked\n", encoding="utf-8"
+                )
+            (bundle / "adapters" / "loops" / "oncall.log").write_text(
+                "run output\n", encoding="utf-8"
+            )
+            self.assertEqual(
+                activation._surface_digests(release)["adapters"],
+                activation._surface_digests(bundle)["adapters"],
+            )
+            # A tracked `.log` fixture is source and must still count.
+            fixture = bundle / "adapters" / "tests" / "fixtures"
+            fixture.mkdir(parents=True)
+            (fixture / "jobs_route.log").write_text("fixture\n", encoding="utf-8")
+            self.assertNotEqual(
+                activation._surface_digests(release)["adapters"],
+                activation._surface_digests(bundle)["adapters"],
+            )
+
+    def test_default_tree_digest_is_unchanged_by_the_skip_hook(self):
+        """`_bundle_checksum` persists this value in bundle metadata; adding the optional
+        filter must not move it for callers that pass no filter."""
+        with tempfile.TemporaryDirectory() as temporary:
+            root = self._surface(Path(temporary) / "tree", "body\n")
+            loops = root / "adapters" / "loops"
+            loops.mkdir(parents=True)
+            (loops / "oncall.log").write_text("run output\n", encoding="utf-8")
+            with_log = activation._tree_digest(root)
+            (loops / "oncall.log").write_text("different\n", encoding="utf-8")
+            self.assertNotEqual(with_log, activation._tree_digest(root))
+
     def test_absent_surface_is_not_skew(self):
         with tempfile.TemporaryDirectory() as temporary:
             missing = Path(temporary) / "never-installed"

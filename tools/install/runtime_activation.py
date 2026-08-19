@@ -192,8 +192,14 @@ def _real_source(source: Optional[str]) -> Path:
 
 
 def _sha_path(
-    path: Path, digest: "hashlib._Hash", label: str, stack: Optional[set] = None
+    path: Path, digest: "hashlib._Hash", label: str, stack: Optional[set] = None,
+    skip=None,
 ) -> None:
+    """`skip` is an optional extra per-path filter, applied ON TOP of `_IGNORE_NAMES`.
+
+    It defaults to None so every existing caller — notably `_bundle_checksum`, whose
+    value is persisted in bundle metadata — keeps its exact previous digest.
+    """
     stack = set() if stack is None else stack
     try:
         resolved_key = str(path.resolve(strict=False))
@@ -226,9 +232,9 @@ def _sha_path(
     if path.is_dir():
         digest.update(b"D\0" + label.encode() + b"\0")
         for child in sorted(path.iterdir(), key=lambda item: item.name):
-            if child.name in _IGNORE_NAMES:
+            if child.name in _IGNORE_NAMES or (skip is not None and skip(child)):
                 continue
-            _sha_path(child, digest, f"{label}/{child.name}", stack)
+            _sha_path(child, digest, f"{label}/{child.name}", stack, skip)
     stack.remove(resolved_key)
 
 
@@ -247,15 +253,15 @@ def _digest_paths(items: Iterable[Path]) -> str:
     return digest.hexdigest()
 
 
-def _tree_digest(root: Path) -> str:
+def _tree_digest(root: Path, skip=None) -> str:
     digest = hashlib.sha256()
     if root.is_dir():
         for child in sorted(root.iterdir(), key=lambda item: item.name):
-            if child.name in _IGNORE_NAMES:
+            if child.name in _IGNORE_NAMES or (skip is not None and skip(child)):
                 continue
-            _sha_path(child, digest, child.name)
+            _sha_path(child, digest, child.name, None, skip)
     elif root.exists() or root.is_symlink():
-        _sha_path(root, digest, root.name)
+        _sha_path(root, digest, root.name, None, skip)
     else:
         digest.update(b"M\0" + str(root).encode())
     return digest.hexdigest()
@@ -2279,8 +2285,27 @@ SHARED_SURFACE_SUBTREES = (
 )
 
 
+def _surface_ephemeral(path: Path) -> bool:
+    """Runtime output that lives inside the source tree and must not read as skew.
+
+    `.gitignore` declares `loops/*.log` and `adapters/*/loops/*.log` ephemeral — loop runs
+    write them where they run. A packaged bundle is COPIED from a checkout and carries
+    whatever the working tree happened to hold; a release archive is built from tracked
+    content and never does. Digesting them made `adapters` differ permanently with no code
+    difference at all (observed 2026-08-19: oncall.log and study.log, months old). A
+    standing false alarm is worse than no check, so they are excluded here.
+
+    Scoped to a `loops` parent rather than the `.log` suffix, because the repository also
+    tracks real `.log` fixtures under `tests/fixtures/route/` whose content IS source.
+    """
+    return path.suffix == ".log" and path.parent.name == "loops"
+
+
 def _surface_digests(root: Path) -> Dict[str, str]:
-    return {name: _tree_digest(root / name) for name in SHARED_SURFACE_SUBTREES}
+    return {
+        name: _tree_digest(root / name, skip=_surface_ephemeral)
+        for name in SHARED_SURFACE_SUBTREES
+    }
 
 
 def surface_skew(release_root: Optional[Path] = None, scope: str = "global") -> dict:
