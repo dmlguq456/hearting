@@ -157,15 +157,33 @@ class F51OptOutTest(unittest.TestCase):
         self.assertIn('"disabled"', out)
 
     def test_recognized_disable_is_additive_and_old_keys_remain(self):
+        # `memory` and `governor` are best-effort keys: their collectors return None when
+        # the source is absent, and `_snapshot_json` then omits the key entirely — that IS
+        # the documented contract ("None (source absent) = key omitted"). Reading the real
+        # collectors made this assertion depend on whether the machine happened to have
+        # governor state on disk, so it failed on any host where the governor had never
+        # run. Stub both so the test checks the additive shape it names, not the host.
         old = {"sessions": [], "jobs": [], "summary": {}, "route": {}, "memory": {},
                "governor": {}}
-        out = json.loads(fleet._snapshot_json([], [], usage={"freshness": "unknown",
-            "api_disabled": True}, disabled={"recognized": ["usage-api"],
-            "ignored": ["bogus"], "api_disabled": True}))
+        with mock.patch.object(fleet, "_collect_memory", return_value={}), \
+             mock.patch.object(fleet, "_collect_governor", return_value={}):
+            out = json.loads(fleet._snapshot_json([], [], usage={"freshness": "unknown",
+                "api_disabled": True}, disabled={"recognized": ["usage-api"],
+                "ignored": ["bogus"], "api_disabled": True}))
         for key in old:
             self.assertIn(key, out)
         self.assertEqual(out["disabled"]["recognized"], ["usage-api"])
         self.assertEqual(out["disabled"]["ignored"], ["bogus"])
+
+    def test_absent_best_effort_source_omits_its_key(self):
+        """The other half of the same contract: absent source omits the key rather than
+        emitting an empty one, so a consumer can tell 'nothing there' from 'nothing yet'."""
+        with mock.patch.object(fleet, "_collect_memory", return_value=None), \
+             mock.patch.object(fleet, "_collect_governor", return_value=None):
+            out = json.loads(fleet._snapshot_json([], [], usage=None, disabled=None))
+        self.assertNotIn("memory", out)
+        self.assertNotIn("governor", out)
+        self.assertIn("sessions", out)
 
     def test_disabled_parser_has_no_side_effects(self):
         self.assertEqual(fleet._disabled_tokens("usage-api, ,BOGUS"),

@@ -3214,6 +3214,7 @@ def _select_entry_job(j, line_idx):
             "proc_start": getattr(j, "proc_start", None),
             "sid": None, "state": j.liveness, "status": j.status,
             "cwd": j.cwd, "slug": j.slug,
+            "attempt_id": getattr(j, "attempt_id", None),
             "label": j.slug or j.key, "harness": j.harness, "source": j.source,
             "is_worker": bool(getattr(j, "is_child", False))}
 _FOLD_CHILD_LIVENESS = {"done"}   # Completed depth-2 rows fold into the owner breadcrumb.
@@ -5014,12 +5015,18 @@ def _build_lines(sessions, jobs, section, narrow, malformed, layout="wide", memo
         _sess_bold_ids = set()
 
         def _emit_dispatch_tree(job, parent_model=None, parent_harness=None, parent_effort=None,
-                                orphan=False, is_last=True, in_card=False):
+                                orphan=False, is_last=True, in_card=False, detached_root=False):
             # Row authority is the attached WorkProjection.  No first-child or
             # first-route selection is allowed in this render-local tree walk.
             block_start = len(lines)   # F-64c: the dispatch-depth-1 rail spans everything emitted below
             depth = max(1, int(getattr(job, "depth", 1) or 1))
-            in_card = in_card or (not orphan and depth == 1)
+            # `detached_root`: a dispatch-depth-2 row whose OWN depth-1 owner is not on screen,
+            # recovered onto its session so a broken parent edge cannot make it vanish. It is a
+            # tree root here even though its depth says otherwise, so it owns a card like any
+            # depth-1 owner does. Without this it rendered frameless between the session row and
+            # the next card — a depth-2 worker floating outside every box (user 2026-08-19).
+            owns_card = not orphan and (depth == 1 or detached_root)
+            in_card = in_card or owns_card
             stage_override = _projection_stage_for_dispatch(job)
             route_seq = _projection_route_seq(job)
             if job.liveness == "stale":
@@ -5036,7 +5043,9 @@ def _build_lines(sessions, jobs, section, narrow, malformed, layout="wide", memo
             # frame and the current breadcrumb token on the owner's own liveness froze
             # an actively working card. Owner OR any nested descendant working = unit works.
             unit_working = None
-            if max(1, int(getattr(job, "depth", 1) or 1)) == 1:
+            # Keyed on DEPTH, not on card ownership: an orphan depth-1 row draws no frame but
+            # still owns a breadcrumb, and gating this on `owns_card` dropped its live hue.
+            if depth == 1 or detached_root:
                 unit_working = (job.liveness == "working"
                                 or any(s2.liveness == "working"
                                        for s2 in job_children.get(job.slug, [])))
@@ -5094,7 +5103,7 @@ def _build_lines(sessions, jobs, section, narrow, malformed, layout="wide", memo
             # F-66: a depth-1 owner and all descendants form one complete box. The
             # frame itself carries hierarchy, so descendants share the owner's body
             # column and every row reaches the same right edge.
-            if (not orphan and max(1, int(getattr(job, "depth", 1) or 1)) == 1):
+            if owns_card:
                 if unit_working or job.liveness == "working":
                     color_i = _depth1_rail_color_index(
                         getattr(job, "key", None),
@@ -5228,7 +5237,10 @@ def _build_lines(sessions, jobs, section, narrow, malformed, layout="wide", memo
             for i, cj in enumerate(dispatch_kids):
                 _emit_dispatch_tree(cj, parent_model=s.model, parent_harness=s.harness,
                                     parent_effort=s.effort, orphan=False,
-                                    is_last=(i == len(dispatch_kids) - 1))
+                                    is_last=(i == len(dispatch_kids) - 1),
+                                    detached_root=(
+                                        max(1, int(getattr(cj, "depth", 1) or 1)) >= 2
+                                    ))
         if group_sessions and hidden:
             lines.append([("     +%d stale/companion hidden" % hidden, "dim")])
 
@@ -6031,12 +6043,12 @@ def _close_job_row_if_registry(entry):
     from . import control
     if entry.get("kind") != "job" or entry.get("source") != "jobs":
         return
-    if entry.get("status") != "open" or not entry.get("slug"):
+    if entry.get("status") not in {"open", "running"} or not entry.get("attempt_id"):
         return
     try:
         from .collectors import dispatch as _dispatch
         for jobs_path in _dispatch._candidate_jobs_paths(None):
-            if control.close_registry_row(jobs_path, entry["slug"], entry.get("cwd") or ""):
+            if control.close_registry_row(jobs_path, entry["attempt_id"]):
                 control.log_action(action="close_row", pid=entry.get("pid"), sid=None,
                                    state=entry.get("state"), approval="single",
                                    result="ok", reason=entry["slug"])

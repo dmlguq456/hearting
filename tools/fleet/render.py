@@ -5015,12 +5015,18 @@ def _build_lines(sessions, jobs, section, narrow, malformed, layout="wide", memo
         _sess_bold_ids = set()
 
         def _emit_dispatch_tree(job, parent_model=None, parent_harness=None, parent_effort=None,
-                                orphan=False, is_last=True, in_card=False):
+                                orphan=False, is_last=True, in_card=False, detached_root=False):
             # Row authority is the attached WorkProjection.  No first-child or
             # first-route selection is allowed in this render-local tree walk.
             block_start = len(lines)   # F-64c: the dispatch-depth-1 rail spans everything emitted below
             depth = max(1, int(getattr(job, "depth", 1) or 1))
-            in_card = in_card or (not orphan and depth == 1)
+            # `detached_root`: a dispatch-depth-2 row whose OWN depth-1 owner is not on screen,
+            # recovered onto its session so a broken parent edge cannot make it vanish. It is a
+            # tree root here even though its depth says otherwise, so it owns a card like any
+            # depth-1 owner does. Without this it rendered frameless between the session row and
+            # the next card — a depth-2 worker floating outside every box (user 2026-08-19).
+            owns_card = not orphan and (depth == 1 or detached_root)
+            in_card = in_card or owns_card
             stage_override = _projection_stage_for_dispatch(job)
             route_seq = _projection_route_seq(job)
             if job.liveness == "stale":
@@ -5037,7 +5043,9 @@ def _build_lines(sessions, jobs, section, narrow, malformed, layout="wide", memo
             # frame and the current breadcrumb token on the owner's own liveness froze
             # an actively working card. Owner OR any nested descendant working = unit works.
             unit_working = None
-            if max(1, int(getattr(job, "depth", 1) or 1)) == 1:
+            # Keyed on DEPTH, not on card ownership: an orphan depth-1 row draws no frame but
+            # still owns a breadcrumb, and gating this on `owns_card` dropped its live hue.
+            if depth == 1 or detached_root:
                 unit_working = (job.liveness == "working"
                                 or any(s2.liveness == "working"
                                        for s2 in job_children.get(job.slug, [])))
@@ -5095,7 +5103,7 @@ def _build_lines(sessions, jobs, section, narrow, malformed, layout="wide", memo
             # F-66: a depth-1 owner and all descendants form one complete box. The
             # frame itself carries hierarchy, so descendants share the owner's body
             # column and every row reaches the same right edge.
-            if (not orphan and max(1, int(getattr(job, "depth", 1) or 1)) == 1):
+            if owns_card:
                 if unit_working or job.liveness == "working":
                     color_i = _depth1_rail_color_index(
                         getattr(job, "key", None),
@@ -5229,7 +5237,10 @@ def _build_lines(sessions, jobs, section, narrow, malformed, layout="wide", memo
             for i, cj in enumerate(dispatch_kids):
                 _emit_dispatch_tree(cj, parent_model=s.model, parent_harness=s.harness,
                                     parent_effort=s.effort, orphan=False,
-                                    is_last=(i == len(dispatch_kids) - 1))
+                                    is_last=(i == len(dispatch_kids) - 1),
+                                    detached_root=(
+                                        max(1, int(getattr(cj, "depth", 1) or 1)) >= 2
+                                    ))
         if group_sessions and hidden:
             lines.append([("     +%d stale/companion hidden" % hidden, "dim")])
 

@@ -266,32 +266,13 @@ class ActionLogTest(ActionLogEnv):
             self.assertIn(k, row)
 
 
-# --- registry close: cross-implementation parity with the real upstream ------------
+# --- registry close: exact-attempt typed cancellation -------------------------------
 
 def _read(path):
     with open(path, encoding="utf-8") as f:
         return f.read()
 
 
-def _load_upstream():
-    """Import the adapter's dispatch-headless.py by path. A TEST may cross the layering
-    boundary that the runtime may not — that is the whole point of this check."""
-    import importlib.util
-    root = os.path.join(os.path.dirname(__file__), "..", "..", "..")
-    path = os.path.abspath(os.path.join(root, "adapters", "claude", "bin",
-                                        "dispatch-headless.py"))
-    if not os.path.exists(path):
-        return None
-    spec = importlib.util.spec_from_file_location("_dh_upstream", path)
-    mod = importlib.util.module_from_spec(spec)
-    try:
-        spec.loader.exec_module(mod)
-    except Exception:
-        return None
-    return mod
-
-
-_UPSTREAM = _load_upstream()
 CURRENT = (
     "attempt_schema_version=2,dispatch_depth=1,transport=headless,"
     "execution_surface=registered-headless,registered_worker=1,"
@@ -300,11 +281,11 @@ CURRENT = (
 
 ROWS = (
     "2026-07-15T10:00:00\topen\t/repo\t/wt/a\tslug-a\t"
-    + CURRENT + "capability=code,mode=dev\n"
+    + CURRENT + "attempt_id=att-fleet-a,capability=code,mode=dev\n"
     "2026-07-15T10:01:00\trunning\t/repo\t/wt/b\tslug-b\t"
-    + CURRENT + "capability=code\n"
+    + CURRENT + "attempt_id=att-fleet-b,capability=code\n"
     "2026-07-15T10:02:00\topen\t/repo\t/wt/c\tslug-c\t"
-    + CURRENT + "capability=spec\n"
+    + CURRENT + "attempt_id=att-fleet-c,capability=spec\n"
 )
 
 
@@ -317,36 +298,48 @@ class RegistryCloseTest(ActionLogEnv):
             f.write(ROWS)
 
     def test_closes_the_matching_open_row(self):
-        self.assertTrue(control.close_registry_row(self.jobs, "slug-a", "/wt/a"))
+        self.assertTrue(control.close_registry_row(self.jobs, "att-fleet-a"))
         out = _read(self.jobs)
         self.assertIn("done\t/repo\t/wt/a\tslug-a\t", out)
-        self.assertIn("capability=code,mode=dev,note=fleet-kill", out)
+        self.assertIn("note=fleet-kill", out)
+        self.assertIn("failure_class=cancelled", out)
+        self.assertIn("classifier_source=fleet-cancel-v1", out)
 
     def test_spec_note_token_is_fleet_kill(self):
         """prd.md:255 names this token; it is what distinguishes an external console kill
         from a dispatch that died on its own (`note=dead-<reason>`)."""
-        control.close_registry_row(self.jobs, "slug-a", "/wt/a")
+        control.close_registry_row(self.jobs, "att-fleet-a")
         out = _read(self.jobs)
         self.assertIn("note=fleet-kill", out)
         self.assertNotIn("note=dead-", out)
 
     def test_no_match_is_idempotent_and_touches_nothing(self):
         before = _read(self.jobs)
-        self.assertFalse(control.close_registry_row(self.jobs, "nope", "/wt/z"))
+        self.assertFalse(control.close_registry_row(self.jobs, "att-missing"))
         self.assertEqual(_read(self.jobs), before)
 
-    def test_worktree_must_match_too(self):
-        """3-part key — the same slug in another worktree is a different job."""
-        self.assertFalse(control.close_registry_row(self.jobs, "slug-a", "/wt/WRONG"))
-        self.assertEqual(_read(self.jobs), ROWS)
+    def test_same_slug_sibling_is_untouched(self):
+        with open(self.jobs, "a") as f:
+            f.write(
+                "2026-07-15T10:03:00\topen\t/repo\t/wt/other\tslug-a\t"
+                + CURRENT + "attempt_id=att-fleet-sibling,capability=code\n"
+            )
+        self.assertTrue(control.close_registry_row(self.jobs, "att-fleet-a"))
+        out = _read(self.jobs)
+        sibling = next(line for line in out.splitlines() if "att-fleet-sibling" in line)
+        self.assertIn("\topen\t", sibling)
+        self.assertNotIn("fleet-kill", sibling)
 
-    def test_a_running_row_is_not_closed(self):
-        """Only `open` rows are ours to close."""
-        self.assertFalse(control.close_registry_row(self.jobs, "slug-b", "/wt/b"))
+    def test_a_running_row_is_typed_cancelled(self):
+        self.assertTrue(control.close_registry_row(self.jobs, "att-fleet-b"))
+        line = next(line for line in _read(self.jobs).splitlines() if "att-fleet-b" in line)
+        self.assertIn("\tdone\t", line)
+        self.assertIn("failure_class=cancelled", line)
 
     def test_missing_file_is_false_not_a_crash(self):
-        self.assertFalse(control.close_registry_row(os.path.join(self.dir, "nope.log"),
-                                                    "s", "/w"))
+        self.assertFalse(control.close_registry_row(
+            os.path.join(self.dir, "nope.log"), "att-fleet-a"
+        ))
 
     def test_legacy_row_is_diagnostic_only(self):
         legacy = (
@@ -355,107 +348,23 @@ class RegistryCloseTest(ActionLogEnv):
         )
         with open(self.jobs, "w") as f:
             f.write(legacy)
-        self.assertFalse(control.close_registry_row(self.jobs, "slug-a", "/wt/a"))
+        self.assertFalse(control.close_registry_row(self.jobs, "att-fleet-a"))
         self.assertEqual(_read(self.jobs), legacy)
 
-    def test_only_the_first_duplicate_is_closed(self):
-        """Duplicate open rows are a registry anomaly; closing them all would make fleet
-        write MORE broadly than upstream does. The exception stays minimal."""
+    def test_duplicate_attempt_identity_fails_closed(self):
         with open(self.jobs, "w") as f:
             f.write((
                 "2026-07-15T10:00:00\topen\t/repo\t/wt/a\tslug-a\t"
-                + CURRENT + "p=1\n"
+                + CURRENT + "attempt_id=att-duplicate,p=1\n"
             ) * 3)
-        self.assertTrue(control.close_registry_row(self.jobs, "slug-a", "/wt/a"))
+        self.assertFalse(control.close_registry_row(self.jobs, "att-duplicate"))
         out = _read(self.jobs)
-        self.assertEqual(out.count("\tdone\t"), 1)
-        self.assertEqual(out.count("\topen\t"), 2)
+        self.assertEqual(out.count("\tdone\t"), 0)
+        self.assertEqual(out.count("\topen\t"), 3)
 
-
-@unittest.skipIf(_UPSTREAM is None, "adapters/claude/bin/dispatch-headless.py not importable")
-class TestRegistryCloseParity(ActionLogEnv):
-    """§6.5 — drift defense. `control.close_registry_row` must stay byte-equivalent to the
-    real `close_job_row` on every axis except the one token the spec requires to differ.
-
-    Scope, stated honestly: this class compares OUTPUT, so it catches drift in the match key,
-    `break` semantics, field reassembly and idempotency. It cannot see locking — both sides
-    run sequentially here, so a dropped flock would still match byte for byte. That axis is
-    covered by `test_close_registry_row_actually_holds_the_flock` below.
-    """
-
-    def setUp(self):
-        super().setUp()
-        self.dir = tempfile.mkdtemp()
-
-    def _jobs(self, name, rows=ROWS):
-        p = os.path.join(self.dir, name)
-        with open(p, "w") as f:
-            f.write(rows)
-        return p
-
-    def _both(self, slug, worktree, rows=ROWS):
-        from pathlib import Path
-        mine_p = self._jobs("mine.log", rows)
-        theirs_p = self._jobs("theirs.log", rows)
-        mine_r = control.close_registry_row(mine_p, slug, worktree)
-        # reset="" aligns the axis fleet has no concept of (a rate-limit reset time).
-        theirs_r = _UPSTREAM.close_job_row(Path(theirs_p), slug, worktree,
-                                           reason="fleet-kill", reset="")
-        mine, theirs = _read(mine_p), _read(theirs_p)
-        # Normalize ONLY the note token — a single exact substitution, never a broad regex,
-        # so no other difference can hide inside it.
-        theirs_norm = theirs.replace("note=dead-fleet-kill", "note=fleet-kill")
-        return (mine_r, mine), (theirs_r, theirs_norm)
-
-    def test_match_case_is_byte_identical_after_note_normalization(self):
-        (mr, mine), (tr, theirs) = self._both("slug-a", "/wt/a")
-        self.assertTrue(mr)
-        self.assertEqual(mr, tr)
-        self.assertEqual(mine, theirs)
-
-    def test_no_match_case_is_identical(self):
-        (mr, mine), (tr, theirs) = self._both("nope", "/wt/zzz")
-        self.assertFalse(mr)
-        self.assertEqual(mr, tr)
-        self.assertEqual(mine, theirs)
-
-    def test_running_row_case_is_identical(self):
-        (mr, mine), (tr, theirs) = self._both("slug-b", "/wt/b")
-        self.assertEqual(mr, tr)
-        self.assertEqual(mine, theirs)
-
-    def test_duplicate_rows_break_semantics_are_identical(self):
-        dup = (
-            "2026-07-15T10:00:00\topen\t/repo\t/wt/a\tslug-a\t"
-            + CURRENT + "p=1\n"
-        ) * 3
-        (mr, mine), (tr, theirs) = self._both("slug-a", "/wt/a", rows=dup)
-        self.assertEqual(mr, tr)
-        self.assertEqual(mine, theirs)
-
-    def test_row_with_extra_fields_loses_them_identically(self):
-        """jobs.log is a 6-field hard contract; upstream drops the 7th+ field on rewrite.
-        fleet must drop it the SAME way — preserving it only in fleet would be a worse,
-        asymmetric drift than the loss itself."""
-        extra = (
-            "2026-07-15T10:00:00\topen\t/repo\t/wt/a\tslug-a\t"
-            + CURRENT + "p=1\tSEVENTH\n"
-        )
-        (mr, mine), (tr, theirs) = self._both("slug-a", "/wt/a", rows=extra)
-        self.assertEqual(mr, tr)
-        self.assertEqual(mine, theirs)
-        self.assertNotIn("SEVENTH", mine)
-
-    def test_close_registry_row_actually_holds_the_flock(self):
-        """phase_02 review M1: the parity comparison runs both implementations SEQUENTIALLY in
-        one process, so it proves nothing about locking — upstream could drop `jobs_lock`
-        entirely and every byte would still match. Axis ① needs its own canary.
-
-        Probe it directly: hold <jobs>.lock from a child process, and close_registry_row must
-        block (it takes LOCK_EX). If it returns while the lock is held, the discipline is gone.
-        """
+    def test_close_registry_row_holds_the_canonical_flock(self):
         import multiprocessing
-        p = self._jobs("locked.log")
+        p = self.jobs
         lock_path = p + ".lock"
         held = multiprocessing.Event()
         release = multiprocessing.Event()
@@ -470,7 +379,7 @@ class TestRegistryCloseParity(ActionLogEnv):
                 f2.flock(fh.fileno(), f2.LOCK_UN)
 
         def closer():
-            control.close_registry_row(p, "slug-a", "/wt/a")
+            control.close_registry_row(p, "att-fleet-a")
             done.set()
 
         h = multiprocessing.Process(target=holder)
@@ -491,14 +400,6 @@ class TestRegistryCloseParity(ActionLogEnv):
                 proc.join(5)
                 if proc.is_alive():
                     proc.terminate()
-
-    def test_upstream_still_hardcodes_the_dead_note(self):
-        """The premise of the note exemption. If upstream ever parameterizes the note, this
-        fails and the exemption must be re-argued rather than silently kept."""
-        from pathlib import Path
-        p = self._jobs("probe.log")
-        _UPSTREAM.close_job_row(Path(p), "slug-a", "/wt/a", reason="fleet-kill", reset="")
-        self.assertIn("note=dead-fleet-kill", _read(p))
 
 
 class NoAutomaticControlTest(unittest.TestCase):
