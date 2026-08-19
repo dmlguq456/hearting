@@ -418,7 +418,8 @@
       "write_scope": [
        "source/**",
        "checklist.md",
-       "dev_logs/**"
+       "dev_logs/**",
+       "evidence/**"
       ],
       "resource_class": "normal",
       "completion_gate": "code-execute",
@@ -495,7 +496,8 @@
       ],
       "write_scope": [
        "test_logs/**",
-       "_internal/test_reviews/**"
+       "_internal/test_reviews/**",
+       "evidence/**"
       ],
       "resource_class": "normal",
       "completion_gate": "code-test",
