@@ -295,6 +295,30 @@ class FoldingTest(unittest.TestCase):
         text = "\n".join("".join(t for t, _k in line) for line in lines if line)
         self.assertIn("plan live-depth-two", text)
 
+    def test_finished_detached_depth_two_leaves_with_its_owner(self):
+        """사용자 2026-08-19: while the owner was on screen this row lived inside the
+        owner's card; once the owner aged off the board only the finished child leaked
+        back out, hours stale, floating between cards. Recovery is for LIVE rows a broken
+        parent edge would otherwise hide — finished residue leaves with its owner and
+        comes back only under `a`/--all."""
+        for finished in ("done", "stale", "dead"):
+            child = DispatchJob(key="code-exec", slug="finished-depth-two", depth=2,
+                                parent_slug="missing-owner", worker_role="code-exec",
+                                liveness=finished, cwd="/tmp/project")
+            render.set_show_all(False)
+            lines = render._build_lines([], [child], section="dispatch", narrow=False,
+                                        malformed=0, layout="wide")
+            text = "\n".join("".join(t for t, _k in line) for line in lines if line)
+            self.assertNotIn("finished-depth-two", text, finished)
+            render.set_show_all(True)
+            try:
+                lines = render._build_lines([], [child], section="dispatch", narrow=False,
+                                            malformed=0, layout="wide")
+                text = "\n".join("".join(t for t, _k in line) for line in lines if line)
+                self.assertIn("finished-depth-two", text, finished)
+            finally:
+                render.set_show_all(False)
+
 
 class StageDoneMarkerTest(unittest.TestCase):
 

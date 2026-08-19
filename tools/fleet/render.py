@@ -3219,6 +3219,11 @@ def _select_entry_job(j, line_idx):
             "is_worker": bool(getattr(j, "is_child", False))}
 _FOLD_CHILD_LIVENESS = {"done"}   # Completed depth-2 rows fold into the owner breadcrumb.
                                   # Queued/idle/unknown remain visible execution identities.
+# The detached (owner-off-screen) variant of the fold above. Wider than in-card `done` on
+# purpose: inside a card, `stale`/`dead` still read against their owner's context, but with
+# the owner gone there is nothing to monitor and no card to belong to — done, stale and dead
+# alike are finished residue. Queued/idle/unknown stay recoverable: they may still run.
+_DETACHED_FINISHED_LIVENESS = {"done", "stale", "dead"}
 
 # F-29 (v9, prd.md:290-295) — sub-agent observation rows. `⚡` is the PRD-specified glyph.
 # Reads distinctly from dispatch's `🚀`/`↳` so the two nested-row kinds never visually merge.
@@ -4897,6 +4902,15 @@ def _build_lines(sessions, jobs, section, narrow, malformed, layout="wide", memo
                     job_children.setdefault(j.parent_slug, []).append(j)
                 elif is_drill_case:
                     loops_jobs.append(j)
+                elif not _SHOW_ALL and j.liveness in _DETACHED_FINISHED_LIVENESS:
+                    # 사용자 2026-08-19 ("done된것도 원래 박스 안에서 떴다니까"): while its owner
+                    # was on screen this row lived inside that owner's card; the owner then
+                    # aged off the board and only the finished child leaked back out, hours
+                    # stale, floating between cards. Recovery exists so a LIVE depth-2 row
+                    # cannot vanish behind a broken parent edge — it is not a reason to
+                    # resurrect finished work whose owner already left. When the owner goes,
+                    # its finished children go with it; `a`/--all still reveals them.
+                    pass
                 elif (getattr(j, "is_child", False) and j.parent_sid
                       and j.parent_sid in shown_sids):
                     children.setdefault(j.parent_sid, []).append(j)
