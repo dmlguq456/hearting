@@ -310,8 +310,21 @@ class RenderDispatchPresentationTest(unittest.TestCase):
                 self.assertEqual(len(set(right_cols)), 1)
                 self.assertLessEqual(right_cols[0], width)
                 self.assertTrue(card[0].endswith("╮"))
-                self.assertTrue(all(text.endswith("│") for text in card[1:-1]))
+                # Interior rows close on the frame's right edge: content rows on `│`,
+                # the header divider on its tee. Alignment is already guaranteed by the
+                # single-width assertion above, so this checks closure, not geometry.
+                self.assertTrue(all(text.endswith(("│", "┤")) for text in card[1:-1]))
                 self.assertTrue(card[-1].endswith("╯"))
+
+                # The header divider (user 2026-08-19) appears exactly once and closes the
+                # owner's own rows: everything above it is the owner, the first descendant
+                # sits below it. A card with no descendants emits none at all.
+                dividers = [i for i, text in enumerate(card) if text.endswith("┤")]
+                self.assertEqual(len(dividers), 1)
+                owner_i = next(i for i, text in enumerate(card) if "rail-owner" in text)
+                child_i = next(i for i, text in enumerate(card) if "rail-leg" in text)
+                self.assertLess(owner_i, dividers[0])
+                self.assertLess(dividers[0], child_i)
 
                 owner = next(text for text in card if "rail-owner" in text)
                 child = next(text for text in card if "rail-leg" in text)

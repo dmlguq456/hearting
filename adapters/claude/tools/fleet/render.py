@@ -1867,6 +1867,8 @@ _RAIL_BOT = "╰"
 _RAIL_TOP_RIGHT = "╮"
 _RAIL_RIGHT = "│"
 _RAIL_BOT_RIGHT = "╯"
+_RAIL_DIV_LEFT = "├"     # header divider tees, drawn only when the card HAS descendants
+_RAIL_DIV_RIGHT = "┤"
 _RAIL_SOLO = "❙"
 _RAIL_CHARS = (_RAIL_TOP, _RAIL_MID, _RAIL_MID.strip(), _RAIL_BOT, _RAIL_SOLO)
 _RAIL_COL = 2 + _CARD_INSET   # capsule's left edge, in raw (pre-tint-band) columns
@@ -2049,10 +2051,14 @@ def _frame_dispatch_line(segs, box_width, edge, key, run_key=None):
     if pad:
         if edge == "top" and pad >= 3 and not right:
             # Owner row: fill the trailing gap with a rule so the top edge reads
-            # as the box's horizontal line, breathing one cell on each side.
+            # as the box's horizontal line, breathing one cell on the TEXT side only.
+            # User 2026-08-19 ("박스의 우측 상단 모서리가 살짝 끊어지는것도 거슬리니까"):
+            # the symmetric one-cell breather also sat between the rule and `╮`, so the
+            # corner floated off its own top edge — the only corner on the card that did
+            # not touch its rule. The gap belongs between TEXT and rule, not between rule
+            # and corner; the run now closes onto the corner and the width is unchanged.
             left.append((" ", None))
-            left.append(("─" * (pad - 2), run_key or key))
-            left.append((" ", None))
+            left.append(("─" * (pad - 1), run_key or key))
         else:
             left.append((" " * pad, None))
     left.extend(right)
@@ -2105,6 +2111,26 @@ def _dispatch_box_bottom(box_width, key, run_key=None, label_segs=None):
             + [("─" * lead_run, rule_key), (" ", None)]
             + list(label_segs)
             + [(" ", None), ("─" * _BOT_LABEL_TAIL, rule_key), (_RAIL_BOT_RIGHT, key)])
+
+
+def _dispatch_box_divider(box_width, key, run_key=None):
+    """One in-card rule closing the depth-1 owner's own rows, above its first descendant.
+
+    User 2026-08-19 ("depth=1,2 사이에 구분감이 없는데(두줄이라서 특히) … depth=1이 일종의
+    박스의 헤더처럼"): every row in the card carries two lines, so an owner block and a
+    stage-worker block presented the same two-line silhouette and the eye had no boundary
+    to land on — the owner read as just another sibling inside its own box. This rule gives
+    the owner a header band.
+
+    Geometry and grain match `_dispatch_box_bottom` exactly (same `run`, same steady
+    `run_key` rule against `key` corners), so the divider reads as part of the frame rather
+    than as content. Emitted ONLY when descendants follow: a childless card keeps its two
+    rows and its close rule, with nothing to divide.
+    """
+    run = max(0, box_width - _RAIL_COL - 2)
+    rule_key = run_key or key
+    return [(" " * _RAIL_COL, None), (_RAIL_DIV_LEFT, key),
+            ("─" * run, rule_key), (_RAIL_DIV_RIGHT, key)]
 
 
 _ORPHAN_DIVIDER_LABEL = "  ⌄ orphaned dispatch rows"
@@ -5050,6 +5076,10 @@ def _build_lines(sessions, jobs, section, narrow, malformed, layout="wide", memo
             if shown_job_subs:
                 lines.extend(_subagent_strip(
                     shown_job_subs, depth=depth, in_card=in_card))
+            # Everything emitted above belongs to the owner itself (identity row, its
+            # NOW line, its own sub-agent strip). Descendants start here, so this index
+            # is where the header divider goes once the frame is drawn.
+            header_end = len(lines)
             for sub in _sort_group_jobs(job_children.get(job.slug, [])):
                 # F-15b P0-2: only a completed stage is absorbed into the
                 # conductor breadcrumb. A registered queued/idle/unknown child
@@ -5094,6 +5124,12 @@ def _build_lines(sessions, jobs, section, narrow, malformed, layout="wide", memo
                 # A ONE-node route is not a pipeline: its breadcrumb is the owner row's own
                 # compact token spelled identically, so the rail stays bare rather than
                 # printing `one-shot` twice on one card (the F-37 single-render contract).
+                # Inserted AFTER framing so the divider is not itself passed through
+                # `_frame_dispatch_line` (it is a frame member, not a content row), and
+                # only when a descendant row actually survived the fold above.
+                if header_end < len(lines):
+                    lines.insert(header_end,
+                                 _dispatch_box_divider(box_width, rail_key, run_key=run_key))
                 bottom_label = None
                 if route_seq and len(route_seq) > 1:
                     bottom_label = _route_stage_segs(
