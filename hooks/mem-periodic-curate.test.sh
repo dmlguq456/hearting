@@ -340,6 +340,9 @@ mkdir -p "$SRC9/hooks" "$SRC9/utilities" "$SRC9/adapters/claude" "$HOME9/hooks"
 cp "$UTIL" "$SRC9/utilities/mem-periodic-curate.sh"
 printf '#!/bin/sh\nprintf %%s\\\\n "%s"\n' "$BASE9" > "$SRC9/utilities/agent-home.sh"
 chmod +x "$SRC9/utilities/agent-home.sh"
+# The installed layout carries the whole utilities directory, including the
+# store resolver the curate script reads its STORE from.
+cp "$ROOT/utilities/memory-store.sh" "$SRC9/utilities/memory-store.sh"
 ln -s ../../utilities "$SRC9/adapters/claude/utilities"
 ln -s "$SRC9/adapters/claude/utilities" "$HOME9/utilities"
 printf '#!/bin/sh\nprintf "portable\\n" >> "$DISPATCH_TRACE"\n' > "$SRC9/hooks/mem-distill-dispatch.sh"

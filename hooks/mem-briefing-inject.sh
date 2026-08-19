@@ -97,10 +97,7 @@ AGENT_LOOP_ENV="${AGENT_LOOP_ENV:-${HOME:-}/.config/hearting/loops.env}"
 [ -f "$AGENT_LOOP_ENV" ] && . "$AGENT_LOOP_ENV"
 AGENT_NOTES_ROOT="${AGENT_NOTES_ROOT:-${HOME:-}/agent-notes}"
 ONCALL="${MEM_BRIEFING_ONCALL:-$AGENT_NOTES_ROOT/oncall/$TODAY.md}"
-default_store="$AGENT_HOME/memory"
-[ -e "$default_store" ] || [ -L "$default_store" ] \
-  || default_store="${XDG_DATA_HOME:-$HOME/.local/share}/hearting/memory"
-STORE="${MEM_STORE:-$default_store}"
+STORE=$(sh "$HOOK_DIR/../utilities/memory-store.sh")
 STATE="$STORE/.briefing-$TODAY"
 
 [ -f "$ONCALL" ] || exit 0      # No report yet: skip.

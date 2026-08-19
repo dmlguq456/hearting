@@ -18,7 +18,12 @@ cd "$ROOT"
 fail=0
 # Shared pre-owner evidence generator is invoked through adapter preflight
 # wrappers and remains at the portable root; no adapter-local utility symlink.
-SHARED_UTILITY_DEFERRED="dispatch-readiness.py verification-background-lease.py"
+# memory-store.sh joins this list rather than the projected one: it is the
+# resolver the canonical memory hooks read their STORE from, and Codex/OpenCode
+# reach those hooks at $ROOT/hooks/* (adapters/codex/bin/preflight.sh), where
+# $ROOT/utilities/memory-store.sh already resolves. A per-adapter copy would
+# assert a projection surface nothing loads.
+SHARED_UTILITY_DEFERRED="dispatch-readiness.py verification-background-lease.py memory-store.sh"
 
 say() {
   printf '%s\n' "$*"
