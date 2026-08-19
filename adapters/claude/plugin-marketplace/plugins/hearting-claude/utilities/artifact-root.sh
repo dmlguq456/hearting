@@ -6,6 +6,12 @@
 # absolute AGENT_ARTIFACT_ROOT wins; otherwise Git projects use the primary
 # worktree (the first `git worktree list --porcelain` entry). Non-Git projects
 # retain upward discovery from the supplied cwd.
+#
+# An installed immutable source tree is never a writable root, whichever of those
+# paths reaches it: it is replaced wholesale on update, so state written there is
+# silently lost, and it must stay byte-identical to the release it was built from.
+# Every emit therefore goes through `emit`, which refuses such a root with a typed
+# failure instead of returning it.
 set -eu
 
 physical_dir() {
@@ -26,6 +32,23 @@ physical_path() {
   printf '%s/%s\n' "$parent" "$leaf"
 }
 
+# Immutable installed source layouts, mirroring
+# utilities/dispatch_contract.py::_versioned_source_layout: a per-runtime release
+# bundle is `<runtime-home>/.harness/bundles/<id>/source`, and a shared managed
+# release is `<xdg-data>/hearting/releases/<version>`. The whole bundle subtree is
+# refused rather than only `<id>/source`, because nothing under a bundle is
+# mutable state.
+emit() {
+  case "$1/" in
+    */.harness/bundles/*|*/hearting/releases/*)
+      echo "artifact-root: refusing an immutable installed source tree as a writable root: $1" >&2
+      exit 67
+      ;;
+  esac
+  printf '%s\n' "$1"
+  exit 0
+}
+
 if [ -n "${AGENT_ARTIFACT_ROOT:-}" ]; then
   case "$AGENT_ARTIFACT_ROOT" in
     /*) ;;
@@ -34,11 +57,11 @@ if [ -n "${AGENT_ARTIFACT_ROOT:-}" ]; then
       exit 64
       ;;
   esac
-  physical_path "$AGENT_ARTIFACT_ROOT" || {
+  override=$(physical_path "$AGENT_ARTIFACT_ROOT") || {
     echo "artifact-root: parent directory does not exist: $AGENT_ARTIFACT_ROOT" >&2
     exit 66
   }
-  exit 0
+  emit "$override"
 fi
 
 start="${1:-$PWD}"
@@ -54,13 +77,12 @@ if command -v git >/dev/null 2>&1 \
   [ -n "$primary" ] || primary=$(git -C "$start" rev-parse --show-toplevel)
   primary=$(physical_dir "$primary")
   if [ -d "$primary/.agent_reports" ]; then
-    physical_dir "$primary/.agent_reports"
+    emit "$(physical_dir "$primary/.agent_reports")"
   elif [ -d "$primary/.claude_reports" ]; then
-    physical_dir "$primary/.claude_reports"
+    emit "$(physical_dir "$primary/.claude_reports")"
   else
-    printf '%s/.agent_reports\n' "$primary"
+    emit "$primary/.agent_reports"
   fi
-  exit 0
 fi
 
 # D-3: cwd's own root is used on discovery (self is not inheritance, no marker
@@ -84,8 +106,7 @@ while :; do
   fi
   if [ -n "$root" ] \
     && { [ "$self" = 1 ] || [ -f "$d/.agent-workspace" ]; }; then
-    physical_dir "$root"
-    exit 0
+    emit "$(physical_dir "$root")"
   fi
   self=0
   [ "$d" = "/" ] && break
@@ -93,4 +114,4 @@ while :; do
   [ "$parent" = "$d" ] && break
   d=$parent
 done
-printf '%s/.agent_reports\n' "$start"
+emit "$start/.agent_reports"

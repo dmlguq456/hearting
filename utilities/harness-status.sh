@@ -38,8 +38,15 @@ if command -v git >/dev/null 2>&1 && git -C "$cwd" rev-parse --is-inside-work-tr
 fi
 
 search_root=${project_root:-$cwd}
-artifact_root=$("$self_dir/artifact-root.sh" "$search_root")
-artifact_kind=$(basename "$artifact_root")
+# The resolver refuses to name a writable root inside an immutable installed
+# source tree. This is a read-only status snapshot under `set -e`, so report the
+# unresolved root instead of aborting the whole surface on that typed refusal.
+if artifact_root=$("$self_dir/artifact-root.sh" "$search_root" 2>/dev/null); then
+  artifact_kind=$(basename "$artifact_root")
+else
+  artifact_root=""
+  artifact_kind=""
+fi
 
 if [ -d "$artifact_root" ]; then
   printf 'artifact_root=%s\n' "$artifact_root"
