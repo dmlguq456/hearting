@@ -584,7 +584,30 @@ def _opencode_workdir(home):
     Mirrors `adapters/opencode/bin/distill-worker.sh`: opencode has no per-invocation
     tool-blocking flag, so the agent definition IS the tool-free contract and it has to
     exist on disk in a directory `--dir` can discover.
+
+    The directory lives in runtime STATE, never under the harness root. `opencode run`
+    treats `--dir` as a project directory and installs `node_modules` plus a lockfile
+    into it, and a packaged activation makes the harness root an immutable snapshot whose
+    checksum is verified on every status call. Rooting the workdir at `home` therefore
+    mutated the live bundle on the first title refresh and pinned the runtime at
+    `freshness=cache-stale` permanently (observed 2026-08-19, once OpenCode became the
+    mini-profile provider and this path started running at all). `home` is still accepted
+    so callers need no change, and is used only as the last-resort fallback when no state
+    directory can be created.
     """
+    state = os.environ.get("FLEET_TITLE_STATE_DIR")
+    if not state:
+        xdg = os.environ.get("XDG_STATE_HOME") or os.path.expanduser("~/.local/state")
+        state = os.path.join(xdg, "hearting")
+    workdir = Path(state) / "fleet-title-workdir"
+    agent_file = workdir / ".opencode" / "agent" / "fleet-titler.md"
+    try:
+        if not agent_file.is_file():
+            agent_file.parent.mkdir(parents=True, exist_ok=True)
+            agent_file.write_text(_OPENCODE_AGENT, encoding="utf-8")
+        return workdir
+    except OSError:
+        pass
     workdir = Path(home) / ".agent-workspace" / "fleet-title-workdir"
     agent_file = workdir / ".opencode" / "agent" / "fleet-titler.md"
     try:

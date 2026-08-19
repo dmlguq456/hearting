@@ -874,6 +874,21 @@ class SecurityTest(_ConfigHomeMixin, unittest.TestCase):
         open(jobs, "w", encoding="utf-8").close()
         os.environ["AGENT_DISPATCH_JOBS"] = jobs
 
+    def test_opencode_workdir_stays_out_of_the_harness_root(self):
+        """`opencode run --dir` installs node_modules into that directory. A packaged
+        activation makes the harness root an immutable snapshot whose checksum is verified
+        on every status call, so a workdir under it pins the runtime at cache-stale."""
+        home = os.path.join(self._tmp.name, "harness-root")
+        os.makedirs(home, exist_ok=True)
+        os.environ["XDG_STATE_HOME"] = os.path.join(self._tmp.name, "state")
+        workdir = rt._opencode_workdir(home)
+        self.assertIsNotNone(workdir)
+        self.assertNotIn(os.path.realpath(home), os.path.realpath(str(workdir)))
+        self.assertTrue(
+            (workdir / ".opencode" / "agent" / "fleet-titler.md").is_file()
+        )
+        self.assertEqual(os.listdir(home), [])
+
     def test_capacity_does_not_make_opencode_a_quality_peer(self):
         self._pin_quality_boundary_config()
         os.environ["HARNESS_CAPACITY_SCORES"] = "claude:70,codex:80,opencode:100"
