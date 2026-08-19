@@ -243,7 +243,8 @@ therefore stays in conversation history for the rest of the session. OpenCode
 has no equivalent: `experimental.chat.system.transform` decorates the system
 prompt of exactly one model call.
 
-Measured on opencode 1.17.13 (probe plugin, `glm-5.3`): the transform fires once
+Measured on opencode 1.17.13 (probe plugin, one `balanced-deep`-profile model
+from `adapters/opencode/config/models.conf`): the transform fires once
 per model call — the session-title generation call, the answering call, and each
 tool-loop continuation. A block injected once per session therefore lands on the
 **title call** and never reaches the answering model. A probe token injected
