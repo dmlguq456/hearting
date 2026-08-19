@@ -783,6 +783,12 @@ def cmd_runtime(args):
                 f"freshness={freshness} "
                 f"next={report.get('next_action', 'none')}"
             )
+            for state_path in report.get("bundle_runtime_state", []):
+                lines.append(
+                    f"{runtime}: bundle-runtime-state {state_path} "
+                    "(runtime state inside the immutable release bundle; "
+                    "remove it, nothing may write there)"
+                )
         if args.runtime_command == "doctor":
             # Cross-surface skew is a property of the INSTALLATION, not of any one runtime,
             # so it is reported once after the per-runtime loop. The managed release root

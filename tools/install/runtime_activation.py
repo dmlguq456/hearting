@@ -2376,12 +2376,53 @@ def surface_skew(release_root: Optional[Path] = None, scope: str = "global") -> 
     }
 
 
+BUNDLE_STATE_DIR_NAMES = (".agent_reports", ".claude_reports")
+BUNDLE_STATE_MAX_FINDINGS = 8
+
+
+def bundle_runtime_state(active_root: Path) -> List[str]:
+    """Return runtime-state directories written inside an immutable release bundle.
+
+    ``<runtime-home>/.harness/bundles/<id>/source`` is replaced wholesale on
+    update, so anything written under it is silently lost and breaks the bundle's
+    byte-identity with the release it was built from.  Only the ACTIVE bundle is
+    scanned: retired bundles are inert, and reporting them would pin every later
+    install to a historical mistake.
+
+    ``utilities/artifact-root.sh`` refuses to select such a root, so a finding
+    here is either residue from before that refusal or a writer that does not
+    resolve through it.  The walk runs on the ``doctor`` path only, never in
+    ``status`` -- the latter is on the statusline and verify hot paths.
+    """
+
+    parts = active_root.parts
+    if ".harness" not in parts or "bundles" not in parts:
+        return []
+    found: List[str] = []
+    for current, dirnames, _files in os.walk(active_root):
+        dirnames[:] = [name for name in dirnames if name != ".git"]
+        for name in BUNDLE_STATE_DIR_NAMES:
+            if name in dirnames:
+                found.append(str(Path(current) / name))
+                dirnames.remove(name)
+        if len(found) >= BUNDLE_STATE_MAX_FINDINGS:
+            break
+    return sorted(found)
+
+
 def doctor(runtime: str, strict: bool = False, scope: str = "global") -> dict:
     report = status(runtime, scope)
     hard = {"missing", "cache-stale", "duplicate", "unsupported"}
     if strict:
         hard.add("source-ahead")
     ok = report["freshness"] not in hard
+    active_root = report.get("active_root")
+    state_in_bundle = bundle_runtime_state(Path(active_root)) if active_root else []
+    # Advisory by default, a failure under --strict, mirroring how `source-ahead`
+    # is promoted above: the projection links can be perfectly healthy while the
+    # immutable tree behind them is being written to.
+    if strict and state_in_bundle:
+        ok = False
     return {
         "runtime": runtime,
         "ok": ok,
@@ -2389,6 +2430,7 @@ def doctor(runtime: str, strict: bool = False, scope: str = "global") -> dict:
         "freshness": report["freshness"],
         "duplicate_sources": report["duplicate_sources"],
         "config_conflicts": report.get("config_conflicts", []),
+        "bundle_runtime_state": state_in_bundle,
         "next_action": report["next_action"],
         "status": report,
     }
