@@ -17,9 +17,24 @@ const designPattern = /(designs?\/|\/design\/|spec\/design|preview\.html$|slides
 // Capabilities that mutate the spec blueprint — must pass the prd.md read gate in a
 // spec-backed cwd. Mirrors Claude's PreToolUse[Skill] spec-skill-gate scope.
 const specGovernedCapabilities = new Set(["autopilot-code", "autopilot-spec"])
-const seenLifecycle = new Set()
 const promptBySession = new Map()
 const turnBySession = new Map()
+// Prompt-lifecycle context that must stay visible for every model call of a
+// session, not just its first one. OpenCode has no Claude-style
+// `additionalContext` that merges into the user turn and persists in history:
+// `experimental.chat.system.transform` output lives only in the system prompt of
+// the single request it decorates. Measured on opencode 1.17.13 — the transform
+// fires once per model call (title generation, the answering turn, and every
+// tool-loop continuation), so a once-per-session injection is consumed by the
+// title call and never reaches the answering model at all.
+//   * memoryBySession — session memory briefing, computed once per session and
+//     re-emitted on every call so it persists the way Claude's SessionStart
+//     additionalContext does.
+//   * turnContextBySession — { turn, blocks } for the capsule candidate probe
+//     and the per-turn signals: recomputed when a new user turn arrives, then
+//     re-emitted on every model call of that turn.
+const memoryBySession = new Map()
+const turnContextBySession = new Map()
 
 function baseDir(ctx) {
   return ctx.worktree || ctx.directory || process.cwd()
@@ -246,6 +261,8 @@ export const AgentHarnessGuards = async (ctx) => {
         spawnSummary(sid, "final")
         promptBySession.delete(sid)
         turnBySession.delete(sid)
+        memoryBySession.delete(sid)
+        turnContextBySession.delete(sid)
       }
     }
   },
@@ -267,18 +284,34 @@ export const AgentHarnessGuards = async (ctx) => {
       // memory/briefing/context stay main-only.
       return
     }
-    if (!seenLifecycle.has(sid)) {
-      seenLifecycle.add(sid)
-      appendContext(output, collectPreflight("memory", [cwd]))
+    // Every model call re-emits the same blocks. The probe/preflight work still
+    // runs once per session (memory) or once per user turn (candidates,
+    // prompt-signal, briefing) — only the emission repeats, so the caps in
+    // core/MEMORY.md are unchanged and no extra process is spawned per
+    // tool-loop continuation.
+    if (!memoryBySession.has(sid)) {
+      memoryBySession.set(sid, collectPreflight("memory", [cwd]))
     }
+    appendContext(output, memoryBySession.get(sid))
+
     const prompt = promptBySession.get(sid) || ""
     const turn = turnBySession.get(sid) || ""
-    if (prompt) {
-      appendContext(output, collectCandidates([prompt, cwd, sid, turn]))
-      promptBySession.delete(sid)
+    const cached = turnContextBySession.get(sid)
+    // A turn is new when chat.message recorded a prompt this plugin has not
+    // built context for yet. Sessions whose runtime supplies no message ID fall
+    // back to the prompt text itself as the turn key.
+    const turnKey = turn || prompt
+    if (prompt && (!cached || cached.turn !== turnKey)) {
+      const blocks = [
+        collectCandidates([prompt, cwd, sid, turn]),
+        collectPreflight("prompt-signal", [cwd, sid]),
+        collectPreflight("briefing", [cwd]),
+      ].filter(Boolean)
+      turnContextBySession.set(sid, { turn: turnKey, blocks })
     }
-    appendContext(output, collectPreflight("prompt-signal", [cwd, sid]))
-    appendContext(output, collectPreflight("briefing", [cwd]))
+    for (const block of turnContextBySession.get(sid)?.blocks || []) {
+      appendContext(output, block)
+    }
   },
   "experimental.session.compacting": async (input, output) => {
     runWorkerState("compact-before", input || {})

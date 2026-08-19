@@ -213,8 +213,8 @@ injections are auto-applied. The table records the current state.
 | `PreToolUse[Skill]` spec-skill gate (deny) | plugin `command.execute.before` → `preflight capability` (throws) | full — auto enforced (command path) |
 | `PostToolUse[Read]` spec-read marker | plugin `tool.execute.after` on `read` → `preflight read` | full — auto enforced |
 | `PostToolUse` design post-write | plugin `tool.execute.after` → `preflight design` | full — auto enforced |
-| `SessionStart`-equivalent memory inject | plugin `experimental.chat.system.transform` (first turn) → `memory` | full — auto injected |
-| `UserPromptSubmit` capsule candidates / routing-contract signal / briefing | plugin `chat.message` → transient prompt, then `experimental.chat.system.transform` → `candidates` / `prompt-signal` / `briefing` | full — candidate output is active current-project/global capsule-only, maximum six / 2,400 UTF-8 bytes; prompt is discarded after the transform |
+| `SessionStart`-equivalent memory inject | plugin `experimental.chat.system.transform` → `memory`, computed once per session and re-emitted on every model call | full — auto injected, persists for the whole session |
+| `UserPromptSubmit` capsule candidates / routing-contract signal / briefing | plugin `chat.message` → prompt/turn capture, then `experimental.chat.system.transform` → `candidates` / `prompt-signal` / `briefing`, computed once per user turn and re-emitted on every model call of that turn | full — candidate output is active current-project/global capsule-only, maximum six / 2,400 UTF-8 bytes; the prompt is held in plugin memory only (never written) and dropped at `session.deleted` |
 | `SessionEnd` + `UserPromptSubmit` auto-distillation | plugin `event` (`session.idle`) → detached `preflight session-end` → no-tools `opencode run` worker | full — auto applied by default (opt out `OPENCODE_DISTILL_ENABLE=0`) |
 | `PreToolUse` material-route guard (deny) | plugin `tool.execute.before` → `preflight write` (structured), plugin `tool.execute.before` on `bash` → `preflight material-route check --tool Bash` (verbatim command), `preflight route` binds after a checked compile | structured: full for a resolvable target — a recognized mutation tool whose target does not resolve (`normalizeFile()` returns `""`, `targetFiles()` yields `[]`) still reaches no guard (see Codex's stricter `pretooluse-write-guard.py:291-293`); bash: full for documented commands. Automatic final-session clear is **not** claimed — `session.idle` is per-turn and `session.deleted` means deletion, not exit. |
 | `PreToolUse[Bash]` worktree-path guard (deny) | plugin `tool.execute.before` on `bash` → `preflight worktree-path`, `preflight worktree-path` explicit fallback | portable `git worktree add` path check only — the built-in-worktree-tool deny is Claude-native and has **no** OpenCode counterpart (`core/HOOKS.md:45`) |
@@ -234,6 +234,30 @@ adapter debt:
    namespace; if OpenCode changes it, lifecycle injection breaks and the
    explicit preflight wrappers (`memory` / `prompt-signal` /
    `briefing`) remain the manual fallback.
+
+### Delivery channel — why every model call is re-decorated
+
+Claude and Codex deliver prompt-lifecycle context as
+`hookSpecificOutput.additionalContext`, which merges into the user turn and
+therefore stays in conversation history for the rest of the session. OpenCode
+has no equivalent: `experimental.chat.system.transform` decorates the system
+prompt of exactly one model call.
+
+Measured on opencode 1.17.13 (probe plugin, `glm-5.3`): the transform fires once
+per model call — the session-title generation call, the answering call, and each
+tool-loop continuation. A block injected once per session therefore lands on the
+**title call** and never reaches the answering model. A probe token injected
+under the old once-per-session rule came back `no` from the model; the same
+token injected on every call came back `yes` with the third call's value.
+
+That is why `memoryBySession` / `turnContextBySession` cache the computed blocks
+and re-emit them on every call instead of injecting once. The probe/preflight
+work still runs once per session (memory) or once per user turn (candidates,
+prompt-signal, briefing), so this changes emission, not the `core/MEMORY.md`
+caps or the process count per turn. Regression evidence: the original
+`mm`-access failure — the model concluded "no mmctl, no MCP server, no API
+token" while the matching capsule candidate existed — reproduces before the fix
+and disappears after it (`mem show` → `mm me/teams/channels/read`).
 
 ### Auto-Distillation
 
@@ -312,8 +336,8 @@ Harness-specific status signals need OpenCode-native realization:
 | design post-write verification | Run `adapters/opencode/bin/preflight.sh design <file>` after design HTML writes |
 | spec read gate | OpenCode plugin enforces this automatically: `command.execute.before` runs `adapters/opencode/bin/preflight.sh capability <name> [cwd] [session-id]` (throws to abort `autopilot-code`/`autopilot-spec` when ungrounded) and `tool.execute.after` on a `read` of `prd.md` runs `adapters/opencode/bin/preflight.sh read <prd.md> [session-id]`. Run both manually when plugins are unavailable |
 | routing-contract signal | OpenCode plugin system transform runs `adapters/opencode/bin/preflight.sh prompt-signal [cwd] [session-id]`; no statusline assumption |
-| memory inject | OpenCode plugin system transform runs `adapters/opencode/bin/preflight.sh memory [cwd]` once per session; run it manually when plugins are unavailable |
-| memory candidate exposure / recall | The plugin transiently captures the current user prompt, runs `preflight.sh candidates <prompt> <cwd> <session-id> [turn-id]`, then deletes it. It injects only bounded active capsule headlines/IDs and publishes the same-turn receipt; it does not inspect bodies or classify relevance. The model reads relevant records in full. Explicit `recall` provides deeper search and `recall-gate` recovers an unavailable probe |
+| memory inject | OpenCode plugin system transform runs `adapters/opencode/bin/preflight.sh memory [cwd]` once per session and re-emits that cached block on every model call; run it manually when plugins are unavailable |
+| memory candidate exposure / recall | The plugin captures the current user prompt in memory, runs `preflight.sh candidates <prompt> <cwd> <session-id> [turn-id]` once for that turn, and re-emits the result on every model call of the turn; the prompt is never written to disk and is dropped at `session.deleted`. It injects only bounded active capsule headlines/IDs and publishes the same-turn receipt; it does not inspect bodies or classify relevance. The model reads relevant records in full. Explicit `recall` provides deeper search and `recall-gate` recovers an unavailable probe |
 | oncall briefing | OpenCode plugin system transform runs `adapters/opencode/bin/preflight.sh briefing [cwd]`; run it manually when plugins are unavailable |
 | loop guidance | Run `adapters/opencode/bin/preflight.sh loop-info <oncall|note|study|drill|runtime-watch>` before following loop guides; OpenCode reports manual contracts, missing implementations, and drill auto-run restrictions without executing loop scripts. The `note` loop and note semantics are application-owned; the harness exposes only the optional app-neutral `artifact-sink` port |
 | memory distill | The plugin `event` hook auto-distills on `session.idle` via detached `preflight session-end` → no-tools `opencode run` worker (verified); enabled by default, opt out `OPENCODE_DISTILL_ENABLE=0`, set `OPENCODE_DISTILL_MODEL` for quality. Manual: `preflight.sh distill-delta <sid>` extracts the delta, `preflight.sh distill-propose <sid>` runs a proposal |
