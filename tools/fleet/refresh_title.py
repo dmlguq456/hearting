@@ -62,9 +62,10 @@ START_WINDOW_SEC = 60      # 1-minute rolling window (was 600s; paired with the 
 SESSION_TICKET_MAX_AGE = 86400
 DISABLE_MARKER = ".refresh-disabled"
 # No default model literal lives here any more. The model comes from the selected
-# provider's own `models.conf` `mini` tier (see `provider_model`); this env var stays
-# only as an explicit per-run override.
-MODEL = os.environ.get("FLEET_TITLE_MODEL") or None
+# provider's own `models.conf` `mini` tier (see `provider_model`). `FLEET_TITLE_MODEL`
+# stays as an explicit per-run override and is read at call time in `_resolve_command`
+# and `worker_argv`, never cached here — the statusline worker is long-lived, so an
+# import-time snapshot would pin whatever the environment held at first import.
 
 _META_RE = re.compile(
     r"^(no |none\b|cannot|can.t|unable|sorry|i |there (is|are) no|untitled\b|empty\b|error\b)",
@@ -670,8 +671,19 @@ def selected_providers():
                     states[fields[0]] = fields[1]
         counts = allocation_module.attempt_counts(jobs, window=allocation["window"])
         scores = capacity.capacity_scores()
+        # The allocation block declares BOTH the strategy and the usage gate; passing
+        # only harness_order silently left `select` on its `capacity-aware` default
+        # while the user's config said `balanced`. Those two strategies disagree about
+        # exactly one thing that decides this call: `capacity-aware` requires positive
+        # headroom evidence and therefore excludes any harness with no gauge, while
+        # `balanced` gates only on a `_limited` usage state. OpenCode exposes no
+        # proactive gauge by design (harness-capacity `capacity_scores`), so under the
+        # unpassed default it was permanently ineligible here no matter what the mini
+        # profile declared — the title worker could never leave claude/codex.
         selected, _band, ranks, promoted = capacity.select(
-            policy, states, counts, allocation["harness_order"], scores
+            policy, states, counts, allocation["harness_order"], scores,
+            strategy=allocation["strategy"],
+            usage_gate_used_percent=allocation["usage_gate_used_percent"],
         )
         band_order = ("relief", "primary", "last_resort") if promoted else (
             "primary", "relief", "last_resort"
@@ -955,8 +967,21 @@ def _resolve_command(prompt, model=None):
     """
     if os.environ.get("FLEET_TITLE_COMMAND"):
         return worker_argv(prompt, model=model), None, None
+    # `FLEET_TITLE_MODEL` is documented in INSTALL_LAYOUT.md as a per-run override, but
+    # it only ever reached `worker_argv` above — the provider path re-resolved the model
+    # from models.conf and ignored it, so on every normal run the variable was dead.
+    # It is honoured here, and ONLY for a provider the operator also pinned: a model id
+    # lives in exactly one runtime's namespace, and the cascade below is free to fall
+    # through to the next harness, so applying it unpinned would hand e.g. an
+    # `opencode/...` id to `claude -p` and fail every call. models.conf stays the source
+    # of truth for the unpinned cascade.
+    pinned = (os.environ.get("FLEET_TITLE_PROVIDER") or "").strip().lower()
+    override = os.environ.get("FLEET_TITLE_MODEL") or None
     for adapter in selected_providers():
-        command = provider_command(adapter, prompt, model=model)
+        adapter_model = model
+        if adapter_model is None and override and adapter == pinned:
+            adapter_model = override
+        command = provider_command(adapter, prompt, model=adapter_model)
         if command and _executable_available(command[0]):
             return command
     return [], None, None

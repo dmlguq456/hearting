@@ -48,6 +48,7 @@ class _ConfigHomeMixin:
             "FLEET_TITLE_PRIORITY_MAX_STARTS", "FLEET_TITLE_COMMAND",
             "AGENT_MODEL_GOVERNOR_ROOT", "HARNESS_CAPACITY_SCORES",
             "HARNESS_CAPACITY_BIAS", "DISPATCH_DEFAULTS_CONFIG",
+            "AGENT_DISPATCH_JOBS",
         )}
         os.environ["AGENT_HOME"] = _REPO_ROOT
         os.environ["CLAUDE_CONFIG_DIR"] = os.path.join(self._tmp.name, "claude")
@@ -834,11 +835,52 @@ class SecurityTest(_ConfigHomeMixin, unittest.TestCase):
         finally:
             _shutil.which = orig_which
 
+    def _pin_quality_boundary_config(self):
+        """Declare the band boundary these two tests are ABOUT, instead of inheriting one.
+
+        Both tests name a quality boundary (claude/codex primary, opencode relief), but
+        neither used to establish it: they read whatever `default_config_path()` resolved
+        — the shipped `profiles/dispatch-defaults.yaml`, which puts all three harnesses in
+        `mini.primary`, or the operator's own file once one exists. They passed only
+        because `selected_providers` was dropping the declared `balanced` strategy and
+        falling back to `capacity-aware`, whose unknown-gauge exclusion happened to sort
+        the way the assertions expected. Pinning the config here makes each test verify
+        its own stated invariant and stops it from tracking an operator's routing edits.
+        """
+        path = os.path.join(self._tmp.name, "dispatch-defaults.yaml")
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write(
+                "schema_version: 3\n"
+                "harnesses:\n"
+                "  enabled: [claude, codex, opencode]\n"
+                "profiles:\n"
+                + "".join(
+                    "  %s:\n"
+                    "    primary: [claude, codex]\n"
+                    "    relief: [opencode]\n"
+                    "    last_resort: []\n"
+                    "    promote_relief_below: 35\n" % name
+                    for name in ("deep", "balanced-deep", "light", "mini")
+                )
+                + "allocation:\n"
+                "  strategy: balanced\n"
+                "  window: 30\n"
+                "  usage_gate_used_percent: 90\n"
+            )
+        os.environ["DISPATCH_DEFAULTS_CONFIG"] = path
+        # Recent-attempt counts are the balanced strategy's tie-break, so an ambient
+        # jobs.log would decide these assertions instead of the capacity scores.
+        jobs = os.path.join(self._tmp.name, "jobs.log")
+        open(jobs, "w", encoding="utf-8").close()
+        os.environ["AGENT_DISPATCH_JOBS"] = jobs
+
     def test_capacity_does_not_make_opencode_a_quality_peer(self):
+        self._pin_quality_boundary_config()
         os.environ["HARNESS_CAPACITY_SCORES"] = "claude:70,codex:80,opencode:100"
-        self.assertEqual(rt.selected_providers()[0], "codex")
+        self.assertEqual(rt.selected_providers()[0], "claude")
 
     def test_tight_primary_capacity_promotes_declared_opencode_relief(self):
+        self._pin_quality_boundary_config()
         os.environ["HARNESS_CAPACITY_SCORES"] = "claude:20,codex:30,opencode:100"
         self.assertEqual(rt.selected_providers()[0], "opencode")
 
