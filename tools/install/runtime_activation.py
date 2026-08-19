@@ -348,6 +348,32 @@ def _kernel_agents(source_root: Path) -> set[str]:
     return set(canonical["kernel"]["agents"])
 
 
+def _native_agent_catalog(source_root: Path, runtime: str) -> set[str]:
+    """Native subagent type names declared by the adapter's model config.
+
+    `CFG_NATIVE_AGENT_CATALOG` is the source of truth that each adapter's
+    sync-native-agents.py generator turns into one agent definition carrying a
+    derived model+effort pin. Those definitions ship in every release, so an
+    activation that projects only the kernel helpers installs none of them.
+    """
+
+    config = source_root / "adapters" / runtime / "config" / "models.conf"
+    names: set[str] = set()
+    try:
+        text = config.read_text(encoding="utf-8")
+    except OSError:
+        return names
+    for line in text.splitlines():
+        if not line.strip().startswith("CFG_NATIVE_AGENT_CATALOG="):
+            continue
+        raw = line.split("=", 1)[1].strip().strip('"').strip("'")
+        for token in raw.split():
+            name, separator, profile = token.partition(":")
+            if name and separator and profile:
+                names.add(name)
+    return names
+
+
 def _linked_entries(
     runtime: str,
     source_root: Path,
@@ -355,7 +381,11 @@ def _linked_entries(
 ) -> List[dict]:
     home = paths.runtime_home(runtime, scope)
     entries: List[dict] = []
-    kernel_agents = _kernel_agents(source_root)
+    # Kernel helpers plus the adapter's native subagent type catalog; both are
+    # projected into every activation. Retired team agents stay excluded.
+    projected_agents = _kernel_agents(source_root) | _native_agent_catalog(
+        source_root, runtime
+    )
 
     if runtime == "codex":
         fixed = [
@@ -388,7 +418,7 @@ def _linked_entries(
                 home / "agents",
                 "agent",
                 "*.toml",
-                allowed=kernel_agents,
+                allowed=projected_agents,
             )
         )
 
@@ -415,14 +445,13 @@ def _linked_entries(
                 "skill",
             )
         )
-        # Runtime team agents retired 2026-07-22 (재홈): only kernel helpers project.
         entries.extend(
             _children(
                 source_root / "adapters/claude/agents",
                 home / "agents",
                 "agent",
                 "*.md",
-                allowed=kernel_agents,
+                allowed=projected_agents,
             )
         )
         entries.extend(
@@ -451,7 +480,7 @@ def _linked_entries(
         agent_root = source_root / "adapters/opencode/agents"
         if agent_root.is_dir():
             for item in sorted(agent_root.glob("*/*.md")):
-                if item.parent.name not in kernel_agents:
+                if item.parent.name not in projected_agents:
                     continue
                 entries.append(_entry(item, home / "agents" / item.name, "agent"))
         entries.extend(
