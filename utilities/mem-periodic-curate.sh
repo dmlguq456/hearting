@@ -48,10 +48,7 @@ if [ "${AGENT_SESSION_ROLE:-}" = "worker" ] \
   exit 0
 fi
 
-default_store="$AGENT_HOME/memory"
-[ -e "$default_store" ] || [ -L "$default_store" ] \
-  || default_store="${XDG_DATA_HOME:-$HOME/.local/share}/hearting/memory"
-STORE="${MEM_STORE:-$default_store}"
+STORE=$(sh "$HOOK_DIR/../utilities/memory-store.sh")
 PROJECTS_ROOT="${MEM_PROJECTS:-$HOME/.claude/projects}"
 
 case "${MEM_PERIODIC_CURATE_MAX_PROJECTS:-8}" in
