@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 from datetime import datetime, timezone
 import hashlib
 import importlib.util
@@ -18,8 +19,10 @@ import uuid
 ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT), str(ROOT / "utilities")]
 from tools.fleet.model import ATTEMPT_CLASSIFIER_SOURCE, classify_attempt_evidence  # noqa: E402
-from dispatch_contract import (DispatchContractError, agent_home_equivalent,
+from dispatch_contract import (ARTIFACT_PROOF_RECEIPT, DispatchContractError,
+                               agent_home_equivalent,
                                annotate_attempt_row_if,
+                               attempt_governed_process_quiescence,
                                attempt_process_quiescence,
                                attempt_tagged_descendants,
                                authoritative_process_identities,
@@ -31,6 +34,7 @@ from dispatch_contract import (DispatchContractError, agent_home_equivalent,
                                process_state,
                                process_start_ticks,
                                observed_attempt_liveness,
+                               post_exit_receipt_reason,
                                dispatch_state_roots,
                                reconcile_local_registry, resolve_agent_home,
                                signal_exact_process_group,
@@ -684,6 +688,199 @@ def _receiptless_namespace_cancel_reason(row, args):
     return ""
 
 
+def _heartbeat_artifact_digest(row, args):
+    """Return the sha256 the worker itself recorded at its last artifact heartbeat.
+
+    `dispatch-progress.py heartbeat` is written by the worker under its own attempt
+    id, so this is the one digest that is evidence about the worker rather than
+    about whoever is reconciling it. Only a `phase=artifact` record counts, and its
+    route binding must match the row.
+    """
+
+    meta = row["meta"]
+    attempt = (meta.get("attempt_id") or "").replace("/", "_")
+    if not attempt:
+        return None, "attempt-id-missing"
+    path = _first_existing_dispatch_path(
+        args.agent_home, args.jobs, "heartbeats", f"{attempt}.json"
+    )
+    if path is None or not path.is_file():
+        return None, "heartbeat-missing"
+    try:
+        heartbeat = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None, "heartbeat-unreadable"
+    if not isinstance(heartbeat, dict):
+        return None, "heartbeat-unreadable"
+    if heartbeat.get("attempt_id") != meta.get("attempt_id"):
+        return None, "heartbeat-attempt-mismatch"
+    if (
+        heartbeat.get("route_id") != meta.get("route_id")
+        or heartbeat.get("route_node") != meta.get("route_node")
+    ):
+        return None, "heartbeat-route-mismatch"
+    if heartbeat.get("phase") != "artifact":
+        return None, f"heartbeat-phase-{heartbeat.get('phase') or 'unknown'}"
+    evidence = heartbeat.get("evidence")
+    if not isinstance(evidence, str) or not evidence.startswith("sha256:"):
+        return None, "heartbeat-evidence-not-a-digest"
+    digest = evidence[len("sha256:"):].strip().lower()
+    if len(digest) != 64 or any(char not in "0123456789abcdef" for char in digest):
+        return None, "heartbeat-evidence-not-a-digest"
+    return digest, ""
+
+
+def _artifact_proof_seal_reason(row, args):
+    """Return ``("", digest, observer_ns)`` only for a fully proved artifact seal.
+
+    Every branch below is a refusal. The seal exists because a post-exit receipt
+    can become permanently unissuable (a process that escaped the governed group
+    while carrying the attempt tag), which leaves `reconcile` classifying the row
+    `terminal-draining` forever and `dispatch_completion_join` pending forever --
+    even for a worker that reported PASS and wrote its artifact. It must never
+    fail open: an unprovable chain stays refused, exactly as today.
+    """
+
+    if row.get("legacy_read_only"):
+        return "legacy-attempt-row", "", ""
+    if row.get("attempt_contract_status") != "current":
+        return "attempt-contract-invalid", "", ""
+    meta = row["meta"]
+    if meta.get("registered_worker") != "1" or meta.get("pid_scope") != "namespace-local":
+        return "not-registered-namespace-local", "", ""
+    if not (meta.get("route_id") and meta.get("route_node")):
+        return "route-binding-missing", "", ""
+    if post_exit_receipt_reason(meta):
+        return "post-exit-receipt-present", "", ""
+    if not meta.get("pid", "").isdigit() or not meta.get("pid_start"):
+        return "exact-process-identity-missing", "", ""
+    try:
+        observer_namespace = os.readlink("/proc/self/ns/pid")
+    except OSError:
+        return "observer-namespace-unavailable", "", ""
+    # "namespace-valid dead" is only observable from the namespace that recorded
+    # the PID. From anywhere else the death was never provable, so there is
+    # nothing to supersede the missing receipt with.
+    if meta.get("pid_observer_ns") != observer_namespace:
+        return "observer-namespace-mismatch", "", ""
+    if meta.get("pid_ns") != observer_namespace:
+        return "process-namespace-mismatch", "", ""
+    governed = attempt_governed_process_quiescence(meta)
+    if governed.state == "live":
+        return f"governed-process-{governed.reason}", "", ""
+    if governed.state != "quiescent":
+        return f"governed-process-{governed.reason}", "", ""
+    terminal = inspect_terminal_attempt(
+        meta.get("log_file"),
+        worktree=row.get("worktree"),
+        artifact_root_metadata=meta.get("artifact_root"),
+    )
+    if terminal.get("state") != "valid":
+        return f"terminal-envelope-{terminal.get('state') or 'unknown'}", "", ""
+    if terminal.get("verdict") != "PASS":
+        return f"terminal-verdict-{terminal.get('verdict') or 'unknown'}", "", ""
+    if terminal.get("artifact_state") != "readable":
+        return f"artifact-{terminal.get('artifact_state') or 'unknown'}", "", ""
+    encoded = terminal.get("artifact_path_b64")
+    if not isinstance(encoded, str) or not encoded:
+        return "artifact-path-missing", "", ""
+    try:
+        artifact = Path(
+            base64.urlsafe_b64decode(encoded + "=" * (-len(encoded) % 4)).decode("utf-8")
+        )
+    except (ValueError, UnicodeDecodeError):
+        return "artifact-path-undecodable", "", ""
+    recorded, heartbeat_reason = _heartbeat_artifact_digest(row, args)
+    if recorded is None:
+        return heartbeat_reason, "", ""
+    try:
+        live = hashlib.sha256(artifact.read_bytes()).hexdigest()
+    except OSError:
+        return "artifact-unreadable", "", ""
+    if live != recorded:
+        return "artifact-digest-mismatch", "", ""
+    return "", live, observer_namespace
+
+
+def seal_artifact_proof_receipt(rows, args):
+    """Operator-only substitution of one permanently unissuable post-exit receipt.
+
+    This IS completion evidence, unlike `--cancel-receiptless-namespace`: it
+    records that the worker's own final artifact digest matches the artifact on
+    disk, so the terminal gates can reach a terminal state. It writes no marker
+    and no PASS verdict of its own -- the row still closes through the ordinary
+    `reconcile` or `capability-route.py complete` path afterwards.
+    """
+
+    selected = [row for row in rows if matches(row, args)]
+    if len(selected) != 1:
+        reason = "attempt-row-not-unique"
+        row = selected[0] if selected else None
+        digest = observer_namespace = ""
+    else:
+        row = selected[0]
+        reason, digest, observer_namespace = _artifact_proof_seal_reason(row, args)
+    sealed = False
+    revalidated = None
+    if args.apply and row is not None and not reason:
+        attempt_id = row["meta"].get("attempt_id", "")
+
+        def still_provable(fields):
+            fresh = {
+                "status": fields[1],
+                "repo": fields[2],
+                "worktree": fields[3],
+                "slug": fields[4],
+                "meta": parse_registry_metadata(fields[5]),
+                "attempt_contract_status": "current",
+            }
+            fresh_reason, fresh_digest, fresh_ns = _artifact_proof_seal_reason(fresh, args)
+            return (
+                not fresh_reason
+                and fresh_digest == digest
+                and fresh_ns == observer_namespace
+            )
+
+        sealed = annotate_attempt_row_if(
+            args.jobs,
+            attempt_id,
+            {
+                "post_exit_receipt_substitute": ARTIFACT_PROOF_RECEIPT,
+                "artifact_proof_sha256": digest,
+                "artifact_proof_observer_ns": observer_namespace,
+                "artifact_proof_verdict": "PASS",
+                "artifact_proof_sealed_at": datetime.now(timezone.utc)
+                .isoformat()
+                .replace("+00:00", "Z"),
+            },
+            still_provable,
+            # The row this repairs is usually already closed: `complete` closes it
+            # without receipt fields, which is exactly why the join stays pending.
+            statuses=frozenset({"open", "running", "done"}),
+        )
+        revalidated = bool(sealed)
+        if not sealed:
+            reason = "revalidation-veto"
+    decision = {
+        "attempt_id": row["meta"].get("attempt_id") if row else args.attempt,
+        "eligible": bool(row is not None and not reason),
+        "reason": reason or "receipt-superseded-by-artifact-proof",
+        "artifact_sha256": digest or None,
+        "proposed_receipt": ARTIFACT_PROOF_RECEIPT,
+        "revalidated": revalidated,
+        "sealed": sealed,
+    }
+    print(json.dumps({
+        "at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "apply": args.apply,
+        "classifier_source": "operator-artifact-proof-seal-v1",
+        "attempted": len(selected),
+        "sealed": int(sealed),
+        "decisions": [decision],
+    }, sort_keys=True))
+    return 0
+
+
 def cancel_receiptless_namespace(rows, args):
     """Operator-only exact cancellation for extinct pre-receipt namespaces.
 
@@ -1298,6 +1495,7 @@ def main(argv):
     p.add_argument("--node"); p.add_argument("--attempt"); p.add_argument("--job"); p.add_argument("--all", action="store_true")
     p.add_argument("--apply", action="store_true"); p.add_argument("--audit", type=Path); p.add_argument("--integration-ref")
     p.add_argument("--cancel-receiptless-namespace", action="store_true")
+    p.add_argument("--seal-artifact-proof-receipt", action="store_true")
     p.add_argument("--agent-home", type=Path); p.add_argument("--now", type=float, default=time.time(), help=argparse.SUPPRESS)
     p.add_argument("--pid", type=int); p.add_argument("--pid-start"); p.add_argument("--pid-scope")
     p.add_argument("--cascade-grace", type=float, default=2.0, help=argparse.SUPPRESS)
@@ -1334,12 +1532,20 @@ def main(argv):
     args.jobs = args.jobs.resolve()
     if args.operation not in ("liveness", "orphan-scan") and not any((args.session, args.route, args.node, args.attempt, args.job)):
         print("check=failed\nreason=current-filter-required"); return 64
+    if args.cancel_receiptless_namespace and args.seal_artifact_proof_receipt:
+        print("check=failed\nreason=receipt-recovery-mode-conflict"); return 64
     if args.cancel_receiptless_namespace and (
         args.operation != "reconcile"
         or not args.attempt
         or any((args.session, args.route, args.node, args.job, args.all))
     ):
         print("check=failed\nreason=exact-attempt-cancel-required"); return 64
+    if args.seal_artifact_proof_receipt and (
+        args.operation != "reconcile"
+        or not args.attempt
+        or any((args.session, args.route, args.node, args.job, args.all))
+    ):
+        print("check=failed\nreason=exact-attempt-seal-required"); return 64
     rows = read_rows(args.jobs)
     if args.operation == "current":
         return emit_current(rows, args)
@@ -1351,6 +1557,8 @@ def main(argv):
         return emit_orphan_scan(rows, args)
     if args.cancel_receiptless_namespace:
         return cancel_receiptless_namespace(rows, args)
+    if args.seal_artifact_proof_receipt:
+        return seal_artifact_proof_receipt(rows, args)
     return reconcile(rows, args)
 
 
