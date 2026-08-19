@@ -11,8 +11,8 @@
 #     가드가 live canonical 재해시 후 이 값과 불일치 시 red — canonical 이 바뀌면(예: S-1 형 fix) 재파생을 강제.
 #     생성/갱신: `python3 tools/build-manifest.py --sync-baselines`. 검증: `--check` + check-adaptation-boundary.sh.
 #
-adapters/claude/hooks/core-first-guard.sh	wrapper	exec-delegates to $AGENT_HOME/hooks/core-first-guard.sh (repo-root portable guard); full-copy 시 SCRIPT_DIR/.. 의 빈 .core-grounding 를 읽어 항상 deny 하던 회귀를 정합(S6 2026-07-09).	-
-adapters/claude/hooks/core-read-marker.sh	wrapper	exec-delegates to $AGENT_HOME/hooks/core-read-marker.sh (core-first-guard 짝 마커 writer, 동형 wrapper).	-
+adapters/claude/hooks/core-first-guard.sh	wrapper	exec-delegates to $AGENT_HOME/hooks/core-first-guard.sh (repo-root portable guard); full-copy 시 SCRIPT_DIR/.. 의 빈 .core-grounding 를 읽어 항상 deny 하던 회귀를 정합(S6 2026-07-09). 설치 레이아웃에서는 $AGENT_HOME/hooks/ 가 이 어댑터 투영이라 그 경로가 자기 자신이므로, 해석된 대상이 self 와 같으면 물리적으로 옆에 있는 포터블 guard(../../../hooks/)로 failover 하고 그마저 없으면 exit 69 로 즉시 실패한다(무한 self-exec 금지).	-
+adapters/claude/hooks/core-read-marker.sh	wrapper	exec-delegates to $AGENT_HOME/hooks/core-read-marker.sh (core-first-guard 짝 마커 writer, 동형 wrapper — 동일한 self-exec failover 포함).	-
 adapters/claude/hooks/mem-distill-dispatch.sh	delta	Claude 어댑터가 no-tools worker 를 bin/mem-distill-worker.sh 로 기본 바인딩(ADAPTER_DIR 심링크 unwrap 경로). canonical 은 MEM_DISTILL_WORKER 미설정 시 exit 0. settings.json MEM_DISTILL_ENABLE=1 이라 worker 기본값이 load-bearing — collapse 시 distill 무력화.	2bdaf70ff0c1f013806489bbf573873bf1b669b9c2aee8cc575fb1777e5f4e82
 adapters/claude/hooks/registered-parent-park.py	wrapper	exec-delegates to $AGENT_HOME/hooks/registered-parent-park.py; Claude receives this PreToolUse bridge through the supervised command's additional --settings payload without mutating user-owned runtime settings.	-
 adapters/claude/hooks/worker-state-compact.py	wrapper	exec-delegates to $AGENT_HOME/hooks/worker-state-compact.py; Claude hook registration remains adapter-owned while ledger and compaction semantics stay portable.	-
