@@ -2268,6 +2268,89 @@ def deactivate(runtime: str, scope: str = "global", dry_run: bool = False) -> di
     }
 
 
+# The subtrees every install surface ships identically at a given version. A whole-tree
+# digest cannot be compared across surface KINDS — a packaged runtime bundle is built from
+# a checkout while the managed release is an extracted archive, so they differ in files
+# that carry no behavior (`.hearting-release.json`, VCS metadata). These seven are the
+# portable contract plus the executable trees, and they are byte-identical between a
+# bundle and a release cut from the same revision (verified 2026-08-19 against v2.54.0).
+SHARED_SURFACE_SUBTREES = (
+    "adapters", "capabilities", "core", "hooks", "roles", "tools", "utilities",
+)
+
+
+def _surface_digests(root: Path) -> Dict[str, str]:
+    return {name: _tree_digest(root / name) for name in SHARED_SURFACE_SUBTREES}
+
+
+def surface_skew(release_root: Optional[Path] = None, scope: str = "global") -> dict:
+    """Compare every install surface against the others, by content.
+
+    The runtime surfaces (`~/.claude`, `~/.codex`, `~/.config/opencode`) and the managed
+    release tree are updated by DIFFERENT commands — `harness runtime activate|refresh`
+    versus `harness update` — so they drift apart silently. `status`/`doctor` only ever
+    asked "is this runtime fresh against its source", which cannot see that the tree the
+    CLI launchers run from is a different version: `~/.local/bin/{fleet,mem,harness}` all
+    resolve into the managed release, and that surface appeared in no diagnostic at all.
+    On 2026-08-19 a runtime activation left the release tree behind and `fleet` kept
+    running the old renderer with every existing check reporting success.
+
+    Identity is a per-subtree content digest rather than a revision string because the two
+    surface kinds label themselves differently (a git SHA versus a semver tag) and neither
+    records the other's label. Comparing content also names WHICH subtree diverged, which
+    is the actionable part — `tools` diverging is exactly the failure above.
+
+    A surface that is not installed is reported absent and never counts as skew.
+    """
+    surfaces: List[dict] = []
+    for runtime in RUNTIMES:
+        state = _load_json(_state_path(runtime, scope))
+        root = Path(state["active_root"]) if state and state.get("active_root") else None
+        present = bool(root and root.is_dir())
+        surfaces.append({
+            "name": runtime,
+            "kind": "runtime",
+            "root": str(root) if root else None,
+            "label": (state or {}).get("active_revision"),
+            "present": present,
+            "digests": _surface_digests(root) if present else {},
+        })
+    if release_root is not None:
+        root = Path(release_root)
+        present = root.is_dir()
+        marker = _load_json(root / ".hearting-release.json") if present else None
+        surfaces.append({
+            "name": "release",
+            "kind": "managed-release",
+            "root": str(root),
+            "label": (marker or {}).get("version"),
+            "present": present,
+            "digests": _surface_digests(root) if present else {},
+        })
+    live = [surface for surface in surfaces if surface["present"]]
+    skewed = []
+    for name in SHARED_SURFACE_SUBTREES:
+        seen = {surface["digests"][name] for surface in live}
+        if len(seen) > 1:
+            skewed.append({
+                "subtree": name,
+                "groups": sorted(
+                    {
+                        digest: sorted(
+                            s["name"] for s in live if s["digests"][name] == digest
+                        )
+                        for digest in seen
+                    }.values()
+                ),
+            })
+    return {
+        "surfaces": surfaces,
+        "skewed": skewed,
+        "ok": not skewed,
+        "compared": [surface["name"] for surface in live],
+    }
+
+
 def doctor(runtime: str, strict: bool = False, scope: str = "global") -> dict:
     report = status(runtime, scope)
     hard = {"missing", "cache-stale", "duplicate", "unsupported"}

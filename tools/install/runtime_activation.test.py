@@ -81,5 +81,79 @@ class RuntimeSnapshotTest(unittest.TestCase):
                 )
 
 
+class SurfaceSkewTest(unittest.TestCase):
+    """The four install surfaces are updated by two different commands and drift apart.
+
+    Regression bar for 2026-08-19: a runtime activation advanced ~/.claude while the
+    managed release tree stayed behind, so `fleet` — which resolves through
+    ~/.local/share/hearting/current — kept running the old code while every existing
+    check reported success. The release surface appeared in no diagnostic at all.
+    """
+
+    def _surface(self, root: Path, subtree_body: str, marker: str = None) -> Path:
+        (root / "tools").mkdir(parents=True)
+        (root / "tools" / "fleet.py").write_text(subtree_body, encoding="utf-8")
+        for name in ("adapters", "capabilities", "core", "hooks", "roles", "utilities"):
+            (root / name).mkdir()
+            (root / name / "shared.md").write_text("same everywhere\n", encoding="utf-8")
+        if marker is not None:
+            (root / ".hearting-release.json").write_text(
+                '{"version": "%s"}\n' % marker, encoding="utf-8"
+            )
+        return root
+
+    def test_identical_content_across_surface_kinds_is_not_skew(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            # Same code, different surface kind: only the release carries the release
+            # marker, exactly as on disk. A whole-tree digest calls that a difference and
+            # would report permanent false skew — which is why subtrees are compared.
+            release = self._surface(Path(temporary) / "release", "same\n", marker="v1.0.0")
+            bundle = self._surface(Path(temporary) / "bundle", "same\n")
+            self.assertNotEqual(
+                activation._tree_digest(release), activation._tree_digest(bundle),
+                "whole-tree digests differ across kinds — the reason subtrees are used",
+            )
+            self.assertEqual(
+                activation._surface_digests(release), activation._surface_digests(bundle)
+            )
+
+    def test_release_behind_a_runtime_is_reported_and_names_the_subtree(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            release = self._surface(Path(temporary) / "release", "old\n", marker="v1.0.0")
+            current = self._surface(Path(temporary) / "runtime", "new\n")
+            original = activation._load_json
+
+            def fake_load(path):
+                if path.name == "activation.json":
+                    return {"active_root": str(current), "active_revision": "abc123"}
+                return original(path)
+
+            activation._load_json = fake_load
+            try:
+                report = activation.surface_skew(release)
+            finally:
+                activation._load_json = original
+
+            self.assertFalse(report["ok"])
+            self.assertEqual([entry["subtree"] for entry in report["skewed"]], ["tools"])
+            groups = report["skewed"][0]["groups"]
+            self.assertIn(["release"], groups)
+            self.assertIn(sorted(activation.RUNTIMES), groups)
+            self.assertIn("release", report["compared"])
+
+    def test_absent_surface_is_not_skew(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            missing = Path(temporary) / "never-installed"
+            original = activation._load_json
+            activation._load_json = lambda path: None
+            try:
+                report = activation.surface_skew(missing)
+            finally:
+                activation._load_json = original
+            self.assertTrue(report["ok"])
+            self.assertEqual(report["compared"], [])
+            self.assertTrue(all(not s["present"] for s in report["surfaces"]))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -783,6 +783,42 @@ def cmd_runtime(args):
                 f"freshness={freshness} "
                 f"next={report.get('next_action', 'none')}"
             )
+        if args.runtime_command == "doctor":
+            # Cross-surface skew is a property of the INSTALLATION, not of any one runtime,
+            # so it is reported once after the per-runtime loop. The managed release root
+            # is passed in rather than imported inside runtime_activation, which keeps that
+            # module free of the distribution/network layer.
+            skew = runtime_activation.surface_skew(
+                distribution.current_path(), scope=args.scope
+            )
+            for surface in skew["surfaces"]:
+                lines.append(
+                    "surface %s: %s label=%s root=%s" % (
+                        surface["name"],
+                        "present" if surface["present"] else "absent",
+                        surface["label"] or "-",
+                        surface["root"] or "-",
+                    )
+                )
+            if skew["ok"]:
+                lines.append(
+                    "surface-skew: none compared=" + ",".join(skew["compared"])
+                )
+            else:
+                for entry in skew["skewed"]:
+                    lines.append(
+                        "surface-skew: %s differs across %s" % (
+                            entry["subtree"],
+                            " | ".join("+".join(group) for group in entry["groups"]),
+                        )
+                    )
+                lines.append(
+                    "next: harness update --version latest (release) and "
+                    "harness runtime refresh --runtime all (runtimes)"
+                )
+                exit_code = EXIT_VERIFY_FAIL
+            for report in reports:
+                report["surface_skew"] = skew
         if args.runtime_command in {"activate", "refresh"} and "codex" in targets:
             try:
                 launcher_result = codex_launcher.install()
