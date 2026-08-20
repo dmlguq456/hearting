@@ -43,7 +43,7 @@ class GovernorCollectTest(unittest.TestCase):
             _write_state(td, {"t1": {"class": "dispatch", "pid": 111, "starttime": "222"}})
             with mock.patch.object(procscan, "read_proc_start", return_value="222"):
                 result = governor.collect(root=td)
-        self.assertEqual(result, {"active": 1, "cap": 5, "classes": {"dispatch": 1}})
+        self.assertEqual(result, {"active": 1, "cap": governor.DEFAULT_TOTAL_LIMIT, "classes": {"dispatch": 1}})
 
     def test_dead_lease_never_write_state_json_but_excluded_from_count(self):
         with tempfile.TemporaryDirectory() as td:
@@ -78,7 +78,7 @@ class GovernorCollectTest(unittest.TestCase):
                 procscan, "read_proc_start", side_effect=lambda pid: starts.get(pid)
             ):
                 result = governor.collect(root=td)
-        self.assertEqual(result, {"active": 2, "cap": 5, "classes": {"dispatch": 2}})
+        self.assertEqual(result, {"active": 2, "cap": governor.DEFAULT_TOTAL_LIMIT, "classes": {"dispatch": 2}})
 
     def test_missing_file_returns_none(self):
         with tempfile.TemporaryDirectory() as td:

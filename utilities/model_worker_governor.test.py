@@ -72,9 +72,18 @@ class GovernorTest(unittest.TestCase):
             batch_issuer=issuer,
         )
 
+    def _dispatch_cap(self):
+        """Effective dispatch admissions: whichever of the class/global cap binds first.
+
+        Derived instead of hardcoded so raising a cap does not turn these
+        boundedness assertions into false failures.
+        """
+        return min(GOVERNOR.CLASS_LIMITS["dispatch"], GOVERNOR.DEFAULT_TOTAL_LIMIT)
+
     def test_caps_release_and_kill_switch(self):
         with tempfile.TemporaryDirectory() as temp_dir:
-            tokens = [GOVERNOR.acquire(temp_dir, "dispatch") for _ in range(5)]
+            cap = self._dispatch_cap()
+            tokens = [GOVERNOR.acquire(temp_dir, "dispatch") for _ in range(cap)]
             with self.assertRaisesRegex(ValueError, "global model-worker cap|class cap"):
                 GOVERNOR.acquire(temp_dir, "dispatch")
             GOVERNOR.release(temp_dir, tokens.pop())
@@ -92,7 +101,7 @@ class GovernorTest(unittest.TestCase):
                     admitted += 1
                 except ValueError:
                     pass
-            self.assertEqual(admitted, 5)
+            self.assertEqual(admitted, self._dispatch_cap())
 
     def test_check_does_not_consume_start_budget(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -129,6 +138,9 @@ class GovernorTest(unittest.TestCase):
 
     def test_competing_multi_slot_reservations_never_partially_admit(self):
         with tempfile.TemporaryDirectory() as temp_dir:
+            # Each contender alone fits; together they overcommit whatever the
+            # current cap is, which is the condition this case exists to test.
+            slice_count = self._dispatch_cap() // 2 + 1
             command = [
                 sys.executable,
                 str(PATH),
@@ -138,7 +150,7 @@ class GovernorTest(unittest.TestCase):
                 "--class",
                 "dispatch",
                 "--count",
-                "3",
+                str(slice_count),
                 "--pid",
                 str(os.getpid()),
             ]
@@ -156,9 +168,9 @@ class GovernorTest(unittest.TestCase):
                 if process.returncode == 0
             ]
             self.assertEqual(len(admitted), 1)
-            self.assertEqual(admitted[0]["count"], 3)
+            self.assertEqual(admitted[0]["count"], slice_count)
             state = json.loads(Path(temp_dir, "state.json").read_text())
-            self.assertEqual(len(state["reservations"]), 3)
+            self.assertEqual(len(state["reservations"]), slice_count)
 
     def test_claim_transfers_reserved_capacity_and_cancel_never_releases_it(self):
         with tempfile.TemporaryDirectory() as temp_dir:

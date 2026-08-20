@@ -19,13 +19,38 @@ from typing import Any, Callable, NamedTuple
 from replica_batch_contract import ReplicaBatchContractError, verify_manifest
 
 
-CLASS_LIMITS = {"dispatch": 5, "distill": 1, "title": 4, "loop": 2}
+# Per-class concurrency caps. A `standard+` cycle occupies its dispatch-depth-1
+# owner plus every leg of its 2-4-way parallel group at once, so one cycle alone
+# holds 3-5 dispatch slots; the former cap of 5 made two concurrent standard+
+# cycles structurally impossible and starved the title/distill classes whenever
+# dispatch filled the shared global cap.
+CLASS_LIMITS = {"dispatch": 8, "distill": 1, "title": 4, "loop": 2}
 START_WINDOW_SECONDS = 600
-DEFAULT_TOTAL_LIMIT = 5
+DEFAULT_TOTAL_LIMIT = 12
 DEFAULT_START_BUDGET = 20
 RESERVATION_ENV = "AGENT_MODEL_GOVERNOR_RESERVATION_TOKEN"
 TOKEN_BYTES = 16
 CLAIM_RECEIPT_SECONDS = START_WINDOW_SECONDS
+
+
+def class_limit(worker_class: str) -> int:
+    """Per-class cap, overridable through `AGENT_MODEL_WORKER_CLASS_LIMIT_<CLASS>`.
+
+    The global cap already answered to `AGENT_MODEL_WORKER_TOTAL`, so leaving the
+    class caps hardcoded meant raising the global one still failed closed here.
+    A malformed or non-positive value keeps the default rather than widening or
+    closing admission by accident.
+    """
+    raw = os.environ.get("AGENT_MODEL_WORKER_CLASS_LIMIT_" + worker_class.upper())
+    if raw:
+        try:
+            value = int(raw)
+        except ValueError:
+            return CLASS_LIMITS[worker_class]
+        if value >= 1:
+            return value
+    return CLASS_LIMITS[worker_class]
+
 BATCH_RESERVATION_KEYS = (
     "reservation_kind",
     "batch_declared_size",
@@ -314,7 +339,7 @@ def _assert_available(
     occupied = [*leases.values(), *reservations.values()]
     if len(occupied) + count > total:
         raise ValueError("global model-worker cap reached")
-    if sum(item.get("class") == worker_class for item in occupied) + count > CLASS_LIMITS[worker_class]:
+    if sum(item.get("class") == worker_class for item in occupied) + count > class_limit(worker_class):
         raise ValueError(f"{worker_class} class cap reached")
     # Unclaimed reservations hold rolling-budget capacity. Claiming one moves
     # that capacity from ``reservations`` to ``starts`` in the same lock.
