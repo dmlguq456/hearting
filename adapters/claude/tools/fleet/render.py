@@ -4946,28 +4946,46 @@ def _build_lines(sessions, jobs, section, narrow, malformed, layout="wide", memo
                     # resurrect finished work whose owner already left. When the owner goes,
                     # its finished children go with it; `a`/--all still reveals them.
                     pass
+                elif getattr(j, "_parent_edge_promoted_orphan", False):
+                    # impl-review gap (round 1 G1 close-out): the ledger's verdict is
+                    # authoritative over shown_sids — a promoted orphan stays an orphan even
+                    # when --all puts its dead parent on screen this tick.
+                    orphans.append(j)
+                elif getattr(j, "_parent_edge_sid", None):
+                    edge_sid = j._parent_edge_sid
+                    if edge_sid in shown_sids:
+                        children.setdefault(edge_sid, []).append(j)
+                        recovered_session_ids.add(edge_sid)
+                    else:
+                        # F-80 L2/C6: collector confirmed this exact edge and it is inside
+                        # grace — consume that verdict rather than re-deriving orphan status
+                        # from shown_sids. The parent row itself is filtered off-screen this
+                        # tick.
+                        grace_jobs.append(j)
                 elif (getattr(j, "is_child", False) and j.parent_sid
                       and j.parent_sid in shown_sids):
+                    # No ledger verdict reached this row (collector never ran
+                    # resolve_parent_edges against it) — fall back to the pre-ledger check.
                     children.setdefault(j.parent_sid, []).append(j)
                     recovered_session_ids.add(j.parent_sid)
-                elif (getattr(j, "is_child", False) and j.parent_sid
-                      and getattr(j, "_parent_edge_sid", None) == j.parent_sid):
-                    # F-80 L2/C6: collector confirmed this exact edge and it is inside grace
-                    # — consume that verdict rather than re-deriving orphan status from
-                    # shown_sids. The parent row itself is filtered off-screen this tick.
-                    grace_jobs.append(j)
                 else:
                     # A malformed/stale parent edge must not make a live dispatch-depth-2 row
                     # disappear from Fleet. Surface it as a project-level orphan.
                     orphans.append(j)
+            elif getattr(j, "_parent_edge_promoted_orphan", False):
+                orphans.append(j)
+            elif getattr(j, "_parent_edge_sid", None):
+                edge_sid = j._parent_edge_sid
+                if edge_sid in shown_sids:
+                    children.setdefault(edge_sid, []).append(j)
+                else:
+                    # F-80 L2/C6: same grace consumption as above, for the depth-1 nesting path.
+                    # Takes priority over the parent_managed_dir/parent_cwd fallbacks below so a
+                    # confirmed edge is never re-resolved through a less precise cwd match.
+                    grace_jobs.append(j)
             elif j.is_child and j.parent_sid and j.parent_sid in shown_sids:
+                # No ledger verdict reached this row — fall back to the pre-ledger check.
                 children.setdefault(j.parent_sid, []).append(j)
-            elif (j.is_child and j.parent_sid
-                  and getattr(j, "_parent_edge_sid", None) == j.parent_sid):
-                # F-80 L2/C6: same grace consumption as above, for the depth-1 nesting path.
-                # Takes priority over the parent_managed_dir/parent_cwd fallbacks below so a
-                # confirmed edge is never re-resolved through a less precise cwd match.
-                grace_jobs.append(j)
             elif (
                 j.is_child
                 and getattr(j, "source", None) != "plugin-queue"

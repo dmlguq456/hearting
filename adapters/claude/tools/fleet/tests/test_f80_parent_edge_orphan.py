@@ -191,6 +191,44 @@ class L2CollectorIntegrationTest(unittest.TestCase):
             render.set_show_all(False)
         self.assertFalse(model.session_parent_visible(parent))
 
+    def test_all_toggle_does_not_change_ledger_confirmation_through_classification(self):
+        # impl-review gap follow-up to C10c above: the assertion there only calls
+        # session_parent_visible() directly, so it never actually exercises render's
+        # per-job classification loop (render.py's children/grace_jobs/orphans elif
+        # ladder) that consumes the ledger. Route the same stale-parent scenario through
+        # that loop via resolve_parent_edges + _build_lines and confirm --all still can't
+        # override the ledger's confirmed/grace verdict for a job the collector already
+        # attributed.
+        render.set_process_view(False)
+        render.set_show_all(False)
+        render.reset_selection()
+        model.reset_parent_edge_tracker()
+        try:
+            parent = Session(harness="claude", pid=1, cwd="/work/stale", session_id="sid-p",
+                             slug="stale-parent", liveness="working")
+            job = DispatchJob(key="code", slug="stale-child", cwd="/work/stale",
+                              parent_sid="sid-p", is_child=True, harness="claude",
+                              liveness="working")
+            fleet_collectors.resolve_parent_edges([parent], [job])  # tick 1: confirmed
+            parent.liveness = "stale"
+            fleet_collectors.resolve_parent_edges([parent], [job])  # tick 2: grace-held
+            self.assertEqual(job._parent_edge_sid, "sid-p")
+            self.assertFalse(job._parent_edge_promoted_orphan)
+
+            for show_all in (False, True):
+                with self.subTest(show_all=show_all):
+                    render.set_show_all(show_all)
+                    rendered = _text(render._build_lines(
+                        [parent], [job], section="both", narrow=False, malformed=0,
+                        layout="wide", term_width=168,
+                    ))
+                    self.assertNotIn("(orphan)", rendered)
+                    self.assertIn("stale-child", rendered)
+        finally:
+            render.set_show_all(False)
+            render.reset_selection()
+            model.reset_parent_edge_tracker()
+
 
 class RenderConsumesLedgerTest(unittest.TestCase):
     """render must consume _parent_edge_sid/_parent_edge_promoted_orphan, never re-derive
@@ -239,6 +277,48 @@ class RenderConsumesLedgerTest(unittest.TestCase):
         rendered = self._render([], [job], term_width=200)
         self.assertIn("(orphan)", rendered)
         self.assertIn("dead-child", rendered)
+
+    def test_show_all_does_not_override_promoted_orphan_depth1(self):
+        # impl-review gap (round 1 G1 not yet closed in code): with a dead parent AND
+        # --all on, render's depth-1 elif ladder used to check `j.parent_sid in
+        # shown_sids` BEFORE consuming the ledger's promoted-orphan verdict. --all puts
+        # the dead parent into shown_sids, so the child was nested inside the dead
+        # parent's card instead of surfacing as an orphan. This must fail on the
+        # pre-fix code and pass once the ledger check runs first.
+        parent = Session(harness="claude", pid=1, cwd="/work/dead", session_id="sid-p",
+                         slug="dead-parent", liveness="dead")
+        job = DispatchJob(key="code", slug="dead-child", cwd="/work/dead",
+                          parent_sid="sid-p", is_child=True, harness="claude",
+                          liveness="working")
+        job._parent_edge_sid = None                    # collector already promoted it
+        job._parent_edge_promoted_orphan = True
+        render.set_show_all(True)
+        try:
+            rendered = self._render([parent], [job], term_width=200)
+        finally:
+            render.set_show_all(False)
+        self.assertIn("(orphan)", rendered)
+        self.assertIn("dead-child", rendered)
+
+    def test_show_all_does_not_override_promoted_orphan_depth2(self):
+        # Same repro as above, for the dispatch-depth-2 elif ladder (render.py's
+        # `parent_slug`/`depth >= 2` branch), which had the identical
+        # shown_sids-before-ledger ordering bug.
+        parent = Session(harness="claude", pid=1, cwd="/work/dead2", session_id="sid-p2",
+                         slug="dead-parent-2", liveness="dead")
+        job = DispatchJob(key="code", slug="dead-child-2", cwd="/work/dead2",
+                          parent_sid="sid-p2", is_child=True, harness="claude",
+                          liveness="working", depth=2, dispatch_depth=2,
+                          parent_slug="unrelated-owner-slug")
+        job._parent_edge_sid = None
+        job._parent_edge_promoted_orphan = True
+        render.set_show_all(True)
+        try:
+            rendered = self._render([parent], [job], term_width=200)
+        finally:
+            render.set_show_all(False)
+        self.assertIn("(orphan)", rendered)
+        self.assertIn("dead-child-2", rendered)
 
     def test_confirmed_visible_parent_still_nests_normally(self):
         # Happy-path regression: the ledger must not get in the way of the ordinary
