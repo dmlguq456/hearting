@@ -428,6 +428,177 @@ class MigrationCliTest(unittest.TestCase):
         self.assertNotIn(record_id, folded.records)
         self.assertEqual(len(folded.tombstones), 1)
 
+    def _add_record(self, body, *, delivery=None):
+        args = ["add", "durable", "note", body, "--scope", "project"]
+        if delivery == "pending":
+            args = ["note", body, "--type", "handoff", "--requires-consume"]
+        created = self.run_mem(*args, json_output=False)
+        self.assertEqual(created.returncode, 0, created.stdout + created.stderr)
+        # The write line names the exact id; the body is normalized on the way
+        # in, so matching on it is not reliable.
+        record_id = created.stdout.strip().rsplit("\u2192", 1)[-1].strip()
+        con = sqlite3.connect(self.db)
+        try:
+            row = con.execute(
+                "SELECT id,cwd_origin FROM records WHERE id=?", (record_id,)
+            ).fetchone()
+        finally:
+            con.close()
+        self.assertIsNotNone(row, created.stdout + created.stderr)
+        return row
+
+    def _reset_capture(self):
+        """Model an imported legacy store: records only, no v2 capture state."""
+        con = sqlite3.connect(self.db)
+        try:
+            for table in ("sync_transactional_graveyard", "sync_graveyard",
+                          "sync_outbox", "sync_applied", "sync_frontier",
+                          "sync_parents", "sync_objects"):
+                con.execute(f'DELETE FROM "{table}"')
+            con.execute("UPDATE sync_replica SET counter='0' WHERE active=1")
+            con.execute(
+                "UPDATE sync_capture_clock SET capture_seq='0' WHERE singleton=1")
+            con.commit()
+            return con.execute(
+                "SELECT replica_id FROM sync_replica WHERE active=1").fetchone()[0]
+        finally:
+            con.close()
+
+    def _seal_through_snapshot(self, replica, project_keys, prefix):
+        capability = self.payload(self.run_mem(
+            "migration", "capabilities", "--epoch", EPOCH))
+        member = self.root / f"{prefix}-member.json"
+        member.write_text(canonical({
+            "replica_id": replica,
+            "logical_project_keys": sorted(project_keys),
+            "protected_ref": "refs/heads/hearting-memory-v2",
+            "writer_capability_hash": capability["writer_capability_hash"]}),
+            encoding="utf-8")
+        expect = self.payload(self.run_mem(
+            "migration", "status", "--epoch", EPOCH))["state_digest"]
+        membership_out = self.root / f"{prefix}-membership"
+        receipt = self.payload(self.run_mem(
+            "migration", "roster", "membership-seal", "--epoch", EPOCH,
+            "--expect", expect, "--member", str(member),
+            "--out", str(membership_out), "--apply"))
+        expect = self.next_expect(receipt)
+        snapshot_out = self.root / f"{prefix}-snapshot"
+        for _ in range(2):
+            receipt = self.payload(self.run_mem(
+                "migration", "snapshot", "--epoch", EPOCH, "--expect", expect,
+                "--membership", str(membership_out / "membership.json"),
+                "--replica", replica, "--store", str(self.store),
+                "--out", str(snapshot_out), "--apply"))
+            expect = self.next_expect(receipt)
+        return (expect, membership_out / "membership.json",
+                snapshot_out / "snapshot.json")
+
+    def test_multi_entry_graveyard_seeds_every_legacy_deletion(self):
+        """A real store deletes more than one record before it ever migrates.
+
+        The deletion log is consumed as canonical JSONL, one entry per line;
+        a pre-capsule row carries no canonical_id/status/capsule_version; and a
+        row deleted while pending needs force authority, not a plain tombstone.
+        """
+        keys = set()
+        deleted = []
+        for index in range(3):
+            record_id, project_key = self._add_record(
+                f"legacy deletion evidence row number {index} for the seed")
+            keys.add(project_key)
+            deleted.append(record_id)
+        pending_id, pending_key = self._add_record(
+            "legacy pending handoff evidence retained for recovery",
+            delivery="pending")
+        keys.add(pending_key)
+        deleted.append(pending_id)
+        survivor_id, survivor_key = self._add_record(
+            "surviving legacy row that the snapshot seed must carry")
+        keys.add(survivor_key)
+        for record_id in deleted:
+            result = self.run_mem("delete", record_id, "--force",
+                                  json_output=False)
+            self.assertEqual(result.returncode, 0,
+                             result.stdout + result.stderr)
+
+        # Strip the capsule columns from one logged row the way a pre-capsule
+        # deletion log looks, and prove the seed still reconstructs it.
+        log = self.store / "deleted-records.jsonl"
+        rows = [json.loads(line) for line in
+                log.read_text(encoding="utf-8").splitlines() if line.strip()]
+        self.assertEqual(len(rows), len(deleted))
+        for row in rows:
+            if row["id"] == deleted[0]:
+                for column in ("canonical_id", "status", "capsule_version",
+                               "delivery_state", "headline"):
+                    row.pop(column, None)
+        log.write_text("".join(json.dumps(row) + "\n" for row in rows),
+                       encoding="utf-8")
+
+        replica = self._reset_capture()
+        expect, membership, snapshot = self._seal_through_snapshot(
+            replica, keys, "multi-graveyard")
+        source = self.root / "multi-graveyard-source.json"
+        source.write_text(canonical({"source_identities": [survivor_id]}),
+                          encoding="utf-8")
+        seed_out = self.root / "multi-graveyard-seed"
+        result = self.run_mem(
+            "migration", "seed", "build", "--epoch", EPOCH, "--expect", expect,
+            "--membership", str(membership), "--snapshot", str(snapshot),
+            "--kind", "snapshot", "--source", str(source),
+            "--out", str(seed_out), "--apply")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        seed = migration_v2.verify_seed_manifest(seed_out / "seed.json")
+        identities = {row["source_identity"] for row in seed["mappings"]}
+        for record_id in deleted:
+            self.assertIn(f"graveyard:{record_id}:prior", identities)
+            self.assertIn(f"graveyard:{record_id}:tombstone", identities)
+        envelopes = [json.loads((seed_out / row["path"]).read_text())
+                     for row in seed["objects"]]
+        protocol = __import__("protocol_v2")
+        folded = protocol.fold_operations(envelopes)
+        self.assertEqual(folded.blocked, {})
+        self.assertEqual(set(folded.records), {survivor_id})
+        self.assertEqual(len(folded.tombstones), len(deleted))
+        kinds = {envelope["payload"]["kind"] for envelope in envelopes}
+        self.assertIn("force-tombstone", kinds)
+
+    def test_refused_seed_namespace_leaves_no_operations(self):
+        """A roster refusal must not leave the operations it refused behind."""
+        record_id, project_key = self._add_record(
+            "legacy row whose project is absent from the sealed roster")
+        replica = self._reset_capture()
+        expect, membership, snapshot = self._seal_through_snapshot(
+            replica, {project_key}, "refused-namespace")
+        # Seal a roster the snapshot's own project is absent from.
+        foreign = json.loads(Path(membership).read_text(encoding="utf-8"))
+        for member in foreign["members"]:
+            member["logical_project_keys"] = ["git:example.invalid/other"]
+        foreign.pop("manifest_digest", None)
+        foreign_path = self.root / "foreign-membership.json"
+        foreign_path.write_text(canonical(
+            migration_v2._with_digest(foreign)), encoding="utf-8")
+        source = self.root / "refused-source.json"
+        source.write_text(canonical({"source_identities": [record_id]}),
+                          encoding="utf-8")
+        result = self.run_mem(
+            "migration", "seed", "build", "--epoch", EPOCH, "--expect", expect,
+            "--membership", str(foreign_path), "--snapshot", str(snapshot),
+            "--kind", "snapshot", "--source", str(source),
+            "--out", str(self.root / "refused-seed"), "--apply")
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        con = sqlite3.connect(self.db)
+        try:
+            self.assertEqual(con.execute(
+                "SELECT COUNT(*) FROM sync_objects").fetchone()[0], 0)
+            self.assertEqual(con.execute(
+                "SELECT COUNT(*) FROM sync_frontier").fetchone()[0], 0)
+            self.assertEqual(con.execute(
+                "SELECT counter FROM sync_replica WHERE active=1"
+            ).fetchone()[0], "0")
+        finally:
+            con.close()
+
     def test_snapshot_seed_rejects_namespace_without_reserving(self):
         con = sqlite3.connect(self.db)
         sync_v2.register_writer_functions(con)

@@ -790,11 +790,16 @@ def _merge_entities(base, extracted):
 
 
 def _default_headline(body):
-    return re.sub(r"[\x00-\x1f\x7f]", " ", _first_line(body or "")).strip()[:240]
+    # Truncating after the strip can leave the cut edge on a space, so a second
+    # pass over the same value would shorten it again. Normalization has to be
+    # a fixpoint: a re-derived headline must equal the stored one, or a v2
+    # operation's post-state stops matching the row it describes.
+    return re.sub(r"[\x00-\x1f\x7f]", " ",
+                  _first_line(body or "")).strip()[:240].strip()
 
 
 def _normalize_headline(value, body):
-    text = re.sub(r"[\x00-\x1f\x7f]", " ", value or "").strip()[:240]
+    text = re.sub(r"[\x00-\x1f\x7f]", " ", value or "").strip()[:240].strip()
     return text or _default_headline(body)
 
 
@@ -1333,8 +1338,11 @@ def _meta_to_params(meta, body):
     delivery_state = meta.get("delivery_state")
     if delivery_state not in DELIVERY_STATES:
         delivery_state = "pending" if _pending_backfill(meta.get("type"), body) else "ordinary"
+    # A caller-supplied zero is not evidence of a clean body: the column
+    # backfill and the protocol post-state check both recompute it, and a row
+    # stored as zero for a guarded body is rejected at v2 seed construction.
     injection_flag = meta.get("injection_flag")
-    if injection_flag is None:
+    if not injection_flag:
         injection_flag = 1 if INJECTION_PAT.search(body or "") else 0
     expires = None if delivery_state == "pending" else meta.get("expires")
     return (
@@ -6403,12 +6411,54 @@ def _migration_legacy_graveyard_bytes():
         os.close(fd)
 
 
+def _legacy_graveyard_defaults(state, record_id):
+    """Fill columns a pre-capsule deletion log never carried.
+
+    Rows deleted before the capsule/status columns existed keep no
+    ``canonical_id``, ``status``, ``capsule_version``, ``delivery_state``, or
+    ``headline``. The live schema migration writes exactly these defaults for a
+    surviving row, so reconstructing the prior state uses the same rule rather
+    than inventing state or emitting an invalid post-state.
+    """
+    state = dict(state)
+    if state.get("status") not in RECORD_STATUSES:
+        state["status"] = "active"
+    if state.get("delivery_state") not in DELIVERY_STATES:
+        state["delivery_state"] = "ordinary"
+    state["canonical_id"] = state.get("canonical_id") or record_id
+    state["capsule_version"] = state.get("capsule_version") or 1
+    if not state.get("headline"):
+        state["headline"] = _default_headline(state.get("body") or "")
+    # The live column backfill recomputes a zero/absent flag from the body, and
+    # the protocol rejects a post-state that claims zero for a guarded body.
+    if not state.get("injection_flag"):
+        state["injection_flag"] = (
+            1 if protocol_v2.INJECTION_RE.search(state.get("body") or "") else 0)
+    try:
+        strength = int(state.get("strength") or 1)
+    except (TypeError, ValueError):
+        strength = 1
+    state["strength"] = max(1, strength)
+    return state
+
+
 def _migration_graveyard_source(raw, snapshot_path):
     snapshot = migration_v2.verify_snapshot(snapshot_path)
     backup = Path(snapshot_path).resolve().parent / snapshot["backup"]["path"]
     con = sqlite3.connect(backup.as_uri() + "?mode=ro&immutable=1", uri=True)
     try:
         live = {str(row[0]) for row in con.execute("SELECT id FROM records")}
+        # A record the snapshot already covers with v2 operations owns its own
+        # lineage: seeding a fresh root from the legacy deletion log would
+        # contradict that head. Its tombstone is verified, never re-created.
+        names = {str(row[0]) for row in con.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'")}
+        covered = set()
+        for table in ("sync_frontier", "sync_transactional_graveyard",
+                      "sync_graveyard"):
+            if table in names:
+                covered |= {str(row[0]) for row in con.execute(
+                    f'SELECT record_id FROM "{table}"')}
     finally:
         con.close()
     latest = {}
@@ -6426,10 +6476,11 @@ def _migration_graveyard_source(raw, snapshot_path):
         latest[record_id] = (source, line)
     entries = []
     for record_id, (source, line) in sorted(latest.items()):
-        if record_id in live:
+        if record_id in live or record_id in covered:
             continue
         prior = _canonical_record_state(
-            {key: source.get(key) for key in RECORD_COLS})
+            _legacy_graveyard_defaults(
+                {key: source.get(key) for key in RECORD_COLS}, record_id))
         tombstone = {"action": str(source.get("_action") or "legacy-delete"),
             "pending": prior.get("delivery_state") == "pending",
             "prior_digest": hashlib.sha256(
@@ -6440,7 +6491,11 @@ def _migration_graveyard_source(raw, snapshot_path):
             "recovery_evidence_digest": hashlib.sha256(line).hexdigest()}
         entries.append({**payload,
             "entry_digest": migration_v2.digest_json(payload)})
-    return b"".join(migration_v2.canonical_bytes(item) for item in entries)
+    # Consumers read this artifact as canonical JSONL (``graveyard.jsonl``), so
+    # each entry needs its own line separator; bare concatenation parsed as one
+    # oversized line and failed every multi-entry store at snapshot time.
+    return b"".join(migration_v2.canonical_bytes(item) + b"\n"
+                    for item in entries)
 
 
 def _migration_validate_snapshot_graveyard(con, operations):
@@ -6707,7 +6762,8 @@ def _migration_require_exact_retry(epoch, expect, phase, inputs):
         raise migration_v2.MigrationError("stale-state")
 
 
-def _migration_seed_operations(snapshot_path, snapshot, source, *, apply):
+def _migration_seed_operations(snapshot_path, snapshot, source, *, apply,
+                               membership=None):
     """Build deterministic snapshot put operations; reserve only on apply."""
     backup = Path(snapshot_path).resolve().parent / snapshot["backup"]["path"]
     con = sqlite3.connect(backup.as_uri() + "?mode=ro&immutable=1", uri=True)
@@ -6864,6 +6920,11 @@ def _migration_seed_operations(snapshot_path, snapshot, source, *, apply):
                         frontier_by_record.get(rid, []), [operation["op_id"]])
                     for rid, operation in seeded if rid in states):
                 raise migration_v2.MigrationError("snapshot-tail-before-seed")
+            # The roster check has to clear before these operations become
+            # durable: validating after the commit left a refused seed's
+            # operations, counters, and frontiers permanently in the store.
+            if membership is not None:
+                _migration_validate_seed_namespaces(membership, operations)
             for rid, operation in seeded:
                 sync_v2.record_reserved_seed_operation(local, operation,
                     epoch_id=snapshot["epoch_id"], seed_kind="snapshot",
@@ -7488,7 +7549,8 @@ def _migration_command_locked(args):
                 if args.kind != "snapshot":
                     raise migration_v2.MigrationError("delta-seed-source-incomplete")
                 source_digest, mappings, operations = _migration_seed_operations(
-                    args.snapshot, snapshot, source, apply=args.apply)
+                    args.snapshot, snapshot, source, apply=args.apply,
+                    membership=membership)
             else:
                 source_digest = source.get("manifest_digest") \
                     or migration_v2.digest_json(source)

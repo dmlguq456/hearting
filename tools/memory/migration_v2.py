@@ -1070,16 +1070,25 @@ def build_graveyard_seed_operations(
                            "post_state": prior}],
             "provenance": {"actor": "migration", "reason": "graveyard-prior",
                 "graveyard_evidence": entry["recovery_evidence_digest"]}})
+        # A row deleted while pending was force-deleted: an ordinary tombstone
+        # over a pending prior state is blocked, and only ``force-tombstone``
+        # carries that authority. The legacy log is the authority evidence.
+        pending_prior = bool(entry["tombstone"].get("pending"))
+        tombstone_provenance = {"actor": "migration",
+            "reason": "graveyard-seed",
+            "graveyard_evidence": entry["recovery_evidence_digest"]}
+        if pending_prior:
+            tombstone_provenance["authority"] = "legacy-graveyard-evidence"
         tombstone_op = protocol.build_operation({"protocol_major": 2,
             "schema_minor": 0, "replica_id": manifest["replica_id"],
             "counter": by_identity[tombstone_identity],
             "parents": [prior_op["op_id"]], "project_key": project_key,
-            "kind": "tombstone", "frontiers": [{"record_id": record_id,
-                                                   "heads": [prior_op["op_id"]]}],
+            "kind": "force-tombstone" if pending_prior else "tombstone",
+            "frontiers": [{"record_id": record_id,
+                           "heads": [prior_op["op_id"]]}],
             "mutations": [{"record_id": record_id, "mutation_ordinal": 0,
                            "tombstone": entry["tombstone"]}],
-            "provenance": {"actor": "migration", "reason": "graveyard-seed",
-                "graveyard_evidence": entry["recovery_evidence_digest"]}})
+            "provenance": tombstone_provenance})
         for identity, operation in ((prior_identity, prior_op),
                                     (tombstone_identity, tombstone_op)):
             operations.append(operation)
