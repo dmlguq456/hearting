@@ -317,8 +317,50 @@ class RenderConsumesLedgerTest(unittest.TestCase):
             rendered = self._render([parent], [job], term_width=200)
         finally:
             render.set_show_all(False)
-        self.assertIn("(orphan)", rendered)
-        self.assertIn("dead-child-2", rendered)
+        # impl-review round 2 (non-blocking): assert the CHILD row itself carries the
+        # marker. A bare `assertIn("(orphan)", rendered)` also passes when only the
+        # parent row is marked, which would not prove the ledger reached this job.
+        child_rows = [ln for ln in rendered.splitlines() if "dead-child-2" in ln]
+        self.assertTrue(child_rows, "child row missing from render")
+        self.assertIn("(orphan)", child_rows[0])
+
+    def test_depth2_nests_under_visible_owner_job_despite_promoted_session_edge(self):
+        """A promoted SESSION edge does not detach a depth-2 row from its visible OWNER JOB.
+
+        impl-review round 2 raised this ordering as a blocking ledger bypass. It is not:
+        `visible_parent_slugs` (render.py:4921-4923) is a job -> job edge (depth-1 owner
+        job <- depth-2 stage worker), while the F-80 ledger governs the session -> job
+        edge (`parent_sid`). When the owner job is on screen the child's displayed parent
+        genuinely exists, so nesting under it is correct and the orphan condition is
+        already carried by the owner row. Marking the whole subtree would restate one fact
+        on every descendant (F-9/F-12 noise restraint; PRD 4 R2 marks the promoted row).
+
+        Owner arbitration: `_internal/owner/implreview_arbitration.md`.
+        """
+        owner = DispatchJob(key="code", slug="dead-owner", cwd="/work/d2", harness="claude",
+                            liveness="dead", depth=1, dispatch_depth=1,
+                            parent_sid="sid-p2", is_child=True)
+        owner._parent_edge_sid = None
+        owner._parent_edge_promoted_orphan = True
+        child = DispatchJob(key="code", slug="dead-child-2b", cwd="/work/d2",
+                            parent_sid="sid-p2", is_child=True, harness="claude",
+                            liveness="working", depth=2, dispatch_depth=2,
+                            parent_slug="dead-owner")
+        child._parent_edge_sid = None
+        child._parent_edge_promoted_orphan = True
+        render.set_show_all(True)
+        try:
+            rendered = self._render([], [owner, child], term_width=200)
+        finally:
+            render.set_show_all(False)
+        owner_rows = [ln for ln in rendered.splitlines() if "dead-owner" in ln]
+        child_rows = [ln for ln in rendered.splitlines() if "dead-child-2b" in ln]
+        self.assertTrue(owner_rows and child_rows)
+        # The owner carries the marker; the child stays nested beneath it, unmarked.
+        self.assertIn("(orphan)", owner_rows[0])
+        self.assertNotIn("(orphan)", child_rows[0])
+        # ...and it is still inside the orphan section, not lost off the board.
+        self.assertIn("orphaned dispatch rows", rendered)
 
     def test_confirmed_visible_parent_still_nests_normally(self):
         # Happy-path regression: the ledger must not get in the way of the ordinary
