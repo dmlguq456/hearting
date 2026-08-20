@@ -37,7 +37,7 @@ import sys
 import time
 
 from .model import (fmt_min, dash, project_of, exec_child_is_wait,
-                    LIVENESS_STATES, PLUGIN_QUEUE_STATES)
+                    LIVENESS_STATES, PLUGIN_QUEUE_STATES, session_parent_visible)
 from . import gitinfo
 from .refresh import LiveSnapshot, RefreshPump
 
@@ -4855,9 +4855,10 @@ def _build_lines(sessions, jobs, section, narrow, malformed, layout="wide", memo
             lines.append(None)
         first = False
 
+        # F-80 L2a: the exact predicate collect_all's ParentEdgeTracker confirms edges
+        # against (model.session_parent_visible) — single definition, not a parallel copy.
         shown = (group_sessions if _SHOW_ALL else
-                 [s for s in group_sessions
-                  if not (s.liveness in ("stale", "dead") or s.app_server)])
+                 [s for s in group_sessions if session_parent_visible(s)])
         hidden = len(group_sessions) - len(shown)
         shown_sids = set(s.session_id for s in shown if s.session_id)
         shown_cwds = {}
@@ -4882,6 +4883,8 @@ def _build_lines(sessions, jobs, section, narrow, malformed, layout="wide", memo
         job_children = {}  # parent dispatch slug -> [dispatch-depth-2 jobs]
         orphans = []       # project-level fallback (parent dead/off-screen/no-env)
         loops_jobs = []    # no-parent-is-normal (cron loops) — no orphan marker
+        grace_jobs = []    # F-80 L2: confirmed edge, parent filtered off-screen this tick
+                            # (stale/app_server/absent) within grace — no orphan marker
         recovered_session_ids = set()
         visible_parent_slugs = {
             j.slug for j in group_jobs
@@ -4915,12 +4918,24 @@ def _build_lines(sessions, jobs, section, narrow, malformed, layout="wide", memo
                       and j.parent_sid in shown_sids):
                     children.setdefault(j.parent_sid, []).append(j)
                     recovered_session_ids.add(j.parent_sid)
+                elif (getattr(j, "is_child", False) and j.parent_sid
+                      and getattr(j, "_parent_edge_sid", None) == j.parent_sid):
+                    # F-80 L2/C6: collector confirmed this exact edge and it is inside grace
+                    # — consume that verdict rather than re-deriving orphan status from
+                    # shown_sids. The parent row itself is filtered off-screen this tick.
+                    grace_jobs.append(j)
                 else:
                     # A malformed/stale parent edge must not make a live dispatch-depth-2 row
                     # disappear from Fleet. Surface it as a project-level orphan.
                     orphans.append(j)
             elif j.is_child and j.parent_sid and j.parent_sid in shown_sids:
                 children.setdefault(j.parent_sid, []).append(j)
+            elif (j.is_child and j.parent_sid
+                  and getattr(j, "_parent_edge_sid", None) == j.parent_sid):
+                # F-80 L2/C6: same grace consumption as above, for the depth-1 nesting path.
+                # Takes priority over the parent_managed_dir/parent_cwd fallbacks below so a
+                # confirmed edge is never re-resolved through a less precise cwd match.
+                grace_jobs.append(j)
             elif (
                 j.is_child
                 and getattr(j, "source", None) != "plugin-queue"
@@ -5269,6 +5284,12 @@ def _build_lines(sessions, jobs, section, narrow, malformed, layout="wide", memo
                 _emit_dispatch_tree(oj, orphan=show_sessions)
         for lj in _sort_group_jobs(loops_jobs):
             _emit_dispatch_tree(lj, orphan=False)
+        # F-80 L2c: a grace-held edge stays a standalone tree row in the SAME group, no
+        # `(orphan)` marker, no divider — nesting under the parent is unavailable because
+        # that row is itself filtered off-screen this tick, but its card/group membership
+        # is preserved exactly as the confirmed edge, not re-derived as project-level loss.
+        for gj in _sort_group_jobs(grace_jobs):
+            _emit_dispatch_tree(gj, orphan=False)
 
         # F-19 repo rows (사용자 확정 2026-07-16): this card's own today-mem events, below a
         # subtle in-band divider — entirely silent when the repo has none (healthy-silent,

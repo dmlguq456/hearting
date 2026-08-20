@@ -57,12 +57,51 @@ def _mark_dispatch_child_sessions(sessions, jobs):
                 continue
             if (j.harness, os.path.realpath(j.cwd)) in represented:
                 continue
+            # L1 (F-80): a session with no observed session_id cannot be proven to differ
+            # from j.parent_sid. Absence of proof is not proof of absence — fail-closed and
+            # never reclassify it as this job's child, rather than reading the missing id
+            # as "not the parent."
+            if getattr(j, 'parent_sid', None) and not getattr(s, 'session_id', None):
+                continue
             if j.parent_sid and s.session_id and j.parent_sid == s.session_id:
                 continue
             if getattr(j, 'parent_cwd', None) and _same_path(s.cwd, j.parent_cwd):
                 continue
             s.is_child = True
             break
+
+
+def resolve_parent_edges(sessions, jobs):
+    """F-80 L2a/L2b: resolve each dispatch job's parent-session edge exactly once.
+
+    Sets ``j._parent_edge_sid`` (the sid to attach under, confirmed or grace-held, else
+    None) and ``j._parent_edge_promoted_orphan`` (True only when this tick's verdict is a
+    fresh project-level orphan promotion) on every job with ``is_child`` and a
+    ``parent_sid``. render and any ``--json`` consumer read these instead of re-deriving
+    orphan status from a display-filtered session list (C6/C13b) — a single decision point,
+    not a parallel copy. Both ephemeral attributes follow the existing leading-underscore,
+    non-dataclass-field convention (e.g. ``_runtime_session_id`` in dispatch.py) so they
+    never leak into ``--json`` output on their own.
+    """
+    from .. import model
+    sessions_by_sid = {s.session_id: s for s in sessions if getattr(s, "session_id", None)}
+    for j in jobs:
+        parent_sid = getattr(j, "parent_sid", None)
+        if not (getattr(j, "is_child", False) and parent_sid):
+            continue
+        parent_session = sessions_by_sid.get(parent_sid)
+        if parent_session is None:
+            # Complete collector-side absence — cannot be told apart from a real registry
+            # gap, so it gets grace like any other non-visible reason (F-80 L2c "완전 부재").
+            parent_visible = None
+            dead_evidence = False
+        else:
+            parent_visible = model.session_parent_visible(parent_session)
+            dead_evidence = getattr(parent_session, "liveness", None) == "dead"
+        edge_sid, promoted = model.parent_edge_resolve(
+            j.slug, parent_sid, parent_visible, dead_evidence)
+        j._parent_edge_sid = edge_sid
+        j._parent_edge_promoted_orphan = promoted
 
 
 def _adopt_child_titles(sessions, jobs):
@@ -290,6 +329,15 @@ def collect_all(harness_filter=None, jobs_path=None, usage="cache-only"):
     except Exception:
         pass
 
+    # F-80 L2a/L2b: a dispatch job's parent-session edge, resolved through the shared
+    # parent_visible predicate + ParentEdgeTracker so --json and render consume one
+    # decision (C6/C13b). Sessions/liveness are already settled above; jobs are already
+    # collected, so every input this needs is final for this tick.
+    try:
+        resolve_parent_edges(sessions, jobs)
+    except Exception:
+        pass
+
     try:
         from ..projection import normalize_context, _evidence, _is_live
         now = _time.time()
@@ -340,6 +388,7 @@ def collect_all(harness_filter=None, jobs_path=None, usage="cache-only"):
     try:
         from .. import model
         model.tracker_sweep()
+        model.parent_edge_sweep()
     except Exception:
         pass
 

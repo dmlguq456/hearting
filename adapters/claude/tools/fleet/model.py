@@ -717,6 +717,112 @@ def reset_state_tracker():
     _TRACKER.reset()
 
 
+def session_parent_visible(session):
+    """F-80 L2a: single definition of "attributable as a live dispatch parent."
+
+    ``collected AND NOT (liveness in {stale, dead} OR app_server)`` — collect_all's own
+    ParentEdgeTracker calls this to decide confirmation, and render's group `shown` filter
+    calls the exact same function so ``--json`` and the screen consume one value (C6/C13b).
+    Does not consult ``--all``/``_SHOW_ALL``: that toggle changes what is DISPLAYED, never
+    attribution history, so it must never reach this predicate.
+    """
+    return not (getattr(session, "liveness", None) in ("stale", "dead")
+                or getattr(session, "app_server", False))
+
+
+# Grace window for a dispatch job's parent-session edge (F-80), in ticks — not seconds.
+# The 0.66-1.37s sid-registry gap measured at session-end is comfortably inside 3 ticks at
+# the default 2s render interval (~6s), and genuine death promotes immediately via
+# dead_evidence, so this window is never a delay on a real-death orphan marker.
+_PARENT_EDGE_GRACE_TICKS = 3
+
+
+class ParentEdgeTracker:
+    """Cross-tick memory for a dispatch job's parent-session edge (F-80).
+
+    Separate from StateTracker (different subject — an edge between two rows, not one
+    row's own state) but owned here for the same reason: collect_all() is the one funnel
+    for --json / --once / live, so this is the only placement that behaves identically on
+    all three paths.
+
+    A parent session going quiet for one tick can mean collection loss OR a display-filter
+    transition (stale/app_server) — neither is confirmed death. This retains the last
+    CONFIRMED exact edge for a bounded number of ticks so a transient gap does not demote
+    the job's children to a project-level orphan. It never invents an edge that was not
+    already confirmed at least once (no cwd-only synthesis, F-68 unchanged): an edge with
+    no prior confirmed observation and an invisible parent resolves to orphan immediately,
+    which is also why grace is a structural no-op on a single --once/--json snapshot — a
+    lone observation has no earlier tick to have confirmed anything against.
+
+    Key: ("pe", slug) -> {"parent_sid": str, "confirmed": bool, "missing_ticks": int}.
+    """
+
+    def __init__(self):
+        self._store = {}
+        self._seen = set()
+
+    def resolve(self, slug, parent_sid, parent_visible, dead_evidence):
+        """(edge_sid_or_None, promoted_orphan: bool) for this tick's verdict.
+
+        parent_visible: True the parent session currently passes the render `shown`
+        predicate (collected AND NOT stale/dead/app_server); False it is collected but
+        filtered; None it was not observed at all this tick.
+        dead_evidence: True only for active death proof this tick (parent liveness ==
+        "dead", which classify_session already folds pid-absence and proc_start mismatch
+        into) — elapsed time alone is never proof (F-46/F-62).
+        """
+        key = ("pe", slug)
+        self._seen.add(key)
+        if not parent_sid:
+            self._store.pop(key, None)
+            return None, False
+        if parent_visible:
+            self._store[key] = {"parent_sid": parent_sid, "confirmed": True, "missing_ticks": 0}
+            return parent_sid, False
+        if dead_evidence:
+            self._store.pop(key, None)
+            return None, True
+        entry = self._store.get(key)
+        if not entry or entry.get("parent_sid") != parent_sid or not entry.get("confirmed"):
+            # Never confirmed this exact edge — grace only extends an already-confirmed
+            # edge, so an unconfirmed one promotes immediately (also the --once/--json
+            # no-op case: a single observation can never have a prior confirmation).
+            self._store.pop(key, None)
+            return None, True
+        missing = entry.get("missing_ticks", 0) + 1
+        if missing > _PARENT_EDGE_GRACE_TICKS:
+            self._store.pop(key, None)
+            return None, True
+        entry["missing_ticks"] = missing
+        return entry["parent_sid"], False
+
+    def sweep(self):
+        """Drop keys not seen this tick (unbounded-growth guard). Call once per tick."""
+        for key in [k for k in self._store if k not in self._seen]:
+            del self._store[key]
+        self._seen.clear()
+
+    def reset(self):
+        self._store.clear()
+        self._seen.clear()
+
+
+_PARENT_EDGE_TRACKER = ParentEdgeTracker()
+
+
+def parent_edge_resolve(slug, parent_sid, parent_visible, dead_evidence):
+    return _PARENT_EDGE_TRACKER.resolve(slug, parent_sid, parent_visible, dead_evidence)
+
+
+def parent_edge_sweep():
+    _PARENT_EDGE_TRACKER.sweep()
+
+
+def reset_parent_edge_tracker():
+    """Test hermeticity: clear cross-tick memory so grace never leaks between cases."""
+    _PARENT_EDGE_TRACKER.reset()
+
+
 def _evidence(state, tier, source, rule, inputs, raw_status=None, hysteresis=None):
     # `inputs` is copied: evidence is a snapshot of the tick that produced it, and the
     # caller's dict must not be able to mutate a verdict after the fact.
