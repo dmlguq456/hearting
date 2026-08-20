@@ -810,7 +810,7 @@ EOF
     # default (parity with the codex/claude session-end distillers); opt out with
     # OPENCODE_DISTILL_ENABLE=0. The worker is no-tools verified and timeout-
     # guarded, so a slow/unreachable model can never stall this path.
-    (cd "$cwd" && AGENT_HOME="$AGENT_ROOT" python3 "$ROOT/tools/memory/mem.py" sync --json) 2>/dev/null || true
+    (cd "$cwd" && AGENT_HOME="$AGENT_ROOT" python3 "$ROOT/tools/memory/mem.py" sync --json >/dev/null) || true
     AGENT_HOME="$AGENT_ROOT" \
       OPENCODE_DISTILL_ENABLE="${OPENCODE_DISTILL_ENABLE:-1}" \
       OPENCODE_DISTILL_APPLY="${OPENCODE_DISTILL_APPLY:-1}" \
