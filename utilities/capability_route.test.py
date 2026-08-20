@@ -316,6 +316,18 @@ class TestRoute(unittest.TestCase):
     R.TOPO._uncovered_path_outputs(
      node.get("outputs",[]),node.get("write_scope",[])),[],node["id"])
   R.verify_route(strong,R.ROOT)
+ def test_code_execute_and_test_can_write_cycle_evidence(self):
+  # 실측(cairn 2026-08-20_step7-apply-prep): assignment가 evidence/…를 요구했지만
+  # execute/test write_scope에 evidence/**가 없어 워커가 우회 기록을 해야 했다.
+  # report는 다른 스테이지의 evidence class를 다시 쓰지 않으므로(capabilities/code-report.md)
+  # 의도적으로 제외한다.
+  route=self.compile_v3(self.dispatch(self.nested()))
+  for node_id in ("execute","test"):
+   node=next(n for n in route["nodes"] if n["id"]==node_id)
+   self.assertIn("evidence/**",node["write_scope"],node_id)
+  report=next(n for n in route["nodes"] if n["id"]=="report")
+  self.assertNotIn("evidence/**",report["write_scope"])
+  R.verify_route(route,R.ROOT)
  def test_compile_and_verify_reject_outputs_outside_write_scope(self):
   recipe=self._composed_recipe()
   frame=next(node for node in recipe["standard_plus"]["nodes"] if node["id"]=="frame")
