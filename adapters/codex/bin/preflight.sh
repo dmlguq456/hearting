@@ -381,7 +381,7 @@ case "$cmd" in
     # the compatibility flag never means dump push. Preserve the typed sync
     # exit after the bounded curator fallback has had its chance to run.
     sync_status=0
-    (cd "$cwd" && AGENT_HOME="$AGENT_ROOT" python3 "$ROOT/tools/memory/mem.py" sync --json) || sync_status=$?
+    (cd "$cwd" && AGENT_HOME="$AGENT_ROOT" python3 "$ROOT/tools/memory/mem.py" sync --json >/dev/null) || sync_status=$?
     if [ "$sync_status" -ne 0 ]; then
       printf 'codex preflight: session-end memory sync status=%s; continuing bounded curator fallback\n' "$sync_status" >&2
     fi

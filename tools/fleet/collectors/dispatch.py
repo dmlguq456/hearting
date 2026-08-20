@@ -1379,8 +1379,29 @@ def _enrich_claude_stream_session(job):
     job._runtime_session_id = session_id
 
 
+def _codex_attempt_thread_ids(lines):
+    """Pull every ``thread_id`` off ``thread.started`` rows in ``lines``."""
+    thread_ids = set()
+    for line in lines:
+        try:
+            payload = json.loads(line)
+        except Exception:
+            continue
+        if isinstance(payload, dict) and payload.get("type") == "thread.started":
+            thread_id = payload.get("thread_id")
+            if isinstance(thread_id, str) and thread_id:
+                thread_ids.add(thread_id)
+    return thread_ids
+
+
 def _parse_codex_attempt_tail(path):
-    """Read sanitized App Server telemetry and the currently open command item."""
+    """Read sanitized App Server telemetry and the currently open command item.
+
+    ``thread.started`` — the only event carrying ``thread_id`` — is written once, on the
+    file's first line (F-82). A tail-only read permanently loses it once the log outgrows
+    the tail window, so a file bigger than head+tail also gets a bounded head read; the
+    bytes read stay a constant independent of file size (F-51b/F-51d non-blocking tick).
+    """
     try:
         st = os.stat(path)
     except OSError:
@@ -1389,18 +1410,33 @@ def _parse_codex_attempt_tail(path):
     cached = _CODEX_ATTEMPT_CACHE.get(path)
     if cached and cached[:2] == cache_key:
         return cached[2]
-    start = max(0, st.st_size - _CLAUDE_STREAM_TAIL_BYTES)
-    try:
-        with open(path, "rb") as stream:
-            stream.seek(start)
-            raw = stream.read(_CLAUDE_STREAM_TAIL_BYTES)
-    except OSError:
-        return None
-    lines = raw.decode("utf-8", "replace").splitlines()
-    if start and lines:
-        lines = lines[1:]
+    head_bytes = _CLAUDE_SUPERVISOR_HEAD_BYTES
+    tail_bytes = _CLAUDE_STREAM_TAIL_BYTES
+    head_thread_ids = set()
+    if st.st_size <= head_bytes + tail_bytes:
+        try:
+            with open(path, "rb") as stream:
+                raw = stream.read()
+        except OSError:
+            return None
+        lines = raw.decode("utf-8", "replace").splitlines()
+    else:
+        try:
+            with open(path, "rb") as stream:
+                head_raw = stream.read(head_bytes)
+                stream.seek(st.st_size - tail_bytes)
+                tail_raw = stream.read(tail_bytes)
+        except OSError:
+            return None
+        head_lines = head_raw.decode("utf-8", "replace").splitlines()
+        if head_lines:
+            head_lines = head_lines[:-1]  # the last line may be truncated at the head boundary
+        head_thread_ids = _codex_attempt_thread_ids(head_lines)
+        lines = tail_raw.decode("utf-8", "replace").splitlines()
+        if lines:
+            lines = lines[1:]  # the first item is a partial JSON line
     latest_usage = None
-    thread_ids = set()
+    thread_ids = set(head_thread_ids)
     open_commands = {}
     for line in lines:
         try:

@@ -15,6 +15,7 @@ import json
 import os
 import re
 
+from . import procscan
 from ..model import ContextEvidence, SubAgent
 
 
@@ -512,6 +513,18 @@ def enrich(sess):
         if recovered:
             sess.session_id = recovered
 
+    # 1b) L3 (F-80): a dispatch worker session has no statusline tap (only interactive
+    # sessions write one), so the tap recovery above is structurally unreachable for it —
+    # a lost registry row leaves it sid-less with no §5 fallback. Recover from the owning
+    # process's own environment, the same CLAUDE_CODE_SESSION_ID a registered attempt
+    # already trusts for the parent link (§4 R2). Tap failure only — never overrides a tap
+    # hit — and read_environ() is /proc-scoped to the same uid, so a foreign process's
+    # environ is simply unreadable rather than misattributed.
+    if not sess.session_id and sess.pid is not None:
+        env_sid = procscan.read_environ(sess.pid).get("CLAUDE_CODE_SESSION_ID")
+        if env_sid:
+            sess.session_id = env_sid
+
     # 2) per-session statusline tap (§5) — telemetry; absent → '—'
     sid = sess.session_id
     if sid:
@@ -592,7 +605,6 @@ def enrich(sess):
     # Best-effort by contract: any failure leaves None and renders no tag (PRD F-26 —
     # misattribution is worse than absence).
     if sess.provenance is None and not sess.title:
-        from . import procscan
         try:
             sess.provenance = procscan.provenance(sess.pid)
         except Exception:

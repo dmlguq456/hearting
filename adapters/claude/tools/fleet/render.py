@@ -37,7 +37,7 @@ import sys
 import time
 
 from .model import (fmt_min, dash, project_of, exec_child_is_wait,
-                    LIVENESS_STATES, PLUGIN_QUEUE_STATES)
+                    LIVENESS_STATES, PLUGIN_QUEUE_STATES, session_parent_visible)
 from . import gitinfo
 from .refresh import LiveSnapshot, RefreshPump
 
@@ -1867,7 +1867,8 @@ _RAIL_BOT = "╰"
 _RAIL_TOP_RIGHT = "╮"
 _RAIL_RIGHT = "│"
 _RAIL_BOT_RIGHT = "╯"
-_RAIL_DIV_LEFT = "├"     # header divider tees, drawn only when the card HAS descendants
+_RAIL_DIV_LEFT = "├"     # header divider tees — descendants present OR a route breadcrumb
+                          # needs a place to live (F-81)
 _RAIL_DIV_RIGHT = "┤"
 _RAIL_SOLO = "❙"
 _RAIL_CHARS = (_RAIL_TOP, _RAIL_MID, _RAIL_MID.strip(), _RAIL_BOT, _RAIL_SOLO)
@@ -2086,6 +2087,22 @@ def bottom_label_budget(box_width):
     return max(0, run - _BOT_LABEL_TAIL - _BOT_LABEL_MIN_LEAD - 2)   # 2 = the label's own spaces
 
 
+def _dispatch_rail_label_layout(box_width, label_segs):
+    """Right-flush placement shared by the divider and the close rail (F-81).
+
+    Both rails place an optional route-breadcrumb label with the exact same budget and
+    lead-run arithmetic (F-75's tail-3/lead-2 baseline) so the breadcrumb lands in the same
+    column whether it rides the header divider or the close rail — one ledger, not two
+    copies. Returns ``(run, rule_lead_run_or_None)``; the second value is None when the
+    label does not fit (caller draws a bare rule instead).
+    """
+    run = max(0, box_width - _RAIL_COL - 2)
+    label_w = sum(_dw(text) for text, _k in (label_segs or ()))
+    if not label_w or label_w > bottom_label_budget(box_width):
+        return run, None
+    return run, run - label_w - 2 - _BOT_LABEL_TAIL
+
+
 def _dispatch_box_bottom(box_width, key, run_key=None, label_segs=None):
     """The card's close rail, optionally carrying the owner's route breadcrumb.
 
@@ -2097,23 +2114,26 @@ def _dispatch_box_bottom(box_width, key, run_key=None, label_segs=None):
     padding-run fill — so the box reads as identity on top, pipeline on the bottom, and
     gains no line.
 
+    F-81 (user 2026-08-20): the breadcrumb itself moved to the header divider — see
+    `_dispatch_box_divider` — so `label_segs` is always None on this call in practice
+    (kept as a parameter because this is the pre-existing, still-correct placement path,
+    not new code; F-75's `╰───` four-cell stub, width, corner, and grain are unchanged).
+
     F-68's grain contract still holds: the RULE stays steady (`run_key`) while corners keep
     `key`. Only the breadcrumb's own current token blinks, exactly as it did on the owner
     row — F-70 kept that pulse on the token and off the outline."""
-    run = max(0, box_width - _RAIL_COL - 2)
     lead = [(" " * _RAIL_COL, None), (_RAIL_BOT[0], key)]
     rule_key = run_key or key
-    label_w = sum(_dw(text) for text, _k in (label_segs or ()))
-    if not label_w or label_w > bottom_label_budget(box_width):
+    run, lead_run = _dispatch_rail_label_layout(box_width, label_segs)
+    if lead_run is None:
         return lead + [("─" * run, rule_key), (_RAIL_BOT_RIGHT, key)]
-    lead_run = run - label_w - 2 - _BOT_LABEL_TAIL
     return (lead
             + [("─" * lead_run, rule_key), (" ", None)]
             + list(label_segs)
             + [(" ", None), ("─" * _BOT_LABEL_TAIL, rule_key), (_RAIL_BOT_RIGHT, key)])
 
 
-def _dispatch_box_divider(box_width, key, run_key=None):
+def _dispatch_box_divider(box_width, key, run_key=None, label_segs=None):
     """One in-card rule closing the depth-1 owner's own rows, above its first descendant.
 
     User 2026-08-19 ("depth=1,2 사이에 구분감이 없는데(두줄이라서 특히) … depth=1이 일종의
@@ -2122,15 +2142,27 @@ def _dispatch_box_divider(box_width, key, run_key=None):
     to land on — the owner read as just another sibling inside its own box. This rule gives
     the owner a header band.
 
+    F-81 (user 2026-08-20 "파이프라인은 카드 헤더 밴드가 소유한다"): the owner's route
+    breadcrumb now rides THIS rule instead of the close rail, using the exact placement
+    `_dispatch_box_bottom` used to (`_dispatch_rail_label_layout` — one shared helper, not
+    a parallel copy). Emitted when descendants follow OR a breadcrumb is present — a
+    childless, breadcrumb-less card keeps its two rows and its close rule, with nothing to
+    divide; a childless card whose owner folded to `done` still needs this rule to keep
+    showing its pipeline (the F-81 regression this exists to fix).
+
     Geometry and grain match `_dispatch_box_bottom` exactly (same `run`, same steady
     `run_key` rule against `key` corners), so the divider reads as part of the frame rather
-    than as content. Emitted ONLY when descendants follow: a childless card keeps its two
-    rows and its close rule, with nothing to divide.
+    than as content.
     """
-    run = max(0, box_width - _RAIL_COL - 2)
     rule_key = run_key or key
-    return [(" " * _RAIL_COL, None), (_RAIL_DIV_LEFT, key),
-            ("─" * run, rule_key), (_RAIL_DIV_RIGHT, key)]
+    run, lead_run = _dispatch_rail_label_layout(box_width, label_segs)
+    if lead_run is None:
+        return [(" " * _RAIL_COL, None), (_RAIL_DIV_LEFT, key),
+                ("─" * run, rule_key), (_RAIL_DIV_RIGHT, key)]
+    return ([(" " * _RAIL_COL, None), (_RAIL_DIV_LEFT, key)]
+            + [("─" * lead_run, rule_key), (" ", None)]
+            + list(label_segs)
+            + [(" ", None), ("─" * _BOT_LABEL_TAIL, rule_key), (_RAIL_DIV_RIGHT, key)])
 
 
 _ORPHAN_DIVIDER_LABEL = "  ⌄ orphaned dispatch rows"
@@ -4855,9 +4887,10 @@ def _build_lines(sessions, jobs, section, narrow, malformed, layout="wide", memo
             lines.append(None)
         first = False
 
+        # F-80 L2a: the exact predicate collect_all's ParentEdgeTracker confirms edges
+        # against (model.session_parent_visible) — single definition, not a parallel copy.
         shown = (group_sessions if _SHOW_ALL else
-                 [s for s in group_sessions
-                  if not (s.liveness in ("stale", "dead") or s.app_server)])
+                 [s for s in group_sessions if session_parent_visible(s)])
         hidden = len(group_sessions) - len(shown)
         shown_sids = set(s.session_id for s in shown if s.session_id)
         shown_cwds = {}
@@ -4882,6 +4915,8 @@ def _build_lines(sessions, jobs, section, narrow, malformed, layout="wide", memo
         job_children = {}  # parent dispatch slug -> [dispatch-depth-2 jobs]
         orphans = []       # project-level fallback (parent dead/off-screen/no-env)
         loops_jobs = []    # no-parent-is-normal (cron loops) — no orphan marker
+        grace_jobs = []    # F-80 L2: confirmed edge, parent filtered off-screen this tick
+                            # (stale/app_server/absent) within grace — no orphan marker
         recovered_session_ids = set()
         visible_parent_slugs = {
             j.slug for j in group_jobs
@@ -4911,15 +4946,45 @@ def _build_lines(sessions, jobs, section, narrow, malformed, layout="wide", memo
                     # resurrect finished work whose owner already left. When the owner goes,
                     # its finished children go with it; `a`/--all still reveals them.
                     pass
+                elif getattr(j, "_parent_edge_promoted_orphan", False):
+                    # impl-review gap (round 1 G1 close-out): the ledger's verdict is
+                    # authoritative over shown_sids — a promoted orphan stays an orphan even
+                    # when --all puts its dead parent on screen this tick.
+                    orphans.append(j)
+                elif getattr(j, "_parent_edge_sid", None):
+                    edge_sid = j._parent_edge_sid
+                    if edge_sid in shown_sids:
+                        children.setdefault(edge_sid, []).append(j)
+                        recovered_session_ids.add(edge_sid)
+                    else:
+                        # F-80 L2/C6: collector confirmed this exact edge and it is inside
+                        # grace — consume that verdict rather than re-deriving orphan status
+                        # from shown_sids. The parent row itself is filtered off-screen this
+                        # tick.
+                        grace_jobs.append(j)
                 elif (getattr(j, "is_child", False) and j.parent_sid
                       and j.parent_sid in shown_sids):
+                    # No ledger verdict reached this row (collector never ran
+                    # resolve_parent_edges against it) — fall back to the pre-ledger check.
                     children.setdefault(j.parent_sid, []).append(j)
                     recovered_session_ids.add(j.parent_sid)
                 else:
                     # A malformed/stale parent edge must not make a live dispatch-depth-2 row
                     # disappear from Fleet. Surface it as a project-level orphan.
                     orphans.append(j)
+            elif getattr(j, "_parent_edge_promoted_orphan", False):
+                orphans.append(j)
+            elif getattr(j, "_parent_edge_sid", None):
+                edge_sid = j._parent_edge_sid
+                if edge_sid in shown_sids:
+                    children.setdefault(edge_sid, []).append(j)
+                else:
+                    # F-80 L2/C6: same grace consumption as above, for the depth-1 nesting path.
+                    # Takes priority over the parent_managed_dir/parent_cwd fallbacks below so a
+                    # confirmed edge is never re-resolved through a less precise cwd match.
+                    grace_jobs.append(j)
             elif j.is_child and j.parent_sid and j.parent_sid in shown_sids:
+                # No ledger verdict reached this row — fall back to the pre-ledger check.
                 children.setdefault(j.parent_sid, []).append(j)
             elif (
                 j.is_child
@@ -5139,27 +5204,36 @@ def _build_lines(sessions, jobs, section, narrow, malformed, layout="wide", memo
                     lines[idx] = _frame_dispatch_line(
                         lines[idx], box_width, "top" if idx == block_start else "mid",
                         rail_key, run_key=run_key)
-                # F-75: the close rail carries the owner's WHOLE pipeline, built against the
-                # rail's own budget so a long route folds through `_drop_past_stages` (SD-F2
-                # order: past first, current last) instead of clipping at the corner. Only a
-                # sealed route qualifies — a legacy/pre-boot row keeps its short token on the
-                # owner line and leaves the rule bare, never a fabricated track (F-3/F-42a).
-                # A ONE-node route is not a pipeline: its breadcrumb is the owner row's own
-                # compact token spelled identically, so the rail stays bare rather than
-                # printing `one-shot` twice on one card (the F-37 single-render contract).
-                # Inserted AFTER framing so the divider is not itself passed through
-                # `_frame_dispatch_line` (it is a frame member, not a content row), and
-                # only when a descendant row actually survived the fold above.
-                if header_end < len(lines):
-                    lines.insert(header_end,
-                                 _dispatch_box_divider(box_width, rail_key, run_key=run_key))
-                bottom_label = None
+                # F-81: the header divider now carries the owner's WHOLE pipeline, built
+                # against the rail's own budget so a long route folds through
+                # `_drop_past_stages` (SD-F2 order: past first, current last) instead of
+                # clipping at the corner. Only a sealed route qualifies — a legacy/pre-boot
+                # row keeps its short token on the owner line and leaves the rule bare,
+                # never a fabricated track (F-3/F-42a). A ONE-node route is not a pipeline:
+                # its breadcrumb is the owner row's own compact token spelled identically,
+                # so the rail stays bare rather than printing `one-shot` twice on one card
+                # (the F-37 single-render contract). Computed BEFORE the insertion check
+                # below so a childless-but-labeled card still gets its divider.
+                route_label = None
                 if route_seq and len(route_seq) > 1:
-                    bottom_label = _route_stage_segs(
+                    route_label = _route_stage_segs(
                         route_seq, unit_working or job.liveness == "working",
                         bottom_label_budget(box_width))
+                # Inserted AFTER framing so the divider is not itself passed through
+                # `_frame_dispatch_line` (it is a frame member, not a content row). Emitted
+                # when a descendant row survived the fold above OR a breadcrumb needs
+                # somewhere to live — a card whose children all folded to `done` still owns
+                # a pipeline and must not go silently breadcrumb-less (F-81).
+                if header_end < len(lines) or route_label:
+                    lines.insert(header_end,
+                                 _dispatch_box_divider(box_width, rail_key, run_key=run_key,
+                                                       label_segs=route_label))
+                # F-81: the close rail reverts to a label-less rule — this is the
+                # pre-existing `label_segs=None` path (`_dispatch_box_bottom`'s own
+                # `if not label_w ...` branch), not new code. The `╰───` four-cell stub,
+                # width, corner, and grain are unchanged (user-confirmed 2026-08-20).
                 lines.append(_dispatch_box_bottom(box_width, rail_key, run_key=run_key,
-                                                  label_segs=bottom_label))
+                                                  label_segs=None))
 
         shown = _sort_group_sessions(shown)
         if live_order is not None:
@@ -5269,6 +5343,12 @@ def _build_lines(sessions, jobs, section, narrow, malformed, layout="wide", memo
                 _emit_dispatch_tree(oj, orphan=show_sessions)
         for lj in _sort_group_jobs(loops_jobs):
             _emit_dispatch_tree(lj, orphan=False)
+        # F-80 L2c: a grace-held edge stays a standalone tree row in the SAME group, no
+        # `(orphan)` marker, no divider — nesting under the parent is unavailable because
+        # that row is itself filtered off-screen this tick, but its card/group membership
+        # is preserved exactly as the confirmed edge, not re-derived as project-level loss.
+        for gj in _sort_group_jobs(grace_jobs):
+            _emit_dispatch_tree(gj, orphan=False)
 
         # F-19 repo rows (사용자 확정 2026-07-16): this card's own today-mem events, below a
         # subtle in-band divider — entirely silent when the repo has none (healthy-silent,
