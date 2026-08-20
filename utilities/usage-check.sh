@@ -74,13 +74,21 @@ latest_limit_marker() { # $1=harness
   [ -f "$JOBS" ] || return 0
   awk -F'\t' -v h="$h" '
     $6 ~ /note=dead-[a-z-]*limit/ {
-      # Match either harness= or owner_harness=.
-      if ($6 ~ ("harness=" h) || $6 ~ ("owner_harness=" h)) {
-        reset="-"
-        n=split($6, kv, ",")
-        for (i=1;i<=n;i++) { if (kv[i] ~ /^reset=/) { reset=substr(kv[i],7) } }
-        print $1 "\t" reset
+      # Attribute the marker to the harness whose session actually hit the
+      # limit: the row-own harness= field. owner_harness= is fleet-continuity
+      # metadata (SD-16c) naming the launching parent, so a codex child under
+      # a claude owner must not flip claude to limited; it is consulted only
+      # when harness= is absent (legacy rows). Field-anchored parsing also
+      # keeps owner_harness=<h> from substring-matching "harness=<h>".
+      n=split($6, kv, ",")
+      row_h=""; owner_h=""; reset="-"
+      for (i=1;i<=n;i++) {
+        if (kv[i] ~ /^harness=/) { row_h=substr(kv[i],9) }
+        else if (kv[i] ~ /^owner_harness=/) { owner_h=substr(kv[i],15) }
+        else if (kv[i] ~ /^reset=/) { reset=substr(kv[i],7) }
       }
+      exec_h = (row_h != "") ? row_h : owner_h
+      if (exec_h == h) { print $1 "\t" reset }
     }' "$JOBS" | sort | tail -1
 }
 

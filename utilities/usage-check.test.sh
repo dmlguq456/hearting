@@ -70,6 +70,21 @@ out=$(AGENT_HOME="$AH" bash "$UC" --harness all 2>&1)
 echo "$out" | grep -q '^claude ok$' && echo "$out" | grep -q '^codex limited(noon)$' \
   && ok "harness scope: claude ok / codex limited" || bad "harness scope wrong: [$out]"
 
+# Case (2026-08-19/20 실측 오탐): cross-harness child — a codex child under a
+# claude owner (owner_harness=claude) hits its limit; the marker belongs to
+# codex only. Before the fix, owner_harness= matched claude AND the unanchored
+# regex made "owner_harness=claude" substring-match "harness=claude".
+printf '%s\tdone\tr\tw\ts5\tcapability=research,depth=2,harness=codex,owner_harness=claude,note=dead-session-limit\n' "$now_iso" > "$jobs"
+out=$(AGENT_HOME="$AH" bash "$UC" --harness all 2>&1)
+echo "$out" | grep -q '^claude ok$' && echo "$out" | grep -q '^codex limited(unknown-reset)$' \
+  && ok "cross-harness child limit: claude ok / codex limited" || bad "cross-harness child attribution wrong: [$out]"
+
+# Case (legacy fallback): row with owner_harness= only (no harness=) still
+# attributes the marker to that harness.
+printf '%s\tdone\tr\tw\ts6\tcapability=code-plan,depth=1,owner_harness=claude,note=dead-session-limit\n' "$now_iso" > "$jobs"
+out=$(AGENT_HOME="$AH" bash "$UC" --harness claude 2>&1 | grep -v "^bias ")
+[ "$out" = "claude limited(unknown-reset)" ] && ok "legacy owner_harness-only row → limited" || bad "expected 'claude limited(unknown-reset)' (legacy fallback), got [$out]"
+
 # Case: bias default line present and defaults to neutral auto
 out=$(AGENT_HOME="$AH" bash "$UC" --harness claude 2>&1)
 echo "$out" | grep -q '^bias auto$' && ok "bias default → auto" || bad "expected 'bias auto' line, got [$out]"
