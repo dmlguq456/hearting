@@ -111,18 +111,56 @@ directory may appear there as a Git snapshot, but it is read-only shadow state
 and must never receive agent output. Dispatch adapters pass the canonical root
 to workers and grant only the runtime-specific access needed for that path.
 
-The artifact root contains durable, project-scoped work products:
+The artifact root's top-level population is closed. Every top-level name is one
+of the following, and its disposition class states how the harness treats it.
+Declaring a name here is classification only: it never assigns a new owner and
+never orders a move or a delete.
 
-| Folder | Meaning |
-|---|---|
-| `analysis_project/` | project source analysis |
-| `research/` | topic research and external references |
-| `spec/` | current product/code blueprint |
-| `plans/` | implementation cycles |
-| `documents/` | document drafts and refinement artifacts |
-| `experiments/` | experiment setup, evaluation, and run logs |
-| `designs/` | standalone design decision records (spec-owned design instead anchors at `spec/design/`) |
-| `.runtime/` | artifact-root-scoped runtime state (route lifecycle records and similar); the only bucket name for this, legacy `_runtime/` is read-only |
+| Folder | Meaning | Disposition class |
+|---|---|---|
+| `analysis_project/` | project source analysis | `C-DUR` |
+| `research/` | topic research and external references | `C-DUR` |
+| `spec/` | current product/code blueprint | `C-DUR` |
+| `plans/` | implementation cycles | `C-DUR` |
+| `documents/` | document drafts and refinement artifacts | `C-DUR` |
+| `experiments/` | experiment setup, evaluation, and run logs (declared, currently absent — a reserved boundary, not an error) | `C-DUR` |
+| `designs/` | standalone design decision records (declared, currently absent — a reserved boundary, not an error; spec-owned design instead anchors at `spec/design/`) | `C-DUR` |
+| `_internal/` | cycle-internal support material — a cycle's child, not an independent entry | `C-INT` |
+| `reviews/` | review support material | `C-INT` |
+| `shards/` | parallel-leg support material | `C-INT` |
+| `.runtime/` | artifact-root-scoped runtime state (route lifecycle records and similar); the only bucket name for this, legacy `_runtime/` is read-only | `C-RT` |
+| `.core-grounding/` | core-document read-guard state | `C-RT` |
+| `.spec-grounding/` | spec read-guard state | `C-RT` |
+| `routes/`, `_routes/` | legacy route-record locations outside `.runtime/` | `C-LRT` |
+| `notes/`, `proposals/`, `spec-research-alternative/`, `research-alternative/` | present containers whose owner is not declared — recognized, not adopted | `C-LEG(undeclared-container)` |
+| `.git/`, `.agents/`, `.codex/`, `.probe-*/` | runtime residue that lives beside artifacts without being one | `C-LEG(runtime-residue)` |
+| `_scratch/` | the sole exact census exclusion | `C-SCR` |
+
+**Population.** `_scratch/` is the sole exact census exclusion; no other name is
+excluded by name. Census never follows symlinks: a symlink is recorded as its own
+row and produces no descendant rows, and a symlink whose target resolves outside
+the canonical root is not canonical content.
+
+**Runtime records.** The canonical route lifecycle record is
+`<artifact-root>/.runtime/routes/<route_id>.json`, with the sole terminal sidecar
+`<route_id>.outcome.json` beside it. No other location or basename is a valid
+target for a new route record — including root-level `*route*.json`, `routes/`,
+`_routes/`, and `.routes/`, and including alias basenames inside the canonical
+directory. Records that already exist in those places are legacy migration
+input: they stay readable and closeable so no route is stranded, and only new
+writes to them are blocked.
+
+**Cycle boundaries.** A cycle boundary is a bucket-specific function, not a
+global depth-1 rule. The per-shape boundary table is owned by the component
+blueprint `spec/artifact-path-contract/prd.md` D-23; it is not restated here.
+
+**Exactly one disposition.** Except for `_scratch/`, every regular file and
+container under the artifact root has exactly one disposition, and none is left
+unclassified. Classification implies no destructive action: a `C-LEG` name is
+quarantine-typed, never a delete instruction. The disposition rule sequence, its
+measurement definitions, and its measured counts are owned by
+`spec/artifact-path-contract/prd.md` §16; this section owns only the vocabulary
+and the top-level assignment.
 
 ## 3.1. Report Bundle Root
 
