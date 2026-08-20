@@ -500,7 +500,13 @@ def assign_harnesses(
             gated = [capacity.get(row[0]) is not None and capacity.get(row[0]) <= gate for row in rows]
             all_gated = bool(gated) and all(gated)
             allocation_order = (
-                sum(0 if item else 1 for item in gated),
+                # min-sort: count the gated (headroom <= 100-usage_gate) legs so
+                # an exhausted harness is avoided, not preferred. The inverted
+                # `0 if item else 1` form selected codex at 0% headroom for two
+                # consecutive retrieval groups (2026-08-20 artifact-knowledge-
+                # index gen-1/gen-2) against the balanced-first policy where
+                # usage acts only as the 90%-used exclusion gate.
+                sum(1 if item else 0 for item in gated),
                 -sum(float(capacity.get(row[0]) or 0) for row in rows) if all_gated else 0,
                 sum(counts.get(row[0], 0) for row in rows),
             )

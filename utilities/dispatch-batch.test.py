@@ -462,6 +462,36 @@ class DispatchBatchTest(unittest.TestCase):
         self.assertEqual(independence, "cross-harness")
         self.assertEqual({row[1] for row in rows}, {"claude", "codex"})
 
+    def test_balanced_batch_avoids_a_usage_gated_harness(self):
+        # 2026-08-20 artifact-knowledge-index gen-1/gen-2: under balanced
+        # allocation the inverted usage-gate term PREFERRED codex at 0%
+        # headroom, and both retrieval groups died on dead-session-limit.
+        # A harness past the usage gate (headroom <= 100-usage_gate_used_percent)
+        # must lose to any non-gated cross-harness combination; unknown
+        # headroom (opencode None) is not gated.
+        route = json.loads(json.dumps(self.route))
+        route["dispatch_allocation"] = {
+            "strategy": "balanced",
+            "window": 30,
+            "usage_gate_used_percent": 90,
+            "harness_order": ["claude", "codex", "opencode"],
+        }
+        for node in route["nodes"]:
+            node["harness_affinity"] = "diverse"
+            node["fallback_hops"][1]["candidates"].append(
+                {"child_harness": "opencode", "status": "supported"}
+            )
+        with mock.patch.object(
+            BATCH.DISPATCH_NODE, "resolve_checked_tuple", side_effect=resolve_side_effect
+        ), mock.patch.object(BATCH.CAPACITY, "capacity_scores", return_value={
+            "claude": 60.0, "codex": 0.0, "opencode": None,
+        }):
+            rows, independence, diagnostics = BATCH.assign_harnesses(
+                route, route["nodes"], allow_degraded=False, jobs=self.jobs
+            )
+        self.assertEqual(independence, "cross-harness")
+        self.assertEqual({row[1] for row in rows}, {"claude", "opencode"})
+
     def test_receipt_hop_and_ordinal_match_the_bound_tuple(self):
         # D7 live case reproduced end to end: a foreign claude->claude row
         # shadows nothing once assign_harnesses consumes the one shared
