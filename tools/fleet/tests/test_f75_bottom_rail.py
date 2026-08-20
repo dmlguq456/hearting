@@ -1,15 +1,22 @@
-"""F-75 — the depth-1 conductor breadcrumb moves from the owner row to the card's close rail.
+"""F-75 (geometry) / F-81 (placement) — the depth-1 conductor breadcrumb's right-flush rail
+label geometry, and which rail actually carries it.
 
 User 2026-08-14: "박스를 만들면서 하단 가로줄이 한줄을 잡아먹는데, 거기에 … 우측 정렬 같은걸
-해서 놓는건 어떨까". Before this, the whole route rode the owner row, which is also the box's
+해서 놓는건 어떨까". Before F-75, the whole route rode the owner row, which is also the box's
 TOP edge: at 140 columns a 7-node strong route clipped to `re…`, and at 200 it shoved the frame
-around. The bottom rule was pure decoration.
+around. F-75 moved it to the close rail (`╰───╯`), right-flushed.
 
-Now the rule hosts the breadcrumb right-flushed and the owner row keeps only the compact
-`<node> <done>/<total>` — the same short form a main session row has always used, so both
-altitudes read alike. This suite pins the parts that silently regress: the flush geometry
-(every card's label ends on the same column), the ledger (a label never overruns the corner),
-and the two suppressions (one-node route, no sealed route).
+F-81 (user 2026-08-20 "파이프라인은 카드 헤더 밴드가 소유한다") moved the breadcrumb AGAIN, this
+time from the close rail to the header divider (`├───┤`) — the close rail reverted to a bare
+rule (F-75's four-cell stub, width, corner, and grain unchanged). The right-flush placement
+arithmetic itself (`_dispatch_rail_label_layout`) is shared by both rails and is unchanged by
+F-81, which is why `BottomRailGeometryTest` below still calls `_dispatch_box_bottom` directly
+and still pins the geometry it always pinned. Only `CardIntegrationTest`, which renders through
+the real card and checks WHICH rail shows the text, reflects the F-81 move.
+
+This suite pins the parts that silently regress: the flush geometry (every card's label ends on
+the same column), the ledger (a label never overruns the corner), and the two suppressions
+(one-node route, no sealed route).
 """
 import os
 import re
@@ -198,13 +205,21 @@ class CardIntegrationTest(unittest.TestCase):
         """The rule between the two corners, as it reaches the terminal."""
         return rail_row[rail_row.index("╰") + 1:rail_row.rindex("╯")]
 
-    def test_route_rides_the_close_rail_not_the_owner_row(self):
+    def test_route_rides_the_header_divider_not_the_owner_row_or_close_rail(self):
+        # F-81: the breadcrumb moved from the close rail to the header divider. This card
+        # has no descendants of its own, so the divider only exists BECAUSE of the
+        # breadcrumb (plan.md §4.3's "or route_label" gate) — proving F-81's own
+        # regression fix, not just the geometry move.
         rows = self._render(_owner())
+        divider = [r for r in rows if "├" in r]
         rail = [r for r in rows if "╰" in r]
         owner = [r for r in rows if "╭" in r]
-        self.assertTrue(rail and owner)
-        self.assertIn("plan-check ✓", rail[0])
-        self.assertIn("report", rail[0])
+        self.assertTrue(divider and rail and owner)
+        self.assertIn("plan-check ✓", divider[0])
+        self.assertIn("report", divider[0])
+        # the close rail reverts to a bare rule — F-75's stub/width/corner/grain, no label.
+        self.assertNotIn("plan-check", rail[0])
+        self.assertNotIn("report", rail[0])
         self.assertNotIn("›", owner[0])
         # F-75b: the owner row shows NO stage cell at all — not the compact token and not
         # the bare ` : -` lead-in, which would read as absent rather than relocated.
@@ -244,6 +259,41 @@ class CardIntegrationTest(unittest.TestCase):
         rail = [r for r in rows if "╰" in r]
         self.assertTrue(rail)
         self.assertEqual(set(self._rail_run(rail[0])), {"─"})
+
+    def test_breadcrumb_survives_when_every_descendant_folded_to_done(self):
+        # F-81's own regression: an owner whose children are ALL `done` folds them out of
+        # the card (D8), so `header_end == len(lines)` exactly like a childless card — the
+        # divider must still appear because the breadcrumb needs it, not because a
+        # descendant row survived.
+        job = _owner()
+        child = DispatchJob(key="code-execute", slug="f75-done-child", cwd="/tmp/f75",
+                            harness="claude", depth=2, liveness="done",
+                            parent_slug="f75-owner", is_child=True)
+        from fleet.model import Session
+        session = Session(harness="claude", pid=912, proc_start="root", cwd="/tmp/f75",
+                          session_id="sid-f75c", slug="f75-parent", liveness="working")
+        job.parent_sid, job.is_child = "sid-f75c", True
+        rows = [re.sub(r"\x00[^\x00]*\x00", "", _text(l)) for l in render._build_lines(
+            [session], [job, child], "both", False, 0, layout="wide", term_width=140) if l]
+        divider = [r for r in rows if "├" in r]
+        self.assertTrue(divider, "breadcrumb-only card must still draw its header divider")
+        self.assertIn("plan-check ✓", divider[0])
+
+    def test_breadcrumb_appears_exactly_once_when_descendants_are_live(self):
+        # D9: a card WITH a surviving descendant must not duplicate the breadcrumb between
+        # the divider and the close rail.
+        job = _owner()
+        child = DispatchJob(key="code-execute", slug="f75-live-child", cwd="/tmp/f75",
+                            harness="claude", depth=2, liveness="working",
+                            parent_slug="f75-owner", is_child=True)
+        rows = self._render(job)
+        from fleet.model import Session
+        session = Session(harness="claude", pid=913, proc_start="root", cwd="/tmp/f75",
+                          session_id="sid-f75d", slug="f75-parent", liveness="working")
+        job.parent_sid, job.is_child = "sid-f75d", True
+        rows = [re.sub(r"\x00[^\x00]*\x00", "", _text(l)) for l in render._build_lines(
+            [session], [job, child], "both", False, 0, layout="wide", term_width=140) if l]
+        self.assertEqual(sum(r.count("plan-check ✓") for r in rows), 1)
 
     def test_routeless_card_keeps_a_bare_rail(self):
         """F-3/F-42a: no sealed route means no track — never a fabricated one on the rule."""
