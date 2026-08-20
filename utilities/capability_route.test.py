@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import contextlib, importlib.util, io, json, os, tempfile, unittest
+import contextlib, importlib.util, io, json, os, re, tempfile, unittest
 from pathlib import Path
 
 P=Path(__file__).with_name("capability-route.py")
@@ -1413,5 +1413,209 @@ class TestRoute(unittest.TestCase):
    with self.assertRaisesRegex(ValueError,"route-close-outside-canonical-or-legacy"):
     R.close_route(route,outside,commit="5"*40)
    self.assertFalse(R.outcome_path(outside).exists())
+
+class TestValidationBasis(unittest.TestCase):
+ """B-2: sealed `validation_basis` provenance and its classifier (task-brief §2, plan §5.1)."""
+ def setUp(self):
+  self._tmp_home=tempfile.TemporaryDirectory()
+  (Path(self._tmp_home.name)/"core").mkdir(parents=True,exist_ok=True)
+  (Path(self._tmp_home.name)/"core"/"CORE.md").write_text("fixture\n",encoding="utf-8")
+  self._previous_agent_home=os.environ.get("AGENT_HOME")
+  os.environ["AGENT_HOME"]=self._tmp_home.name
+  self._previous_dispatch_jobs=os.environ.get("AGENT_DISPATCH_JOBS")
+  os.environ.pop("AGENT_DISPATCH_JOBS",None)
+  self.addCleanup(self._restore_agent_home)
+ def _restore_agent_home(self):
+  if self._previous_agent_home is None: os.environ.pop("AGENT_HOME",None)
+  else: os.environ["AGENT_HOME"]=self._previous_agent_home
+  if self._previous_dispatch_jobs is None: os.environ.pop("AGENT_DISPATCH_JOBS",None)
+  else: os.environ["AGENT_DISPATCH_JOBS"]=self._previous_dispatch_jobs
+  self._tmp_home.cleanup()
+ def args(self,**kw):
+  gate={"spec_read":{"satisfied":True,"source":"canonical-prd-sha256"},"drift_verdict":"within-spec","workflow_mode":"tracked","artifact_guard":{"satisfied":True,"source":"conductor-prechecked"}}
+  d=dict(capability="autopilot-code",capability_mode="dev",requested_intensity="direct",cwd=R.ROOT,artifact_root=R.ROOT,predicates=ALL,transport=None,inline_reason="atomic-direct",tracking="tracked",tracked_gate_evidence=gate); d.update(kw); return d
+ def _reseal(self,route):
+  route=json.loads(json.dumps(route))
+  route["route_hash"]=R.route_hash(route); route["route_id"]="rt-"+route["route_hash"].split(":",1)[1][:16]
+  return route
+ def test_fresh_compile_seals_validation_basis(self):
+  route=R.compile_route(**self.args())
+  vb=route["validation_basis"]
+  self.assertEqual(vb["basis_version"],1)
+  self.assertEqual(vb["registry_root"],str(R.TOPO.ROOT))
+  self.assertEqual(vb["unit_catalog_root"],str(R.ROOT))
+  self.assertTrue(Path(vb["runtime_root"]).is_absolute())
+  self.assertIsInstance(vb["runtime_root_validated"],bool)
+  self.assertIsInstance(vb["runtime_root_match"],bool)
+  R.verify_route(route,R.ROOT)
+ def test_relative_runtime_root_candidate_seals_an_absolute_path(self):
+  previous=os.environ.get("AGENT_HOME")
+  os.environ["AGENT_HOME"]=os.path.relpath(self._tmp_home.name,os.getcwd())
+  try:
+   route=R.compile_route(**self.args())
+  finally:
+   if previous is None: os.environ.pop("AGENT_HOME",None)
+   else: os.environ["AGENT_HOME"]=previous
+  vb=route["validation_basis"]
+  self.assertTrue(Path(vb["runtime_root"]).is_absolute())
+  self.assertEqual(Path(vb["runtime_root"]),Path(self._tmp_home.name).resolve())
+  R.verify_route(route,R.ROOT)
+  with tempfile.TemporaryDirectory() as tmp:
+   artifact_root=Path(tmp); route=dict(route); route["artifact_root"]=str(artifact_root)
+   path=artifact_root/"demo-route.json"; path.write_text(json.dumps(route),encoding="utf-8")
+   outcome,created=R.close_route(route,path,commit="b"*40)
+   self.assertTrue(created)
+ def test_same_root_digest_change_still_reads_as_stale(self):
+  route=R.compile_route(**self.args())
+  stale=self._reseal({**json.loads(json.dumps(route)),"registry_digest":"sha256:"+"0"*64})
+  with self.assertRaisesRegex(ValueError,"stale registry digest"):
+   R.verify_route(stale,R.ROOT)
+  stale=self._reseal({**json.loads(json.dumps(route)),"unit_catalog_digest":"sha256:"+"0"*64})
+  with self.assertRaisesRegex(ValueError,"stale unit catalog digest"):
+   R.verify_route(stale,R.ROOT)
+ def test_legacy_route_without_basis_keeps_stale_wording(self):
+  route=R.compile_route(**self.args())
+  legacy=json.loads(json.dumps(route)); legacy.pop("validation_basis")
+  legacy["registry_digest"]="sha256:"+"0"*64
+  legacy=self._reseal(legacy)
+  with self.assertRaisesRegex(ValueError,"stale registry digest"):
+   R.verify_route(legacy,R.ROOT)
+  unmutated=json.loads(json.dumps(route)); unmutated.pop("validation_basis")
+  unmutated=self._reseal(unmutated)
+  R.verify_route(unmutated,R.ROOT)
+ def test_cross_root_digest_mismatch_reports_typed_skew(self):
+  route=R.compile_route(**self.args())
+  skewed=json.loads(json.dumps(route))
+  skewed["validation_basis"]["registry_root"]="/tmp/b2-fixture-other-registry-root"
+  skewed["registry_digest"]="sha256:"+"1"*64
+  skewed=self._reseal(skewed)
+  with self.assertRaisesRegex(ValueError,r"^registry-digest-skew\(compiled="):
+   R.verify_route(skewed,R.ROOT)
+  try:
+   R.verify_route(skewed,R.ROOT)
+  except ValueError as exc:
+   msg=str(exc)
+   self.assertIn(skewed["registry_digest"],msg)
+   self.assertIn(R.TOPO.registry_digest(R.TOPO.load_registry()),msg)
+   self.assertIn("/tmp/b2-fixture-other-registry-root",msg)
+   self.assertIn(str(R.TOPO.ROOT),msg)
+  skewed=json.loads(json.dumps(route))
+  skewed["validation_basis"]["unit_catalog_root"]="/tmp/b2-fixture-other-unit-root"
+  skewed["unit_catalog_digest"]="sha256:"+"1"*64
+  skewed=self._reseal(skewed)
+  with self.assertRaisesRegex(ValueError,r"^unit-catalog-digest-skew\(compiled="):
+   R.verify_route(skewed,R.ROOT)
+ def test_cross_root_equal_digest_passes(self):
+  route=R.compile_route(**self.args())
+  moved=json.loads(json.dumps(route))
+  moved["validation_basis"]["registry_root"]="/tmp/b2-fixture-other-registry-root"
+  moved["validation_basis"]["unit_catalog_root"]="/tmp/b2-fixture-other-unit-root"
+  moved=self._reseal(moved)
+  R.verify_route(moved,R.ROOT)
+ def test_registry_axis_precedes_unit_catalog_axis(self):
+  route=R.compile_route(**self.args())
+  both=json.loads(json.dumps(route))
+  both["registry_digest"]="sha256:"+"0"*64
+  both["validation_basis"]["unit_catalog_root"]="/tmp/b2-fixture-other-unit-root"
+  both["unit_catalog_digest"]="sha256:"+"1"*64
+  both=self._reseal(both)
+  with self.assertRaisesRegex(ValueError,r"^stale registry digest$"):
+   R.verify_route(both,R.ROOT)
+ def test_malformed_validation_basis_fails_closed(self):
+  route=R.compile_route(**self.args())
+  def check(mutate,token):
+   for allow in (False,True):
+    broken=json.loads(json.dumps(route)); mutate(broken)
+    broken=self._reseal(broken)
+    with self.assertRaisesRegex(ValueError,re.escape(token)):
+     R.verify_route(broken,R.ROOT,allow_stale_registry=allow)
+  check(lambda r: r.__setitem__("validation_basis","not-a-dict"),"invalid-validation-basis(field=validation_basis)")
+  check(lambda r: r["validation_basis"].pop("basis_version"),"invalid-validation-basis(field=basis_version)")
+  check(lambda r: r["validation_basis"].__setitem__("basis_version","1"),"invalid-validation-basis(field=basis_version)")
+  check(lambda r: r["validation_basis"].__setitem__("basis_version",0),"invalid-validation-basis(field=basis_version)")
+  for field in ("registry_root","unit_catalog_root","runtime_root"):
+   check(lambda r,field=field: r["validation_basis"].pop(field),f"invalid-validation-basis(field={field})")
+   check(lambda r,field=field: r["validation_basis"].__setitem__(field,""),f"invalid-validation-basis(field={field})")
+   check(lambda r,field=field: r["validation_basis"].__setitem__(field,"relative/path"),f"invalid-validation-basis(field={field})")
+   check(lambda r,field=field: r["validation_basis"].__setitem__(field,7),f"invalid-validation-basis(field={field})")
+  for field in ("runtime_root_validated","runtime_root_match"):
+   check(lambda r,field=field: r["validation_basis"].__setitem__(field,"yes"),f"invalid-validation-basis(field={field})")
+ def test_explicit_null_and_boolean_version_fail_closed(self):
+  route=R.compile_route(**self.args())
+  def check(mutate,token):
+   for allow in (False,True):
+    broken=json.loads(json.dumps(route)); mutate(broken)
+    broken=self._reseal(broken)
+    with self.assertRaisesRegex(ValueError,re.escape(token)):
+     R.verify_route(broken,R.ROOT,allow_stale_registry=allow)
+  check(lambda r: r.__setitem__("validation_basis",None),"invalid-validation-basis(field=validation_basis)")
+  check(lambda r: r["validation_basis"].__setitem__("basis_version",True),"invalid-validation-basis(field=basis_version)")
+ def test_malformed_basis_is_an_intentional_close_blocker(self):
+  # A structurally malformed basis has no legitimate producer -- route_hash is
+  # checked first, so reaching this branch means a hand-edited, resealed record.
+  # It is therefore an intentional close blocker, not a bug to relax later.
+  route=R.compile_route(**self.args())
+  broken=json.loads(json.dumps(route)); broken["validation_basis"]["registry_root"]=""
+  broken=self._reseal(broken)
+  with self.assertRaisesRegex(ValueError,r"^invalid-validation-basis\(field=registry_root\)$"):
+   R.verify_route(broken,R.ROOT,allow_stale_registry=True)
+ def test_unsupported_basis_version_raises_for_launch(self):
+  route=R.compile_route(**self.args())
+  newer=json.loads(json.dumps(route))
+  newer["validation_basis"]["basis_version"]=R.VALIDATION_BASIS_VERSION+1
+  newer=self._reseal(newer)
+  with self.assertRaisesRegex(ValueError,r"^unsupported-validation-basis-version\(basis_version=2\)$"):
+   R.verify_route(newer,R.ROOT,allow_stale_registry=False)
+ def test_unsupported_basis_version_degrades_at_close(self):
+  route=R.compile_route(**self.args())
+  newer=json.loads(json.dumps(route))
+  newer["validation_basis"]["basis_version"]=R.VALIDATION_BASIS_VERSION+1
+  newer=self._reseal(newer)
+  verified=R.verify_route(newer,R.ROOT,allow_stale_registry=True)
+  self.assertIs(verified["_registry_current"],False)
+  with tempfile.TemporaryDirectory() as tmp:
+   artifact_root=Path(tmp); verified=dict(verified); verified["artifact_root"]=str(artifact_root)
+   path=artifact_root/"demo-route.json"; path.write_text(json.dumps(verified),encoding="utf-8")
+   outcome,created=R.close_route(verified,path,commit="c"*40)
+   self.assertTrue(created)
+   self.assertIs(outcome["registry_current"],False)
+ def test_unknown_basis_keys_are_tolerated(self):
+  route=R.compile_route(**self.args())
+  extended=json.loads(json.dumps(route))
+  extended["validation_basis"]["future_field"]="x"
+  extended=self._reseal(extended)
+  R.verify_route(extended,R.ROOT)
+ def test_skew_message_fits_the_batch_clip(self):
+  route=R.compile_route(**self.args())
+  registry_skew=json.loads(json.dumps(route))
+  registry_skew["validation_basis"]["registry_root"]="/tmp/b2-fixture-other-registry-root"
+  registry_skew["registry_digest"]="sha256:"+"1"*64
+  registry_skew=self._reseal(registry_skew)
+  unit_skew=json.loads(json.dumps(route))
+  unit_skew["validation_basis"]["unit_catalog_root"]="/tmp/b2-fixture-other-unit-root"
+  unit_skew["unit_catalog_digest"]="sha256:"+"1"*64
+  unit_skew=self._reseal(unit_skew)
+  for candidate,token in ((registry_skew,"registry-digest-skew"),(unit_skew,"unit-catalog-digest-skew")):
+   try:
+    R.verify_route(candidate,R.ROOT)
+    self.fail("expected ValueError")
+   except ValueError as exc:
+    msg=str(exc)
+    self.assertTrue(msg.startswith(token))
+    self.assertLessEqual(len(f"capability-route: {msg}"[:512]),512)
+    self.assertLessEqual(len(f"capability-route: {msg}"),512)
+ def test_skewed_route_can_still_be_closed(self):
+  route=R.compile_route(**self.args())
+  skewed=json.loads(json.dumps(route))
+  skewed["validation_basis"]["registry_root"]="/tmp/b2-fixture-other-registry-root"
+  skewed["registry_digest"]="sha256:"+"1"*64
+  skewed=self._reseal(skewed)
+  verified=R.verify_route(skewed,R.ROOT,allow_stale_registry=True)
+  self.assertIs(verified["_registry_current"],False)
+  with tempfile.TemporaryDirectory() as tmp:
+   artifact_root=Path(tmp); verified=dict(verified); verified["artifact_root"]=str(artifact_root)
+   path=artifact_root/"demo-route.json"; path.write_text(json.dumps(verified),encoding="utf-8")
+   outcome,created=R.close_route(verified,path,commit="d"*40)
+   self.assertTrue(created)
 
 if __name__=="__main__": unittest.main()

@@ -54,6 +54,7 @@ BROKER_FIELDS_V2 = {"broker_root"}                   # historical v2
 DISPATCH_CONTRACT_VERSION = 3
 FALLBACK_ORDER = ["same-harness-headless", "cross-harness-headless", "native-subagent", "inline"]
 ROUTE_SCHEMA_VERSION = 2
+VALIDATION_BASIS_VERSION = 1
 # Only dispatch-depth-2 nodes receive a checked `fallback_hops` chain, so they are
 # the sole consumers of `dispatch_evidence.tuples`.
 EVIDENCE_CONSUMER_DISPATCH_DEPTH = 2
@@ -609,6 +610,27 @@ def _seal_dispatch_defaults(nodes, capability, owner_profile=None):
         DEFAULTS.query_profile_policy(cfg, owner_profile) if owner_profile else None,
     )
 
+def _validation_basis():
+    """Seal which install root produced `registry_digest`/`unit_catalog_digest`.
+
+    `runtime_root` is normalized to an absolute, resolved path even though
+    `resolve_agent_home()` returns its candidate unnormalized -- a relative
+    `AGENT_HOME`/`CLAUDE_HOME` must not seal a relative `runtime_root`, since
+    the close-time structural gate treats a non-absolute required field as a
+    forged record with no legitimate producer.
+    """
+    runtime_root = Path(resolve_agent_home()).resolve(strict=False)
+    registry_root = TOPO.ROOT
+    unit_catalog_root = ROOT
+    return {
+        "basis_version": VALIDATION_BASIS_VERSION,
+        "registry_root": str(registry_root),
+        "unit_catalog_root": str(unit_catalog_root),
+        "runtime_root": str(runtime_root),
+        "runtime_root_validated": (runtime_root/"core"/"CORE.md").is_file(),
+        "runtime_root_match": agent_home_equivalent(registry_root, runtime_root),
+    }
+
 def unit_catalog_digest(units_root=None):
     """Digest of unit frontmatter blocks (machine contracts); unit BODY prose stays un-hashed."""
     units_root=Path(units_root) if units_root else ROOT/"roles"/"units"
@@ -770,7 +792,8 @@ def _compile_from_recipe(registry, recipe, capability, capability_mode, requeste
       "dispatch_contract_version":DISPATCH_CONTRACT_VERSION,
       "registered_headless_candidates":registered_headless_candidates,
       "registered_headless_policy":"serial-attempt" if effective=="quick" else None,
-      "unit_catalog_digest":unit_catalog_digest()}
+      "unit_catalog_digest":unit_catalog_digest(),
+      "validation_basis":_validation_basis()}
     if checked_dispatch is not None:
         payload["dispatch_evidence_scope_version"]=DISPATCH_EVIDENCE_SCOPE_VERSION
     if composed:
@@ -778,6 +801,87 @@ def _compile_from_recipe(registry, recipe, capability, capability_mode, requeste
         payload["composed_recipe"]=json.loads(json.dumps(recipe))
     digest=route_hash(payload); payload["route_hash"]=digest; payload["route_id"]="rt-"+digest.split(":",1)[1][:16]
     return payload
+
+class _ValidationBasisDegrade:
+    """Sentinel: an over-ceiling `basis_version` degrades rather than raising."""
+
+_DEGRADE_VALIDATION_BASIS = _ValidationBasisDegrade()
+
+def _check_validation_basis(route, *, allow_stale_registry):
+    """Structural/version gate for `validation_basis` (task-brief B-2 §1.3).
+
+    Returns the object when present and well-formed, `None` when the field is
+    absent (legacy route), or `_DEGRADE_VALIDATION_BASIS` when the caller
+    tolerates staleness and the object's `basis_version` exceeds this
+    validator's ceiling. A structurally malformed object always raises on
+    either `allow_stale_registry` setting -- no legitimate compiler can emit
+    one (every required field is a non-empty absolute-path string by
+    construction), so reaching this branch means a hand-edited and resealed
+    record.
+    """
+    if "validation_basis" not in route:
+        return None
+    basis = route.get("validation_basis")
+    if not isinstance(basis, dict):
+        raise ValueError("invalid-validation-basis(field=validation_basis)")
+    version = basis.get("basis_version")
+    if isinstance(version, bool) or not isinstance(version, int) or version < 1:
+        raise ValueError("invalid-validation-basis(field=basis_version)")
+    for field in ("registry_root", "unit_catalog_root", "runtime_root"):
+        value = basis.get(field)
+        if not isinstance(value, str) or not value or not Path(value).is_absolute():
+            raise ValueError(f"invalid-validation-basis(field={field})")
+    for field in ("runtime_root_validated", "runtime_root_match"):
+        if field in basis and not isinstance(basis[field], bool):
+            raise ValueError(f"invalid-validation-basis(field={field})")
+    if version > VALIDATION_BASIS_VERSION:
+        if allow_stale_registry:
+            return _DEGRADE_VALIDATION_BASIS
+        raise ValueError(f"unsupported-validation-basis-version(basis_version={version})")
+    return basis
+
+def classify_validation_basis(route, *, registry_digest_now, units_digest_now,
+                              registry_root_now, unit_catalog_root_now):
+    """Pure classifier for a route's registry/unit-catalog currentness
+    (task-brief B-2 §1.4/§1.5). Never raises and never touches the filesystem.
+
+    `route["validation_basis"]` must already have passed
+    `_check_validation_basis`; its absence (legacy route) makes both axes
+    classify same-root staleness on a digest mismatch, preserving today's
+    exact wording.
+    """
+    basis = route.get("validation_basis")
+    axes = {}
+    for axis, own_digest, own_root, digest_key, root_key, stale_message, skew_reason in (
+        ("registry", registry_digest_now, registry_root_now,
+         "registry_digest", "registry_root", "stale registry digest", "registry-digest-skew"),
+        ("unit_catalog", units_digest_now, unit_catalog_root_now,
+         "unit_catalog_digest", "unit_catalog_root", "stale unit catalog digest", "unit-catalog-digest-skew"),
+    ):
+        sealed_digest = route.get(digest_key)
+        if sealed_digest is None or sealed_digest == own_digest:
+            axes[axis] = {"verdict": "current", "message": None}
+            continue
+        if basis is None or agent_home_equivalent(basis[root_key], own_root):
+            axes[axis] = {"verdict": "stale", "message": stale_message}
+            continue
+        sealed_root = basis[root_key]
+        axes[axis] = {
+            "verdict": "skew",
+            "message": (
+                f"{skew_reason}(compiled={sealed_digest}@{sealed_root}, "
+                f"validator={own_digest}@{own_root})"
+            ),
+        }
+    verdict, message = "current", None
+    for axis in ("registry", "unit_catalog"):
+        if axes[axis]["verdict"] != "current":
+            verdict, message = axes[axis]["verdict"], axes[axis]["message"]
+            break
+    return {
+        "registry": axes["registry"], "unit_catalog": axes["unit_catalog"],
+        "verdict": verdict, "message": message, "basis_present": basis is not None,
+    }
 
 def verify_route(route, expected_cwd=None, *, allow_stale_registry=False):
     """Verify a route for mutating/resume use.
@@ -803,17 +907,22 @@ def verify_route(route, expected_cwd=None, *, allow_stale_registry=False):
     if route.get("route_hash") != route_hash(route): raise ValueError("stale or modified route hash")
     if route.get("route_id") != "rt-"+route["route_hash"].split(":",1)[1][:16]: raise ValueError("invalid route id")
     if expected_cwd and Path(expected_cwd).resolve()!=Path(route["cwd"]): raise ValueError("route cwd mismatch")
+    basis=_check_validation_basis(route, allow_stale_registry=allow_stale_registry)
+    if basis is _DEGRADE_VALIDATION_BASIS:
+        # An unsupported basis_version is a legitimate newer harness's route;
+        # closure records it honestly as unproven rather than stranding it.
+        return dict(route, _registry_current=False)
     registry=TOPO.load_registry()
-    registry_current=route["registry_digest"]==TOPO.registry_digest(registry)
-    units_current=(route.get("unit_catalog_digest") is None
-                   or route["unit_catalog_digest"]==unit_catalog_digest())
-    if not (registry_current and units_current):
+    classification=classify_validation_basis(
+        route, registry_digest_now=TOPO.registry_digest(registry),
+        units_digest_now=unit_catalog_digest(),
+        registry_root_now=TOPO.ROOT, unit_catalog_root_now=ROOT,
+    )
+    if classification["verdict"] != "current":
         if not allow_stale_registry:
-            raise ValueError(
-                "stale registry digest" if not registry_current else "stale unit catalog digest"
-            )
-        # A stale sealed graph cannot be re-derived from the current registry, so every
-        # check that compares against it is skipped rather than guessed at.
+            raise ValueError(classification["message"])
+        # A stale/skewed sealed graph cannot be re-derived from the current registry, so
+        # every check that compares against it is skipped rather than guessed at.
         return dict(route, _registry_current=False)
     _validate_output_scopes(route.get("nodes", []))
     def _node_identity(node):
@@ -2702,6 +2811,15 @@ def main():
             output_path=expected_output
         write_once(output_path,route)
         print(f"route_file={output_path.resolve()}",file=sys.stderr)
+        vbasis=route.get("validation_basis") or {}
+        if vbasis.get("runtime_root_match") is False:
+            print(
+                "capability-route: compiled-outside-runtime-root "
+                f"registry_root={vbasis.get('registry_root')} "
+                f"runtime_root={vbasis.get('runtime_root')} "
+                f"runtime_root_validated={int(bool(vbasis.get('runtime_root_validated')))}",
+                file=sys.stderr,
+            )
         print(json.dumps(route,sort_keys=True))
     elif a.command=="status":
         rows=route_status(a.artifact_root)
