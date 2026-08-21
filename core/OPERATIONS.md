@@ -181,7 +181,11 @@ will be pruned, while `_cleanup_releases` repeats the same succession check as a
 fail-closed safety net before deleting an older release. Thus an env-less
 session under the managed release never strands state merely because rotation
 did not trigger pruning — fail-closing here would instead break that established
-succession contract. Explicit or inherited registries inside a bundle's versioned `source` tree are rejected with
+succession contract. Succession is not a sufficient condition for deletion: before pruning a
+release, `_cleanup_releases` also checks both the candidate release's own registry and the live
+release's registry for an open row whose `launch_home=` names that candidate, and keeps the release
+if either check finds one or the evidence cannot be read — a release a live attempt still
+references is never pruned. Explicit or inherited registries inside a bundle's versioned `source` tree are rejected with
 `versioned-source-registry-fallback`. Completion, logs, watchdog, heartbeat,
 and supervisor state continue to derive only from the accepted registry's
 parent.

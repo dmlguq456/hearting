@@ -836,6 +836,82 @@ assert (state_root_after / "completion" / "rt-chain3-fixture" / "plan.json").is_
 PY
 echo "ok - chain-(3) dispatch state survives release rotation via _cleanup_releases succession"
 
+# In-use release preservation (installer-probes-dispatch-fixes plan item 2, P0):
+# a live registered dispatch attempt with an open row whose launch_home= names a
+# release must survive rotation even when its retention floor and succession
+# would otherwise let _cleanup_releases rmtree it. Reproduces the real incident:
+# v2.57.1 was live, v2.57.2 -> v2.57.3 rotated past it, and the directory was
+# deleted out from under a registered owner whose route was sealed to it.
+python3 - "$ROOT" <<'PY'
+import os, sys, time
+from pathlib import Path
+
+root = Path(sys.argv[1])
+sys.path.insert(0, str(root / "tools/install"))
+import distribution as d
+
+os.environ.pop("AGENT_DISPATCH_JOBS", None)
+
+releases = d.data_root() / "releases"
+releases.mkdir(parents=True, exist_ok=True)
+
+future_base = time.time() + 30_000_000
+names = ("v-inuse-1", "v-inuse-2", "v-inuse-3", "v-inuse-4")
+release_dirs = []
+for i, name in enumerate(names):
+    rel = releases / name
+    (rel / "core").mkdir(parents=True)
+    (rel / "core" / "CORE.md").write_text("fixture\n")
+    os.utime(rel, (future_base + i, future_base + i))
+    release_dirs.append(rel)
+
+oldest, newest = release_dirs[0], release_dirs[3]
+if d.current_path().exists() or d.current_path().is_symlink():
+    d.current_path().unlink()
+d.current_path().symlink_to(newest)
+
+def write_open_row(release, launch_home):
+    jobs_log = release / ".dispatch" / "jobs.log"
+    jobs_log.parent.mkdir(parents=True, exist_ok=True)
+    row = (
+        f"{time.time()}\topen\trepo\t/tmp/wt\tslug\t"
+        f"attempt_id=att-inuse,launch_home={launch_home}\n"
+    )
+    jobs_log.write_text(row)
+    return jobs_log
+
+# Case A: an open row in the oldest release's own registry names that same
+# release as its launch_home -- it must be preserved, not pruned.
+jobs_log = write_open_row(oldest, str(oldest.resolve()))
+# Counter-case (same cleanup pass, so both assertions are proven against the
+# identical retention/floor arithmetic): a DIFFERENT candidate whose own open
+# row's launch_home= points at yet another release must not be pinned by it.
+other = release_dirs[1]
+write_open_row(other, str(release_dirs[2].resolve()))
+
+d._cleanup_releases(keep=set())
+
+assert oldest.exists(), (
+    "a release referenced by an open dispatch attempt (launch_home=self) "
+    "must survive rotation"
+)
+assert not other.exists(), (
+    "an open row naming a different release's launch_home must not pin "
+    "this candidate release"
+)
+
+# Symmetric counter-case: the SAME oldest row, now `done`, no longer preserves
+# the release -- proves this doesn't degrade into "preserve everything".
+jobs_log.write_text(
+    jobs_log.read_text().replace("\topen\t", "\tdone\t", 1)
+)
+d._cleanup_releases(keep=set())
+assert not oldest.exists(), (
+    "a done row must not preserve a release -- only an open row does"
+)
+PY
+echo "ok - a release referenced by an open dispatch attempt survives rotation"
+
 # 2026-08-20 regression (dispatch-harness-balance plan.md Phase 2 / completion
 # criterion (b)): with EXACTLY 2 release dirs, _cleanup_releases has zero
 # prune candidates (the `retained < 2` floor plus `keep` protect both), so its
