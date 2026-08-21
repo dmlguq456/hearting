@@ -496,8 +496,11 @@ def assign_harnesses(
             }
         )
         if isinstance(allocation, dict) and allocation.get("strategy") == "balanced":
-            gate = 100 - allocation.get("usage_gate_used_percent", 90)
-            gated = [capacity.get(row[0]) is not None and capacity.get(row[0]) <= gate for row in rows]
+            gate_pct = allocation.get("usage_gate_used_percent", 90)
+            gated = [
+                CAPACITY.is_gated(capacity, row[0], usage_gate_used_percent=gate_pct)
+                for row in rows
+            ]
             all_gated = bool(gated) and all(gated)
             gated_legs = sum(1 if item else 0 for item in gated)
             if all_gated:
@@ -510,10 +513,13 @@ def assign_harnesses(
                 # artifact-knowledge-index gen-1/gen-2) against the
                 # balanced-first policy where usage acts only as the
                 # 90%-used exclusion gate.
-                allocation_order = (
+                gate_order = (
                     gated_legs,
                     -sum(float(capacity.get(row[0]) or 0) for row in rows),
+                )
+                allocation_order = (
                     float(sum(counts.get(row[0], 0) for row in rows)),
+                    0.0,
                 )
             else:
                 # Same soft headroom/round-robin blend rank_band's balanced
@@ -526,18 +532,20 @@ def assign_harnesses(
                 # not the legs in this one group, because a target share is
                 # only defined over the full candidate set.
                 deficit = CAPACITY.allocation_deficit(capacity, counts, usable)
+                gate_order = (gated_legs, 0.0)
                 allocation_order = (
-                    gated_legs,
                     0.0,
                     round(-sum(deficit.get(row[0], 0.0) for row in rows), 9),
                 )
         else:
+            gate_order = (0, 0.0)
             allocation_order = (
                 -sum(CAPACITY.ordering_score(capacity, row[0]) for row in rows),
                 sum(counts.get(row[0], 0) for row in rows),
             )
         return (
             -len({row[0] for row in rows}),
+            *gate_order,  # B-1: the balanced usage gate precedes quality band
             sum(band_rank(node, row[0]) for node, row in zip(nodes, rows)),
             affinity_misses,
             *allocation_order,

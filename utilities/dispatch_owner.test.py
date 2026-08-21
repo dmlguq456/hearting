@@ -260,6 +260,38 @@ class DispatchOwnerTests(unittest.TestCase):
         self.assertEqual(selected, ["claude", "codex", "opencode"])
         self.assertIn("allocation_strategy=balanced", result.stdout)
 
+    def test_balanced_owner_prefers_an_ungated_last_resort_over_a_gated_primary(self):
+        # B-1: the balanced usage gate is a cross-band partition, so a gated
+        # primary must not win over an ungated last_resort.
+        result = self.run_owner(
+            config=self.balanced_quality_config(),
+            model_profile="deep",
+            env_extra={"HARNESS_CAPACITY_SCORES": "claude:5,codex:5,opencode:80"},
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("adapter=opencode", result.stdout)
+        self.assertIn("quality_band=last_resort", result.stdout)
+
+    def test_explicit_target_still_beats_the_usage_gate(self):
+        result = self.run_owner(
+            "claude", ("--adapter", "codex"),
+            config=self.balanced_quality_config(),
+            model_profile="deep",
+            env_extra={"HARNESS_CAPACITY_SCORES": "claude:5,codex:5,opencode:80"},
+        )
+        self.assert_model_map(result, "codex")
+        self.assertIn("quality_band=explicit", result.stdout)
+
+    def test_balanced_owner_uses_global_headroom_when_all_candidates_are_gated(self):
+        result = self.run_owner(
+            config=self.balanced_quality_config(),
+            model_profile="deep",
+            env_extra={"HARNESS_CAPACITY_SCORES": "claude:4,codex:1,opencode:9"},
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("adapter=opencode", result.stdout)
+        self.assertIn("quality_band=last_resort", result.stdout)
+
     def test_opencode_is_light_peer_but_deep_last_resort(self):
         config = self.balanced_quality_config()
         light = self.run_owner(config=config, model_profile="light")
