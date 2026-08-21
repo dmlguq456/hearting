@@ -892,7 +892,15 @@ class SecurityTest(_ConfigHomeMixin, unittest.TestCase):
     def test_capacity_does_not_make_opencode_a_quality_peer(self):
         self._pin_quality_boundary_config()
         os.environ["HARNESS_CAPACITY_SCORES"] = "claude:70,codex:80,opencode:100"
-        self.assertEqual(rt.selected_providers()[0], "claude")
+        # opencode holds the highest gauge but is declared relief, and both
+        # primaries sit far above promote_relief_below, so the winner must come
+        # from the primary band — that is what this case guards. Which primary
+        # wins is a separate contract: balanced ordering now blends headroom, so
+        # codex (80) leads claude (70). Asserting "claude" here restated that
+        # ordering incidentally and turned the allocation fix into a failure.
+        selected = rt.selected_providers()[0]
+        self.assertNotEqual(selected, "opencode")
+        self.assertEqual(selected, "codex")
 
     def test_tight_primary_capacity_promotes_declared_opencode_relief(self):
         self._pin_quality_boundary_config()
