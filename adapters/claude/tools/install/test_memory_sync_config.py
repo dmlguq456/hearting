@@ -1,0 +1,1 @@
+../../../../tools/install/test_memory_sync_config.py

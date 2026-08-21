@@ -77,6 +77,7 @@ python3 <agent-home>/tools/memory/mem.py <command>
 | `project [--cwd]` | Build the compatibility projection. Session context uses `inject`, not this command. |
 | `migrate [--apply] [--all-projects]` | Scan only the current logical project by default. `--all-projects` is the explicit cross-project/global recovery path required for runtime-memory cleanup; this command is not a live multi-server seed/cutover executor. |
 | `migration <phase> … --epoch <id> [--json]` | Inspect or orchestrate the sealed existing-store protocol-v2 cutover. Artifact/ref/store mutations are dry-run by default and require both `--apply` and a matching `--expect` state digest. See “Existing-store migration” below. |
+| `migration join [--epoch <id>] [--apply] [--sync] [--json]` | Join a provably fresh store to an existing exchange: seal a fresh epoch, activate its writer fence, and optionally run the first sync. An epoch is derived from the replica and protected ref, so a repeated join is the same join. A store that already holds records or v2 operations is refused — that store needs the sealed-seed cutover instead. |
 | `lifecycle [--apply]` | Apply working expiry and expose durable duplicate/capacity candidates. Pending delivery records remain protected. |
 | `stats` | Print a grouped store snapshot. |
 | `log [--limit 20] [--action] [--tier] [--actor] [--json]` | Read the bounded write-event timeline (D-38), complementing the `stats` snapshot. |
@@ -273,6 +274,18 @@ and confidence thresholds never substitute for that judgment.
 - `mem log` is a timeline and complements rather than replaces `stats`.
 - `mem doctor` is read-only. Its findings are evidence for an agent; it does not
   automatically consolidate, merge, graduate, or delete records.
+
+## Exchange policy
+
+`${XDG_CONFIG_HOME:-$HOME/.config}/hearting/memory-sync.json` holds the shared
+exchange policy — `enabled`, `remote_url`, `ref`, and `exchange_dir` — and every
+adapter reads it. Only one runtime keeps a settings file able to carry
+environment defaults, so a policy stored there alone would leave the others
+synchronizing local-only. The process environment overrides the file
+field-for-field, which keeps one-off and test runs unaffected by it.
+
+`harness memory join --remote-url <url>` writes that file and then joins this
+store; `harness memory status` reports the recorded policy.
 
 ## Environment overrides
 

@@ -17,6 +17,7 @@ import os
 import json
 import argparse
 import shutil
+import subprocess
 from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
@@ -32,6 +33,7 @@ import distribution
 import codex_launcher
 import routing_config
 import report_bundle_config
+import memory_sync_config
 from drivers import get_driver, RUNTIMES
 
 # Exit codes map one-to-one to the PRD CLI table.
@@ -100,6 +102,29 @@ def build_parser():
 
     p_uninstall = sub.add_parser("uninstall", parents=[common], help="Remove only manifest-owned files")
     p_uninstall.add_argument("target", nargs="?", choices=RUNTIMES, default=None)
+
+    # Memory exchange policy: one portable file every adapter reads, plus the
+    # one-shot join that turns a fresh store into a member of that exchange.
+    p_memory = sub.add_parser(
+        "memory", help="Configure and join the shared memory exchange")
+    memory_sub = p_memory.add_subparsers(
+        dest="memory_command", required=True, parser_class=_UsageExitParser)
+    p_memory_join = memory_sub.add_parser(
+        "join", help="Record the exchange policy and join this store to it")
+    p_memory_join.add_argument("--remote-url", required=True,
+                               help="Git remote holding the protected ref")
+    p_memory_join.add_argument(
+        "--ref", default=memory_sync_config.DEFAULT_REF,
+        help=f"Protected ref (default: {memory_sync_config.DEFAULT_REF})")
+    p_memory_join.add_argument(
+        "--exchange-dir",
+        help="Private per-host exchange repository (default: XDG state home)")
+    p_memory_join.add_argument("--dry-run", action="store_true",
+                               help="Show the policy without writing or joining")
+    p_memory_join.add_argument("--json", action="store_true")
+    p_memory_status = memory_sub.add_parser(
+        "status", help="Show the recorded exchange policy")
+    p_memory_status.add_argument("--json", action="store_true")
 
     # Source → active runtime truth.  These parsers intentionally do not inherit
     # the legacy install channel's --plugin option: linked/packaged are mutually
@@ -1020,8 +1045,66 @@ def cmd_auto_update(args):
     }
 
 
+def cmd_memory(args):
+    """Record the shared exchange policy, then join this store to it."""
+    operation = args.memory_command
+    if operation == "status":
+        report = memory_sync_config.validate()
+        return {
+            "operation": f"memory {operation}",
+            "memory_sync": report,
+            "checks": [],
+            "drift": [],
+            "exit": EXIT_OK if report["status"] in {"ok", "absent"} else EXIT_VERIFY_FAIL,
+            "lines": [f"memory sync config: {report['status']}: {report['path']}"]
+                     + ([f"remote: {report.get('remote_url')}",
+                         f"ref: {report.get('ref')}",
+                         f"exchange: {report.get('exchange_dir')}"]
+                        if report["status"] == "ok" else []),
+        }
+
+    try:
+        written = memory_sync_config.write(
+            remote_url=args.remote_url, ref=args.ref,
+            exchange_dir=args.exchange_dir, dry_run=args.dry_run)
+    except ValueError as exc:
+        return {"operation": f"memory {operation}", "checks": [], "drift": [],
+                "exit": EXIT_FAIL, "lines": [f"memory join: invalid policy: {exc}"]}
+
+    lines = [f"memory join: policy {written['status']}: {written['path']}",
+             f"remote: {written['remote_url']}",
+             f"ref: {written['ref']}",
+             f"exchange: {written['exchange_dir']}"]
+    if args.dry_run:
+        lines.append("next: rerun without --dry-run to join")
+        return {"operation": f"memory {operation}", "memory_sync": written,
+                "checks": [], "drift": [], "exit": EXIT_OK, "lines": lines}
+
+    # `mem` owns every store mutation; this command only supplies the policy.
+    mem = paths.agent_home() / "tools" / "memory" / "mem.py"
+    completed = subprocess.run(
+        [sys.executable, str(mem), "migration", "join", "--apply", "--sync", "--json"],
+        text=True, capture_output=True)
+    payload = {}
+    if completed.stdout.strip():
+        try:
+            payload = json.loads(completed.stdout.strip().splitlines()[-1])
+        except json.JSONDecodeError:
+            payload = {}
+    ok = completed.returncode == 0 and payload.get("status") != "hard-failure"
+    lines.append(
+        f"join: {payload.get('migration_state', 'failed')}"
+        f" ({payload.get('reason', completed.stderr.strip()[:120] or 'no output')})")
+    if ok:
+        lines.append(f"sync exit: {payload.get('sync_exit_code', 'n/a')}")
+    return {"operation": f"memory {operation}", "memory_sync": written,
+            "join": payload, "checks": [], "drift": [],
+            "exit": EXIT_OK if ok else EXIT_FAIL, "lines": lines}
+
+
 COMMANDS = {
     "install": cmd_install,
+    "memory": cmd_memory,
     "verify": cmd_verify,
     "update": cmd_update,
     "status": cmd_status,
