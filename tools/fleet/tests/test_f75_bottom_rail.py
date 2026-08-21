@@ -205,26 +205,33 @@ class CardIntegrationTest(unittest.TestCase):
         """The rule between the two corners, as it reaches the terminal."""
         return rail_row[rail_row.index("╰") + 1:rail_row.rindex("╯")]
 
-    def test_route_rides_the_header_divider_not_the_owner_row_or_close_rail(self):
-        # F-81: the breadcrumb moved from the close rail to the header divider. This card
-        # has no descendants of its own, so the divider only exists BECAUSE of the
-        # breadcrumb (plan.md §4.3's "or route_label" gate) — proving F-81's own
-        # regression fix, not just the geometry move.
-        rows = self._render(_owner())
-        divider = [r for r in rows if "├" in r]
-        rail = [r for r in rows if "╰" in r]
-        owner = [r for r in rows if "╭" in r]
-        self.assertTrue(divider and rail and owner)
-        self.assertIn("plan-check ✓", divider[0])
-        self.assertIn("report", divider[0])
-        # the close rail reverts to a bare rule — F-75's stub/width/corner/grain, no label.
-        self.assertNotIn("plan-check", rail[0])
-        self.assertNotIn("report", rail[0])
-        self.assertNotIn("›", owner[0])
-        # F-75b: the owner row shows NO stage cell at all — not the compact token and not
-        # the bare ` : -` lead-in, which would read as absent rather than relocated.
-        self.assertNotIn("execute", owner[0])
-        self.assertNotIn(" : ", owner[0])
+    def test_route_rides_the_close_rail_when_the_card_has_no_children(self):
+        # D4/F-81 revision: the header divider separates the owner's own rows from its
+        # descendants' — a card with no raw children (this one) has nothing for a divider
+        # to separate, so it draws NO divider and the breadcrumb rides the close rail
+        # instead (the pre-F-81 shape, restored deliberately: a childless multi-node
+        # route no longer grows the card by one line just because a route resolved).
+        # Checked at both a wide (140) and a narrow (80) terminal — the divider/rail
+        # split is a geometry decision independent of column budget.
+        for width in (140, 80):
+            with self.subTest(width=width):
+                rows = self._render(_owner(), width=width, layout=render._layout_mode(width))
+                divider = [r for r in rows if "├" in r]
+                rail = [r for r in rows if "╰" in r]
+                owner = [r for r in rows if "╭" in r]
+                self.assertFalse(divider)
+                self.assertTrue(rail and owner)
+                self.assertIn("plan-check ✓", rail[0])
+                self.assertIn("report", rail[0])
+                self.assertNotIn("›", owner[0])
+                # F-75b: the owner row shows NO stage cell at all — not the compact token
+                # and not the bare ` : -` lead-in, which would read as absent rather than
+                # relocated.
+                self.assertNotIn("execute", owner[0])
+                self.assertNotIn(" : ", owner[0])
+                for row in rows:
+                    if any(mark in row for mark in ("╭", "│", "╰")):
+                        self.assertLessEqual(render._dw(row), width)
 
     def test_child_row_keeps_its_own_status_inside_the_card(self):
         job = _owner()
@@ -265,35 +272,55 @@ class CardIntegrationTest(unittest.TestCase):
         # the card (D8), so `header_end == len(lines)` exactly like a childless card — the
         # divider must still appear because the breadcrumb needs it, not because a
         # descendant row survived.
-        job = _owner()
-        child = DispatchJob(key="code-execute", slug="f75-done-child", cwd="/tmp/f75",
-                            harness="claude", depth=2, liveness="done",
-                            parent_slug="f75-owner", is_child=True)
         from fleet.model import Session
-        session = Session(harness="claude", pid=912, proc_start="root", cwd="/tmp/f75",
-                          session_id="sid-f75c", slug="f75-parent", liveness="working")
-        job.parent_sid, job.is_child = "sid-f75c", True
-        rows = [re.sub(r"\x00[^\x00]*\x00", "", _text(l)) for l in render._build_lines(
-            [session], [job, child], "both", False, 0, layout="wide", term_width=140) if l]
-        divider = [r for r in rows if "├" in r]
-        self.assertTrue(divider, "breadcrumb-only card must still draw its header divider")
-        self.assertIn("plan-check ✓", divider[0])
+        for width in (140, 80):
+            with self.subTest(width=width):
+                job = _owner()
+                child = DispatchJob(key="code-execute", slug="f75-done-child", cwd="/tmp/f75",
+                                    harness="claude", depth=2, liveness="done",
+                                    parent_slug="f75-owner", is_child=True)
+                session = Session(harness="claude", pid=912, proc_start="root", cwd="/tmp/f75",
+                                  session_id="sid-f75c", slug="f75-parent", liveness="working")
+                job.parent_sid, job.is_child = "sid-f75c", True
+                rows = [re.sub(r"\x00[^\x00]*\x00", "", _text(l))
+                        for l in render._build_lines(
+                            [session], [job, child], "both", False, 0,
+                            layout=render._layout_mode(width), term_width=width) if l]
+                divider = [r for r in rows if "├" in r]
+                rail = [r for r in rows if "╰" in r]
+                self.assertTrue(divider,
+                                "breadcrumb-only card must still draw its header divider")
+                self.assertIn("plan-check ✓", divider[0])
+                self.assertNotIn("plan-check ✓", rail[0])
+                for row in rows:
+                    if any(mark in row for mark in ("╭", "│", "├", "╰")):
+                        self.assertLessEqual(render._dw(row), width)
 
     def test_breadcrumb_appears_exactly_once_when_descendants_are_live(self):
         # D9: a card WITH a surviving descendant must not duplicate the breadcrumb between
         # the divider and the close rail.
-        job = _owner()
-        child = DispatchJob(key="code-execute", slug="f75-live-child", cwd="/tmp/f75",
-                            harness="claude", depth=2, liveness="working",
-                            parent_slug="f75-owner", is_child=True)
-        rows = self._render(job)
         from fleet.model import Session
-        session = Session(harness="claude", pid=913, proc_start="root", cwd="/tmp/f75",
-                          session_id="sid-f75d", slug="f75-parent", liveness="working")
-        job.parent_sid, job.is_child = "sid-f75d", True
-        rows = [re.sub(r"\x00[^\x00]*\x00", "", _text(l)) for l in render._build_lines(
-            [session], [job, child], "both", False, 0, layout="wide", term_width=140) if l]
-        self.assertEqual(sum(r.count("plan-check ✓") for r in rows), 1)
+        for width in (140, 80):
+            with self.subTest(width=width):
+                job = _owner()
+                child = DispatchJob(key="code-execute", slug="f75-live-child", cwd="/tmp/f75",
+                                    harness="claude", depth=2, liveness="working",
+                                    parent_slug="f75-owner", is_child=True)
+                session = Session(harness="claude", pid=913, proc_start="root", cwd="/tmp/f75",
+                                  session_id="sid-f75d", slug="f75-parent", liveness="working")
+                job.parent_sid, job.is_child = "sid-f75d", True
+                rows = [re.sub(r"\x00[^\x00]*\x00", "", _text(l))
+                        for l in render._build_lines(
+                            [session], [job, child], "both", False, 0,
+                            layout=render._layout_mode(width), term_width=width) if l]
+                divider = [r for r in rows if "├" in r]
+                rail = [r for r in rows if "╰" in r]
+                self.assertTrue(divider)
+                self.assertEqual(sum(r.count("plan-check ✓") for r in rows), 1)
+                self.assertNotIn("plan-check ✓", rail[0])
+                for row in rows:
+                    if any(mark in row for mark in ("╭", "│", "├", "╰")):
+                        self.assertLessEqual(render._dw(row), width)
 
     def test_routeless_card_keeps_a_bare_rail(self):
         """F-3/F-42a: no sealed route means no track — never a fabricated one on the rule."""

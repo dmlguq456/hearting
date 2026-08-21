@@ -29,8 +29,12 @@ from fleet.collectors import claude    # noqa: E402
 from fleet.collectors import opencode  # noqa: E402
 from fleet.collectors import usage_api  # noqa: E402
 from fleet import render             # noqa: E402
+from fleet import projection         # noqa: E402
+from fleet import route              # noqa: E402
 from fleet import collectors as fleet_collectors  # noqa: E402
 from fleet.model import ATTEMPT_CLASSIFIER_SOURCE, DispatchJob, Session  # noqa: E402
+
+REAL = os.path.join(os.path.dirname(__file__), "fixtures", "route", "real_claude_staged.json")
 
 
 class RuntimeRootSeparationTest(unittest.TestCase):
@@ -435,7 +439,78 @@ class RenderDispatchPresentationTest(unittest.TestCase):
         self.assertNotIn("(orphan)", rendered("codex-thread"))
         self.assertIn("(orphan)", rendered("synthetic-thread"))
 
+    @staticmethod
+    def _board_lines(session, jobs):
+        # The top summary strip ("hearting …", "usage …", "fleet …") is fixed board chrome
+        # unrelated to any one session/card — exclude it so a coincidental substring match
+        # there (e.g. "plan quota is console-only") cannot contaminate a card-content count.
+        lines = render._build_lines([session], jobs, section="both", narrow=False,
+                                    malformed=0, layout="wide")
+        texts = ["".join(part for part, _key in line) for line in lines if line]
+        return [t for t in texts
+                if not (t.startswith("  hearting") or t.startswith("  usage")
+                        or t.startswith("  fleet "))]
 
+    def test_unresolved_owner_card_owns_unknown_stage_once(self):
+        # D3/D4: a standard+ owner with no route binding at all still owns a card
+        # (it is a direct dispatch child of the session), so the session row must show NO
+        # stage of its own — only the card's owner row carries the single dim `—` fallback.
+        # The session ALSO has its own independently-resolvable (artifact-inferred) stage
+        # here — the pre-D3 exact-route-match rule would have left that stage showing on
+        # the session row once the owner's OWN route binding broke; the fix is card
+        # ownership, not route agreement, so it must stay suppressed regardless.
+        with tempfile.TemporaryDirectory() as tmp:
+            os.makedirs(os.path.join(tmp, "plans", "2026-07-22_unresolved-parent", "execute"))
+            session = Session(harness="claude", pid=500, proc_start="root", cwd=tmp,
+                              session_id="sid-unresolved", slug="unresolved-parent",
+                              liveness="working")
+            owner = DispatchJob(
+                key="code", slug="unresolved-owner", cwd="/work/repo",
+                parent_sid="sid-unresolved", is_child=True, harness="claude",
+                depth=1, worker_type="owner", intensity="standard",
+                attempt_id="att-unresolved", liveness="working",
+            )
+            projection.attach_projections([session], [owner], now=100.0)
+            self.assertIsNone(owner.work_projection.route_id)
+            self.assertFalse(owner.work_projection._route_view)
+            self.assertEqual(session.work_projection.source, "artifact-inferred")
+            texts = self._board_lines(session, [owner])
+        session_line = next(t for t in texts if "unresolved-parent" in t)
+        owner_line = next(t for t in texts if "unresolved-owner" in t)
+        # The session's own would-be stage ("exec") never reaches its row.
+        self.assertNotIn("exec", session_line)
+        # The owner card carries exactly one dim `—` fallback token, not a blank slot.
+        segs = render._dispatch_row(owner, in_card=True, card_interior=100)
+        self.assertIn((" : ", "dim"), segs)
+        dash_idx = segs.index((" : ", "dim")) + 1
+        self.assertEqual(segs[dash_idx], ("—", "dim"))
+        self.assertNotIn("execute", owner_line)
+
+    def test_exact_owner_card_keeps_its_breadcrumb_with_stage_suppressed_once(self):
+        # Regression companion: an exact (resolved) owner route must keep showing its own
+        # breadcrumb on the card exactly as before — D3's ownership-based suppression must
+        # not regress the already-working exact-route case.
+        rid = route.load(REAL)["route_id"]
+        session = Session(harness="claude", pid=501, proc_start="root", cwd="/work/repo",
+                          session_id="sid-exact", slug="exact-parent", liveness="working")
+        owner = DispatchJob(
+            key="code", slug="exact-owner", cwd="/work/repo",
+            parent_sid="sid-exact", is_child=True, harness="claude",
+            depth=1, worker_type="owner", intensity="standard", attempt_id="att-exact",
+            owner_route_file=REAL, owner_route_id=rid,
+            owner_route_hash=route.load(REAL)["route_hash"], liveness="working",
+        )
+        child = DispatchJob(
+            key="code-execute", slug="exact-child", parent_slug="exact-owner", depth=2,
+            route_id=rid, route_file=REAL, route_node="execute",
+            assigned_contract="code-execute", liveness="working",
+        )
+        projection.attach_projections([session], [owner, child], now=100.0)
+        texts = self._board_lines(session, [owner, child])
+        breadcrumb = [t for t in texts if "plan › execute › test › report" in t]
+        self.assertEqual(len(breadcrumb), 1)
+        owner_line = next(t for t in texts if "exact-owner" in t)
+        self.assertNotIn("plan › execute", owner_line)
 
 
 # --- D1: _registry_home() / _jobs_path() precedence ---
@@ -1017,6 +1092,54 @@ class CwdFallbackEnrichmentTest(unittest.TestCase):
             self.assertEqual(jobs[0]._transcript_path, os.path.realpath(log_file))
             self.assertEqual(jobs[0]._summary_sid, "dispatch-" + attempt)
             self.assertEqual(jobs[0].artifact_root, artifact)
+
+    def test_collect_backfills_owner_route_by_exact_attempt_across_same_slug_retry(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            worktree = os.path.join(tmp, "worktree")
+            artifact_a = os.path.join(tmp, "artifacts-a")
+            artifact_b = os.path.join(tmp, "artifacts-b")
+            os.makedirs(worktree)
+            attempt_a = "att-owner-a"
+            attempt_b = "att-owner-b"
+            route_a = os.path.join(artifact_a, "owner-a.route.json")
+            route_b = os.path.join(artifact_b, "owner-b.route.json")
+            jobs_log = os.path.join(tmp, "jobs.log")
+
+            def row(attempt, artifact, route, timestamp):
+                return "\t".join([
+                    timestamp, "open", "repo", worktree, "same-slug-owner",
+                    "capability=autopilot-code,capability_mode=debug,worker_mode=dev/backend,"
+                    "mode=debug,profile=light,harness=codex,worker_type=owner,depth=1,"
+                    "attempt_id=%s,artifact_root=%s,owner_route_file=%s,"
+                    "owner_route_id=rt-%s,owner_route_hash=hash-%s,log_file=%s"
+                    % (attempt, artifact, route, attempt[-1], attempt[-1],
+                       os.path.join(artifact, "attempt.jsonl")),
+                ]) + "\n"
+
+            with open(jobs_log, "w", encoding="utf-8") as stream:
+                stream.write(row(attempt_a, artifact_a, route_a,
+                                 "2026-07-05T01:00:00+00:00"))
+                stream.write(row(attempt_b, artifact_b, route_b,
+                                 "2026-07-05T02:00:00+00:00"))
+
+            proc_job = DispatchJob(
+                key="code", slug="same-slug-owner", cwd=worktree, pid=4242,
+                harness="codex", source="proc", is_child=True, attempt_id=attempt_a,
+                mode="debug", capability_mode="debug", worker_mode="dev/backend",
+                profile="light", worker_type="owner", depth=1, dispatch_depth=1,
+            )
+            with mock.patch.object(dispatch, "_scan_processes", return_value=[proc_job]), \
+                 mock.patch.object(dispatch, "_dispatch_liveness", return_value="working"):
+                jobs = dispatch.collect(jobs_path=jobs_log)
+
+            self.assertEqual(len(jobs), 1)
+            job = jobs[0]
+            self.assertEqual(job.attempt_id, attempt_a)
+            self.assertEqual(job.owner_route_file, route_a)
+            self.assertEqual(job.owner_route_id, "rt-a")
+            self.assertEqual(job.owner_route_hash, "hash-a")
+            self.assertEqual(job.artifact_root, artifact_a)
+            self.assertEqual(job._log_file, os.path.join(artifact_a, "attempt.jsonl"))
 
     def test_argv_matched_pid_excluded_from_cwd_scan(self):
         """Case 2 — an already argv-matched (proc-scanned) pid is passed into
