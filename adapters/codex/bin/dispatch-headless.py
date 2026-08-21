@@ -751,8 +751,8 @@ def _worktree_mutating_write_scope(write_scope: str | None) -> bool:
     )
 
 
-def _is_linked_worktree(worktree, agent_home) -> bool:
-    """Identify a real linked worktree from Git metadata, not path inequality."""
+def _worktree_git_dirs(worktree) -> tuple[Path, Path] | None:
+    """Resolve (git-dir, git-common-dir) for a worktree, or None if unprovable."""
     try:
         root = Path(worktree).resolve()
         values = []
@@ -763,28 +763,62 @@ def _is_linked_worktree(worktree, agent_home) -> bool:
             )
             value = Path(result.stdout.strip())
             values.append(value.resolve() if value.is_absolute() else (root / value).resolve())
-        git_dir, common_dir = values
-        return git_dir != common_dir
+        return values[0], values[1]
     except (OSError, subprocess.SubprocessError, ValueError):
+        return None
+
+
+def _is_linked_worktree(worktree, agent_home) -> bool:
+    """Identify a real linked worktree from Git metadata, not path inequality."""
+    dirs = _worktree_git_dirs(worktree)
+    if dirs is None:
         # A mutating stage whose Git topology cannot be proved is treated as
         # linked/protected, preserving the no-commit safety boundary.
         return True
+    git_dir, common_dir = dirs
+    return git_dir != common_dir
 
 
 def is_no_commit_stage(args: argparse.Namespace) -> bool:
-    """SD-69: a linked-worktree Codex mutation stage never commits.
+    """SD-69: a linked-worktree Codex depth-2 mutation stage never commits.
 
-    Codex's ``workspace-write`` sandbox keeps ``.git`` and the resolved
-    git-common-dir protected even when other roots are writable, so widening
-    the sandbox to expose Git metadata is never an accepted fix. Such a stage
-    produces source diff, tests, and evidence but does not ``git commit``; a
-    trusted dispatch-depth-0/Claude boundary commits after the stage's own PASS gate.
+    The boundary is contractual, not a sandbox impossibility: parallel stages
+    must not race HEAD, so the owner integrates and commits once after the
+    stage's own PASS gate (core/OPERATIONS.md SD-69). A dispatch-depth-1 owner
+    is commit-expected in its linked worktree and gets the exact primary Git
+    metadata directories via `linked_worktree_git_writable_dirs` instead.
     """
     return (
-        getattr(args, "worker_type", None) in ("owner", "stage")
+        getattr(args, "worker_type", None) == "stage"
         and _worktree_mutating_write_scope(getattr(args, "write_scope", None))
         and _is_linked_worktree(args.worktree, args.agent_home)
     )
+
+
+def linked_worktree_git_writable_dirs(args: argparse.Namespace) -> tuple[Path, ...]:
+    """Primary Git metadata dirs a commit-expected linked-worktree run needs.
+
+    Codex resolves a linked worktree's real git dir and allows it on its own
+    only under the default ``~/.codex`` home; with any custom ``CODEX_HOME``
+    (the masked dispatch home) that built-in allowance is inactive and
+    ``git commit`` fails on ``index.lock`` with EROFS (verified against
+    codex-cli 0.148.0, 2026-08-21). The wrapper therefore grants the exact
+    directories a commit touches: the per-worktree git dir plus the common
+    dir's ``objects``/``refs``/``logs``. The common-dir root itself stays
+    ungranted so ``hooks/`` and ``config`` remain read-only — a worker must
+    not be able to plant code a later unsandboxed session would execute.
+    Only the dispatch-depth-1 owner is commit-expected; every other worker
+    type (including non-mutating depth-2 stages) gets no Git metadata grant.
+    """
+    if getattr(args, "worker_type", None) != "owner":
+        return ()
+    dirs = _worktree_git_dirs(getattr(args, "worktree", ""))
+    if dirs is None:
+        return ()
+    git_dir, common_dir = dirs
+    if git_dir == common_dir:
+        return ()
+    return (git_dir, common_dir / "objects", common_dir / "refs", common_dir / "logs")
 
 
 def dispatch_prompt(
@@ -1155,6 +1189,10 @@ def shell_command(args: argparse.Namespace, prompt_path: Path, log_path: Path) -
             command += ["--writable-root", str(_spec_grounding_dir(args))]
         for writable_dir in route_bound_worker_writable_dirs(args):
             command += ["--writable-root", str(writable_dir)]
+        for writable_dir in linked_worktree_git_writable_dirs(args):
+            # SD-69: a commit-expected linked-worktree run gets the exact
+            # primary Git metadata dirs; no-commit stages get none of these.
+            command += ["--writable-root", str(writable_dir)]
         if args.nested_headless_network:
             command += ["--network-access"]
         if args.resolved_model_settings["source"] != "inherit":
@@ -1193,16 +1231,18 @@ def shell_command(args: argparse.Namespace, prompt_path: Path, log_path: Path) -
         # SD-69: a route-bound worker needs the exact primary spec-grounding
         # marker directory writable (and SD-72 grants a standard+ owner the
         # same directory unconditionally, route or not — review F-3).
-        # Codex's workspace-write sandbox keeps
-        # .git/the resolved git-common-dir protected even under other
-        # writable roots, so this is intentionally narrow — never all of
-        # agent home, and never .git. Codex-only: the Claude wrapper commits
-        # normally from its own worktree and has no equivalent boundary gap.
+        # Intentionally narrow — never all of agent home.
         cmd += ["--add-dir", str(_spec_grounding_dir(args))]
     for writable_dir in route_bound_worker_writable_dirs(args):
         # SD-72: an ordinary route-bound depth-2 worker also runs the portable
         # core-read guard hook and must record its own .core-grounding marker,
         # independent of the owner-only nested_headless_network network grant.
+        cmd += ["--add-dir", str(writable_dir)]
+    for writable_dir in linked_worktree_git_writable_dirs(args):
+        # SD-69: only a commit-expected linked-worktree owner gets the exact
+        # primary Git metadata dirs a commit touches; the common-dir root
+        # itself, hooks/, and config stay ungranted, and every other worker
+        # type (no-commit mutation stages included) gets none of these.
         cmd += ["--add-dir", str(writable_dir)]
     cmd += ["--sandbox", effective_runtime_sandbox(args)]
     if args.nested_headless_network:
