@@ -115,17 +115,87 @@ class DispatchOwnerRewakeTest(unittest.TestCase):
     def test_receipt_forbids_visible_monitor_rearming(self) -> None:
         launch = rewake.parse_launch(self.payload())
         assert launch is not None
+        marker = self.root / "plan.json"
+        marker.write_text(
+            json.dumps(
+                {
+                    "route_id": "rt-owner",
+                    "route_hash": "sha256:owner",
+                    "node_id": "plan",
+                }
+            ),
+            encoding="utf-8",
+        )
         self.jobs.write_text(
             "2026-08-06T00:00:00Z\tdone\t/repo\t/wt\towner\t"
-            "attempt_schema_version=2,attempt_id=att-owner-1,failure_class=pass\n",
+            "attempt_schema_version=2,attempt_id=att-owner-1,failure_class=pass,"
+            "note=completed-marker,route_id=rt-owner,route_hash=sha256:owner,"
+            f"route_node=plan,completion_marker={marker}\n",
             encoding="utf-8",
         )
         message = rewake.receipt(launch, "ready", "terminal-quiescent", self.root)
         self.assertIn("attempt_id=att-owner-1", message)
         self.assertIn("Do not start or re-arm Background Bash", message)
         self.assertIn("required_action=advance-completed", message)
+        self.assertIn("state=success", message)
+        self.assertIn("Hearting dispatch completed", message)
         self.assertIn("No harvest command is required", message)
         self.assertNotIn("harvest --attempt-id", message)
+
+    def test_attention_snapshot_promotes_from_current_completed_supervisor_row(self) -> None:
+        launch = rewake.parse_launch(self.payload())
+        assert launch is not None
+        self.jobs.write_text(
+            "2026-08-06T00:00:00Z\tdone\t/repo\t/wt\towner\t"
+            "attempt_schema_version=2,attempt_id=att-owner-1,failure_class=pass,"
+            "note=completed-supervisor\n",
+            encoding="utf-8",
+        )
+        state, message = rewake.classified_receipt(
+            launch, "attention", "terminal-failure-or-unclosed", self.root
+        )
+        self.assertEqual(state, "success")
+        self.assertIn("state=success", message)
+        self.assertIn("reason=row-advanced", message)
+        self.assertNotIn("requires attention", message)
+
+    def test_unsealed_pass_row_stays_attention(self) -> None:
+        launch = rewake.parse_launch(self.payload())
+        assert launch is not None
+        self.jobs.write_text(
+            "2026-08-06T00:00:00Z\tdone\t/repo\t/wt\towner\t"
+            "attempt_schema_version=2,attempt_id=att-owner-1,failure_class=pass\n",
+            encoding="utf-8",
+        )
+        state, message = rewake.classified_receipt(
+            launch, "ready", "terminal-quiescent", self.root
+        )
+        self.assertEqual(state, "attention")
+        self.assertIn("reason=completion-marker-unverified", message)
+        self.assertIn(f"--jobs {self.jobs}", message)
+
+    def test_success_is_structured_notification_and_attention_is_warning(self) -> None:
+        success_stdout = io.StringIO()
+        success_stderr = io.StringIO()
+        with mock.patch.object(sys, "stdout", success_stdout), mock.patch.object(
+            sys, "stderr", success_stderr
+        ):
+            success_rc = rewake.emit_receipt("success", "completed")
+        self.assertEqual(success_rc, 0)
+        self.assertEqual(success_stderr.getvalue(), "")
+        rendered = json.loads(success_stdout.getvalue())
+        self.assertEqual(rendered["systemMessage"], "completed")
+        self.assertIn("Hearting dispatch completed", rendered["terminalSequence"])
+
+        attention_stdout = io.StringIO()
+        attention_stderr = io.StringIO()
+        with mock.patch.object(sys, "stdout", attention_stdout), mock.patch.object(
+            sys, "stderr", attention_stderr
+        ):
+            attention_rc = rewake.emit_receipt("attention", "warning")
+        self.assertEqual(attention_rc, 2)
+        self.assertEqual(attention_stdout.getvalue(), "")
+        self.assertEqual(attention_stderr.getvalue(), "warning\n")
 
     def test_terminal_failure_receipt_uses_matching_status(self) -> None:
         launch = rewake.parse_launch(self.payload())
