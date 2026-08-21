@@ -386,13 +386,14 @@ class ClaudeSessionSupervisorTest(unittest.TestCase):
                         "required_action": "complete-open",
                     },
                 ],
-            }
+            },
+            jobs="/tmp/fixture-jobs.log",
         )
-        self.assertEqual(prompt.count("preflight.sh harvest --attempt-id"), 2)
+        self.assertEqual(prompt.count("preflight.sh harvest --jobs"), 2)
         self.assertEqual(
             prompt.count(
                 str(ROOT / "adapters" / "codex" / "bin" / "preflight.sh")
-                + " harvest --attempt-id"
+                + " harvest --jobs /tmp/fixture-jobs.log --attempt-id"
             ),
             2,
         )
@@ -403,10 +404,10 @@ class ClaudeSessionSupervisorTest(unittest.TestCase):
         self.assertNotIn("RAW_CLAUDE_SENTINEL", prompt)
 
     def test_remediation_prompt_uses_shared_absolute_harvest_surface(self):
-        prompt = supervisor.remediation_prompt({"att-child"})
+        prompt = supervisor.remediation_prompt({"att-child"}, jobs="/tmp/fixture-jobs.log")
         self.assertIn(
             str(ROOT / "adapters" / "codex" / "bin" / "preflight.sh")
-            + " harvest --attempt-id att-child --mark-done",
+            + " harvest --jobs /tmp/fixture-jobs.log --attempt-id att-child --mark-done",
             prompt,
         )
         self.assertIn("shared, runtime-neutral registry harvest compatibility surface", prompt)

@@ -256,21 +256,22 @@ def settle_runtime_wait_children(
 
 
 def completion_prompt(
-    receipt: dict[str, Any], outbox: SupervisorOutbox | None = None
+    receipt: dict[str, Any], outbox: SupervisorOutbox | None = None, *, jobs: str = ""
 ) -> str:
     compact = json.dumps(receipt, separators=(",", ":"), sort_keys=True)
+    jobs_argument = f"--jobs {shlex.quote(jobs)} " if jobs else ""
     commands: list[str] = []
     for child in receipt["children"]:
         attempt = shlex.quote(child["attempt_id"])
         action = child["required_action"]
         if action == "complete-open":
             commands.append(
-                "adapters/codex/bin/preflight.sh harvest --attempt-id "
+                f"adapters/codex/bin/preflight.sh harvest {jobs_argument}--attempt-id "
                 f"{attempt} --status open --mark-done"
             )
         elif action == "inspect-done-failure":
             commands.append(
-                "adapters/codex/bin/preflight.sh harvest --attempt-id "
+                f"adapters/codex/bin/preflight.sh harvest {jobs_argument}--attempt-id "
                 f"{attempt} --status done --failure-detail"
             )
     command_text = "\n".join(commands) or "(no harvest command; advance the route)"
@@ -585,7 +586,7 @@ def main(argv: list[str] | None = None) -> int:
                 if active_outbox.receipt is None:
                     raise SupervisorError("supervisor-outbox-receipt-missing")
                 prompt = completion_prompt(
-                    active_outbox.receipt, active_outbox
+                    active_outbox.receipt, active_outbox, jobs=args.jobs
                 )
         server = AppServer(command, args.worktree, runtime_env)
         server.request(
@@ -657,7 +658,7 @@ def main(argv: list[str] | None = None) -> int:
                     )
                     active_outbox = refreshed.outbox
                     next_prompt = completion_prompt(
-                        active_outbox.receipt or {}, active_outbox
+                        active_outbox.receipt or {}, active_outbox, jobs=args.jobs
                     )
                     continuations += 1
                     continue
@@ -764,7 +765,7 @@ def main(argv: list[str] | None = None) -> int:
                 delivered = set(prepared.delivered_attempt_ids)
                 active_outbox = prepared.outbox
                 next_prompt = completion_prompt(
-                    active_outbox.receipt or {}, active_outbox
+                    active_outbox.receipt or {}, active_outbox, jobs=args.jobs
                 )
                 continuations += 1
                 continue

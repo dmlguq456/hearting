@@ -165,7 +165,7 @@ def run_join(args: argparse.Namespace, attempts: set[str]) -> dict[str, Any]:
 
 
 def completion_prompt(
-    receipt: dict[str, Any], outbox: SupervisorOutbox | None = None
+    receipt: dict[str, Any], outbox: SupervisorOutbox | None = None, *, jobs: str = ""
 ) -> str:
     # This command's route-bound success depends on the derived-evidence
     # fallback in adapters/codex/bin/dispatch-harvest.py /
@@ -174,17 +174,18 @@ def completion_prompt(
     # this exact command is unsatisfiable for a route-bound row and the
     # delivered/harvest-only phase deadlocks (SD-70/78).
     compact = json.dumps(receipt, separators=(",", ":"), sort_keys=True)
+    jobs_argument = f"--jobs {shlex.quote(jobs)} " if jobs else ""
     commands: list[str] = []
     for child in receipt["children"]:
         attempt = shlex.quote(child["attempt_id"])
         if child["required_action"] == "complete-open":
             commands.append(
-                f"{SHARED_HARVEST_SURFACE} harvest --attempt-id "
+                f"{SHARED_HARVEST_SURFACE} harvest {jobs_argument}--attempt-id "
                 f"{attempt} --status open --mark-done"
             )
         elif child["required_action"] == "inspect-done-failure":
             commands.append(
-                f"{SHARED_HARVEST_SURFACE} harvest --attempt-id "
+                f"{SHARED_HARVEST_SURFACE} harvest {jobs_argument}--attempt-id "
                 f"{attempt} --status done --failure-detail"
             )
     command_text = "\n".join(commands) or "(no harvest command; advance the route)"
@@ -233,10 +234,11 @@ def runtime_reconcile(args: argparse.Namespace, rows: dict[str, Any],
     return closed
 
 
-def remediation_prompt(attempts: set[str]) -> str:
+def remediation_prompt(attempts: set[str], *, jobs: str = "") -> str:
     # Same route-bound-success dependency as completion_prompt() above.
+    jobs_argument = f"--jobs {shlex.quote(jobs)} " if jobs else ""
     commands = "\n".join(
-        f"{SHARED_HARVEST_SURFACE} harvest --attempt-id "
+        f"{SHARED_HARVEST_SURFACE} harvest {jobs_argument}--attempt-id "
         f"{shlex.quote(attempt)} --mark-done"
         for attempt in sorted(attempts)
     )
@@ -439,7 +441,7 @@ def main(argv: list[str] | None = None) -> int:
                 )
                 active_outbox = refreshed.outbox
                 next_prompt = completion_prompt(
-                    active_outbox.receipt or {}, active_outbox
+                    active_outbox.receipt or {}, active_outbox, jobs=args.jobs
                 )
         while True:
             if active_outbox is None:
@@ -489,7 +491,7 @@ def main(argv: list[str] | None = None) -> int:
                     )
                     active_outbox = refreshed.outbox
                     next_prompt = completion_prompt(
-                        active_outbox.receipt or {}, active_outbox
+                        active_outbox.receipt or {}, active_outbox, jobs=args.jobs
                     )
                     continuations += 1
                     resume = True
@@ -590,7 +592,7 @@ def main(argv: list[str] | None = None) -> int:
                 delivered = set(prepared.delivered_attempt_ids)
                 active_outbox = prepared.outbox
                 next_prompt = completion_prompt(
-                    active_outbox.receipt or {}, active_outbox
+                    active_outbox.receipt or {}, active_outbox, jobs=args.jobs
                 )
                 continuations += 1
                 resume = True
@@ -617,7 +619,7 @@ def main(argv: list[str] | None = None) -> int:
                 if signature in remediated or continuations >= args.max_continuations:
                     raise SupervisorError("owned-children-remain-open-after-resume")
                 remediated.add(signature)
-                next_prompt = remediation_prompt(unresolved)
+                next_prompt = remediation_prompt(unresolved, jobs=args.jobs)
                 continuations += 1
                 resume = True
                 continue
