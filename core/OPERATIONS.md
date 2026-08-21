@@ -488,3 +488,12 @@ second takes a fresh directory rather than overwriting the first one's log.
 This is deliberately not dispatch: no capability, registry, attempt, or
 completion gate is involved, and the harness never chooses a host on its own.
 The acting agent names the host.
+
+It is also not the registry-owned resource-job lifecycle above. That one tracks
+a detached local process against its launching attempt, so a conductor can
+poll, harvest, and integrate it inside one task flow. `compute-hosts run`
+answers a different question — *which machine* — and deliberately keeps no
+attempt binding, because the work usually outlives the session that started it.
+Use the resource-job lifecycle when a registered attempt must own the run;
+use `compute-hosts` when the run belongs on another machine. A run that needs
+both is a resource job whose payload is a `compute-hosts run` invocation.

@@ -234,6 +234,19 @@ Each artifact should be changed through the capability that owns it:
 | `experiments/` | lab capability |
 | user profile records | analyze-user / post-it capability |
 
+Where work runs is a separate axis from who owns its output. The session host
+runs everything by default. When an operator keeps more than one machine, the
+user-owned inventory at
+`${XDG_CONFIG_HOME:-$HOME/.config}/hearting/compute-hosts.yaml` names them, and
+`utilities/compute-hosts.py` both measures their live state and starts detached
+work on them. Consult it before starting anything that needs a GPU the session
+host lacks, or that would occupy the session host long enough to slow the
+conversation; a run started that way survives the session that launched it and
+is reachable by id from any host sharing the run root. Nothing chooses a host
+automatically — the acting agent does, and having read the inventory is the
+difference between choosing and defaulting. `OPERATIONS.md#513-operator-compute-hosts`
+owns the mechanics and the boundary against registry-owned resource jobs.
+
 ## 5. Adapter Responsibilities
 
 Each adapter should provide:

@@ -97,6 +97,16 @@ python train.py --config config.yaml
 
 The user may submit it to a cluster instead. Do not auto-run training because GPU, queue, and cluster environments vary. The user returns through eval mode afterward.
 
+**Choose the host from the inventory, not by habit.** When
+`${XDG_CONFIG_HOME:-$HOME/.config}/hearting/compute-hosts.yaml` exists, read
+`compute-hosts list` before proposing the command: it reports which machines
+are reachable and how much GPU memory each has free right now. Propose the host
+whose free memory and idle load fit the run, and say why — the session host is
+a default, not an answer. This selects a host; it does not start anything.
+Launching still needs the user's go-ahead and the WORKFLOW §0.3 pre-execution
+gate, after which `compute-hosts run <host> --env <conda> --cwd <dir> -- <cmd>`
+starts it detached and returns a run id that outlives this session.
+
 **S3-2. Append one pending row before the run** to `<artifact-root>/experiments/_RUNLOG.md`, leaving the result as `—`. This makes in-flight work and duplicate setup visible during long queues and mirrors `pipeline_state.run: in_progress`.
 
 At the same point, create `experiments/{date}_{slug}/run.json` with `status: "running"`, `skill_mode: "setup"` from `pipeline_state.mode`, `parent`, current ISO 8601 `started_at`, scaffold config path in `config_ref`, and the expected best-checkpoint path in `ckpt_path`. Omit `best` and `ended_at` while running. E3-4 updates them on completion.
@@ -117,6 +127,13 @@ exact PID/starttime/command hash; do not restart an existing run to repair
 visibility. If the run predates automatic indexing, import its registry with
 `resource-runner index --registry <existing-resource-runs.json>` and repeat
 the visibility check.
+
+A run started on another host through `compute-hosts` is outside this check:
+it has no local PID, no registered attempt, and no Fleet row. Its equivalent
+evidence is the run id — record it in `run.json` next to `config_ref`, and
+verify with `compute-hosts runs` that the run exists and with
+`compute-hosts tail <run-id>` that the payload actually started. Substitute
+that evidence for the Fleet check; do not skip both.
 
 **S3-4. Escalate convergence failures on user request.** For prompts such as `loss 가 안 떨어져`, `NaN`, or `수렴 이상`, dispatch the `qa/ml-debug` unit. Provide the experiment directory, symptom, available logs, and `experiment_spec.md`. Check data shape/range/NaN/balance, model initialization/freezing/gradient flow, loss scale/sign/stability, optimizer learning rate/weight decay/warmup, and batch/device/mixed precision. Return the one or two most likely causes plus commands that distinguish them.
 
