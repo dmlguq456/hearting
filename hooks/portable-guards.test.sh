@@ -124,6 +124,21 @@ if AGENT_ROUTE_FILE="$route_spec" AGENT_ROUTE_ID="$route_spec_id" AGENT_ROUTE_NO
 else
   bad "verified spec route should authorize its declared output"
 fi
+mkdir -p "$TMP/proj/.agent_reports/spec/dispatch-profiles/nested"
+if AGENT_ROUTE_FILE="$route_spec" AGENT_ROUTE_ID="$route_spec_id" AGENT_ROUTE_NODE=inline \
+  "$ART" --file "$TMP/proj/.agent_reports/spec/dispatch-profiles/prd.md" >/tmp/art_component_guard.out 2>/tmp/art_component_guard.err; then
+  ok "verified spec route authorizes a declared component output"
+else
+  bad "verified spec route should authorize a declared component output"
+fi
+if AGENT_ROUTE_FILE="$route_spec" AGENT_ROUTE_ID="$route_spec_id" AGENT_ROUTE_NODE=inline \
+  "$ART" --file "$TMP/proj/.agent_reports/spec/dispatch-profiles/nested/prd.md" >/tmp/art_component_nested.out 2>/tmp/art_component_nested.err; then
+  bad "a component placeholder must not absorb multiple path segments"
+else
+  [ "$?" -eq 2 ] && grep -q 'artifact-write-outside-node-scope' /tmp/art_component_nested.err \
+    && ok "a component placeholder binds exactly one path segment" \
+    || bad "nested component path rejection missing structured scope failure"
+fi
 
 route_plan=$(fixture_route autopilot-code dev route-plan)
 route_plan_id=$(fixture_route_id "$route_plan")

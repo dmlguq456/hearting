@@ -180,7 +180,7 @@ def patterns(scope):
         return ["^documents/*/*","^research/*/*"]
     root=scope[:-3] if scope.endswith("/**") else scope
     if scope in WORKTREE_ONLY or root=="source" or root.startswith("source/"): return []
-    return [scope.replace("<cycle>","*").replace("<topic>","*").replace("/**","/*")]
+    return [scope.replace("<cycle>","*").replace("<topic>","*").replace("<component>","*").replace("/**","/*")]
 def bound(rel,pat):
     if pat.startswith("^"):
         return fnmatch.fnmatch(rel,pat[1:])

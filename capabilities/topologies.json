@@ -2977,8 +2977,11 @@
     "worker_kind": "capability-owner",
     "write_scope": [
      "spec/prd.md",
+     "spec/<component>/prd.md",
      "spec/pipeline_state.yaml",
-     "spec/pipeline_summary.md"
+     "spec/<component>/pipeline_state.yaml",
+     "spec/pipeline_summary.md",
+     "spec/<component>/pipeline_summary.md"
     ],
     "owner_dispatch_depth": 1,
     "max_dispatch_depth": 1,
@@ -2997,10 +3000,12 @@
        "prior-evidence"
       ],
       "outputs": [
-       "spec/_internal/research/**"
+       "spec/_internal/research/**",
+       "spec/<component>/_internal/research/**"
       ],
       "write_scope": [
-       "spec/_internal/research/**"
+       "spec/_internal/research/**",
+       "spec/<component>/_internal/research/**"
       ],
       "resource_class": "normal",
       "completion_gate": "spec-research",
@@ -3026,13 +3031,16 @@
       "role": "deep reviewer",
       "inputs": [
        "intent",
-       "spec/_internal/research/**"
+       "spec/_internal/research/**",
+       "spec/<component>/_internal/research/**"
       ],
       "outputs": [
-       "spec/_internal/reviews/verdict.json"
+       "spec/_internal/reviews/verdict.json",
+       "spec/<component>/_internal/reviews/verdict.json"
       ],
       "write_scope": [
-       "spec/_internal/reviews/**"
+       "spec/_internal/reviews/**",
+       "spec/<component>/_internal/reviews/**"
       ],
       "resource_class": "normal",
       "completion_gate": "spec-review",
@@ -3059,19 +3067,28 @@
       "inputs": [
        "intent",
        "spec/_internal/research/**",
-       "spec/_internal/reviews/verdict.json"
+       "spec/<component>/_internal/research/**",
+       "spec/_internal/reviews/verdict.json",
+       "spec/<component>/_internal/reviews/verdict.json"
       ],
       "outputs": [
        "spec/prd.md",
+       "spec/<component>/prd.md",
        "spec/pipeline_state.yaml",
+       "spec/<component>/pipeline_state.yaml",
        "spec/pipeline_summary.md",
+       "spec/<component>/pipeline_summary.md",
        "version-snapshot"
       ],
       "write_scope": [
        "spec/prd.md",
+       "spec/<component>/prd.md",
        "spec/pipeline_state.yaml",
+       "spec/<component>/pipeline_state.yaml",
        "spec/pipeline_summary.md",
-       "spec/_internal/versions/**"
+       "spec/<component>/pipeline_summary.md",
+       "spec/_internal/versions/**",
+       "spec/<component>/_internal/versions/**"
       ],
       "resource_class": "normal",
       "completion_gate": "spec-atomic-transaction",

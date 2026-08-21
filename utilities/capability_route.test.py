@@ -349,7 +349,13 @@ class TestRoute(unittest.TestCase):
    predicates=[],signals=["shared-contract"],transport="headless",inline_reason=None,
    dispatch_evidence=self.dispatch(self.nested())))
   replica=next(n for n in route["nodes"] if n["id"]=="research-alternative")
-  self.assertEqual(replica["outputs"],["spec/_internal/research-alternative/**"])
+  self.assertEqual(
+   replica["outputs"],
+   [
+    "spec/_internal/research-alternative/**",
+    "spec/<component>/_internal/research-alternative/**",
+   ],
+  )
   review=next(n for n in route["nodes"] if n["id"]=="review")
   self.assertIn("research-alternative",review["depends_on"])
   self.assertIn("spec/_internal/research-alternative/**",review["inputs"])

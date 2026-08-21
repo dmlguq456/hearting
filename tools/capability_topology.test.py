@@ -43,7 +43,7 @@ PRESERVED_FULL_FIELD_DIGESTS = {
         "913de8c5f6200a539e6fe19ec488c42120dc6e4e0a0cb2149f33a3aa8cd4f326",
     ),
     ("autopilot-spec", ('api', 'app', 'cli', 'library', 'research', 'update')): (
-        "096a33a46adf1886561c032019301c7dbc64ec94729acee715c74ed3f4af302a",
+                "06d04475ad6ffdb25f791fd62ff8c817dc7a6db27055378fc42e5c22f2824522",
         "f7bf589ba369a08a7031c71db8a2523b250af84be5ef6e0e4d9b00a1cdcb897c",
     ),
 }
@@ -639,6 +639,10 @@ class TestTopology(unittest.TestCase):
         # path and break map/review containment for the common flat case).
         spec=next(x for x in self.r["recipes"] if x["capability"]=="autopilot-spec")
         self.assertEqual(spec["artifact_scope"]["cycle_anchors"], ["spec", "spec/<component>"])
+        self.assertIn("spec/<component>/prd.md", spec["quick"]["write_scope"])
+        transaction=next(n for n in spec["standard_plus"]["nodes"] if n["id"]=="prd-transaction")
+        self.assertIn("spec/<component>/prd.md", transaction["outputs"])
+        self.assertIn("spec/<component>/_internal/versions/**", transaction["write_scope"])
         T._validate_bucket_anchor(
             spec, self.r, ["spec/mycomp/_internal/research/**"], "map-worker", "research"
         )
