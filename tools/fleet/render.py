@@ -695,6 +695,23 @@ def _pad(s, w):
     return s[:w].ljust(w)
 
 
+def _badge_cell(hn, width):
+    """Harness badge padded to exactly `width` cells with the LAST cell always a
+    space — the guaranteed-gap idiom `_harness_model_cell` documents, applied to
+    the narrow/stack badge whose field is narrowed by the row prefix. Without it
+    a badge that exactly fills (or overflows) the narrowed field ran straight
+    into the stage label / session name: `claude codeclaim-b`, `claude cexecute`
+    (F-84, pre-dates F-63 — visible since the arrow-indent era). A badge that
+    cannot fit whole falls back to its first word (`claude`) rather than a
+    mid-word cut."""
+    hn = hn or ""
+    width = max(2, width)
+    if len(hn) >= width:
+        first = hn.split(" ")[0]
+        hn = first if len(first) < width else hn[:width - 1]
+    return _pad(hn, width)
+
+
 _BR_TTL = 15.0
 _BR_CACHE = {"ts": 0.0, "map": {}}
 
@@ -2660,7 +2677,21 @@ def _dispatch_row(j, orphan=False, parent_model=None, parent_harness=None, is_la
             # ellipsis instead of losing the tag or the border.
             segs += _stage_part(max(8, card_interior - consumed - 5 - time_w))
         else:
-            segs += _stage_part(route_zone)
+            # F-83: the open-row zone ledger (`_route_zone_width`) is tuned for
+            # 168 columns, so below that an unframed conductor row (orphans —
+            # the `··` prefix rows outside every card) kept the fixed 42-cell
+            # breadcrumb zone and overflowed the terminal (measured 159/164
+            # cells at 140 columns). Clamp to the cells actually left before
+            # the shared card right edge, the same consumed-based ledger the
+            # framed branch above uses; on a ≥168-column terminal the original
+            # zone is the smaller bound and nothing changes.
+            budget = route_zone
+            if card_interior:
+                consumed = sum(_dw(t) for t, _k in segs)
+                tail_w = _dw(_ELAPSED_GLYPH + fmt_min(j.elapsed_min)) + 2
+                open_budget = max(8, card_interior - consumed - tail_w)
+                budget = min(route_zone, open_budget) if route_zone else open_budget
+            segs += _stage_part(budget)
 
     # F-68 (user 2026-08-14 "time은 빼고 설명 요약쪽처럼 일관성", "열 자체를 없애라",
     # "박스 내부에도 time 표시는 하고"): a framed row keeps no right-flushed time
@@ -2816,7 +2847,7 @@ def _dispatch_row_2line(j, orphan=False, parent_model=None, parent_effort=None, 
     name_key_j = ("nm_dead" if j.liveness == "dead"
                   else _NAME_KEY_DIM.get(j.harness, "nmd_other"))
     l1 = [("  ", None), (prefix, "dim"), (gch, gkey), (" ", None),
-          (_pad(hn, max(1, _HW - len(prefix))), _BADGE_KEY.get(j.harness, "dim")), (shown_name, name_key_j)]
+          (_badge_cell(hn, _HW - len(prefix)), _BADGE_KEY.get(j.harness, "dim")), (shown_name, name_key_j)]
     if orphan:
         l1.append(("  (orphan)", "gate_u"))
     br_segs = _branch_suffix_segs(
@@ -5154,8 +5185,9 @@ def _build_lines(sessions, jobs, section, narrow, malformed, layout="wide", memo
                                            name_width=card_name_width if in_card else wide_name_width,
                                            route_seq=route_seq, route_zone=wide_route_zone,
                                            in_card=in_card, unit_working=unit_working,
-                                           card_interior=(_dispatch_box_width(term_width, layout) - 1
-                                                          if in_card else None)))
+                                           # F-83: unframed rows need the same right-edge
+                                           # ledger to clamp their open-row breadcrumb zone.
+                                           card_interior=_dispatch_box_width(term_width, layout) - 1))
             # 2026-07-24: a dispatch card's second line is its live log summary ONLY —
             # the same "identity row + fresh NOW" shape as a main-session card. The
             # pipeline rides the row's own breadcrumb; dedicated stage rows are a
