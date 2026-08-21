@@ -154,8 +154,10 @@ main/orchestrator chooses per job and the wrapper only reflects that choice:
   evidence: success returns a clean terminal notification with exit zero, and
   only attention exits two to wake Claude with warning context. Registered Claude
   owners keep one `--input-format stream-json` process for the route and submit
-  each joined receipt immediately; the process is closed before terminal row
-  reconciliation. An explicit `--claude-command` keeps the checked historical
+  each non-terminal joined receipt immediately. When the current rows and exact
+  sealed markers prove every declared terminal node complete, the supervisor
+  skips the redundant final owner turn and closes the process before terminal
+  row reconciliation. An explicit `--claude-command` keeps the checked historical
   `--session-id`/`--resume` per-turn fallback. Monotonic control rows measure every
   turn, join, and terminal teardown without exposing model text. Both paths work
   for either a Claude or Codex child. A Codex parent

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -52,6 +53,101 @@ SHARED_HARVEST_SURFACE = shlex.quote(
 
 class SupervisorError(RuntimeError):
     """The Claude session bridge could not preserve its completion contract."""
+
+
+def terminal_route_completion(
+    args: argparse.Namespace, rows: list[object]
+) -> tuple[str, ...]:
+    """Return freshly proven terminal nodes, or an empty tuple.
+
+    This only authorizes skipping the owner's final harvest turn when the bound
+    route is still sealed and every declared terminal node has a current
+    successful row backed by its exact completion marker.
+    """
+
+    if not args.route_file or not args.route_id or not args.route_hash:
+        return ()
+    route_path = Path(args.route_file)
+    try:
+        if route_path.is_symlink() or route_path.stat().st_size > 1_048_576:
+            return ()
+        route = json.loads(route_path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, OSError, TypeError, ValueError):
+        return ()
+    if not isinstance(route, dict) or route.get("schema_version") != 2:
+        return ()
+    bare = {
+        key: value for key, value in route.items()
+        if key not in {"route_hash", "route_id"}
+    }
+    sealed_hash = "sha256:" + hashlib.sha256(
+        json.dumps(
+            bare, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        ).encode()
+    ).hexdigest()
+    if (
+        route.get("route_id") != args.route_id
+        or route.get("route_hash") != args.route_hash
+        or sealed_hash != args.route_hash
+        or args.route_id != "rt-" + sealed_hash.split(":", 1)[1][:16]
+    ):
+        return ()
+    contract = route.get("workflow_contract")
+    raw_terminal = contract.get("terminal_nodes") if isinstance(contract, dict) else None
+    if not isinstance(raw_terminal, list) or not raw_terminal:
+        return ()
+    terminal_nodes = tuple(sorted(raw_terminal))
+    if any(not isinstance(node, str) or not node for node in terminal_nodes):
+        return ()
+    declared_terminal = tuple(
+        sorted(
+            node.get("id")
+            for node in route.get("nodes", [])
+            if isinstance(node, dict)
+            and node.get("terminal") is True
+            and isinstance(node.get("id"), str)
+        )
+    )
+    if declared_terminal != terminal_nodes:
+        return ()
+    if any(getattr(row, "status", "") in {"open", "running"} for row in rows):
+        return ()
+
+    proven: set[str] = set()
+    for row in rows:
+        metadata = getattr(row, "metadata", {})
+        node = metadata.get("route_node", "")
+        if node not in terminal_nodes:
+            continue
+        if (
+            getattr(row, "status", "") != "done"
+            or metadata.get("failure_class") != "pass"
+            or metadata.get("route_id") != args.route_id
+            or metadata.get("route_hash") != args.route_hash
+        ):
+            continue
+        marker_path = Path(metadata.get("completion_marker", ""))
+        try:
+            if (
+                not marker_path.is_absolute()
+                or marker_path.is_symlink()
+                or not marker_path.is_file()
+                or marker_path.stat().st_size > 65_536
+            ):
+                continue
+            marker = json.loads(marker_path.read_text(encoding="utf-8"))
+        except (FileNotFoundError, OSError, TypeError, ValueError):
+            continue
+        if (
+            isinstance(marker, dict)
+            and marker.get("schema_version") == 2
+            and marker.get("route_id") == args.route_id
+            and marker.get("route_hash") == args.route_hash
+            and marker.get("node_id") == node
+            and marker.get("attempt_id") == getattr(row, "attempt_id", "")
+        ):
+            proven.add(node)
+    return terminal_nodes if proven == set(terminal_nodes) else ()
 
 
 def emit(value: dict[str, Any]) -> None:
@@ -769,6 +865,42 @@ def main(argv: list[str] | None = None) -> int:
                     joined_rows = current_children(
                         Path(args.jobs), args.parent_attempt_id, new_attempts
                     )
+                terminal_nodes = terminal_route_completion(
+                    args,
+                    current_children(Path(args.jobs), args.parent_attempt_id),
+                )
+                if terminal_nodes:
+                    emit(
+                        {
+                            "type": "dispatch.supervisor.terminal-fast-path",
+                            "parent_attempt_id": args.parent_attempt_id,
+                            "terminal_nodes": list(terminal_nodes),
+                            "continuation_saved": True,
+                        }
+                    )
+                    if stream_session is not None:
+                        teardown_started_ns = time.monotonic_ns()
+                        stream_session.close()
+                        stream_session = None
+                        teardown_completed_ns = time.monotonic_ns()
+                        emit(
+                            {
+                                "type": "dispatch.supervisor.teardown-completed",
+                                "parent_attempt_id": args.parent_attempt_id,
+                                "reason": "route-terminal",
+                                "monotonic_ns": teardown_completed_ns,
+                                "duration_seconds": round(
+                                    (teardown_completed_ns - teardown_started_ns)
+                                    / 1_000_000_000,
+                                    3,
+                                ),
+                            }
+                        )
+                    terminal = classify_claude_result(result, process_rc)
+                    if not reconcile(args, terminal):
+                        return 70
+                    emit(result)
+                    return 0
                 emit(
                     {
                         "type": "dispatch.supervisor.resumed",

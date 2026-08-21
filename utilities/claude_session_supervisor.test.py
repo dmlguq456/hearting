@@ -11,6 +11,7 @@ import subprocess
 import sys
 import tempfile
 import textwrap
+from types import SimpleNamespace
 import unittest
 
 
@@ -160,11 +161,27 @@ class ClaudeSessionSupervisorTest(unittest.TestCase):
                 time.sleep(0.2)
                 with open(jobs, 'a', encoding='utf-8') as h:
                     for attempt in attempts:
+                        route_file = os.environ.get('FAKE_TERMINAL_ROUTE')
+                        terminal = ''
+                        if route_file:
+                            with open(route_file, encoding='utf-8') as route_handle:
+                                route = json.load(route_handle)
+                            marker = os.environ['FAKE_TERMINAL_MARKER']
+                            with open(marker, 'w', encoding='utf-8') as marker_handle:
+                                json.dump({'schema_version': 2,
+                                           'route_id': route['route_id'],
+                                           'route_hash': route['route_hash'],
+                                           'node_id': 'report',
+                                           'attempt_id': attempt}, marker_handle)
+                            terminal = (f",failure_class=pass,note=completed-marker,"
+                                        f"route_id={route['route_id']},"
+                                        f"route_hash={route['route_hash']},"
+                                        f"route_node=report,completion_marker={marker}")
                         h.write('2026-07-23T00:00:01Z\\tdone\\t/repo\\t/wt\\tchild\\t'
                                 'attempt_schema_version=2,dispatch_depth=2,transport=headless,'
                                 'execution_surface=registered-headless,registered_worker=1,'
                                 f'attempt_id={attempt},parent_attempt_id={parent},'
-                                'failure_class=pass,note=completed-supervisor\\n')
+                                f'failure_class=pass,note=completed-supervisor{terminal}\\n')
                 with open(trace, 'a', encoding='utf-8') as h:
                     h.write(json.dumps({'event':'join-end','time':time.monotonic()}) + '\\n')
                 print(json.dumps({'schema_version':2,'state':'ready','parent_attempt_id':parent,
@@ -308,6 +325,89 @@ class ClaudeSessionSupervisorTest(unittest.TestCase):
         self.assertTrue(all(row["transport"] == "stream-json" for row in starts))
         self.assertTrue(all(row["duration_seconds"] >= 0 for row in completed + joins + teardowns))
         self.assertEqual(rows[-1]["type"], "result")
+
+    def test_terminal_marker_closes_stream_without_final_owner_turn(self):
+        route = self.base / "terminal-route.json"
+        route_value = seal_route({
+            "schema_version": 2,
+            "cwd": str(self.base),
+            "nodes": [{"id": "report", "terminal": True}],
+            "workflow_contract": {"terminal_nodes": ["report"]},
+            "resume_retry_boundaries": [],
+        })
+        route.write_text(json.dumps(route_value), encoding="utf-8")
+        marker = self.base / "report.json"
+        self.jobs.write_text(owner_row(self.lease) + child_row(), encoding="utf-8")
+        result = subprocess.run(
+            self.command(self.stream_claude)
+            + [
+                "--turn-transport", "stream-json",
+                "--route-file", str(route),
+                "--route-id", route_value["route_id"],
+                "--route-hash", route_value["route_hash"],
+            ],
+            input="initial assignment",
+            text=True,
+            capture_output=True,
+            env=self.child_env(
+                FAKE_TRACE=str(self.trace),
+                FAKE_TERMINAL_ROUTE=str(route),
+                FAKE_TERMINAL_MARKER=str(marker),
+            ),
+            timeout=10,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        trace = [json.loads(line) for line in self.trace.read_text().splitlines()]
+        turns = [row for row in trace if row["event"] == "turn-start"]
+        self.assertEqual(len(turns), 1, trace)
+        rows = [json.loads(line) for line in result.stdout.splitlines()]
+        fast = [
+            row for row in rows
+            if row.get("type") == "dispatch.supervisor.terminal-fast-path"
+        ]
+        self.assertEqual(len(fast), 1, rows)
+        self.assertEqual(fast[0]["terminal_nodes"], ["report"])
+        self.assertTrue(fast[0]["continuation_saved"])
+        self.assertFalse(
+            any(row.get("type") == "dispatch.supervisor.resumed" for row in rows)
+        )
+        self.assertEqual(rows[-1]["type"], "result")
+
+    def test_terminal_fast_path_rejects_mismatched_marker(self):
+        route = self.base / "terminal-route.json"
+        route_value = seal_route({
+            "schema_version": 2,
+            "cwd": str(self.base),
+            "nodes": [{"id": "report", "terminal": True}],
+            "workflow_contract": {"terminal_nodes": ["report"]},
+            "resume_retry_boundaries": [],
+        })
+        route.write_text(json.dumps(route_value), encoding="utf-8")
+        marker = self.base / "report.json"
+        marker.write_text(json.dumps({
+            "schema_version": 2,
+            "route_id": route_value["route_id"],
+            "route_hash": route_value["route_hash"],
+            "node_id": "report",
+            "attempt_id": "att-other",
+        }), encoding="utf-8")
+        args = SimpleNamespace(
+            route_file=str(route),
+            route_id=route_value["route_id"],
+            route_hash=route_value["route_hash"],
+        )
+        row = SimpleNamespace(
+            status="done",
+            attempt_id="att-child",
+            metadata={
+                "failure_class": "pass",
+                "route_id": route_value["route_id"],
+                "route_hash": route_value["route_hash"],
+                "route_node": "report",
+                "completion_marker": str(marker),
+            },
+        )
+        self.assertEqual(supervisor.terminal_route_completion(args, [row]), ())
 
     def test_session_announcement_precedes_every_turn_and_leaks_nothing(self):
         """The receipt log must name the child session it never transcribes.
