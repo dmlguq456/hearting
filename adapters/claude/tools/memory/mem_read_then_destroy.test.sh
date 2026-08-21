@@ -1,0 +1,1 @@
+../../../../tools/memory/mem_read_then_destroy.test.sh
