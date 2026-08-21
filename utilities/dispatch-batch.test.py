@@ -492,6 +492,90 @@ class DispatchBatchTest(unittest.TestCase):
         self.assertEqual(independence, "cross-harness")
         self.assertEqual({row[1] for row in rows}, {"claude", "opencode"})
 
+    def _three_leg_route(self):
+        # Three nodes, exactly two usable families (codex/claude): with the
+        # diversity key already satisfied by any distinct combo (>= 2
+        # families present), the balanced allocation_order term is the only
+        # thing left to decide which family gets the majority (2 of 3) legs.
+        route = json.loads(json.dumps(self.route))
+        third = dict(replica_node("plan-third"))
+        third["id"] = "plan-third"
+        third["parallel_leg_index"] = 2
+        third["parallel_leg_count"] = 3
+        route["nodes"].append(third)
+        route["dispatch_allocation"] = {
+            "strategy": "balanced",
+            "window": 30,
+            "usage_gate_used_percent": 90,
+            "harness_order": ["claude", "codex", "opencode"],
+        }
+        return route
+
+    def test_balanced_group_placement_prefers_the_larger_headroom_family(self):
+        route = self._three_leg_route()
+        with mock.patch.object(
+            BATCH.DISPATCH_NODE, "resolve_checked_tuple", side_effect=resolve_side_effect
+        ), mock.patch.object(BATCH.CAPACITY, "capacity_scores", return_value={
+            "claude": 58.0, "codex": 99.0, "opencode": None,
+        }):
+            rows, independence, _diagnostics = BATCH.assign_harnesses(
+                route, route["nodes"], allow_degraded=False, jobs=self.jobs
+            )
+        self.assertEqual(independence, "cross-harness")
+        placed = [row[1] for row in rows]
+        self.assertEqual(placed.count("codex"), 2)
+        self.assertEqual(placed.count("claude"), 1)
+
+    def test_balanced_group_placement_still_honours_recent_attempt_balance(self):
+        # Same headroom gap as the test above (58/99), but codex already took
+        # 20 of the last 30 attempts to claude's 10: the 2026-08-13
+        # balanced-first policy must still pull the majority back to claude.
+        route = self._three_leg_route()
+        rows_log = []
+        for index in range(10):
+            rows_log.append(
+                f"2026-08-09T00:00:{index:02d}Z\tdone\t/r\t/w\tn{index}\t"
+                "attempt_schema_version=2,registered_worker=1,"
+                f"attempt_id=att-batch-headroom-claude-{index},harness=claude\n"
+            )
+        for index in range(20):
+            rows_log.append(
+                f"2026-08-09T00:01:{index:02d}Z\tdone\t/r\t/w\tn{index}\t"
+                "attempt_schema_version=2,registered_worker=1,"
+                f"attempt_id=att-batch-headroom-codex-{index},harness=codex\n"
+            )
+        self.jobs.write_text("".join(rows_log), encoding="utf-8")
+        with mock.patch.object(
+            BATCH.DISPATCH_NODE, "resolve_checked_tuple", side_effect=resolve_side_effect
+        ), mock.patch.object(BATCH.CAPACITY, "capacity_scores", return_value={
+            "claude": 58.0, "codex": 99.0, "opencode": None,
+        }):
+            rows, independence, _diagnostics = BATCH.assign_harnesses(
+                route, route["nodes"], allow_degraded=False, jobs=self.jobs
+            )
+        self.assertEqual(independence, "cross-harness")
+        placed = [row[1] for row in rows]
+        self.assertEqual(placed.count("claude"), 2)
+        self.assertEqual(placed.count("codex"), 1)
+
+    def test_balanced_group_placement_keeps_gated_leg_count_as_the_primary_key(self):
+        # 28fef331 invariant: an exhausted (fully gated) family must never
+        # take the majority of legs, regardless of what the deficit term
+        # alone would prefer.
+        route = self._three_leg_route()
+        with mock.patch.object(
+            BATCH.DISPATCH_NODE, "resolve_checked_tuple", side_effect=resolve_side_effect
+        ), mock.patch.object(BATCH.CAPACITY, "capacity_scores", return_value={
+            "claude": 0.0, "codex": 99.0, "opencode": None,
+        }):
+            rows, independence, _diagnostics = BATCH.assign_harnesses(
+                route, route["nodes"], allow_degraded=False, jobs=self.jobs
+            )
+        self.assertEqual(independence, "cross-harness")
+        placed = [row[1] for row in rows]
+        self.assertEqual(placed.count("claude"), 1)
+        self.assertEqual(placed.count("codex"), 2)
+
     def test_receipt_hop_and_ordinal_match_the_bound_tuple(self):
         # D7 live case reproduced end to end: a foreign claude->claude row
         # shadows nothing once assign_harnesses consumes the one shared

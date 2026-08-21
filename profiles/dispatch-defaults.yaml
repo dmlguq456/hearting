@@ -64,8 +64,12 @@ profiles:
     promote_relief_below: 0
 
 # Read-only allocation telemetry counts the last 30 exact registered attempt
-# rows in the selected canonical jobs.log. Fresh runtime gauges order quality
-# peers first; recent exact attempts break unknown/equal-capacity ties.
+# rows in the selected canonical jobs.log. `balanced` blends that count with
+# fresh gauge headroom in one continuous key: headroom sets each peer's target
+# share of the next attempt, the recent count says how much it already used.
+# Equal headroom therefore reduces to exact round-robin. `usage_gate_used_percent`
+# stays the existing hard gate-class/demotion boundary, not the sole ordering
+# signal; typed hard eligibility and explicit selection keep their precedence.
 allocation:
   strategy: balanced
   window: 30

@@ -10,7 +10,8 @@ F=importlib.util.module_from_spec(S);S.loader.exec_module(F)
 class CapacityTest(unittest.TestCase):
  def setUp(self):
   self.tmp=tempfile.TemporaryDirectory();self.jobs=Path(self.tmp.name)/"jobs.log"
-  self.args=type("Args",(),{"slug":"s","parent":"p","jobs":self.jobs,
+  self.args=type("Args",(),{"slug":"s","parent":"p","parent_attempt_id":"att-parent",
+   "jobs":self.jobs,
    "capacity_model":"gpt-5.6-luna","capacity_reasoning":"medium",
    "capacity_effort":None,"capacity_variant":None,"direct_timeout":2,
    "action":"register","progress_window_seconds":0,"watchdog_max_windows":2})()

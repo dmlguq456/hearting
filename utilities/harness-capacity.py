@@ -194,6 +194,39 @@ def ordering_score(scores, harness, neutral=ORDERING_NEUTRAL_SCORE):
     return float(neutral) if value is None else float(value)
 
 
+def allocation_deficit(scores, counts, candidates, *, neutral=ORDERING_NEUTRAL_SCORE):
+    """Blend remaining headroom and round-robin balance into one continuous key.
+
+    Headroom sets each candidate's *target share* of the next attempt; the
+    recent-attempt count says how much of that share it already consumed.
+    Equal headroom collapses the formula to exact round-robin, so the
+    2026-08-13 balanced-first policy survives as the equal-gauge special case
+    rather than being replaced. A widening gauge gap moves the ranking
+    continuously — deliberately no second threshold, because the defect this
+    repairs (2026-08-20: 58%-headroom claude beating 99%-headroom codex) was
+    caused by leaving ordering to a single step decision.
+
+    An unknown gauge takes the same neutral share `ordering_score` uses: it is
+    not exclusion here (see `rank_band`'s capacity-aware branch for the
+    exclusion semantics that must NOT be harmonised with this).
+    """
+    shares = {
+        name: (float(neutral) if scores.get(name) is None else max(0.0, float(scores[name])))
+        for name in candidates
+    }
+    total = sum(shares.values())
+    consumed = {name: int(counts.get(name, 0)) for name in candidates}
+    if total <= 0:
+        # Every gauge reads exactly zero: no share information survives, so
+        # fall back to pure round-robin instead of dividing by zero.
+        return {name: -float(value) for name, value in consumed.items()}
+    horizon = sum(consumed.values()) + 1
+    return {
+        name: shares[name] / total * horizon - consumed[name]
+        for name in candidates
+    }
+
+
 def rank_band(candidates, states, counts, declared_order, scores, *, strategy="capacity-aware", usage_gate_used_percent=90):
     """Rank eligible quality peers by headroom, then recent attempts and config order.
 
@@ -201,6 +234,16 @@ def rank_band(candidates, states, counts, declared_order, scores, *, strategy="c
     separate ordering-only term over candidates already proven eligible here.
     Do not harmonise the two — an unknown gauge is exclusion here and neutral
     there, deliberately.
+
+    Within `balanced`, the general (not-all-gated) branch is the one exception:
+    it already sorts by `counts`/`declared_order`, i.e. it lives on the
+    ordering side of that divide, not the eligibility side. `allocation_deficit`
+    blends fresh headroom into that existing ordering key rather than opening a
+    new gate — a widening headroom gap must move the ranking continuously
+    instead of only at the `usage_gate_used_percent` cutoff. The `all_gated`
+    branch keeps its own documented contract (max fresh headroom breaks the
+    tie when every candidate is gated — `core/OPERATIONS.md` SD-16) untouched,
+    and `capacity-aware` below keeps unknown-gauge exclusion untouched too.
     """
     if strategy == "balanced":
         cutoff = 100.0 - float(usage_gate_used_percent)
@@ -209,7 +252,6 @@ def rank_band(candidates, states, counts, declared_order, scores, *, strategy="c
             if not _limited(states.get(name, "unknown"))
         ]
         order = {name: index for index, name in enumerate(declared_order)}
-        known = [scores.get(name) is not None for name in candidates]
         all_gated = bool(candidates) and all(
             value is not None and float(value) <= cutoff
             for value in (scores.get(name) for name in candidates)
@@ -217,9 +259,12 @@ def rank_band(candidates, states, counts, declared_order, scores, *, strategy="c
         if all_gated:
             key = lambda name: (-float(scores[name]), int(counts.get(name, 0)), order.get(name, len(order)))
         else:
+            deficit = allocation_deficit(scores, counts, candidates)
             key = lambda name: (
                 1 if scores.get(name) is not None and float(scores[name]) <= cutoff else 0,
-                int(counts.get(name, 0)),
+                # Rounded so two identical inputs can never diverge on float
+                # noise; declared_order stays the deterministic final tiebreak.
+                round(-deficit[name], 9),
                 order.get(name, len(order)),
             )
         ranked = sorted(candidates, key=key)

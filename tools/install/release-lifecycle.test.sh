@@ -836,6 +836,113 @@ assert (state_root_after / "completion" / "rt-chain3-fixture" / "plan.json").is_
 PY
 echo "ok - chain-(3) dispatch state survives release rotation via _cleanup_releases succession"
 
+# 2026-08-20 regression (dispatch-harness-balance plan.md Phase 2 / completion
+# criterion (b)): with EXACTLY 2 release dirs, _cleanup_releases has zero
+# prune candidates (the `retained < 2` floor plus `keep` protect both), so its
+# prune-time _succeed_dispatch_state call never fires for the release rotation
+# just walked away from. Real fleets stay at exactly 2 releases most of the
+# time (2026-08-20 v2.55.6 -> v2.55.8), so this is the common case, not an
+# edge case: attempt history must still carry forward at ROTATION, not only
+# when a 3rd/4th release finally triggers a prune.
+python3 - "$ROOT" <<'PY'
+import json, os, sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+sys.path.insert(0, str(root / "tools/install"))
+sys.path.insert(0, str(root / "utilities"))
+import distribution as d
+import dispatch_allocation as da
+
+os.environ.pop("AGENT_DISPATCH_JOBS", None)
+
+releases = d.data_root() / "releases"
+releases.mkdir(parents=True, exist_ok=True)
+
+import time
+future_base = time.time() + 40_000_000
+names = ("v-2rel-old", "v-2rel-new")
+release_dirs = []
+for i, name in enumerate(names):
+    rel = releases / name
+    (rel / "core").mkdir(parents=True)
+    (rel / "core" / "CORE.md").write_text("fixture\n")
+    os.utime(rel, (future_base + i, future_base + i))
+    release_dirs.append(rel)
+
+old_root, new_root = release_dirs
+
+# Purge any release dirs a prior block in this same script left behind, so
+# "exactly 2 releases" is really exactly 2 for this block's own assertions.
+for stray in releases.iterdir():
+    if stray not in release_dirs and stray.is_dir() and not stray.is_symlink():
+        import shutil
+        shutil.rmtree(stray, ignore_errors=True)
+
+# A session ran while `current` pointed at the old release, with no
+# AGENT_DISPATCH_JOBS (chain (3)) -- registered attempt rows plus a
+# completion marker land directly under the old release's `.dispatch`.
+old_jobs = old_root / ".dispatch" / "jobs.log"
+old_jobs.parent.mkdir(parents=True, exist_ok=True)
+rows = []
+for i in range(19):
+    harness = "claude" if i % 2 == 0 else "codex"
+    rows.append(
+        f"2026-08-20T00:00:{i:02d}Z\tdone\t/r\t/w\tn{i}\t"
+        "attempt_schema_version=2,registered_worker=1,"
+        f"attempt_id=att-rot-{i},harness={harness}\n"
+    )
+# One row missing the schema/registered fields must never be counted.
+rows.append(
+    "2026-08-20T00:01:00Z\tdone\t/r\t/w\tn19\tattempt_id=att-rot-unregistered,harness=claude\n"
+)
+old_jobs.write_text("".join(rows))
+completion_dir = old_root / ".dispatch" / "completion" / "rt-2rel-fixture"
+completion_dir.mkdir(parents=True)
+marker_path = completion_dir / "plan.json"
+marker_path.write_text(json.dumps({"schema_version": 2, "route_id": "rt-2rel-fixture"}))
+
+if d.current_path().exists() or d.current_path().is_symlink():
+    d.current_path().unlink()
+d.current_path().symlink_to(old_root)
+
+# Reproduce the exact rotation-time sequence _install_or_update now runs:
+# retarget `current` to the new release, THEN succeed the old release's
+# dispatch state -- _succeed_dispatch_state reads `current` to find the live
+# release, so order matters.
+d.current_path().unlink()
+d.current_path().symlink_to(new_root)
+ok = d._succeed_dispatch_state(old_root)
+assert ok, "dispatch state carry-forward must report success for a clean copy"
+
+# With exactly 2 releases, _cleanup_releases prunes nothing -- the exact
+# shape this block exists to cover.
+d._cleanup_releases(keep={new_root, old_root})
+assert old_root.exists() and new_root.exists(), (
+    "succession must not depend on the old release being deleted"
+)
+
+new_jobs = new_root / ".dispatch" / "jobs.log"
+assert new_jobs.is_file(), "attempt rows must be carried into the live release at rotation time"
+migrated_marker = new_root / ".dispatch" / "completion" / "rt-2rel-fixture" / "plan.json"
+assert migrated_marker.is_file(), "completion marker must be re-anchored into the live release"
+assert json.loads(migrated_marker.read_text())["route_id"] == "rt-2rel-fixture"
+
+counts = da.attempt_counts(new_jobs, window=30)
+assert counts != {"claude": 0, "codex": 0, "opencode": 0}, (
+    "carried-forward history must reach allocation counting, not just sit on disk"
+)
+assert counts["claude"] == 10 and counts["codex"] == 9, counts
+
+# Idempotency: a second succession call must not change the live release's
+# content (additive-only, live copy always wins).
+before = new_jobs.read_text()
+ok_again = d._succeed_dispatch_state(old_root)
+assert ok_again
+assert new_jobs.read_text() == before, "a repeat succession call must be a no-op on the live release"
+PY
+echo "ok - dispatch state carries forward at rotation time even when release pruning has nothing to do"
+
 # T-2 regression (impl-review round-4 Q-6/P-3): if _succeed_dispatch_state
 # hits a copy failure partway through, _cleanup_releases must keep the
 # candidate release instead of rmtree-ing it -- losing the release directory

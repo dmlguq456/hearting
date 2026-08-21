@@ -499,17 +499,38 @@ def assign_harnesses(
             gate = 100 - allocation.get("usage_gate_used_percent", 90)
             gated = [capacity.get(row[0]) is not None and capacity.get(row[0]) <= gate for row in rows]
             all_gated = bool(gated) and all(gated)
-            allocation_order = (
-                # min-sort: count the gated (headroom <= 100-usage_gate) legs so
-                # an exhausted harness is avoided, not preferred. The inverted
-                # `0 if item else 1` form selected codex at 0% headroom for two
-                # consecutive retrieval groups (2026-08-20 artifact-knowledge-
-                # index gen-1/gen-2) against the balanced-first policy where
-                # usage acts only as the 90%-used exclusion gate.
-                sum(1 if item else 0 for item in gated),
-                -sum(float(capacity.get(row[0]) or 0) for row in rows) if all_gated else 0,
-                sum(counts.get(row[0], 0) for row in rows),
-            )
+            gated_legs = sum(1 if item else 0 for item in gated)
+            if all_gated:
+                # Documented scarcity contract (OPERATIONS §5.10 SD-16): when
+                # every candidate is gated, maximum fresh headroom breaks the
+                # tie. min-sort: count the gated (headroom <= 100-usage_gate)
+                # legs so an exhausted harness is avoided, not preferred. The
+                # inverted `0 if item else 1` form selected codex at 0%
+                # headroom for two consecutive retrieval groups (2026-08-20
+                # artifact-knowledge-index gen-1/gen-2) against the
+                # balanced-first policy where usage acts only as the
+                # 90%-used exclusion gate.
+                allocation_order = (
+                    gated_legs,
+                    -sum(float(capacity.get(row[0]) or 0) for row in rows),
+                    float(sum(counts.get(row[0], 0) for row in rows)),
+                )
+            else:
+                # Same soft headroom/round-robin blend rank_band's balanced
+                # branch uses (utilities/harness-capacity.py), so owner
+                # selection, single-stage fallback, and parallel group
+                # placement cannot drift apart (2026-08-20). min-sort, so
+                # `-sum(deficit)` minimizes to the placement that maximizes
+                # total deficit — i.e. the family furthest behind its target
+                # share. Candidate pool is `usable` (the whole family pool),
+                # not the legs in this one group, because a target share is
+                # only defined over the full candidate set.
+                deficit = CAPACITY.allocation_deficit(capacity, counts, usable)
+                allocation_order = (
+                    gated_legs,
+                    0.0,
+                    round(-sum(deficit.get(row[0], 0.0) for row in rows), 9),
+                )
         else:
             allocation_order = (
                 -sum(CAPACITY.ordering_score(capacity, row[0]) for row in rows),

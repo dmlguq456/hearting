@@ -1150,6 +1150,22 @@ def _install_or_update(
         keep = {target}
         if old_root:
             keep.add(old_root)
+            # Succession is owed at ROTATION, not at deletion. `keep` plus the
+            # `retained < 2` floor in _cleanup_releases means the release we
+            # just rotated away from is never a prune candidate, so the
+            # prune-time call below never fired for it: on 2026-08-20 v2.55.6
+            # held 19 registered attempt rows while the live v2.55.8 registry
+            # had 3, which reset balanced allocation's round-robin history and
+            # pinned every owner to the declared_order head. Copying is
+            # additive-only (live release wins), so an in-progress writer on
+            # the live release cannot be clobbered, and the prune-time call
+            # stays as a second net.
+            if not _succeed_dispatch_state(old_root):
+                print(
+                    "harness release: dispatch state carry-forward incomplete for "
+                    f"{old_root}; rotated state may be stranded until the next update",
+                    file=sys.stderr,
+                )
         _cleanup_releases(keep)
         return {
             "status": "installed" if previous_state is None else "updated",
