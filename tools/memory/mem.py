@@ -4447,7 +4447,7 @@ def log(limit=20, action=None, tier=None, actor=None, json_output=False):
         if DB.exists():
             con = get_con()
             try:
-                policy = sync_v2.remote_policy(os.environ, connection=con)
+                policy = sync_v2.remote_policy(_sync_environment(), connection=con)
                 payload["sync"] = sync_v2.sync_status(con, policy=policy)
                 payload["phases"]["sync-status"] = "ok"
                 payload.update(
@@ -4781,7 +4781,7 @@ def doctor(json_output=False):
             else:
                 print(f"  [FAIL] schema-version: v{schema_version}; upgrade required")
             return 2
-        policy = sync_v2.remote_policy(os.environ, connection=con)
+        policy = sync_v2.remote_policy(_sync_environment(), connection=con)
         sync_snapshot = sync_v2.sync_status(con, policy=policy)
         # ① PRAGMA integrity_check
         rows = con.execute("PRAGMA integrity_check").fetchall()
@@ -5545,16 +5545,62 @@ def _ingest_and_fold_snapshot(snapshot, remote_ref, *, record_peer=True,
     )
 
 
+SYNC_SETTINGS_KEYS = {
+    "enabled": "MEM_SYNC_REMOTE",
+    "exchange_dir": "MEM_SYNC_DIR",
+    "ref": "MEM_SYNC_REF",
+    "remote_url": "MEM_SYNC_REMOTE_URL",
+}
+
+
+def _sync_settings_path():
+    """User-owned cross-runtime exchange policy, outside any runtime's home."""
+    return (Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
+            / "hearting" / "memory-sync.json")
+
+
+def _sync_settings():
+    """Read the shared exchange policy; an unreadable file is simply absent.
+
+    Only Claude has a settings file that can carry environment defaults, so a
+    policy kept solely in one runtime's config would leave the other adapters
+    syncing local-only. This file is the portable surface all three read.
+    """
+    path = _sync_settings_path()
+    try:
+        if path.is_symlink() or not path.is_file():
+            return {}
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    resolved = {}
+    for key, name in SYNC_SETTINGS_KEYS.items():
+        value = data.get(key)
+        if isinstance(value, bool):
+            value = "1" if value else "0"
+        if isinstance(value, str) and value.strip():
+            resolved[name] = value.strip()
+    return resolved
+
+
+def _sync_environment():
+    """Overlay the shared policy with the process environment, which wins."""
+    return {**_sync_settings(), **os.environ}
+
+
 def _sync_exchange_config():
     dump = _dump_worktree_path()
-    remote = os.environ.get("MEM_SYNC_REMOTE_URL", "").strip()
+    environ = _sync_environment()
+    remote = environ.get("MEM_SYNC_REMOTE_URL", "").strip()
     if not remote:
         remote = _git_out(["remote", "get-url", "origin"], dump.parent)
-    configured = os.environ.get("MEM_SYNC_DIR")
+    configured = environ.get("MEM_SYNC_DIR")
     root = (Path(configured).expanduser() if configured else
-            Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local/state")) /
+            Path(environ.get("XDG_STATE_HOME", Path.home() / ".local/state")) /
             "hearting" / "memory-sync" / "exchange")
-    ref = os.environ.get("MEM_SYNC_REF", git_exchange_v2.DEFAULT_REF)
+    ref = environ.get("MEM_SYNC_REF", git_exchange_v2.DEFAULT_REF)
     return root, remote, ref, dump.parent
 
 
@@ -5744,7 +5790,7 @@ def _sync_locked(json_output=False):
 
     con = get_con()
     try:
-        policy = sync_v2.remote_policy(os.environ, connection=con)
+        policy = sync_v2.remote_policy(_sync_environment(), connection=con)
         status = sync_v2.sync_status(con, policy=policy)
     finally:
         con.close()
@@ -6090,6 +6136,19 @@ def _configure_migration_parser(sub):
     activate.add_argument("--equality", required=True)
     activate.add_argument("--fence-receipt", action="append", default=[], required=True)
 
+    # Joining is a bootstrap, not a cutover: a provably empty store needs no
+    # snapshot, seed, barrier, or equality proof, so it gets one leaf instead
+    # of the eleven-phase operator protocol.
+    join = phases.add_parser(
+        "join", help="Join a provably fresh store to an existing exchange")
+    join.add_argument("--epoch", help="Defaults to a value derived from this "
+                                      "replica and the protected ref")
+    join.add_argument("--json", dest="json_output", action="store_true")
+    join.add_argument("--apply", action="store_true",
+                      help="Apply the join (default: deterministic dry-run)")
+    join.add_argument("--sync", action="store_true",
+                      help="Run one exchange sync after a successful join")
+
     rollback = phases.add_parser("rollback", help="Prepare, verify, apply, or close rollback")
     rollback_phases = rollback.add_subparsers(dest="migration_rollback_cmd", required=True)
     rollback_prepare = _migration_leaf(rollback_phases.add_parser("prepare"), mutating=True)
@@ -6200,6 +6259,116 @@ def _migration_operation(args):
     command = args.migration_cmd
     child = getattr(args, f"migration_{command.replace('-', '_')}_cmd", None)
     return f"{command}.{child}" if child else command
+
+
+def _migration_join_identity(replica, ref):
+    """Derive one stable epoch so a repeated join is the same join."""
+    return hashlib.sha256(
+        f"fresh-join:{replica}:{ref}".encode()).hexdigest()[:32]
+
+
+def _migration_join_proof(kind, *, epoch, replica, ref, state):
+    return migration_v2.digest_json({
+        "kind": kind, "epoch_id": epoch, "replica_id": replica,
+        "protected_ref": ref, "object_count": int(state["object_count"]),
+        "legacy_nonempty": bool(state["legacy_nonempty"]),
+    })
+
+
+def _migration_join(args):
+    """Bootstrap a provably fresh store onto an existing protected ref.
+
+    An empty store has nothing to snapshot, seed, or prove equal, so joining
+    only has to seal a fresh epoch and activate the writer fence. Everything
+    else arrives through the ordinary exchange fold.
+    """
+    identity = get_con()
+    try:
+        identity.execute("BEGIN IMMEDIATE")
+        sync_v2.ensure_replica_identity(
+            identity, installation_fingerprint=_installation_fingerprint())
+        identity.commit()
+    finally:
+        identity.close()
+
+    root, remote, ref, _dump_repo = _sync_exchange_config()
+    con = _migration_read_connection()
+    try:
+        state = sync_v2.bootstrap_state(con)
+        replica = con.execute(
+            "SELECT replica_id FROM sync_replica WHERE active=1").fetchone()[0]
+    finally:
+        con.close()
+    epoch = args.epoch or _migration_join_identity(replica, ref)
+    migration_v2.state_digest(epoch, "legacy")  # validates the epoch identity
+
+    blockers, reason = [], None
+    if not state["schema_ready"]:
+        blockers.append("sync-schema-unavailable")
+    if state["legacy_nonempty"] or int(state["object_count"]):
+        # Joining an already-populated store would fork its history; that store
+        # needs the sealed-seed cutover instead.
+        blockers.append("store-is-not-fresh")
+    if not remote:
+        blockers.append("remote-url-unavailable")
+    else:
+        try:
+            git_exchange_v2.GitExchange(
+                root, remote, ref=ref,
+                forbidden_roots=_synchronized_project_roots())
+        except git_exchange_v2.ExchangeError as exc:
+            blockers.append("exchange-location-unusable")
+            reason = str(exc)
+    already = bool(state["seed_ready"] and state["fence_ready"]
+                   and state["epoch_id"] == epoch)
+
+    plan = {"phase": "join", "epoch_id": epoch, "replica_id": replica,
+            "protected_ref": ref, "exchange_dir": str(root),
+            "remote_configured": bool(remote),
+            "migration_state": "fresh-join" if not already else "joined",
+            "changed": False}
+    if blockers and not already:
+        return _migration_emit({
+            **plan, "status": "hard-failure", "exit_code": 2,
+            "reason": reason or blockers[0], "blocker_ids": blockers,
+            "required_action": "repair-input-and-retry"},
+            json_output=args.json_output)
+    if already:
+        return _migration_emit({**plan, "reason": "already-joined"},
+                               json_output=args.json_output)
+    if not args.apply:
+        return _migration_emit({**plan, "reason": "dry-run"},
+                               json_output=args.json_output)
+
+    con = get_con()
+    try:
+        con.execute("BEGIN IMMEDIATE")
+        sync_v2.initialize_fresh_v2_epoch(
+            con, epoch,
+            proof=_migration_join_proof("fresh-store-join", epoch=epoch,
+                                        replica=replica, ref=ref, state=state))
+        final = sync_v2.activate_v2_only_fence(
+            con, epoch, operator_authorized=True,
+            fence_proof=_migration_join_proof("fresh-store-fence", epoch=epoch,
+                                              replica=replica, ref=ref,
+                                              state=state))
+        con.commit()
+    except Exception:
+        con.rollback()
+        raise
+    finally:
+        con.close()
+
+    result = {**plan, "changed": True, "migration_state": "joined",
+              "old_writer_fence_active": bool(final["old_writer_fence_active"]),
+              "v2_only": bool(final["v2_only"]),
+              "remote_allowed": bool(final["remote_allowed"])}
+    if args.sync:
+        # An applying migration leaf already holds the sync process lock, so
+        # entering it again would report the caller's own lock as contention.
+        exit_code = _sync_locked(json_output=False)
+        result["sync_exit_code"] = int(exit_code or 0)
+    return _migration_emit(result, json_output=args.json_output)
 
 
 def _migration_require_snapshot_create(args):
@@ -6963,7 +7132,7 @@ def _migration_exchange(checkout, ref):
     root = Path(checkout).expanduser()
     if not root.is_absolute():
         raise migration_v2.MigrationError("checkout-must-be-absolute")
-    remote = os.environ.get("MEM_SYNC_REMOTE_URL", "").strip()
+    remote = _sync_environment().get("MEM_SYNC_REMOTE_URL", "").strip()
     if not remote and root.is_dir():
         remote = _git_out(["remote", "get-url", "origin"], root)
     if not remote:
@@ -7161,6 +7330,9 @@ def _migration_command_locked(args):
             result = migration_v2.verify_snapshot(args.manifest)
             return _migration_emit({**result, "phase": operation, "migration_state": "verified",
                 "changed": False}, json_output=args.json_output)
+        if operation == "join":
+            # A join derives its own epoch, so it validates the identity itself.
+            return _migration_join(args)
         migration_v2.state_digest(args.epoch, "legacy")  # validates the epoch identity
         if operation == "status":
             return _migration_status(args)

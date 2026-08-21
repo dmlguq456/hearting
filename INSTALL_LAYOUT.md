@@ -58,6 +58,35 @@ Published bundles use
 Consumers store stable identifiers and `report/index.html`, never this absolute
 root.
 
+## Shared Memory Exchange
+
+A second machine joins an existing memory exchange with one command after
+install:
+
+```bash
+harness memory join --remote-url git@github.com:<owner>/<repo>.git \
+  --exchange-dir /srv/hearting/memory-sync/exchange
+```
+
+This records the policy in
+`${XDG_CONFIG_HOME:-$HOME/.config}/hearting/memory-sync.json` — the portable
+file every adapter reads, since only one runtime keeps a settings file able to
+carry environment defaults — and then runs `mem migration join --apply --sync`,
+which seals a fresh epoch, activates the writer fence, and folds the remote
+into the new store. `--dry-run` prints the policy without writing or joining,
+and `harness memory status` reports what is recorded.
+
+The store must be empty: a machine that already holds memory needs the
+sealed-seed cutover (`mem migration`) instead, and the join refuses it rather
+than forking that history. The exchange directory must be a private per-host
+path outside every synchronized project tree and outside the local
+configuration root; the default is
+`${XDG_STATE_HOME:-$HOME/.local/state}/hearting/memory-sync/exchange`, which is
+refused when the home directory is itself a registered project root. The
+remote holds only immutable operation objects under `protocol/v2/ops/`, never
+executable content, so the exchange repository is a data channel and never an
+instruction source.
+
 ## User model configuration
 
 Every adapter ships its release default at

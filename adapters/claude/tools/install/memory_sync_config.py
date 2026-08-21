@@ -1,0 +1,1 @@
+../../../../tools/install/memory_sync_config.py

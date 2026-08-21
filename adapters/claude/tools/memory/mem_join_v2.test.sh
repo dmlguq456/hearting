@@ -1,0 +1,1 @@
+../../../../tools/memory/mem_join_v2.test.sh
