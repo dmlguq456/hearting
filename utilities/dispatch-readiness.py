@@ -78,7 +78,45 @@ def generate(
                 prospective_standard_owner=parent == "codex",
             )
             rows.append(NESTED.evaluate(args))
-    return {"tuples": rows, "native_subagent": []}
+    return {
+        "tuples": rows,
+        "native_subagent": [],
+        "candidates": _quick_candidates(rows),
+    }
+
+
+def _quick_candidates(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Project the checked tuples into `capability-route.py compile
+    --registered-headless-evidence` candidates.
+
+    The two consumers grew apart (observed 2026-08-21, memory 6b227d): compile
+    validates `{"candidates": [{harness, transport, surface, status,
+    probe_source, probe_time}]}` while this tool emitted only the
+    dispatch-depth-2 `tuples` shape, so the documented direct/quick path —
+    dispatch-readiness → compile — always failed `quick-headless-unavailable`.
+    A candidate names the harness of the prospective registered-headless
+    worker (the tuple's `child_harness`); one row per harness, a supported
+    probe outranking an unsupported/unknown one."""
+    projected: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        harness = row.get("child_harness")
+        if not harness:
+            continue
+        status = row.get("status")
+        if status not in ("supported", "unsupported"):
+            status = "unknown"
+        candidate = {
+            "harness": harness,
+            "transport": "headless",
+            "surface": "registered-headless",
+            "status": status,
+            "probe_source": row.get("probe_source") or "dispatch-readiness",
+            "probe_time": row.get("probe_time") or "",
+        }
+        held = projected.get(harness)
+        if held is None or (held["status"] != "supported" and status == "supported"):
+            projected[harness] = candidate
+    return sorted(projected.values(), key=lambda row: row["harness"])
 
 
 def _atomic_json(path: Path, value: dict[str, Any]) -> None:
