@@ -151,6 +151,76 @@ class CapacityPolicyTests(unittest.TestCase):
         )
         self.assertEqual(ranked, ["codex", "claude"])
 
+    def test_balanced_prefers_clearly_larger_headroom_at_equal_counts(self):
+        # The reported symptom (2026-08-20): 58%-headroom claude beating
+        # 99%-headroom codex because the general branch never consulted the
+        # gauge value, only the 10%-cutoff gate class.
+        ranked = C.rank_band(
+            ["claude", "codex"], self.states, {"claude": 0, "codex": 0},
+            ["claude", "codex"], {"claude": 58, "codex": 99},
+            strategy="balanced",
+        )
+        self.assertEqual(ranked, ["codex", "claude"])
+
+    def test_balanced_reduces_to_round_robin_when_headroom_is_equal(self):
+        ranked_a = C.rank_band(
+            ["claude", "codex"], self.states, {"claude": 3, "codex": 1},
+            ["claude", "codex"], {"claude": 70, "codex": 70},
+            strategy="balanced",
+        )
+        self.assertEqual(ranked_a, ["codex", "claude"])
+        ranked_b = C.rank_band(
+            ["claude", "codex"], self.states, {"claude": 1, "codex": 3},
+            ["claude", "codex"], {"claude": 70, "codex": 70},
+            strategy="balanced",
+        )
+        self.assertEqual(ranked_b, ["claude", "codex"])
+
+    def test_balanced_recent_attempts_still_outweigh_a_modest_headroom_gap(self):
+        # 2026-08-13 balanced-first policy must not be defeated by headroom
+        # alone: codex already took 20 of the last 30 attempts, so claude is
+        # still due even though codex has more fresh headroom.
+        ranked = C.rank_band(
+            ["claude", "codex"], self.states, {"claude": 10, "codex": 20},
+            ["claude", "codex"], {"claude": 58, "codex": 99},
+            strategy="balanced",
+        )
+        self.assertEqual(ranked, ["claude", "codex"])
+
+    def test_balanced_headroom_weight_is_continuous_not_stepped(self):
+        counts = {"claude": 0, "codex": 0}
+        values = []
+        for codex_score in (58, 58.5, 59, 70, 85, 99):
+            deficit = C.allocation_deficit(
+                {"claude": 58, "codex": codex_score}, counts, ["claude", "codex"],
+            )
+            values.append(deficit["codex"] - deficit["claude"])
+        # Strictly increasing as codex's headroom rises relative to claude's
+        # fixed 58 — a stepped/thresholded formula would show a flat run.
+        for earlier, later in zip(values, values[1:]):
+            self.assertLess(earlier, later)
+        ranked = C.rank_band(
+            ["claude", "codex"], self.states, counts,
+            ["claude", "codex"], {"claude": 58, "codex": 99},
+            strategy="balanced",
+        )
+        self.assertEqual(ranked, ["codex", "claude"])
+
+    def test_balanced_unknown_gauge_takes_the_neutral_share(self):
+        ranked = C.rank_band(
+            ["claude", "codex"], self.states, {"claude": 0, "codex": 0},
+            ["claude", "codex"], {"claude": 99, "codex": None},
+            strategy="balanced",
+        )
+        self.assertEqual(set(ranked), {"claude", "codex"})
+        self.assertEqual(ranked[0], "claude")
+
+    def test_allocation_deficit_all_zero_headroom_falls_back_to_round_robin(self):
+        deficit = C.allocation_deficit(
+            {"a": 0, "b": 0}, {"a": 2, "b": 0}, ["a", "b"],
+        )
+        self.assertGreater(deficit["b"], deficit["a"])
+
 
 class CodexGaugeReaderTests(unittest.TestCase):
     """The codex gauge must not starve on idle: live probe first, rollout second.
