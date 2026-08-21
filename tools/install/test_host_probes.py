@@ -106,6 +106,12 @@ class HostProbesWarnOnlyContractTest(unittest.TestCase):
                     {"id": "host.bwrap-userns", "status": "warning", "detail": "userns unavailable"},
                 ]
             ))
+            stack.enter_context(mock.patch.object(
+                installer.node_runtime, "ensure_node", return_value={
+                    "id": "host.node-runtime", "status": "warning",
+                    "detail": "node install failed: offline",
+                }
+            ))
             result = installer.cmd_install(args)
         self.assertEqual(result["exit"], installer.EXIT_OK)
         self.assertEqual(

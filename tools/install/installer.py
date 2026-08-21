@@ -35,6 +35,7 @@ import routing_config
 import report_bundle_config
 import memory_sync_config
 import host_probes
+import node_runtime
 from drivers import get_driver, RUNTIMES
 
 # Exit codes map one-to-one to the PRD CLI table.
@@ -341,7 +342,8 @@ def cmd_install(args):
                 lr["status"] == "skipped-collision" for lr in launcher_results
             )
 
-    environment = host_probes.run()
+    environment = [node_runtime.ensure_node()]
+    environment.extend(host_probes.run())
     for probe in environment:
         lines.append(f"environment: {probe['id']} -> {probe['status']} ({probe['detail']})")
 

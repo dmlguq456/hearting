@@ -13,6 +13,13 @@ import subprocess
 def probe_node() -> dict:
     path = shutil.which("node")
     if path is None:
+        managed = _managed_node()
+        if managed is not None:
+            return {
+                "id": "host.node",
+                "status": "ok",
+                "detail": f"managed install at {managed} (not yet on this shell's PATH)",
+            }
         return {
             "id": "host.node",
             "status": "warning",
@@ -23,6 +30,15 @@ def probe_node() -> dict:
             ),
         }
     return {"id": "host.node", "status": "ok", "detail": path}
+
+
+def _managed_node():
+    try:
+        import node_runtime
+    except ImportError:
+        return None
+    candidate = node_runtime._node_root() / "current" / "bin" / "node"
+    return candidate if candidate.is_file() else None
 
 
 def probe_bwrap_userns() -> dict:
