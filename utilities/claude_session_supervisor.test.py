@@ -192,13 +192,28 @@ class ClaudeSessionSupervisorTest(unittest.TestCase):
             "--disallowed-tool", "Monitor",
         ]
 
+    def child_env(self, **extra: str) -> dict[str, str]:
+        """Fixture-pinned subprocess environment.
+
+        This suite also runs inside dispatched workers, whose real
+        ``AGENT_ARTIFACT_ROOT`` otherwise contradicts every fixture artifact
+        root: reconcile then skips with ``terminal-error:artifact-root-mismatch``
+        and the run only ends at ``continuation-limit-exceeded``. Pin the
+        fixture root for every child process instead of leaking the caller's.
+        """
+        return {
+            **os.environ,
+            "AGENT_ARTIFACT_ROOT": str(self.artifact_root),
+            **extra,
+        }
+
     def run_supervisor(self, **extra_env: str) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
             self.command(),
             input="initial assignment",
             text=True,
             capture_output=True,
-            env={**os.environ, "FAKE_TRACE": str(self.trace), **extra_env},
+            env=self.child_env(FAKE_TRACE=str(self.trace), **extra_env),
             timeout=10,
         )
 
@@ -251,7 +266,7 @@ class ClaudeSessionSupervisorTest(unittest.TestCase):
             ],
             text=True,
             capture_output=True,
-            env={**os.environ, "AGENT_ARTIFACT_ROOT": str(self.artifact_root)},
+            env=self.child_env(),
         )
         self.assertEqual(inspected.returncode, 0, inspected.stderr + inspected.stdout)
         self.assertIn("\tvalid\texact-claude-result\tPASS\tnone\tnone", inspected.stdout)
@@ -264,7 +279,7 @@ class ClaudeSessionSupervisorTest(unittest.TestCase):
             input="initial assignment",
             text=True,
             capture_output=True,
-            env={**os.environ, "FAKE_TRACE": str(self.trace)},
+            env=self.child_env(FAKE_TRACE=str(self.trace)),
             timeout=10,
         )
         self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
@@ -400,7 +415,7 @@ class ClaudeSessionSupervisorTest(unittest.TestCase):
             input="initial assignment",
             text=True,
             capture_output=True,
-            env={**os.environ, "FAKE_TRACE": str(self.trace), "LONG_JOBS": str(self.jobs)},
+            env=self.child_env(FAKE_TRACE=str(self.trace), LONG_JOBS=str(self.jobs)),
             timeout=20,
         )
         self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
@@ -488,7 +503,7 @@ class ClaudeSessionSupervisorTest(unittest.TestCase):
             input="initial assignment",
             text=True,
             capture_output=True,
-            env={**os.environ, "FAKE_TRACE": str(self.trace)},
+            env=self.child_env(FAKE_TRACE=str(self.trace)),
             timeout=10,
         )
         self.assertNotEqual(result.returncode, 0)
@@ -513,7 +528,7 @@ class ClaudeSessionSupervisorTest(unittest.TestCase):
             input="initial assignment",
             text=True,
             capture_output=True,
-            env={**os.environ, "FAKE_TRACE": str(self.trace)},
+            env=self.child_env(FAKE_TRACE=str(self.trace)),
             timeout=10,
         )
         self.assertEqual(result.returncode, 3, result.stderr + result.stdout)
@@ -538,7 +553,7 @@ class ClaudeSessionSupervisorTest(unittest.TestCase):
             input="initial assignment",
             text=True,
             capture_output=True,
-            env={**os.environ, "FAKE_TRACE": str(self.trace)},
+            env=self.child_env(FAKE_TRACE=str(self.trace)),
             timeout=10,
         )
         self.assertEqual(result.returncode, 3, result.stderr + result.stdout)
@@ -628,7 +643,7 @@ class ClaudeSessionSupervisorTest(unittest.TestCase):
             input="initial assignment",
             text=True,
             capture_output=True,
-            env={**os.environ, "FAKE_TRACE": str(self.trace)},
+            env=self.child_env(FAKE_TRACE=str(self.trace)),
             timeout=10,
         )
         self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
@@ -682,7 +697,7 @@ class ClaudeSessionSupervisorTest(unittest.TestCase):
             input="initial assignment",
             text=True,
             capture_output=True,
-            env={**os.environ, "FAKE_TRACE": str(self.trace)},
+            env=self.child_env(FAKE_TRACE=str(self.trace)),
             timeout=10,
         )
         self.assertNotEqual(result.returncode, 0)
@@ -729,7 +744,7 @@ class ClaudeSessionSupervisorTest(unittest.TestCase):
             input="initial assignment",
             text=True,
             capture_output=True,
-            env={**os.environ, "FAKE_TRACE": str(self.trace)},
+            env=self.child_env(FAKE_TRACE=str(self.trace)),
             timeout=10,
         )
         self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
@@ -780,7 +795,7 @@ class ClaudeSessionSupervisorTest(unittest.TestCase):
             input="initial assignment",
             text=True,
             capture_output=True,
-            env={**os.environ, "FAKE_TRACE": str(self.trace)},
+            env=self.child_env(FAKE_TRACE=str(self.trace)),
             timeout=10,
         )
         self.assertNotEqual(result.returncode, 0)

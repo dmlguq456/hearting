@@ -197,6 +197,61 @@ class DispatchOwnerRewakeTest(unittest.TestCase):
         self.assertEqual(attention_stdout.getvalue(), "")
         self.assertEqual(attention_stderr.getvalue(), "warning\n")
 
+    def test_promoted_success_renders_exit_zero_notification_and_attention_exits_two(
+        self,
+    ) -> None:
+        # SD-97 end to end: an earlier `attention/terminal-failure-or-unclosed`
+        # snapshot plus the current sealed `done/completed-supervisor/pass` row must
+        # reach the terminal as one exit-0 structured notification. Only a row that
+        # is genuinely unresolved may reach it as an exit-2 warning, and that warning
+        # must name this exact registry.
+        launch = rewake.parse_launch(self.payload())
+        assert launch is not None
+        self.jobs.write_text(
+            "2026-08-06T00:00:00Z\tdone\t/repo\t/wt\towner\t"
+            "attempt_schema_version=2,attempt_id=att-owner-1,failure_class=pass,"
+            "note=completed-supervisor\n",
+            encoding="utf-8",
+        )
+        state, message = rewake.classified_receipt(
+            launch, "attention", "terminal-failure-or-unclosed", self.root
+        )
+        self.assertEqual(state, "success")
+        self.assertIn("state=success", message)
+        self.assertIn("reason=row-advanced", message)
+        self.assertIn("required_action=advance-completed", message)
+        self.assertIn("Hearting dispatch completed", message)
+        self.assertNotIn("harvest --jobs", message)
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with mock.patch.object(sys, "stdout", stdout), mock.patch.object(
+            sys, "stderr", stderr
+        ):
+            self.assertEqual(rewake.emit_receipt(state, message), 0)
+        self.assertEqual(stderr.getvalue(), "")
+        rendered = json.loads(stdout.getvalue())
+        self.assertEqual(rendered["systemMessage"], message)
+        self.assertIn("Hearting dispatch completed", rendered["terminalSequence"])
+
+        self.jobs.write_text(
+            "2026-08-06T00:00:00Z\topen\t/repo\t/wt\towner\t"
+            "attempt_schema_version=2,attempt_id=att-owner-1\n",
+            encoding="utf-8",
+        )
+        state, message = rewake.classified_receipt(
+            launch, "attention", "terminal-failure-or-unclosed", self.root
+        )
+        self.assertEqual(state, "attention")
+        self.assertIn("Hearting dispatch requires attention", message)
+        self.assertIn("required_action=complete-open", message)
+        self.assertIn(f"--jobs {self.jobs} ", message)
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with mock.patch.object(sys, "stdout", stdout), mock.patch.object(
+            sys, "stderr", stderr
+        ):
+            self.assertEqual(rewake.emit_receipt(state, message), 2)
+        self.assertEqual(stdout.getvalue(), "")
+        self.assertEqual(stderr.getvalue(), message + "\n")
+
     def test_terminal_failure_receipt_uses_matching_status(self) -> None:
         launch = rewake.parse_launch(self.payload())
         assert launch is not None
