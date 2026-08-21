@@ -261,6 +261,10 @@ class WorkProjectionTest(unittest.TestCase):
         self.assertEqual(owner.work_projection.source, "route-exact")
         self.assertEqual(owner.work_projection.route_id, rid)
         self.assertEqual(owner.work_projection.progress.total, 4)
+        # No child has attached yet, so no node is sealed active — the scalar
+        # selection stays unknown rather than guessing the first node.
+        self.assertIsNone(owner.work_projection.route_node)
+        self.assertEqual(owner.work_projection.node_state, "unknown")
         lines = render._build_lines([], jobs, section="dispatch", narrow=False,
                                     malformed=0, layout="wide")
         text = "\n".join("".join(token for token, _kind in line)
@@ -286,6 +290,8 @@ class WorkProjectionTest(unittest.TestCase):
         )
         projection.attach_projections([], [owner, child], now=100.0)
         self.assertEqual(owner.work_projection.stage_label, "execute")
+        self.assertEqual(owner.work_projection.route_node, "execute")
+        self.assertEqual(owner.work_projection.node_state, "active")
         with mock.patch.object(render, "_BLINK_ON", True):
             lines = render._build_lines([], [owner, child], section="dispatch",
                                         narrow=False, malformed=0, layout="wide")
@@ -302,6 +308,76 @@ class WorkProjectionTest(unittest.TestCase):
         )
         projection.attach_projections([], [owner, conflict], now=100.0)
         self.assertEqual(owner.work_projection.ambiguity, "owner-route-conflict")
+
+    def test_owner_projection_collapses_parallel_active_nodes(self):
+        record = {
+            "schema_version": 1,
+            "nodes": [
+                {"id": "frame", "depends_on": [], "parallel_group": "frame"},
+                {"id": "frame-alt", "depends_on": [], "parallel_group": "frame"},
+                {"id": "next", "depends_on": ["frame", "frame-alt"]},
+            ],
+        }
+        record["route_hash"] = route.route_hash(record)
+        digest = record["route_hash"].split(":", 1)[1]
+        record["route_id"] = "rt-" + digest[:16]
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "parallel.route.json")
+            with open(path, "w", encoding="utf-8") as stream:
+                json.dump(record, stream)
+            rid, route_hash_ = record["route_id"], record["route_hash"]
+            owner = DispatchJob(
+                key="code", slug="owner", depth=1, worker_type="owner",
+                attempt_id="att-owner", liveness="working",
+                owner_route_file=path, owner_route_id=rid, owner_route_hash=route_hash_,
+            )
+            leg_a = DispatchJob(
+                key="frame", slug="leg-a", depth=2, parent_slug="owner",
+                route_id=rid, route_file=path, route_hash=route_hash_,
+                route_node="frame", liveness="working",
+            )
+            leg_b = DispatchJob(
+                key="frame", slug="leg-b", depth=2, parent_slug="owner",
+                route_id=rid, route_file=path, route_hash=route_hash_,
+                route_node="frame-alt", liveness="working",
+            )
+            projection.attach_projections([], [owner, leg_a, leg_b], now=100.0)
+        self.assertEqual(owner.work_projection.route_node, "frame(2-way)")
+        self.assertEqual(owner.work_projection.node_state, "active")
+
+    def test_owner_render_uses_node_states_not_progress(self):
+        owner_record = route.load(REAL)
+        rid, route_hash = owner_record["route_id"], owner_record["route_hash"]
+        owner = DispatchJob(
+            key="code", slug="owner", depth=1, worker_type="owner",
+            attempt_id="att-owner", liveness="working",
+            owner_route_file=REAL, owner_route_id=rid, owner_route_hash=route_hash,
+        )
+        child = DispatchJob(
+            key="code-execute", slug="child", depth=2, parent_slug="owner",
+            route_id=rid, route_file=REAL, route_hash=route_hash,
+            route_node="execute", assigned_contract="code-execute",
+            liveness="working",
+        )
+        projection.attach_projections([], [owner, child], now=100.0)
+        # Only `execute` is actually active; `plan` has no completed evidence and
+        # must stay pending rather than being inferred done from its position
+        # ahead of the active node.
+        view = owner.work_projection._route_view["view"]
+        states = {n["id"]: n["state"] for n in view["nodes"]}
+        self.assertEqual(states, {"plan": "pending", "execute": "active",
+                                  "test": "pending", "report": "pending"})
+        route_seq = [(n["id"], n["state"]) for n in view["nodes"]]
+        self.assertEqual(render._route_current_index(route_seq), 1)
+        self.assertEqual(render._depth1_rail_color_index("code", None, route_seq), 1)
+        with mock.patch.object(render, "_BLINK_ON", True):
+            lines = render._build_lines([], [owner, child], section="dispatch",
+                                        narrow=False, malformed=0, layout="wide")
+        text = "\n".join("".join(token for token, _kind in line)
+                         for line in lines if line)
+        self.assertNotIn("plan ✓", text)
+        self.assertNotIn("test ✓", text)
+        self.assertNotIn("report ✓", text)
 
     def test_partial_owner_binding_fails_closed(self):
         record = route.load(REAL)

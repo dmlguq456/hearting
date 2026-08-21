@@ -2631,12 +2631,23 @@ def _dispatch_row(j, orphan=False, parent_model=None, parent_harness=None, is_la
         def _stage_part(budget):
             if _route_rides_the_rail(j, route_seq, in_card):
                 return []
-            return _stage_zone_segs(
-                _dispatch_stage_segs(j, key, stage, slug_name,
-                                     working=(unit_working if unit_working is not None
-                                              else j.liveness == "working"),
-                                     route_seq=route_seq, route_zone=budget,
-                                     compact_route=in_card))
+            bc = _dispatch_stage_segs(j, key, stage, slug_name,
+                                      working=(unit_working if unit_working is not None
+                                               else j.liveness == "working"),
+                                      route_seq=route_seq, route_zone=budget,
+                                      compact_route=in_card)
+            # F-81 unresolved-owner fallback: a standard+ owner card whose route never
+            # resolved (including a wholly absent owner binding) would otherwise fall through to
+            # the generic `preparing…`/empty-breadcrumb fallback. Show a dim `—`
+            # instead, so an unresolved owner card does not claim a stage it cannot
+            # prove. Quick/legacy non-owner rows and rows outside a card keep the
+            # pre-existing fallback.
+            if (in_card and depth == 1
+                    and getattr(j, "worker_type", None) == "owner"
+                    and (getattr(j, "intensity", None) or "") != "quick"
+                    and not route_seq):
+                return _stage_zone_segs([("—", "dim")])
+            return _stage_zone_segs(bc)
         if in_card and card_interior:
             consumed = sum(_dw(t) for t, _k in segs)
             # F-68b (user): the box keeps its elapsed, but as an inline bare `<t>` value
@@ -5219,21 +5230,29 @@ def _build_lines(sessions, jobs, section, narrow, malformed, layout="wide", memo
                     route_label = _route_stage_segs(
                         route_seq, unit_working or job.liveness == "working",
                         bottom_label_budget(box_width))
-                # Inserted AFTER framing so the divider is not itself passed through
-                # `_frame_dispatch_line` (it is a frame member, not a content row). Emitted
-                # when a descendant row survived the fold above OR a breadcrumb needs
-                # somewhere to live — a card whose children all folded to `done` still owns
-                # a pipeline and must not go silently breadcrumb-less (F-81).
-                if header_end < len(lines) or route_label:
+                # D4/F-81: a divider only makes sense when this card actually HAS raw
+                # children — it separates the owner's own rows from its descendants'.
+                # `has_children` is the raw job_children lookup, not whether any of them
+                # survived the F-15b fold above: a card whose children all folded to
+                # `done` still owns a pipeline and must not go silently breadcrumb-less,
+                # so the divider (with the breadcrumb) is drawn even with zero visible
+                # descendants. A genuinely childless card gets no divider at all — the
+                # breadcrumb instead rides the closing rail, so a one-line-taller box
+                # never appears just because a route happened to resolve (F-81
+                # regression: this used to trigger off `header_end < len(lines) or
+                # route_label`, which drew a divider for a childless multi-node route
+                # too). Inserted/appended AFTER framing so neither rail row is itself
+                # passed through `_frame_dispatch_line` (frame members, not content rows).
+                has_children = bool(job_children.get(job.slug))
+                if has_children:
                     lines.insert(header_end,
                                  _dispatch_box_divider(box_width, rail_key, run_key=run_key,
                                                        label_segs=route_label))
-                # F-81: the close rail reverts to a label-less rule — this is the
-                # pre-existing `label_segs=None` path (`_dispatch_box_bottom`'s own
-                # `if not label_w ...` branch), not new code. The `╰───` four-cell stub,
-                # width, corner, and grain are unchanged (user-confirmed 2026-08-20).
-                lines.append(_dispatch_box_bottom(box_width, rail_key, run_key=run_key,
-                                                  label_segs=None))
+                    lines.append(_dispatch_box_bottom(box_width, rail_key, run_key=run_key,
+                                                      label_segs=None))
+                else:
+                    lines.append(_dispatch_box_bottom(box_width, rail_key, run_key=run_key,
+                                                      label_segs=route_label))
 
         shown = _sort_group_sessions(shown)
         if live_order is not None:
@@ -5272,24 +5291,16 @@ def _build_lines(sessions, jobs, section, narrow, malformed, layout="wide", memo
                 _seen_glyphs.add("subagent")
             if plugin_kids:
                 _seen_glyphs.add("subagent")
-            session_projection = getattr(s, "work_projection", None)
-            session_route = getattr(session_projection, "route_id", None)
-            visible_route_owner = (
-                bool(session_route)
-                and getattr(session_projection, "source", None) == "route-exact"
-                and not getattr(session_projection, "ambiguity", None)
-                and any(
-                    max(1, int(getattr(child, "depth", 1) or 1)) == 1
-                    and getattr(getattr(child, "work_projection", None), "route_id", None)
-                    == session_route
-                    and getattr(getattr(child, "work_projection", None), "source", None)
-                    == "route-exact"
-                    and not getattr(getattr(child, "work_projection", None), "ambiguity", None)
-                    for child in dispatch_kids
-                )
-            )
+            # D3: suppression follows whether a depth-1 owner card actually renders under
+            # this session, not whether the session and a child agree on an exact route.
+            # Every direct dispatch_kids child owns a card (`orphan=False` and either
+            # depth == 1 or the depth>=2 detached-root recovery both satisfy
+            # `_emit_dispatch_tree`'s `owns_card`) — a card is present whenever any exist,
+            # so a lost route binding stops synthesizing a duplicate session-row stage
+            # without leaving both the card and the session stage-less.
+            card_owner_present = bool(dispatch_kids)
             recovered_session_owner = s.session_id in recovered_session_ids
-            suppress_session_stage = visible_route_owner or recovered_session_owner
+            suppress_session_stage = card_owner_present or recovered_session_owner
             _n0 = len(lines)
             if _selectable_session(s):
                 _SELECTABLE.append(_select_entry(s, _n0))    # F-27 target map

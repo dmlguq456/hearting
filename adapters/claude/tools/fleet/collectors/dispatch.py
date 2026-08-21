@@ -2660,12 +2660,18 @@ def _scan_jobs_log(path, seen_slugs, seen_keys=None, registry_priority=0,
 
 
 def _jobs_log_fields(paths):
-    """{slug: metadata} from the latest jobs.log row per slug (last-occurrence-wins,
-    mirrors the reconciliation in _scan_jobs_log). Tolerant: missing file / malformed rows
-    (field count != 6) never raise — worst case an empty or partial map."""
+    """Return slug and exact-attempt metadata indexes from jobs.log.
+
+    The slug index preserves the legacy latest-row-wins behavior.  The attempt
+    index is separate because a proc row for an older live retry must not inherit
+    route, transcript, or artifact fields from a newer row with the same slug.
+    Both indexes are tolerant of missing files and malformed rows, and preserve
+    first-registry-wins precedence across registry files.
+    """
     if isinstance(paths, (str, bytes, os.PathLike)):
         paths = [paths]
     fields_by_slug = {}
+    fields_by_attempt = {}
     for path in paths:
         path_fields = {}
         try:
@@ -2673,6 +2679,7 @@ def _jobs_log_fields(paths):
                 rows = f.read().splitlines()
         except OSError:
             continue
+        path_attempts = {}
         for line in rows:
             if not line.strip():
                 continue
@@ -2683,10 +2690,16 @@ def _jobs_log_fields(paths):
             value = _parse_pipe_meta(fields[5] or "")
             value["_registry_path"] = path
             path_fields[slug] = value
+            attempt_id = value.get("attempt_id")
+            if attempt_id:
+                path_attempts[attempt_id] = value
         for slug, value in path_fields.items():
             if slug not in fields_by_slug:
                 fields_by_slug[slug] = value         # first registry wins across files
-    return fields_by_slug
+        for attempt_id, value in path_attempts.items():
+            if attempt_id not in fields_by_attempt:
+                fields_by_attempt[attempt_id] = value  # first registry wins across files
+    return fields_by_slug, fields_by_attempt
 
 
 def _reconcile_drill_rows(jobs, now=None, codex_index=None):
@@ -2895,10 +2908,11 @@ def collect(jobs_path=None, harness_filter=None):
             and not all((j.owner_route_file, j.owner_route_id, j.owner_route_hash)))
         for j in proc_jobs
     ):
-        log_fields = _jobs_log_fields(paths)
+        log_fields, attempt_fields = _jobs_log_fields(paths)
         for j in proc_jobs:
             if j.slug:
                 metadata = log_fields.get(j.slug, {})
+                exact_metadata = attempt_fields.get(j.attempt_id, {}) if j.attempt_id else {}
                 if j.mode is None:
                     j.mode = metadata.get("mode")
                 if j.capability_mode is None:
@@ -2907,18 +2921,17 @@ def collect(jobs_path=None, harness_filter=None):
                     j.worker_mode = metadata.get("worker_mode")
                 if j.profile is None:
                     j.profile = metadata.get("profile")
-                if (j.attempt_id and metadata.get("attempt_id") == j.attempt_id
-                        and not getattr(j, "_log_file", None)):
-                    j._log_file = metadata.get("log_file")
-                    j._launch_home = metadata.get("launch_home")
-                    j._registry_path = metadata.get("_registry_path")
+                if j.attempt_id and exact_metadata:
+                    if not getattr(j, "_log_file", None):
+                        j._log_file = exact_metadata.get("log_file")
+                        j._launch_home = exact_metadata.get("launch_home")
+                        j._registry_path = exact_metadata.get("_registry_path")
                     if not j.artifact_root:
-                        j.artifact_root = metadata.get("artifact_root")
-                if (j.attempt_id and metadata.get("attempt_id") == j.attempt_id
-                        and j.worker_type == "owner"):
-                    j.owner_route_file = j.owner_route_file or metadata.get("owner_route_file")
-                    j.owner_route_id = j.owner_route_id or metadata.get("owner_route_id")
-                    j.owner_route_hash = j.owner_route_hash or metadata.get("owner_route_hash")
+                        j.artifact_root = exact_metadata.get("artifact_root")
+                if j.attempt_id and exact_metadata and j.worker_type == "owner":
+                    j.owner_route_file = j.owner_route_file or exact_metadata.get("owner_route_file")
+                    j.owner_route_id = j.owner_route_id or exact_metadata.get("owner_route_id")
+                    j.owner_route_hash = j.owner_route_hash or exact_metadata.get("owner_route_hash")
                 cap_mode, worker_mode, conflict = _dispatch_mode_axes(
                     {
                         "capability_mode": j.capability_mode,

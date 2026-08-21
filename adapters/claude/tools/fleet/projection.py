@@ -227,6 +227,31 @@ def _active_stage_label(active_nodes):
     return "{%s}" % ",".join(ids)
 
 
+def _owner_active_selection(active_nodes):
+    """Derive the owner's scalar (route_node, node_state) from sealed active nodes.
+
+    A single active node projects its own id/state.  Active legs that share one
+    ``parallel_group`` collapse into the same ``<group>(N-way)`` id used by
+    ``_active_stage_label``, with state ``active`` — the group is one selection,
+    not several.  No active node, or more than one independent active node/group,
+    cannot be named by a single node id, so this returns ``(None, "unknown")``
+    rather than picking one arbitrarily.
+    """
+    named = [node for node in active_nodes if node.id]
+    if not named:
+        return None, "unknown"
+    groups = {getattr(node, "parallel_group", None) or getattr(node, "replica_group", None)
+              for node in named}
+    if len(groups) != 1:
+        return None, "unknown"
+    group = next(iter(groups))
+    if group is None:
+        if len(named) == 1:
+            return named[0].id, named[0].state
+        return None, "unknown"
+    return ("%s(%d-way)" % (group, len(named)) if len(named) > 1 else named[0].id), "active"
+
+
 def _load_evidence_records(node_evidence, route_records):
     """Load records named only by terminal jobs.log evidence, without inventing routes."""
     from . import route
@@ -277,8 +302,11 @@ def _projection_from_record(entity, record, route_id, jobs, node_evidence=None, 
     selected = next((node for node in projections if node.id == route_node), None)
     contract = _field(entity, "assigned_contract")
     active_nodes = tuple(node for node in projections if node.state == "active")
+    owner_state = None
     if owner:
         label = _active_stage_label(active_nodes)
+        route_node, owner_state = _owner_active_selection(active_nodes)
+        selected = next((node for node in projections if node.id == route_node), None)
     elif contract and selected is not None:
         label = contract
     elif selected is not None:
@@ -289,12 +317,13 @@ def _projection_from_record(entity, record, route_id, jobs, node_evidence=None, 
         label = "{%s}" % ",".join(node.id for node in active_nodes)
     else:
         label = None
+    node_state = owner_state if owner else (selected.state if selected else None)
     return WorkProjection(
         source="route-exact", route_id=record.get("route_id", route_id),
         route_hash=record.get("route_hash"), route_node=route_node,
         attempt_id=_field(entity, "attempt_id"), assigned_contract=contract,
         unit=selected.unit if selected else _field(entity, "unit"), stage_label=label,
-        node_state=selected.state if selected else None, active_nodes=active_nodes,
+        node_state=node_state, active_nodes=active_nodes,
         progress=ProgressProjection(**(view.get("progress") or {"done": 0, "total": len(nodes)})),
         _route_view={"record": record, "nodes": nodes, "view": view},
     )
@@ -956,7 +985,9 @@ def resolve_work_projection(entity, jobs=(), route_records=None, node_evidence=N
     if len(route_keys) == 1 and exact:
         p = exact[0]
         active = p.active_nodes
+        owner_node, owner_state = _owner_active_selection(active)
         return WorkProjection(source="route-exact", route_id=p.route_id, route_hash=p.route_hash,
+                              route_node=owner_node, node_state=owner_state,
                               active_nodes=active, progress=p.progress,
                               stage_label=_active_stage_label(active),
                               _route_view=p._route_view)
