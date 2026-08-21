@@ -72,6 +72,22 @@ class ComputeHostsTest(unittest.TestCase):
         self.assertEqual(result.returncode, 2)
         self.assertIn("unknown host", result.stderr)
 
+    def test_the_local_entry_is_discovered_by_hostname(self):
+        # The inventory is identical on every machine, so moving the session
+        # host must not require editing which entry says "local".
+        module = load_module()
+        import socket
+        here = socket.gethostname()
+        self.assertTrue(module.is_self({"ssh_host": "example.invalid",
+                                        "hostname": here}))
+        self.assertFalse(module.is_self({"ssh_host": "example.invalid",
+                                         "hostname": here + "-other"}))
+        self.assertFalse(module.is_self({"ssh_host": "example.invalid"}))
+        # The explicit marker stays valid for a single-machine inventory.
+        self.assertTrue(module.is_self({"ssh_host": "local"}))
+        self.assertEqual(module.ssh_prefix({"ssh_host": "example.invalid",
+                                            "hostname": here}), [])
+
     def test_ssh_prefix_carries_port_and_user(self):
         module = load_module()
         argv = module.ssh_prefix({"ssh_host": "h", "ssh_port": 2222,

@@ -470,9 +470,13 @@ neither half is rediscovered per session.
 The static half — addresses, ports, environment roots, and the shared run root
 — lives in one user-owned file at
 `${XDG_CONFIG_HOME:-$HOME/.config}/hearting/compute-hosts.yaml`, alongside the
-other cross-runtime policy files; install and update never write it. Live state
-is never recorded: `list` and `probe` measure reachability and free GPU memory
-at the moment they are asked.
+other cross-runtime policy files; install and update never write it. That file
+is byte-identical on every host: which entry is the local machine is discovered
+by matching its declared `hostname`, not written down, so promoting a different
+machine to session host is a change of habit rather than an edit on every
+server. An inventory label and a system hostname need not agree, which is why
+the match is against a declared field. Live state is never recorded: `list` and
+`probe` measure reachability and free GPU memory at the moment they are asked.
 
 `run` starts a command detached under a stable run id and writes its log and
 exit code beneath the shared run root, so the session that launched the work
