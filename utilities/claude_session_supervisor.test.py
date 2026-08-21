@@ -68,6 +68,7 @@ class ClaudeSessionSupervisorTest(unittest.TestCase):
         self.lease = self.base / "supervisor-state" / f"{PARENT}.lease"
         self.trace = self.base / "trace.jsonl"
         self.claude = self.base / "fake_claude.py"
+        self.stream_claude = self.base / "fake_stream_claude.py"
         self.join = self.base / "fake_join.py"
         self.claude.write_text(
             textwrap.dedent(
@@ -115,6 +116,33 @@ class ClaudeSessionSupervisorTest(unittest.TestCase):
                                   'private':'RAW_PARENT_CONTEXT_SENTINEL'}))
                 print(json.dumps({'type':'result','subtype':'success','is_error':False,
                                   'result':text}))
+                """
+            ),
+            encoding="utf-8",
+        )
+        self.stream_claude.write_text(
+            textwrap.dedent(
+                """\
+                import json, os, sys, time
+                args = sys.argv[1:]
+                session = args[args.index('--session-id') + 1]
+                state_path = os.environ['AGENT_DISPATCH_COMPLETION_STATE_FILE']
+                with open(os.environ['FAKE_TRACE'], 'a', encoding='utf-8') as h:
+                    h.write(json.dumps({'event':'process-start','pid':os.getpid(),
+                                        'session':session,'args':args}) + '\\n')
+                for line in sys.stdin:
+                    payload = json.loads(line)
+                    prompt = payload['message']['content'][0]['text']
+                    with open(state_path, encoding='utf-8') as state_handle:
+                        delivered = json.load(state_handle)['delivered_attempt_ids']
+                    with open(os.environ['FAKE_TRACE'], 'a', encoding='utf-8') as h:
+                        h.write(json.dumps({'event':'turn-start','pid':os.getpid(),
+                                            'time':time.monotonic(),'session':session,
+                                            'prompt':prompt,'delivered':delivered}) + '\\n')
+                    text = ('artifact: -\\nverdict: PASS\\nblocker: none'
+                            if delivered else 'runtime_wait: registered-children')
+                    print(json.dumps({'type':'result','subtype':'success','is_error':False,
+                                      'result':text}), flush=True)
                 """
             ),
             encoding="utf-8",
@@ -227,6 +255,44 @@ class ClaudeSessionSupervisorTest(unittest.TestCase):
         )
         self.assertEqual(inspected.returncode, 0, inspected.stderr + inspected.stdout)
         self.assertIn("\tvalid\texact-claude-result\tPASS\tnone\tnone", inspected.stdout)
+
+    def test_stream_transport_reuses_one_process_and_emits_boundary_timings(self):
+        self.jobs.write_text(owner_row(self.lease) + child_row(), encoding="utf-8")
+        result = subprocess.run(
+            self.command(self.stream_claude)
+            + ["--turn-transport", "stream-json"],
+            input="initial assignment",
+            text=True,
+            capture_output=True,
+            env={**os.environ, "FAKE_TRACE": str(self.trace)},
+            timeout=10,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        trace = [json.loads(line) for line in self.trace.read_text().splitlines()]
+        process_rows = [row for row in trace if row["event"] == "process-start"]
+        turns = [row for row in trace if row["event"] == "turn-start"]
+        self.assertEqual(len(process_rows), 1, trace)
+        self.assertEqual(len(turns), 2, trace)
+        self.assertEqual({row["pid"] for row in turns}, {process_rows[0]["pid"]})
+        self.assertIn("--input-format", process_rows[0]["args"])
+        self.assertNotIn("--resume", process_rows[0]["args"])
+        rows = [json.loads(line) for line in result.stdout.splitlines()]
+        starts = [row for row in rows if row.get("type") == "dispatch.supervisor.turn-started"]
+        completed = [
+            row for row in rows if row.get("type") == "dispatch.supervisor.turn-completed"
+        ]
+        joins = [row for row in rows if row.get("type") == "dispatch.supervisor.join-completed"]
+        teardowns = [
+            row for row in rows if row.get("type") == "dispatch.supervisor.teardown-completed"
+        ]
+        self.assertEqual(len(starts), 2, rows)
+        self.assertEqual(len(completed), 2, rows)
+        self.assertEqual(len(joins), 1, rows)
+        self.assertEqual(len(teardowns), 1, rows)
+        self.assertEqual(teardowns[0]["reason"], "route-terminal")
+        self.assertTrue(all(row["transport"] == "stream-json" for row in starts))
+        self.assertTrue(all(row["duration_seconds"] >= 0 for row in completed + joins + teardowns))
+        self.assertEqual(rows[-1]["type"], "result")
 
     def test_session_announcement_precedes_every_turn_and_leaks_nothing(self):
         """The receipt log must name the child session it never transcribes.

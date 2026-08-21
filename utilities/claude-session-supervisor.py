@@ -7,9 +7,11 @@ import argparse
 import json
 import os
 from pathlib import Path
+import selectors
 import shlex
 import subprocess
 import sys
+import time
 from typing import Any
 import uuid
 
@@ -130,6 +132,15 @@ def typed_receipt(value: object, parent_attempt_id: str, attempts: set[str]) -> 
 
 
 def run_join(args: argparse.Namespace, attempts: set[str]) -> dict[str, Any]:
+    started_ns = time.monotonic_ns()
+    emit(
+        {
+            "type": "dispatch.supervisor.join-started",
+            "parent_attempt_id": args.parent_attempt_id,
+            "attempt_count": len(attempts),
+            "monotonic_ns": started_ns,
+        }
+    )
     command = shlex.split(args.join_command) if args.join_command else [
         sys.executable,
         str(ROOT / "utilities" / "dispatch_completion_join.py"),
@@ -161,7 +172,19 @@ def run_join(args: argparse.Namespace, attempts: set[str]) -> dict[str, Any]:
         raise SupervisorError("join-receipt-json-invalid") from exc
     if result.returncode not in {0, 3}:
         raise SupervisorError("join-process-contract-failed")
-    return typed_receipt(value, args.parent_attempt_id, attempts)
+    receipt = typed_receipt(value, args.parent_attempt_id, attempts)
+    completed_ns = time.monotonic_ns()
+    emit(
+        {
+            "type": "dispatch.supervisor.join-completed",
+            "parent_attempt_id": args.parent_attempt_id,
+            "attempt_count": len(attempts),
+            "state": receipt["state"],
+            "monotonic_ns": completed_ns,
+            "duration_seconds": round((completed_ns - started_ns) / 1_000_000_000, 3),
+        }
+    )
+    return receipt
 
 
 def completion_prompt(
@@ -252,13 +275,15 @@ def remediation_prompt(attempts: set[str], *, jobs: str = "") -> str:
     )
 
 
-def claude_command(args: argparse.Namespace, session_id: str, resume: bool) -> list[str]:
+def claude_command(
+    args: argparse.Namespace, session_id: str, resume: bool, *, stream: bool = False
+) -> list[str]:
     if args.claude_command:
         command = shlex.split(args.claude_command)
     else:
         command = ["claude"]
     command += ["-p"]
-    command += ["--resume" if resume else "--session-id", session_id]
+    command += ["--session-id" if stream or not resume else "--resume", session_id]
     hook_command = " ".join(
         shlex.quote(value)
         for value in (
@@ -284,6 +309,8 @@ def claude_command(args: argparse.Namespace, session_id: str, resume: bool) -> l
     command += ["--settings", json.dumps(hook_settings, separators=(",", ":"))]
     for path in args.add_dir:
         command += ["--add-dir", path]
+    if stream:
+        command += ["--input-format", "stream-json"]
     command += ["--output-format", "stream-json", "--verbose"]
     if args.model:
         command += ["--model", args.model]
@@ -294,13 +321,125 @@ def claude_command(args: argparse.Namespace, session_id: str, resume: bool) -> l
     return command
 
 
+class ClaudeStreamSession:
+    """One long-lived realtime-input Claude process for every owner boundary."""
+
+    def __init__(self, args: argparse.Namespace, session_id: str) -> None:
+        try:
+            self.process = subprocess.Popen(
+                claude_command(args, session_id, False, stream=True),
+                cwd=args.worktree,
+                env={
+                    **os.environ,
+                    **(
+                        {"AGENT_DISPATCH_COMPLETION_STATE_FILE": args.state_file}
+                        if args.state_file
+                        else {}
+                    ),
+                },
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=None,
+                text=False,
+                bufsize=0,
+            )
+        except OSError as exc:
+            raise SupervisorError("claude-stream-process-failed") from exc
+        if self.process.stdin is None or self.process.stdout is None:
+            raise SupervisorError("claude-stream-pipe-missing")
+        self.selector = selectors.DefaultSelector()
+        self.selector.register(self.process.stdout, selectors.EVENT_READ)
+        self.output_buffer = b""
+        self.closed = False
+
+    def run_turn(self, prompt: str, timeout: float) -> tuple[dict[str, Any], int]:
+        if self.closed or self.process.stdin is None or self.process.stdout is None:
+            raise SupervisorError("claude-stream-closed")
+        payload = {
+            "type": "user",
+            "message": {
+                "role": "user",
+                "content": [{"type": "text", "text": prompt}],
+            },
+            "parent_tool_use_id": None,
+        }
+        try:
+            self.process.stdin.write(
+                (
+                    json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
+                    + "\n"
+                ).encode("utf-8")
+            )
+            self.process.stdin.flush()
+        except (BrokenPipeError, OSError) as exc:
+            raise SupervisorError("claude-stream-write-failed") from exc
+        deadline = time.monotonic() + timeout
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise SupervisorError("claude-turn-process-failed")
+            events = self.selector.select(remaining)
+            if not events:
+                raise SupervisorError("claude-turn-process-failed")
+            try:
+                chunk = os.read(self.process.stdout.fileno(), 65_536)
+            except OSError as exc:
+                raise SupervisorError("claude-stream-read-failed") from exc
+            if not chunk:
+                raise SupervisorError("claude-result-missing")
+            self.output_buffer += chunk
+            if len(self.output_buffer) > 16_777_216:
+                raise SupervisorError("claude-stream-message-oversized")
+            while b"\n" in self.output_buffer:
+                raw_line, self.output_buffer = self.output_buffer.split(b"\n", 1)
+                try:
+                    value = json.loads(raw_line.decode("utf-8"))
+                except (UnicodeDecodeError, ValueError):
+                    continue
+                if isinstance(value, dict) and value.get("type") == "result":
+                    return value, self.process.poll() or 0
+
+    def close(self) -> None:
+        if self.closed:
+            return
+        self.closed = True
+        try:
+            self.selector.close()
+        except Exception:
+            pass
+        try:
+            if self.process.stdin is not None:
+                self.process.stdin.close()
+        except OSError:
+            pass
+        try:
+            self.process.wait(timeout=10)
+            return
+        except subprocess.TimeoutExpired:
+            self.process.terminate()
+        try:
+            self.process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            self.process.kill()
+            self.process.wait(timeout=5)
+
+
+def resolved_turn_transport(args: argparse.Namespace) -> str:
+    if args.turn_transport != "auto":
+        return args.turn_transport
+    return "resume-process" if args.claude_command else "stream-json"
+
+
 def run_turn(
     args: argparse.Namespace,
     session_id: str,
     prompt: str,
     *,
     resume: bool,
+    stream_session: ClaudeStreamSession | None = None,
 ) -> tuple[dict[str, Any], int]:
+    if stream_session is not None:
+        return stream_session.run_turn(prompt, args.turn_timeout)
     try:
         result = subprocess.run(
             claude_command(args, session_id, resume),
@@ -357,6 +496,11 @@ def parser() -> argparse.ArgumentParser:
     value.add_argument("--state-file", default=os.environ.get("AGENT_DISPATCH_COMPLETION_STATE_FILE"))
     value.add_argument("--lease-file", default=os.environ.get("AGENT_DISPATCH_SUPERVISOR_LEASE_FILE"))
     value.add_argument("--claude-command", default=os.environ.get("CLAUDE_SESSION_COMMAND"))
+    value.add_argument(
+        "--turn-transport",
+        choices=("auto", "stream-json", "resume-process"),
+        default="auto",
+    )
     value.add_argument("--join-command", default=os.environ.get("AGENT_DISPATCH_JOIN_COMMAND"))
     return value
 
@@ -413,6 +557,9 @@ def main(argv: list[str] | None = None) -> int:
     next_prompt = initial_prompt
     continuations = 0
     resume = False
+    turn_ordinal = 0
+    turn_transport = resolved_turn_transport(args)
+    stream_session: ClaudeStreamSession | None = None
     lease = hold_supervisor_lease(
         args.jobs, args.parent_attempt_id, args.lease_file or ""
     )
@@ -421,6 +568,8 @@ def main(argv: list[str] | None = None) -> int:
     try:
         lease.__enter__()
         lease_acquired = True
+        if turn_transport == "stream-json":
+            stream_session = ClaudeStreamSession(args, session_id)
         recovered = read_supervisor_phase_state(
             state_path, args.parent_attempt_id
         )
@@ -448,14 +597,62 @@ def main(argv: list[str] | None = None) -> int:
                 write_supervisor_state(
                     state_path, args.parent_attempt_id, delivered, phase="running-turn"
                 )
+            turn_ordinal += 1
+            turn_started_ns = time.monotonic_ns()
+            emit(
+                {
+                    "type": "dispatch.supervisor.turn-started",
+                    "parent_attempt_id": args.parent_attempt_id,
+                    "turn_ordinal": turn_ordinal,
+                    "transport": turn_transport,
+                    "resume": resume,
+                    "monotonic_ns": turn_started_ns,
+                }
+            )
             result, process_rc = run_turn(
-                args, session_id, next_prompt, resume=resume
+                args,
+                session_id,
+                next_prompt,
+                resume=resume,
+                stream_session=stream_session,
+            )
+            turn_completed_ns = time.monotonic_ns()
+            emit(
+                {
+                    "type": "dispatch.supervisor.turn-completed",
+                    "parent_attempt_id": args.parent_attempt_id,
+                    "turn_ordinal": turn_ordinal,
+                    "transport": turn_transport,
+                    "resume": resume,
+                    "monotonic_ns": turn_completed_ns,
+                    "duration_seconds": round(
+                        (turn_completed_ns - turn_started_ns) / 1_000_000_000, 3
+                    ),
+                }
             )
             if (
                 process_rc != 0
                 or result.get("is_error") is True
                 or result.get("subtype") not in {None, "success"}
             ):
+                if stream_session is not None:
+                    teardown_started_ns = time.monotonic_ns()
+                    stream_session.close()
+                    stream_session = None
+                    teardown_completed_ns = time.monotonic_ns()
+                    emit(
+                        {
+                            "type": "dispatch.supervisor.teardown-completed",
+                            "parent_attempt_id": args.parent_attempt_id,
+                            "reason": "model-error",
+                            "monotonic_ns": teardown_completed_ns,
+                            "duration_seconds": round(
+                                (teardown_completed_ns - teardown_started_ns)
+                                / 1_000_000_000,
+                                3,
+                            ),
+                        }
+                    )
                 terminal = classify_claude_result(result, process_rc)
                 if not reconcile(args, terminal):
                     return 70
@@ -624,12 +821,33 @@ def main(argv: list[str] | None = None) -> int:
                 resume = True
                 continue
 
+            if stream_session is not None:
+                teardown_started_ns = time.monotonic_ns()
+                stream_session.close()
+                stream_session = None
+                teardown_completed_ns = time.monotonic_ns()
+                emit(
+                    {
+                        "type": "dispatch.supervisor.teardown-completed",
+                        "parent_attempt_id": args.parent_attempt_id,
+                        "reason": "route-terminal",
+                        "monotonic_ns": teardown_completed_ns,
+                        "duration_seconds": round(
+                            (teardown_completed_ns - teardown_started_ns)
+                            / 1_000_000_000,
+                            3,
+                        ),
+                    }
+                )
             terminal = classify_claude_result(result, process_rc)
             if not reconcile(args, terminal):
                 return 70
             emit(result)
             return 0 if terminal.failure_class == "pass" else 3
     except (DispatchContractError, JoinContractError, SupervisorError) as exc:
+        if stream_session is not None:
+            stream_session.close()
+            stream_session = None
         lease_exit = (type(exc), exc, exc.__traceback__)
         reason = exc.reason if isinstance(exc, DispatchContractError) else str(exc)
         terminal = classify_supervisor_error("claude", reason)
@@ -638,6 +856,9 @@ def main(argv: list[str] | None = None) -> int:
         emit({"type": "dispatch.supervisor.error", "reason": reason})
         return 70
     except Exception as exc:  # fail closed without leaking protocol/model content
+        if stream_session is not None:
+            stream_session.close()
+            stream_session = None
         lease_exit = (type(exc), exc, exc.__traceback__)
         terminal = classify_supervisor_error(
             "claude", f"supervisor-internal-{type(exc).__name__}"
@@ -652,6 +873,8 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 70
     finally:
+        if stream_session is not None:
+            stream_session.close()
         try:
             open_children = {
                 row.attempt_id
