@@ -1402,6 +1402,49 @@ def _state_namespace(state):
     return "global" if state.get("scope") == "global" else state.get("cwd_origin")
 
 
+def _lineage_access_times(con, record_ids):
+    """Return the ``last_accessed`` each record's own v2 lineage already states.
+
+    Reading a record touches its local access date but authors no operation, so
+    the row and the folded state legitimately disagree on that one field. Every
+    other consumer knows this — the coverage check drops `last_accessed` before
+    comparing — but a destructive operation used to digest the live row, which
+    made its prior-state evidence unmatchable the moment anyone had read the
+    record. Carrying the lineage's own value forward keeps the evidence exact
+    while leaving access recency server-local.
+    """
+    resolved = {}
+    for rid in set(record_ids):
+        heads = [str(row[0]) for row in con.execute(
+            "SELECT op_id FROM sync_frontier WHERE record_id=?", (rid,))]
+        # Concurrent heads have no single prior state to inherit from; leave
+        # those to the ordinary conflict path rather than picking a winner.
+        if len(heads) != 1:
+            continue
+        row = con.execute(
+            "SELECT payload_bytes FROM sync_objects WHERE op_id=?", (heads[0],)
+        ).fetchone()
+        if row is None:
+            continue
+        try:
+            payload = protocol_v2.canonical_loads(bytes(row[0]))
+        except (ValueError, TypeError):
+            continue
+        for mutation in payload.get("mutations", ()):
+            state = mutation.get("post_state")
+            if str(mutation.get("record_id")) == rid and isinstance(state, dict) \
+                    and state.get("last_accessed") is not None:
+                resolved[rid] = state["last_accessed"]
+    return resolved
+
+
+def _with_lineage_access(state, rid, lineage):
+    """Overlay one record state with the access date its lineage carries."""
+    if not isinstance(state, dict) or rid not in lineage:
+        return state
+    return {**state, "last_accessed": lineage[rid]}
+
+
 def _capture_v2_operation(con, kind, *, post_ids=(), tombstones=None,
                           edges=None, target_ops=None, reason=None,
                           prior_states=None, project_namespace=None):
@@ -1423,11 +1466,17 @@ def _capture_v2_operation(con, kind, *, post_ids=(), tombstones=None,
     tombstones = dict(tombstones or {})
     edges = dict(edges or {})
     target_ops = dict(target_ops or {})
+    prior_states = dict(prior_states or {})
+    lineage = _lineage_access_times(
+        con, set(prior_states) | set(post_ids) | set(tombstones))
     prior_states = {
-        rid: _canonical_record_state(state)
-        for rid, state in dict(prior_states or {}).items()
+        rid: _with_lineage_access(_canonical_record_state(state), rid, lineage)
+        for rid, state in prior_states.items()
     }
-    post = {rid: _record_state(con, rid) for rid in set(post_ids)}
+    # A post-state inherits the same access date: the operation describes what
+    # changed, and reading the record is not one of those changes.
+    post = {rid: _with_lineage_access(_record_state(con, rid), rid, lineage)
+            for rid in set(post_ids)}
     if any(state is None for state in post.values()):
         missing = sorted(rid for rid, state in post.items() if state is None)
         raise sync_v2.SyncInvariantError(
