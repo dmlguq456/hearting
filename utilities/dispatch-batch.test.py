@@ -492,6 +492,149 @@ class DispatchBatchTest(unittest.TestCase):
         self.assertEqual(independence, "cross-harness")
         self.assertEqual({row[1] for row in rows}, {"claude", "opencode"})
 
+    def test_balanced_batch_gate_outranks_the_quality_band(self):
+        # B-1 framing's parallel falsifier: the gate must outrank aggregate
+        # band_rank, so the gated primary (claude) is never placed while an
+        # ungated combination exists.
+        route = json.loads(json.dumps(self.route))
+        route["dispatch_allocation"] = {
+            "strategy": "balanced",
+            "window": 30,
+            "usage_gate_used_percent": 90,
+            "harness_order": ["claude", "codex", "opencode"],
+        }
+        for node in route["nodes"]:
+            node["harness_affinity"] = "diverse"
+            node["harness_policy"] = {
+                "primary": ["claude", "codex"],
+                "relief": ["opencode"],
+                "last_resort": [],
+                "promote_relief_below": 0,
+            }
+            node["fallback_hops"][1]["candidates"].append(
+                {"child_harness": "opencode", "status": "supported"}
+            )
+        with mock.patch.object(
+            BATCH.DISPATCH_NODE, "resolve_checked_tuple", side_effect=resolve_side_effect
+        ), mock.patch.object(BATCH.CAPACITY, "capacity_scores", return_value={
+            "claude": 5.0, "codex": 60.0, "opencode": 80.0,
+        }):
+            rows, independence, _diagnostics = BATCH.assign_harnesses(
+                route, route["nodes"], allow_degraded=False, jobs=self.jobs
+            )
+        self.assertEqual(independence, "cross-harness")
+        self.assertEqual({row[1] for row in rows}, {"codex", "opencode"})
+
+    def test_balanced_batch_gate_outranks_affinity(self):
+        route = json.loads(json.dumps(self.route))
+        route["dispatch_allocation"] = {
+            "strategy": "balanced",
+            "window": 30,
+            "usage_gate_used_percent": 90,
+            "harness_order": ["claude", "codex", "opencode"],
+        }
+        for node in route["nodes"]:
+            node["harness_policy"] = {
+                "primary": ["claude", "codex"],
+                "relief": ["opencode"],
+                "last_resort": [],
+                "promote_relief_below": 0,
+            }
+            node["fallback_hops"][1]["candidates"].append(
+                {"child_harness": "opencode", "status": "supported"}
+            )
+        # Pin the sealed affinity to the gated family on one leg.
+        route["nodes"][0]["harness_affinity"] = "claude"
+        route["nodes"][1]["harness_affinity"] = "diverse"
+        with mock.patch.object(
+            BATCH.DISPATCH_NODE, "resolve_checked_tuple", side_effect=resolve_side_effect
+        ), mock.patch.object(BATCH.CAPACITY, "capacity_scores", return_value={
+            "claude": 5.0, "codex": 60.0, "opencode": 80.0,
+        }):
+            rows, independence, _diagnostics = BATCH.assign_harnesses(
+                route, route["nodes"], allow_degraded=False, jobs=self.jobs
+            )
+        self.assertEqual(independence, "cross-harness")
+        self.assertNotIn("claude", {row[1] for row in rows})
+
+    def test_balanced_batch_unknown_usage_is_not_gated_across_bands(self):
+        route = json.loads(json.dumps(self.route))
+        route["dispatch_allocation"] = {
+            "strategy": "balanced",
+            "window": 30,
+            "usage_gate_used_percent": 90,
+            "harness_order": ["claude", "codex", "opencode"],
+        }
+        for node in route["nodes"]:
+            node["harness_affinity"] = "diverse"
+            node["harness_policy"] = {
+                "primary": ["claude", "codex"],
+                "relief": ["opencode"],
+                "last_resort": [],
+                "promote_relief_below": 0,
+            }
+            node["fallback_hops"][1]["candidates"].append(
+                {"child_harness": "opencode", "status": "supported"}
+            )
+        with mock.patch.object(
+            BATCH.DISPATCH_NODE, "resolve_checked_tuple", side_effect=resolve_side_effect
+        ), mock.patch.object(BATCH.CAPACITY, "capacity_scores", return_value={
+            "claude": 5.0, "codex": 5.0, "opencode": None,
+        }):
+            rows, independence, _diagnostics = BATCH.assign_harnesses(
+                route, route["nodes"], allow_degraded=False, jobs=self.jobs
+            )
+        self.assertEqual(independence, "cross-harness")
+        self.assertIn("opencode", {row[1] for row in rows})
+
+    def test_balanced_three_leg_gate_precedes_band_rank(self):
+        # Policy prefers codex (primary) over claude (relief); scores gate
+        # codex and leave claude ungated. Aggregate band_rank alone would
+        # push toward more codex legs -- the gate must still win, so the
+        # gated family (codex) gets at most the diversity-forced minimum.
+        route = self._three_leg_route()
+        for node in route["nodes"]:
+            node["harness_policy"] = {
+                "primary": ["codex"],
+                "relief": ["claude"],
+                "last_resort": [],
+                "promote_relief_below": 0,
+            }
+        with mock.patch.object(
+            BATCH.DISPATCH_NODE, "resolve_checked_tuple", side_effect=resolve_side_effect
+        ), mock.patch.object(BATCH.CAPACITY, "capacity_scores", return_value={
+            "claude": 60.0, "codex": 5.0, "opencode": None,
+        }):
+            rows, independence, _diagnostics = BATCH.assign_harnesses(
+                route, route["nodes"], allow_degraded=False, jobs=self.jobs
+            )
+        self.assertEqual(independence, "cross-harness")
+        placed = [row[1] for row in rows]
+        self.assertLessEqual(placed.count("codex"), 1)
+        self.assertGreaterEqual(placed.count("claude"), 2)
+
+    def test_balanced_batch_all_gated_still_uses_maximum_headroom(self):
+        route = self._three_leg_route()
+        for node in route["nodes"]:
+            node["harness_policy"] = {
+                "primary": ["claude"],
+                "relief": ["codex"],
+                "last_resort": [],
+                "promote_relief_below": 0,
+            }
+        with mock.patch.object(
+            BATCH.DISPATCH_NODE, "resolve_checked_tuple", side_effect=resolve_side_effect
+        ), mock.patch.object(BATCH.CAPACITY, "capacity_scores", return_value={
+            "claude": 2.0, "codex": 8.0, "opencode": 1.0,
+        }):
+            rows, independence, _diagnostics = BATCH.assign_harnesses(
+                route, route["nodes"], allow_degraded=False, jobs=self.jobs
+            )
+        self.assertEqual(independence, "cross-harness")
+        placed = [row[1] for row in rows]
+        self.assertEqual(placed.count("codex"), 2)
+        self.assertEqual(placed.count("claude"), 1)
+
     def _three_leg_route(self):
         # Three nodes, exactly two usable families (codex/claude): with the
         # diversity key already satisfied by any distinct combo (>= 2

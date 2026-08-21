@@ -221,6 +221,141 @@ class CapacityPolicyTests(unittest.TestCase):
         )
         self.assertGreater(deficit["b"], deficit["a"])
 
+    def test_balanced_gate_beats_quality_band_across_bands(self):
+        # B-1 framing's smallest falsifier: a gated primary must not win over
+        # an ungated relief, regardless of band_rank.
+        policy = {
+            "primary": ["claude", "codex"],
+            "relief": ["opencode"],
+            "last_resort": [],
+            "promote_relief_below": 0,
+        }
+        chosen, band, _ranks, _promoted = C.select(
+            policy, self.states, self.counts, C.HARNESSES,
+            {"claude": 5, "codex": 5, "opencode": 80},
+            strategy="balanced",
+        )
+        self.assertEqual((chosen, band), ("opencode", "relief"))
+
+    def test_balanced_gate_beats_quality_band_into_last_resort(self):
+        policy = {
+            "primary": ["claude", "codex"],
+            "relief": [],
+            "last_resort": ["opencode"],
+            "promote_relief_below": 0,
+        }
+        chosen, band, _ranks, _promoted = C.select(
+            policy, self.states, self.counts, C.HARNESSES,
+            {"claude": 0, "codex": 10, "opencode": 60},
+            strategy="balanced",
+        )
+        self.assertEqual((chosen, band), ("opencode", "last_resort"))
+
+    def test_balanced_unknown_usage_outranks_a_gated_primary(self):
+        policy = {
+            "primary": ["claude", "codex"],
+            "relief": ["opencode"],
+            "last_resort": [],
+            "promote_relief_below": 0,
+        }
+        chosen, band, _ranks, _promoted = C.select(
+            policy, self.states, self.counts, C.HARNESSES,
+            {"claude": 5, "codex": 5, "opencode": None},
+            strategy="balanced",
+        )
+        self.assertEqual((chosen, band), ("opencode", "relief"))
+
+    def test_balanced_gate_boundary_is_inclusive_across_bands(self):
+        policy = {
+            "primary": ["claude"],
+            "relief": ["opencode"],
+            "last_resort": [],
+            "promote_relief_below": 0,
+        }
+        chosen, band, _ranks, _promoted = C.select(
+            policy, self.states, self.counts, C.HARNESSES,
+            {"claude": 10, "opencode": 11},
+            strategy="balanced", usage_gate_used_percent=90,
+        )
+        self.assertEqual((chosen, band), ("opencode", "relief"))
+        chosen, band, _ranks, _promoted = C.select(
+            policy, self.states, self.counts, C.HARNESSES,
+            {"claude": 10.1, "opencode": 11},
+            strategy="balanced", usage_gate_used_percent=90,
+        )
+        self.assertEqual((chosen, band), ("claude", "primary"))
+
+    def test_balanced_all_gated_uses_global_max_headroom_before_band(self):
+        policy = {
+            "primary": ["claude", "codex"],
+            "relief": ["opencode"],
+            "last_resort": [],
+            "promote_relief_below": 0,
+        }
+        chosen, band, _ranks, _promoted = C.select(
+            policy, self.states, self.counts, C.HARNESSES,
+            {"claude": 4, "codex": 1, "opencode": 9},
+            strategy="balanced",
+        )
+        self.assertEqual((chosen, band), ("opencode", "relief"))
+
+    def test_balanced_ungated_primary_still_wins_over_ungated_relief(self):
+        policy = {
+            "primary": ["claude", "codex"],
+            "relief": ["opencode"],
+            "last_resort": [],
+            "promote_relief_below": 0,
+        }
+        chosen, band, _ranks, _promoted = C.select(
+            policy, self.states, self.counts, C.HARNESSES,
+            {"claude": 60, "codex": 40, "opencode": 100},
+            strategy="balanced",
+        )
+        self.assertEqual(band, "primary")
+        self.assertIn(chosen, {"claude", "codex"})
+
+    def test_balanced_relief_promotion_survives_the_gate(self):
+        policy = {
+            "primary": ["claude", "codex"],
+            "relief": ["opencode"],
+            "last_resort": [],
+            "promote_relief_below": 35,
+        }
+        chosen, band, _ranks, promoted = C.select(
+            policy, self.states, self.counts, C.HARNESSES,
+            {"claude": 20, "codex": 30, "opencode": 90},
+            strategy="balanced",
+        )
+        self.assertEqual((chosen, band, promoted), ("opencode", "relief", True))
+
+    def test_capacity_aware_has_no_cross_band_gate(self):
+        policy = {
+            "primary": ["claude", "codex"],
+            "relief": ["opencode"],
+            "last_resort": [],
+            "promote_relief_below": 0,
+        }
+        chosen, band, _ranks, _promoted = C.select(
+            policy, self.states, self.counts, C.HARNESSES,
+            {"claude": 5, "codex": 5, "opencode": 80},
+        )
+        self.assertEqual(band, "primary")
+        self.assertIn(chosen, {"claude", "codex"})
+
+    def test_ordered_candidates_demotes_but_never_drops_gated(self):
+        ranks = {
+            "primary": ["claude", "codex"],
+            "relief": ["opencode"],
+            "last_resort": [],
+        }
+        scores = {"claude": 5, "codex": 5, "opencode": 80}
+        flat = C.ordered_candidates(
+            ranks, ("primary", "relief", "last_resort"), scores, strategy="balanced",
+        )
+        self.assertEqual(
+            [name for _band, name in flat], ["opencode", "claude", "codex"],
+        )
+
 
 class CodexGaugeReaderTests(unittest.TestCase):
     """The codex gauge must not starve on idle: live probe first, rollout second.

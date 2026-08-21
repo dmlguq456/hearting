@@ -305,7 +305,14 @@ def ordered_fallback_hops(
         band_order = ("relief", "primary", "last_resort") if relief_promoted else (
             "primary", "relief", "last_resort"
         )
-        ranked = [h for band in band_order for h in ranks[band]]
+        ranked = [
+            name
+            for _band, name in CAPACITY.ordered_candidates(
+                ranks, band_order, scores,
+                strategy=allocation["strategy"],
+                usage_gate_used_percent=allocation.get("usage_gate_used_percent", 90),
+            )
+        ]
     else:
         ranked = rank_harnesses(
             eligible,
@@ -314,7 +321,32 @@ def ordered_fallback_hops(
         )
     affinity = node.get("harness_affinity")
     if affinity in ranked:
-        ranked = [affinity] + [harness for harness in ranked if harness != affinity]
+        # B-1: mirrors the HARNESS_CAPACITY_BIAS gate-class constraint in
+        # `rank_band` — a sealed affinity may reorder within its own gate
+        # class but must never lift a gated harness above an ungated one.
+        if allocation["strategy"] == "balanced" and scores is not None:
+            gated_of = lambda name: CAPACITY.is_gated(
+                scores, name, usage_gate_used_percent=allocation.get("usage_gate_used_percent", 90),
+            )
+            affinity_gated = gated_of(affinity)
+            all_gated = bool(ranked) and all(gated_of(h) for h in ranked)
+            if all_gated:
+                # Scarcity fallback is global maximum-headroom first; affinity
+                # may only break a tie already preserved by the stable order.
+                pass
+            elif any(gated_of(h) != affinity_gated for h in ranked):
+                own_class = [h for h in ranked if gated_of(h) == affinity_gated]
+                other_class = [h for h in ranked if gated_of(h) != affinity_gated]
+                reordered_own_class = [affinity] + [h for h in own_class if h != affinity]
+                ranked = (
+                    (other_class + reordered_own_class)
+                    if affinity_gated
+                    else (reordered_own_class + other_class)
+                )
+            else:
+                ranked = [affinity] + [harness for harness in ranked if harness != affinity]
+        else:
+            ranked = [affinity] + [harness for harness in ranked if harness != affinity]
     # SD-101 parent-cross stable partition (W2) + SD-100 ② sole-gate (W2),
     # placed exactly between the affinity head-hoist and `ranked += limited`
     # so usage-limited harnesses stay out of the partition (spec 13.30.3 ④).

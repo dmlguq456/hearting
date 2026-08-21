@@ -328,6 +328,85 @@ class FallbackTest(unittest.TestCase):
   selected=[hop["candidates"][0]["child_harness"] for hop in hops[:3]]
   self.assertEqual(selected,["codex","claude","opencode"])
   self.assertFalse(context["relief_promoted"])
+ def test_balanced_stage_fallback_orders_ungated_relief_before_a_gated_primary(self):
+  node={
+   "harness_affinity":"diverse",
+   "harness_policy":{"primary":["claude","codex"],"relief":["opencode"],
+                     "last_resort":[],"promote_relief_below":0},
+   "fallback_hops":[
+    {"ordinal":1,"fallback_hop":"same-harness-headless","candidates":[
+     {"child_harness":"claude","status":"supported"}]},
+    {"ordinal":2,"fallback_hop":"cross-harness-headless","candidates":[
+     {"child_harness":"codex","status":"supported"},
+     {"child_harness":"opencode","status":"supported"}]},
+    {"ordinal":3,"fallback_hop":"native-subagent","candidates":[]},
+    {"ordinal":4,"fallback_hop":"inline","candidates":[]},
+   ],
+  }
+  route={"dispatch_allocation":{"strategy":"balanced","window":30,
+                                 "usage_gate_used_percent":90,
+                                 "harness_order":["claude","codex","opencode"]}}
+  with mock.patch.object(F,"_usage_states",return_value={
+      "claude":"ok","codex":"ok","opencode":"ok"}), \
+      mock.patch.object(F.CAPACITY,"capacity_scores",return_value={
+       "claude":5,"codex":5,"opencode":80}):
+   hops,context=F.ordered_fallback_hops(route,node,self.jobs)
+  # Ungated relief (opencode) leads; the gated primaries are demoted, not
+  # dropped -- they stay reachable later in rank as fallback hops.
+  self.assertEqual(context["rank"][0],"opencode")
+  self.assertEqual(set(context["rank"]),{"claude","codex","opencode"})
+ def test_balanced_stage_affinity_cannot_lift_a_gated_harness(self):
+  node={
+   "harness_affinity":"claude",
+   "harness_policy":{"primary":["claude","codex"],"relief":["opencode"],
+                     "last_resort":[],"promote_relief_below":0},
+   "fallback_hops":[
+    {"ordinal":1,"fallback_hop":"same-harness-headless","candidates":[
+     {"child_harness":"claude","status":"supported"}]},
+    {"ordinal":2,"fallback_hop":"cross-harness-headless","candidates":[
+     {"child_harness":"codex","status":"supported"},
+     {"child_harness":"opencode","status":"supported"}]},
+    {"ordinal":3,"fallback_hop":"native-subagent","candidates":[]},
+    {"ordinal":4,"fallback_hop":"inline","candidates":[]},
+   ],
+  }
+  route={"dispatch_allocation":{"strategy":"balanced","window":30,
+                                 "usage_gate_used_percent":90,
+                                 "harness_order":["claude","codex","opencode"]}}
+  with mock.patch.object(F,"_usage_states",return_value={
+      "claude":"ok","codex":"ok","opencode":"ok"}), \
+      mock.patch.object(F.CAPACITY,"capacity_scores",return_value={
+       "claude":5,"codex":5,"opencode":80}):
+   hops,context=F.ordered_fallback_hops(route,node,self.jobs)
+  # The sealed affinity (claude, gated) is not lifted over the ungated
+  # relief, but it is still hoisted to the head of its own gate class.
+  self.assertNotEqual(context["rank"][0],"claude")
+  self.assertEqual(context["rank"][0],"opencode")
+  gated_tail=[h for h in context["rank"] if h!="opencode"]
+  self.assertEqual(gated_tail[0],"claude")
+ def test_balanced_stage_all_gated_affinity_cannot_beat_global_headroom(self):
+  node={
+   "harness_affinity":"claude",
+   "harness_policy":{"primary":["claude"],"relief":["opencode"],
+                     "last_resort":[],"promote_relief_below":0},
+   "fallback_hops":[
+    {"ordinal":1,"fallback_hop":"same-harness-headless","candidates":[
+     {"child_harness":"claude","status":"supported"}]},
+    {"ordinal":2,"fallback_hop":"cross-harness-headless","candidates":[
+     {"child_harness":"opencode","status":"supported"}]},
+    {"ordinal":3,"fallback_hop":"native-subagent","candidates":[]},
+    {"ordinal":4,"fallback_hop":"inline","candidates":[]},
+   ],
+  }
+  route={"dispatch_allocation":{"strategy":"balanced","window":30,
+                                 "usage_gate_used_percent":90,
+                                 "harness_order":["claude","opencode"]}}
+  with mock.patch.object(F,"_usage_states",return_value={
+      "claude":"ok","opencode":"ok"}), \
+      mock.patch.object(F.CAPACITY,"capacity_scores",return_value={
+       "claude":2,"opencode":9}):
+   _hops,context=F.ordered_fallback_hops(route,node,self.jobs)
+  self.assertEqual(context["rank"][:2],["opencode","claude"])
  def _shadowed_claude_node(self):
   # D7's live case reproduced on the third resolver: ordinal 1 seals a
   # foreign-parent (claude) same-harness claude row that would otherwise

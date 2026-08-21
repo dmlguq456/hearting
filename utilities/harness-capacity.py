@@ -227,6 +227,28 @@ def allocation_deficit(scores, counts, candidates, *, neutral=ORDERING_NEUTRAL_S
     }
 
 
+def gate_cutoff(usage_gate_used_percent=90):
+    """Headroom cutoff below which a `balanced` candidate is gated.
+
+    Scores are headroom (`100 - used`), so the cutoff is the complement of the
+    configured used-percent threshold.
+    """
+    return 100.0 - float(usage_gate_used_percent)
+
+
+def is_gated(scores, harness, *, usage_gate_used_percent=90):
+    """Is `harness` gated under the `balanced` cross-band usage gate?
+
+    A known score at or below `gate_cutoff` is gated. An absent/unknown score
+    is optimistically ungated — the same unknown-is-not-exclusion reading
+    `ordering_score` and `allocation_deficit` already use for `balanced`
+    ordering, deliberately distinct from `rank_band`'s capacity-aware
+    eligibility branch, which excludes unknown gauges instead.
+    """
+    value = scores.get(harness)
+    return value is not None and float(value) <= gate_cutoff(usage_gate_used_percent)
+
+
 def rank_band(candidates, states, counts, declared_order, scores, *, strategy="capacity-aware", usage_gate_used_percent=90):
     """Rank eligible quality peers by headroom, then recent attempts and config order.
 
@@ -246,22 +268,21 @@ def rank_band(candidates, states, counts, declared_order, scores, *, strategy="c
     and `capacity-aware` below keeps unknown-gauge exclusion untouched too.
     """
     if strategy == "balanced":
-        cutoff = 100.0 - float(usage_gate_used_percent)
         candidates = [
             name for name in candidates
             if not _limited(states.get(name, "unknown"))
         ]
         order = {name: index for index, name in enumerate(declared_order)}
         all_gated = bool(candidates) and all(
-            value is not None and float(value) <= cutoff
-            for value in (scores.get(name) for name in candidates)
+            is_gated(scores, name, usage_gate_used_percent=usage_gate_used_percent)
+            for name in candidates
         )
         if all_gated:
             key = lambda name: (-float(scores[name]), int(counts.get(name, 0)), order.get(name, len(order)))
         else:
             deficit = allocation_deficit(scores, counts, candidates)
             key = lambda name: (
-                1 if scores.get(name) is not None and float(scores[name]) <= cutoff else 0,
+                1 if is_gated(scores, name, usage_gate_used_percent=usage_gate_used_percent) else 0,
                 # Rounded so two identical inputs can never diverge on float
                 # noise; declared_order stays the deterministic final tiebreak.
                 round(-deficit[name], 9),
@@ -277,8 +298,8 @@ def rank_band(candidates, states, counts, declared_order, scores, *, strategy="c
                 # Balanced-only constraint: bias may reorder within its own gate
                 # class but must never lift a gated harness above an ungated one
                 # (or vice versa) — that would defeat the usage gate.
-                gated_of = lambda name: (
-                    scores.get(name) is not None and float(scores[name]) <= cutoff
+                gated_of = lambda name: is_gated(
+                    scores, name, usage_gate_used_percent=usage_gate_used_percent
                 )
                 bias_gated = gated_of(bias)
                 bias_group = [name for name in ranked if gated_of(name) == bias_gated]
@@ -316,6 +337,29 @@ def rank_band(candidates, states, counts, declared_order, scores, *, strategy="c
     return ranked
 
 
+def ordered_candidates(ranks, band_order, scores, *, strategy="capacity-aware", usage_gate_used_percent=90):
+    """Flatten `ranks` across `band_order` into the one gate-first candidate order.
+
+    This is the single realization of the B-1 cross-band gate (policy rule 3):
+    while any ungated candidate exists, no gated candidate may precede it,
+    regardless of quality band. Non-`balanced` strategies pass through
+    unchanged — `rank_band` never gates them.
+
+    Gated candidates are demoted, never dropped, so they remain reachable as
+    fallback hops. When every candidate is gated, maximum headroom is compared
+    across all bands; Python's stable sort preserves the existing band/rank
+    order for equal-headroom ties.
+    """
+    flat = [(band, name) for band in band_order for name in ranks[band]]
+    if strategy != "balanced":
+        return flat
+    ungated = [pair for pair in flat if not is_gated(scores, pair[1], usage_gate_used_percent=usage_gate_used_percent)]
+    gated = [pair for pair in flat if is_gated(scores, pair[1], usage_gate_used_percent=usage_gate_used_percent)]
+    if flat and len(gated) == len(flat):
+        return sorted(flat, key=lambda pair: -float(scores[pair[1]]))
+    return ungated + gated
+
+
 def select(policy, states, counts, declared_order, scores, *, strategy="capacity-aware", usage_gate_used_percent=90):
     """Select one harness without allowing capacity to erase quality boundaries."""
     ranks = {
@@ -338,9 +382,12 @@ def select(policy, states, counts, declared_order, scores, *, strategy="capacity
     band_order = ("relief", "primary", "last_resort") if promote else (
         "primary", "relief", "last_resort"
     )
-    for band in band_order:
-        if ranks[band]:
-            return ranks[band][0], band, ranks, promote
+    flat = ordered_candidates(
+        ranks, band_order, scores, strategy=strategy, usage_gate_used_percent=usage_gate_used_percent,
+    )
+    if flat:
+        band, name = flat[0]
+        return name, band, ranks, promote
     return None, None, ranks, promote
 
 
