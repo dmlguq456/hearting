@@ -13,6 +13,8 @@ S = importlib.util.spec_from_file_location("nested_eligibility", P)
 N = importlib.util.module_from_spec(S)
 S.loader.exec_module(N)
 
+ROOT = Path(__file__).resolve().parents[1]
+
 
 class NestedEligibilityTest(unittest.TestCase):
     def args(self, worktree):
@@ -395,6 +397,136 @@ class NestedEligibilityTest(unittest.TestCase):
         self.assertEqual(
             N.resolve_parent_sandbox("codex", "auto"), ("workspace-write", "")
         )
+
+
+class SandboxUsernsProbeTest(unittest.TestCase):
+    """SD-48: `headless --check` must prove sandbox init, not just auth+shape.
+
+    Item 3 of installer-probes-dispatch-fixes -- observed 2026-08-21 that a
+    supported/direct-auth+headless-check tuple still died dead-worker-blocked
+    because bwrap userns setup failed on the host. The reason word
+    `sandbox-userns-unavailable` is deliberately absent from
+    `WORKTREE_LOCAL_FAILURES`, so no eligibility code change is required --
+    the fallthrough in `failure_diagnostics` alone must classify it
+    `runtime-global`/`retry_on_isolated_worktree=0`.
+    """
+
+    def test_sealed_probe_becomes_unsupported_direct_headless_check(self):
+        result = mock.Mock(
+            returncode=69,
+            stdout=(
+                "check=failed\nreason=sandbox-userns-unavailable\n"
+                "detail=bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted\n"
+                "failure_scope=runtime-global\ncodex_command=ok\n"
+                "retry_on_isolated_worktree=0\n"
+            ),
+            stderr="",
+        )
+        with tempfile.TemporaryDirectory() as worktree, \
+             mock.patch.object(N, "auth_check", return_value=(True, "")), \
+             mock.patch.object(N.subprocess, "run", return_value=result):
+            self.assertEqual(
+                N.command_check("codex", worktree),
+                ("unsupported", "direct-headless-check", "sandbox-userns-unavailable"),
+            )
+
+    def test_sandbox_userns_unavailable_is_runtime_global_not_worktree_local(self):
+        # WORKTREE_LOCAL_FAILURES must NOT gain this reason -- that omission is
+        # the mechanism by which the fallthrough yields runtime-global.
+        self.assertNotIn("sandbox-userns-unavailable", N.WORKTREE_LOCAL_FAILURES)
+        self.assertEqual(
+            N.failure_diagnostics(
+                "codex", "unsupported", "direct-headless-check",
+                "sandbox-userns-unavailable",
+            ),
+            ("runtime-global", "ok", 0),
+        )
+
+    def _worktree(self, tmp):
+        worktree = Path(tmp) / "repo"
+        worktree.mkdir()
+        subprocess.run(["git", "init", "-q", str(worktree)], check=True)
+        return worktree
+
+    def _stub(self, bin_dir, name, body):
+        bin_dir.mkdir(exist_ok=True)
+        stub = bin_dir / name
+        stub.write_text(body)
+        stub.chmod(0o755)
+        return stub
+
+    def _path_hiding_bwrap(self, worktree):
+        """Real PATH dirs, minus any directory that itself contains `bwrap`.
+
+        `command -v bwrap` only fails to find the binary if no PATH directory
+        has it -- prepending a stub dir is not enough when the real `bwrap`
+        also sits in an inherited PATH directory (e.g. `/usr/bin`), so this
+        drops any such directory wholesale from the search path instead.
+        """
+        kept = []
+        for entry in os.environ.get("PATH", "").split(os.pathsep):
+            if not entry:
+                continue
+            if (Path(entry) / "bwrap").exists():
+                continue
+            kept.append(entry)
+        return os.pathsep.join(kept)
+
+    def _preflight_check(self, worktree, bwrap_rc=None, extra_env=None):
+        """Run the real `preflight.sh headless --check` with stub `codex`/`bwrap`."""
+        bin_dir = worktree.parent / "stub-bin"
+        self._stub(bin_dir, "codex", "#!/bin/sh\nexit 0\n")
+        env = {k: v for k, v in os.environ.items()
+               if k not in ("AGENT_DISPATCH_CHILD", "CODEX_DISPATCH_SANDBOX_FORCE")}
+        env["AGENT_HOME"] = str(ROOT)
+        if bwrap_rc is None:
+            env["PATH"] = "%s:%s" % (bin_dir, self._path_hiding_bwrap(worktree))
+        else:
+            self._stub(
+                bin_dir, "bwrap",
+                f"#!/bin/sh\necho 'stub bwrap failure line' >&2\nexit {bwrap_rc}\n"
+                if bwrap_rc != 0 else "#!/bin/sh\nexit 0\n",
+            )
+            env["PATH"] = "%s:%s" % (bin_dir, env.get("PATH", ""))
+        env.update(extra_env or {})
+        return subprocess.run(
+            [str(ROOT / "adapters/codex/bin/preflight.sh"), "headless", "--check", str(worktree)],
+            text=True, capture_output=True, env=env, timeout=60,
+        )
+
+    def test_real_probe_seals_when_stub_bwrap_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            worktree = self._worktree(tmp)
+            result = self._preflight_check(worktree, bwrap_rc=1)
+        self.assertEqual(result.returncode, 69, result.stdout + result.stderr)
+        self.assertIn("reason=sandbox-userns-unavailable", result.stdout)
+
+    def test_real_probe_passes_when_stub_bwrap_succeeds(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            worktree = self._worktree(tmp)
+            result = self._preflight_check(worktree, bwrap_rc=0)
+        self.assertNotIn("sandbox-userns-unavailable", result.stdout)
+
+    def test_real_probe_passes_when_bwrap_binary_is_absent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            worktree = self._worktree(tmp)
+            result = self._preflight_check(worktree, bwrap_rc=None)
+        self.assertNotIn("sandbox-userns-unavailable", result.stdout)
+
+    def test_real_probe_honors_suppression_signals(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            worktree = self._worktree(tmp)
+            result = self._preflight_check(
+                worktree, bwrap_rc=1, extra_env={"AGENT_DISPATCH_CHILD": "1"},
+            )
+        self.assertNotIn("sandbox-userns-unavailable", result.stdout)
+        with tempfile.TemporaryDirectory() as tmp:
+            worktree = self._worktree(tmp)
+            result = self._preflight_check(
+                worktree, bwrap_rc=1,
+                extra_env={"CODEX_DISPATCH_SANDBOX_FORCE": "danger-full-access"},
+            )
+        self.assertNotIn("sandbox-userns-unavailable", result.stdout)
 
 
 if __name__ == "__main__":
