@@ -5654,7 +5654,15 @@ def _sync_exchange_config():
 
 
 def _synchronized_project_roots():
-    """Return local project roots known through the runtime project registry."""
+    """Return local project roots known through the runtime project registry.
+
+    The home directory is deliberately not one of them. It is an ancestor of
+    every default runtime path, so treating a session opened there as a
+    synchronized project tree excludes the shipped exchange location from
+    itself and leaves no usable default at all. Its descendants stay eligible,
+    the containing-Git-tree check is unaffected, and a home that really is
+    synchronized still needs an explicit ``MEM_SYNC_DIR`` outside it.
+    """
 
     roots = {Path.cwd(), PROJECTS}
     try:
@@ -5665,6 +5673,8 @@ def _synchronized_project_roots():
         decoded = _decode_enc_cwd(entry.name)
         if decoded is not None:
             roots.add(decoded)
+    home = Path.home().resolve(strict=False)
+    roots = {root for root in roots if root.resolve(strict=False) != home}
     return tuple(sorted(roots, key=lambda path: os.fsencode(str(path))))
 
 

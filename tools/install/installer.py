@@ -1059,7 +1059,7 @@ def cmd_memory(args):
             "lines": [f"memory sync config: {report['status']}: {report['path']}"]
                      + ([f"remote: {report.get('remote_url')}",
                          f"ref: {report.get('ref')}",
-                         f"exchange: {report.get('exchange_dir')}"]
+                         f"exchange: {report.get('exchange_dir') or '(default)'}"]
                         if report["status"] == "ok" else []),
         }
 
@@ -1074,7 +1074,7 @@ def cmd_memory(args):
     lines = [f"memory join: policy {written['status']}: {written['path']}",
              f"remote: {written['remote_url']}",
              f"ref: {written['ref']}",
-             f"exchange: {written['exchange_dir']}"]
+             f"exchange: {written.get('exchange_dir') or '(default)'}"]
     if args.dry_run:
         lines.append("next: rerun without --dry-run to join")
         return {"operation": f"memory {operation}", "memory_sync": written,

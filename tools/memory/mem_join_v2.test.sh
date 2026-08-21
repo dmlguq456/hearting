@@ -84,5 +84,46 @@ SYNC="$(MEM_STORE="$CONFIG_STORE" python3 "$MEM" sync --json 2>/dev/null)"
   && ok "sync reaches the remote using only the config file" \
   || bad "sync did not use the config file: $(printf '%s' "$SYNC" | json reason)"
 
+echo "== a session opened in the home directory does not veto the default =="
+# The home directory is an ancestor of the default exchange location, so
+# counting it as a synchronized project root excluded the shipped default
+# from itself and left no usable value at all. Checked at the source, since
+# only a project entry that resolves to a real directory is decoded.
+# The encoded-cwd form uses '-' as its separator, so the fixture path itself
+# must not contain one or it cannot be decoded back to a real directory.
+FAKE_ROOT="$(mktemp -d "${MEM_TEST_ROOT:-/var/tmp}/hearting_home_XXXXXX")"
+trap 'rm -rf "$TMP" "$FAKE_ROOT"' EXIT
+FAKE_HOME="$FAKE_ROOT/home"
+mkdir -p "$FAKE_HOME/projects"
+# The encoder maps '/', '.', and '_' alike onto the separator.
+ENC="-$(printf %s "$FAKE_HOME" | sed 's|^/||; s|[/._]|-|g')"
+mkdir -p "$FAKE_HOME/projects/$ENC"
+python3 - "$HERE" "$FAKE_HOME" <<'PYEOF'
+import importlib.util, os, sys
+here, fake_home = sys.argv[1], sys.argv[2]
+os.environ["HOME"] = fake_home
+os.environ["MEM_PROJECTS"] = fake_home + "/projects"
+os.environ["MEM_STORE"] = fake_home + "/store"
+os.environ["MEM_INIT"] = "1"
+spec = importlib.util.spec_from_file_location("memmod", here + "/mem.py")
+mem = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mem)
+from pathlib import Path
+roots = [Path(r) for r in mem._synchronized_project_roots()]
+home = Path(fake_home)
+assert home not in roots, f"home is still a forbidden root: {roots}"
+# A real project under the home directory must still be refused.
+project = home / "someproject"
+project.mkdir(exist_ok=True)
+import re
+enc = "-" + re.sub(r"[/._]", "-", str(project).lstrip("/"))
+(Path(os.environ["MEM_PROJECTS"]) / enc).mkdir(exist_ok=True)
+roots = [Path(r) for r in mem._synchronized_project_roots()]
+assert project in roots, f"a real project under home was dropped: {roots}"
+print("ok")
+PYEOF
+[ $? -eq 0 ] && ok "home is exempt while its real project subtrees are not" \
+  || bad "home exemption is wrong"
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

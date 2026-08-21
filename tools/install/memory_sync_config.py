@@ -82,10 +82,13 @@ def write(*, remote_url: str, ref: Optional[str] = None,
         "enabled": bool(enabled),
         "remote_url": _validate_remote(remote_url),
         "ref": _validate_ref(ref or DEFAULT_REF),
-        "exchange_dir": str(_absolute(
-            exchange_dir or os.environ.get("MEM_SYNC_DIR")
-            or default_exchange_dir(), "exchange_dir")),
     }
+    # Recording the exchange path only when it was chosen keeps this file
+    # byte-identical across hosts that are happy with the default, and the
+    # exchange is a rebuildable local cache rather than shared state.
+    chosen = exchange_dir or os.environ.get("MEM_SYNC_DIR")
+    if chosen:
+        payload["exchange_dir"] = str(_absolute(chosen, "exchange_dir"))
     path = config_path()
     if dry_run:
         return {"status": "would-write", "path": str(path), **payload}
