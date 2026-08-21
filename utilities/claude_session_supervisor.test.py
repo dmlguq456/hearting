@@ -374,6 +374,12 @@ class ClaudeSessionSupervisorTest(unittest.TestCase):
             any(row.get("type") == "dispatch.supervisor.resumed" for row in rows)
         )
         self.assertEqual(rows[-1]["type"], "result")
+        self.assertEqual(
+            rows[-1]["result"], "artifact: -\nverdict: PASS\nblocker: none"
+        )
+        registry = self.jobs.read_text(encoding="utf-8")
+        self.assertIn("failure_class=pass", registry)
+        self.assertIn("reconcile_reason=exact-final-handoff", registry)
 
     def test_terminal_fast_path_rejects_mismatched_marker(self):
         route = self.base / "terminal-route.json"

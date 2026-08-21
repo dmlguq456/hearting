@@ -156,6 +156,36 @@ def terminal_route_completion(
     return terminal_nodes if proven == set(terminal_nodes) else ()
 
 
+def terminal_handoff_result(
+    result: dict[str, Any], rows: list[object], terminal_nodes: tuple[str, ...]
+) -> dict[str, Any]:
+    """Build the standard PASS envelope without another model turn."""
+
+    artifacts: list[str] = []
+    for row in rows:
+        metadata = getattr(row, "metadata", {})
+        if metadata.get("route_node") not in terminal_nodes:
+            continue
+        marker_path = Path(metadata.get("completion_marker", ""))
+        try:
+            marker = json.loads(marker_path.read_text(encoding="utf-8"))
+        except (FileNotFoundError, OSError, TypeError, ValueError):
+            continue
+        evidence = marker.get("evidence") if isinstance(marker, dict) else None
+        artifact = evidence.get("path") if isinstance(evidence, dict) else None
+        if (
+            isinstance(artifact, str)
+            and Path(artifact).is_absolute()
+            and not Path(artifact).is_symlink()
+            and Path(artifact).is_file()
+        ):
+            artifacts.append(artifact)
+    artifact = sorted(set(artifacts))[0] if artifacts else "-"
+    terminal_result = dict(result)
+    terminal_result["result"] = f"artifact: {artifact}\nverdict: PASS\nblocker: none"
+    return terminal_result
+
+
 def emit(value: dict[str, Any]) -> None:
     print(json.dumps(value, separators=(",", ":"), ensure_ascii=False), flush=True)
 
@@ -871,10 +901,8 @@ def main(argv: list[str] | None = None) -> int:
                     joined_rows = current_children(
                         Path(args.jobs), args.parent_attempt_id, new_attempts
                     )
-                terminal_nodes = terminal_route_completion(
-                    args,
-                    current_children(Path(args.jobs), args.parent_attempt_id),
-                )
+                current_rows = current_children(Path(args.jobs), args.parent_attempt_id)
+                terminal_nodes = terminal_route_completion(args, current_rows)
                 if terminal_nodes:
                     emit(
                         {
@@ -902,11 +930,14 @@ def main(argv: list[str] | None = None) -> int:
                                 ),
                             }
                         )
-                    terminal = classify_claude_result(result, process_rc)
+                    final_result = terminal_handoff_result(
+                        result, current_rows, terminal_nodes
+                    )
+                    terminal = classify_claude_result(final_result, process_rc)
                     if not reconcile(args, terminal):
                         return 70
-                    emit(result)
-                    return 0
+                    emit(final_result)
+                    return 0 if terminal.failure_class == "pass" else 3
                 emit(
                     {
                         "type": "dispatch.supervisor.resumed",
