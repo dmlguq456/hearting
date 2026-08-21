@@ -29,6 +29,7 @@ import importlib.util
 import json
 import os
 import shlex
+import socket
 import subprocess
 import sys
 from pathlib import Path
@@ -82,9 +83,25 @@ def load_config():
     return {"run_root": Path(run_root), "hosts": hosts}
 
 
+def is_self(host):
+    """True when this entry describes the machine we are already running on.
+
+    The inventory is meant to be byte-identical on every machine, so which
+    entry is local has to be discovered rather than written down: marking one
+    host `local` would make the file machine-specific and turn moving the
+    session host into an edit on every server. A declared `hostname` is matched
+    against this machine's own, since an inventory label (`moving4`) and the
+    system hostname (`workstation`) need not agree.
+    """
+    if host.get("ssh_host") == LOCAL:
+        return True
+    declared = host.get("hostname")
+    return bool(declared) and declared == socket.gethostname()
+
+
 def ssh_prefix(host):
     """Argv prefix that runs a command on this host, locally or over SSH."""
-    if host.get("ssh_host") == LOCAL:
+    if is_self(host):
         return []
     target = host["ssh_host"]
     user = host.get("ssh_user")
@@ -170,7 +187,7 @@ def cmd_list(args):
     for name, host in _select(config, args.hosts):
         row = {"host": name, "ssh": host.get("ssh_host"),
                "port": host.get("ssh_port"), "conda": host.get("conda"),
-               "note": host.get("note")}
+               "note": host.get("note"), "self": is_self(host)}
         row.update(probe_host(name, host) if not args.static
                    else {"reachable": None, "gpus": []})
         rows.append(row)
@@ -184,12 +201,14 @@ def cmd_list(args):
             print(f"  {row['host']:<10} unreachable  ({row.get('detail', '')})")
             continue
         if row.get("reachable") is None:
-            print(f"  {row['host']:<10} {row['ssh']}  {row.get('note') or ''}")
+            here = "*" if row.get("self") else " "
+            print(f" {here}{row['host']:<10} {row['ssh']}  {row.get('note') or ''}")
             continue
         summary = ", ".join(
             f"{g['index']}:{g['name'].replace('NVIDIA ', '')} "
             f"{g['free_mib'] // 1024}G free" for g in row["gpus"]) or "no gpu"
-        print(f"  {row['host']:<10} up   load {row.get('load', '?')}  | {summary}")
+        here = "*" if row.get("self") else " "
+        print(f" {here}{row['host']:<10} up   load {row.get('load', '?')}  | {summary}")
     return 0
 
 
