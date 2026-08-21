@@ -168,6 +168,52 @@ class CodexNoCommitFixtureTest(unittest.TestCase):
             "unprovable Git topology must conservatively retain the no-commit boundary",
         )
 
+    def _worker_args(self, worker_type, worktree=None):
+        import argparse
+        return argparse.Namespace(
+            worker_type=worker_type, write_scope="source/**",
+            worktree=str(worktree or self.linked), agent_home=self.primary,
+        )
+
+    def test_owner_is_commit_expected_and_stage_stays_no_commit(self):
+        # SD-69 boundary is depth-2/stage-only: an owner in the same linked
+        # worktree is commit-expected and must not be flagged no-commit.
+        self.assertTrue(WH.is_no_commit_stage(self._worker_args("stage")))
+        self.assertFalse(WH.is_no_commit_stage(self._worker_args("owner")))
+
+    def test_git_writable_dirs_grant_exact_metadata_for_commit_expected_runs(self):
+        common = self.primary / ".git"
+        git_dir = common / "worktrees" / "linked-worktree"
+        expected = (git_dir.resolve(), (common / "objects").resolve(),
+                    (common / "refs").resolve(), (common / "logs").resolve())
+        self.assertEqual(
+            tuple(WH.linked_worktree_git_writable_dirs(self._worker_args("owner"))),
+            expected,
+        )
+        # The grant never includes the common-dir root (hooks/ and config stay
+        # read-only) and a no-commit stage gets none of these directories.
+        self.assertNotIn(
+            common.resolve(),
+            WH.linked_worktree_git_writable_dirs(self._worker_args("owner")),
+        )
+        self.assertEqual(
+            WH.linked_worktree_git_writable_dirs(self._worker_args("stage")), ()
+        )
+        # A primary checkout needs no grant: cwd already covers .git.
+        self.assertEqual(
+            WH.linked_worktree_git_writable_dirs(
+                self._worker_args("owner", worktree=self.primary)
+            ),
+            (),
+        )
+        # Unprovable topology fails closed to no grant.
+        self.assertEqual(
+            WH.linked_worktree_git_writable_dirs(
+                self._worker_args("owner", worktree=self.base / "not-a-repo")
+            ),
+            (),
+        )
+
     def test_source_edit_and_primary_spec_marker_persist_across_boundary(self):
         """(2) a simulated worker's source edit persists in the worktree, and a
         `.spec-grounding/<marker>` write lands in the PRIMARY checkout — the
