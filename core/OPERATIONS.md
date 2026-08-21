@@ -460,3 +460,27 @@ The supervisor accepts only exact child rows whose durable launch fence records
 `launch_started=1`. An empty or register-only runtime wait receives one bounded
 same-session correction requiring `--start` and the three-field receipt; repeated
 absence then fails closed.
+
+### §5.13. Operator Compute Hosts
+
+Sessions run on one machine while training and evaluation belong on whichever
+host holds the right GPUs. `utilities/compute-hosts.py` owns that boundary so
+neither half is rediscovered per session.
+
+The static half — addresses, ports, environment roots, and the shared run root
+— lives in one user-owned file at
+`${XDG_CONFIG_HOME:-$HOME/.config}/hearting/compute-hosts.yaml`, alongside the
+other cross-runtime policy files; install and update never write it. Live state
+is never recorded: `list` and `probe` measure reachability and free GPU memory
+at the moment they are asked.
+
+`run` starts a command detached under a stable run id and writes its log and
+exit code beneath the shared run root, so the session that launched the work
+may end long before it finishes and any later session on any host that mounts
+that root can follow it by id through `runs`, `tail`, and `stop`. A run id
+doubles as the remote `tmux` session name, and a second launch within the same
+second takes a fresh directory rather than overwriting the first one's log.
+
+This is deliberately not dispatch: no capability, registry, attempt, or
+completion gate is involved, and the harness never chooses a host on its own.
+The acting agent names the host.
