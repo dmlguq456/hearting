@@ -149,9 +149,18 @@ main/orchestrator chooses per job and the wrapper only reflects that choice:
   `asyncRewake` hook for that owner attempt. The hook waits for terminal
   quiescence outside the model and wakes once with an exact harvest command;
   ordinary Bash calls are silent no-ops, and no Background Bash monitor,
-  `dispatch-wait`, progress recap, or periodic re-arm is created. Registered
-  Claude owners keep the separate `--session-id`/`--resume` supervisor for their
-  internal batches. Both paths work for either a Claude or Codex child. A Codex parent
+  `dispatch-wait`, progress recap, or periodic re-arm is created. Immediately
+  before rendering, the hook re-reads the exact row and its sealed completion
+  evidence: success returns a clean terminal notification with exit zero, and
+  only attention exits two to wake Claude with warning context. Registered Claude
+  owners keep one `--input-format stream-json` process for the route and submit
+  each non-terminal joined receipt immediately. When the current rows and exact
+  sealed markers prove every declared terminal node complete, the supervisor
+  skips the redundant final owner turn and closes the process before terminal
+  row reconciliation. An explicit `--claude-command` keeps the checked historical
+  `--session-id`/`--resume` per-turn fallback. Monotonic control rows measure every
+  turn, join, and terminal teardown without exposing model text. Both paths work
+  for either a Claude or Codex child. A Codex parent
   that launches a Claude child uses the checked `codex-managed-gateway` only
   when that parent was created through the explicit managed entry; its
   completion sidecar is control-only and never becomes a Claude or Codex

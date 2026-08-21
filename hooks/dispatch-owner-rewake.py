@@ -37,6 +37,7 @@ REGISTRY_OWNER_START = {
     "launch_claimed": "1",
     "launch_started": "1",
 }
+SUCCESS_NOTIFICATION = "\x1b]9;Hearting dispatch completed\x07"
 
 
 @dataclass(frozen=True)
@@ -287,7 +288,42 @@ def wait_for_attempt(launch: Launch, readiness: Path) -> tuple[str, str]:
         time.sleep(interval)
 
 
-def receipt(launch: Launch, state: str, reason: str, root: Path) -> str:
+def _completion_evidence_current(row: Any) -> bool:
+    """Prove that the current exact row carries sealed success evidence."""
+
+    note = row.metadata.get("note", "")
+    if note == "completed-supervisor":
+        return row.metadata.get("failure_class") == "pass"
+    if note != "completed-marker":
+        return False
+    raw_marker = row.metadata.get("completion_marker", "")
+    marker = Path(raw_marker) if raw_marker else None
+    if (
+        marker is None
+        or not marker.is_absolute()
+        or marker.is_symlink()
+        or not marker.is_file()
+    ):
+        return False
+    try:
+        if marker.stat().st_size > 65_536:
+            return False
+        value = json.loads(marker.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    if not isinstance(value, dict):
+        return False
+    expected = {
+        "route_id": row.metadata.get("route_id", ""),
+        "route_hash": row.metadata.get("route_hash", ""),
+        "node_id": row.metadata.get("route_node", ""),
+    }
+    return all(expected[key] and value.get(key) == expected[key] for key in expected)
+
+
+def classified_receipt(
+    launch: Launch, state: str, reason: str, root: Path
+) -> tuple[str, str]:
     row = None
     try:
         row = current_attempt_row(launch.jobs, launch.attempt_id)
@@ -309,12 +345,20 @@ def receipt(launch: Launch, state: str, reason: str, root: Path) -> str:
     row_revision = child_row_revision(row) if row is not None else "unavailable"
     if state in {"ready", "attention"} and row is not None:
         required_action = required_action_for_attempt(row.status, row.metadata)
-        expected_state = (
-            "ready" if required_action == "advance-completed" else "attention"
-        )
-        if expected_state != state:
-            reason = "row-advanced"
-        if required_action == "complete-open":
+        snapshot_state = state
+        if required_action == "advance-completed" and _completion_evidence_current(row):
+            state = "success"
+            reason = "terminal-complete" if snapshot_state == "ready" else "row-advanced"
+        else:
+            state = "attention"
+            if snapshot_state == "ready" and required_action != "advance-completed":
+                reason = "row-advanced"
+            if required_action == "advance-completed":
+                required_action = "inspect-completion"
+                reason = "completion-marker-unverified"
+        if state == "success":
+            instruction = "No harvest command is required; the registered owner completed."
+        elif required_action == "complete-open":
             instruction = (
                 "Use only the exact checked harvest command: "
                 f"{shlex.quote(str(harvest))} harvest --jobs {jobs_argument} "
@@ -326,19 +370,57 @@ def receipt(launch: Launch, state: str, reason: str, root: Path) -> str:
                 f"{shlex.quote(str(harvest))} harvest --jobs {jobs_argument} "
                 f"--attempt-id {shlex.quote(launch.attempt_id)} --status done --failure-detail."
             )
-        else:
+        elif required_action == "advance-completed":
             instruction = "No harvest command is required; advance or finish the route."
+        else:
+            instruction = (
+                "Inspect the exact current row and completion marker with: "
+                f"{shlex.quote(str(harvest))} harvest --jobs {jobs_argument} "
+                f"--attempt-id {shlex.quote(launch.attempt_id)} --status done "
+                "--failure-detail."
+            )
     else:
         required_action = "inspect-bridge"
         instruction = "Inspect the typed bridge state; do not harvest or re-arm it."
-    return (
-        "Runtime owner completion receipt "
+    title = (
+        "Hearting dispatch completed"
+        if state == "success"
+        else "Hearting dispatch requires attention"
+    )
+    message = (
+        f"{title}. Runtime owner completion receipt "
         f"schema=2 state={state} attempt_id={launch.attempt_id} armed={launch.armed} "
         f"status={status or '-'} row_revision={row_revision} "
         f"reason={reason} required_action={required_action}. "
         "Do not start or re-arm Background Bash, Monitor, liveness, or dispatch-wait. "
         f"{instruction} Do not emit a periodic progress recap."
     )
+    return state, message
+
+
+def receipt(launch: Launch, state: str, reason: str, root: Path) -> str:
+    """Compatibility text view used by tests and non-hook callers."""
+
+    return classified_receipt(launch, state, reason, root)[1]
+
+
+def emit_receipt(state: str, message: str) -> int:
+    """Render success as a notification and only attention as a hook error."""
+
+    if state == "success":
+        print(
+            json.dumps(
+                {
+                    "systemMessage": message,
+                    "terminalSequence": SUCCESS_NOTIFICATION,
+                },
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+        )
+        return 0
+    print(message, file=sys.stderr)
+    return 2
 
 
 def main() -> int:
@@ -352,11 +434,13 @@ def main() -> int:
     root = agent_home()
     readiness = root / "utilities" / "dispatch-attempt-ready.py"
     if not readiness.is_file():
-        print(receipt(launch, "bridge-error", "readiness-helper-missing", root), file=sys.stderr)
-        return 2
+        state, message = classified_receipt(
+            launch, "bridge-error", "readiness-helper-missing", root
+        )
+        return emit_receipt(state, message)
     state, reason = wait_for_attempt(launch, readiness)
-    print(receipt(launch, state, reason, root), file=sys.stderr)
-    return 2
+    state, message = classified_receipt(launch, state, reason, root)
+    return emit_receipt(state, message)
 
 
 if __name__ == "__main__":

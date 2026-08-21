@@ -11,6 +11,7 @@ import subprocess
 import sys
 import tempfile
 import textwrap
+from types import SimpleNamespace
 import unittest
 
 
@@ -68,6 +69,7 @@ class ClaudeSessionSupervisorTest(unittest.TestCase):
         self.lease = self.base / "supervisor-state" / f"{PARENT}.lease"
         self.trace = self.base / "trace.jsonl"
         self.claude = self.base / "fake_claude.py"
+        self.stream_claude = self.base / "fake_stream_claude.py"
         self.join = self.base / "fake_join.py"
         self.claude.write_text(
             textwrap.dedent(
@@ -119,6 +121,33 @@ class ClaudeSessionSupervisorTest(unittest.TestCase):
             ),
             encoding="utf-8",
         )
+        self.stream_claude.write_text(
+            textwrap.dedent(
+                """\
+                import json, os, sys, time
+                args = sys.argv[1:]
+                session = args[args.index('--session-id') + 1]
+                state_path = os.environ['AGENT_DISPATCH_COMPLETION_STATE_FILE']
+                with open(os.environ['FAKE_TRACE'], 'a', encoding='utf-8') as h:
+                    h.write(json.dumps({'event':'process-start','pid':os.getpid(),
+                                        'session':session,'args':args}) + '\\n')
+                for line in sys.stdin:
+                    payload = json.loads(line)
+                    prompt = payload['message']['content'][0]['text']
+                    with open(state_path, encoding='utf-8') as state_handle:
+                        delivered = json.load(state_handle)['delivered_attempt_ids']
+                    with open(os.environ['FAKE_TRACE'], 'a', encoding='utf-8') as h:
+                        h.write(json.dumps({'event':'turn-start','pid':os.getpid(),
+                                            'time':time.monotonic(),'session':session,
+                                            'prompt':prompt,'delivered':delivered}) + '\\n')
+                    text = ('artifact: -\\nverdict: PASS\\nblocker: none'
+                            if delivered else 'runtime_wait: registered-children')
+                    print(json.dumps({'type':'result','subtype':'success','is_error':False,
+                                      'result':text}), flush=True)
+                """
+            ),
+            encoding="utf-8",
+        )
         self.join.write_text(
             textwrap.dedent(
                 """\
@@ -132,11 +161,29 @@ class ClaudeSessionSupervisorTest(unittest.TestCase):
                 time.sleep(0.2)
                 with open(jobs, 'a', encoding='utf-8') as h:
                     for attempt in attempts:
+                        route_file = os.environ.get('FAKE_TERMINAL_ROUTE')
+                        terminal = ''
+                        if route_file:
+                            with open(route_file, encoding='utf-8') as route_handle:
+                                route = json.load(route_handle)
+                            marker = os.environ['FAKE_TERMINAL_MARKER']
+                            with open(marker, 'w', encoding='utf-8') as marker_handle:
+                                json.dump({'schema_version': 2,
+                                           'route_id': route['route_id'],
+                                           'route_hash': route['route_hash'],
+                                           'node_id': 'report',
+                                           'attempt_id': attempt}, marker_handle)
+                            terminal = (f",note=completed-marker,"
+                                        f"route_id={route['route_id']},"
+                                        f"route_hash={route['route_hash']},"
+                                        f"route_node=report,completion_marker={marker}")
+                        else:
+                            terminal = ',failure_class=pass,note=completed-supervisor'
                         h.write('2026-07-23T00:00:01Z\\tdone\\t/repo\\t/wt\\tchild\\t'
                                 'attempt_schema_version=2,dispatch_depth=2,transport=headless,'
                                 'execution_surface=registered-headless,registered_worker=1,'
-                                f'attempt_id={attempt},parent_attempt_id={parent},'
-                                'failure_class=pass,note=completed-supervisor\\n')
+                                f'attempt_id={attempt},parent_attempt_id={parent}'
+                                f'{terminal}\\n')
                 with open(trace, 'a', encoding='utf-8') as h:
                     h.write(json.dumps({'event':'join-end','time':time.monotonic()}) + '\\n')
                 print(json.dumps({'schema_version':2,'state':'ready','parent_attempt_id':parent,
@@ -164,13 +211,28 @@ class ClaudeSessionSupervisorTest(unittest.TestCase):
             "--disallowed-tool", "Monitor",
         ]
 
+    def child_env(self, **extra: str) -> dict[str, str]:
+        """Fixture-pinned subprocess environment.
+
+        This suite also runs inside dispatched workers, whose real
+        ``AGENT_ARTIFACT_ROOT`` otherwise contradicts every fixture artifact
+        root: reconcile then skips with ``terminal-error:artifact-root-mismatch``
+        and the run only ends at ``continuation-limit-exceeded``. Pin the
+        fixture root for every child process instead of leaking the caller's.
+        """
+        return {
+            **os.environ,
+            "AGENT_ARTIFACT_ROOT": str(self.artifact_root),
+            **extra,
+        }
+
     def run_supervisor(self, **extra_env: str) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
             self.command(),
             input="initial assignment",
             text=True,
             capture_output=True,
-            env={**os.environ, "FAKE_TRACE": str(self.trace), **extra_env},
+            env=self.child_env(FAKE_TRACE=str(self.trace), **extra_env),
             timeout=10,
         )
 
@@ -223,10 +285,137 @@ class ClaudeSessionSupervisorTest(unittest.TestCase):
             ],
             text=True,
             capture_output=True,
-            env={**os.environ, "AGENT_ARTIFACT_ROOT": str(self.artifact_root)},
+            env=self.child_env(),
         )
         self.assertEqual(inspected.returncode, 0, inspected.stderr + inspected.stdout)
         self.assertIn("\tvalid\texact-claude-result\tPASS\tnone\tnone", inspected.stdout)
+
+    def test_stream_transport_reuses_one_process_and_emits_boundary_timings(self):
+        self.jobs.write_text(owner_row(self.lease) + child_row(), encoding="utf-8")
+        result = subprocess.run(
+            self.command(self.stream_claude)
+            + ["--turn-transport", "stream-json"],
+            input="initial assignment",
+            text=True,
+            capture_output=True,
+            env=self.child_env(FAKE_TRACE=str(self.trace)),
+            timeout=10,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        trace = [json.loads(line) for line in self.trace.read_text().splitlines()]
+        process_rows = [row for row in trace if row["event"] == "process-start"]
+        turns = [row for row in trace if row["event"] == "turn-start"]
+        self.assertEqual(len(process_rows), 1, trace)
+        self.assertEqual(len(turns), 2, trace)
+        self.assertEqual({row["pid"] for row in turns}, {process_rows[0]["pid"]})
+        self.assertIn("--input-format", process_rows[0]["args"])
+        self.assertNotIn("--resume", process_rows[0]["args"])
+        rows = [json.loads(line) for line in result.stdout.splitlines()]
+        starts = [row for row in rows if row.get("type") == "dispatch.supervisor.turn-started"]
+        completed = [
+            row for row in rows if row.get("type") == "dispatch.supervisor.turn-completed"
+        ]
+        joins = [row for row in rows if row.get("type") == "dispatch.supervisor.join-completed"]
+        teardowns = [
+            row for row in rows if row.get("type") == "dispatch.supervisor.teardown-completed"
+        ]
+        self.assertEqual(len(starts), 2, rows)
+        self.assertEqual(len(completed), 2, rows)
+        self.assertEqual(len(joins), 1, rows)
+        self.assertEqual(len(teardowns), 1, rows)
+        self.assertEqual(teardowns[0]["reason"], "route-terminal")
+        self.assertTrue(all(row["transport"] == "stream-json" for row in starts))
+        self.assertTrue(all(row["duration_seconds"] >= 0 for row in completed + joins + teardowns))
+        self.assertEqual(rows[-1]["type"], "result")
+
+    def test_terminal_marker_closes_stream_without_final_owner_turn(self):
+        route = self.base / "terminal-route.json"
+        route_value = seal_route({
+            "schema_version": 2,
+            "cwd": str(self.base),
+            "nodes": [{"id": "report", "terminal": True}],
+            "workflow_contract": {"terminal_nodes": ["report"]},
+            "resume_retry_boundaries": [],
+        })
+        route.write_text(json.dumps(route_value), encoding="utf-8")
+        marker = self.base / "report.json"
+        self.jobs.write_text(owner_row(self.lease) + child_row(), encoding="utf-8")
+        result = subprocess.run(
+            self.command(self.stream_claude)
+            + [
+                "--turn-transport", "stream-json",
+                "--route-file", str(route),
+                "--route-id", route_value["route_id"],
+                "--route-hash", route_value["route_hash"],
+            ],
+            input="initial assignment",
+            text=True,
+            capture_output=True,
+            env=self.child_env(
+                FAKE_TRACE=str(self.trace),
+                FAKE_TERMINAL_ROUTE=str(route),
+                FAKE_TERMINAL_MARKER=str(marker),
+            ),
+            timeout=10,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        trace = [json.loads(line) for line in self.trace.read_text().splitlines()]
+        turns = [row for row in trace if row["event"] == "turn-start"]
+        self.assertEqual(len(turns), 1, trace)
+        rows = [json.loads(line) for line in result.stdout.splitlines()]
+        fast = [
+            row for row in rows
+            if row.get("type") == "dispatch.supervisor.terminal-fast-path"
+        ]
+        self.assertEqual(len(fast), 1, rows)
+        self.assertEqual(fast[0]["terminal_nodes"], ["report"])
+        self.assertTrue(fast[0]["continuation_saved"])
+        self.assertFalse(
+            any(row.get("type") == "dispatch.supervisor.resumed" for row in rows)
+        )
+        self.assertEqual(rows[-1]["type"], "result")
+        self.assertEqual(
+            rows[-1]["result"], "artifact: -\nverdict: PASS\nblocker: none"
+        )
+        registry = self.jobs.read_text(encoding="utf-8")
+        self.assertIn("failure_class=pass", registry)
+        self.assertIn("reconcile_reason=exact-final-handoff", registry)
+
+    def test_terminal_fast_path_rejects_mismatched_marker(self):
+        route = self.base / "terminal-route.json"
+        route_value = seal_route({
+            "schema_version": 2,
+            "cwd": str(self.base),
+            "nodes": [{"id": "report", "terminal": True}],
+            "workflow_contract": {"terminal_nodes": ["report"]},
+            "resume_retry_boundaries": [],
+        })
+        route.write_text(json.dumps(route_value), encoding="utf-8")
+        marker = self.base / "report.json"
+        marker.write_text(json.dumps({
+            "schema_version": 2,
+            "route_id": route_value["route_id"],
+            "route_hash": route_value["route_hash"],
+            "node_id": "report",
+            "attempt_id": "att-other",
+        }), encoding="utf-8")
+        args = SimpleNamespace(
+            route_file=str(route),
+            route_id=route_value["route_id"],
+            route_hash=route_value["route_hash"],
+        )
+        row = SimpleNamespace(
+            status="done",
+            attempt_id="att-child",
+            metadata={
+                "failure_class": "pass",
+                "route_id": route_value["route_id"],
+                "route_hash": route_value["route_hash"],
+                "route_node": "report",
+                "completion_marker": str(marker),
+            },
+        )
+        self.assertEqual(supervisor.terminal_route_completion(args, [row]), ())
 
     def test_session_announcement_precedes_every_turn_and_leaks_nothing(self):
         """The receipt log must name the child session it never transcribes.
@@ -334,7 +523,7 @@ class ClaudeSessionSupervisorTest(unittest.TestCase):
             input="initial assignment",
             text=True,
             capture_output=True,
-            env={**os.environ, "FAKE_TRACE": str(self.trace), "LONG_JOBS": str(self.jobs)},
+            env=self.child_env(FAKE_TRACE=str(self.trace), LONG_JOBS=str(self.jobs)),
             timeout=20,
         )
         self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
@@ -422,7 +611,7 @@ class ClaudeSessionSupervisorTest(unittest.TestCase):
             input="initial assignment",
             text=True,
             capture_output=True,
-            env={**os.environ, "FAKE_TRACE": str(self.trace)},
+            env=self.child_env(FAKE_TRACE=str(self.trace)),
             timeout=10,
         )
         self.assertNotEqual(result.returncode, 0)
@@ -447,7 +636,7 @@ class ClaudeSessionSupervisorTest(unittest.TestCase):
             input="initial assignment",
             text=True,
             capture_output=True,
-            env={**os.environ, "FAKE_TRACE": str(self.trace)},
+            env=self.child_env(FAKE_TRACE=str(self.trace)),
             timeout=10,
         )
         self.assertEqual(result.returncode, 3, result.stderr + result.stdout)
@@ -472,7 +661,7 @@ class ClaudeSessionSupervisorTest(unittest.TestCase):
             input="initial assignment",
             text=True,
             capture_output=True,
-            env={**os.environ, "FAKE_TRACE": str(self.trace)},
+            env=self.child_env(FAKE_TRACE=str(self.trace)),
             timeout=10,
         )
         self.assertEqual(result.returncode, 3, result.stderr + result.stdout)
@@ -562,7 +751,7 @@ class ClaudeSessionSupervisorTest(unittest.TestCase):
             input="initial assignment",
             text=True,
             capture_output=True,
-            env={**os.environ, "FAKE_TRACE": str(self.trace)},
+            env=self.child_env(FAKE_TRACE=str(self.trace)),
             timeout=10,
         )
         self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
@@ -616,7 +805,7 @@ class ClaudeSessionSupervisorTest(unittest.TestCase):
             input="initial assignment",
             text=True,
             capture_output=True,
-            env={**os.environ, "FAKE_TRACE": str(self.trace)},
+            env=self.child_env(FAKE_TRACE=str(self.trace)),
             timeout=10,
         )
         self.assertNotEqual(result.returncode, 0)
@@ -663,7 +852,7 @@ class ClaudeSessionSupervisorTest(unittest.TestCase):
             input="initial assignment",
             text=True,
             capture_output=True,
-            env={**os.environ, "FAKE_TRACE": str(self.trace)},
+            env=self.child_env(FAKE_TRACE=str(self.trace)),
             timeout=10,
         )
         self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
@@ -714,7 +903,7 @@ class ClaudeSessionSupervisorTest(unittest.TestCase):
             input="initial assignment",
             text=True,
             capture_output=True,
-            env={**os.environ, "FAKE_TRACE": str(self.trace)},
+            env=self.child_env(FAKE_TRACE=str(self.trace)),
             timeout=10,
         )
         self.assertNotEqual(result.returncode, 0)
