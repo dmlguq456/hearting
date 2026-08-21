@@ -96,13 +96,16 @@ def terminal_route_completion(
     raw_terminal = contract.get("terminal_nodes") if isinstance(contract, dict) else None
     if not isinstance(raw_terminal, list) or not raw_terminal:
         return ()
+    if any(not isinstance(node, str) or not node for node in raw_terminal):
+        return ()
     terminal_nodes = tuple(sorted(raw_terminal))
-    if any(not isinstance(node, str) or not node for node in terminal_nodes):
+    route_nodes = route.get("nodes")
+    if not isinstance(route_nodes, list):
         return ()
     declared_terminal = tuple(
         sorted(
             node.get("id")
-            for node in route.get("nodes", [])
+            for node in route_nodes
             if isinstance(node, dict)
             and node.get("terminal") is True
             and isinstance(node.get("id"), str)
@@ -121,7 +124,10 @@ def terminal_route_completion(
             continue
         if (
             getattr(row, "status", "") != "done"
-            or metadata.get("failure_class") != "pass"
+            or not (
+                metadata.get("failure_class") == "pass"
+                or metadata.get("note") in {"completed-marker", "completed-supervisor"}
+            )
             or metadata.get("route_id") != args.route_id
             or metadata.get("route_hash") != args.route_hash
         ):

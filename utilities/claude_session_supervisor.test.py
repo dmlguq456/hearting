@@ -173,15 +173,17 @@ class ClaudeSessionSupervisorTest(unittest.TestCase):
                                            'route_hash': route['route_hash'],
                                            'node_id': 'report',
                                            'attempt_id': attempt}, marker_handle)
-                            terminal = (f",failure_class=pass,note=completed-marker,"
+                            terminal = (f",note=completed-marker,"
                                         f"route_id={route['route_id']},"
                                         f"route_hash={route['route_hash']},"
                                         f"route_node=report,completion_marker={marker}")
+                        else:
+                            terminal = ',failure_class=pass,note=completed-supervisor'
                         h.write('2026-07-23T00:00:01Z\\tdone\\t/repo\\t/wt\\tchild\\t'
                                 'attempt_schema_version=2,dispatch_depth=2,transport=headless,'
                                 'execution_surface=registered-headless,registered_worker=1,'
-                                f'attempt_id={attempt},parent_attempt_id={parent},'
-                                f'failure_class=pass,note=completed-supervisor{terminal}\\n')
+                                f'attempt_id={attempt},parent_attempt_id={parent}'
+                                f'{terminal}\\n')
                 with open(trace, 'a', encoding='utf-8') as h:
                     h.write(json.dumps({'event':'join-end','time':time.monotonic()}) + '\\n')
                 print(json.dumps({'schema_version':2,'state':'ready','parent_attempt_id':parent,
