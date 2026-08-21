@@ -332,7 +332,13 @@ class RenderDispatchPresentationTest(unittest.TestCase):
 
                 owner = next(text for text in card if "rail-owner" in text)
                 child = next(text for text in card if "rail-leg" in text)
-                self.assertEqual(owner.index("claude code"), child.index("claude code"))
+                # F-84: the prefix-narrowed badge keeps a guaranteed trailing
+                # gap, so narrow/stack fields show the first-word badge
+                # (`claude` + space, never `claude codeclaim-b`); the wide
+                # layout's roomy field keeps the full `claude code`. Column
+                # alignment is asserted on the badge start either way.
+                badge = "claude code" if layout == "wide" else "claude "
+                self.assertEqual(owner.index(badge), child.index(badge))
 
     def test_f66_80_and_140_have_no_overwidth_box_lines(self):
         for width, layout in ((80, "narrow"), (140, "wide")):
