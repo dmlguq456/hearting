@@ -637,6 +637,31 @@ EOF
         "$worktree/.codex" "$worktree"
       exit 65
     fi
+    # SD-48: a readiness probe must not claim what the runtime cannot back up.
+    # auth + worktree shape checks alone don't prove the sandboxed child can
+    # actually spawn -- observed 2026-08-21: bwrap userns setup can fail on a
+    # host that otherwise passes every check above, and the resulting spawn
+    # dies dead-worker-blocked well after this wrapper already answered
+    # `supported`. Same override signals as the `.codex` mount check above
+    # disable this probe, plus a bare absence of `bwrap` (a different sandbox
+    # backend may apply) and a probe timeout (slow is not proof of unavailable).
+    if [ "${CODEX_DISPATCH_SANDBOX_FORCE:-}" != "danger-full-access" ] \
+      && [ "${AGENT_DISPATCH_CHILD:-}" != "1" ] \
+      && command -v bwrap >/dev/null 2>&1; then
+      set +e
+      if command -v timeout >/dev/null 2>&1; then
+        sandbox_probe_err=$(timeout 10 bwrap --ro-bind / / --unshare-net true 2>&1 >/dev/null)
+      else
+        sandbox_probe_err=$(bwrap --ro-bind / / --unshare-net true 2>&1 >/dev/null)
+      fi
+      sandbox_probe_rc=$?
+      set -e
+      if [ "$sandbox_probe_rc" -ne 0 ] && [ "$sandbox_probe_rc" -ne 124 ]; then
+        printf 'check=failed\nreason=sandbox-userns-unavailable\ndetail=%s\nfailure_scope=runtime-global\ncodex_command=ok\nretry_on_isolated_worktree=0\nworktree=%s\n' \
+          "$(printf '%s' "$sandbox_probe_err" | head -n 1)" "$worktree"
+        exit 69
+      fi
+    fi
     if [ "$require_hook_trust" -eq 1 ]; then
       CODEX_REQUIRE_HOOK_TRUST=1 codex_runtime_projection_check
     else

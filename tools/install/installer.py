@@ -34,6 +34,7 @@ import codex_launcher
 import routing_config
 import report_bundle_config
 import memory_sync_config
+import host_probes
 from drivers import get_driver, RUNTIMES
 
 # Exit codes map one-to-one to the PRD CLI table.
@@ -340,9 +341,13 @@ def cmd_install(args):
                 lr["status"] == "skipped-collision" for lr in launcher_results
             )
 
+    environment = host_probes.run()
+    for probe in environment:
+        lines.append(f"environment: {probe['id']} -> {probe['status']} ({probe['detail']})")
+
     exit_code = EXIT_BLOCKED if any_blocked else EXIT_FAIL if bootstrap_failed else EXIT_OK
     return {"runtime": runtimes, "channel": "plugin" if args.plugin else "dev", "checks": checks,
-            "drift": [], "exit": exit_code, "lines": lines}
+            "drift": [], "exit": exit_code, "lines": lines, "environment": environment}
 
 
 def cmd_verify(args):

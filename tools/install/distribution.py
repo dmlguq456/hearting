@@ -956,6 +956,76 @@ def _succeed_dispatch_state(candidate: Path) -> bool:
     return ok
 
 
+def _release_reference_registries(candidate: Path) -> list[Path]:
+    """Registries that can name `candidate` as a launch home.
+
+    Two registries can hold an open row pointing at this release: the
+    release's own `.dispatch/jobs.log` (state-root chain (3) -- a session
+    that never had `AGENT_DISPATCH_JOBS` registers directly under whichever
+    release `current` pointed at when it ran), and the live release's
+    `.dispatch/jobs.log` (a row `_succeed_dispatch_state()` already carried
+    forward before this candidate is deleted).
+    """
+
+    registries = [candidate / ".dispatch" / "jobs.log"]
+    try:
+        live_release = current_path().resolve(strict=True)
+    except OSError:
+        return registries
+    registries.append(live_release / ".dispatch" / "jobs.log")
+    return registries
+
+
+def _release_in_use(candidate: Path) -> tuple[bool, str]:
+    """Return (in_use, reason). Undecidable evidence returns (True, ...)."""
+
+    try:
+        candidate_real = os.path.realpath(candidate)
+    except OSError:
+        candidate_real = str(candidate)
+
+    for registry in _release_reference_registries(candidate):
+        is_live_registry = registry.parent.parent != candidate
+        if not registry.is_file():
+            continue
+        try:
+            text = registry.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            return True, f"registry-unreadable:{registry}"
+        for line in text.splitlines():
+            if not line.strip():
+                continue
+            fields = line.split("\t")
+            if len(fields) < 6:
+                return True, f"registry-row-unparsable:{registry}"
+            if fields[1] != "open":
+                continue
+            pipe = fields[5]
+            launch_home = None
+            for item in pipe.split(","):
+                if item.startswith("launch_home="):
+                    launch_home = item[len("launch_home="):]
+                    break
+            if launch_home is not None:
+                try:
+                    home_real = os.path.realpath(launch_home)
+                    common = os.path.commonpath((candidate_real, home_real))
+                except (OSError, ValueError):
+                    continue
+                if common == candidate_real:
+                    attempt_id = None
+                    for item in pipe.split(","):
+                        if item.startswith("attempt_id="):
+                            attempt_id = item[len("attempt_id="):]
+                            break
+                    identifier = attempt_id or fields[4]
+                    return True, f"open-attempt:{identifier}"
+                continue
+            if not is_live_registry:
+                return True, "legacy-open-row-in-release-registry"
+    return False, ""
+
+
 def _cleanup_releases(keep: set[Path]) -> None:
     releases = data_root() / "releases"
     if not releases.is_dir() or releases.is_symlink():
@@ -969,6 +1039,14 @@ def _cleanup_releases(keep: set[Path]) -> None:
     for candidate in candidates:
         if candidate in keep or retained < 2:
             retained += 1
+            continue
+        in_use, why = _release_in_use(candidate)
+        if in_use:
+            print(
+                f"harness release: {candidate} is still referenced by a live dispatch "
+                f"attempt ({why}); keeping it instead of deleting it",
+                file=sys.stderr,
+            )
             continue
         if not _succeed_dispatch_state(candidate):
             print(

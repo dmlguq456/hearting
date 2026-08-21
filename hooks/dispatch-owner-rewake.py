@@ -288,14 +288,23 @@ def wait_for_attempt(launch: Launch, readiness: Path) -> tuple[str, str]:
 
 
 def receipt(launch: Launch, state: str, reason: str, root: Path) -> str:
-    harvest = (
-        root / "adapters" / "codex" / "bin" / "preflight.sh"
-    )
     row = None
     try:
         row = current_attempt_row(launch.jobs, launch.attempt_id)
     except JoinContractError:
         row = None
+    # The row's sealed launch_home (SD-49) is the checkout the attempt actually
+    # ran under; `root` (agent_home(), preferring env AGENT_HOME) may point at a
+    # mutable primary checkout instead when this hook inherits that env var --
+    # a harvest command built from `root` can then be rejected by a parent
+    # guard that expects the sealed path. Prefer the sealed value and fall back
+    # to `root` only when it is missing or no longer names a real checkout.
+    sealed = row.metadata.get("launch_home") if row is not None else None
+    home = Path(sealed) if sealed else root
+    if not (home / "adapters" / "codex" / "bin" / "preflight.sh").is_file():
+        home = root
+    harvest = home / "adapters" / "codex" / "bin" / "preflight.sh"
+    jobs_argument = shlex.quote(str(launch.jobs))
     status = row.status if row is not None else ""
     row_revision = child_row_revision(row) if row is not None else "unavailable"
     if state in {"ready", "attention"} and row is not None:
@@ -308,14 +317,14 @@ def receipt(launch: Launch, state: str, reason: str, root: Path) -> str:
         if required_action == "complete-open":
             instruction = (
                 "Use only the exact checked harvest command: "
-                f"{shlex.quote(str(harvest))} harvest --attempt-id "
-                f"{shlex.quote(launch.attempt_id)} --status open --mark-done."
+                f"{shlex.quote(str(harvest))} harvest --jobs {jobs_argument} "
+                f"--attempt-id {shlex.quote(launch.attempt_id)} --status open --mark-done."
             )
         elif required_action == "inspect-done-failure":
             instruction = (
                 "Use only the exact checked harvest command: "
-                f"{shlex.quote(str(harvest))} harvest --attempt-id "
-                f"{shlex.quote(launch.attempt_id)} --status done --failure-detail."
+                f"{shlex.quote(str(harvest))} harvest --jobs {jobs_argument} "
+                f"--attempt-id {shlex.quote(launch.attempt_id)} --status done --failure-detail."
             )
         else:
             instruction = "No harvest command is required; advance or finish the route."

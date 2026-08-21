@@ -139,8 +139,58 @@ class DispatchOwnerRewakeTest(unittest.TestCase):
             launch, "attention", "terminal-failure-or-unclosed", self.root
         )
         self.assertIn("required_action=inspect-done-failure", message)
+        self.assertIn(f"--jobs {self.jobs}", message)
+        self.assertIn("--attempt-id att-owner-1", message)
+        self.assertIn("--status done --failure-detail", message)
+
+    def test_complete_open_receipt_names_the_exact_registry(self) -> None:
+        launch = rewake.parse_launch(self.payload())
+        assert launch is not None
+        self.jobs.write_text(
+            "2026-08-06T00:00:00Z\topen\t/repo\t/wt\towner\t"
+            "attempt_schema_version=2,attempt_id=att-owner-1\n",
+            encoding="utf-8",
+        )
+        message = rewake.receipt(launch, "attention", "terminal-quiescent", self.root)
+        self.assertIn("required_action=complete-open", message)
+        # A guard-rejected harvest command an owner cannot act on (SD-97) is the
+        # incident this reproduces: the instruction must name this exact
+        # registry rather than let dispatch-harvest.py fall back to its default.
+        self.assertIn(f"--jobs {self.jobs}", message)
+        self.assertIn("--attempt-id att-owner-1", message)
+        self.assertIn("--status open --mark-done", message)
+
+    def test_receipt_prefers_the_sealed_launch_home_over_a_mutable_root(self) -> None:
+        launch = rewake.parse_launch(self.payload())
+        assert launch is not None
+        sealed_home = self.root / "sealed-release"
+        (sealed_home / "adapters" / "codex" / "bin").mkdir(parents=True)
+        (sealed_home / "adapters" / "codex" / "bin" / "preflight.sh").write_text("#!/bin/sh\n")
+        self.jobs.write_text(
+            "2026-08-06T00:00:00Z\topen\t/repo\t/wt\towner\t"
+            f"attempt_schema_version=2,attempt_id=att-owner-1,launch_home={sealed_home}\n",
+            encoding="utf-8",
+        )
+        mutable_root = self.root / "mutable-checkout"
+        mutable_root.mkdir()
+        message = rewake.receipt(launch, "attention", "terminal-quiescent", mutable_root)
         self.assertIn(
-            "harvest --attempt-id att-owner-1 --status done --failure-detail",
+            str(sealed_home / "adapters" / "codex" / "bin" / "preflight.sh"),
+            message,
+        )
+        self.assertNotIn(str(mutable_root), message)
+
+    def test_receipt_falls_back_to_root_when_launch_home_is_absent(self) -> None:
+        launch = rewake.parse_launch(self.payload())
+        assert launch is not None
+        self.jobs.write_text(
+            "2026-08-06T00:00:00Z\topen\t/repo\t/wt\towner\t"
+            "attempt_schema_version=2,attempt_id=att-owner-1\n",
+            encoding="utf-8",
+        )
+        message = rewake.receipt(launch, "attention", "terminal-quiescent", self.root)
+        self.assertIn(
+            str(self.root / "adapters" / "codex" / "bin" / "preflight.sh"),
             message,
         )
 

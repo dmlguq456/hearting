@@ -51,7 +51,7 @@ unset CLAUDE_CODE_SESSION_ID CODEX_SESSION_ID \
   AGENT_ARTIFACT_ROOT AGENT_ROUTE_FILE AGENT_ROUTE_ID AGENT_ROUTE_NODE \
   AGENT_OWNER_ROUTE_FILE AGENT_OWNER_ROUTE_ID AGENT_OWNER_ROUTE_HASH \
   CLAUDE_CODE_CHILD_SESSION OPENCODE_DISPATCH_SLUG FLEET_TITLE_REFRESH \
-  MEM_DISTILL MEM_DISTILL_ENABLE
+  MEM_DISTILL MEM_DISTILL_ENABLE CODEX_DISPATCH_SANDBOX_FORCE
 # Adapter wrappers resolve their installed runtime pointer; invoking the Python
 # scripts directly falls back to the checkout that contains the script. Keep
 # those two contracts separate when the developer HOME already has Hearting.
@@ -1017,7 +1017,7 @@ else
   fi
 fi
 if AGENT_HOME="$ROOT" CODEX_HOME="$TMP/codex_headless_home" "$ROOT/adapters/codex/bin/install-runtime-projection.sh" >/tmp/codex_headless_install.out 2>/tmp/codex_headless_install.err \
-  && AGENT_HOME="$ROOT" CODEX_HOME="$TMP/codex_headless_home" "$CODEX" headless --check "$TMP/repo" >/tmp/codex_headless_check.out 2>/tmp/codex_headless_check.err \
+  && AGENT_HOME="$ROOT" CODEX_HOME="$TMP/codex_headless_home" CODEX_DISPATCH_SANDBOX_FORCE=danger-full-access "$CODEX" headless --check "$TMP/repo" >/tmp/codex_headless_check.out 2>/tmp/codex_headless_check.err \
   && grep -q '^runtime_projection=ok$' /tmp/codex_headless_check.out \
   && grep -q '^check=hook-trust:skipped reason=authoritative-current-hash-check-not-requested' /tmp/codex_headless_check.out \
   && grep -q '^check=ok$' /tmp/codex_headless_check.out; then
@@ -1025,10 +1025,46 @@ if AGENT_HOME="$ROOT" CODEX_HOME="$TMP/codex_headless_home" "$ROOT/adapters/code
 else
   bad "codex headless check should validate runtime projection"
 fi
-if AGENT_HOME="$ROOT" CODEX_HOME="$TMP/codex_headless_home" "$CODEX" headless --check --require-hook-trust "$TMP/repo" >/tmp/codex_headless_strict.out 2>/tmp/codex_headless_strict.err; then
+if AGENT_HOME="$ROOT" CODEX_HOME="$TMP/codex_headless_home" CODEX_DISPATCH_SANDBOX_FORCE=danger-full-access "$CODEX" headless --check --require-hook-trust "$TMP/repo" >/tmp/codex_headless_strict.out 2>/tmp/codex_headless_strict.err; then
   bad "codex headless strict check should fail when hook trust is incomplete"
 else
   grep -q '^check=hook-trust:review-needed' /tmp/codex_headless_strict.out && ok "codex headless strict check requires complete hook trust" || bad "codex headless strict check missing trust output wrong"
+fi
+# SD-48 sandbox-init probe (installer-probes-dispatch-fixes plan item 3): a
+# stub `bwrap` proves the probe's own outcome host-independently, separate
+# from the hook-trust/runtime-projection cases above (which now suppress the
+# probe via CODEX_DISPATCH_SANDBOX_FORCE so their original coverage stands).
+codex_sandbox_probe_bin="$TMP/codex-sandbox-probe-bin"
+mkdir -p "$codex_sandbox_probe_bin"
+cat >"$codex_sandbox_probe_bin/bwrap" <<'EOF'
+#!/bin/sh
+echo "stub bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted" >&2
+exit 1
+EOF
+chmod +x "$codex_sandbox_probe_bin/bwrap"
+if PATH="$codex_sandbox_probe_bin:$PATH" AGENT_HOME="$ROOT" CODEX_HOME="$TMP/codex_headless_home" "$CODEX" headless --check "$TMP/repo" >/tmp/codex_sandbox_probe_fail.out 2>/tmp/codex_sandbox_probe_fail.err; then
+  bad "codex headless check refuses a host whose sandbox userns is unavailable"
+else
+  rc=$?
+  if [ "$rc" -eq 69 ] \
+    && grep -q '^reason=sandbox-userns-unavailable$' /tmp/codex_sandbox_probe_fail.out \
+    && grep -q '^failure_scope=runtime-global$' /tmp/codex_sandbox_probe_fail.out \
+    && grep -q '^retry_on_isolated_worktree=0$' /tmp/codex_sandbox_probe_fail.out; then
+    ok "codex headless check refuses a host whose sandbox userns is unavailable"
+  else
+    bad "codex headless check refuses a host whose sandbox userns is unavailable"
+  fi
+fi
+cat >"$codex_sandbox_probe_bin/bwrap" <<'EOF'
+#!/bin/sh
+exit 0
+EOF
+chmod +x "$codex_sandbox_probe_bin/bwrap"
+if PATH="$codex_sandbox_probe_bin:$PATH" AGENT_HOME="$ROOT" CODEX_HOME="$TMP/codex_headless_home" "$CODEX" headless --check "$TMP/repo" >/tmp/codex_sandbox_probe_pass.out 2>/tmp/codex_sandbox_probe_pass.err \
+  && grep -q '^check=ok$' /tmp/codex_sandbox_probe_pass.out; then
+  ok "codex headless check still passes when the sandbox probe succeeds"
+else
+  bad "codex headless check still passes when the sandbox probe succeeds"
 fi
 if "$CODEX" dispatch --dry-run --worktree "$TMP/repo" --slug codex-missing-model --capability autopilot-code --mode dev --qa standard --prompt-text "do work" --jobs "$TMP/codex-missing-model.log" >/tmp/codex_missing_model.out 2>/tmp/codex_missing_model.err; then
   bad "codex dispatch wrapper should require main-selected model settings"
@@ -1237,7 +1273,7 @@ cat > "$TMP/codex-stubbin/codex" <<'EOF'
 printf '%s\n' "$*" > "$CODEX_STUB_ARGV"
 EOF
 chmod +x "$TMP/codex-stubbin/codex"
-if PATH="$TMP/codex-stubbin:$PATH" AGENT_HOME="$ROOT" CODEX_HOME="$TMP/codex_headless_home" CODEX_STUB_ARGV="$TMP/codex-start.argv" \
+if PATH="$TMP/codex-stubbin:$PATH" AGENT_HOME="$ROOT" CODEX_HOME="$TMP/codex_headless_home" CODEX_STUB_ARGV="$TMP/codex-start.argv" CODEX_DISPATCH_SANDBOX_FORCE=danger-full-access \
   "$CODEX" dispatch --start --completion-delivery poll --worktree "$TMP/repo" --slug nested/codex-start --capability autopilot-code --mode dev --qa standard --prompt-text "nested work" --model gpt-test --reasoning low --jobs "$TMP/codex-start.log" --log-dir "$TMP/codex-logs" >/tmp/codex_dispatch_start.out 2>/tmp/codex_dispatch_start.err \
   && grep -q '^status=start$' /tmp/codex_dispatch_start.out \
   && grep -q '^started=1$' /tmp/codex_dispatch_start.out \
@@ -1272,7 +1308,7 @@ if PATH="$TMP/codex-stubbin:$PATH" AGENT_HOME="$ROOT" CODEX_HOME="$TMP/codex_hea
 else
   bad "codex dispatch wrapper should start nested slug after runtime projection check"
 fi
-if PATH="$TMP/codex-stubbin:$PATH" AGENT_HOME="$ROOT" CODEX_HOME="$TMP/codex_headless_home" CODEX_STUB_ARGV="$TMP/codex-strict-start.argv" \
+if PATH="$TMP/codex-stubbin:$PATH" AGENT_HOME="$ROOT" CODEX_HOME="$TMP/codex_headless_home" CODEX_STUB_ARGV="$TMP/codex-strict-start.argv" CODEX_DISPATCH_SANDBOX_FORCE=danger-full-access \
   "$CODEX" dispatch --start --require-hook-trust --worktree "$TMP/repo" --slug codex-strict-start --capability autopilot-code --mode dev --qa standard --prompt-text "strict work" --model gpt-test --reasoning low --jobs "$TMP/codex-strict-start.log" --log-dir "$TMP/codex-strict-logs" >/tmp/codex_dispatch_strict_start.out 2>/tmp/codex_dispatch_strict_start.err; then
   bad "codex dispatch strict start should fail when hook trust is incomplete"
 else
