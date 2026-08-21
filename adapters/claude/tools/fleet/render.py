@@ -2811,16 +2811,17 @@ def _session_row_stack(s, is_parent=False, child_count=0, term_width=None,
 
 
 def _dispatch_row_stack(j, orphan=False, parent_model=None, parent_effort=None, stage_override=None,
-                        route_seq=None, in_card=False):
+                        route_seq=None, in_card=False, unit_working=None):
     l1, l2 = _dispatch_row_2line(j, orphan=orphan, parent_model=parent_model,
                                  parent_effort=parent_effort, stage_override=stage_override,
-                                 route_seq=route_seq, in_card=in_card)
+                                 route_seq=route_seq, in_card=in_card,
+                                 unit_working=unit_working)
     gi = _stack_split(l2)
     return [l1, l2[:gi], [(" " * (4 + _HW), None)] + l2[gi:]]
 
 
 def _dispatch_row_2line(j, orphan=False, parent_model=None, parent_effort=None, _split=False,
-                        stage_override=None, route_seq=None, in_card=False):
+                        stage_override=None, route_seq=None, in_card=False, unit_working=None):
     """F-15a narrow card — L1 = identity ONLY (stage label + slug, no mode/qa tag); L2 =
     elapsed · model · options (relocated from L1) · breadcrumb/micro-status."""
     key = j.key or "?"
@@ -2880,7 +2881,14 @@ def _dispatch_row_2line(j, orphan=False, parent_model=None, parent_effort=None, 
         if not _route_rides_the_rail(j, route_seq, in_card):
             l2 += _stage_zone_segs(
                 _dispatch_stage_segs(j, key, stage, slug_name,
-                                     working=(j.liveness == "working"),
+                                     # F-67 parity (77d0c2): the current
+                                     # breadcrumb token pulses on UNIT activity
+                                     # like the wide row and the frame — an
+                                     # idle standard+ owner whose depth-2
+                                     # workers are busy still reads live.
+                                     working=(unit_working
+                                              if unit_working is not None
+                                              else j.liveness == "working"),
                                      route_seq=route_seq, compact_route=in_card))
     if _split:
         return l1, l2, br_segs
@@ -5176,7 +5184,8 @@ def _build_lines(sessions, jobs, section, narrow, malformed, layout="wide", memo
             if _jrow:
                 lines.extend(_jrow(job, orphan=orphan, parent_model=row_parent_model,
                                    parent_effort=row_parent_effort, stage_override=stage_override,
-                                   route_seq=route_seq, in_card=in_card))
+                                   route_seq=route_seq, in_card=in_card,
+                                   unit_working=unit_working))
             else:
                 lines.append(_dispatch_row(job, orphan=orphan, parent_model=row_parent_model,
                                            parent_harness=parent_harness,
