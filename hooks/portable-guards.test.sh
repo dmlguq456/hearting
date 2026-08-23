@@ -2,7 +2,7 @@
 set -u
 export PYTHONDONTWRITEBYTECODE=1
 
-ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+ROOT="$(cd "$(dirname "$0")/.." && pwd -P)"
 ART="$ROOT/hooks/artifact-guard.sh"
 GIT="$ROOT/hooks/git-state-guard.sh"
 MEM="$ROOT/hooks/builtin-memory-guard.sh"

@@ -30,10 +30,16 @@ class FallbackTest(unittest.TestCase):
   subprocess.run(["git","init","-q",str(self.repo)],check=True); subprocess.run(["git","-C",str(self.repo),"config","user.email","fixture@example.com"],check=True); subprocess.run(["git","-C",str(self.repo),"config","user.name","Fixture"],check=True)
   (self.repo/"x").write_text("x"); subprocess.run(["git","-C",str(self.repo),"add","x"],check=True); subprocess.run(["git","-C",str(self.repo),"commit","-qm","init"],check=True)
   self.art=base/".agent_reports"; self.art.mkdir(); self.jobs=base/"jobs.log"
+  self.previous_dispatch_defaults=os.environ.get("DISPATCH_DEFAULTS_CONFIG")
+  os.environ["DISPATCH_DEFAULTS_CONFIG"]=str(ROOT/"profiles/dispatch-defaults.yaml")
   self.owner=subprocess.Popen(["sleep","60"])
  def tearDown(self):
   if self.owner.poll() is None:self.owner.kill()
   self.owner.wait();self.tmp.cleanup()
+  if self.previous_dispatch_defaults is None:
+   os.environ.pop("DISPATCH_DEFAULTS_CONFIG",None)
+  else:
+   os.environ["DISPATCH_DEFAULTS_CONFIG"]=self.previous_dispatch_defaults
  def seed_parent(self,harness="codex",sandbox="workspace-write"):
   """Append the live dispatch-depth-1 owner row the depth-2 launch resolves.
 
