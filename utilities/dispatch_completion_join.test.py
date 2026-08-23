@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import contextlib
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
@@ -466,6 +468,53 @@ class DispatchCompletionJoinTest(unittest.TestCase):
         self.assertEqual(receipt["state"], "timeout")
         self.assertEqual(receipt["children"][0]["readiness"], "pending")
         self.assertNotIn("RAW_TIMEOUT_SENTINEL", json.dumps(receipt))
+
+    def test_unexpected_join_failure_is_still_one_typed_receipt(self):
+        # Regression for the 2026-08-14 candidate 2 supervisor-join death: a
+        # non-JoinContractError escaped main(), so the supervisor read an empty
+        # stdout and could only report `join-receipt-json-invalid`.
+        self.jobs.write_text(row("open", "att-a", "att-parent", "a"), encoding="utf-8")
+        with mock.patch.object(
+            JOIN, "join_batch", side_effect=RuntimeError("boom-raw-detail")
+        ):
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                code = JOIN.main(
+                    ["--jobs", str(self.jobs), "--parent-attempt-id", "att-parent"]
+                )
+        self.assertEqual(code, 69)
+        receipt = json.loads(out.getvalue())
+        self.assertEqual(receipt["state"], "contract-error")
+        self.assertEqual(receipt["parent_attempt_id"], "att-parent")
+        self.assertEqual(receipt["reason"], "join-internal-error-RuntimeError")
+        self.assertEqual(receipt["children"], [])
+        self.assertNotIn("boom-raw-detail", out.getvalue())
+
+    def test_unexpected_join_failure_exits_typed_as_a_subprocess(self):
+        # The supervisor consumes this over a pipe: stdout must be exactly one
+        # JSON receipt and the exit code must stay inside the join protocol.
+        self.jobs.write_text(row("open", "att-a", "att-parent", "a"), encoding="utf-8")
+        harness = (
+            "import importlib.util,sys\n"
+            "spec=importlib.util.spec_from_file_location('j',%r)\n"
+            "m=importlib.util.module_from_spec(spec)\n"
+            "sys.modules['j']=m\n"
+            "spec.loader.exec_module(m)\n"
+            "def boom(**kwargs):\n"
+            "    raise ValueError('boom-raw-detail')\n"
+            "m.join_batch=boom\n"
+            "raise SystemExit(m.main(sys.argv[1:]))\n"
+            % str(HERE / "dispatch_completion_join.py")
+        )
+        result = subprocess.run(
+            [sys.executable, "-c", harness,
+             "--jobs", str(self.jobs), "--parent-attempt-id", "att-parent"],
+            text=True, capture_output=True, check=False,
+        )
+        self.assertEqual(result.returncode, 69, result.stderr)
+        receipt = json.loads(result.stdout)
+        self.assertEqual(receipt["reason"], "join-internal-error-ValueError")
+        self.assertNotIn("boom-raw-detail", result.stdout)
 
     def test_expected_attempt_set_fails_closed(self):
         self.jobs.write_text(row("done", "att-a", "att-parent", "a"), encoding="utf-8")

@@ -2036,6 +2036,21 @@ def main(argv: list[str] | None = None) -> int:
             "reason": str(exc),
             "children": [],
         }
+    except Exception as exc:  # noqa: BLE001 - protocol boundary, see below
+        # The join receipt on stdout is this process's only protocol. An
+        # unexpected exception used to escape here, so the caller saw a
+        # traceback on a discarded stderr and an EMPTY stdout, which
+        # `claude-session-supervisor.py` / `codex-app-server-supervisor.py`
+        # can only classify as `join-receipt-json-invalid`. Fail closed with a
+        # typed receipt instead: the exception class name is diagnostic
+        # enough and, unlike `str(exc)`, can never carry raw child bytes.
+        receipt = {
+            "schema_version": SCHEMA_VERSION,
+            "state": "contract-error",
+            identity_name: identity_value,
+            "reason": "join-internal-error-" + type(exc).__name__,
+            "children": [],
+        }
     print(json.dumps(receipt, separators=(",", ":"), sort_keys=True))
     return {"ready": 0, "no-children": 2, "timeout": 3}.get(str(receipt["state"]), 69)
 
