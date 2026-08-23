@@ -42,6 +42,10 @@ from dispatch_lifecycle import (  # noqa: E402
     bounded_foreground_timeout,
     select_launch_lifecycle,
 )
+# Spawn-confirm window: how long a `--start` call may synchronously watch a
+# healthy child before it owes its caller a launch receipt.
+DIRECT_TIMEOUT_DEFAULT = 45.0
+
 from dispatch_contract import (  # noqa: E402
     PRELAUNCH_PROCESS_BLOCK_REASONS,
     DispatchContractError,
@@ -1086,8 +1090,31 @@ def direct_env() -> dict[str, str]:
     }
 
 
+def launch_confirm_deadline_seconds(args) -> float:
+    """Ceiling for the synchronous post-launch observation of a healthy child.
+
+    `--start` must return a launch receipt, not babysit the worker. The window
+    below used to be the FULL no-progress budget
+    (`progress_window_seconds * watchdog_max_windows`, 300*12 = 1h by default),
+    so a detached child that stayed healthy kept the launcher polling for an
+    hour and the owner's foreground call died before ever seeing
+    `registered=1/started=1/child_spawned=1`. Bound it by the spawn-confirm
+    window (`--direct-timeout`) instead: early death and capacity death still
+    surface here, while everything after launch belongs to the watchdog,
+    orphan watch, and the completion supervisor.
+    """
+
+    budget = max(0.1, float(args.progress_window_seconds)) * max(
+        1, args.watchdog_max_windows
+    )
+    confirm = float(getattr(args, "direct_timeout", None) or DIRECT_TIMEOUT_DEFAULT)
+    if confirm <= 0:
+        return budget
+    return min(budget, confirm)
+
+
 def watch_launched_attempt(args, route, node, attempt_id, launch_fields):
-    """Synchronously observe one exact attempt for a bounded number of windows."""
+    """Synchronously observe one exact attempt for a bounded launch-confirm window."""
     progress = ROOT / "utilities/dispatch-progress.py"
     common = [sys.executable, str(progress), "--attempt-id", attempt_id,
               "--route-id", route["route_id"], "--route-node", node["id"],
@@ -1142,7 +1169,7 @@ def watch_launched_attempt(args, route, node, attempt_id, launch_fields):
         return state, last
 
     window = max(0.1, float(args.progress_window_seconds))
-    deadline = time.monotonic() + window * max(1, args.watchdog_max_windows)
+    deadline = time.monotonic() + launch_confirm_deadline_seconds(args)
     poll = min(1.0, max(0.1, window / 10.0))
     while time.monotonic() < deadline:
         time.sleep(poll)
@@ -1271,7 +1298,7 @@ def main() -> int:
     p.add_argument("--jobs", type=Path)
     p.add_argument("--broker-root", type=Path, help=argparse.SUPPRESS)
     p.add_argument("--broker-timeout", type=float, help=argparse.SUPPRESS)
-    p.add_argument("--direct-timeout", type=float, default=45.0)
+    p.add_argument("--direct-timeout", type=float, default=DIRECT_TIMEOUT_DEFAULT)
     p.add_argument("--foreground-timeout", type=float, default=3600.0)
     p.add_argument("--progress-window-seconds", type=float, default=300.0)
     p.add_argument("--watchdog-max-windows", type=int, default=12)

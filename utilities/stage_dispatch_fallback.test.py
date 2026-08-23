@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import importlib.util, json, os, subprocess, sys, tempfile, unittest
+import importlib.util, json, os, subprocess, sys, tempfile, time, unittest
 from types import SimpleNamespace
 from pathlib import Path
 from unittest import mock
@@ -116,6 +116,42 @@ class FallbackTest(unittest.TestCase):
   result=self.run_chain(path,"--failed-tuple",same,"--failed-tuple",cross); self.assertEqual(result.returncode,79,result.stdout+result.stderr); self.assertIn("selected_hop=inline",result.stdout)
   self.assertIn("route_reuse=required",result.stdout)
   self.assertIn("route_id="+route["route_id"],result.stdout)
+ def test_healthy_child_returns_a_launch_receipt_inside_the_confirm_window(self):
+  # Regression for the 2026-08-14 candidate 6 defect: `--start` observed a
+  # healthy detached child for the FULL no-progress budget
+  # (progress_window_seconds * watchdog_max_windows = 300*12 = 1h by default),
+  # so the owner's foreground call died before the launch receipt was printed.
+  args=SimpleNamespace(jobs=self.jobs,progress_window_seconds=300.0,
+                       watchdog_max_windows=12,direct_timeout=45.0)
+  self.assertEqual(F.launch_confirm_deadline_seconds(args),45.0)
+  route={"route_id":"rt-fixture"}
+  node={"id":"plan"}
+  seed=mock.Mock(returncode=0,stdout="",stderr="")
+  alive=mock.Mock(returncode=0,stdout="action=observed\n",stderr="")
+  args=SimpleNamespace(jobs=self.jobs,progress_window_seconds=0.4,
+                       watchdog_max_windows=12,direct_timeout=0.2)
+  started=time.monotonic()
+  with mock.patch.object(F.subprocess,"run",side_effect=[seed]+[alive]*400):
+   state,_=F.watch_launched_attempt(
+    args,route,node,"att-healthy",{"child_pid":"1","child_pid_start":"2"})
+  elapsed=time.monotonic()-started
+  self.assertEqual(state,"observed")
+  # Without the confirm bound this would run 0.4*12 = 4.8s, not <= ~0.2s.
+  self.assertLess(elapsed,1.5)
+
+ def test_confirm_window_never_exceeds_the_no_progress_budget(self):
+  # A tiny explicit budget still wins over a larger spawn-confirm window, and a
+  # disabled/non-positive confirm value falls back to the full budget.
+  small=SimpleNamespace(progress_window_seconds=1.0,watchdog_max_windows=2,
+                        direct_timeout=45.0)
+  self.assertEqual(F.launch_confirm_deadline_seconds(small),2.0)
+  disabled=SimpleNamespace(progress_window_seconds=1.0,watchdog_max_windows=2,
+                           direct_timeout=0.0)
+  self.assertEqual(F.launch_confirm_deadline_seconds(disabled),2.0)
+  absent=SimpleNamespace(progress_window_seconds=300.0,watchdog_max_windows=12)
+  self.assertEqual(F.launch_confirm_deadline_seconds(absent),
+                   F.DIRECT_TIMEOUT_DEFAULT)
+
  def test_process_exit_without_marker_advances_fallback(self):
   args=SimpleNamespace(jobs=self.jobs,progress_window_seconds=1,watchdog_max_windows=2)
   route={"route_id":"rt-fixture"}
