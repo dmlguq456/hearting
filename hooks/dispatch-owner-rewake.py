@@ -86,6 +86,41 @@ def _validated_jobs(raw: str | None) -> Path | None:
     return jobs
 
 
+def _start_surface(command: str) -> str | None:
+    """Recognize only the two typed depth-1 owner start command surfaces."""
+
+    try:
+        parts = shlex.split(command)
+    except ValueError:
+        return None
+    separators = {"|", "||", "&&", ";"}
+    for index, token in enumerate(parts):
+        name = Path(token).name
+        if name not in {
+            "dispatch-owner", "dispatch-owner.py", "dispatch-node", "dispatch-node.py"
+        }:
+            continue
+        if index:
+            launcher = Path(parts[index - 1]).name
+            if re.fullmatch(r"python(?:3(?:\.\d+)?)?", launcher) is None:
+                continue
+        end = index + 1
+        while end < len(parts) and parts[end] not in separators:
+            end += 1
+        arguments = parts[index + 1 : end]
+        if name in {"dispatch-owner", "dispatch-owner.py"}:
+            if "--start" in arguments:
+                return "dispatch-owner"
+            continue
+        if "--action=start" in arguments:
+            return "dispatch-node"
+        for offset, value in enumerate(arguments[:-1]):
+            if value == "--action" and arguments[offset + 1] == "start":
+                return "dispatch-node"
+        continue
+    return None
+
+
 def _owner_start_command(payload: object) -> tuple[dict[str, Any], str] | None:
     if not isinstance(payload, dict):
         return None
@@ -95,7 +130,7 @@ def _owner_start_command(payload: object) -> tuple[dict[str, Any], str] | None:
     if not isinstance(tool_input, dict):
         return None
     command = tool_input.get("command")
-    if not isinstance(command, str) or "dispatch-owner" not in command:
+    if not isinstance(command, str) or _start_surface(command) is None:
         return None
     return payload, command
 
@@ -190,8 +225,6 @@ def registry_launch(payload: object) -> Launch | None:
     if gate is None:
         return None
     payload, command = gate
-    if "--start" not in command:
-        return None
     session = _payload_session(payload)
     if session is None:
         return None

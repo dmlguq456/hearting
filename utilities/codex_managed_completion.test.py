@@ -229,6 +229,7 @@ raise SystemExit(3 if state == 'timeout' else 0)
         assert server.request is not None
         children = server.request["receipt"]["children"]
         self.assertEqual(server.request["receipt"]["schema_version"], 2)
+        self.assertEqual(server.request["receipt"]["job_registry"], str(self.jobs))
         self.assertEqual(
             {child["harness"] for child in children},
             {"codex", "claude"},
@@ -247,8 +248,22 @@ raise SystemExit(3 if state == 'timeout' else 0)
                     separators=(",", ":"),
                 ).encode()
             ),
-            1536,
+            2048,
         )
+
+    def test_symlinked_registry_is_rejected_before_gateway(self) -> None:
+        target = self.base / "real-jobs.log"
+        target.write_text(row("att-one", harness="codex"), encoding="utf-8")
+        self.jobs.symlink_to(target)
+        result = subprocess.run(
+            self.command(["att-one"]),
+            text=True,
+            capture_output=True,
+            timeout=5,
+        )
+        self.assertEqual(result.returncode, 65)
+        self.assertIn("jobs-path-invalid", result.stdout)
+        self.assertFalse(self.control_path.exists())
 
     def test_timeout_never_connects_to_gateway(self) -> None:
         attempts = ["att-a", "att-b"]

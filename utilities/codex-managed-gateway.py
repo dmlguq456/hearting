@@ -40,7 +40,13 @@ from tools.fleet import interaction as fleet_interaction
 
 MAX_FRAME_BYTES = 16 * 1024 * 1024
 MAX_CONTROL_BYTES = 16 * 1024
-MAX_CONTEXT_BYTES = 2048
+# SD-92 bounds the typed receipt itself at 2048 bytes.  The older 1536-byte
+# implementation reserved the remaining 512 bytes of MAX_CONTEXT_BYTES for
+# fixed prose, but an exact registry path repeated across up to four actionable
+# commands makes those budgets independent.  Keep both bounded explicitly.
+MAX_RECEIPT_BYTES = 2048
+MAX_CONTEXT_BYTES = 8 * 1024
+MAX_JOB_REGISTRY_BYTES = 1024
 MAX_LEDGER_BYTES = 4 * 1024 * 1024
 MAX_DELIVERIES = 4096
 MAX_THREAD_LINEAGE = 16
@@ -48,7 +54,7 @@ INTERNAL_ID_PREFIX = "hearting-managed:"
 ID_PATTERN = re.compile(r"^[A-Za-z0-9._:@/+\-=]{1,256}$")
 FLEET_SESSION_PATTERN = re.compile(r"^[A-Za-z0-9._-]{1,256}$")
 ALLOWED_RECEIPT_KEYS = {
-    "schema_version", "state", "parent_attempt_id", "children",
+    "schema_version", "state", "parent_attempt_id", "job_registry", "children",
 }
 ALLOWED_CHILD_KEYS = {
     "attempt_id", "status", "readiness", "reason", "required_action", "harness",
@@ -1241,6 +1247,21 @@ class ManagedGateway:
             or receipt.get("parent_attempt_id") != parent_attempt_id
         ):
             raise GatewayError("receipt-identity-invalid")
+        raw_jobs = receipt.get("job_registry")
+        if (
+            not isinstance(raw_jobs, str)
+            or not raw_jobs
+            or len(raw_jobs.encode("utf-8")) > MAX_JOB_REGISTRY_BYTES
+        ):
+            raise GatewayError("receipt-job-registry-invalid")
+        jobs = Path(raw_jobs)
+        if (
+            not jobs.is_absolute()
+            or jobs.is_symlink()
+            or not jobs.is_file()
+            or str(jobs) != raw_jobs
+        ):
+            raise GatewayError("receipt-job-registry-unsafe")
         raw_children = receipt.get("children")
         if (
             not isinstance(raw_children, list)
@@ -1295,10 +1316,11 @@ class ManagedGateway:
             "schema_version": 2,
             "state": "ready",
             "parent_attempt_id": parent_attempt_id,
+            "job_registry": raw_jobs,
             "children": children,
         }
         receipt_bytes = canonical(normalized).encode("utf-8")
-        if len(receipt_bytes) > 1536:
+        if len(receipt_bytes) > MAX_RECEIPT_BYTES:
             raise GatewayError("receipt-oversized")
         receipt_digest = (
             "sha256:" + hashlib.sha256(receipt_bytes).hexdigest()
@@ -1334,16 +1356,17 @@ class ManagedGateway:
         harvest = shlex.quote(
             str(AGENT_HOME / "adapters" / "codex" / "bin" / "preflight.sh")
         )
+        jobs = shlex.quote(str(receipt["job_registry"]))
         for child in receipt["children"]:
             attempt = shlex.quote(str(child["attempt_id"]))
             if child["required_action"] == "complete-open":
                 commands.append(
-                    f"{harvest} harvest --attempt-id {attempt} "
+                    f"{harvest} harvest --jobs {jobs} --attempt-id {attempt} "
                     "--status open --mark-done"
                 )
             elif child["required_action"] == "inspect-done-failure":
                 commands.append(
-                    f"{harvest} harvest --attempt-id {attempt} "
+                    f"{harvest} harvest --jobs {jobs} --attempt-id {attempt} "
                     "--status done --failure-detail"
                 )
         command_text = "\n".join(commands) or "(no harvest command; advance the route)"

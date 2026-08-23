@@ -28,7 +28,7 @@ from dispatch_completion_join import (  # noqa: E402
 
 
 MAX_RESPONSE_BYTES = 16 * 1024
-MAX_RECEIPT_BYTES = 1536
+MAX_RECEIPT_BYTES = 2048
 ALLOWED_REASONS = {"registry-closed", "terminal-observed"}
 REQUIRED_ACTIONS = {
     "complete-open", "inspect-done-failure", "advance-completed",
@@ -230,6 +230,7 @@ def normalize_receipt(
         "schema_version": 2,
         "state": "ready",
         "parent_attempt_id": delivery_parent_id,
+        "job_registry": str(jobs),
         "children": [
             {
                 "attempt_id": attempt_id,
@@ -358,7 +359,12 @@ def parser() -> argparse.ArgumentParser:
 def execute(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
     if args.control_socket is None:
         raise CompletionError("control-socket-missing")
-    if args.jobs is None or not args.jobs.is_absolute():
+    if (
+        args.jobs is None
+        or not args.jobs.is_absolute()
+        or args.jobs.is_symlink()
+        or not args.jobs.is_file()
+    ):
         raise CompletionError("jobs-path-invalid")
     if not args.parent_attempt_id and not args.parent_session_id:
         args.parent_attempt_id = os.environ.get("AGENT_DISPATCH_ATTEMPT_ID")

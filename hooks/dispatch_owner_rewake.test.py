@@ -68,6 +68,17 @@ class DispatchOwnerRewakeTest(unittest.TestCase):
         self.assertEqual(launch.jobs, self.jobs)
         self.assertEqual(launch.session_id, "session-1")
 
+    def test_exact_successful_quick_dispatch_node_start_is_armed(self) -> None:
+        payload = self.payload()
+        payload["tool_input"]["command"] = (
+            "python3 utilities/dispatch-node.py --route route.json --node one-shot "
+            "--action start --slug quick --adapter claude"
+        )
+        launch = rewake.parse_launch(payload)
+        self.assertIsNotNone(launch)
+        assert launch is not None
+        self.assertEqual(launch.attempt_id, "att-owner-1")
+
     def test_foreign_or_incomplete_output_is_ignored(self) -> None:
         foreign = self.payload(session_id="session-2")
         self.assertIsNone(rewake.parse_launch(foreign))
@@ -78,6 +89,12 @@ class DispatchOwnerRewakeTest(unittest.TestCase):
             "started=1", "started=0"
         )
         self.assertIsNone(rewake.parse_launch(incomplete))
+        echoed = self.payload(
+            tool_input={
+                "command": "echo utilities/dispatch-node.py --action start"
+            }
+        )
+        self.assertIsNone(rewake.parse_launch(echoed))
 
     def test_symlink_registry_is_rejected(self) -> None:
         link = self.root / "jobs-link.log"
@@ -478,6 +495,22 @@ class RegistryConfirmArmTest(unittest.TestCase):
     def test_a_start_free_dispatch_owner_command_never_arms(self) -> None:
         payload = self.payload()
         payload["tool_input"]["command"] = "python3 utilities/dispatch-owner.py --status"
+        self.assertIsNone(rewake.registry_launch(payload))
+
+    def test_quick_dispatch_node_start_arms_but_dry_run_does_not(self) -> None:
+        payload = self.payload(stdout="check=ok")
+        payload["tool_input"]["command"] = (
+            "python3 utilities/dispatch-node.py --route route.json --node one-shot "
+            "--action=start --slug quick --adapter claude | tail -5"
+        )
+        launch = rewake.registry_launch(payload)
+        self.assertIsNotNone(launch)
+        assert launch is not None
+        self.assertEqual(launch.attempt_id, "att-owner-1")
+
+        payload["tool_input"]["command"] = payload["tool_input"]["command"].replace(
+            "--action=start", "--action=dry-run"
+        )
         self.assertIsNone(rewake.registry_launch(payload))
 
     def test_space_delimited_registry_metadata_is_tolerated(self) -> None:

@@ -7,7 +7,9 @@ import json
 import os
 from pathlib import Path
 import queue
+import shlex
 import socket
+import subprocess
 import sys
 import tempfile
 import threading
@@ -411,6 +413,7 @@ def receipt_request(batch: str = "batch-1") -> dict[str, Any]:
             "schema_version": 2,
             "state": "ready",
             "parent_attempt_id": "att-parent",
+            "job_registry": str(Path(__file__).resolve()),
             "children": [
                 {
                     "attempt_id": f"att-{batch}",
@@ -580,9 +583,79 @@ class ManagedGatewayTest(unittest.TestCase):
         )
         encoded = GATEWAY.canonical(start)
         self.assertIn(
-            "harvest --attempt-id att-batch-open --status open --mark-done",
+            "harvest --jobs "
+            + str(Path(__file__).resolve())
+            + " --attempt-id att-batch-open --status open --mark-done",
             encoded,
         )
+
+    def test_missing_or_unsafe_job_registry_never_reaches_upstream(self) -> None:
+        before = self.server.counts()
+        missing = receipt_request("batch-no-jobs")
+        missing["receipt"].pop("job_registry")
+        self.assertEqual(control(self.control, missing)["status"], "rejected")
+
+        unsafe = receipt_request("batch-unsafe-jobs")
+        link = self.root / "jobs-link.log"
+        link.symlink_to(Path(__file__).resolve())
+        unsafe["receipt"]["job_registry"] = str(link)
+        result = control(self.control, unsafe)
+        self.assertEqual(result["status"], "rejected")
+        self.assertEqual(result["reason"], "receipt-job-registry-unsafe")
+        self.assertEqual(self.server.counts(), before)
+
+    def test_rendered_harvest_command_matches_exact_registry_once(self) -> None:
+        jobs = self.root / "exact.jobs.log"
+        attempt = "att-batch-failed"
+        metadata = ",".join(
+            (
+                "attempt_schema_version=2",
+                "dispatch_depth=1",
+                "transport=headless",
+                "execution_surface=registered-headless",
+                "registered_worker=1",
+                f"attempt_id={attempt}",
+                "harness=codex",
+                "failure_class=child-failed",
+                "note=dead-worker-fail",
+            )
+        )
+        jobs.write_text(
+            f"2026-08-24T00:00:00Z\tdone\t/repo\t/repo\tquick\t{metadata}\n",
+            encoding="utf-8",
+        )
+        request = receipt_request("batch-failed")
+        request["receipt"]["job_registry"] = str(jobs)
+        request["receipt"]["children"][0].update(
+            {
+                "attempt_id": attempt,
+                "status": "done",
+                "required_action": "inspect-done-failure",
+            }
+        )
+        params = GATEWAY.ManagedGateway._context_params(
+            "thread-1", request["receipt"], "dlv-fixture"
+        )
+        context = params["additionalContext"]["hearting-completion"]["value"]
+        command = next(line for line in context.splitlines() if " harvest --jobs " in line)
+        environment = dict(os.environ)
+        for name in (
+            "AGENT_DISPATCH_JOBS",
+            "AGENT_DISPATCH_ATTEMPT_ID",
+            "AGENT_DISPATCH_PARENT_SESSION_ID",
+            "AGENT_DISPATCH_COMPLETION_STATE_FILE",
+        ):
+            environment.pop(name, None)
+        result = subprocess.run(
+            shlex.split(command),
+            text=True,
+            capture_output=True,
+            env=environment,
+            timeout=10,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn(f"job_registry={jobs}", result.stdout)
+        self.assertIn("matched=1", result.stdout)
 
     def test_active_manual_turn_receipt_steers_without_second_turn(self) -> None:
         self.client.request(

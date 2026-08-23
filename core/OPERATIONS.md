@@ -352,6 +352,23 @@ The SD-92 advanced-thread clause accepts only a gateway-witnessed fork lineage
 or an exact same-thread resume. An unrelated thread switch remains
 `managed-gateway-not-ready` and cannot inherit the predecessor's completion.
 
+### §5.10a. Completion Delivery Clarifications (SD-92/97)
+
+- The interactive Claude `asyncRewake` bridge recognizes both an exact
+  `dispatch-owner --start` and the quick one-shot
+  `dispatch-node --action start` surface. Neither command is wake authority by
+  itself: arming still requires exactly one recent, same-session,
+  claimed-and-started depth-1 `worker_type=owner` row stamped
+  `parent_completion_delivery=claude-parent-runtime`; zero, multiple, stale,
+  foreign, or non-owner candidates arm nothing.
+- Managed receipt schema v2 binds the one canonical absolute `job_registry`
+  supplied by its completion sidecar. The gateway includes it in the delivery
+  digest and names it with `--jobs` in every actionable harvest command, so
+  packaged `AGENT_HOME` is never used to reconstruct the registry and an exact
+  receipt cannot become `matched=0` by selecting another state root. The receipt
+  remains bounded to 2,048 UTF-8 bytes; the complete typed context has its own
+  finite bound.
+
 ### §5.11. Commit and Push Policy for `<agent-home>`
 
 After validating changes to instructions, rules, hooks, preflight, or runtime status surfaces under `<agent-home>`, commit and push them in the same turn without a separate user signal. This policy was ratified on 2026-06-12. A work repository's push is separate and remains subject to its deployment gate.
