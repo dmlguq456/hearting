@@ -18,7 +18,7 @@ cd "$ROOT"
 fail=0
 # Shared pre-owner evidence generator is invoked through adapter preflight
 # wrappers and remains at the portable root; no adapter-local utility symlink.
-SHARED_UTILITY_DEFERRED="artifact-quiescence.py cairn-artifact-read.sh cairn-artifact-read.ts dispatch-readiness.py verification-background-lease.py"
+SHARED_UTILITY_DEFERRED="artifact-quiescence.py artifact-knowledge-feed.py cairn-artifact-read.sh cairn-artifact-read.ts dispatch-readiness.py verification-background-lease.py"
 
 say() {
   printf '%s\n' "$*"
