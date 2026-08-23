@@ -753,6 +753,84 @@ if "$CODEX" read "$TMP/coreproj/core/CORE.md" codexcoregatesid >/tmp/codex_core_
 else
   bad "codex read+write wrapper should pass core-first gate"
 fi
+
+echo "== core hook adapter wrapper delegation (self-exec regression) =="
+# The Claude adapter wrappers exec `$AGENT_HOME/hooks/<own name>`. That is the
+# portable guard in a repository checkout, but in an installed runtime layout
+# `$AGENT_HOME/hooks/` is the adapter projection whose entries are symlinks to
+# those same wrappers -- so the exec re-entered the wrapper without bound. The
+# gate returned no decision (core-first went silently unenforced), every
+# Edit/Write paid the registered hook timeout, and the spinning process outlived
+# the dispatch process group that launched it. `timeout` below IS the assertion:
+# a looping wrapper must fail this suite rather than hang it.
+core_wrap_installed="$TMP/core_wrap_installed"
+mkdir -p "$core_wrap_installed/hooks" "$core_wrap_installed/core"
+printf 'fixture\n' > "$core_wrap_installed/core/CORE.md"
+ln -s "$ROOT/adapters/claude/hooks/core-first-guard.sh" "$core_wrap_installed/hooks/core-first-guard.sh"
+ln -s "$ROOT/adapters/claude/hooks/core-read-marker.sh" "$core_wrap_installed/hooks/core-read-marker.sh"
+ln -s "$ROOT/adapters/claude/utilities" "$core_wrap_installed/utilities"
+# Checkout-shaped control: the same wrappers, but the active root's hooks/ holds
+# the portable guards. The pre-existing delegation must be untouched here.
+core_wrap_checkout="$TMP/core_wrap_checkout"
+mkdir -p "$core_wrap_checkout/hooks" "$core_wrap_checkout/core"
+printf 'fixture\n' > "$core_wrap_checkout/core/CORE.md"
+ln -s "$ROOT/hooks/core-first-guard.sh" "$core_wrap_checkout/hooks/core-first-guard.sh"
+ln -s "$ROOT/hooks/core-read-marker.sh" "$core_wrap_checkout/hooks/core-read-marker.sh"
+ln -s "$ROOT/adapters/claude/utilities" "$core_wrap_checkout/utilities"
+
+AGENT_HOME="$core_wrap_installed" timeout 10 sh \
+  "$core_wrap_installed/hooks/core-first-guard.sh" \
+  --file "$TMP/coreproj/adapters/codex/AGENTS.md" --session wrapsid \
+  >/tmp/core_wrap_installed.out 2>/tmp/core_wrap_installed.err
+core_wrap_rc=$?
+if [ "$core_wrap_rc" -eq 2 ] && grep -q 'Core-first gate' /tmp/core_wrap_installed.err; then
+  ok "adapter guard wrapper reaches a decision when the runtime projection resolves to itself"
+else
+  bad "adapter guard wrapper should deny under an installed projection (rc=$core_wrap_rc)"
+fi
+if printf '{"tool_name":"Write","tool_input":{"file_path":"%s"},"session_id":"wrapjsonsid"}\n' \
+    "$TMP/coreproj/adapters/codex/AGENTS.md" \
+  | AGENT_HOME="$core_wrap_installed" timeout 10 sh \
+      "$core_wrap_installed/hooks/core-first-guard.sh" \
+      >/tmp/core_wrap_json.out 2>/tmp/core_wrap_json.err \
+  && grep -q '"permissionDecision":"deny"' /tmp/core_wrap_json.out; then
+  ok "adapter guard wrapper emits hook-protocol deny JSON under an installed projection"
+else
+  bad "adapter guard wrapper should emit deny JSON under an installed projection"
+fi
+if AGENT_HOME="$core_wrap_installed" timeout 10 sh \
+     "$core_wrap_installed/hooks/core-read-marker.sh" \
+     --file "$TMP/coreproj/core/CORE.md" --session wrapsid \
+     >/tmp/core_wrap_mark.out 2>/tmp/core_wrap_mark.err \
+  && find "$core_wrap_installed/.core-grounding" -type f -name 'wrapsid__*' -print -quit | grep -q . \
+  && AGENT_HOME="$core_wrap_installed" timeout 10 sh \
+       "$core_wrap_installed/hooks/core-first-guard.sh" \
+       --file "$TMP/coreproj/adapters/codex/AGENTS.md" --session wrapsid \
+       >/tmp/core_wrap_pass.out 2>/tmp/core_wrap_pass.err; then
+  ok "adapter marker wrapper writes the marker the paired guard reads under an installed projection"
+else
+  bad "adapter wrapper pair should share one .core-grounding under an installed projection"
+fi
+AGENT_HOME="$core_wrap_checkout" timeout 10 sh \
+  "$ROOT/adapters/claude/hooks/core-first-guard.sh" \
+  --file "$TMP/coreproj/adapters/codex/AGENTS.md" --session chkwrapsid \
+  >/tmp/core_wrap_chk.out 2>/tmp/core_wrap_chk.err
+core_wrap_chk_rc=$?
+if [ "$core_wrap_chk_rc" -eq 2 ] \
+  && AGENT_HOME="$core_wrap_checkout" timeout 10 sh \
+       "$ROOT/adapters/claude/hooks/core-read-marker.sh" \
+       --file "$TMP/coreproj/core/CORE.md" --session chkwrapsid \
+       >/tmp/core_wrap_chk.out 2>/tmp/core_wrap_chk.err \
+  && find "$core_wrap_checkout/.core-grounding" -type f -name 'chkwrapsid__*' -print -quit | grep -q . \
+  && AGENT_HOME="$core_wrap_checkout" timeout 10 sh \
+       "$ROOT/adapters/claude/hooks/core-first-guard.sh" \
+       --file "$TMP/coreproj/adapters/codex/AGENTS.md" --session chkwrapsid \
+       >/tmp/core_wrap_chk.out 2>/tmp/core_wrap_chk.err; then
+  ok "adapter wrappers keep delegating to the active root's portable guards in a checkout layout"
+else
+  bad "checkout-layout delegation regressed (rc=$core_wrap_chk_rc)"
+fi
+
 # Spec reads satisfy grounding but never replace capability-route participation.
 # Ordinary source remains outside the artifact route gate.
 mkdir -p "$TMP/cxspec/.agent_reports/spec" "$TMP/cxspec/.agent_reports/research" "$TMP/cxspec/src"
