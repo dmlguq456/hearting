@@ -9,7 +9,9 @@ marker afterward. Before this cycle, the writer used
 $AGENT_HOME/.dispatch/completion, which _cleanup_releases deletes wholesale
 every second rotation.
 """
+import contextlib
 import importlib.util
+import io
 import json
 import os
 import shutil
@@ -809,6 +811,330 @@ class SymlinkedDataRootRotationSuccessionTest(unittest.TestCase):
             self._publish(self.release_b)
         except ValueError as exc:
             self.fail(f"republish after rotation succession raised: {exc}")
+
+
+def _row(ts, state, attempt_id, extra=""):
+    """plan.md §3 Phase3 Step3.1 helper: a minimal 6-field registry row."""
+    return (
+        f"{ts}\t{state}\t/r\t/w\t{attempt_id}\t"
+        f"attempt_schema_version=2,registered_worker=1,attempt_id={attempt_id},"
+        f"harness=claude{extra}"
+    )
+
+
+class RotationRegistryCarryFidelityTest(unittest.TestCase):
+    """plan.md §3 Phase3 Step3.1 (i)+(ii): before this cycle's fix,
+    `_succeed_dispatch_state` copied `jobs.log` byte-for-byte -- either
+    skipping a live registry outright (carrying nothing forward) or, absent
+    a live registry, clobbering nothing but also gaining nothing from a
+    later stale-side write. (i) pins that a live terminal row survives
+    succession untouched even when the stale side still has that attempt
+    open. (ii) reproduces the actual observed defect: a session kept
+    writing to the *stale* registry after a first succession pass had
+    already frozen a snapshot of it, and a second succession pass could not
+    see that later write -- because the destination-exists byte copy makes
+    every row after the first succession invisible to every succession
+    after it."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.base = Path(self.temp.name)
+        self.prior_env = {
+            key: os.environ.get(key)
+            for key in ("AGENT_HOME", "AGENT_DISPATCH_JOBS", "HARNESS_DATA_ROOT")
+        }
+        os.environ.pop("AGENT_DISPATCH_JOBS", None)
+        os.environ["HARNESS_DATA_ROOT"] = str(self.base / "data")
+        self.addCleanup(self._restore_env)
+
+        self.old_release = DISTRIBUTION.data_root() / "releases" / "old"
+        self.new_release = DISTRIBUTION.data_root() / "releases" / "new"
+        for release in (self.old_release, self.new_release):
+            (release / "core").mkdir(parents=True)
+            (release / "core" / "CORE.md").write_text("x\n", encoding="utf-8")
+        current = DISTRIBUTION.current_path()
+        current.parent.mkdir(parents=True, exist_ok=True)
+        current.symlink_to(self.new_release)
+
+    def _restore_env(self):
+        for key, value in self.prior_env.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+    def test_succession_never_reverts_terminal_attempt(self):
+        live_jobs = self.new_release / ".dispatch" / "jobs.log"
+        live_jobs.parent.mkdir(parents=True, exist_ok=True)
+        live_row = _row(
+            "2026-08-23T00:00:00Z", "done", "att-X",
+            ",note=completed-marker,completion_marker=/tmp/m.json",
+        )
+        live_jobs.write_text(live_row + "\n", encoding="utf-8")
+
+        stale_jobs = self.old_release / ".dispatch" / "jobs.log"
+        stale_jobs.parent.mkdir(parents=True, exist_ok=True)
+        stale_open = _row("2026-08-22T00:00:00Z", "open", "att-X")
+        stale_q = _row("2026-08-22T00:00:01Z", "done", "att-Q")
+        stale_jobs.write_text(stale_open + "\n" + stale_q + "\n", encoding="utf-8")
+
+        self.assertTrue(DISTRIBUTION._succeed_dispatch_state(self.old_release))
+
+        lines = live_jobs.read_text(encoding="utf-8").splitlines()
+        self.assertEqual(lines, [live_row, stale_q])
+        self.assertEqual(lines[0].split("\t")[1], "done")
+        self.assertIn("note=completed-marker", lines[0])
+        self.assertIn("completion_marker=/tmp/m.json", lines[0])
+
+        before = live_jobs.read_text(encoding="utf-8")
+        self.assertTrue(DISTRIBUTION._succeed_dispatch_state(self.old_release))
+        self.assertEqual(live_jobs.read_text(encoding="utf-8"), before)
+
+    def test_rotation_carry_recovers_late_close_and_late_rows(self):
+        stale_jobs = self.old_release / ".dispatch" / "jobs.log"
+        stale_jobs.parent.mkdir(parents=True, exist_ok=True)
+        row_y = _row(
+            "2026-08-22T00:00:00Z", "open", "att-Y",
+            ",dispatch_depth=2,transport=headless,"
+            "execution_surface=registered-headless,fallback_hop=same-harness-headless",
+        )
+        row_z = _row("2026-08-22T00:00:01Z", "done", "att-Z")
+        stale_jobs.write_text(row_y + "\n" + row_z + "\n", encoding="utf-8")
+
+        live_jobs = self.new_release / ".dispatch" / "jobs.log"
+        self.assertFalse(live_jobs.is_file())
+
+        # 1st succession -- live is created with both stale rows.
+        self.assertTrue(DISTRIBUTION._succeed_dispatch_state(self.old_release))
+        self.assertTrue(live_jobs.is_file())
+        self.assertEqual(len(live_jobs.read_text(encoding="utf-8").splitlines()), 2)
+
+        # A session that froze `current` before rotation kept writing to the
+        # now-stale registry afterward: it closes att-Y and registers a
+        # brand-new att-W that no succession pass has ever seen.
+        DC.close_attempt_row(
+            stale_jobs, "att-Y", "completed-marker",
+            evidence={
+                "reconcile_reason": "test", "detected_by": "test", "failure_class": "pass",
+            },
+        )
+        row_w = _row("2026-08-22T00:00:02Z", "done", "att-W")
+        with stale_jobs.open("a", encoding="utf-8") as handle:
+            handle.write(row_w + "\n")
+
+        # 2nd succession -- the next rotation or prune pass's own
+        # fail-closed safety net (core/OPERATIONS.md §5.10).
+        self.assertTrue(DISTRIBUTION._succeed_dispatch_state(self.old_release))
+
+        lines = live_jobs.read_text(encoding="utf-8").splitlines()
+        self.assertEqual(len(lines), 3)
+        att_y_lines = [line for line in lines if "attempt_id=att-Y" in line]
+        self.assertEqual(len(att_y_lines), 1)
+        self.assertEqual(att_y_lines[0].split("\t")[1], "done")
+        self.assertEqual(len([line for line in lines if "attempt_id=att-W" in line]), 1)
+        self.assertEqual(len([line for line in lines if "attempt_id=att-Z" in line]), 1)
+
+        before = live_jobs.read_text(encoding="utf-8")
+        self.assertTrue(DISTRIBUTION._succeed_dispatch_state(self.old_release))
+        self.assertEqual(live_jobs.read_text(encoding="utf-8"), before)
+
+
+class RegistryRepairStaleRowTest(unittest.TestCase):
+    """plan.md §3 Phase3 Step3.2 (iii): `repair-stale-row` must close
+    exactly the shape of stale row the real registry showed (plan §2.4) --
+    marker-backed positive, marker-missing, axis-skew, and
+    route-identity-absent negatives -- and must be a strict no-op once a
+    row is already terminal or has already been repaired."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.base = Path(self.temp.name)
+        self.home = self.base / "home"
+        (self.home / "core").mkdir(parents=True)
+        (self.home / "core" / "CORE.md").write_text("x\n", encoding="utf-8")
+        self.jobs = self.home / ".dispatch" / "jobs.log"
+        self.jobs.parent.mkdir(parents=True, exist_ok=True)
+        self.prior_env = {
+            key: os.environ.get(key) for key in ("AGENT_HOME", "AGENT_DISPATCH_JOBS")
+        }
+        os.environ["AGENT_HOME"] = str(self.home)
+        os.environ.pop("AGENT_DISPATCH_JOBS", None)
+        self.addCleanup(self._restore_env)
+
+    def _restore_env(self):
+        for key, value in self.prior_env.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+    def _publish(self, route_id, node_id, attempt_id, dispatch_depth=2):
+        evidence = self.base / f"evidence-{attempt_id}.md"
+        evidence.write_text("evidence\n", encoding="utf-8")
+        route = {"route_id": route_id, "route_hash": "h" * 8, "registry_digest": "d" * 8}
+        node = {
+            "completion_gate": "artifact",
+            "dispatch_depth": dispatch_depth,
+            "execution_surface": "registered-headless",
+            "kind": "stage",
+        }
+        attempt_metadata = {
+            "attempt_schema_version": 2,
+            "dispatch_depth": dispatch_depth,
+            "transport": "headless",
+            "execution_surface": "registered-headless",
+            "registered_worker": True,
+            "fallback_hop": "same-harness-headless",
+        }
+        ROUTE._publish_completion_locked(
+            route, node, node_id, evidence,
+            attempt_id=attempt_id, attempt_metadata=attempt_metadata,
+        )
+
+    def _row(self, state, attempt_id, extra=""):
+        return _row("2026-08-23T00:00:00Z", state, attempt_id, extra)
+
+    def _run(self, attempt_id, *, apply=False):
+        argv = [
+            "dispatch-registry.py", "repair-stale-row",
+            "--jobs", str(self.jobs), "--attempt", attempt_id,
+            "--agent-home", str(self.home),
+        ]
+        if apply:
+            argv.append("--apply")
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            code = REGISTRY.main(argv)
+        return code, buffer.getvalue()
+
+    def test_positive_marker_backed_repair(self):
+        self._publish("rt-a", "frame", "att-good")
+        row = self._row(
+            "open", "att-good",
+            ",route_id=rt-a,route_node=frame,dispatch_depth=2,transport=headless,"
+            "execution_surface=registered-headless,fallback_hop=same-harness-headless,"
+            "route_hash=hhhhhhhh,registry_digest=dddddddd,completion_gate=artifact",
+        )
+        self.jobs.write_text(row + "\n", encoding="utf-8")
+
+        before = self.jobs.read_text(encoding="utf-8")
+        code, out = self._run("att-good")
+        self.assertEqual(code, 0)
+        self.assertIn("would-repair", out)
+        self.assertEqual(self.jobs.read_text(encoding="utf-8"), before)
+
+        code, out = self._run("att-good", apply=True)
+        self.assertEqual(code, 0)
+        self.assertIn('"repaired"', out)
+        after = self.jobs.read_text(encoding="utf-8")
+        self.assertNotEqual(after, before)
+        self.assertTrue(after.startswith("2026-08-23T00:00:00Z\tdone\t"))
+        self.assertIn("note=completed-marker", after)
+        self.assertIn("reconcile_reason=rotation-carry-stale-open", after)
+        self.assertIn("detected_by=registry-repair", after)
+
+    def test_negative_marker_missing(self):
+        row = self._row(
+            "open", "att-nomarker",
+            ",route_id=rt-b,route_node=frame,dispatch_depth=2,transport=headless,"
+            "execution_surface=registered-headless,fallback_hop=same-harness-headless",
+        )
+        self.jobs.write_text(row + "\n", encoding="utf-8")
+        before = self.jobs.read_text(encoding="utf-8")
+        code, out = self._run("att-nomarker")
+        self.assertEqual(code, 65)
+        self.assertIn("refused:marker-missing", out)
+        self.assertEqual(self.jobs.read_text(encoding="utf-8"), before)
+        self.assertFalse((self.jobs.parent / "repair" / "registry-repair.jsonl").exists())
+
+    def test_negative_axis_skew(self):
+        self._publish("rt-c", "frame", "att-skew", dispatch_depth=2)
+        row = self._row(
+            "open", "att-skew",
+            ",route_id=rt-c,route_node=frame,dispatch_depth=1,transport=headless,"
+            "execution_surface=registered-headless,fallback_hop=same-harness-headless,"
+            "route_hash=hhhhhhhh,registry_digest=dddddddd,completion_gate=artifact",
+        )
+        self.jobs.write_text(row + "\n", encoding="utf-8")
+        before = self.jobs.read_text(encoding="utf-8")
+        code, out = self._run("att-skew")
+        self.assertEqual(code, 65)
+        self.assertIn("refused:axis-skew", out)
+        self.assertIn('"dispatch_depth"', out)
+        self.assertEqual(self.jobs.read_text(encoding="utf-8"), before)
+
+        # No mitigation flag exists for axis skew -- `--apply` alone must
+        # not close this row either.
+        code, out = self._run("att-skew", apply=True)
+        self.assertEqual(code, 65)
+        self.assertIn("refused:axis-skew", out)
+        self.assertEqual(self.jobs.read_text(encoding="utf-8"), before)
+
+    def test_negative_route_identity_absent(self):
+        row = self._row("open", "att-owner", ",owner_route_id=rt-owner")
+        self.jobs.write_text(row + "\n", encoding="utf-8")
+        before = self.jobs.read_text(encoding="utf-8")
+        code, out = self._run("att-owner")
+        self.assertEqual(code, 65)
+        self.assertIn("refused:row-route-identity-absent", out)
+        self.assertEqual(self.jobs.read_text(encoding="utf-8"), before)
+
+    def test_already_terminal_is_a_no_op(self):
+        row = self._row("done", "att-done")
+        self.jobs.write_text(row + "\n", encoding="utf-8")
+        before = self.jobs.read_text(encoding="utf-8")
+        code, out = self._run("att-done")
+        self.assertEqual(code, 0)
+        self.assertIn("already-terminal", out)
+        self.assertEqual(self.jobs.read_text(encoding="utf-8"), before)
+
+    def test_repeat_apply_is_idempotent(self):
+        self._publish("rt-d", "frame", "att-idem")
+        row = self._row(
+            "open", "att-idem",
+            ",route_id=rt-d,route_node=frame,dispatch_depth=2,transport=headless,"
+            "execution_surface=registered-headless,fallback_hop=same-harness-headless,"
+            "route_hash=hhhhhhhh,registry_digest=dddddddd,completion_gate=artifact",
+        )
+        self.jobs.write_text(row + "\n", encoding="utf-8")
+        code, _ = self._run("att-idem", apply=True)
+        self.assertEqual(code, 0)
+        after_first = self.jobs.read_text(encoding="utf-8")
+
+        code, out = self._run("att-idem", apply=True)
+        self.assertEqual(code, 0)
+        self.assertIn("already-terminal", out)
+        self.assertEqual(self.jobs.read_text(encoding="utf-8"), after_first)
+
+
+class RegistryRowIdentityParityTest(unittest.TestCase):
+    """plan.md §3 Phase3 Step3.3: `DISTRIBUTION._registry_row_identity` is a
+    hand-written stdlib mirror of `DC._row_identity`
+    (utilities/dispatch_contract.py). A silent drift between the two would
+    let the registry-carry merge (Phase 1) disagree with every other
+    reader/writer of these rows about what "the same attempt" means."""
+
+    GRID = [
+        ["t", "open", "/r", "/w", "s", "attempt_id=att-1,harness=claude"],
+        ["t", "open", "/r", "/w", "s", "route_id=rt-1,route_node=frame,parent=att-owner"],
+        ["t", "open", "/r", "/w", "s", "harness=claude,registered_worker=1"],
+        ["t", "open", "/r", "/w", "s"],
+        ["t", "open", "/r", "/w", "s", "attempt_id=att-1", "extra"],
+        ["t", "open", "/r", "/w", "s", "attempt_id=att=weird"],
+        ["t", "open", "/r", "/w", "s", ""],
+        ["t", "open", "/r", "/w", "s", "attempt_id=att-first,attempt_id=att-second"],
+        ["t", "open", "/r", "/w", "s", "attempt_id="],
+    ]
+
+    def test_identity_parity_across_grid(self):
+        for fields in self.GRID:
+            with self.subTest(fields=fields):
+                self.assertEqual(
+                    DISTRIBUTION._registry_row_identity(fields),
+                    DC._row_identity(fields),
+                )
 
 
 if __name__ == "__main__":
