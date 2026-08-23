@@ -43,12 +43,33 @@ count_links() {
 # Expected counts are derived from harness-manifest.json, never hardcoded:
 # capability count, kernel-agent count, and non-internal mode count.
 EXPECT=$(python3 - "$ROOT" <<'PY'
-import json, sys
-manifest = json.load(open(sys.argv[1] + "/harness-manifest.json"))
+import json, pathlib, sys
+root = pathlib.Path(sys.argv[1])
+manifest = json.load(open(root / "harness-manifest.json"))
 capabilities = len(manifest["capabilities"])
-kernel_agents = len(manifest["kernel"]["agents"])
 modes = len([m for m in manifest["modes"] if not m.split("/")[-1].startswith("_")])
-print(f"{capabilities} {kernel_agents} {modes}")
+
+
+def catalog(runtime):
+    """Native subagent type names from one adapter's model config."""
+    names = set()
+    config = root / "adapters" / runtime / "config" / "models.conf"
+    for line in config.read_text(encoding="utf-8").splitlines():
+        if not line.strip().startswith("CFG_NATIVE_AGENT_CATALOG="):
+            continue
+        raw = line.split("=", 1)[1].strip().strip('"').strip("'")
+        names.update(token.split(":", 1)[0] for token in raw.split() if ":" in token)
+    return names
+
+
+# Every activation projects the kernel helpers plus the adapter's native
+# subagent type catalog. The single expected count below is only meaningful
+# while the three adapters declare the same catalog, so assert that first.
+catalogs = {runtime: catalog(runtime) for runtime in ("claude", "codex", "opencode")}
+if len(set(map(frozenset, catalogs.values()))) != 1:
+    raise SystemExit(f"native agent catalogs diverge across adapters: {catalogs}")
+agents = len(set(manifest["kernel"]["agents"]) | catalogs["claude"])
+print(f"{capabilities} {agents} {modes}")
 PY
 )
 EXPECTED_CAPABILITIES=$(echo "$EXPECT" | cut -d' ' -f1)
@@ -73,7 +94,8 @@ PY
   test "$(count_dirs "$HOME/.config/opencode/skills")" = "$EXPECTED_CAPABILITIES" || fail "$mode OpenCode skill count"
   test "$(count_dirs "$HOME/.config/opencode/commands")" = "$EXPECTED_CAPABILITIES" || fail "$mode OpenCode command count"
 
-  # Kernel helpers only (memory-scout): runtime team agents retired 2026-07-22 (재홈).
+  # Kernel helpers (memory-scout) plus the native subagent type catalog;
+  # runtime team agents retired 2026-07-22 (재홈) and stay unprojected.
   test "$(count_dirs "$HOME/.codex/agents")" = "$EXPECTED_AGENTS" || fail "$mode Codex agent count"
   test "$(count_dirs "$HOME/.claude/agents")" = "$EXPECTED_AGENTS" || fail "$mode Claude agent count"
   test "$(count_dirs "$HOME/.config/opencode/agents")" = "$EXPECTED_AGENTS" || fail "$mode OpenCode agent count"
