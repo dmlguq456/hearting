@@ -7,6 +7,8 @@ import hashlib
 import importlib.util
 import os
 from pathlib import Path
+import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -591,6 +593,42 @@ class ClaudeSessionSupervisorTest(unittest.TestCase):
         self.assertIn("--attempt-id att-child-a --status open --mark-done", prompt)
         self.assertIn("--attempt-id att-child-b --status open --mark-done", prompt)
         self.assertNotIn("RAW_CLAUDE_SENTINEL", prompt)
+
+    def test_harvest_surface_survives_a_release_rotation(self):
+        # Regression for the 2026-08-14 candidate 3 deadlock. Launched through a
+        # managed `current` pointer, the supervisor used to resolve the harvest
+        # surface down to the versioned release directory. After `current`
+        # rotated, the owner's park guard no longer recognized that path, so it
+        # denied every command the receipt told the owner to run.
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        for name in ("v1", "v2"):
+            release = tmp / "releases" / name
+            (release / "core").mkdir(parents=True)
+            (release / "core" / "CORE.md").write_text("x", encoding="utf-8")
+            (release / "adapters" / "codex" / "bin").mkdir(parents=True)
+            (release / "adapters" / "codex" / "bin" / "preflight.sh").write_text(
+                "#!/bin/sh\n", encoding="utf-8"
+            )
+            (release / "utilities").mkdir()
+        current = tmp / "current"
+        current.symlink_to(tmp / "releases" / "v1")
+        launched = current / "utilities" / "claude-session-supervisor.py"
+
+        surface = supervisor.harvest_surface(str(launched))
+
+        self.assertEqual(
+            surface, str(current / "adapters" / "codex" / "bin" / "preflight.sh")
+        )
+        # Rotate `current` the way a managed release upgrade does.
+        current.unlink()
+        current.symlink_to(tmp / "releases" / "v2")
+        self.assertTrue(Path(surface).is_file())
+        self.assertEqual(
+            Path(surface).resolve(),
+            (tmp / "releases" / "v2" / "adapters" / "codex" / "bin"
+             / "preflight.sh").resolve(),
+        )
 
     def test_remediation_prompt_uses_shared_absolute_harvest_surface(self):
         prompt = supervisor.remediation_prompt({"att-child"}, jobs="/tmp/fixture-jobs.log")
