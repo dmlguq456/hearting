@@ -5408,15 +5408,24 @@ def _materialize_fold_state(con, rid, source):
         )
     state = dict(source)
     existing = con.execute(
-        "SELECT last_accessed FROM records WHERE id=?", (rid,)
+        f"SELECT {','.join(RECORD_COLS)} FROM records WHERE id=?", (rid,)
     ).fetchone()
     if existing is not None:
-        state["last_accessed"] = existing[0]
+        state["last_accessed"] = existing[RECORD_COLS.index("last_accessed")]
     body = state.pop("body")
+    params = _meta_to_params(state, body)
+    if existing is not None and tuple(existing) == params:
+        # Record-level fold fixpoint: the stored row already equals the fold
+        # state (local last_accessed preserved), and every derived retrieval
+        # row is a pure projection of this identical row, so delete-and-
+        # reinsert would repeat identical work. Any inequality — including a
+        # type or encoding round-trip difference — falls through to the full
+        # rewrite below.
+        return
     _delete_rows(con, rid)
     con.execute(
         f"INSERT INTO records VALUES({','.join(['?'] * len(RECORD_COLS))})",
-        _meta_to_params(state, body),
+        params,
     )
     if _FTS_OK:
         con.execute("INSERT INTO records_fts(id,body) VALUES(?,?)", (rid, body))
@@ -5449,7 +5458,12 @@ def _apply_fold(con, result, remote_tip, remote_ref, *, record_peer=True):
     con.execute("DELETE FROM sync_conflicts WHERE resolved_by IS NULL")
     con.execute("DELETE FROM sync_quarantine WHERE cleared_by IS NULL")
     for rid in sorted(set(result.tombstones) | set(result.conflicts)):
-        _delete_rows(con, rid)
+        # Long-tombstoned records have no live row, and their derived
+        # retrieval rows are projections of `records` that this sync's index
+        # phase already rebuilt, so the repeated FTS-table scans behind each
+        # no-op delete are pure waste on every sync.
+        if con.execute("SELECT 1 FROM records WHERE id=?", (rid,)).fetchone():
+            _delete_rows(con, rid)
     for rid, state in sorted(result.records.items()):
         if rid not in result.conflicts:
             _materialize_fold_state(con, rid, state)
@@ -5962,10 +5976,6 @@ def _sync_locked(json_output=False):
         else:
             final_snapshot = snapshot
         phases["remote-push"] = "ok" if pending else "not-applicable"
-        # Publish returns the same fresh authoritative snapshot used for its
-        # reachability confirmation. A push retry may have integrated concurrent
-        # remote objects after the pre-push fold, so fold that exact snapshot
-        # before advancing peer/outbox evidence without another whole-tree scan.
         if final_snapshot is None:
             raise sync_v2.SyncInvariantError(
                 "publish completed without an authoritative confirmation snapshot"
@@ -5975,11 +5985,19 @@ def _sync_locked(json_output=False):
             envelope["op_id"] for envelope in pending
             if envelope["op_id"] in final_snapshot.operations
         }
-        result = _ingest_and_fold_snapshot(final_snapshot, ref)
-        phases["remote-fold"] = "ok"
-        with contextlib.redirect_stdout(sink):
-            export_dump()
-            _commit_dump()
+        if pending:
+            # Publish returns the same fresh authoritative snapshot used for
+            # its reachability confirmation. A push retry may have integrated
+            # concurrent remote objects after the pre-push fold, so fold that
+            # exact snapshot before advancing peer/outbox evidence without
+            # another whole-tree scan. With no pending operations,
+            # final_snapshot is the identical object already ingested, folded,
+            # and exported above, so refolding would only repeat that work.
+            result = _ingest_and_fold_snapshot(final_snapshot, ref)
+            phases["remote-fold"] = "ok"
+            with contextlib.redirect_stdout(sink):
+                export_dump()
+                _commit_dump()
         if result.quarantined or result.deferred:
             con = get_con()
             try:
