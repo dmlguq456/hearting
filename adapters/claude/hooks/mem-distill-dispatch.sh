@@ -73,10 +73,7 @@ fi
 # Opt-in gate: remain a no-op until explicitly enabled (see R1 above).
 [ "${MEM_DISTILL_ENABLE:-}" = "1" ] || exit 0
 
-_default_store="$AGENT_HOME/memory"
-[ -e "$_default_store" ] || [ -L "$_default_store" ] \
-  || _default_store="${XDG_DATA_HOME:-$HOME/.local/share}/hearting/memory"
-STORE="${MEM_STORE:-$_default_store}"
+STORE=$(sh "$HOOK_DIR/../utilities/memory-store.sh")
 # MEM_PY is a test-only override for a worktree-local mem.py.
 MEM="${MEM_PY:-$AGENT_HOME/tools/memory/mem.py}"
 mkdir -p "$STORE" 2>/dev/null || true
