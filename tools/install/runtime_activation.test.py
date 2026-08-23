@@ -196,5 +196,52 @@ class SurfaceSkewTest(unittest.TestCase):
             self.assertTrue(all(not s["present"] for s in report["surfaces"]))
 
 
+class BundleRuntimeStateTest(unittest.TestCase):
+    """A release bundle is immutable; runtime state written inside it is a finding."""
+
+    def _bundle(self, root: Path) -> Path:
+        source = root / "runtime-home" / ".harness" / "bundles" / "release-v1-aaa" / "source"
+        (source / "utilities").mkdir(parents=True)
+        return source
+
+    def test_reports_state_written_inside_the_active_bundle(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            source = self._bundle(Path(temporary))
+            governor = ".runtime/model-worker-governor"
+            (source / ".agent_reports" / governor).mkdir(parents=True)
+            (source / "utilities" / ".agent_reports" / governor).mkdir(parents=True)
+            found = activation.bundle_runtime_state(source)
+            self.assertEqual(
+                found,
+                sorted(
+                    [
+                        str(source / ".agent_reports"),
+                        str(source / "utilities" / ".agent_reports"),
+                    ]
+                ),
+            )
+
+    def test_clean_bundle_reports_nothing(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            source = self._bundle(Path(temporary))
+            self.assertEqual(activation.bundle_runtime_state(source), [])
+
+    def test_a_linked_checkout_is_never_scanned(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            checkout = Path(temporary) / "checkout"
+            (checkout / ".agent_reports").mkdir(parents=True)
+            self.assertEqual(activation.bundle_runtime_state(checkout), [])
+
+    def test_nested_state_is_not_double_reported(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            source = self._bundle(Path(temporary))
+            nested = source / ".agent_reports" / "inner" / ".claude_reports"
+            nested.mkdir(parents=True)
+            self.assertEqual(
+                activation.bundle_runtime_state(source),
+                [str(source / ".agent_reports")],
+            )
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

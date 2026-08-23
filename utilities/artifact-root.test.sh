@@ -122,4 +122,59 @@ actual=$(env -i -u AGENT_ARTIFACT_ROOT PATH="$gitless_bin" HOME="$HOME" "$RESOLV
   || fail "a bare .git directory is never an implicit marker, git-less or not"
 ok "a bare .git directory is never an implicit marker, git-less or not"
 
+# --- immutable installed source trees are never a writable root -------------
+
+# A managed release is replaced wholesale on update, so a root selected inside one
+# silently loses its state and breaks the release's byte-identity with its source.
+# `model-worker-governor.py` reached exactly this through the non-Git fallback
+# (cwd = the bundle's own `source/` or `source/utilities/`) and wrote
+# `lock`/`state.json` into the release bundle.
+refuses_immutable() {
+  set +e
+  env -u AGENT_ARTIFACT_ROOT "$@" >/dev/null 2>&1
+  rc=$?
+  set -e
+  [ "$rc" -eq 67 ] || fail "expected exit 67 (immutable source refused), got $rc: $*"
+}
+
+bundle_source="$TMP/runtime-home/.harness/bundles/release-v1-abcdef/source"
+mkdir -p "$bundle_source/utilities"
+refuses_immutable "$RESOLVER" "$bundle_source"
+refuses_immutable "$RESOLVER" "$bundle_source/utilities"
+ok "non-Git discovery inside a release bundle is refused"
+
+mkdir -p "$bundle_source/.agent_reports"
+refuses_immutable "$RESOLVER" "$bundle_source"
+ok "an existing .agent_reports inside a release bundle is still refused"
+
+set +e
+env -u AGENT_ARTIFACT_ROOT AGENT_ARTIFACT_ROOT="$bundle_source/.agent_reports" \
+  "$RESOLVER" "$repo" >/dev/null 2>&1
+rc=$?
+set -e
+[ "$rc" -eq 67 ] || fail "an explicit override into a release bundle must be refused, got $rc"
+ok "an explicit override into a release bundle is refused"
+
+bundle_repo="$TMP/runtime-home/.harness/bundles/release-v1-abcdef/source/checkout"
+mkdir -p "$bundle_repo"
+git -C "$bundle_repo" init -q
+git -C "$bundle_repo" config user.name test
+git -C "$bundle_repo" config user.email test@example.com
+refuses_immutable "$RESOLVER" "$bundle_repo"
+ok "a Git project whose primary worktree sits inside a release bundle is refused"
+
+shared_release="$TMP/data/hearting/releases/v1.2.3/utilities"
+mkdir -p "$shared_release"
+refuses_immutable "$RESOLVER" "$shared_release"
+ok "a shared managed release tree is refused"
+
+# The refusal is anchored on the layout, not on the words. A project that merely
+# has a directory named `bundles` or `releases` keeps resolving.
+lookalike="$TMP/lookalike/bundles/releases/work"
+mkdir -p "$lookalike"
+actual=$(env -u AGENT_ARTIFACT_ROOT "$RESOLVER" "$lookalike")
+[ "$actual" = "$lookalike/.agent_reports" ] \
+  || fail "a plain bundles/releases directory name must not be refused (got $actual)"
+ok "a plain bundles/releases directory name is not refused"
+
 echo "artifact-root.test.sh: all assertions passed"
