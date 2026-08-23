@@ -1,21 +1,104 @@
 #!/usr/bin/env sh
 set -eu
 
-SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-if command -v git >/dev/null 2>&1 && ROOT=$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel 2>/dev/null); then
-  :
-else
-  ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/../../.." && pwd)
-fi
+READLINK_F_AVAILABLE=0
+if command -v readlink >/dev/null 2>&1 && readlink_probe=$(readlink -f / 2>/dev/null) && [ "$readlink_probe" = / ]; then READLINK_F_AVAILABLE=1; fi
+canonical_existing_path() {
+  path=$1; [ -n "$path" ] || return 1; [ -e "$path" ] || [ -L "$path" ] || return 1
+  if [ "$READLINK_F_AVAILABLE" -eq 1 ] && canonical=$(readlink -f "$path" 2>/dev/null); then
+    [ -n "$canonical" ] && [ -e "$canonical" ] || return 1; printf '%s\n' "$canonical"; return 0
+  fi
+  if [ -d "$path" ]; then
+    if physical_dir=$(CDPATH= cd -P "$path" 2>/dev/null && pwd -P); then printf '%s\n' "$physical_dir"; return 0; fi
+    return 1
+  fi
+  [ -L "$path" ] && return 1
+  path_dir=$(dirname "$path"); path_base=$(basename "$path")
+  if physical_dir=$(CDPATH= cd -P "$path_dir" 2>/dev/null && pwd -P) && [ -e "$physical_dir/$path_base" ]; then printf '%s/%s\n' "$physical_dir" "$path_base"; return 0; fi
+  return 1
+}
+is_harness_source_root() {
+  candidate=$1
+  if canonical_candidate=$(canonical_existing_path "$candidate" 2>/dev/null); then :; else return 1; fi
+  [ -d "$canonical_candidate" ] && [ -f "$canonical_candidate/core/CORE.md" ] || return 1
+  [ -f "$canonical_candidate/adapters/codex/bin/preflight.sh" ] && [ -x "$canonical_candidate/adapters/codex/bin/preflight.sh" ] || return 1
+  [ -f "$canonical_candidate/adapters/codex/utilities/agent-home.sh" ] && [ -x "$canonical_candidate/adapters/codex/utilities/agent-home.sh" ] || return 1
+  [ -f "$canonical_candidate/utilities/artifact-root.sh" ] || return 1
+  [ -d "$canonical_candidate/roles" ] && [ -d "$canonical_candidate/capabilities" ] || return 1
+  expected_hook=$canonical_candidate/hooks/core-first-guard.sh; [ -f "$expected_hook" ] && [ -x "$expected_hook" ] || return 1
+  if canonical_hook=$(canonical_existing_path "$expected_hook" 2>/dev/null); then :; else return 1; fi
+  [ "$canonical_hook" = "$expected_hook" ] || return 1
+  printf '%s\n' "$canonical_candidate"
+}
+typed_root_refusal() { printf 'check=failed\nreason=harness-source-root-unresolved\n' >&2; exit 69; }
+if script_parent=$(dirname "$0") && SCRIPT_DIR=$(CDPATH= cd -P "$script_parent" 2>/dev/null && pwd -P); then :; else typed_root_refusal; fi
+if SELF_REAL=$(canonical_existing_path "$0" 2>/dev/null); then :; else typed_root_refusal; fi
+resolve_source_root() {
+  git_candidate=""
+  if command -v git >/dev/null 2>&1 && git_root=$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel 2>/dev/null) && git_root=$(canonical_existing_path "$git_root" 2>/dev/null); then git_candidate=$git_root; fi
+  relative_candidate=""
+  if relative_candidate=$(CDPATH= cd -P "$SCRIPT_DIR/../../.." 2>/dev/null && pwd -P) && relative_candidate=$(canonical_existing_path "$relative_candidate" 2>/dev/null); then :; else relative_candidate=""; fi
+  for candidate in "$git_candidate" "$relative_candidate" "${AGENT_HOME:-}"; do
+    [ -n "$candidate" ] || continue
+    if accepted=$(is_harness_source_root "$candidate" 2>/dev/null); then printf '%s\n' "$accepted"; return 0; fi
+  done
+  record=${CODEX_HOME:-${HOME:-}/.codex}/.harness/activation.json
+  if [ -f "$record" ] && command -v python3 >/dev/null 2>&1; then
+    if activation_candidate=$(python3 - "$record" codex 2>/dev/null <<'PY'
+import json, os, sys
+with open(sys.argv[1], encoding="utf-8") as h: data=json.load(h)
+if data.get("runtime") != sys.argv[2]: raise SystemExit(1)
+root=data["active_root"] if "active_root" in data else data.get("source_root")
+if not isinstance(root, str) or not root or not os.path.isabs(root): raise SystemExit(1)
+if data.get("mode") == "packaged" and not data.get("activated_projection_digest"): raise SystemExit(1)
+print(root)
+PY
+    ); then
+      if [ -n "$activation_candidate" ] && accepted=$(is_harness_source_root "$activation_candidate" 2>/dev/null); then printf '%s\n' "$accepted"; return 0; fi
+    fi
+  fi
+  adjacent_resolver=$SCRIPT_DIR/../utilities/agent-home.sh
+  if [ -x "$adjacent_resolver" ] && resolver_value=$("$adjacent_resolver" 2>/dev/null); then
+    if [ -n "$resolver_value" ] && accepted=$(is_harness_source_root "$resolver_value" 2>/dev/null); then printf '%s\n' "$accepted"; return 0; fi
+  fi
+  for candidate in "${CODEX_HOME:-${HOME:-}/.codex}/hearting" "${HOME:-}/hearting" "${HOME:-}/agent_setting"; do
+    if accepted=$(is_harness_source_root "$candidate" 2>/dev/null); then printf '%s\n' "$accepted"; return 0; fi
+  done
+  return 1
+}
+if ROOT=$(resolve_source_root 2>/dev/null); then :; else typed_root_refusal; fi
+
+checked_guard_target() {
+  relative_guard=$1
+  case "$relative_guard" in
+    hooks/git-state-guard.sh|hooks/core-first-guard.sh|hooks/artifact-guard.sh|hooks/builtin-memory-guard.sh|hooks/material-route-guard.py|hooks/worktree-path-guard.sh) :;;
+    *) printf 'check=failed\nreason=guard-target-unresolved\n' >&2; exit 69;;
+  esac
+  expected=$ROOT/$relative_guard
+  if [ ! -f "$expected" ] || [ ! -x "$expected" ]; then printf 'check=failed\nreason=guard-target-unresolved\n' >&2; exit 69; fi
+  if target=$(canonical_existing_path "$expected" 2>/dev/null); then :; else printf 'check=failed\nreason=guard-target-unresolved\n' >&2; exit 69; fi
+  case "$relative_guard" in
+    hooks/*) name=${relative_guard#hooks/}; expected=$ROOT/hooks/$name;;
+  esac
+  if [ "$target" != "$expected" ]; then printf 'check=failed\nreason=guard-target-self-reference\n' >&2; exit 69; fi
+  printf '%s\n' "$target"
+}
+run_guard() {
+  relative_guard=$1; shift
+  target=$(checked_guard_target "$relative_guard")
+  case "$relative_guard" in
+    hooks/material-route-guard.py) exec python3 "$target" --agent-home "$AGENT_ROOT" "$@";;
+    hooks/worktree-path-guard.sh) exec "$target" "$@";;
+    *) "$target" "$@";;
+  esac
+}
 
 agent_home() {
   if [ -n "${AGENT_HOME:-}" ] && [ -f "$AGENT_HOME/core/CORE.md" ]; then
     printf '%s\n' "$AGENT_HOME"
     return
   fi
-  candidate=$(
-    "$ROOT/adapters/codex/utilities/agent-home.sh" 2>/dev/null || true
-  )
+  if candidate=$("$ROOT/adapters/codex/utilities/agent-home.sh" 2>/dev/null); then :; else candidate=""; fi
   if [ -n "$candidate" ] && [ -f "$candidate/core/CORE.md" ]; then
     printf '%s\n' "$candidate"
   else
@@ -270,10 +353,10 @@ case "$cmd" in
         --path "$AGENT_WORKER_STATE_LEDGER" \
         --attempt-id "$AGENT_DISPATCH_ATTEMPT_ID" --file "$file"
     fi
-    "$ROOT/hooks/git-state-guard.sh" --file "$file"
-    "$ROOT/hooks/core-first-guard.sh" --file "$file" --session "$sid"
-    "$ROOT/hooks/artifact-guard.sh" --file "$file" --session "$sid"
-    "$ROOT/hooks/builtin-memory-guard.sh" --file "$file"
+    run_guard hooks/git-state-guard.sh --file "$file"
+    run_guard hooks/core-first-guard.sh --file "$file" --session "$sid"
+    run_guard hooks/artifact-guard.sh --file "$file" --session "$sid"
+    run_guard hooks/builtin-memory-guard.sh --file "$file"
     # Spec read gate, fitted to Codex's interception point. Claude hard-denies the
     # ungrounded autopilot-code/spec *Skill* (PreToolUse[Skill]); Codex has no
     # skill-invocation event (skills are implicitly selected), so the equivalent
@@ -343,11 +426,11 @@ case "$cmd" in
   material-route)
     [ "$#" -ge 2 ] || { echo "codex preflight: material-route requires an action" >&2; exit 64; }
     shift
-    exec python3 "$ROOT/hooks/material-route-guard.py" --agent-home "$AGENT_ROOT" "$@"
+    run_guard hooks/material-route-guard.py "$@"
     ;;
   worktree-path)
     shift
-    exec "$ROOT/hooks/worktree-path-guard.sh" "$@"
+    run_guard hooks/worktree-path-guard.sh "$@"
     ;;
   worker-route)
     shift
