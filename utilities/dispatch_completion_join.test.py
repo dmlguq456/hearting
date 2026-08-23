@@ -26,6 +26,25 @@ assert SPEC.loader is not None
 sys.modules[SPEC.name] = JOIN
 SPEC.loader.exec_module(JOIN)
 
+# D-42 hermeticity: `classify_supervised_shell_command` and the supervisor
+# state readers consult the LIVE session's dispatch environment on purpose, so
+# running this suite from inside a supervised registered worker used to change
+# its verdicts (`AGENT_DISPATCH_COMPLETION_MODE=supervised` alone turns the
+# strict owner binding on and makes every unbound dispatch case classify as
+# None). Each case supplies its own bindings as explicit arguments; drop the
+# ambient ones so the suite measures the code, not its host session.
+for _leaked in (
+    "AGENT_DISPATCH_COMPLETION_MODE",
+    "AGENT_DISPATCH_COMPLETION_STATE_FILE",
+    "AGENT_DISPATCH_ATTEMPT_ID",
+    "AGENT_DISPATCH_JOBS",
+    "AGENT_DISPATCH_SELF_SLUG",
+    "AGENT_ROUTE_FILE",
+    "AGENT_ROUTE_ID",
+    "AGENT_ROUTE_NODE",
+):
+    os.environ.pop(_leaked, None)
+
 
 def row(
     status: str,
@@ -949,6 +968,37 @@ class DispatchCompletionJoinTest(unittest.TestCase):
                         parent_slug="owner",
                     )
                 )
+
+    def test_supervised_env_alone_turns_on_the_strict_owner_binding(self):
+        # Production behaviour the hermeticity block above exists for: the live
+        # session's completion mode is a real input, so any suite that lets it
+        # leak in measures its host instead of the code.
+        self.assertFalse(
+            JOIN._strict_supervisor_binding_requested(
+                jobs=None, parent_attempt_id="", route_file=None, route_id=""
+            )
+        )
+        with mock.patch.dict(
+            JOIN.os.environ, {"AGENT_DISPATCH_COMPLETION_MODE": "supervised"}
+        ):
+            self.assertTrue(
+                JOIN._strict_supervisor_binding_requested(
+                    jobs=None, parent_attempt_id="", route_file=None, route_id=""
+                )
+            )
+            self.assertIsNone(
+                JOIN.classify_supervised_shell_command(
+                    base=JOIN.ROOT,
+                    command=(
+                        "python3 utilities/dispatch-node.py "
+                        "--route /tmp/route.json --node implement "
+                        "--adapter claude --action start --slug worker-b "
+                        "--parent owner -- --jobs /tmp/jobs.log"
+                    ),
+                    open_attempt_ids={"att-a"},
+                    parent_slug="owner",
+                )
+            )
 
     def test_strict_supervisor_admits_only_one_missing_leg_of_three_way_group(self):
         parent = "att-parent"
