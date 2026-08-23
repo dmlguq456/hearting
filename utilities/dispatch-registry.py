@@ -23,6 +23,7 @@ from dispatch_contract import (DispatchContractError, agent_home_equivalent,
                                attempt_process_quiescence,
                                attempt_tagged_descendants,
                                authoritative_process_identities,
+                               close_attempt_row,
                                close_attempt_row_if,
                                exact_process_group_signal_authority,
                                parse_registry_metadata,
@@ -574,6 +575,159 @@ def emit_liveness(rows, args):
         selected = current(selected)
     for row in selected:
         print(row["raw"])
+    return 0
+
+
+def repair_stale_row(rows, args):
+    """SD-70 follow-up: close one exact stale open/running row by marker
+    evidence alone, bypassing the liveness classifier entirely -- for rows a
+    release-rotation carry-forward (Phase 1 of this cycle's plan) should
+    have already resolved but could not observe retroactively. Never widens
+    `_marker_backed_repair`'s acceptance criteria: it is called unmodified,
+    and every rejection below either runs strictly before it or reports one
+    of its own axes without relaxing them.
+    """
+
+    # plan-check round-1 major-1: this typed rejection is reachable only
+    # when --attempt is given together with another filter. When --attempt
+    # is absent entirely, main()'s shared current-filter-required gate
+    # returns exit 64 before this function is ever called.
+    if not args.attempt or any((args.session, args.route, args.node, args.job, args.all)):
+        print("decision=refused:exact-attempt-required")
+        return 64
+
+    matching = [row for row in rows if row["meta"].get("attempt_id") == args.attempt]
+    if not matching:
+        print("decision=refused:row-not-found")
+        return 65
+    if len(matching) > 1:
+        print("decision=refused:row-not-unique")
+        return 65
+    row = matching[0]
+    meta = row["meta"]
+
+    def _record(decision, *, row_after=None, evidence=None, axis_skew=None):
+        payload = {
+            "at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            "operation": "repair-stale-row",
+            "apply": bool(args.apply),
+            "attempt_id": args.attempt,
+            "decision": decision,
+            "row_before": row["raw"],
+            "row_after": row_after,
+            "evidence": evidence or {},
+            "axis_skew": axis_skew or [],
+            "classifier_source": ATTEMPT_CLASSIFIER_SOURCE,
+        }
+        print(json.dumps(payload, sort_keys=True))
+        audit_path = args.audit
+        if audit_path is None and args.apply:
+            audit_path = args.jobs.parent / "repair" / "registry-repair.jsonl"
+        if audit_path is not None:
+            cleanup.append_audit(audit_path, payload)
+        return payload
+
+    if row["status"] not in OPEN:
+        _record("already-terminal")
+        return 0
+
+    route_id, route_node = meta.get("route_id"), meta.get("route_node")
+    if not (route_id and route_node):
+        _record("refused:row-route-identity-absent")
+        return 65
+
+    # `_marker_backed_repair` evaluates `int(meta["dispatch_depth"])` outside
+    # its own try/except (dispatch-registry.py:307), so a row with route
+    # identity but no (or a non-numeric) dispatch_depth raises an
+    # unhandled KeyError/ValueError there. Validate before calling it rather
+    # than changing the shared judge (Phase2 Step2.2 rule 6; mode=debug).
+    try:
+        int(meta.get("dispatch_depth"))
+    except (TypeError, ValueError):
+        _record("refused:row-metadata-invalid")
+        return 65
+    try:
+        validate_attempt_metadata(meta)
+    except DispatchContractError:
+        _record("refused:row-metadata-invalid")
+        return 65
+
+    safe_attempt = "".join(c if c.isalnum() or c in "._-" else "_" for c in args.attempt)
+    linkage_path = _first_existing_dispatch_path(
+        args.agent_home, args.jobs, "completion", route_id,
+        f"{route_node}.{safe_attempt}.attempt.json",
+    )
+    # `_first_existing_dispatch_path` returns its first candidate as a
+    # best-guess default even when nothing exists (candidates[0] fallback)
+    # -- only `None` (home unresolved) or a non-existent path means no
+    # sidecar was actually found.
+    if linkage_path is None or not linkage_path.is_file():
+        _record("refused:marker-missing")
+        return 65
+
+    evidence = {"attempt_link": str(linkage_path)}
+    try:
+        linkage = json.loads(linkage_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        linkage = {}
+    evidence["completion_marker"] = linkage.get("completion_marker", "")
+    evidence["completion_marker_history"] = linkage.get("completion_marker_history", "")
+
+    # Read-only re-derivation of the axis comparison `_marker_backed_repair`
+    # performs internally, purely to report *which* keys mismatched (Phase2
+    # Step2.2 rule 9). This widens no acceptance criteria -- the judge below
+    # still runs unmodified and has the final say.
+    row_registered = str(meta.get("registered_worker", "")).lower() in {"1", "true"}
+    expected_axes = {
+        "dispatch_depth": int(meta["dispatch_depth"]),
+        "transport": meta.get("transport"),
+        "execution_surface": meta.get("execution_surface"),
+        "registered_worker": row_registered,
+        "fallback_hop": meta.get("fallback_hop") or None,
+    }
+    axis_skew = [key for key, value in expected_axes.items() if linkage.get(key) != value]
+    if axis_skew:
+        _record("refused:axis-skew", evidence=evidence, axis_skew=axis_skew)
+        return 65
+
+    try:
+        history_path = Path(linkage["completion_marker_history"])
+        marker = json.loads(history_path.read_text(encoding="utf-8"))
+        evidence["evidence_path"] = marker.get("evidence", {}).get("path", "")
+        evidence["evidence_sha256"] = marker.get("evidence", {}).get("sha256", "")
+    except (KeyError, OSError, TypeError, ValueError):
+        pass
+
+    if not _marker_backed_repair(row, args.agent_home, args.jobs):
+        _record("refused:marker-attempt-link-mismatch", evidence=evidence)
+        return 65
+
+    if not args.apply:
+        _record("would-repair", evidence=evidence)
+        return 0
+
+    closed = close_attempt_row(
+        args.jobs, args.attempt, "completed-marker",
+        evidence={
+            "classifier_source": ATTEMPT_CLASSIFIER_SOURCE,
+            "reconcile_reason": "rotation-carry-stale-open",
+            "detected_by": "registry-repair",
+            "failure_class": "pass",
+        },
+    )
+    fresh_rows = read_rows(args.jobs)
+    fresh = next(
+        (item for item in fresh_rows if item["meta"].get("attempt_id") == args.attempt),
+        None,
+    )
+    if not closed:
+        if fresh is not None and fresh["meta"].get("teardown_claim"):
+            _record("refused:teardown-claimed", evidence=evidence)
+            return 65
+        _record("refused:close-rejected", evidence=evidence)
+        return 65
+
+    _record("repaired", row_after=fresh["raw"] if fresh else None, evidence=evidence)
     return 0
 
 
@@ -1292,7 +1446,7 @@ def emit_orphan_scan(rows, args):
 
 
 def main(argv):
-    p = argparse.ArgumentParser(description=__doc__); p.add_argument("operation", choices=("current", "liveness", "reconcile", "attempt-state", "orphan-status", "orphan-scan"))
+    p = argparse.ArgumentParser(description=__doc__); p.add_argument("operation", choices=("current", "liveness", "reconcile", "attempt-state", "orphan-status", "orphan-scan", "repair-stale-row"))
     p.add_argument("--jobs", type=Path); p.add_argument("--global-jobs", type=Path); p.add_argument("--local-jobs", type=Path)
     p.add_argument("--session"); p.add_argument("--route")
     p.add_argument("--node"); p.add_argument("--attempt"); p.add_argument("--job"); p.add_argument("--all", action="store_true")
@@ -1349,6 +1503,8 @@ def main(argv):
         return emit_orphan_status(rows, args)
     if args.operation == "orphan-scan":
         return emit_orphan_scan(rows, args)
+    if args.operation == "repair-stale-row":
+        return repair_stale_row(rows, args)
     if args.cancel_receiptless_namespace:
         return cancel_receiptless_namespace(rows, args)
     return reconcile(rows, args)
