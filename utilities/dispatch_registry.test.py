@@ -4,6 +4,12 @@ from pathlib import Path
 from unittest import mock
 
 ROOT=Path(__file__).resolve().parents[1]; SCRIPT=ROOT/"utilities/dispatch-registry.py"
+sys.path[:0]=[str(ROOT),str(ROOT/"utilities")]
+from dispatch_contract import (attempt_process_quiescence,  # noqa: E402
+                               attempt_tagged_descendants,
+                               observed_attempt_liveness,
+                               parse_registry_metadata,
+                               post_exit_receipt_reason)
 CURRENT_ATTEMPT_CONTRACT=(
  "attempt_schema_version=2,dispatch_depth=2,transport=headless,"
  "execution_surface=registered-headless,registered_worker=1,"
@@ -530,6 +536,217 @@ class RegistryTest(unittest.TestCase):
   result=self.invoke("reconcile","--route","r-ghost","--cancel-receiptless-namespace","--apply")
   self.assertEqual(result.returncode,64)
   self.assertIn("exact-attempt-cancel-required",result.stdout)
+
+
+class ArtifactProofReceiptSealTest(unittest.TestCase):
+ """A PASS worker whose post-exit receipt can never be issued must be recoverable.
+
+ The detached drain receipt needs `attempt-tagged-empty-v1`. One process that
+ escapes the governed process group while carrying the attempt tag makes that
+ proof unobtainable forever, so `reconcile` answers `terminal-draining` and
+ `dispatch_completion_join` answers `process-unverifiable` for a worker that
+ finished and wrote its artifact -- with no checked path back. The seal supplies
+ the one substitute that is evidence about the worker itself: its own final
+ artifact-heartbeat digest, matched against the artifact on disk.
+ """
+
+ def setUp(self):
+  self.tmp=tempfile.TemporaryDirectory();self.base=Path(self.tmp.name)
+  self.home=self.base/"home";self.home.mkdir()
+  self.jobs=self.base/"jobs.log"
+  self.repo=self.base/"repo";self.repo.mkdir()
+  for command in (["git","init","-q"],["git","config","user.email","t@example.invalid"],
+                  ["git","config","user.name","Fixture"]):
+   subprocess.run(command,cwd=self.repo,check=True)
+  (self.repo/"tracked.txt").write_text("tracked\n")
+  subprocess.run(["git","add","tracked.txt"],cwd=self.repo,check=True)
+  subprocess.run(["git","commit","-qm","init"],cwd=self.repo,check=True)
+  self.artifact_root=self.repo/".agent_reports"
+  self.artifact=self.artifact_root/"plans"/"fixture"/"plan.md"
+  self.artifact.parent.mkdir(parents=True)
+  self.artifact.write_text("final worker output\n")
+  self.digest=hashlib.sha256(self.artifact.read_bytes()).hexdigest()
+  self.observer=os.readlink("/proc/self/ns/pid")
+  self.attempt="att-artifact-proof-1"
+  self.log=self.base/"worker.codex.jsonl"
+  self.write_log(f"artifact: {self.artifact}\nverdict: PASS\nblocker: none")
+  self.write_heartbeat(phase="artifact",evidence=f"sha256:{self.digest}")
+
+ def tearDown(self):
+  self.tmp.cleanup()
+
+ def write_log(self,final_message):
+  self.log.write_text(
+   json.dumps({"type":"item.completed",
+               "item":{"type":"agent_message","text":final_message}})+"\n"
+   +json.dumps({"type":"turn.completed"})+"\n")
+
+ def write_heartbeat(self,*,phase,evidence,attempt=None,route_id="r-proof",
+                     route_node="execute"):
+  heartbeats=self.home/".dispatch"/"heartbeats";heartbeats.mkdir(parents=True,exist_ok=True)
+  name=(attempt or self.attempt).replace("/","_")
+  (heartbeats/f"{name}.json").write_text(json.dumps(
+   {"schema_version":1,"attempt_id":attempt or self.attempt,"route_id":route_id,
+    "route_node":route_node,"phase":phase,"sequence":7,"kind":"artifact",
+    "evidence":evidence,"updated_at":time.time()}))
+
+ def write_row(self,*,status="done",extra="",pid=99999996):
+  self.jobs.write_text(
+   f"2026-08-19T00:00:00Z\t{status}\t{self.repo}\t{self.repo}\tproof\t"
+   f"route_id=r-proof,route_node=execute,route_hash=h-proof,"
+   f"attempt_id={self.attempt},pid={pid},pid_start=1,"
+   f"pid_scope=namespace-local,pid_ns={self.observer},"
+   f"pid_observer_ns={self.observer},pgid={pid},launch_lifecycle=detached,"
+   f"artifact_root={self.artifact_root},log_file={self.log}{extra}\n")
+  currentize_registry(self.jobs)
+
+ def invoke(self,*args):
+  # Hermetic: an inherited AGENT_ARTIFACT_ROOT would redirect the terminal
+  # inspector's root resolution away from this fixture's repository.
+  env={key:value for key,value in os.environ.items()
+       if key not in {"AGENT_ARTIFACT_ROOT","AGENT_DISPATCH_ATTEMPT_ID"}}
+  return subprocess.run(
+   [sys.executable,str(SCRIPT),*args,"--jobs",str(self.jobs),
+    "--agent-home",str(self.home)],
+   capture_output=True,text=True,env=env)
+
+ def seal(self,*extra):
+  result=self.invoke("reconcile","--attempt",self.attempt,
+                     "--seal-artifact-proof-receipt",*extra)
+  self.assertEqual(result.returncode,0,result.stdout+result.stderr)
+  return json.loads(result.stdout)
+
+ def test_dry_run_reports_eligible_and_writes_nothing(self):
+  self.write_row()
+  before=self.jobs.read_text()
+  record=self.seal()
+  self.assertEqual(record["sealed"],0)
+  self.assertTrue(record["decisions"][0]["eligible"],record)
+  self.assertEqual(record["decisions"][0]["artifact_sha256"],self.digest)
+  self.assertEqual(self.jobs.read_text(),before)
+
+ def test_seal_makes_a_closed_row_reach_a_terminal_verdict(self):
+  self.write_row()
+  metadata=parse_registry_metadata(self.jobs.read_text().strip().split("\t",5)[5])
+  before=observed_attempt_liveness("done",metadata,terminal_receipt_gate=True)
+  self.assertEqual(before.state,"unverifiable")
+  self.assertEqual(before.process_reason,"post-exit-receipt-incomplete")
+
+  record=self.seal("--apply")
+  self.assertEqual(record["sealed"],1,record)
+  self.assertTrue(record["decisions"][0]["revalidated"])
+  text=self.jobs.read_text()
+  self.assertIn("post_exit_receipt_substitute=artifact-proof-v1",text)
+  self.assertIn(f"artifact_proof_sha256={self.digest}",text)
+  self.assertIn("artifact_proof_verdict=PASS",text)
+  # The seal is not completion: it invents no marker, verdict, or reap proof.
+  self.assertNotIn("completed-marker",text)
+  self.assertNotIn("group_reap_proof",text)
+  self.assertNotIn("attempt_descendant_proof",text)
+  self.assertNotIn("launch_outcome",text)
+
+  sealed=parse_registry_metadata(text.strip().split("\t",5)[5])
+  self.assertEqual(post_exit_receipt_reason(sealed),
+                   "receipt-superseded-by-artifact-proof")
+  after=observed_attempt_liveness("done",sealed,terminal_receipt_gate=True)
+  self.assertEqual(after.state,"terminal")
+  self.assertEqual(after.reason,"registry-closed")
+
+ def test_seal_survives_a_live_tagged_process_that_outlived_the_worker(self):
+  """The exact shape that made the receipt unissuable: a leaked tagged process."""
+  child=subprocess.Popen([sys.executable,"-c","import time; time.sleep(30)"],
+                         env={**os.environ,"AGENT_DISPATCH_ATTEMPT_ID":self.attempt})
+  try:
+   self.write_row()
+   metadata=parse_registry_metadata(self.jobs.read_text().strip().split("\t",5)[5])
+   self.assertEqual(
+    attempt_tagged_descendants(metadata).state,"populated",
+    "fixture precondition: a tagged process must be visible")
+   self.assertEqual(self.seal("--apply")["sealed"],1)
+   sealed=parse_registry_metadata(self.jobs.read_text().strip().split("\t",5)[5])
+   self.assertEqual(
+    observed_attempt_liveness("done",sealed,terminal_receipt_gate=True).state,
+    "terminal")
+   # Without the seal the same live tag still vetoes quiescence.
+   unsealed={key:value for key,value in sealed.items()
+             if not key.startswith("artifact_proof_")
+             and key!="post_exit_receipt_substitute"}
+   self.assertEqual(
+    attempt_process_quiescence(unsealed,terminal_receipt=True).state,
+    "unverifiable")
+  finally:
+   child.terminate();child.wait(timeout=5)
+
+ def test_refuses_when_the_artifact_no_longer_matches_the_heartbeat(self):
+  self.write_row()
+  self.artifact.write_text("someone edited the artifact after the worker died\n")
+  record=self.seal("--apply")
+  self.assertEqual(record["sealed"],0)
+  self.assertEqual(record["decisions"][0]["reason"],"artifact-digest-mismatch")
+  self.assertNotIn("artifact-proof-v1",self.jobs.read_text())
+
+ def test_refuses_without_an_artifact_phase_heartbeat(self):
+  self.write_row()
+  self.write_heartbeat(phase="tool",evidence=f"sha256:{self.digest}")
+  record=self.seal("--apply")
+  self.assertEqual(record["sealed"],0)
+  self.assertEqual(record["decisions"][0]["reason"],"heartbeat-phase-tool")
+  self.assertNotIn("artifact-proof-v1",self.jobs.read_text())
+
+ def test_refuses_a_non_pass_terminal_envelope(self):
+  self.write_row()
+  self.write_log(f"artifact: {self.artifact}\nverdict: FAIL\nblocker: something broke")
+  record=self.seal("--apply")
+  self.assertEqual(record["sealed"],0)
+  self.assertEqual(record["decisions"][0]["reason"],"terminal-verdict-FAIL")
+  self.assertNotIn("artifact-proof-v1",self.jobs.read_text())
+
+ def test_refuses_a_live_governed_process(self):
+  live=subprocess.Popen(["sleep","60"])
+  try:
+   start=(Path("/proc")/str(live.pid)/"stat").read_text().split()[21]
+   self.write_row(status="open",pid=live.pid,
+                  extra="")
+   self.jobs.write_text(self.jobs.read_text().replace("pid_start=1",f"pid_start={start}"))
+   record=self.seal("--apply")
+   self.assertEqual(record["sealed"],0)
+   self.assertTrue(record["decisions"][0]["reason"].startswith("governed-process-"),
+                   record)
+   self.assertNotIn("artifact-proof-v1",self.jobs.read_text())
+  finally:
+   live.terminate();live.wait(timeout=5)
+
+ def test_refuses_a_foreign_observer_namespace(self):
+  self.write_row()
+  self.jobs.write_text(
+   self.jobs.read_text().replace(f"pid_observer_ns={self.observer}",
+                                 "pid_observer_ns=pid:[elsewhere]"))
+  record=self.seal("--apply")
+  self.assertEqual(record["sealed"],0)
+  self.assertEqual(record["decisions"][0]["reason"],"observer-namespace-mismatch")
+  self.assertNotIn("artifact-proof-v1",self.jobs.read_text())
+
+ def test_refuses_when_a_real_receipt_already_exists(self):
+  self.write_row(extra=(",launch_outcome=governed-process-group-drained,"
+                        "group_reap_proof=pgid-empty-v1,group_reap_pgid=99999996,"
+                        "attempt_descendant_proof=attempt-tagged-empty-v1,"
+                        f"attempt_descendant_observer_ns={self.observer}"))
+  record=self.seal("--apply")
+  self.assertEqual(record["sealed"],0)
+  self.assertEqual(record["decisions"][0]["reason"],"post-exit-receipt-present")
+
+ def test_requires_an_exact_attempt_filter(self):
+  self.write_row()
+  result=self.invoke("reconcile","--route","r-proof","--seal-artifact-proof-receipt","--apply")
+  self.assertEqual(result.returncode,64)
+  self.assertIn("exact-attempt-seal-required",result.stdout)
+
+ def test_the_two_recovery_modes_are_mutually_exclusive(self):
+  self.write_row()
+  result=self.invoke("reconcile","--attempt",self.attempt,
+                     "--seal-artifact-proof-receipt","--cancel-receiptless-namespace")
+  self.assertEqual(result.returncode,64)
+  self.assertIn("receipt-recovery-mode-conflict",result.stdout)
 
 
 class MixedRegistryTest(unittest.TestCase):

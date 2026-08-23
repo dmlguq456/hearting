@@ -157,6 +157,11 @@ ATTEMPT_MUTABLE_METADATA = {
     "teardown_claim_pid_start",
     "reap_close_deferred",
     "reap_close_deferred_at",
+    "post_exit_receipt_substitute",
+    "artifact_proof_sha256",
+    "artifact_proof_observer_ns",
+    "artifact_proof_verdict",
+    "artifact_proof_sealed_at",
 }
 ATTEMPT_TERMINAL_EVIDENCE_KEYS = {
     "api_status",
@@ -1069,6 +1074,10 @@ def process_group_members(pgid: int) -> tuple[tuple[int, str, str], ...]:
 
 ATTEMPT_DESCENDANT_ENV = "AGENT_DISPATCH_ATTEMPT_ID"
 ATTEMPT_DESCENDANT_PROOF = "attempt-tagged-empty-v1"
+# Operator-sealed substitute for a post-exit receipt that can never be issued.
+# `dispatch-registry.py reconcile --seal-artifact-proof-receipt` writes it only
+# after re-deriving the whole evidence chain; nothing issues it automatically.
+ARTIFACT_PROOF_RECEIPT = "artifact-proof-v1"
 
 # Every reason `completion_marker_gate` raises because some process has not
 # stopped yet. They share one exit code (78) and one meaning for the caller:
@@ -1182,12 +1191,54 @@ def _detached_group_drain_receipt(metadata: dict[str, str]) -> bool:
     )
 
 
+def _artifact_proof_receipt(metadata: dict[str, str]) -> bool:
+    """Was an artifact-proof substitute sealed for this exact attempt and observer?
+
+    A detached drain receipt needs `attempt-tagged-empty-v1`, so a single process
+    that escaped the governed group while carrying the attempt tag makes the
+    receipt unissuable forever -- and every gate that consumes it (`reconcile`,
+    `dispatch_completion_join`) then has no terminal state to reach, even for a
+    worker that finished and wrote its artifact.  This substitute is the recorded
+    proof that the worker's own last `stage-heartbeat --phase artifact` digest
+    matches the artifact on disk, so its output was already final when the
+    governed process died.  `dispatch-registry.py reconcile
+    --seal-artifact-proof-receipt` is the only writer, and it re-derives the whole
+    chain before and after the write; this predicate only reads the seal back.
+    """
+
+    raw_pid = metadata.get("pid", "")
+    observer_namespace = metadata.get("pid_observer_ns", "")
+    process_namespace = metadata.get("pid_ns", "")
+    digest = metadata.get("artifact_proof_sha256", "")
+    return bool(
+        raw_pid.isdigit()
+        and metadata.get("pid_start")
+        and observer_namespace
+        # The seal is only meaningful to an observer in the namespace that
+        # recorded the PID: elsewhere "dead" was never provable in the first place.
+        and process_namespace == observer_namespace
+        and metadata.get("artifact_proof_observer_ns") == observer_namespace
+        and metadata.get("post_exit_receipt_substitute") == ARTIFACT_PROOF_RECEIPT
+        and metadata.get("artifact_proof_verdict") == "PASS"
+        and len(digest) == 64
+        and all(char in "0123456789abcdef" for char in digest)
+    )
+
+
 def _post_exit_receipt_reason(metadata: dict[str, str]) -> str:
     if _foreground_reap_receipt(metadata):
         return "governed-process-group-reaped"
     if _detached_group_drain_receipt(metadata):
         return "governed-process-group-drained"
+    if _artifact_proof_receipt(metadata):
+        return "receipt-superseded-by-artifact-proof"
     return ""
+
+
+def post_exit_receipt_reason(metadata: dict[str, str]) -> str:
+    """Public view of which durable post-exit receipt this row already carries."""
+
+    return _post_exit_receipt_reason(metadata)
 
 
 def attempt_process_quiescence(
@@ -1231,6 +1282,16 @@ def attempt_process_quiescence(
         return result
     probe = attempt_tagged_descendants(metadata)
     if probe.state == "populated":
+        # A visible tagged process normally vetoes quiescence, because it may
+        # still be writing this attempt's output. A sealed artifact proof settles
+        # exactly that question the other way: the artifact on disk already
+        # matches the digest the worker itself recorded at its final artifact
+        # heartbeat, and the governed process is gone (checked above), so the
+        # survivor is leaked residue rather than the worker. Only at a terminal
+        # gate, and only with the operator-sealed proof -- an unsealed row keeps
+        # the veto.
+        if terminal_receipt and _artifact_proof_receipt(metadata):
+            return result
         return ProcessQuiescence(
             "live", "attempt-descendant-live", probe.members[0][0]
         )
@@ -1248,6 +1309,20 @@ def attempt_process_quiescence(
             return result
         return ProcessQuiescence("unverifiable", "attempt-descendant-unverifiable")
     return result
+
+
+def attempt_governed_process_quiescence(
+    metadata: dict[str, str],
+) -> ProcessQuiescence:
+    """Classify only the exact governed process, with no tagged-descendant probe.
+
+    An operator surface that has to decide whether the *worker* died needs this
+    verdict on its own: `attempt_process_quiescence` folds in the tagged-descendant
+    scan, so a leaked tagged process reads back as `live` and hides the fact that
+    the governed process itself is provably gone.
+    """
+
+    return _attempt_process_quiescence_impl(metadata)
 
 
 def _attempt_process_quiescence_impl(metadata: dict[str, str]) -> ProcessQuiescence:
@@ -4240,8 +4315,15 @@ def annotate_attempt_row_if(
     attempt_id: str,
     values: dict[str, str],
     predicate: Callable[[list[str]], bool],
+    *,
+    statuses: frozenset[str] = frozenset({"open", "running"}),
 ) -> bool:
-    """Compare-and-set mutable metadata on one exact open attempt row."""
+    """Compare-and-set mutable metadata on one exact attempt row.
+
+    Only open rows are eligible by default. A caller that repairs missing
+    post-exit evidence has to name a terminal status explicitly, because the row
+    it needs to annotate is precisely the one an ordinary annotate would skip.
+    """
 
     if not attempt_id:
         raise DispatchContractError("attempt-id-required")
@@ -4251,7 +4333,7 @@ def annotate_attempt_row_if(
         lines = jobs.read_text(encoding="utf-8", errors="replace").splitlines()
         for index, line in enumerate(lines):
             fields = line.split("\t")
-            if len(fields) != 6 or fields[1] not in {"open", "running"}:
+            if len(fields) != 6 or fields[1] not in statuses:
                 continue
             metadata = parse_registry_metadata(fields[5])
             if metadata.get("attempt_id") != attempt_id:

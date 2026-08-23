@@ -427,6 +427,27 @@ Registered model-backed jobs remain owned by the dispatching session even when t
 
 Each registered dispatch attempt also owns its summary lifecycle. While the governed worker remains behind its launch fence, the selected adapter starts one non-model summary supervisor bound to the exact attempt id, log path, and worker PID/start identity; the same registry transaction publishes that owner identity before releasing the worker. The supervisor requests one early summary, ordinary debounced updates while the exact worker lives, and one final update after log quiescence, then exits without completion, signal, retry, or launch authority. Initial and final requests may each use one durable `(harness, session, phase)` admission ticket when the ordinary rolling refresh budget is exhausted, but never bypass the provider kill switch, per-session lock, governor, or global concurrency cap. `dispatch-reconcile --apply` may idempotently restore a missing supervisor only for one open, exact, live attempt. An extinct registered namespace-local row from a pre-receipt runtime may be removed from the active Fleet set only through `dispatch-reconcile --attempt <id> --cancel-receiptless-namespace --apply`: this exact operator action records `failure_class=cancelled`, writes no PASS, marker, or reap receipt, and deliberately leaves successor readiness fail-closed. Fleet's explicit kill path likewise closes only the selected exact attempt as a typed cancellation; its wrapper remains responsible for the genuine post-exit receipt. Fleet is otherwise a pure observer of registry and stored summary sidecars: starting, refreshing, or closing Fleet never creates provider work. Interactive sessions use their runtime lifecycle bridge as the summary producer and follow the same bounded admission rules.
 
+A post-exit receipt can become permanently unissuable. The detached drain
+receipt requires `attempt-tagged-empty-v1`, so one process that escapes the
+governed process group while still carrying the attempt tag blocks that proof
+forever: `reconcile` answers `terminal-draining` with
+`marker-missing-post-exit-receipt-incomplete`, the completion join answers
+`process-unverifiable`, and a worker that reported PASS and wrote its artifact
+has no checked way back. `dispatch-reconcile --attempt <id>
+--seal-artifact-proof-receipt --apply` is the recovery, and it is completion
+evidence rather than a cancellation: it seals a typed
+`receipt-superseded-by-artifact-proof` substitute only when the artifact named by
+the exact terminal PASS envelope still hashes to the digest the worker itself
+recorded at its own last `stage-heartbeat --phase artifact`, the governed process
+is dead, and the observing session is in the namespace that recorded that PID.
+The seal writes no marker and no verdict of its own; the row still closes through
+the ordinary `reconcile` or `capability-route.py complete` path afterwards. Any
+unprovable link in that chain is a typed refusal, never a fail-open close, and a
+row that already carries a genuine receipt is refused as
+`post-exit-receipt-present`. Only this seal lets a sealed proof outrank a live
+attempt-tagged process, and only at a terminal gate — an unsealed row keeps the
+ordinary veto.
+
 Detached resource runs are first-class lab/resource jobs, not registered agent
 dispatches and not members of `jobs.log`. Every `resource-runner start`
 atomically registers its absolute run-registry path in the harness-owned global
