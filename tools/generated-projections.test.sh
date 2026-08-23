@@ -3,6 +3,13 @@
 set -eu
 export PYTHONDONTWRITEBYTECODE=1
 
+# D-42 hermeticity: the orientation case below asserts what
+# `utilities/artifact-root.sh` discovers for a fixture directory, and an
+# explicit AGENT_ARTIFACT_ROOT wins over discovery by design. Every registered
+# worker exports one, so inheriting it made this suite fail on the live session
+# instead of on the code. The fixtures supply their own roots.
+unset AGENT_ARTIFACT_ROOT AGENT_ROUTE_FILE AGENT_ROUTE_ID AGENT_ROUTE_NODE
+
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 TMP=$(mktemp -d)
 MANIFEST="$ROOT/harness-manifest.json"
