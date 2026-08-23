@@ -16,6 +16,10 @@ You are a bounded worker, not the user-facing main session.
   session identity is used automatically and no explicit guard session id is passed.
 - Write durable artifacts only under the canonical artifact root; the task
   worktree's tracked `.agent_reports`/`.claude_reports` snapshot is read-only shadow state.
+  Resolve that root as an absolute path and report the artifact as an absolute
+  path. A relative `artifact:` value resolves against the worker cwd, so the
+  terminal envelope check classifies it `outside-root` and the completed
+  attempt is discarded as a contract violation even when the file exists.
 - Put changed files, commands, results, warnings, reasoning, and unsupported
   runtime-contract details in the canonical artifact. File handoff must be
   sufficient for the next stage without conversation history.

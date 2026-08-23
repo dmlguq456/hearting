@@ -7,6 +7,12 @@ intensity, topology, or model role, and do not dispatch another registered
 worker or create dispatch depth 3. A checked runtime-native helper is allowed
 only under the bounded helper contract in `roles/worker-bootstrap.md`.
 
+An owner-level scope decision recorded in your assignment is a boundary you
+work inside, not a blocker you report. If your assigned slice completed and was
+verified, the verdict is `PASS` even when the owner deferred something you would
+otherwise have done; reserve `BLOCKED` for missing authority, input, or runtime
+state that actually stopped you.
+
 If the assignment is a declared sub-session, execute only its phase brief and
 fixed files, maintain the required state ledger, and use only its narrow verify
 command. Report a bounded handoff with completed and unfinished items. You have no
