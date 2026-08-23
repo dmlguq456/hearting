@@ -14,6 +14,8 @@ boundary: only symlinks this module itself created (targets inside our
 node root) are ever replaced; a foreign ``node`` on PATH or a foreign file
 at the expose path is reported, never touched.
 """
+from __future__ import annotations
+
 import hashlib
 import json
 import os

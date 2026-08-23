@@ -56,6 +56,19 @@
     ]
    }
   },
+  "artifact-projection-read": {
+   "group": "support",
+   "family": "support",
+   "modes": [],
+   "summary": "Read-only lookup of Cairn artifact projections through the canonical W3a contract.",
+   "invocation": {
+    "class": "model-support",
+    "use_when": "Use when an agent or operator needs to browse or query an existing Cairn artifact projection without changing artifacts or runtime state.",
+    "not_for": "Not for primary task routing, ingest, mutation, activation, deactivation, apply, migration, namespace switching, or flat-browse fallback ownership."
+   },
+   "argument_shape": "one JSON read request on stdin",
+   "requires": {"capabilities": [], "units": []}
+  },
   "audit": {
    "group": "ops",
    "family": "ops",
@@ -921,8 +934,8 @@
   ],
   "agents": [
    "memory-scout"
-  ]
- },
+   ]
+  },
  "ownership": {
   "generated": [
    "manifest.json",

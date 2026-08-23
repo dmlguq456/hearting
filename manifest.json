@@ -41,6 +41,18 @@
       "argument_hint": "<aspect> [--source <path>] [--mode init|update] [--from discover|analyze|verify|qa|output|summary] [--user-refine]"
     },
     {
+      "slug": "skill__artifact-projection-read",
+      "name": "artifact-projection-read",
+      "group": "support",
+      "fam": "support",
+      "modes": [],
+      "blurb": "Read-only lookup of Cairn artifact projections through the canonical W3a contract.",
+      "invocation_class": "model-support",
+      "use_when": "Use when an agent or operator needs to browse or query an existing Cairn artifact projection without changing artifacts or runtime state.",
+      "not_for": "Not for primary task routing, ingest, mutation, activation, deactivation, apply, migration, namespace switching, or flat-browse fallback ownership.",
+      "argument_hint": "one JSON read request on stdin"
+    },
+    {
       "slug": "skill__audit",
       "name": "audit",
       "group": "ops",
