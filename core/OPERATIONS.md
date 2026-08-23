@@ -178,7 +178,11 @@ release rotation carries its dispatch state into the successor release before
 pruning: the rotation path additively carries the previous release into the
 newly active successor even when the two-release retention floor means nothing
 will be pruned, while `_cleanup_releases` repeats the same succession check as a
-fail-closed safety net before deleting an older release. Thus an env-less
+fail-closed safety net before deleting an older release. That carry is row-wise
+and monotonic: succession merges the previous registry into the live one per
+attempt identity with terminal precedence, so it never reverts a terminal
+attempt row to open, and a merge that cannot prove that invariant writes
+nothing and keeps the candidate release. Thus an env-less
 session under the managed release never strands state merely because rotation
 did not trigger pruning — fail-closing here would instead break that established
 succession contract. Succession is not a sufficient condition for deletion: before pruning a

@@ -891,6 +891,274 @@ def _reanchor_succeeded_attempt_links(directory: Path, old_release: Path, new_re
     return ok
 
 
+_REGISTRY_CARRY_NAMES = ("jobs.log", "jobs.log.lock")
+_REGISTRY_ROW_RANK = {"open": 0, "running": 1, "done": 2}
+
+
+def _registry_row_identity(fields: list[str]) -> tuple[str, ...] | None:
+    """stdlib-only mirror of utilities/dispatch_contract.py::_row_identity."""
+    if len(fields) != 6:
+        return None
+    metadata = dict(part.split("=", 1) for part in fields[5].split(",") if "=" in part)
+    if metadata.get("attempt_id"):
+        return ("attempt", metadata["attempt_id"])
+    route_id = metadata.get("route_id")
+    route_node = metadata.get("route_node")
+    parent = metadata.get("parent")
+    if route_id and route_node and parent:
+        return ("legacy", route_id, route_node, parent, fields[4])
+    return None
+
+
+def _registry_row_rank(fields: list[str]) -> int | None:
+    """None for an unknown state word -- never let it lose a comparison."""
+    if len(fields) != 6:
+        return None
+    return _REGISTRY_ROW_RANK.get(fields[1])
+
+
+def _merge_registry_rows(
+    live_lines: list[str], stale_lines: list[str]
+) -> tuple[list[str], bool]:
+    """Pure row-wise merge. Returns (merged_lines, ok).
+
+    ``ok=False`` means "processed without losing a row, but the merge
+    cannot vouch for completeness" -- the caller must write nothing and
+    treat this the same as a copy failure (candidate release retained).
+    """
+
+    def _prepare(raw_lines: list[str]) -> tuple[list[dict], bool]:
+        prepared: list[dict] = []
+        seen_identity: dict[tuple[str, ...], int] = {}
+        dropped_duplicate = False
+        for line in raw_lines:
+            if not line.strip():
+                continue
+            fields = line.split("\t")
+            identity = _registry_row_identity(fields)
+            rank = _registry_row_rank(fields)
+            entry = {"line": line, "fields": fields, "identity": identity, "rank": rank}
+            if identity is None:
+                prepared.append(entry)
+                continue
+            if identity in seen_identity:
+                # Rule 6: two rows in one file sharing an identity is not a
+                # normal registry shape. Keep the earliest-occurring row with
+                # the highest rank as the representative and drop the rest
+                # from this file; the caller decides whether that matters.
+                index = seen_identity[identity]
+                existing_rank = prepared[index]["rank"]
+                existing_rank = -1 if existing_rank is None else existing_rank
+                new_rank = -1 if rank is None else rank
+                if new_rank > existing_rank:
+                    prepared[index] = entry
+                dropped_duplicate = True
+                continue
+            seen_identity[identity] = len(prepared)
+            prepared.append(entry)
+        return prepared, dropped_duplicate
+
+    live_rows, live_dropped_duplicate = _prepare(live_lines)
+    stale_rows, _stale_dropped_duplicate = _prepare(stale_lines)
+
+    ok = True
+    if live_dropped_duplicate:
+        # A live registry should never legitimately hold two rows for the
+        # same attempt identity -- unlike the stale side (rule 6 below),
+        # this is not an expected shape, so treat it as incomplete.
+        ok = False
+    if any(row["identity"] is None and len(row["fields"]) != 6 for row in live_rows):
+        ok = False
+    if any(row["identity"] is None and len(row["fields"]) != 6 for row in stale_rows):
+        ok = False
+    # Rule 6 asymmetry: a duplicate identity dropped from the *stale* file
+    # is never reported as data loss here, because that file's release is
+    # rmtree-d by this function's caller immediately after this call
+    # succeeds -- there is no surviving copy of the stale file for a
+    # dropped duplicate to have been the only record of, so the live
+    # registry (the sole surviving copy of record) loses nothing.
+
+    live_identity_index = {
+        row["identity"]: index
+        for index, row in enumerate(live_rows)
+        if row["identity"] is not None
+    }
+    live_literals = {row["line"] for row in live_rows}
+    merged = [row["line"] for row in live_rows]
+
+    stale_identity_seen: set[tuple[str, ...]] = set()
+    for row in stale_rows:
+        identity = row["identity"]
+        if identity is None:
+            if row["line"] not in live_literals:
+                merged.append(row["line"])
+                live_literals.add(row["line"])
+            continue
+        if identity in stale_identity_seen:
+            continue
+        stale_identity_seen.add(identity)
+        if identity in live_identity_index:
+            index = live_identity_index[identity]
+            live_rank = live_rows[index]["rank"]
+            stale_rank = row["rank"]
+            if live_rank is not None and stale_rank is not None and stale_rank > live_rank:
+                merged[index] = row["line"]
+            # Rule 5: a rank tie, or either side's rank unknown, preserves
+            # the live row untouched.
+        else:
+            merged.append(row["line"])
+            live_literals.add(row["line"])
+
+    # Rule 8 -- post-write invariants. A violation here means the rules
+    # above disagree with their own contract; refuse to write rather than
+    # let that disagreement pass silently.
+    def _identity_ranks(rows: list[dict]) -> dict[tuple[str, ...], int | None]:
+        return {row["identity"]: row["rank"] for row in rows if row["identity"] is not None}
+
+    live_identity_ranks = _identity_ranks(live_rows)
+    stale_identity_ranks = _identity_ranks(stale_rows)
+    required_identities = set(live_identity_ranks) | set(stale_identity_ranks)
+
+    merged_identity_ranks: dict[tuple[str, ...], list[int | None]] = {}
+    for line in merged:
+        fields = line.split("\t")
+        identity = _registry_row_identity(fields)
+        if identity is not None:
+            merged_identity_ranks.setdefault(identity, []).append(_registry_row_rank(fields))
+
+    if any(len(ranks) != 1 for ranks in merged_identity_ranks.values()):
+        return [], False
+    for identity in required_identities:
+        if identity not in merged_identity_ranks:
+            return [], False
+        merged_rank = merged_identity_ranks[identity][0]
+        candidate_ranks = [
+            rank
+            for rank in (live_identity_ranks.get(identity), stale_identity_ranks.get(identity))
+            if rank is not None
+        ]
+        # An unranked merged row (unrecognized state word) is a legitimate
+        # rule-5 outcome -- e.g. live keeps a row whose own state word this
+        # merge does not recognize rather than comparing it away -- so a
+        # None merged rank is excluded from this check the same way a None
+        # live/stale rank is excluded from `candidate_ranks` above.
+        if candidate_ranks and merged_rank is not None and merged_rank < max(candidate_ranks):
+            return [], False
+
+    required_literals = {row["line"] for row in live_rows if row["identity"] is None} | {
+        row["line"] for row in stale_rows if row["identity"] is None
+    }
+    if not required_literals <= set(merged):
+        return [], False
+
+    return merged, ok
+
+
+@contextlib.contextmanager
+def _registry_lock(jobs: Path):
+    """flock the registry's `<jobs>.lock`, mirroring `_distribution_lock()`."""
+    jobs.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = Path(f"{jobs}.lock")
+    if lock_path.is_symlink():
+        raise OSError(f"dispatch registry lock must not be a symlink: {lock_path}")
+    handle = lock_path.open("a+b")
+    try:
+        try:
+            import fcntl
+
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        except ImportError:
+            import msvcrt
+
+            msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+        yield
+    finally:
+        try:
+            if "fcntl" in sys.modules:
+                sys.modules["fcntl"].flock(handle.fileno(), sys.modules["fcntl"].LOCK_UN)
+        finally:
+            handle.close()
+
+
+def _atomic_registry_write(jobs: Path, lines: list[str]) -> None:
+    """stdlib mirror of `dispatch_contract._atomic_registry_replace`."""
+    fd, tmp_name = tempfile.mkstemp(prefix=f".{jobs.name}.carry-", dir=str(jobs.parent))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as registry:
+            registry.write("\n".join(lines) + "\n" if lines else "")
+            registry.flush()
+            os.fsync(registry.fileno())
+        os.replace(tmp_name, jobs)
+        dir_fd = os.open(str(jobs.parent), os.O_RDONLY)
+        try:
+            os.fsync(dir_fd)
+        finally:
+            os.close(dir_fd)
+    finally:
+        try:
+            os.unlink(tmp_name)
+        except FileNotFoundError:
+            pass
+
+
+def _succeed_registry_rows(stale_jobs: Path, live_jobs: Path) -> bool:
+    """Merge `stale_jobs` into `live_jobs` row-wise with terminal precedence,
+    instead of the byte-copy `_succeed_dispatch_state` uses for every other
+    file under `.dispatch`. A byte copy either skips the whole live registry
+    (destination exists) or clobbers it outright; neither preserves rows the
+    live registry gained after the stale snapshot was taken. Never holds
+    both registries' locks at once: the stale file is read and released
+    before the live lock is acquired, so there is no lock-ordering deadlock
+    surface with any other reader/writer of these two files.
+    """
+    if not stale_jobs.is_file():
+        return True
+
+    def _reject(reason: str) -> None:
+        print(
+            "harness release: dispatch registry carry-forward rejected for "
+            f"{stale_jobs}: {reason}",
+            file=sys.stderr,
+        )
+
+    try:
+        with _registry_lock(stale_jobs):
+            stale_text = stale_jobs.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        _reject("stale-unreadable")
+        return False
+
+    try:
+        with _registry_lock(live_jobs):
+            try:
+                live_text = (
+                    live_jobs.read_text(encoding="utf-8", errors="replace")
+                    if live_jobs.is_file()
+                    else ""
+                )
+            except OSError:
+                _reject("live-unreadable")
+                return False
+            merged, ok = _merge_registry_rows(live_text.splitlines(), stale_text.splitlines())
+            if not ok:
+                # Rule 3/6 malformed-row rejections and rule 8 invariant
+                # failures both collapse to this single boolean from
+                # _merge_registry_rows; there is no finer-grained "reason"
+                # signal to report than the fact that the merge could not
+                # vouch for completeness.
+                _reject("merge-invariant-violated")
+                return False
+            try:
+                _atomic_registry_write(live_jobs, merged)
+            except OSError:
+                _reject("write-failed")
+                return False
+    except OSError:
+        _reject("lock-unavailable")
+        return False
+    return True
+
+
 def _succeed_dispatch_state(candidate: Path) -> bool:
     """Carry a pruned release's `.dispatch` tree forward into the live
     release before the candidate is deleted.
@@ -904,7 +1172,9 @@ def _succeed_dispatch_state(candidate: Path) -> bool:
     core/OPERATIONS.md P0 §5.12 says must never happen. Copying is
     additive-only: anything already present under the live release's
     `.dispatch` wins, so an in-progress writer on the live release can never
-    be clobbered by a stale copy.
+    be clobbered by a stale copy -- except the registry itself, which is
+    merged row-wise with terminal precedence so a carried snapshot can
+    never revert a live terminal row to open.
 
     Returns False if any file failed to copy, so the caller can leave the
     candidate release in place instead of rmtree-ing state that was never
@@ -926,7 +1196,10 @@ def _succeed_dispatch_state(candidate: Path) -> bool:
     for source in stale_dispatch.rglob("*"):
         if not source.is_file():
             continue
-        destination = live_dispatch / source.relative_to(stale_dispatch)
+        relative = source.relative_to(stale_dispatch)
+        if relative.as_posix() in _REGISTRY_CARRY_NAMES:
+            continue
+        destination = live_dispatch / relative
         if destination.exists():
             continue
         try:
@@ -936,6 +1209,10 @@ def _succeed_dispatch_state(candidate: Path) -> bool:
             ok = False
             continue
         touched_dirs.add(destination.parent)
+    if not _succeed_registry_rows(
+        stale_dispatch / "jobs.log", live_dispatch / "jobs.log"
+    ):
+        ok = False
     # Review V-1: a retry pass copies nothing (every destination already
     # exists), so re-anchor verification must not be derived from the copy
     # set alone -- that let a first-pass failure (malformed or unwritable

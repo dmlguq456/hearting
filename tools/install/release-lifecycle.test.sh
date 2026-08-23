@@ -870,24 +870,30 @@ if d.current_path().exists() or d.current_path().is_symlink():
     d.current_path().unlink()
 d.current_path().symlink_to(newest)
 
-def write_open_row(release, launch_home):
+def write_open_row(release, launch_home, attempt_id):
     jobs_log = release / ".dispatch" / "jobs.log"
     jobs_log.parent.mkdir(parents=True, exist_ok=True)
     row = (
         f"{time.time()}\topen\trepo\t/tmp/wt\tslug\t"
-        f"attempt_id=att-inuse,launch_home={launch_home}\n"
+        f"attempt_id={attempt_id},launch_home={launch_home}\n"
     )
     jobs_log.write_text(row)
     return jobs_log
 
 # Case A: an open row in the oldest release's own registry names that same
 # release as its launch_home -- it must be preserved, not pruned.
-jobs_log = write_open_row(oldest, str(oldest.resolve()))
+# Rotation-carry-fidelity plan (2026-08-23) §2.3②: these two rows use
+# distinct attempt identities -- with the registry-carry merge now keyed by
+# attempt identity, sharing one identity across two different releases'
+# candidate rows would let a later rank comparison between them decide an
+# outcome neither in-use assertion below actually inspects, which is not
+# what this fixture exists to test.
+jobs_log = write_open_row(oldest, str(oldest.resolve()), "att-inuse-self")
 # Counter-case (same cleanup pass, so both assertions are proven against the
 # identical retention/floor arithmetic): a DIFFERENT candidate whose own open
 # row's launch_home= points at yet another release must not be pinned by it.
 other = release_dirs[1]
-write_open_row(other, str(release_dirs[2].resolve()))
+write_open_row(other, str(release_dirs[2].resolve()), "att-inuse-other")
 
 d._cleanup_releases(keep=set())
 
