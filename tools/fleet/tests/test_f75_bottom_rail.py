@@ -258,6 +258,20 @@ class CardIntegrationTest(unittest.TestCase):
                 self.assertLessEqual(render._dw(row), width,
                                      "width %d overrun: %r" % (width, row))
 
+    def test_wide_unframed_orphan_route_never_overruns_the_terminal(self):
+        """F-83's exact user-visible shape: open orphan row plus a long route."""
+        width = 140
+        job = _owner()
+        job.parent_sid = "missing-session"
+        job.is_child = True
+        job._parent_edge_sid = None
+        job._parent_edge_promoted_orphan = True
+        rows = [re.sub(r"\x00[^\x00]*\x00", "", _text(line)) for line in
+                render._build_lines([], [job], "both", False, 0,
+                                    layout="wide", term_width=width) if line]
+        self.assertTrue(any("(orphan)" in row and "f75-owner" in row for row in rows))
+        self.assertFalse([row for row in rows if render._dw(row) > width])
+
     def test_one_node_route_leaves_the_rail_bare(self):
         """A one-node route is not a pipeline: its breadcrumb would spell the owner row's
         own compact token a second time (the F-37 single-render contract)."""
@@ -295,6 +309,61 @@ class CardIntegrationTest(unittest.TestCase):
                 for row in rows:
                     if any(mark in row for mark in ("╭", "│", "├", "╰")):
                         self.assertLessEqual(render._dw(row), width)
+
+    def test_reconciling_child_folds_but_gate_ellipsis_stays_on_route(self):
+        """A terminal worker row is not a second copy of its unresolved completion gate."""
+        from fleet.model import Session
+        route_seq = [("plan-check", "reconciling"), ("execute", "pending")]
+        for width in (180, 100, 60):
+            with self.subTest(width=width):
+                job = _owner(route_seq=route_seq, done=0, total=2)
+                child = DispatchJob(
+                    key="code-plan-check", slug="compile-standard-plan-check", cwd="/tmp/f75",
+                    harness="claude", depth=2, liveness="stale", status="open",
+                    parent_slug="f75-owner", is_child=True,
+                    work_projection=WorkProjection(
+                        source="route-exact", route_id="rt-f75", route_node="plan-check",
+                        node_state="reconciling", stage_label="code-plan-check",
+                    ),
+                )
+                session = Session(harness="claude", pid=914, proc_start="root", cwd="/tmp/f75",
+                                  session_id="sid-f75e", slug="f75-parent", liveness="working")
+                job.parent_sid, job.is_child = "sid-f75e", True
+                rows = [re.sub(r"\x00[^\x00]*\x00", "", _text(line)) for line in
+                        render._build_lines(
+                            [session], [job, child], "both", False, 0,
+                            layout=render._layout_mode(width), term_width=width) if line]
+                joined = "\n".join(rows)
+                self.assertNotIn("compile-standard-plan-check", joined)
+                self.assertRegex(joined, r"plan-check\s+\u2026")
+
+    def test_stale_open_child_with_exact_done_node_folds_to_checkmark(self):
+        """A completion marker can settle the route before an old registry row is reconciled."""
+        child = DispatchJob(
+            key="code-test", slug="compile-standard-test", cwd="/tmp/f75",
+            harness="claude", depth=2, liveness="stale", status="open",
+            parent_slug="f75-owner", is_child=True,
+            work_projection=WorkProjection(
+                source="route-exact", route_id="rt-f75", route_node="test",
+                node_state="done", stage_label="code-test",
+            ),
+        )
+        self.assertTrue(render._fold_completed_child(child))
+
+    def test_generic_stale_child_does_not_fold_as_reconciling(self):
+        """Only the exact route projection may hide a stale physical row."""
+        job = _owner()
+        child = DispatchJob(key="code-test", slug="generic-stale-child", cwd="/tmp/f75",
+                            harness="claude", depth=2, liveness="stale", status="open",
+                            parent_slug="f75-owner", is_child=True)
+        from fleet.model import Session
+        session = Session(harness="claude", pid=915, proc_start="root", cwd="/tmp/f75",
+                          session_id="sid-f75f", slug="f75-parent", liveness="working")
+        job.parent_sid, job.is_child = "sid-f75f", True
+        joined = "\n".join(_text(line) for line in render._build_lines(
+            [session], [job, child], "both", False, 0,
+            layout="wide", term_width=180) if line)
+        self.assertIn("generic-stale-child", joined)
 
     def test_breadcrumb_appears_exactly_once_when_descendants_are_live(self):
         # D9: a card WITH a surviving descendant must not duplicate the breadcrumb between

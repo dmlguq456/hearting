@@ -24,12 +24,13 @@ class FakeScreen:
 
     def __init__(self, h=24, w=168):
         self.h, self.w = h, w
+        self.erase_count = 0
 
     def getmaxyx(self):
         return self.h, self.w
 
     def erase(self):
-        pass
+        self.erase_count += 1
 
     def addstr(self, row, col, text, attr=0):
         pass
@@ -88,6 +89,14 @@ class MouseSelectionTest(MouseEnv):
                           liveness="working", title="live")
         working.proc_start = "222"
         return [unused, working]
+
+    def test_each_refresh_erases_the_complete_previous_frame(self):
+        """A terminal row that disappears cannot leave an old-format or input fragment."""
+        scr = FakeScreen()
+        with mock.patch.object(render.curses, "doupdate"):
+            render._draw(scr, self._rows(), [], "fleet", 0)
+            render._draw(scr, [], [], "fleet", 0)
+        self.assertEqual(scr.erase_count, 2)
 
     def test_row_click_selects_and_highlights(self):
         self._draw_once(self._rows())

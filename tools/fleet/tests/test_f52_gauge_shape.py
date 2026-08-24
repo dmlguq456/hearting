@@ -114,6 +114,51 @@ class F52bTrackLengthTest(unittest.TestCase):
                          render._gauge_segs(50, 99, track=render._GAUGE_W))
 
 
+class AbsoluteContextTest(unittest.TestCase):
+    def test_wide_detail_compares_active_tokens_with_the_window(self):
+        session = Session(harness="claude", pid=1, cwd="/x", liveness="working",
+                          ctx_pct=38, active_context_tokens=380000,
+                          context_window_tokens=1000000, summary="working now")
+        row = render._context_detail_row(session, term_width=168)[0]
+        text = "".join(value for value, _key in row)
+        self.assertIn("38%  380K/1M", text)
+        self.assertLessEqual(render._dw(text), 168)
+
+    def test_absolute_context_yields_whole_when_the_row_is_tight(self):
+        session = Session(harness="claude", pid=1, cwd="/x", liveness="working",
+                          ctx_pct=47, active_context_tokens=100000,
+                          context_window_tokens=200000, summary="working now")
+        for width in (20, 22, 24):
+            with self.subTest(width=width):
+                text = "".join(value for value, _key in
+                               render._context_detail_row(session, term_width=width)[0])
+                self.assertNotIn("100K/200K", text)
+                self.assertLessEqual(render._dw(text), width)
+
+    def test_absolute_context_requires_both_real_measurements(self):
+        for active, window in ((None, 1000000), (380000, None), (True, 1000000)):
+            with self.subTest(active=active, window=window):
+                session = Session(harness="claude", pid=1, cwd="/x", liveness="idle",
+                                  ctx_pct=38, active_context_tokens=active,
+                                  context_window_tokens=window)
+                text = "".join(value for value, _key in
+                               render._context_detail_row(session, term_width=168)[0])
+                self.assertNotIn("/", text)
+
+
+class MainOwnershipWeightTest(unittest.TestCase):
+    def test_child_count_uses_the_main_session_name_hue_in_wide_and_narrow(self):
+        session = Session(harness="claude", pid=1, cwd="/x", liveness="working",
+                          slug="main")
+        expected = render._NAME_KEY["claude"]
+        wide = render._session_row(session, narrow=False, is_parent=True, child_count=3)
+        narrow = render._session_row_2line(
+            session, is_parent=True, child_count=3, term_width=80)[0]
+        for row in (wide, narrow):
+            self.assertIn((" ▾3", expected), row)
+            self.assertNotIn((" ▾3", "dim"), row)
+
+
 class F52cLivenessLeadTest(unittest.TestCase):
     """F-52c's lead-cell SLOT, as corrected by F-55/F-55a/F-55b (v39/v40): the cell holds the
     state WORD, not a glyph. Its position, color source and legend policy are still F-52c's."""

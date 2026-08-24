@@ -19,13 +19,21 @@ import importlib.util
 import os
 import sys
 import unittest
+from pathlib import Path
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 from fleet import render                                      # noqa: E402
 
 
-REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
+def _repo_root():
+    for candidate in Path(__file__).resolve().parents:
+        if (candidate / "core" / "CORE.md").is_file():
+            return str(candidate)
+    raise RuntimeError("repository root not found")
+
+
+REPO = _repo_root()
 
 
 def _nodes(*specs):
@@ -128,10 +136,7 @@ class CompilerStillTagsTest(unittest.TestCase):
     keep writing the tag, or every future route would quietly rely on shape alone."""
 
     def _expand(self, intensity):
-        path = os.path.join(REPO, "hearting", "utilities", "capability-route.py")
-        if not os.path.isfile(path):
-            path = os.path.join(os.path.dirname(__file__), "..", "..", "..",
-                                "utilities", "capability-route.py")
+        path = os.path.join(REPO, "utilities", "capability-route.py")
         path = os.path.abspath(path)
         if not os.path.isfile(path):
             self.skipTest("capability-route.py not reachable from this checkout")

@@ -1086,18 +1086,15 @@ def _summary_failures(sidecar):
     return max(0, min(len(SUMMARY_RETRY_DELAYS), value))
 
 
-def _resolve_command(prompt, model=None):
-    """First installed provider in the cascade, as (argv, stdin_text, output_file).
+def _resolve_commands(prompt, model=None):
+    """Installed providers in fallback order as command triples.
 
-    Walks `selected_providers()` and stops at the first one whose executable is actually
-    on this machine, so a host with only one harness installed still produces titles
-    instead of silently going blank. `FLEET_TITLE_COMMAND` short-circuits the whole
-    cascade — an operator naming an exact command means it, and it keeps the existing
-    argv-template contract. Returns an empty argv when nothing is available; the caller
-    already treats that as "no provider" and degrades to "".
+    An operator-pinned provider or custom command is intentionally a one-item list. The
+    automatic selector retains every installed candidate so an empty, failed, or timed-out
+    first provider can fall through without spending another global capacity/start ticket.
     """
     if os.environ.get("FLEET_TITLE_COMMAND"):
-        return worker_argv(prompt, model=model), None, None
+        return [(worker_argv(prompt, model=model), None, None)]
     # `FLEET_TITLE_MODEL` is documented in INSTALL_LAYOUT.md as a per-run override, but
     # it only ever reached `worker_argv` above — the provider path re-resolved the model
     # from models.conf and ignored it, so on every normal run the variable was dead.
@@ -1108,22 +1105,29 @@ def _resolve_command(prompt, model=None):
     # of truth for the unpinned cascade.
     pinned = (os.environ.get("FLEET_TITLE_PROVIDER") or "").strip().lower()
     override = os.environ.get("FLEET_TITLE_MODEL") or None
+    commands = []
     for adapter in selected_providers():
         adapter_model = model
         if adapter_model is None and override and adapter == pinned:
             adapter_model = override
         command = provider_command(adapter, prompt, model=adapter_model)
         if command and _executable_available(command[0]):
-            return command
-    return [], None, None
+            commands.append(command)
+    return commands
+
+
+def _resolve_command(prompt, model=None):
+    """Compatibility view: the first installed command, or an empty command triple."""
+    commands = _resolve_commands(prompt, model=model)
+    return commands[0] if commands else ([], None, None)
 
 
 def run_worker(prompt, model=None, timeout=WORKER_TIMEOUT, capacity_held=False):
-    """Run the configured title provider with no shell; failures degrade to ``''``."""
+    """Run the title-provider cascade with no shell; all failures degrade to ``''``."""
     if refresh_disabled():
         return ""
-    argv, stdin_text, out_file = _resolve_command(prompt, model=model)
-    if not _executable_available(argv):
+    commands = _resolve_commands(prompt, model=model)
+    if not commands:
         return ""
     owned_slot = None
     if not capacity_held:
@@ -1160,32 +1164,55 @@ def run_worker(prompt, model=None, timeout=WORKER_TIMEOUT, capacity_held=False):
         governor_module = importlib.util.module_from_spec(spec); spec.loader.exec_module(governor_module)
         governor_root = governor_module.default_root()
         governor_token = governor_module.acquire(governor_root, "title")
-        result = subprocess.run(
-            argv,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            env=env,
-            input=stdin_text,
-            stdin=None if stdin_text is not None else subprocess.DEVNULL,
-            shell=False,
-        )
-        if result.returncode != 0:
-            return ""
-        if out_file is None:
-            return result.stdout or ""
-        # codex answers into a file rather than on stdout; a zero exit with no file is
-        # an empty answer, not an error, so it degrades to "" like every other miss.
-        try:
-            text = Path(out_file).read_text(encoding="utf-8", errors="replace")
-        except OSError:
-            return ""
-        finally:
+        # `timeout` remains one total bound. Divide the remaining wall-clock budget across
+        # remaining candidates so a stuck leader cannot consume the fallback's entire turn.
+        deadline = time.monotonic() + max(0.0, float(timeout))
+        for index, (argv, stdin_text, out_file) in enumerate(commands):
+            remaining = max(0.0, deadline - time.monotonic())
+            remaining_candidates = len(commands) - index
+            if remaining <= 0:
+                break
+            attempt_timeout = max(0.001, remaining / remaining_candidates)
+            if out_file is not None:
+                # A prior interrupted Codex call can leave this pid-scoped file behind.
+                # Never accept that stale answer as the next attempt's output.
+                try:
+                    Path(out_file).unlink()
+                except OSError:
+                    pass
             try:
-                Path(out_file).unlink()
-            except OSError:
-                pass
-        return text
+                result = subprocess.run(
+                    argv,
+                    capture_output=True,
+                    text=True,
+                    timeout=attempt_timeout,
+                    env=env,
+                    input=stdin_text,
+                    stdin=None if stdin_text is not None else subprocess.DEVNULL,
+                    shell=False,
+                )
+                if result.returncode != 0:
+                    continue
+                if out_file is None:
+                    text = result.stdout or ""
+                else:
+                    try:
+                        text = Path(out_file).read_text(encoding="utf-8", errors="replace")
+                    except OSError:
+                        text = ""
+                if text.strip():
+                    return text
+            except Exception:
+                # Provider failures are isolated. The next selected runtime gets the
+                # remaining bounded budget; a pinned/custom one simply exhausts the list.
+                continue
+            finally:
+                if out_file is not None:
+                    try:
+                        Path(out_file).unlink()
+                    except OSError:
+                        pass
+        return ""
     except Exception:
         return ""
     finally:

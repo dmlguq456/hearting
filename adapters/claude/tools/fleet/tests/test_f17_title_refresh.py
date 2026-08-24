@@ -13,6 +13,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 _TOOLS_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 if _TOOLS_DIR not in sys.path:
@@ -46,6 +47,7 @@ class _ConfigHomeMixin:
         self._old_safety_env = {key: os.environ.get(key) for key in (
             "FLEET_TITLE_DISABLE", "FLEET_TITLE_CONCURRENCY", "FLEET_TITLE_MAX_STARTS",
             "FLEET_TITLE_PRIORITY_MAX_STARTS", "FLEET_TITLE_COMMAND",
+            "FLEET_TITLE_PROVIDER",
             "AGENT_MODEL_GOVERNOR_ROOT", "HARNESS_CAPACITY_SCORES",
             "HARNESS_CAPACITY_BIAS", "DISPATCH_DEFAULTS_CONFIG",
             "AGENT_DISPATCH_JOBS",
@@ -763,6 +765,53 @@ class DeltaOffsetTest(_ConfigHomeMixin, unittest.TestCase):
 
 
 class SecurityTest(_ConfigHomeMixin, unittest.TestCase):
+
+    class _Completed:
+        def __init__(self, stdout="", returncode=0):
+            self.stdout = stdout
+            self.returncode = returncode
+
+    def test_automatic_cascade_falls_through_an_empty_answer(self):
+        commands = [(["first"], None, None), (["second"], None, None)]
+        with mock.patch.object(rt, "_resolve_commands", return_value=commands), \
+             mock.patch.object(subprocess, "run", side_effect=[
+                 self._Completed("   "), self._Completed("Fallback title")
+             ]) as run:
+            self.assertEqual(rt.run_worker("prompt", timeout=30), "Fallback title")
+        self.assertEqual([call.args[0][0] for call in run.call_args_list], ["first", "second"])
+
+    def test_automatic_cascade_falls_through_a_timeout_within_one_total_bound(self):
+        commands = [(["first"], None, None), (["second"], None, None)]
+        with mock.patch.object(rt, "_resolve_commands", return_value=commands), \
+             mock.patch.object(subprocess, "run", side_effect=[
+                 subprocess.TimeoutExpired(["first"], 10),
+                 self._Completed("Recovered title"),
+             ]) as run:
+            self.assertEqual(rt.run_worker("prompt", timeout=30), "Recovered title")
+        budgets = [call.kwargs["timeout"] for call in run.call_args_list]
+        self.assertEqual(len(budgets), 2)
+        self.assertGreater(budgets[0], 0)
+        self.assertLessEqual(budgets[0], 15.01)
+        self.assertLessEqual(budgets[1], 30.01)
+
+    def test_pinned_provider_never_cascades_to_another_runtime(self):
+        os.environ["FLEET_TITLE_PROVIDER"] = "claude"
+        with mock.patch.object(rt, "provider_command",
+                               side_effect=lambda adapter, *_a, **_k: ([adapter], None, None)), \
+             mock.patch.object(rt, "_executable_available", return_value=True), \
+             mock.patch.object(subprocess, "run", return_value=self._Completed("", 1)) as run:
+            self.assertEqual(rt.run_worker("prompt", timeout=30), "")
+        self.assertEqual(run.call_count, 1)
+        self.assertEqual(run.call_args.args[0], ["claude"])
+
+    def test_automatic_cascade_returns_empty_after_every_provider_fails(self):
+        commands = [(["first"], None, None), (["second"], None, None)]
+        with mock.patch.object(rt, "_resolve_commands", return_value=commands), \
+             mock.patch.object(subprocess, "run", side_effect=[
+                 self._Completed("", 1), self._Completed("\n")
+             ]) as run:
+            self.assertEqual(rt.run_worker("prompt", timeout=30), "")
+        self.assertEqual(run.call_count, 2)
 
     def test_injection_payload_cannot_execute(self):
         with tempfile.TemporaryDirectory() as tmp:

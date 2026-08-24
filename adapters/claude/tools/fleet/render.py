@@ -1747,7 +1747,10 @@ def _session_row(s, narrow, is_parent=False, child_count=0, name_width=None,
     if is_parent and child_count:
         child_tag = " ▾%d" % child_count
         if _dw(child_tag) < avail:
-            suffix.append((child_tag, "dim"))
+            # Ownership is hierarchy, not telemetry. Keep the compact shape but give it
+            # the same harness hue as the main-session name so it remains legible beside
+            # the deliberately dim dispatch card without adding a badge or another row.
+            suffix.append((child_tag, name_key))
             suffix_w += _dw(child_tag)
     # F-26: the unused badge outranks the provenance tag — it is the whole reason the
     # row is surfaced, so it is the last identity tag to drop, not the first.
@@ -2734,7 +2737,7 @@ def _session_row_2line(s, is_parent=False, child_count=0, _split=False, term_wid
     l1 = [("  ", None), (gch, gkey), (" ", None), (_pad(hn, _HW), hkey)]
     suffix = []
     if is_parent and child_count:
-        suffix.append((" ▾%d" % child_count, "dim"))
+        suffix.append((" ▾%d" % child_count, name_key))
     unused_at = None
     if live == "unused":                       # F-26 parity with the wide row
         unused_at = len(suffix)
@@ -3307,7 +3310,29 @@ def _select_entry_job(j, line_idx):
             "label": j.slug or j.key, "harness": j.harness, "source": j.source,
             "is_worker": bool(getattr(j, "is_child", False))}
 _FOLD_CHILD_LIVENESS = {"done"}   # Completed depth-2 rows fold into the owner breadcrumb.
+_FOLD_CHILD_ROUTE_STATES = {"done", "reconciling"}
                                   # Queued/idle/unknown remain visible execution identities.
+
+
+def _fold_completed_child(job):
+    """Whether a depth-2 execution row has no state left beyond the route breadcrumb.
+
+    A clean ``done`` row has always folded here.  An exact route projection can also establish
+    that a stale/open registry row belongs to a completed node, or to a ``reconciling`` node
+    whose worker emitted terminal evidence and exited while the owner has not published its
+    completion marker yet.  Keep the route verdict (``check`` or yellow ``...``) on the
+    breadcrumb, but do not retain a duplicate dim ``done`` worker row for the whole
+    continuation.  Generic stale/dead rows never qualify -- they may be failures and must remain
+    visible.
+    """
+    if getattr(job, "liveness", None) in _FOLD_CHILD_LIVENESS:
+        return True
+    projection = getattr(job, "work_projection", None)
+    return (
+        getattr(job, "liveness", None) == "stale"
+        and getattr(projection, "source", None) == "route-exact"
+        and getattr(projection, "node_state", None) in _FOLD_CHILD_ROUTE_STATES
+    )
 # The detached (owner-off-screen) variant of the fold above. Wider than in-card `done` on
 # purpose: inside a card, `stale`/`dead` still read against their owner's context, but with
 # the owner gone there is nothing to monitor and no card to belong to — done, stale and dead
@@ -3622,6 +3647,28 @@ def _context_lead_cell(state, dim=False, degrade=False):
     return state.ljust(_CTX_LEAD_W) + " ", key
 
 
+def _compact_token_count(value):
+    """A width-stable absolute context count (``380K``, ``1M``), or ``None``."""
+    if (not isinstance(value, (int, float)) or isinstance(value, bool)
+            or not math.isfinite(value) or value < 0):
+        return None
+    value = int(value)
+    for scale, suffix in ((1000000, "M"), (1000, "K")):
+        if value >= scale:
+            amount = value / float(scale)
+            if amount >= 10 or value % scale == 0:
+                return "%d%s" % (int(round(amount)), suffix)
+            return ("%.1f" % amount).rstrip("0").rstrip(".") + suffix
+    return str(value)
+
+
+def _context_absolute_text(entity):
+    """Comparable active/window token text only when both measurements are real."""
+    active = _compact_token_count(getattr(entity, "active_context_tokens", None))
+    window = _compact_token_count(getattr(entity, "context_window_tokens", None))
+    return "%s/%s" % (active, window) if active is not None and window is not None else None
+
+
 def _context_detail_row(entity, depth=0, term_width=None, dim=False,
                         indent_width=None, muted=False, now_key="now_sub"):
     """One ``<liveness> <gauge> <value>   NOW`` row for every live card.
@@ -3664,6 +3711,15 @@ def _context_detail_row(entity, depth=0, term_width=None, dim=False,
     else:
         value_text = "%d%%" % shown_pct
     segs.append((value_text.rjust(_CONTEXT_VALUE_W), "dim"))
+    # Absolute active/window tokens make 38% on a 1M model and 47% on a 200K model
+    # directly comparable. They reuse this existing detail line and yield whole before
+    # NOW (or the liveness word) needs to move, so narrow layouts never grow or overrun.
+    absolute_text = _context_absolute_text(entity)
+    prefix_width = sum(_dw(text) for text, _key in segs)
+    if absolute_text:
+        absolute_seg = "  " + absolute_text
+        if prefix_width + _dw(absolute_seg) <= (term_width or _SUMMARY_FALLBACK_W):
+            segs.append((absolute_seg, "dim"))
     exec_segs = _exec_detail_segs(entity)
     if now_text or exec_segs:
         prefix_width = sum(_dw(text) for text, _key in segs)
@@ -5234,7 +5290,7 @@ def _build_lines(sessions, jobs, section, narrow, malformed, layout="wide", memo
                 # conductor breadcrumb. A registered queued/idle/unknown child
                 # is still execution identity and must keep its own row.
                 if (max(1, int(getattr(sub, "depth", 1) or 1)) >= 2 and not _SHOW_ALL
-                        and sub.liveness in _FOLD_CHILD_LIVENESS):
+                        and _fold_completed_child(sub)):
                     continue
                 _emit_dispatch_tree(sub, parent_model=job.model or parent_model,
                                     parent_harness=job.harness or parent_harness,

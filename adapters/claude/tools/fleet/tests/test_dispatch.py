@@ -233,6 +233,34 @@ class RenderDispatchPresentationTest(unittest.TestCase):
             keys = [k for p, k in leg if p == render._RAIL_MID]
             self.assertEqual(keys, ["frm_idle"])
 
+    def test_f67_narrow_and_stack_owner_stage_pulses_from_child_activity(self):
+        """The compact layouts must pass the same unit-working bit as wide.
+
+        A stale conductor with a working depth-2 child is the real standard+ shape that
+        exposed this gap: testing the frame alone would pass even if the owner's stage
+        token stayed frozen.
+        """
+        for width, layout in ((80, "narrow"), (60, "stack")):
+            with self.subTest(width=width, layout=layout):
+                parent, owner, child = self._rail_fixture(owner_liveness="stale")
+                owner.stage = "exec"
+                for blink, expected in ((True, "stg0_on"), (False, "stg0_off")):
+                    old = render._BLINK_ON
+                    try:
+                        render._BLINK_ON = blink
+                        lines = render._build_lines(
+                            [parent], [owner, child], section="both", narrow=False,
+                            malformed=0, layout=layout, term_width=width)
+                    finally:
+                        render._BLINK_ON = old
+                    top = next(i for i, line in enumerate(lines)
+                               if line and "rail-owner" in "".join(p for p, _k in line))
+                    divider = next(i for i, line in enumerate(lines[top:], top)
+                                   if line and "├" in "".join(p for p, _k in line))
+                    owner_keys = [key for line in lines[top:divider]
+                                  for _part, key in (line or [])]
+                    self.assertIn(expected, owner_keys)
+
     def test_f66_entire_frame_uses_the_owner_rail_color(self):
         for blink, expected in ((True, "frm0"), (False, "frm0")):
             lines = self._rail_lines(blink=blink)

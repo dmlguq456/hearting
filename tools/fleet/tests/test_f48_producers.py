@@ -13,7 +13,14 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 from fleet import interaction  # noqa: E402
 
 
-ROOT = Path(__file__).resolve().parents[3]
+def _repo_root():
+    for candidate in Path(__file__).resolve().parents:
+        if (candidate / "core" / "CORE.md").is_file():
+            return candidate
+    raise RuntimeError("repository root not found")
+
+
+ROOT = _repo_root()
 CLAUDE = ROOT / "adapters/claude/hooks/fleet-interaction-state.py"
 CODEX_SET = ROOT / "adapters/codex/hooks/permissionrequest-lifecycle.py"
 CODEX_CLEAR = ROOT / "adapters/codex/hooks/posttooluse-interaction-clear.py"

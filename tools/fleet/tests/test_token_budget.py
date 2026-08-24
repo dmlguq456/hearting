@@ -43,7 +43,14 @@ from fleet.token_accounting import (  # noqa: E402
 )
 
 
-ROOT = Path(_TOOLS_DIR).parent
+def _repo_root():
+    for candidate in Path(__file__).resolve().parents:
+        if (candidate / "core" / "CORE.md").is_file():
+            return candidate
+    raise RuntimeError("repository root not found")
+
+
+ROOT = _repo_root()
 CLI = ROOT / "utilities" / "token-budget.py"
 SID = "12345678-1234-1234-1234-123456789abc"
 
