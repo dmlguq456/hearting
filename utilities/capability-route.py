@@ -32,6 +32,7 @@ from dispatch_contract import (
 )
 from stage_session_contract import load_manifest
 from dispatch_degradation import record_degradation  # noqa: E402
+from replica_batch_contract import verify_manifest as verify_batch_manifest  # noqa: E402
 ORDER = {"direct":0,"quick":1,"standard":2,"strong":3,"thorough":4,"adversarial":5}
 TRACKING = {"tracked", "untracked"}
 GATE_FIELDS = {"spec_read", "drift_verdict", "workflow_mode", "artifact_guard"}
@@ -55,6 +56,18 @@ DISPATCH_CONTRACT_VERSION = 3
 FALLBACK_ORDER = ["same-harness-headless", "cross-harness-headless", "native-subagent", "inline"]
 ROUTE_SCHEMA_VERSION = 2
 VALIDATION_BASIS_VERSION = 1
+LAUNCH_COMPATIBILITY_TUPLE_VERSION = 1
+CONTINUATION_CONTRACT_VERSION = 1
+_LAUNCH_CODE_ANCHORS = (
+    "core/CORE.md",
+    "harness-manifest.json",
+    "capabilities/topologies.json",
+    "manifest.json",
+)
+_LAUNCH_ROOT_IDENTITY_CACHE = {}
+_LAUNCH_CONTENT_DIGEST_CACHE = {}
+_LAUNCH_SOURCE_REVISION_CACHE = {}
+_RUNTIME_ACTIVATION = None
 # Only dispatch-depth-2 nodes receive a checked `fallback_hops` chain, so they are
 # the sole consumers of `dispatch_evidence.tuples`.
 EVIDENCE_CONSUMER_DISPATCH_DEPTH = 2
@@ -112,6 +125,645 @@ def canonical(payload):
 def route_hash(payload):
     bare={k:v for k,v in payload.items() if k not in ("route_hash","route_id")}
     return "sha256:"+hashlib.sha256(canonical(bare)).hexdigest()
+
+def _runtime_activation_module():
+    """Load the installer identity implementation without copying its convention."""
+    global _RUNTIME_ACTIVATION
+    if _RUNTIME_ACTIVATION is None:
+        install_root=ROOT/"tools"/"install"
+        if str(install_root) not in sys.path:
+            sys.path.insert(0,str(install_root))
+        spec=importlib.util.spec_from_file_location(
+            "_capability_route_runtime_activation",
+            install_root/"runtime_activation.py",
+        )
+        module=importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
+        _RUNTIME_ACTIVATION=module
+    return _RUNTIME_ACTIVATION
+
+def _launch_source_revision(path):
+    resolved=Path(path).resolve(strict=False)
+    key=str(resolved)
+    if key not in _LAUNCH_SOURCE_REVISION_CACHE:
+        _LAUNCH_SOURCE_REVISION_CACHE[key]=_runtime_activation_module().source_revision(resolved)
+    return _LAUNCH_SOURCE_REVISION_CACHE[key]
+
+def _launch_content_digest(path):
+    """Digest only immutable code anchors, representing missing anchors explicitly."""
+    resolved=Path(path).resolve(strict=False)
+    key=str(resolved)
+    if key not in _LAUNCH_CONTENT_DIGEST_CACHE:
+        rows=[]
+        for relative in _LAUNCH_CODE_ANCHORS:
+            anchor=resolved/relative
+            try:
+                data=anchor.read_bytes() if anchor.is_file() else None
+            except OSError:
+                data=None
+            rows.append({
+                "anchor":relative,
+                "state":"file" if data is not None else "missing",
+                "sha256":hashlib.sha256(data).hexdigest() if data is not None else None,
+            })
+        _LAUNCH_CONTENT_DIGEST_CACHE[key]="sha256:"+hashlib.sha256(canonical(rows)).hexdigest()
+    return _LAUNCH_CONTENT_DIGEST_CACHE[key]
+
+def _launch_root_identity(kind, path, *, resolver_identity=None):
+    """Return one memoized code-root identity or runtime-bound mutable path identity."""
+    resolved=Path(path).expanduser().resolve(strict=False)
+    resolver_key=None
+    if resolver_identity is not None:
+        resolver_key=(
+            resolver_identity.get("path"), resolver_identity.get("release_id"),
+            resolver_identity.get("content_digest"),
+        )
+    key=(kind,str(resolved),resolver_key)
+    if key not in _LAUNCH_ROOT_IDENTITY_CACHE:
+        if resolver_identity is None:
+            release_id=_launch_source_revision(resolved)
+            content_digest=_launch_content_digest(resolved)
+        else:
+            release_id=resolver_identity["release_id"]
+            content_digest=resolver_identity["content_digest"]
+        binding_digest="sha256:"+hashlib.sha256(canonical({
+            "kind":kind,"path":str(resolved),"release_id":release_id,
+            "content_digest":content_digest,
+        })).hexdigest()
+        _LAUNCH_ROOT_IDENTITY_CACHE[key]={
+            "kind":kind,"path":str(resolved),"release_id":release_id,
+            "content_digest":content_digest,"binding_digest":binding_digest,
+        }
+    return json.loads(json.dumps(_LAUNCH_ROOT_IDENTITY_CACHE[key]))
+
+def launch_compatibility_tuple(*, artifact_root, jobs=None, cwd=None):
+    """Compute v1 bounded launch identities without hashing mutable state contents."""
+    runtime_root=Path(resolve_agent_home()).resolve(strict=False)
+    runtime_identity=_launch_root_identity("runtime_root",runtime_root)
+    grounding_cwd=Path(cwd if cwd is not None else Path.cwd()).resolve(strict=False)
+    result={
+        "tuple_version":LAUNCH_COMPATIBILITY_TUPLE_VERSION,
+        "registry_root":_launch_root_identity("registry_root",TOPO.ROOT),
+        "launch_home":_launch_root_identity("launch_home",runtime_root),
+        "runtime_root":runtime_identity,
+        "grounding_roots":{
+            "cwd":_launch_root_identity("grounding_cwd",grounding_cwd),
+            "artifact_root":_launch_root_identity(
+                "grounding_artifact_root",artifact_root,
+                resolver_identity=runtime_identity,
+            ),
+        },
+        "wrapper_root":_launch_root_identity("wrapper_root",runtime_root/"adapters"),
+    }
+    try:
+        jobs_path=resolve_dispatch_state_root(resolve_agent_home(),jobs)/"jobs.log"
+        result["jobs_path"]=_launch_root_identity(
+            "jobs_path",jobs_path,resolver_identity=runtime_identity,
+        )
+    except (DispatchContractError,OSError,ValueError) as exc:
+        reason=exc.reason if isinstance(exc,DispatchContractError) else type(exc).__name__
+        unresolved={
+            "kind":"jobs_path","path":None,
+            "release_id":runtime_identity["release_id"],
+            "content_digest":runtime_identity["content_digest"],
+            "unresolved":reason,
+        }
+        unresolved["binding_digest"]="sha256:"+hashlib.sha256(canonical(unresolved)).hexdigest()
+        result["jobs_path"]=unresolved
+    return result
+
+def _launch_tuple_roots(payload):
+    roots={key:payload.get(key) for key in (
+        "registry_root","launch_home","runtime_root","wrapper_root","jobs_path",
+    )}
+    grounding=payload.get("grounding_roots")
+    roots["grounding_roots.cwd"]=grounding.get("cwd") if isinstance(grounding,dict) else None
+    roots["grounding_roots.artifact_root"]=(
+        grounding.get("artifact_root") if isinstance(grounding,dict) else None
+    )
+    return roots
+
+def revalidate_launch_compatibility(route):
+    """Compare a route's sealed launch tuple with this process's current roots."""
+    sealed=route.get("launch_compatibility_tuple")
+    if sealed is None:
+        return True,{"tuple":"absent-legacy"}
+    fresh={"contract_version":LAUNCH_COMPATIBILITY_TUPLE_VERSION}
+    fresh.update(launch_compatibility_tuple(
+        artifact_root=route.get("artifact_root","."),cwd=route.get("cwd","."),
+    ))
+    mismatches={}
+    if not isinstance(sealed,dict):
+        return False,{"tuple":{"expected":sealed,"actual":fresh}}
+    for field in ("contract_version","tuple_version"):
+        if sealed.get(field) != fresh.get(field):
+            mismatches[field]={"expected":sealed.get(field),"actual":fresh.get(field)}
+    expected_roots=_launch_tuple_roots(sealed)
+    actual_roots=_launch_tuple_roots(fresh)
+    identity_fields=("kind","path","release_id","content_digest","binding_digest")
+    for name,expected in expected_roots.items():
+        actual=actual_roots[name]
+        if not isinstance(expected,dict) or not isinstance(actual,dict):
+            mismatches[name]={"expected":expected,"actual":actual}
+            continue
+        changed={field:{"expected":expected.get(field),"actual":actual.get(field)}
+                 for field in identity_fields if expected.get(field) != actual.get(field)}
+        if expected.get("unresolved") != actual.get("unresolved"):
+            changed["unresolved"]={
+                "expected":expected.get("unresolved"),"actual":actual.get("unresolved"),
+            }
+        if changed:
+            mismatches[name]={
+                "expected":expected,"actual":actual,"fields":sorted(changed),
+            }
+    return not mismatches,mismatches
+
+def _sha256_record(value):
+    return "sha256:"+hashlib.sha256(canonical(value)).hexdigest()
+
+def _continuation_contract_hash(node):
+    return _sha256_record(node)
+
+def _continuation_source_jobs(source_route):
+    jobs=(
+        ((source_route.get("launch_compatibility_tuple") or {}).get("jobs_path") or {})
+        .get("path")
+    )
+    if not isinstance(jobs,str) or not jobs or not Path(jobs).is_absolute():
+        raise ValueError("continuation-source-jobs-binding-unresolved")
+    return Path(jobs).resolve(strict=False)
+
+def _continuation_reused_evidence(route, node):
+    """Read one reusable node from its canonical marker and exact attempt link."""
+    node_id=str(node["id"])
+    jobs=_continuation_source_jobs(route)
+    directory=completion_dir(route["route_id"],jobs=jobs)
+    marker_path=directory/f"{node_id}.json"
+    gate=_marker_identity_row(
+        route,node,node_id,node.get("completion_gate"),jobs=jobs
+    )
+    if not gate.get("passed"):
+        raise ValueError(
+            f"continuation-source-node-unverified:{node_id}:{gate.get('reason')}"
+        )
+    try:
+        marker_bytes=marker_path.read_bytes()
+        marker=json.loads(marker_bytes)
+    except (OSError,ValueError) as exc:
+        raise ValueError(f"continuation-source-node-unverified:{node_id}:marker") from exc
+    if not completion_marker_is_current(route,node,marker_path,marker):
+        raise ValueError(
+            f"continuation-source-node-unverified:{node_id}:attempt-link"
+        )
+    attempt_id=marker.get("attempt_id")
+    if not isinstance(attempt_id,str) or not attempt_id:
+        raise ValueError(
+            f"continuation-source-node-unverified:{node_id}:terminal-attempt"
+        )
+    link_path=_attempt_completion_path(route,node_id,attempt_id,jobs=jobs)
+    try:
+        link_bytes=link_path.read_bytes()
+        link=json.loads(link_bytes)
+    except (OSError,ValueError) as exc:
+        raise ValueError(
+            f"continuation-source-node-unverified:{node_id}:attempt-sidecar"
+        ) from exc
+    verdict=str(link.get("verdict") or marker.get("verdict") or "PASS").upper()
+    if verdict != "PASS":
+        raise ValueError(
+            f"continuation-source-verdict-not-pass:{node_id}:{verdict}"
+        )
+    history_path=directory/f"{node_id}.{marker.get('sequence')}.json"
+    try:
+        history_digest="sha256:"+hashlib.sha256(history_path.read_bytes()).hexdigest()
+    except OSError as exc:
+        raise ValueError(
+            f"continuation-source-node-unverified:{node_id}:marker-history"
+        ) from exc
+    quiescence_digest=(
+        link.get("quiescence_proof_digest")
+        or marker.get("quiescence_proof_digest")
+        or _sha256_record({
+            "attempt_id":attempt_id,
+            "attempt_sidecar_digest":"sha256:"+hashlib.sha256(link_bytes).hexdigest(),
+            "marker_history_digest":history_digest,
+            "terminal_marker_current":True,
+        })
+    )
+    if not isinstance(quiescence_digest,str) or not quiescence_digest:
+        raise ValueError(
+            f"continuation-source-node-unverified:{node_id}:quiescence-proof"
+        )
+    evidence=marker.get("evidence") or {}
+    public={
+        "node_id":node_id,
+        "completion_gate":node.get("completion_gate"),
+        "marker_path":str(marker_path.resolve(strict=False)),
+        "marker_digest":"sha256:"+hashlib.sha256(marker_bytes).hexdigest(),
+        "terminal_attempt_id":attempt_id,
+        "verdict":verdict,
+        "quiescence_proof_digest":quiescence_digest,
+        "output_evidence_digest":str(evidence.get("sha256")),
+        "contract_hash":_continuation_contract_hash(node),
+        "new_attempt_count":0,
+    }
+    last_turn_id=(
+        link.get("last_turn_id") or link.get("lastTurnId")
+        or marker.get("last_turn_id") or marker.get("lastTurnId")
+    )
+    return public,(str(last_turn_id) if last_turn_id else None)
+
+def _source_evidence_snapshot(route, node_ids):
+    by_id={str(node.get("id")):node for node in route.get("nodes",[])}
+    rows=[]; turns={}
+    for node_id in node_ids:
+        node=by_id.get(str(node_id))
+        if node is None:
+            raise ValueError(f"continuation-source-node-unknown:{node_id}")
+        row,last_turn_id=_continuation_reused_evidence(route,node)
+        rows.append(row)
+        if last_turn_id:
+            turns[str(node_id)]=last_turn_id
+    return rows,_sha256_record(rows),turns
+
+def source_evidence_digest(route, reused_node_ids=None):
+    """Canonical digest of an exact reusable marker/attempt prefix."""
+    if reused_node_ids is None:
+        reusable=[]
+        for node in route.get("nodes",[]):
+            try:
+                _continuation_reused_evidence(route,node)
+            except ValueError:
+                break
+            reusable.append(str(node["id"]))
+        reused_node_ids=reusable
+    _rows,digest,_turns=_source_evidence_snapshot(route,list(reused_node_ids))
+    return digest
+
+def _continuation_lineage(
+    source_route,reused_nodes,reused_turns,*,operation="resume",
+    thread_id=None,new_thread_id=None,forked_from_id=None,last_turn_id=None,
+    ephemeral=False,
+):
+    if ephemeral:
+        raise ValueError("continuation-ephemeral-forbidden")
+    if operation not in {"resume","fork"}:
+        raise ValueError("continuation-lineage-operation-invalid")
+    source_lineage=source_route.get("runtime_lineage") or {}
+    source_thread=thread_id or source_lineage.get("thread_id")
+    reused_end_node=reused_nodes[-1]["node_id"] if reused_nodes else None
+    node_turns=source_lineage.get("node_turn_ids") or {}
+    expected_turn=(
+        reused_turns.get(reused_end_node)
+        or (node_turns.get(reused_end_node) if reused_end_node else None)
+    )
+    selected_turn=last_turn_id or expected_turn
+    if last_turn_id and expected_turn and last_turn_id != expected_turn:
+        raise ValueError("continuation-last-turn-mismatch")
+    if operation=="resume":
+        if new_thread_id or forked_from_id:
+            raise ValueError("continuation-resume-lineage-switch-forbidden")
+        return {
+            "operation":"resume","thread_id":source_thread,
+            "lastTurnId":selected_turn,"ephemeral":False,
+        }
+    if not source_thread or not new_thread_id or new_thread_id==source_thread:
+        raise ValueError("continuation-fork-lineage-incomplete")
+    if forked_from_id != source_thread:
+        raise ValueError("continuation-fork-source-mismatch")
+    if not expected_turn or selected_turn != expected_turn:
+        raise ValueError("continuation-last-turn-mismatch")
+    return {
+        "operation":"fork","thread_id":new_thread_id,
+        "forkedFromId":source_thread,"lastTurnId":selected_turn,
+        "ephemeral":False,
+    }
+
+def partial_group_continuation(
+    source_route,*,source_group_id,source_batch_manifest,
+    failed_source_attempt_id,gap_leg_id,
+):
+    """Seal the immutable successful-peer proof for one exact failed group leg."""
+    manifest,manifest_digest,leg_digests=verify_batch_manifest(source_batch_manifest)
+    if (
+        manifest.get("route_id") != source_route.get("route_id")
+        or manifest.get("parallel_group") != source_group_id
+    ):
+        raise ValueError("partial-continuation-batch-source-mismatch")
+    group=next(
+        (row for row in source_route.get("parallel_groups",[])
+         if row.get("id")==source_group_id),None,
+    )
+    if group is None:
+        raise ValueError("partial-continuation-group-unknown")
+    members=manifest.get("members") or []
+    if manifest.get("declared_size") != group.get("width") or len(members)!=group.get("width"):
+        raise ValueError("partial-continuation-group-cardinality-mismatch")
+    gap=next((row for row in members if row.get("route_node")==gap_leg_id),None)
+    if gap is None or gap.get("attempt_id") != failed_source_attempt_id:
+        raise ValueError("partial-continuation-gap-attempt-mismatch")
+    nodes={str(node.get("id")):node for node in source_route.get("nodes",[])}
+    realized=[]
+    for member in members:
+        node_id=str(member.get("route_node"))
+        if node_id==gap_leg_id:
+            continue
+        node=nodes.get(node_id)
+        if node is None:
+            raise ValueError(f"partial-continuation-peer-unknown:{node_id}")
+        evidence,_last_turn=_continuation_reused_evidence(source_route,node)
+        if evidence["terminal_attempt_id"] != member.get("attempt_id"):
+            raise ValueError(f"partial-continuation-peer-attempt-mismatch:{node_id}")
+        realized.append({
+            key:evidence[key] for key in (
+                "node_id","terminal_attempt_id","marker_path","marker_digest",
+                "verdict","quiescence_proof_digest","output_evidence_digest",
+                "contract_hash",
+            )
+        })
+    if len(realized) != int(group["width"])-1:
+        raise ValueError("partial-continuation-peer-set-incomplete")
+    peer_digest=_sha256_record(realized)
+    replacement_identity=_sha256_record({
+        "source_route_id":source_route["route_id"],
+        "source_route_hash":source_route["route_hash"],
+        "source_group_id":source_group_id,
+        "failed_source_attempt_id":failed_source_attempt_id,
+        "gap_leg_id":gap_leg_id,
+        "reused_peer_set_proof_digest":peer_digest,
+    })
+    return {
+        "contract_version":CONTINUATION_CONTRACT_VERSION,
+        "source_group_id":source_group_id,
+        "source_batch_manifest_digest":manifest_digest,
+        "leg_manifest_digests":{
+            str(member["route_node"]):leg_digests[str(member["attempt_id"])]
+            for member in members
+        },
+        "original_group_cardinality":int(group["width"]),
+        "join_policy":group.get("join_policy"),
+        "failed_source_attempt_id":failed_source_attempt_id,
+        "gap_leg_id":gap_leg_id,
+        "realized_peer_set":realized,
+        "reused_peer_set_proof_digest":peer_digest,
+        "replacement_leg_identity":replacement_identity,
+        "replacement_attempt_id":"att-"+replacement_identity.split(":",1)[1][:48],
+    }
+
+def _continuation_id(payload):
+    return "cont-"+hashlib.sha256(canonical(payload)).hexdigest()[:32]
+
+def build_continuation_route(
+    source_route,*,resume_from_node,requested_boundary,reason,
+    artifact_root,lineage_operation="resume",thread_id=None,new_thread_id=None,
+    forked_from_id=None,last_turn_id=None,ephemeral=False,
+    partial_group=None,
+):
+    """Generate one official route suffix without invoking the generic compiler."""
+    source_nodes=source_route.get("nodes") or []
+    node_ids=[str(node.get("id")) for node in source_nodes]
+    requested_blocker=(
+        None if requested_boundary in node_ids else "requested-boundary-unknown"
+    )
+    first_blocker=None
+    if resume_from_node not in node_ids:
+        first_blocker="first-runnable-node-unknown"
+        resume_index=None
+    else:
+        resume_index=node_ids.index(resume_from_node)
+    reused_ids=node_ids[:resume_index] if resume_index is not None else []
+    reused=[]; reused_turns={}; evidence_digest=_sha256_record([])
+    if first_blocker is None:
+        try:
+            reused,evidence_digest,reused_turns=_source_evidence_snapshot(
+                source_route,reused_ids
+            )
+        except ValueError as exc:
+            first_blocker=str(exc)
+            reused=[]; reused_turns={}
+            for node_id in reused_ids:
+                try:
+                    row,turn=_continuation_reused_evidence(
+                        source_route,source_nodes[node_ids.index(node_id)]
+                    )
+                except ValueError:
+                    break
+                reused.append(row)
+                if turn: reused_turns[node_id]=turn
+            evidence_digest=_sha256_record(reused)
+    lineage=_continuation_lineage(
+        source_route,reused,reused_turns,operation=lineage_operation,
+        thread_id=thread_id,new_thread_id=new_thread_id,
+        forked_from_id=forked_from_id,last_turn_id=last_turn_id,
+        ephemeral=ephemeral,
+    )
+    identity={
+        "source_route_id":source_route.get("route_id"),
+        "source_route_hash":source_route.get("route_hash"),
+        "resume_from_node":resume_from_node,
+        "requested_boundary":requested_boundary,
+        "reason":reason,
+        "source_evidence_digest":evidence_digest,
+        "lineage":lineage,
+    }
+    continuation_id=_continuation_id(identity)
+    edge={
+        "edge_version":1,
+        "edge_id":_sha256_record({
+            "from_route_id":source_route.get("route_id"),
+            "from_route_hash":source_route.get("route_hash"),
+            "to_continuation_id":continuation_id,
+            "reason":reason,
+        }),
+        "operation":"continuation",
+        "from_route_id":source_route.get("route_id"),
+        "from_route_hash":source_route.get("route_hash"),
+        "to_continuation_id":continuation_id,
+        "reason":reason,
+        "source_verdict_preserved":True,
+    }
+    result={
+        "continuation_contract_version":CONTINUATION_CONTRACT_VERSION,
+        **identity,
+        "continuation_id":continuation_id,
+        "first_runnable_node":(
+            resume_from_node if resume_index is not None else None
+        ),
+        "requested_boundary_blocker":requested_blocker,
+        "first_runnable_blocker":first_blocker,
+        "lineage_operation":lineage_operation,
+        "runtime_lineage":lineage,
+        "source_route_supersession":edge,
+        "supersession_edges":[
+            *json.loads(json.dumps(source_route.get("supersession_edges") or [])),
+            edge,
+        ],
+        "reused_nodes":reused,
+        "new_nodes":[],
+        "partial_group_continuation":None,
+    }
+    if partial_group is not None and first_blocker is None:
+        result["partial_group_continuation"]=partial_group_continuation(
+            source_route,**partial_group
+        )
+    if requested_blocker or first_blocker:
+        return result
+    reused_by_id={row["node_id"]:row for row in reused}
+    route_nodes=[]
+    descriptors=[]
+    for offset,source_node in enumerate(source_nodes[resume_index:]):
+        node=json.loads(json.dumps(source_node))
+        original_dependencies=list(node.get("depends_on") or [])
+        satisfied=[dep for dep in original_dependencies if dep in reused_by_id]
+        if satisfied:
+            node["source_depends_on"]=original_dependencies
+            node["depends_on"]=[dep for dep in original_dependencies if dep not in reused_by_id]
+            node["reused_dependencies"]=[
+                {
+                    "node_id":dep,
+                    "contract_hash":reused_by_id[dep]["contract_hash"],
+                    "marker_digest":reused_by_id[dep]["marker_digest"],
+                    "terminal_attempt_id":reused_by_id[dep]["terminal_attempt_id"],
+                }
+                for dep in satisfied
+            ]
+        source_contract_hash=_continuation_contract_hash(source_node)
+        node["source_contract_hash"]=source_contract_hash
+        route_nodes.append(node)
+        descriptors.append({
+            "node_id":str(source_node["id"]),
+            "source_contract_hash":source_contract_hash,
+            "realized_contract_hash":_continuation_contract_hash(node),
+            "attempt_authority":"granted" if offset==0 else "pending-dependency",
+            "new_attempt_count":0,
+        })
+    result["new_nodes"]=descriptors
+    launch={
+        "contract_version":LAUNCH_COMPATIBILITY_TUPLE_VERSION,
+        **launch_compatibility_tuple(
+            artifact_root=artifact_root,cwd=source_route.get("cwd"),
+        ),
+    }
+    inherited_keys=(
+        "schema_version","capability","capability_mode","requested_intensity",
+        "effective_intensity","owner_model_profile","execution_topology",
+        "owner_dispatch_depth","max_dispatch_depth","tracking",
+        "tracked_gate_evidence","spec_touch","cwd","source_commit",
+        "registry_digest","dispatch_defaults_digest","dispatch_allocation",
+        "owner_harness_policy","selection","human_gates","human_gate_bindings",
+        "resume_retry_boundaries","dispatch_evidence","dispatch_contract_version",
+        "dispatch_evidence_scope_version","registered_headless_candidates",
+        "registered_headless_policy","unit_catalog_digest","validation_basis",
+    )
+    route={key:json.loads(json.dumps(source_route[key]))
+           for key in inherited_keys if key in source_route}
+    route.update(result)
+    route["artifact_root"]=str(Path(artifact_root).resolve(strict=False))
+    route["nodes"]=route_nodes
+    route["parallel_groups"]=_realized_parallel_groups(route_nodes)
+    route["conditional_extensions"]=[]
+    route["completion_gates"]=sorted({
+        str(node.get("terminal_gate") or node.get("completion_gate"))
+        for node in route_nodes if node.get("terminal") is True
+    })
+    route["workflow_contract"]={
+        "schema_version":WORKFLOW_CONTRACT_VERSION,
+        "states":list((source_route.get("workflow_contract") or {}).get("states") or []),
+        "failure_states":list((source_route.get("workflow_contract") or {}).get("failure_states") or []),
+        "terminal_nodes":[
+            str(node["id"]) for node in route_nodes if node.get("terminal") is True
+        ],
+        "continuations":{
+            str(node["id"]):json.loads(json.dumps(node.get("continuation")))
+            for node in route_nodes if node.get("terminal") is not True
+        },
+        "human_gate_bindings":json.loads(json.dumps(route.get("human_gate_bindings") or [])),
+    }
+    route["launch_compatibility_tuple"]=launch
+    digest=route_hash(route)
+    route["route_hash"]=digest
+    route["route_id"]="rt-"+digest.split(":",1)[1][:16]
+    return route
+
+def _verify_continuation_route(route):
+    if route.get("continuation_contract_version") != CONTINUATION_CONTRACT_VERSION:
+        raise ValueError("unsupported-continuation-contract-version")
+    required=(
+        "source_route_id","source_route_hash","resume_from_node",
+        "requested_boundary","reason","source_evidence_digest",
+        "continuation_id","first_runnable_node","requested_boundary_blocker",
+        "first_runnable_blocker","lineage_operation","source_route_supersession",
+        "reused_nodes","new_nodes",
+    )
+    if any(key not in route for key in required):
+        raise ValueError("continuation-contract-incomplete")
+    if route.get("requested_boundary_blocker") or route.get("first_runnable_blocker"):
+        raise ValueError("blocked-continuation-route-published")
+    reused=route.get("reused_nodes")
+    new=route.get("new_nodes")
+    if not isinstance(reused,list) or not isinstance(new,list):
+        raise ValueError("continuation-node-sets-invalid")
+    if route.get("source_evidence_digest") != _sha256_record(reused):
+        raise ValueError("continuation-source-evidence-digest-invalid")
+    reused_ids=[row.get("node_id") for row in reused if isinstance(row,dict)]
+    new_ids=[row.get("node_id") for row in new if isinstance(row,dict)]
+    route_ids=[node.get("id") for node in route.get("nodes",[]) if isinstance(node,dict)]
+    if len(reused_ids)!=len(set(reused_ids)) or set(reused_ids)&set(new_ids):
+        raise ValueError("continuation-node-sets-overlap")
+    if new_ids != route_ids or not new_ids or new_ids[0]!=route.get("first_runnable_node"):
+        raise ValueError("continuation-new-node-census-invalid")
+    if any(row.get("new_attempt_count")!=0 for row in reused):
+        raise ValueError("continuation-reused-node-attempt-authority")
+    for descriptor,node in zip(new,route.get("nodes",[])):
+        if descriptor.get("source_contract_hash") != node.get("source_contract_hash"):
+            raise ValueError("continuation-new-node-contract-invalid")
+        if descriptor.get("realized_contract_hash") != _continuation_contract_hash(node):
+            raise ValueError("continuation-realized-node-contract-invalid")
+    expected_continuation_id=_continuation_id({
+        "source_route_id":route.get("source_route_id"),
+        "source_route_hash":route.get("source_route_hash"),
+        "resume_from_node":route.get("resume_from_node"),
+        "requested_boundary":route.get("requested_boundary"),
+        "reason":route.get("reason"),
+        "source_evidence_digest":route.get("source_evidence_digest"),
+        "lineage":route.get("runtime_lineage"),
+    })
+    if route.get("continuation_id") != expected_continuation_id:
+        raise ValueError("continuation-id-invalid")
+    edge=route.get("source_route_supersession") or {}
+    if (
+        edge.get("from_route_id") != route.get("source_route_id")
+        or edge.get("from_route_hash") != route.get("source_route_hash")
+        or edge.get("to_continuation_id") != route.get("continuation_id")
+        or edge.get("source_verdict_preserved") is not True
+    ):
+        raise ValueError("continuation-supersession-edge-invalid")
+    launch=route.get("launch_compatibility_tuple") or {}
+    if launch.get("contract_version") != LAUNCH_COMPATIBILITY_TUPLE_VERSION:
+        raise ValueError("launch-compatibility-tuple-required")
+    _validate_output_scopes(route.get("nodes",[]))
+    return route
+
+def publish_continuation_route(route,source_route,output_path):
+    """Recheck source bytes immediately before the one immutable publication."""
+    if route.get("requested_boundary_blocker") or route.get("first_runnable_blocker"):
+        raise ValueError("continuation-boundary-blocked")
+    node_ids=[row["node_id"] for row in route.get("reused_nodes",[])]
+    try:
+        current,current_digest,_turns=_source_evidence_snapshot(source_route,node_ids)
+    except ValueError as exc:
+        raise ValueError("continuation-source-evidence-drift") from exc
+    if (
+        current_digest != route.get("source_evidence_digest")
+        or canonical(current) != canonical(route.get("reused_nodes"))
+    ):
+        raise ValueError("continuation-source-evidence-drift")
+    path=Path(output_path)
+    if classify_route_location(path,route["artifact_root"]) != "canonical":
+        raise ValueError("route-output-outside-canonical")
+    if not route_path_is_exact(path,route["artifact_root"],route["route_id"]):
+        raise ValueError("route-output-alias-basename")
+    write_once(path,route)
+    return path
 
 def _git_commit(cwd):
     p=subprocess.run(["git","-C",str(cwd),"rev-parse","HEAD"],text=True,capture_output=True)
@@ -793,7 +1445,11 @@ def _compile_from_recipe(registry, recipe, capability, capability_mode, requeste
       "registered_headless_candidates":registered_headless_candidates,
       "registered_headless_policy":"serial-attempt" if effective=="quick" else None,
       "unit_catalog_digest":unit_catalog_digest(),
-      "validation_basis":_validation_basis()}
+      "validation_basis":_validation_basis(),
+      "launch_compatibility_tuple":{
+          "contract_version":LAUNCH_COMPATIBILITY_TUPLE_VERSION,
+          **launch_compatibility_tuple(artifact_root=artifact,cwd=cwd),
+      }}
     if checked_dispatch is not None:
         payload["dispatch_evidence_scope_version"]=DISPATCH_EVIDENCE_SCOPE_VERSION
     if composed:
@@ -924,6 +1580,8 @@ def verify_route(route, expected_cwd=None, *, allow_stale_registry=False):
         # A stale/skewed sealed graph cannot be re-derived from the current registry, so
         # every check that compares against it is skipped rather than guessed at.
         return dict(route, _registry_current=False)
+    if "continuation_contract_version" in route:
+        return _verify_continuation_route(route)
     _validate_output_scopes(route.get("nodes", []))
     def _node_identity(node):
         return {
@@ -1657,12 +2315,12 @@ def _exclusive_lock(path):
         finally:
             fcntl.flock(handle.fileno(),fcntl.LOCK_UN)
 
-def _attempt_completion_path(route, node_id, attempt_id):
+def _attempt_completion_path(route, node_id, attempt_id, *, jobs=None):
     safe_attempt="".join(
         character if character.isalnum() or character in "._-" else "_"
         for character in attempt_id
     )
-    return completion_dir(route["route_id"])/f"{node_id}.{safe_attempt}.attempt.json"
+    return completion_dir(route["route_id"],jobs=jobs)/f"{node_id}.{safe_attempt}.attempt.json"
 
 def _parse_auxiliary_findings(evidence: Path):
     """Extract `auxiliary_findings_considered` from JSON or markdown frontmatter.
@@ -1894,9 +2552,9 @@ def arbitration_path(route_id, group_id):
     return completion_dir(route_id)/f"{_safe_group_id(group_id)}.arbitration.json"
 
 
-def _marker_identity_row(route, node, node_id, gate):
+def _marker_identity_row(route, node, node_id, gate, *, jobs=None):
     """One completion marker's on-disk truth, in the shared gate vocabulary."""
-    path = completion_dir(route["route_id"])/f"{node_id}.json"
+    path = completion_dir(route["route_id"],jobs=jobs)/f"{node_id}.json"
     try:
         marker = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
@@ -2752,7 +3410,25 @@ def main():
     c.add_argument("--spec-read",required=True); c.add_argument("--drift-verdict",required=True)
     c.add_argument("--workflow-mode",choices=sorted(TRACKING),required=True); c.add_argument("--artifact-guard",required=True)
     c.add_argument("--output")
+    co=sub.add_parser("continuation")
+    co.add_argument("--source-route",required=True)
+    co.add_argument("--resume-from-node",required=True)
+    co.add_argument("--requested-boundary",required=True)
+    co.add_argument("--reason",required=True)
+    co.add_argument("--artifact-root",required=True)
+    co.add_argument("--output")
+    co.add_argument("--lineage-operation",choices=("resume","fork"),default="resume")
+    co.add_argument("--thread-id")
+    co.add_argument("--new-thread-id")
+    co.add_argument("--forked-from-id")
+    co.add_argument("--last-turn-id")
+    co.add_argument("--ephemeral",action="store_true")
+    co.add_argument("--partial-group-manifest")
+    co.add_argument("--source-group-id")
+    co.add_argument("--failed-source-attempt-id")
+    co.add_argument("--gap-leg-id")
     v=sub.add_parser("verify"); v.add_argument("--route",required=True); v.add_argument("--cwd")
+    v.add_argument("--launch-phase",choices=("dry-run","register","start"))
     n=sub.add_parser("node"); n.add_argument("--route",required=True); n.add_argument("--node",required=True)
     d=sub.add_parser("complete"); d.add_argument("--route",required=True); d.add_argument("--node",required=True); d.add_argument("--evidence",required=True); d.add_argument("--output")
     d.add_argument("--jobs",help="canonical registry path for a registered attempt")
@@ -2800,6 +3476,16 @@ def main():
                 a.predicate,a.signal,a.transport,a.transport_evidence,a.inline_reason,
                 a.tracking,gate,dispatch_evidence,registered_headless_evidence,
             )
+        vbasis=route.get("validation_basis") or {}
+        if vbasis.get("runtime_root_match") is False:
+            launch_tuple=route.get("launch_compatibility_tuple") or {}
+            expected=launch_tuple.get("registry_root")
+            observed=launch_tuple.get("runtime_root")
+            print("route_file_written=0 registered=0 started=0 child_spawned=0",file=sys.stderr)
+            raise ValueError(
+                "launch-runtime-root-mismatch "
+                f"expected={canonical(expected).decode()} observed={canonical(observed).decode()}"
+            )
         expected_output=canonical_route_path(a.artifact_root,route["route_id"])
         if a.output:
             output_path=Path(a.output)
@@ -2811,15 +3497,74 @@ def main():
             output_path=expected_output
         write_once(output_path,route)
         print(f"route_file={output_path.resolve()}",file=sys.stderr)
-        vbasis=route.get("validation_basis") or {}
-        if vbasis.get("runtime_root_match") is False:
+        print(json.dumps(route,sort_keys=True))
+    elif a.command=="continuation":
+        source_path=Path(a.source_route).resolve(strict=True)
+        source=verify_route(json.loads(source_path.read_text(encoding="utf-8")))
+        artifact=Path(a.artifact_root).resolve(strict=False)
+        if artifact != Path(source["artifact_root"]).resolve(strict=False):
             print(
-                "capability-route: compiled-outside-runtime-root "
-                f"registry_root={vbasis.get('registry_root')} "
-                f"runtime_root={vbasis.get('runtime_root')} "
-                f"runtime_root_validated={int(bool(vbasis.get('runtime_root_validated')))}",
-                file=sys.stderr,
+                "route_file_written=0 predecessor_attempts=0 registered=0 "
+                "started=0 child_spawned=0",file=sys.stderr,
             )
+            raise ValueError("continuation-artifact-root-mismatch")
+        partial_values=(
+            a.partial_group_manifest,a.source_group_id,
+            a.failed_source_attempt_id,a.gap_leg_id,
+        )
+        if any(partial_values) and not all(partial_values):
+            raise ValueError("partial-continuation-input-incomplete")
+        partial=None
+        if a.partial_group_manifest:
+            partial={
+                "source_group_id":a.source_group_id,
+                "source_batch_manifest":json.loads(
+                    Path(a.partial_group_manifest).read_text(encoding="utf-8")
+                ),
+                "failed_source_attempt_id":a.failed_source_attempt_id,
+                "gap_leg_id":a.gap_leg_id,
+            }
+        route=build_continuation_route(
+            source,resume_from_node=a.resume_from_node,
+            requested_boundary=a.requested_boundary,reason=a.reason,
+            artifact_root=artifact,lineage_operation=a.lineage_operation,
+            thread_id=a.thread_id,new_thread_id=a.new_thread_id,
+            forked_from_id=a.forked_from_id,last_turn_id=a.last_turn_id,
+            ephemeral=a.ephemeral,partial_group=partial,
+        )
+        if (
+            route.get("requested_boundary_blocker")
+            or route.get("first_runnable_blocker")
+        ):
+            print(json.dumps(route,sort_keys=True),file=sys.stderr)
+            print(
+                "route_file_written=0 predecessor_attempts=0 registered=0 "
+                "started=0 child_spawned=0",file=sys.stderr,
+            )
+            raise ValueError("continuation-boundary-blocked")
+        launch_tuple=route.get("launch_compatibility_tuple") or {}
+        if not agent_home_equivalent(
+            (launch_tuple.get("registry_root") or {}).get("path",""),
+            (launch_tuple.get("runtime_root") or {}).get("path",""),
+        ):
+            print(
+                "route_file_written=0 predecessor_attempts=0 registered=0 "
+                "started=0 child_spawned=0",file=sys.stderr,
+            )
+            raise ValueError("launch-runtime-root-mismatch")
+        output_path=Path(a.output) if a.output else canonical_route_path(
+            artifact,route["route_id"]
+        )
+        try:
+            publish_continuation_route(route,source,output_path)
+        except ValueError as exc:
+            if str(exc)=="continuation-source-evidence-drift":
+                print(
+                    "route_file_written=0 predecessor_attempts=0 registered=0 "
+                    "started=0 child_spawned=0",file=sys.stderr,
+                )
+            raise
+        print(f"route_file={output_path.resolve()}",file=sys.stderr)
         print(json.dumps(route,sort_keys=True))
     elif a.command=="status":
         rows=route_status(a.artifact_root)
@@ -2830,7 +3575,25 @@ def main():
             json.loads(Path(a.route).read_text()), getattr(a,"cwd",None),
             allow_stale_registry=a.command=="close",
         )
-        if a.command=="verify": print(f"route_id={route['route_id']}\nroute_hash={route['route_hash']}")
+        if a.command=="verify":
+            if a.launch_phase:
+                compatible,mismatches=revalidate_launch_compatibility(route)
+                if mismatches.get("tuple") == "absent-legacy":
+                    print("registered=0 started=0 child_spawned=0",file=sys.stderr)
+                    raise ValueError("launch-compatibility-tuple-required")
+                if not compatible:
+                    name=sorted(mismatches)[0]
+                    mismatch=mismatches[name]
+                    print(
+                        "launch-runtime-root-mismatch "
+                        f"phase={a.launch_phase} mismatch={name}:"
+                        f"expected={canonical(mismatch.get('expected',mismatch)).decode()}:"
+                        f"actual={canonical(mismatch.get('actual',mismatch)).decode()}",
+                        file=sys.stderr,
+                    )
+                    print("registered=0 started=0 child_spawned=0",file=sys.stderr)
+                    raise ValueError("launch-runtime-root-mismatch")
+            print(f"route_id={route['route_id']}\nroute_hash={route['route_hash']}")
         elif a.command=="arbitrate":
             evidence=Path(a.evidence).resolve()
             if not evidence.is_file(): raise SystemExit("arbitration evidence missing")

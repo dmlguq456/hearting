@@ -288,6 +288,35 @@ def fail(reason: str, code: int, **fields: str) -> int:
     return code
 
 
+def read_launch_fence_failure(fd: int) -> dict[str, object] | None:
+    """Read and close the fence's private, close-on-exec failure channel."""
+    try:
+        os.set_blocking(fd, False)
+        try:
+            raw = os.read(fd, 16384)
+        except BlockingIOError:
+            return None
+    finally:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+    if not raw:
+        return None
+    try:
+        record = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    if (
+        not isinstance(record, dict)
+        or record.get("schema_version") != 1
+        or not isinstance(record.get("reason"), str)
+        or not isinstance(record.get("detail"), str)
+    ):
+        return None
+    return record
+
+
 class ModelSelectionError(ValueError):
     def __init__(self, reason: str, detail: str):
         super().__init__(detail)
@@ -1167,6 +1196,7 @@ def validate_route_record(args: argparse.Namespace) -> int:
         "--intensity",args.intensity,"--write-scope",args.write_scope,
         "--route-id",args.route_id,"--route-hash",args.route_hash,
         "--registry-digest",args.registry_digest,"--unit",args.unit,
+        "--launch-phase",args.action,
         "--model-role",args.model_role or "","--model-profile",args.model_profile or ""]
     if args.attempt_id:
         command += ["--current-attempt", args.attempt_id]
@@ -1174,7 +1204,11 @@ def validate_route_record(args: argparse.Namespace) -> int:
     if result.returncode:
         if result.stdout: print(result.stdout,end="")
         if result.stderr: print(result.stderr,end="",file=sys.stderr)
-        return fail("worker-route-validation-failed",result.returncode,route_file=args.route_file)
+        return fail(
+            "worker-route-validation-failed", result.returncode,
+            route_file=args.route_file, registered="0", started="0",
+            child_spawned="0",
+        )
     args.route_validation=result.stdout.strip()
     early_jobs = Path(
         args.jobs
@@ -1554,26 +1588,46 @@ def main(argv: list[str]) -> int:
             dispatch_env["AGENT_DISPATCH_UNIT"] = args.unit
         else:
             dispatch_env.pop("AGENT_DISPATCH_UNIT", None)
+        fence_failure_read_fd, fence_failure_write_fd = os.pipe()
         def spawn_worker(gate_fd: int) -> subprocess.Popen:
-            return subprocess.Popen(
+            fence_command = [
+                sys.executable, str(ROOT / "utilities" / "launch-fence.py"),
+                "--parent-pid", str(os.getpid()),
+                "--gate-fd", str(gate_fd),
+                "--failure-fd", str(fence_failure_write_fd),
+                "--jobs", str(jobs), "--attempt-id", args.attempt_id,
+            ]
+            if args.route_file:
+                fence_command.extend(
+                    [
+                        "--route-file", args.route_file,
+                        "--launch-phase", args.action,
+                    ]
+                )
+            fence_command.extend(
                 [
-                    sys.executable, str(ROOT / "utilities" / "launch-fence.py"),
-                    "--parent-pid", str(os.getpid()),
-                    "--gate-fd", str(gate_fd),
-                    "--jobs", str(jobs), "--attempt-id", args.attempt_id,
                     "--post-release-parent-death-signal",
                     "kill" if args.launch_lifecycle == FOREGROUND_SCOPED else "none",
                     "--",
                     sys.executable, str(governor), "--root", str(governor_root),
                     "run", "--class", "dispatch", "--", "sh", "-c", command,
-                ],
-                start_new_session=True,
-                env=dispatch_env,
-                pass_fds=(gate_fd,),
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
+                ]
             )
+            try:
+                return subprocess.Popen(
+                    fence_command,
+                    start_new_session=True,
+                    env=dispatch_env,
+                    pass_fds=(gate_fd, fence_failure_write_fd),
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+            finally:
+                try:
+                    os.close(fence_failure_write_fd)
+                except OSError:
+                    pass
         launch_metadata = args.launch_lifecycle_resolution.metadata()
         if args.dispatch_depth >= 2 and os.environ.get("AGENT_DISPATCH_CHILD") == "1":
             launch_metadata["pid_scope"] = "namespace-local"
@@ -1595,6 +1649,11 @@ def main(argv: list[str]) -> int:
                 ),
             )
         except DispatchContractError as exc:
+            for fd in (fence_failure_read_fd, fence_failure_write_fd):
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
             if exc.reason == "attempt-launch-already-claimed":
                 cancel_governor_reservation(
                     governor, governor_root, reservation_token
@@ -1628,6 +1687,11 @@ def main(argv: list[str]) -> int:
             close_job_row(jobs, args.slug, args.worktree, reason, "", args.attempt_id)
             return fail(exc.reason, 73, detail=exc.detail, attempt_id=args.attempt_id)
         except OSError as exc:
+            for fd in (fence_failure_read_fd, fence_failure_write_fd):
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
             annotate_attempt_row(
                 jobs, args.attempt_id, {"launch_outcome": "never-launched"}
             )
@@ -1641,6 +1705,7 @@ def main(argv: list[str]) -> int:
                 expected_reservation=args.replica_batch_expectation,
             )
         except DispatchContractError as exc:
+            fence_failure = read_launch_fence_failure(fence_failure_read_fd)
             try:
                 os.killpg(proc.pid, signal.SIGTERM)
                 proc.wait(timeout=0.5)
@@ -1651,6 +1716,19 @@ def main(argv: list[str]) -> int:
                 except (ProcessLookupError, subprocess.TimeoutExpired):
                     pass
             cancel_governor_reservation(governor, governor_root, reservation_token)
+            if fence_failure is not None:
+                reason = str(fence_failure["reason"])
+                annotate_attempt_row(
+                    jobs, args.attempt_id, {"launch_outcome": "never-launched"}
+                )
+                close_job_row(
+                    jobs, args.slug, args.worktree, reason, "", args.attempt_id,
+                )
+                return fail(
+                    reason, 73, detail=str(fence_failure["detail"]),
+                    attempt_id=args.attempt_id, registered="0", started="0",
+                    child_spawned="0",
+                )
             close_job_row(
                 jobs, args.slug, args.worktree,
                 "governor-reservation-transfer", "", args.attempt_id,
@@ -1659,6 +1737,7 @@ def main(argv: list[str]) -> int:
                 exc.reason, 75, detail=exc.detail,
                 attempt_id=args.attempt_id, child_spawned="1",
             )
+        read_launch_fence_failure(fence_failure_read_fd)
         if (args.dispatch_depth == 1 and args.worker_type == "owner"
                 and args.launch_lifecycle == DETACHED):
             try:

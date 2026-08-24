@@ -15,6 +15,30 @@ class WorkerRouteGuardTest(unittest.TestCase):
  def route(self):
   gate={"spec_read":{"satisfied":True,"source":"prd-sha256"},"drift_verdict":"within-spec","workflow_mode":"tracked","artifact_guard":{"satisfied":True,"source":"conductor"}}
   return R.compile_route("autopilot-code","dev","strong",ROOT,ROOT,predicates=ALL,signals=["shared-contract"],transport="headless",tracking="tracked",tracked_gate_evidence=gate,dispatch_evidence=dispatch(ROOT))
+
+ def reseal(self,route):
+  route["route_hash"]=R.route_hash(route)
+  route["route_id"]="rt-"+route["route_hash"].split(":",1)[1][:16]
+  return route
+
+ def test_launch_tuple_absent_and_incompatible_fail_closed(self):
+  for case in ("absent","incompatible"):
+   with self.subTest(case=case), tempfile.TemporaryDirectory() as td:
+    route=self.route()
+    if case=="absent":
+     route.pop("launch_compatibility_tuple")
+     expected="launch-compatibility-tuple-required"
+    else:
+     route["launch_compatibility_tuple"]["runtime_root"]["binding_digest"]="sha256:"+"0"*64
+     expected="launch-runtime-root-mismatch"
+    self.reseal(route); path=Path(td)/"route.json"; path.write_text(json.dumps(route))
+    # Plain material/spec callers remain compatible with legacy route records.
+    if case=="absent":
+     _,node,_=G.validate_route_contract(path,"execute",ROOT,ROOT)
+     self.assertEqual(node["id"],"execute")
+    with self.assertRaises(G.WorkerRouteError) as ctx:
+     G.validate_route_contract(path,"execute",ROOT,ROOT,launch_phase="start")
+    self.assertEqual(ctx.exception.reason,expected)
  def test_valid_and_scope_bound(self):
   with tempfile.TemporaryDirectory() as td:
    path=Path(td)/"route.json"; route=self.route(); path.write_text(json.dumps(route))
