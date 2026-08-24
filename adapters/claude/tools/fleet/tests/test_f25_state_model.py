@@ -225,6 +225,35 @@ class JobFixtureTest(FixtureBase):
         self.assertEqual(state, "working")
         self.assertEqual(ev["tier"], 2)
 
+    def test_parent_extinction_ladder_fixtures(self):
+        base = {"pid_scope":"namespace-local", "pid_authoritative":False,
+                "pid_alive":False, "proc_start_match":False,
+                "attempt_descendants":"unverifiable",
+                "heartbeat":{"phase":"tool", "sequence":1, "updated_at":999.0,
+                              "attempt_id":"child", "route_id":"r", "route_node":"execute"},
+                "observed_liveness":{"state":"unverifiable"},
+                "attempt_id":"child", "route_id":"r", "route_node":"execute"}
+        evidence = model.classify_attempt_evidence(
+            dict(base, parent_extinction={"state":"proven", "reason":"parent-terminal-process:gone"}), 1000.0)
+        self.assertEqual(evidence["state"], "dead")
+        self.assertEqual(evidence["source"], "parent")
+        self.assertEqual(evidence["rule"], "parent-terminal-process:gone")
+        evidence = model.classify_attempt_evidence(
+            dict(base, pid_authoritative=True, pid_alive=True, proc_start_match=True,
+                 parent_extinction={"state":"proven", "reason":"parent-proof"}), 1000.0)
+        self.assertEqual(evidence["state"], "working")
+        self.assertEqual(evidence["source"], "proc")
+        populated = model.classify_attempt_evidence(
+            dict(base, attempt_descendants="populated",
+                 parent_extinction={"state":"proven", "reason":"parent-proof"}), 1000.0)
+        self.assertEqual(populated["state"], "working")
+        self.assertEqual(populated["source"], "namespace")
+        ordinary = model.classify_attempt_evidence(base, 1000.0)
+        self.assertEqual(ordinary["state"], "working")
+        for proof in (None, {"state":"unproven", "reason":"no-proof"}):
+            unchanged = model.classify_attempt_evidence(dict(base, parent_extinction=proof), 1000.0)
+            self.assertEqual(unchanged["state"], "working")
+
 
 class RelocationGuardTest(unittest.TestCase):
     """plan §3 — the heuristics were RELOCATED into the classifier, not left as patch layers.
@@ -432,7 +461,7 @@ class NamespaceLocalDescendantEvidenceTest(unittest.TestCase):
         verdict = model.classify_attempt_evidence(
             self.evidence(attempt_descendants="populated"), now=1060.0)
         self.assertEqual(verdict["state"], "working")
-        self.assertEqual(verdict["source"], "heartbeat")
+        self.assertEqual(verdict["source"], "namespace")
 
     def test_unscannable_and_absent_probes_both_stay_fail_closed(self):
         # An impossible scan, and an older caller that supplies no probe at all.

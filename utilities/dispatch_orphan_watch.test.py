@@ -42,6 +42,7 @@ class OrphanWatchTest(unittest.TestCase):
         self.supervisor_lease.write_text("stale", encoding="utf-8")
         self.owner = subprocess.Popen(["sleep", "60"])
         self.owner_start = self.proc_start(self.owner.pid)
+        self.observer_namespace = (Path("/proc/self/ns/pid").readlink())
         self.children = []
 
     def tearDown(self):
@@ -79,7 +80,9 @@ class OrphanWatchTest(unittest.TestCase):
         self.jobs.write_text(
             f"2026-07-19T00:00:00Z\t{status}\t/r\t/w\towner\t"
             f"{current},dispatch_depth=1,worker_type=owner,attempt_id=att-watch,"
-            f"pid={self.owner.pid},pid_start={self.owner_start}"
+            f"pid={self.owner.pid},pid_start={self.owner_start},"
+            f"pid_observer_ns={self.observer_namespace},"
+            f"pid_ns={self.observer_namespace}"
             f"{supervised_metadata}\n"
             "2026-07-19T00:00:01Z\topen\t/r\t/w\tchild\t"
             f"{current},dispatch_depth=2,route_id={self.route_id},"
@@ -130,14 +133,75 @@ class OrphanWatchTest(unittest.TestCase):
         self.assertFalse(self.supervisor_state.exists())
         self.assertTrue(self.supervisor_lease.exists())
 
-    def test_terminal_owner_makes_watcher_exit_without_mutation(self):
+    def test_terminal_owner_waits_for_extinction_before_exit_without_mutation(self):
         self.write_rows(completed_owner=True)
         before = self.jobs.read_text()
         watcher = self.watcher()
+        time.sleep(0.08)
+        self.assertIsNone(watcher.poll())
+        self.assertTrue(self.supervisor_state.exists())
+        self.owner.kill(); self.owner.wait()
         self.assertEqual(watcher.wait(timeout=5), 0)
         self.assertEqual(self.jobs.read_text(), before)
         self.assertFalse(self.supervisor_state.exists())
         self.assertFalse(self.supervisor_lease.exists())
+
+    def test_fleet_kill_waits_then_closes_exact_child_and_protects_foreign_sibling(self):
+        child = subprocess.Popen(["sleep", "60"], start_new_session=True)
+        sibling = subprocess.Popen(["sleep", "60"], start_new_session=True)
+        self.children.extend((child, sibling))
+        self.write_rows(completed_owner=True, child=child)
+        current = (
+            "attempt_schema_version=2,transport=headless,execution_surface=registered-headless,"
+            "registered_worker=1,fallback_hop=same-harness-headless"
+        )
+        self.jobs.write_text(self.jobs.read_text() +
+            "2026-07-19T00:00:02Z\topen\t/r\t/w\tforeign\t"
+            f"{current},dispatch_depth=2,route_id={self.route_id},route_node=test,"
+            f"attempt_id=att-foreign,parent=other,parent_attempt_id=att-other,"
+            f"pid={sibling.pid},pid_start={self.proc_start(sibling.pid)},"
+            "pid_scope=namespace-local,launch_lifecycle=foreground-scoped\n")
+        watcher = self.watcher()
+        time.sleep(0.08)
+        self.assertIsNone(watcher.poll())
+        self.assertIsNone(child.poll())
+        self.owner.kill(); self.owner.wait()
+        self.assertEqual(watcher.wait(timeout=5), 0)
+        text = self.jobs.read_text()
+        self.assertIn("att-child", text)
+        child_line = next(line for line in text.splitlines() if "att-child" in line)
+        sibling_line = next(line for line in text.splitlines() if "att-foreign" in line)
+        self.assertIn("note=dead-parent-terminated", child_line)
+        self.assertIn("\topen\t", sibling_line)
+        self.assertIsNotNone(child.poll())
+        self.assertIsNone(sibling.poll())
+
+    def test_killed_owner_also_waits_for_extinction_before_namespace_close(self):
+        self.write_rows(completed_owner=True)
+        text = self.jobs.read_text()
+        text = text.replace("\tdone\t/r\t/w\towner\t", "\tkilled\t/r\t/w\towner\t")
+        text = text.replace(
+            f"pid_start={self.owner_start},",
+            f"pid_start={self.owner_start},pid_scope=namespace-local,",
+            1,
+        )
+        text = text.replace(
+            "pid_start=1\n",
+            "pid_start=1,pid_scope=namespace-local,"
+            "launch_lifecycle=foreground-scoped\n",
+        )
+        self.jobs.write_text(text)
+        watcher = self.watcher()
+        time.sleep(0.08)
+        self.assertIsNone(watcher.poll())
+        child_line = next(line for line in self.jobs.read_text().splitlines()
+                          if "att-child" in line)
+        self.assertIn("\topen\t", child_line)
+        self.owner.kill(); self.owner.wait()
+        self.assertEqual(watcher.wait(timeout=5), 0)
+        child_line = next(line for line in self.jobs.read_text().splitlines()
+                          if "att-child" in line)
+        self.assertIn("note=dead-parent-terminated", child_line)
 
     def test_non_orphan_429_exit_is_reconciled_as_capacity(self):
         log = self.base / "owner.claude.jsonl"

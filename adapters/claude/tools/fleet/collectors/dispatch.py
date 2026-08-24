@@ -38,6 +38,7 @@ from dispatch_contract import (  # noqa: E402
     dispatch_state_roots,
     observed_attempt_liveness,
     observed_supervised_owner_liveness,
+    resolve_parent_extinction,
     resolve_agent_home,
 )
 from dispatch_completion_join import read_supervisor_phase_state  # noqa: E402
@@ -750,6 +751,33 @@ def _attempt_terminal_observation(job):
     }
 
 
+def _parent_extinction_rows(paths):
+    """Read one bounded registry snapshot for exact parent-proof lookups.
+
+    The first registry containing an attempt owns that attempt, but duplicate
+    rows inside that registry remain visible so the proof resolver can reject
+    ambiguity instead of silently selecting the last row.
+    """
+    rows = {}
+    for path in paths:
+        per_path = {}
+        try:
+            content = Path(path).read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        for line in content.splitlines():
+            fields = line.split("\t")
+            if len(fields) != 6:
+                continue
+            meta = _parse_pipe_meta(fields[5] or "")
+            attempt_id = meta.get("attempt_id")
+            if attempt_id:
+                per_path.setdefault(attempt_id, []).append((fields, meta))
+        for attempt_id, evidence in per_path.items():
+            rows.setdefault(attempt_id, evidence)
+    return tuple(item for evidence in rows.values() for item in evidence)
+
+
 def _dispatch_liveness(job, now, track=True, codex_index=None):
     """Job → state string. Signature/return preserved; the verdict now comes from the
     single F-25 classifier. Stamps `job.state_evidence` as a side effect.
@@ -861,6 +889,7 @@ def _dispatch_liveness(job, now, track=True, codex_index=None):
             if common_observation
             else None
         ),
+        "parent_extinction": getattr(job, "_parent_extinction", None),
         # A loop proc row is decided by tier-2 evidence; skip the mtime probe entirely
         # (it was never consulted on that path pre-F-25 either).
         "transcript": (
@@ -2638,6 +2667,8 @@ def _scan_jobs_log(path, seen_slugs, seen_keys=None, registry_priority=0,
         job._launch_home = meta.get("launch_home")
         job._registry_path = path
         job._registry_metadata = dict(meta)
+        job._registry_repo = repo
+        job._registry_worktree = cwd
         jobs.append(job)
     quick_groups = {}
     for job in jobs:
@@ -2983,6 +3014,24 @@ def collect(jobs_path=None, harness_filter=None):
                 j.model = _claude_job_model(str(pid), j.cwd)
                 j.stage = None
     now = time.time()
+    parent_rows = _parent_extinction_rows(paths)
+    for j in jobs:
+        metadata = getattr(j, "_registry_metadata", None)
+        if not isinstance(metadata, dict) or j.dispatch_depth != 2:
+            continue
+        child_metadata = {
+            **metadata,
+            "parent": j.parent_slug,
+            "worktree": j.cwd,
+            "repo": getattr(j, "_registry_repo", ""),
+        }
+        proof = resolve_parent_extinction(child_metadata, parent_rows)
+        if proof.state == "proven":
+            j._parent_extinction = {
+                "state": proof.state,
+                "reason": proof.reason,
+                "parent_attempt_id": proof.parent_attempt_id,
+            }
     try:
         codex_index = _build_codex_rollout_index(jobs)
     except Exception:

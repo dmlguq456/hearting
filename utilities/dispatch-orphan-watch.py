@@ -11,10 +11,12 @@ import sys
 import time
 
 from dispatch_contract import (
+    PARENT_EXTINCTION_TERMINAL_STATUSES,
     SUPERVISOR_LEASE_KIND,
     dispatch_state_root,
     observed_supervised_owner_liveness,
     parse_registry_metadata,
+    process_namespace_identity,
     process_start_ticks,
     remove_supervisor_lease,
     supervisor_lease_path,
@@ -58,16 +60,21 @@ def attempt_status(jobs: Path, attempt_id: str) -> str | None:
 
 
 def _run_registry(operation: str, args) -> subprocess.CompletedProcess:
+    command = [
+        sys.executable,
+        str(Path(__file__).resolve().with_name("dispatch-registry.py")),
+        operation,
+        "--attempt", args.attempt_id,
+        "--jobs", str(args.jobs),
+        "--agent-home", str(args.agent_home),
+        "--apply",
+    ]
+    if operation == "orphan-status":
+        command.extend(("--pid", str(args.pid), "--pid-start", args.pid_start))
+        if args.pid_observer_ns:
+            command.extend(("--pid-observer-ns", args.pid_observer_ns))
     return subprocess.run(
-        [
-            sys.executable,
-            str(Path(__file__).resolve().with_name("dispatch-registry.py")),
-            operation,
-            "--attempt", args.attempt_id,
-            "--jobs", str(args.jobs),
-            "--agent-home", str(args.agent_home),
-            "--apply",
-        ],
+        command,
         check=False,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
@@ -163,10 +170,20 @@ def watch(args) -> int:
     while True:
         status = attempt_status(args.jobs, args.attempt_id)
         if status not in OPEN:
-            # A prior watcher may have closed the owner and died before its
-            # child cascade. orphan-status is idempotent and only continues a
-            # row already typed dead-parent-orphaned.
-            return reconcile_orphan_cascade(args) if status == "done" else 0
+            # A terminal registry word can precede owner teardown (notably
+            # Fleet kill). Keep the supervisor state and wait for the exact
+            # recorded owner identity to disappear before cascading.
+            if (
+                status in PARENT_EXTINCTION_TERMINAL_STATUSES
+                and process_start(args.pid) == args.pid_start
+            ):
+                time.sleep(args.interval)
+                continue
+            return (
+                reconcile_orphan_cascade(args)
+                if status in PARENT_EXTINCTION_TERMINAL_STATUSES
+                else 0
+            )
         if process_start(args.pid) != args.pid_start:
             observed, _phase, _metadata = observed_owner_lifecycle(args)
             if observed is not None and observed.state == "parked-supervised":
@@ -190,6 +207,11 @@ def main(argv=None) -> int:
         parser.error("--pid and --interval must be positive")
     args.jobs = args.jobs.resolve()
     args.agent_home = args.agent_home.resolve()
+    # Bind the exact PID/start extinction observed by this watcher to the
+    # namespace in which those numbers were meaningful. The registry resolver
+    # independently compares this value with both its current namespace and
+    # the parent's recorded launch observer before consuming the proof.
+    args.pid_observer_ns = process_namespace_identity() or ""
     return watch(args)
 
 

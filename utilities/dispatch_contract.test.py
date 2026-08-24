@@ -85,6 +85,110 @@ class DispatchContractTest(unittest.TestCase):
           "fallback_hop=same-harness-headless,worker_type=owner,"
           f"attempt_id={attempt},pid={pid},pid_start={start}{extra}")
 
+ def test_resolve_parent_extinction_proof_matrix(self):
+  child={"attempt_schema_version":2,"dispatch_depth":2,"transport":"headless",
+         "execution_surface":"registered-headless","registered_worker":1,
+         "fallback_hop":"same-harness-headless","pid_scope":"namespace-local",
+         "launch_lifecycle":"foreground-scoped","parent_attempt_id":"att-parent",
+         "parent":"owner","repo":"/repo","worktree":"/wt",
+         "route_id":"rt-parent","route_file":"/route.json"}
+  terminal=self.parent_row("att-parent",999999,"1",status="done")
+  rows=lambda *values: [(value.split("\t"), D.parse_registry_metadata(value.split("\t",5)[5]))
+                        for value in values]
+  with mock.patch.object(D,"post_exit_receipt_reason",return_value="receipt"), \
+       mock.patch.object(D,"attempt_process_quiescence",return_value=D.ProcessQuiescence("quiescent","gone")):
+   self.assertEqual(D.resolve_parent_extinction(child, rows(terminal)).state,"proven")
+  with mock.patch.object(D,"post_exit_receipt_reason",return_value="receipt"), \
+       mock.patch.object(
+        D,"attempt_process_quiescence",
+        return_value=D.ProcessQuiescence("live","local-pid-live")):
+   proof=D.resolve_parent_extinction(child,rows(terminal))
+   self.assertEqual(proof.state,"unproven")
+   self.assertEqual(proof.reason,"parent-process-still-live:local-pid-live")
+  for label, changed in (
+   ("open", {"status":"open"}),
+   ("detached", {"launch_lifecycle":"detached"}),
+   ("host-pid", {"pid_scope":"host-visible"}),
+   ("unregistered", {"registered_worker":0}),
+   ("depth", {"dispatch_depth":1}),
+   ("parent-contract", {"parent_dispatch_depth":2, "parent_worker_type":"stage"}),
+   ("legacy-child", {"attempt_schema_version":1}),
+   ("missing-parent", {"parent_attempt_id":""}),
+   ("foreign-repo", {"repo":"/other"}),
+   ("foreign-worktree", {"worktree":"/other"}),
+   ("missing-repo", {"repo":""}),
+   ("missing-worktree", {"worktree":""}),
+   ("partial-route", {"route_file":""}),
+   ("slug", {"parent":"retry"}),
+  ):
+   value=dict(child); value.update(changed)
+   parent_status=changed.get("status","done")
+   parent_slug="retry" if label == "slug" else "owner"
+   row=terminal.replace("\tdone\t", f"\t{parent_status}\t", 1).replace("\towner\t", f"\t{parent_slug}\t", 1)
+   if label == "parent-contract":
+    row=row.replace("dispatch_depth=1,", "dispatch_depth=2,").replace("worker_type=owner", "worker_type=stage")
+   self.assertEqual(D.resolve_parent_extinction(value, rows(row)).state,"unproven",label)
+  self.assertEqual(D.resolve_parent_extinction(child, ()).reason,"parent-attempt-absent")
+  self.assertEqual(D.resolve_parent_extinction(child, rows(terminal, terminal)).reason,"parent-attempt-ambiguous")
+  legacy_parent=terminal.replace("attempt_schema_version=2","attempt_schema_version=1")
+  self.assertEqual(D.resolve_parent_extinction(child,rows(legacy_parent)).reason,
+                   "parent-contract-not-current")
+  missing_parent_repo=self.parent_row(
+   "att-parent",999999,"1",status="done",repo="")
+  self.assertEqual(
+   D.resolve_parent_extinction(child,rows(missing_parent_repo)).reason,
+   "parent-identity-incomplete")
+  conflicting_sibling=(
+   "2026-08-13T00:00:01Z\topen\t/repo\t/wt\tchild-other\t"
+   "attempt_schema_version=2,dispatch_depth=2,transport=headless,"
+   "execution_surface=registered-headless,registered_worker=1,"
+   "fallback_hop=same-harness-headless,worker_type=stage,"
+   "attempt_id=att-child-other,parent=owner,parent_attempt_id=att-parent,"
+   "route_id=rt-other,route_file=/other-route.json")
+  self.assertEqual(
+   D.resolve_parent_extinction(
+    child,rows(terminal,conflicting_sibling)).reason,
+   "parent-route-context-conflict")
+  with mock.patch.object(D,"canonical_repository_identity",return_value="/same-repo"), \
+       mock.patch.object(D,"post_exit_receipt_reason",return_value="receipt"):
+   other_tree=dict(child,worktree="/same-repo-other-worktree")
+   self.assertEqual(D.resolve_parent_extinction(other_tree,rows(terminal)).reason,
+                    "parent-worktree-foreign")
+  watcher_parent=self.parent_row(
+   "att-parent",999999,"1",status="done")
+  observation={"state":"extinct","parent_attempt_id":"att-parent",
+               "pid":"999999","pid_start":"1",
+               "pid_observer_ns":"pid:[watcher]"}
+  with mock.patch.object(D,"post_exit_receipt_reason",return_value=""), \
+       mock.patch.object(
+        D,"attempt_process_quiescence",
+        return_value=D.ProcessQuiescence(
+         "unverifiable","local-process-group-identity-unverifiable")), \
+       mock.patch.object(D,"process_namespace_identity",return_value="pid:[watcher]"), \
+       mock.patch.object(D,"_proc_observation",return_value=("missing","","")):
+   proof=D.resolve_parent_extinction(child,rows(watcher_parent),observation)
+   self.assertEqual(proof.reason,"parent-terminal-watcher-pid-extinct")
+   live_observation=dict(observation,pid_start="2")
+   self.assertEqual(
+    D.resolve_parent_extinction(child,rows(watcher_parent),live_observation).state,
+    "unproven")
+   foreign_observation=dict(observation,pid_observer_ns="pid:[foreign]")
+   self.assertEqual(
+    D.resolve_parent_extinction(child,rows(watcher_parent),foreign_observation).state,
+    "unproven")
+   with mock.patch.object(D,"_proc_observation",return_value=("inaccessible","","")):
+    self.assertEqual(
+     D.resolve_parent_extinction(child,rows(watcher_parent),observation).state,
+     "unproven")
+   namespace_parent=self.parent_row(
+    "att-parent",999999,"1",status="done",extra=",pid_scope=namespace-local")
+   self.assertEqual(
+    D.resolve_parent_extinction(child,rows(namespace_parent),observation).state,
+    "unproven")
+  with mock.patch.object(D,"post_exit_receipt_reason",return_value=""), \
+       mock.patch.object(D,"attempt_process_quiescence",return_value=D.ProcessQuiescence("unverifiable","live")):
+   self.assertEqual(D.resolve_parent_extinction(child, rows(terminal)).state,"unproven")
+
  # F-1: parent_completion_window's typed `source` pins the fail-closed axes
  # (§F-1.2) — one fixture per source value, absent/not-open/ambiguous/
  # contract-invalid/foreign-slug/foreign-worktree/pid-start-mismatch fail

@@ -1075,12 +1075,19 @@ def classify_attempt_evidence(ev_in, now=None):
         ):
             state, source = "working", "proc"
             rule = "namespace-bound authoritative pid/start-time is live"
+        elif ev_in.get("attempt_descendants") == "populated":
+            state, source = "working", "namespace"
+            rule = "namespace-local attempt has a surviving attempt-tagged process"
         elif ev_in.get("pid_authoritative") is True and (
             ev_in.get("pid_alive") is False
             or ev_in.get("proc_start_match") is False
         ):
             state, source = "dead", "proc"
             rule = "namespace-bound authoritative process identity ended or changed"
+        elif (isinstance(ev_in.get("parent_extinction"), dict)
+              and ev_in["parent_extinction"].get("state") == "proven"):
+            state, source = "dead", "parent"
+            rule = ev_in["parent_extinction"].get("reason", "proven parent extinction")
         elif ev_in.get("attempt_descendants") == "empty":
             # SD-58: a heartbeat is the attempt talking about itself, and a row
             # that stopped mid-sentence keeps a fresh one forever. A proven-empty
@@ -1138,6 +1145,7 @@ def classify_attempt_evidence(ev_in, now=None):
         "pgid": ev_in.get("pgid"),
         "heartbeat": ev_in.get("heartbeat"),
         "terminal_observation": terminal,
+        "parent_extinction": ev_in.get("parent_extinction"),
         "observed_liveness": observed,
         "registry_transition": ev_in.get("registry_transition"),
         "progress_fingerprint": deterministic_progress_fingerprint(ev_in),

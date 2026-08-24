@@ -452,6 +452,243 @@ class ObservedAttemptLiveness:
     process_reason: str
 
 
+class ParentExtinctionEvidence(NamedTuple):
+    """Bounded, read-only proof that a foreground child lost its owner."""
+
+    state: str
+    reason: str
+    parent_attempt_id: str = ""
+
+
+PARENT_EXTINCTION_TERMINAL_STATUSES = frozenset(("done", "killed", "cancelled"))
+
+
+def resolve_parent_extinction(
+    child_metadata, parent_rows, parent_observation=None
+):
+    """Resolve exact parent extinction for a namespace-local foreground child.
+
+    ``parent_rows`` is a preloaded registry snapshot containing ``(fields, meta)``
+    pairs. The resolver never mutates either registry or process state. It
+    deliberately requires a durable receipt or authoritative read-only
+    quiescence observation in addition to the parent's terminal registry word.
+    """
+    child = child_metadata if isinstance(child_metadata, dict) else {}
+    try:
+        validate_attempt_metadata(child)
+    except DispatchContractError:
+        return ParentExtinctionEvidence("unproven", "child-contract-not-current")
+    parent_id = str(child.get("parent_attempt_id") or "")
+    required = (
+        child.get("dispatch_depth") in (2, "2")
+        and child.get("registered_worker") in (True, "1", "true")
+        and child.get("pid_scope") == "namespace-local"
+        and child.get("launch_lifecycle") == "foreground-scoped"
+        and parent_id
+        and (child.get("parent") or child.get("parent_slug"))
+    )
+    if not required:
+        return ParentExtinctionEvidence("unproven", "child-contract-not-eligible")
+    records = []
+    matches = []
+    for row in parent_rows or ():
+        if isinstance(row, tuple) and len(row) == 2:
+            fields, meta = row
+            fields = list(fields or [])
+            meta = dict(meta or {})
+            record = {"fields": fields, "meta": meta}
+        elif isinstance(row, dict):
+            record = row
+            fields = list(row.get("fields") or [])
+            meta = dict(row.get("meta") or row)
+        else:
+            continue
+        record = {**record, "fields": fields, "meta": meta}
+        records.append(record)
+        if meta.get("attempt_id") != parent_id:
+            continue
+        matches.append(record)
+    if len(matches) != 1:
+        return ParentExtinctionEvidence(
+            "unproven", "parent-attempt-" + ("absent" if not matches else "ambiguous"), parent_id
+        )
+    record = matches[0]
+    fields, parent = record["fields"], record["meta"]
+    status = (fields[1] if len(fields) > 1 else parent.get("status", ""))
+    if status not in PARENT_EXTINCTION_TERMINAL_STATUSES:
+        return ParentExtinctionEvidence("unproven", "parent-not-terminal", parent_id)
+    try:
+        validate_attempt_metadata(parent)
+    except DispatchContractError:
+        return ParentExtinctionEvidence("unproven", "parent-contract-not-current", parent_id)
+    if parent.get("dispatch_depth") not in (1, "1") or parent.get("worker_type") != "owner":
+        return ParentExtinctionEvidence("unproven", "parent-contract-not-owner", parent_id)
+    child_repo = child.get("repo") or child.get("repository")
+    stable_parent_repo = fields[2] if len(fields) > 2 else ""
+    metadata_parent_repo = parent.get("repo") or parent.get("repository") or ""
+    if (
+        stable_parent_repo
+        and metadata_parent_repo
+        and canonical_repository_identity(stable_parent_repo)
+        != canonical_repository_identity(metadata_parent_repo)
+    ):
+        return ParentExtinctionEvidence("unproven", "parent-identity-foreign", parent_id)
+    parent_repo = stable_parent_repo or metadata_parent_repo
+    child_worktree = child.get("worktree") or child.get("cwd")
+    stable_parent_worktree = fields[3] if len(fields) > 3 else ""
+    metadata_parent_worktree = parent.get("worktree") or parent.get("cwd") or ""
+    if (
+        stable_parent_worktree
+        and metadata_parent_worktree
+        and Path(stable_parent_worktree).expanduser().resolve(strict=False)
+        != Path(metadata_parent_worktree).expanduser().resolve(strict=False)
+    ):
+        return ParentExtinctionEvidence("unproven", "parent-worktree-foreign", parent_id)
+    parent_worktree = stable_parent_worktree or metadata_parent_worktree
+    child_parent_slug = child.get("parent") or child.get("parent_slug")
+    stable_parent_slug = fields[4] if len(fields) > 4 else ""
+    metadata_parent_slug = parent.get("slug") or ""
+    if stable_parent_slug and metadata_parent_slug and stable_parent_slug != metadata_parent_slug:
+        return ParentExtinctionEvidence("unproven", "parent-identity-foreign", parent_id)
+    parent_slug = stable_parent_slug or metadata_parent_slug
+    if not all((child_repo, parent_repo, child_worktree, parent_worktree,
+                child_parent_slug, parent_slug)):
+        return ParentExtinctionEvidence("unproven", "parent-identity-incomplete", parent_id)
+    if (child_parent_slug != parent_slug or
+            canonical_repository_identity(child_repo) != canonical_repository_identity(parent_repo)):
+        return ParentExtinctionEvidence("unproven", "parent-identity-foreign", parent_id)
+    if (Path(child_worktree).expanduser().resolve(strict=False)
+        != Path(parent_worktree).expanduser().resolve(strict=False)
+    ):
+        return ParentExtinctionEvidence("unproven", "parent-worktree-foreign", parent_id)
+    child_route_id = str(child.get("route_id") or "")
+    child_route_file = str(child.get("route_file") or "")
+    if bool(child_route_id) != bool(child_route_file):
+        return ParentExtinctionEvidence("unproven", "parent-route-context-conflict", parent_id)
+    route_candidates = (
+        {(child_route_id, child_route_file)}
+        if child_route_id and child_route_file else set()
+    )
+    parent_route_id = str(parent.get("route_id") or "")
+    parent_route_file = str(parent.get("route_file") or "")
+    if bool(parent_route_id) != bool(parent_route_file):
+        return ParentExtinctionEvidence("unproven", "parent-route-context-conflict", parent_id)
+    if parent_route_id and parent_route_file:
+        route_candidates.add((parent_route_id, parent_route_file))
+    for sibling_record in records:
+        sibling = sibling_record["meta"]
+        if sibling.get("parent_attempt_id") != parent_id:
+            continue
+        sibling_fields = sibling_record["fields"]
+        stable_sibling_repo = sibling_fields[2] if len(sibling_fields) > 2 else ""
+        metadata_sibling_repo = sibling.get("repo") or sibling.get("repository") or ""
+        stable_sibling_worktree = sibling_fields[3] if len(sibling_fields) > 3 else ""
+        metadata_sibling_worktree = sibling.get("worktree") or sibling.get("cwd") or ""
+        if (
+            stable_sibling_repo
+            and metadata_sibling_repo
+            and canonical_repository_identity(stable_sibling_repo)
+            != canonical_repository_identity(metadata_sibling_repo)
+        ) or (
+            stable_sibling_worktree
+            and metadata_sibling_worktree
+            and Path(stable_sibling_worktree).expanduser().resolve(strict=False)
+            != Path(metadata_sibling_worktree).expanduser().resolve(strict=False)
+        ):
+            return ParentExtinctionEvidence(
+                "unproven", "parent-route-context-conflict", parent_id
+            )
+        sibling_repo = stable_sibling_repo or metadata_sibling_repo
+        sibling_worktree = stable_sibling_worktree or metadata_sibling_worktree
+        sibling_parent = sibling.get("parent") or sibling.get("parent_slug")
+        if not all((sibling_repo, sibling_worktree, sibling_parent)):
+            return ParentExtinctionEvidence(
+                "unproven", "parent-route-context-conflict", parent_id
+            )
+        if (
+            sibling_parent != parent_slug
+            or canonical_repository_identity(sibling_repo)
+            != canonical_repository_identity(parent_repo)
+            or Path(sibling_worktree).expanduser().resolve(strict=False)
+            != Path(parent_worktree).expanduser().resolve(strict=False)
+        ):
+            return ParentExtinctionEvidence(
+                "unproven", "parent-route-context-conflict", parent_id
+            )
+        sibling_route_id = str(sibling.get("route_id") or "")
+        sibling_route_file = str(sibling.get("route_file") or "")
+        if bool(sibling_route_id) != bool(sibling_route_file):
+            return ParentExtinctionEvidence(
+                "unproven", "parent-route-context-conflict", parent_id
+            )
+        if sibling_route_id and sibling_route_file:
+            route_candidates.add((sibling_route_id, sibling_route_file))
+    if len(route_candidates) > 1:
+        return ParentExtinctionEvidence(
+            "unproven", "parent-route-context-conflict", parent_id
+        )
+    receipt = post_exit_receipt_reason(parent)
+    process = attempt_process_quiescence(parent, terminal_receipt=True)
+    if process.state == "live":
+        return ParentExtinctionEvidence(
+            "unproven", "parent-process-still-live:" + process.reason, parent_id
+        )
+    if receipt:
+        return ParentExtinctionEvidence("proven", "parent-terminal-receipt:" + receipt, parent_id)
+    if process.state == "quiescent":
+        return ParentExtinctionEvidence("proven", "parent-terminal-process:" + process.reason, parent_id)
+    observation = (
+        parent_observation if isinstance(parent_observation, dict) else {}
+    )
+    observed_pid = str(observation.get("pid") or "")
+    observed_start = str(observation.get("pid_start") or "")
+    observed_namespace = str(observation.get("pid_observer_ns") or "")
+    current_namespace = process_namespace_identity() or ""
+    recorded_observer = str(parent.get("pid_observer_ns") or "")
+    recorded_process_namespace = str(parent.get("pid_ns") or "")
+    observer_owns_recorded_pid = bool(
+        observed_namespace
+        and observed_namespace == current_namespace
+        and (
+            (
+                recorded_observer == observed_namespace
+                and recorded_process_namespace in {"", observed_namespace}
+            )
+            or (
+                not recorded_observer
+                and parent.get("pid_scope", "host-visible") != "namespace-local"
+                and recorded_process_namespace in {"", observed_namespace}
+            )
+        )
+    )
+    if (
+        observation.get("state") == "extinct"
+        and observation.get("parent_attempt_id") == parent_id
+        and observer_owns_recorded_pid
+        and observed_pid
+        and observed_pid == str(parent.get("pid") or "")
+        and observed_start
+        and observed_start == str(parent.get("pid_start") or "")
+        and process.reason in {
+            "local-process-group-identity-unverifiable",
+            "host-process-group-identity-unverifiable",
+            "post-exit-receipt-incomplete",
+        }
+    ):
+        visibility, actual_start, state = _proc_observation(int(observed_pid))
+        if (
+            visibility == "missing"
+            or (
+                visibility == "present"
+                and (actual_start != observed_start or state == "Z")
+            )
+        ):
+            return ParentExtinctionEvidence(
+                "proven", "parent-terminal-watcher-pid-extinct", parent_id
+            )
+    return ParentExtinctionEvidence("unproven", "parent-extinction-unproven:" + process.reason, parent_id)
+
+
 def parse_registry_metadata(pipe: str) -> dict[str, str]:
     """Parse the stable six-column registry's comma-delimited metadata."""
 

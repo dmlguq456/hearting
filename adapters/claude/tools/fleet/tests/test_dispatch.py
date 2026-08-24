@@ -780,6 +780,133 @@ class InstalledRuntimeRegistryTest(unittest.TestCase):
         self.assertEqual(row.source, "jobs")
         self.assertEqual(row.attempt_id, "att-installed00001")
 
+    def test_parent_extinction_rows_keep_canonical_path_precedence(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            current = os.path.join(tmp, "current.jobs.log")
+            legacy = os.path.join(tmp, "legacy.jobs.log")
+            line = ("2026-08-01T00:00:00Z\t{status}\t/repo\t/wt\towner\t"
+                    "attempt_id=att-parent,dispatch_depth=1,worker_type=owner\n")
+            with open(current, "w", encoding="utf-8") as f:
+                f.write(line.format(status="done"))
+            with open(legacy, "w", encoding="utf-8") as f:
+                f.write(line.format(status="killed"))
+            rows = dispatch._parent_extinction_rows([current, legacy])
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0][0][1], "done")
+
+    def test_parent_extinction_rows_preserve_same_registry_ambiguity(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            current = os.path.join(tmp, "current.jobs.log")
+            line = ("2026-08-01T00:00:00Z\t{status}\t/repo\t/wt\towner\t"
+                    "attempt_id=att-parent,dispatch_depth=1,worker_type=owner\n")
+            with open(current, "w", encoding="utf-8") as f:
+                f.write(line.format(status="open"))
+                f.write(line.format(status="done"))
+            rows = dispatch._parent_extinction_rows([current])
+            self.assertEqual(len(rows), 2)
+
+    def test_collect_classifies_both_parent_extinction_children_and_protects_sibling(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            jobs_log = os.path.join(tmp, "jobs.log")
+            contract = ("attempt_schema_version=2,dispatch_depth=2,transport=headless,"
+                        "execution_surface=registered-headless,registered_worker=1,"
+                        "fallback_hop=same-harness-headless")
+            owner = ("2026-08-01T00:00:00Z\tdone\t/repo\t/wt\towner\t"
+                     f"{contract},dispatch_depth=1,worker_type=owner,attempt_id=att-parent,"
+                     "note=fleet-kill,pid=99999991,pid_start=1,pgid=99999991,"
+                     "pid_ns=pid:[fleet],pid_observer_ns=pid:[fleet],"
+                     "launch_lifecycle=foreground-scoped,launch_outcome=governed-process-reaped,"
+                     "group_reap_proof=pgid-empty-v1,group_reap_pgid=99999991")
+            def child(attempt, parent):
+                return (f"2026-08-01T00:00:01Z\topen\t/repo\t/wt\t{attempt}\t"
+                        f"{contract},route_id=rt-ghost,route_node=execute,attempt_id={attempt},"
+                        "route_file=/route.json,"
+                        f"parent=owner,parent_attempt_id={parent},pid=99999992,pid_start=1,"
+                        "pid_scope=namespace-local,launch_lifecycle=foreground-scoped")
+            Path(jobs_log).write_text("\n".join((owner, child("att-child-a", "att-parent"),
+                                                   child("att-child-b", "att-parent"),
+                                                   child("att-sibling", "att-other"))) + "\n")
+            with mock.patch.object(dispatch, "_scan_processes", return_value=[]), \
+                 mock.patch.object(dispatch, "_live_attempt_ids", return_value=set()), \
+                 mock.patch.object(dispatch, "_attempt_heartbeat",
+                                   side_effect=lambda job: {
+                                       "updated_at": 9999999999,
+                                       "attempt_id": job.attempt_id,
+                                       "route_id": job.route_id,
+                                       "route_node": job.route_node,
+                                       "phase": "launch",
+                                       "sequence": 1,
+                                   }), \
+                 mock.patch.object(dispatch, "_job_transcript_signal", return_value="working"), \
+                 mock.patch.object(dispatch, "_attempt_terminal_observation", return_value=None):
+                jobs = dispatch.collect(jobs_path=jobs_log)
+            by_attempt = {job.attempt_id: job for job in jobs}
+            for attempt in ("att-child-a", "att-child-b"):
+                self.assertEqual(by_attempt[attempt].liveness, "dead")
+                self.assertEqual(by_attempt[attempt].state_evidence["attempt"]["source"], "parent")
+            self.assertEqual(by_attempt["att-sibling"].liveness, "working",
+                             by_attempt["att-sibling"].state_evidence)
+
+    def test_collect_parent_proof_fails_closed_on_route_conflict_and_missing_binding(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            jobs_log = os.path.join(tmp, "jobs.log")
+            contract = ("attempt_schema_version=2,transport=headless,"
+                        "execution_surface=registered-headless,registered_worker=1,"
+                        "fallback_hop=same-harness-headless")
+            receipt = ("pid=99999991,pid_start=1,pgid=99999991,"
+                       "pid_ns=pid:[fleet],pid_observer_ns=pid:[fleet],"
+                       "launch_lifecycle=foreground-scoped,"
+                       "launch_outcome=governed-process-reaped,"
+                       "group_reap_proof=pgid-empty-v1,group_reap_pgid=99999991")
+            owner_conflict = (
+                "2026-08-01T00:00:00Z\tdone\t/repo\t/wt\towner-a\t"
+                f"{contract},dispatch_depth=1,worker_type=owner,"
+                f"attempt_id=att-parent-conflict,{receipt}")
+            child_conflict = (
+                "2026-08-01T00:00:01Z\topen\t/repo\t/wt\ttarget-conflict\t"
+                f"{contract},dispatch_depth=2,route_id=rt-one,route_file=/one.json,"
+                "route_node=execute,attempt_id=att-target-conflict,parent=owner-a,"
+                "parent_attempt_id=att-parent-conflict,pid=99999992,pid_start=1,"
+                "pid_scope=namespace-local,launch_lifecycle=foreground-scoped")
+            sibling_conflict = child_conflict.replace(
+                "target-conflict", "sibling-conflict").replace(
+                "att-target-conflict", "att-sibling-conflict").replace(
+                "rt-one,route_file=/one.json", "rt-two,route_file=/two.json")
+            owner_missing = (
+                "2026-08-01T00:00:03Z\tdone\t\t/wt\towner-b\t"
+                f"{contract},dispatch_depth=1,worker_type=owner,"
+                f"attempt_id=att-parent-missing,{receipt}")
+            child_missing = (
+                "2026-08-01T00:00:04Z\topen\t/repo\t/wt\ttarget-missing\t"
+                f"{contract},dispatch_depth=2,route_id=rt-one,route_file=/one.json,"
+                "route_node=test,attempt_id=att-target-missing,parent=owner-b,"
+                "parent_attempt_id=att-parent-missing,pid=99999993,pid_start=1,"
+                "pid_scope=namespace-local,launch_lifecycle=foreground-scoped")
+            Path(jobs_log).write_text("\n".join((
+                owner_conflict, child_conflict, sibling_conflict,
+                owner_missing, child_missing,
+            )) + "\n")
+            with mock.patch.object(dispatch, "_scan_processes", return_value=[]), \
+                 mock.patch.object(dispatch, "_live_attempt_ids", return_value=set()), \
+                 mock.patch.object(dispatch, "_attempt_heartbeat",
+                                   side_effect=lambda job: {
+                                       "updated_at": 9999999999,
+                                       "attempt_id": job.attempt_id,
+                                       "route_id": job.route_id,
+                                       "route_node": job.route_node,
+                                       "phase": "launch",
+                                       "sequence": 1,
+                                   }), \
+                 mock.patch.object(dispatch, "_job_transcript_signal", return_value="working"), \
+                 mock.patch.object(dispatch, "_attempt_terminal_observation", return_value=None):
+                jobs = dispatch.collect(jobs_path=jobs_log)
+            by_attempt = {job.attempt_id: job for job in jobs}
+            for attempt in ("att-target-conflict", "att-target-missing"):
+                self.assertEqual(by_attempt[attempt].liveness, "working")
+                self.assertIsNone(
+                    by_attempt[attempt].state_evidence["attempt"]["parent_extinction"]
+                )
+
 
 # --- D2: runtime home (_proj_home / claude._home) must NOT follow the registry home ---
 class RuntimeHomeIndependenceTest(unittest.TestCase):

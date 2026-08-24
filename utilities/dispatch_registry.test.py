@@ -464,6 +464,293 @@ class RegistryTest(unittest.TestCase):
   self.assertEqual(record["closed"],0)
   self.assertNotIn("note=dead-namespace-absent",self.jobs.read_text())
 
+ def test_terminal_parent_closes_only_proven_foreground_namespace_children(self):
+  """Parent proof closes exact children without ever signalling inner PIDs."""
+  owner="att-parent-fleet-kill"
+  current=("attempt_schema_version=2,transport=headless,execution_surface=registered-headless,"
+           "registered_worker=1,fallback_hop=same-harness-headless")
+  rows=[
+   f"2026-07-16T00:00:00Z\tdone\t/r\t/w\towner\t{current},dispatch_depth=1,worker_type=owner,attempt_id={owner},note=fleet-kill,pid=99999991,pid_start=1,pgid=99999991,pid_ns=pid:[fleet],pid_observer_ns=pid:[fleet],launch_lifecycle=foreground-scoped,launch_outcome=governed-process-reaped,group_reap_proof=pgid-empty-v1,group_reap_pgid=99999991",
+   f"2026-07-16T00:00:01Z\topen\t/r\t/w\tchild-a\t{current},dispatch_depth=2,worker_type=stage,route_id=r-ghost,route_file=/route.json,route_node=execute,attempt_id=att-child-a,parent=owner,parent_attempt_id={owner},pid=99999992,pid_start=1,pid_scope=namespace-local,launch_lifecycle=foreground-scoped",
+   f"2026-07-16T00:00:02Z\topen\t/r\t/w\tchild-b\t{current},dispatch_depth=2,worker_type=stage,route_id=r-ghost,route_file=/route.json,route_node=test,attempt_id=att-child-b,parent=owner,parent_attempt_id={owner},pid=99999993,pid_start=1,pid_scope=namespace-local,launch_lifecycle=foreground-scoped",
+   f"2026-07-16T00:00:03Z\topen\t/r\t/w\tsibling\t{current},dispatch_depth=2,worker_type=stage,route_id=r-ghost,route_node=other,attempt_id=att-sibling,parent=other,parent_attempt_id=att-other,pid=99999994,pid_start=1,pid_scope=namespace-local,launch_lifecycle=foreground-scoped",
+  ]
+  self.jobs.write_text("\n".join(rows)+"\n")
+  applied=self.invoke("orphan-status","--attempt",owner,"--apply").stdout
+  self.assertIn("cascade_closed=2",applied)
+  text=self.jobs.read_text()
+  for attempt in ("att-child-a","att-child-b"):
+   line=next(line for line in text.splitlines() if attempt in line)
+   self.assertIn("note=dead-parent-terminated",line)
+  sibling=next(line for line in text.splitlines() if "att-sibling" in line)
+  self.assertIn("\topen\t",sibling)
+
+ def test_orphan_status_dry_run_is_byte_identical_and_never_signals(self):
+  owner="att-parent-dry-run"
+  current=("attempt_schema_version=2,transport=headless,execution_surface=registered-headless,"
+           "registered_worker=1,fallback_hop=same-harness-headless")
+  rows=[
+   f"2026-07-16T00:00:00Z\tdone\t/r\t/w\towner\t{current},dispatch_depth=1,worker_type=owner,attempt_id={owner},note=fleet-kill,pid=99999991,pid_start=1,pgid=99999991,pid_ns=pid:[fleet],pid_observer_ns=pid:[fleet],launch_lifecycle=foreground-scoped,launch_outcome=governed-process-reaped,group_reap_proof=pgid-empty-v1,group_reap_pgid=99999991",
+   f"2026-07-16T00:00:01Z\topen\t/r\t/w\tchild-a\t{current},dispatch_depth=2,worker_type=stage,route_id=r-ghost,route_node=execute,attempt_id=att-dry-a,parent=owner,parent_attempt_id={owner},pid=99999992,pid_start=1,pid_scope=namespace-local,launch_lifecycle=foreground-scoped",
+   f"2026-07-16T00:00:02Z\topen\t/r\t/w\tchild-b\t{current},dispatch_depth=2,worker_type=stage,route_id=r-ghost,route_node=test,attempt_id=att-dry-b,parent=owner,parent_attempt_id={owner},pid=99999993,pid_start=1,pid_scope=namespace-local,launch_lifecycle=foreground-scoped",
+  ]
+  self.jobs.write_text("\n".join(rows)+"\n")
+  before=self.jobs.read_bytes()
+  dry=self.invoke("orphan-status","--attempt",owner)
+  self.assertEqual(dry.returncode,0,dry.stdout+dry.stderr)
+  self.assertIn("cascade_attempted=2",dry.stdout)
+  self.assertEqual(self.jobs.read_bytes(),before)
+  spec=importlib.util.spec_from_file_location("dispatch_registry_dry_run_test",SCRIPT)
+  module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+  parsed=module.read_rows(self.jobs)
+  owner_row=next(row for row in parsed if row["meta"].get("attempt_id")==owner)
+  args=types.SimpleNamespace(
+   apply=False,jobs=self.jobs,agent_home=self.base,now=time.time(),
+   cascade_grace=0,cascade_kill_wait=0)
+  with mock.patch.object(module,"_signal_exact_group") as signal_group, \
+       mock.patch.object(module,"close_attempt_row_if") as close_row:
+   decisions=module.cascade_orphan_children(owner_row,"r-ghost",args)
+  self.assertEqual(len(decisions),2)
+  signal_group.assert_not_called()
+  close_row.assert_not_called()
+
+ def test_same_slug_replacement_child_is_not_reconciled(self):
+  current=("attempt_schema_version=2,transport=headless,"
+           "execution_surface=registered-headless,registered_worker=1,"
+           "fallback_hop=same-harness-headless")
+  owner="att-old-owner"
+  self.jobs.write_text(
+   f"2026-07-16T00:00:00Z\tdone\t/r\t/w\towner\t{current},dispatch_depth=1,"
+   f"worker_type=owner,attempt_id={owner},launch_outcome=governed-process-reaped,"
+   "group_reap_proof=pgid-empty-v1,group_reap_pgid=99999991,pgid=99999991\n"
+   f"2026-07-16T00:00:01Z\topen\t/r\t/w\treplacement\t{current},"
+   "dispatch_depth=2,route_id=r-ghost,route_node=execute,"
+   "attempt_id=att-replacement,parent=owner,parent_attempt_id=att-new-owner,"
+   "pid=99999992,pid_start=1,pid_scope=namespace-local,"
+   "launch_lifecycle=foreground-scoped\n"
+  )
+  before=self.jobs.read_bytes()
+  applied=self.invoke("orphan-status","--attempt",owner,"--apply")
+  self.assertEqual(applied.returncode,0,applied.stdout+applied.stderr)
+  self.assertIn("cascade_attempted=0",applied.stdout)
+  self.assertEqual(self.jobs.read_bytes(),before)
+
+ def test_detached_namespace_child_is_not_reconciled(self):
+  current=("attempt_schema_version=2,transport=headless,"
+           "execution_surface=registered-headless,registered_worker=1,"
+           "fallback_hop=same-harness-headless")
+  owner="att-detached-owner"
+  self.jobs.write_text(
+   f"2026-07-16T00:00:00Z\tdone\t/r\t/w\towner\t{current},dispatch_depth=1,"
+   f"worker_type=owner,attempt_id={owner},launch_outcome=governed-process-reaped,"
+   "group_reap_proof=pgid-empty-v1,group_reap_pgid=99999991,pgid=99999991\n"
+   f"2026-07-16T00:00:01Z\topen\t/r\t/w\tdetached\t{current},"
+   "dispatch_depth=2,route_id=r-ghost,route_node=execute,"
+   f"attempt_id=att-detached,parent=owner,parent_attempt_id={owner},"
+   "pid=99999992,pid_start=1,pid_scope=namespace-local,"
+   "launch_lifecycle=detached\n"
+  )
+  before=self.jobs.read_bytes()
+  applied=self.invoke("orphan-status","--attempt",owner,"--apply")
+  self.assertEqual(applied.returncode,0,applied.stdout+applied.stderr)
+  self.assertIn("cascade_closed=0",applied.stdout)
+  self.assertEqual(self.jobs.read_bytes(),before)
+
+ def test_cascade_signals_only_authoritative_live_group(self):
+  current=("attempt_schema_version=2,transport=headless,"
+           "execution_surface=registered-headless,registered_worker=1,"
+           "fallback_hop=same-harness-headless")
+  owner="att-signal-owner"
+  live=subprocess.Popen(["sleep","60"],start_new_session=True)
+  live_start=(Path("/proc")/str(live.pid)/"stat").read_text().split()[21]
+  try:
+   self.jobs.write_text(
+    f"2026-07-16T00:00:00Z\tdone\t/r\t/w\towner\t{current},dispatch_depth=1,"
+    f"worker_type=owner,attempt_id={owner},pid=99999991,pid_start=1,"
+    "pgid=99999991,pid_ns=pid:[fleet],pid_observer_ns=pid:[fleet],"
+    "launch_lifecycle=foreground-scoped,launch_outcome=governed-process-reaped,"
+    "group_reap_proof=pgid-empty-v1,group_reap_pgid=99999991\n"
+    f"2026-07-16T00:00:01Z\topen\t/r\t/w\tnamespace\t{current},"
+    "dispatch_depth=2,route_id=r-ghost,route_file=/route.json,route_node=execute,"
+    f"attempt_id=att-namespace,parent=owner,parent_attempt_id={owner},"
+    "pid=99999992,pid_start=1,pid_scope=namespace-local,"
+    "launch_lifecycle=foreground-scoped\n"
+    f"2026-07-16T00:00:02Z\topen\t/r\t/w\thost\t{current},"
+    "dispatch_depth=2,route_id=r-ghost,route_file=/route.json,route_node=test,"
+    f"attempt_id=att-host,parent=owner,parent_attempt_id={owner},"
+    f"pid={live.pid},pid_start={live_start},pgid={live.pid},"
+    "pid_scope=host-visible,launch_lifecycle=foreground-scoped\n"
+   )
+   spec=importlib.util.spec_from_file_location("dispatch_registry_signal_test",SCRIPT)
+   module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+   parsed=module.read_rows(self.jobs)
+   owner_row=next(row for row in parsed if row["meta"].get("attempt_id")==owner)
+   args=types.SimpleNamespace(
+    apply=True,jobs=self.jobs,agent_home=self.base,now=time.time(),
+    cascade_grace=1,cascade_kill_wait=1)
+   def reap_group(pid,_start,_timeout):
+    self.assertEqual(pid,live.pid)
+    live.wait(timeout=2)
+    return True
+   with mock.patch.object(module,"_signal_exact_group",
+                          wraps=module._signal_exact_group) as signal_group, \
+        mock.patch.object(module,"_wait_exact_group_end",
+                          side_effect=reap_group):
+    decisions=module.cascade_orphan_children(owner_row,"r-ghost",args)
+   self.assertEqual(sum(bool(item.get("closed")) for item in decisions),2,decisions)
+   signal_group.assert_called_once_with(live.pid,live_start,module.signal.SIGTERM)
+   text=self.jobs.read_text()
+   namespace=next(line for line in text.splitlines() if "att-namespace" in line)
+   host=next(line for line in text.splitlines() if "att-host" in line)
+   self.assertIn("note=dead-parent-terminated",namespace)
+   self.assertIn("note=dead-parent-terminated",host)
+  finally:
+   if live.poll() is None: live.kill()
+   live.wait()
+
+ def test_positive_namespace_child_evidence_outranks_parent_proof_in_cascade(self):
+  current=("attempt_schema_version=2,transport=headless,execution_surface=registered-headless,"
+           "registered_worker=1,fallback_hop=same-harness-headless")
+  owner="att-positive-child-owner"
+  outer=subprocess.Popen(["sleep","60"],start_new_session=True)
+  tagged_attempt="att-tagged-survivor"
+  tagged_env=dict(os.environ,AGENT_DISPATCH_ATTEMPT_ID=tagged_attempt)
+  tagged=subprocess.Popen(["sleep","60"],start_new_session=True,env=tagged_env)
+  observer=os.readlink("/proc/self/ns/pid")
+  outer_start=(Path("/proc")/str(outer.pid)/"stat").read_text().split()[21]
+  try:
+   self.jobs.write_text(
+    f"2026-07-16T00:00:00Z\tdone\t/r\t/w\towner\t{current},dispatch_depth=1,"
+    f"worker_type=owner,attempt_id={owner},pid=99999991,pid_start=1,"
+    "pgid=99999991,pid_ns=pid:[fleet],pid_observer_ns=pid:[fleet],"
+    "launch_lifecycle=foreground-scoped,launch_outcome=governed-process-reaped,"
+    "group_reap_proof=pgid-empty-v1,group_reap_pgid=99999991\n"
+    f"2026-07-16T00:00:01Z\topen\t/r\t/w\touter-live\t{current},"
+    "dispatch_depth=2,route_id=r-ghost,route_file=/route.json,route_node=execute,"
+    f"attempt_id=att-outer-live,parent=owner,parent_attempt_id={owner},"
+    f"pid=7,pid_start={outer_start},pid_scope=namespace-local,"
+    "pid_observer_ns=pid:[inner],pid_ns=pid:[inner],"
+    f"pid_host={outer.pid},pid_host_start={outer_start},pid_host_ns={observer},"
+    f"pid_host_proof=nspid-procfs-root-v1,pgid_host={outer.pid},"
+    "launch_lifecycle=foreground-scoped\n"
+    f"2026-07-16T00:00:02Z\topen\t/r\t/w\ttagged-live\t{current},"
+    "dispatch_depth=2,route_id=r-ghost,route_file=/route.json,route_node=test,"
+    f"attempt_id={tagged_attempt},parent=owner,parent_attempt_id={owner},"
+    "pid=99999992,pid_start=1,pid_scope=namespace-local,"
+    "launch_lifecycle=foreground-scoped\n"
+   )
+   spec=importlib.util.spec_from_file_location("dispatch_registry_positive_child",SCRIPT)
+   module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+   parsed=module.read_rows(self.jobs)
+   owner_row=next(row for row in parsed if row["meta"].get("attempt_id")==owner)
+   args=types.SimpleNamespace(
+    apply=True,jobs=self.jobs,agent_home=self.base,now=time.time(),
+    cascade_grace=1,cascade_kill_wait=1)
+   def reap_outer(pid,_start,_timeout):
+    self.assertEqual(pid,outer.pid)
+    outer.wait(timeout=2)
+    return True
+   with mock.patch.object(module,"_signal_exact_group",
+                          wraps=module._signal_exact_group) as signal_group, \
+        mock.patch.object(module,"_wait_exact_group_end",side_effect=reap_outer):
+    decisions=module.cascade_orphan_children(owner_row,"r-ghost",args)
+   by_attempt={item["attempt_id"]:item for item in decisions}
+   self.assertTrue(by_attempt["att-outer-live"]["closed"],decisions)
+   self.assertFalse(by_attempt[tagged_attempt]["closed"],decisions)
+   signal_group.assert_called_once_with(outer.pid,outer_start,module.signal.SIGTERM)
+   tagged_row=next(line for line in self.jobs.read_text().splitlines()
+                   if tagged_attempt in line)
+   self.assertIn("\topen\t",tagged_row)
+   self.assertIsNone(tagged.poll())
+  finally:
+   for proc in (outer,tagged):
+    if proc.poll() is None: proc.kill()
+    proc.wait()
+
+ def test_duplicate_child_attempt_rows_block_parent_proof_closure(self):
+  current=("attempt_schema_version=2,transport=headless,execution_surface=registered-headless,"
+           "registered_worker=1,fallback_hop=same-harness-headless")
+  owner="att-duplicate-child-owner"
+  child=(
+   f"2026-07-16T00:00:01Z\topen\t/r\t/w\tchild\t{current},dispatch_depth=2,"
+   "route_id=r-ghost,route_file=/route.json,route_node=execute,"
+   f"attempt_id=att-duplicate-child,parent=owner,parent_attempt_id={owner},"
+   "pid=99999992,pid_start=1,pid_scope=namespace-local,"
+   "launch_lifecycle=foreground-scoped")
+  self.jobs.write_text(
+   f"2026-07-16T00:00:00Z\tdone\t/r\t/w\towner\t{current},dispatch_depth=1,"
+   f"worker_type=owner,attempt_id={owner},pid=99999991,pid_start=1,"
+   "pgid=99999991,pid_ns=pid:[fleet],pid_observer_ns=pid:[fleet],"
+   "launch_lifecycle=foreground-scoped,launch_outcome=governed-process-reaped,"
+   "group_reap_proof=pgid-empty-v1,group_reap_pgid=99999991\n"
+   +child+"\n"+child.replace("00:00:01Z","00:00:02Z",1)+"\n")
+  before=self.jobs.read_bytes()
+  applied=self.invoke("orphan-status","--attempt",owner,"--apply")
+  self.assertEqual(applied.returncode,0,applied.stdout+applied.stderr)
+  self.assertIn("cascade_closed=0",applied.stdout)
+  self.assertIn("attempt-row-not-unique",applied.stdout)
+  self.assertEqual(self.jobs.read_bytes(),before)
+
+ def test_terminal_owner_fast_path_refuses_duplicate_and_route_conflict(self):
+  current=("attempt_schema_version=2,transport=headless,"
+           "execution_surface=registered-headless,registered_worker=1,"
+           "fallback_hop=same-harness-headless")
+  owner="att-fast-path-owner"
+  owner_row=(
+   f"2026-07-16T00:00:00Z\tdone\t/r\t/w\towner\t{current},"
+   f"dispatch_depth=1,worker_type=owner,attempt_id={owner}"
+  )
+  duplicate_rows="\n".join((
+   owner_row,
+   owner_row.replace("00:00:00Z","00:00:01Z"),
+   f"2026-07-16T00:00:02Z\topen\t/r\t/w\tchild\t{current},"
+   f"dispatch_depth=2,attempt_id=att-duplicate-child,parent=owner,"
+   f"parent_attempt_id={owner},pid=99999992,pid_start=1,pgid=99999992",
+  ))+"\n"
+  self.jobs.write_text(duplicate_rows)
+  spec=importlib.util.spec_from_file_location("dispatch_registry_fast_path_test",SCRIPT)
+  module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+  args=types.SimpleNamespace(
+   attempt=owner,apply=True,jobs=self.jobs,agent_home=self.base,
+   now=time.time(),cascade_grace=0,cascade_kill_wait=0,pid=None,pid_start=None)
+  before=self.jobs.read_bytes()
+  stream=io.StringIO()
+  with mock.patch.object(module,"_signal_exact_group") as signal_group, \
+       contextlib.redirect_stdout(stream):
+   self.assertEqual(module.emit_orphan_status(module.read_rows(self.jobs),args),0)
+  self.assertIn("reason=attempt-row-not-unique",stream.getvalue())
+  signal_group.assert_not_called()
+  self.assertEqual(self.jobs.read_bytes(),before)
+
+  live=subprocess.Popen(["sleep","60"],start_new_session=True)
+  live_start=(Path("/proc")/str(live.pid)/"stat").read_text().split()[21]
+  try:
+   conflict_rows="\n".join((
+    owner_row,
+    f"2026-07-16T00:00:01Z\topen\t/r\t/w\tchild-a\t{current},"
+    f"dispatch_depth=2,route_id=rt-a,route_file=/route-a,route_node=execute,"
+    f"attempt_id=att-route-a,parent=owner,parent_attempt_id={owner},"
+    f"pid={live.pid},pid_start={live_start},pgid={live.pid}",
+    f"2026-07-16T00:00:02Z\topen\t/r\t/w\tchild-b\t{current},"
+    "dispatch_depth=2,route_id=rt-b,route_file=/route-b,route_node=test,"
+    f"attempt_id=att-route-b,parent=owner,parent_attempt_id={owner},"
+    "pid=99999993,pid_start=1,pid_scope=namespace-local,"
+    "launch_lifecycle=foreground-scoped",
+   ))+"\n"
+   self.jobs.write_text(conflict_rows)
+   before=self.jobs.read_bytes()
+   stream=io.StringIO()
+   with mock.patch.object(module,"_signal_exact_group") as signal_group, \
+        contextlib.redirect_stdout(stream):
+    self.assertEqual(module.emit_orphan_status(module.read_rows(self.jobs),args),0)
+   self.assertIn("route-context-conflict",stream.getvalue())
+   signal_group.assert_not_called()
+   self.assertEqual(self.jobs.read_bytes(),before)
+   self.assertIsNone(live.poll())
+  finally:
+   if live.poll() is None: live.kill()
+   live.wait()
+
  def test_explicit_receiptless_namespace_cancel_is_typed_not_completion(self):
   attempt="att-receiptless-cancel"
   empty_log=self.base/"receiptless.codex.jsonl"
