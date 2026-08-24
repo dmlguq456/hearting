@@ -3348,6 +3348,7 @@ _DETACHED_FINISHED_LIVENESS = {"done", "stale", "dead"}
 # Reads distinctly from dispatch's `🚀`/`↳` so the two nested-row kinds never visually merge.
 # Single point of ASCII-degrade if double-width alignment ever breaks in a real terminal.
 _ICON_SUBAGENT = "⚡"
+_ICON_GPU_RESOURCE = "▣"
 _SUBAGENT_IND = "        "  # strip indent: pure inset, no connector glyph, 8 cells for a
                           # session-owned strip — at/past the dispatch-depth-2 arrow column so the
                           # strip reads as INSIDE the row above, never as a sibling (사용자
@@ -3952,37 +3953,118 @@ def _gpu_gib(value):
     return ("%.1f" % amount).rstrip("0").rstrip(".")
 
 
-def _gpu_owner_text(gpu, sessions=None):
-    exact = {(s.harness, getattr(s, "session_id", None)): s for s in (sessions or ())}
-    labels = []
-    for process in gpu.get("processes") or ():
-        if not isinstance(process, dict):
-            continue
-        owner = process.get("owner")
-        if isinstance(owner, dict):
-            if (owner.get("kind") == "session" and owner.get("harness")
-                    and owner.get("id")):
-                key = (owner["harness"], owner["id"])
-                session = exact.get(key)
-                title = getattr(session, "title", None) if session else None
-                display = session_display_name(key[0], key[1], title, fallback="")
-                label = (display if display else
-                         "session %s/%s" % (key[0], str(key[1])[:8]))
-            else:
-                label = owner.get("label")
-        else:
-            process_name = os.path.basename(_gpu_safe_text(process.get("process_name")))
-            pid = process.get("pid")
-            suffix = ((process_name or "process")
-                      + (("#%s" % pid) if isinstance(pid, int) else ""))
-            label = "unattributed:" + suffix
-        label = _gpu_safe_text(label) or "unattributed"
-        if label not in labels:
-            labels.append(label)
-    if not labels:
-        return "idle"
-    shown = labels[:2]
-    return ",".join(shown) + ((" +%d" % (len(labels) - 2)) if len(labels) > 2 else "")
+def _gpu_process_rows(gpu, indent, width):
+    """Bounded nvtop-style process rows; owner evidence never enters this surface."""
+    rows = []
+    processes = [row for row in (gpu.get("processes") or ()) if isinstance(row, dict)]
+    processes.sort(key=lambda process: (
+        process.get("used_memory_mib") is None,
+        -(process.get("used_memory_mib") or 0)
+        if isinstance(process.get("used_memory_mib"), (int, float)) else 0,
+        process.get("pid") if isinstance(process.get("pid"), int) else 2**63,
+    ))
+    for process in processes:
+        pid = process.get("pid")
+        pid_text = str(pid) if isinstance(pid, int) and not isinstance(pid, bool) else "—"
+        memory = process.get("used_memory_mib")
+        memory_text = ("%d MiB" % max(0, memory)
+                       if isinstance(memory, int) and not isinstance(memory, bool) else "— MiB")
+        command = _gpu_safe_text(process.get("command"))
+        if not command:
+            command = os.path.basename(_gpu_safe_text(process.get("process_name"))) or "process"
+        row = [
+            (indent + "  ", None), ("PID ", "dim"), (pid_text, "head"),
+            ("  VRAM ", "dim"), (memory_text, "name_dim"), ("  ", None),
+            (command, "dim"),
+        ]
+        rows.append(_clip_segs(row, width)[0])
+    return rows
+
+
+def _gpu_session_resources(snapshot=None):
+    """Exact full-session-id GPU relations, normalized once for every Fleet view."""
+    snapshot = _COMPUTE_HOSTS if snapshot is None else snapshot
+    if not isinstance(snapshot, dict):
+        return {}
+    index = {}
+    hosts = [row for row in (snapshot.get("hosts") or ()) if isinstance(row, dict)]
+    for host in hosts:
+        host_name = _gpu_safe_text(host.get("host") or "?") or "?"
+        gpus = [gpu for gpu in (host.get("gpus") or ()) if isinstance(gpu, dict)]
+        for gpu in gpus:
+            gpu_index = gpu.get("index")
+            if not isinstance(gpu_index, int) or isinstance(gpu_index, bool):
+                continue
+            resource_key = (host_name, gpu_index)
+            for process in (gpu.get("processes") or ()):
+                if not isinstance(process, dict):
+                    continue
+                owner = process.get("session_owner")
+                if (not isinstance(owner, dict) or owner.get("kind") != "session"
+                        or owner.get("harness") not in {"claude", "codex", "opencode"}
+                        or not isinstance(owner.get("id"), str) or not owner.get("id")):
+                    continue
+                session_key = (owner["harness"], owner["id"])
+                resources = index.setdefault(session_key, {})
+                resource = resources.setdefault(resource_key, {
+                    "host": host_name, "index": gpu_index,
+                    "model": _gpu_safe_text(gpu.get("name")).replace("NVIDIA ", ""),
+                    "process_count": 0, "used_memory_mib": 0,
+                    "has_memory": False,
+                })
+                resource["process_count"] += 1
+                used = process.get("used_memory_mib")
+                if isinstance(used, int) and not isinstance(used, bool):
+                    resource["used_memory_mib"] += max(0, used)
+                    resource["has_memory"] = True
+    return {
+        session_key: [resources[key] for key in sorted(resources)]
+        for session_key, resources in index.items()
+    }
+
+
+def _gpu_resources_for_session(session, resource_index):
+    harness = getattr(session, "harness", None)
+    session_id = (getattr(session, "session_id", None)
+                  or getattr(session, "_runtime_session_id", None))
+    if harness not in {"claude", "codex", "opencode"} or not session_id:
+        return []
+    return list(resource_index.get((harness, session_id), ()))
+
+
+def _gpu_resource_strip(resources, term_width=None, depth=0, in_card=False):
+    """One exact-session resource strip, orthogonal to work/stage/liveness rendering."""
+    if not resources:
+        return []
+    shown_depth = min(depth, 1) if in_card else depth
+    indent = _SUBAGENT_IND + "  " * max(0, shown_depth)
+    width = max(20, int(term_width or 200))
+
+    def build(show_model, show_count, show_memory):
+        segs = [(indent, None)]
+        for position, resource in enumerate(resources):
+            if position:
+                segs.append((" · ", "dim"))
+            identity = "GPU %s:%s" % (resource["host"], resource["index"])
+            segs += [(_ICON_GPU_RESOURCE + " ", "dim"), (identity, "name_dim")]
+            details = []
+            if show_model and resource.get("model"):
+                details.append(resource["model"])
+            if show_count:
+                details.append("%d proc" % resource.get("process_count", 0))
+            if show_memory and resource.get("has_memory"):
+                details.append("%d MiB" % resource.get("used_memory_mib", 0))
+            if details:
+                segs.append((" · " + " · ".join(details), "dim"))
+        return segs
+
+    # F-88: drop model, then count, then VRAM while preserving every GPU identity.
+    for flags in ((True, True, True), (False, True, True),
+                  (False, False, True), (False, False, False)):
+        segs = build(*flags)
+        if sum(_dw(text) for text, _key in segs) <= width:
+            return [segs]
+    return [_clip_segs(build(False, False, False), width)[0]]
 
 
 def _gpu_state(gpu):
@@ -4058,20 +4140,12 @@ def _gpu_token(gpu, available, show_name=False, sessions=None):
     segs += [("  VRAM ", "dim")]
     segs += _resource_gauge_segs(vram_pct, track=track)
     segs += [("  " + memory, _gpu_level(gpu))]
-    owner = _gpu_owner_text(gpu, sessions=sessions) if state == "working" else None
-    owner_sep = ("  ↳ " if owner and not owner.startswith("unattributed:") else " · ")
-    owner_reserve = min(_dw(owner), 28) if owner else 0
     if show_name and gpu.get("name"):
         name = _gpu_safe_text(gpu["name"]).replace("NVIDIA ", "")
         name_room = max(0, min(32, (available - sum(_dw(t) for t, _k in segs)
-                                   - (_dw(owner_sep) if owner else 0) - owner_reserve - 2)))
+                                   - 2)))
         if name_room >= 6:
             segs += [("  ", None), (_clip_w(name, name_room), "dim")]
-    used = sum(_dw(text) for text, _key in segs)
-    owner_room = max(0, available - used - (_dw(owner_sep) if owner else 0))
-    if owner and owner_room >= 4:
-        segs += [(owner_sep, "dim"), (_clip_w(owner, owner_room),
-                                    "lvl_y" if "unattributed:" in owner else "name_dim")]
     return segs
 
 
@@ -4136,6 +4210,7 @@ def _compute_host_rows(term_width=None, sessions=None):
             token = _gpu_token(gpu, max(12, width - _dw(indent)), show_name=width >= 100,
                                sessions=sessions)
             rows.append(_clip_segs([(indent, None)] + token, width)[0])
+            rows.extend(_gpu_process_rows(gpu, indent, width))
     return rows
 
 
@@ -4430,7 +4505,7 @@ def _subagents_for_job(session_by_identity, job):
     return getattr(session, "subagents", None) if session is not None else None
 
 
-def _route_card(view, session_by_identity, term_width, now):
+def _route_card(view, session_by_identity, term_width, now, gpu_resources=None):
     """One F-30 card. Returns (out_lines, meta) — meta = {"card_key", "fold_line" (index into
     out_lines of the header row), "job_rows": [(index_into_out_lines, DispatchJob), ...]}. The
     caller (`_build_process_lines`) owns translating these to ABSOLUTE line indices for
@@ -4497,6 +4572,13 @@ def _route_card(view, session_by_identity, term_width, now):
                 if sa.active or _SHOW_ALL]
         if subs:
             out.extend(_subagent_strip(subs))
+        resources = _gpu_resources_for_session(job, gpu_resources or {})
+        if not resources:
+            session = _session_for_job(session_by_identity, job)
+            resources = (_gpu_resources_for_session(session, gpu_resources or {})
+                         if session else [])
+        if resources:
+            out.extend(_gpu_resource_strip(resources, term_width=term_width))
 
     if _SHOW_ALL:
         # prd.md:310 — completion gates stay behind the `a` toggle, never on the base screen.
@@ -4549,7 +4631,7 @@ def _degrade_candidates(jobs, covered_slugs=()):
     return out
 
 
-def _degrade_card(job, session_by_identity, term_width):
+def _degrade_card(job, session_by_identity, term_width, gpu_resources=None):
     """§5.3's degrade card — `source: heuristic`, existing `_PIPE_STAGES` breadcrumb, no DAG
     (there is no record to derive one from). No job-row entry (the card key IS the job)."""
     cap = job.key or "?"
@@ -4585,6 +4667,13 @@ def _degrade_card(job, session_by_identity, term_width):
             if sa.active or _SHOW_ALL]
     if subs:
         out.extend(_subagent_strip(subs))
+    resources = _gpu_resources_for_session(job, gpu_resources or {})
+    if not resources:
+        session = _session_for_job(session_by_identity, job)
+        resources = (_gpu_resources_for_session(session, gpu_resources or {})
+                     if session else [])
+    if resources:
+        out.extend(_gpu_resource_strip(resources, term_width=term_width))
     return out, {"card_key": card_key, "fold_line": 0, "job_rows": [], "folded": folded}
 
 
@@ -4622,6 +4711,7 @@ def _build_process_lines(sessions, jobs, route_views_by_id, malformed, memory, t
 
     session_by_identity = {(s.pid, getattr(s, "proc_start", None)): s
                            for s in sessions if s.pid is not None and s.proc_start is not None}
+    gpu_resources = _gpu_session_resources()
     now = time.time()
 
     real_views = sorted((v for v in route_views_by_id.values() if v.get("nodes")),
@@ -4667,8 +4757,9 @@ def _build_process_lines(sessions, jobs, route_views_by_id, malformed, memory, t
             continue
         s_subs = [sa for sa in (getattr(s, "subagents", None) or []) if sa.active or _SHOW_ALL]
         plugin_subs = plugin_by_parent.pop(getattr(s, "session_id", None), [])
-        if s_subs or plugin_subs:
-            agent_sessions.append((s, s_subs, plugin_subs))
+        session_resources = _gpu_resources_for_session(s, gpu_resources)
+        if s_subs or session_resources or plugin_subs:
+            agent_sessions.append((s, s_subs, session_resources, plugin_subs))
     for remaining in plugin_by_parent.values():
         plugin_orphans.extend(remaining)
 
@@ -4686,7 +4777,8 @@ def _build_process_lines(sessions, jobs, route_views_by_id, malformed, memory, t
             lines.append(None)
         first = False
         base = len(lines)
-        card_lines, meta = _route_card(view, session_by_identity, term_width, now)
+        card_lines, meta = _route_card(
+            view, session_by_identity, term_width, now, gpu_resources=gpu_resources)
         lines.extend(card_lines)
         _FOLDABLE.append({"line": base + meta["fold_line"], "card_key": meta["card_key"],
                           "folded": meta["folded"]})
@@ -4711,7 +4803,8 @@ def _build_process_lines(sessions, jobs, route_views_by_id, malformed, memory, t
             lines.append(None)
         first = False
         base = len(lines)
-        card_lines, meta = _degrade_card(job, session_by_identity, term_width)
+        card_lines, meta = _degrade_card(
+            job, session_by_identity, term_width, gpu_resources=gpu_resources)
         lines.extend(card_lines)
         _FOLDABLE.append({"line": base + meta["fold_line"], "card_key": meta["card_key"],
                           "folded": meta["folded"]})
@@ -4721,8 +4814,9 @@ def _build_process_lines(sessions, jobs, route_views_by_id, malformed, memory, t
 
     # Routeless sessions with active sub-agents — one minimal owner anchor + the same strip,
     # skipping any pid already shown under a route/degrade card above (no double draw).
-    for s, s_subs, plugin_subs in agent_sessions:
-        if s.pid and s.pid in covered_pids and not plugin_subs:
+    for s, s_subs, session_resources, plugin_subs in agent_sessions:
+        covered = bool(s.pid and s.pid in covered_pids)
+        if covered and not plugin_subs:
             continue
         if not first:
             lines.append(None)
@@ -4734,6 +4828,8 @@ def _build_process_lines(sessions, jobs, route_views_by_id, malformed, memory, t
         lines.append(anchor)
         if s_subs:
             lines.extend(_subagent_strip(s_subs))
+        if session_resources and not covered:
+            lines.extend(_gpu_resource_strip(session_resources, term_width=term_width))
         for plugin_job in plugin_subs:
             lines.extend(_plugin_agent_row(plugin_job, term_width=term_width))
 
@@ -5042,6 +5138,9 @@ def _build_lines(sessions, jobs, section, narrow, malformed, layout="wide", memo
     # the pid/start join (사용자 2026-07-16 "서브 세션에 서브 에이전트도").
     child_subs_by_pid = {s.pid: s.subagents for s in sessions
                          if getattr(s, "is_child", False) and getattr(s, "subagents", None)}
+    session_by_identity = {(s.pid, getattr(s, "proc_start", None)): s
+                           for s in sessions if s.pid is not None and s.proc_start is not None}
+    gpu_resources = _gpu_session_resources()
     # headless dispatch children are shown as dispatch rows under their parent — never as
     # top-level sessions (the same headless process would otherwise double-show as session+job).
     # Automation workers inherit a parent's cwd, so never attribute them to a project card.
@@ -5476,6 +5575,14 @@ def _build_lines(sessions, jobs, section, narrow, malformed, layout="wide", memo
             if shown_job_subs:
                 lines.extend(_subagent_strip(
                     shown_job_subs, depth=depth, in_card=in_card))
+            job_resources = _gpu_resources_for_session(job, gpu_resources)
+            if not job_resources:
+                job_session = _session_for_job(session_by_identity, job)
+                job_resources = (_gpu_resources_for_session(job_session, gpu_resources)
+                                 if job_session else [])
+            if job_resources:
+                lines.extend(_gpu_resource_strip(
+                    job_resources, term_width=term_width, depth=depth, in_card=in_card))
             # Everything emitted above belongs to the owner itself (identity row, its
             # NOW line, its own sub-agent strip). Descendants start here, so this index
             # is where the header divider goes once the frame is drawn.
@@ -5632,6 +5739,9 @@ def _build_lines(sessions, jobs, section, narrow, malformed, layout="wide", memo
                          if sa.active or _SHOW_ALL]
             if shown_subs:
                 lines.extend(_subagent_strip(shown_subs))
+            session_resources = _gpu_resources_for_session(s, gpu_resources)
+            if session_resources:
+                lines.extend(_gpu_resource_strip(session_resources, term_width=term_width))
             for plugin_job in plugin_kids:
                 lines.extend(_plugin_agent_row(plugin_job, term_width=term_width))
             for i, cj in enumerate(dispatch_kids):

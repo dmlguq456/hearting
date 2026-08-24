@@ -25,15 +25,17 @@ class SessionHandleTest(unittest.TestCase):
         self.assertEqual(session_display_name("codex", "abcdefgh-123", "title", 11), "CX/abcdefgh")
         self.assertEqual(session_display_name("codex", "abcdefgh-123", "title", 10), "CX/abcdef…")
 
-    def test_exact_gpu_lookup_keeps_same_sid8_titles_separate(self):
+    def test_exact_gpu_lookup_keeps_same_sid8_sessions_separate(self):
         sessions = [
             SimpleNamespace(harness="codex", session_id="abcdefgh-one", title="first"),
             SimpleNamespace(harness="codex", session_id="abcdefgh-two", title="second"),
         ]
-        gpu = {"index": 0, "processes": [{"owner": {"kind": "session", "harness": "codex", "id": "abcdefgh-two"}}]}
-        text = render._plain(render._gpu_token(gpu, 100, sessions=sessions))
-        self.assertIn("CX/abcdefgh · second", text)
-        self.assertNotIn("first", text)
+        snapshot = {"hosts": [{"host": "cnn", "gpus": [{"index": 0, "processes": [{
+            "session_owner": {"kind": "session", "harness": "codex", "id": "abcdefgh-two"},
+        }]}]}]}
+        resources = render._gpu_session_resources(snapshot)
+        self.assertEqual(render._gpu_resources_for_session(sessions[0], resources), [])
+        self.assertEqual(render._gpu_resources_for_session(sessions[1], resources)[0]["host"], "cnn")
 
     def test_json_owner_payload_is_not_rewritten(self):
         owner = {"kind": "session", "harness": "codex", "id": "abcdefgh-one", "label": "old"}
@@ -41,27 +43,30 @@ class SessionHandleTest(unittest.TestCase):
         render._gpu_token(gpu, 100)
         self.assertEqual(owner, {"kind": "session", "harness": "codex", "id": "abcdefgh-one", "label": "old"})
 
-    def test_gpu_mixed_owner_set_keeps_titles_and_single_arrow(self):
+    def test_gpu_mixed_primary_owners_never_return_to_the_upper_row(self):
         sessions = [SimpleNamespace(harness="codex", session_id="abcdefgh-one", title="train")]
         gpu = {"index": 0, "processes": [
-            {"owner": {"kind": "session", "harness": "codex", "id": "abcdefgh-one"}},
+            {"owner": {"kind": "session", "harness": "codex", "id": "abcdefgh-one"},
+             "session_owner": {"kind": "session", "harness": "codex", "id": "abcdefgh-one"}},
             {"owner": {"kind": "job", "label": "job:train"}},
             {"owner": {"kind": "run", "label": "run:eval"}},
             {"owner": {"kind": "unattributed", "label": "unattributed:worker"}},
         ]}
         text = render._plain(render._gpu_token(gpu, 160, show_name=True, sessions=sessions))
-        self.assertIn("↳ CX/abcdefgh · train", text)
-        self.assertIn("job:train", text)
-        self.assertIn("+2", text)
-        self.assertEqual(text.count("↳"), 1)
+        for owner in ("CX/abcdefgh", "job:train", "run:eval", "unattributed:", "↳"):
+            self.assertNotIn(owner, text)
 
-    def test_gpu_unknown_harness_keeps_safe_owner_fallback(self):
+    def test_gpu_unknown_harness_cannot_create_a_resource_relation(self):
         gpu = {"index": 0, "processes": [{"owner": {
+            "kind": "session", "harness": "unknown", "id": "abcdefgh-123",
+        }, "session_owner": {
             "kind": "session", "harness": "unknown", "id": "abcdefgh-123",
         }}]}
         text = render._plain(render._gpu_token(gpu, 120))
-        self.assertIn("session unknown/abcdefgh", text)
-        self.assertNotIn("session ", text.replace("session unknown/abcdefgh", ""))
+        self.assertNotIn("session unknown/abcdefgh", text)
+        self.assertEqual(render._gpu_session_resources({
+            "hosts": [{"host": "cnn", "gpus": [gpu]}],
+        }), {})
 
 
 if __name__ == "__main__":

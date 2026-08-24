@@ -45,7 +45,11 @@ class ComputeHostCollectorTest(unittest.TestCase):
                     "index": 0, "uuid": "GPU-A", "utilization_gpu_pct": 71,
                     "memory_used_mib": 8192, "memory_total_mib": 24576,
                     "processes": [{"pid": 7, "proc_start": 99,
-                                   "owner": {"kind": "run", "label": "run:x"}}],
+                                   "command": "python train.py",
+                                   "owner": {"kind": "run", "label": "run:x"},
+                                   "session_owner": {"kind": "session",
+                                                     "harness": "codex",
+                                                     "id": "sid-full"}}],
                 }],
             }],
         }
@@ -54,7 +58,11 @@ class ComputeHostCollectorTest(unittest.TestCase):
         with self._env():
             result = compute_hosts.collect()
         self.assertTrue(result["configured"])
-        self.assertEqual(result["hosts"][0]["gpus"][0]["processes"][0]["pid"], 7)
+        process = result["hosts"][0]["gpus"][0]["processes"][0]
+        self.assertEqual(process["pid"], 7)
+        self.assertEqual(process["command"], "python train.py")
+        self.assertEqual(process["owner"], {"kind": "run", "label": "run:x"})
+        self.assertEqual(process["session_owner"]["id"], "sid-full")
         self.assertEqual(result["observed_at"], 12.0)
 
     def test_malformed_and_timeout_are_typed_diagnostics(self):
@@ -89,14 +97,18 @@ class ComputeHostRenderTest(unittest.TestCase):
                      "memory_used_mib": 32768, "memory_total_mib": 49152,
                      "processes": [
                          {"pid": 1, "used_memory_mib": 16000,
+                          "command": "python train.py",
                           "owner": {"kind": "job", "label": "job:train"}},
                          {"pid": 2, "used_memory_mib": 8000,
+                          "command": "python eval.py",
                           "owner": {"kind": "run", "label": "run:eval"}},
-                         {"pid": 3, "used_memory_mib": 4000, "owner": None},
+                         {"pid": 3, "used_memory_mib": 4000,
+                          "command": "python worker.py", "owner": None},
                      ]},
                     {"index": 1, "name": "NVIDIA RTX 6000 Ada", "utilization_gpu_pct": None,
                      "memory_used_mib": 1024, "memory_total_mib": 49152,
-                     "processes": [{"pid": 4, "used_memory_mib": 1024, "owner": None}]},
+                     "processes": [{"pid": 4, "used_memory_mib": 1024,
+                                    "command": "python shell.py", "owner": None}]},
                 ]},
                 {"host": "cnn", "self": False, "reachable": True,
                  "cpu_utilization_pct": 8, "cpu_count": 24, "load": "0.4 0.3 0.2",
@@ -136,15 +148,17 @@ class ComputeHostRenderTest(unittest.TestCase):
                 self.assertNotIn("HOME", text)
                 self.assertNotIn("· idle", text)
         wide = "\n".join(render._plain(row) for row in render._compute_host_rows(168))
-        for value in ("RTX 6000 Ada Generation", "job:train", "run:eval", "+1",
-                      "unattributed:process#4", "BUSY 11.8/32t"):
+        for value in ("RTX 6000 Ada Generation", "PID 1", "VRAM 16000 MiB",
+                      "python train.py", "PID 4", "python shell.py", "BUSY 11.8/32t"):
             self.assertIn(value, wide)
+        for owner in ("job:train", "run:eval", "unattributed:", "↳"):
+            self.assertNotIn(owner, wide)
         self.assertNotIn("LOAD", wide)
         base_row = next(row for row in render._compute_host_rows(168)
                         if "⌂ moving4" in render._plain(row))
         self.assertIn(("⌂", "base_host"), base_row)
 
-    def test_exact_session_owner_is_an_explicit_gpu_link(self):
+    def test_exact_session_owner_is_not_rendered_in_the_upper_gpu_row(self):
         gpu = {
             "index": 1, "name": "NVIDIA RTX 6000 Ada Generation",
             "utilization_gpu_pct": 25, "memory_used_mib": 8192,
@@ -154,12 +168,15 @@ class ComputeHostRenderTest(unittest.TestCase):
                 "owner": {"kind": "session", "harness": "claude",
                           "id": "f11a0486-c090-4fea-86be-c8097817761e",
                           "label": "claude:f11a0486"},
+                "session_owner": {"kind": "session", "harness": "claude",
+                                  "id": "f11a0486-c090-4fea-86be-c8097817761e"},
             }],
         }
         text = render._plain(render._gpu_token(gpu, 141, show_name=True))
         self.assertIn("1:", text)
         self.assertIn("RTX 6000 Ada Generation", text)
-        self.assertIn("↳ CL/f11a0486", text)
+        self.assertNotIn("CL/f11a0486", text)
+        self.assertNotIn("↳", text)
         self.assertNotIn("g1", text)
 
     def test_gpu_liveness_uses_process_presence_and_shared_session_glyphs(self):
@@ -185,7 +202,7 @@ class ComputeHostRenderTest(unittest.TestCase):
         self.assertEqual(working_a[0][1], "g_spin")
         self.assertIn("working", render._plain(working_a))
         self.assertNotEqual(working_a[0][0], working_b[0][0])
-        self.assertIn("unattributed:python#7", render._plain(working_a))
+        self.assertNotIn("unattributed:", render._plain(working_a))
 
     def test_narrow_gpu_state_word_degrades_whole_but_keeps_glyph(self):
         gpu = {

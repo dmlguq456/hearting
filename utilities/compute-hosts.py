@@ -189,6 +189,7 @@ import os
 import socket
 import subprocess
 import time
+import unicodedata
 from pathlib import Path
 
 try:
@@ -275,6 +276,54 @@ def same_euid(pid):
     except (OSError, ValueError):
         pass
     return False
+
+
+COMMAND_BYTES_MAX = 4096
+COMMAND_ARGV_MAX = 32
+COMMAND_CELLS_MAX = 160
+
+
+def command_text(values):
+    # One control-free, display-bounded line from already bounded argv bytes.
+    words = []
+    for raw in list(values)[:COMMAND_ARGV_MAX]:
+        if isinstance(raw, bytes):
+            text = raw.decode("utf-8", errors="replace")
+        else:
+            text = str(raw or "")
+        text = "".join(" " if unicodedata.category(char).startswith("C") else char
+                       for char in text)
+        text = " ".join(text.split())
+        if text:
+            words.append(text)
+    joined = " ".join(words)
+    out = []
+    cells = 0
+    for char in joined:
+        width = (0 if unicodedata.combining(char) else
+                 2 if unicodedata.east_asian_width(char) in {"W", "F"} else 1)
+        if cells + width > COMMAND_CELLS_MAX:
+            break
+        out.append(char)
+        cells += width
+    return "".join(out) or None
+
+
+def process_command(pid, expected_start, process_name):
+    # Read cmdline only across one same-EUID, stable pid/start observation.
+    fallback = command_text([process_name])
+    before = proc_stat(pid)
+    if (before is None or before["start"] != expected_start or not same_euid(pid)):
+        return fallback
+    try:
+        with (Path("/proc") / str(pid) / "cmdline").open("rb") as handle:
+            raw = handle.read(COMMAND_BYTES_MAX + 1)[:COMMAND_BYTES_MAX]
+    except OSError:
+        return fallback
+    after = proc_stat(pid)
+    if (after is None or after["start"] != expected_start or not same_euid(pid)):
+        return fallback
+    return command_text(raw.split(b"\0")) or fallback
 
 
 ENV_KEYS = {
@@ -400,13 +449,24 @@ def process_owner(pid, expected_start):
             })
         verified = proc_stat(current)
         if verified is None or verified["start"] != stat["start"]:
-            return None, "ancestor-reused-or-gone"
+            return None, "ancestor-reused-or-gone", None
         current = stat["ppid"]
         depth += 1
 
     final_stat = proc_stat(pid)
     if final_stat is None or final_stat["start"] != expected_start:
-        return None, "pid-reused-or-gone"
+        return None, "pid-reused-or-gone", None
+    exact_sessions = {}
+    for candidate in candidates["session"]:
+        harness, sid = candidate.get("harness"), candidate.get("id")
+        if harness not in {"claude", "codex", "opencode"} or not isinstance(sid, str) or not sid:
+            continue
+        key = (harness, sid)
+        prior = exact_sessions.get(key)
+        if prior is None or candidate["ancestry_depth"] < prior["ancestry_depth"]:
+            exact_sessions[key] = candidate
+    session_owner = (next(iter(exact_sessions.values()))
+                     if len(exact_sessions) == 1 else None)
     for kind in ("job", "run", "session", "harness"):
         if not candidates[kind]:
             continue
@@ -418,10 +478,10 @@ def process_owner(pid, expected_start):
             unique.setdefault((candidate["kind"], candidate.get("harness"),
                                candidate["id"]), candidate)
         if len(unique) == 1:
-            return next(iter(unique.values())), None
+            return next(iter(unique.values())), None, session_owner
         if len(unique) > 1:
-            return None, "ambiguous-" + kind
-    return None, "no-exact-owner"
+            return None, "ambiguous-" + kind, session_owner
+    return None, "no-exact-owner", session_owner
 
 
 payload = {
@@ -476,14 +536,20 @@ else:
         except ValueError:
             continue
         stat = proc_stat(pid)
-        owner, reason = (process_owner(pid, stat["start"]) if stat is not None
-                         else (None, "process-unavailable"))
+        owner, reason, session_owner = (
+            process_owner(pid, stat["start"])
+            if stat is not None else (None, "process-unavailable", None)
+        )
         process = {
             "gpu_uuid": uuid or None, "pid": pid,
             "proc_start": stat["start"] if stat is not None else None,
             "process_name": process_name or None, "used_memory_mib": integer(used),
+            "command": process_command(pid, stat["start"], process_name)
+            if stat is not None else command_text([process_name]),
             "owner": owner, "attribution_reason": reason,
         }
+        if session_owner is not None:
+            process["session_owner"] = session_owner
         gpu = by_uuid.get(uuid)
         if gpu is None:
             payload["unmatched_processes"].append(process)
