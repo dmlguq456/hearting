@@ -159,7 +159,7 @@ class ComputeHostRenderTest(unittest.TestCase):
         text = render._plain(render._gpu_token(gpu, 141, show_name=True))
         self.assertIn("1:", text)
         self.assertIn("RTX 6000 Ada Generation", text)
-        self.assertIn("↳ session CL/f11a0486", text)
+        self.assertIn("↳ CL/f11a0486", text)
         self.assertNotIn("g1", text)
 
     def test_gpu_liveness_uses_process_presence_and_shared_session_glyphs(self):

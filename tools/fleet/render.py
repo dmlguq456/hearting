@@ -3966,7 +3966,7 @@ def _gpu_owner_text(gpu, sessions=None):
                 session = exact.get(key)
                 title = getattr(session, "title", None) if session else None
                 display = session_display_name(key[0], key[1], title, fallback="")
-                label = ("session " + display if display else
+                label = (display if display else
                          "session %s/%s" % (key[0], str(key[1])[:8]))
             else:
                 label = owner.get("label")

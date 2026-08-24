@@ -18,7 +18,9 @@ def session_handle(harness: object, session_id: object) -> str:
 def sanitize_title(title: object) -> str:
     if not isinstance(title, str):
         return ""
-    return "".join("?" if (ord(ch) < 32 or ord(ch) == 127) else ch for ch in title).strip()
+    single_line = "".join(" " if (ord(ch) < 32 or ord(ch) == 127) else ch
+                          for ch in title)
+    return " ".join(single_line.split())
 
 
 def _cell_width(text: str) -> int:

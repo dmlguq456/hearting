@@ -12,7 +12,7 @@ ROOT = Path(__file__).resolve().parents[3]
 TOOLS = ROOT / "tools"
 if str(TOOLS) not in __import__("sys").path:
     __import__("sys").path.insert(0, str(TOOLS))
-from fleet.session_handle import sanitize_title, session_handle  # noqa: E402
+from fleet.session_handle import clip_cells, sanitize_title, session_handle  # noqa: E402
 
 
 def _title(session_id: str) -> str:
@@ -33,15 +33,14 @@ def project(payload: dict[str, Any] | None, session_id: str, *, worker: bool = F
     if not pane or not herdr or not handle:
         return True
     commands = [
-        [herdr, "pane", "report-agent-session", "--source", "hearting:codex",
-         "--agent", "codex", "--agent-session-id", session_id, pane],
+        [herdr, "pane", "report-agent-session", pane, "--source", "herdr:codex",
+         "--agent", "codex", "--agent-session-id", session_id],
     ]
     title = _title(session_id)
-    metadata = [herdr, "pane", "report-metadata", "--source", "hearting:codex",
+    metadata = [herdr, "pane", "report-metadata", pane, "--source", "herdr:codex",
                 "--display-agent", handle]
     if title:
-        metadata += ["--title", title[:80]]
-    metadata.append(pane)
+        metadata += ["--title", clip_cells(title, 48)]
     commands.append(metadata)
     for command in commands:
         try:

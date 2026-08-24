@@ -60,7 +60,7 @@ class RuntimeProjectionTest(unittest.TestCase):
             missing = self.statusline(root, sid, "My Task", helper=False)
             self.assertEqual(missing.returncode, 0)
             self.assertNotIn("CL/abcdefgh", missing.stdout)
-            self.assertIn("CL/abcdefgh · A?B", self.statusline(root, sid, "A\nB\x00").stdout)
+            self.assertIn("CL/abcdefgh · A B", self.statusline(root, sid, "A\nB\x00").stdout)
             long = self.statusline(root, sid, "가" * 100).stdout
             display = next(x for x in long.split(" │ ") if "CL/abcdefgh" in x)
             self.assertLess(display.count("가"), 100)
@@ -71,9 +71,12 @@ class RuntimeProjectionTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             _, rows = self.project(root, sid, title="A title")
-            self.assertEqual(rows, [["pane","report-agent-session","--source","hearting:codex","--agent","codex","--agent-session-id",sid,"pane-7"], ["pane","report-metadata","--source","hearting:codex","--display-agent","CX/abcdefgh","--title","A title","pane-7"]])
+            self.assertEqual(rows, [["pane","report-agent-session","pane-7","--source","herdr:codex","--agent","codex","--agent-session-id",sid], ["pane","report-metadata","pane-7","--source","herdr:codex","--display-agent","CX/abcdefgh","--title","A title"]])
             _, rows = self.project(root, sid, title="{")
             self.assertNotIn("--title", rows[1])
+            _, rows = self.project(root, sid, title="가" * 60)
+            projected = rows[1][rows[1].index("--title") + 1]
+            self.assertEqual(projected, "가" * 23 + "…")
             for mode in ("nonzero", "timeout"):
                 _, rows = self.project(root, sid, mode=mode)
                 self.assertEqual(len(rows), 2)
@@ -104,8 +107,8 @@ class RuntimeProjectionTest(unittest.TestCase):
                     self.assertIn(expected, self.statusline(root, sid, title).stdout)
                 else:
                     _, rows = self.project(root, sid, title=title)
-                    self.assertEqual(rows[1][-2], title)
-                    self.assertEqual(rows[1][5], expected)
+                    self.assertEqual(rows[1][-1], title)
+                    self.assertEqual(rows[1][6], expected)
 
     def test_sessionstart_worker_gating_and_json_contract(self):
         env = {**os.environ, "AGENT_SESSION_ROLE": "worker", "HERDR_PANE_ID": "pane-7"}

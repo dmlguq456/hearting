@@ -14,7 +14,7 @@ class SessionHandleTest(unittest.TestCase):
         self.assertEqual(session_handle("codex", ""), "")
 
     def test_sanitize_and_cell_clipping(self):
-        self.assertEqual(sanitize_title("  hello\nworld\x00 "), "hello?world?")
+        self.assertEqual(sanitize_title("  hello\nworld\x00 "), "hello world")
         self.assertEqual(clip_cells("가나다", 4), "가…")
         self.assertEqual(session_display_name("codex", "abcdefgh-123", "a very long title", 12), "CX/abcdefgh")
         self.assertEqual(session_display_name("codex", None, None, fallback="legacy"), "legacy")
@@ -50,7 +50,7 @@ class SessionHandleTest(unittest.TestCase):
             {"owner": {"kind": "unattributed", "label": "unattributed:worker"}},
         ]}
         text = render._plain(render._gpu_token(gpu, 160, show_name=True, sessions=sessions))
-        self.assertIn("↳ session CX/abcdefgh · train", text)
+        self.assertIn("↳ CX/abcdefgh · train", text)
         self.assertIn("job:train", text)
         self.assertIn("+2", text)
         self.assertEqual(text.count("↳"), 1)
