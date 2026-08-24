@@ -20,7 +20,8 @@ class RuntimeProjectionTest(unittest.TestCase):
     def env(self, root):
         env = os.environ.copy()
         env.update({"AGENT_HOME": str(root / "agent"), "HOME": str(root / "home"),
-                    "CODEX_HOME": str(root / "codex"), "FLEET_TITLE_STATE_DIR": str(root / "titles")})
+                    "CODEX_HOME": str(root / "codex"), "FLEET_TITLE_STATE_DIR": str(root / "titles"),
+                    "PYTHONDONTWRITEBYTECODE": "1"})
         return env
 
     def statusline(self, root, sid, title, helper=True):
