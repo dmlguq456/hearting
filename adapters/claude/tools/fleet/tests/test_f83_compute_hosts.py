@@ -81,7 +81,9 @@ class ComputeHostRenderTest(unittest.TestCase):
         self.snapshot = {
             "configured": True,
             "hosts": [
-                {"host": "moving4", "self": True, "reachable": True, "gpus": [
+                {"host": "moving4", "self": True, "reachable": True,
+                 "cpu_utilization_pct": 37, "cpu_count": 32, "load": "3.2 3.0 2.8",
+                 "gpus": [
                     {"index": 0, "name": "NVIDIA RTX 6000 Ada", "utilization_gpu_pct": 84,
                      "memory_used_mib": 32768, "memory_total_mib": 49152,
                      "processes": [
@@ -95,14 +97,17 @@ class ComputeHostRenderTest(unittest.TestCase):
                      "memory_used_mib": 1024, "memory_total_mib": 49152,
                      "processes": [{"pid": 4, "used_memory_mib": 1024, "owner": None}]},
                 ]},
-                {"host": "cnn", "self": False, "reachable": True, "gpus": [
+                {"host": "cnn", "self": False, "reachable": True,
+                 "cpu_utilization_pct": 8, "cpu_count": 24, "load": "0.4 0.3 0.2",
+                 "gpus": [
                     {"index": 0, "name": "NVIDIA A100", "utilization_gpu_pct": 7,
                      "memory_used_mib": 512, "memory_total_mib": 40960,
                      "processes": []},
                 ]},
                 {"host": "xavier", "self": False, "reachable": False,
                  "detail": "timed out", "gpus": []},
-                {"host": "cpu", "self": False, "reachable": True, "gpus": []},
+                {"host": "cpu", "self": False, "reachable": True,
+                 "cpu_utilization_pct": None, "cpu_count": 64, "gpus": []},
             ],
         }
         render.set_compute_hosts(self.snapshot)
@@ -118,19 +123,24 @@ class ComputeHostRenderTest(unittest.TestCase):
                 rows = render._compute_host_rows(width)
                 self.assertTrue(all(render._dw(render._plain(row)) <= width for row in rows))
                 text = "\n".join(render._plain(row) for row in rows)
-                for value in ("GPU HOSTS 3/4", "moving4", "g0", "g1", "32/48G",
-                              "1/48G", "job:train", "run:eval", "+1",
-                              "unattributed", "xavier", "down", "cpu", "no gpu"):
+                for value in ("GPU HOSTS 3/4", "◆ moving4", "CPU", "g0", "g1",
+                              "UTIL", "VRAM", "32/48G", "1/48G", "xavier", "down",
+                              "cpu", "no gpu"):
                     self.assertIn(value, text)
+        wide = "\n".join(render._plain(row) for row in render._compute_host_rows(168))
+        for value in ("job:train", "run:eval", "+1", "unattributed:process#4"):
+            self.assertIn(value, wide)
 
-    def test_header_order_is_product_then_gpu_then_fleet_pulse(self):
+    def test_resource_panel_is_below_the_top_summary_divider(self):
         lines = render._build_lines([], [], "both", False, 0, term_width=120)
         text = [render._plain(line) for line in lines]
         hearting_at = next(i for i, line in enumerate(text) if "hearting v2.0.0" in line)
         gpu_at = next(i for i, line in enumerate(text) if "GPU HOSTS" in line)
         pulse_at = next(i for i, line in enumerate(text) if line.startswith("  fleet "))
-        self.assertLess(hearting_at, gpu_at)
-        self.assertLess(gpu_at, pulse_at)
+        divider_at = next(i for i, line in enumerate(text) if line == "─────")
+        self.assertLess(hearting_at, pulse_at)
+        self.assertLess(pulse_at, divider_at)
+        self.assertLess(divider_at, gpu_at)
 
     def test_public_json_is_additive_and_keeps_unfolded_processes(self):
         with mock.patch.object(fleet, "_collect_memory", return_value=None), \

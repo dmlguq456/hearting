@@ -3984,7 +3984,14 @@ def _gpu_owner_text(gpu):
         if not isinstance(process, dict):
             continue
         owner = process.get("owner")
-        label = owner.get("label") if isinstance(owner, dict) else "unattributed"
+        if isinstance(owner, dict):
+            label = owner.get("label")
+        else:
+            process_name = os.path.basename(_gpu_safe_text(process.get("process_name")))
+            pid = process.get("pid")
+            suffix = ((process_name or "process")
+                      + (("#%s" % pid) if isinstance(pid, int) else ""))
+            label = "unattributed:" + suffix
         label = _gpu_safe_text(label) or "unattributed"
         if label not in labels:
             labels.append(label)
@@ -4007,28 +4014,45 @@ def _gpu_level(gpu):
         "lvl_g" if level is not None else "dim")
 
 
+_RESOURCE_GAUGE_W = 8
+
+
+def _resource_gauge_segs(value, track=_RESOURCE_GAUGE_W):
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        return [("·" * track, "dim"), ("   —", "dim")]
+    value = max(0, min(100, _half_up(value)))
+    return (_gauge_segs(value, track, track=track)
+            + [(" %3d%%" % value, _flat_level(_pct_key(value)))])
+
+
 def _gpu_token(gpu, available, show_name=False):
     index = gpu.get("index")
     util = gpu.get("utilization_gpu_pct")
-    util_text = "%s%%" % (int(util) if isinstance(util, (int, float))
-                            and not isinstance(util, bool) else "—")
+    total, used = gpu.get("memory_total_mib"), gpu.get("memory_used_mib")
+    vram_pct = (100.0 * used / total
+                if isinstance(total, (int, float)) and not isinstance(total, bool) and total > 0
+                and isinstance(used, (int, float)) and not isinstance(used, bool) else None)
     memory = "%s/%sG" % (_gpu_gib(gpu.get("memory_used_mib")),
                           _gpu_gib(gpu.get("memory_total_mib")))
-    level = _gpu_level(gpu)
-    segs = [("g%s " % (index if isinstance(index, int) else "?"), "head"),
-            (util_text, level), (" ", None), (memory, level)]
+    track = 4 if available < 58 else _RESOURCE_GAUGE_W
+    segs = [("g%s  " % (index if isinstance(index, int) else "?"), "head"),
+            ("UTIL ", "dim")]
+    segs += _resource_gauge_segs(util, track=track)
+    segs += [("  VRAM ", "dim")]
+    segs += _resource_gauge_segs(vram_pct, track=track)
+    segs += [("  " + memory, _gpu_level(gpu))]
     if show_name and gpu.get("name"):
         name = _gpu_safe_text(gpu["name"]).replace("NVIDIA ", "")
-        name_room = max(0, min(18, available - sum(_dw(t) for t, _k in segs) - 8))
+        name_room = max(0, min(20, available - sum(_dw(t) for t, _k in segs) - 8))
         if name_room >= 4:
-            segs += [(" ", None), (_clip_w(name, name_room), "dim")]
+            segs += [("  ", None), (_clip_w(name, name_room), "dim")]
     owner = _gpu_owner_text(gpu)
     used = sum(_dw(text) for text, _key in segs)
     owner_room = max(0, available - used - 3)
     if owner_room >= 4:
         segs += [(" · ", "dim"), (_clip_w(owner, owner_room),
                                     "dim" if owner == "idle" else
-                                    "lvl_y" if "unattributed" in owner else "name_dim")]
+                                    "lvl_y" if "unattributed:" in owner else "name_dim")]
     return segs
 
 
@@ -4039,7 +4063,8 @@ def _compute_host_rows(term_width=None):
     width = max(20, int(term_width or 200))
     hosts = [row for row in (snapshot.get("hosts") or ()) if isinstance(row, dict)]
     up = sum(row.get("reachable") is True for row in hosts)
-    rows = [[("  GPU HOSTS", "head"), (" %d/%d" % (up, len(hosts)), "dim")]]
+    rows = [[("  GPU HOSTS", "head"), (" %d/%d" % (up, len(hosts)), "dim"),
+             ("  · compute resources", "dim")]]
     if snapshot.get("error"):
         detail = _gpu_safe_text(snapshot["error"])
         rows.append([("    unavailable · ", "lvl_y"),
@@ -4053,53 +4078,48 @@ def _compute_host_rows(term_width=None):
     host_width = min(max_host, 16 if width >= 100 else 10)
     for host in hosts:
         name = _clip_w(_gpu_safe_text(host.get("host") or "?"), host_width)
-        marker = "*" if host.get("self") else " "
-        prefix = "  %s%s  " % (marker, _pad(name, host_width))
-        continuation = " " * _dw(prefix)
+        marker = "◆" if host.get("self") else "◇"
+        marker_key = "lvl_g" if host.get("self") else "dim"
+        prefix = "  %s %s  " % (marker, _pad(name, host_width))
+        host_row = [("  ", None), (marker, marker_key),
+                    (" " + _pad(name, host_width), "head"), ("  ", None)]
         if host.get("reachable") is not True:
             detail = _gpu_safe_text(host.get("detail") or "unreachable")
-            row = [(prefix, "head"), ("down", "lvl_r_flat")]
+            row = host_row + [("down", "lvl_r_flat")]
             if detail:
                 row += [(" · ", "dim"), (detail, "dim")]
             rows.append(_clip_segs(row, width)[0])
             continue
 
+        cpu = host.get("cpu_utilization_pct")
+        host_row += [("CPU ", "dim")]
+        host_row += _resource_gauge_segs(cpu)
+        cpu_count = host.get("cpu_count")
+        if isinstance(cpu_count, int) and cpu_count > 0:
+            host_row += [("  %dc" % cpu_count, "dim")]
+        load = _gpu_safe_text(host.get("load"))
+        if load and width >= 80:
+            host_row += [(" · load " + load.split()[0], "dim")]
+        rows.append(_clip_segs(host_row, width)[0])
+
         gpus = [gpu for gpu in (host.get("gpus") or ()) if isinstance(gpu, dict)]
         if not gpus:
             state = "gpu unavailable" if host.get("detail") else "no gpu"
-            row = [(prefix, "head"), (state, "lvl_y" if host.get("detail") else "dim")]
+            row = [(" " * _dw(prefix), None),
+                   (state, "lvl_y" if host.get("detail") else "dim")]
             rows.append(_clip_segs(row, width)[0])
             continue
 
-        current = [(prefix, "head")]
-        current_width = _dw(prefix)
         for gpu in sorted(gpus, key=lambda value: (value.get("index") is None,
                                                     value.get("index") or 0)):
-            gpu_available = max(12, width - _dw(prefix))
-            token = _gpu_token(gpu, gpu_available, show_name=width >= 120)
-            token_width = sum(_dw(text) for text, _key in token)
-            separator = [("   ", "dim")]
-            sep_width = 3
-            if len(current) > 1 and current_width + sep_width + token_width <= width:
-                current += separator + token
-                current_width += sep_width + token_width
-                continue
-            if len(current) > 1:
-                rows.append(_clip_segs(current, width)[0])
-                current = [(continuation, None)]
-                current_width = _dw(continuation)
-            current += token
-            current_width += token_width
-        if len(current) > 1:
-            rows.append(_clip_segs(current, width)[0])
+            indent = " " * _dw(prefix)
+            token = _gpu_token(gpu, max(12, width - _dw(indent)), show_name=width >= 120)
+            rows.append(_clip_segs([(indent, None)] + token, width)[0])
     return rows
 
 
 def _top_rows(term_width=None):
-    rows = [_hearting_header_row()]
-    rows.extend(_compute_host_rows(term_width))
-    rows.append(None)
-    return rows
+    return [_hearting_header_row(), None]
 
 
 # --- F-30 (v10, prd.md:304-310) — process view: pipeline-centric regrouping, `p` toggle ---
@@ -4572,6 +4592,7 @@ def _build_process_lines(sessions, jobs, route_views_by_id, malformed, memory, t
     if malformed:
         lines.append([("  +%d malformed jobs.log rows skipped" % malformed, "dim")])
     lines.append([(_HFILL, None)])
+    lines.extend(_compute_host_rows(term_width))
     lines.append(None)
     lines.append([("  PROCESS VIEW", "head"), (_RFLUSH, None), ("p group view  ", "head")])
 
@@ -5097,6 +5118,7 @@ def _build_lines(sessions, jobs, section, narrow, malformed, layout="wide", memo
     # usage/intel zone = PLAIN bg + a full-width dim rule below it (user 2026-07-03: intel
     # Keep tint directory-only so the intelligence zone is not confused with active cards.
     lines.append([(_HFILL, None)])
+    lines.extend(_compute_host_rows(term_width))
 
     # header bar REPLACES the `──` zone divider — htop separates meters from the process list
     # with its bar, not a rule. Leave one blank line above it so

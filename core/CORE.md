@@ -240,7 +240,9 @@ runs everything by default. When an operator keeps more than one machine, the
 user-owned inventory at
 `${XDG_CONFIG_HOME:-$HOME/.config}/hearting/compute-hosts.yaml` names them, and
 `utilities/compute-hosts.py` both measures their live state and starts detached
-work on them. Consult it before starting anything that needs a GPU the session
+work on them. Its exact detached-process claim surface reconnects a live root
+PID to the launcher session only while PID start time, command hash, and current
+ancestry still match. Consult it before starting anything that needs a GPU the session
 host lacks, or that would occupy the session host long enough to slow the
 conversation; a run started that way survives the session that launched it and
 is reachable by id from any host sharing the run root. Nothing chooses a host
