@@ -124,19 +124,25 @@ class ComputeHostRenderTest(unittest.TestCase):
                 rows = render._compute_host_rows(width)
                 self.assertTrue(all(render._dw(render._plain(row)) <= width for row in rows))
                 text = "\n".join(render._plain(row) for row in rows)
-                for value in ("Compute Resources 3/4", "◆ HOME moving4", "CPU", "0:", "1:",
+                for value in ("Compute Resources 3/4", "⌂ moving4", "CPU", "0:", "1:",
                               "UTIL", "VRAM", "32/48G", "1/48G", "xavier", "down",
                               "cpu", "no gpu"):
                     self.assertIn(value, text)
+                if width >= 100:
+                    self.assertIn("working", text)
+                    self.assertIn("idle", text)
                 self.assertNotIn("g0", text)
                 self.assertNotIn("g1", text)
+                self.assertNotIn("HOME", text)
+                self.assertNotIn("· idle", text)
         wide = "\n".join(render._plain(row) for row in render._compute_host_rows(168))
         for value in ("RTX 6000 Ada Generation", "job:train", "run:eval", "+1",
-                      "unattributed:process#4", "LOAD 3.2/32c"):
+                      "unattributed:process#4", "BUSY 11.8/32t"):
             self.assertIn(value, wide)
-        home_row = next(row for row in render._compute_host_rows(168)
-                        if "◆ HOME" in render._plain(row))
-        self.assertIn(("◆ HOME", "home_chip"), home_row)
+        self.assertNotIn("LOAD", wide)
+        base_row = next(row for row in render._compute_host_rows(168)
+                        if "⌂ moving4" in render._plain(row))
+        self.assertIn(("⌂", "base_host"), base_row)
 
     def test_exact_session_owner_is_an_explicit_gpu_link(self):
         gpu = {
@@ -156,9 +162,62 @@ class ComputeHostRenderTest(unittest.TestCase):
         self.assertIn("↳ session claude/f11a0486", text)
         self.assertNotIn("g1", text)
 
+    def test_gpu_liveness_uses_process_presence_and_shared_session_glyphs(self):
+        idle = {
+            "index": 0, "name": "NVIDIA A100", "utilization_gpu_pct": 99,
+            "memory_used_mib": 40000, "memory_total_mib": 40960, "processes": [],
+        }
+        working = {
+            "index": 1, "name": "NVIDIA A100", "utilization_gpu_pct": 0,
+            "memory_used_mib": 0, "memory_total_mib": 40960,
+            "processes": [{"pid": 7, "process_name": "python", "owner": None}],
+        }
+        with mock.patch.object(render.time, "time", return_value=1.0):
+            idle_row = render._gpu_token(idle, 141, show_name=True)
+            working_a = render._gpu_token(working, 141, show_name=True)
+        with mock.patch.object(render.time, "time", return_value=1.1):
+            working_b = render._gpu_token(working, 141, show_name=True)
+
+        self.assertEqual(idle_row[0], ("●", "g_work_off"))
+        self.assertIn("idle", render._plain(idle_row))
+        self.assertNotIn("· idle", render._plain(idle_row))
+        self.assertIn(working_a[0][0], render._SPIN)
+        self.assertEqual(working_a[0][1], "g_spin")
+        self.assertIn("working", render._plain(working_a))
+        self.assertNotEqual(working_a[0][0], working_b[0][0])
+        self.assertIn("unattributed:python#7", render._plain(working_a))
+
+    def test_narrow_gpu_state_word_degrades_whole_but_keeps_glyph(self):
+        gpu = {
+            "index": 1, "utilization_gpu_pct": 0,
+            "memory_used_mib": 1024, "memory_total_mib": 49152,
+            "processes": [{"pid": 7, "process_name": "python", "owner": None}],
+        }
+        with mock.patch.object(render.time, "time", return_value=1.0):
+            wide = render._gpu_token(gpu, 87, show_name=False)
+            narrow = render._gpu_token(gpu, 47, show_name=False)
+        self.assertIn("working", render._plain(wide))
+        self.assertNotIn("working", render._plain(narrow))
+        self.assertNotIn("work…", render._plain(narrow))
+        self.assertIn(narrow[0][0], render._SPIN)
+        self.assertIn("1: UTIL", render._plain(narrow))
+        self.assertLessEqual(render._dw(render._plain(narrow)), 47)
+
     def test_sub_tenth_gib_has_no_inequality_marker(self):
         self.assertEqual(render._gpu_gib(1), "0.0")
         self.assertNotIn("<", render._gpu_gib(1))
+
+    def test_cpu_track_scales_with_threads_and_busy_is_utilization_derived(self):
+        self.assertEqual(render._cpu_gauge_track(24), 6)
+        self.assertEqual(render._cpu_gauge_track(28), 7)
+        self.assertEqual(render._cpu_gauge_track(64), 16)
+        self.assertEqual(render._cpu_gauge_track(80), 20)
+        self.assertEqual(render._cpu_gauge_track(None), 8)
+        self.assertEqual(render._cpu_busy_text(37, 32), "11.8/32t")
+        self.assertEqual(render._cpu_busy_text(0, 64), "0.0/64t")
+        self.assertEqual(render._cpu_busy_text(100, 28), "28.0/28t")
+        self.assertEqual(render._cpu_busy_text(None, 64), "—/64t")
+        self.assertEqual(render._cpu_busy_text(10, None), "—")
 
     def test_resource_panel_is_below_the_top_summary_divider(self):
         lines = render._build_lines([], [], "both", False, 0, term_width=120)
@@ -189,6 +248,7 @@ class ComputeHostRenderTest(unittest.TestCase):
             payload = json.loads(fleet._snapshot_json(
                 [], [], compute_host_snapshot=self.snapshot))
         self.assertIn("compute_hosts", payload)
+        self.assertEqual(payload["compute_hosts"]["hosts"][0]["load"], "3.2 3.0 2.8")
         processes = payload["compute_hosts"]["hosts"][0]["gpus"][0]["processes"]
         self.assertEqual(len(processes), 3)
         self.assertIsNone(processes[2]["owner"])

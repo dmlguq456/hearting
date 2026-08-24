@@ -159,7 +159,7 @@ _HUE_OF = {
     # ●>○>◌ ink-weight gradient still reads.
     "g_unused_b": ("y", 0),
     "lvl_g": ("g", 0), "lvl_y": ("y", 0), "lvl_r": ("r", _A_B),
-    "home_chip": ("g", _A_REVERSE | _A_B),
+    "base_host": ("g", _A_B),
     # F-61: the usage header's own red — same hue and threshold as `lvl_r`, without the bold.
     # The header is always-on background information, so one meter crossing 80% must not make it
     # the heaviest ink on screen. Only the header maps onto this key; every other `lvl_r` surface
@@ -316,7 +316,7 @@ def _init_colors():
     _COLOR["lvl_y"] = _COLOR.get("yellow", 0)
     _COLOR["lvl_r"] = _COLOR.get("red", 0) | curses.A_BOLD
     _COLOR["lvl_r_flat"] = _COLOR.get("red", 0)          # F-61: usage header, no alarm weight
-    _COLOR["home_chip"] = _COLOR.get("green", 0) | curses.A_REVERSE | curses.A_BOLD
+    _COLOR["base_host"] = _COLOR.get("green", 0) | curses.A_BOLD
     # per-MODEL family colors, in TWO intensities (2026-07-02: main↔dispatch contrast = whole-row
     # brightness): fam_* = BRIGHT (main session rows) / famd_* = DIM (dispatch rows recede).
     _hue = {h: _COLOR.get("h_" + h, 0) for h in ("claude", "codex", "opencode")}
@@ -3976,6 +3976,13 @@ def _gpu_owner_text(gpu):
     return ",".join(shown) + ((" +%d" % (len(labels) - 2)) if len(labels) > 2 else "")
 
 
+def _gpu_state(gpu):
+    """GPU liveness from exact current process evidence, never utilization heuristics."""
+    return ("working" if any(isinstance(process, dict)
+                             for process in (gpu.get("processes") or ()))
+            else "idle")
+
+
 def _gpu_level(gpu):
     util = gpu.get("utilization_gpu_pct")
     total, used = gpu.get("memory_total_mib"), gpu.get("memory_used_mib")
@@ -3990,6 +3997,8 @@ def _gpu_level(gpu):
 
 
 _RESOURCE_GAUGE_W = 8
+_CPU_GAUGE_MIN = 4
+_CPU_GAUGE_MAX = 20
 
 
 def _resource_gauge_segs(value, track=_RESOURCE_GAUGE_W):
@@ -3998,6 +4007,24 @@ def _resource_gauge_segs(value, track=_RESOURCE_GAUGE_W):
     value = max(0, min(100, _half_up(value)))
     return (_gauge_segs(value, track, track=track)
             + [(" %3d%%" % value, _flat_level(_pct_key(value)))])
+
+
+def _cpu_gauge_track(cpu_count):
+    """Four logical threads per cell, bounded for terminal readability."""
+    if not isinstance(cpu_count, int) or isinstance(cpu_count, bool) or cpu_count <= 0:
+        return _RESOURCE_GAUGE_W
+    return max(_CPU_GAUGE_MIN, min(_CPU_GAUGE_MAX, _half_up(cpu_count / 4.0)))
+
+
+def _cpu_busy_text(utilization, cpu_count):
+    """Average busy thread-equivalents over the CPU sampling interval."""
+    if not isinstance(cpu_count, int) or isinstance(cpu_count, bool) or cpu_count <= 0:
+        return "—"
+    if not isinstance(utilization, (int, float)) or isinstance(utilization, bool):
+        return "—/%dt" % cpu_count
+    pct = max(0.0, min(100.0, float(utilization)))
+    busy = _half_up((pct * cpu_count / 100.0) * 10.0) / 10.0
+    return "%.1f/%dt" % (busy, cpu_count)
 
 
 def _gpu_token(gpu, available, show_name=False):
@@ -4009,27 +4036,32 @@ def _gpu_token(gpu, available, show_name=False):
                 and isinstance(used, (int, float)) and not isinstance(used, bool) else None)
     memory = "%s/%sG" % (_gpu_gib(gpu.get("memory_used_mib")),
                           _gpu_gib(gpu.get("memory_total_mib")))
-    track = 4 if available < 58 else _RESOURCE_GAUGE_W
-    segs = [("%s: " % (index if isinstance(index, int) else "?"), "head"),
-            ("UTIL ", "dim")]
+    state = _gpu_state(gpu)
+    glyph, state_key = _glyph(state)
+    show_state_word = available >= 58
+    track = 4 if available < 70 else _RESOURCE_GAUGE_W
+    segs = [(glyph, state_key), (" ", None),
+            ("%s: " % (index if isinstance(index, int) else "?"), "head")]
+    if show_state_word:
+        segs.append((state.ljust(7) + "  ", state_key))
+    segs.append(("UTIL ", "dim"))
     segs += _resource_gauge_segs(util, track=track)
     segs += [("  VRAM ", "dim")]
     segs += _resource_gauge_segs(vram_pct, track=track)
     segs += [("  " + memory, _gpu_level(gpu))]
-    owner = _gpu_owner_text(gpu)
-    owner_sep = "  ↳ " if owner != "idle" and not owner.startswith("unattributed:") else " · "
-    owner_reserve = min(_dw(owner), 28)
+    owner = _gpu_owner_text(gpu) if state == "working" else None
+    owner_sep = ("  ↳ " if owner and not owner.startswith("unattributed:") else " · ")
+    owner_reserve = min(_dw(owner), 28) if owner else 0
     if show_name and gpu.get("name"):
         name = _gpu_safe_text(gpu["name"]).replace("NVIDIA ", "")
         name_room = max(0, min(32, (available - sum(_dw(t) for t, _k in segs)
-                                   - _dw(owner_sep) - owner_reserve - 2)))
+                                   - (_dw(owner_sep) if owner else 0) - owner_reserve - 2)))
         if name_room >= 6:
             segs += [("  ", None), (_clip_w(name, name_room), "dim")]
     used = sum(_dw(text) for text, _key in segs)
-    owner_room = max(0, available - used - _dw(owner_sep))
-    if owner_room >= 4:
+    owner_room = max(0, available - used - (_dw(owner_sep) if owner else 0))
+    if owner and owner_room >= 4:
         segs += [(owner_sep, "dim"), (_clip_w(owner, owner_room),
-                                    "dim" if owner == "idle" else
                                     "lvl_y" if "unattributed:" in owner else "name_dim")]
     return segs
 
@@ -4056,10 +4088,10 @@ def _compute_host_rows(term_width=None):
     for host in hosts:
         name = _clip_w(_gpu_safe_text(host.get("host") or "?"), host_width)
         if host.get("self"):
-            host_row = [("  ", None), ("◆ HOME", "home_chip"), (" ", None),
+            host_row = [("  ", None), ("⌂", "base_host"), (" ", None),
                         (_pad(name, host_width), "grp"), ("  ", None)]
         else:
-            host_row = [("  ", None), ("◇", "dim"), ("      ", None),
+            host_row = [("  ", None), ("◇", "dim"), (" ", None),
                         (_pad(name, host_width), "head"), ("  ", None)]
         prefix_width = sum(_dw(text) for text, _key in host_row)
         if host.get("reachable") is not True:
@@ -4071,16 +4103,14 @@ def _compute_host_rows(term_width=None):
             continue
 
         cpu = host.get("cpu_utilization_pct")
-        host_row += [("CPU ", "dim")]
-        host_row += _resource_gauge_segs(cpu)
         cpu_count = host.get("cpu_count")
-        load = _gpu_safe_text(host.get("load"))
-        if load and width >= 80 and isinstance(cpu_count, int) and cpu_count > 0:
-            host_row += [("  · LOAD %s/%dc" % (load.split()[0], cpu_count), "dim")]
-        elif isinstance(cpu_count, int) and cpu_count > 0:
-            host_row += [("  %dc" % cpu_count, "dim")]
-        elif load and width >= 80:
-            host_row += [("  · LOAD " + load.split()[0], "dim")]
+        host_row += [("CPU ", "dim")]
+        host_row += _resource_gauge_segs(cpu, track=_cpu_gauge_track(cpu_count))
+        busy = _cpu_busy_text(cpu, cpu_count)
+        if width >= 80:
+            host_row += [("  · BUSY " + busy, "dim")]
+        else:
+            host_row += [("  " + busy, "dim")]
         rows.append(_clip_segs(host_row, width)[0])
 
         gpus = [gpu for gpu in (host.get("gpus") or ()) if isinstance(gpu, dict)]
