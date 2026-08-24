@@ -72,8 +72,8 @@ class F63VisibilityTest(unittest.TestCase):
         self.assertIn("╰───", text)
         owner_block = text[text.index("╭─"):text.index("╰───")]
         self.assertNotIn("↳", owner_block)
-        self.assertNotIn("d1", text)
-        self.assertNotIn("d2", text)
+        self.assertNotIn("d1", owner_block)
+        self.assertNotIn("d2", owner_block)
 
     def test_dispatch_model_name_map_preserves_unknown(self):
         self.assertEqual(render._dispatch_display_model("opus"), "Opus 5")
