@@ -115,6 +115,8 @@ class ProbeCommandAndSessionEvidenceTest(unittest.TestCase):
 
 class GpuProcessAndResourceRenderTest(unittest.TestCase):
     def setUp(self):
+        self.original_blink = render._BLINK_ON
+        self.addCleanup(setattr, render, "_BLINK_ON", self.original_blink)
         self.session = Session(
             harness="codex", pid=101, proc_start="11", cwd="/tmp/f88-project",
             session_id="sid-exact", title="training", liveness="working",
@@ -155,16 +157,20 @@ class GpuProcessAndResourceRenderTest(unittest.TestCase):
         self.addCleanup(render.set_compute_hosts, None)
         self.addCleanup(render.set_process_view, False)
 
-    def test_upper_rows_are_owner_free_process_rows_and_bounded(self):
+    def test_upper_rows_are_owner_free_command_only_and_bounded(self):
         for width in (168, 100, 60):
             rows = render._compute_host_rows(width, [self.session])
             self.assertTrue(all(render._dw(render._plain(row)) <= width for row in rows))
             text = "\n".join(render._plain(row) for row in rows)
-            self.assertIn("PID 300", text)
-            self.assertIn("VRAM 8192 MiB", text)
             self.assertIn("python train.py", text)
             for owner in ("job:train", "run:one", "CX/sid-exac", "↳"):
                 self.assertNotIn(owner, text)
+            process_text = "\n".join(render._plain(row) for row in
+                                     render._gpu_process_rows(
+                                         self.snapshot["hosts"][0]["gpus"][0], "", width))
+            self.assertNotIn("PID ", process_text)
+            self.assertNotIn("VRAM ", process_text)
+            self.assertNotIn("MiB", process_text)
 
     def test_exact_relation_aggregates_multi_gpu_in_stable_order(self):
         resources = render._gpu_session_resources(self.snapshot)
@@ -186,9 +192,42 @@ class GpuProcessAndResourceRenderTest(unittest.TestCase):
             row = render._gpu_resource_strip(linked, term_width=width)[0]
             text = render._plain(row)
             self.assertLessEqual(render._dw(text), width)
-            self.assertTrue(text.startswith(render._SUBAGENT_IND + "▣ GPU cnn:0"))
+            self.assertTrue(text.startswith(render._SUBAGENT_IND + "● GPU cnn:0"))
             self.assertIn("GPU cnn:1", text)
             self.assertNotIn("⚡", text)
+            self.assertNotIn("▣", text)
+            self.assertNotIn(" proc", text)
+            self.assertNotIn("MiB", text)
+        wide = render._gpu_resource_strip(linked, term_width=168)[0]
+        self.assertIn("12 GB", render._plain(wide))
+        self.assertIn(("A100", "gpu_ampere"), wide)
+        self.assertIn(("L40S", "gpu_ada"), wide)
+
+    def test_resource_pulse_reuses_live_tick_and_keeps_metadata_dim(self):
+        linked = render._gpu_resources_for_session(
+            self.session, render._gpu_session_resources(self.snapshot))
+        render._BLINK_ON = True
+        on = render._gpu_resource_strip(linked, term_width=168)[0]
+        render._BLINK_ON = False
+        off = render._gpu_resource_strip(linked, term_width=168)[0]
+        self.assertEqual(on[1], ("●", "g_work"))
+        self.assertEqual(off[1], ("●", "g_work_off"))
+        self.assertIn(("GPU cnn:0", "name_dim"), on)
+        self.assertIn((" · 12 GB", "dim"), on)
+
+    def test_gpu_model_families_are_stable_dim_color_keys(self):
+        expected = {
+            "NVIDIA B200": "gpu_blackwell",
+            "NVIDIA H100": "gpu_hopper",
+            "NVIDIA RTX 6000 Ada Generation": "gpu_ada",
+            "NVIDIA A100": "gpu_ampere",
+            "NVIDIA T4": "gpu_turing",
+            "Mystery Accelerator": "gpu_other",
+        }
+        for model, key in expected.items():
+            with self.subTest(model=model):
+                self.assertEqual(render._gpu_model_key(model), key)
+                self.assertEqual(render._HUE_OF[key][1], render._A_DIM)
 
     def test_group_and_process_views_share_link_and_order_after_subagent_strip(self):
         group = render._build_lines(
@@ -198,15 +237,15 @@ class GpuProcessAndResourceRenderTest(unittest.TestCase):
         for lines in (group, process):
             text = [render._plain(line) for line in lines if line]
             sub_at = next(index for index, line in enumerate(text) if "⚡explorer" in line)
-            gpu_at = next(index for index, line in enumerate(text) if "▣ GPU cnn:0" in line)
+            gpu_at = next(index for index, line in enumerate(text) if "● GPU cnn:0" in line)
             self.assertLess(sub_at, gpu_at)
-            self.assertEqual(sum("▣ GPU cnn:0" in line for line in text), 1)
+            self.assertEqual(sum("● GPU cnn:0" in line for line in text), 1)
 
     def test_missing_visible_session_leaves_only_upper_process_view(self):
         lines = render._build_process_lines([], [], {}, 0, None, 100, "wide")
         text = "\n".join(render._plain(line) for line in lines if line)
-        self.assertIn("PID 300", text)
-        self.assertNotIn("▣ GPU", text)
+        self.assertIn("python train.py", text)
+        self.assertNotIn(render._SUBAGENT_IND + "● GPU", text)
 
 
 if __name__ == "__main__":

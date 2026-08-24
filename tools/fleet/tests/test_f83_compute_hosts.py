@@ -137,7 +137,7 @@ class ComputeHostRenderTest(unittest.TestCase):
                 self.assertTrue(all(render._dw(render._plain(row)) <= width for row in rows))
                 text = "\n".join(render._plain(row) for row in rows)
                 for value in ("Compute Resources 3/4", "⌂ moving4", "CPU", "0:", "1:",
-                              "UTIL", "VRAM", "32/48G", "1/48G", "xavier", "down",
+                              "UTIL", "VRAM", "32/48GB", "1/48GB", "xavier", "down",
                               "cpu", "no gpu"):
                     self.assertIn(value, text)
                 if width >= 100:
@@ -148,9 +148,11 @@ class ComputeHostRenderTest(unittest.TestCase):
                 self.assertNotIn("HOME", text)
                 self.assertNotIn("· idle", text)
         wide = "\n".join(render._plain(row) for row in render._compute_host_rows(168))
-        for value in ("RTX 6000 Ada Generation", "PID 1", "VRAM 16000 MiB",
-                      "python train.py", "PID 4", "python shell.py", "BUSY 11.8/32t"):
+        for value in ("RTX 6000 Ada Generation", "python train.py",
+                      "python shell.py", "BUSY 11.8/32t"):
             self.assertIn(value, wide)
+        self.assertNotIn("PID ", wide)
+        self.assertNotIn("MiB", wide)
         for owner in ("job:train", "run:eval", "unattributed:", "↳"):
             self.assertNotIn(owner, wide)
         self.assertNotIn("LOAD", wide)
@@ -175,6 +177,8 @@ class ComputeHostRenderTest(unittest.TestCase):
         text = render._plain(render._gpu_token(gpu, 141, show_name=True))
         self.assertIn("1:", text)
         self.assertIn("RTX 6000 Ada Generation", text)
+        self.assertIn(("RTX 6000 Ada Generation", "gpu_ada"),
+                      render._gpu_token(gpu, 141, show_name=True))
         self.assertNotIn("CL/f11a0486", text)
         self.assertNotIn("↳", text)
         self.assertNotIn("g1", text)

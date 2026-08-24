@@ -178,6 +178,9 @@ _HUE_OF = {
     "fam_fable": ("m", 0), "fam_gpt": ("y", 0), "fam_other": ("d", 0),
     "famd_opus": ("c", _A_D), "famd_sonnet": ("l", _A_D), "famd_haiku": ("g", _A_D),
     "famd_fable": ("m", _A_D), "famd_gpt": ("y", _A_D), "famd_other": ("d", _A_D),
+    "gpu_blackwell": ("g", _A_D), "gpu_hopper": ("m", _A_D),
+    "gpu_ada": ("c", _A_D), "gpu_ampere": ("l", _A_D),
+    "gpu_turing": ("y", _A_D), "gpu_other": ("d", _A_D),
     # stage palette indices 0-4 = blue·cyan·green·yellow·magenta (see _stage_raw)
     "stg0_on": ("l", _A_B), "stg1_on": ("c", _A_B), "stg2_on": ("g", _A_B),
     "stg3_on": ("y", _A_B), "stg4_on": ("m", _A_B),
@@ -338,6 +341,16 @@ def _init_colors():
         _COLOR["famd_" + fam] = hue | curses.A_DIM
     _COLOR["fam_other"] = 0                        # unknown family → default fg
     _COLOR["famd_other"] = curses.A_DIM
+    # GPU architecture/model families reuse the same restrained identity palette
+    # as harness/model labels, but never rise above DIM weight (F-89).  The
+    # model name remains present, so color is an additive cue rather than the
+    # only identifier.
+    for fam, hue_name in {
+        "blackwell": "green", "hopper": "magenta", "ada": "cyan",
+        "ampere": "blue", "turing": "yellow",
+    }.items():
+        _COLOR["gpu_" + fam] = _COLOR.get(hue_name, 0) | curses.A_DIM
+    _COLOR["gpu_other"] = curses.A_DIM
     # branch: normal on main session rows, dim on dispatch rows (same brightness axis)
     _COLOR["branch_s"] = 0
     for h, hue in _hue.items():
@@ -3348,7 +3361,6 @@ _DETACHED_FINISHED_LIVENESS = {"done", "stale", "dead"}
 # Reads distinctly from dispatch's `🚀`/`↳` so the two nested-row kinds never visually merge.
 # Single point of ASCII-degrade if double-width alignment ever breaks in a real terminal.
 _ICON_SUBAGENT = "⚡"
-_ICON_GPU_RESOURCE = "▣"
 _SUBAGENT_IND = "        "  # strip indent: pure inset, no connector glyph, 8 cells for a
                           # session-owned strip — at/past the dispatch-depth-2 arrow column so the
                           # strip reads as INSIDE the row above, never as a sibling (사용자
@@ -3953,8 +3965,31 @@ def _gpu_gib(value):
     return ("%.1f" % amount).rstrip("0").rstrip(".")
 
 
+_GPU_MODEL_PATTERNS = (
+    ("blackwell", re.compile(r"\b(?:b100|b200|gb200|gb300)\b|blackwell|\brtx\s*50\d{2}\b")),
+    ("hopper", re.compile(r"\b(?:h100|h200|gh200)\b|hopper")),
+    ("ada", re.compile(r"\b(?:l4|l40|l40s)\b|ada|\brtx\s*40\d{2}\b")),
+    ("ampere", re.compile(r"\b(?:a10|a30|a40|a100|a6000)\b|ampere|\brtx\s*30\d{2}\b")),
+    ("turing", re.compile(r"\b(?:t4|rtx\s*20\d{2}|titan\s+rtx)\b|turing")),
+)
+
+
+def _gpu_model_family(model):
+    """Stable display-only GPU family; unknown names fail soft to dim grey."""
+    normalized = _gpu_safe_text(model).lower().replace("-", " ")
+    for family, pattern in _GPU_MODEL_PATTERNS:
+        if pattern.search(normalized):
+            return family
+    return "other"
+
+
+def _gpu_model_key(model):
+    """Every GPU model hue stays dim so resource metadata remains subordinate."""
+    return "gpu_" + _gpu_model_family(model)
+
+
 def _gpu_process_rows(gpu, indent, width):
-    """Bounded nvtop-style process rows; owner evidence never enters this surface."""
+    """Bounded command-only process rows; evidence stays in structured output."""
     rows = []
     processes = [row for row in (gpu.get("processes") or ()) if isinstance(row, dict)]
     processes.sort(key=lambda process: (
@@ -3964,19 +3999,10 @@ def _gpu_process_rows(gpu, indent, width):
         process.get("pid") if isinstance(process.get("pid"), int) else 2**63,
     ))
     for process in processes:
-        pid = process.get("pid")
-        pid_text = str(pid) if isinstance(pid, int) and not isinstance(pid, bool) else "—"
-        memory = process.get("used_memory_mib")
-        memory_text = ("%d MiB" % max(0, memory)
-                       if isinstance(memory, int) and not isinstance(memory, bool) else "— MiB")
         command = _gpu_safe_text(process.get("command"))
         if not command:
             command = os.path.basename(_gpu_safe_text(process.get("process_name"))) or "process"
-        row = [
-            (indent + "  ", None), ("PID ", "dim"), (pid_text, "head"),
-            ("  VRAM ", "dim"), (memory_text, "name_dim"), ("  ", None),
-            (command, "dim"),
-        ]
+        row = [(indent + "  ", None), (command, "dim")]
         rows.append(_clip_segs(row, width)[0])
     return rows
 
@@ -4040,31 +4066,28 @@ def _gpu_resource_strip(resources, term_width=None, depth=0, in_card=False):
     indent = _SUBAGENT_IND + "  " * max(0, shown_depth)
     width = max(20, int(term_width or 200))
 
-    def build(show_model, show_count, show_memory):
+    def build(show_model, show_memory):
         segs = [(indent, None)]
         for position, resource in enumerate(resources):
             if position:
                 segs.append((" · ", "dim"))
             identity = "GPU %s:%s" % (resource["host"], resource["index"])
-            segs += [(_ICON_GPU_RESOURCE + " ", "dim"), (identity, "name_dim")]
-            details = []
+            pulse_key = "g_work" if _BLINK_ON else "g_work_off"
+            segs += [("●", pulse_key), (" ", None), (identity, "name_dim")]
             if show_model and resource.get("model"):
-                details.append(resource["model"])
-            if show_count:
-                details.append("%d proc" % resource.get("process_count", 0))
+                segs += [(" · ", "dim"),
+                         (resource["model"], _gpu_model_key(resource["model"]))]
             if show_memory and resource.get("has_memory"):
-                details.append("%d MiB" % resource.get("used_memory_mib", 0))
-            if details:
-                segs.append((" · " + " · ".join(details), "dim"))
+                segs += [(" · " + _gpu_gib(resource.get("used_memory_mib", 0))
+                          + " GB", "dim")]
         return segs
 
-    # F-88: drop model, then count, then VRAM while preserving every GPU identity.
-    for flags in ((True, True, True), (False, True, True),
-                  (False, False, True), (False, False, False)):
+    # F-89: drop model, then memory while preserving pulse + every GPU identity.
+    for flags in ((True, True), (False, True), (False, False)):
         segs = build(*flags)
         if sum(_dw(text) for text, _key in segs) <= width:
             return [segs]
-    return [_clip_segs(build(False, False, False), width)[0]]
+    return [_clip_segs(build(False, False), width)[0]]
 
 
 def _gpu_state(gpu):
@@ -4125,8 +4148,8 @@ def _gpu_token(gpu, available, show_name=False, sessions=None):
     vram_pct = (100.0 * used / total
                 if isinstance(total, (int, float)) and not isinstance(total, bool) and total > 0
                 and isinstance(used, (int, float)) and not isinstance(used, bool) else None)
-    memory = "%s/%sG" % (_gpu_gib(gpu.get("memory_used_mib")),
-                          _gpu_gib(gpu.get("memory_total_mib")))
+    memory = "%s/%sGB" % (_gpu_gib(gpu.get("memory_used_mib")),
+                           _gpu_gib(gpu.get("memory_total_mib")))
     state = _gpu_state(gpu)
     glyph, state_key = _glyph(state)
     show_state_word = available >= 58
@@ -4145,7 +4168,7 @@ def _gpu_token(gpu, available, show_name=False, sessions=None):
         name_room = max(0, min(32, (available - sum(_dw(t) for t, _k in segs)
                                    - 2)))
         if name_room >= 6:
-            segs += [("  ", None), (_clip_w(name, name_room), "dim")]
+            segs += [("  ", None), (_clip_w(name, name_room), _gpu_model_key(name))]
     return segs
 
 
