@@ -16,12 +16,18 @@ import time
 from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "utilities"))
-from dispatch_contract import resolve_agent_home as _resolve_agent_home  # noqa: E402
+from dispatch_contract import (  # noqa: E402
+    DispatchContractError,
+    resolve_agent_home as _resolve_agent_home,
+)
 from dispatch_completion_join import (  # noqa: E402
+    CurrentDeliveryState,
     JoinContractError,
-    child_row_revision,
     current_attempt_row,
-    required_action_for_attempt,
+    current_children,
+    current_delivery_state,
+    delivery_classification,
+    delivery_required_action,
 )
 
 
@@ -233,7 +239,6 @@ def registry_launch(payload: object) -> Launch | None:
         _validated_jobs(_single(fields, "job_registry"))
         or _validated_jobs(_command_jobs(command))
         or _validated_jobs(os.environ.get("AGENT_DISPATCH_JOBS"))
-        or _validated_jobs(str(agent_home() / ".dispatch" / "jobs.log"))
     )
     if jobs is None:
         return None
@@ -321,46 +326,45 @@ def wait_for_attempt(launch: Launch, readiness: Path) -> tuple[str, str]:
         time.sleep(interval)
 
 
-def _completion_evidence_current(row: Any) -> bool:
-    """Prove that the current exact row carries sealed success evidence."""
+def _completion_evidence_current(state: CurrentDeliveryState) -> bool:
+    """Consume the marker identity already verified inside the jobs lock."""
 
-    note = row.metadata.get("note", "")
-    if note == "completed-supervisor":
-        return row.metadata.get("failure_class") == "pass"
-    if note != "completed-marker":
-        return False
-    raw_marker = row.metadata.get("completion_marker", "")
-    marker = Path(raw_marker) if raw_marker else None
-    if (
-        marker is None
-        or not marker.is_absolute()
-        or marker.is_symlink()
-        or not marker.is_file()
-    ):
-        return False
-    try:
-        if marker.stat().st_size > 65_536:
-            return False
-        value = json.loads(marker.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return False
-    if not isinstance(value, dict):
-        return False
-    expected = {
-        "route_id": row.metadata.get("route_id", ""),
-        "route_hash": row.metadata.get("route_hash", ""),
-        "node_id": row.metadata.get("route_node", ""),
-    }
-    return all(expected[key] and value.get(key) == expected[key] for key in expected)
+    marker = state.marker
+    return bool(
+        isinstance(marker, dict)
+        and re.fullmatch(r"[0-9a-f]{64}", state.marker_digest)
+        and marker.get("route_id")
+        and marker.get("route_hash")
+        and marker.get("node_id")
+        and marker.get("attempt_id")
+    )
 
 
 def classified_receipt(
     launch: Launch, state: str, reason: str, root: Path
 ) -> tuple[str, str]:
     row = None
+    delivery = None
+    transaction_error = ""
     try:
+        if state in {"ready", "attention"}:
+            try:
+                delivery = current_delivery_state(
+                    launch.jobs,
+                    launch.attempt_id,
+                    parent_attempt_id=launch.attempt_id,
+                )
+            except (DispatchContractError, JoinContractError, OSError) as exc:
+                transaction_error = (
+                    exc.reason
+                    if isinstance(exc, DispatchContractError)
+                    else str(exc) or type(exc).__name__
+                )
+        # Rendering the sealed launch-home path is deliberately separate from
+        # classification. The transaction above is the only current-row
+        # decision authority.
         row = current_attempt_row(launch.jobs, launch.attempt_id)
-    except JoinContractError:
+    except (JoinContractError, OSError):
         row = None
     # The row's sealed launch_home (SD-49) is the checkout the attempt actually
     # ran under; `root` (agent_home(), preferring env AGENT_HOME) may point at a
@@ -374,21 +378,42 @@ def classified_receipt(
         home = root
     harvest = home / "adapters" / "codex" / "bin" / "preflight.sh"
     jobs_argument = shlex.quote(str(launch.jobs))
-    status = row.status if row is not None else ""
-    row_revision = child_row_revision(row) if row is not None else "unavailable"
-    if state in {"ready", "attention"} and row is not None:
-        required_action = required_action_for_attempt(row.status, row.metadata)
+    status = delivery.status if delivery is not None else ""
+    row_revision = delivery.row_revision if delivery is not None else "unavailable"
+    marker_current = bool(delivery and _completion_evidence_current(delivery))
+    if delivery is not None:
+        owned_children = delivery.owned_children
+    elif transaction_error:
+        try:
+            owned_children = sum(
+                child.status in {"open", "running"}
+                and child.metadata.get("registered_worker") == "1"
+                and child.metadata.get("execution_surface") == "registered-headless"
+                for child in current_children(launch.jobs, launch.attempt_id)
+            )
+        except (JoinContractError, OSError):
+            owned_children = 0
+    else:
+        owned_children = 0
+    quiescent = bool(delivery and delivery.quiescent)
+    advanced = bool(delivery and delivery.advanced)
+    row_digest = delivery.row_digest if delivery is not None else "unavailable"
+    if (
+        state in {"ready", "attention"}
+        and delivery is not None
+        and delivery.status in {"open", "running", "done"}
+    ):
+        required_action = delivery_required_action(delivery)
         snapshot_state = state
-        if required_action == "advance-completed" and _completion_evidence_current(row):
-            state = "success"
-            reason = "terminal-complete" if snapshot_state == "ready" else "row-advanced"
+        state = delivery_classification(delivery)
+        if state == "success":
+            reason = (
+                "row-advanced"
+                if delivery.advanced or snapshot_state == "attention"
+                else "terminal-complete"
+            )
         else:
-            state = "attention"
-            if snapshot_state == "ready" and required_action != "advance-completed":
-                reason = "row-advanced"
-            if required_action == "advance-completed":
-                required_action = "inspect-completion"
-                reason = "completion-marker-unverified"
+            reason = "terminal-failure-or-unclosed"
         if state == "success":
             instruction = "No harvest command is required; the registered owner completed."
         elif required_action == "complete-open":
@@ -412,6 +437,15 @@ def classified_receipt(
                 f"--attempt-id {shlex.quote(launch.attempt_id)} --status done "
                 "--failure-detail."
             )
+    elif transaction_error:
+        state = "attention"
+        reason = f"delivery-transaction-failed-{transaction_error}"
+        required_action = "complete-open" if owned_children else "inspect-bridge"
+        instruction = (
+            "A real owned child remains open; inspect only the sealed registry."
+            if owned_children
+            else "The delivery transaction needs attention; no open child was observed, so do not block this Stop."
+        )
     else:
         required_action = "inspect-bridge"
         instruction = "Inspect the typed bridge state; do not harvest or re-arm it."
@@ -424,6 +458,9 @@ def classified_receipt(
         f"{title}. Runtime owner completion receipt "
         f"schema=2 state={state} attempt_id={launch.attempt_id} armed={launch.armed} "
         f"status={status or '-'} row_revision={row_revision} "
+        f"row_digest={row_digest} marker_current={int(marker_current)} "
+        f"quiescent={int(quiescent)} owned_children={owned_children} "
+        f"advanced={int(advanced)} "
         f"reason={reason} required_action={required_action}. "
         "Do not start or re-arm Background Bash, Monitor, liveness, or dispatch-wait. "
         f"{instruction} Do not emit a periodic progress recap."
@@ -437,16 +474,18 @@ def receipt(launch: Launch, state: str, reason: str, root: Path) -> str:
     return classified_receipt(launch, state, reason, root)[1]
 
 
-def emit_receipt(state: str, message: str) -> int:
-    """Render success as a notification and only attention as a hook error."""
+def emit_receipt(state: str, message: str, *, block: bool | None = None) -> int:
+    """Render success/nonblocking attention without a Stop block decision."""
 
-    if state == "success":
+    if block is None:
+        block = state != "success"
+    if state == "success" or not block:
+        payload = {"systemMessage": message}
+        if state == "success":
+            payload["terminalSequence"] = SUCCESS_NOTIFICATION
         print(
             json.dumps(
-                {
-                    "systemMessage": message,
-                    "terminalSequence": SUCCESS_NOTIFICATION,
-                },
+                payload,
                 ensure_ascii=False,
                 separators=(",", ":"),
             )
@@ -454,6 +493,11 @@ def emit_receipt(state: str, message: str) -> int:
         return 0
     print(message, file=sys.stderr)
     return 2
+
+
+def _attention_has_open_child(message: str) -> bool:
+    match = re.search(r"\bowned_children=([0-9]+)\b", message)
+    return bool(match and int(match.group(1)) > 0)
 
 
 def main() -> int:
@@ -470,10 +514,10 @@ def main() -> int:
         state, message = classified_receipt(
             launch, "bridge-error", "readiness-helper-missing", root
         )
-        return emit_receipt(state, message)
+        return emit_receipt(state, message, block=_attention_has_open_child(message))
     state, reason = wait_for_attempt(launch, readiness)
     state, message = classified_receipt(launch, state, reason, root)
-    return emit_receipt(state, message)
+    return emit_receipt(state, message, block=_attention_has_open_child(message))
 
 
 if __name__ == "__main__":

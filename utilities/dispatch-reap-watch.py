@@ -30,6 +30,7 @@ from dispatch_completion_join import (
     close_wrapper_pass,
     exact_attempt_row,
 )
+from dispatch_degradation import record_degradation
 
 
 def attempt_record(
@@ -67,6 +68,42 @@ def exact_binding(metadata: dict[str, str], args: argparse.Namespace) -> bool:
         and metadata.get("pid_observer_ns")
         and metadata.get("pid_ns") == metadata.get("pid_observer_ns")
     )
+
+
+def record_missing_result_degradation(
+    metadata: dict[str, str], args: argparse.Namespace
+) -> None:
+    """Best-effort SD-93 evidence for one reaper-owned leg close."""
+
+    try:
+        record_degradation(
+            route_id=metadata.get("route_id") or metadata.get("batch_route_id"),
+            route_node=metadata.get("route_node")
+            or metadata.get("batch_route_node"),
+            route_hash=metadata.get("route_hash"),
+            dispatch_depth=2,
+            fallback_hop=metadata.get("fallback_hop")
+            or metadata.get("batch_fallback_hop"),
+            execution_surface="registered-headless",
+            writer="dispatch-reap-watch.py",
+            kind="leg-failure",
+            jobs=args.jobs,
+            parallel_group=metadata.get("parallel_group")
+            or metadata.get("batch_group"),
+            parallel_leg_index=metadata.get("parallel_leg_index")
+            or metadata.get("batch_parallel_leg_index"),
+            parallel_leg_count=metadata.get("parallel_leg_count")
+            or metadata.get("batch_declared_size"),
+            attempt_id=metadata.get("attempt_id") or args.attempt_id,
+            fallback_ordinal=metadata.get("fallback_ordinal")
+            or metadata.get("batch_fallback_ordinal"),
+            harness=metadata.get("harness") or metadata.get("batch_harness"),
+            leg_class=metadata.get("leg_class"),
+            reason="dead-missing-result",
+        )
+    except BaseException:
+        # SD-93d: observability must never change dispatch state or outcome.
+        return
 
 
 def watch(args: argparse.Namespace) -> int:
@@ -176,7 +213,7 @@ def watch(args: argparse.Namespace) -> int:
                 ).deferred
             )
 
-        close_attempt_row_if(
+        closed = close_attempt_row_if(
             args.jobs,
             args.attempt_id,
             "dead-missing-result",
@@ -186,6 +223,8 @@ def watch(args: argparse.Namespace) -> int:
                 "reconcile_reason": "governed-process-group-drained",
             },
         )
+        if closed:
+            record_missing_result_degradation(metadata, args)
         return 0
 
 

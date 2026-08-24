@@ -236,7 +236,28 @@ raise SystemExit(3 if state == 'timeout' else 0)
         )
         self.assertEqual(
             {child["required_action"] for child in children},
-            {"advance-completed"},
+            {"inspect-done-failure"},
+        )
+        self.assertEqual(
+            {child["delivery_classification"] for child in children},
+            {"attention"},
+        )
+        timing = server.request["receipt"]["delivery_timing"]
+        self.assertEqual(timing["delivery_timing_schema_version"], 1)
+        self.assertIsInstance(timing["last_child_terminal_ns"], int)
+        self.assertIsInstance(timing["join_completed_ns"], int)
+        self.assertEqual(
+            set(timing),
+            {
+                "delivery_timing_schema_version",
+                "last_child_terminal_ns",
+                "join_completed_ns",
+                "same_thread_resume_ns",
+                "exact_harvest_ns",
+                "next_stage_start_ns",
+                "final_report_marker_ns",
+                "owner_terminal_envelope_ns",
+            },
         )
         encoded = json.dumps(server.request)
         self.assertNotIn("RAW_CHILD_SENTINEL", encoded)
@@ -301,7 +322,7 @@ raise SystemExit(3 if state == 'timeout' else 0)
         assert server.request is not None
         child = server.request["receipt"]["children"][0]
         self.assertEqual(child["status"], "open")
-        self.assertEqual(child["reason"], "terminal-observed")
+        self.assertEqual(child["reason"], "terminal-failure-or-unclosed")
         self.assertEqual(child["required_action"], "complete-open")
 
     def test_foreign_or_missing_attempt_fails_before_gateway(self) -> None:

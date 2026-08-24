@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+import hashlib
 import importlib.util
 import io
 import json
@@ -139,6 +140,7 @@ class DispatchOwnerRewakeTest(unittest.TestCase):
                     "route_id": "rt-owner",
                     "route_hash": "sha256:owner",
                     "node_id": "plan",
+                    "attempt_id": "att-owner-1",
                 }
             ),
             encoding="utf-8",
@@ -147,17 +149,213 @@ class DispatchOwnerRewakeTest(unittest.TestCase):
             "2026-08-06T00:00:00Z\tdone\t/repo\t/wt\towner\t"
             "attempt_schema_version=2,attempt_id=att-owner-1,failure_class=pass,"
             "note=completed-marker,route_id=rt-owner,route_hash=sha256:owner,"
-            f"route_node=plan,completion_marker={marker}\n",
+            f"route_node=plan,completion_marker={marker},"
+            "launch_outcome=never-launched\n",
             encoding="utf-8",
         )
         message = rewake.receipt(launch, "ready", "terminal-quiescent", self.root)
         self.assertIn("attempt_id=att-owner-1", message)
         self.assertIn("Do not start or re-arm Background Bash", message)
-        self.assertIn("required_action=advance-completed", message)
+        self.assertIn("required_action=inspect-done-failure", message)
+        self.assertIn("state=attention", message)
+        self.assertIn("Hearting dispatch requires attention", message)
+        self.assertIn("--status done --failure-detail", message)
+
+    def write_marker_bound_owner(self, *, status: str = "open", child: bool = False):
+        evidence = self.root / "report.md"
+        evidence.write_text("fixture report\n", encoding="utf-8")
+        route = self.root / "route.json"
+        route_value = {
+            "route_id": "rt-owner",
+            "route_hash": "sha256:owner",
+            "registry_digest": "sha256:registry",
+            "nodes": [{
+                "id": "report",
+                "completion_gate": "code-report",
+                "dispatch_depth": 1,
+            }],
+        }
+        route.write_text(json.dumps(route_value), encoding="utf-8")
+        marker = self.root / "owner-marker.json"
+        marker_value = {
+            "schema_version": 2,
+            "sequence": 1,
+            "route_id": "rt-owner",
+            "route_hash": "sha256:owner",
+            "registry_digest": "sha256:registry",
+            "node_id": "report",
+            "completion_gate": "code-report",
+            "attempt_id": "att-owner-1",
+            "dispatch_depth": 1,
+            "transport": "headless",
+            "execution_surface": "registered-headless",
+            "registered_worker": True,
+            "fallback_hop": "same-harness-headless",
+            "evidence": {
+                "path": str(evidence),
+                "sha256": hashlib.sha256(evidence.read_bytes()).hexdigest(),
+            },
+        }
+        marker.write_text(json.dumps(marker_value), encoding="utf-8")
+        (self.root / "report.1.json").write_text(
+            json.dumps(marker_value), encoding="utf-8"
+        )
+        (self.root / "report.att-owner-1.attempt.json").write_text(
+            json.dumps({
+                "schema_version": 2,
+                "route_id": "rt-owner",
+                "node_id": "report",
+                "attempt_id": "att-owner-1",
+                "dispatch_depth": 1,
+                "transport": "headless",
+                "execution_surface": "registered-headless",
+                "registered_worker": True,
+                "fallback_hop": "same-harness-headless",
+                "evidence_sha256": marker_value["evidence"]["sha256"],
+                "completion_marker": str(marker),
+                "completion_marker_history": str(self.root / "report.1.json"),
+            }),
+            encoding="utf-8",
+        )
+        terminal = (
+            ",failure_class=pass,note=completed-marker" if status == "done" else ""
+        )
+        target = (
+            f"2026-08-25T00:00:00Z\t{status}\t/repo\t/wt\towner\t"
+            "attempt_schema_version=2,dispatch_depth=1,transport=headless,"
+            "execution_surface=registered-headless,registered_worker=1,"
+            "fallback_hop=same-harness-headless,attempt_id=att-owner-1,"
+            "route_id=rt-owner,route_hash=sha256:owner,route_node=report,"
+            f"route_file={route},completion_marker={marker},"
+            f"launch_outcome=never-launched{terminal}\n"
+        )
+        owned = ""
+        if child:
+            owned = (
+                "2026-08-25T00:00:01Z\topen\t/repo\t/wt\tchild\t"
+                "attempt_schema_version=2,dispatch_depth=2,transport=headless,"
+                "execution_surface=registered-headless,registered_worker=1,"
+                "fallback_hop=same-harness-headless,attempt_id=att-child-1,"
+                "parent_attempt_id=att-owner-1\n"
+            )
+        self.jobs.write_text(target + owned, encoding="utf-8")
+        return marker
+
+    def test_marker_open_row_advances_once_then_renders_success(self) -> None:
+        self.write_marker_bound_owner()
+        launch = rewake.parse_launch(self.payload())
+        assert launch is not None
+        state, message = rewake.classified_receipt(
+            launch, "attention", "terminal-failure-or-unclosed", self.root
+        )
+        self.assertEqual(state, "success")
+        self.assertIn("advanced=1", message)
+        self.assertIn("marker_current=1", message)
         self.assertIn("state=success", message)
-        self.assertIn("Hearting dispatch completed", message)
-        self.assertIn("No harvest command is required", message)
-        self.assertNotIn("harvest --attempt-id", message)
+        self.assertIn("\tdone\t", self.jobs.read_text(encoding="utf-8"))
+        self.assertEqual(
+            self.jobs.read_text(encoding="utf-8").count("classifier_source=marker-bound-delivery-v1"),
+            1,
+        )
+
+    def test_marker_open_row_failed_advance_is_nonblocking_attention(self) -> None:
+        self.write_marker_bound_owner()
+        launch = rewake.parse_launch(self.payload())
+        assert launch is not None
+        delivery = rewake.CurrentDeliveryState(
+            marker={
+                "route_id": "rt-owner",
+                "route_hash": "sha256:owner",
+                "node_id": "report",
+                "attempt_id": "att-owner-1",
+            },
+            marker_digest="a" * 64,
+            row_revision="b" * 64,
+            row_digest="b" * 64,
+            status="open",
+            verdict="",
+            quiescent=False,
+            owned_children=0,
+            advanced=False,
+        )
+        with mock.patch.object(rewake, "current_delivery_state", return_value=delivery):
+            state, message = rewake.classified_receipt(
+                launch, "attention", "terminal-failure-or-unclosed", self.root
+            )
+        self.assertEqual(state, "attention")
+        self.assertIn("advanced=0", message)
+        self.assertIn("owned_children=0", message)
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with mock.patch.object(sys, "stdout", stdout), mock.patch.object(
+            sys, "stderr", stderr
+        ):
+            rc = rewake.emit_receipt(
+                state, message, block=rewake._attention_has_open_child(message)
+            )
+        self.assertEqual(rc, 0)
+        self.assertEqual(stderr.getvalue(), "")
+        self.assertEqual(json.loads(stdout.getvalue())["systemMessage"], message)
+
+    def test_only_a_real_open_owned_child_blocks_attention(self) -> None:
+        self.write_marker_bound_owner(status="done", child=True)
+        launch = rewake.parse_launch(self.payload())
+        assert launch is not None
+        state, message = rewake.classified_receipt(
+            launch, "attention", "terminal-failure-or-unclosed", self.root
+        )
+        self.assertEqual(state, "attention")
+        self.assertIn("owned_children=1", message)
+        with mock.patch.object(sys, "stderr", io.StringIO()):
+            self.assertEqual(
+                rewake.emit_receipt(
+                    state, message, block=rewake._attention_has_open_child(message)
+                ),
+                2,
+            )
+
+    def test_delivery_transaction_error_without_open_child_is_nonblocking_attention(self) -> None:
+        self.write_marker_bound_owner(status="done")
+        launch = rewake.parse_launch(self.payload())
+        assert launch is not None
+        with mock.patch.object(
+            rewake,
+            "current_delivery_state",
+            side_effect=rewake.DispatchContractError("delivery-cas-race"),
+        ):
+            state, message = rewake.classified_receipt(
+                launch, "attention", "terminal-failure-or-unclosed", self.root
+            )
+        self.assertEqual(state, "attention")
+        self.assertIn("owned_children=0", message)
+        self.assertIn("reason=delivery-transaction-failed-delivery-cas-race", message)
+        self.assertFalse(rewake._attention_has_open_child(message))
+
+    def test_delivery_transaction_error_with_real_open_child_still_blocks(self) -> None:
+        self.write_marker_bound_owner(status="done", child=True)
+        launch = rewake.parse_launch(self.payload())
+        assert launch is not None
+        with mock.patch.object(
+            rewake,
+            "current_delivery_state",
+            side_effect=rewake.DispatchContractError("delivery-cas-race"),
+        ):
+            state, message = rewake.classified_receipt(
+                launch, "attention", "terminal-failure-or-unclosed", self.root
+            )
+        self.assertEqual(state, "attention")
+        self.assertIn("owned_children=1", message)
+        self.assertTrue(rewake._attention_has_open_child(message))
+
+    def test_stop_failure_remains_api_error_notification_only(self) -> None:
+        payload = self.payload(hook_event_name="StopFailure")
+        with mock.patch.object(
+            rewake.sys, "stdin", io.StringIO(json.dumps(payload))
+        ), mock.patch.object(rewake.sys, "stdout", io.StringIO()) as stdout, mock.patch.object(
+            rewake.sys, "stderr", io.StringIO()
+        ) as stderr:
+            self.assertEqual(rewake.main(), 0)
+        self.assertEqual(stdout.getvalue(), "")
+        self.assertEqual(stderr.getvalue(), "")
 
     def test_attention_snapshot_promotes_from_current_completed_supervisor_row(self) -> None:
         launch = rewake.parse_launch(self.payload())
@@ -165,7 +363,7 @@ class DispatchOwnerRewakeTest(unittest.TestCase):
         self.jobs.write_text(
             "2026-08-06T00:00:00Z\tdone\t/repo\t/wt\towner\t"
             "attempt_schema_version=2,attempt_id=att-owner-1,failure_class=pass,"
-            "note=completed-supervisor\n",
+            "note=completed-supervisor,launch_outcome=never-launched\n",
             encoding="utf-8",
         )
         state, message = rewake.classified_receipt(
@@ -188,7 +386,8 @@ class DispatchOwnerRewakeTest(unittest.TestCase):
             launch, "ready", "terminal-quiescent", self.root
         )
         self.assertEqual(state, "attention")
-        self.assertIn("reason=completion-marker-unverified", message)
+        self.assertIn("reason=terminal-failure-or-unclosed", message)
+        self.assertIn("required_action=inspect-done-failure", message)
         self.assertIn(f"--jobs {self.jobs}", message)
 
     def test_success_is_structured_notification_and_attention_is_warning(self) -> None:
@@ -227,7 +426,7 @@ class DispatchOwnerRewakeTest(unittest.TestCase):
         self.jobs.write_text(
             "2026-08-06T00:00:00Z\tdone\t/repo\t/wt\towner\t"
             "attempt_schema_version=2,attempt_id=att-owner-1,failure_class=pass,"
-            "note=completed-supervisor\n",
+            "note=completed-supervisor,launch_outcome=never-launched\n",
             encoding="utf-8",
         )
         state, message = rewake.classified_receipt(
@@ -345,7 +544,7 @@ class DispatchOwnerRewakeTest(unittest.TestCase):
             encoding="utf-8",
         )
         message = rewake.receipt(launch, "ready", "terminal-quiescent", self.root)
-        self.assertIn("reason=row-advanced", message)
+        self.assertIn("reason=terminal-failure-or-unclosed", message)
         self.assertIn("required_action=inspect-done-failure", message)
         self.assertNotIn("--status open", message)
 
@@ -363,8 +562,8 @@ class DispatchOwnerRewakeTest(unittest.TestCase):
             mock.patch.object(rewake, "registry_launch")
         ) as fallback, mock.patch.object(
             rewake, "wait_for_attempt", return_value=("ready", "terminal-quiescent")
-        ), mock.patch.object(rewake.sys, "stderr", io.StringIO()):
-            self.assertEqual(rewake.main(), 2)
+        ), mock.patch.object(rewake.sys, "stdout", io.StringIO()):
+            self.assertEqual(rewake.main(), 0)
         fallback.assert_not_called()
 
 
@@ -438,9 +637,9 @@ class RegistryConfirmArmTest(unittest.TestCase):
             mock.patch.object(
                 rewake, "wait_for_attempt", return_value=("ready", "terminal-quiescent")
             )
-        ) as wait, mock.patch.object(rewake.sys, "stderr", io.StringIO()) as stderr:
-            self.assertEqual(rewake.main(), 2)
-            message = stderr.getvalue()
+        ) as wait, mock.patch.object(rewake.sys, "stdout", io.StringIO()) as stdout:
+            self.assertEqual(rewake.main(), 0)
+            message = json.loads(stdout.getvalue())["systemMessage"]
         self.assertEqual(wait.call_args.args[0].attempt_id, "att-owner-1")
         self.assertIn("armed=registry", message)
         self.assertIn("attempt_id=att-owner-1", message)
@@ -491,6 +690,11 @@ class RegistryConfirmArmTest(unittest.TestCase):
         linked = rewake.registry_launch(payload)
         assert linked is not None
         self.assertEqual(linked.jobs, self.jobs)
+
+    def test_missing_all_sealed_registry_sources_does_not_reconstruct_agent_home(self) -> None:
+        payload = self.payload(stdout="check=ok")
+        with mock.patch.dict(os.environ, {}, clear=True):
+            self.assertIsNone(rewake.registry_launch(payload))
 
     def test_a_start_free_dispatch_owner_command_never_arms(self) -> None:
         payload = self.payload()

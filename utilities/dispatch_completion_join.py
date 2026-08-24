@@ -29,7 +29,11 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "utilities"))
 from dispatch_contract import (  # noqa: E402
     DispatchContractError,
+    ProcessQuiescence,
+    attempt_process_quiescence,
     close_attempt_row,
+    marker_bound_delivery_transaction,
+    marker_bound_process_identity,
     observed_attempt_liveness,
     reconcile_attempt_terminal,
 )
@@ -51,6 +55,16 @@ SESSION_PARENT_DELIVERIES = frozenset(
 )
 SUCCESS_NOTES = frozenset({"completed-marker", "completed-supervisor"})
 RUNTIME_WAIT_SENTINEL = "runtime_wait: registered-children"
+DELIVERY_TIMING_SCHEMA_VERSION = 1
+DELIVERY_TIMING_POINTS = (
+    "last_child_terminal_ns",
+    "join_completed_ns",
+    "same_thread_resume_ns",
+    "exact_harvest_ns",
+    "next_stage_start_ns",
+    "final_report_marker_ns",
+    "owner_terminal_envelope_ns",
+)
 
 
 class JoinContractError(RuntimeError):
@@ -77,6 +91,181 @@ class ChildRow:
     attempt_id: str
     raw: str
     metadata: dict[str, str]
+
+
+@dataclass(frozen=True)
+class CurrentDeliveryState:
+    """One marker/current-row classification snapshot from the jobs lock."""
+
+    marker: dict[str, object] | None
+    marker_digest: str
+    row_revision: str
+    row_digest: str
+    status: str
+    verdict: str
+    quiescent: bool
+    owned_children: int
+    advanced: bool
+    supervisor_terminal: bool = False
+
+
+def delivery_classification(state: CurrentDeliveryState) -> str:
+    """Return the sole shared success/attention decision for delivery writers."""
+
+    return (
+        "success"
+        if (
+            (
+                (state.marker is not None and bool(state.marker_digest))
+                or state.supervisor_terminal
+            )
+            and state.status == "done"
+            and state.verdict == "PASS"
+            and state.quiescent
+            and state.owned_children == 0
+        )
+        else "attention"
+    )
+
+
+def delivery_required_action(state: CurrentDeliveryState) -> str:
+    """Map the shared classification to its only legal parent action."""
+
+    classification = delivery_classification(state)
+    if classification == "success":
+        return "advance-completed"
+    if state.status in OPEN_STATES:
+        return "complete-open"
+    return "inspect-done-failure"
+
+
+def delivery_timing_fields(**values: int | None) -> dict[str, int | None]:
+    """Project the same versioned timing vocabulary on every runtime surface."""
+
+    unknown = set(values).difference(DELIVERY_TIMING_POINTS)
+    if unknown:
+        raise JoinContractError("delivery-timing-field-invalid")
+    for value in values.values():
+        if value is not None and (
+            not isinstance(value, int) or isinstance(value, bool) or value < 0
+        ):
+            raise JoinContractError("delivery-timing-value-invalid")
+    result = {
+        "delivery_timing_schema_version": DELIVERY_TIMING_SCHEMA_VERSION,
+        **{point: values.get(point) for point in DELIVERY_TIMING_POINTS},
+    }
+    observed = [result[point] for point in DELIVERY_TIMING_POINTS if result[point] is not None]
+    if observed != sorted(observed):
+        raise JoinContractError("delivery-timing-order-invalid")
+    return result
+
+
+def validate_delivery_timing(value: object) -> dict[str, int | None]:
+    """Validate and normalize one complete SD-109 timing projection."""
+
+    if not isinstance(value, dict) or set(value) != {
+        "delivery_timing_schema_version",
+        *DELIVERY_TIMING_POINTS,
+    }:
+        raise JoinContractError("delivery-timing-shape-invalid")
+    if value.get("delivery_timing_schema_version") != DELIVERY_TIMING_SCHEMA_VERSION:
+        raise JoinContractError("delivery-timing-version-invalid")
+    return delivery_timing_fields(
+        **{point: value.get(point) for point in DELIVERY_TIMING_POINTS}
+    )
+
+
+def advance_delivery_timing(
+    timing: dict[str, int | None] | None,
+    point: str,
+    *,
+    at_ns: int | None = None,
+) -> dict[str, int | None]:
+    """Idempotently stamp one real lifecycle boundary in monotonic order."""
+
+    if point not in DELIVERY_TIMING_POINTS:
+        raise JoinContractError("delivery-timing-field-invalid")
+    current = validate_delivery_timing(timing or delivery_timing_fields())
+    if current[point] is not None:
+        return current
+    value = time.monotonic_ns() if at_ns is None else at_ns
+    candidate = dict(current)
+    candidate[point] = value
+    return validate_delivery_timing(candidate)
+
+
+def stamp_delivery_receipt(
+    receipt: dict[str, object], point: str, *, at_ns: int | None = None
+) -> dict[str, object]:
+    stamped = dict(receipt)
+    inherited = receipt.get("delivery_timing")
+    stamped["delivery_timing"] = advance_delivery_timing(
+        inherited if isinstance(inherited, dict) else None,
+        point,
+        at_ns=at_ns,
+    )
+    return stamped
+
+
+def receipt_with_delivery_observability(
+    receipt: dict[str, object],
+    *,
+    jobs: Path,
+    timing: dict[str, int | None] | None = None,
+) -> dict[str, object]:
+    """Attach shared per-attempt classification and one timing vocabulary."""
+
+    raw_children = receipt.get("children")
+    if not isinstance(raw_children, list):
+        raise JoinContractError("delivery-receipt-children-invalid")
+    children: list[dict[str, object]] = []
+    classifications: list[str] = []
+    for raw_child in raw_children:
+        if not isinstance(raw_child, dict):
+            raise JoinContractError("delivery-receipt-child-invalid")
+        attempt_id = raw_child.get("attempt_id")
+        if not isinstance(attempt_id, str) or not attempt_id:
+            raise JoinContractError("delivery-receipt-attempt-invalid")
+        try:
+            state = current_delivery_state(
+                jobs, attempt_id, parent_attempt_id=attempt_id
+            )
+        except (DispatchContractError, OSError) as exc:
+            reason = exc.reason if isinstance(exc, DispatchContractError) else type(exc).__name__
+            raise JoinContractError(f"delivery-transaction-failed:{reason}") from exc
+        classification = delivery_classification(state)
+        child = dict(raw_child)
+        child["status"] = state.status
+        child["delivery_classification"] = classification
+        child["required_action"] = delivery_required_action(state)
+        if classification == "attention":
+            child["reason"] = "terminal-failure-or-unclosed"
+        elif state.advanced:
+            child["reason"] = "row-advanced"
+        children.append(child)
+        classifications.append(classification)
+    projected = dict(receipt)
+    projected["children"] = children
+    projected["delivery_classification"] = (
+        "success" if classifications and set(classifications) == {"success"} else "attention"
+    )
+    inherited_timing = receipt.get("delivery_timing")
+    base_timing = (
+        validate_delivery_timing(inherited_timing)
+        if isinstance(inherited_timing, dict)
+        else delivery_timing_fields()
+    )
+    supplied_timing = validate_delivery_timing(timing) if timing is not None else None
+    if supplied_timing is not None:
+        for point in DELIVERY_TIMING_POINTS:
+            if supplied_timing[point] is not None:
+                base_timing = advance_delivery_timing(
+                    base_timing, point, at_ns=supplied_timing[point]
+                )
+    projected["delivery_timing"] = validate_delivery_timing(
+        base_timing
+    )
+    return projected
 
 
 @dataclass(frozen=True)
@@ -470,15 +659,14 @@ def child_row_revision(row: ChildRow) -> str:
 
 
 def receipt_with_current_actions(
-    receipt: dict[str, object], rows: list[ChildRow]
+    receipt: dict[str, object], rows: list[ChildRow], *, jobs: Path
 ) -> dict[str, object]:
-    """Refresh copied status/action fields from the current exact rows."""
+    """Refresh through the shared delivery classifier, never a second mapper."""
 
     raw_children = receipt.get("children")
     if not isinstance(raw_children, list) or not raw_children:
         raise JoinContractError("supervisor-outbox-children-invalid")
     indexed = {row.attempt_id: row for row in rows}
-    refreshed_children: list[dict[str, object]] = []
     seen: set[str] = set()
     for raw_child in raw_children:
         if not isinstance(raw_child, dict):
@@ -491,21 +679,9 @@ def receipt_with_current_actions(
         ):
             raise JoinContractError("supervisor-outbox-attempt-set-mismatch")
         seen.add(attempt)
-        row = indexed[attempt]
-        child = dict(raw_child)
-        previous = (child.get("status"), child.get("required_action"))
-        child["status"] = row.status
-        child["required_action"] = required_action_for_attempt(
-            row.status, row.metadata
-        )
-        if previous != (child["status"], child["required_action"]):
-            child["reason"] = "row-advanced"
-        refreshed_children.append(child)
     if seen != set(indexed):
         raise JoinContractError("supervisor-outbox-attempt-set-mismatch")
-    refreshed = dict(receipt)
-    refreshed["children"] = refreshed_children
-    return refreshed
+    return receipt_with_delivery_observability(receipt, jobs=jobs)
 
 
 def prepare_supervisor_outbox(
@@ -573,6 +749,8 @@ def refresh_supervisor_outbox_actions(
     path: Path | None,
     parent_attempt_id: str,
     rows: list[ChildRow],
+    *,
+    jobs: Path,
 ) -> SupervisorState:
     """Recommit one pending outbox against the exact current row generations.
 
@@ -592,7 +770,7 @@ def refresh_supervisor_outbox_actions(
         if set(indexed) != set(outbox.attempt_ids):
             raise JoinContractError("supervisor-outbox-attempt-set-mismatch")
         refreshed_receipt = receipt_with_current_actions(
-            outbox.receipt or {}, rows
+            outbox.receipt or {}, rows, jobs=jobs
         )
         encoded = json.dumps(
             refreshed_receipt, separators=(",", ":"), sort_keys=True
@@ -709,10 +887,13 @@ def consume_advance_completed_outbox(
         attempt
         for attempt in pending
         if attempt in indexed
-        and required_action_for_attempt(
-            indexed[attempt].status, indexed[attempt].metadata
+        and any(
+            isinstance(child, dict)
+            and child.get("attempt_id") == attempt
+            and child.get("delivery_classification") == "success"
+            and child.get("required_action") == "advance-completed"
+            for child in ((state.outbox.receipt or {}).get("children") or [])
         )
-        == "advance-completed"
     }
     if completed and consume_supervisor_outbox_attempts(
         path, parent_attempt_id, completed
@@ -1664,6 +1845,59 @@ def current_attempt_row(jobs: Path, attempt_id: str) -> ChildRow | None:
     return found
 
 
+def current_delivery_state(
+    jobs: Path,
+    attempt_id: str,
+    *,
+    parent_attempt_id: str,
+    advance: bool = True,
+) -> CurrentDeliveryState:
+    """Construct one current marker/row/owned-child delivery decision.
+
+    The potentially expensive process and descendant observation happens
+    before the registry lock.  The contract transaction then proves that both
+    the exact row revision and its process identity still match before it may
+    advance a marker-bound open row.
+    """
+
+    snapshot = current_attempt_row(jobs, attempt_id)
+    if snapshot is None:
+        expected_revision = ""
+        expected_process_identity: tuple[tuple[str, str], ...] = ()
+        process = ProcessQuiescence("unverifiable", "attempt-row-missing")
+    else:
+        expected_revision = child_row_revision(snapshot)
+        expected_process_identity = marker_bound_process_identity(snapshot.metadata)
+        process = attempt_process_quiescence(
+            snapshot.metadata,
+            terminal_receipt=(
+                snapshot.status == "done"
+                or bool(snapshot.metadata.get("completion_marker"))
+            ),
+        )
+    result = marker_bound_delivery_transaction(
+        jobs,
+        attempt_id,
+        parent_attempt_id=parent_attempt_id,
+        expected_row_revision=expected_revision,
+        expected_process_identity=expected_process_identity,
+        process_observation=process,
+        advance=advance,
+    )
+    return CurrentDeliveryState(
+        marker=result.marker,
+        marker_digest=result.marker_digest,
+        row_revision=result.row_revision,
+        row_digest=result.row_digest,
+        status=result.status,
+        verdict=result.verdict,
+        quiescent=result.quiescent,
+        owned_children=result.owned_children,
+        advanced=result.advanced,
+        supervisor_terminal=result.supervisor_terminal,
+    )
+
+
 def current_session_children(
     jobs: Path,
     parent_session_id: str,
@@ -1891,6 +2125,9 @@ def _join_snapshot(
                 "state": "ready",
                 **identity,
                 "children": children,
+                "delivery_timing": delivery_timing_fields(
+                    last_child_terminal_ns=time.monotonic_ns()
+                ),
             }
         if time.monotonic() - started >= timeout:
             return {

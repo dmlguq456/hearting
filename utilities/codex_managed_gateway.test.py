@@ -414,6 +414,8 @@ def receipt_request(batch: str = "batch-1") -> dict[str, Any]:
             "state": "ready",
             "parent_attempt_id": "att-parent",
             "job_registry": str(Path(__file__).resolve()),
+            "delivery_classification": "success",
+            "delivery_timing": GATEWAY.delivery_timing_fields(),
             "children": [
                 {
                     "attempt_id": f"att-{batch}",
@@ -422,6 +424,7 @@ def receipt_request(batch: str = "batch-1") -> dict[str, Any]:
                     "reason": "registry-closed",
                     "required_action": "advance-completed",
                     "harness": "codex",
+                    "delivery_classification": "success",
                 }
             ],
         },
@@ -561,9 +564,46 @@ class ManagedGatewayTest(unittest.TestCase):
         ]
         self.assertEqual(starts[0]["params"]["input"], [])
         encoded = GATEWAY.canonical(starts[0])
+        completion_context = starts[0]["params"]["additionalContext"]["hearting-completion"]["value"]
         self.assertIn("AGENT_HARNESS_COMPLETION_V1", encoded)
         self.assertIn("no harvest command; advance the route", encoded)
+        self.assertIn('"delivery_classification":"success"', completion_context)
+        self.assertIn('"delivery_timing_schema_version":1', completion_context)
         self.assertNotIn("RAW_CHILD", encoded)
+        trace = [json.loads(line) for line in self.trace.read_text().splitlines()]
+        timing = next(row for row in trace if row.get("event") == "completion-send")
+        self.assertEqual(
+            set(GATEWAY.DELIVERY_TIMING_POINTS).difference(timing), set()
+        )
+        self.assertIsInstance(timing["same_thread_resume_ns"], int)
+
+    def test_invalid_delivery_timing_is_rejected_before_upstream(self) -> None:
+        before = self.server.counts()
+        request = receipt_request("batch-bad-timing")
+        request["receipt"]["delivery_timing"].pop("exact_harvest_ns")
+        result = control(self.control, request)
+        self.assertEqual(result["status"], "rejected")
+        self.assertEqual(result["reason"], "receipt-delivery-timing-invalid")
+        self.assertEqual(self.server.counts(), before)
+
+    def test_future_delivery_timing_is_rejected_before_upstream(self) -> None:
+        before = self.server.counts()
+        request = receipt_request("batch-future-timing")
+        request["receipt"]["delivery_timing"]["exact_harvest_ns"] = 17
+        result = control(self.control, request)
+        self.assertEqual(result["status"], "rejected")
+        self.assertEqual(result["reason"], "receipt-delivery-timing-phase-invalid")
+        self.assertEqual(self.server.counts(), before)
+
+    def test_attention_cannot_request_advance_completed(self) -> None:
+        before = self.server.counts()
+        request = receipt_request("batch-impossible-action")
+        request["receipt"]["delivery_classification"] = "attention"
+        request["receipt"]["children"][0]["delivery_classification"] = "attention"
+        result = control(self.control, request)
+        self.assertEqual(result["status"], "rejected")
+        self.assertEqual(result["reason"], "receipt-child-contract-invalid")
+        self.assertEqual(self.server.counts(), before)
 
     def test_actionable_receipt_emits_exact_harvest_command(self) -> None:
         request = receipt_request("batch-open")
@@ -573,8 +613,10 @@ class ManagedGatewayTest(unittest.TestCase):
                 "status": "open",
                 "reason": "terminal-observed",
                 "required_action": "complete-open",
+                "delivery_classification": "attention",
             }
         )
+        request["receipt"]["delivery_classification"] = "attention"
         result = control(self.control, request)
         self.assertEqual(result["status"], "accepted")
         start = next(

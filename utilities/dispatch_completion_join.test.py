@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import importlib.util
 import io
 import json
@@ -150,6 +151,132 @@ class DispatchCompletionJoinTest(unittest.TestCase):
         self.assertEqual(
             JOIN.required_action_for_attempt("done", {"failure_class": "contract"}),
             "inspect-done-failure",
+        )
+
+    def marker_delivery_fixture(self, attempt: str = "att-delivery") -> str:
+        evidence = self.root / "execute.md"
+        evidence.write_text("fixture evidence\n", encoding="utf-8")
+        route = self.root / "route.json"
+        route_value = {
+            "route_id": "rt-delivery",
+            "route_hash": "sha256:" + "5" * 64,
+            "registry_digest": "sha256:" + "6" * 64,
+            "nodes": [{
+                "id": "execute",
+                "completion_gate": "code-execute",
+                "dispatch_depth": 2,
+            }],
+        }
+        route.write_text(json.dumps(route_value), encoding="utf-8")
+        marker = self.root / "execute.json"
+        marker_value = {
+            "schema_version": 2,
+            "sequence": 1,
+            "route_id": route_value["route_id"],
+            "route_hash": route_value["route_hash"],
+            "registry_digest": route_value["registry_digest"],
+            "node_id": "execute",
+            "completion_gate": "code-execute",
+            "attempt_id": attempt,
+            "dispatch_depth": 2,
+            "transport": "headless",
+            "execution_surface": "registered-headless",
+            "registered_worker": True,
+            "fallback_hop": "same-harness-headless",
+            "evidence": {
+                "path": str(evidence),
+                "sha256": hashlib.sha256(evidence.read_bytes()).hexdigest(),
+            },
+        }
+        marker.write_text(json.dumps(marker_value), encoding="utf-8")
+        (self.root / "execute.1.json").write_text(
+            json.dumps(marker_value), encoding="utf-8"
+        )
+        (self.root / f"execute.{attempt}.attempt.json").write_text(
+            json.dumps({
+                "schema_version": 2,
+                "route_id": route_value["route_id"],
+                "node_id": "execute",
+                "attempt_id": attempt,
+                "dispatch_depth": 2,
+                "transport": "headless",
+                "execution_surface": "registered-headless",
+                "registered_worker": True,
+                "fallback_hop": "same-harness-headless",
+                "evidence_sha256": marker_value["evidence"]["sha256"],
+                "completion_marker": str(marker),
+                "completion_marker_history": str(self.root / "execute.1.json"),
+            }),
+            encoding="utf-8",
+        )
+        metadata = (
+            "attempt_schema_version=2,dispatch_depth=2,transport=headless,"
+            "execution_surface=registered-headless,registered_worker=1,"
+            f"fallback_hop=same-harness-headless,attempt_id={attempt},"
+            "route_id=rt-delivery,route_hash=sha256:" + "5" * 64 + ","
+            f"route_node=execute,route_file={route},completion_marker={marker},"
+            "launch_outcome=never-launched"
+        )
+        raw = f"2026-08-25T00:00:00Z\topen\t/r\t/w\texecute\t{metadata}"
+        self.jobs.write_text(raw + "\n", encoding="utf-8")
+        return raw
+
+    def test_current_delivery_state_advances_marker_open_row_once(self):
+        self.marker_delivery_fixture()
+        with mock.patch.object(
+            JOIN,
+            "attempt_process_quiescence",
+            return_value=JOIN.ProcessQuiescence("quiescent", "fixture"),
+        ) as process:
+            state = JOIN.current_delivery_state(
+                self.jobs, "att-delivery", parent_attempt_id="att-delivery"
+            )
+        self.assertEqual(process.call_count, 1)
+        self.assertTrue(state.advanced)
+        self.assertEqual((state.status, state.verdict), ("done", "PASS"))
+        self.assertEqual(JOIN.delivery_classification(state), "success")
+        self.assertEqual(state.owned_children, 0)
+
+    def test_current_delivery_state_revision_race_is_attention_without_retry(self):
+        self.marker_delivery_fixture("att-delivery-race")
+        transaction = JOIN.marker_bound_delivery_transaction
+
+        def race(*args, **kwargs):
+            current = self.jobs.read_text(encoding="utf-8")
+            self.jobs.write_text(
+                current.replace(
+                    "launch_outcome=never-launched",
+                    "launch_outcome=never-launched,heartbeat=raced",
+                ),
+                encoding="utf-8",
+            )
+            return transaction(*args, **kwargs)
+
+        with mock.patch.object(
+            JOIN,
+            "attempt_process_quiescence",
+            return_value=JOIN.ProcessQuiescence("quiescent", "stale"),
+        ), mock.patch.object(
+            JOIN, "marker_bound_delivery_transaction", side_effect=race
+        ) as called:
+            state = JOIN.current_delivery_state(
+                self.jobs,
+                "att-delivery-race",
+                parent_attempt_id="att-delivery-race",
+            )
+        self.assertEqual(called.call_count, 1)
+        self.assertFalse(state.advanced)
+        self.assertFalse(state.quiescent)
+        self.assertEqual(state.status, "open")
+        self.assertEqual(JOIN.delivery_classification(state), "attention")
+
+    def test_delivery_timing_projection_is_complete_and_versioned(self):
+        projected = JOIN.delivery_timing_fields(join_completed_ns=17)
+        self.assertEqual(projected["delivery_timing_schema_version"], 1)
+        self.assertEqual(projected["join_completed_ns"], 17)
+        self.assertEqual(
+            set(projected),
+            {"delivery_timing_schema_version", *JOIN.DELIVERY_TIMING_POINTS},
         )
 
     def test_parallel_batch_waits_for_every_exact_child_and_ignores_foreign(self):
@@ -724,8 +851,9 @@ class DispatchCompletionJoinTest(unittest.TestCase):
             child.raw.replace("\topen\t", "\tdone\t") + ",failure_class=fail",
             {**child.metadata, "failure_class": "fail"},
         )
+        self.jobs.write_text(advanced.raw + "\n", encoding="utf-8")
         refreshed = JOIN.refresh_supervisor_outbox_actions(
-            state_path, "att-parent", [advanced]
+            state_path, "att-parent", [advanced], jobs=self.jobs
         )
         self.assertEqual(refreshed.outbox.receipt_id, prepared.outbox.receipt_id)
         self.assertNotEqual(
@@ -739,7 +867,20 @@ class DispatchCompletionJoinTest(unittest.TestCase):
         self.assertEqual(
             child_receipt["required_action"], "inspect-done-failure"
         )
-        self.assertEqual(child_receipt["reason"], "row-advanced")
+        self.assertEqual(child_receipt["reason"], "terminal-failure-or-unclosed")
+
+    def test_delivery_timing_rejects_out_of_order_boundaries_and_stamps_once(self):
+        timing = JOIN.delivery_timing_fields(last_child_terminal_ns=10)
+        timing = JOIN.advance_delivery_timing(timing, "join_completed_ns", at_ns=20)
+        timing = JOIN.advance_delivery_timing(timing, "same_thread_resume_ns", at_ns=30)
+        self.assertEqual(
+            JOIN.advance_delivery_timing(
+                timing, "same_thread_resume_ns", at_ns=999
+            )["same_thread_resume_ns"],
+            30,
+        )
+        with self.assertRaisesRegex(JOIN.JoinContractError, "delivery-timing-order-invalid"):
+            JOIN.advance_delivery_timing(timing, "exact_harvest_ns", at_ns=25)
 
     def test_session_children_select_only_stamped_exact_direct_rows(self):
         session = "thread-exact"

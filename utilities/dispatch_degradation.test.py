@@ -174,6 +174,50 @@ record_degradation(agent_home=sys.argv[1], route_id='rt-race', route_node='execu
             self.assertEqual(row["writer"], "capability-route.py")
             self.assertEqual(row["reason"], "subdivision-scope-violation")
 
+    def test_writer_allowlist_preserves_legacy_and_adds_reaper(self):
+        with tempfile.TemporaryDirectory() as home:
+            writers = (
+                "stage-dispatch-fallback.py",
+                "dispatch-batch.py",
+                "capability-route.py",
+                "dispatch-reap-watch.py",
+            )
+            for index, writer in enumerate(writers):
+                with self.subTest(writer=writer):
+                    route_id = f"rt-writer-{index}"
+                    path = record_degradation(
+                        agent_home=home,
+                        route_id=route_id,
+                        route_node="execute",
+                        route_hash="sha256:writer",
+                        dispatch_depth=2,
+                        fallback_hop="same-harness-headless",
+                        execution_surface="registered-headless",
+                        writer=writer,
+                    )
+                    self.assertIsNotNone(path)
+                    with open(path, encoding="utf-8") as stream:
+                        self.assertEqual(json.loads(stream.readline())["writer"], writer)
+
+            refused = record_degradation(
+                agent_home=home,
+                route_id="rt-unknown-writer",
+                route_node="execute",
+                route_hash="sha256:writer",
+                dispatch_depth=2,
+                fallback_hop="same-harness-headless",
+                execution_surface="registered-headless",
+                writer="unknown-writer.py",
+            )
+            self.assertIsNone(refused)
+            self.assertFalse(
+                os.path.exists(
+                    os.path.join(
+                        home, ".dispatch", "degradations", "rt-unknown-writer.jsonl"
+                    )
+                )
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

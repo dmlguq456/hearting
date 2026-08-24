@@ -16,6 +16,11 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1]
 SUPERVISOR = ROOT / "utilities" / "codex-app-server-supervisor.py"
 PARENT = "att-parent"
+DELIVERY_TIMING_POINTS = (
+    "last_child_terminal_ns", "join_completed_ns", "same_thread_resume_ns",
+    "exact_harvest_ns", "next_stage_start_ns", "final_report_marker_ns",
+    "owner_terminal_envelope_ns",
+)
 
 
 def seal_route(value: dict) -> dict:
@@ -197,13 +202,24 @@ class CodexAppServerSupervisorTest(unittest.TestCase):
                     phase = json.load(state_handle)['phase']
                 record('join-start', phase=phase)
                 time.sleep(0.2)
-                with open(jobs, 'a', encoding='utf-8') as h:
-                    for attempt in attempts:
-                        h.write('2026-07-23T00:00:01Z\\tdone\\t/repo\\t/wt\\tchild\\t'
-                                'attempt_schema_version=2,dispatch_depth=2,transport=headless,'
-                                'execution_surface=registered-headless,registered_worker=1,'
-                                f'attempt_id={attempt},parent_attempt_id={parent},'
-                                'failure_class=pass,note=completed-supervisor\\n')
+                with open(jobs, encoding='utf-8') as h:
+                    lines = h.read().splitlines()
+                kept, current = [], {}
+                for line in lines:
+                    fields = line.split('\\t')
+                    metadata = dict(part.split('=', 1) for part in fields[5].split(',') if '=' in part) if len(fields) == 6 else {}
+                    attempt = metadata.get('attempt_id')
+                    if attempt in attempts:
+                        current[attempt] = fields
+                    else:
+                        kept.append(line)
+                for attempt in attempts:
+                    fields = current[attempt]
+                    fields[1] = 'done'
+                    fields[5] += ',failure_class=pass,note=completed-supervisor'
+                    kept.append('\\t'.join(fields))
+                with open(jobs, 'w', encoding='utf-8') as h:
+                    h.write('\\n'.join(kept) + '\\n')
                 record('join-end')
                 print(json.dumps({'schema_version':2,'state':'ready','parent_attempt_id':parent,
                     'children':[{'attempt_id':attempt,'status':'done','readiness':'ready',
@@ -288,9 +304,33 @@ class CodexAppServerSupervisorTest(unittest.TestCase):
         resumed = [row for row in rows if row.get("type") == "dispatch.supervisor.resumed"]
         self.assertEqual(len(resumed), 1)
         self.assertEqual(resumed[0]["attempt_count"], 2)
+        observed = [
+            row for row in rows
+            if row.get("type") == "dispatch.supervisor.join-observed"
+        ]
+        self.assertEqual(len(observed), 1)
+        self.assertEqual(observed[0]["delivery_timing_schema_version"], 1)
+        self.assertIsInstance(observed[0]["join_completed_ns"], int)
+        self.assertIn('"delivery_classification":"attention"', trace[3]["prompt"])
+        timing_events = [
+            row for row in rows
+            if row.get("type") == "dispatch.supervisor.delivery-timing"
+        ]
+        self.assertEqual(len(timing_events), 1, rows)
+        timing = timing_events[0]
+        points = [timing[point] for point in DELIVERY_TIMING_POINTS]
+        self.assertIsNone(timing["next_stage_start_ns"])
+        observed_points = [value for value in points if value is not None]
+        self.assertTrue(all(isinstance(value, int) for value in observed_points), timing)
+        self.assertEqual(observed_points, sorted(observed_points))
+        self.assertEqual(timing["same_thread_resume_count"], 1)
         terminal = next(i for i, row in enumerate(rows) if row.get("type") == "turn.completed")
-        self.assertEqual(rows[terminal - 1]["item"]["type"], "agent_message")
-        self.assertIn("verdict: PASS", rows[terminal - 1]["item"]["text"])
+        final_item = next(
+            row for row in reversed(rows[:terminal])
+            if row.get("type") == "item.completed"
+            and row.get("item", {}).get("type") == "agent_message"
+        )
+        self.assertIn("verdict: PASS", final_item["item"]["text"])
         self.assertNotIn("RAW_CHILD_SENTINEL", result.stdout)
         self.assertFalse(self.state.exists())
         self.assertFalse(self.lease.exists())
@@ -413,6 +453,15 @@ class CodexAppServerSupervisorTest(unittest.TestCase):
                         send({'jsonrpc':'2.0','id':value['id'],'result':{'thread':{'id':'thread-long'}}})
                     elif method == 'turn/start':
                         turns += 1
+                        prompt = value['params']['input'][0]['text']
+                        if '--failure-detail' in prompt:
+                            state_path = os.environ['AGENT_DISPATCH_COMPLETION_STATE_FILE']
+                            with open(state_path, encoding='utf-8') as h:
+                                state_value = json.load(h)
+                            state_value.pop('outbox', None)
+                            state_value['phase'] = 'running-turn'
+                            with open(state_path, 'w', encoding='utf-8') as h:
+                                json.dump(state_value, h)
                         if turns <= 13:
                             attempt = f'att-child-{turns}'
                             with open(os.environ['LONG_JOBS'], 'a', encoding='utf-8') as h:
