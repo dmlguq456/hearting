@@ -1,0 +1,1 @@
+../../../../tools/memory/test-isolation.sh

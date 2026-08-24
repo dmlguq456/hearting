@@ -1,4 +1,6 @@
 #!/usr/bin/env sh
+. "$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)/test-isolation.sh"
+hearting_test_isolate
 # Regression: empty-store creation guard (2026-07-22 memory audit P2).
 # A DERIVED store path (AGENT_HOME/default) with no memory.db must FAIL LOUD and
 # create nothing; explicit MEM_STORE or MEM_INIT=1 may create. Uncovered before:
@@ -15,7 +17,7 @@ fail() { echo "not ok - $*" >&2; exit 1; }
 # 1. Derived path (AGENT_HOME → empty checkout): refuse, mention the resolved path,
 #    create no store.
 mkdir -p "$TMP/fake-home"
-if AGENT_HOME="$TMP/fake-home" XDG_DATA_HOME="$TMP/fake-data" \
+if hearting_test_derived_env env AGENT_HOME="$TMP/fake-home" XDG_DATA_HOME="$TMP/fake-data" \
     python3 "$MEM" profile 01_paper_figure_style \
     >"$TMP/out1" 2>"$TMP/err1"; then
   fail "derived empty store was accepted (guard missing)"
@@ -35,7 +37,7 @@ test -f "$TMP/store2/memory.db" || fail "MEM_STORE store not created"
 
 # 3. MEM_INIT=1 escape hatch on a derived path: creation allowed.
 mkdir -p "$TMP/fresh-home"
-if ! AGENT_HOME="$TMP/fresh-home" XDG_DATA_HOME="$TMP/fresh-data" MEM_INIT=1 \
+if ! hearting_test_derived_env env AGENT_HOME="$TMP/fresh-home" XDG_DATA_HOME="$TMP/fresh-data" MEM_INIT=1 \
     python3 "$MEM" add durable note \
     "empty-store guard regression fixture: MEM_INIT=1 is the documented escape hatch for a genuine first install on a derived path." \
     --scope global >"$TMP/out3" 2>"$TMP/err3"; then
@@ -44,8 +46,8 @@ fi
 test -f "$TMP/fresh-data/hearting/memory/memory.db" \
   || fail "MEM_INIT store not created"
 
-# 4. The real primary store still opens read paths normally (no regression).
-python3 "$MEM" profile 01_paper_figure_style >/dev/null 2>&1 \
+# 4. An isolated primary fixture still opens read paths normally (no regression).
+MEM_STORE="$TMP/store2" python3 "$MEM" stats >/dev/null 2>&1 \
   || fail "primary store profile read broke"
 
 echo "empty-store-guard: PASS"

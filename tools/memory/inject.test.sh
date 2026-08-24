@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+. "$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)/test-isolation.sh"
+hearting_test_isolate
 # Isolated test for `mem inject` D-16 (QA ② + ③) + lifecycle() equivalence (Step 1.1).
 # Fully isolated via MEM_STORE + MEM_PROJECTS temp dirs — never touches real runtime state.
 # All mem calls via `python3 "$MEM" ...` (worktree copy, matches distill.test.sh convention).

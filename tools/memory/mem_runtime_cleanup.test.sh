@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+. "$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)/test-isolation.sh"
+hearting_test_isolate
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)

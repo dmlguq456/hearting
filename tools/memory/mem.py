@@ -786,7 +786,78 @@ def _extract_entities(body, headline, *, limit=12):
 
 def _merge_entities(base, extracted):
     """Append-only merge: base order and values are preserved verbatim."""
-    return _normalize_capsule_list(list(base or []) + list(extracted or []))
+    # Mechanical extraction must never mint or overwrite the reserved pointer
+    # namespace. Explicit caller-supplied entities remain untouched here.
+    extracted = [item for item in (extracted or [])
+                 if not (isinstance(item, str) and item.startswith("apid:"))]
+    return _normalize_capsule_list(list(base or []) + list(extracted))
+
+
+class ApidCapacityError(ValueError):
+    """Closed, user-actionable pointer capacity failure."""
+
+
+_APID_SLOTS = frozenset(("root", "artifact", "cycle", "campaign", "shared-reference", "route"))
+_APID_TARGET_SLOTS = _APID_SLOTS - {"root"}
+_APID_CAPACITY_REASONS = frozenset((
+    "apid-token-too-long", "apid-target-capacity", "apid-root-capacity",
+    "apid-entity-capacity", "apid-in-artifact-refs", "apid-exact-write-mismatch",
+))
+
+
+def _normalize_explicit_entity_candidate(value, *, item_chars=160):
+    """Normalize a complete explicit entity candidate without truncating it."""
+    if isinstance(value, str):
+        try:
+            decoded = json.loads(value)
+            value = decoded if isinstance(decoded, list) else [value]
+        except (json.JSONDecodeError, TypeError):
+            value = [value]
+    if not isinstance(value, (list, tuple)):
+        return []
+    out, seen = [], set()
+    for raw in value:
+        if not isinstance(raw, str):
+            continue
+        item = re.sub(r"[\x00-\x1f\x7f]", " ", raw).strip()[:item_chars]
+        key = item.casefold()
+        if item and key not in seen:
+            seen.add(key); out.append(item)
+    return out
+
+
+def _validate_apid_state(entities, artifact_refs):
+    """Validate before a capsule list can silently truncate or discard values."""
+    entities = list(entities or [])
+    refs = list(artifact_refs or [])
+    if any(isinstance(item, str) and item.startswith("apid:") for item in refs):
+        raise ApidCapacityError("apid-in-artifact-refs")
+    parsed = []
+    for item in entities:
+        if not isinstance(item, str) or not item.startswith("apid:"):
+            continue
+        if len(item) > 160:
+            raise ApidCapacityError("apid-token-too-long")
+        pieces = item.split(":", 2)
+        if len(pieces) != 3 or pieces[1] not in _APID_SLOTS or not pieces[2]:
+            continue
+        parsed.append(item)
+    roots = [item for item in parsed if item.split(":", 2)[1] == "root"]
+    targets = [item for item in parsed if item.split(":", 2)[1] in _APID_TARGET_SLOTS]
+    if len(roots) > 1:
+        raise ApidCapacityError("apid-root-capacity")
+    if len(targets) > 4:
+        raise ApidCapacityError("apid-target-capacity")
+    # Capacity is an invariant of the complete explicit candidate.  Do not
+    # inspect the bounded capsule representation: it intentionally truncates
+    # at 24 and would turn a 25-item request into a successful 24-item write.
+    if len(_normalize_explicit_entity_candidate(entities)) > 24:
+        raise ApidCapacityError("apid-entity-capacity")
+
+
+def _apid_set(value):
+    return {item for item in _normalize_capsule_list(value)
+            if isinstance(item, str) and item.startswith("apid:")}
 
 
 def _default_headline(body):
@@ -1674,6 +1745,12 @@ def write_record(tier, scope, rtype, body, cwd_origin=None, tags=None, links=Non
         return None
     body, flags = sanitize(body)
     _extracted = _extract_entities(body, headline)
+    # Mechanical entities are not explicit pointer candidates.  Filter the
+    # reserved namespace before validation so quoted/overlong extracted text
+    # cannot consume capacity or reject an otherwise valid write.
+    _extracted = [item for item in _extracted
+                  if not (isinstance(item, str) and item.startswith("apid:"))]
+    _validate_apid_state(list(entities or []) + list(_extracted), artifact_refs)
     if not quiet and not any((headline, aliases, entities, topics, artifact_refs)) and not _extracted:
         sys.stderr.write("[capsule] no capsule fields; add --headline/--alias/--entity/--topic "
                          "so this record stays retrievable\n")
@@ -1697,6 +1774,7 @@ def write_record(tier, scope, rtype, body, cwd_origin=None, tags=None, links=Non
                 if idx == 1:  # entities slot: merge in deterministic extraction
                     normalized = _merge_entities(normalized, _extracted)
                 values.append(json.dumps(normalized, ensure_ascii=False))
+            _validate_apid_state(json.loads(values[1]), json.loads(values[3]))
             if headline is not None or body_replaced:
                 next_headline = _normalize_headline(headline, body)
             else:
@@ -1705,6 +1783,10 @@ def write_record(tier, scope, rtype, body, cwd_origin=None, tags=None, links=Non
                 "UPDATE records SET headline=?,aliases=?,entities=?,topics=?,artifact_refs=?,"
                 "capsule_version=1 WHERE id=?", (next_headline, *values, rid))
             _sync_capsule_row(con, rid)
+            stored = con.execute("SELECT entities,artifact_refs FROM records WHERE id=?", (rid,)).fetchone()
+            if (_apid_set(json.loads(stored[0])) != _apid_set(json.loads(values[1]))
+                    or _apid_set(json.loads(stored[1])) != _apid_set(json.loads(values[3]))):
+                raise ApidCapacityError("apid-exact-write-mismatch")
 
         # A matching source key updates in place and preserves the record ID.
         requested_delivery = "pending" if (rtype == "handoff" or requires_consume) else "ordinary"
@@ -1814,6 +1896,10 @@ def write_record(tier, scope, rtype, body, cwd_origin=None, tags=None, links=Non
             con.execute("INSERT INTO records_cjk(id, body) VALUES(?,?)",
                         (sid, _cjk_shadow_text(body)))
         _sync_capsule_row(con, sid)
+        stored = con.execute("SELECT entities,artifact_refs FROM records WHERE id=?", (sid,)).fetchone()
+        _validate_apid_state(json.loads(stored[0]), json.loads(stored[1]))
+        if _apid_set(json.loads(stored[0])) != _apid_set(meta["entities"]):
+            raise ApidCapacityError("apid-exact-write-mismatch")
         _capture_v2_operation(con, "put", post_ids=[sid], reason="record-write")
         con.commit()
         if not quiet:
@@ -1824,6 +1910,9 @@ def write_record(tier, scope, rtype, body, cwd_origin=None, tags=None, links=Non
                                  rtype=rtype, actor=journal_actor,
                                  cwd=journal_cwd, snippet=_first_line(body))
         return sid
+    except ApidCapacityError:
+        con.rollback()
+        raise
     finally:
         con.close()
 
@@ -4620,7 +4709,12 @@ def resolve_conflict(rid, body=None, *, parents=None, headline=None, aliases=Non
                             ("topics", topics), ("artifact_refs", artifact_refs)):
             if value is not None:
                 state[name] = sorted(set(value))
+        _validate_apid_state(state.get("entities", []), state.get("artifact_refs", []))
         _materialize_fold_state(con, rid, state)
+        stored = con.execute("SELECT entities,artifact_refs FROM records WHERE id=?", (rid,)).fetchone()
+        if (_apid_set(json.loads(stored[0])) != _apid_set(state.get("entities", []))
+                or _apid_set(json.loads(stored[1])) != _apid_set(state.get("artifact_refs", []))):
+            raise ApidCapacityError("apid-exact-write-mismatch")
         operation = _capture_v2_operation(
             con, "resolve", post_ids=[rid], project_namespace=row[0],
             reason="explicit-conflict-resolution",
@@ -4633,6 +4727,9 @@ def resolve_conflict(rid, body=None, *, parents=None, headline=None, aliases=Non
         con.commit()
         print(f"[resolve] {rid} → {operation['op_id']}")
         return True
+    except ApidCapacityError:
+        con.rollback()
+        raise
     finally:
         con.close()
 
@@ -8932,6 +9029,9 @@ def main():
 if __name__ == "__main__":
     try:
         main()
+    except ApidCapacityError as exc:
+        sys.stderr.write(f"[apid-capacity] {exc}\n")
+        sys.exit(2)
     except (UnsupportedSchemaError, sync_v2.SyncError, sqlite3.Error) as exc:
         sys.stderr.write(f"[mem] hard-failure: {exc}\n")
         sys.exit(2)

@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+. "$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)/test-isolation.sh"
+hearting_test_isolate
 # Regressions for the 2026-08-20 v2 cutover: a stored record must equal what a
 # later normalization pass would derive from it, because a protocol-v2
 # post-state is compared byte-for-byte against the row it describes.

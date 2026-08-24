@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+. "$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)/test-isolation.sh"
+hearting_test_isolate
 # retrieval-eval.test.sh — mini retrieval eval (LongMemEval 축소판)
 #
 # Fixed query → expected-record contract test against LIVE store content.

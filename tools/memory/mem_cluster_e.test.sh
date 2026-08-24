@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+. "$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)/test-isolation.sh"
+hearting_test_isolate
 # Cluster E Phase α — isolated test suite.
 # Tests: ① migration idempotency  ② strength/last_accessed backfill  ③ project_key resolution
 #        (decoder round-trip, part of ④)  ④ cwd_origin remap  ⑤ dump round-trip
