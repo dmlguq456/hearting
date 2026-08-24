@@ -26,6 +26,7 @@ from dispatch_contract import (  # noqa: E402
     DispatchContractError,
     anchored_capacity_failure,
     attempt_process_quiescence,
+    attempt_tagged_descendants,
     authoritative_process_identities,
     close_attempt_row_if,
     dispatch_state_root,
@@ -193,6 +194,7 @@ def proc_evidence(metadata):
         pid, expected, source = identity.pid, identity.expected_start, identity.source
     raw_local = metadata.get("pid", "")
     raw_host = metadata.get("pid_host", "")
+    descendant_probe = attempt_tagged_descendants(metadata)
     return {
         "pid": pid,
         "proc_start": expected,
@@ -211,6 +213,7 @@ def proc_evidence(metadata):
         "pid_observer_ns": metadata.get("pid_observer_ns"),
         "pid_host_proof": metadata.get("pid_host_proof"),
         "pgid": metadata.get("pgid"),
+        "attempt_descendants": descendant_probe.state,
     }
 
 

@@ -315,7 +315,10 @@ class AdapterV11Test(unittest.TestCase):
      self.assertIn("launch_lifecycle_reselection=promoted-wrapper-scope",row)
      self.assertNotIn("dead-nested-sandbox-lifetime",row)
      self.assertIn("parent_attempt_id=att-parent-fixture",row)
-     self.assertIn("pid_host=",row);self.assertIn("pid_host_start=",row)
+     # A one-element NSpid vector (this test's own procfs view) proves only
+     # local identity, never an outer host mapping; neither wrapper may
+     # publish a pid_host* claim from it.
+     self.assertNotIn("pid_host=",row);self.assertNotIn("pid_host_start=",row)
      self.assertIn("pgid=",row)
      if harness=="claude":
       self.assertIn("--output-format stream-json",output)

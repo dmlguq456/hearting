@@ -1053,6 +1053,14 @@ def classify_attempt_evidence(ev_in, now=None):
             else "shared observed-liveness: %s (%s)"
             % (observed_state, observed.get("reason", "unknown"))
         )
+    # A positive exact-attempt tag is process evidence from the current
+    # namespace. It keeps execution live even when the recorded leader is
+    # missing/reused and must outrank terminal summaries and heartbeats, but
+    # not a terminal artifact-proof exception already resolved by the shared
+    # observer above.
+    elif pid_scope == "namespace-local" and ev_in.get("attempt_descendants") == "populated":
+        state, source = "working", "namespace"
+        rule = "namespace-local attempt has a surviving exact attempt-tagged process"
     elif terminal:
         completed = (
             terminal.get("terminal_action") == "completed-marker"

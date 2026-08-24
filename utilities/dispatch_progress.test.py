@@ -10,6 +10,7 @@ import tempfile
 import time
 import unittest
 from unittest import mock
+from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location("progress", ROOT / "utilities/dispatch-progress.py")
@@ -185,6 +186,19 @@ class ProgressTest(unittest.TestCase):
         self.assertEqual(P.inspect(self.args(), 0)["state"], "dead")
         self.assertIs(P.classify_attempt_evidence, model.classify_attempt_evidence)
         self.assertEqual(P.ATTEMPT_CLASSIFIER_SOURCE, model.ATTEMPT_CLASSIFIER_SOURCE)
+
+    def test_exact_descendant_keeps_progress_working_without_heartbeat(self):
+        text = self.jobs.read_text().replace(
+            f"pid={self.proc.pid},pid_start={self.proc_start},pgid={self.proc.pid},",
+            f"pid=7,pid_start=1,pgid=7,pid_scope=namespace-local,"
+            "pid_ns=pid:[inner],pid_observer_ns=pid:[outer],")
+        self.jobs.write_text(text)
+        with mock.patch.object(P, "authoritative_process_identities", return_value=()), \
+             mock.patch.object(P, "attempt_tagged_descendants",
+                               return_value=SimpleNamespace(state="populated")):
+            verdict = P.inspect(self.args(), 99000.0)
+        self.assertEqual((verdict["state"], verdict["source"]),
+                         ("working", "namespace"))
 
     def test_signal_denied_fails_closed_without_closing_live_row(self):
         P.heartbeat(self.args(), 0)

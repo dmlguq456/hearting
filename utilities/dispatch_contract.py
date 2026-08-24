@@ -928,19 +928,12 @@ def process_launch_identity(pid: int) -> dict[str, str]:
     procfs_root_namespace = (
         process_namespace_identity(1) if procfs_pid_aligned else None
     )
-    # Some sandboxes hide /proc/1/ns/pid.  A one-element vector is still
-    # safely bound to the launch observer: the new child has no PID-namespace
-    # ancestor between that observer and this procfs view.  For a multi-level
-    # vector, absence of /proc/1 namespace evidence must remain unverifiable.
+    # A one-element vector identifies only the local procfs view.  It cannot
+    # establish an outer PID, start time, namespace, or process-group mapping.
+    # For a multi-level vector, absence of an independently observed procfs
+    # root namespace remains unverifiable.
     if (
-        not procfs_root_namespace
-        and len(namespace_pids) == 1
-        and observer_namespace
-        and child_namespace == observer_namespace
-    ):
-        procfs_root_namespace = observer_namespace
-    if (
-        namespace_pids
+        len(namespace_pids) > 1
         and namespace_pids[-1] == pid
         and procfs_root_namespace
     ):
@@ -1264,21 +1257,20 @@ def attempt_process_quiescence(
     # and publishes its receipt.  Host-visible rows retain their established
     # behavior, and an actually live process remains live.
     result = _attempt_process_quiescence_impl(metadata)
-    if (
-        terminal_receipt
-        and metadata.get("registered_worker") == "1"
-        and metadata.get("pid_scope") == "namespace-local"
-        and not _post_exit_receipt_reason(metadata)
-        and result.state != "live"
-    ):
-        return ProcessQuiescence("unverifiable", "post-exit-receipt-incomplete")
-    if result.state != "quiescent":
+    if result.state == "live":
         return result
     # D-1: a legacy row records no attempt id, so there is no tag to scan for.
     # Answering `unverifiable` for all of them would retroactively freeze every
     # successor, join, wait, and cleanup gate that reads an old row, so they
     # keep the verdict they already had instead.
     if not metadata.get("attempt_id"):
+        if (
+            terminal_receipt
+            and metadata.get("registered_worker") == "1"
+            and metadata.get("pid_scope") == "namespace-local"
+            and not _post_exit_receipt_reason(metadata)
+        ):
+            return ProcessQuiescence("unverifiable", "post-exit-receipt-incomplete")
         return result
     probe = attempt_tagged_descendants(metadata)
     if probe.state == "populated":
@@ -1295,6 +1287,17 @@ def attempt_process_quiescence(
         return ProcessQuiescence(
             "live", "attempt-descendant-live", probe.members[0][0]
         )
+    if (
+        terminal_receipt
+        and metadata.get("registered_worker") == "1"
+        and metadata.get("pid_scope") == "namespace-local"
+        and not _post_exit_receipt_reason(metadata)
+    ):
+        return ProcessQuiescence("unverifiable", "post-exit-receipt-incomplete")
+    if result.state != "quiescent":
+        # A non-quiescent leader verdict remains authoritative unless the
+        # positive descendant branch above proves additional live evidence.
+        return result
     if probe.state == "unverifiable":
         # SD-79/80/89: the observer that produced a complete post-exit receipt
         # may itself have disappeared before a successor or retry is launched.
