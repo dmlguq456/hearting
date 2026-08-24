@@ -46,6 +46,8 @@ REQUIRED_RELEASE_FILES = (
     "tools/install/harness.sh",
     "tools/install/installer.py",
     "tools/install/distribution.py",
+    "utilities/compute-hosts",
+    "utilities/compute-hosts.py",
     "tools/fleet/fleet.sh",
     "tools/memory/mem.py",
     "tools/memory/protocol_v2.py",
@@ -56,6 +58,7 @@ REQUIRED_RELEASE_FILES = (
 TOOL_LAUNCHERS = (
     ("fleet", "tools/fleet/fleet.sh"),
     ("mem", "tools/memory/mem.py"),
+    ("compute-hosts", "utilities/compute-hosts"),
 )
 _REPOSITORY_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 _VERSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")

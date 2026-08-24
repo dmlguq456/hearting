@@ -510,13 +510,16 @@ absence then fails closed.
 ### §5.13. Operator Compute Hosts
 
 Sessions run on one machine while training and evaluation belong on whichever
-host holds the right GPUs. `utilities/compute-hosts.py` owns that boundary so
+host holds the right GPUs. The installed `compute-hosts` command delegates to
+`utilities/compute-hosts.py` and owns that boundary so
 neither half is rediscovered per session.
 
 The static half — addresses, ports, environment roots, and the shared run root
 — lives in one user-owned file at
 `${XDG_CONFIG_HOME:-$HOME/.config}/hearting/compute-hosts.yaml`, alongside the
-other cross-runtime policy files; install and update never write it. That file
+other cross-runtime policy files; install and update never write it. The
+launcher is shared across runtimes, repairs only an exact owned link, preserves
+foreign collisions, and is removed only by a full uninstall. That file
 is byte-identical on every host: which entry is the local machine is discovered
 by matching its declared `hostname`, not written down, so promoting a different
 machine to session host is a change of habit rather than an edit on every

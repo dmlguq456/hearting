@@ -92,9 +92,16 @@ fleet          # 라이브 cross-harness 대시보드, 단순 스냅숏은 --onc
 
 installer는 `~/.local/bin`에 `hearting`과 `harness`를 함께 놓습니다. 같은
 launcher의 두 이름이라 예전 이름으로 쓰던 것이 그대로 동작합니다. `fleet`
-launcher도 함께 설치합니다. 전체 화면
+launcher와 공용 `compute-hosts` operator launcher도 함께 설치합니다. 전체 화면
 라이브 뷰에는 `curses`가 필요하지만 `fleet --once`와 `fleet --json`은 필요
 없어서, Python이 도는 곳이면 스크립팅과 스냅숏이 그대로 동작합니다.
+
+`compute-hosts`는 host를 명시적으로 선택하며 사용자가 소유한
+`${XDG_CONFIG_HOME:-$HOME/.config}/hearting/compute-hosts.yaml`을 읽습니다.
+설치와 update는 이 inventory를 만들거나 바꾸지 않고, shell startup 파일도
+수정하지 않습니다. 자동 GPU scheduler나 remote agent dispatch는 없습니다.
+외부 PATH 파일과 symlink는 보존되며, 전체 uninstall만 소유한 공용 link를
+제거하고 부분 runtime uninstall은 이를 유지합니다.
 
 `hearting update`는 새 release를 staging에서 검증한 뒤 active pointer를
 전환하고 실패하면 이전 release로 rollback합니다. 이미 열린 agent session이

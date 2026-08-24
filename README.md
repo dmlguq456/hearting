@@ -89,9 +89,17 @@ fleet          # live cross-harness dashboard; --once for a plain snapshot
 
 The installer puts both `hearting` and `harness` on your `PATH` — the same
 launcher under two names, so anything written against the old name keeps
-working. It also drops a `fleet` launcher into `~/.local/bin`. The live
+working. It also drops `fleet` and the shared `compute-hosts` operator launcher
+into `~/.local/bin`. The live
 full-screen view needs `curses`; `fleet --once` and `fleet --json` do not, so
 scripting and snapshots work anywhere Python does.
+
+`compute-hosts` requires an explicit host choice and reads the user-owned
+`${XDG_CONFIG_HOME:-$HOME/.config}/hearting/compute-hosts.yaml`; install and
+update never create or modify that inventory. The installer does not edit shell
+startup files, schedule GPU work, or dispatch remote agents. Foreign PATH files
+and symlinks are preserved; full uninstall removes only the owned shared link,
+while a partial runtime uninstall retains it.
 
 `auto-update status` also reports the installed release, channel, and live
 scheduler health when Linux systemd-user or macOS LaunchAgent exposes it.

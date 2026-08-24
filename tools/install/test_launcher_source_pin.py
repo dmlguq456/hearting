@@ -27,6 +27,7 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import bootstrap  # noqa: E402
 import paths  # noqa: E402
+import distribution  # noqa: E402
 
 
 def _git(*args, cwd):
@@ -156,6 +157,9 @@ class ManagedReleaseMigrationTest(unittest.TestCase):
         )
         self.resolve.start()
         self.addCleanup(self.resolve.stop)
+        self.managed = mock.patch.object(distribution, "is_managed", return_value=False)
+        self.managed.start()
+        self.addCleanup(self.managed.stop)
 
     def _link_all_to_release(self):
         for name, rel in bootstrap.LAUNCHERS:

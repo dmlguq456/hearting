@@ -15,6 +15,7 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import bootstrap  # noqa: E402
 import installer  # noqa: E402
+import distribution  # noqa: E402
 
 
 class LauncherMigrationTest(unittest.TestCase):
@@ -38,6 +39,9 @@ class LauncherMigrationTest(unittest.TestCase):
         )
         self.resolve.start()
         self.addCleanup(self.resolve.stop)
+        self.managed = mock.patch.object(distribution, "is_managed", return_value=False)
+        self.managed.start()
+        self.addCleanup(self.managed.stop)
 
     def _target(self, name):
         return self.home / ".local/bin" / name

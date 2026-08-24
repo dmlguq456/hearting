@@ -2,7 +2,7 @@
 
 ``restore_memory`` imports ``dump.jsonl`` when ``memory.db`` is absent.
 ``install_launchers`` creates guarded
-``~/.local/bin/{hearting,harness,fleet,mem}`` symlinks.
+``~/.local/bin/{hearting,harness,fleet,mem,compute-hosts}`` symlinks.
 The helpers remain usable independently of installer command wiring.
 """
 
@@ -77,6 +77,7 @@ LAUNCHERS = (
     ("harness", "tools/install/harness.sh"),
     ("fleet", "tools/fleet/fleet.sh"),
     ("mem", "tools/memory/mem.py"),
+    ("compute-hosts", "utilities/compute-hosts"),
 )
 
 
@@ -178,7 +179,7 @@ def _replace_symlink(target, source):
 
 
 def install_launchers(home=None, dry_run=False):
-    """Create guarded ``~/.local/bin/{hearting,harness,fleet,mem}`` symlinks.
+    """Create guarded common PATH launcher symlinks.
 
     Args:
         home: Destination home directory, or ``Path.home()`` when omitted.
@@ -199,24 +200,38 @@ def install_launchers(home=None, dry_run=False):
     if not dry_run:
         bin_dir.mkdir(parents=True, exist_ok=True)
 
+    managed_current = None
+    try:
+        import distribution
+        if distribution.is_managed():
+            managed_current = distribution.current_path()
+    except (ImportError, OSError, ValueError):
+        managed_current = None
+
     for name, rel_source in LAUNCHERS:
         # F-80: pinned to the primary checkout, never to whichever tree happens to be
         # running this install. A launcher outlives the worktree an install was run from.
         source = paths.resolve_launcher_source(rel_source)
+        desired_source = (
+            managed_current / rel_source
+            if name == "compute-hosts" and managed_current is not None
+            else source
+        )
         target = bin_dir / name
         common = {"name": name, "target": str(target), "source": str(source)}
 
         if target.exists() or target.is_symlink():
-            if _is_our_symlink(target, source):
+            if _is_our_symlink(target, desired_source):
                 results.append({**common, "status": "unchanged"})
                 continue
 
             if _is_prior_linked_launcher(target, home, rel_source):
                 old_source = _symlink_destination(target)
                 if not dry_run:
-                    _replace_symlink(target, source)
+                    _replace_symlink(target, desired_source)
                 results.append({
                     **common,
+                    "source": str(desired_source),
                     "status": "planned-migration" if dry_run else "migrated-legacy",
                     "detail": f"{old_source} -> {source}",
                 })
@@ -231,7 +246,61 @@ def install_launchers(home=None, dry_run=False):
             continue
 
         if not dry_run:
-            target.symlink_to(source)
+            target.symlink_to(desired_source)
         results.append({**common, "status": "planned" if dry_run else "created"})
 
     return results
+
+
+def compute_hosts_status(home=None):
+    """Return a read-only ownership/health report for the shared launcher."""
+    home = Path(home) if home is not None else Path.home()
+    target = home / ".local" / "bin" / "compute-hosts"
+    rel_source = "utilities/compute-hosts"
+    source = paths.resolve_launcher_source(rel_source)
+    if not target.exists() and not target.is_symlink():
+        return {"status": "missing", "target": str(target), "source": str(source)}
+    if not target.is_symlink():
+        return {"status": "foreign-collision", "target": str(target), "source": str(source)}
+    managed_current = None
+    try:
+        import distribution
+        if distribution.is_managed():
+            managed_current = distribution.current_path()
+    except (ImportError, OSError, ValueError):
+        managed_current = None
+    if managed_current is not None:
+        # Ownership and health are separate: concrete release links are ours,
+        # but only the lexical current pointer is the healthy managed target.
+        desired_raw = str(managed_current / rel_source)
+        raw_target = os.readlink(target)
+        owned = raw_target == desired_raw or _is_prior_linked_launcher(target, home, rel_source)
+        if not owned:
+            return {"status": "foreign-collision", "target": str(target), "source": str(source)}
+        healthy = raw_target == desired_raw and target.resolve().is_file() and os.access(target, os.X_OK)
+        return {
+            "status": "healthy" if healthy else "owned-drift",
+            "target": str(target), "source": str(managed_current / rel_source),
+        }
+    if _is_our_symlink(target, source) or _is_prior_linked_launcher(target, home, rel_source):
+        return {
+            "status": "healthy" if target.resolve().is_file() and os.access(target, os.X_OK) else "owned-drift",
+            "target": str(target), "source": str(source),
+        }
+    return {"status": "foreign-collision", "target": str(target), "source": str(source)}
+
+
+def uninstall_compute_hosts(home=None, dry_run=False):
+    """Remove only an exact installer-owned compute-hosts link."""
+    home = Path(home) if home is not None else Path.home()
+    target = home / ".local" / "bin" / "compute-hosts"
+    report = compute_hosts_status(home)
+    if report["status"] == "missing":
+        report["status"] = "not-installed"
+    elif report["status"] in {"healthy", "owned-drift"}:
+        report["status"] = "planned-remove" if dry_run else "removed"
+        if not dry_run:
+            target.unlink()
+    else:
+        report["status"] = "preserved-foreign"
+    return report
