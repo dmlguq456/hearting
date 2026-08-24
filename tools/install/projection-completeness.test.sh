@@ -172,6 +172,7 @@ assert {item["id"] for item in row["checks"]} == {
     "opencode.runtime-activation",
     "routing-config.user-policy",
     "report-bundle-config.root",
+    "bootstrap.launcher.compute-hosts",
 }, row
 PY
 

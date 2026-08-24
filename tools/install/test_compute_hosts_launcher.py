@@ -122,6 +122,24 @@ class ComputeHostsLauncherTest(unittest.TestCase):
             target.symlink_to(self.root / "foreign")
             self.assertEqual(bootstrap.compute_hosts_status(self.home)["status"], "foreign-collision")
 
+    def test_launcher_expectation_distinguishes_activation_only_from_install(self):
+        self.assertFalse(bootstrap.compute_hosts_expected(self.home))
+
+        harness_source = self.source / "tools/install/harness.sh"
+        harness_source.parent.mkdir(parents=True)
+        harness_source.write_text("#!/bin/sh\n", encoding="utf-8")
+        harness_target = self.home / ".local/bin/harness"
+        harness_target.parent.mkdir(parents=True)
+        harness_target.symlink_to(harness_source)
+        with mock.patch.object(
+            bootstrap.paths, "resolve_launcher_source", return_value=harness_source
+        ):
+            self.assertTrue(bootstrap.compute_hosts_expected(self.home))
+
+        harness_target.unlink()
+        with mock.patch.object(distribution, "is_managed", return_value=True):
+            self.assertTrue(bootstrap.compute_hosts_expected(self.home))
+
     def test_linked_update_repairs_compute_hosts_including_dry_run(self):
         args = type("Args", (), {
             "runtimes": ["claude"], "target": None, "scope": "global",
@@ -148,18 +166,39 @@ class ComputeHostsLauncherTest(unittest.TestCase):
              mock.patch.object(installer.routing_config, "validate", return_value={"ok": True, "status": "ok", "path": "x"}), \
              mock.patch.object(installer.report_bundle_config, "validate", return_value={"ok": True, "status": "ok", "path": "x"}), \
              mock.patch.object(installer.bootstrap, "compute_hosts_status", return_value={"status": "healthy", "target": str(self.home / "bin")}), \
+             mock.patch.object(installer.bootstrap, "compute_hosts_expected", return_value=True), \
              mock.patch.object(installer.subprocess, "run", return_value=type("R", (), {"returncode": 0, "stderr": ""})()):
             result = installer.cmd_verify(args)
         self.assertEqual(result["exit"], installer.EXIT_OK)
         self.assertTrue(any(c["id"] == "bootstrap.launcher.compute-hosts-smoke" and c["ok"] for c in result["checks"]))
 
         with mock.patch.object(installer.bootstrap, "compute_hosts_status", return_value={"status": "owned-drift", "target": "x"}), \
+             mock.patch.object(installer.bootstrap, "compute_hosts_expected", return_value=True), \
              mock.patch.object(installer.paths, "harness_state_dir", return_value=self.root / "missing"), \
              mock.patch.object(installer.verifier, "run", return_value=[]), \
              mock.patch.object(installer.routing_config, "validate", return_value={"ok": True, "status": "ok", "path": "x"}), \
              mock.patch.object(installer.report_bundle_config, "validate", return_value={"ok": True, "status": "ok", "path": "x"}):
             result = installer.cmd_verify(args)
         self.assertEqual(result["exit"], installer.EXIT_VERIFY_FAIL)
+
+    def test_verify_skips_missing_launcher_for_activation_only_channel(self):
+        args = type("Args", (), {
+            "runtimes": ["claude"], "target": None, "scope": "global",
+            "plugin": False,
+        })()
+        with mock.patch.object(installer.paths, "harness_state_dir", return_value=self.root / "missing"), \
+             mock.patch.object(installer.verifier, "run", return_value=[]), \
+             mock.patch.object(installer.routing_config, "validate", return_value={"ok": True, "status": "ok", "path": "x"}), \
+             mock.patch.object(installer.report_bundle_config, "validate", return_value={"ok": True, "status": "ok", "path": "x"}), \
+             mock.patch.object(installer.bootstrap, "compute_hosts_status", return_value={"status": "missing", "target": "x"}), \
+             mock.patch.object(installer.bootstrap, "compute_hosts_expected", return_value=False), \
+             mock.patch.object(installer.subprocess, "run") as smoke:
+            result = installer.cmd_verify(args)
+        self.assertEqual(result["exit"], installer.EXIT_OK)
+        check = next(c for c in result["checks"] if c["id"] == "bootstrap.launcher.compute-hosts")
+        self.assertTrue(check["ok"])
+        self.assertIn("SKIP", check["detail"])
+        smoke.assert_not_called()
 
     def test_bare_full_uninstall_removes_owned_but_partial_retains(self):
         base = {"scope": "global", "dry_run": True, "runtimes": None, "target": None}

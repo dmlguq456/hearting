@@ -290,6 +290,36 @@ def compute_hosts_status(home=None):
     return {"status": "foreign-collision", "target": str(target), "source": str(source)}
 
 
+def compute_hosts_expected(home=None):
+    """Return whether the shared launcher belongs to the active install channel.
+
+    ``runtime activate`` intentionally projects runtime surfaces without
+    installing common PATH launchers. A managed distribution or an existing
+    installer-owned common launcher means the full installer channel is active,
+    so a missing ``compute-hosts`` entry is real drift rather than an optional
+    surface that was never installed.
+    """
+    home = Path(home) if home is not None else Path.home()
+    try:
+        import distribution
+        if distribution.is_managed():
+            return True
+    except (ImportError, OSError, ValueError):
+        pass
+
+    bin_dir = home / ".local" / "bin"
+    for name, rel_source in LAUNCHERS:
+        if name == "compute-hosts":
+            continue
+        target = bin_dir / name
+        source = paths.resolve_launcher_source(rel_source)
+        if _is_our_symlink(target, source) or _is_prior_linked_launcher(
+            target, home, rel_source
+        ):
+            return True
+    return False
+
+
 def uninstall_compute_hosts(home=None, dry_run=False):
     """Remove only an exact installer-owned compute-hosts link."""
     home = Path(home) if home is not None else Path.home()

@@ -403,13 +403,21 @@ def cmd_verify(args):
     if not bundle_config["ok"]:
         ok = False
     launcher = bootstrap.compute_hosts_status()
-    launcher_ok = launcher["status"] == "healthy"
+    launcher_expected = bootstrap.compute_hosts_expected()
+    launcher_skipped = launcher["status"] == "missing" and not launcher_expected
+    launcher_ok = launcher["status"] == "healthy" or launcher_skipped
+    launcher_detail = launcher["status"] + ": " + launcher["target"]
+    if launcher_skipped:
+        launcher_detail = (
+            "SKIP: common PATH launchers were not installed by this "
+            "runtime-activation-only channel"
+        )
     all_checks.append({
         "id": "bootstrap.launcher.compute-hosts",
         "ok": launcher_ok,
-        "detail": launcher["status"] + ": " + launcher["target"],
+        "detail": launcher_detail,
     })
-    if launcher_ok:
+    if launcher["status"] == "healthy":
         try:
             smoke = subprocess.run(
                 [launcher["target"], "--help"],
@@ -422,7 +430,7 @@ def cmd_verify(args):
             smoke_ok, smoke_detail = False, str(exc)
         all_checks.append({"id": "bootstrap.launcher.compute-hosts-smoke", "ok": smoke_ok, "detail": smoke_detail})
         ok = ok and smoke_ok
-    else:
+    elif not launcher_skipped:
         ok = False
     lines = [("✓" if c["ok"] else "✗") + f" {c['id']} {c['detail']}" for c in all_checks]
     return {"runtime": runtimes, "channel": "plugin" if args.plugin else "dev", "checks": all_checks,
