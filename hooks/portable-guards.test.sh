@@ -71,7 +71,8 @@ OPENCODE_DIRECT_DISPATCH_HOME=$(AGENT_HOME="$TMP/not-agent-home" \
   "$ROOT/adapters/opencode/utilities/agent-home.sh")
 
 echo "== artifact guard CLI =="
-mkdir -p "$TMP/proj/.agent_reports/spec"
+ROUTE_FIXTURE_JOBS="$TMP/proj/.dispatch/jobs.log"
+mkdir -p "$TMP/proj/.agent_reports/spec" "$(dirname "$ROUTE_FIXTURE_JOBS")"
 if "$ART" --file "$TMP/proj/.agent_reports/spec/prd.md" --session test >/tmp/art.out 2>/tmp/art.err; then
   bad "spec write with no route declared should fail"
 else
@@ -87,6 +88,7 @@ fixture_route() {
   fixture_name=$3
   fixture_stdout="$TMP/$fixture_name.route.json"
   fixture_stderr="$TMP/$fixture_name.route.err"
+  AGENT_HOME="$ROOT" AGENT_DISPATCH_JOBS="$ROUTE_FIXTURE_JOBS" \
   python3 "$ROOT/utilities/capability-route.py" compile \
     --capability "$fixture_capability" --capability-mode "$fixture_mode" \
     --intensity direct --cwd "$TMP/proj" \
@@ -316,7 +318,8 @@ mkdir -p "$TMP/repo"
   git config user.email test@example.com
   git config user.name Test
   printf 'a\n' > f
-  git add f
+  printf '.agent_reports/\n.dispatch/\n' > .gitignore
+  git add f .gitignore
   git commit -q -m init
 )
 if "$GIT" --file "$TMP/repo/f" >/tmp/git.out 2>/tmp/git.err; then
@@ -2448,22 +2451,29 @@ else
   bad "source-bearing functions.exec_command commit should be denied [$commit_decision]"
 fi
 codex_route_args="--capability autopilot-code --capability-mode dev --intensity direct --cwd $TMP/repo --artifact-root $TMP/repo/.agent_reports --predicate atomic-outcome --predicate known-scope --predicate no-shared-contract --predicate no-resource-run --predicate no-artifact-handoff --predicate no-independent-verifier --predicate focused-verification --tracking untracked --spec-read not-applicable --drift-verdict no-project-spec --workflow-mode untracked --artifact-guard preflight-passed --inline-reason atomic-direct"
-"$ROOT/adapters/codex/bin/preflight.sh" route $codex_route_args >"$TMP/codex_route_probe.json" 2>"$TMP/codex_route_probe.err"
+MATERIAL_ROUTE_JOBS="$TMP/repo/.dispatch/jobs.log"
+mkdir -p "$(dirname "$MATERIAL_ROUTE_JOBS")"
+codex_bind_session="codex-bind-$(basename "$TMP")"
+recall_opportunity "$TMP/repo" "$codex_bind_session"
+AGENT_HOME="$ROOT" AGENT_DISPATCH_JOBS="$MATERIAL_ROUTE_JOBS" \
+  "$ROOT/adapters/codex/bin/preflight.sh" route $codex_route_args >"$TMP/codex_route_probe.json" 2>"$TMP/codex_route_probe.err"
 codex_route_id=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1],encoding="utf-8"))["route_id"])' "$TMP/codex_route_probe.json")
 codex_route="$TMP/repo/.agent_reports/.runtime/routes/$codex_route_id.json"
 codex_compile="$ROOT/adapters/codex/bin/preflight.sh route $codex_route_args --output $codex_route"
-mkdir -p "$(dirname "$codex_route")"
-recall_opportunity "$TMP/repo" codex-bind
-if eval "$codex_compile" >"$TMP/codex_compile.out" 2>"$TMP/codex_compile.err" \
-  && printf '%s\n' "{\"tool_name\":\"functions.exec_command\",\"input\":{\"command\":\"$codex_compile\"},\"session_id\":\"codex-bind\",\"cwd\":\"$TMP/repo\"}" \
-  | AGENT_HOME="$ROOT" HOME="$TMP/codex_hook_home" python3 "$TMP/codex_hook_home/.codex/hearting/adapters/codex/hooks/posttooluse-read-marker.py" >"$TMP/codex_bind.out" 2>"$TMP/codex_bind.err" \
+# The first compile discovers the content-addressed route ID. Remove only that
+# fixture artifact before exercising the one real explicit-output compile/bind.
+rm -f "$codex_route"
+if AGENT_HOME="$ROOT" AGENT_DISPATCH_JOBS="$MATERIAL_ROUTE_JOBS" \
+  sh -c "$codex_compile" >"$TMP/codex_compile.out" 2>"$TMP/codex_compile.err" \
+  && printf '%s\n' "{\"tool_name\":\"functions.exec_command\",\"input\":{\"command\":\"$codex_compile\"},\"session_id\":\"$codex_bind_session\",\"cwd\":\"$TMP/repo\"}" \
+  | AGENT_HOME="$ROOT" AGENT_DISPATCH_JOBS="$MATERIAL_ROUTE_JOBS" HOME="$TMP/codex_hook_home" python3 "$TMP/codex_hook_home/.codex/hearting/adapters/codex/hooks/posttooluse-read-marker.py" >"$TMP/codex_bind.out" 2>"$TMP/codex_bind.err" \
   && [ ! -s "$TMP/codex_bind.out" ] && [ ! -s "$TMP/codex_bind.err" ] \
-  && printf '{"tool_name":"Write","tool_input":{"file_path":"%s"},"session_id":"codex-bind","cwd":"%s"}\n' "$codex_source" "$TMP/repo" \
+  && printf '{"tool_name":"Write","tool_input":{"file_path":"%s"},"session_id":"%s","cwd":"%s"}\n' "$codex_source" "$codex_bind_session" "$TMP/repo" \
     | HOME="$TMP/codex_hook_home" python3 "$TMP/codex_hook_home/.codex/hearting/adapters/codex/hooks/pretooluse-write-guard.py" >"$TMP/codex_bind_allow.out" 2>"$TMP/codex_bind_allow.err" \
   && [ ! -s "$TMP/codex_bind_allow.out" ] && [ ! -s "$TMP/codex_bind_allow.err" ]; then
   ok "trusted local Codex compile binds silently and same cwd/session allows Write"
 else
-  bad "trusted local Codex compile should bind silently and allow same cwd/session [route=$(test -f "$codex_route" && echo yes || echo no) bind_out=$(cat "$TMP/codex_bind.out") bind_err=$(cat "$TMP/codex_bind.err") allow_out=$(cat "$TMP/codex_bind_allow.out") allow_err=$(cat "$TMP/codex_bind_allow.err")]"
+  bad "trusted local Codex compile should bind silently and allow same cwd/session [compile_err=$(cat "$TMP/codex_compile.err") route=$(test -f "$codex_route" && echo yes || echo no) bind_out=$(cat "$TMP/codex_bind.out" 2>/dev/null) bind_err=$(cat "$TMP/codex_bind.err" 2>/dev/null) allow_out=$(cat "$TMP/codex_bind_allow.out" 2>/dev/null) allow_err=$(cat "$TMP/codex_bind_allow.err" 2>/dev/null)]"
 fi
 foreign_bind=$(printf '{"tool_name":"Write","tool_input":{"file_path":"%s"},"session_id":"codex-foreign","cwd":"%s"}\n' "$codex_source" "$TMP/repo" \
   | HOME="$TMP/codex_hook_home" python3 "$TMP/codex_hook_home/.codex/hearting/adapters/codex/hooks/pretooluse-write-guard.py")
@@ -2472,16 +2482,16 @@ if python3 -c 'import json,sys; assert json.loads(sys.argv[1])["decision"]=="blo
 else
   bad "foreign session should be denied [$foreign_bind]"
 fi
-codex_bind_marker_hash=$(python3 -c 'import hashlib,sys; print(hashlib.sha256(b"material-route-session-v1\0" + sys.argv[1].encode()).hexdigest())' codex-bind)
+codex_bind_marker_hash=$(python3 -c 'import hashlib,sys; print(hashlib.sha256(b"material-route-session-v1\0" + sys.argv[1].encode()).hexdigest())' "$codex_bind_session")
 codex_bind_marker="$ROOT/.route-grounding/$codex_bind_marker_hash.json"
-printf '{"hook_event_name":"Stop","session_id":"codex-bind","cwd":"%s"}\n' "$TMP/repo" \
+printf '{"hook_event_name":"Stop","session_id":"%s","cwd":"%s"}\n' "$codex_bind_session" "$TMP/repo" \
   | MEM_STORE="$TMP/codex_hook_mem_stop" AGENT_HOME="$ROOT" HOME="$TMP/codex_hook_home" python3 "$TMP/codex_hook_home/.codex/hearting/adapters/codex/hooks/stop-lifecycle.py" >/tmp/codex_stop_retention.out 2>/tmp/codex_stop_retention.err || true
 if [ -f "$codex_bind_marker" ] && [ ! -s /tmp/codex_stop_retention.out ] && [ ! -s /tmp/codex_stop_retention.err ]; then
   ok "Codex Stop is a silent no-op and retains material route marker"
 else
   bad "Codex Stop should be a silent no-op that retains material route marker"
 fi
-if printf '{"hook_event_name":"SessionEnd","session_id":"codex-bind","cwd":"%s"}\n' "$TMP/repo" \
+if printf '{"hook_event_name":"SessionEnd","session_id":"%s","cwd":"%s"}\n' "$codex_bind_session" "$TMP/repo" \
   | MEM_STORE="$TMP/codex_hook_mem" AGENT_HOME="$ROOT" HOME="$TMP/codex_hook_home" python3 "$TMP/codex_hook_home/.codex/hearting/adapters/codex/hooks/sessionend-lifecycle.py" >"$TMP/codex_sessionend.out" 2>"$TMP/codex_sessionend.err" \
   && [ ! -s "$TMP/codex_sessionend.out" ] \
   && [ ! -e "$codex_bind_marker" ] \
@@ -3445,11 +3455,13 @@ fi
 # preserving the compiler's own stdout/stderr/exit status.
 mkdir -p "$TMP/repo/.agent_reports/.runtime/routes"
 opencode_route_args="--capability autopilot-code --capability-mode dev --intensity direct --cwd $TMP/repo --artifact-root $TMP/repo/.agent_reports --predicate atomic-outcome --predicate known-scope --predicate no-shared-contract --predicate no-resource-run --predicate no-artifact-handoff --predicate no-independent-verifier --predicate focused-verification --tracking untracked --spec-read not-applicable --drift-verdict no-project-spec --workflow-mode untracked --artifact-guard preflight-passed --inline-reason atomic-direct"
-env -u OPENCODE_SESSION_ID "$OPENCODE" route $opencode_route_args >"$TMP/opencode_route_probe.json" 2>"$TMP/opencode_route_probe.err"
+env -u OPENCODE_SESSION_ID AGENT_HOME="$ROOT" AGENT_DISPATCH_JOBS="$MATERIAL_ROUTE_JOBS" \
+  "$OPENCODE" route $opencode_route_args >"$TMP/opencode_route_probe.json" 2>"$TMP/opencode_route_probe.err"
 opencode_route_id=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1],encoding="utf-8"))["route_id"])' "$TMP/opencode_route_probe.json")
 opencode_route="$TMP/repo/.agent_reports/.runtime/routes/$opencode_route_id.json"
 recall_opportunity "$TMP/repo" opencode-bind
-if OPENCODE_SESSION_ID=opencode-bind "$OPENCODE" route $opencode_route_args --output "$opencode_route" >/tmp/opencode_route.out 2>/tmp/opencode_route.err \
+if OPENCODE_SESSION_ID=opencode-bind AGENT_HOME="$ROOT" AGENT_DISPATCH_JOBS="$MATERIAL_ROUTE_JOBS" \
+  "$OPENCODE" route $opencode_route_args --output "$opencode_route" >/tmp/opencode_route.out 2>/tmp/opencode_route.err \
   && [ -f "$opencode_route" ] \
   && "$OPENCODE" material-route check --tool Write --file "$opencode_source" --cwd "$TMP/repo" --session opencode-bind >/tmp/opencode_bind_allow.out 2>/tmp/opencode_bind_allow.err; then
   ok "opencode route wrapper binds on successful compile and allows same-sid/cwd Write"
@@ -3464,7 +3476,8 @@ else
 fi
 opencode_route_nooutput="$TMP/repo/.agent_reports/.runtime/routes/opencode-route-nooutput.json"
 rm -f "$opencode_route_nooutput"
-if OPENCODE_SESSION_ID=opencode-neg-nooutput "$OPENCODE" route $opencode_route_args >/tmp/opencode_neg_nooutput.out 2>/tmp/opencode_neg_nooutput.err \
+if OPENCODE_SESSION_ID=opencode-neg-nooutput AGENT_HOME="$ROOT" AGENT_DISPATCH_JOBS="$MATERIAL_ROUTE_JOBS" \
+  "$OPENCODE" route $opencode_route_args >/tmp/opencode_neg_nooutput.out 2>/tmp/opencode_neg_nooutput.err \
   && [ ! -f "$opencode_route_nooutput" ] \
   && "$OPENCODE" material-route check --tool Write --file "$opencode_source" --cwd "$TMP/repo" --session opencode-neg-nooutput >/tmp/opencode_neg_nooutput_check.out 2>/tmp/opencode_neg_nooutput_check.err; then
   bad "opencode route wrapper without --output should stay unbound"
@@ -3475,12 +3488,14 @@ fi
 opencode_route_multi_root="$TMP/repo/.agent_reports-opencode-multi"
 opencode_route_multi_args=$(printf '%s\n' "$opencode_route_args" \
   | sed "s#--artifact-root $TMP/repo/.agent_reports#--artifact-root $opencode_route_multi_root#")
-env -u OPENCODE_SESSION_ID "$OPENCODE" route $opencode_route_multi_args >"$TMP/opencode_route_multi_probe.json" 2>"$TMP/opencode_route_multi_probe.err"
+env -u OPENCODE_SESSION_ID AGENT_HOME="$ROOT" AGENT_DISPATCH_JOBS="$MATERIAL_ROUTE_JOBS" \
+  "$OPENCODE" route $opencode_route_multi_args >"$TMP/opencode_route_multi_probe.json" 2>"$TMP/opencode_route_multi_probe.err"
 opencode_route_multi_id=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1],encoding="utf-8"))["route_id"])' "$TMP/opencode_route_multi_probe.json")
 opencode_route_multi_a="$opencode_route_multi_root/.runtime/routes/$opencode_route_multi_id.json"
 opencode_route_multi_b="$opencode_route_multi_root/.runtime/routes/alias-$opencode_route_multi_id.json"
 rm -f "$opencode_route_multi_a" "$opencode_route_multi_b"
-if OPENCODE_SESSION_ID=opencode-neg-multi "$OPENCODE" route $opencode_route_multi_args --output "$opencode_route_multi_a" --output "$opencode_route_multi_b" >/tmp/opencode_neg_multi.out 2>/tmp/opencode_neg_multi.err; then
+if OPENCODE_SESSION_ID=opencode-neg-multi AGENT_HOME="$ROOT" AGENT_DISPATCH_JOBS="$MATERIAL_ROUTE_JOBS" \
+  "$OPENCODE" route $opencode_route_multi_args --output "$opencode_route_multi_a" --output "$opencode_route_multi_b" >/tmp/opencode_neg_multi.out 2>/tmp/opencode_neg_multi.err; then
   :
 fi
 if "$OPENCODE" material-route check --tool Write --file "$opencode_source" --cwd "$TMP/repo" --session opencode-neg-multi >/tmp/opencode_neg_multi_check.out 2>/tmp/opencode_neg_multi_check.err; then
@@ -3493,11 +3508,13 @@ fi
 opencode_route_nosid_root="$TMP/repo/.agent_reports-opencode-nosid"
 opencode_route_nosid_args=$(printf '%s\n' "$opencode_route_args" \
   | sed "s#--artifact-root $TMP/repo/.agent_reports#--artifact-root $opencode_route_nosid_root#")
-env -u OPENCODE_SESSION_ID "$OPENCODE" route $opencode_route_nosid_args >"$TMP/opencode_route_nosid_probe.json" 2>"$TMP/opencode_route_nosid_probe.err"
+env -u OPENCODE_SESSION_ID AGENT_HOME="$ROOT" AGENT_DISPATCH_JOBS="$MATERIAL_ROUTE_JOBS" \
+  "$OPENCODE" route $opencode_route_nosid_args >"$TMP/opencode_route_nosid_probe.json" 2>"$TMP/opencode_route_nosid_probe.err"
 opencode_route_nosid_id=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1],encoding="utf-8"))["route_id"])' "$TMP/opencode_route_nosid_probe.json")
 opencode_route_nosid="$opencode_route_nosid_root/.runtime/routes/$opencode_route_nosid_id.json"
 rm -f "$opencode_route_nosid"
-if env -u OPENCODE_SESSION_ID "$OPENCODE" route $opencode_route_nosid_args --output "$opencode_route_nosid" >/tmp/opencode_neg_nosid.out 2>/tmp/opencode_neg_nosid.err \
+if env -u OPENCODE_SESSION_ID AGENT_HOME="$ROOT" AGENT_DISPATCH_JOBS="$MATERIAL_ROUTE_JOBS" \
+  "$OPENCODE" route $opencode_route_nosid_args --output "$opencode_route_nosid" >/tmp/opencode_neg_nosid.out 2>/tmp/opencode_neg_nosid.err \
   && [ -f "$opencode_route_nosid" ] \
   && "$OPENCODE" material-route check --tool Write --file "$opencode_source" --cwd "$TMP/repo" --session opencode-neg-nosid >/tmp/opencode_neg_nosid_check.out 2>/tmp/opencode_neg_nosid_check.err; then
   bad "opencode route wrapper without OPENCODE_SESSION_ID should stay unbound"
