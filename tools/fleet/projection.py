@@ -161,8 +161,9 @@ def _record_view(record, route_id, jobs, node_evidence=None, now=None, degradati
     `✕` on the owning session/dispatch row — parity with the group/process route views,
     which already resolve marks via `resolve_and_build_views`."""
     from . import route
-    marks = route.resolve_gate_marks({route_id: record}).get(route_id)
-    return route._record_view(record, route_id, list(jobs), node_evidence or {},
+    jobs = list(jobs)
+    marks = route.resolve_gate_marks({route_id: record}, jobs=jobs).get(route_id)
+    return route._record_view(record, route_id, jobs, node_evidence or {},
                               time.time() if now is None else now,
                               gate_marks_for_route=marks,
                               degradations_for_route=(degradations or {}).get(route_id, ()))

@@ -753,6 +753,22 @@ class ProjectionMarkThreadingTest(GateMarkBase):
         self.assertEqual(plan["state"], "done")      # dead attempt + marker -> done
         self.assertIs(plan["gate_passed"], True)
 
+    def test_projection_uses_row_registry_root_without_inherited_jobs_env(self):
+        from fleet import projection
+        observer = os.path.join(self._tmp.name, "installed-release")
+        os.makedirs(observer)
+        row = self._Row("plan")
+        row.route_id = self.route_id
+        row._launch_home = observer
+        row._registry_path = os.path.join(self.home, ".dispatch", "jobs.log")
+        with mock.patch.dict(os.environ, {"AGENT_HOME": observer}, clear=True):
+            view = projection._record_view(
+                self.record, self.route_id, [row], now=1_000_000.0
+            )
+        plan = next(n for n in view["nodes"] if n["id"] == "plan")
+        self.assertEqual(plan["state"], "done")
+        self.assertIs(plan["gate_passed"], True)
+
 
 if __name__ == "__main__":
     unittest.main()
