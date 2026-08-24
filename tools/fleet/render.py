@@ -1545,6 +1545,9 @@ def _collapse_parallel_nodes(nodes):
                     deps.append(parent)
         elapsed = [m.get("elapsed_min") for m in members
                    if m.get("elapsed_min") is not None]
+        rounds = [m.get("attempt_round") for m in members
+                  if isinstance(m.get("attempt_round"), int)
+                  and not isinstance(m.get("attempt_round"), bool)]
         merged = dict(members[0])
         # ``gate_passed`` is the single completion carrier for registered,
         # native, and inline attempts alike.  It is resolved from the exact
@@ -1560,6 +1563,9 @@ def _collapse_parallel_nodes(nodes):
             "unit": None, "unit_choices": [], "model": None, "effort": None,
             "elapsed_min": max(elapsed) if elapsed else None,
             "gate_passed": True if all(member_gates) else None,
+            "attempt_round": max(rounds) if rounds else None,
+            "round_node_id": gid,
+            "parallel_width": len(members),
         })
         merged_by_group[gid] = merged
         for m in members:
@@ -1596,7 +1602,8 @@ def _projection_route_seq(entity):
         return None
     backing = getattr(projection, "_route_view", None) or {}
     view = backing.get("view") or {}
-    return [(node.get("id"), node.get("state"))
+    from . import route
+    return [(route.node_display_label(node), node.get("state"))
             for node in _collapse_parallel_nodes(view.get("nodes") or ())]
 
 
@@ -3922,7 +3929,8 @@ def _route_node_text(n):
     exact merge render.py:101 warns about. `gate_passed` is True|None only, so there is no
     "not passed" mark to render: absence of evidence draws nothing."""
     st = n["state"]
-    nid = n["id"]
+    from . import route
+    nid = route.node_display_label(n)
     unit = n.get("unit")
     if unit:
         nid = "%s[%s]" % (nid, _compact_dispatch_name(unit, _PROFILE_MAX))

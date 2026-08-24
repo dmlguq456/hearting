@@ -48,6 +48,56 @@ from dataclasses import dataclass
 from pathlib import Path
 
 _CACHE = {}          # {abspath: (mtime, size, record|None)}
+
+# F-30 retry rounds are display evidence, not route shape. Only these semantic
+# nodes carry the compact marker; every other opaque route node keeps its sealed
+# identifier verbatim.
+_ROUND_NODE_IDS = frozenset(("execute", "review", "impl-review"))
+
+
+def _verified_attempt_round(node_id, evidence):
+    """Count unique current-contract attempts for an F-30 retry node.
+
+    ``attempt_history`` survives terminal registry-row suppression. A row with
+    no exact attempt id, or one whose dispatch contract was not verified as
+    current, cannot establish a round. Repeated status rows for one attempt
+    therefore count once.
+    """
+    if node_id not in _ROUND_NODE_IDS or not isinstance(evidence, dict):
+        return None
+    history = evidence.get("attempt_history")
+    if not isinstance(history, list):
+        return None
+    attempt_ids = set()
+    for item in history:
+        if (not isinstance(item, dict)
+                or item.get("contract_status") != "current"
+                or not isinstance(item.get("attempt_id"), str)
+                or not item.get("attempt_id").strip()):
+            continue
+        pid = item.get("pid")
+        started = (
+            item.get("status") in ("running", "done")
+            or (isinstance(pid, int) and not isinstance(pid, bool) and pid > 0)
+        )
+        if started:
+            attempt_ids.add(item["attempt_id"].strip())
+    return len(attempt_ids) or None
+
+
+def node_display_label(node):
+    """Return a node's fixed-shape label, adding only verified retry evidence."""
+    node_id = node.get("id") if isinstance(node, dict) else None
+    round_node_id = node.get("round_node_id", node_id) if isinstance(node, dict) else None
+    attempt_round = node.get("attempt_round") if isinstance(node, dict) else None
+    if (round_node_id in _ROUND_NODE_IDS and isinstance(attempt_round, int)
+            and not isinstance(attempt_round, bool) and attempt_round > 0):
+        parallel_width = node.get("parallel_width")
+        if (isinstance(parallel_width, int) and not isinstance(parallel_width, bool)
+                and parallel_width > 1):
+            return "%s(R%d·%d-way)" % (round_node_id, attempt_round, parallel_width)
+        return "%s(R%d)" % (round_node_id, attempt_round)
+    return node_id
 _MARKER_CACHE = {}   # {abspath: (mtime, size, marker|None)} — same shape, separate namespace
 
 
@@ -793,6 +843,7 @@ def _record_view(record, route_id, route_jobs, ev_by_node, now, gate_marks_for_r
                 "elapsed_min": st["elapsed_min"], "model": st["model"], "harness": st["harness"],
                 "effort": st["effort"], "pid": st["pid"], "job": st["job"],
                 "degradation": degradation if st["state"] == "degraded" else None,
+                "attempt_round": _verified_attempt_round(nid, ev_by_node.get(nid)),
             })
     return {"route_id": route_id, "route_hash": record.get("route_hash"), "source": "record",
             "capability": record.get("capability"), "capability_mode": record.get("capability_mode"),
@@ -933,6 +984,8 @@ def summary(views):
         for node, source in zip(nodes, v.get("nodes") or []):
             if source.get("degradation") is not None:
                 node["degradation"] = source.get("degradation")
+            if source.get("attempt_round") is not None:
+                node["attempt_round"] = source.get("attempt_round")
         out.append({"route_id": v.get("route_id"), "route_hash": v.get("route_hash"),
                     "source": v.get("source"), "capability": v.get("capability"),
                     "capability_mode": v.get("capability_mode"),

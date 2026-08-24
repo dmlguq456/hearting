@@ -2157,6 +2157,7 @@ def _scan_registry_evidence(paths):
             node_evidence.setdefault("attempt_history", []).append({
                 "attempt_id": attempt_id,
                 "status": status,
+                "pid": int(pid_s) if (pid_s or "").isdigit() else None,
                 "dispatch_depth": attempt_contract["dispatch_depth"],
                 "transport": attempt_contract["transport"],
                 "execution_surface": attempt_contract["execution_surface"],

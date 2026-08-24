@@ -11,6 +11,7 @@ import json
 import os
 import sys
 import unittest
+from types import SimpleNamespace
 from unittest import mock
 
 _TOOLS_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -100,6 +101,107 @@ class ProcessViewEnv(unittest.TestCase):
 
 
 class RenderContentTest(ProcessViewEnv):
+    @staticmethod
+    def _retry_view(review_history=None):
+        record = {
+            "route_id": "rt-rounds",
+            "route_hash": "sha256:rounds",
+            "capability": "autopilot-code",
+            "nodes": [
+                {"id": "execute", "depends_on": []},
+                {"id": "impl-review", "depends_on": ["execute"]},
+            ],
+        }
+        execute = DispatchJob(
+            key="code-execute", slug="rounds-execute-r2", cwd="/x", depth=2,
+            liveness="working", route_id="rt-rounds", route_node="execute",
+        )
+        evidence = {
+            "execute": {"attempt_history": [
+                {"attempt_id": "att-execute-1", "contract_status": "current", "status": "done"},
+                {"attempt_id": "att-execute-1", "contract_status": "current", "status": "done"},
+                {"attempt_id": "att-execute-2", "contract_status": "current", "status": "running"},
+            ]},
+            "impl-review": {
+                "status": "done", "ts": None,
+                "attempt_history": review_history or [
+                    {"attempt_id": "att-review-1", "contract_status": "current", "status": "done"},
+                ],
+            },
+        }
+        return route._record_view(record, "rt-rounds", [execute], evidence, 0.0)
+
+    def test_retry_rounds_are_independent_and_keep_one_fixed_dag_line(self):
+        view = self._retry_view()
+        rows = render._route_card_l2(view, max_width=160)
+        self.assertEqual(len(rows), 1)
+        text = _joined(rows)
+        self.assertIn("execute(R2)", text)
+        self.assertIn("impl-review(R1)", text)
+        self.assertEqual(text.count("execute(R2)"), 1)
+        self.assertEqual(text.count("impl-review(R1)"), 1)
+
+        projection_holder = SimpleNamespace(
+            work_projection=SimpleNamespace(
+                source="route-exact", _route_view={"view": view}))
+        breadcrumb = "".join(
+            text for text, _key in render._route_stage_segs(
+                render._projection_route_seq(projection_holder), True, 160))
+        self.assertIn("execute(R2)", breadcrumb)
+        self.assertIn("impl-review(R1)", breadcrumb)
+
+    def test_retry_round_omits_unverified_evidence_and_advances_on_actual_start(self):
+        unverified = self._retry_view(review_history=[
+            {"attempt_id": "att-review-1", "contract_status": "legacy-read-only", "status": "done"},
+            {"attempt_id": None, "contract_status": "current", "status": "done"},
+        ])
+        self.assertNotIn("impl-review(R", _joined(render._route_card_l2(unverified, 160)))
+
+        second_started = self._retry_view(review_history=[
+            {"attempt_id": "att-review-1", "contract_status": "current", "status": "done"},
+            {"attempt_id": "att-review-2", "contract_status": "current", "status": "running"},
+        ])
+        text = _joined(render._route_card_l2(second_started, 160))
+        self.assertIn("execute(R2)", text)
+        self.assertIn("impl-review(R2)", text)
+
+        payload = route.summary([second_started])[0]
+        rounds = {node["id"]: node.get("attempt_round") for node in payload["nodes"]}
+        self.assertEqual(rounds, {"execute": 2, "impl-review": 2})
+
+    def test_retry_round_waits_for_start_evidence(self):
+        registered_only = self._retry_view(review_history=[
+            {"attempt_id": "att-review-1", "contract_status": "current", "status": "done"},
+            {"attempt_id": "att-review-2", "contract_status": "current", "status": "open"},
+        ])
+        self.assertIn("impl-review(R1)", _joined(render._route_card_l2(registered_only, 160)))
+
+        spawned = self._retry_view(review_history=[
+            {"attempt_id": "att-review-1", "contract_status": "current", "status": "done"},
+            {"attempt_id": "att-review-2", "contract_status": "current", "status": "open", "pid": 42},
+        ])
+        self.assertIn("impl-review(R2)", _joined(render._route_card_l2(spawned, 160)))
+
+    def test_parallel_review_keeps_round_and_width_in_one_marker(self):
+        view = self._retry_view(review_history=[
+            {"attempt_id": "att-review-1", "contract_status": "current", "status": "done"},
+            {"attempt_id": "att-review-2", "contract_status": "current", "status": "running"},
+        ])
+        anchor = next(node for node in view["nodes"] if node["id"] == "impl-review")
+        anchor["parallel_group"] = "impl-review"
+        alternative = dict(anchor)
+        alternative.update({
+            "id": "impl-review-alternative",
+            "parallel_group": "impl-review",
+            "attempt_round": None,
+        })
+        view["nodes"].append(alternative)
+
+        collapsed = {"nodes": render._collapse_parallel_nodes(view["nodes"])}
+        text = _joined(render._route_card_l2(collapsed, 160))
+        self.assertIn("impl-review(R2·2-way)", text)
+        self.assertNotIn("impl-review(2-way)(R2)", text)
+
     def test_t3_1_process_view_off_matches_group_view(self):
         job = DispatchJob(key="code", slug="plain-job", cwd="/x", liveness="working", depth=1)
         render.set_process_view(False)
