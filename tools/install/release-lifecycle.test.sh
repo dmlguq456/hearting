@@ -299,6 +299,18 @@ assert same["status"] == "up-to-date"
 assert len(activation_calls) == 1
 
 fleet_launcher = d.bin_dir() / "fleet"
+prior_bundle = Path(os.environ["CODEX_HOME"]) / ".harness/bundles/prior/source"
+prior_fleet = prior_bundle / "tools/fleet/fleet.sh"
+prior_fleet.parent.mkdir(parents=True)
+prior_fleet.write_text("#!/bin/sh\n")
+fleet_launcher.unlink()
+fleet_launcher.symlink_to(prior_fleet)
+same = d.update()
+assert same["status"] == "repaired"
+assert Path(os.readlink(fleet_launcher)) == (
+    d.current_path() / "tools/fleet/fleet.sh"
+)
+
 fleet_launcher.unlink()
 fleet_launcher.symlink_to(tmp / "foreign/fleet")
 try:
@@ -328,7 +340,7 @@ for runtime, home in runtime_homes.items():
         "source_root": str(linked if runtime == "claude" else old_root),
     }
     path = home / ".harness/activation.json"
-    path.parent.mkdir(parents=True)
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(state))
 
 make_release("v1.1.0")

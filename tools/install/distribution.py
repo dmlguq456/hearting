@@ -593,6 +593,37 @@ def _launcher_destination(path: Path) -> Optional[Path]:
         return None
 
 
+def _managed_runtime_bundle_roots() -> set[Path]:
+    """Return immutable runtime bundle sources owned by this installer.
+
+    Activation advances before shared launchers are repointed, so the launcher
+    can legitimately still reference the immediately previous bundle.  Scan
+    the installer-owned bundle containers instead of trusting only the current
+    activation record.  Symlinked bundle entries and source roots remain
+    foreign.
+    """
+    roots = set()
+    for runtime in RUNTIMES:
+        bundles = _runtime_home(runtime) / ".harness" / "bundles"
+        try:
+            entries = list(bundles.iterdir())
+        except OSError:
+            continue
+        for entry in entries:
+            source = entry / "source"
+            try:
+                if (
+                    not entry.is_symlink()
+                    and entry.is_dir()
+                    and not source.is_symlink()
+                    and source.is_dir()
+                ):
+                    roots.add(source.resolve(strict=False))
+            except OSError:
+                continue
+    return roots
+
+
 def _known_tool_launcher_roots(state: Optional[dict]) -> set[Path]:
     roots = {_home() / "hearting", _home() / "agent_setting"}
     if state and state.get("release_root"):
@@ -605,6 +636,7 @@ def _known_tool_launcher_roots(state: Optional[dict]) -> set[Path]:
         source = activation.get("source_root") if activation else None
         if source and Path(source).is_absolute():
             roots.add(Path(source))
+    roots.update(_managed_runtime_bundle_roots())
     return {root.resolve(strict=False) for root in roots}
 
 
