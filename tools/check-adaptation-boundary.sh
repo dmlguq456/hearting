@@ -23,7 +23,7 @@ fail=0
 # reach those hooks at $ROOT/hooks/* (adapters/codex/bin/preflight.sh), where
 # $ROOT/utilities/memory-store.sh already resolves. A per-adapter copy would
 # assert a projection surface nothing loads.
-SHARED_UTILITY_DEFERRED="artifact-quiescence.py artifact-knowledge-feed.py cairn-artifact-read.sh cairn-artifact-read.ts dispatch-readiness.py verification-background-lease.py memory-store.sh"
+SHARED_UTILITY_DEFERRED="artifact-quiescence.py artifact-knowledge-feed.py cairn-artifact-read.sh cairn-artifact-read.ts dispatch-readiness.py verification-background-lease.py memory-store.sh compute-hosts"
 
 say() {
   printf '%s\n' "$*"
@@ -3012,7 +3012,7 @@ check_claude_tool_projection() {
     rel=${p#tools/}
     adapter_p=adapters/claude/tools/$rel
     case "$rel" in
-      generate.py|harness_manifest.py|sync-skill-invocation-policy.py|sync-entry-skill-layer.py|entry-skill-layer.test.py|generated-projections.test.sh|sync-missing-projections.sh|sync-missing-projections.py|context-footprint-baseline.json|install/projection-completeness.test.sh|release|release/*|render-landing.py|render-fleet-svg.py|lab-config-provenance.py|lab_config_provenance.test.py|git-hooks|git-hooks/*)
+      generate.py|harness_manifest.py|sync-skill-invocation-policy.py|sync-entry-skill-layer.py|entry-skill-layer.test.py|generated-projections.test.sh|sync-missing-projections.sh|sync-missing-projections.py|context-footprint-baseline.json|install/projection-completeness.test.sh|install/test_compute_hosts_launcher.py|release|release/*|render-landing.py|render-fleet-svg.py|lab-config-provenance.py|lab_config_provenance.test.py|git-hooks|git-hooks/*)
         # Harness-development, profile acceptance, repository release, Git
         # maintainer hooks, and GitHub Pages docs automation tools are
         # intentionally not runtime projections.

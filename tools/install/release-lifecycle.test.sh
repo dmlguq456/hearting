@@ -83,6 +83,8 @@ required = {
     "hearting/tools/install/harness.sh": "#!/bin/sh\n",
     "hearting/tools/install/installer.py": "# fixture\n",
     "hearting/tools/install/distribution.py": "# fixture\n",
+    "hearting/utilities/compute-hosts": "#!/bin/sh\n",
+    "hearting/utilities/compute-hosts.py": "#!/usr/bin/env python3\n",
     "hearting/tools/fleet/fleet.sh": "#!/bin/sh\n",
     "hearting/tools/memory/mem.py": "#!/usr/bin/env python3\n",
     "hearting/tools/memory/protocol_v2.py": "#!/usr/bin/env python3\n",
@@ -99,7 +101,7 @@ def make_release(version, attack=None, wrong_checksum=False):
         for name, text in files.items():
             payload = text.encode()
             info = tarfile.TarInfo(name)
-            info.mode = 0o755 if name.endswith(".sh") else 0o644
+            info.mode = 0o755 if name.endswith(".sh") or name.endswith("/compute-hosts") else 0o644
             info.size = len(payload)
             bundle.addfile(info, io.BytesIO(payload))
         if attack == "traversal":
@@ -174,6 +176,9 @@ for name, relative in d.TOOL_LAUNCHERS:
     path = d.bin_dir() / name
     assert path.is_symlink()
     assert Path(os.readlink(path)) == d.current_path() / relative
+compute_hosts = d.bin_dir() / "compute-hosts"
+assert compute_hosts.is_symlink() and os.access(compute_hosts, os.X_OK)
+assert Path(os.readlink(compute_hosts)) == d.current_path() / "utilities/compute-hosts"
 assert d.is_managed()
 service, timer = d._systemd_paths()
 assert service.is_file() and timer.is_file()

@@ -251,6 +251,17 @@ installer also drops a `fleet` launcher into `~/.local/bin` (put that dir on
 your Git Bash `PATH`) so `fleet` works as a one-word command. Everything else
 (hooks, memory, statusline, skills) runs under Git Bash.
 
+## Common operator CLI — `compute-hosts`
+
+The installer places one shared `compute-hosts` launcher in
+`~/.local/bin`; Claude, Codex, and OpenCode use the same entry. It resolves the
+active pinned Hearting root and delegates to `utilities/compute-hosts.py`.
+Choose a host explicitly. The installer never creates or edits the user-owned
+`${XDG_CONFIG_HOME:-$HOME/.config}/hearting/compute-hosts.yaml`, edits shell
+startup files, schedules GPU work, or dispatches remote agents. Foreign PATH
+files and symlinks are preserved; full uninstall removes only the owned shared
+link, while partial runtime uninstall retains it.
+
 ## Cross-harness CLI — `fleet`
 
 `fleet` is a cross-harness live dashboard under `tools/fleet/`. Its observation

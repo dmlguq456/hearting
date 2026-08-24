@@ -1,0 +1,32 @@
+#!/usr/bin/env sh
+# Portable PATH entry for the explicit compute-hosts operator CLI.
+set -eu
+
+SELF=$0
+while [ -L "$SELF" ]; do
+  LINK=$(readlink "$SELF")
+  case "$LINK" in
+    /*) SELF=$LINK ;;
+    *) SELF=$(dirname -- "$SELF")/$LINK ;;
+  esac
+done
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$SELF")" && pwd -P)
+AGENT_HOME=$(
+  AGENT_HOME="${AGENT_HOME:-}" \
+  CLAUDE_HOME="${CLAUDE_HOME:-}" \
+  XDG_DATA_HOME="${XDG_DATA_HOME:-}" \
+  HOME="$HOME" \
+  "$SCRIPT_DIR/agent-home.sh"
+)
+
+if [ ! -f "$AGENT_HOME/core/CORE.md" ] || [ ! -f "$AGENT_HOME/utilities/compute-hosts.py" ]; then
+  printf '%s\n' "compute-hosts: active Hearting root is invalid: $AGENT_HOME" >&2
+  exit 1
+fi
+
+if ! command -v python3 >/dev/null 2>&1; then
+  printf '%s\n' "compute-hosts: python3 is required" >&2
+  exit 127
+fi
+
+exec python3 "$AGENT_HOME/utilities/compute-hosts.py" "$@"

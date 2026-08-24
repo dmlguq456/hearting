@@ -103,7 +103,7 @@ def build_parser():
     sub.add_parser("status", parents=[common], help="Summarize installation channels, versions, and drift")
 
     p_uninstall = sub.add_parser("uninstall", parents=[common], help="Remove only manifest-owned files")
-    p_uninstall.add_argument("target", nargs="?", choices=RUNTIMES, default=None)
+    p_uninstall.add_argument("target", nargs="?", choices=[*RUNTIMES, "all"], default=None)
 
     # Memory exchange policy: one portable file every adapter reads, plus the
     # one-shot join that turns a fresh store into a member of that exchange.
@@ -402,6 +402,28 @@ def cmd_verify(args):
     })
     if not bundle_config["ok"]:
         ok = False
+    launcher = bootstrap.compute_hosts_status()
+    launcher_ok = launcher["status"] == "healthy"
+    all_checks.append({
+        "id": "bootstrap.launcher.compute-hosts",
+        "ok": launcher_ok,
+        "detail": launcher["status"] + ": " + launcher["target"],
+    })
+    if launcher_ok:
+        try:
+            smoke = subprocess.run(
+                [launcher["target"], "--help"],
+                capture_output=True, text=True, timeout=10,
+                env={**os.environ, "COMPUTE_HOSTS_CONFIG": str(Path(os.devnull))},
+            )
+            smoke_ok = smoke.returncode == 0
+            smoke_detail = "forwarding smoke passed" if smoke_ok else (smoke.stderr or "smoke failed").strip()
+        except (OSError, subprocess.SubprocessError) as exc:
+            smoke_ok, smoke_detail = False, str(exc)
+        all_checks.append({"id": "bootstrap.launcher.compute-hosts-smoke", "ok": smoke_ok, "detail": smoke_detail})
+        ok = ok and smoke_ok
+    else:
+        ok = False
     lines = [("✓" if c["ok"] else "✗") + f" {c['id']} {c['detail']}" for c in all_checks]
     return {"runtime": runtimes, "channel": "plugin" if args.plugin else "dev", "checks": all_checks,
             "drift": [], "exit": EXIT_OK if ok else EXIT_VERIFY_FAIL, "lines": lines}
@@ -513,6 +535,21 @@ def cmd_update(args):
         else:
             checks.append({"id": "update.drift", "ok": True, "detail": "no drift"})
             exit_code = EXIT_OK
+        launcher_results = bootstrap.install_launchers(dry_run=args.dry_run)
+        for launcher in launcher_results:
+            if launcher["name"] != "compute-hosts":
+                continue
+            status = launcher["status"]
+            lines.append(f"bootstrap: launcher compute-hosts -> {status}" +
+                         (f" ({launcher['detail']})" if launcher.get("detail") else ""))
+            launcher_ok = status != "skipped-collision"
+            checks.append({
+                "id": "bootstrap.launcher.compute-hosts",
+                "ok": launcher_ok,
+                "detail": launcher.get("detail", status),
+            })
+            if not launcher_ok:
+                exit_code = EXIT_FAIL
         return {"runtime": runtimes, "channel": "plugin" if args.plugin else "dev", "checks": checks,
                 "drift": drift, "exit": exit_code, "lines": lines}
 
@@ -741,6 +778,29 @@ def cmd_uninstall(args):
             }
         )
 
+    full = (
+        args.scope == "global"
+        and (
+            getattr(args, "target", None) == "all"
+            or "all" in (args.runtimes or [])
+            or set(runtimes) == set(RUNTIMES)
+        )
+    )
+    if full and args.scope == "global":
+        launcher_result = bootstrap.uninstall_compute_hosts(dry_run=args.dry_run)
+        lines.append("uninstall: common compute-hosts launcher — " + launcher_result["status"])
+        checks.append({
+            "id": "bootstrap.launcher.compute-hosts",
+            "ok": launcher_result["status"] != "preserved-foreign",
+            "detail": launcher_result["status"],
+        })
+    else:
+        lines.append("uninstall: common compute-hosts launcher — retained for other runtimes")
+        checks.append({
+            "id": "bootstrap.launcher.compute-hosts",
+            "ok": True,
+            "detail": "retained for partial runtime uninstall",
+        })
     return {"runtime": runtimes, "channel": "dev", "checks": checks, "drift": [], "exit": EXIT_OK, "lines": lines}
 
 
