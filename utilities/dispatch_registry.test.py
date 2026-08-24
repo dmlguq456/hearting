@@ -5,6 +5,7 @@ from unittest import mock
 
 ROOT=Path(__file__).resolve().parents[1]; SCRIPT=ROOT/"utilities/dispatch-registry.py"
 sys.path[:0]=[str(ROOT),str(ROOT/"utilities")]
+import dispatch_contract as D  # noqa: E402
 from dispatch_contract import (attempt_process_quiescence,  # noqa: E402
                                attempt_tagged_descendants,
                                observed_attempt_liveness,
@@ -40,6 +41,10 @@ class RegistryTest(unittest.TestCase):
  def invoke(self,*args):
   currentize_registry(self.jobs)
   return subprocess.run([sys.executable,str(SCRIPT),*args,"--jobs",str(self.jobs),"--agent-home",str(self.base)],capture_output=True,text=True)
+ def load_registry_module(self,suffix):
+  spec=importlib.util.spec_from_file_location(f"dispatch_registry_{suffix}",SCRIPT)
+  module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+  return module
  def test_current_filters_before_totals(self):
   r=self.invoke("current","--route","r1");self.assertEqual(r.returncode,0,r.stdout+r.stderr);data=json.loads(r.stdout)
   self.assertEqual(data["total"],2);self.assertEqual({x["slug"] for x in data["rows"]},{"active","dead"})
@@ -779,6 +784,221 @@ class RegistryTest(unittest.TestCase):
   self.assertNotIn("completed-marker",text)
   self.assertNotIn("group_reap_proof",text)
   self.assertNotIn("launch_outcome",text)
+  self.assertNotIn("automatic-receipt-unavailable-v1",text)
+  self.assertNotIn("receipt_state=",text)
+  self.assertNotIn("marker_state=",text)
+
+ def cancellation_row(self,attempt,portable=False,extra=""):
+  metadata={
+   "route_id":"rt-recovery","route_hash":"sha256:"+"4"*64,
+   "route_node":"execute","attempt_id":attempt,
+   "pid":"41","pid_start":"900","pgid":"41",
+   "pid_scope":"namespace-local","pid_observer_ns":"pid:[401]",
+   "pid_ns":"pid:[401]","launch_lifecycle":"detached",
+  }
+  if portable:
+   metadata.update({
+    "launch_outcome":"governed-process-group-drained",
+    "group_reap_proof":D.GROUP_REAP_PROOF,"group_reap_pgid":"41",
+    "attempt_descendant_proof":D.ATTEMPT_DESCENDANT_PROOF,
+    "attempt_descendant_observer_ns":"pid:[401]",
+   })
+  pipe=CURRENT_ATTEMPT_CONTRACT+","+",".join(
+   f"{key}={value}" for key,value in metadata.items())+extra
+  return f"2026-08-25T00:00:00Z\topen\t/r\t/w\texecute\t{pipe}\n"
+
+ def cancellation_args(self,attempt,apply=True):
+  route_file=self.base/"route.json"
+  route_file.write_text(json.dumps({
+   "route_id":"rt-recovery","route_hash":"sha256:"+"4"*64,
+   "launch_compatibility_tuple":{
+    "jobs_path":{"path":str(self.jobs.resolve())},
+   },
+  }))
+  return types.SimpleNamespace(
+   session=None,route=None,node=None,attempt=attempt,job=None,all=False,
+   apply=apply,jobs=self.jobs,agent_home=self.base,now=time.time(),
+   cancellation_wait=0.0,route_file=route_file,
+  )
+
+ def test_automatic_cancel_unproven_is_blocked_without_any_mutation(self):
+  module=self.load_registry_module("automatic_unproven")
+  attempt="att-automatic-unproven"
+  self.jobs.write_text(self.cancellation_row(attempt))
+  before=self.jobs.read_bytes()
+  populated=D.ProcessGroupObservation("populated",((41,"900","S"),))
+  with mock.patch.object(module,"attempt_tagged_descendants",return_value=D.ProcessGroupObservation("empty")), \
+       mock.patch.object(D,"process_group_observation",return_value=populated), \
+       mock.patch.object(D,"attempt_tagged_descendants",return_value=D.ProcessGroupObservation("empty")), \
+       mock.patch.object(D,"attempt_scan_namespace_authority",return_value=True), \
+       contextlib.redirect_stdout(io.StringIO()) as stream:
+   self.assertEqual(module.automatic_cancel_receiptless(
+    module.read_rows(self.jobs),self.cancellation_args(attempt)),0)
+  record=json.loads(stream.getvalue())
+  decision=record["decisions"][0]
+  self.assertEqual(decision["reason"],"cancellation-quiescence-unproven")
+  self.assertEqual(decision["derived_gate"],"BLOCKED")
+  self.assertEqual(decision["retry_launch"],0)
+  self.assertEqual(decision["row_mutated"],0)
+  self.assertEqual(self.jobs.read_bytes(),before)
+
+ def test_automatic_exact_and_portable_teardown_seal_distinct_receipts(self):
+  module=self.load_registry_module("automatic_proven")
+  for portable in (False,True):
+   with self.subTest(portable=portable):
+    attempt=f"att-automatic-{'portable' if portable else 'exact'}"
+    self.jobs.write_text(self.cancellation_row(attempt,portable=portable))
+    observation=(D.ProcessGroupObservation("unverifiable",reason="foreign")
+                 if portable else D.ProcessGroupObservation("empty"))
+    with mock.patch.object(module,"attempt_tagged_descendants",return_value=D.ProcessGroupObservation("empty")), \
+         mock.patch.object(D,"process_group_observation",return_value=observation), \
+         mock.patch.object(D,"attempt_tagged_descendants",return_value=observation), \
+         mock.patch.object(D,"attempt_scan_namespace_authority",return_value=not portable), \
+         contextlib.redirect_stdout(io.StringIO()) as stream:
+     self.assertEqual(module.automatic_cancel_receiptless(
+      module.read_rows(self.jobs),self.cancellation_args(attempt)),0)
+    record=json.loads(stream.getvalue())
+    self.assertEqual(record["closed"],1,record)
+    self.assertEqual(
+     record["decisions"][0]["proof_source"],
+     "authenticated-namespace-portable" if portable else "exact-teardown")
+    fields=self.jobs.read_text().strip().split("\t",5)
+    metadata=D.parse_registry_metadata(fields[5])
+    self.assertEqual(fields[1],"done")
+    self.assertEqual(metadata["failure_class"],"cancelled")
+    self.assertEqual(metadata["note"],"cancelled-receipt-unavailable")
+    self.assertEqual(metadata["classifier_source"],"automatic-receipt-unavailable-v1")
+    self.assertEqual(metadata["reconcile_reason"],"automatic-cancelled-receipt-unavailable")
+    self.assertEqual(metadata["receipt_state"],"unavailable")
+    self.assertEqual(metadata["marker_state"],"absent")
+    self.assertEqual(
+     metadata["cancellation_quiescence_receipt"],
+     D.ATTEMPT_CANCELLATION_QUIESCENCE_RECEIPT)
+    self.assertNotEqual(metadata["failure_class"],"blocked")
+
+ def test_legacy_receiptless_gate_admits_real_exact_and_portable_quiescence(self):
+  module=self.load_registry_module("legacy_gate_real_quiescence")
+  attempt="att-real-quiescence"
+  self.jobs.write_text(self.cancellation_row(attempt))
+  row=module.read_rows(self.jobs)[0]
+  args=self.cancellation_args(attempt)
+  for reason in ("exact-process-quiescent","portable-teardown-receipt"):
+   with self.subTest(reason=reason), \
+        mock.patch.object(module,"_marker_backed_repair",return_value=False), \
+        mock.patch.object(module,"inspect_terminal_attempt",return_value={"state":"absent"}), \
+        mock.patch.object(module,"attempt_tagged_descendants",return_value=D.ProcessGroupObservation("empty")), \
+        mock.patch.object(module,"attempt_process_quiescence",return_value=D.ProcessQuiescence("quiescent",reason)), \
+        mock.patch.object(module,"classify_attempt_evidence",return_value=None):
+    self.assertEqual(module._receiptless_namespace_cancel_reason(row,args),"")
+
+ def test_false_evidence_matrix_never_creates_pass_or_terminal_class_mix(self):
+  module=self.load_registry_module("automatic_false_matrix")
+  attempt="att-automatic-false-matrix"
+  log=self.base/"missing-envelope.jsonl";log.write_text(
+   json.dumps({"type":"system","subtype":"init"})+"\n")
+  self.jobs.write_text(self.cancellation_row(
+   attempt,extra=(
+    f",log_file={log},summary_owner=dispatch-v1,summary_state=frozen,"
+    "heartbeat=stale,parent_attempt_id=att-parent-live,cancellation_intent=1"
+   )))
+  heartbeat=self.base/".dispatch/heartbeats"/f"{attempt}.json"
+  heartbeat.parent.mkdir(parents=True,exist_ok=True)
+  heartbeat.write_text(json.dumps({
+   "attempt_id":attempt,"route_id":"rt-recovery","route_node":"execute",
+   "phase":"tool","sequence":1,"updated_at":time.time()-3600,
+  }))
+  before=self.jobs.read_bytes()
+  populated=D.ProcessGroupObservation("populated",((41,"901","S"),))
+  with mock.patch.object(module,"attempt_tagged_descendants",return_value=D.ProcessGroupObservation("empty")), \
+       mock.patch.object(D,"process_group_observation",return_value=populated), \
+       mock.patch.object(D,"attempt_tagged_descendants",return_value=D.ProcessGroupObservation("empty")), \
+       mock.patch.object(D,"attempt_scan_namespace_authority",return_value=False), \
+       contextlib.redirect_stdout(io.StringIO()) as stream:
+   module.automatic_cancel_receiptless(
+    module.read_rows(self.jobs),self.cancellation_args(attempt))
+  decision=json.loads(stream.getvalue())["decisions"][0]
+  self.assertEqual(decision["reason"],"cancellation-quiescence-unproven")
+  self.assertEqual(self.jobs.read_bytes(),before)
+  text=self.jobs.read_text()
+  self.assertNotIn("failure_class=cancelled",text)
+  self.assertNotIn("failure_class=blocked",text)
+  self.assertNotIn("dead-missing-result",text)
+  self.assertNotIn("verdict=PASS",text)
+
+ def test_recover_receiptless_claims_once_and_never_spawns(self):
+  module=self.load_registry_module("automatic_recovery")
+  attempt="att-automatic-recovery"
+  self.jobs.write_text(self.cancellation_row(attempt))
+  empty=D.ProcessGroupObservation("empty")
+  args=self.cancellation_args(attempt)
+  with mock.patch.object(module,"attempt_tagged_descendants",return_value=empty), \
+       mock.patch.object(D,"process_group_observation",return_value=empty), \
+       mock.patch.object(D,"attempt_tagged_descendants",return_value=empty), \
+       mock.patch.object(D,"attempt_scan_namespace_authority",return_value=True), \
+       contextlib.redirect_stdout(io.StringIO()):
+   module.automatic_cancel_receiptless(module.read_rows(self.jobs),args)
+  budget=types.SimpleNamespace(retry_slots=1,source="bound-route")
+  outputs=[]
+  with mock.patch.object(module,"resolve_continuation_budget",return_value=budget):
+   for _ in range(2):
+    stream=io.StringIO()
+    with contextlib.redirect_stdout(stream):
+     module.recover_receiptless(module.read_rows(self.jobs),args)
+    outputs.append(json.loads(stream.getvalue()))
+  self.assertEqual(outputs[0]["claimed"],1)
+  self.assertEqual(outputs[0]["spawned"],0)
+  self.assertEqual(outputs[1]["retry_attempt_id"],outputs[0]["retry_attempt_id"])
+  metadata=D.parse_registry_metadata(self.jobs.read_text().strip().split("\t",5)[5])
+  self.assertEqual(metadata["retry_ordinal"],"1")
+  self.assertEqual(metadata["failure_class"],"cancelled")
+
+ def test_recover_receiptless_exhaustion_replays_without_recancelling(self):
+  module=self.load_registry_module("automatic_recovery_exhausted")
+  attempt="att-automatic-exhausted"
+  self.jobs.write_text(self.cancellation_row(attempt))
+  empty=D.ProcessGroupObservation("empty")
+  args=self.cancellation_args(attempt)
+  with mock.patch.object(module,"attempt_tagged_descendants",return_value=empty), \
+       mock.patch.object(D,"process_group_observation",return_value=empty), \
+       mock.patch.object(D,"attempt_tagged_descendants",return_value=empty), \
+       mock.patch.object(D,"attempt_scan_namespace_authority",return_value=True), \
+       contextlib.redirect_stdout(io.StringIO()):
+   module.automatic_cancel_receiptless(module.read_rows(self.jobs),args)
+  budget=types.SimpleNamespace(retry_slots=0,source="bound-route")
+  outputs=[]
+  with mock.patch.object(module,"resolve_continuation_budget",return_value=budget), \
+       mock.patch.object(module,"_automatic_receiptless_result") as recancel:
+   for _ in range(2):
+    stream=io.StringIO()
+    with contextlib.redirect_stdout(stream):
+     module.recover_receiptless(module.read_rows(self.jobs),args)
+    outputs.append(json.loads(stream.getvalue()))
+  recancel.assert_not_called()
+  self.assertEqual(outputs[0]["reason"],"receipt-unavailable-retry-exhausted")
+  self.assertEqual(outputs[1]["recovery_id"],outputs[0]["recovery_id"])
+  metadata=D.parse_registry_metadata(self.jobs.read_text().strip().split("\t",5)[5])
+  self.assertEqual(metadata["failure_class"],"blocked")
+  self.assertEqual(metadata["note"],"receipt-unavailable-retry-exhausted")
+  self.assertNotIn("retry_attempt_id",metadata)
+
+ def test_recover_receiptless_rejects_jobs_not_sealed_by_route(self):
+  module=self.load_registry_module("automatic_recovery_wrong_jobs")
+  attempt="att-automatic-wrong-jobs"
+  self.jobs.write_text(self.cancellation_row(attempt))
+  args=self.cancellation_args(attempt)
+  args.route_file.write_text(json.dumps({
+   "route_id":"rt-recovery","route_hash":"sha256:"+"4"*64,
+   "launch_compatibility_tuple":{
+    "jobs_path":{"path":str(self.base/"another-jobs.log")},
+   },
+  }))
+  before=self.jobs.read_bytes();stream=io.StringIO()
+  with contextlib.redirect_stdout(stream):
+   module.recover_receiptless(module.read_rows(self.jobs),args)
+  result=json.loads(stream.getvalue())
+  self.assertEqual(result["reason"],"recovery-route-jobs-mismatch")
+  self.assertEqual(result["claimed"],0)
+  self.assertEqual(self.jobs.read_bytes(),before)
 
  def test_receiptless_cancel_refuses_fresh_exact_heartbeat(self):
   attempt="att-receiptless-heartbeat"

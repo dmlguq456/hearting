@@ -19,7 +19,9 @@ import uuid
 ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT), str(ROOT / "utilities")]
 from tools.fleet.model import ATTEMPT_CLASSIFIER_SOURCE, classify_attempt_evidence  # noqa: E402
-from dispatch_contract import (ARTIFACT_PROOF_RECEIPT, DispatchContractError,
+from dispatch_contract import (ARTIFACT_PROOF_RECEIPT,
+                               AUTOMATIC_RECEIPTLESS_CLASSIFIER,
+                               DispatchContractError,
                                PARENT_EXTINCTION_TERMINAL_STATUSES,
                                agent_home_equivalent,
                                annotate_attempt_row_if,
@@ -35,13 +37,18 @@ from dispatch_contract import (ARTIFACT_PROOF_RECEIPT, DispatchContractError,
                                process_observation,
                                process_state,
                                process_start_ticks,
+                               prove_attempt_quiescence,
                                observed_attempt_liveness,
                                post_exit_receipt_reason,
+                               recovery_id,
                                dispatch_state_roots,
+                               claim_recovery_retry,
                                reconcile_local_registry, resolve_agent_home,
                                resolve_parent_extinction,
+                               seal_cancellation_quiescence_receipt,
                                signal_exact_process_group,
                                validate_attempt_metadata)  # noqa: E402
+from dispatch_continuation_budget import resolve_continuation_budget  # noqa: E402
 from codex_dispatch_terminal import (  # noqa: E402
     inspect_terminal_attempt,
     inspect_terminal_log,
@@ -866,7 +873,7 @@ def _receiptless_namespace_cancel_reason(row, args):
     process = attempt_process_quiescence(meta, terminal_receipt=True)
     if process.state == "live":
         return "process-alive"
-    if process.state != "unverifiable":
+    if process.state not in {"quiescent", "unverifiable"}:
         return "receiptless-namespace-not-proved"
     exact = classify_attempt_evidence(
         proc_inputs(row, args.agent_home, args.jobs), args.now
@@ -1134,6 +1141,246 @@ def cancel_receiptless_namespace(rows, args):
         "attempted": len(selected),
         "closed": int(closed),
         "decisions": [decision],
+    }, sort_keys=True))
+    return 0
+
+
+def _automatic_receiptless_result(rows, args):
+    """Prove and close one receiptless cancellation without projecting PASS."""
+
+    selected = [row for row in rows if matches(row, args)]
+    row = selected[0] if len(selected) == 1 else None
+    reason = "attempt-row-not-unique" if row is None else _receiptless_namespace_cancel_reason(row, args)
+    proof = None
+    receipt_digest = ""
+    closed = False
+    revalidated = None
+    if not reason:
+        proof = prove_attempt_quiescence(
+            row["meta"], max_wait_seconds=args.cancellation_wait
+        )
+        if not proof.proven:
+            reason = "cancellation-quiescence-unproven"
+    if args.apply and row is not None and not reason:
+        attempt_id = row["meta"].get("attempt_id", "")
+        try:
+            receipt_digest = seal_cancellation_quiescence_receipt(
+                args.jobs, attempt_id, proof
+            )
+        except DispatchContractError as exc:
+            reason = exc.reason
+        if not reason:
+            def still_proven(fields):
+                fresh = {
+                    "status": fields[1],
+                    "repo": fields[2],
+                    "worktree": fields[3],
+                    "slug": fields[4],
+                    "meta": parse_registry_metadata(fields[5]),
+                    "attempt_contract_status": "current",
+                }
+                if _receiptless_namespace_cancel_reason(fresh, args):
+                    return False
+                current = prove_attempt_quiescence(
+                    fresh["meta"], max_wait_seconds=args.cancellation_wait
+                )
+                return bool(
+                    current.proven
+                    and proof is not None
+                    and current.binding_digest == proof.binding_digest
+                )
+
+            closed = close_attempt_row_if(
+                args.jobs,
+                attempt_id,
+                "cancelled-receipt-unavailable",
+                still_proven,
+                evidence={
+                    "failure_class": "cancelled",
+                    "note": "cancelled-receipt-unavailable",
+                    "reconcile_reason": "automatic-cancelled-receipt-unavailable",
+                    "classifier_source": AUTOMATIC_RECEIPTLESS_CLASSIFIER,
+                    "receipt_state": "unavailable",
+                    "marker_state": "absent",
+                },
+            )
+            revalidated = bool(closed)
+            if not closed:
+                reason = "cancellation-quiescence-unproven"
+    decision = {
+        "attempt_id": row["meta"].get("attempt_id") if row else args.attempt,
+        "eligible": bool(row is not None and not reason),
+        "reason": reason or "automatic-cancelled-receipt-unavailable",
+        "proposed_note": "cancelled-receipt-unavailable",
+        "derived_gate": "BLOCKED",
+        "retry_launch": 0,
+        "marker_written": 0,
+        "row_mutated": int(closed),
+        "proof_source": proof.source if proof and proof.proven else None,
+        "receipt_digest": receipt_digest or None,
+        "revalidated": revalidated,
+        "closed": closed,
+    }
+    return {
+        "at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "apply": args.apply,
+        "classifier_source": AUTOMATIC_RECEIPTLESS_CLASSIFIER,
+        "attempted": len(selected),
+        "closed": int(closed),
+        "decisions": [decision],
+    }
+
+
+def automatic_cancel_receiptless(rows, args):
+    record = _automatic_receiptless_result(rows, args)
+    print(json.dumps(record, sort_keys=True))
+    return 0
+
+
+def recover_receiptless(rows, args):
+    """Seal and claim one recovery retry; registration and spawn stay external."""
+
+    try:
+        route = json.loads(args.route_file.read_text(encoding="utf-8"))
+        launch = route.get("launch_compatibility_tuple")
+        jobs_binding = (
+            (launch.get("jobs_path") or {}).get("path")
+            if isinstance(launch, dict)
+            else None
+        )
+    except (OSError, ValueError):
+        jobs_binding = None
+    if not isinstance(jobs_binding, str) or not jobs_binding:
+        print(json.dumps({
+            "apply": args.apply,
+            "attempted": 0,
+            "claimed": 0,
+            "spawned": 0,
+            "reason": "recovery-route-jobs-binding-missing",
+        }, sort_keys=True))
+        return 0
+    if Path(jobs_binding).resolve(strict=False) != args.jobs.resolve(strict=False):
+        print(json.dumps({
+            "apply": args.apply,
+            "attempted": 0,
+            "claimed": 0,
+            "spawned": 0,
+            "reason": "recovery-route-jobs-mismatch",
+        }, sort_keys=True))
+        return 0
+
+    selected = [row for row in rows if matches(row, args)]
+    if len(selected) != 1:
+        print(json.dumps({
+            "apply": args.apply,
+            "attempted": len(selected),
+            "claimed": 0,
+            "spawned": 0,
+            "reason": "attempt-row-not-unique",
+        }, sort_keys=True))
+        return 0
+    row = selected[0]
+    metadata = row["meta"]
+    existing_recovery = bool(
+        metadata.get("recovery_id")
+        and (
+            metadata.get("retry_ordinal") == "1"
+            or metadata.get("note") == "receipt-unavailable-retry-exhausted"
+        )
+    )
+    already_cancelled = bool(
+        row["status"] == "done"
+        and metadata.get("classifier_source") == AUTOMATIC_RECEIPTLESS_CLASSIFIER
+        and metadata.get("cancellation_receipt_digest")
+        and (
+            metadata.get("failure_class") == "cancelled"
+            or existing_recovery
+        )
+    )
+    cancellation = None
+    if not already_cancelled:
+        cancellation = _automatic_receiptless_result(rows, args)
+        if not cancellation["closed"]:
+            decision = cancellation["decisions"][0]
+            print(json.dumps({
+                "apply": args.apply,
+                "attempted": 1,
+                "claimed": 0,
+                "spawned": 0,
+                "reason": decision["reason"],
+                "derived_gate": decision["derived_gate"],
+                "retry_launch": 0,
+                "cancellation": cancellation,
+            }, sort_keys=True))
+            return 0
+        rows = read_rows(args.jobs)
+        row = next(
+            item for item in rows
+            if item["meta"].get("attempt_id") == args.attempt
+        )
+        metadata = row["meta"]
+    if not args.apply:
+        print(json.dumps({
+            "apply": False,
+            "attempted": 1,
+            "claimed": 0,
+            "spawned": 0,
+            "reason": "apply-required-for-recovery-claim",
+        }, sort_keys=True))
+        return 0
+
+    source_route_id = metadata.get("route_id", "")
+    source_route_hash = metadata.get("route_hash", "")
+    node_or_group_leg = (
+        metadata.get("route_node") or metadata.get("batch_route_node") or ""
+    )
+    cancellation_digest = metadata.get("cancellation_receipt_digest", "")
+    recovery_identity = recovery_id(
+        source_route_id=source_route_id,
+        source_route_hash=source_route_hash,
+        node_or_group_leg=node_or_group_leg,
+        original_attempt_id=args.attempt,
+        cancellation_receipt_digest=cancellation_digest,
+    )
+    budget = resolve_continuation_budget(
+        route_file=args.route_file,
+        route_id=source_route_id,
+        route_hash=source_route_hash,
+        expected_cwd=row["worktree"],
+    )
+    remaining = budget.retry_slots
+    try:
+        claim = claim_recovery_retry(
+            args.jobs,
+            recovery_id=recovery_identity,
+            source_route_id=source_route_id,
+            source_route_hash=source_route_hash,
+            node_or_group_leg=node_or_group_leg,
+            original_attempt_id=args.attempt,
+            remaining_cascade=remaining,
+        )
+    except DispatchContractError as exc:
+        print(json.dumps({
+            "apply": True,
+            "attempted": 1,
+            "claimed": 0,
+            "spawned": 0,
+            "reason": exc.reason,
+            "recovery_id": recovery_identity,
+        }, sort_keys=True))
+        return 0
+    print(json.dumps({
+        "apply": True,
+        "attempted": 1,
+        "claimed": int(claim.state == "claimed"),
+        "spawned": 0,
+        "reason": claim.reason,
+        "recovery_id": claim.recovery_id,
+        "retry_ordinal": claim.retry_ordinal,
+        "retry_attempt_id": claim.retry_attempt_id or None,
+        "start_permitted": claim.start_permitted,
+        "remaining_cascade": remaining,
+        "budget_source": budget.source,
     }, sort_keys=True))
     return 0
 
@@ -1752,14 +1999,18 @@ def main(argv):
     p.add_argument("--node"); p.add_argument("--attempt"); p.add_argument("--job"); p.add_argument("--all", action="store_true")
     p.add_argument("--apply", action="store_true"); p.add_argument("--audit", type=Path); p.add_argument("--integration-ref")
     p.add_argument("--cancel-receiptless-namespace", action="store_true")
+    p.add_argument("--automatic-cancel-receiptless", action="store_true")
+    p.add_argument("--recover-receiptless", action="store_true")
     p.add_argument("--seal-artifact-proof-receipt", action="store_true")
+    p.add_argument("--route-file", type=Path)
     p.add_argument("--agent-home", type=Path); p.add_argument("--now", type=float, default=time.time(), help=argparse.SUPPRESS)
     p.add_argument("--pid", type=int); p.add_argument("--pid-start"); p.add_argument("--pid-scope")
     p.add_argument("--pid-observer-ns", help=argparse.SUPPRESS)
     p.add_argument("--cascade-grace", type=float, default=2.0, help=argparse.SUPPRESS)
     p.add_argument("--cascade-kill-wait", type=float, default=1.0, help=argparse.SUPPRESS)
+    p.add_argument("--cancellation-wait", type=float, default=2.0, help=argparse.SUPPRESS)
     args = p.parse_args(argv[1:]); args.agent_home = args.agent_home or resolve_agent_home()
-    if args.cascade_grace < 0 or args.cascade_kill_wait < 0:
+    if args.cascade_grace < 0 or args.cascade_kill_wait < 0 or args.cancellation_wait < 0:
         print("check=failed\nreason=invalid-cascade-timeout"); return 64
     if args.operation == "attempt-state":
         if args.pid is None or not args.pid_start:
@@ -1790,7 +2041,13 @@ def main(argv):
     args.jobs = args.jobs.resolve()
     if args.operation not in ("liveness", "orphan-scan") and not any((args.session, args.route, args.node, args.attempt, args.job)):
         print("check=failed\nreason=current-filter-required"); return 64
-    if args.cancel_receiptless_namespace and args.seal_artifact_proof_receipt:
+    recovery_modes = sum(bool(value) for value in (
+        args.cancel_receiptless_namespace,
+        args.automatic_cancel_receiptless,
+        args.recover_receiptless,
+        args.seal_artifact_proof_receipt,
+    ))
+    if recovery_modes > 1:
         print("check=failed\nreason=receipt-recovery-mode-conflict"); return 64
     if args.cancel_receiptless_namespace and (
         args.operation != "reconcile"
@@ -1804,6 +2061,19 @@ def main(argv):
         or any((args.session, args.route, args.node, args.job, args.all))
     ):
         print("check=failed\nreason=exact-attempt-seal-required"); return 64
+    if args.automatic_cancel_receiptless and (
+        args.operation != "reconcile"
+        or not args.attempt
+        or any((args.session, args.route, args.node, args.job, args.all))
+    ):
+        print("check=failed\nreason=exact-attempt-automatic-cancel-required"); return 64
+    if args.recover_receiptless and (
+        args.operation != "reconcile"
+        or not args.attempt
+        or not args.route_file
+        or any((args.session, args.route, args.node, args.job, args.all))
+    ):
+        print("check=failed\nreason=exact-attempt-recovery-required"); return 64
     rows = read_rows(args.jobs)
     if args.operation == "current":
         return emit_current(rows, args)
@@ -1817,6 +2087,10 @@ def main(argv):
         return repair_stale_row(rows, args)
     if args.cancel_receiptless_namespace:
         return cancel_receiptless_namespace(rows, args)
+    if args.automatic_cancel_receiptless:
+        return automatic_cancel_receiptless(rows, args)
+    if args.recover_receiptless:
+        return recover_receiptless(rows, args)
     if args.seal_artifact_proof_receipt:
         return seal_artifact_proof_receipt(rows, args)
     return reconcile(rows, args)
