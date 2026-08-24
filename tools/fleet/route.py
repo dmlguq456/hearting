@@ -523,15 +523,33 @@ def gate_mark(record, node_id, home=None, state_roots=None):
     return True
 
 
-def _route_state_roots(route_id, jobs, home=None):
+def _route_state_roots(route_id, jobs, home=None, node_evidence=None):
+    """Return route-owned state roots, with observer state only as a last fallback.
+
+    A standalone Fleet process may carry a different ``AGENT_DISPATCH_JOBS`` or
+    ``AGENT_HOME`` than the managed parent.  Once a live row or terminal evidence
+    names the registry that owns this route, mixing observer state back into the
+    lookup would make the gate verdict depend on who launched Fleet.
+    """
     roots = []
     for job in jobs or ():
         if getattr(job, "route_id", None) != route_id:
             continue
         launch_home = getattr(job, "_launch_home", None) or home or _completion_home()
         registry_path = getattr(job, "_registry_path", None)
-        roots.extend(_dispatch_state_roots(launch_home, jobs=registry_path))
-    roots.extend(_dispatch_state_roots(home))
+        candidates = _dispatch_state_roots(launch_home, jobs=registry_path)
+        # dispatch_state_roots deliberately includes an agent-home legacy read
+        # fallback. Once the row names an exact registry, that fallback belongs
+        # to the observer/launcher and is not route evidence.
+        roots.extend(candidates[:1] if registry_path else candidates)
+    for evidence in (node_evidence or {}).values():
+        if not isinstance(evidence, dict):
+            continue
+        registry_path = evidence.get("_registry_path")
+        if registry_path:
+            roots.extend(_dispatch_state_roots(home, jobs=registry_path)[:1])
+    if not roots:
+        roots.extend(_dispatch_state_roots(home))
     result = []
     for value in roots:
         path = os.path.realpath(value)
@@ -540,14 +558,17 @@ def _route_state_roots(route_id, jobs, home=None):
     return result
 
 
-def resolve_gate_marks(records, home=None, jobs=()):
+def resolve_gate_marks(records, home=None, jobs=(), node_evidence=None):
     """{route_id: {node_id: True}} — the second impure entry point (sibling of resolve_records).
     Only PASSED nodes appear; a missing key is the no-claim default, so callers never have to
     distinguish "absent" from "False" (there is no False)."""
     marks = {}
     for rid, record in (records or {}).items():
         per_node = {}
-        state_roots = _route_state_roots(rid, jobs, home=home)
+        state_roots = _route_state_roots(
+            rid, jobs, home=home,
+            node_evidence=(node_evidence or {}).get(rid),
+        )
         for n in (record.get("nodes") or []):
             if not isinstance(n, dict):
                 continue
@@ -960,7 +981,7 @@ def collect_views(jobs, node_evidence=None, now=None, degradations=None):
         node_evidence,
         records,
         now,
-        resolve_gate_marks(records, jobs=jobs),
+        resolve_gate_marks(records, jobs=jobs, node_evidence=node_evidence),
         degradations,
     )
 

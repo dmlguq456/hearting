@@ -7,6 +7,7 @@ import os
 import sys
 import tempfile
 import unittest
+from pathlib import Path
 from unittest import mock
 
 _TOOLS_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -31,6 +32,31 @@ class GovernorCollectTest(unittest.TestCase):
 
     def tearDown(self):
         governor.clear_cache()
+
+    def test_unset_env_uses_canonical_artifact_resolver_once(self):
+        with tempfile.TemporaryDirectory() as td, \
+             mock.patch.dict(os.environ, {}, clear=True), \
+             mock.patch.object(governor, "_artifact_root_resolver",
+                               return_value=Path("/resolver/artifact-root.sh")), \
+             mock.patch.object(governor.subprocess, "run") as run:
+            run.return_value = mock.Mock(returncode=0, stdout=td + "\n")
+            expected = os.path.join(td, ".runtime", "model-worker-governor")
+            self.assertEqual(governor._default_root(), expected)
+            self.assertEqual(governor._default_root(), expected)
+            self.assertEqual(run.call_count, 1)
+
+    def test_exported_and_standalone_resolution_choose_the_same_root(self):
+        with tempfile.TemporaryDirectory() as td:
+            expected = os.path.join(td, ".runtime", "model-worker-governor")
+            with mock.patch.dict(os.environ, {"AGENT_ARTIFACT_ROOT": td}, clear=True):
+                self.assertEqual(governor._default_root(), expected)
+            governor.clear_cache()
+            with mock.patch.dict(os.environ, {}, clear=True), \
+                 mock.patch.object(governor, "_artifact_root_resolver",
+                                   return_value=Path("/resolver/artifact-root.sh")), \
+                 mock.patch.object(governor.subprocess, "run",
+                                   return_value=mock.Mock(returncode=0, stdout=td + "\n")):
+                self.assertEqual(governor._default_root(), expected)
 
     def test_zombie_proc_start_is_not_live_identity_evidence(self):
         fields = ["Z"] + [str(value) for value in range(4, 22)] + ["98765"]

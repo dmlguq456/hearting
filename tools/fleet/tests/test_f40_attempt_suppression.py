@@ -92,6 +92,10 @@ class TerminalAttemptIndexTest(unittest.TestCase):
         self.addCleanup(temp.cleanup)
         self.assertEqual(terminal["att-terminal"]["route_node"], "one-shot")
         self.assertEqual(routes["rt-f40"]["one-shot"]["status"], "done")
+        self.assertEqual(
+            routes["rt-f40"]["one-shot"]["_registry_path"],
+            str(Path(temp.name) / "jobs.log"),
+        )
 
     def test_latest_row_wins_for_the_same_exact_attempt(self):
         temp, (_routes, terminal) = self._snapshot(

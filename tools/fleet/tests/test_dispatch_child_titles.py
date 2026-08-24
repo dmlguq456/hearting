@@ -272,6 +272,25 @@ class AttemptSummaryFallbackTest(unittest.TestCase):
             with mock.patch.object(dispatch, "_registry_home", return_value=registry):
                 self.assertIsNone(dispatch._owned_attempt_log_path(job))
 
+    def test_observer_home_cannot_authorize_a_row_owned_attempt_log(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            observer = os.path.join(tmp, "observer")
+            observer_logs = os.path.join(observer, ".dispatch", "logs")
+            exact_state = os.path.join(tmp, "exact-state")
+            os.makedirs(observer_logs)
+            os.makedirs(exact_state)
+            path = os.path.join(observer_logs, "child.att-observer.claude.jsonl")
+            with open(path, "w", encoding="utf-8") as stream:
+                stream.write("{}\n")
+            job = DispatchJob(
+                key="code-test", slug="child", cwd="/work", harness="claude",
+                is_child=True, liveness="working", attempt_id="att-observer",
+            )
+            job._registry_path = os.path.join(exact_state, "jobs.log")
+            job._log_file = path
+            with mock.patch.object(dispatch, "_registry_home", return_value=observer):
+                self.assertIsNone(dispatch._owned_attempt_log_path(job))
+
 
 class DispatchRowTitleTest(unittest.TestCase):
     def test_wide_row_prefers_the_adopted_title_over_the_slug(self):

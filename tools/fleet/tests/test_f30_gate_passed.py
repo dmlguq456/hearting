@@ -344,6 +344,32 @@ class ResolveGateMarksTest(GateMarkBase):
         )
         self.assertEqual(set(marks[self.route_id]), set(_NODES))
 
+    def test_observer_markers_cannot_override_an_exact_empty_registry_root(self):
+        exact_root = os.path.join(self._tmp.name, "exact-state")
+        os.makedirs(exact_root)
+        job = mock.Mock(route_id=self.route_id)
+        job._launch_home = self.home
+        job._registry_path = os.path.join(exact_root, "jobs.log")
+        # self.home contains valid markers. The exact route registry does not.
+        # The observer's ambient state must not leak back into this verdict.
+        marks = route.resolve_gate_marks(
+            {self.route_id: self.record}, home=self.home, jobs=[job]
+        )
+        self.assertEqual(marks, {})
+
+    def test_terminal_evidence_registry_resolves_marks_without_live_rows(self):
+        evidence = {self.route_id: {
+            node: {"_registry_path": os.path.join(self.home, ".dispatch", "jobs.log")}
+            for node in _NODES
+        }}
+        observer = os.path.join(self._tmp.name, "standalone-observer")
+        os.makedirs(observer)
+        marks = route.resolve_gate_marks(
+            {self.route_id: self.record}, home=observer, jobs=[],
+            node_evidence=evidence,
+        )
+        self.assertEqual(set(marks[self.route_id]), set(_NODES))
+
     def test_resolve_returns_only_passed_nodes(self):
         os.remove(os.path.join(self.cdir, "report.json"))
         route.clear_cache()
@@ -768,6 +794,25 @@ class ProjectionMarkThreadingTest(GateMarkBase):
         plan = next(n for n in view["nodes"] if n["id"] == "plan")
         self.assertEqual(plan["state"], "done")
         self.assertIs(plan["gate_passed"], True)
+
+    def test_projection_uses_terminal_evidence_registry_without_live_row(self):
+        from fleet import projection
+        observer = os.path.join(self._tmp.name, "standalone-release")
+        os.makedirs(observer)
+        evidence = {
+            node: {"_registry_path": os.path.join(self.home, ".dispatch", "jobs.log")}
+            for node in _NODES
+        }
+        with mock.patch.dict(os.environ, {
+            "AGENT_HOME": observer,
+            "AGENT_DISPATCH_JOBS": os.path.join(observer, "jobs.log"),
+        }, clear=True):
+            view = projection._record_view(
+                self.record, self.route_id, [], node_evidence=evidence,
+                now=1_000_000.0,
+            )
+        self.assertTrue(all(node["state"] == "done" for node in view["nodes"]))
+        self.assertTrue(all(node["gate_passed"] is True for node in view["nodes"]))
 
 
 if __name__ == "__main__":

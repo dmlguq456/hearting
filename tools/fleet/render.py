@@ -3822,12 +3822,13 @@ def _projection_stage_detail_rows(entity, depth=0, term_width=None):
     backing = getattr(projection, "_route_view", None) or {}
     view = backing.get("view") or {}
     nodes = _collapse_parallel_nodes(view.get("nodes") or ())
-    # A fully-complete route needs no detail row on the owning session: the pipeline is
-    # done, and a finished (often dead-conductor) route's whole DAG lingering under the
+    # A route with no open nodes needs no detail row on the owning session. Its whole
+    # DAG lingering below a long-lived main session is historical residue.
     # live dispatcher session is noise (user 2026-07-24 "stage 설명 여전히 뜨는데 이거
     # 없앴다매?"). The detail row's value is the IN-PROGRESS non-linear process view — a
-    # real failure (non-done node) still shows so it can be seen; only all-done is dropped.
-    if nodes and all(n.get("state") == "done" for n in nodes):
+    # Failed is terminal here too: process view owns history, while this legacy multi-line
+    # stage surface is reserved for a route that still has open work.
+    if nodes and all(n.get("state") in {"done", "failed"} for n in nodes):
         return []
     return _stage_detail_rows(nodes, depth=depth, term_width=term_width)
 

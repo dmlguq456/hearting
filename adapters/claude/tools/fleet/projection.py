@@ -162,7 +162,10 @@ def _record_view(record, route_id, jobs, node_evidence=None, now=None, degradati
     which already resolve marks via `resolve_and_build_views`."""
     from . import route
     jobs = list(jobs)
-    marks = route.resolve_gate_marks({route_id: record}, jobs=jobs).get(route_id)
+    marks = route.resolve_gate_marks(
+        {route_id: record}, jobs=jobs,
+        node_evidence={route_id: node_evidence or {}},
+    ).get(route_id)
     return route._record_view(record, route_id, jobs, node_evidence or {},
                               time.time() if now is None else now,
                               gate_marks_for_route=marks,
@@ -282,6 +285,13 @@ def _evidence_owner_candidates(entity, node_evidence, route_records):
             if record is not None:
                 candidates.append((rid, record, nodes or {}))
     return candidates
+
+
+def _terminal_route_projection(value):
+    """Whether terminal-only evidence is history rather than current session work."""
+    backing = getattr(value, "_route_view", None) or {}
+    nodes = (backing.get("view") or {}).get("nodes") or ()
+    return bool(nodes) and all(node.get("state") in {"done", "failed"} for node in nodes)
 
 
 def _projection_from_record(entity, record, route_id, jobs, node_evidence=None, now=None,
@@ -976,9 +986,14 @@ def resolve_work_projection(entity, jobs=(), route_records=None, node_evidence=N
                                                   degradations=degradations)
                          for child in children]
     for rid, record, evidence in _evidence_owner_candidates(entity, node_evidence, route_records or {}):
-        child_projections.append(_projection_from_record(
+        historical = _projection_from_record(
             entity, record, rid, [j for j in jobs if _field(j, "route_id") == rid],
-            node_evidence=evidence, now=now, owner=True, degradations=degradations))
+            node_evidence=evidence, now=now, owner=True, degradations=degradations)
+        # Terminal rows remain available to route.collect_views/process view.  They
+        # must not reattach a finished child pipeline to a long-lived main session
+        # as if it were the session's current unit of work.
+        if not _terminal_route_projection(historical):
+            child_projections.append(historical)
     exact = [p for p in child_projections if p.source == "route-exact"]
     route_keys = {(p.route_id, p.route_hash) for p in exact}
     if len(route_keys) > 1:

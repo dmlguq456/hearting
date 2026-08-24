@@ -389,11 +389,11 @@ class ContextDetailTruthTableTest(unittest.TestCase):
                 self.assertIn("| root-b", rendered)
                 self.assertIn("| partial", rendered)
 
-    def test_completed_route_suppresses_session_detail_row(self):
+    def test_terminal_route_suppresses_legacy_session_detail_row(self):
         # 2026-07-24 (user "stage 설명 여전히 뜨는데 이거 없앴다매?"): a fully-done route draws
         # no stage detail row on the owning session — a finished (often dead-conductor) pipeline's
-        # whole DAG lingering under the live dispatcher session is noise. Any non-done node still
-        # renders so a real failure stays visible.
+        # whole DAG lingering under the live dispatcher session is noise. Failed is terminal
+        # too; history belongs to process view rather than this retired session-stage surface.
         def _session(nodes):
             return Session(harness="claude", pid=1, proc_start="p", cwd="/x",
                            session_id="sid-x", slug="root", liveness="working",
@@ -408,6 +408,10 @@ class ContextDetailTruthTableTest(unittest.TestCase):
             with self.subTest(width=width):
                 self.assertEqual(
                     render._projection_stage_detail_rows(_session(done_nodes), term_width=width),
+                    [])
+                failed_nodes = [dict(done_nodes[0]), dict(done_nodes[1], state="failed")]
+                self.assertEqual(
+                    render._projection_stage_detail_rows(_session(failed_nodes), term_width=width),
                     [])
         live_nodes = [
             {"id": "plan", "state": "done", "level": 0, "depends_on": []},

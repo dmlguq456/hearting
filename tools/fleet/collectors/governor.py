@@ -5,14 +5,14 @@ plan §6a's probe distinguishes this from the OTHER half of F-28c, the resource-
 registry, which is skipped for lack of a canonical path — see `_internal/carryover.md`).
 
 **Read-only**: this module never writes `state.json` (governor's own reservation/lease
-transactions own that file exclusively) and never spawns a subprocess (no `artifact-root.sh` per
-tick — governor's own `default_root()` shells out to it as a LAST resort only; fleet accepts
-the env-var-first, home-guess-fallback resolution instead and skips the subprocess hop
-entirely, since a dispatch tick already runs `ps` and a second subprocess per tick is exactly
-the cost this collector should not add).
+transactions own that file exclusively).  When no root is exported it invokes the canonical
+`artifact-root.sh` resolver once per Fleet process and caches the result; no subprocess is
+spawned per tick.
 """
 import json
 import os
+import subprocess
+from pathlib import Path
 
 from . import procscan
 
@@ -24,23 +24,49 @@ from . import procscan
 DEFAULT_TOTAL_LIMIT = 12
 
 _CACHE = {}   # {abspath: (mtime, size, result)}
+_ROOT_CACHE = {}  # {cwd: canonical governor root}
+
+
+def _artifact_root_resolver():
+    for parent in Path(__file__).resolve().parents:
+        candidate = parent / "utilities" / "artifact-root.sh"
+        if candidate.is_file():
+            return candidate
+    return None
 
 
 def _default_root():
-    """Mirrors utilities/model-worker-governor.py:24-33 `default_root()` MINUS the
-    `artifact-root.sh` subprocess fallback (module docstring — no subprocess per tick). The
-    env-var and $AGENT_ARTIFACT_ROOT branches cover every real launch path this repo uses
-    (dispatch wrappers always set AGENT_ARTIFACT_ROOT); the subprocess branch is a
-    last-resort CLI convenience governor.py itself needs for ad-hoc invocation, not fleet."""
+    """Mirror the governor writer's canonical env -> artifact resolver chain."""
     explicit = os.environ.get("AGENT_MODEL_GOVERNOR_ROOT")
     if explicit:
         return explicit
     artifact_root = os.environ.get("AGENT_ARTIFACT_ROOT")
     if artifact_root:
         return os.path.join(artifact_root, ".runtime", "model-worker-governor")
-    from . import dispatch
-    return os.path.join(dispatch._registry_home(), ".agent_reports", ".runtime",
-                        "model-worker-governor")
+    try:
+        cwd = os.path.realpath(os.getcwd())
+    except OSError:
+        cwd = ""
+    if cwd in _ROOT_CACHE:
+        return _ROOT_CACHE[cwd]
+    resolver = _artifact_root_resolver()
+    if resolver is not None:
+        try:
+            resolved = subprocess.run(
+                [str(resolver), cwd or os.curdir], check=False,
+                capture_output=True, text=True,
+            )
+            if resolved.returncode == 0 and resolved.stdout.strip():
+                root = os.path.join(
+                    resolved.stdout.strip(), ".runtime", "model-worker-governor"
+                )
+                _ROOT_CACHE[cwd] = root
+                return root
+        except OSError:
+            pass
+    root = os.path.join(str(Path.home()), ".agent-worker-governor")
+    _ROOT_CACHE[cwd] = root
+    return root
 
 
 def _state_path(root=None):
@@ -50,6 +76,7 @@ def _state_path(root=None):
 def clear_cache():
     """Test hermeticity (route.clear_cache() precedent)."""
     _CACHE.clear()
+    _ROOT_CACHE.clear()
 
 
 def collect(root=None):

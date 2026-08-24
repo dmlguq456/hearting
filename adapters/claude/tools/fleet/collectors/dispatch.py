@@ -1013,7 +1013,7 @@ def _owned_attempt_log_path(job):
     if harness not in ("claude", "codex", "opencode") or not raw or not attempt_id:
         return None
     path = os.path.realpath(raw)
-    roots = [os.path.realpath(os.path.join(_registry_home(), ".dispatch", "logs"))]
+    roots = []
     registry_path = getattr(job, "_registry_path", None)
     if registry_path:
         registry_dir = os.path.dirname(os.path.realpath(registry_path))
@@ -1040,6 +1040,11 @@ def _owned_attempt_log_path(job):
     launch_home = getattr(job, "_launch_home", None)
     if launch_home:
         roots.append(os.path.join(os.path.realpath(launch_home), ".dispatch", "logs"))
+    if not roots:
+        # Legacy compatibility only when the row carries no owning root at all.
+        # Otherwise the observer's AGENT_HOME would make one Fleet process trust
+        # a log path that the same binary launched by another user rejects.
+        roots.append(os.path.realpath(os.path.join(_registry_home(), ".dispatch", "logs")))
     allowed = False
     for root in roots:
         try:
@@ -2176,6 +2181,10 @@ def _scan_registry_evidence(paths):
                 "route_file": meta.get("route_file"),
                 "route_hash": meta.get("route_hash"),
                 "parent": meta.get("parent") or meta.get("parent_slug"),
+                # Keep route-owned state identity after the live row disappears.
+                # A standalone Fleet must not fall back to its ambient registry
+                # when resolving a terminal-only route's completion markers.
+                "_registry_path": path,
             })
             if attempt_contract["attempt_contract_status"] != "current":
                 continue

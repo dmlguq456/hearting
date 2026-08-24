@@ -19,6 +19,43 @@ REAL = os.path.join(FIXTURES, "real_claude_staged.json")
 
 
 class WorkProjectionTest(unittest.TestCase):
+    def test_terminal_only_child_route_does_not_reattach_to_main_session(self):
+        record = route.load(REAL)
+        rid = record["route_id"]
+        owner = Session(harness="codex", pid=90, proc_start="main-start",
+                        cwd="/owner", slug="main", session_id="sid-main",
+                        liveness="idle")
+        evidence = {rid: {
+            node["id"]: dict({
+                "status": "done", "parent": owner.session_id,
+                "route_file": REAL, "route_hash": record["route_hash"],
+            }, **({"note": "dead-worker-fail"} if node["id"] == "execute" else {}))
+            for node in record["nodes"]
+        }}
+        historical = route.build_views([], evidence, {rid: record}, 100.0)[0]
+        self.assertEqual(
+            next(node for node in historical["nodes"] if node["id"] == "execute")["state"],
+            "failed",
+        )
+        projection.attach_projections(
+            [owner], [], route_records={rid: record}, node_evidence=evidence,
+            now=100.0,
+        )
+        self.assertEqual(owner.work_projection.source, "none")
+        self.assertIsNone(owner.work_projection.route_id)
+        render.set_process_view(False)
+        rendered = "\n".join(
+            "".join(token for token, _kind in line)
+            for line in render._build_lines(
+                [owner], [], section="fleet", narrow=False, malformed=0,
+                layout="wide", term_width=168,
+            )
+            if line
+        )
+        self.assertIn("main", rendered)
+        self.assertNotIn("stage ", rendered)
+        self.assertNotIn("plan ✓", rendered)
+
     def test_session_owner_render_shows_all_parallel_siblings_in_sealed_order(self):
         record = route.load(COMPOSED)
         rid = record["route_id"]
