@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+. "$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)/test-isolation.sh"
+hearting_test_isolate
 # Pending drain (2026-07-22 plan) — mem doctor stale-pending age ordering +
 # mem maintenance --drain-pending (consumed cleanup, pending human gate).
 # ABSOLUTE: every case uses isolated MEM_STORE/MEM_PROJECTS/MEM_WRITE_EVENTS (mktemp -d).

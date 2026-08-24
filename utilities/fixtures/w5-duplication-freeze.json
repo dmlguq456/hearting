@@ -1,0 +1,20 @@
+{
+  "body_byte_cap": 240,
+  "calibration_source_digest": "77c2d1fd3f3a65cb74a1a483b7de919fb00fa6b3bc2ac342ae9ae059420d92d1",
+  "corpus_count": 21,
+  "corpus_sha256": "75e748961e3149ac1e03ab4ecc68c1daf9dfd97e4c31a097990cf895a3bd7c8b",
+  "duplication_rule_version": "w5-v1",
+  "false_negative": 0,
+  "false_negative_upper_bound": 0,
+  "false_positive": 0,
+  "false_positive_upper_bound": 0,
+  "lcs_threshold": 24,
+  "ngram_n": 2,
+  "ngram_overlap_threshold": 0.7,
+  "normalize_source_digest": "2678999c7fe116960ac67b31a7f80df5c9c36af20edaac7fe2d36d7a5e0858f2",
+  "normalize_version": "w5-norm-v1",
+  "rule_source_digest": "018546215e2c823432cd281457f22200668f466daab2d41ff4bc760579dfb4b4",
+  "undecidable_count": 1,
+  "undecidable_lower_bound": 1,
+  "undecidable_upper_bound": 1
+}

@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+. "$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)/test-isolation.sh"
+hearting_test_isolate
 # Regression for the 2026-08-21 field failure: reading a record and then
 # deleting or superseding it produced evidence the fold could never match, so
 # the operation stayed blocked forever and the store stopped synchronizing.
