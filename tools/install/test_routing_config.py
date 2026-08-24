@@ -44,17 +44,20 @@ class RoutingConfigInstallTests(unittest.TestCase):
             self.assertEqual(second["status"], "preserved")
             self.assertTrue(path.read_text(encoding="utf-8").endswith("# user edit\n"))
 
-    def test_single_opencode_install_stays_usable(self):
-        text = routing_config.render(["opencode"])
-        self.assertIn("primary: [opencode]", text)
-        self.assertIn("relief: []", text)
+    def test_single_opencode_install_skips_invalid_user_policy(self):
+        with self.assertRaisesRegex(ValueError, "quality-peer runtime"):
+            routing_config.render(["opencode"])
         with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
             os.environ, {"XDG_CONFIG_HOME": tmp}, clear=False
+        ), mock.patch.object(
+            routing_config.shutil, "which",
+            side_effect=lambda name: "/bin/opencode" if name == "opencode" else None,
         ):
-            path = Path(tmp) / "hearting" / "dispatch-defaults.yaml"
-            path.parent.mkdir()
-            path.write_text(text, encoding="utf-8")
-            self.assertTrue(routing_config.validate()["ok"])
+            result = routing_config.ensure(["opencode"])
+            path = Path(result["path"])
+            self.assertEqual(result["status"], "skipped-no-quality-peer")
+            self.assertEqual(result["enabled"], ["opencode"])
+            self.assertFalse(path.exists())
 
     def test_rendered_config_still_answers_the_shipped_capability_baseline(self):
         with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(

@@ -31,7 +31,9 @@ def render(enabled) -> str:
     peers = [name for name in enabled if name != "opencode"]
     opencode = ["opencode"] if "opencode" in enabled else []
     if not peers:
-        peers, opencode = list(opencode), []
+        raise ValueError(
+            "routing config requires at least one quality-peer runtime (claude or codex)"
+        )
 
     def inline(values):
         return "[" + ", ".join(values) + "]"
@@ -70,6 +72,12 @@ def ensure(targets, *, dry_run=False) -> dict:
     enabled = available_runtimes(targets)
     if path.exists():
         return {"status": "preserved", "path": str(path), "enabled": enabled}
+    if not any(name in enabled for name in ("claude", "codex")):
+        return {
+            "status": "skipped-no-quality-peer",
+            "path": str(path),
+            "enabled": enabled,
+        }
     if dry_run:
         return {"status": "would-create", "path": str(path), "enabled": enabled}
     path.parent.mkdir(parents=True, exist_ok=True)
