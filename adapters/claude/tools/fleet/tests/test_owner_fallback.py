@@ -80,7 +80,7 @@ class OwnerFallbackTest(unittest.TestCase):
         self.assertIn("Sonnet", rendered)
         self.assertIn("parent now", rendered)
         self.assertEqual(rendered.count("stage plan ✓"), 1)
-        self.assertIn("unrelated", rendered)
+        self.assertIn("CX/sid-unr", rendered)
         self.assertIn("stage plan ✓", rendered)
 
     def test_unmatched_parent_stays_orphaned(self):
@@ -129,7 +129,7 @@ class OwnerFallbackTest(unittest.TestCase):
         self.assertIn("parent", group)
         self.assertIn("stage summary", group)
         self.assertIn("Sonnet", group)
-        self.assertIn("parent ▾1", group)  # recovered child contributes to parent nesting/count.
+        self.assertIn("CX/sid-pare ▾1", group)  # recovered child contributes to parent nesting/count.
 
         process = self._render([parent], [stage], process=True)
         for node in ("plan", "execute", "test"):

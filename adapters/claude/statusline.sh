@@ -19,6 +19,7 @@ model = m.get("display_name") or m.get("id") or "?"
 mid = (m.get("id") or "").lower()
 effort = ((d.get("effort") or {}).get("level") or "")  # reasoning effort: low|medium|high|xhigh|max
 sid = d.get("session_id") or ""
+session_name = d.get("session_name") or ""
 tpath = d.get("transcript_path") or ""
 rl = d.get("rate_limits") or {}
 def rlpct(k):
@@ -60,6 +61,7 @@ print("S_MS=" + shlex.quote(" ".join(ms_parts)))
 print("S_MODEL=" + shlex.quote(model))
 print("S_EFFORT=" + shlex.quote(effort))
 print("S_SID=" + shlex.quote(sid))
+print("S_SESSION_NAME=" + shlex.quote(session_name if isinstance(session_name, str) else ""))
 print("S_TRANSCRIPT=" + shlex.quote(tpath))
 print("S_5H=" + shlex.quote(rlpct("five_hour")))
 print("S_7D=" + shlex.quote(rlpct("seven_day")))
@@ -67,7 +69,24 @@ print("S_5H_RST=" + shlex.quote(rlrem("five_hour")))
 print("S_7D_RST=" + shlex.quote(rlrem("seven_day")))
 print("S_CTX=" + shlex.quote(str(cpct)))
 ' 2>/dev/null)"
-: "${S_CWD:=$PWD}" "${S_MODEL:=?}" "${S_EFFORT:=}" "${S_SID:=}" "${S_5H:=}" "${S_7D:=}" "${S_5H_RST:=}" "${S_7D_RST:=}" "${S_CTX:=-1}" "${S_MS:=}" "${S_TRANSCRIPT:=}"
+: "${S_CWD:=$PWD}" "${S_MODEL:=?}" "${S_EFFORT:=}" "${S_SID:=}" "${S_SESSION_NAME:=}" "${S_5H:=}" "${S_7D:=}" "${S_5H_RST:=}" "${S_7D_RST:=}" "${S_CTX:=-1}" "${S_MS:=}" "${S_TRANSCRIPT:=}"
+
+# F-87 shared session handle projection; unavailable helpers are deliberately silent.
+S_SESSION_DISPLAY=""
+session_helper="$AGENT_HOME/tools/fleet/session_handle.py"
+[ -f "$session_helper" ] || session_helper="$(dirname "$AGENT_HOME")/tools/fleet/session_handle.py"
+if [ -n "$S_SID" ] && [ -f "$session_helper" ]; then
+  S_SESSION_DISPLAY=$(python3 - "$session_helper" "$S_SID" "$S_SESSION_NAME" <<'PY' 2>/dev/null || true
+import importlib.util, sys
+try:
+    spec = importlib.util.spec_from_file_location("fleet_session_handle", sys.argv[1])
+    mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)
+    print(mod.session_display_name("claude", sys.argv[2], sys.argv[3], budget=48))
+except Exception:
+    pass
+PY
+  )
+fi
 
 # §5 per-session statusline tap (agent-fleet-dashboard) — 멀티세션 대시보드(tools/fleet)가
 # 세션별 telemetry 를 읽게 stdin JSON 을 세션별 파일로도 dump. 단일 .statusline-last.json 은
@@ -198,6 +217,7 @@ pcol(){ if [ "${1:-0}" -ge 80 ] 2>/dev/null; then printf '%s' "$RED"; elif [ "${
 # --- 세그먼트 배열 → 세로선(│) 파티션으로 join ---
 segs_arr=()
 segs_arr+=("📁 ${CYAN}${dir}${RST}")
+ [ -n "$S_SESSION_DISPLAY" ] && segs_arr+=("${DIM}${S_SESSION_DISPLAY}${RST}")
 if [ -n "$branch" ]; then
   bseg="${DIM}⎇${RST}${YEL}${branch}${RST}"
   [ -n "$gflag" ] && bseg="${bseg} ${RED}${gflag}${RST}"

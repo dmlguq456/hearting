@@ -509,7 +509,7 @@ class RenderDispatchPresentationTest(unittest.TestCase):
             self.assertFalse(owner.work_projection._route_view)
             self.assertEqual(session.work_projection.source, "artifact-inferred")
             texts = self._board_lines(session, [owner])
-        session_line = next(t for t in texts if "unresolved-parent" in t)
+        session_line = next(t for t in texts if "CL/sid-unr" in t)
         owner_line = next(t for t in texts if "unresolved-owner" in t)
         # The session's own would-be stage ("exec") never reaches its row.
         self.assertNotIn("exec", session_line)

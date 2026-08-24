@@ -288,6 +288,11 @@ def main() -> int:
         return 0
     current_cwd = cwd(payload)
     interaction_sid = interaction_session_id(payload)
+    try:
+        from herdr_session_projection import project
+        project(payload, interaction_sid or "", worker=False)
+    except Exception:
+        pass
     if interaction_sid:
         try:
             from fleet import interaction

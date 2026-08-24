@@ -40,6 +40,7 @@ from .model import (fmt_min, dash, project_of, exec_child_is_wait,
                     LIVENESS_STATES, PLUGIN_QUEUE_STATES, session_parent_visible)
 from . import gitinfo
 from .refresh import LiveSnapshot, RefreshPump
+from .session_handle import session_display_name
 
 # curses attribute constants — real values when curses is present, harmless 0 fallbacks
 # otherwise, so this module imports (and the plain --once path runs) with no curses at all.
@@ -1370,7 +1371,9 @@ def _session_name(s):
     that has never been prompted has no title, and without the registry name it would render
     as an anonymous cwd basename — which is exactly how the ghost session hid."""
     slug = s.slug or (s.cwd.rsplit("/", 1)[-1] if s.cwd else "?")
-    return s.title or getattr(s, "registry_name", None) or slug
+    fallback = s.title or getattr(s, "registry_name", None) or slug
+    return session_display_name(s.harness, getattr(s, "session_id", None),
+                                s.title, fallback=fallback)
 
 
 def _projection_stage_text(entity, max_width=24):
@@ -3949,7 +3952,8 @@ def _gpu_gib(value):
     return ("%.1f" % amount).rstrip("0").rstrip(".")
 
 
-def _gpu_owner_text(gpu):
+def _gpu_owner_text(gpu, sessions=None):
+    exact = {(s.harness, getattr(s, "session_id", None)): s for s in (sessions or ())}
     labels = []
     for process in gpu.get("processes") or ():
         if not isinstance(process, dict):
@@ -3958,7 +3962,12 @@ def _gpu_owner_text(gpu):
         if isinstance(owner, dict):
             if (owner.get("kind") == "session" and owner.get("harness")
                     and owner.get("id")):
-                label = "session %s/%s" % (owner["harness"], str(owner["id"])[:8])
+                key = (owner["harness"], owner["id"])
+                session = exact.get(key)
+                title = getattr(session, "title", None) if session else None
+                display = session_display_name(key[0], key[1], title, fallback="")
+                label = ("session " + display if display else
+                         "session %s/%s" % (key[0], str(key[1])[:8]))
             else:
                 label = owner.get("label")
         else:
@@ -4027,7 +4036,7 @@ def _cpu_busy_text(utilization, cpu_count):
     return "%.1f/%dt" % (busy, cpu_count)
 
 
-def _gpu_token(gpu, available, show_name=False):
+def _gpu_token(gpu, available, show_name=False, sessions=None):
     index = gpu.get("index")
     util = gpu.get("utilization_gpu_pct")
     total, used = gpu.get("memory_total_mib"), gpu.get("memory_used_mib")
@@ -4049,7 +4058,7 @@ def _gpu_token(gpu, available, show_name=False):
     segs += [("  VRAM ", "dim")]
     segs += _resource_gauge_segs(vram_pct, track=track)
     segs += [("  " + memory, _gpu_level(gpu))]
-    owner = _gpu_owner_text(gpu) if state == "working" else None
+    owner = _gpu_owner_text(gpu, sessions=sessions) if state == "working" else None
     owner_sep = ("  ↳ " if owner and not owner.startswith("unattributed:") else " · ")
     owner_reserve = min(_dw(owner), 28) if owner else 0
     if show_name and gpu.get("name"):
@@ -4066,7 +4075,7 @@ def _gpu_token(gpu, available, show_name=False):
     return segs
 
 
-def _compute_host_rows(term_width=None):
+def _compute_host_rows(term_width=None, sessions=None):
     snapshot = _COMPUTE_HOSTS
     if not isinstance(snapshot, dict) or not snapshot.get("configured"):
         return []
@@ -4124,7 +4133,8 @@ def _compute_host_rows(term_width=None):
         for gpu in sorted(gpus, key=lambda value: (value.get("index") is None,
                                                     value.get("index") or 0)):
             indent = " " * prefix_width
-            token = _gpu_token(gpu, max(12, width - _dw(indent)), show_name=width >= 100)
+            token = _gpu_token(gpu, max(12, width - _dw(indent)), show_name=width >= 100,
+                               sessions=sessions)
             rows.append(_clip_segs([(indent, None)] + token, width)[0])
     return rows
 
@@ -4603,7 +4613,7 @@ def _build_process_lines(sessions, jobs, route_views_by_id, malformed, memory, t
     if malformed:
         lines.append([("  +%d malformed jobs.log rows skipped" % malformed, "dim")])
     lines.append([(_HFILL, None)])
-    compute_rows = _compute_host_rows(term_width)
+    compute_rows = _compute_host_rows(term_width, sessions)
     lines.extend(compute_rows)
     if compute_rows:
         lines.append([(_HFILL, None)])
@@ -5132,7 +5142,7 @@ def _build_lines(sessions, jobs, section, narrow, malformed, layout="wide", memo
     # usage/intel zone = PLAIN bg + a full-width dim rule below it (user 2026-07-03: intel
     # Keep tint directory-only so the intelligence zone is not confused with active cards.
     lines.append([(_HFILL, None)])
-    compute_rows = _compute_host_rows(term_width)
+    compute_rows = _compute_host_rows(term_width, sessions)
     lines.extend(compute_rows)
     if compute_rows:
         lines.append([(_HFILL, None)])
