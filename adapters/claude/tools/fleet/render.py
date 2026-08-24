@@ -159,6 +159,7 @@ _HUE_OF = {
     # ●>○>◌ ink-weight gradient still reads.
     "g_unused_b": ("y", 0),
     "lvl_g": ("g", 0), "lvl_y": ("y", 0), "lvl_r": ("r", _A_B),
+    "home_chip": ("g", _A_REVERSE | _A_B),
     # F-61: the usage header's own red — same hue and threshold as `lvl_r`, without the bold.
     # The header is always-on background information, so one meter crossing 80% must not make it
     # the heaviest ink on screen. Only the header maps onto this key; every other `lvl_r` surface
@@ -315,6 +316,7 @@ def _init_colors():
     _COLOR["lvl_y"] = _COLOR.get("yellow", 0)
     _COLOR["lvl_r"] = _COLOR.get("red", 0) | curses.A_BOLD
     _COLOR["lvl_r_flat"] = _COLOR.get("red", 0)          # F-61: usage header, no alarm weight
+    _COLOR["home_chip"] = _COLOR.get("green", 0) | curses.A_REVERSE | curses.A_BOLD
     # per-MODEL family colors, in TWO intensities (2026-07-02: main↔dispatch contrast = whole-row
     # brightness): fam_* = BRIGHT (main session rows) / famd_* = DIM (dispatch rows recede).
     _hue = {h: _COLOR.get("h_" + h, 0) for h in ("claude", "codex", "opencode")}
@@ -3647,28 +3649,6 @@ def _context_lead_cell(state, dim=False, degrade=False):
     return state.ljust(_CTX_LEAD_W) + " ", key
 
 
-def _compact_token_count(value):
-    """A width-stable absolute context count (``380K``, ``1M``), or ``None``."""
-    if (not isinstance(value, (int, float)) or isinstance(value, bool)
-            or not math.isfinite(value) or value < 0):
-        return None
-    value = int(value)
-    for scale, suffix in ((1000000, "M"), (1000, "K")):
-        if value >= scale:
-            amount = value / float(scale)
-            if amount >= 10 or value % scale == 0:
-                return "%d%s" % (int(round(amount)), suffix)
-            return ("%.1f" % amount).rstrip("0").rstrip(".") + suffix
-    return str(value)
-
-
-def _context_absolute_text(entity):
-    """Comparable active/window token text only when both measurements are real."""
-    active = _compact_token_count(getattr(entity, "active_context_tokens", None))
-    window = _compact_token_count(getattr(entity, "context_window_tokens", None))
-    return "%s/%s" % (active, window) if active is not None and window is not None else None
-
-
 def _context_detail_row(entity, depth=0, term_width=None, dim=False,
                         indent_width=None, muted=False, now_key="now_sub"):
     """One ``<liveness> <gauge> <value>   NOW`` row for every live card.
@@ -3711,15 +3691,6 @@ def _context_detail_row(entity, depth=0, term_width=None, dim=False,
     else:
         value_text = "%d%%" % shown_pct
     segs.append((value_text.rjust(_CONTEXT_VALUE_W), "dim"))
-    # Absolute active/window tokens make 38% on a 1M model and 47% on a 200K model
-    # directly comparable. They reuse this existing detail line and yield whole before
-    # NOW (or the liveness word) needs to move, so narrow layouts never grow or overrun.
-    absolute_text = _context_absolute_text(entity)
-    prefix_width = sum(_dw(text) for text, _key in segs)
-    if absolute_text:
-        absolute_seg = "  " + absolute_text
-        if prefix_width + _dw(absolute_seg) <= (term_width or _SUMMARY_FALLBACK_W):
-            segs.append((absolute_seg, "dim"))
     exec_segs = _exec_detail_segs(entity)
     if now_text or exec_segs:
         prefix_width = sum(_dw(text) for text, _key in segs)
@@ -3972,7 +3943,7 @@ def _gpu_gib(value):
         return "—"
     amount = max(0.0, float(value)) / 1024.0
     if value > 0 and amount < 0.1:
-        return "<0.1"
+        return "0.0"
     if amount >= 10 or amount.is_integer():
         return str(int(round(amount)))
     return ("%.1f" % amount).rstrip("0").rstrip(".")
@@ -3985,7 +3956,11 @@ def _gpu_owner_text(gpu):
             continue
         owner = process.get("owner")
         if isinstance(owner, dict):
-            label = owner.get("label")
+            if (owner.get("kind") == "session" and owner.get("harness")
+                    and owner.get("id")):
+                label = "session %s/%s" % (owner["harness"], str(owner["id"])[:8])
+            else:
+                label = owner.get("label")
         else:
             process_name = os.path.basename(_gpu_safe_text(process.get("process_name")))
             pid = process.get("pid")
@@ -4035,22 +4010,25 @@ def _gpu_token(gpu, available, show_name=False):
     memory = "%s/%sG" % (_gpu_gib(gpu.get("memory_used_mib")),
                           _gpu_gib(gpu.get("memory_total_mib")))
     track = 4 if available < 58 else _RESOURCE_GAUGE_W
-    segs = [("g%s  " % (index if isinstance(index, int) else "?"), "head"),
+    segs = [("%s: " % (index if isinstance(index, int) else "?"), "head"),
             ("UTIL ", "dim")]
     segs += _resource_gauge_segs(util, track=track)
     segs += [("  VRAM ", "dim")]
     segs += _resource_gauge_segs(vram_pct, track=track)
     segs += [("  " + memory, _gpu_level(gpu))]
+    owner = _gpu_owner_text(gpu)
+    owner_sep = "  ↳ " if owner != "idle" and not owner.startswith("unattributed:") else " · "
+    owner_reserve = min(_dw(owner), 28)
     if show_name and gpu.get("name"):
         name = _gpu_safe_text(gpu["name"]).replace("NVIDIA ", "")
-        name_room = max(0, min(20, available - sum(_dw(t) for t, _k in segs) - 8))
-        if name_room >= 4:
+        name_room = max(0, min(32, (available - sum(_dw(t) for t, _k in segs)
+                                   - _dw(owner_sep) - owner_reserve - 2)))
+        if name_room >= 6:
             segs += [("  ", None), (_clip_w(name, name_room), "dim")]
-    owner = _gpu_owner_text(gpu)
     used = sum(_dw(text) for text, _key in segs)
-    owner_room = max(0, available - used - 3)
+    owner_room = max(0, available - used - _dw(owner_sep))
     if owner_room >= 4:
-        segs += [(" · ", "dim"), (_clip_w(owner, owner_room),
+        segs += [(owner_sep, "dim"), (_clip_w(owner, owner_room),
                                     "dim" if owner == "idle" else
                                     "lvl_y" if "unattributed:" in owner else "name_dim")]
     return segs
@@ -4063,8 +4041,7 @@ def _compute_host_rows(term_width=None):
     width = max(20, int(term_width or 200))
     hosts = [row for row in (snapshot.get("hosts") or ()) if isinstance(row, dict)]
     up = sum(row.get("reachable") is True for row in hosts)
-    rows = [[("  GPU HOSTS", "head"), (" %d/%d" % (up, len(hosts)), "dim"),
-             ("  · compute resources", "dim")]]
+    rows = [[("  Compute Resources", "head"), (" %d/%d" % (up, len(hosts)), "dim")]]
     if snapshot.get("error"):
         detail = _gpu_safe_text(snapshot["error"])
         rows.append([("    unavailable · ", "lvl_y"),
@@ -4078,11 +4055,13 @@ def _compute_host_rows(term_width=None):
     host_width = min(max_host, 16 if width >= 100 else 10)
     for host in hosts:
         name = _clip_w(_gpu_safe_text(host.get("host") or "?"), host_width)
-        marker = "◆" if host.get("self") else "◇"
-        marker_key = "lvl_g" if host.get("self") else "dim"
-        prefix = "  %s %s  " % (marker, _pad(name, host_width))
-        host_row = [("  ", None), (marker, marker_key),
-                    (" " + _pad(name, host_width), "head"), ("  ", None)]
+        if host.get("self"):
+            host_row = [("  ", None), ("◆ HOME", "home_chip"), (" ", None),
+                        (_pad(name, host_width), "grp"), ("  ", None)]
+        else:
+            host_row = [("  ", None), ("◇", "dim"), ("      ", None),
+                        (_pad(name, host_width), "head"), ("  ", None)]
+        prefix_width = sum(_dw(text) for text, _key in host_row)
         if host.get("reachable") is not True:
             detail = _gpu_safe_text(host.get("detail") or "unreachable")
             row = host_row + [("down", "lvl_r_flat")]
@@ -4095,25 +4074,27 @@ def _compute_host_rows(term_width=None):
         host_row += [("CPU ", "dim")]
         host_row += _resource_gauge_segs(cpu)
         cpu_count = host.get("cpu_count")
-        if isinstance(cpu_count, int) and cpu_count > 0:
-            host_row += [("  %dc" % cpu_count, "dim")]
         load = _gpu_safe_text(host.get("load"))
-        if load and width >= 80:
-            host_row += [(" · load " + load.split()[0], "dim")]
+        if load and width >= 80 and isinstance(cpu_count, int) and cpu_count > 0:
+            host_row += [("  · LOAD %s/%dc" % (load.split()[0], cpu_count), "dim")]
+        elif isinstance(cpu_count, int) and cpu_count > 0:
+            host_row += [("  %dc" % cpu_count, "dim")]
+        elif load and width >= 80:
+            host_row += [("  · LOAD " + load.split()[0], "dim")]
         rows.append(_clip_segs(host_row, width)[0])
 
         gpus = [gpu for gpu in (host.get("gpus") or ()) if isinstance(gpu, dict)]
         if not gpus:
             state = "gpu unavailable" if host.get("detail") else "no gpu"
-            row = [(" " * _dw(prefix), None),
+            row = [(" " * prefix_width, None),
                    (state, "lvl_y" if host.get("detail") else "dim")]
             rows.append(_clip_segs(row, width)[0])
             continue
 
         for gpu in sorted(gpus, key=lambda value: (value.get("index") is None,
                                                     value.get("index") or 0)):
-            indent = " " * _dw(prefix)
-            token = _gpu_token(gpu, max(12, width - _dw(indent)), show_name=width >= 120)
+            indent = " " * prefix_width
+            token = _gpu_token(gpu, max(12, width - _dw(indent)), show_name=width >= 100)
             rows.append(_clip_segs([(indent, None)] + token, width)[0])
     return rows
 
@@ -4592,7 +4573,10 @@ def _build_process_lines(sessions, jobs, route_views_by_id, malformed, memory, t
     if malformed:
         lines.append([("  +%d malformed jobs.log rows skipped" % malformed, "dim")])
     lines.append([(_HFILL, None)])
-    lines.extend(_compute_host_rows(term_width))
+    compute_rows = _compute_host_rows(term_width)
+    lines.extend(compute_rows)
+    if compute_rows:
+        lines.append([(_HFILL, None)])
     lines.append(None)
     lines.append([("  PROCESS VIEW", "head"), (_RFLUSH, None), ("p group view  ", "head")])
 
@@ -5118,7 +5102,10 @@ def _build_lines(sessions, jobs, section, narrow, malformed, layout="wide", memo
     # usage/intel zone = PLAIN bg + a full-width dim rule below it (user 2026-07-03: intel
     # Keep tint directory-only so the intelligence zone is not confused with active cards.
     lines.append([(_HFILL, None)])
-    lines.extend(_compute_host_rows(term_width))
+    compute_rows = _compute_host_rows(term_width)
+    lines.extend(compute_rows)
+    if compute_rows:
+        lines.append([(_HFILL, None)])
 
     # header bar REPLACES the `──` zone divider — htop separates meters from the process list
     # with its bar, not a rule. Leave one blank line above it so

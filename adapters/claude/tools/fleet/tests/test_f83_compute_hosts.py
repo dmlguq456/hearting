@@ -84,7 +84,8 @@ class ComputeHostRenderTest(unittest.TestCase):
                 {"host": "moving4", "self": True, "reachable": True,
                  "cpu_utilization_pct": 37, "cpu_count": 32, "load": "3.2 3.0 2.8",
                  "gpus": [
-                    {"index": 0, "name": "NVIDIA RTX 6000 Ada", "utilization_gpu_pct": 84,
+                    {"index": 0, "name": "NVIDIA RTX 6000 Ada Generation",
+                     "utilization_gpu_pct": 84,
                      "memory_used_mib": 32768, "memory_total_mib": 49152,
                      "processes": [
                          {"pid": 1, "used_memory_mib": 16000,
@@ -123,24 +124,64 @@ class ComputeHostRenderTest(unittest.TestCase):
                 rows = render._compute_host_rows(width)
                 self.assertTrue(all(render._dw(render._plain(row)) <= width for row in rows))
                 text = "\n".join(render._plain(row) for row in rows)
-                for value in ("GPU HOSTS 3/4", "◆ moving4", "CPU", "g0", "g1",
+                for value in ("Compute Resources 3/4", "◆ HOME moving4", "CPU", "0:", "1:",
                               "UTIL", "VRAM", "32/48G", "1/48G", "xavier", "down",
                               "cpu", "no gpu"):
                     self.assertIn(value, text)
+                self.assertNotIn("g0", text)
+                self.assertNotIn("g1", text)
         wide = "\n".join(render._plain(row) for row in render._compute_host_rows(168))
-        for value in ("job:train", "run:eval", "+1", "unattributed:process#4"):
+        for value in ("RTX 6000 Ada Generation", "job:train", "run:eval", "+1",
+                      "unattributed:process#4", "LOAD 3.2/32c"):
             self.assertIn(value, wide)
+        home_row = next(row for row in render._compute_host_rows(168)
+                        if "◆ HOME" in render._plain(row))
+        self.assertIn(("◆ HOME", "home_chip"), home_row)
+
+    def test_exact_session_owner_is_an_explicit_gpu_link(self):
+        gpu = {
+            "index": 1, "name": "NVIDIA RTX 6000 Ada Generation",
+            "utilization_gpu_pct": 25, "memory_used_mib": 8192,
+            "memory_total_mib": 49152,
+            "processes": [{
+                "pid": 7,
+                "owner": {"kind": "session", "harness": "claude",
+                          "id": "f11a0486-c090-4fea-86be-c8097817761e",
+                          "label": "claude:f11a0486"},
+            }],
+        }
+        text = render._plain(render._gpu_token(gpu, 141, show_name=True))
+        self.assertIn("1:", text)
+        self.assertIn("RTX 6000 Ada Generation", text)
+        self.assertIn("↳ session claude/f11a0486", text)
+        self.assertNotIn("g1", text)
+
+    def test_sub_tenth_gib_has_no_inequality_marker(self):
+        self.assertEqual(render._gpu_gib(1), "0.0")
+        self.assertNotIn("<", render._gpu_gib(1))
 
     def test_resource_panel_is_below_the_top_summary_divider(self):
         lines = render._build_lines([], [], "both", False, 0, term_width=120)
         text = [render._plain(line) for line in lines]
         hearting_at = next(i for i, line in enumerate(text) if "hearting v2.0.0" in line)
-        gpu_at = next(i for i, line in enumerate(text) if "GPU HOSTS" in line)
+        resource_at = next(i for i, line in enumerate(text) if "Compute Resources" in line)
         pulse_at = next(i for i, line in enumerate(text) if line.startswith("  fleet "))
-        divider_at = next(i for i, line in enumerate(text) if line == "─────")
+        dividers = [i for i, line in enumerate(text) if line == "─────"]
+        self.assertGreaterEqual(len(dividers), 2)
         self.assertLess(hearting_at, pulse_at)
-        self.assertLess(pulse_at, divider_at)
-        self.assertLess(divider_at, gpu_at)
+        self.assertLess(pulse_at, dividers[0])
+        self.assertLess(dividers[0], resource_at)
+        self.assertLess(resource_at, dividers[1])
+
+    def test_process_view_also_separates_resources_from_cards(self):
+        lines = render._build_process_lines([], [], {}, 0, None, 120, "wide")
+        text = [render._plain(line) for line in lines]
+        resource_at = next(i for i, line in enumerate(text) if "Compute Resources" in line)
+        process_at = next(i for i, line in enumerate(text) if "PROCESS VIEW" in line)
+        divider_at = next(i for i, line in enumerate(text)
+                          if i > resource_at and line == "─────")
+        self.assertLess(resource_at, divider_at)
+        self.assertLess(divider_at, process_at)
 
     def test_public_json_is_additive_and_keeps_unfolded_processes(self):
         with mock.patch.object(fleet, "_collect_memory", return_value=None), \
