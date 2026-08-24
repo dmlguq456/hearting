@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+. "$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)/test-isolation.sh"
+hearting_test_isolate
 # Isolated test for `mem distill` + session distill adapter/ingest/marker (Cluster C, D-11~13).
 # Fully isolated via MEM_STORE + MEM_PROJECTS temp dirs — never touches real runtime memory.
 # All mem calls go through `python3 tools/memory/mem.py` subprocess (env evaluated at module load).

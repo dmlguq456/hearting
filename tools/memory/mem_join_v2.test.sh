@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+. "$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)/test-isolation.sh"
+hearting_test_isolate
 # Regressions for the fresh-store join surface (2026-08-21):
 #   1) `mem migration join` refuses a store that already holds memory
 #   2) its dry-run writes nothing, and apply opens the remote gate
@@ -28,6 +30,7 @@ REMOTE="$TMP/remote.git"
 git init -q --bare "$REMOTE"
 
 json(){ python3 -c "import json,sys; print(json.load(sys.stdin).get(sys.argv[1]))" "$1"; }
+json_path(){ python3 -c 'import json,sys; value=json.load(sys.stdin); [value:=value[key] for key in sys.argv[1].split(".")]; print(value)' "$1"; }
 
 echo "== a populated store cannot join =="
 POPULATED="$TMP/populated"
@@ -80,9 +83,28 @@ OUT="$(MEM_STORE="$CONFIG_STORE" MEM_INIT=1 python3 "$MEM" migration join --appl
   || bad "config-file policy was not used: $OUT"
 
 SYNC="$(MEM_STORE="$CONFIG_STORE" python3 "$MEM" sync --json 2>/dev/null)"
-[ "$(printf '%s' "$SYNC" | json status)" = "remote-confirmed" ] \
-  && ok "sync reaches the remote using only the config file" \
-  || bad "sync did not use the config file: $(printf '%s' "$SYNC" | json reason)"
+[ "$(printf '%s' "$SYNC" | json status)" = "folded" ] \
+  && [ "$(printf '%s' "$SYNC" | json reason)" = "None" ] \
+  && [ "$(printf '%s' "$SYNC" | json_path peer.status)" = "folded" ] \
+  && [ "$(printf '%s' "$SYNC" | json_path phases.remote-fetch-validate)" = "ok" ] \
+  && [ "$(printf '%s' "$SYNC" | json_path phases.remote-fold)" = "ok" ] \
+  && [ "$(printf '%s' "$SYNC" | json_path phases.remote-render)" = "not-applicable" ] \
+  && [ "$(printf '%s' "$SYNC" | json_path phases.remote-commit)" = "not-applicable" ] \
+  && [ "$(printf '%s' "$SYNC" | json_path phases.remote-push)" = "not-applicable" ] \
+  && [ "$(printf '%s' "$SYNC" | json_path phases.remote-confirm)" = "ok" ] \
+  && ok "tipless remote is folded with exact fetch/fold evidence" \
+  || bad "tipless sync evidence was not folded: $SYNC"
+
+echo "== a published remote tip remains remote-confirmed =="
+MEM_STORE="$CONFIG_STORE" MEM_INIT=1 python3 "$MEM" add durable note \
+  "published tip fixture record" --scope global >/dev/null 2>&1
+CONFIRMED="$(MEM_STORE="$CONFIG_STORE" python3 "$MEM" sync --json 2>/dev/null)"
+[ "$(printf '%s' "$CONFIRMED" | json status)" = "remote-confirmed" ] \
+  && [ "$(printf '%s' "$CONFIRMED" | json_path peer.last_confirmed_tip)" != "None" ] \
+  && [ "$(printf '%s' "$CONFIRMED" | json_path phases.remote-push)" = "ok" ] \
+  && [ "$(printf '%s' "$CONFIRMED" | json_path phases.remote-confirm)" = "ok" ] \
+  && ok "published remote tip remains remote-confirmed" \
+  || bad "published tip lost remote confirmation: $CONFIRMED"
 
 echo "== a session opened in the home directory does not veto the default =="
 # The home directory is an ancestor of the default exchange location, so

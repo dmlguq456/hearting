@@ -525,7 +525,18 @@ by matching its declared `hostname`, not written down, so promoting a different
 machine to session host is a change of habit rather than an edit on every
 server. An inventory label and a system hostname need not agree, which is why
 the match is against a declared field. Live state is never recorded: `list` and
-`probe` measure reachability and free GPU memory at the moment they are asked.
+`probe` measure reachability, CPU utilization, and GPU utilization/free memory
+at the moment they are asked.
+
+`claim <host> <pid> --harness <runtime> --session <id>` is the narrow bridge for
+an already detached `nohup`/`setsid` process whose runtime ancestor and session
+environment no longer survive. It writes only to the shared run root's
+`.process-owners.json`, never to the inventory. Creation revalidates the remote
+root PID's start time, effective UID, and command-line SHA-256; every later
+probe revalidates the same tuple and requires the current GPU process ancestry
+to contain that exact root. A stale/reused PID, changed command, ambiguous
+claim, missing ancestry, or unreadable `/proc` remains unattributed. Cwd, PID
+number alone, and transcript text are never ownership evidence.
 
 `run` starts a command detached under a stable run id and writes its log and
 exit code beneath the shared run root, so the session that launched the work

@@ -114,36 +114,36 @@ class F52bTrackLengthTest(unittest.TestCase):
                          render._gauge_segs(50, 99, track=render._GAUGE_W))
 
 
-class AbsoluteContextTest(unittest.TestCase):
-    def test_wide_detail_compares_active_tokens_with_the_window(self):
+class ContextDisplayRestraintTest(unittest.TestCase):
+    def test_wide_detail_keeps_percent_but_hides_absolute_tokens(self):
         session = Session(harness="claude", pid=1, cwd="/x", liveness="working",
                           ctx_pct=38, active_context_tokens=380000,
                           context_window_tokens=1000000, summary="working now")
         row = render._context_detail_row(session, term_width=168)[0]
         text = "".join(value for value, _key in row)
-        self.assertIn("38%  380K/1M", text)
+        self.assertIn("38%", text)
+        self.assertNotIn("380K", text)
+        self.assertNotIn("1M", text)
         self.assertLessEqual(render._dw(text), 168)
 
-    def test_absolute_context_yields_whole_when_the_row_is_tight(self):
+    def test_narrow_detail_also_hides_absolute_tokens(self):
         session = Session(harness="claude", pid=1, cwd="/x", liveness="working",
                           ctx_pct=47, active_context_tokens=100000,
                           context_window_tokens=200000, summary="working now")
-        for width in (20, 22, 24):
+        for width in (20, 22, 24, 60):
             with self.subTest(width=width):
                 text = "".join(value for value, _key in
                                render._context_detail_row(session, term_width=width)[0])
                 self.assertNotIn("100K/200K", text)
                 self.assertLessEqual(render._dw(text), width)
 
-    def test_absolute_context_requires_both_real_measurements(self):
-        for active, window in ((None, 1000000), (380000, None), (True, 1000000)):
-            with self.subTest(active=active, window=window):
-                session = Session(harness="claude", pid=1, cwd="/x", liveness="idle",
-                                  ctx_pct=38, active_context_tokens=active,
-                                  context_window_tokens=window)
-                text = "".join(value for value, _key in
-                               render._context_detail_row(session, term_width=168)[0])
-                self.assertNotIn("/", text)
+    def test_telemetry_remains_available_for_json_and_gauge_normalization(self):
+        session = Session(harness="claude", pid=1, cwd="/x", liveness="idle",
+                          ctx_pct=38, active_context_tokens=380000,
+                          context_window_tokens=1000000)
+        self.assertEqual(session.active_context_tokens, 380000)
+        self.assertEqual(session.context_window_tokens, 1000000)
+        self.assertEqual(len(track_of(render._context_detail_row(session, term_width=168))), 16)
 
 
 class MainOwnershipWeightTest(unittest.TestCase):

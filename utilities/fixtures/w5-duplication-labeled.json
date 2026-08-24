@@ -1,0 +1,23 @@
+[
+  {"id":"p1","label":"positive","body":"Read the artifact after the projection is refreshed.","target_text":"Read the artifact after the projection is refreshed."},
+  {"id":"p2","label":"positive","body":"Read the artifact after the projection is refreshed tomorrow.","target_text":"Read the artifact after the projection is refreshed."},
+  {"id":"p3","label":"positive","body":"When the projection is stale, read the artifact again.","target_text":"When the projection is stale read the artifact again."},
+  {"id":"p4","label":"positive","body":"Verify the artifact metadata before writing a conclusion.","target_text":"Verify the artifact metadata before writing a conclusion."},
+  {"id":"p5","label":"positive","body":"The artifact must be read after a projection refresh.","target_text":"The artifact must be read after a projection refresh."},
+  {"id":"p6","label":"positive","body":"Read the canonical artifact only when the pointer is needed.","target_text":"Read the canonical artifact only when the pointer is needed."},
+  {"id":"p7","label":"positive","body":"Read the artifact and verify metadata before using it.","target_text":"Read the artifact and verify metadata before using it."},
+  {"id":"p8","label":"positive","body":"After a stale snapshot, read the artifact again.","target_text":"After a stale snapshot read the artifact again."},
+  {"id":"p9","label":"positive","body":"Read the artifact to confirm its current locator.","target_text":"Read the artifact to confirm its current locator."},
+  {"id":"p10","label":"positive","body":"Read the projection artifact after the target changes.","target_text":"Read the projection artifact after the target changes."},
+  {"id":"n1","label":"negative","body":"This durable note records a decision and its owner.","target_text":"A separate projection contains unrelated metadata."},
+  {"id":"n2","label":"negative","body":"Use the pointer when a future task needs fresh evidence.","target_text":"The archive contains a different historical record."},
+  {"id":"n3","label":"negative","body":"The memory entry explains when to revisit the source.","target_text":"The source has an independent lifecycle."},
+  {"id":"n4","label":"negative","body":"Keep this note short and scoped to retrieval timing.","target_text":"A target can be unavailable during maintenance."},
+  {"id":"n5","label":"negative","body":"This record names the responsible workflow and review date.","target_text":"The artifact has a stable opaque identifier."},
+  {"id":"n6","label":"negative","body":"Record only the reason for a later read.","target_text":"Projection rows contain locators and freshness metadata."},
+  {"id":"n7","label":"negative","body":"A bounded memory record supports future navigation.","target_text":"The target may require a retry after a timeout."},
+  {"id":"n8","label":"negative","body":"The owner accepted the implementation boundary.","target_text":"A canonical read returns a path-only result."},
+  {"id":"n9","label":"negative","body":"This note is about a review correction.","target_text":"The read contract rejects mutation options."},
+  {"id":"n10","label":"negative","body":"Use a stable ID to request a later projection read.","target_text":"The database remains outside the memory store."},
+  {"id":"u1","label":"unreadable","target_readable":false,"body":"A sealed memory-side target is not readable.","target_text":""}
+]

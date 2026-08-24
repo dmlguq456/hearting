@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+. "$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)/test-isolation.sh"
+hearting_test_isolate
 # Cluster J (v15, D-37/D-38/D-39) — write-events 저널 + mem log + mem doctor.
 # ABSOLUTE: every case uses isolated MEM_STORE/MEM_PROJECTS/MEM_WRITE_EVENTS (mktemp -d).
 # NEVER writes real runtime memory. This suite spawns NO `claude` (ISO-2).

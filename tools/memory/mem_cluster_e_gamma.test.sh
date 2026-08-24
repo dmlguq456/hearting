@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+. "$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)/test-isolation.sh"
+hearting_test_isolate
 # Cluster E Phase γ — isolated test suite (curator subcommands + anti-bloat + graduate).
 # Maps to Verification ②③⑤⑥⑦ (dispatch ①④⑧ live in mem-distill-dispatch.test.sh).
 #

@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+. "$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)/test-isolation.sh"
+hearting_test_isolate
 # Regressions for tools/memory/recover-lost-deltas.py (P3-1).
 #
 # The tool rewinds distill markers over the 2026-08-10 worker-outage window.

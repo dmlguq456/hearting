@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+. "$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)/test-isolation.sh"
+hearting_test_isolate
 # Regressions for the 2026-07-22 memory-audit repairs:
 #   1) migrate v6 — legacy cwd_origin remap (audit W3) + canonical absorb path
 #   2) CJK bigram retrieval (audit W4) — ranked FTS for Korean substrings
@@ -24,10 +26,10 @@ PY
 echo "== storage default: local XDG store when source memory is absent =="
 FALLBACK_HOME="$TMP/fallback-home"; FALLBACK_AGENT="$TMP/fallback-agent"
 mkdir -p "$FALLBACK_HOME" "$FALLBACK_AGENT"
-HOME="$FALLBACK_HOME" AGENT_HOME="$FALLBACK_AGENT" MEM_INIT=1 \
+hearting_test_derived_env env HOME="$FALLBACK_HOME" AGENT_HOME="$FALLBACK_AGENT" MEM_INIT=1 \
   python3 "$MEM" add durable note \
     "local data store fallback fixture record" --scope global >/dev/null 2>&1
-[ -f "$FALLBACK_HOME/.local/share/hearting/memory/memory.db" ] \
+[ -f "$XDG_DATA_HOME/hearting/memory/memory.db" ] \
   && ok "missing source memory defaults SQLite to the local data store" \
   || bad "local data-store fallback was not selected"
 

@@ -10,6 +10,7 @@ This holds the static half in one user-owned file and measures the rest:
 
     list    inventory plus reachability, GPU load/VRAM, and exact process owners
     probe   the live GPU/process measurement alone, for one host or all of them
+    claim   bind a detached root PID to its exact launcher session identity
     run     start a detached command on a host under a stable run id
     runs    what has been started, and which of those are still alive
     tail    read a run's log from any host that shares the run root
@@ -26,6 +27,7 @@ from __future__ import annotations
 import argparse
 import concurrent.futures
 import datetime
+import fcntl
 import importlib.util
 import json
 import os
@@ -40,6 +42,9 @@ CONNECT_TIMEOUT = 8
 PROBE_TIMEOUT = 40
 GPU_PROBE_TIMEOUT = 3
 LOCAL = "local"
+OWNER_CLAIMS = ".process-owners.json"
+OWNER_CLAIMS_LOCK = ".process-owners.lock"
+OWNER_CLAIMS_SCHEMA = 1
 
 
 def _parser_module():
@@ -83,6 +88,48 @@ def load_config():
         if not isinstance(host, dict) or not host.get("ssh_host"):
             raise ConfigError(f"host {name} declares no ssh_host")
     return {"run_root": Path(run_root), "hosts": hosts}
+
+
+def _claim_path(run_root):
+    return Path(run_root) / OWNER_CLAIMS
+
+
+def _load_claims(run_root):
+    path = _claim_path(run_root)
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return []
+    if not isinstance(payload, dict) or payload.get("schema_version") != OWNER_CLAIMS_SCHEMA:
+        return []
+    rows = payload.get("claims")
+    return [dict(row) for row in rows if isinstance(row, dict)] if isinstance(rows, list) else []
+
+
+def _record_claim(run_root, claim):
+    """Atomically replace one exact host/root identity claim under the shared run root."""
+    root = Path(run_root)
+    root.mkdir(parents=True, exist_ok=True)
+    lock_path = root / OWNER_CLAIMS_LOCK
+    with lock_path.open("a+", encoding="utf-8") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        claims = _load_claims(root)
+        key = (claim["host"], claim["root_pid"], claim["root_start"])
+        claims = [row for row in claims
+                  if (row.get("host"), row.get("root_pid"), row.get("root_start")) != key]
+        claims.append(dict(claim))
+        payload = {"schema_version": OWNER_CLAIMS_SCHEMA, "claims": claims[-1024:]}
+        temp = root / (OWNER_CLAIMS + ".tmp.%d" % os.getpid())
+        try:
+            temp.write_text(json.dumps(payload, ensure_ascii=False, indent=1,
+                                       sort_keys=True) + "\n", encoding="utf-8")
+            os.replace(temp, _claim_path(root))
+        finally:
+            try:
+                temp.unlink()
+            except FileNotFoundError:
+                pass
+        fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
 
 
 def is_self(host):
@@ -135,6 +182,7 @@ def remote(host, script, *, timeout=PROBE_TIMEOUT):
 PROBE_SCRIPT = r"""
 python3 - <<'PY'
 import csv
+import hashlib
 import io
 import json
 import os
@@ -142,6 +190,13 @@ import socket
 import subprocess
 import time
 from pathlib import Path
+
+try:
+    OWNER_CLAIMS = json.loads(os.environ.get("HEARTING_OWNER_CLAIMS_JSON", "[]"))
+except (TypeError, ValueError):
+    OWNER_CLAIMS = []
+if not isinstance(OWNER_CLAIMS, list):
+    OWNER_CLAIMS = []
 
 
 def smi(query):
@@ -175,6 +230,40 @@ def proc_stat(pid):
         return {"ppid": int(rest[1]), "start": int(rest[19])}
     except (OSError, ValueError, IndexError):
         return None
+
+
+def proc_cmdline_sha256(pid):
+    try:
+        raw = (Path("/proc") / str(pid) / "cmdline").read_bytes()
+    except OSError:
+        return None
+    return hashlib.sha256(raw).hexdigest()
+
+
+def cpu_sample():
+    def read():
+        try:
+            fields = Path("/proc/stat").read_text().splitlines()[0].split()[1:]
+            values = [int(value) for value in fields]
+        except (OSError, ValueError, IndexError):
+            return None
+        if len(values) < 4:
+            return None
+        idle = values[3] + (values[4] if len(values) > 4 else 0)
+        return sum(values), idle
+
+    before = read()
+    if before is None:
+        return None
+    time.sleep(0.10)
+    after = read()
+    if after is None:
+        return None
+    total = after[0] - before[0]
+    idle = after[1] - before[1]
+    if total <= 0:
+        return None
+    return max(0, min(100, int(round(100.0 * (total - idle) / total))))
 
 
 def same_euid(pid):
@@ -279,6 +368,28 @@ def process_owner(pid, expected_start):
                 "evidence_start": stat["start"], "ancestry_depth": depth,
                 "source": "environment+ancestry",
             })
+        for claim in OWNER_CLAIMS:
+            if not isinstance(claim, dict):
+                continue
+            owner = claim.get("owner")
+            if (claim.get("root_pid") != current or claim.get("root_start") != stat["start"]
+                    or not isinstance(owner, dict) or owner.get("kind") != "session"):
+                continue
+            expected_hash = claim.get("root_cmdline_sha256")
+            if (not isinstance(expected_hash, str)
+                    or proc_cmdline_sha256(current) != expected_hash):
+                continue
+            harness = owner.get("harness")
+            sid = owner.get("id")
+            if harness not in {"claude", "codex", "opencode"} or not isinstance(sid, str):
+                continue
+            candidates["session"].append({
+                "kind": "session", "id": sid,
+                "label": "%s:%s" % (harness, safe_label(sid[:8], "session")),
+                "harness": harness, "evidence_pid": current,
+                "evidence_start": stat["start"], "ancestry_depth": depth,
+                "source": "persistent-claim+ancestry",
+            })
         harness = harness_process(current)
         if harness:
             candidates["harness"].append({
@@ -314,7 +425,8 @@ def process_owner(pid, expected_start):
 
 
 payload = {
-    "hostname": socket.gethostname(), "load": None, "gpus": [],
+    "hostname": socket.gethostname(), "load": None,
+    "cpu_count": os.cpu_count(), "cpu_utilization_pct": cpu_sample(), "gpus": [],
     "unmatched_processes": [], "observed_at": time.time(),
 }
 try:
@@ -388,9 +500,13 @@ PY
 """
 
 
-def probe_host(name, host):
+def probe_host(name, host, owner_claims=None):
     observed_at = datetime.datetime.now().timestamp()
-    result = remote(host, PROBE_SCRIPT, timeout=GPU_PROBE_TIMEOUT)
+    claims_json = json.dumps(list(owner_claims or ()), ensure_ascii=False,
+                             separators=(",", ":"))
+    script = "export HEARTING_OWNER_CLAIMS_JSON=%s\n%s" % (
+        shlex.quote(claims_json), PROBE_SCRIPT)
+    result = remote(host, script, timeout=GPU_PROBE_TIMEOUT)
     if result.returncode != 0:
         detail = (result.stderr or result.stdout).strip().splitlines()
         return {"host": name, "reachable": False,
@@ -418,6 +534,8 @@ def probe_host(name, host):
         gpus.append(gpu)
     row = {"host": name, "reachable": True,
            "hostname": payload.get("hostname"), "load": payload.get("load"),
+           "cpu_count": payload.get("cpu_count"),
+           "cpu_utilization_pct": payload.get("cpu_utilization_pct"),
            "gpus": gpus, "observed_at": payload.get("observed_at") or observed_at,
            "unmatched_processes": payload.get("unmatched_processes") or []}
     if payload.get("gpu_error"):
@@ -427,13 +545,20 @@ def probe_host(name, host):
     return row
 
 
-def _probe_selected(selected):
+def _probe_selected(selected, run_root=None):
     """Probe hosts concurrently while preserving the inventory's declared order."""
     if not selected:
         return []
+    claims = _load_claims(run_root) if run_root is not None else []
+    claims_by_host = {}
+    for claim in claims:
+        if isinstance(claim.get("host"), str):
+            claims_by_host.setdefault(claim["host"], []).append(claim)
     workers = min(8, len(selected))
     with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
-        return list(pool.map(lambda item: probe_host(*item), selected))
+        return list(pool.map(
+            lambda item: probe_host(item[0], item[1], claims_by_host.get(item[0], ())),
+            selected))
 
 
 def _select(config, names):
@@ -449,7 +574,8 @@ def _select(config, names):
 def cmd_list(args):
     config = load_config()
     selected = _select(config, args.hosts)
-    live_rows = ({row["host"]: row for row in _probe_selected(selected)}
+    live_rows = ({row["host"]: row
+                  for row in _probe_selected(selected, config["run_root"])}
                  if not args.static else {})
     rows = []
     for name, host in selected:
@@ -479,13 +605,16 @@ def cmd_list(args):
             for g in row["gpus"] if g.get("used_mib") is not None
             and g.get("total_mib") is not None) or "no gpu"
         here = "*" if row.get("self") else " "
-        print(f" {here}{row['host']:<10} up   load {row.get('load', '?')}  | {summary}")
+        cpu = row.get("cpu_utilization_pct")
+        cpu_text = "%s%%" % cpu if isinstance(cpu, int) else "—"
+        print(f" {here}{row['host']:<10} up   cpu {cpu_text:<4} "
+              f"load {row.get('load', '?')}  | {summary}")
     return 0
 
 
 def cmd_probe(args):
     config = load_config()
-    results = _probe_selected(_select(config, args.hosts))
+    results = _probe_selected(_select(config, args.hosts), config["run_root"])
     if args.json:
         print(json.dumps(results, ensure_ascii=False, sort_keys=True))
     else:
@@ -498,6 +627,78 @@ def cmd_probe(args):
                       f"{gpu.get('used_mib')}/{gpu.get('total_mib')} MiB used, "
                       f"{util if util is not None else '—'}% util")
     return 0 if all(r["reachable"] for r in results) else 1
+
+
+CLAIM_IDENTITY_SCRIPT = r"""
+python3 - <<'PY'
+import hashlib
+import json
+import os
+from pathlib import Path
+
+pid = int(os.environ["HEARTING_CLAIM_PID"])
+root = Path("/proc") / str(pid)
+try:
+    text = (root / "stat").read_text(encoding="utf-8", errors="replace")
+    rest = text[text.rfind(")") + 2:].split()
+    start = int(rest[19])
+    cmdline = (root / "cmdline").read_bytes()
+    status = (root / "status").read_text(encoding="utf-8", errors="replace")
+except (OSError, ValueError, IndexError) as exc:
+    raise SystemExit("process unavailable: %s" % exc)
+effective = None
+for line in status.splitlines():
+    if line.startswith("Uid:"):
+        fields = line.split()
+        effective = int(fields[2]) if len(fields) >= 3 else None
+        break
+if effective != os.geteuid():
+    raise SystemExit("process belongs to another effective uid")
+print(json.dumps({
+    "pid": pid, "start": start,
+    "cmdline_sha256": hashlib.sha256(cmdline).hexdigest(),
+}, sort_keys=True))
+PY
+"""
+
+
+def cmd_claim(args):
+    config = load_config()
+    (name, host), = _select(config, [args.host])
+    if args.harness not in {"claude", "codex", "opencode"}:
+        raise ConfigError("claim harness must be claude, codex, or opencode")
+    session_id = str(args.session or "").strip()
+    if not session_id or len(session_id) > 256:
+        raise ConfigError("claim session id must contain 1..256 characters")
+    script = "export HEARTING_CLAIM_PID=%d\n%s" % (args.pid, CLAIM_IDENTITY_SCRIPT)
+    result = remote(host, script, timeout=CONNECT_TIMEOUT)
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "identity probe failed").strip()
+        raise ConfigError("cannot claim %s pid %d: %s" % (name, args.pid, detail[:200]))
+    try:
+        identity = json.loads(result.stdout.strip().splitlines()[-1])
+    except (IndexError, TypeError, ValueError) as exc:
+        raise ConfigError("invalid claim identity response") from exc
+    if (identity.get("pid") != args.pid or not isinstance(identity.get("start"), int)
+            or not isinstance(identity.get("cmdline_sha256"), str)):
+        raise ConfigError("incomplete claim identity response")
+    claim = {
+        "host": name,
+        "root_pid": args.pid,
+        "root_start": identity["start"],
+        "root_cmdline_sha256": identity["cmdline_sha256"],
+        "owner": {
+            "kind": "session", "id": session_id, "harness": args.harness,
+            "label": "%s:%s" % (args.harness, session_id[:8]),
+        },
+        "recorded_at": datetime.datetime.now().isoformat(timespec="seconds"),
+    }
+    _record_claim(config["run_root"], claim)
+    if args.json:
+        print(json.dumps(claim, ensure_ascii=False, sort_keys=True))
+    else:
+        print("claimed %s pid %d -> %s" % (name, args.pid, claim["owner"]["label"]))
+    return 0
 
 
 def _run_id(host_name, label, now, run_root=None):
@@ -675,16 +876,27 @@ def build_parser():
         prog="compute-hosts", description=__doc__.splitlines()[0])
     sub = parser.add_subparsers(dest="command", required=True)
 
-    p_list = sub.add_parser("list", help="Inventory with live reachability and GPUs")
+    p_list = sub.add_parser("list", help="Inventory with live reachability and CPU/GPU state")
     p_list.add_argument("hosts", nargs="*")
     p_list.add_argument("--static", action="store_true", help="Skip the live probe")
     p_list.add_argument("--json", action="store_true")
     p_list.set_defaults(func=cmd_list)
 
-    p_probe = sub.add_parser("probe", help="Measure reachability, GPUs, and process owners")
+    p_probe = sub.add_parser(
+        "probe", help="Measure reachability, CPU/GPUs, and process owners")
     p_probe.add_argument("hosts", nargs="*")
     p_probe.add_argument("--json", action="store_true")
     p_probe.set_defaults(func=cmd_probe)
+
+    p_claim = sub.add_parser(
+        "claim", help="Bind a detached root PID to its exact launcher session")
+    p_claim.add_argument("host")
+    p_claim.add_argument("pid", type=int)
+    p_claim.add_argument("--harness", required=True,
+                         choices=("claude", "codex", "opencode"))
+    p_claim.add_argument("--session", required=True)
+    p_claim.add_argument("--json", action="store_true")
+    p_claim.set_defaults(func=cmd_claim)
 
     p_run = sub.add_parser("run", help="Start a detached command on a host")
     p_run.add_argument("host")

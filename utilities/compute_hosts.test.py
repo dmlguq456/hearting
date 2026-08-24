@@ -183,7 +183,7 @@ class ComputeHostsTest(unittest.TestCase):
         module = load_module()
         barrier = threading.Barrier(3, timeout=1.0)
 
-        def fake_probe(name, _host):
+        def fake_probe(name, _host, _claims):
             barrier.wait()
             return {"host": name, "reachable": True, "gpus": []}
 
@@ -276,6 +276,80 @@ class ComputeHostsTest(unittest.TestCase):
         self.assertEqual(second_by_pid[session_proc.pid]["owner"]["kind"], "session")
         self.assertEqual(second_by_pid[session_proc.pid]["owner"]["label"], "codex:codex-ex")
         self.assertIsInstance(second_by_pid[job_proc.pid]["proc_start"], int)
+        self.assertIsInstance(payload["cpu_count"], int)
+        self.assertGreater(payload["cpu_count"], 0)
+        self.assertGreaterEqual(payload["cpu_utilization_pct"], 0)
+        self.assertLessEqual(payload["cpu_utilization_pct"], 100)
+
+    def test_persistent_claim_reconnects_a_detached_root_to_its_session(self):
+        module = load_module()
+        fakebin = self.root / "claim-bin"
+        fakebin.mkdir()
+        fake_smi = fakebin / "nvidia-smi"
+        fake_smi.write_text(
+            "#!/usr/bin/env python3\n"
+            "import os, sys\n"
+            "if any(a.startswith('--query-gpu=') for a in sys.argv):\n"
+            " print('0, GPU-A, NVIDIA A100, 61, 40960, 12288')\n"
+            "else:\n"
+            " print('GPU-A, %s, python, 12288' % os.environ['CLAIMED_GPU_PID'])\n",
+            encoding="utf-8",
+        )
+        fake_smi.chmod(0o755)
+        identity_keys = {
+            "AGENT_DISPATCH_ATTEMPT_ID", "AGENT_DISPATCH_SELF_SLUG",
+            "HEARTING_COMPUTE_RUN_ID", "HEARTING_COMPUTE_HOST",
+            "CLAUDE_CODE_SESSION_ID", "CODEX_THREAD_ID", "CODEX_SESSION_ID",
+            "OPENCODE_SESSION_ID",
+        }
+        clean = {key: value for key, value in os.environ.items() if key not in identity_keys}
+        process = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(10)"], env=clean,
+            start_new_session=True,
+        )
+        try:
+            claimed = self.run_tool(
+                "claim", "here", str(process.pid), "--harness", "claude",
+                "--session", "f11a0486-c090-4098-aeb0-0fd6d79f8d0c", "--json",
+            )
+            self.assertEqual(claimed.returncode, 0, claimed.stderr)
+            claim = json.loads(claimed.stdout)
+            self.assertEqual(claim["root_pid"], process.pid)
+            self.assertEqual(claim["owner"]["label"], "claude:f11a0486")
+
+            env = {
+                **clean,
+                "PATH": str(fakebin) + os.pathsep + os.environ.get("PATH", ""),
+                "CLAIMED_GPU_PID": str(process.pid),
+                "HEARTING_OWNER_CLAIMS_JSON": json.dumps([claim]),
+            }
+            result = subprocess.run(
+                ["bash", "-c", module.PROBE_SCRIPT], text=True, capture_output=True,
+                env=env, timeout=5,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            payload = json.loads(result.stdout)
+            stale_claim = {**claim, "root_cmdline_sha256": "0" * 64}
+            stale_result = subprocess.run(
+                ["bash", "-c", module.PROBE_SCRIPT], text=True, capture_output=True,
+                env={**env, "HEARTING_OWNER_CLAIMS_JSON": json.dumps([stale_claim])},
+                timeout=5,
+            )
+            self.assertEqual(stale_result.returncode, 0, stale_result.stderr)
+            stale_payload = json.loads(stale_result.stdout)
+        finally:
+            process.terminate()
+            process.wait(timeout=2)
+
+        owner = payload["gpus"][0]["processes"][0]["owner"]
+        self.assertEqual(owner["kind"], "session")
+        self.assertEqual(owner["label"], "claude:f11a0486")
+        self.assertEqual(owner["source"], "persistent-claim+ancestry")
+        stale_process = stale_payload["gpus"][0]["processes"][0]
+        stale_owner = stale_process["owner"]
+        if stale_owner is not None:  # the test runner's own session ancestor may still be exact
+            self.assertNotEqual(stale_owner["label"], "claude:f11a0486")
+            self.assertNotEqual(stale_owner["source"], "persistent-claim+ancestry")
 
 
 if __name__ == "__main__":
