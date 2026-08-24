@@ -119,6 +119,37 @@ def _managed_release_roots(home):
     return roots
 
 
+def _managed_runtime_bundle_roots(home):
+    """Immutable bundle sources created by runtime activation for this user.
+
+    Activation records name only the current bundle.  A launcher can still point
+    at the immediately previous bundle when activation advances first, so scan
+    the installer-owned bundle containers rather than relying on the current
+    record to recognize that prior link.  Symlinked entries are never claimed as
+    installer-owned.
+    """
+    bundle_dirs = (
+        home / ".claude" / ".harness" / "bundles",
+        home / ".codex" / ".harness" / "bundles",
+        home / ".config" / "opencode" / ".harness" / "bundles",
+    )
+    roots = []
+    for bundles in bundle_dirs:
+        try:
+            entries = list(bundles.iterdir())
+        except OSError:
+            continue
+        for entry in entries:
+            source = entry / "source"
+            try:
+                if (not entry.is_symlink() and entry.is_dir()
+                        and not source.is_symlink() and source.is_dir()):
+                    roots.append(source)
+            except OSError:
+                continue
+    return roots
+
+
 def _is_prior_linked_launcher(target, home, rel_source):
     """Recognize exact launchers from legacy or activated Hearting sources."""
     destination = _symlink_destination(target)
@@ -136,6 +167,8 @@ def _is_prior_linked_launcher(target, home, rel_source):
         # pinned to v2.49.0 while `fleet` had to be repointed by hand.
         prior.update((root / rel_source).resolve(strict=False)
                      for root in _managed_release_roots(home))
+        prior.update((root / rel_source).resolve(strict=False)
+                     for root in _managed_runtime_bundle_roots(home))
     except (OSError, RuntimeError):
         return False
     activation_paths = (

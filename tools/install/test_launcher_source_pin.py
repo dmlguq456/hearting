@@ -181,6 +181,45 @@ class ManagedReleaseMigrationTest(unittest.TestCase):
         rows = {r["name"]: r["status"] for r in bootstrap.install_launchers(home=self.home)}
         self.assertEqual(set(rows.values()), {"migrated-legacy"})
 
+    def test_prior_runtime_bundle_links_migrate_after_activation_advances(self):
+        """The old bundle is no longer named by activation.json after a refresh."""
+        rel = dict(bootstrap.LAUNCHERS)["fleet"]
+        bundle_dirs = (
+            self.home / ".claude" / ".harness" / "bundles",
+            self.home / ".codex" / ".harness" / "bundles",
+            self.home / ".config" / "opencode" / ".harness" / "bundles",
+        )
+        target = self.bin_dir / "fleet"
+        for index, bundles in enumerate(bundle_dirs):
+            with self.subTest(bundles=bundles):
+                prior = bundles / f"prior-{index}" / "source" / rel
+                prior.parent.mkdir(parents=True)
+                prior.write_text("#!/bin/sh\n", encoding="utf-8")
+                if target.is_symlink():
+                    target.unlink()
+                target.symlink_to(prior)
+
+                rows = {r["name"]: r for r in bootstrap.install_launchers(home=self.home)}
+
+                self.assertEqual(rows["fleet"]["status"], "migrated-legacy")
+                self.assertEqual(target.resolve(), (self.source / rel).resolve())
+
+    def test_symlinked_runtime_bundle_entry_is_still_foreign(self):
+        rel = dict(bootstrap.LAUNCHERS)["fleet"]
+        foreign = self.root / "foreign-bundle" / "source" / rel
+        foreign.parent.mkdir(parents=True)
+        foreign.write_text("#!/bin/sh\n", encoding="utf-8")
+        bundles = self.home / ".codex" / ".harness" / "bundles"
+        bundles.mkdir(parents=True)
+        (bundles / "lookalike").symlink_to(self.root / "foreign-bundle")
+        target = self.bin_dir / "fleet"
+        target.symlink_to(foreign)
+
+        rows = {r["name"]: r["status"] for r in bootstrap.install_launchers(home=self.home)}
+
+        self.assertEqual(rows["fleet"], "skipped-collision")
+        self.assertEqual(target.resolve(), foreign.resolve())
+
     def test_a_foreign_link_is_still_preserved(self):
         """The guard's whole purpose survives: only installer-owned trees are re-pointed."""
         foreign = self.root / "elsewhere" / "fleet.sh"
