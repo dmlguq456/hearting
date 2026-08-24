@@ -229,6 +229,29 @@ class GpuProcessAndResourceRenderTest(unittest.TestCase):
                 self.assertEqual(render._gpu_model_key(model), key)
                 self.assertEqual(render._HUE_OF[key][1], render._A_DIM)
 
+    def test_gpu_family_colors_bind_to_initialized_palette_pairs(self):
+        previous = dict(render._COLOR)
+
+        def restore_colors():
+            render._COLOR.clear()
+            render._COLOR.update(previous)
+
+        self.addCleanup(restore_colors)
+        with mock.patch.object(render.curses, "start_color"), \
+                mock.patch.object(render.curses, "use_default_colors"), \
+                mock.patch.object(render.curses, "can_change_color", return_value=False), \
+                mock.patch.object(render.curses, "init_pair"), \
+                mock.patch.object(render.curses, "color_pair", side_effect=lambda pair: pair << 8), \
+                mock.patch.object(render.curses, "COLORS", 256, create=True):
+            render._init_colors()
+
+        self.assertEqual(render._COLOR["gpu_ada"], render._COLOR["h_claude"])
+        self.assertEqual(render._COLOR["gpu_hopper"], render._COLOR["h_codex"])
+        self.assertEqual(render._COLOR["gpu_ampere"], render._COLOR["h_opencode"])
+        for family in ("gpu_blackwell", "gpu_hopper", "gpu_ada", "gpu_ampere", "gpu_turing"):
+            with self.subTest(family=family):
+                self.assertNotEqual(render._COLOR[family] & ~render.curses.A_DIM, 0)
+
     def test_group_and_process_views_share_link_and_order_after_subagent_strip(self):
         group = render._build_lines(
             [self.session], [], "both", False, 0, layout="wide", term_width=120)

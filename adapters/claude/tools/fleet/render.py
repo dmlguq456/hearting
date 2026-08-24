@@ -346,8 +346,8 @@ def _init_colors():
     # model name remains present, so color is an additive cue rather than the
     # only identifier.
     for fam, hue_name in {
-        "blackwell": "green", "hopper": "magenta", "ada": "cyan",
-        "ampere": "blue", "turing": "yellow",
+        "blackwell": "green", "hopper": "h_codex", "ada": "h_claude",
+        "ampere": "h_opencode", "turing": "yellow",
     }.items():
         _COLOR["gpu_" + fam] = _COLOR.get(hue_name, 0) | curses.A_DIM
     _COLOR["gpu_other"] = curses.A_DIM
