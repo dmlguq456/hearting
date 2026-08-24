@@ -337,6 +337,263 @@ class GovernorTest(unittest.TestCase):
                     },
                 )
 
+    def test_partial_continuation_supersedes_only_gap_and_reuses_retry_claim(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            source, source_digest, source_legs = self.manifest()
+            replacement_members = json.loads(json.dumps(source["members"]))
+            replacement_members[1]["attempt_id"] = "att-retry-verbatim"
+            replacement, replacement_digest, replacement_legs = build_manifest(
+                parallel_group="plan",
+                route_id="rt-governor",
+                parent_attempt_id="att-parent-governor",
+                independence="cross-harness",
+                members=replacement_members,
+                required_independence_axes=[
+                    "cross-harness", "model-profile", "perspective"
+                ],
+                realized_independence_axes=[
+                    "cross-harness", "model-profile", "perspective"
+                ],
+            )
+            realized = [{
+                "node_id": "plan",
+                "terminal_attempt_id": "att-plan-one",
+                "marker_path": str(Path(temp_dir, "plan.json")),
+                "marker_digest": "sha256:" + "1" * 64,
+                "verdict": "PASS",
+                "quiescence_proof_digest": "sha256:" + "2" * 64,
+                "output_evidence_digest": "sha256:" + "3" * 64,
+                "contract_hash": "sha256:" + "4" * 64,
+            }]
+            peer_digest = GOVERNOR._record_digest(realized)
+            identity = GOVERNOR._record_digest({
+                "source_route_id": "rt-governor",
+                "source_route_hash": "sha256:source-route",
+                "source_group_id": "plan",
+                "failed_source_attempt_id": "att-plan-two",
+                "gap_leg_id": "plan-replica",
+                "reused_peer_set_proof_digest": peer_digest,
+            })
+            partial = {
+                "contract_version": 1,
+                "source_group_id": "plan",
+                "source_batch_manifest_digest": source_digest,
+                "leg_manifest_digests": {
+                    member["route_node"]: source_legs[member["attempt_id"]]
+                    for member in source["members"]
+                },
+                "original_group_cardinality": 2,
+                "join_policy": "all",
+                "failed_source_attempt_id": "att-plan-two",
+                "gap_leg_id": "plan-replica",
+                "realized_peer_set": realized,
+                "reused_peer_set_proof_digest": peer_digest,
+                "replacement_leg_identity": identity,
+                "replacement_attempt_id": "att-" + identity.split(":", 1)[1][:48],
+            }
+            continuation = {
+                "continuation_contract_version": 1,
+                "continuation_id": "cont-governor-at5",
+                "source_route_id": "rt-governor",
+                "source_route_hash": "sha256:source-route",
+                "partial_group_continuation": partial,
+            }
+            seal = {
+                "schema_version": 1,
+                "continuation_id": "cont-governor-at5",
+                "source_route_id": "rt-governor",
+                "source_route_hash": "sha256:source-route",
+                "source_group_id": "plan",
+                "source_batch_manifest_digest": source_digest,
+                "failed_source_attempt_id": "att-plan-two",
+                "gap_leg_id": "plan-replica",
+                "reused_peer_set_proof_digest": peer_digest,
+                "replacement_leg_identity": identity,
+                "replacement_attempt_id": "att-retry-verbatim",
+                "retry_claim_reused": True,
+            }
+            route_path = Path(temp_dir, "route.json")
+            route_path.write_text(json.dumps({
+                "route_id": "rt-governor",
+                "route_hash": "sha256:source-route",
+                "registry_digest": "sha256:source-registry",
+                "cwd": temp_dir,
+                "nodes": [
+                    {
+                        "id": "plan", "parallel_group": "plan", "replica_group": "plan",
+                        "dispatch_depth": 2, "completion_gate": "plan-gate",
+                    },
+                    {
+                        "id": "plan-replica", "parallel_group": "plan",
+                        "replica_group": "plan", "dispatch_depth": 2,
+                        "completion_gate": "plan-replica-gate",
+                    },
+                ],
+            }), encoding="utf-8")
+            raw = Path(f"/proc/{os.getpid()}/stat").read_text(encoding="utf-8")
+            start = raw[raw.rfind(")") + 2 :].split()[19]
+
+            def metadata(member, *, note="", retry=False):
+                value = (
+                    "attempt_schema_version=2,dispatch_depth=2,transport=headless,"
+                    "execution_surface=registered-headless,registered_worker=1,"
+                    f"fallback_hop={member['fallback_hop']},harness={member['harness']},"
+                    f"child_harness={member['harness']},route_id=rt-governor,"
+                    f"route_node={member['route_node']},"
+                    "parent_attempt_id=att-parent-governor,"
+                    f"fallback_ordinal={member['fallback_ordinal']},"
+                    f"attempt_id={member['attempt_id']},launch_claimed=1,"
+                    "parallel_group=plan,replica_group=plan,"
+                    "reservation_kind=parallel-batch,batch_declared_size=2,"
+                    "batch_group=plan,batch_route_id=rt-governor,"
+                    "batch_parent_attempt_id=att-parent-governor,"
+                    f"batch_attempt_id={member['attempt_id']},"
+                    f"batch_route_node={member['route_node']},"
+                    f"batch_harness={member['harness']},"
+                    f"batch_fallback_hop={member['fallback_hop']},"
+                    f"batch_fallback_ordinal={member['fallback_ordinal']},"
+                    f"batch_model_profile={member['model_profile']},"
+                    f"batch_perspective={member['perspective']},"
+                    f"batch_parallel_leg_index={member['parallel_leg_index']},"
+                    "batch_leg_class=peer,batch_auxiliary_check=-,"
+                    "batch_independence=cross-harness,"
+                    f"batch_assignment_sha256={member['assignment_sha256']},"
+                    f"batch_manifest_sha256={source_digest},"
+                    f"batch_leg_sha256={source_legs[member['attempt_id']]}"
+                )
+                if note:
+                    value += f",note={note}"
+                if retry:
+                    value += (
+                        ",recovery_id=rec-at5,retry_ordinal=1,"
+                        "retry_attempt_id=att-retry-verbatim"
+                    )
+                return value
+
+            peer, gap = source["members"]
+            peer_metadata = metadata(peer) + (
+                f",pid={os.getpid()},pid_start={start},"
+                f"pid_observer_ns={os.readlink('/proc/self/ns/pid')}"
+            )
+            gap_metadata = metadata(
+                gap, note="cancelled-receipt-unavailable", retry=True
+            )
+            jobs = Path(temp_dir, "jobs.log")
+            jobs.write_text(
+                f"2026-07-24T00:00:00Z\topen\t{temp_dir}\t{temp_dir}\tpeer\t"
+                f"{peer_metadata}\n"
+                f"2026-07-24T00:01:00Z\tdone\t{temp_dir}\t{temp_dir}\tgap\t"
+                f"{gap_metadata}\n",
+                encoding="utf-8",
+            )
+            batch = {
+                "manifest": replacement,
+                "selected_attempt_ids": ["att-retry-verbatim"],
+                "peers": [{
+                    "agent_home": temp_dir,
+                    "attempt_id": "att-plan-one",
+                    "jobs": str(jobs),
+                    "route": str(route_path),
+                }],
+                "source_manifest": source,
+                "continuation": continuation,
+                "replacement_seal": seal,
+            }
+            with self.assertRaisesRegex(
+                ValueError, "partial continuation peer is not immutable terminal success"
+            ):
+                self.reserve_batch(temp_dir, 1, batch)
+            self.assertFalse(Path(temp_dir, "state.json").exists())
+
+            evidence = Path(temp_dir, "peer-output.md")
+            evidence.write_text("peer output\n", encoding="utf-8")
+            evidence_digest = __import__("hashlib").sha256(evidence.read_bytes()).hexdigest()
+            completion = Path(temp_dir, "completion", "rt-governor")
+            completion.mkdir(parents=True)
+            marker_path = completion / "plan.json"
+            history_path = completion / "plan.1.json"
+            marker = {
+                "schema_version": 2,
+                "sequence": 1,
+                "route_id": "rt-governor",
+                "route_hash": "sha256:source-route",
+                "registry_digest": "sha256:source-registry",
+                "node_id": "plan",
+                "completion_gate": "plan-gate",
+                "attempt_id": "att-plan-one",
+                "dispatch_depth": 2,
+                "transport": "headless",
+                "execution_surface": "registered-headless",
+                "registered_worker": True,
+                "fallback_hop": "same-harness-headless",
+                "evidence": {"path": str(evidence), "sha256": evidence_digest},
+            }
+            marker_json = json.dumps(marker, sort_keys=True)
+            marker_path.write_text(marker_json, encoding="utf-8")
+            history_path.write_text(marker_json, encoding="utf-8")
+            (completion / "plan.att-plan-one.attempt.json").write_text(
+                json.dumps({
+                    "schema_version": 2,
+                    "route_id": "rt-governor",
+                    "node_id": "plan",
+                    "attempt_id": "att-plan-one",
+                    "dispatch_depth": 2,
+                    "transport": "headless",
+                    "execution_surface": "registered-headless",
+                    "registered_worker": True,
+                    "fallback_hop": "same-harness-headless",
+                    "evidence_sha256": evidence_digest,
+                    "completion_marker": str(marker_path),
+                    "completion_marker_history": str(history_path),
+                }, sort_keys=True),
+                encoding="utf-8",
+            )
+            dead_pid = "99999999"
+            terminal_peer_metadata = metadata(peer, note="completed-marker") + (
+                ",failure_class=pass,"
+                f"pid={dead_pid},pid_start=1,pgid={dead_pid},"
+                f"pid_observer_ns={os.readlink('/proc/self/ns/pid')}"
+            )
+            jobs.write_text(
+                f"2026-07-24T00:00:00Z\tdone\t{temp_dir}\t{temp_dir}\tpeer\t"
+                f"{terminal_peer_metadata}\n"
+                f"2026-07-24T00:01:00Z\tdone\t{temp_dir}\t{temp_dir}\tgap\t"
+                f"{gap_metadata}\n",
+                encoding="utf-8",
+            )
+            token = self.reserve_batch(temp_dir, 1, batch)[0]
+            receipt = GOVERNOR.reservation_check(temp_dir, token)
+            self.assertEqual(receipt["batch_attempt_id"], "att-retry-verbatim")
+            self.assertEqual(receipt["batch_manifest_sha256"], replacement_digest)
+            self.assertEqual(
+                receipt["batch_leg_sha256"],
+                replacement_legs["att-retry-verbatim"],
+            )
+            self.assertEqual(receipt["batch_admission_count"], 1)
+            self.assertEqual(receipt["batch_peer_count"], 1)
+            self.assertEqual(
+                receipt["batch_peer_set"][0]["manifest_sha256"],
+                replacement_digest,
+            )
+            self.assertEqual(
+                receipt["batch_peer_set"][0]["attempt_id"],
+                "att-plan-one",
+            )
+
+            before = json.loads(Path(temp_dir, "state.json").read_text())
+            tampered = json.loads(json.dumps(batch))
+            tampered["continuation"]["partial_group_continuation"][
+                "source_batch_manifest_digest"
+            ] = "sha256:" + "0" * 64
+            with self.assertRaisesRegex(
+                ValueError, "partial continuation source binding mismatch"
+            ):
+                self.reserve_batch(temp_dir, 1, tampered)
+            self.assertEqual(
+                json.loads(Path(temp_dir, "state.json").read_text())["reservations"],
+                before["reservations"],
+            )
+
     def test_batch_reserve_python_api_requires_verified_issuer_capability(self):
         manifest, _digest, _legs = self.manifest()
         batch = {

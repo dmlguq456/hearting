@@ -474,12 +474,181 @@ def _consume_batch_issuer_capability(
     capability._used = True
 
 
+def _record_digest(value: object) -> str:
+    encoded = json.dumps(value, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    return "sha256:" + hashlib.sha256(encoded).hexdigest()
+
+
+def _validate_partial_replacement(
+    replacement_manifest: dict[str, object],
+    replacement_manifest_digest: str,
+    source_manifest_raw: object,
+    continuation: object,
+    replacement_seal: object,
+    peers: object,
+) -> tuple[dict[str, object], str, dict[str, str], str]:
+    """Verify the source-manifest supersession for one sealed gap attempt."""
+
+    try:
+        source_manifest, source_digest, source_leg_digests = verify_manifest(
+            source_manifest_raw
+        )
+    except ReplicaBatchContractError as exc:
+        raise ValueError(f"partial continuation source manifest invalid: {exc}") from exc
+    if not isinstance(continuation, dict) or not isinstance(replacement_seal, dict):
+        raise ValueError("partial continuation replacement evidence incomplete")
+    partial = continuation.get("partial_group_continuation")
+    if (
+        continuation.get("continuation_contract_version") != 1
+        or not isinstance(partial, dict)
+        or partial.get("contract_version") != 1
+        or continuation.get("source_route_id") != source_manifest.get("route_id")
+        or partial.get("source_group_id")
+        != (source_manifest.get("parallel_group") or source_manifest.get("replica_group"))
+        or partial.get("source_batch_manifest_digest") != source_digest
+        or partial.get("original_group_cardinality") != source_manifest.get("declared_size")
+        or source_manifest.get("declared_size")
+        != replacement_manifest.get("declared_size")
+    ):
+        raise ValueError("partial continuation source binding mismatch")
+    expected_leg_digests = {
+        str(member["route_node"]): source_leg_digests[str(member["attempt_id"])]
+        for member in source_manifest["members"]
+    }
+    realized = partial.get("realized_peer_set")
+    if (
+        partial.get("leg_manifest_digests") != expected_leg_digests
+        or not isinstance(realized, list)
+        or partial.get("reused_peer_set_proof_digest") != _record_digest(realized)
+    ):
+        raise ValueError("partial continuation source evidence invalid")
+    replacement_identity = _record_digest({
+        "source_route_id": continuation.get("source_route_id"),
+        "source_route_hash": continuation.get("source_route_hash"),
+        "source_group_id": partial.get("source_group_id"),
+        "failed_source_attempt_id": partial.get("failed_source_attempt_id"),
+        "gap_leg_id": partial.get("gap_leg_id"),
+        "reused_peer_set_proof_digest": partial.get("reused_peer_set_proof_digest"),
+    })
+    if (
+        partial.get("replacement_leg_identity") != replacement_identity
+        or partial.get("replacement_attempt_id")
+        != "att-" + replacement_identity.split(":", 1)[1][:48]
+    ):
+        raise ValueError("partial continuation replacement identity invalid")
+
+    source_by_node = {
+        str(member["route_node"]): member for member in source_manifest["members"]
+    }
+    replacement_by_node = {
+        str(member["route_node"]): member
+        for member in replacement_manifest["members"]
+    }
+    gap = str(partial.get("gap_leg_id", ""))
+    if set(source_by_node) != set(replacement_by_node) or gap not in source_by_node:
+        raise ValueError("partial continuation replacement member census invalid")
+    for node_id, source_member in source_by_node.items():
+        replacement_member = replacement_by_node[node_id]
+        source_shape = {key: value for key, value in source_member.items() if key != "attempt_id"}
+        replacement_shape = {
+            key: value for key, value in replacement_member.items() if key != "attempt_id"
+        }
+        if source_shape != replacement_shape:
+            raise ValueError("partial continuation replacement member drift")
+        if node_id != gap and replacement_member["attempt_id"] != source_member["attempt_id"]:
+            raise ValueError("partial continuation successful peer replacement forbidden")
+    source_attempt = str(source_by_node[gap]["attempt_id"])
+    replacement_attempt = str(replacement_by_node[gap]["attempt_id"])
+    if (
+        source_attempt != partial.get("failed_source_attempt_id")
+        or replacement_attempt == source_attempt
+        or replacement_seal.get("replacement_attempt_id") != replacement_attempt
+    ):
+        raise ValueError("partial continuation gap attempt mismatch")
+    expected_seal = {
+        "schema_version": 1,
+        "continuation_id": str(continuation.get("continuation_id", "")),
+        "source_route_id": str(continuation.get("source_route_id", "")),
+        "source_route_hash": str(continuation.get("source_route_hash", "")),
+        "source_group_id": str(partial.get("source_group_id", "")),
+        "source_batch_manifest_digest": source_digest,
+        "failed_source_attempt_id": source_attempt,
+        "gap_leg_id": gap,
+        "reused_peer_set_proof_digest": str(
+            partial.get("reused_peer_set_proof_digest", "")
+        ),
+        "replacement_leg_identity": replacement_identity,
+        "replacement_attempt_id": replacement_attempt,
+        "retry_claim_reused": replacement_seal.get("retry_claim_reused"),
+    }
+    if replacement_seal != expected_seal or not isinstance(
+        replacement_seal.get("retry_claim_reused"), bool
+    ):
+        raise ValueError("partial continuation replacement seal mismatch")
+    if not replacement_seal["retry_claim_reused"] and (
+        replacement_attempt != partial.get("replacement_attempt_id")
+    ):
+        raise ValueError("partial continuation replacement attempt invalid")
+
+    if not isinstance(peers, list) or not peers:
+        raise ValueError("partial continuation replacement peers missing")
+    jobs_values = {
+        str(peer.get("jobs")) for peer in peers if isinstance(peer, dict)
+    }
+    if len(jobs_values) != 1:
+        raise ValueError("partial continuation replacement registry ambiguous")
+    jobs = Path(next(iter(jobs_values)))
+    from dispatch_contract import parse_registry_metadata, validate_attempt_metadata
+    try:
+        with Path(f"{jobs}.lock").open("a", encoding="utf-8") as lock:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+            lines = jobs.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError as exc:
+        raise ValueError(f"partial continuation gap registry unreadable: {exc}") from exc
+    rows = []
+    for line in lines:
+        fields = line.split("\t")
+        if len(fields) != 6:
+            continue
+        metadata = parse_registry_metadata(fields[5])
+        if metadata.get("attempt_id") == source_attempt:
+            rows.append((fields, metadata))
+    if len(rows) != 1:
+        raise ValueError("partial continuation gap row is not unique")
+    fields, metadata = rows[0]
+    validate_attempt_metadata(metadata)
+    if (
+        fields[1] != "done"
+        or metadata.get("note") == "completed-marker"
+        or metadata.get("route_id") != source_manifest["route_id"]
+        or metadata.get("route_node") != gap
+        or metadata.get("batch_manifest_sha256") != source_digest
+        or metadata.get("batch_leg_sha256") != source_leg_digests[source_attempt]
+    ):
+        raise ValueError("partial continuation gap source row invalid")
+    if replacement_seal["retry_claim_reused"]:
+        if (
+            metadata.get("retry_ordinal") != "1"
+            or not metadata.get("recovery_id")
+            or metadata.get("retry_attempt_id") != replacement_attempt
+        ):
+            raise ValueError("partial continuation recovery claim mismatch")
+    elif metadata.get("retry_attempt_id"):
+        raise ValueError("partial continuation recovery claim ignored")
+    if replacement_manifest_digest == source_digest:
+        raise ValueError("partial continuation manifest was not superseded")
+    return source_manifest, source_digest, source_leg_digests, source_attempt
+
+
 def _validate_batch_peer(
     peer: object,
     manifest: dict[str, object],
     manifest_digest: str,
     leg_digests: dict[str, str],
     selected_attempt_ids: list[str],
+    *,
+    proof_manifest_digest: str | None = None,
+    require_terminal_success: bool = False,
 ) -> dict[str, object]:
     """Prove one non-selected member before a one-leg recovery reservation."""
 
@@ -611,6 +780,15 @@ def _validate_batch_peer(
             "parallel batch peer identity mismatch: " + ",".join(mismatches)
         )
 
+    if require_terminal_success and (
+        fields[1] != "done"
+        or metadata.get("note") != "completed-marker"
+        or metadata.get("failure_class") != "pass"
+    ):
+        raise ValueError(
+            "partial continuation peer is not immutable terminal success"
+        )
+
     peer_state = ""
     proof_reason = ""
     if fields[1] in {"open", "running"}:
@@ -659,7 +837,7 @@ def _validate_batch_peer(
         "agent_home": str(paths["agent_home"]),
         "attempt_id": attempt_id,
         "jobs": str(jobs),
-        "manifest_sha256": manifest_digest,
+        "manifest_sha256": proof_manifest_digest or manifest_digest,
         "reason": proof_reason,
         "route": str(paths["route"]),
         "state": peer_state,
@@ -679,11 +857,29 @@ def _validate_batch_peers(
     manifest_digest: str,
     leg_digests: dict[str, str],
     selected_attempt_ids: list[str],
+    *,
+    source_replacement: tuple[
+        dict[str, object], str, dict[str, str], str
+    ] | None = None,
 ) -> dict[str, object]:
     """Prove the exact N-1 peer set for a single missing-leg recovery."""
 
-    members = {str(member["attempt_id"]) for member in manifest["members"]}
-    expected = members - set(selected_attempt_ids)
+    validation_manifest = manifest
+    validation_digest = manifest_digest
+    validation_legs = leg_digests
+    validation_selected = selected_attempt_ids
+    if source_replacement is not None:
+        (
+            validation_manifest,
+            validation_digest,
+            validation_legs,
+            source_attempt,
+        ) = source_replacement
+        validation_selected = [source_attempt]
+    members = {
+        str(member["attempt_id"]) for member in validation_manifest["members"]
+    }
+    expected = members - set(validation_selected)
     if not isinstance(peers, list) or len(peers) != len(expected):
         raise ValueError("parallel batch recovery requires the exact N-1 peer set")
     supplied = [peer.get("attempt_id") if isinstance(peer, dict) else None for peer in peers]
@@ -691,7 +887,15 @@ def _validate_batch_peers(
         raise ValueError("parallel batch recovery peer membership mismatch")
     proofs = [
         _validate_batch_peer(
-            peer, manifest, manifest_digest, leg_digests, selected_attempt_ids
+            peer,
+            validation_manifest,
+            validation_digest,
+            validation_legs,
+            validation_selected,
+            proof_manifest_digest=(
+                manifest_digest if source_replacement is not None else None
+            ),
+            require_terminal_success=source_replacement is not None,
         )
         for peer in peers
     ]
@@ -733,7 +937,14 @@ def reserve(
         _consume_batch_issuer_capability(batch_issuer, pid)
         if (
             not isinstance(batch, dict)
-            or set(batch) - {"manifest", "selected_attempt_ids", "peers"}
+            or set(batch) - {
+                "manifest",
+                "selected_attempt_ids",
+                "peers",
+                "source_manifest",
+                "continuation",
+                "replacement_seal",
+            }
             or not {"manifest", "selected_attempt_ids"}.issubset(batch)
         ):
             raise ValueError("invalid parallel batch reservation metadata")
@@ -756,12 +967,38 @@ def reserve(
             raise ValueError("parallel batch selected member is not declared")
         members = [member_by_attempt[attempt_id] for attempt_id in selected]
         peer_proof: dict[str, object] = {}
+        replacement_values = (
+            batch.get("source_manifest"),
+            batch.get("continuation"),
+            batch.get("replacement_seal"),
+        )
+        if any(value is not None for value in replacement_values) and not all(
+            value is not None for value in replacement_values
+        ):
+            raise ValueError("partial continuation replacement evidence incomplete")
+        source_replacement = None
+        if all(value is not None for value in replacement_values):
+            if count != 1:
+                raise ValueError("partial continuation replacement must reserve one leg")
+            source_replacement = _validate_partial_replacement(
+                manifest,
+                manifest_digest,
+                batch["source_manifest"],
+                batch["continuation"],
+                batch["replacement_seal"],
+                batch.get("peers"),
+            )
         if count == int(manifest["declared_size"]):
             if batch.get("peers") is not None:
                 raise ValueError("full parallel batch reservation cannot include peer proof")
         elif count == 1:
             peer_proof = _validate_batch_peers(
-                batch.get("peers"), manifest, manifest_digest, leg_digests, selected
+                batch.get("peers"),
+                manifest,
+                manifest_digest,
+                leg_digests,
+                selected,
+                source_replacement=source_replacement,
             )
         else:
             raise ValueError("parallel batch reservation count must be one or declared size")
@@ -978,6 +1215,9 @@ def main() -> int:
     reserve_parser.add_argument("--batch-peer-jobs")
     reserve_parser.add_argument("--batch-peer-route")
     reserve_parser.add_argument("--batch-peers-json")
+    reserve_parser.add_argument("--batch-source-manifest")
+    reserve_parser.add_argument("--batch-continuation")
+    reserve_parser.add_argument("--batch-replacement-seal")
     reservation_check_parser = commands.add_parser("reservation-check")
     reservation_check_parser.add_argument("--token", required=True)
     reservation_check_parser.add_argument("--class", dest="worker_class")
@@ -1009,6 +1249,9 @@ def main() -> int:
             args.batch_attempt_id,
             *peer_values,
             args.batch_peers_json,
+            args.batch_source_manifest,
+            args.batch_continuation,
+            args.batch_replacement_seal,
         )
         batch = None
         if any(batch_values):
@@ -1041,6 +1284,26 @@ def main() -> int:
                     "jobs": args.batch_peer_jobs,
                     "route": args.batch_peer_route,
                 }]
+            replacement_values = (
+                args.batch_source_manifest,
+                args.batch_continuation,
+                args.batch_replacement_seal,
+            )
+            if any(replacement_values):
+                if not all(replacement_values):
+                    raise ValueError(
+                        "partial continuation replacement evidence incomplete"
+                    )
+                try:
+                    batch.update({
+                        "source_manifest": json.loads(args.batch_source_manifest),
+                        "continuation": json.loads(args.batch_continuation),
+                        "replacement_seal": json.loads(args.batch_replacement_seal),
+                    })
+                except json.JSONDecodeError as exc:
+                    raise ValueError(
+                        "invalid partial continuation replacement JSON"
+                    ) from exc
             batch_issuer = _issue_batch_issuer_capability(args.pid)
         else:
             batch_issuer = None

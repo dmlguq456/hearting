@@ -350,6 +350,66 @@ class DispatchBatchTest(unittest.TestCase):
         with self.jobs.open(mode, encoding="utf-8") as handle:
             handle.write(row)
 
+    def partial_continuation(self, source_legs):
+        legs = [dict(leg, leg_class="peer") for leg in source_legs]
+        manifest, manifest_digest, leg_digests = BATCH.build_manifest(
+            parallel_group="plan",
+            route_id=self.route["route_id"],
+            parent_attempt_id="att-parent-fixture",
+            independence="cross-harness",
+            members=BATCH.manifest_members(legs),
+            required_independence_axes=[
+                "cross-harness", "model-profile", "perspective"
+            ],
+            realized_independence_axes=[
+                "cross-harness", "model-profile", "perspective"
+            ],
+        )
+        peer, gap = legs
+        realized = [{
+            "node_id": peer["node"],
+            "terminal_attempt_id": peer["attempt_id"],
+            "marker_path": str(self.base / "peer-marker.json"),
+            "marker_digest": "sha256:" + "1" * 64,
+            "verdict": "PASS",
+            "quiescence_proof_digest": "sha256:" + "2" * 64,
+            "output_evidence_digest": "sha256:" + "3" * 64,
+            "contract_hash": "sha256:" + "4" * 64,
+        }]
+        peer_digest = BATCH.record_digest(realized)
+        identity = BATCH.record_digest({
+            "source_route_id": self.route["route_id"],
+            "source_route_hash": self.route["route_hash"],
+            "source_group_id": "plan",
+            "failed_source_attempt_id": gap["attempt_id"],
+            "gap_leg_id": gap["node"],
+            "reused_peer_set_proof_digest": peer_digest,
+        })
+        partial = {
+            "contract_version": 1,
+            "source_group_id": "plan",
+            "source_batch_manifest_digest": manifest_digest,
+            "leg_manifest_digests": {
+                leg["node"]: leg_digests[leg["attempt_id"]] for leg in legs
+            },
+            "original_group_cardinality": 2,
+            "join_policy": "all",
+            "failed_source_attempt_id": gap["attempt_id"],
+            "gap_leg_id": gap["node"],
+            "realized_peer_set": realized,
+            "reused_peer_set_proof_digest": peer_digest,
+            "replacement_leg_identity": identity,
+            "replacement_attempt_id": "att-" + identity.split(":", 1)[1][:48],
+        }
+        continuation = {
+            "continuation_contract_version": 1,
+            "continuation_id": "cont-at5",
+            "source_route_id": self.route["route_id"],
+            "source_route_hash": self.route["route_hash"],
+            "partial_group_continuation": partial,
+        }
+        return manifest, continuation, partial
+
     def test_load_route_rejects_non_object_json_before_verification(self):
         self.route_path.write_text("[]", encoding="utf-8")
         with mock.patch.object(BATCH.subprocess, "run") as verify, \
@@ -357,6 +417,245 @@ class DispatchBatchTest(unittest.TestCase):
             BATCH.load_route(self.route_path)
         self.assertEqual(ctx.exception.reason, "route-record-invalid")
         verify.assert_not_called()
+
+    def test_at5_plain_single_group_start_remains_batch_required(self):
+        self.route_path.write_text(json.dumps(self.route), encoding="utf-8")
+        output = io.StringIO()
+        argv = [
+            "dispatch-node.py",
+            "--route", str(self.route_path),
+            "--node", "plan",
+            "--adapter", "codex",
+            "--action", "start",
+            "--slug", "single-gap",
+            "--parent", "owner",
+            "--jobs", str(self.jobs),
+        ]
+        with mock.patch.object(sys, "argv", argv), mock.patch.object(
+            BATCH.DISPATCH_NODE.subprocess,
+            "run",
+            return_value=SimpleNamespace(returncode=0, stderr=""),
+        ), mock.patch.dict(
+            os.environ,
+            {BATCH.GOVERNOR_RESERVATION_ENV: ""},
+        ), contextlib.redirect_stdout(output), self.assertRaises(SystemExit) as caught:
+            BATCH.DISPATCH_NODE.main()
+        self.assertEqual(caught.exception.code, 65)
+        self.assertIn("reason=parallel-group-batch-required", output.getvalue())
+        self.assertFalse(self.jobs.exists())
+
+    def test_at5_plain_full_batch_identity_conflict_still_starts_nothing(self):
+        first, _second = self.legs()
+        self.write_existing(first)
+        raw = self.jobs.read_text(encoding="utf-8")
+        self.jobs.write_text(
+            raw.replace("batch_route_node=plan,", "batch_route_node=foreign,"),
+            encoding="utf-8",
+        )
+        stack, assignments = self.common_patches()
+        output = io.StringIO()
+        with stack:
+            stack.enter_context(mock.patch.object(BATCH, "load_route", return_value=self.route))
+            stack.enter_context(mock.patch.object(BATCH, "assign_harnesses", return_value=(assignments, "cross-harness", {"families_considered": [], "usable_families": [], "family_exclusions": {}, "capacity": {}, "degradation_cause": ""})))
+            stack.enter_context(mock.patch.object(BATCH, "resolve_agent_home", return_value=self.base))
+            stack.enter_context(mock.patch.object(BATCH, "resolve_global_registry", return_value=SimpleNamespace(path=self.jobs)))
+            stack.enter_context(mock.patch.object(BATCH, "resolve_live_parent_attempt"))
+            stack.enter_context(mock.patch.object(BATCH, "completion_marker_gate"))
+            stack.enter_context(mock.patch.object(BATCH.subprocess, "check_output", return_value=str(self.base)))
+            reserve = stack.enter_context(mock.patch.object(BATCH, "reserve_batch"))
+            popen = stack.enter_context(mock.patch.object(BATCH.subprocess, "Popen"))
+            stack.enter_context(mock.patch.dict(os.environ, {
+                "AGENT_DISPATCH_SELF_SLUG": "owner",
+                "AGENT_DISPATCH_ATTEMPT_ID": "att-parent-fixture",
+                "AGENT_DISPATCH_CURRENT_HARNESS": "codex",
+                "AGENT_DISPATCH_CURRENT_TRANSPORT": "headless",
+                "AGENT_DISPATCH_CURRENT_SANDBOX": "workspace-write",
+            }))
+            with contextlib.redirect_stdout(output):
+                rc = BATCH.main(self.argv())
+        self.assertEqual(rc, 73)
+        self.assertEqual(
+            json.loads(output.getvalue())["reason"],
+            "batch-attempt-identity-conflict",
+        )
+        reserve.assert_not_called()
+        popen.assert_not_called()
+
+    def test_at5_partial_continuation_reuses_peers_and_claims_only_gap(self):
+        source_legs = self.legs()
+        _source_manifest, continuation, partial = self.partial_continuation(source_legs)
+        peer, gap = source_legs
+        self.write_existing(peer, status="done", note="completed-marker")
+        self.write_existing(
+            gap, status="done", note="cancelled-receipt-unavailable"
+        )
+        self.jobs.write_text(
+            self.jobs.read_text(encoding="utf-8").replace(
+                f"note=cancelled-receipt-unavailable\n",
+                "note=cancelled-receipt-unavailable,recovery_id=rec-at5,"
+                "retry_ordinal=1,retry_attempt_id=att-retry-verbatim\n",
+            ),
+            encoding="utf-8",
+        )
+        continuation_path = self.base / "continuation.json"
+        argv = self.argv() + ["--continuation", str(continuation_path)]
+        output = io.StringIO()
+        created = []
+
+        class FakeProcess:
+            returncode = 0
+            pid = 10001
+
+            def __init__(self, command, **kwargs):
+                self.command = command
+                created.append(self)
+
+            def communicate(self):
+                return success_receipt(self.command), ""
+
+        stack, original_assignments = self.common_patches()
+        # A fresh allocator would now reverse both harnesses. Official partial
+        # recovery must recover the exact source tuples from the registry rows.
+        assignments = [
+            (
+                self.route["nodes"][0],
+                "claude",
+                "cross-harness-headless",
+                2,
+            ),
+            (
+                self.route["nodes"][1],
+                "codex",
+                "same-harness-headless",
+                1,
+            ),
+        ]
+        with stack:
+            stack.enter_context(mock.patch.object(BATCH, "load_route", return_value=self.route))
+            stack.enter_context(mock.patch.object(
+                BATCH,
+                "load_partial_continuation",
+                return_value=(continuation, partial),
+            ))
+            stack.enter_context(mock.patch.object(
+                BATCH,
+                "revalidate_partial_peers",
+                return_value=partial["realized_peer_set"],
+            ))
+            stack.enter_context(mock.patch.object(
+                BATCH.DISPATCH_NODE,
+                "resolve_checked_tuple",
+                side_effect=resolve_side_effect,
+            ))
+            stack.enter_context(mock.patch.object(BATCH, "assign_harnesses", return_value=(assignments, "cross-harness", {"families_considered": [], "usable_families": [], "family_exclusions": {}, "capacity": {}, "degradation_cause": ""})))
+            stack.enter_context(mock.patch.object(BATCH, "resolve_agent_home", return_value=self.base))
+            stack.enter_context(mock.patch.object(BATCH, "resolve_global_registry", return_value=SimpleNamespace(path=self.jobs)))
+            stack.enter_context(mock.patch.object(BATCH, "resolve_live_parent_attempt"))
+            gate = stack.enter_context(mock.patch.object(BATCH, "completion_marker_gate"))
+            stack.enter_context(mock.patch.object(BATCH.subprocess, "check_output", return_value=str(self.base)))
+            reserve = stack.enter_context(mock.patch.object(
+                BATCH, "reserve_batch", return_value=["b" * 32]
+            ))
+            stack.enter_context(mock.patch.object(BATCH, "cancel_unclaimed"))
+            popen = stack.enter_context(mock.patch.object(
+                BATCH.subprocess, "Popen", side_effect=FakeProcess
+            ))
+            stack.enter_context(mock.patch.dict(os.environ, {
+                "AGENT_DISPATCH_SELF_SLUG": "owner",
+                "AGENT_DISPATCH_ATTEMPT_ID": "att-parent-fixture",
+                "AGENT_DISPATCH_CURRENT_HARNESS": "codex",
+                "AGENT_DISPATCH_CURRENT_TRANSPORT": "headless",
+                "AGENT_DISPATCH_CURRENT_SANDBOX": "workspace-write",
+            }))
+            with contextlib.redirect_stdout(output):
+                rc = BATCH.main(argv)
+        self.assertEqual(rc, 0)
+        self.assertEqual(gate.call_count, 1)
+        self.assertEqual(reserve.call_count, 1)
+        pending = reserve.call_args.args[2]
+        self.assertEqual(
+            [
+                (leg["node"], leg["adapter"], leg["hop"], leg["ordinal"],
+                 leg["attempt_id"])
+                for leg in pending
+            ],
+            [(
+                partial["gap_leg_id"],
+                original_assignments[1][1],
+                original_assignments[1][2],
+                original_assignments[1][3],
+                "att-retry-verbatim",
+            )],
+        )
+        self.assertEqual(
+            reserve.call_args.kwargs["source_manifest"],
+            _source_manifest,
+        )
+        self.assertEqual(
+            reserve.call_args.kwargs["continuation"],
+            continuation,
+        )
+        self.assertTrue(
+            reserve.call_args.kwargs["replacement_seal"]["retry_claim_reused"]
+        )
+        self.assertEqual(popen.call_count, 1)
+        self.assertEqual(len(created), 1)
+        command = created[0].command
+        self.assertEqual(
+            command[command.index("--attempt-id") + 1],
+            "att-retry-verbatim",
+        )
+        receipt = json.loads(output.getvalue())
+        self.assertEqual((receipt["newly_started"], receipt["existing"]), (1, 1))
+        self.assertEqual(receipt["replacement_attempt_id"], "att-retry-verbatim")
+        self.assertEqual(receipt["original_group_cardinality"], 2)
+        self.assertEqual(receipt["reused_peer_count"], 1)
+        self.assertEqual(
+            receipt["legs"][0]["reason"], "reused-successful-peer"
+        )
+        self.assertEqual(len(self.jobs.read_text(encoding="utf-8").splitlines()), 2)
+
+    def test_blocked_recovery_claim_can_never_reuse_retry_attempt(self):
+        metadata = {
+            "recovery_id": "rec-blocked",
+            "retry_ordinal": "1",
+            "retry_attempt_id": "att-retry-must-not-start",
+            "start_permitted": "0",
+            "note": "receipt-unavailable-retry-exhausted",
+            "failure_class": "blocked",
+        }
+        with self.assertRaises(BATCH.BatchError) as caught:
+            BATCH._recovery_replacement_attempt(metadata)
+        self.assertEqual(caught.exception.reason, "receipt-unavailable-retry-exhausted")
+        self.assertEqual(
+            BATCH._recovery_replacement_attempt({
+                "recovery_id": "rec-live",
+                "retry_ordinal": "1",
+                "retry_attempt_id": "att-retry-live",
+            }),
+            "att-retry-live",
+        )
+
+    def test_launch_runtime_mismatch_is_zero_spawn_and_does_not_create_registry(self):
+        output = io.StringIO()
+        with mock.patch.object(
+            BATCH, "load_route",
+            side_effect=BATCH.BatchError(
+                "launch-runtime-root-mismatch", "sealed runtime differs"
+            ),
+        ), contextlib.redirect_stdout(output):
+            result = BATCH.main(self.argv("start"))
+        self.assertEqual(result, 65)
+        receipt = json.loads(output.getvalue())
+        self.assertEqual(receipt["reason"], "launch-runtime-root-mismatch")
+        self.assertEqual(
+            {key: receipt[key] for key in (
+                "admitted", "spawned", "registered", "started", "child_spawned"
+            )},
+            {"admitted": "0", "spawned": "0", "registered": "0",
+             "started": "0", "child_spawned": "0"},
+        )
+        self.assertFalse(self.jobs.exists())
 
     def test_stable_attempt_identity_ignores_display_slug_prefix(self):
         node = self.route["nodes"][0]
@@ -2302,11 +2601,16 @@ class DispatchBatchIntegrationTest(unittest.TestCase):
                 check=True,
             )
             (repo / "README.md").write_text("batch integration\n", encoding="utf-8")
-            subprocess.run(["git", "-C", str(repo), "add", "README.md"], check=True)
+            (repo / ".gitignore").write_text(".dispatch/\n", encoding="utf-8")
+            subprocess.run(
+                ["git", "-C", str(repo), "add", "README.md", ".gitignore"],
+                check=True,
+            )
             subprocess.run(["git", "-C", str(repo), "commit", "-qm", "init"], check=True)
 
             artifact_root = base / ".agent_reports"
             artifact_root.mkdir()
+            jobs = base / "jobs.log"
             evidence_path = base / "dispatch-evidence.json"
             evidence_path.write_text(
                 json.dumps({
@@ -2348,7 +2652,12 @@ class DispatchBatchIntegrationTest(unittest.TestCase):
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 check=False,
-                env={key: value for key, value in os.environ.items() if key != "AGENT_ARTIFACT_ROOT"},
+                env={
+                    **{key: value for key, value in os.environ.items()
+                       if key != "AGENT_ARTIFACT_ROOT"},
+                    "AGENT_HOME": str(ROOT),
+                    "AGENT_DISPATCH_JOBS": str(jobs),
+                },
             )
             self.assertEqual(
                 compile_result.returncode, 0, compile_result.stdout + compile_result.stderr
@@ -2389,7 +2698,7 @@ class DispatchBatchIntegrationTest(unittest.TestCase):
                 stderr=subprocess.PIPE,
                 env={
                     **os.environ,
-                    "AGENT_HOME": str(agent_home),
+                    "AGENT_HOME": str(ROOT),
                     "CODEX_HOME": str(codex_home),
                 },
                 check=False,
@@ -2405,7 +2714,6 @@ class DispatchBatchIntegrationTest(unittest.TestCase):
             self._write_fake_runtime(fake_bin / "claude", "claude")
             claude_home = base / "claude-home"
             claude_home.mkdir()
-            jobs = base / "jobs.log"
             parent_attempt = "att-integration-parent"
             raw = Path(f"/proc/{os.getpid()}/stat").read_text(encoding="utf-8")
             parent_start = raw[raw.rfind(")") + 2 :].split()[19]
@@ -2423,7 +2731,7 @@ class DispatchBatchIntegrationTest(unittest.TestCase):
             env = {
                 **os.environ,
                 "PATH": str(fake_bin) + os.pathsep + os.environ.get("PATH", ""),
-                "AGENT_HOME": str(agent_home),
+                "AGENT_HOME": str(ROOT),
                 "AGENT_ARTIFACT_ROOT": str(artifact_root),
                 "AGENT_MODEL_GOVERNOR_ROOT": str(governor_root),
                 "AGENT_DISPATCH_JOBS": str(jobs),
