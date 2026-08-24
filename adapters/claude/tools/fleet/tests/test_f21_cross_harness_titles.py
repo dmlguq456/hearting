@@ -134,6 +134,105 @@ class CodexCollectorTitleTest(_EnvMixin, unittest.TestCase):
 
 
 class CrossHarnessWorkerTest(_EnvMixin, unittest.TestCase):
+
+    def test_opencode_anchor_cursor_is_lazy_and_scan_bounded(self):
+        class _Cursor:
+            def __init__(self):
+                self.rows = [
+                    (json.dumps({"type": "tool", "text": "ignored"}),),
+                    (json.dumps({"type": "text", "text": "earliest usable anchor"}),),
+                    ("x" * rt.ANCHOR_SCAN_CAP,),
+                ]
+                self.calls = 0
+
+            def fetchone(self):
+                self.calls += 1
+                return self.rows.pop(0) if self.rows else None
+
+            def fetchall(self):
+                raise AssertionError("anchor selection must not materialize all rows")
+
+        class _Connection:
+            def __init__(self):
+                self.cursor = _Cursor()
+                self.query = None
+                self.params = None
+
+            def execute(self, query, params):
+                self.query, self.params = query, params
+                return self.cursor
+
+        connection = _Connection()
+        self.assertEqual(
+            rt._read_opencode_anchor(connection, "messages", "data", "sid"),
+            "earliest usable anchor",
+        )
+        self.assertEqual(connection.cursor.calls, 2)
+        self.assertIn("substr(data, 1, ?)", connection.query)
+        self.assertIn("ORDER BY rowid ASC", connection.query)
+        self.assertEqual(connection.params, (rt.ANCHOR_SCAN_CAP, "sid"))
+
+    def test_opencode_anchor_scan_budget_is_cumulative_before_json_parse(self):
+        class _Cursor:
+            def __init__(self):
+                self.rows = [
+                    ("{" + "x" * (50000 - 1),),
+                    (json.dumps({
+                        "padding": "x" * rt.ANCHOR_SCAN_CAP,
+                        "type": "text",
+                        "text": "anchor beyond the remaining scan budget",
+                    }),),
+                ]
+                self.calls = 0
+
+            def fetchone(self):
+                self.calls += 1
+                return self.rows.pop(0) if self.rows else None
+
+        class _Connection:
+            def __init__(self):
+                self.cursor = _Cursor()
+
+            def execute(self, query, params):
+                self.params = params
+                return self.cursor
+
+        parsed_lengths = []
+        original_loads = rt.json.loads
+        rt.json.loads = lambda payload: (
+            parsed_lengths.append(len(payload)) or original_loads(payload)
+        )
+        connection = _Connection()
+        try:
+            self.assertEqual(
+                rt._read_opencode_anchor(connection, "messages", "data", "sid"),
+                "",
+            )
+        finally:
+            rt.json.loads = original_loads
+        self.assertEqual(connection.cursor.calls, 2)
+        self.assertEqual(parsed_lengths, [50000, rt.ANCHOR_SCAN_CAP - 50000])
+        self.assertEqual(sum(parsed_lengths), rt.ANCHOR_SCAN_CAP)
+
+    def test_prompt_path_is_forwarded_without_anchor_contents(self):
+        prompt_path = os.path.join(self.tmp.name, "task.prompt.txt")
+        transcript = os.path.join(self.tmp.name, "task.jsonl")
+        with open(prompt_path, "w", encoding="utf-8") as handle:
+            handle.write("DISTINCT ASSIGNMENT ANCHOR")
+        with open(transcript, "w", encoding="utf-8") as handle:
+            handle.write(json.dumps({"type": "item.completed", "item": {
+                "type": "agent_message", "text": "delta"}}) + "\n")
+        captured = {}
+        original = rt.subprocess.Popen
+        rt.subprocess.Popen = lambda argv, **kwargs: captured.update(argv=list(argv), kwargs=kwargs) or object()
+        try:
+            self.assertTrue(rt.maybe_spawn("codex", "prompt-path-sid", transcript,
+                                           prompt_path=prompt_path))
+        finally:
+            rt.subprocess.Popen = original
+        self.assertIn(prompt_path, captured["argv"])
+        self.assertNotIn("DISTINCT ASSIGNMENT ANCHOR", captured["argv"])
+        self.assertNotIn("DISTINCT ASSIGNMENT ANCHOR", " ".join(captured["kwargs"]["env"].values()))
     def test_codex_delta_extracts_only_user_and_assistant_messages(self):
         rows = [
             {"type": "response_item", "payload": {"type": "message", "role": "user",

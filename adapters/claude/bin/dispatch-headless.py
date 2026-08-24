@@ -1991,6 +1991,7 @@ def main(argv: list[str]) -> int:
                     attempt_id=args.attempt_id,
                     harness="claude",
                     transcript=log_path,
+                    prompt_path=prompt_path,
                     target_pid=int(identity["pid"]),
                     target_start=identity["pid_start"],
                 ),

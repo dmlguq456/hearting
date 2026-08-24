@@ -43,6 +43,19 @@ class DispatchSummaryTest(unittest.TestCase):
         os.environ.update(self.old_env)
         self.tmp.cleanup()
 
+    def test_prompt_validator_accepts_exact_sibling_and_rejects_neighbor(self):
+        attempt = "att-prompt-validator"
+        directory = Path(self.tmp.name)
+        log = directory / f"owner.{attempt}.codex.jsonl"
+        prompt = directory / f"owner.{attempt}.codex.prompt.txt"
+        neighbor = directory / "owner.other.codex.prompt.txt"
+        log.write_text("{}\n", encoding="utf-8")
+        prompt.write_text("Assignment:\nanchor\n", encoding="utf-8")
+        neighbor.write_text("neighbor\n", encoding="utf-8")
+        self.assertEqual(S._validate_prompt(prompt, S._validate_transcript(log, "codex", attempt)), prompt)
+        with self.assertRaises(ValueError):
+            S._validate_prompt(neighbor, S._validate_transcript(log, "codex", attempt))
+
     def test_supervisor_generates_initial_and_final_sidecar_without_fleet(self):
         attempt = "att-summary-live"
         log = Path(self.tmp.name) / f"owner.{attempt}.codex.jsonl"
@@ -85,6 +98,8 @@ class DispatchSummaryTest(unittest.TestCase):
             start = S.process_observation(worker.pid)[1]
             log = Path(self.tmp.name) / f"owner.{attempt}.claude.jsonl"
             log.write_text('{"message":"recover summary"}\n', encoding="utf-8")
+            prompt = Path(self.tmp.name) / f"owner.{attempt}.claude.prompt.txt"
+            prompt.write_text("Assignment:\nRetained exact anchor\n", encoding="utf-8")
             jobs = Path(self.tmp.name) / "jobs.log"
             jobs.write_text(
                 "2026-08-04T00:00:00Z\topen\t/repo\t/wt\towner\t"
@@ -115,6 +130,7 @@ class DispatchSummaryTest(unittest.TestCase):
                 "pid": owner.pid,
                 "proc_start": owner_start,
                 "observer_namespace": observer_namespace,
+                "prompt_path": str(prompt),
             }))
             with mock.patch.object(S, "launch_summary_owner", return_value=attached) as launch:
                 first = S.ensure_attempt_owner(jobs, attempt)
@@ -122,12 +138,116 @@ class DispatchSummaryTest(unittest.TestCase):
             self.assertEqual(first["state"], "started")
             self.assertEqual(second, {"state": "existing", "reason": "owner-live"})
             launch.assert_called_once()
+            self.assertEqual(launch.call_args.kwargs["prompt_path"], prompt)
             self.assertIn("summary_owner=dispatch-v1", jobs.read_text())
         finally:
             for process in (worker, owner):
                 if process.poll() is None:
                     process.kill()
                 process.wait()
+
+    def test_reconcile_invalid_retained_prompt_degrades_without_globbing(self):
+        worker = subprocess.Popen(["sleep", "60"], start_new_session=True)
+        try:
+            start = S.process_observation(worker.pid)[1]
+            observer_namespace = S.process_namespace_identity()
+            invalid_paths = {
+                "missing": Path(self.tmp.name) / "owner.att-missing.claude.prompt.txt",
+                "moved": Path(self.tmp.name) / "moved.prompt.txt",
+                "symlink": Path(self.tmp.name) / "owner.att-symlink.claude.prompt.txt",
+                "foreign": Path(self.tmp.name) / "owner.att-foreign.codex.prompt.txt",
+                "suffix": Path(self.tmp.name) / "owner.att-suffix.claude.txt",
+            }
+            invalid_paths["moved"].write_text("moved\n", encoding="utf-8")
+            foreign_target = invalid_paths["foreign"]
+            foreign_target.write_text("foreign\n", encoding="utf-8")
+            invalid_paths["symlink"].symlink_to(foreign_target)
+            for label, retained in invalid_paths.items():
+                attempt = "att-invalid-" + label
+                log = Path(self.tmp.name) / f"owner.{attempt}.claude.jsonl"
+                log.write_text('{"message":"recover summary"}\n', encoding="utf-8")
+                jobs = Path(self.tmp.name) / (label + ".jobs.log")
+                jobs.write_text(
+                    "2026-08-04T00:00:00Z\topen\t/repo\t/wt\towner\t"
+                    "attempt_schema_version=2,dispatch_depth=1,transport=headless,"
+                    "execution_surface=registered-headless,registered_worker=1,"
+                    "fallback_hop=same-harness-headless,worker_type=owner,"
+                    f"attempt_id={attempt},harness=claude,pid={worker.pid},"
+                    f"pid_start={start},log_file={log}\n",
+                    encoding="utf-8",
+                )
+                state_path = S.owner_state_path("claude", attempt)
+                state_path.parent.mkdir(parents=True, exist_ok=True)
+                state_path.write_text(json.dumps({
+                    "schema_version": S.OWNER_SCHEMA,
+                    "status": "terminal",
+                    "attempt_id": attempt,
+                    "harness": "claude",
+                    "pid": 0,
+                    "proc_start": "not-live",
+                    "observer_namespace": observer_namespace,
+                    "prompt_path": str(retained),
+                }))
+                attached = {"summary_owner": S.OWNER_KIND, "summary_sid": S.summary_sid(attempt)}
+                with mock.patch.object(S, "launch_summary_owner", return_value=attached) as launch:
+                    result = S.ensure_attempt_owner(jobs, attempt)
+                self.assertEqual(result["state"], "started", label)
+                self.assertIsNone(launch.call_args.kwargs["prompt_path"], label)
+        finally:
+            if worker.poll() is None:
+                worker.kill()
+            worker.wait()
+
+    def test_launch_summary_owner_passes_one_prompt_pair_without_contents(self):
+        attempt = "att-summary-argv"
+        worker = subprocess.Popen(["sleep", "60"], start_new_session=True)
+        try:
+            start = S.process_observation(worker.pid)[1]
+            log = Path(self.tmp.name) / f"owner.{attempt}.codex.jsonl"
+            prompt = Path(self.tmp.name) / f"owner.{attempt}.codex.prompt.txt"
+            log.write_text("{}\n", encoding="utf-8")
+            prompt.write_text("Assignment:\nsecret anchor contents\n", encoding="utf-8")
+            captured = {}
+
+            class FakeOwner:
+                pid = 54321
+
+                def poll(self):
+                    return None
+
+            def fake_popen(argv, **kwargs):
+                captured["argv"] = list(argv)
+                captured["env"] = dict(kwargs["env"])
+                return FakeOwner()
+
+            def fake_identity(_pid):
+                state_path = S.owner_state_path("codex", attempt)
+                state_path.write_text(json.dumps({
+                    "schema_version": S.OWNER_SCHEMA,
+                    "status": "active",
+                    "attempt_id": attempt,
+                    "harness": "codex",
+                    "pid": 54321,
+                    "proc_start": "owner-start",
+                    "observer_namespace": S.process_namespace_identity(),
+                }))
+                return {"pid_start": "owner-start"}
+
+            with mock.patch.object(S.subprocess, "Popen", side_effect=fake_popen), \
+                    mock.patch.object(S, "process_launch_identity", side_effect=fake_identity):
+                S.launch_summary_owner(
+                    attempt_id=attempt, harness="codex", transcript=log,
+                    target_pid=worker.pid, target_start=start, prompt_path=prompt,
+                )
+            self.assertEqual(captured["argv"].count("--prompt"), 1)
+            prompt_index = captured["argv"].index("--prompt")
+            self.assertEqual(captured["argv"][prompt_index + 1], str(prompt))
+            self.assertNotIn("secret anchor contents", " ".join(captured["argv"]))
+            self.assertNotIn("secret anchor contents", " ".join(captured["env"].values()))
+        finally:
+            if worker.poll() is None:
+                worker.kill()
+            worker.wait()
 
     def _announce(self, session_id: str, cwd: str) -> str:
         return json.dumps({

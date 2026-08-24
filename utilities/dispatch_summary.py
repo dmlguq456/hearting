@@ -102,6 +102,19 @@ def _validate_transcript(path: str | Path, harness: str, attempt_id: str) -> Pat
     return target
 
 
+def _validate_prompt(path: str | Path | None, log_path: Path) -> Path | None:
+    if not path:
+        return None
+    candidate = Path(path).expanduser()
+    if candidate.is_symlink() or not candidate.is_file():
+        raise ValueError("prompt path is not a regular file")
+    target = candidate.resolve()
+    expected = log_path.name[:-len(".jsonl")] + ".prompt.txt"
+    if target.parent != log_path.parent or target.name != expected:
+        raise ValueError("prompt path identity mismatch")
+    return target
+
+
 def _atomic_write(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=str(path.parent))
@@ -182,11 +195,12 @@ def _owner_env() -> dict[str, str]:
 
 def launch_summary_owner(
     *, attempt_id: str, harness: str, transcript: str | Path,
-    target_pid: int, target_start: str,
+    target_pid: int, target_start: str, prompt_path: str | Path | None = None,
 ) -> dict[str, str]:
     """Launch and prove one exact-attempt supervisor; return registry metadata."""
 
     log_path = _validate_transcript(transcript, harness, attempt_id)
+    prompt = _validate_prompt(prompt_path, log_path)
     if target_pid <= 0 or not target_start:
         raise ValueError("exact target identity required")
     live, reason = _proc_live(target_pid, target_start)
@@ -202,6 +216,8 @@ def launch_summary_owner(
         "--pid", str(target_pid),
         "--proc-start", target_start,
     ]
+    if prompt is not None:
+        argv += ["--prompt", str(prompt)]
     process = subprocess.Popen(
         argv,
         cwd=str(ROOT),
@@ -366,7 +382,7 @@ def _summary_source(log_path: Path, cache: dict[str, Any]) -> Path | None:
 
 def _refresh(
     harness: str, sid: str, transcript: Path, *,
-    phase: str, debounce: int, priority: bool,
+    phase: str, debounce: int, priority: bool, prompt_path: Path | None = None,
 ) -> bool:
     try:
         from fleet import refresh_title
@@ -378,6 +394,7 @@ def _refresh(
             debounce=debounce,
             priority=priority,
             quota_class=phase if phase in {"initial", "final"} else None,
+            prompt_path=str(prompt_path) if prompt_path else None,
         ))
     except Exception:
         return False
@@ -385,7 +402,8 @@ def _refresh(
 
 def supervise(
     *, attempt_id: str, harness: str, transcript: str | Path,
-    target_pid: int, target_start: str, poll: float = DEFAULT_POLL,
+    target_pid: int, target_start: str, prompt_path: str | Path | None = None,
+    poll: float = DEFAULT_POLL,
     initial_delay: float = DEFAULT_INITIAL_DELAY,
     periodic_debounce: int = DEFAULT_PERIODIC_DEBOUNCE,
     final_grace: float = DEFAULT_FINAL_GRACE,
@@ -394,6 +412,7 @@ def supervise(
     """Follow one governed process and maintain its attempt-scoped summary."""
 
     log_path = _validate_transcript(transcript, harness, attempt_id)
+    prompt = _validate_prompt(prompt_path, log_path)
     sid = summary_sid(attempt_id)
     lock_path = owner_lock_path(harness, attempt_id)
     state_path = owner_state_path(harness, attempt_id)
@@ -413,6 +432,7 @@ def supervise(
             "harness": harness,
             "sid": sid,
             "transcript": str(log_path),
+            "prompt_path": str(prompt) if prompt else None,
             "target_pid": target_pid,
             "target_proc_start": target_start,
             "pid": os.getpid(),
@@ -439,14 +459,14 @@ def supervise(
                 previous = _read_sidecar(harness, sid)
                 if not initial_requested and not previous.get("summary"):
                     initial_requested = _refresh(
-                        harness, sid, source, phase="initial", debounce=0, priority=True)
+                        harness, sid, source, phase="initial", debounce=0, priority=True, prompt_path=prompt)
                     if initial_requested:
                         state.update(last_refresh_phase="initial", last_refresh_at=time.time())
                         _atomic_write(state_path, state)
                 else:
                     if _refresh(
                         harness, sid, source, phase="periodic",
-                        debounce=periodic_debounce, priority=not previous.get("summary"),
+                        debounce=periodic_debounce, priority=not previous.get("summary"), prompt_path=prompt,
                     ):
                         state.update(last_refresh_phase="periodic", last_refresh_at=time.time())
                         _atomic_write(state_path, state)
@@ -482,7 +502,7 @@ def supervise(
                 break
             if not final_started:
                 final_started = _refresh(
-                    harness, sid, source, phase="final", debounce=0, priority=True)
+                    harness, sid, source, phase="final", debounce=0, priority=True, prompt_path=prompt)
                 if final_started:
                     state.update(last_refresh_phase="final", last_refresh_at=time.time())
                     _atomic_write(state_path, state)
@@ -555,6 +575,12 @@ def ensure_attempt_owner(jobs: str | Path, attempt_id: str) -> dict[str, Any]:
         live, reason = _proc_live(int(raw_pid), target_start)
         if not live:
             return {"state": "skipped", "reason": f"worker-{reason}"}
+        retained_prompt = None
+        try:
+            state = json.loads(owner_state_path(harness, attempt_id).read_text(encoding="utf-8"))
+            retained_prompt = _validate_prompt(state.get("prompt_path"), _validate_transcript(transcript, harness, attempt_id))
+        except (OSError, ValueError, json.JSONDecodeError, AttributeError):
+            retained_prompt = None
         try:
             values = launch_summary_owner(
                 attempt_id=attempt_id,
@@ -562,6 +588,7 @@ def ensure_attempt_owner(jobs: str | Path, attempt_id: str) -> dict[str, Any]:
                 transcript=transcript,
                 target_pid=int(raw_pid),
                 target_start=target_start,
+                prompt_path=retained_prompt,
             )
         except (OSError, ValueError) as exc:
             return {"state": "failed", "reason": str(exc)}
@@ -599,6 +626,7 @@ def main(argv: list[str] | None = None) -> int:
     supervise_parser.add_argument("--transcript", required=True)
     supervise_parser.add_argument("--pid", required=True, type=int)
     supervise_parser.add_argument("--proc-start", required=True)
+    supervise_parser.add_argument("--prompt")
     supervise_parser.add_argument("--poll", type=float, default=DEFAULT_POLL)
     supervise_parser.add_argument("--initial-delay", type=float, default=DEFAULT_INITIAL_DELAY)
     supervise_parser.add_argument("--periodic-debounce", type=int, default=DEFAULT_PERIODIC_DEBOUNCE)
@@ -618,6 +646,7 @@ def main(argv: list[str] | None = None) -> int:
         transcript=args.transcript,
         target_pid=args.pid,
         target_start=args.proc_start,
+        prompt_path=args.prompt,
         poll=args.poll,
         initial_delay=args.initial_delay,
         periodic_debounce=args.periodic_debounce,

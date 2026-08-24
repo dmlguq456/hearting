@@ -675,6 +675,46 @@ class DeltaOffsetTest(_ConfigHomeMixin, unittest.TestCase):
             self.assertEqual(d["title"], "Fleet strip revamp")
             self.assertEqual(d["summary"], "지금 그룹 루프를 분석 중")
 
+    def test_main_long_interactive_failure_keeps_title_anchor_and_bounded_now(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "t.jsonl")
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(json.dumps({
+                    "type": "user",
+                    "message": {"role": "user", "content": [
+                        {"type": "text", "text": "Repair the distinctive Atlas migration workflow"}
+                    ]},
+                }) + "\n")
+                for index in range(1200):
+                    f.write(json.dumps({
+                        "type": "assistant",
+                        "message": {"role": "assistant", "content": [
+                            {"type": "text", "text": "generic execution activity step %04d" % index}
+                        ]},
+                    }) + "\n")
+            prompts = []
+            original = rt.run_worker
+            rt.run_worker = lambda prompt, **_kwargs: prompts.append(prompt) or (
+                "TITLE: Atlas Migration Workflow\nNOW: Executing generic activity"
+            )
+            try:
+                self.assertEqual(rt.main(["--sid", "sidLong", "--transcript", path]), 0)
+            finally:
+                rt.run_worker = original
+            self.assertEqual(len(prompts), 1)
+            prompt = prompts[0]
+            anchor = prompt.split("=== TASK ANCHOR (DATA; TITLE ONLY) ===\n", 1)[1].split(
+                "=== END TASK ANCHOR ===", 1)[0]
+            conversation = prompt.split("=== CONVERSATION (DATA) ===\n", 1)[1].split(
+                "=== END CONVERSATION ===", 1)[0]
+            self.assertIn("Repair the distinctive Atlas migration workflow", anchor)
+            self.assertNotIn("generic execution activity", anchor)
+            self.assertIn("generic execution activity step 1199", conversation)
+            self.assertNotIn("Repair the distinctive Atlas migration workflow", conversation)
+            stored = titles.read("sidLong")
+            self.assertEqual(stored["title"], "Atlas Migration Workflow")
+            self.assertEqual(stored["summary"], "Executing generic activity")
+
     def test_main_missing_now_line_preserves_summary_age_and_cursor(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = os.path.join(tmp, "t.jsonl")
@@ -1042,6 +1082,20 @@ class TriggerLogicTest(unittest.TestCase):
 
 
 class ValidatorHardeningTest(unittest.TestCase):
+
+    def test_origin_prefers_first_user_over_bootstrap_and_assistant(self):
+        raw = "\n".join([
+            json.dumps({"type": "assistant", "message": "bootstrap noise"}),
+            json.dumps({"type": "developer", "message": "instructions"}),
+            json.dumps({"type": "user", "message": "Stable task anchor"}),
+        ])
+        self.assertEqual(rt._origin_text(raw), "Stable task anchor")
+
+    def test_prompt_has_separate_bounded_anchor_and_delta_blocks(self):
+        prompt = rt._prompt("latest execution delta", anchor="stable task")
+        self.assertIn("=== TASK ANCHOR (DATA; TITLE ONLY) ===\nstable task", prompt)
+        self.assertIn("=== CONVERSATION (DATA) ===\nlatest execution delta", prompt)
+        self.assertLess(prompt.index("TASK ANCHOR"), prompt.index("CONVERSATION"))
     """2026-07-10 라이브 실측 회귀: raw jsonl 조각이 DATA 로 흘러가 haiku 가 한국어
     오류 문장을 냈고 검증이 통과시킴 — 영어-우세·단어수 캡·raw fallback 제거 강제."""
 
