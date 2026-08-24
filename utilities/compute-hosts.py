@@ -8,8 +8,8 @@ own answer to "where do the logs go" and "how do I get back to it".
 
 This holds the static half in one user-owned file and measures the rest:
 
-    list    static inventory plus live reachability and free GPU memory
-    probe   the live measurement alone, for one host or all of them
+    list    inventory plus reachability, GPU load/VRAM, and exact process owners
+    probe   the live GPU/process measurement alone, for one host or all of them
     run     start a detached command on a host under a stable run id
     runs    what has been started, and which of those are still alive
     tail    read a run's log from any host that shares the run root
@@ -24,6 +24,7 @@ harness utilities.
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import datetime
 import importlib.util
 import json
@@ -37,6 +38,7 @@ from pathlib import Path
 SCHEMA_VERSION = 1
 CONNECT_TIMEOUT = 8
 PROBE_TIMEOUT = 40
+GPU_PROBE_TIMEOUT = 3
 LOCAL = "local"
 
 
@@ -131,44 +133,307 @@ def remote(host, script, *, timeout=PROBE_TIMEOUT):
 
 
 PROBE_SCRIPT = r"""
-echo "host=$(hostname)"
-if command -v nvidia-smi >/dev/null 2>&1; then
-  nvidia-smi --query-gpu=index,name,memory.total,memory.used --format=csv,noheader \
-    | sed 's/^/gpu=/'
-else
-  echo "gpu=none"
-fi
-echo "load=$(cut -d' ' -f1-3 /proc/loadavg 2>/dev/null)"
+python3 - <<'PY'
+import csv
+import io
+import json
+import os
+import socket
+import subprocess
+import time
+from pathlib import Path
+
+
+def smi(query):
+    try:
+        result = subprocess.run(
+            ["nvidia-smi", query, "--format=csv,noheader,nounits"],
+            text=True, capture_output=True, timeout=1.3,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return None, str(exc)
+    if result.returncode:
+        return None, (result.stderr or result.stdout or "nvidia-smi failed").strip()[:160]
+    return list(csv.reader(io.StringIO(result.stdout))), None
+
+
+def integer(value):
+    value = str(value or "").strip()
+    if not value or value.lower() in {"n/a", "[n/a]", "not supported"}:
+        return None
+    try:
+        return int(float(value.split()[0]))
+    except (ValueError, IndexError):
+        return None
+
+
+def proc_stat(pid):
+    try:
+        raw = Path("/proc") / str(pid) / "stat"
+        text = raw.read_text(encoding="utf-8", errors="replace")
+        rest = text[text.rfind(")") + 2:].split()
+        return {"ppid": int(rest[1]), "start": int(rest[19])}
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def same_euid(pid):
+    try:
+        for line in (Path("/proc") / str(pid) / "status").read_text().splitlines():
+            if line.startswith("Uid:"):
+                fields = line.split()
+                return len(fields) >= 3 and int(fields[2]) == os.geteuid()
+    except (OSError, ValueError):
+        pass
+    return False
+
+
+ENV_KEYS = {
+    "AGENT_DISPATCH_ATTEMPT_ID", "AGENT_DISPATCH_SELF_SLUG",
+    "HEARTING_COMPUTE_RUN_ID", "HEARTING_COMPUTE_HOST",
+    "CLAUDE_CODE_SESSION_ID", "CODEX_THREAD_ID", "CODEX_SESSION_ID",
+    "OPENCODE_SESSION_ID",
+}
+
+
+def identity_env(pid):
+    values = {}
+    try:
+        with (Path("/proc") / str(pid) / "environ").open("rb") as handle:
+            raw = handle.read(1024 * 1024)
+    except OSError:
+        return values
+    for item in raw.split(b"\0"):
+        key, sep, value = item.partition(b"=")
+        if not sep:
+            continue
+        decoded_key = key.decode("utf-8", errors="ignore")
+        if decoded_key in ENV_KEYS:
+            values[decoded_key] = value.decode("utf-8", errors="replace")[:256]
+    return values
+
+
+def harness_process(pid):
+    names = {"claude": "claude", "codex": "codex", "opencode": "opencode"}
+    try:
+        comm = (Path("/proc") / str(pid) / "comm").read_text().strip().lower()
+    except OSError:
+        comm = ""
+    if comm in names:
+        return names[comm]
+    try:
+        with (Path("/proc") / str(pid) / "cmdline").open("rb") as handle:
+            argv0 = handle.read(4096).split(b"\0", 1)[0]
+        base = os.path.basename(argv0.decode("utf-8", errors="ignore")).lower()
+    except OSError:
+        base = ""
+    return names.get(base)
+
+
+def safe_label(value, fallback):
+    text = str(value or fallback)
+    return "".join(c if c.isalnum() or c in "._-" else "-" for c in text)[:64]
+
+
+def process_owner(pid, expected_start):
+    candidates = {"job": [], "run": [], "session": [], "harness": []}
+    seen = set()
+    current = pid
+    depth = 0
+    while current > 0 and current not in seen and depth < 128:
+        seen.add(current)
+        stat = proc_stat(current)
+        if stat is None or not same_euid(current):
+            break
+        env = identity_env(current)
+        attempt = env.get("AGENT_DISPATCH_ATTEMPT_ID")
+        if attempt:
+            slug = safe_label(env.get("AGENT_DISPATCH_SELF_SLUG"), attempt[:12])
+            candidates["job"].append({
+                "kind": "job", "id": attempt, "label": "job:" + slug,
+                "harness": None, "evidence_pid": current,
+                "evidence_start": stat["start"], "ancestry_depth": depth,
+                "source": "environment+ancestry",
+            })
+        run_id = env.get("HEARTING_COMPUTE_RUN_ID")
+        if run_id:
+            candidates["run"].append({
+                "kind": "run", "id": run_id,
+                "label": "run:" + safe_label(run_id, "run"), "harness": None,
+                "evidence_pid": current, "evidence_start": stat["start"],
+                "ancestry_depth": depth, "source": "environment+ancestry",
+            })
+        sessions = []
+        for key, harness in (("CLAUDE_CODE_SESSION_ID", "claude"),
+                             ("CODEX_THREAD_ID", "codex"),
+                             ("CODEX_SESSION_ID", "codex"),
+                             ("OPENCODE_SESSION_ID", "opencode")):
+            sid = env.get(key)
+            if sid:
+                sessions.append((harness, sid))
+        for harness, sid in set(sessions):
+            candidates["session"].append({
+                "kind": "session", "id": sid,
+                "label": "%s:%s" % (harness, safe_label(sid[:8], "session")),
+                "harness": harness, "evidence_pid": current,
+                "evidence_start": stat["start"], "ancestry_depth": depth,
+                "source": "environment+ancestry",
+            })
+        harness = harness_process(current)
+        if harness:
+            candidates["harness"].append({
+                "kind": "harness", "id": "%s:%s" % (current, stat["start"]),
+                "label": "%s:pid%s" % (harness, current), "harness": harness,
+                "evidence_pid": current, "evidence_start": stat["start"],
+                "ancestry_depth": depth, "source": "process-ancestry",
+            })
+        verified = proc_stat(current)
+        if verified is None or verified["start"] != stat["start"]:
+            return None, "ancestor-reused-or-gone"
+        current = stat["ppid"]
+        depth += 1
+
+    final_stat = proc_stat(pid)
+    if final_stat is None or final_stat["start"] != expected_start:
+        return None, "pid-reused-or-gone"
+    for kind in ("job", "run", "session", "harness"):
+        if not candidates[kind]:
+            continue
+        nearest = min(candidate["ancestry_depth"] for candidate in candidates[kind])
+        unique = {}
+        for candidate in candidates[kind]:
+            if candidate["ancestry_depth"] != nearest:
+                continue
+            unique.setdefault((candidate["kind"], candidate.get("harness"),
+                               candidate["id"]), candidate)
+        if len(unique) == 1:
+            return next(iter(unique.values())), None
+        if len(unique) > 1:
+            return None, "ambiguous-" + kind
+    return None, "no-exact-owner"
+
+
+payload = {
+    "hostname": socket.gethostname(), "load": None, "gpus": [],
+    "unmatched_processes": [], "observed_at": time.time(),
+}
+try:
+    payload["load"] = " ".join(Path("/proc/loadavg").read_text().split()[:3])
+except OSError:
+    pass
+
+if not any(os.access(os.path.join(path, "nvidia-smi"), os.X_OK)
+           for path in os.environ.get("PATH", "").split(os.pathsep)):
+    print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+    raise SystemExit(0)
+
+gpu_rows, gpu_error = smi("--query-gpu=index,uuid,name,utilization.gpu,memory.total,memory.used")
+if gpu_rows is None:
+    payload["gpu_error"] = gpu_error
+    print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+    raise SystemExit(0)
+
+by_uuid = {}
+for row in gpu_rows:
+    if len(row) != 6:
+        continue
+    index, uuid, name, util, total, used = (part.strip() for part in row)
+    try:
+        index = int(index)
+    except ValueError:
+        continue
+    gpu = {
+        "index": index, "uuid": uuid or None, "name": name or None,
+        "utilization_gpu_pct": integer(util), "memory_total_mib": integer(total),
+        "memory_used_mib": integer(used), "processes": [],
+    }
+    payload["gpus"].append(gpu)
+    if uuid:
+        by_uuid[uuid] = gpu
+
+process_rows, process_error = smi("--query-compute-apps=gpu_uuid,pid,process_name,used_gpu_memory")
+if process_rows is None:
+    payload["process_error"] = process_error
+else:
+    for row in process_rows:
+        if len(row) != 4:
+            continue
+        uuid, raw_pid, process_name, used = (part.strip() for part in row)
+        try:
+            pid = int(raw_pid)
+        except ValueError:
+            continue
+        stat = proc_stat(pid)
+        owner, reason = (process_owner(pid, stat["start"]) if stat is not None
+                         else (None, "process-unavailable"))
+        process = {
+            "gpu_uuid": uuid or None, "pid": pid,
+            "proc_start": stat["start"] if stat is not None else None,
+            "process_name": process_name or None, "used_memory_mib": integer(used),
+            "owner": owner, "attribution_reason": reason,
+        }
+        gpu = by_uuid.get(uuid)
+        if gpu is None:
+            payload["unmatched_processes"].append(process)
+        else:
+            gpu["processes"].append(process)
+
+payload["gpus"].sort(key=lambda gpu: gpu["index"])
+for gpu in payload["gpus"]:
+    gpu["processes"].sort(
+        key=lambda proc: (proc["used_memory_mib"] is None,
+                          -(proc["used_memory_mib"] or 0), proc["pid"]))
+print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+PY
 """
 
 
 def probe_host(name, host):
-    result = remote(host, PROBE_SCRIPT)
+    observed_at = datetime.datetime.now().timestamp()
+    result = remote(host, PROBE_SCRIPT, timeout=GPU_PROBE_TIMEOUT)
     if result.returncode != 0:
         detail = (result.stderr or result.stdout).strip().splitlines()
         return {"host": name, "reachable": False,
                 "detail": (detail[-1][:120] if detail else "unreachable"),
-                "gpus": []}
-    gpus, hostname, load = [], None, None
-    for line in result.stdout.splitlines():
-        line = line.strip()
-        if line.startswith("gpu=") and line != "gpu=none":
-            parts = [p.strip() for p in line[4:].split(",")]
-            if len(parts) == 4:
-                try:
-                    total = int(parts[2].split()[0])
-                    used = int(parts[3].split()[0])
-                except (ValueError, IndexError):
-                    continue
-                gpus.append({"index": int(parts[0]), "name": parts[1],
-                             "total_mib": total, "used_mib": used,
-                             "free_mib": total - used})
-        elif line.startswith("host="):
-            hostname = line[5:]
-        elif line.startswith("load="):
-            load = line[5:]
-    return {"host": name, "reachable": True, "hostname": hostname,
-            "load": load, "gpus": gpus}
+                "gpus": [], "observed_at": observed_at}
+    try:
+        payload = json.loads(result.stdout.strip().splitlines()[-1])
+    except (IndexError, TypeError, ValueError):
+        return {"host": name, "reachable": False, "detail": "invalid probe output",
+                "gpus": [], "observed_at": observed_at}
+    if not isinstance(payload, dict) or not isinstance(payload.get("gpus"), list):
+        return {"host": name, "reachable": False, "detail": "invalid probe payload",
+                "gpus": [], "observed_at": observed_at}
+    gpus = []
+    for gpu in payload.get("gpus", []):
+        if not isinstance(gpu, dict) or not isinstance(gpu.get("index"), int):
+            continue
+        gpu = dict(gpu)
+        total, used = gpu.get("memory_total_mib"), gpu.get("memory_used_mib")
+        gpu["total_mib"] = total
+        gpu["used_mib"] = used
+        gpu["free_mib"] = total - used if isinstance(total, int) and isinstance(used, int) else None
+        if not isinstance(gpu.get("processes"), list):
+            gpu["processes"] = []
+        gpus.append(gpu)
+    row = {"host": name, "reachable": True,
+           "hostname": payload.get("hostname"), "load": payload.get("load"),
+           "gpus": gpus, "observed_at": payload.get("observed_at") or observed_at,
+           "unmatched_processes": payload.get("unmatched_processes") or []}
+    if payload.get("gpu_error"):
+        row["detail"] = str(payload["gpu_error"])[:120]
+    if payload.get("process_error"):
+        row["process_detail"] = str(payload["process_error"])[:120]
+    return row
+
+
+def _probe_selected(selected):
+    """Probe hosts concurrently while preserving the inventory's declared order."""
+    if not selected:
+        return []
+    workers = min(8, len(selected))
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
+        return list(pool.map(lambda item: probe_host(*item), selected))
 
 
 def _select(config, names):
@@ -183,12 +448,15 @@ def _select(config, names):
 
 def cmd_list(args):
     config = load_config()
+    selected = _select(config, args.hosts)
+    live_rows = ({row["host"]: row for row in _probe_selected(selected)}
+                 if not args.static else {})
     rows = []
-    for name, host in _select(config, args.hosts):
+    for name, host in selected:
         row = {"host": name, "ssh": host.get("ssh_host"),
                "port": host.get("ssh_port"), "conda": host.get("conda"),
                "note": host.get("note"), "self": is_self(host)}
-        row.update(probe_host(name, host) if not args.static
+        row.update(live_rows[name] if not args.static
                    else {"reachable": None, "gpus": []})
         rows.append(row)
     if args.json:
@@ -206,7 +474,10 @@ def cmd_list(args):
             continue
         summary = ", ".join(
             f"{g['index']}:{g['name'].replace('NVIDIA ', '')} "
-            f"{g['free_mib'] // 1024}G free" for g in row["gpus"]) or "no gpu"
+            f"{g['used_mib'] / 1024:.1f}/{g['total_mib'] / 1024:.0f}G "
+            f"{g.get('utilization_gpu_pct') if g.get('utilization_gpu_pct') is not None else '—'}%"
+            for g in row["gpus"] if g.get("used_mib") is not None
+            and g.get("total_mib") is not None) or "no gpu"
         here = "*" if row.get("self") else " "
         print(f" {here}{row['host']:<10} up   load {row.get('load', '?')}  | {summary}")
     return 0
@@ -214,7 +485,7 @@ def cmd_list(args):
 
 def cmd_probe(args):
     config = load_config()
-    results = [probe_host(name, host) for name, host in _select(config, args.hosts)]
+    results = _probe_selected(_select(config, args.hosts))
     if args.json:
         print(json.dumps(results, ensure_ascii=False, sort_keys=True))
     else:
@@ -222,8 +493,10 @@ def cmd_probe(args):
             state = "up" if row["reachable"] else f"down ({row.get('detail', '')})"
             print(f"{row['host']:<10} {state}")
             for gpu in row.get("gpus", []):
+                util = gpu.get("utilization_gpu_pct")
                 print(f"    gpu{gpu['index']} {gpu['name']}: "
-                      f"{gpu['free_mib']}/{gpu['total_mib']} MiB free")
+                      f"{gpu.get('used_mib')}/{gpu.get('total_mib')} MiB used, "
+                      f"{util if util is not None else '—'}% util")
     return 0 if all(r["reachable"] for r in results) else 1
 
 
@@ -256,7 +529,10 @@ def cmd_run(args):
     run_dir = config["run_root"] / run_id
     rendered = " ".join(shlex.quote(part) for part in command)
 
-    setup = []
+    setup = [
+        f"export HEARTING_COMPUTE_RUN_ID={shlex.quote(run_id)}",
+        f"export HEARTING_COMPUTE_HOST={shlex.quote(name)}",
+    ]
     workdir = args.cwd or host.get("workdir")
     if workdir:
         setup.append(f"cd {shlex.quote(workdir)}")
@@ -286,7 +562,7 @@ def cmd_run(args):
     )
     if args.dry_run:
         print(f"run_id: {run_id}\nrun_dir: {run_dir}\nhost: {name}\n"
-              f"would run: {body}")
+              f"would run: {rendered}\nsetup: {preamble}")
         return 0
 
     result = remote(host, launch)
@@ -405,7 +681,7 @@ def build_parser():
     p_list.add_argument("--json", action="store_true")
     p_list.set_defaults(func=cmd_list)
 
-    p_probe = sub.add_parser("probe", help="Measure reachability and free GPU memory")
+    p_probe = sub.add_parser("probe", help="Measure reachability, GPUs, and process owners")
     p_probe.add_argument("hosts", nargs="*")
     p_probe.add_argument("--json", action="store_true")
     p_probe.set_defaults(func=cmd_probe)

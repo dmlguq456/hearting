@@ -3903,11 +3903,18 @@ def set_api_disabled(v):
 
 
 _HEARTING = None   # resolved once by fleet.main; render ticks never inspect installer/git state
+_COMPUTE_HOSTS = None  # F-83: atomic last-good from the independent GPU/SSH refresh pump
+_COMPUTE_HOST_INTERVAL = 10.0
 
 
 def set_hearting(value):
     global _HEARTING
     _HEARTING = dict(value) if isinstance(value, dict) else None
+
+
+def set_compute_hosts(value):
+    global _COMPUTE_HOSTS
+    _COMPUTE_HOSTS = dict(value) if isinstance(value, dict) else None
 
 
 _VERSION_RELEASE_RE = re.compile(r"^v?\d+(?:\.\d+)+(?:[-+][0-9A-Za-z.]+)?$")
@@ -3954,6 +3961,145 @@ def _hearting_header_row():
     return ([("  ", None), ("hearting", "hearting_name"), (" ", None)]
             + _hearting_version_segments(version)
             + [(" · ", "dim"), (method, "version_method")])
+
+
+def _gpu_safe_text(value):
+    return re.sub(r"[\x00-\x1f\x7f]", "?", str(value or ""))
+
+
+def _gpu_gib(value):
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        return "—"
+    amount = max(0.0, float(value)) / 1024.0
+    if value > 0 and amount < 0.1:
+        return "<0.1"
+    if amount >= 10 or amount.is_integer():
+        return str(int(round(amount)))
+    return ("%.1f" % amount).rstrip("0").rstrip(".")
+
+
+def _gpu_owner_text(gpu):
+    labels = []
+    for process in gpu.get("processes") or ():
+        if not isinstance(process, dict):
+            continue
+        owner = process.get("owner")
+        label = owner.get("label") if isinstance(owner, dict) else "unattributed"
+        label = _gpu_safe_text(label) or "unattributed"
+        if label not in labels:
+            labels.append(label)
+    if not labels:
+        return "idle"
+    shown = labels[:2]
+    return ",".join(shown) + ((" +%d" % (len(labels) - 2)) if len(labels) > 2 else "")
+
+
+def _gpu_level(gpu):
+    util = gpu.get("utilization_gpu_pct")
+    total, used = gpu.get("memory_total_mib"), gpu.get("memory_used_mib")
+    ratios = [util] if isinstance(util, (int, float)) and not isinstance(util, bool) else []
+    if (isinstance(total, (int, float)) and not isinstance(total, bool) and total > 0
+            and isinstance(used, (int, float)) and not isinstance(used, bool)):
+        ratios.append(100.0 * used / total)
+    level = max(ratios) if ratios else None
+    return "lvl_r_flat" if level is not None and level >= 80 else (
+        "lvl_y" if level is not None and level >= 50 else
+        "lvl_g" if level is not None else "dim")
+
+
+def _gpu_token(gpu, available, show_name=False):
+    index = gpu.get("index")
+    util = gpu.get("utilization_gpu_pct")
+    util_text = "%s%%" % (int(util) if isinstance(util, (int, float))
+                            and not isinstance(util, bool) else "—")
+    memory = "%s/%sG" % (_gpu_gib(gpu.get("memory_used_mib")),
+                          _gpu_gib(gpu.get("memory_total_mib")))
+    level = _gpu_level(gpu)
+    segs = [("g%s " % (index if isinstance(index, int) else "?"), "head"),
+            (util_text, level), (" ", None), (memory, level)]
+    if show_name and gpu.get("name"):
+        name = _gpu_safe_text(gpu["name"]).replace("NVIDIA ", "")
+        name_room = max(0, min(18, available - sum(_dw(t) for t, _k in segs) - 8))
+        if name_room >= 4:
+            segs += [(" ", None), (_clip_w(name, name_room), "dim")]
+    owner = _gpu_owner_text(gpu)
+    used = sum(_dw(text) for text, _key in segs)
+    owner_room = max(0, available - used - 3)
+    if owner_room >= 4:
+        segs += [(" · ", "dim"), (_clip_w(owner, owner_room),
+                                    "dim" if owner == "idle" else
+                                    "lvl_y" if "unattributed" in owner else "name_dim")]
+    return segs
+
+
+def _compute_host_rows(term_width=None):
+    snapshot = _COMPUTE_HOSTS
+    if not isinstance(snapshot, dict) or not snapshot.get("configured"):
+        return []
+    width = max(20, int(term_width or 200))
+    hosts = [row for row in (snapshot.get("hosts") or ()) if isinstance(row, dict)]
+    up = sum(row.get("reachable") is True for row in hosts)
+    rows = [[("  GPU HOSTS", "head"), (" %d/%d" % (up, len(hosts)), "dim")]]
+    if snapshot.get("error"):
+        detail = _gpu_safe_text(snapshot["error"])
+        rows.append([("    unavailable · ", "lvl_y"),
+                     (_clip_w(detail, max(1, width - 18)), "dim")])
+        return [_clip_segs(row, width)[0] for row in rows]
+    if not hosts:
+        rows.append([("    no hosts", "dim")])
+        return rows
+
+    max_host = max((_dw(_gpu_safe_text(row.get("host") or "?")) for row in hosts), default=1)
+    host_width = min(max_host, 16 if width >= 100 else 10)
+    for host in hosts:
+        name = _clip_w(_gpu_safe_text(host.get("host") or "?"), host_width)
+        marker = "*" if host.get("self") else " "
+        prefix = "  %s%s  " % (marker, _pad(name, host_width))
+        continuation = " " * _dw(prefix)
+        if host.get("reachable") is not True:
+            detail = _gpu_safe_text(host.get("detail") or "unreachable")
+            row = [(prefix, "head"), ("down", "lvl_r_flat")]
+            if detail:
+                row += [(" · ", "dim"), (detail, "dim")]
+            rows.append(_clip_segs(row, width)[0])
+            continue
+
+        gpus = [gpu for gpu in (host.get("gpus") or ()) if isinstance(gpu, dict)]
+        if not gpus:
+            state = "gpu unavailable" if host.get("detail") else "no gpu"
+            row = [(prefix, "head"), (state, "lvl_y" if host.get("detail") else "dim")]
+            rows.append(_clip_segs(row, width)[0])
+            continue
+
+        current = [(prefix, "head")]
+        current_width = _dw(prefix)
+        for gpu in sorted(gpus, key=lambda value: (value.get("index") is None,
+                                                    value.get("index") or 0)):
+            gpu_available = max(12, width - _dw(prefix))
+            token = _gpu_token(gpu, gpu_available, show_name=width >= 120)
+            token_width = sum(_dw(text) for text, _key in token)
+            separator = [("   ", "dim")]
+            sep_width = 3
+            if len(current) > 1 and current_width + sep_width + token_width <= width:
+                current += separator + token
+                current_width += sep_width + token_width
+                continue
+            if len(current) > 1:
+                rows.append(_clip_segs(current, width)[0])
+                current = [(continuation, None)]
+                current_width = _dw(continuation)
+            current += token
+            current_width += token_width
+        if len(current) > 1:
+            rows.append(_clip_segs(current, width)[0])
+    return rows
+
+
+def _top_rows(term_width=None):
+    rows = [_hearting_header_row()]
+    rows.extend(_compute_host_rows(term_width))
+    rows.append(None)
+    return rows
 
 
 # --- F-30 (v10, prd.md:304-310) — process view: pipeline-centric regrouping, `p` toggle ---
@@ -4825,7 +4971,7 @@ def _build_lines(sessions, jobs, section, narrow, malformed, layout="wide", memo
             sessions, display_jobs, _route_views_by_id, malformed, memory,
             term_width, layout, node_evidence=_node_evidence, governor=governor)
         resource_lines = _resource_rows(resources, section)
-        return ([_hearting_header_row(), None] + resource_lines
+        return (_top_rows(term_width) + resource_lines
                 + ([None] if resource_lines else []) + process_lines)
     # F-18b: mem-worker (distiller/curator/F-17 refresher) census — computed on the ORIGINAL
     # session list, before is_child/mem filtering, so folded/mem-only groups still surface a
@@ -4919,7 +5065,7 @@ def _build_lines(sessions, jobs, section, narrow, malformed, layout="wide", memo
 
     # The product identity is a distinct, quiet title block. Keep one breathing row
     # before account usage begins instead of letting the two metadata zones touch.
-    lines = [_hearting_header_row(), None]
+    lines = _top_rows(term_width)
     _seen_glyphs = set()
     # F-12(c) legend glyph-appearance tracking — LOCAL to this call (never module/global state,
     # _OFFSET invariant R3): which of the conditional legend glyphs actually got emitted this
@@ -6466,6 +6612,19 @@ def _loop(stdscr, collect_all, hfilter, section, interval):
     generation = 0
     pump = RefreshPump(collect_snapshot, interval)
     pump.start()
+    compute_host_refresh = getattr(collect_all, "compute_hosts_refresh", None)
+    compute_host_generation = 0
+    compute_host_pump = None
+    if callable(compute_host_refresh):
+        compute_host_interval = os.environ.get("FLEET_COMPUTE_HOST_INTERVAL",
+                                               str(_COMPUTE_HOST_INTERVAL))
+        try:
+            compute_host_interval = max(1.0, float(compute_host_interval))
+        except (TypeError, ValueError):
+            compute_host_interval = _COMPUTE_HOST_INTERVAL
+        compute_host_pump = RefreshPump(
+            compute_host_refresh, compute_host_interval, name="fleet-gpu-refresh")
+        compute_host_pump.start()
     sessions, jobs = snapshot.sessions, snapshot.jobs
     resources = snapshot.resources
     usage_snapshots = snapshot.usage_snapshots
@@ -6485,6 +6644,8 @@ def _loop(stdscr, collect_all, hfilter, section, interval):
             ch = stdscr.getch()
             now = time.time()
             pump.request_due(now=time.monotonic())
+            if compute_host_pump is not None:
+                compute_host_pump.request_due(now=time.monotonic())
             update = pump.poll(generation)
             if update is not None:
                 generation, snapshot = update
@@ -6496,6 +6657,11 @@ def _loop(stdscr, collect_all, hfilter, section, interval):
                 governor_snapshot = snapshot.governor
                 if snapshot.hearting is not None:
                     set_hearting(snapshot.hearting)
+            if compute_host_pump is not None:
+                compute_host_update = compute_host_pump.poll(compute_host_generation)
+                if compute_host_update is not None:
+                    compute_host_generation, compute_host_snapshot = compute_host_update
+                    set_compute_hosts(compute_host_snapshot)
             _BLINK_ON = (int(now * 2) % 2 == 0)
 
             if ch in (ord("q"), ord("Q")):
@@ -6548,6 +6714,8 @@ def _loop(stdscr, collect_all, hfilter, section, interval):
 
             if ch in (ord("r"), ord("R")):
                 pump.request(force=True)
+                if compute_host_pump is not None:
+                    compute_host_pump.request(force=True)
             _poll_pending_kill()     # F-27 grace window — non-blocking; may raise a re-prompt
             # Redraw every wake for the spinner/blink; curses doupdate emits only changed cells.
             _draw(stdscr, sessions, jobs, section, malformed, memory=mem_snapshot,
@@ -6555,6 +6723,8 @@ def _loop(stdscr, collect_all, hfilter, section, interval):
                   governor=governor_snapshot)
     finally:
         pump.stop(join_timeout=1.0)
+        if compute_host_pump is not None:
+            compute_host_pump.stop(join_timeout=1.0)
 
 
 def run_live(collect_all, hfilter, section, interval):

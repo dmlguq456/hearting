@@ -21,10 +21,12 @@ import sys
 if __package__ in (None, ""):
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     from fleet.collectors import collect_all
+    from fleet.collectors import compute_hosts
     from fleet.collectors import procscan
     from fleet import installinfo
 else:
     from .collectors import collect_all
+    from .collectors import compute_hosts
     from .collectors import procscan
     from . import installinfo
 
@@ -98,7 +100,7 @@ def _collect_memory():
 
 
 def _snapshot_json(sessions, jobs, resource_jobs=None, usage=None, disabled=None, show_all=False,
-                   hearting=None):
+                   hearting=None, compute_host_snapshot=None):
     resource_jobs = list(resource_jobs or [])
     visible_resources = resource_jobs if show_all else [
         row for row in resource_jobs if row.liveness == "working"
@@ -133,6 +135,8 @@ def _snapshot_json(sessions, jobs, resource_jobs=None, usage=None, disabled=None
         out["disabled"] = disabled
     if hearting is not None:
         out["hearting"] = dict(hearting)
+    if compute_host_snapshot is not None:
+        out["compute_hosts"] = compute_host_snapshot
     return json.dumps(out, ensure_ascii=False, indent=2)
 
 
@@ -225,6 +229,7 @@ def main(argv=None):
 
     if args.json:
         sessions, jobs = projected_collector(harness_filter=hfilter)
+        compute_host_snapshot = compute_hosts.collect()
         usage_json = dict(getattr(collect_all, "last_usage", {}))
         snapshots = [value for value in usage_json.values() if isinstance(value, dict)]
         freshnesses = [value.get("freshness") for value in snapshots]
@@ -239,7 +244,8 @@ def main(argv=None):
                              usage=usage_json,
                              disabled=disabled,
                              show_all=args.show_all,
-                             hearting=hearting))
+                             hearting=hearting,
+                             compute_host_snapshot=compute_host_snapshot))
         return 0
 
     # curses / --once path (render module) — resolved lazily so --json needs no curses.
@@ -263,6 +269,7 @@ def main(argv=None):
     if view:
         render.set_process_view(view == "process")
     if args.once:
+        render.set_compute_hosts(compute_hosts.collect())
         return render.render_once(projected_collector, hfilter, args.section)
     render.reset_scroll()   # fresh launch starts scrolled to top (belt-and-suspenders)
 
@@ -293,6 +300,9 @@ def main(argv=None):
     # thread; --once/--json never opt into remote release discovery.
     live_collector.hearting_refresh = lambda: installinfo.collect(
         refresh_remote=True, fast_local=True)
+    # F-83: SSH/GPU polling has its own slower pump in render. Never put it in
+    # the 2-second process snapshot producer or on the curses thread.
+    live_collector.compute_hosts_refresh = compute_hosts.collect
 
     return render.run_live(live_collector, hfilter, args.section, args.interval)
 

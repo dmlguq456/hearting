@@ -10,9 +10,11 @@ import os
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parent
 TOOL = ROOT / "compute-hosts.py"
@@ -128,6 +130,21 @@ class ComputeHostsTest(unittest.TestCase):
         self.assertIn("quoted output", tail.stdout)
         self.assertIn("exit 0", tail.stdout)
 
+    def test_local_run_exports_exact_compute_identity(self):
+        result = self.run_tool(
+            "run", "here", "--name", "identity", "--", "bash", "-c",
+            "printf '%s|%s' \"$HEARTING_COMPUTE_RUN_ID\" \"$HEARTING_COMPUTE_HOST\"",
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        run_id = result.stdout.split()[1]
+        exit_path = self.run_root / run_id / "exit_code"
+        for _ in range(50):
+            if exit_path.is_file():
+                break
+            time.sleep(0.1)
+        log = (self.run_root / run_id / "log").read_text(encoding="utf-8")
+        self.assertEqual(log, f"{run_id}|here")
+
     def test_failure_exit_code_is_preserved(self):
         result = self.run_tool("run", "here", "--", "bash", "-c", "exit 7")
         run_id = result.stdout.split()[1]
@@ -161,6 +178,104 @@ class ComputeHostsTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("CUDA_VISIBLE_DEVICES=1", result.stdout)
         self.assertIn(f"cd {self.root}", result.stdout)
+
+    def test_host_probes_run_in_parallel_and_keep_inventory_order(self):
+        module = load_module()
+        barrier = threading.Barrier(3, timeout=1.0)
+
+        def fake_probe(name, _host):
+            barrier.wait()
+            return {"host": name, "reachable": True, "gpus": []}
+
+        selected = [(name, {"ssh_host": "local"}) for name in ("a", "b", "c")]
+        with mock.patch.object(module, "probe_host", side_effect=fake_probe):
+            rows = module._probe_selected(selected)
+        self.assertEqual([row["host"] for row in rows], ["a", "b", "c"])
+
+    def test_gpu_probe_keeps_multi_gpu_processes_and_refuses_ambiguous_sessions(self):
+        module = load_module()
+        fakebin = self.root / "bin"
+        fakebin.mkdir()
+        fake_smi = fakebin / "nvidia-smi"
+        fake_smi.write_text(
+            "#!/usr/bin/env python3\n"
+            "import json, os, sys\n"
+            "if any(a.startswith('--query-gpu=') for a in sys.argv):\n"
+            " print('0, GPU-A, NVIDIA A100, 42, 40960, 12288')\n"
+            " print('1, GPU-B, NVIDIA A100, N/A, 40960, 2048')\n"
+            "else:\n"
+            " for row in json.loads(os.environ['FAKE_GPU_PROCESSES']): print(', '.join(map(str,row)))\n",
+            encoding="utf-8",
+        )
+        fake_smi.chmod(0o755)
+
+        identity_keys = {
+            "AGENT_DISPATCH_ATTEMPT_ID", "AGENT_DISPATCH_SELF_SLUG",
+            "HEARTING_COMPUTE_RUN_ID", "HEARTING_COMPUTE_HOST",
+            "CLAUDE_CODE_SESSION_ID", "CODEX_THREAD_ID", "CODEX_SESSION_ID",
+            "OPENCODE_SESSION_ID",
+        }
+        clean = {key: value for key, value in os.environ.items() if key not in identity_keys}
+        processes = []
+        try:
+            run_proc = subprocess.Popen(
+                [sys.executable, "-c", "import time; time.sleep(10)"],
+                env={**clean, "HEARTING_COMPUTE_RUN_ID": "cnn-run-7",
+                     "HEARTING_COMPUTE_HOST": "cnn"},
+            )
+            ambiguous_proc = subprocess.Popen(
+                [sys.executable, "-c", "import time; time.sleep(10)"],
+                env={**clean, "CODEX_THREAD_ID": "same-session-token",
+                     "CLAUDE_CODE_SESSION_ID": "same-session-token"},
+            )
+            job_proc = subprocess.Popen(
+                [sys.executable, "-c", "import time; time.sleep(10)"],
+                env={**clean, "AGENT_DISPATCH_ATTEMPT_ID": "att-42",
+                     "AGENT_DISPATCH_SELF_SLUG": "train-test",
+                     "HEARTING_COMPUTE_RUN_ID": "shadowed-run"},
+            )
+            session_proc = subprocess.Popen(
+                [sys.executable, "-c", "import time; time.sleep(10)"],
+                env={**clean, "CODEX_THREAD_ID": "codex-exact-session"},
+            )
+            processes = [run_proc, ambiguous_proc, job_proc, session_proc]
+            env = {
+                **clean,
+                "PATH": str(fakebin) + os.pathsep + os.environ.get("PATH", ""),
+                "FAKE_GPU_PROCESSES": json.dumps([
+                    ["GPU-A", run_proc.pid, "python", 8192],
+                    ["GPU-A", ambiguous_proc.pid, "python", 2048],
+                    ["GPU-B", job_proc.pid, "python", 1024],
+                    ["GPU-B", session_proc.pid, "python", 512],
+                ]),
+            }
+            result = subprocess.run(
+                ["bash", "-c", module.PROBE_SCRIPT], text=True, capture_output=True,
+                env=env, timeout=5,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            payload = json.loads(result.stdout)
+        finally:
+            for process in processes:
+                process.terminate()
+            for process in processes:
+                process.wait(timeout=2)
+
+        self.assertEqual([gpu["index"] for gpu in payload["gpus"]], [0, 1])
+        first, second = payload["gpus"]
+        self.assertEqual(len(first["processes"]), 2)
+        by_pid = {row["pid"]: row for row in first["processes"]}
+        self.assertEqual(by_pid[run_proc.pid]["owner"]["kind"], "run")
+        self.assertEqual(by_pid[run_proc.pid]["owner"]["label"], "run:cnn-run-7")
+        self.assertIsNone(by_pid[ambiguous_proc.pid]["owner"])
+        self.assertEqual(by_pid[ambiguous_proc.pid]["attribution_reason"],
+                         "ambiguous-session")
+        second_by_pid = {row["pid"]: row for row in second["processes"]}
+        self.assertEqual(second_by_pid[job_proc.pid]["owner"]["kind"], "job")
+        self.assertEqual(second_by_pid[job_proc.pid]["owner"]["label"], "job:train-test")
+        self.assertEqual(second_by_pid[session_proc.pid]["owner"]["kind"], "session")
+        self.assertEqual(second_by_pid[session_proc.pid]["owner"]["label"], "codex:codex-ex")
+        self.assertIsInstance(second_by_pid[job_proc.pid]["proc_start"], int)
 
 
 if __name__ == "__main__":

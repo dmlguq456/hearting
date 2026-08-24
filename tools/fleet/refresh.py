@@ -25,11 +25,13 @@ class LiveSnapshot:
 class RefreshPump:
     """Run an arbitrary producer off-thread with last-good atomic handoff."""
 
-    def __init__(self, producer, interval, clock=time.monotonic, thread_factory=threading.Thread):
+    def __init__(self, producer, interval, clock=time.monotonic,
+                 thread_factory=threading.Thread, name="fleet-refresh"):
         self._producer = producer
         self._interval = max(0.1, float(interval))
         self._clock = clock
         self._thread_factory = thread_factory
+        self._name = str(name)
         self._lock = threading.RLock()
         self._thread = None
         self._running = False
@@ -106,7 +108,7 @@ class RefreshPump:
     def _start_locked(self):
         thread = self._thread_factory(
             target=self._run,
-            name="fleet-refresh",
+            name=self._name,
             daemon=True,
         )
         self._thread = thread
