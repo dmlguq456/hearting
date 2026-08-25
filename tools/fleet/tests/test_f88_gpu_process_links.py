@@ -219,7 +219,10 @@ class GpuProcessAndResourceRenderTest(unittest.TestCase):
         expected = {
             "NVIDIA B200": "gpu_blackwell",
             "NVIDIA H100": "gpu_hopper",
-            "NVIDIA RTX 6000 Ada Generation": "gpu_ada",
+            "NVIDIA RTX 6000 Ada Generation": "gpu_rtx6000",
+            "NVIDIA RTX A6000": "gpu_rtx6000",
+            "NVIDIA RTX 4090": "gpu_rtx4090",
+            "NVIDIA RTX 5090": "gpu_rtx5090",
             "NVIDIA A100": "gpu_ampere",
             "NVIDIA T4": "gpu_turing",
             "Mystery Accelerator": "gpu_other",
@@ -248,7 +251,11 @@ class GpuProcessAndResourceRenderTest(unittest.TestCase):
         self.assertEqual(render._COLOR["gpu_ada"], render._COLOR["h_claude"])
         self.assertEqual(render._COLOR["gpu_hopper"], render._COLOR["h_codex"])
         self.assertEqual(render._COLOR["gpu_ampere"], render._COLOR["h_opencode"])
-        for family in ("gpu_blackwell", "gpu_hopper", "gpu_ada", "gpu_ampere", "gpu_turing"):
+        self.assertEqual(render._COLOR["gpu_rtx6000"], render._COLOR["h_opencode"])
+        self.assertEqual(render._COLOR["gpu_rtx4090"], render._COLOR["h_claude"])
+        self.assertNotEqual(render._COLOR["gpu_rtx6000"], render._COLOR["gpu_rtx4090"])
+        for family in ("gpu_rtx6000", "gpu_rtx4090", "gpu_rtx5090",
+                       "gpu_blackwell", "gpu_hopper", "gpu_ada", "gpu_ampere", "gpu_turing"):
             with self.subTest(family=family):
                 self.assertNotEqual(render._COLOR[family] & ~render.curses.A_DIM, 0)
 

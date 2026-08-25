@@ -52,7 +52,7 @@ _CACHE = {}          # {abspath: (mtime, size, record|None)}
 # F-30 retry rounds are display evidence, not route shape. Only these semantic
 # nodes carry the compact marker; every other opaque route node keeps its sealed
 # identifier verbatim.
-_ROUND_NODE_IDS = frozenset(("execute", "review", "impl-review"))
+_ROUND_NODE_IDS = frozenset(("plan", "plan-check", "execute", "review", "impl-review"))
 
 
 def _verified_attempt_round(node_id, evidence):

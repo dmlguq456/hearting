@@ -178,6 +178,8 @@ _HUE_OF = {
     "fam_fable": ("m", 0), "fam_gpt": ("y", 0), "fam_other": ("d", 0),
     "famd_opus": ("c", _A_D), "famd_sonnet": ("l", _A_D), "famd_haiku": ("g", _A_D),
     "famd_fable": ("m", _A_D), "famd_gpt": ("y", _A_D), "famd_other": ("d", _A_D),
+    "gpu_rtx6000": ("l", _A_D), "gpu_rtx4090": ("c", _A_D),
+    "gpu_rtx5090": ("g", _A_D),
     "gpu_blackwell": ("g", _A_D), "gpu_hopper": ("m", _A_D),
     "gpu_ada": ("c", _A_D), "gpu_ampere": ("l", _A_D),
     "gpu_turing": ("y", _A_D), "gpu_other": ("d", _A_D),
@@ -346,6 +348,7 @@ def _init_colors():
     # model name remains present, so color is an additive cue rather than the
     # only identifier.
     for fam, hue_name in {
+        "rtx6000": "h_opencode", "rtx4090": "h_claude", "rtx5090": "green",
         "blackwell": "green", "hopper": "h_codex", "ada": "h_claude",
         "ampere": "h_opencode", "turing": "yellow",
     }.items():
@@ -3966,6 +3969,9 @@ def _gpu_gib(value):
 
 
 _GPU_MODEL_PATTERNS = (
+    ("rtx6000", re.compile(r"\brtx\s+(?:a\s*)?6000\b")),
+    ("rtx4090", re.compile(r"\brtx\s*4090\b")),
+    ("rtx5090", re.compile(r"\brtx\s*5090\b")),
     ("blackwell", re.compile(r"\b(?:b100|b200|gb200|gb300)\b|blackwell|\brtx\s*50\d{2}\b")),
     ("hopper", re.compile(r"\b(?:h100|h200|gh200)\b|hopper")),
     ("ada", re.compile(r"\b(?:l4|l40|l40s)\b|ada|\brtx\s*40\d{2}\b")),
@@ -4123,11 +4129,28 @@ def _resource_gauge_segs(value, track=_RESOURCE_GAUGE_W):
             + [(" %3d%%" % value, _flat_level(_pct_key(value)))])
 
 
+def _resource_pct_segs(value):
+    """Compact percent-only resource value; unknown remains explicit."""
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        return [("—", "dim")]
+    value = max(0, min(100, _half_up(value)))
+    return [("%d%%" % value, _flat_level(_pct_key(value)))]
+
+
 def _cpu_gauge_track(cpu_count):
     """Four logical threads per cell, bounded for terminal readability."""
     if not isinstance(cpu_count, int) or isinstance(cpu_count, bool) or cpu_count <= 0:
         return _RESOURCE_GAUGE_W
     return max(_CPU_GAUGE_MIN, min(_CPU_GAUGE_MAX, _half_up(cpu_count / 4.0)))
+
+
+def _vram_gauge_track(total_mib):
+    """Four GiB per cell, bounded like the CPU capacity track."""
+    if (not isinstance(total_mib, (int, float)) or isinstance(total_mib, bool)
+            or total_mib <= 0):
+        return _RESOURCE_GAUGE_W
+    return max(_CPU_GAUGE_MIN, min(_CPU_GAUGE_MAX,
+                                   _half_up(total_mib / 4096.0)))
 
 
 def _cpu_busy_text(utilization, cpu_count):
@@ -4153,15 +4176,16 @@ def _gpu_token(gpu, available, show_name=False, sessions=None):
     state = _gpu_state(gpu)
     glyph, state_key = _glyph(state)
     show_state_word = available >= 58
-    track = 4 if available < 70 else _RESOURCE_GAUGE_W
+    narrow_track = available < 70
+    vram_track = 4 if narrow_track else _vram_gauge_track(total)
     segs = [(glyph, state_key), (" ", None),
             ("%s: " % (index if isinstance(index, int) else "?"), "head")]
     if show_state_word:
         segs.append((state.ljust(7) + "  ", state_key))
     segs.append(("UTIL ", "dim"))
-    segs += _resource_gauge_segs(util, track=track)
+    segs += _resource_pct_segs(util)
     segs += [("  VRAM ", "dim")]
-    segs += _resource_gauge_segs(vram_pct, track=track)
+    segs += _resource_gauge_segs(vram_pct, track=vram_track)
     segs += [("  " + memory, _gpu_level(gpu))]
     if show_name and gpu.get("name"):
         name = _gpu_safe_text(gpu["name"]).replace("NVIDIA ", "")

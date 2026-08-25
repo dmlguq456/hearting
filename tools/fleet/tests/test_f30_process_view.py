@@ -108,7 +108,9 @@ class RenderContentTest(ProcessViewEnv):
             "route_hash": "sha256:rounds",
             "capability": "autopilot-code",
             "nodes": [
-                {"id": "execute", "depends_on": []},
+                {"id": "plan", "depends_on": []},
+                {"id": "plan-check", "depends_on": ["plan"]},
+                {"id": "execute", "depends_on": ["plan-check"]},
                 {"id": "impl-review", "depends_on": ["execute"]},
             ],
         }
@@ -117,6 +119,15 @@ class RenderContentTest(ProcessViewEnv):
             liveness="working", route_id="rt-rounds", route_node="execute",
         )
         evidence = {
+            "plan": {"attempt_history": [
+                {"attempt_id": "att-plan-%d" % index,
+                 "contract_status": "current", "status": "done"}
+                for index in range(1, 5)
+            ]},
+            "plan-check": {"attempt_history": [
+                {"attempt_id": "att-plan-check-1", "contract_status": "current", "status": "done"},
+                {"attempt_id": "att-plan-check-2", "contract_status": "current", "status": "running"},
+            ]},
             "execute": {"attempt_history": [
                 {"attempt_id": "att-execute-1", "contract_status": "current", "status": "done"},
                 {"attempt_id": "att-execute-1", "contract_status": "current", "status": "done"},
@@ -136,10 +147,14 @@ class RenderContentTest(ProcessViewEnv):
         rows = render._route_card_l2(view, max_width=160)
         self.assertEqual(len(rows), 1)
         text = _joined(rows)
+        self.assertIn("plan(R4)", text)
+        self.assertIn("plan-check(R2)", text)
         self.assertIn("execute(R2)", text)
         self.assertIn("impl-review(R1)", text)
         self.assertEqual(text.count("execute(R2)"), 1)
         self.assertEqual(text.count("impl-review(R1)"), 1)
+        self.assertEqual(text.count("plan(R4)"), 1)
+        self.assertEqual(text.count("plan-check(R2)"), 1)
 
         projection_holder = SimpleNamespace(
             work_projection=SimpleNamespace(
@@ -149,6 +164,8 @@ class RenderContentTest(ProcessViewEnv):
                 render._projection_route_seq(projection_holder), True, 160))
         self.assertIn("execute(R2)", breadcrumb)
         self.assertIn("impl-review(R1)", breadcrumb)
+        self.assertIn("plan(R4)", breadcrumb)
+        self.assertIn("plan-check(R2)", breadcrumb)
 
     def test_retry_round_omits_unverified_evidence_and_advances_on_actual_start(self):
         unverified = self._retry_view(review_history=[
@@ -167,7 +184,8 @@ class RenderContentTest(ProcessViewEnv):
 
         payload = route.summary([second_started])[0]
         rounds = {node["id"]: node.get("attempt_round") for node in payload["nodes"]}
-        self.assertEqual(rounds, {"execute": 2, "impl-review": 2})
+        self.assertEqual(rounds, {"plan": 4, "plan-check": 2,
+                                  "execute": 2, "impl-review": 2})
 
     def test_retry_round_waits_for_start_evidence(self):
         registered_only = self._retry_view(review_history=[

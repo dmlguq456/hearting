@@ -177,7 +177,7 @@ class ComputeHostRenderTest(unittest.TestCase):
         text = render._plain(render._gpu_token(gpu, 141, show_name=True))
         self.assertIn("1:", text)
         self.assertIn("RTX 6000 Ada Generation", text)
-        self.assertIn(("RTX 6000 Ada Generation", "gpu_ada"),
+        self.assertIn(("RTX 6000 Ada Generation", "gpu_rtx6000"),
                       render._gpu_token(gpu, 141, show_name=True))
         self.assertNotIn("CL/f11a0486", text)
         self.assertNotIn("↳", text)
@@ -239,6 +239,32 @@ class ComputeHostRenderTest(unittest.TestCase):
         self.assertEqual(render._cpu_busy_text(100, 28), "28.0/28t")
         self.assertEqual(render._cpu_busy_text(None, 64), "—/64t")
         self.assertEqual(render._cpu_busy_text(10, None), "—")
+
+    def test_gpu_util_is_numeric_and_vram_track_scales_with_capacity(self):
+        self.assertEqual(render._vram_gauge_track(24576), 6)
+        self.assertEqual(render._vram_gauge_track(32768), 8)
+        self.assertEqual(render._vram_gauge_track(49152), 12)
+        self.assertEqual(render._vram_gauge_track(81920), 20)
+        self.assertEqual(render._vram_gauge_track(None), 8)
+
+        gpu = {
+            "index": 0, "name": "NVIDIA RTX 6000 Ada Generation",
+            "utilization_gpu_pct": 84,
+            "memory_used_mib": 32768, "memory_total_mib": 49152,
+            "processes": [],
+        }
+
+        def vram_track(row):
+            start = next(index for index, segment in enumerate(row)
+                         if segment[0] == "  VRAM ")
+            return sum(render._dw(row[index][0]) for index in (start + 1, start + 2))
+
+        wide = render._gpu_token(gpu, 141, show_name=True)
+        util = render._plain(wide).split("UTIL ", 1)[1].split("  VRAM ", 1)[0]
+        self.assertEqual(util, "84%")
+        self.assertNotRegex(util, r"[━─]")
+        self.assertEqual(vram_track(wide), 12)
+        self.assertEqual(vram_track(render._gpu_token(gpu, 47, show_name=False)), 4)
 
     def test_resource_panel_is_below_the_top_summary_divider(self):
         lines = render._build_lines([], [], "both", False, 0, term_width=120)
