@@ -252,30 +252,58 @@ def proc_cmdline_sha256(pid):
     return hashlib.sha256(raw).hexdigest()
 
 
-def cpu_sample():
+def cpu_sample(cpu_count=None):
     def read():
+        rows = {}
         try:
-            fields = Path("/proc/stat").read_text().splitlines()[0].split()[1:]
-            values = [int(value) for value in fields]
+            lines = Path("/proc/stat").read_text().splitlines()
         except (OSError, ValueError, IndexError):
             return None
-        if len(values) < 4:
+        for line in lines:
+            fields = line.split()
+            if not fields:
+                continue
+            label = fields[0]
+            if label != "cpu" and not (label.startswith("cpu") and label[3:].isdigit()):
+                continue
+            try:
+                values = [int(value) for value in fields[1:]]
+            except ValueError:
+                continue
+            if len(values) < 4:
+                continue
+            idle = values[3] + (values[4] if len(values) > 4 else 0)
+            rows[label] = (sum(values), idle)
+        return rows or None
+
+    def utilization(before, after):
+        if before is None or after is None:
             return None
-        idle = values[3] + (values[4] if len(values) > 4 else 0)
-        return sum(values), idle
+        total = after[0] - before[0]
+        idle = after[1] - before[1]
+        if total <= 0:
+            return None
+        return max(0, min(100, int(round(100.0 * (total - idle) / total))))
 
     before = read()
     if before is None:
-        return None
+        return None, None
     time.sleep(0.10)
     after = read()
     if after is None:
-        return None
-    total = after[0] - before[0]
-    idle = after[1] - before[1]
-    if total <= 0:
-        return None
-    return max(0, min(100, int(round(100.0 * (total - idle) / total))))
+        return None, None
+
+    aggregate = utilization(before.get("cpu"), after.get("cpu"))
+    if isinstance(cpu_count, int) and not isinstance(cpu_count, bool) and cpu_count > 0:
+        labels = ["cpu%d" % index for index in range(cpu_count)]
+    else:
+        labels = sorted(
+            (label for label in set(before) | set(after)
+             if label.startswith("cpu") and label[3:].isdigit()),
+            key=lambda label: int(label[3:]),
+        )
+    threads = [utilization(before.get(label), after.get(label)) for label in labels]
+    return aggregate, (threads or None)
 
 
 def memory_sample():
@@ -534,9 +562,14 @@ def process_owner(pid, expected_start):
     return None, "no-exact-owner", session_owner
 
 
+cpu_count = os.cpu_count()
+cpu_utilization, cpu_threads = cpu_sample(cpu_count)
+if cpu_count is None and cpu_threads:
+    cpu_count = len(cpu_threads)
 payload = {
     "hostname": socket.gethostname(), "load": None,
-    "cpu_count": os.cpu_count(), "cpu_utilization_pct": cpu_sample(), "gpus": [],
+    "cpu_count": cpu_count, "cpu_utilization_pct": cpu_utilization,
+    "cpu_thread_utilization_pct": cpu_threads, "gpus": [],
     "unmatched_processes": [], "observed_at": time.time(),
 }
 payload.update(memory_sample())
@@ -653,6 +686,7 @@ def probe_host(name, host, owner_claims=None):
            "hostname": payload.get("hostname"), "load": payload.get("load"),
            "cpu_count": payload.get("cpu_count"),
            "cpu_utilization_pct": payload.get("cpu_utilization_pct"),
+           "cpu_thread_utilization_pct": payload.get("cpu_thread_utilization_pct"),
            "memory_total_mib": payload.get("memory_total_mib"),
            "memory_used_mib": payload.get("memory_used_mib"),
            "swap_total_mib": payload.get("swap_total_mib"),

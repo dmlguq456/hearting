@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
@@ -24,6 +25,40 @@ def _title(session_id: str) -> str:
         return ""
 
 
+def _metadata_formatter() -> Path:
+    override = os.environ.get("HERDR_SESSION_METADATA_FORMATTER")
+    if override:
+        return Path(override).expanduser()
+    config = Path(os.environ.get("XDG_CONFIG_HOME") or (Path.home() / ".config"))
+    return config / "hearting" / "herdr-session-metadata"
+
+
+def _display_metadata(session_id: str, title: str, fallback: str) -> tuple[str, str]:
+    """Resolve an optional user formatter without making it runtime authority."""
+    formatter = _metadata_formatter()
+    if not formatter.is_file() or not os.access(formatter, os.X_OK):
+        return fallback, title
+    try:
+        result = subprocess.run(
+            [str(formatter), "--harness", "codex", "--session-id", session_id,
+             "--summary", title],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
+            timeout=0.2, check=False,
+        )
+        if result.returncode or len(result.stdout.encode("utf-8")) > 4096:
+            return fallback, title
+        value = json.loads(result.stdout)
+        if not isinstance(value, dict):
+            return fallback, title
+        display_agent = sanitize_title(value.get("display_agent"))
+        custom_title = sanitize_title(value.get("title"))
+        if not display_agent:
+            return fallback, title
+        return clip_cells(display_agent, 24), clip_cells(custom_title, 48)
+    except Exception:
+        return fallback, title
+
+
 def project(payload: dict[str, Any] | None, session_id: str, *, worker: bool = False) -> bool:
     if worker or not session_id:
         return True
@@ -37,8 +72,9 @@ def project(payload: dict[str, Any] | None, session_id: str, *, worker: bool = F
          "--agent", "codex", "--agent-session-id", session_id],
     ]
     title = _title(session_id)
+    display_agent, title = _display_metadata(session_id, title, handle)
     metadata = [herdr, "pane", "report-metadata", pane, "--source", "herdr:codex",
-                "--display-agent", handle]
+                "--display-agent", display_agent]
     if title:
         metadata += ["--title", clip_cells(title, 48)]
     commands.append(metadata)

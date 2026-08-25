@@ -37,6 +37,15 @@ class SessionHandleTest(unittest.TestCase):
         self.assertEqual(render._gpu_resources_for_session(sessions[0], resources), [])
         self.assertEqual(render._gpu_resources_for_session(sessions[1], resources)[0]["host"], "cnn")
 
+    def test_fleet_session_name_uses_summary_without_display_id(self):
+        session = SimpleNamespace(harness="codex", session_id="abcdefgh-one",
+                                  title="session summary", registry_name="registry",
+                                  slug="slug", cwd="/work/repo")
+        self.assertEqual(render._session_name(session), "session summary")
+        session.title = None
+        self.assertEqual(render._session_name(session), "registry")
+        self.assertNotIn("CX/", render._session_name(session))
+
     def test_json_owner_payload_is_not_rewritten(self):
         owner = {"kind": "session", "harness": "codex", "id": "abcdefgh-one", "label": "old"}
         gpu = {"index": 0, "processes": [{"owner": owner}]}

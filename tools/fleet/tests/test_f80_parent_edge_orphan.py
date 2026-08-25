@@ -374,7 +374,8 @@ class RenderConsumesLedgerTest(unittest.TestCase):
         job._parent_edge_promoted_orphan = False
         rendered = self._render([parent], [job])
         self.assertNotIn("(orphan)", rendered)
-        self.assertIn("CL/sid-p", rendered)
+        self.assertIn("live-parent", rendered)
+        self.assertNotIn("CL/sid-p", rendered)
         self.assertIn("live-child", rendered)
 
 

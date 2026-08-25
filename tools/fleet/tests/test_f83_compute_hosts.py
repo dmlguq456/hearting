@@ -74,6 +74,8 @@ class ComputeHostCollectorTest(unittest.TestCase):
             "run_root": "/runs",
             "hosts": [{
                 "host": "cnn", "reachable": True, "observed_at": 12.0,
+                "cpu_count": 4, "cpu_utilization_pct": 25,
+                "cpu_thread_utilization_pct": [0, 75, 0, 25],
                 "memory_used_mib": 8192, "memory_total_mib": 32768,
                 "swap_used_mib": 1024, "swap_total_mib": 4096,
                 "gpus": [{
@@ -100,6 +102,8 @@ class ComputeHostCollectorTest(unittest.TestCase):
         self.assertEqual(process["session_owner"]["id"], "sid-full")
         self.assertEqual(result["hosts"][0]["memory_used_mib"], 8192)
         self.assertEqual(result["hosts"][0]["swap_total_mib"], 4096)
+        self.assertEqual(result["hosts"][0]["cpu_thread_utilization_pct"],
+                         [0, 75, 0, 25])
         self.assertEqual(result["observed_at"], 12.0)
 
     def test_malformed_and_timeout_are_typed_diagnostics(self):
@@ -128,6 +132,7 @@ class ComputeHostRenderTest(unittest.TestCase):
             "hosts": [
                 {"host": "moving4", "self": True, "reachable": True,
                  "cpu_utilization_pct": 37, "cpu_count": 32, "load": "3.2 3.0 2.8",
+                 "cpu_thread_utilization_pct": [0, 70, 0, 30] + [0] * 28,
                  "memory_used_mib": 16384, "memory_total_mib": 65536,
                  "swap_used_mib": 2048, "swap_total_mib": 8192,
                  "gpus": [
@@ -151,8 +156,9 @@ class ComputeHostRenderTest(unittest.TestCase):
                 ]},
                 {"host": "cnn", "self": False, "reachable": True,
                  "cpu_utilization_pct": 8, "cpu_count": 24, "load": "0.4 0.3 0.2",
-                 "memory_used_mib": 8192, "memory_total_mib": 32768,
-                 "swap_used_mib": 0, "swap_total_mib": 0,
+                 "cpu_thread_utilization_pct": [0] * 24,
+                 "memory_used_mib": 28672, "memory_total_mib": 32768,
+                 "swap_used_mib": 5120, "swap_total_mib": 8192,
                  "gpus": [
                     {"index": 0, "name": "NVIDIA A100", "utilization_gpu_pct": 7,
                      "memory_used_mib": 512, "memory_total_mib": 40960,
@@ -190,7 +196,7 @@ class ComputeHostRenderTest(unittest.TestCase):
                 self.assertNotIn("· idle", text)
         wide = "\n".join(render._plain(row) for row in render._compute_host_rows(168))
         for value in ("RTX 6000 Ada Gen.", "python train.py",
-                      "python shell.py", "12/32 thr", "MEM 16/64GB", "SWP 2/8GB"):
+                      "python shell.py", "2/32 thr", "MEM 16/64GB", "SWP 2/8GB"):
             self.assertIn(value, wide)
         narrow = "\n".join(render._plain(row) for row in render._compute_host_rows(60))
         self.assertIn("M 16/64G", narrow)
@@ -209,8 +215,17 @@ class ComputeHostRenderTest(unittest.TestCase):
                         if "⌂ moving4" in render._plain(row))
         self.assertIn(("⌂", "base_host"), base_row)
         self.assertIn(("CPU ", "resource_active"), base_row)
-        self.assertIn(("12/32 thr", "lvl_g"), base_row)
-        self.assertIn(("MEM ", "resource_active"), base_row)
+        self.assertIn(("2/32 thr", "lvl_g"), base_row)
+        self.assertIn(("MEM ", "lvl_g_dim"), base_row)
+        self.assertIn(("16/64GB", "lvl_g_dim"), base_row)
+        self.assertIn(("SWP ", "lvl_g_dim"), base_row)
+        cnn_row = next(row for row in render._compute_host_rows(168)
+                       if "◇ cnn" in render._plain(row))
+        self.assertIn(("CPU ", "dim"), cnn_row)
+        self.assertIn(("MEM ", "lvl_r_dim"), cnn_row)
+        self.assertIn(("28/32GB", "lvl_r_dim"), cnn_row)
+        self.assertIn(("SWP ", "lvl_y_dim"), cnn_row)
+        self.assertIn(("5/8GB", "lvl_y_dim"), cnn_row)
         unknown_cpu_row = next(row for row in render._compute_host_rows(168)
                                if "◇ cpu" in render._plain(row))
         self.assertIn(("CPU ", "dim"), unknown_cpu_row)
@@ -289,7 +304,7 @@ class ComputeHostRenderTest(unittest.TestCase):
         self.assertEqual(render._gpu_gib(1), "0.0")
         self.assertNotIn("<", render._gpu_gib(1))
 
-    def test_cpu_track_uses_threads_and_active_count_is_half_up(self):
+    def test_cpu_track_uses_actual_threads_with_aggregate_fallback(self):
         self.assertEqual(render._cpu_gauge_track(24), 24)
         self.assertEqual(render._cpu_gauge_track(28), 28)
         self.assertEqual(render._cpu_gauge_track(64), 64)
@@ -298,6 +313,8 @@ class ComputeHostRenderTest(unittest.TestCase):
         self.assertEqual(render._cpu_gauge_track(80, 20), 20)
         self.assertEqual(render._cpu_gauge_track(80, 3), 0)
         self.assertEqual(render._cpu_active_threads(37, 32), 12)
+        threads = [0, 70, 0, 30] + [0] * 28
+        self.assertEqual(render._cpu_active_threads(37, 32, threads), 2)
         self.assertEqual(render._cpu_active_threads(0, 64), 0)
         self.assertEqual(render._cpu_active_threads(100, 28), 28)
         self.assertIsNone(render._cpu_active_threads(None, 64))
@@ -309,7 +326,16 @@ class ComputeHostRenderTest(unittest.TestCase):
         compressed = render._cpu_gauge_segs(12, 32, 8, "lvl_g")
         self.assertEqual((len(full[0][0]), len(full[1][0])), (12, 20))
         self.assertEqual((len(compressed[0][0]), len(compressed[1][0])), (3, 5))
+        actual = render._cpu_gauge_segs(2, 32, 32, "lvl_g", threads)
+        bucketed = render._cpu_gauge_segs(2, 32, 4, "lvl_g", threads)
+        self.assertEqual(render._plain(actual), "─━─━" + "─" * 28)
+        self.assertEqual(render._plain(bucketed), "━───")
+        self.assertIn(("━", "lvl_y"), actual)
+        self.assertIn(("━", "lvl_g"), actual)
         self.assertEqual(render._resource_level_key(0, False), "lvl_g_dim")
+        self.assertEqual(render._subdued_ratio_key(28, 32), "lvl_r_dim")
+        self.assertEqual(render._subdued_ratio_key(5, 8), "lvl_y_dim")
+        self.assertEqual(render._subdued_ratio_key(0, 0), "dim")
 
     def test_gpu_util_is_numeric_and_vram_track_scales_with_capacity(self):
         self.assertEqual(render._vram_gauge_track(24576), 6)
@@ -385,15 +411,21 @@ class ComputeHostRenderTest(unittest.TestCase):
         self.assertTrue(all(render._dw(cell) == render._GPU_MODEL_COLUMN_W
                             for cell in model_cells))
         capacity_columns = []
+        vram_slots = []
         for row in gpu_rows:
+            vram_index = next(index for index, segment in enumerate(row)
+                              if segment[0] == "  VRAM ")
             capacity_index = next(index for index, segment in enumerate(row)
                                   if segment[0].rstrip().endswith("GB"))
             self.assertEqual(render._dw(row[capacity_index][0]),
                              2 + render._GPU_CAPACITY_COLUMN_W)
             capacity_columns.append(sum(render._dw(text) for text, _key
                                         in row[:capacity_index]))
+            vram_slots.append(sum(render._dw(text) for text, _key
+                                  in row[vram_index + 1:capacity_index]))
             self.assertNotIn("%", render._plain(row).split("  VRAM ", 1)[1])
         self.assertEqual(len(set(capacity_columns)), 1)
+        self.assertEqual(vram_slots, [12, 12, 12])
 
     def test_resource_panel_is_below_the_top_summary_divider(self):
         lines = render._build_lines([], [], "both", False, 0, term_width=120)

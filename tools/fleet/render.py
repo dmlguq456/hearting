@@ -40,7 +40,7 @@ from .model import (fmt_min, dash, project_of, exec_child_is_wait,
                     LIVENESS_STATES, PLUGIN_QUEUE_STATES, session_parent_visible)
 from . import gitinfo
 from .refresh import LiveSnapshot, RefreshPump
-from .session_handle import session_display_name
+from .session_handle import sanitize_title
 
 # curses attribute constants — real values when curses is present, harmless 0 fallbacks
 # otherwise, so this module imports (and the plain --once path runs) with no curses at all.
@@ -1403,8 +1403,7 @@ def _session_name(s):
     as an anonymous cwd basename — which is exactly how the ghost session hid."""
     slug = s.slug or (s.cwd.rsplit("/", 1)[-1] if s.cwd else "?")
     fallback = s.title or getattr(s, "registry_name", None) or slug
-    return session_display_name(s.harness, getattr(s, "session_id", None),
-                                s.title, fallback=fallback)
+    return sanitize_title(fallback)
 
 
 def _projection_stage_text(entity, max_width=24):
@@ -4141,7 +4140,6 @@ _RESOURCE_GAUGE_W = 8
 _CPU_GAUGE_MIN = 4
 _CPU_GAUGE_MAX = 20  # shared legacy bounds for the capacity-scaled VRAM track
 _GPU_MODEL_COLUMN_W = 18
-_GPU_VRAM_SLOT_W = 20
 _GPU_CAPACITY_COLUMN_W = 9
 
 
@@ -4161,8 +4159,28 @@ def _resource_pct_segs(value, width=4, active=True):
     return [(('%d%%' % value).rjust(width), _resource_level_key(value, active))]
 
 
-def _cpu_active_threads(utilization, cpu_count):
-    """Integer average active threads, using the display contract's half-up rule."""
+def _cpu_thread_values(values, cpu_count):
+    """Normalize a complete logical-index thread sample or reject it as legacy."""
+    if not isinstance(cpu_count, int) or isinstance(cpu_count, bool) or cpu_count <= 0:
+        return None
+    if not isinstance(values, (list, tuple)) or len(values) != cpu_count:
+        return None
+    normalized = []
+    for value in values:
+        if value is None:
+            normalized.append(None)
+        elif isinstance(value, (int, float)) and not isinstance(value, bool):
+            normalized.append(max(0.0, min(100.0, float(value))))
+        else:
+            return None
+    return normalized
+
+
+def _cpu_active_threads(utilization, cpu_count, thread_utilizations=None):
+    """Count observed active logical threads, with the aggregate legacy fallback."""
+    values = _cpu_thread_values(thread_utilizations, cpu_count)
+    if values is not None:
+        return sum(value is not None and value > 0 for value in values)
     if not isinstance(cpu_count, int) or isinstance(cpu_count, bool) or cpu_count <= 0:
         return None
     if not isinstance(utilization, (int, float)) or isinstance(utilization, bool):
@@ -4201,10 +4219,26 @@ def _vram_gauge_track(total_mib):
                                    _half_up(total_mib / 4096.0)))
 
 
-def _cpu_gauge_segs(active, cpu_count, track, key):
-    """Light exact active threads on full tracks and proportional cells when compressed."""
+def _cpu_gauge_segs(active, cpu_count, track, key, thread_utilizations=None):
+    """Map logical CPU positions to cells; aggregate payloads retain prefix fallback."""
     if track <= 0:
         return []
+    values = _cpu_thread_values(thread_utilizations, cpu_count)
+    if values is not None:
+        cells = []
+        for cell in range(track):
+            start = cell * cpu_count // track
+            end = (cell + 1) * cpu_count // track
+            bucket = [value for value in values[start:max(start + 1, end)]
+                      if value is not None]
+            peak = max(bucket) if bucket else None
+            item = ((_BAR_FULL, _resource_level_key(peak, True))
+                    if peak is not None and peak > 0 else (_BAR_EMPTY, "dim"))
+            if cells and cells[-1][1] == item[1] and cells[-1][0][-1:] == item[0]:
+                cells[-1] = (cells[-1][0] + item[0], item[1])
+            else:
+                cells.append(item)
+        return cells
     if (not isinstance(active, int) or isinstance(active, bool)
             or not isinstance(cpu_count, int) or isinstance(cpu_count, bool)
             or cpu_count <= 0 or active <= 0):
@@ -4222,7 +4256,15 @@ def _host_memory_pair(used, total, unit):
     return "%s/%s%s" % (_gpu_gib(used), _gpu_gib(total), unit)
 
 
-def _gpu_token(gpu, available, show_name=False, sessions=None, index_width=1):
+def _subdued_ratio_key(used, total):
+    if (not isinstance(total, (int, float)) or isinstance(total, bool) or total <= 0
+            or not isinstance(used, (int, float)) or isinstance(used, bool)):
+        return "dim"
+    return _resource_level_key(100.0 * used / total, False)
+
+
+def _gpu_token(gpu, available, show_name=False, sessions=None, index_width=1,
+               vram_slot=None):
     index = gpu.get("index")
     util = gpu.get("utilization_gpu_pct")
     total, used = gpu.get("memory_total_mib"), gpu.get("memory_used_mib")
@@ -4239,7 +4281,12 @@ def _gpu_token(gpu, available, show_name=False, sessions=None, index_width=1):
     show_state_word = available >= 58
     narrow_track = available < 70
     vram_track = 4 if narrow_track else _vram_gauge_track(total)
-    vram_slot = 4 if narrow_track else _GPU_VRAM_SLOT_W
+    if narrow_track:
+        vram_slot = 4
+    elif not isinstance(vram_slot, int) or isinstance(vram_slot, bool):
+        vram_slot = vram_track
+    else:
+        vram_slot = max(vram_track, vram_slot)
     index_text = str(index) if isinstance(index, int) and not isinstance(index, bool) else "?"
     segs = [(glyph, state_key), (" ", None),
             ("%s: " % index_text.rjust(max(1, index_width)), summary_key)]
@@ -4306,6 +4353,12 @@ def _compute_host_rows(term_width=None, sessions=None):
                    if isinstance(gpu, dict)]
     gpu_index_width = max((len(str(index)) for index in gpu_indexes
                            if isinstance(index, int) and not isinstance(index, bool)), default=1)
+    wide_vram_slot = max(
+        (_vram_gauge_track(gpu.get("memory_total_mib"))
+         for host in hosts if host.get("reachable") is True
+         for gpu in (host.get("gpus") or ()) if isinstance(gpu, dict)),
+        default=_RESOURCE_GAUGE_W,
+    )
     for host in hosts:
         name = _clip_w(_gpu_safe_text(host.get("host") or "?"), host_width)
         if host.get("self"):
@@ -4325,10 +4378,15 @@ def _compute_host_rows(term_width=None, sessions=None):
 
         cpu = host.get("cpu_utilization_pct")
         cpu_count = host.get("cpu_count")
-        active_threads = _cpu_active_threads(cpu, cpu_count)
+        cpu_threads = host.get("cpu_thread_utilization_pct")
+        thread_values = _cpu_thread_values(cpu_threads, cpu_count)
+        active_threads = _cpu_active_threads(cpu, cpu_count, cpu_threads)
         active = isinstance(active_threads, int) and active_threads >= 1
         summary_key = "resource_active" if active else "dim"
-        cpu_key = _resource_level_key(cpu, active)
+        thread_peak = max((value for value in (thread_values or ()) if value is not None),
+                          default=None)
+        cpu_key = _resource_level_key(cpu if isinstance(cpu, (int, float)) else thread_peak,
+                                      active)
         thread_text = _cpu_thread_text(active_threads, cpu_count)
         memory = _host_memory_pair(host.get("memory_used_mib"),
                                    host.get("memory_total_mib"),
@@ -4336,20 +4394,24 @@ def _compute_host_rows(term_width=None, sessions=None):
         swap = _host_memory_pair(host.get("swap_used_mib"),
                                  host.get("swap_total_mib"),
                                  "GB" if width >= 100 else "G")
+        memory_key = _subdued_ratio_key(host.get("memory_used_mib"),
+                                        host.get("memory_total_mib"))
+        swap_key = _subdued_ratio_key(host.get("swap_used_mib"),
+                                      host.get("swap_total_mib"))
         if width >= 100:
             suffix = [("  ", None), (thread_text, cpu_key),
-                      ("  · ", "dim"), ("MEM ", summary_key), (memory, summary_key),
-                      ("  · ", "dim"), ("SWP ", summary_key), (swap, summary_key)]
+                      ("  · ", "dim"), ("MEM ", memory_key), (memory, memory_key),
+                      ("  · ", "dim"), ("SWP ", swap_key), (swap, swap_key)]
         else:
             suffix = [("  ", None), (thread_text, cpu_key),
-                      ("  M ", summary_key), (memory, summary_key),
-                      ("  S ", summary_key), (swap, summary_key)]
+                      ("  M ", memory_key), (memory, memory_key),
+                      ("  S ", swap_key), (swap, swap_key)]
         fixed = 4 + sum(_dw(text) for text, _key in suffix)
         track = _cpu_gauge_track(cpu_count, width - prefix_width - fixed)
         if track == 0:
             suffix[0] = (" ", None)
         host_row += [("CPU ", summary_key)]
-        host_row += _cpu_gauge_segs(active_threads, cpu_count, track, cpu_key)
+        host_row += _cpu_gauge_segs(active_threads, cpu_count, track, cpu_key, cpu_threads)
         host_row += suffix
         rows.append(_clip_segs(host_row, width)[0])
 
@@ -4365,7 +4427,8 @@ def _compute_host_rows(term_width=None, sessions=None):
                                                     value.get("index") or 0)):
             indent = " " * prefix_width
             token = _gpu_token(gpu, max(12, width - _dw(indent)), show_name=width >= 100,
-                               sessions=sessions, index_width=gpu_index_width)
+                               sessions=sessions, index_width=gpu_index_width,
+                               vram_slot=wide_vram_slot)
             rows.append(_clip_segs([(indent, None)] + token, width)[0])
             rows.extend(_gpu_process_rows(gpu, indent, width))
     return rows

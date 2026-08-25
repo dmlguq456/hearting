@@ -41,7 +41,8 @@ class RuntimeProjectionTest(unittest.TestCase):
         path.chmod(path.stat().st_mode | stat.S_IXUSR)
         return bindir, log
 
-    def project(self, root, sid="abcdefgh-123", mode="ok", worker=False, title="title"):
+    def project(self, root, sid="abcdefgh-123", mode="ok", worker=False, title="title",
+                formatter=None):
         bindir, log = self.stub(root)
         sidecar = root / "titles/codex" / (sid + ".json")
         sidecar.parent.mkdir(parents=True, exist_ok=True)
@@ -49,6 +50,8 @@ class RuntimeProjectionTest(unittest.TestCase):
         log.write_text("")
         env = self.env(root)
         env.update({"PATH": str(bindir) + os.pathsep + env["PATH"], "HERDR_PANE_ID": "pane-7", "HERDR_LOG": str(log), "HERDR_MODE": mode, "HERDR_EXIT": "7" if mode == "nonzero" else "0"})
+        if formatter is not None:
+            env["HERDR_SESSION_METADATA_FORMATTER"] = str(formatter)
         code = ("import sys;sys.path.insert(0,%r);from adapters.codex.hooks.herdr_session_projection import project;assert project({},%r,worker=%r)" % (str(ROOT), sid, worker))
         result = subprocess.run([sys.executable, "-c", code], env=env, capture_output=True)
         rows = [json.loads(x) for x in log.read_text().splitlines()] if log.exists() else []
@@ -87,6 +90,33 @@ class RuntimeProjectionTest(unittest.TestCase):
             self.assertEqual(rows, [])
             self.assertFalse(before.exists())
             self.assertTrue(all(row[0] == "pane" for row in rows))
+
+    def test_codex_private_metadata_formatter_and_fail_soft_fallback(self):
+        sid = "abcdefgh-codex"
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            formatter = root / "formatter"
+            formatter.write_text(
+                "#!/usr/bin/env python3\n"
+                "import argparse,json\n"
+                "p=argparse.ArgumentParser();p.add_argument('--harness');"
+                "p.add_argument('--session-id');p.add_argument('--summary');a=p.parse_args()\n"
+                "print(json.dumps({'display_agent':a.harness,'title':a.summary}))\n"
+            )
+            formatter.chmod(formatter.stat().st_mode | stat.S_IXUSR)
+            _, rows = self.project(root, sid, title="Session summary", formatter=formatter)
+            self.assertEqual(rows[1][6:],
+                             ["codex", "--title", "Session summary"])
+
+            formatter.write_text("#!/usr/bin/env python3\nprint('{')\n")
+            formatter.chmod(formatter.stat().st_mode | stat.S_IXUSR)
+            _, rows = self.project(root, sid, title="Fallback", formatter=formatter)
+            self.assertEqual(rows[1][6:], ["CX/abcdefgh", "--title", "Fallback"])
+
+            formatter.write_text("#!/usr/bin/env python3\nimport time;time.sleep(.5)\n")
+            formatter.chmod(formatter.stat().st_mode | stat.S_IXUSR)
+            _, rows = self.project(root, sid, title="Timeout", formatter=formatter)
+            self.assertEqual(rows[1][6:], ["CX/abcdefgh", "--title", "Timeout"])
 
     def test_codex_absent_command_is_fail_soft(self):
         with tempfile.TemporaryDirectory() as td:

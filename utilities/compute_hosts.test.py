@@ -280,6 +280,12 @@ class ComputeHostsTest(unittest.TestCase):
         self.assertGreater(payload["cpu_count"], 0)
         self.assertGreaterEqual(payload["cpu_utilization_pct"], 0)
         self.assertLessEqual(payload["cpu_utilization_pct"], 100)
+        self.assertEqual(len(payload["cpu_thread_utilization_pct"]),
+                         payload["cpu_count"])
+        self.assertTrue(all(value is None or isinstance(value, int)
+                            for value in payload["cpu_thread_utilization_pct"]))
+        self.assertTrue(all(value is None or 0 <= value <= 100
+                            for value in payload["cpu_thread_utilization_pct"]))
         for key in ("memory_total_mib", "memory_used_mib",
                     "swap_total_mib", "swap_used_mib"):
             self.assertTrue(payload[key] is None or isinstance(payload[key], int))
