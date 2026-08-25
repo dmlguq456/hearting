@@ -137,7 +137,8 @@ _TINT_PAIR = {}    # (tint_char, hue_char) → curses attr — the (fg, tint_bg)
 # Keys absent here render as default-hue plain text under tint (safe degradation).
 _A_B, _A_D = _A_BOLD, _A_DIM
 _HUE_OF = {
-    None: ("d", 0), "dim": ("d", _A_D), "head": ("d", _A_D), "unknown": ("d", _A_D),
+    None: ("d", 0), "dim": ("d", _A_D), "head": ("d", _A_D),
+    "section_head": ("w", _A_B), "unknown": ("d", _A_D),
     "version_release": ("l", _A_D), "version_build": ("d", _A_D),
     "version_dirty": ("y", _A_D), "version_method": ("d", _A_D),
     # F-76b retired "name_work"/"name_idle": names wear the harness hue now (`nm_*`).
@@ -486,6 +487,7 @@ def _init_colors():
     _COLOR["nm_other"] = _COLOR.get("soft", 0) | curses.A_BOLD
     _COLOR["nmd_other"] = _COLOR.get("soft", 0) | curses.A_DIM
     _COLOR["head"] = curses.A_DIM
+    _COLOR["section_head"] = _COLOR.get("soft", 0) | curses.A_BOLD
     _COLOR["unknown"] = curses.A_DIM
 
 
@@ -4129,12 +4131,12 @@ def _resource_gauge_segs(value, track=_RESOURCE_GAUGE_W):
             + [(" %3d%%" % value, _flat_level(_pct_key(value)))])
 
 
-def _resource_pct_segs(value):
-    """Compact percent-only resource value; unknown remains explicit."""
+def _resource_pct_segs(value, width=4):
+    """Fixed-width percent column; unknown remains explicit."""
     if not isinstance(value, (int, float)) or isinstance(value, bool):
-        return [("—", "dim")]
+        return [("—".rjust(width), "dim")]
     value = max(0, min(100, _half_up(value)))
-    return [("%d%%" % value, _flat_level(_pct_key(value)))]
+    return [(('%d%%' % value).rjust(width), _flat_level(_pct_key(value)))]
 
 
 def _cpu_gauge_track(cpu_count):
@@ -4164,7 +4166,7 @@ def _cpu_busy_text(utilization, cpu_count):
     return "%.1f/%dt" % (busy, cpu_count)
 
 
-def _gpu_token(gpu, available, show_name=False, sessions=None):
+def _gpu_token(gpu, available, show_name=False, sessions=None, index_width=1):
     index = gpu.get("index")
     util = gpu.get("utilization_gpu_pct")
     total, used = gpu.get("memory_total_mib"), gpu.get("memory_used_mib")
@@ -4178,8 +4180,9 @@ def _gpu_token(gpu, available, show_name=False, sessions=None):
     show_state_word = available >= 58
     narrow_track = available < 70
     vram_track = 4 if narrow_track else _vram_gauge_track(total)
+    index_text = str(index) if isinstance(index, int) and not isinstance(index, bool) else "?"
     segs = [(glyph, state_key), (" ", None),
-            ("%s: " % (index if isinstance(index, int) else "?"), "head")]
+            ("%s: " % index_text.rjust(max(1, index_width)), "head")]
     if show_state_word:
         segs.append((state.ljust(7) + "  ", state_key))
     segs.append(("UTIL ", "dim"))
@@ -4203,7 +4206,8 @@ def _compute_host_rows(term_width=None, sessions=None):
     width = max(20, int(term_width or 200))
     hosts = [row for row in (snapshot.get("hosts") or ()) if isinstance(row, dict)]
     up = sum(row.get("reachable") is True for row in hosts)
-    rows = [[("  Compute Resources", "head"), (" %d/%d" % (up, len(hosts)), "dim")]]
+    rows = [[("  COMPUTE RESOURCES", "section_head"),
+             ("  %d/%d" % (up, len(hosts)), "dim")]]
     if snapshot.get("error"):
         detail = _gpu_safe_text(snapshot["error"])
         rows.append([("    unavailable · ", "lvl_y"),
@@ -4215,6 +4219,12 @@ def _compute_host_rows(term_width=None, sessions=None):
 
     max_host = max((_dw(_gpu_safe_text(row.get("host") or "?")) for row in hosts), default=1)
     host_width = min(max_host, 16 if width >= 100 else 10)
+    gpu_indexes = [gpu.get("index")
+                   for host in hosts
+                   for gpu in (host.get("gpus") or ())
+                   if isinstance(gpu, dict)]
+    gpu_index_width = max((len(str(index)) for index in gpu_indexes
+                           if isinstance(index, int) and not isinstance(index, bool)), default=1)
     for host in hosts:
         name = _clip_w(_gpu_safe_text(host.get("host") or "?"), host_width)
         if host.get("self"):
@@ -4255,7 +4265,7 @@ def _compute_host_rows(term_width=None, sessions=None):
                                                     value.get("index") or 0)):
             indent = " " * prefix_width
             token = _gpu_token(gpu, max(12, width - _dw(indent)), show_name=width >= 100,
-                               sessions=sessions)
+                               sessions=sessions, index_width=gpu_index_width)
             rows.append(_clip_segs([(indent, None)] + token, width)[0])
             rows.extend(_gpu_process_rows(gpu, indent, width))
     return rows

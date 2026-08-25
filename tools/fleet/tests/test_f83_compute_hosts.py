@@ -136,7 +136,7 @@ class ComputeHostRenderTest(unittest.TestCase):
                 rows = render._compute_host_rows(width)
                 self.assertTrue(all(render._dw(render._plain(row)) <= width for row in rows))
                 text = "\n".join(render._plain(row) for row in rows)
-                for value in ("Compute Resources 3/4", "⌂ moving4", "CPU", "0:", "1:",
+                for value in ("COMPUTE RESOURCES  3/4", "⌂ moving4", "CPU", "0:", "1:",
                               "UTIL", "VRAM", "32/48GB", "1/48GB", "xavier", "down",
                               "cpu", "no gpu"):
                     self.assertIn(value, text)
@@ -261,16 +261,44 @@ class ComputeHostRenderTest(unittest.TestCase):
 
         wide = render._gpu_token(gpu, 141, show_name=True)
         util = render._plain(wide).split("UTIL ", 1)[1].split("  VRAM ", 1)[0]
-        self.assertEqual(util, "84%")
+        self.assertEqual(util, " 84%")
         self.assertNotRegex(util, r"[━─]")
         self.assertEqual(vram_track(wide), 12)
         self.assertEqual(vram_track(render._gpu_token(gpu, 47, show_name=False)), 4)
+
+    def test_resource_header_and_gpu_metric_columns_are_aligned(self):
+        aligned = {
+            "configured": True,
+            "hosts": [{
+                "host": "moving4", "self": True, "reachable": True,
+                "cpu_utilization_pct": 10, "cpu_count": 32,
+                "gpus": [
+                    {"index": 0, "utilization_gpu_pct": 7,
+                     "memory_used_mib": 1024, "memory_total_mib": 24576,
+                     "processes": []},
+                    {"index": 1, "utilization_gpu_pct": 84,
+                     "memory_used_mib": 8192, "memory_total_mib": 49152,
+                     "processes": []},
+                    {"index": 10, "utilization_gpu_pct": None,
+                     "memory_used_mib": 0, "memory_total_mib": 24576,
+                     "processes": []},
+                ],
+            }],
+        }
+        render.set_compute_hosts(aligned)
+        rows = render._compute_host_rows(120)
+
+        self.assertEqual(rows[0][0], ("  COMPUTE RESOURCES", "section_head"))
+        gpu_lines = [render._plain(row) for row in rows if "UTIL" in render._plain(row)]
+        self.assertEqual(len(gpu_lines), 3)
+        self.assertEqual(len({line.index("UTIL") for line in gpu_lines}), 1)
+        self.assertEqual(len({line.index("VRAM") for line in gpu_lines}), 1)
 
     def test_resource_panel_is_below_the_top_summary_divider(self):
         lines = render._build_lines([], [], "both", False, 0, term_width=120)
         text = [render._plain(line) for line in lines]
         hearting_at = next(i for i, line in enumerate(text) if "hearting v2.0.0" in line)
-        resource_at = next(i for i, line in enumerate(text) if "Compute Resources" in line)
+        resource_at = next(i for i, line in enumerate(text) if "COMPUTE RESOURCES" in line)
         pulse_at = next(i for i, line in enumerate(text) if line.startswith("  fleet "))
         dividers = [i for i, line in enumerate(text) if line == "─────"]
         self.assertGreaterEqual(len(dividers), 2)
@@ -282,7 +310,7 @@ class ComputeHostRenderTest(unittest.TestCase):
     def test_process_view_also_separates_resources_from_cards(self):
         lines = render._build_process_lines([], [], {}, 0, None, 120, "wide")
         text = [render._plain(line) for line in lines]
-        resource_at = next(i for i, line in enumerate(text) if "Compute Resources" in line)
+        resource_at = next(i for i, line in enumerate(text) if "COMPUTE RESOURCES" in line)
         process_at = next(i for i, line in enumerate(text) if "PROCESS VIEW" in line)
         divider_at = next(i for i, line in enumerate(text)
                           if i > resource_at and line == "─────")
