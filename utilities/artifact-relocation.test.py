@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import argparse
 import hashlib
 import importlib.util
 import json
@@ -674,6 +675,222 @@ class DeltaTest(unittest.TestCase):
             (root / "a.txt").write_bytes(b"bb")
             result = run("delta", "--baseline", str(baseline), "--artifact-root", str(root), "--cutoff", str(cutoff), "--output", str(base / "two"))
             self.assertEqual(result.returncode, 69)
+
+
+def e1_row(source="designs", target="campaigns/<campaign_id>/cycles/<cycle_id>/artifacts/designs",
+           required=None, kind="directory"):
+    required = required or ["repository_id", "artifact_root_id", "campaign_id", "cycle_id",
+                            "artifact_id", "artifact_revision_id"]
+    return {
+        "record_type": "relocation", "source_locator": {"root_relative_path": source},
+        "identity": {"state": "unissued", "required_ids": required},
+        "before": {"kind": kind}, "current_observation": {"kind": kind},
+        "target": {"locator_state": "template" if target else "none", "root_relative_path": target,
+                   "disposition": "hold_until_ids_issued"},
+    }
+
+
+class CountingAllocator:
+    def __init__(self):
+        self.calls = []
+
+    def allocate(self, kind):
+        self.calls.append((kind,))
+        return M.IDENTITY.ID_KINDS[kind] + f"{len(self.calls):032x}"
+
+
+class E1BindingAndTemplateTest(unittest.TestCase):
+    def test_lineage_template(self):
+        family, tokens = M._e1_validate_template(
+            "campaigns/<campaign_id>/cycles/<cycle_id>/artifacts/designs", e1_row()["identity"]["required_ids"], "directory")
+        self.assertEqual((family, tokens), ("lineage", ("campaign_id", "cycle_id")))
+
+    def test_shared_analysis_template(self):
+        req = ["repository_id", "artifact_root_id", "shared_reference_id", "shared_reference_revision_id"]
+        self.assertEqual(M._e1_validate_template("shared/analysis/<shared_reference_id>/revisions/<shared_reference_revision_id>/", req, "directory")[0], "shared-analysis")
+
+    def test_shared_spec_template(self):
+        req = ["repository_id", "artifact_root_id", "shared_reference_id", "shared_reference_revision_id"]
+        self.assertEqual(M._e1_validate_template("shared/spec/<shared_reference_id>/revisions/<shared_reference_revision_id>/x.md", req, "file")[0], "shared-spec")
+
+    def test_unknown_family_is_refused(self):
+        with self.assertRaises(ValueError):
+            M._e1_validate_template("shared/research/<shared_reference_id>/revisions/<shared_reference_revision_id>/", [], "directory")
+
+    def test_duplicate_token_is_refused(self):
+        with self.assertRaises(ValueError):
+            M._e1_validate_template("campaigns/<campaign_id>/cycles/<cycle_id>/artifacts/<campaign_id>", e1_row()["identity"]["required_ids"], "file")
+
+    def test_wrong_required_set_is_refused(self):
+        with self.assertRaises(ValueError):
+            M._e1_validate_template("campaigns/<campaign_id>/cycles/<cycle_id>/artifacts/x", ["campaign_id", "cycle_id"], "file")
+
+    def test_trailing_slash_kind_mismatch_is_refused(self):
+        with self.assertRaises(ValueError):
+            M._e1_validate_template("campaigns/<campaign_id>/cycles/<cycle_id>/artifacts/x/", e1_row()["identity"]["required_ids"], "file")
+
+    def test_unsafe_parent_segment_is_refused(self):
+        with self.assertRaises(ValueError):
+            M._e1_validate_template("campaigns/<campaign_id>/cycles/<cycle_id>/artifacts/../x", e1_row()["identity"]["required_ids"], "file")
+
+
+class E1AuditedAccessTest(unittest.TestCase):
+    def test_exclusive_create_records_exact_bytes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "x"; M._e1_new(path, b"abc")
+            self.assertEqual(path.read_bytes(), b"abc")
+
+    def test_exclusive_create_refuses_replace(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "x"; path.write_bytes(b"old")
+            with self.assertRaises(FileExistsError): M._e1_new(path, b"new")
+            self.assertEqual(path.read_bytes(), b"old")
+
+    def test_canonical_loader_rejects_pretty_json(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "x"; path.write_text('{\n  "a": 1\n}\n')
+            with self.assertRaises(ValueError): M._e1_load_canonical(path)
+
+    def test_registry_enumeration_classifies_without_mutation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory); routes = base / "routes"; routes.mkdir(); jobs = base / "jobs.log"; jobs.write_text("")
+            (routes / "rt-0123456789abcdef.json").write_text("{}")
+            (routes / "rt-0123456789abcdef.outcome.json").write_text("{}")
+            (routes / "note.json").write_text("{}")
+            classes = {row["classification"] for row in M._e1_registry_rows(jobs, routes)}
+            self.assertEqual(classes, {"jobs_registry", "route", "outcome", "misplaced_nonroute_evidence"})
+
+    def test_census_uses_nofollow_symlink_text(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); (root / "target").write_text("body"); (root / "link").symlink_to("target")
+            row = e1_row(source="link", target=None)
+            census = M._e1_census(root, [row])[0]
+            self.assertEqual((census["kind"], census["link_target"]), ("symlink", "target"))
+
+    def test_auxiliary_trace_is_closed_jsonl(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            args = argparse.Namespace(access_fragment_output=str(base / "access.jsonl"),
+                command_record_output=str(base / "command.json"), status_output=str(base / "status.json"))
+            old = sys.argv; sys.argv = ["tool", "issue"]
+            try: M._e1_emit_aux(args, "issue", "created", [str(base / "in")], [str(base / "out")])
+            finally: sys.argv = old
+            self.assertEqual(len(M.read_jsonl_rows(base / "access.jsonl")), 2)
+
+
+class E1NoReplacePersistenceTest(unittest.TestCase):
+    def _pair(self, base):
+        body = base / "body.json"; seal = base / "seal.json"
+        M._e1_new_json(body, {"request_sha256": "a" * 64})
+        M._e1_create_seal(body, seal, "identity-ledger", "a" * 64, {"row_count": 0})
+        return body, seal
+
+    def test_body_and_seal_validate(self):
+        with tempfile.TemporaryDirectory() as directory:
+            body, seal = self._pair(Path(directory))
+            self.assertEqual(M._e1_verify_seal(body, seal, "identity-ledger", "a" * 64)[0]["request_sha256"], "a" * 64)
+
+    def test_seal_digest_drift_is_refused(self):
+        with tempfile.TemporaryDirectory() as directory:
+            body, seal = self._pair(Path(directory)); body.write_text("{}\n")
+            with self.assertRaises(ValueError): M._e1_verify_seal(body, seal, "identity-ledger")
+
+    def test_wrong_seal_kind_is_refused(self):
+        with tempfile.TemporaryDirectory() as directory:
+            body, seal = self._pair(Path(directory))
+            with self.assertRaises(ValueError): M._e1_verify_seal(body, seal, "exact-target-set")
+
+    def test_wrong_request_is_refused(self):
+        with tempfile.TemporaryDirectory() as directory:
+            body, seal = self._pair(Path(directory))
+            with self.assertRaises(ValueError): M._e1_verify_seal(body, seal, "identity-ledger", "b" * 64)
+
+    def test_jsonl_has_one_lf_per_row(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "rows.jsonl"; raw = M._e1_new_jsonl(path, [{"b": 2}, {"a": 1}])
+            self.assertEqual(raw.count(b"\n"), 2)
+
+    def test_second_jsonl_write_is_refused(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "rows.jsonl"; M._e1_new_jsonl(path, [])
+            with self.assertRaises(FileExistsError): M._e1_new_jsonl(path, [])
+
+    def test_created_mode_is_private(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "x"; M._e1_new(path, b"")
+            self.assertEqual(os.stat(path).st_mode & 0o777, 0o600)
+
+    def test_seal_has_closed_key_set(self):
+        with tempfile.TemporaryDirectory() as directory:
+            _, seal = self._pair(Path(directory)); value = json.loads(seal.read_text())
+            self.assertEqual(set(value), {"schema_version", "artifact_kind", "body_sha256", "body_bytes", "request_sha256", "summary", "created_after_body"})
+
+
+class E1IssuanceTargetTest(unittest.TestCase):
+    def test_ledger_has_complete_row_coverage(self):
+        allocator = CountingAllocator(); rows = [e1_row()]
+        body = M.build_e1_ledger(rows, "n", "a" * 64, "b" * 64, "c" * 64, allocator=allocator)
+        self.assertEqual(len(body["row_bindings"]), 1)
+        self.assertEqual([ref["required_id"] for ref in body["row_bindings"][0]["subject_refs"]], rows[0]["identity"]["required_ids"])
+
+    def test_shared_subjects_are_reused(self):
+        rows = [e1_row(source="designs/a", target="campaigns/<campaign_id>/cycles/<cycle_id>/artifacts/a", kind="file"),
+                e1_row(source="designs/b", target="campaigns/<campaign_id>/cycles/<cycle_id>/artifacts/b", kind="file")]
+        body = M.build_e1_ledger(rows, "n", "a" * 64, "b" * 64, "c" * 64, allocator=CountingAllocator())
+        self.assertEqual(sum(s["id_kind"] == "campaign" for s in body["subjects"]), 1)
+        self.assertEqual(sum(s["id_kind"] == "artifact" for s in body["subjects"]), 2)
+
+    def test_legacy_key_and_migration_formula(self):
+        row = e1_row(source="dev_logs", target=None, required=["artifact_root_id", "legacy_key_id", "migration_id"])
+        body = M.build_e1_ledger([row], "n", "a" * 64, "b" * 64, "c" * 64,
+                                 allocator=CountingAllocator(), legacy_entropy=lambda n: b"x" * n)
+        legacy = next(s for s in body["subjects"] if s["id_kind"] == "legacy_key")
+        self.assertEqual(legacy["migration_id"], M.FEED.migration_id(legacy["stable_id"]))
+
+    def test_route_id_is_external_not_allocated(self):
+        row = e1_row(source=".runtime/routes/rt-0123456789abcdef.json", target=None,
+                     required=["artifact_root_id", "route_id"])
+        body = M.build_e1_ledger([row], "n", "a" * 64, "b" * 64, "c" * 64, allocator=CountingAllocator())
+        self.assertEqual(body["row_bindings"][0]["route_id"], "rt-0123456789abcdef")
+        self.assertNotIn("route", {s["id_kind"] for s in body["subjects"]})
+
+    def test_allocator_receives_only_kind(self):
+        allocator = CountingAllocator(); M.build_e1_ledger([e1_row(source="secret-path")], "n", "a" * 64, "b" * 64, "c" * 64, allocator=allocator)
+        self.assertTrue(allocator.calls); self.assertTrue(all(len(call) == 1 and "path" not in call[0] for call in allocator.calls))
+
+    def test_full_target_set_is_nonempty_and_collision_free(self):
+        rows = [e1_row(source=f"designs/f{i}.md",
+                       target=f"campaigns/<campaign_id>/cycles/<cycle_id>/artifacts/f{i}.md", kind="file") for i in range(5631)]
+        ledger = M.build_e1_ledger(rows, "n", "a" * 64, "b" * 64, "c" * 64, allocator=CountingAllocator())
+        with tempfile.TemporaryDirectory() as directory:
+            body = M.build_e1_targets(rows, ledger, "a" * 64, "d" * 64, "b" * 64, "c" * 64, Path(directory))
+        self.assertEqual(body["row_count"], 5631); self.assertFalse(any(body["collision_counts"].values()))
+
+
+class E1ReportExclusionTest(unittest.TestCase):
+    def _scan(self, base, injected=None):
+        rows = []
+        for i, command in enumerate(M.E1_PRODUCTION_SUBCOMMANDS, 1):
+            argv = ["python3", str(TOOL), command]
+            if injected and i == 1: argv += injected
+            rows.append({"scope": "production-e1", "sequence": i, "subcommand": command, "argv": argv})
+        trace = base / "trace.jsonl"; raw = M._e1_new_jsonl(trace, rows)
+        seal = base / "seal.json"; M._e1_new_json(seal, {"schema_version": "artifact-relocation-command-trace-seal/v1",
+            "trace_sha256": M.digest_bytes(raw), "trace_bytes": len(raw), "row_count": 7,
+            "included_sequences": list(range(1, 8)), "excluded_meta_operations": list(M.E1_EXCLUDED_META)})
+        args = argparse.Namespace(command_trace=str(trace), command_trace_seal=str(seal),
+                                  output=str(base / "result.json"), policy="e1-exclusions-v1")
+        return M.scan_e1_command_payload(args), json.loads((base / "result.json").read_text())
+
+    def test_meta_commands_are_structurally_excluded(self):
+        with tempfile.TemporaryDirectory() as directory:
+            rc, body = self._scan(Path(directory))
+            self.assertEqual(rc, 0); self.assertEqual(body["findings"], [])
+
+    def test_forbidden_effect_token_is_detected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            rc, body = self._scan(Path(directory), ["apply"])
+            self.assertEqual(rc, 65); self.assertTrue(body["findings"])
 
 
 if __name__ == "__main__":
