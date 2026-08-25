@@ -52,8 +52,12 @@ def registry_digest(registry):
 def expected_recipe_keys(manifest=None):
     if manifest is None:
         manifest = json.loads(MANIFEST.read_text(encoding="utf-8"))
+    # W7C: every entry-router capability (the 12 user-facing entries, not only
+    # the `entry` group) needs a recipe so a producer cycle can be issued for
+    # it at direct/quick/standard+.
     return {(name, mode) for name, spec in manifest["capabilities"].items()
-            if spec["group"] == "entry" for mode in (spec["modes"] or ["default"])}
+            if spec.get("invocation", {}).get("class") == "entry-router"
+            for mode in (spec["modes"] or ["default"])}
 
 
 def recipe_keys(registry):
@@ -1220,6 +1224,50 @@ def _validate_recipe(recipe, registry, standard_plus_owner_profile):
         raise TopologyError(f"{recipe['capability']}: invalid retry boundaries")
 
 
+PRODUCER_LIFECYCLE_STEPS = ["begin", "write", "finalize", "admit-shared"]
+PRODUCER_LIFECYCLE_ENV = [
+    "AGENT_ARTIFACT_CAMPAIGN_ID", "AGENT_ARTIFACT_CYCLE_ID", "AGENT_ARTIFACT_PRODUCER_ID",
+    "AGENT_ARTIFACT_CYCLE_DIR", "AGENT_ARTIFACT_OUTPUT_DIR",
+]
+PRODUCER_SHARED_KINDS = {"spec": "canonical", "analysis": "canonical", "research": "explicit-promotion"}
+
+
+def _validate_producer_lifecycle(registry):
+    """W7C: the producer begin/finalize vocabulary is a closed registry table."""
+    table = registry.get("producer_lifecycle")
+    if not isinstance(table, dict):
+        raise TopologyError("producer_lifecycle registry table required")
+    if table.get("contract") != "artifact-producer/v1":
+        raise TopologyError("producer_lifecycle.contract must be artifact-producer/v1")
+    if table.get("cutover_states") != ["inactive", "active"]:
+        raise TopologyError("producer_lifecycle.cutover_states must be [inactive, active]")
+    if table.get("steps") != PRODUCER_LIFECYCLE_STEPS:
+        raise TopologyError("producer_lifecycle.steps vocabulary mismatch")
+    if table.get("shared_kinds") != PRODUCER_SHARED_KINDS:
+        raise TopologyError("producer_lifecycle.shared_kinds must be spec/analysis canonical, research explicit-promotion")
+    if table.get("env") != PRODUCER_LIFECYCLE_ENV:
+        raise TopologyError("producer_lifecycle.env must list the five producer-cycle variables")
+    by_intensity = table.get("by_intensity")
+    if not isinstance(by_intensity, dict) or set(by_intensity) != {"direct", "quick", "standard+"}:
+        raise TopologyError("producer_lifecycle.by_intensity must cover direct, quick, standard+")
+    for intensity, row in by_intensity.items():
+        if not isinstance(row, dict) or set(row) != {"begin", "finalize", "stage_workers"}:
+            raise TopologyError(f"producer_lifecycle.by_intensity[{intensity}] shape mismatch")
+        expected_owner = "inline-owner" if intensity == "direct" else "dispatch-depth-1-owner"
+        if row["begin"] != expected_owner or row["finalize"] != expected_owner:
+            raise TopologyError(f"producer_lifecycle.by_intensity[{intensity}] owner mismatch")
+        expected_workers = "join-open-cycle-by-node" if intensity == "standard+" else "none"
+        if row["stage_workers"] != expected_workers:
+            raise TopologyError(f"producer_lifecycle.by_intensity[{intensity}] stage_workers mismatch")
+    if table.get("legacy_top_level_writes") != {"inactive": "allowed-compat-window", "active": "denied"}:
+        raise TopologyError("producer_lifecycle.legacy_top_level_writes policy mismatch")
+    buckets = registry.get("artifact_buckets", {})
+    if buckets.get("campaign-cycle") != "campaigns/<campaign>/cycles/<cycle>/artifacts":
+        raise TopologyError("artifact_buckets.campaign-cycle must declare the W7C cycle output layout")
+    if buckets.get("shared-revision") != "shared/<kind>/<reference>/revisions/<revision>":
+        raise TopologyError("artifact_buckets.shared-revision must declare the immutable shared layout")
+
+
 def validate_registry(registry, manifest=None):
     if registry.get("schema_version") != 9:
         raise TopologyError("legacy topology registry is read-only")
@@ -1301,6 +1349,7 @@ def validate_registry(registry, manifest=None):
     for recipe in registry["recipes"]:
         if not isinstance(recipe.get("artifact_scope"), dict):
             raise TopologyError(f"{recipe['capability']}: artifact_scope required (fail-closed for new recipes)")
+    _validate_producer_lifecycle(registry)
     actual, expected = recipe_keys(registry), expected_recipe_keys(manifest)
     if actual != expected:
         raise TopologyError(f"coverage mismatch missing={sorted(expected-actual)} extra={sorted(actual-expected)}")

@@ -6,6 +6,18 @@ P = Path(__file__).with_name("capability_topology.py")
 S = importlib.util.spec_from_file_location("topology", P); T = importlib.util.module_from_spec(S); S.loader.exec_module(T)
 
 PRESERVED_FULL_FIELD_DIGESTS = {
+    ('analyze-project', ('code', 'doc', 'paper')): (
+        "ee85d1be56de7252bd6892bd48391bbbfd7fc3b5a61412a4752cce16e731606f",
+        "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+    ),
+    ('analyze-user', ('init', 'update')): (
+        "24d059d438a560f471a1e748b9c20c8a2b6f651b5b8cf5899d075e4f7e20aab3",
+        "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+    ),
+    ('audit', ('default',)): (
+        "74b9f70f5c6106ce6e6dcf71b9ee22ef2e9345a26fba58a206aafb614f2f169f",
+        "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+    ),
     ("autopilot-apply", ('default',)): (
         "8b5adb03d56bf8b6e68c4ff78f35cde2e0076dcc3db46841658f4cb85645bf8b",
         "926c9eff35134529d23574f9052da464493b09fd52cb98da03785ff7798669d7",
@@ -57,7 +69,7 @@ def full_field_digest(value):
 class TestTopology(unittest.TestCase):
     def setUp(self): self.r = T.load_registry()
     def test_exact_coverage_and_digest(self):
-        result = T.validate_registry(self.r); self.assertEqual((9, 21), (result["capabilities"], result["recipes"])); self.assertEqual(T.registry_digest(self.r), T.registry_digest(json.loads(json.dumps(self.r, sort_keys=True))))
+        result = T.validate_registry(self.r); self.assertEqual((12, 27), (result["capabilities"], result["recipes"])); self.assertEqual(T.registry_digest(self.r), T.registry_digest(json.loads(json.dumps(self.r, sort_keys=True))))
     def test_missing_coverage(self):
         r=copy.deepcopy(self.r); r["recipes"].pop(); self.assertRaises(T.TopologyError, T.validate_registry, r)
     def test_cycle(self):

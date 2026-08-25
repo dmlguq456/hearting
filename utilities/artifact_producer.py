@@ -738,16 +738,26 @@ def build_manifest(
         "route_hash": route["route_hash"], "terminal_marker": "pending",
         "terminal_evidence_id": "",
     }
-    cycle_state = "completed" if state == "completed" else "abandoned"
-    events.append({
-        "event_id": allocator.allocate("event"), "stream_id": allocator.allocate("stream"),
-        "stream_sequence": 1, "event_type": f"cycle.{cycle_state}", "target_id": record["cycle_id"],
-        "actor": {"kind": "producer", "id": record["producer_id"]}, "recorded_at": when,
-        "provenance": provenance(cycle_digest), "evidence_ids": [], "payload": {},
-    })
     closed = route_is_closed(root, route)
     if not closed and not allow_open_route:
         raise ProducerError("route-not-closed", route["route_id"])
+    # D-6: a `completed` cycle must bind a route.terminal.recorded event, which
+    # only exists once the route is closed.  Sealing an open route therefore
+    # records a provisional `active` cycle (lineage committed, completion not
+    # claimed); `abandoned` needs no terminal evidence.
+    if state == "abandoned":
+        cycle_state = "abandoned"
+    elif closed:
+        cycle_state = "completed"
+    else:
+        cycle_state = "active"
+    if cycle_state != "active":
+        events.append({
+            "event_id": allocator.allocate("event"), "stream_id": allocator.allocate("stream"),
+            "stream_sequence": 1, "event_type": f"cycle.{cycle_state}", "target_id": record["cycle_id"],
+            "actor": {"kind": "producer", "id": record["producer_id"]}, "recorded_at": when,
+            "provenance": provenance(cycle_digest), "evidence_ids": [], "payload": {},
+        })
     if closed:
         terminal_event_id = allocator.allocate("event")
         events.append({

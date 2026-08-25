@@ -625,6 +625,8 @@ When `spec/pipeline_state.yaml` exists, read it and activate every applicable ap
 | note | Run logs in artifact root plus routed cards and digests under the configured notes target |
 | apply | Real source outside artifact root; git branch and commit provide versions, with apply logs under the cheatsheet artifact |
 
+**W7C cycle layout.** The output paths above are bucket-relative. While the producer cutover is inactive they resolve to the legacy top-level bucket; once active they resolve to `campaigns/<camp>/cycles/<cyc>/artifacts/<bucket>/…` of the cycle issued by `utilities/artifact_producer.py begin` (see `core/CORE.md §3` and `producer_lifecycle` in `capabilities/topologies.json`). Only `spec`, `analysis`, and explicitly promoted `research` reach the immutable `shared/` tree, via `admit-shared` from a sealed cycle.
+
 ### §6.5-anchors. Anchor Resolution
 
 Every track's scopes above resolve against exactly one bucket domain:

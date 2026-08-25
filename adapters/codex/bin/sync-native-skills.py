@@ -73,6 +73,7 @@ def portable_sections(source: str) -> str:
     sections: list[str] = []
     for heading in (
         "Artifact Ownership",
+        "Artifact Producer Lifecycle",
         "Role Requirements",
         "Guard Requirements",
         "Portable Procedure",

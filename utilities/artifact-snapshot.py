@@ -48,11 +48,17 @@ def target_parts(artifact_root: Path, target: Path) -> tuple[Path,Path]:
     except ValueError as exc:
         raise SnapshotError("target-outside-artifact-root") from exc
     parts=rel.parts
+    # W7C cycle layout: campaigns/<camp>/cycles/<cyc>/artifacts/<bucket>/<name>/...
+    prefix=()
+    if len(parts)>=5 and parts[0]=="campaigns" and parts[2]=="cycles" and parts[4]=="artifacts":
+        prefix=parts[:5]; parts=parts[5:]
+    elif parts[:1]==("shared",):
+        raise SnapshotError("target-shared-immutable")
     if len(parts)<3 or parts[0] not in OWNED_CONTAINERS:
         raise SnapshotError("target-container-unowned")
     if "_internal" in parts or parts[-1] in EXCLUDED_NAMES:
         raise SnapshotError("target-machine-managed")
-    return artifact_root/parts[0]/parts[1],Path(*parts[2:])
+    return artifact_root.joinpath(*prefix,parts[0],parts[1]),Path(*parts[2:])
 
 
 def ensure_directory(path: Path) -> None:

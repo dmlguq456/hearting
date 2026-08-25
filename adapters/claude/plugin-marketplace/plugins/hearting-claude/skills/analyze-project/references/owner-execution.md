@@ -134,3 +134,27 @@ Once the selected mode's analysis directory and QA evidence are durable, evaluat
 | `mode-paper.md` | When running `--mode paper` (required) | Complete `research/research-survey` dispatch prompt: inputs, §0 complete own-paper analysis, §1-6 reference survey, `00_overview_and_constraints.md` structure, and post-analysis steps |
 | `mode-doc.md` | When running `--mode doc` (required) | Phase 1 input-scope resolution and classification heuristics; Phase 2 per-category delegation prompt for reviewers, formats, samples, and miscellaneous input plus `00_overview.md`; Phase 3 verification |
 | `outputs-and-integration.md` | When finalizing output structure or selecting follow-up capabilities | Standard output structure by mode, integration rules for `autopilot-code`, `autopilot-lab`, `autopilot-draft`, and `autopilot-research`, and a typical workflow |
+
+## Artifact Producer Lifecycle (W7C)
+
+Owner-executed, same at every intensity (`direct` inline; `quick`/`standard+`
+by the dispatch-depth-1 owner). Full contract: `capabilities/analyze-project.md`
+§Artifact Producer Lifecycle and `producer_lifecycle` in
+`capabilities/topologies.json`.
+
+1. After the route is compiled and bound, and before the first durable
+   artifact: `python3 <agent-home>/utilities/artifact_producer.py begin
+   --artifact-root <root> --route <route file> --capability analyze-project
+   --intensity <intensity> --env-file <env>`; export the returned
+   `AGENT_ARTIFACT_*` variables. `legacy-compat` means the cutover is inactive
+   and the legacy `analysis_project/` layout is still the write target.
+2. Write every artifact under `$AGENT_ARTIFACT_OUTPUT_DIR/analysis_project/...`; never
+   write to a legacy top-level bucket while the cutover is active, never write
+   under `shared/`.
+3. Pass the exported `AGENT_ARTIFACT_*` variables to every stage dispatch
+   (the adapters forward them); stage workers call `begin --node <id>` and
+   join the same cycle.
+4. Close the route, then `artifact_producer.py finalize --artifact-root <root>
+   --cycle $AGENT_ARTIFACT_CYCLE_ID`; on `recovery-required`, run
+   `artifact_producer.py recover` and retry.
+5. Only then, if this capability owns a shared kind, `admit-shared`.

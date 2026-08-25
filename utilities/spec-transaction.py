@@ -17,6 +17,8 @@ from pathlib import Path
 ROOT=Path(__file__).resolve().parents[1]
 SPEC=importlib.util.spec_from_file_location("worker_route_guard",ROOT/"utilities/worker-route-guard.py")
 GUARD=importlib.util.module_from_spec(SPEC); SPEC.loader.exec_module(GUARD)
+sys.path.insert(0,str(ROOT/"utilities"))
+import artifact_producer as PRODUCER  # noqa: E402
 
 
 def emit(event, events=None):
@@ -102,13 +104,19 @@ def main():
     command=args.transaction[1:] if args.transaction[:1]==["--"] else args.transaction
     if not command: parser.error("transaction command required after --")
     artifact=Path(args.artifact_root).resolve(); worktree=Path(args.worktree)
-    spec_base=(artifact/"spec").resolve()
+    # W7C: the spec bucket lives under the open producer cycle once the
+    # cutover is active (AGENT_ARTIFACT_CYCLE_DIR); the legacy top-level
+    # `spec/` is only reachable during the compatibility window.
+    try: spec_base,spec_layout=PRODUCER.resolve_output_dir(artifact,"spec")
+    except PRODUCER.ProducerError as exc:
+        emit({"status":"blocked","reason":exc.code,"detail":exc.detail,"artifact_root":str(artifact)},args.events); return 65
+    spec_base=spec_base.resolve()
     spec_root=(Path(args.spec_root).expanduser() if args.spec_root else spec_base)
     if not spec_root.is_absolute(): spec_root=artifact/spec_root
     spec_root=spec_root.resolve()
     try: spec_root.relative_to(spec_base)
     except ValueError:
-        emit({"status":"blocked","reason":"spec-root-outside-artifact","spec_root":str(spec_root)},args.events); return 65
+        emit({"status":"blocked","reason":"spec-root-outside-artifact","spec_root":str(spec_root),"spec_base":str(spec_base),"layout":spec_layout},args.events); return 65
     try: route,node,_=GUARD.validate_route_contract(args.route,args.node,worktree,artifact)
     except GUARD.WorkerRouteError as exc:
         emit({"status":"blocked","reason":exc.reason,"detail":str(exc),"route_id":exc.route_id,"route_file":args.route},args.events); return 65
@@ -134,7 +142,7 @@ def main():
         version=next_version(spec_root)
         owner={"route_id":route["route_id"],"node_id":node["id"],"worktree":str(worktree.resolve()),"pid":os.getpid(),"next_version":version}
         lock.seek(0); lock.truncate(); lock.write(json.dumps(owner,sort_keys=True)+"\n"); lock.flush(); os.fsync(lock.fileno())
-        emit({"status":"acquired","action":"latest-reread","route_id":route["route_id"],"next_version":version,"waited":waited},args.events)
+        emit({"status":"acquired","action":"latest-reread","route_id":route["route_id"],"next_version":version,"waited":waited,"layout":spec_layout,"spec_root":str(spec_root)},args.events)
         prd=spec_root/"prd.md"
         try:
             preimage=read_regular_file(prd,allow_missing=True)

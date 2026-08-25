@@ -100,3 +100,27 @@ Run `Stage A → B (B.1/B.2) → B.5 → C → D (D.5) → E` in order. The refe
 | `aspect-lints.md` | When running Stage C | Pre-checks for `--no-fact-check`; document fact/style/structure/cross-reference/coverage lints; research consistency/tier/coverage/cross-card lints; plan test/lint/code-review/TODO/implementation/semantic-deterministic checks |
 | `report-and-autofix.md` | When running Stages D-E | Report template, `editorial/polish` unit polish, chat format, and auto-fix chain conditions, prompt, dispatch, logging, and rationale |
 | `examples-and-checklist.md` | For invocation examples or follow-up after `--report-only` | Examples and the post-audit checklist |
+
+## Artifact Producer Lifecycle (W7C)
+
+Owner-executed, same at every intensity (`direct` inline; `quick`/`standard+`
+by the dispatch-depth-1 owner). Full contract: `capabilities/audit.md`
+§Artifact Producer Lifecycle and `producer_lifecycle` in
+`capabilities/topologies.json`.
+
+1. After the route is compiled and bound, and before the first durable
+   artifact: `python3 <agent-home>/utilities/artifact_producer.py begin
+   --artifact-root <root> --route <route file> --capability audit
+   --intensity <intensity> --env-file <env>`; export the returned
+   `AGENT_ARTIFACT_*` variables. `legacy-compat` means the cutover is inactive
+   and the legacy `reviews/audit/` layout is still the write target.
+2. Write every artifact under `$AGENT_ARTIFACT_OUTPUT_DIR/reviews/audit/...`; never
+   write to a legacy top-level bucket while the cutover is active, never write
+   under `shared/`.
+3. Pass the exported `AGENT_ARTIFACT_*` variables to every stage dispatch
+   (the adapters forward them); stage workers call `begin --node <id>` and
+   join the same cycle.
+4. Close the route, then `artifact_producer.py finalize --artifact-root <root>
+   --cycle $AGENT_ARTIFACT_CYCLE_ID`; on `recovery-required`, run
+   `artifact_producer.py recover` and retry.
+5. Only then, if this capability owns a shared kind, `admit-shared`.

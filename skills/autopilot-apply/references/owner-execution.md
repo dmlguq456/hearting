@@ -159,3 +159,27 @@ last_completed_stage: verify
 - To edit Markdown artifacts under `<artifact-root>/` → `/autopilot-refine`
 - To change a codebase → `/autopilot-code`
 - When no cheatsheet exists → `/autopilot-draft --mode paper` first
+
+## Artifact Producer Lifecycle (W7C)
+
+Owner-executed, same at every intensity (`direct` inline; `quick`/`standard+`
+by the dispatch-depth-1 owner). Full contract: `capabilities/autopilot-apply.md`
+§Artifact Producer Lifecycle and `producer_lifecycle` in
+`capabilities/topologies.json`.
+
+1. After the route is compiled and bound, and before the first durable
+   artifact: `python3 <agent-home>/utilities/artifact_producer.py begin
+   --artifact-root <root> --route <route file> --capability autopilot-apply
+   --intensity <intensity> --env-file <env>`; export the returned
+   `AGENT_ARTIFACT_*` variables. `legacy-compat` means the cutover is inactive
+   and the legacy `apply-log/` layout is still the write target.
+2. Write every artifact under `$AGENT_ARTIFACT_OUTPUT_DIR/apply-log/...`; never
+   write to a legacy top-level bucket while the cutover is active, never write
+   under `shared/`.
+3. Pass the exported `AGENT_ARTIFACT_*` variables to every stage dispatch
+   (the adapters forward them); stage workers call `begin --node <id>` and
+   join the same cycle.
+4. Close the route, then `artifact_producer.py finalize --artifact-root <root>
+   --cycle $AGENT_ARTIFACT_CYCLE_ID`; on `recovery-required`, run
+   `artifact_producer.py recover` and retry.
+5. Only then, if this capability owns a shared kind, `admit-shared`.

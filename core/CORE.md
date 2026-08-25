@@ -125,6 +125,8 @@ never orders a move or a delete.
 | `documents/` | document drafts and refinement artifacts | `C-DUR` |
 | `experiments/` | experiment setup, evaluation, and run logs (declared, currently absent — a reserved boundary, not an error) | `C-DUR` |
 | `designs/` | standalone design decision records (declared, currently absent — a reserved boundary, not an error; spec-owned design instead anchors at `spec/design/`) | `C-DUR` |
+| `campaigns/` | W7C producer output: `campaigns/<camp>/cycles/<cyc>/artifacts/<bucket>/…` plus the machine-managed `campaign.json` and per-cycle `manifest.json` commit point; the only new-write target once the write-cutover is active (`utilities/artifact_producer.py`) | `C-DUR` |
+| `shared/` | immutable shared revisions `shared/<spec\|analysis\|research>/<ref>/revisions/<rrev>/…`; created only by `admit-shared` from a sealed cycle, research only with an explicit promotion; never a direct write target | `C-DUR` |
 | `_internal/` | cycle-internal support material — a cycle's child, not an independent entry | `C-INT` |
 | `reviews/` | review support material | `C-INT` |
 | `shards/` | parallel-leg support material | `C-INT` |
@@ -135,6 +137,8 @@ never orders a move or a delete.
 | `notes/`, `proposals/`, `spec-research-alternative/`, `research-alternative/` | present containers whose owner is not declared — recognized, not adopted | `C-LEG(undeclared-container)` |
 | `.git/`, `.agents/`, `.codex/`, `.probe-*/` | runtime residue that lives beside artifacts without being one | `C-LEG(runtime-residue)` |
 | `_scratch/` | the sole exact census exclusion | `C-SCR` |
+
+**Write cutover.** The legacy `C-DUR` buckets above (`analysis_project/`, `research/`, `spec/`, `plans/`, `documents/`, `experiments/`, `designs/`) are writable only while the producer cutover is inactive (`.runtime/artifact-producer/v1/cutover.json` absent). Once activated by the approval package, every new write must land under an open cycle's `campaigns/<camp>/cycles/<cyc>/artifacts/`, IDs are issued by `begin` before the first write, and `artifact_producer.py check-write` is the single allow/deny oracle for hooks and writers. Existing legacy content stays readable; nothing is moved or deleted by activation.
 
 **Population.** `_scratch/` is the sole exact census exclusion; no other name is
 excluded by name. Census never follows symlinks: a symlink is recorded as its own

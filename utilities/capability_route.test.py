@@ -227,7 +227,7 @@ class TestRoute(unittest.TestCase):
        ]
       self.assertEqual(stable(route["nodes"]),stable(expected))
       R.verify_route(route,R.ROOT); compiled+=1
-  self.assertEqual(compiled,126)
+  self.assertEqual(compiled,162)  # 27 recipes x 6 intensities (W7C added the 3 pre/ops entries)
  def test_verify_rejects_rehashed_executable_owner_profile_drift(self):
   quick=R.compile_route(**self.args(
    requested_intensity="quick",predicates=[],transport=None,inline_reason=None,

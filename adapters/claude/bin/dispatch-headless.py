@@ -20,6 +20,12 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+# W7C producer-cycle environment passed from an owner to its stage workers.
+ARTIFACT_PRODUCER_CYCLE_ENV = (
+    "AGENT_ARTIFACT_CAMPAIGN_ID", "AGENT_ARTIFACT_CYCLE_ID", "AGENT_ARTIFACT_PRODUCER_ID",
+    "AGENT_ARTIFACT_CYCLE_DIR", "AGENT_ARTIFACT_OUTPUT_DIR",
+)
+
 ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT / "utilities"))
 from dispatch_contract import (  # noqa: E402
@@ -1919,6 +1925,12 @@ def main(argv: list[str]) -> int:
             "AGENT_DISPATCH_OWNER": args.capability_owner or "",
             "AGENT_DISPATCH_OWNER_HARNESS": args.owner_harness or "",
             "AGENT_ARTIFACT_ROOT": args.artifact_root,
+            # W7C producer lifecycle: the owner's open cycle (issued by
+            # `artifact_producer.py begin` before the first write) is passed
+            # through unchanged so stage workers write into the same
+            # `campaigns/<camp>/cycles/<cyc>/artifacts/` and never issue a
+            # second lineage.
+            **{key: os.environ.get(key, "") for key in ARTIFACT_PRODUCER_CYCLE_ENV},
             "REPORT_BUNDLE_ROOT": str(args.report_bundle_root or ""),
             "AGENT_ROUTE_FILE": (
                 args.route_file

@@ -68,7 +68,14 @@ CAPABILITY_ARTIFACT_CAPS = {
     "experiments": {"autopilot-lab", "audit"},
     "spec": {"autopilot-spec", "autopilot-design", "autopilot-ship", "audit"},
     "analysis_project": {"analyze-project", "autopilot-code", "audit"},
+    "designs": {"autopilot-design", "audit"},
+    "user_profile": {"analyze-user", "audit"},
 }
+# W7C cycle layout: `campaigns/<camp>/cycles/<cyc>/artifacts/<bucket>/...` is
+# gated by the same bucket table; `shared/<kind>/...` maps the shared kind onto
+# its legacy bucket (writes there are denied upstream by artifact_producer
+# check-write, so this only decides which route may be asserted).
+SHARED_KIND_BUCKETS = {"spec": "spec", "analysis": "analysis_project", "research": "research"}
 ROUTABLE_CAPABILITIES = set().union(*CAPABILITY_ARTIFACT_CAPS.values())
 SOURCE_SUFFIXES = {
     ".asm", ".bash", ".c", ".cc", ".clj", ".cljs", ".cpp", ".cs",
@@ -680,8 +687,29 @@ def capability_artifact_caps(path: Path) -> set[str] | None:
     for index, part in enumerate(parts[:-1]):
         if part not in {".agent_reports", ".claude_reports"}:
             continue
-        return CAPABILITY_ARTIFACT_CAPS.get(parts[index + 1])
+        return artifact_bucket_caps(parts[index + 1:])
     return None
+
+
+def artifact_bucket_caps(rel_parts: tuple[str, ...]) -> set[str] | None:
+    """Map artifact-root-relative parts onto the owning capability set.
+
+    Legacy `<bucket>/...`, W7C cycle `campaigns/<camp>/cycles/<cyc>/artifacts/
+    <bucket>/...`, and `shared/<kind>/...` all resolve through one table.
+    """
+
+    if not rel_parts:
+        return None
+    top = rel_parts[0]
+    if top == "campaigns":
+        if len(rel_parts) >= 7 and rel_parts[2] == "cycles" and rel_parts[4] == "artifacts":
+            return CAPABILITY_ARTIFACT_CAPS.get(rel_parts[5])
+        return None
+    if top == "shared":
+        if len(rel_parts) >= 3:
+            return CAPABILITY_ARTIFACT_CAPS.get(SHARED_KIND_BUCKETS.get(rel_parts[1], ""))
+        return None
+    return CAPABILITY_ARTIFACT_CAPS.get(top)
 
 
 def require_recall_opportunity(session_id: str, turn_id: str, root: Path) -> None:

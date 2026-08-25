@@ -274,6 +274,13 @@ def git_state(repo, rel_path):
         return "unstaged", commit
     return "clean", commit
 
+def _producer():
+    import importlib
+    utilities = Path(__file__).resolve().parents[1] / "utilities"
+    if str(utilities) not in sys.path:
+        sys.path.insert(0, str(utilities))
+    return importlib.import_module("artifact_producer")
+
 def _assert_manifest_location(manifest_path, snapshot_path):
     m = Path(manifest_path).resolve(strict=False)
     s = Path(snapshot_path).resolve(strict=False)
@@ -327,7 +334,14 @@ def cmd_seal(a):
     # _manifest_chain_slug() recomputes the sealed run id from a slug it
     # recovers from this directory name -- that recomputation is only valid
     # because this uses the raw, unnormalized `a.slug` (not normalize(slug)).
-    out = artifact_root / "experiments" / a.slug / "_internal" / "configs"
+    # W7C: `experiments/` resolves under the open producer cycle once the
+    # write-cutover is active (AGENT_ARTIFACT_CYCLE_DIR); the legacy top-level
+    # bucket is only reachable during the compatibility window.
+    try:
+        experiments_dir, _layout = _producer().resolve_output_dir(artifact_root, "experiments")
+    except Exception as exc:  # ProducerError or import failure: fail closed
+        fail(f"experiments bucket unavailable: {exc}")
+    out = experiments_dir / a.slug / "_internal" / "configs"
     try:
         out.resolve(strict=False).relative_to(artifact_root)
     except ValueError:

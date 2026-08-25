@@ -104,6 +104,18 @@ root=$local_project
 [ -z "$root" ] && exit 0
 cr=$canonical
 
+# ---- W7C write-cutover oracle ----
+# `artifact_producer.py check-write` is the single allow/deny oracle for new
+# artifact writes: legacy top-level buckets stay writable only while the
+# cutover is inactive (compatibility window); once active, every write must
+# land under an open cycle's `campaigns/<camp>/cycles/<cyc>/artifacts/`;
+# `shared/` revisions are immutable in both states. Fail closed on any error.
+if ! cutover_verdict=$(python3 "$SCRIPT_DIR/../utilities/artifact_producer.py"   check-write --artifact-root "$cr" --file "$fp" 2>&1); then
+  [ -z "$route_file" ] || route_failure "artifact-write-cutover-denied"
+  printf '⛔ Artifact write denied by the W7C write-cutover oracle.\n   target=%s\n   verdict=%s\n' "$fp" "$cutover_verdict" >&2
+  exit 2
+fi
+
 # Durable capability artifacts are execution, not routing prose. Every public
 # or internal write under a capability-owned bucket requires one verified
 # current route, including direct intensity. This runs before the `_internal`

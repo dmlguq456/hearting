@@ -58,6 +58,20 @@ Required evidence:
 - failing level and first actionable error when verification fails;
 - final one-line verdict suitable for handoff to `code-report`.
 
+## Artifact Producer Lifecycle
+
+`code-test` is a `standard+` stage worker: it never issues its own campaign or
+cycle. It receives the owner's open cycle through
+`AGENT_ARTIFACT_CAMPAIGN_ID`/`AGENT_ARTIFACT_CYCLE_ID`/`AGENT_ARTIFACT_PRODUCER_ID`/
+`AGENT_ARTIFACT_CYCLE_DIR`/`AGENT_ARTIFACT_OUTPUT_DIR` (dispatch env
+pass-through), may call `utilities/artifact_producer.py begin --node <node id>`
+on the same route to resume that cycle, and writes only inside
+`<cycle_dir>/artifacts/<bucket>/...` within its node `write_scope`.
+`artifact_producer.py check-write` (via `hooks/artifact-guard.sh`) denies any
+write outside the open cycle once the cutover is active; `finalize` and
+`admit-shared` belong to the owner, never to a stage worker. See
+`producer_lifecycle` in `capabilities/topologies.json`.
+
 ## Role Requirements
 
 Use portable role names from `roles/README.md` and `core/CONVENTIONS.md`.

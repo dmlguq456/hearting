@@ -1205,5 +1205,29 @@ class MaterialRouteGuardTest(unittest.TestCase):
         self.assertEqual(projection.resolve(), GUARD.resolve())
 
 
+class ArtifactBucketCapsTest(unittest.TestCase):
+    """W7C: one bucket table gates legacy, cycle, and shared layouts."""
+
+    def test_legacy_bucket(self):
+        self.assertEqual(MATERIAL_GUARD.artifact_bucket_caps(("plans", "c", "plan.md")), {"autopilot-code", "audit"})
+        self.assertEqual(MATERIAL_GUARD.artifact_bucket_caps(("designs", "c", "x.md")), {"autopilot-design", "audit"})
+        self.assertIsNone(MATERIAL_GUARD.artifact_bucket_caps(("notes", "x.md")))
+
+    def test_cycle_layout_maps_bucket_after_artifacts(self):
+        parts = ("campaigns", "camp_" + "1" * 32, "cycles", "cyc_" + "2" * 32, "artifacts", "spec", "prd.md")
+        self.assertEqual(MATERIAL_GUARD.artifact_bucket_caps(parts), MATERIAL_GUARD.CAPABILITY_ARTIFACT_CAPS["spec"])
+        self.assertIsNone(MATERIAL_GUARD.artifact_bucket_caps(("campaigns", "camp_x", "campaign.json")))
+        self.assertIsNone(MATERIAL_GUARD.artifact_bucket_caps(parts[:5] + ("unknown-bucket", "x")))
+
+    def test_shared_layout_maps_kind(self):
+        self.assertEqual(MATERIAL_GUARD.artifact_bucket_caps(("shared", "analysis", "ref_x", "revisions", "rrev_y", "a.md")),
+                         MATERIAL_GUARD.CAPABILITY_ARTIFACT_CAPS["analysis_project"])
+        self.assertIsNone(MATERIAL_GUARD.artifact_bucket_caps(("shared", "plans", "ref_x")))
+
+    def test_capability_artifact_caps_path_entry(self):
+        path = Path("/tmp/proj/.agent_reports/campaigns/camp_1/cycles/cyc_2/artifacts/research/topic/report.md")
+        self.assertEqual(MATERIAL_GUARD.capability_artifact_caps(path), MATERIAL_GUARD.CAPABILITY_ARTIFACT_CAPS["research"])
+
+
 if __name__ == "__main__":
     unittest.main()

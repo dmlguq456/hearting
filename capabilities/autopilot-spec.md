@@ -51,6 +51,37 @@ Internal artifacts belong under `spec/_internal/`, including old PRD snapshots, 
 
 For update mode, run the complete write through `utilities/spec-transaction.py`. It prepares the previous `prd.md` at `spec/_internal/versions/v{N}/prd.md` before the child command, retains it only when the PRD changes, and verifies byte identity. The owning command updates `pipeline_summary.md` under the same lock. Initial creation and no-op updates create no snapshot.
 
+## Artifact Producer Lifecycle
+
+W7C write-cutover contract (`utilities/artifact_producer.py`, registry table
+`producer_lifecycle` in `capabilities/topologies.json`). The same lifecycle
+binds `direct`, `quick`, and `standard+`; only the acting owner differs.
+
+1. **begin before the first write.** After the route is compiled and bound,
+   the owner (the inline session for `direct`, the dispatch-depth-1 owner for
+   `quick` and `standard+`) runs `artifact_producer.py begin --artifact-root
+   <root> --route <route file> --capability autopilot-spec --intensity <intensity>`.
+   While the cutover is inactive this returns `legacy-compat` and the legacy
+   `<artifact-root>/spec/` layout stays writable; once active it
+   issues `campaign_id`/`cycle_id`/`producer_id` and the cycle directory
+   `campaigns/<camp>/cycles/<cyc>/artifacts/` before any artifact exists.
+2. **write only inside the open cycle.** Every durable artifact goes under
+   `<cycle_dir>/artifacts/spec/...` (`AGENT_ARTIFACT_OUTPUT_DIR`).
+   `artifact_producer.py check-write` is the single allow/deny oracle used by
+   `hooks/artifact-guard.sh`; an active cutover hard-denies new legacy
+   top-level writes, and `shared/` is immutable in both states.
+3. **stage workers join, never fork.** `standard+` stage workers receive
+   `AGENT_ARTIFACT_CAMPAIGN_ID`/`CYCLE_ID`/`PRODUCER_ID`/`CYCLE_DIR`/`OUTPUT_DIR`
+   from the owner (dispatch env pass-through) and call `begin --node <id>`
+   on the same route, which resumes the owner's open cycle.
+4. **finalize after route closure.** The owner runs `artifact_producer.py
+   finalize --artifact-root <root> --cycle <cycle_id>` once the route is
+   closed: it enumerates `artifacts/`, builds and validates the D-6 manifest,
+   commits `manifest.json` (the commit point), applies the index, and seals
+   the cycle record. Empty output leaves no lineage (D-9). `recover` rolls a
+   crashed finalize forward or back from its journal.
+5. **shared admission.** `spec` output is admitted to `shared/spec/` by `admit-shared --kind spec` after the cycle is sealed (canonical shared kind).
+
 ## Role Requirements
 
 Use portable role names from `roles/README.md` and `core/CONVENTIONS.md`. Concrete model names, subagent frontmatter, and runtime-specific tool lists belong in adapter files.
