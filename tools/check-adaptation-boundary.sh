@@ -383,7 +383,7 @@ EXEMPTIONS_FILE=tools/adaptation-exemptions.tsv
 
 # CENSUS_DEFERRED lists temporary subtrees owned by another in-flight collapse.
 # Remove entries when that work lands; this is not a permanent exemption.
-CENSUS_DEFERRED="adapters/claude/tools/fleet"
+CENSUS_DEFERRED=""
 
 # Return true when an adapter path is under CENSUS_DEFERRED.
 is_census_deferred() {

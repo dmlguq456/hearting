@@ -1,1 +1,1 @@
-"""agent-fleet-dashboard — zero-dep cross-harness live session + dispatch TUI (PRD §9)."""
+../../../../tools/fleet/__init__.py

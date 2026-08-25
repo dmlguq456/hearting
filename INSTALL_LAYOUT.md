@@ -292,8 +292,7 @@ mkdir -p "$HOME/.local/bin"
 ln -sfn "$AGENT_HOME/tools/fleet/fleet.sh" "$HOME/.local/bin/fleet"   # needs ~/.local/bin on PATH
 ```
 
-No install step at all still works — run it by path: `bash "$AGENT_HOME/tools/fleet/fleet.sh"`
-(or, via the Claude projection above, `bash ~/.claude/tools/fleet/fleet.sh`). Zero-dep
+No install step at all still works — run it by path: `bash "$AGENT_HOME/tools/fleet/fleet.sh"`. Zero-dep
 (stdlib python3 + curses); nothing to build.
 
 Title acquisition is best-effort and runtime-specific. Fleet reads native title

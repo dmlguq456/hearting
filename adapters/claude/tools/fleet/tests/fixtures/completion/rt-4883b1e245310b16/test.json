@@ -1,11 +1,1 @@
-{
-  "route_id": "rt-4883b1e245310b16",
-  "route_hash": "sha256:4883b1e245310b16a19be0b57a88d5cd823fce620ff8817fff739586130a04a1",
-  "registry_digest": "sha256:161b5539ad48dfd354aae3605daf27a9203ec3a676b450ba27b4856bfcea03c1",
-  "node_id": "test",
-  "completion_gate": "code-test",
-  "evidence": {
-    "path": "/home/alice/agent_setting/.agent_reports/plans/2026-07-16_stage-dispatch-v13/test_logs/01-independent-verification.md",
-    "sha256": "be29eda6b738b597945bee4d896b51838d005d72b2892ee1d2e68bff8f34edb8"
-  }
-}
+../../../../../../../../tools/fleet/tests/fixtures/completion/rt-4883b1e245310b16/test.json

@@ -1,15 +1,1 @@
-{
-  "records": [
-    {"context_used_pct": 60, "status": "observed"},
-    {"context_used_pct": 68, "status": "observed"},
-    {"context_used_pct": 70, "status": "observed"},
-    {"context_used_pct": 72, "status": "observed"},
-    {"context_used_pct": 50, "status": "observed"},
-    {"context_used_pct": 51, "status": "observed"},
-    {"context_used_pct": 69, "status": "observed"},
-    {"context_used_pct": 80, "status": "observed"},
-    {"context_used_pct": 85, "status": "observed"},
-    {"context_used_pct": null, "status": "unknown"}
-  ],
-  "synthetic_non_evidentiary": true
-}
+../../../../../../../tools/fleet/tests/fixtures/token_experiment/replay.json

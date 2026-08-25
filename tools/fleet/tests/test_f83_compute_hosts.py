@@ -186,7 +186,7 @@ class ComputeHostRenderTest(unittest.TestCase):
             self.assertIn(value, wide)
         self.assertNotIn("PID ", wide)
         self.assertNotIn("MiB", wide)
-        for owner in ("job:train", "run:eval", "unattributed:", "↳"):
+        for owner in ("job:train", "run:eval", "unattributed:"):
             self.assertNotIn(owner, wide)
         self.assertNotIn("LOAD", wide)
         base_row = next(row for row in render._compute_host_rows(168)

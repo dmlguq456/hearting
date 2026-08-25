@@ -112,6 +112,7 @@ def sync(check: bool) -> int:
     counterpart_symlink("tools/memory")
     counterpart_symlink("tools/install")
     counterpart_symlink("tools/integrations")
+    counterpart_symlink("tools/fleet")
 
     if check:
         if missing:
