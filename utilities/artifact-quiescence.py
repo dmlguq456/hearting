@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 from datetime import datetime, timedelta, timezone
+import fcntl
 import hashlib
 import importlib.util
 import json
@@ -16,7 +17,7 @@ import uuid
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "utilities"))
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 COUNT_KEYS = ("open_routes", "open_jobs", "open_dispatch_attempts")
 RESOURCE_OPEN = {"open", "running", "pending", "working"}
 
@@ -94,11 +95,45 @@ def _dispatch_snapshot(jobs: Path) -> dict:
     return _snapshot([_file_row(jobs)])
 
 
+def _lock_probe(lock_path: Path) -> dict:
+    """Observe ownership without treating the persistent lock file as state."""
+    resolved = lock_path.expanduser().resolve(strict=False)
+    if not resolved.exists():
+        return {"kind": "lock", "path": str(resolved), "present": False,
+                "held": False, "owner_state": "absent"}
+    if not resolved.is_file():
+        raise ValueError("lock-source-not-file")
+    try:
+        fd = os.open(resolved, os.O_RDWR | os.O_NOFOLLOW)
+    except OSError as exc:
+        raise ValueError("lock-source-unreadable") from exc
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            held = False
+        except BlockingIOError:
+            held = True
+        content = os.pread(fd, 4096, 0).decode("utf-8", errors="strict")
+        if "\x00" in content or "\n\n" in content:
+            raise ValueError("lock-owner-malformed")
+        return {"kind": "lock", "path": str(resolved), "present": held,
+                "held": held, "owner_state": "held" if held else
+                ("stale-owner" if content else "empty-unlocked")}
+    except UnicodeError as exc:
+        raise ValueError("lock-owner-malformed") from exc
+    finally:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
+
+
 def _source_snapshots(config: dict) -> dict:
     return {
         "routes": _route_snapshot(Path(config["artifact_root"])),
         "jobs": _resource_snapshot(Path(config["resource_index"])),
         "dispatch": _dispatch_snapshot(Path(config["dispatch_jobs"])),
+        "lock": _lock_probe(Path(config["lock_path"])),
     }
 
 
@@ -153,13 +188,15 @@ def collect(config: dict, now: datetime | None = None) -> dict:
         "open_jobs": open_jobs,
         "open_dispatch_attempts": sum(1 for row in dispatch_rows if row["status"] in DISPATCH.OPEN),
     }
+    lock_present = bool(after["lock"].get("held"))
     stamp = _observed_at(now)
     sources = {
         "routes": {"reader": "capability-route.py:route_status", "count": counts["open_routes"], **after["routes"]},
         "jobs": {"reader": "resource_run_registry.py:scan", "count": counts["open_jobs"], **after["jobs"]},
         "dispatch": {"reader": "dispatch-registry.py:current(read_rows)", "count": counts["open_dispatch_attempts"], **after["dispatch"]},
+        "lock": {"reader": "flock(LOCK_EX|LOCK_NB)", "count": int(lock_present), **after["lock"]},
     }
-    pending = sum(counts.values())
+    pending = sum(counts.values()) + int(lock_present)
     observation_valid = not blocking_route_diagnostics
     identity_seed = json.dumps({"observed_at": stamp, "sources": sources,
                                 "nonce": uuid.uuid4().hex}, sort_keys=True).encode()
@@ -170,6 +207,7 @@ def collect(config: dict, now: datetime | None = None) -> dict:
         "scope": config["scope"],
         "observed_at": stamp,
         **counts,
+        "lock_present": lock_present,
         "pending": pending,
         "proven": observation_valid and pending == 0,
         "config": config,
@@ -213,6 +251,7 @@ def fixture_config(artifact_root: str, resource_index: str, dispatch_jobs: str) 
         "artifact_root": str(Path(artifact_root).expanduser().resolve(strict=False)),
         "resource_index": str(Path(resource_index).expanduser().resolve(strict=False)),
         "dispatch_jobs": str(Path(dispatch_jobs).expanduser().resolve(strict=False)),
+        "lock_path": str((Path(artifact_root) / ".pipeline-lock").expanduser().resolve(strict=False)),
     }
 
 
@@ -229,6 +268,7 @@ def live_config(cwd: str | None = None) -> dict:
         "artifact_root": str(Path(artifact_root).resolve(strict=False)),
         "resource_index": str(RESOURCES.default_index_path()),
         "dispatch_jobs": str(Path(jobs).expanduser().resolve(strict=False)),
+        "lock_path": str((Path(artifact_root) / ".pipeline-lock").resolve(strict=False)),
     }
 
 
@@ -246,6 +286,7 @@ def publish(output: str, config: dict, now: datetime | None = None) -> dict:
             "open_routes": 0,
             "open_jobs": 0,
             "open_dispatch_attempts": 0,
+            "lock_present": False,
             "pending": 0,
             "proven": False,
             "config": config,
@@ -291,7 +332,10 @@ def validate(path: str, max_age: int = 300, now: datetime | None = None,
             if not isinstance(value, int) or isinstance(value, bool) or value < 0:
                 raise ValueError("count-invalid")
         if payload.get("pending") != sum(payload[key] for key in COUNT_KEYS):
-            raise ValueError("pending-sum-invalid")
+            if payload.get("pending") != sum(payload[key] for key in COUNT_KEYS) + int(payload.get("lock_present") is True):
+                raise ValueError("pending-sum-invalid")
+        if not isinstance(payload.get("lock_present"), bool):
+            raise ValueError("lock-state-invalid")
         if payload.get("proven") is not (payload["pending"] == 0):
             raise ValueError("published-proof-invalid")
         config = payload.get("config")
@@ -300,7 +344,7 @@ def validate(path: str, max_age: int = 300, now: datetime | None = None,
         if scope == "live" and config != live_config():
             raise ValueError("live-source-config-changed")
         current_payload = collect(config, current)
-        if any(current_payload[key] != payload[key] for key in (*COUNT_KEYS, "pending")):
+        if any(current_payload[key] != payload[key] for key in (*COUNT_KEYS, "lock_present", "pending")):
             raise ValueError("source-count-changed")
         if current_payload["sources"] != payload.get("sources"):
             raise ValueError("source-evidence-changed")

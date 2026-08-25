@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import tempfile
 import unittest
+import fcntl
 
 P = Path(__file__).with_name("artifact-quiescence.py")
 S = importlib.util.spec_from_file_location("artifact_quiescence_tested", P)
@@ -22,6 +23,56 @@ class QuiescenceTest(unittest.TestCase):
         jobs = base / "jobs.log"
         jobs.write_text("", encoding="utf-8")
         return Q.fixture_config(str(artifact_root), str(index), str(jobs))
+
+    def test_lock_is_ownership_not_path_presence(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            config = self.fixture(base)
+            lock = Path(config["lock_path"])
+            lock.touch()
+            empty = Q.publish(str(base / "empty.json"), config)
+            self.assertFalse(empty["lock_present"])
+            self.assertTrue(empty["proven"])
+            lock.write_text("stale-owner\n", encoding="utf-8")
+            stale = Q.publish(str(base / "stale.json"), config)
+            self.assertFalse(stale["lock_present"])
+            self.assertTrue(stale["proven"])
+            fd = os.open(lock, os.O_RDWR)
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                held = Q.publish(str(base / "held.json"), config)
+                self.assertTrue(held["lock_present"])
+                self.assertFalse(held["proven"])
+                self.assertEqual(held["pending"], 1)
+            finally:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+                os.close(fd)
+
+    def test_lock_malformed_or_changing_observation_fails_closed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            config = self.fixture(base)
+            lock = Path(config["lock_path"])
+            lock.write_bytes(b"bad\x00owner")
+            result = Q.publish(str(base / "bad.json"), config)
+            self.assertFalse(result["observation_valid"])
+            self.assertFalse(result["proven"])
+
+            original = Q._source_snapshots
+            calls = [0]
+            def changing(current):
+                calls[0] += 1
+                value = original(current)
+                if calls[0] == 2:
+                    Path(current["lock_path"]).touch()
+                return value
+            Q._source_snapshots = changing
+            try:
+                changed = Q.publish(str(base / "changed.json"), config)
+            finally:
+                Q._source_snapshots = original
+            self.assertFalse(changed["observation_valid"])
+            self.assertFalse(changed["proven"])
 
     def test_zero_pair_is_independent_atomic_and_brackets_fold(self):
         with tempfile.TemporaryDirectory() as directory:
