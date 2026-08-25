@@ -3982,6 +3982,12 @@ _GPU_MODEL_PATTERNS = (
 )
 
 
+def _gpu_display_model(model):
+    """Terminal model label: vendor-neutral and compact without changing identity."""
+    name = _gpu_safe_text(model).replace("NVIDIA ", "", 1)
+    return re.sub(r"\bgeneration\b", "Gen.", name, flags=re.IGNORECASE)
+
+
 def _gpu_model_family(model):
     """Stable display-only GPU family; unknown names fail soft to dim grey."""
     normalized = _gpu_safe_text(model).lower().replace("-", " ")
@@ -4083,8 +4089,9 @@ def _gpu_resource_strip(resources, term_width=None, depth=0, in_card=False):
             pulse_key = "g_work" if _BLINK_ON else "g_work_off"
             segs += [("●", pulse_key), (" ", None), (identity, "name_dim")]
             if show_model and resource.get("model"):
+                model = _gpu_display_model(resource["model"])
                 segs += [(" · ", "dim"),
-                         (resource["model"], _gpu_model_key(resource["model"]))]
+                         (model, _gpu_model_key(resource["model"]))]
             if show_memory and resource.get("has_memory"):
                 segs += [(" · " + _gpu_gib(resource.get("used_memory_mib", 0))
                           + " GB", "dim")]
@@ -4121,6 +4128,9 @@ def _gpu_level(gpu):
 _RESOURCE_GAUGE_W = 8
 _CPU_GAUGE_MIN = 4
 _CPU_GAUGE_MAX = 20
+_GPU_MODEL_COLUMN_W = 18
+_GPU_VRAM_SLOT_W = 20
+_GPU_CAPACITY_COLUMN_W = 9
 
 
 def _resource_gauge_segs(value, track=_RESOURCE_GAUGE_W):
@@ -4180,22 +4190,31 @@ def _gpu_token(gpu, available, show_name=False, sessions=None, index_width=1):
     show_state_word = available >= 58
     narrow_track = available < 70
     vram_track = 4 if narrow_track else _vram_gauge_track(total)
+    vram_slot = 4 if narrow_track else _GPU_VRAM_SLOT_W
     index_text = str(index) if isinstance(index, int) and not isinstance(index, bool) else "?"
     segs = [(glyph, state_key), (" ", None),
             ("%s: " % index_text.rjust(max(1, index_width)), "head")]
     if show_state_word:
         segs.append((state.ljust(7) + "  ", state_key))
+    fixed_tail_width = 5 + 4 + 7 + vram_slot + 2 + _GPU_CAPACITY_COLUMN_W
+    show_model_column = (show_name and
+                         sum(_dw(text) for text, _key in segs)
+                         + _GPU_MODEL_COLUMN_W + 2 + fixed_tail_width <= available)
+    if show_model_column:
+        raw_name = gpu.get("name")
+        name = _gpu_display_model(raw_name) if raw_name else "—"
+        model = _clip_w(name, _GPU_MODEL_COLUMN_W)
+        segs += [((model + " " * (_GPU_MODEL_COLUMN_W - _dw(model))),
+                  _gpu_model_key(raw_name) if raw_name else "dim"),
+                 ("  ", None)]
     segs.append(("UTIL ", "dim"))
     segs += _resource_pct_segs(util)
     segs += [("  VRAM ", "dim")]
-    segs += _resource_gauge_segs(vram_pct, track=vram_track)
-    segs += [("  " + memory, _gpu_level(gpu))]
-    if show_name and gpu.get("name"):
-        name = _gpu_safe_text(gpu["name"]).replace("NVIDIA ", "")
-        name_room = max(0, min(32, (available - sum(_dw(t) for t, _k in segs)
-                                   - 2)))
-        if name_room >= 6:
-            segs += [("  ", None), (_clip_w(name, name_room), _gpu_model_key(name))]
+    segs += _gauge_segs(vram_pct, vram_track, track=vram_track)
+    if vram_track < vram_slot:
+        segs += [(" " * (vram_slot - vram_track), None)]
+    capacity = _clip_w(memory, _GPU_CAPACITY_COLUMN_W, ellipsis="")
+    segs += [("  " + capacity.rjust(_GPU_CAPACITY_COLUMN_W), _gpu_level(gpu))]
     return segs
 
 

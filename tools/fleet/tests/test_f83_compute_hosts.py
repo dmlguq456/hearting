@@ -181,9 +181,10 @@ class ComputeHostRenderTest(unittest.TestCase):
                 self.assertNotIn("HOME", text)
                 self.assertNotIn("· idle", text)
         wide = "\n".join(render._plain(row) for row in render._compute_host_rows(168))
-        for value in ("RTX 6000 Ada Generation", "python train.py",
+        for value in ("RTX 6000 Ada Gen.", "python train.py",
                       "python shell.py", "BUSY 11.8/32t"):
             self.assertIn(value, wide)
+        self.assertNotIn("Generation", wide)
         self.assertNotIn("PID ", wide)
         self.assertNotIn("MiB", wide)
         for owner in ("job:train", "run:eval", "unattributed:"):
@@ -209,8 +210,8 @@ class ComputeHostRenderTest(unittest.TestCase):
         }
         text = render._plain(render._gpu_token(gpu, 141, show_name=True))
         self.assertIn("1:", text)
-        self.assertIn("RTX 6000 Ada Generation", text)
-        self.assertIn(("RTX 6000 Ada Generation", "gpu_rtx6000"),
+        self.assertIn("RTX 6000 Ada Gen.", text)
+        self.assertIn(("RTX 6000 Ada Gen. ", "gpu_rtx6000"),
                       render._gpu_token(gpu, 141, show_name=True))
         self.assertNotIn("CL/f11a0486", text)
         self.assertNotIn("↳", text)
@@ -294,8 +295,10 @@ class ComputeHostRenderTest(unittest.TestCase):
 
         wide = render._gpu_token(gpu, 141, show_name=True)
         util = render._plain(wide).split("UTIL ", 1)[1].split("  VRAM ", 1)[0]
+        vram = render._plain(wide).split("  VRAM ", 1)[1]
         self.assertEqual(util, " 84%")
         self.assertNotRegex(util, r"[━─]")
+        self.assertNotIn("%", vram)
         self.assertEqual(vram_track(wide), 12)
         self.assertEqual(vram_track(render._gpu_token(gpu, 47, show_name=False)), 4)
 
@@ -306,14 +309,16 @@ class ComputeHostRenderTest(unittest.TestCase):
                 "host": "moving4", "self": True, "reachable": True,
                 "cpu_utilization_pct": 10, "cpu_count": 32,
                 "gpus": [
-                    {"index": 0, "utilization_gpu_pct": 7,
+                    {"index": 0, "name": "NVIDIA RTX 6000 Ada Generation",
+                     "utilization_gpu_pct": 7,
                      "memory_used_mib": 1024, "memory_total_mib": 24576,
                      "processes": []},
-                    {"index": 1, "utilization_gpu_pct": 84,
+                    {"index": 1, "name": "NVIDIA A100", "utilization_gpu_pct": 84,
                      "memory_used_mib": 8192, "memory_total_mib": 49152,
                      "processes": []},
-                    {"index": 10, "utilization_gpu_pct": None,
-                     "memory_used_mib": 0, "memory_total_mib": 24576,
+                    {"index": 10, "name": "NVIDIA RTX 5090",
+                     "utilization_gpu_pct": None,
+                     "memory_used_mib": 0, "memory_total_mib": 32768,
                      "processes": []},
                 ],
             }],
@@ -322,10 +327,29 @@ class ComputeHostRenderTest(unittest.TestCase):
         rows = render._compute_host_rows(120)
 
         self.assertEqual(rows[0][0], ("  COMPUTE RESOURCES", "section_head"))
-        gpu_lines = [render._plain(row) for row in rows if "UTIL" in render._plain(row)]
+        gpu_rows = [row for row in rows if "UTIL" in render._plain(row)]
+        gpu_lines = [render._plain(row) for row in gpu_rows]
         self.assertEqual(len(gpu_lines), 3)
         self.assertEqual(len({line.index("UTIL") for line in gpu_lines}), 1)
         self.assertEqual(len({line.index("VRAM") for line in gpu_lines}), 1)
+        self.assertIn("RTX 6000 Ada Gen.", gpu_lines[0])
+        self.assertNotIn("Generation", "\n".join(gpu_lines))
+        self.assertTrue(all(line.index("Gen.") < line.index("UTIL")
+                            for line in gpu_lines if "Gen." in line))
+        model_cells = [next(text for text, key in row if key and key.startswith("gpu_"))
+                       for row in gpu_rows]
+        self.assertTrue(all(render._dw(cell) == render._GPU_MODEL_COLUMN_W
+                            for cell in model_cells))
+        capacity_columns = []
+        for row in gpu_rows:
+            capacity_index = next(index for index, segment in enumerate(row)
+                                  if segment[0].rstrip().endswith("GB"))
+            self.assertEqual(render._dw(row[capacity_index][0]),
+                             2 + render._GPU_CAPACITY_COLUMN_W)
+            capacity_columns.append(sum(render._dw(text) for text, _key
+                                        in row[:capacity_index]))
+            self.assertNotIn("%", render._plain(row).split("  VRAM ", 1)[1])
+        self.assertEqual(len(set(capacity_columns)), 1)
 
     def test_resource_panel_is_below_the_top_summary_divider(self):
         lines = render._build_lines([], [], "both", False, 0, term_width=120)
