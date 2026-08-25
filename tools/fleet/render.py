@@ -4198,9 +4198,11 @@ def _cpu_thread_text(active, cpu_count):
 
 
 def _cpu_gauge_track(cpu_count, available=None):
-    """One cell per logical thread when possible; compress or omit before numbers."""
+    """One cell per four logical threads; compress or omit before numbers."""
     known = isinstance(cpu_count, int) and not isinstance(cpu_count, bool) and cpu_count > 0
-    desired = cpu_count if known else _RESOURCE_GAUGE_W
+    desired = (max(_CPU_GAUGE_MIN, min(_CPU_GAUGE_MAX,
+                                       _half_up(cpu_count / 4.0)))
+               if known else _RESOURCE_GAUGE_W)
     if available is None:
         return desired
     available = max(0, int(available))
@@ -4219,26 +4221,10 @@ def _vram_gauge_track(total_mib):
                                    _half_up(total_mib / 4096.0)))
 
 
-def _cpu_gauge_segs(active, cpu_count, track, key, thread_utilizations=None):
-    """Map logical CPU positions to cells; aggregate payloads retain prefix fallback."""
+def _cpu_gauge_segs(active, cpu_count, track, key):
+    """Render the active-thread ratio as one contiguous aggregate gauge."""
     if track <= 0:
         return []
-    values = _cpu_thread_values(thread_utilizations, cpu_count)
-    if values is not None:
-        cells = []
-        for cell in range(track):
-            start = cell * cpu_count // track
-            end = (cell + 1) * cpu_count // track
-            bucket = [value for value in values[start:max(start + 1, end)]
-                      if value is not None]
-            peak = max(bucket) if bucket else None
-            item = ((_BAR_FULL, _resource_level_key(peak, True))
-                    if peak is not None and peak > 0 else (_BAR_EMPTY, "dim"))
-            if cells and cells[-1][1] == item[1] and cells[-1][0][-1:] == item[0]:
-                cells[-1] = (cells[-1][0] + item[0], item[1])
-            else:
-                cells.append(item)
-        return cells
     if (not isinstance(active, int) or isinstance(active, bool)
             or not isinstance(cpu_count, int) or isinstance(cpu_count, bool)
             or cpu_count <= 0 or active <= 0):
@@ -4379,14 +4365,10 @@ def _compute_host_rows(term_width=None, sessions=None):
         cpu = host.get("cpu_utilization_pct")
         cpu_count = host.get("cpu_count")
         cpu_threads = host.get("cpu_thread_utilization_pct")
-        thread_values = _cpu_thread_values(cpu_threads, cpu_count)
         active_threads = _cpu_active_threads(cpu, cpu_count, cpu_threads)
         active = isinstance(active_threads, int) and active_threads >= 1
         summary_key = "resource_active" if active else "dim"
-        thread_peak = max((value for value in (thread_values or ()) if value is not None),
-                          default=None)
-        cpu_key = _resource_level_key(cpu if isinstance(cpu, (int, float)) else thread_peak,
-                                      active)
+        cpu_key = _resource_level_key(cpu, active)
         thread_text = _cpu_thread_text(active_threads, cpu_count)
         memory = _host_memory_pair(host.get("memory_used_mib"),
                                    host.get("memory_total_mib"),
@@ -4411,7 +4393,7 @@ def _compute_host_rows(term_width=None, sessions=None):
         if track == 0:
             suffix[0] = (" ", None)
         host_row += [("CPU ", summary_key)]
-        host_row += _cpu_gauge_segs(active_threads, cpu_count, track, cpu_key, cpu_threads)
+        host_row += _cpu_gauge_segs(active_threads, cpu_count, track, cpu_key)
         host_row += suffix
         rows.append(_clip_segs(host_row, width)[0])
 
