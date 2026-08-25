@@ -74,6 +74,8 @@ class ComputeHostCollectorTest(unittest.TestCase):
             "run_root": "/runs",
             "hosts": [{
                 "host": "cnn", "reachable": True, "observed_at": 12.0,
+                "memory_used_mib": 8192, "memory_total_mib": 32768,
+                "swap_used_mib": 1024, "swap_total_mib": 4096,
                 "gpus": [{
                     "index": 0, "uuid": "GPU-A", "utilization_gpu_pct": 71,
                     "memory_used_mib": 8192, "memory_total_mib": 24576,
@@ -96,6 +98,8 @@ class ComputeHostCollectorTest(unittest.TestCase):
         self.assertEqual(process["command"], "python train.py")
         self.assertEqual(process["owner"], {"kind": "run", "label": "run:x"})
         self.assertEqual(process["session_owner"]["id"], "sid-full")
+        self.assertEqual(result["hosts"][0]["memory_used_mib"], 8192)
+        self.assertEqual(result["hosts"][0]["swap_total_mib"], 4096)
         self.assertEqual(result["observed_at"], 12.0)
 
     def test_malformed_and_timeout_are_typed_diagnostics(self):
@@ -124,6 +128,8 @@ class ComputeHostRenderTest(unittest.TestCase):
             "hosts": [
                 {"host": "moving4", "self": True, "reachable": True,
                  "cpu_utilization_pct": 37, "cpu_count": 32, "load": "3.2 3.0 2.8",
+                 "memory_used_mib": 16384, "memory_total_mib": 65536,
+                 "swap_used_mib": 2048, "swap_total_mib": 8192,
                  "gpus": [
                     {"index": 0, "name": "NVIDIA RTX 6000 Ada Generation",
                      "utilization_gpu_pct": 84,
@@ -145,6 +151,8 @@ class ComputeHostRenderTest(unittest.TestCase):
                 ]},
                 {"host": "cnn", "self": False, "reachable": True,
                  "cpu_utilization_pct": 8, "cpu_count": 24, "load": "0.4 0.3 0.2",
+                 "memory_used_mib": 8192, "memory_total_mib": 32768,
+                 "swap_used_mib": 0, "swap_total_mib": 0,
                  "gpus": [
                     {"index": 0, "name": "NVIDIA A100", "utilization_gpu_pct": 7,
                      "memory_used_mib": 512, "memory_total_mib": 40960,
@@ -182,8 +190,15 @@ class ComputeHostRenderTest(unittest.TestCase):
                 self.assertNotIn("· idle", text)
         wide = "\n".join(render._plain(row) for row in render._compute_host_rows(168))
         for value in ("RTX 6000 Ada Gen.", "python train.py",
-                      "python shell.py", "BUSY 11.8/32t"):
+                      "python shell.py", "12/32 thr", "MEM 16/64GB", "SWP 2/8GB"):
             self.assertIn(value, wide)
+        narrow = "\n".join(render._plain(row) for row in render._compute_host_rows(60))
+        self.assertIn("M 16/64G", narrow)
+        self.assertIn("S 2/8G", narrow)
+        cpu_lines = [render._plain(row) for row in render._compute_host_rows(168)
+                     if "CPU " in render._plain(row)]
+        self.assertTrue(all("%" not in line for line in cpu_lines))
+        self.assertNotIn("BUSY", wide)
         self.assertNotIn("Generation", wide)
         self.assertNotIn("PID ", wide)
         self.assertNotIn("MiB", wide)
@@ -193,6 +208,12 @@ class ComputeHostRenderTest(unittest.TestCase):
         base_row = next(row for row in render._compute_host_rows(168)
                         if "⌂ moving4" in render._plain(row))
         self.assertIn(("⌂", "base_host"), base_row)
+        self.assertIn(("CPU ", "resource_active"), base_row)
+        self.assertIn(("12/32 thr", "lvl_g"), base_row)
+        self.assertIn(("MEM ", "resource_active"), base_row)
+        unknown_cpu_row = next(row for row in render._compute_host_rows(168)
+                               if "◇ cpu" in render._plain(row))
+        self.assertIn(("CPU ", "dim"), unknown_cpu_row)
 
     def test_exact_session_owner_is_not_rendered_in_the_upper_gpu_row(self):
         gpu = {
@@ -211,7 +232,7 @@ class ComputeHostRenderTest(unittest.TestCase):
         text = render._plain(render._gpu_token(gpu, 141, show_name=True))
         self.assertIn("1:", text)
         self.assertIn("RTX 6000 Ada Gen.", text)
-        self.assertIn(("RTX 6000 Ada Gen. ", "gpu_rtx6000"),
+        self.assertIn(("RTX 6000 Ada Gen. ", "gpu_rtx6000_active"),
                       render._gpu_token(gpu, 141, show_name=True))
         self.assertNotIn("CL/f11a0486", text)
         self.assertNotIn("↳", text)
@@ -234,13 +255,19 @@ class ComputeHostRenderTest(unittest.TestCase):
             working_b = render._gpu_token(working, 141, show_name=True)
 
         self.assertEqual(idle_row[0], ("●", "g_work_off"))
+        self.assertIn(("UTIL ", "dim"), idle_row)
+        self.assertIn(("A100              ", "gpu_ampere"), idle_row)
         self.assertIn("idle", render._plain(idle_row))
         self.assertNotIn("· idle", render._plain(idle_row))
         self.assertIn(working_a[0][0], render._SPIN)
         self.assertEqual(working_a[0][1], "g_spin")
+        self.assertIn(("UTIL ", "resource_active"), working_a)
+        self.assertIn(("A100              ", "gpu_ampere_active"), working_a)
         self.assertIn("working", render._plain(working_a))
         self.assertNotEqual(working_a[0][0], working_b[0][0])
         self.assertNotIn("unattributed:", render._plain(working_a))
+        command_row = render._gpu_process_rows(working, "", 120)[0]
+        self.assertTrue(all(key == "dim" for text, key in command_row if text.strip()))
 
     def test_narrow_gpu_state_word_degrades_whole_but_keeps_glyph(self):
         gpu = {
@@ -262,17 +289,27 @@ class ComputeHostRenderTest(unittest.TestCase):
         self.assertEqual(render._gpu_gib(1), "0.0")
         self.assertNotIn("<", render._gpu_gib(1))
 
-    def test_cpu_track_scales_with_threads_and_busy_is_utilization_derived(self):
-        self.assertEqual(render._cpu_gauge_track(24), 6)
-        self.assertEqual(render._cpu_gauge_track(28), 7)
-        self.assertEqual(render._cpu_gauge_track(64), 16)
-        self.assertEqual(render._cpu_gauge_track(80), 20)
+    def test_cpu_track_uses_threads_and_active_count_is_half_up(self):
+        self.assertEqual(render._cpu_gauge_track(24), 24)
+        self.assertEqual(render._cpu_gauge_track(28), 28)
+        self.assertEqual(render._cpu_gauge_track(64), 64)
+        self.assertEqual(render._cpu_gauge_track(80), 80)
         self.assertEqual(render._cpu_gauge_track(None), 8)
-        self.assertEqual(render._cpu_busy_text(37, 32), "11.8/32t")
-        self.assertEqual(render._cpu_busy_text(0, 64), "0.0/64t")
-        self.assertEqual(render._cpu_busy_text(100, 28), "28.0/28t")
-        self.assertEqual(render._cpu_busy_text(None, 64), "—/64t")
-        self.assertEqual(render._cpu_busy_text(10, None), "—")
+        self.assertEqual(render._cpu_gauge_track(80, 20), 20)
+        self.assertEqual(render._cpu_gauge_track(80, 3), 0)
+        self.assertEqual(render._cpu_active_threads(37, 32), 12)
+        self.assertEqual(render._cpu_active_threads(0, 64), 0)
+        self.assertEqual(render._cpu_active_threads(100, 28), 28)
+        self.assertIsNone(render._cpu_active_threads(None, 64))
+        self.assertIsNone(render._cpu_active_threads(10, None))
+        self.assertEqual(render._cpu_thread_text(12, 32), "12/32 thr")
+        self.assertEqual(render._cpu_thread_text(None, 64), "—/64 thr")
+        self.assertEqual(render._cpu_thread_text(None, None), "— thr")
+        full = render._cpu_gauge_segs(12, 32, 32, "lvl_g")
+        compressed = render._cpu_gauge_segs(12, 32, 8, "lvl_g")
+        self.assertEqual((len(full[0][0]), len(full[1][0])), (12, 20))
+        self.assertEqual((len(compressed[0][0]), len(compressed[1][0])), (3, 5))
+        self.assertEqual(render._resource_level_key(0, False), "lvl_g_dim")
 
     def test_gpu_util_is_numeric_and_vram_track_scales_with_capacity(self):
         self.assertEqual(render._vram_gauge_track(24576), 6)
@@ -285,7 +322,7 @@ class ComputeHostRenderTest(unittest.TestCase):
             "index": 0, "name": "NVIDIA RTX 6000 Ada Generation",
             "utilization_gpu_pct": 84,
             "memory_used_mib": 32768, "memory_total_mib": 49152,
-            "processes": [],
+            "processes": [{"pid": 7, "command": "python train.py"}],
         }
 
         def vram_track(row):
@@ -301,6 +338,13 @@ class ComputeHostRenderTest(unittest.TestCase):
         self.assertNotIn("%", vram)
         self.assertEqual(vram_track(wide), 12)
         self.assertEqual(vram_track(render._gpu_token(gpu, 47, show_name=False)), 4)
+        util_segment = next(segment for segment in wide if segment[0].strip() == "84%")
+        vram_start = next(index for index, segment in enumerate(wide)
+                          if segment[0] == "  VRAM ")
+        capacity = next(segment for segment in wide if segment[0].rstrip().endswith("GB"))
+        self.assertEqual(util_segment[1], "lvl_r_flat")
+        self.assertEqual(wide[vram_start + 1][1], "lvl_y")
+        self.assertEqual(capacity[1], wide[vram_start + 1][1])
 
     def test_resource_header_and_gpu_metric_columns_are_aligned(self):
         aligned = {

@@ -280,6 +280,11 @@ class ComputeHostsTest(unittest.TestCase):
         self.assertGreater(payload["cpu_count"], 0)
         self.assertGreaterEqual(payload["cpu_utilization_pct"], 0)
         self.assertLessEqual(payload["cpu_utilization_pct"], 100)
+        for key in ("memory_total_mib", "memory_used_mib",
+                    "swap_total_mib", "swap_used_mib"):
+            self.assertTrue(payload[key] is None or isinstance(payload[key], int))
+        self.assertGreater(payload["memory_total_mib"], 0)
+        self.assertGreaterEqual(payload["memory_used_mib"], 0)
 
     def test_persistent_claim_reconnects_a_detached_root_to_its_session(self):
         module = load_module()

@@ -278,6 +278,45 @@ def cpu_sample():
     return max(0, min(100, int(round(100.0 * (total - idle) / total))))
 
 
+def memory_sample():
+    # Missing inputs remain unknown instead of becoming zero.
+    values = {}
+    try:
+        for line in Path("/proc/meminfo").read_text().splitlines():
+            key, separator, remainder = line.partition(":")
+            if not separator:
+                continue
+            fields = remainder.split()
+            if fields:
+                try:
+                    values[key] = int(fields[0])
+                except ValueError:
+                    continue
+    except OSError:
+        values = {}
+
+    total = values.get("MemTotal")
+    available = values.get("MemAvailable")
+    if available is None and total is not None:
+        fallback = ("MemFree", "Buffers", "Cached", "SReclaimable")
+        if all(key in values for key in fallback):
+            available = sum(values[key] for key in fallback)
+    swap_total = values.get("SwapTotal")
+    swap_free = values.get("SwapFree")
+
+    def mib(value):
+        return max(0, value) // 1024 if isinstance(value, int) else None
+
+    return {
+        "memory_total_mib": mib(total),
+        "memory_used_mib": mib(max(0, total - available)
+                               if total is not None and available is not None else None),
+        "swap_total_mib": mib(swap_total),
+        "swap_used_mib": mib(max(0, swap_total - swap_free)
+                             if swap_total is not None and swap_free is not None else None),
+    }
+
+
 def same_euid(pid):
     try:
         for line in (Path("/proc") / str(pid) / "status").read_text().splitlines():
@@ -500,6 +539,7 @@ payload = {
     "cpu_count": os.cpu_count(), "cpu_utilization_pct": cpu_sample(), "gpus": [],
     "unmatched_processes": [], "observed_at": time.time(),
 }
+payload.update(memory_sample())
 try:
     payload["load"] = " ".join(Path("/proc/loadavg").read_text().split()[:3])
 except OSError:
@@ -613,6 +653,10 @@ def probe_host(name, host, owner_claims=None):
            "hostname": payload.get("hostname"), "load": payload.get("load"),
            "cpu_count": payload.get("cpu_count"),
            "cpu_utilization_pct": payload.get("cpu_utilization_pct"),
+           "memory_total_mib": payload.get("memory_total_mib"),
+           "memory_used_mib": payload.get("memory_used_mib"),
+           "swap_total_mib": payload.get("swap_total_mib"),
+           "swap_used_mib": payload.get("swap_used_mib"),
            "gpus": gpus, "observed_at": payload.get("observed_at") or observed_at,
            "unmatched_processes": payload.get("unmatched_processes") or []}
     if payload.get("gpu_error"):

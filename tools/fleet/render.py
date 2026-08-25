@@ -161,6 +161,8 @@ _HUE_OF = {
     # ●>○>◌ ink-weight gradient still reads.
     "g_unused_b": ("y", 0),
     "lvl_g": ("g", 0), "lvl_y": ("y", 0), "lvl_r": ("r", _A_B),
+    "lvl_g_dim": ("g", _A_D), "lvl_y_dim": ("y", _A_D),
+    "lvl_r_dim": ("r", _A_D), "resource_active": ("w", 0),
     "base_host": ("g", _A_B),
     # F-61: the usage header's own red — same hue and threshold as `lvl_r`, without the bold.
     # The header is always-on background information, so one meter crossing 80% must not make it
@@ -184,6 +186,11 @@ _HUE_OF = {
     "gpu_blackwell": ("g", _A_D), "gpu_hopper": ("m", _A_D),
     "gpu_ada": ("c", _A_D), "gpu_ampere": ("l", _A_D),
     "gpu_turing": ("y", _A_D), "gpu_other": ("d", _A_D),
+    "gpu_rtx6000_active": ("l", 0), "gpu_rtx4090_active": ("c", 0),
+    "gpu_rtx5090_active": ("g", 0),
+    "gpu_blackwell_active": ("g", 0), "gpu_hopper_active": ("m", 0),
+    "gpu_ada_active": ("c", 0), "gpu_ampere_active": ("l", 0),
+    "gpu_turing_active": ("y", 0), "gpu_other_active": ("d", 0),
     # stage palette indices 0-4 = blue·cyan·green·yellow·magenta (see _stage_raw)
     "stg0_on": ("l", _A_B), "stg1_on": ("c", _A_B), "stg2_on": ("g", _A_B),
     "stg3_on": ("y", _A_B), "stg4_on": ("m", _A_B),
@@ -323,6 +330,10 @@ def _init_colors():
     _COLOR["lvl_y"] = _COLOR.get("yellow", 0)
     _COLOR["lvl_r"] = _COLOR.get("red", 0) | curses.A_BOLD
     _COLOR["lvl_r_flat"] = _COLOR.get("red", 0)          # F-61: usage header, no alarm weight
+    _COLOR["lvl_g_dim"] = _COLOR.get("green", 0) | curses.A_DIM
+    _COLOR["lvl_y_dim"] = _COLOR.get("yellow", 0) | curses.A_DIM
+    _COLOR["lvl_r_dim"] = _COLOR.get("red", 0) | curses.A_DIM
+    _COLOR["resource_active"] = _COLOR.get("soft", 0)
     _COLOR["base_host"] = _COLOR.get("green", 0) | curses.A_BOLD
     # per-MODEL family colors, in TWO intensities (2026-07-02: main↔dispatch contrast = whole-row
     # brightness): fam_* = BRIGHT (main session rows) / famd_* = DIM (dispatch rows recede).
@@ -344,17 +355,19 @@ def _init_colors():
         _COLOR["famd_" + fam] = hue | curses.A_DIM
     _COLOR["fam_other"] = 0                        # unknown family → default fg
     _COLOR["famd_other"] = curses.A_DIM
-    # GPU architecture/model families reuse the same restrained identity palette
-    # as harness/model labels, but never rise above DIM weight (F-89).  The
-    # model name remains present, so color is an additive cue rather than the
-    # only identifier.
+    # GPU architecture/model families reuse the same restrained identity palette.
+    # Idle summaries stay DIM; exact current process evidence promotes the same
+    # hue to normal intensity (F-93). Text remains the primary identifier.
     for fam, hue_name in {
         "rtx6000": "h_opencode", "rtx4090": "h_claude", "rtx5090": "green",
         "blackwell": "green", "hopper": "h_codex", "ada": "h_claude",
         "ampere": "h_opencode", "turing": "yellow",
     }.items():
-        _COLOR["gpu_" + fam] = _COLOR.get(hue_name, 0) | curses.A_DIM
+        hue = _COLOR.get(hue_name, 0)
+        _COLOR["gpu_" + fam] = hue | curses.A_DIM
+        _COLOR["gpu_" + fam + "_active"] = hue
     _COLOR["gpu_other"] = curses.A_DIM
+    _COLOR["gpu_other_active"] = 0
     # branch: normal on main session rows, dim on dispatch rows (same brightness axis)
     _COLOR["branch_s"] = 0
     for h, hue in _hue.items():
@@ -3997,9 +4010,10 @@ def _gpu_model_family(model):
     return "other"
 
 
-def _gpu_model_key(model):
-    """Every GPU model hue stays dim so resource metadata remains subordinate."""
-    return "gpu_" + _gpu_model_family(model)
+def _gpu_model_key(model, active=False):
+    """Keep the model-family hue, promoting it only for a working GPU summary."""
+    key = "gpu_" + _gpu_model_family(model)
+    return key + "_active" if active else key
 
 
 def _gpu_process_rows(gpu, indent, width):
@@ -4112,22 +4126,20 @@ def _gpu_state(gpu):
             else "idle")
 
 
-def _gpu_level(gpu):
-    util = gpu.get("utilization_gpu_pct")
-    total, used = gpu.get("memory_total_mib"), gpu.get("memory_used_mib")
-    ratios = [util] if isinstance(util, (int, float)) and not isinstance(util, bool) else []
-    if (isinstance(total, (int, float)) and not isinstance(total, bool) and total > 0
-            and isinstance(used, (int, float)) and not isinstance(used, bool)):
-        ratios.append(100.0 * used / total)
-    level = max(ratios) if ratios else None
-    return "lvl_r_flat" if level is not None and level >= 80 else (
-        "lvl_y" if level is not None and level >= 50 else
-        "lvl_g" if level is not None else "dim")
+def _resource_level_key(value, active):
+    """Usage hue at active or idle intensity; unknown telemetry stays dim."""
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        return "dim"
+    level = _flat_level(_pct_key(max(0, min(100, value))))
+    if active:
+        return level
+    return {"lvl_g": "lvl_g_dim", "lvl_y": "lvl_y_dim",
+            "lvl_r_flat": "lvl_r_dim"}.get(level, "dim")
 
 
 _RESOURCE_GAUGE_W = 8
 _CPU_GAUGE_MIN = 4
-_CPU_GAUGE_MAX = 20
+_CPU_GAUGE_MAX = 20  # shared legacy bounds for the capacity-scaled VRAM track
 _GPU_MODEL_COLUMN_W = 18
 _GPU_VRAM_SLOT_W = 20
 _GPU_CAPACITY_COLUMN_W = 9
@@ -4141,19 +4153,43 @@ def _resource_gauge_segs(value, track=_RESOURCE_GAUGE_W):
             + [(" %3d%%" % value, _flat_level(_pct_key(value)))])
 
 
-def _resource_pct_segs(value, width=4):
+def _resource_pct_segs(value, width=4, active=True):
     """Fixed-width percent column; unknown remains explicit."""
     if not isinstance(value, (int, float)) or isinstance(value, bool):
         return [("—".rjust(width), "dim")]
     value = max(0, min(100, _half_up(value)))
-    return [(('%d%%' % value).rjust(width), _flat_level(_pct_key(value)))]
+    return [(('%d%%' % value).rjust(width), _resource_level_key(value, active))]
 
 
-def _cpu_gauge_track(cpu_count):
-    """Four logical threads per cell, bounded for terminal readability."""
+def _cpu_active_threads(utilization, cpu_count):
+    """Integer average active threads, using the display contract's half-up rule."""
     if not isinstance(cpu_count, int) or isinstance(cpu_count, bool) or cpu_count <= 0:
-        return _RESOURCE_GAUGE_W
-    return max(_CPU_GAUGE_MIN, min(_CPU_GAUGE_MAX, _half_up(cpu_count / 4.0)))
+        return None
+    if not isinstance(utilization, (int, float)) or isinstance(utilization, bool):
+        return None
+    pct = max(0.0, min(100.0, float(utilization)))
+    return max(0, min(cpu_count, _half_up(pct * cpu_count / 100.0)))
+
+
+def _cpu_thread_text(active, cpu_count):
+    if not isinstance(cpu_count, int) or isinstance(cpu_count, bool) or cpu_count <= 0:
+        return "— thr"
+    if not isinstance(active, int) or isinstance(active, bool):
+        return "—/%d thr" % cpu_count
+    return "%d/%d thr" % (active, cpu_count)
+
+
+def _cpu_gauge_track(cpu_count, available=None):
+    """One cell per logical thread when possible; compress or omit before numbers."""
+    known = isinstance(cpu_count, int) and not isinstance(cpu_count, bool) and cpu_count > 0
+    desired = cpu_count if known else _RESOURCE_GAUGE_W
+    if available is None:
+        return desired
+    available = max(0, int(available))
+    if available >= desired:
+        return desired
+    minimum = min(_CPU_GAUGE_MIN, desired)
+    return available if available >= minimum else 0
 
 
 def _vram_gauge_track(total_mib):
@@ -4165,15 +4201,25 @@ def _vram_gauge_track(total_mib):
                                    _half_up(total_mib / 4096.0)))
 
 
-def _cpu_busy_text(utilization, cpu_count):
-    """Average busy thread-equivalents over the CPU sampling interval."""
-    if not isinstance(cpu_count, int) or isinstance(cpu_count, bool) or cpu_count <= 0:
-        return "—"
-    if not isinstance(utilization, (int, float)) or isinstance(utilization, bool):
-        return "—/%dt" % cpu_count
-    pct = max(0.0, min(100.0, float(utilization)))
-    busy = _half_up((pct * cpu_count / 100.0) * 10.0) / 10.0
-    return "%.1f/%dt" % (busy, cpu_count)
+def _cpu_gauge_segs(active, cpu_count, track, key):
+    """Light exact active threads on full tracks and proportional cells when compressed."""
+    if track <= 0:
+        return []
+    if (not isinstance(active, int) or isinstance(active, bool)
+            or not isinstance(cpu_count, int) or isinstance(cpu_count, bool)
+            or cpu_count <= 0 or active <= 0):
+        filled = 0
+    elif active >= cpu_count:
+        filled = track
+    elif track <= 1:
+        filled = 0
+    else:
+        filled = max(1, min(track - 1, _half_up(active * track / float(cpu_count))))
+    return [(_BAR_FULL * filled, key), (_BAR_EMPTY * (track - filled), "dim")]
+
+
+def _host_memory_pair(used, total, unit):
+    return "%s/%s%s" % (_gpu_gib(used), _gpu_gib(total), unit)
 
 
 def _gpu_token(gpu, available, show_name=False, sessions=None, index_width=1):
@@ -4186,6 +4232,9 @@ def _gpu_token(gpu, available, show_name=False, sessions=None, index_width=1):
     memory = "%s/%sGB" % (_gpu_gib(gpu.get("memory_used_mib")),
                            _gpu_gib(gpu.get("memory_total_mib")))
     state = _gpu_state(gpu)
+    active = state == "working"
+    summary_key = "resource_active" if active else "dim"
+    vram_key = _resource_level_key(vram_pct, active)
     glyph, state_key = _glyph(state)
     show_state_word = available >= 58
     narrow_track = available < 70
@@ -4193,7 +4242,7 @@ def _gpu_token(gpu, available, show_name=False, sessions=None, index_width=1):
     vram_slot = 4 if narrow_track else _GPU_VRAM_SLOT_W
     index_text = str(index) if isinstance(index, int) and not isinstance(index, bool) else "?"
     segs = [(glyph, state_key), (" ", None),
-            ("%s: " % index_text.rjust(max(1, index_width)), "head")]
+            ("%s: " % index_text.rjust(max(1, index_width)), summary_key)]
     if show_state_word:
         segs.append((state.ljust(7) + "  ", state_key))
     fixed_tail_width = 5 + 4 + 7 + vram_slot + 2 + _GPU_CAPACITY_COLUMN_W
@@ -4205,16 +4254,18 @@ def _gpu_token(gpu, available, show_name=False, sessions=None, index_width=1):
         name = _gpu_display_model(raw_name) if raw_name else "—"
         model = _clip_w(name, _GPU_MODEL_COLUMN_W)
         segs += [((model + " " * (_GPU_MODEL_COLUMN_W - _dw(model))),
-                  _gpu_model_key(raw_name) if raw_name else "dim"),
+                  _gpu_model_key(raw_name, active=active) if raw_name else summary_key),
                  ("  ", None)]
-    segs.append(("UTIL ", "dim"))
-    segs += _resource_pct_segs(util)
-    segs += [("  VRAM ", "dim")]
-    segs += _gauge_segs(vram_pct, vram_track, track=vram_track)
+    segs.append(("UTIL ", summary_key))
+    segs += _resource_pct_segs(util, active=active)
+    segs += [("  VRAM ", summary_key)]
+    gauge = _gauge_segs(vram_pct, vram_track, track=vram_track)
+    gauge[0] = (gauge[0][0], vram_key)
+    segs += gauge
     if vram_track < vram_slot:
         segs += [(" " * (vram_slot - vram_track), None)]
     capacity = _clip_w(memory, _GPU_CAPACITY_COLUMN_W, ellipsis="")
-    segs += [("  " + capacity.rjust(_GPU_CAPACITY_COLUMN_W), _gpu_level(gpu))]
+    segs += [("  " + capacity.rjust(_GPU_CAPACITY_COLUMN_W), vram_key)]
     return segs
 
 
@@ -4274,13 +4325,32 @@ def _compute_host_rows(term_width=None, sessions=None):
 
         cpu = host.get("cpu_utilization_pct")
         cpu_count = host.get("cpu_count")
-        host_row += [("CPU ", "dim")]
-        host_row += _resource_gauge_segs(cpu, track=_cpu_gauge_track(cpu_count))
-        busy = _cpu_busy_text(cpu, cpu_count)
-        if width >= 80:
-            host_row += [("  · BUSY " + busy, "dim")]
+        active_threads = _cpu_active_threads(cpu, cpu_count)
+        active = isinstance(active_threads, int) and active_threads >= 1
+        summary_key = "resource_active" if active else "dim"
+        cpu_key = _resource_level_key(cpu, active)
+        thread_text = _cpu_thread_text(active_threads, cpu_count)
+        memory = _host_memory_pair(host.get("memory_used_mib"),
+                                   host.get("memory_total_mib"),
+                                   "GB" if width >= 100 else "G")
+        swap = _host_memory_pair(host.get("swap_used_mib"),
+                                 host.get("swap_total_mib"),
+                                 "GB" if width >= 100 else "G")
+        if width >= 100:
+            suffix = [("  ", None), (thread_text, cpu_key),
+                      ("  · ", "dim"), ("MEM ", summary_key), (memory, summary_key),
+                      ("  · ", "dim"), ("SWP ", summary_key), (swap, summary_key)]
         else:
-            host_row += [("  " + busy, "dim")]
+            suffix = [("  ", None), (thread_text, cpu_key),
+                      ("  M ", summary_key), (memory, summary_key),
+                      ("  S ", summary_key), (swap, summary_key)]
+        fixed = 4 + sum(_dw(text) for text, _key in suffix)
+        track = _cpu_gauge_track(cpu_count, width - prefix_width - fixed)
+        if track == 0:
+            suffix[0] = (" ", None)
+        host_row += [("CPU ", summary_key)]
+        host_row += _cpu_gauge_segs(active_threads, cpu_count, track, cpu_key)
+        host_row += suffix
         rows.append(_clip_segs(host_row, width)[0])
 
         gpus = [gpu for gpu in (host.get("gpus") or ()) if isinstance(gpu, dict)]
