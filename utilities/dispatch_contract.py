@@ -4284,11 +4284,13 @@ def _existing_recovery_claim(
     if metadata.get("attempt_id") != original_attempt_id:
         raise DispatchContractError("recovery-claim-original-attempt-mismatch")
     if metadata.get("note") == "receipt-unavailable-retry-exhausted":
+        retry_attempt_id = metadata.get("retry_attempt_id", "")
+        retry_ordinal = 1 if metadata.get("retry_ordinal") == "1" else 0
         return RecoveryRetryClaim(
             recovery_identity,
             original_attempt_id,
-            0,
-            "",
+            retry_ordinal,
+            retry_attempt_id,
             "exhausted",
             "receipt-unavailable-retry-exhausted",
             False,
@@ -4504,8 +4506,6 @@ def seal_recovery_blocked(
                 "classifier_source": AUTOMATIC_RECEIPTLESS_CLASSIFIER,
                 "reconcile_reason": reason or "receipt-unavailable-retry-exhausted",
                 "start_permitted": "0",
-                "retry_attempt_id": "",
-                "retry_ordinal": "",
             },
             terminal=True,
         )

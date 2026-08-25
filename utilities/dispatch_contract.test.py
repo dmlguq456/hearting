@@ -353,8 +353,12 @@ class DispatchContractTest(unittest.TestCase):
     jobs,original_attempt_id=metadata["attempt_id"],recovery_id=rid))
    blocked=D.parse_registry_metadata(jobs.read_text().strip().split("\t",5)[5])
    self.assertEqual(blocked["start_permitted"],"0")
-   self.assertFalse(blocked.get("retry_attempt_id"))
-   self.assertFalse(blocked.get("retry_ordinal"))
+   self.assertEqual(blocked["retry_attempt_id"],first.retry_attempt_id)
+   self.assertEqual(blocked["retry_ordinal"],"1")
+   exhausted=D.claim_recovery_retry(jobs,**kwargs)
+   self.assertEqual(exhausted.retry_attempt_id,first.retry_attempt_id)
+   self.assertEqual(exhausted.retry_ordinal,1)
+   self.assertFalse(exhausted.start_permitted)
 
  def test_recovery_retry_exhaustion_is_permanent_and_never_claims_start(self):
   with tempfile.TemporaryDirectory() as td:
