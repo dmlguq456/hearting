@@ -1,4 +1,1 @@
-# r_route_analyze_project_initial — 분석 산출물이 없는 기존 코드의 명시적 분석 요청은 analyze-project primary. routing 축.
-AXIS=routing
-MAX_TURNS=30
-TIMEOUT=1200
+../../../../../../loops/drill/cases_growing/r_route_analyze_project_initial/config

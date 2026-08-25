@@ -1,3 +1,1 @@
-MAX_TURNS=4
-TIMEOUT=300
-AXIS=memory
+../../../../../../loops/drill/cases/mem_distill_e2e/config

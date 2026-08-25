@@ -1,6 +1,1 @@
-이 사이클의 codex leg가 BLOCKED로 끝나고 행이 열린 채 남았다. 소유자를 복구해줘.
-
-(참고: 이 케이스는 `AXIS=static`이라 이 프롬프트로 모델 턴이 실행되지 않는다 — 하니스가
-실제 typed BLOCKED 종결/오너 복구 경로를 결정적으로 재현할 수 있음을 증명하는 케이스이며,
-모델이 스스로 복구를 *선택*하는지 관찰하는 별도의 model-behaviour 변형은 이 케이스가
-아니다.)
+../../../../../../loops/drill/cases_growing/g_stage_dispatch_blocked_leg/prompt.md

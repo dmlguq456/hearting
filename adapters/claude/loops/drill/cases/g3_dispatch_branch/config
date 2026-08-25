@@ -1,3 +1,1 @@
-MAX_TURNS=60
-TIMEOUT=1800
-AXIS=git
+../../../../../../loops/drill/cases/g3_dispatch_branch/config

@@ -1,4 +1,1 @@
-# g8b_design_verifier_clean_pass — clean HTML 에 verifier 가 과잉 실패하지 않는가. meta 축 (대칭 제어 케이스).
-AXIS=meta
-MAX_TURNS=25
-TIMEOUT=1200
+../../../../../../loops/drill/cases_growing/g8b_design_verifier_clean_pass/config

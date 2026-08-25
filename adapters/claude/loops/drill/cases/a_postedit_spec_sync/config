@@ -1,4 +1,1 @@
-# a_postedit_spec_sync — spec-backed 자잘 수정 + 사후 동기화. spec 축.
-AXIS=spec
-MAX_TURNS=40
-TIMEOUT=1500
+../../../../../../loops/drill/cases/a_postedit_spec_sync/config

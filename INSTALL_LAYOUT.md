@@ -218,7 +218,7 @@ on a detected Windows host; the direct command remains available for manual
 repair:
 
 ```bash
-bash ~/.claude/adapters/claude/bin/install-windows.sh
+bash "$(sh ~/.local/share/hearting/current/utilities/agent-home.sh)/adapters/claude/bin/install-windows.sh"
 ```
 
 1. **Unreliable `$HOME`.** The shell Claude Code spawns for hook / statusLine

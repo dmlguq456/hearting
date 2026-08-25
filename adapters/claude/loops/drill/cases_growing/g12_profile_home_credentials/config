@@ -1,4 +1,1 @@
-AXIS=meta
-MAX_TURNS=15
-TIMEOUT=600
-ADAPTERS=claude
+../../../../../../loops/drill/cases_growing/g12_profile_home_credentials/config

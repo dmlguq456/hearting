@@ -46,7 +46,11 @@ _loop_agent_home() {
     printf '%s\n' "$cand"
     return 0
   fi
-  printf '%s\n' "${CLAUDE_HOME:-$HOME/.claude}"
+  if [ -n "${CLAUDE_HOME:-}" ]; then
+    printf '%s\n' "$CLAUDE_HOME"
+    return 0
+  fi
+  printf '%s\n' "${XDG_DATA_HOME:-$HOME/.local/share}/hearting/current"
 }
 
 _loop_governor_path() {
@@ -183,7 +187,7 @@ _loop_register_dispatch_job() {
   git_root=$(git -C "$repo" rev-parse --show-toplevel 2>/dev/null || printf '%s' "$repo")
   # A drill case is its own fixture-rooted Fleet tree. Do not inherit the
   # interactive launcher session/cwd: doing so renders one run twice, once under
-  # agent_setting and once under /tmp/drill-*. Explicit drill-only parent fields
+  # Hearting and once under /tmp/drill-*. Explicit drill-only parent fields
   # remain available for a caller that intentionally nests diagnostic workers.
   parent_sid="${DRILL_FLEET_PARENT_SESSION_ID:-}"
   parent_cwd="${DRILL_FLEET_PARENT_CWD:-}"

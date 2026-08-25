@@ -1,1 +1,1 @@
-cli.py 에 `--verbose` 옵션을 추가해줘 — 줄 수 외에 단어 수도 같이 출력.
+../../../../../../loops/drill/cases/g4_spec_gate/prompt.md

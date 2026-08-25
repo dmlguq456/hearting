@@ -1,4 +1,1 @@
-# r_route_direct — typo 1줄 직접 처리 경계. routing 축.
-AXIS=routing
-MAX_TURNS=10
-TIMEOUT=600
+../../../../../../loops/drill/cases_growing/r_route_direct/config

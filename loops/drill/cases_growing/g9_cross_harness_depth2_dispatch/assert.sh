@@ -1,5 +1,5 @@
 #!/bin/bash
-# Full-chain positive contract: exact two-way Codex+Claude launch and Fleet visibility.
+# Full-chain positive contract: bounded N-way Codex+Claude launch and Fleet visibility.
 set -eu
 CASE_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 HARNESS_ROOT=$(git -C "$CASE_DIR" rev-parse --show-toplevel)
@@ -29,17 +29,19 @@ source = path.read_text(encoding="utf-8")
 assert '"reserve"' in source and '"--count"' in source
 assert '"--batch-manifest"' in source and '"--batch-attempt-id"' in source
 assert "as_completed" in source
-assert '"replica-group-cardinality"' in source
-assert '"replica-group-dependency-mismatch"' in source
+assert '"parallel-group-cardinality"' in source
+assert '"parallel-group-dependency-mismatch"' in source
 assert '"concurrent_launch"' in source
 contract = (root / "utilities" / "dispatch_contract.py").read_text(encoding="utf-8")
-assert '"replica-group-batch-required"' in contract
-assert '"replica-group-reservation-mismatch"' in contract
+assert '"parallel-group-batch-required"' in contract
+assert '"parallel-group-reservation-mismatch"' in contract
 assert 'GROUP_REAP_PROOF = "pgid-empty-v1"' in contract
 for adapter in ("codex", "claude"):
     wrapper = (root / "adapters" / adapter / "bin" / "dispatch-headless.py").read_text(encoding="utf-8")
     assert "replica_batch_expectation" in wrapper
     assert "REPLICA_RESERVATION_ROW_KEYS" in wrapper
+    assert 'parallel_group=' in wrapper
+    assert 'model_profile=' in wrapper
     assert '"launch_outcome": "governed-process-reaped"' in wrapper
-print("PASS: exact two-way Codex+Claude batch, live overlap/Fleet, provenance, bypass, and reap contract")
+print("PASS: bounded N-way Codex+Claude batch, 3-way live overlap/Fleet, profiles, provenance, bypass, and reap contract")
 PY

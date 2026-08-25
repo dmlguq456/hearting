@@ -1,4 +1,1 @@
-# r_route_lab_eval_primary — 재평가+보고서 업데이트 요청의 semantic primary 가 lab eval 인지 (WORKFLOW §0.2 Case A). routing 축.
-AXIS=routing
-MAX_TURNS=80
-TIMEOUT=2400
+../../../../../../loops/drill/cases_growing/r_route_lab_eval_primary/config

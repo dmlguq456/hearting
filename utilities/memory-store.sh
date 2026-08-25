@@ -27,7 +27,7 @@ elif [ -e "$HOME/hearting" ]; then
 elif [ -e "$HOME/agent_setting" ]; then
   store_home=$HOME/agent_setting
 else
-  store_home=$HOME/.claude
+  store_home=${XDG_DATA_HOME:-$HOME/.local/share}/hearting/current
 fi
 
 store=$store_home/memory

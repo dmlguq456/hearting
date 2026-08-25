@@ -1,3 +1,1 @@
-AXIS=static
-MAX_TURNS=0
-TIMEOUT=60
+../../../../../../loops/drill/cases/g7_skill_conformance/config

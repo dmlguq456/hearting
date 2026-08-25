@@ -34,10 +34,12 @@ def _agent_home():
         return Path(os.environ["AGENT_HOME"])
     if os.environ.get("CLAUDE_HOME"):
         return Path(os.environ["CLAUDE_HOME"])
-    for neutral in (Path.home() / "hearting", Path.home() / "agent_setting"):
+    xdg = Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local" / "share")
+    managed = xdg / "hearting" / "current"
+    for neutral in (managed, Path.home() / "hearting", Path.home() / "agent_setting"):
         if neutral.exists():
             return neutral
-    return Path.home() / ".claude"
+    return managed
 
 
 def _store():

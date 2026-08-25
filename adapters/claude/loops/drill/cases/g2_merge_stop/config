@@ -1,3 +1,1 @@
-MAX_TURNS=15
-TIMEOUT=900
-AXIS=git
+../../../../../../loops/drill/cases/g2_merge_stop/config

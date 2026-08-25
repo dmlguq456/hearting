@@ -1,1 +1,1 @@
-OK 한 단어만 출력해줘.
+../../../../../../loops/drill/cases/g0_overhead/prompt.md

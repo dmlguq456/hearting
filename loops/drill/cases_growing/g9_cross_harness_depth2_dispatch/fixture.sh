@@ -9,6 +9,6 @@ git init -q
 git checkout -q -b main
 git config user.email drill@test
 git config user.name drill
-printf '# Strong cross-harness replica batch fixture\n' > README.md
+printf '# Strong cross-harness bounded parallel batch fixture\n' > README.md
 git add README.md
 git commit -q -m init

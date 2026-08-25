@@ -210,12 +210,13 @@ class MaterialRouteGuardTest(unittest.TestCase):
         cycle fixed (artifact-guard.sh pinning --agent-home to its own script
         location) only fires with AGENT_HOME/CLAUDE_HOME unset, so exercise
         that exact cell: an isolated $HOME whose only marked candidate is
-        $HOME/.claude — the shared final fallback of utilities/agent-home.sh —
+        $XDG_DATA_HOME/hearting/current — the shared managed-release default of
+        utilities/agent-home.sh —
         must be where BOTH the direct bind and the artifact-guard-mediated
         check keep their `.route-grounding` state."""
         self.opportunity("session-no-home")
         fake_home = self.base / "fakehome"
-        fallback_home = fake_home / ".claude"
+        fallback_home = fake_home / ".local" / "share" / "hearting" / "current"
         (fallback_home / "core").mkdir(parents=True)
         (fallback_home / "core" / "CORE.md").write_text("core\n", encoding="utf-8")
         (fallback_home / "utilities").symlink_to(
@@ -244,7 +245,7 @@ class MaterialRouteGuardTest(unittest.TestCase):
         marker_path = MATERIAL_GUARD.marker_path(fallback_home, "session-no-home")
         self.assertTrue(
             marker_path.is_file(),
-            "bind without AGENT_HOME must land in the shared $HOME/.claude fallback",
+            "bind without AGENT_HOME must land in the shared managed-release default",
         )
 
         # The target must (a) sit inside self.route's own artifact_root, so

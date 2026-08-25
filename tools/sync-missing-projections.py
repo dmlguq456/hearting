@@ -13,8 +13,8 @@ makes the counterpart DERIVED instead of remembered:
   adapter-owned divergence is never overwritten.
 
 Domains (mirroring tools/check-adaptation-boundary.sh expectations):
-- ``loops/``      → copy into  adapters/claude/loops/
-- ``scaffolds/``  → copy into  adapters/claude/scaffolds/
+- ``loops/``      → symlink    adapters/claude/loops/<f> (``.gitignore`` stays a copy)
+- ``scaffolds/``  → symlink    adapters/claude/scaffolds/<f>
 - ``tools/memory``→ symlink    adapters/claude/tools/memory/<f>
                     → ../../../../tools/memory/<f> (established projection style)
 - ``tools/install``→ symlink   adapters/claude/tools/install/<f>
@@ -107,8 +107,8 @@ def sync(check: bool) -> int:
             n += 1
         return n
 
-    counterpart_copy("loops")
-    counterpart_copy("scaffolds")
+    counterpart_symlink("loops")
+    counterpart_symlink("scaffolds")
     counterpart_symlink("tools/memory")
     counterpart_symlink("tools/install")
     counterpart_symlink("tools/integrations")

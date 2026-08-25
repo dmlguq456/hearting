@@ -1,4 +1,1 @@
-# g_eval_stage_dispatch_or_reason — standard+ eval 의 분리 가능 스테이지는 dispatch 또는 명시적 inline 사유 기록 (autopilot-lab eval topology, Case E). git 축.
-AXIS=git
-MAX_TURNS=120
-TIMEOUT=2400
+../../../../../../loops/drill/cases_growing/g_eval_stage_dispatch_or_reason/config

@@ -298,7 +298,7 @@ check_claude_adapter_concrete_surfaces() {
     layer=${rel%%/*}
     sub=${rel#*/}
     case "$layer" in
-      hooks|tools|utilities)
+      hooks|tools|utilities|loops|scaffolds)
         # Derive the relative depth from adapters/claude/<layer>/<sub>.
         _slashes=$(printf '%s' "$sub" | tr -cd '/' | wc -c)
         _up=$((3 + _slashes))
@@ -2927,17 +2927,58 @@ check_claude_drill_runner_projection() {
   adapter_runner=adapters/claude/loops/drill/run.sh
   root_runner=loops/drill/run.sh
 
+  # 2026-08-25: the runner is a collapsed file symlink like every other loop file;
+  # a concrete copy here drifted twice (cb4aafd, and the 2026-08 loops/ split).
+  if [ ! -L "$adapter_runner" ]; then
+    fail_msg "$adapter_runner must be a file symlink to ../../../../$root_runner"
+    return
+  fi
+  if [ "$(readlink "$adapter_runner")" != "../../../../$root_runner" ]; then
+    fail_msg "$adapter_runner points to $(readlink "$adapter_runner"); expected ../../../../$root_runner"
+  fi
   if [ ! -x "$adapter_runner" ]; then
-    fail_msg "$adapter_runner must be an executable concrete drill runner projection"
-    return
+    fail_msg "$adapter_runner must resolve to an executable drill runner"
   fi
-  if [ -L "$adapter_runner" ]; then
-    fail_msg "$adapter_runner must be concrete, not a symlink passthrough"
-    return
-  fi
-  if ! cmp -s "$root_runner" "$adapter_runner"; then
-    fail_msg "$adapter_runner must stay byte-equivalent to $root_runner"
-  fi
+}
+
+# Collapsed file-symlink projection contract shared by loops/ and scaffolds/
+# (2026-08-25): directories stay concrete containers, every tracked file is a
+# depth-aware relative symlink to the canonical root file. A concrete copy is a
+# second edit site that drifts silently (fleet/loops/scaffolds all did).
+check_claude_collapsed_domain() {
+  domain=$1
+  for p in $(find "$domain" -mindepth 1 -print); do
+    git check-ignore -q "$p" 2>/dev/null && continue
+    rel=${p#$domain/}
+    adapter_p=adapters/claude/$domain/$rel
+    case "$rel" in
+      .gitignore|*/.gitignore)
+        # git never reads a symlinked .gitignore; keep a byte-equal concrete copy.
+        if [ -L "$adapter_p" ]; then
+          fail_msg "$adapter_p must be a concrete .gitignore copy (git does not follow symlinked ignore files)"
+        elif ! cmp -s "$p" "$adapter_p"; then
+          fail_msg "$adapter_p must stay byte-equivalent to $p"
+        fi
+        continue
+        ;;
+    esac
+    if [ -d "$p" ]; then
+      if [ -L "$adapter_p" ]; then
+        fail_msg "$adapter_p must be a concrete directory container (holds collapsed file symlinks)"
+      else
+        [ -d "$adapter_p" ] || fail_msg "$adapter_p is missing"
+      fi
+    elif [ -f "$p" ]; then
+      if [ ! -L "$adapter_p" ]; then
+        fail_msg "$adapter_p must be a file symlink to canonical $p, not a concrete copy"
+        continue
+      fi
+      expected=$(python3 -c 'import os,sys;print(os.path.relpath(sys.argv[1],os.path.dirname(sys.argv[2])))' "$p" "$adapter_p")
+      if [ "$(readlink "$adapter_p")" != "$expected" ]; then
+        fail_msg "$adapter_p points to $(readlink "$adapter_p"); expected $expected"
+      fi
+    fi
+  done
 }
 
 check_claude_scaffold_projection() {
@@ -2951,19 +2992,7 @@ check_claude_scaffold_projection() {
     fail_msg "claude_setting/scaffolds points to $target; expected ../adapters/claude/scaffolds"
   fi
 
-  for p in $(find scaffolds -mindepth 1 ! -name '.*' -print); do
-    rel=${p#scaffolds/}
-    adapter_p=adapters/claude/scaffolds/$rel
-    if [ -L "$adapter_p" ]; then
-      fail_msg "$adapter_p must be a concrete adapter-owned scaffold projection"
-      continue
-    fi
-    if [ -d "$p" ]; then
-      [ -d "$adapter_p" ] || fail_msg "$adapter_p is missing"
-    elif [ -f "$p" ]; then
-      [ -f "$adapter_p" ] || fail_msg "$adapter_p is missing"
-    fi
-  done
+  check_claude_collapsed_domain scaffolds
 }
 
 check_claude_loop_projection() {
@@ -2977,21 +3006,7 @@ check_claude_loop_projection() {
     fail_msg "claude_setting/loops points to $target; expected ../adapters/claude/loops"
   fi
 
-  for p in $(find loops -mindepth 1 -print); do
-    # Gitignored runtime output such as drill results is outside projection parity.
-    git check-ignore -q "$p" 2>/dev/null && continue
-    rel=${p#loops/}
-    adapter_p=adapters/claude/loops/$rel
-    if [ -L "$adapter_p" ]; then
-      fail_msg "$adapter_p must be a concrete adapter-owned loop projection"
-      continue
-    fi
-    if [ -d "$p" ]; then
-      [ -d "$adapter_p" ] || fail_msg "$adapter_p is missing"
-    elif [ -f "$p" ]; then
-      [ -f "$adapter_p" ] || fail_msg "$adapter_p is missing"
-    fi
-  done
+  check_claude_collapsed_domain loops
 }
 
 check_claude_tool_projection() {

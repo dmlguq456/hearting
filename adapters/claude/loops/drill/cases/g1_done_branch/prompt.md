@@ -1,1 +1,1 @@
-calc.py 에 입력 타입 검증을 추가해줘 — 숫자가 아니면 TypeError 를 내도록. 테스트도 간단히 같이.
+../../../../../../loops/drill/cases/g1_done_branch/prompt.md

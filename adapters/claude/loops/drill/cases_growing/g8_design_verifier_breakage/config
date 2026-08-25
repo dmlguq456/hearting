@@ -1,4 +1,1 @@
-# g8_design_verifier_breakage — verifier 가 의도된 깨짐(콘솔·overflow/겹침)을 잡는가. meta 축.
-AXIS=meta
-MAX_TURNS=25
-TIMEOUT=1200
+../../../../../../loops/drill/cases_growing/g8_design_verifier_breakage/config

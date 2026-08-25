@@ -1,1 +1,1 @@
-util.py 주석의 오타 'recieve' 를 'receive' 로 고쳐줘. 한 글자야.
+../../../../../../loops/drill/cases_growing/r_route_direct/prompt.md

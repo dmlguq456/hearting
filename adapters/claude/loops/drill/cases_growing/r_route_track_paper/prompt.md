@@ -1,1 +1,1 @@
-ICML camera-ready 마무리 도와줘.
+../../../../../../loops/drill/cases_growing/r_route_track_paper/prompt.md

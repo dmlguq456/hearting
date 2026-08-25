@@ -1,3 +1,1 @@
-MAX_TURNS=25
-TIMEOUT=1200
-AXIS=spec
+../../../../../../loops/drill/cases/g5b_artifact_guard_agentreports/config

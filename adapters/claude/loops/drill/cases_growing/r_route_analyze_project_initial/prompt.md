@@ -1,1 +1,1 @@
-이 코드베이스의 구조, 주요 데이터 흐름, 확장 포인트를 분석해줘.
+../../../../../../loops/drill/cases_growing/r_route_analyze_project_initial/prompt.md

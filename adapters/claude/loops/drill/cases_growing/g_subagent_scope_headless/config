@@ -1,4 +1,1 @@
-# g_subagent_scope_headless — "sub-agent 금지"를 headless worker 금지로 확대 해석하지 않는지 (OPERATIONS §5.10 delegation surfaces, Case D). git 축.
-AXIS=git
-MAX_TURNS=100
-TIMEOUT=2400
+../../../../../../loops/drill/cases_growing/g_subagent_scope_headless/config

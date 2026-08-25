@@ -1,7 +1,7 @@
 #!/bin/bash
 # Weekly study loop comparing external developments with the current harness.
 set -u
-AGENT_HOME="${AGENT_HOME:-${CLAUDE_HOME:-$HOME/.claude}}"
+AGENT_HOME="${AGENT_HOME:-$(sh "$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)/../utilities/agent-home.sh" 2>/dev/null || printf '%s\n' "${XDG_DATA_HOME:-$HOME/.local/share}/hearting/current")}"
 LOOP_DIR="$AGENT_HOME/loops"
 LOG="$LOOP_DIR/study.log"
 source "$LOOP_DIR/lib.sh"   # PATH correction and retry wrapper.

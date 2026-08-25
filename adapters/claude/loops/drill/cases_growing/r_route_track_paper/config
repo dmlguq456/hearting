@@ -1,4 +1,1 @@
-# r_route_track_paper — 문서 트랙 라우팅 (soft). routing 축. 라우팅 판단까지만 (turn 낮게).
-AXIS=routing
-MAX_TURNS=3
-TIMEOUT=300
+../../../../../../loops/drill/cases_growing/r_route_track_paper/config

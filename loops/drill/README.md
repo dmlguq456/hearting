@@ -23,7 +23,7 @@ RUN_JUDGE=1 <agent-home>/loops/drill/run.sh  # add an LLM pass over response dis
 
 Do not run the full suite after every change. Select the changed instruction axis with `--axis`; cron on-call and study checks use a sample. Running without arguments is the explicit full-suite path. Full-ceremony cases, especially on the artifact axis, are expensive.
 
-For Fleet grouping, each case uses `/tmp/drill-<case>-*/repo` as one group root. When `AGENT_DISPATCH_JOBS` is set, runner, owner, and stage/child registration, monitoring, and harvesting all use that registry. The runner row does not implicitly inherit `parent_sid` or `parent_cwd` from the `agent_setting/main` session that started it. The capability owner inside the case is depth 1; stage or review workers opened by that owner are depth 2.
+For Fleet grouping, each case uses `/tmp/drill-<case>-*/repo` as one group root. When `AGENT_DISPATCH_JOBS` is set, runner, owner, and stage/child registration, monitoring, and harvesting all use that registry. The runner row does not implicitly inherit `parent_sid` or `parent_cwd` from the `hearting/main` session that started it. The capability owner inside the case is depth 1; stage or review workers opened by that owner are depth 2.
 
 - Run after committing instruction changes under `<agent-home>`, not every night.
 - Use the user's default model so the drill matches normal usage; do not pin a model.
@@ -71,7 +71,7 @@ Cases in `cases_growing/` graduate after two consecutive passes.
 | `r_route_direct` | A typo or one-line edit stays direct rather than over-routing | Typo fixed with no plan, spec, or document artifact |
 | `r_route_track_paper` | A camera-ready request routes to the document track | Soft result-track warning only; tool-log parsing is still needed for a hard check |
 | `a_core_first_adapter_edit` | An adapter edit reads the core contract first | No `adapters/**` edit without a core read marker |
-| `g9_cross_harness_depth2_dispatch` | Deterministic no-model full-chain contract for an exact two-way strong replica batch | Codex+Claude runtimes overlap, both exact depth-2 attempts are `working` in Fleet, admission is manifest-bound and atomic, individual bypass is rejected, leases are reaped, and OpenCode is absent |
+| `g9_cross_harness_depth2_dispatch` | Deterministic no-model full-chain contract for bounded 2–4-way parallel batches, including a real three-way launch | Codex+Claude runtimes overlap, every exact depth-2 attempt is `working` in Fleet, admission is manifest-bound and atomic, profile/perspective asymmetry is sealed, individual bypass is rejected, leases are reaped, and OpenCode is absent |
 | `g10_claude_opencode_depth2_start` | Static negative contract for OpenCode registered depth-2 without a live parent to bind | Exit 73, typed `live-parent-not-found`, zero child row/process/prompt/log, and zero Fleet child |
 | `r_route_lab_eval_primary` | Reevaluation plus report update keeps `autopilot-lab eval` primary (WORKFLOW §0.2 Case A, 2026-07-14 incident) | New empirical artifacts exist; report-only change without them fails; RUNLOG stays append-only |
 | `r_route_refine_doc_only` | A wording-only fix stays `autopilot-refine` primary without lab (Case B) | Typos fixed; no new experiment directory or RUNLOG row |

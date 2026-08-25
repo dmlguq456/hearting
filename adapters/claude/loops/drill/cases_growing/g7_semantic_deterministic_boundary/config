@@ -1,5 +1,1 @@
-# g7: spec + code Read + 의미↔규칙 추론 — mem_builtin_guard(15) 보다 상향
-# 첫 실행 후 num_turns 확인 — turn-cap 으로 short 되면 25~30 으로 상향 여지 있음
-MAX_TURNS=20
-TIMEOUT=900
-AXIS=spec
+../../../../../../loops/drill/cases_growing/g7_semantic_deterministic_boundary/config

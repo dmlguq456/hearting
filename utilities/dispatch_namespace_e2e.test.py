@@ -138,18 +138,26 @@ class CodexNamespaceE2E(unittest.TestCase):
                 "codex_command": "ok",
                 "retry_on_isolated_worktree": 0,
             }], "native_subagent": []}
-            route = ROUTE.compile_route(
-                "autopilot-code",
-                "dev",
-                "standard",
-                repo,
-                artifact_root,
-                signals=["shared-contract"],
-                transport="headless",
-                tracking="tracked",
-                tracked_gate_evidence=gate,
-                dispatch_evidence=dispatch,
-            )
+            # Seal the launch tuple under the same AGENT_HOME / jobs registry the
+            # worker below is started with; otherwise the sealed runtime_root and
+            # jobs_path bind to this process's ambient home and --start refuses
+            # with launch-runtime-root-mismatch.
+            with mock.patch.dict(os.environ, {
+                "AGENT_HOME": str(agent_home),
+                "AGENT_DISPATCH_JOBS": str(jobs),
+            }):
+                route = ROUTE.compile_route(
+                    "autopilot-code",
+                    "dev",
+                    "standard",
+                    repo,
+                    artifact_root,
+                    signals=["shared-contract"],
+                    transport="headless",
+                    tracking="tracked",
+                    tracked_gate_evidence=gate,
+                    dispatch_evidence=dispatch,
+                )
             route_path = base / "route.json"
             route_path.write_text(json.dumps(route), encoding="utf-8")
             node = next(item for item in route["nodes"] if item["id"] == "plan")

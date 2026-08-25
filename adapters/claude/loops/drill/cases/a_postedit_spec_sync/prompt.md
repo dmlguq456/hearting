@@ -1,1 +1,1 @@
-train.py 의 학습 epoch 을 30에서 50으로 바꿔줘. 한 줄이면 돼.
+../../../../../../loops/drill/cases/a_postedit_spec_sync/prompt.md

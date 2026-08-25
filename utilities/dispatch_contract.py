@@ -327,18 +327,21 @@ def resolve_agent_home(runtime_pointer: str | Path | None = None) -> Path:
             str(Path.home() / ".local" / "share" / "hearting" / "current"),
             str(Path.home() / "hearting"),
             str(Path.home() / "agent_setting"),
-            str(Path.home() / ".claude"),
         ]
     )
     for candidate in candidates:
         if _valid(candidate):
             return Path(candidate)
     # No candidate is marked: converge on utilities/agent-home.sh's final
-    # fallback ($HOME/.claude, unvalidated) so the two resolver chains cannot
-    # silently diverge in a bare environment (review F-4). _MODULE_ROOT stays
-    # only for the pathological case where even $HOME is undefined.
+    # fallback (the managed-release default path, unvalidated) so the two
+    # resolver chains cannot silently diverge in a bare environment (review
+    # F-4). ~/.claude is Claude Code's config dir, not a harness root, since
+    # managed releases replaced the ~/.claude-as-AGENT_HOME layout (2026-08-25).
+    # _MODULE_ROOT stays only for the pathological case where even $HOME is
+    # undefined.
     try:
-        return Path.home() / ".claude"
+        xdg = os.environ.get("XDG_DATA_HOME") or str(Path.home() / ".local" / "share")
+        return Path(xdg) / "hearting" / "current"
     except RuntimeError:
         return _MODULE_ROOT
 

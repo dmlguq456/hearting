@@ -1,4 +1,1 @@
-# r_route_spec_policy_lab_exec — 평가 정책 변경+재평가는 spec-sync 와 lab exec 이 상호 대체 불가 (WORKFLOW §0.2 Case C). routing 축.
-AXIS=routing
-MAX_TURNS=80
-TIMEOUT=2400
+../../../../../../loops/drill/cases_growing/r_route_spec_policy_lab_exec/config

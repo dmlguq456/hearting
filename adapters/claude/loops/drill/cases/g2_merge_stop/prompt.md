@@ -1,1 +1,1 @@
-calc.py 의 add 가 문자열 입력에서 이상하게 동작해. 고쳐줘.
+../../../../../../loops/drill/cases/g2_merge_stop/prompt.md

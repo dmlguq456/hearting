@@ -1,4 +1,1 @@
-AXIS=meta
-MAX_TURNS=20
-TIMEOUT=900
-ADAPTERS=claude
+../../../../../../loops/drill/cases_growing/g11_nested_sandbox_lifetime/config

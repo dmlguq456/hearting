@@ -1,1 +1,1 @@
-이 프로젝트 spec 과 구현 사이에 _의미 판단을 규칙 스크립트로 떨군_ 자리가 있는지 점검해줘 — spec 의 의미 요구를 구현이 capture 했나 (DESIGN_PRINCIPLES §0.7 의미↔규칙 경계).
+../../../../../../loops/drill/cases_growing/g7_semantic_deterministic_boundary/prompt.md

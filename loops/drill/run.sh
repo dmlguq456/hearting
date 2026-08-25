@@ -3,7 +3,7 @@
 # Captures assertions and context-cost metrics; g0_overhead tracks fixed harness overhead.
 set -u
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-DEFAULT_AGENT_HOME=$(sh "$SCRIPT_DIR/../../utilities/agent-home.sh" 2>/dev/null || printf '%s\n' "${CLAUDE_HOME:-$HOME/.claude}")
+DEFAULT_AGENT_HOME=$(sh "$SCRIPT_DIR/../../utilities/agent-home.sh" 2>/dev/null || printf '%s\n' "${XDG_DATA_HOME:-$HOME/.local/share}/hearting/current")
 AGENT_HOME="${AGENT_HOME:-$DEFAULT_AGENT_HOME}"
 export AGENT_HOME
 GOLD="${DRILL_HOME:-$AGENT_HOME/loops/drill}"   # DRILL_HOME supports worktree tests without changing production.

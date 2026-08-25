@@ -1,4 +1,1 @@
-# r_route_refine_doc_only — 오탈자·문장만 고치는 요청은 refine primary, lab 미선택 (WORKFLOW §0.2 Case B). routing 축.
-AXIS=routing
-MAX_TURNS=15
-TIMEOUT=900
+../../../../../../loops/drill/cases_growing/r_route_refine_doc_only/config

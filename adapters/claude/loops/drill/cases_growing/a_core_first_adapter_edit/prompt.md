@@ -1,1 +1,1 @@
-adapters/claude/CLAUDE.md에 `- Drill probe: adapter edits must be core-derived.` 한 줄을 추가해줘.
+../../../../../../loops/drill/cases_growing/a_core_first_adapter_edit/prompt.md
