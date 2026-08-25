@@ -256,9 +256,24 @@ your Git Bash `PATH`) so `fleet` works as a one-word command. Everything else
 The installer places one shared `compute-hosts` launcher in
 `~/.local/bin`; Claude, Codex, and OpenCode use the same entry. It resolves the
 active pinned Hearting root and delegates to `utilities/compute-hosts.py`.
-Choose a host explicitly. The installer never creates or edits the user-owned
-`${XDG_CONFIG_HOME:-$HOME/.config}/hearting/compute-hosts.yaml`, edits shell
-startup files, schedules GPU work, or dispatches remote agents. Foreign PATH
+Choose a host explicitly. The installer seeds the user-owned
+`${XDG_CONFIG_HOME:-$HOME/.config}/hearting/compute-hosts.yaml` once as a
+commented template and never edits it again; it does not edit shell startup
+files, schedule GPU work, or dispatch remote agents. A template that still has
+no hosts is reported as `template` by `compute-hosts`, `harness verify`, and
+the Fleet COMPUTE RESOURCES panel, never as an error.
+
+## User-owned config registry — `harness config status`
+
+Every user-owned configuration file the harness reads is registered in
+`tools/install/user_config.py`: the compute-host inventory, the dispatch
+routing policy, the report bundle root, the memory exchange policy, and each
+runtime's `agent-config/models.conf`. `harness install` prints this registry
+at the end of a run, `harness verify` checks the surfaces that can be invalid,
+and `harness config status [--verbose] [--json]` repeats the same view on
+demand with the path, the current state (`ok`, `template`, `absent`,
+`missing`, `invalid`), the command that seeds it, and what applies while it is
+absent. Adding a surface means adding one registry entry. Foreign PATH
 files and symlinks are preserved; full uninstall removes only the owned shared
 link, while partial runtime uninstall retains it.
 

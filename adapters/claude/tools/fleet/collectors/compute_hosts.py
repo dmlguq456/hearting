@@ -38,12 +38,20 @@ def _tool_argv():
     return None
 
 
-def _configured():
+def _config_path():
     override = os.environ.get("COMPUTE_HOSTS_CONFIG")
     if override:
-        return Path(override).expanduser().is_file()
+        return Path(override).expanduser()
     root = Path(os.environ.get("XDG_CONFIG_HOME") or (Path.home() / ".config"))
-    return (root / "hearting" / "compute-hosts.yaml").is_file()
+    return root / "hearting" / "compute-hosts.yaml"
+
+
+def _unconfigured(status, path):
+    """Guidance-only snapshot: nothing to probe, but the panel says what to do."""
+    hint = ("edit the seeded template" if status == "template"
+            else "run `harness install` to seed a template")
+    return {"configured": False, "status": status, "hosts": [],
+            "path": str(path), "hint": hint, "observed_at": time.time()}
 
 
 def _diagnostic(message, observed_at=None):
@@ -56,9 +64,10 @@ def _diagnostic(message, observed_at=None):
 
 
 def collect(timeout=COLLECT_TIMEOUT):
-    """Return a complete host snapshot, diagnostic, or ``None`` when unconfigured."""
-    if not _configured():
-        return None
+    """Return a host snapshot, a probe diagnostic, or an unconfigured guidance block."""
+    path = _config_path()
+    if not path.is_file():
+        return _unconfigured("missing", path)
     argv = _tool_argv()
     if not argv:
         return _diagnostic("compute-hosts utility unavailable")
@@ -74,10 +83,13 @@ def collect(timeout=COLLECT_TIMEOUT):
         return _diagnostic(exc, observed_at)
     if result.returncode:
         detail = (result.stderr or result.stdout or "compute-host probe failed").strip()
-        # A config can disappear between the pre-check and subprocess startup. Treat
-        # that race exactly like an initially absent config: no empty/error block.
+        # A config can disappear between the pre-check and subprocess startup;
+        # treat that race exactly like an initially absent config. A seeded but
+        # still-commented template is guidance, not a probe failure.
         if "not initialized" in detail:
-            return None
+            return _unconfigured("missing", path)
+        if "has no hosts yet" in detail:
+            return _unconfigured("template", path)
         return _diagnostic(detail, observed_at)
     try:
         payload = json.loads(result.stdout)

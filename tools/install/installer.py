@@ -34,6 +34,8 @@ import codex_launcher
 import routing_config
 import report_bundle_config
 import memory_sync_config
+import compute_hosts_config
+import user_config
 import host_probes
 import node_runtime
 from drivers import get_driver, RUNTIMES
@@ -127,6 +129,18 @@ def build_parser():
     p_memory_status = memory_sub.add_parser(
         "status", help="Show the recorded exchange policy")
     p_memory_status.add_argument("--json", action="store_true")
+
+    # User-owned configuration surfaces: one read-only status view over the
+    # registry that install seeds and verify checks.
+    p_config = sub.add_parser(
+        "config", help="Show every user-owned config file, its state, and how to set it")
+    config_sub = p_config.add_subparsers(
+        dest="config_command", required=True, parser_class=_UsageExitParser)
+    p_config_status = config_sub.add_parser(
+        "status", help="List config surfaces with path, state, and next step")
+    p_config_status.add_argument("--verbose", action="store_true",
+                                 help="Show seeding and absence notes for every surface")
+    p_config_status.add_argument("--json", action="store_true")
 
     # Source → active runtime truth.  These parsers intentionally do not inherit
     # the legacy install channel's --plugin option: linked/packaged are mutually
@@ -301,6 +315,13 @@ def cmd_install(args):
                 "ok": True,
                 "detail": bundle_config["status"],
             })
+        inventory = compute_hosts_config.ensure(dry_run=args.dry_run)
+        lines.append("compute-hosts-config: " + inventory["status"] + " " + inventory["path"])
+        checks.append({
+            "id": "compute-hosts-config.inventory",
+            "ok": True,
+            "detail": inventory["status"],
+        })
         if args.dry_run:
             launcher_results = bootstrap.install_launchers(dry_run=True)
             lines.append("bootstrap: mem-import skipped (dry-run — no dry-run mode for restore_memory)")
@@ -347,9 +368,15 @@ def cmd_install(args):
     for probe in environment:
         lines.append(f"environment: {probe['id']} -> {probe['status']} ({probe['detail']})")
 
+    user_config_rows = [] if args.dry_run else user_config.status()
+    if user_config_rows:
+        lines.append("user config (edit any time; `harness config status` repeats this):")
+        lines.extend("  " + line for line in user_config.lines(user_config_rows))
+
     exit_code = EXIT_BLOCKED if any_blocked else EXIT_FAIL if bootstrap_failed else EXIT_OK
     return {"runtime": runtimes, "channel": "plugin" if args.plugin else "dev", "checks": checks,
-            "drift": [], "exit": exit_code, "lines": lines, "environment": environment}
+            "drift": [], "exit": exit_code, "lines": lines, "environment": environment,
+            "user_config": user_config_rows}
 
 
 def cmd_verify(args):
@@ -402,6 +429,16 @@ def cmd_verify(args):
     })
     if not bundle_config["ok"]:
         ok = False
+    for surface_id, check_id in (("compute-hosts", "compute-hosts-config.inventory"),
+                                 ("memory-sync", "memory-sync-config.policy")):
+        row = user_config.status([surface_id])[0]
+        all_checks.append({
+            "id": check_id,
+            "ok": row["ok"],
+            "detail": row["reading"] + ": " + row["path"],
+        })
+        if not row["ok"]:
+            ok = False
     launcher = bootstrap.compute_hosts_status()
     launcher_expected = bootstrap.compute_hosts_expected()
     launcher_skipped = launcher["status"] == "missing" and not launcher_expected
@@ -1126,6 +1163,20 @@ def cmd_auto_update(args):
     }
 
 
+def cmd_config(args):
+    """Read-only view of the user-owned configuration registry."""
+    rows = user_config.status()
+    ok = all(row["ok"] for row in rows)
+    return {
+        "operation": f"config {args.config_command}",
+        "user_config": rows,
+        "checks": [],
+        "drift": [],
+        "exit": EXIT_OK if ok else EXIT_VERIFY_FAIL,
+        "lines": user_config.lines(rows, verbose=args.verbose),
+    }
+
+
 def cmd_memory(args):
     """Record the shared exchange policy, then join this store to it."""
     operation = args.memory_command
@@ -1186,6 +1237,7 @@ def cmd_memory(args):
 COMMANDS = {
     "install": cmd_install,
     "memory": cmd_memory,
+    "config": cmd_config,
     "verify": cmd_verify,
     "update": cmd_update,
     "status": cmd_status,

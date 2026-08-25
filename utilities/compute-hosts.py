@@ -65,13 +65,19 @@ def config_path() -> Path:
 
 
 class ConfigError(RuntimeError):
-    pass
+    """Inventory cannot be used. ``status`` names why: missing, template, invalid."""
+
+    def __init__(self, message, status="invalid"):
+        super().__init__(message)
+        self.status = status
 
 
-def load_config():
-    path = config_path()
+def load_config(path=None):
+    path = Path(path) if path is not None else config_path()
     if path.is_symlink() or not path.is_file():
-        raise ConfigError(f"compute host inventory is not initialized: {path}")
+        raise ConfigError(
+            f"compute host inventory is not initialized: {path} "
+            "(`harness install` seeds a commented template there)", status="missing")
     try:
         data = _parser_module().parse_yaml_subset(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, ValueError) as exc:
@@ -80,7 +86,12 @@ def load_config():
         raise ConfigError(f"unsupported inventory schema: {path}")
     hosts = data.get("hosts")
     if not isinstance(hosts, dict) or not hosts:
-        raise ConfigError("inventory declares no hosts")
+        # The seeded template parses to exactly this: a schema line and an empty
+        # `hosts:` mapping with every example entry still commented out.
+        raise ConfigError(
+            f"compute host inventory has no hosts yet: edit {path} "
+            "(uncomment and fill in the host entries, then set run_root)",
+            status="template")
     run_root = data.get("run_root")
     if not isinstance(run_root, str) or not run_root.startswith("/"):
         raise ConfigError("run_root must be an absolute path")

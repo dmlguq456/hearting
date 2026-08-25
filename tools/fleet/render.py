@@ -4201,9 +4201,20 @@ def _gpu_token(gpu, available, show_name=False, sessions=None, index_width=1):
 
 def _compute_host_rows(term_width=None, sessions=None):
     snapshot = _COMPUTE_HOSTS
-    if not isinstance(snapshot, dict) or not snapshot.get("configured"):
+    if not isinstance(snapshot, dict):
         return []
     width = max(20, int(term_width or 200))
+    if not snapshot.get("configured"):
+        # Seeded-but-empty or absent inventory: one guidance line so an operator
+        # learns where the file is instead of wondering why the panel is gone.
+        status = _gpu_safe_text(snapshot.get("status") or "missing")
+        hint = _gpu_safe_text(snapshot.get("hint") or "")
+        path = _gpu_safe_text(snapshot.get("path") or "")
+        rows = [[("  COMPUTE RESOURCES", "section_head"), ("  " + status, "dim")],
+                [("    not configured · ", "lvl_y"),
+                 (_clip_w(" — ".join(part for part in (hint, path) if part),
+                          max(1, width - 22)), "dim")]]
+        return [_clip_segs(row, width)[0] for row in rows]
     hosts = [row for row in (snapshot.get("hosts") or ()) if isinstance(row, dict)]
     up = sum(row.get("reachable") is True for row in hosts)
     rows = [[("  COMPUTE RESOURCES", "section_head"),

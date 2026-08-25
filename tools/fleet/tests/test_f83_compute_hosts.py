@@ -31,10 +31,43 @@ class ComputeHostCollectorTest(unittest.TestCase):
             "FLEET_COMPUTE_HOSTS_TOOL": str(self.tool),
         }, clear=False)
 
-    def test_unconfigured_inventory_is_absent_not_an_error_panel(self):
-        with mock.patch.dict(os.environ, {
-                "COMPUTE_HOSTS_CONFIG": str(self.root / "missing.yaml")}, clear=False):
-            self.assertIsNone(compute_hosts.collect())
+    def test_unconfigured_inventory_is_guidance_not_an_error_panel(self):
+        missing = self.root / "missing.yaml"
+        with mock.patch.dict(os.environ, {"COMPUTE_HOSTS_CONFIG": str(missing)}, clear=False):
+            result = compute_hosts.collect()
+        self.assertEqual((result["configured"], result["status"], result["hosts"]),
+                         (False, "missing", []))
+        self.assertEqual(result["path"], str(missing))
+        self.assertNotIn("error", result)
+
+    def test_seeded_template_reports_template_not_probe_failure(self):
+        self.tool.write_text(
+            "import sys\n"
+            "print('compute-hosts: compute host inventory has no hosts yet: edit x',"
+            " file=sys.stderr)\nsys.exit(2)\n", encoding="utf-8")
+        with self._env():
+            result = compute_hosts.collect()
+        self.assertEqual((result["configured"], result["status"]), (False, "template"))
+        self.assertIn("edit", result["hint"])
+        self.assertNotIn("error", result)
+
+    def test_unconfigured_panel_renders_one_guidance_line(self):
+        render.set_compute_hosts({"configured": False, "status": "template", "hosts": [],
+                                  "path": "/home/op/.config/hearting/compute-hosts.yaml",
+                                  "hint": "edit the seeded template"})
+        try:
+            for width in (168, 60):
+                rows = render._compute_host_rows(width)
+                text = "\n".join(render._plain(row) for row in rows)
+                self.assertEqual(len(rows), 2)
+                self.assertIn("COMPUTE RESOURCES  template", text)
+                self.assertIn("not configured", text)
+                self.assertTrue(all(render._dw(render._plain(row)) <= width for row in rows))
+            self.assertIn("compute-hosts.yaml",
+                          "\n".join(render._plain(r) for r in render._compute_host_rows(168)))
+            self.assertEqual(render._gpu_session_resources(), {})
+        finally:
+            render.set_compute_hosts(None)
 
     def test_json_bridge_preserves_full_gpu_process_payload(self):
         payload = {

@@ -517,7 +517,9 @@ neither half is rediscovered per session.
 The static half — addresses, ports, environment roots, and the shared run root
 — lives in one user-owned file at
 `${XDG_CONFIG_HOME:-$HOME/.config}/hearting/compute-hosts.yaml`, alongside the
-other cross-runtime policy files; install and update never write it. The
+other cross-runtime policy files; install seeds it once as a commented template
+and neither install nor update ever rewrites it. `harness config status` shows
+its state next to the other user-owned config surfaces. The
 launcher is shared across runtimes, repairs only an exact owned link, preserves
 foreign collisions, and is removed only by a full uninstall. That file
 is byte-identical on every host: which entry is the local machine is discovered
