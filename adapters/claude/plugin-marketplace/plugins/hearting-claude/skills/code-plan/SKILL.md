@@ -67,7 +67,7 @@ After the `plan/plan-author` unit returns:
 
 1. Check whether the selected graph requires independent review. Otherwise run an inline plan-check.
 2. When independent review is required, the conductor dispatches the `plan-check` sibling node (unit `qa/plan-review`), which writes `{log_dir}/_internal/plan_reviews/round_{N}.md`. Use bounded separate reviewers only when the owner-worker graph and rigor select them.
-3. If blocking issues exist, re-enter the plan boundary for at most one correction at standard or the selected thorough/adversarial budget. Do not loop solely because rigor is high.
+3. If blocking issues exist, run **one batched correction** through the `code-refine` boundary: close every 🔴 of `round_{N}.md` together, including the follow-on gaps the review named. Then dispatch the re-review as round `N+1` with a `Round protocol` block naming the round number and `round_{N}.md`; it is a closure check (prior 🔴 closed? delta clean?), not a fresh independent pass. Never redispatch the full `plan` node for a correction. Budget: at most one correction at standard or the selected thorough/adversarial budget; do not loop solely because rigor is high.
 4. If concerns remain after the budget, add them to the plan's risk or unresolved section and continue only when the caller can safely own the risk.
 
 Record any user-facing pause, including active-plan ambiguity, for the pipeline summary.

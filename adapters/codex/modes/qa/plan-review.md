@@ -80,6 +80,27 @@ smaller budget.
 5. Return per the dual return switch (`io.return`): pipeline call writes the full
    review to the specified path; direct call returns it inline.
 
+## Round Protocol
+
+A review node may run more than once on the same route. The round number and the
+prior review path arrive in the dispatch assignment (`Round protocol` block); when
+absent, treat the pass as round 1. Every round returns one closed finding set — the
+gate must converge, not peel one layer per pass.
+
+- **Round 1 — front-load.** List **every** blocker you can substantiate now, grouped
+  by cause, and for each proposed correction also name the follow-on gaps that
+  correction will predictably open (new steps, callers, allowlists, ordering, tests).
+  The 5–7 cap below applies to 🟡 only; 🔴 is never truncated to stay under it.
+- **Round ≥ 2 — closure check, not a fresh audit.** Read the prior round's 🔴 list
+  first. Your verdict is decided by exactly two questions: (1) is every prior 🔴
+  closed, and (2) did the delta since that round introduce a correctness defect?
+  Report each prior 🔴 as `closed` / `open` / `regressed` with evidence. A finding
+  that is neither a prior 🔴 nor a defect introduced by the delta goes to 🟡 as
+  `deferred` and cannot flip the verdict. Do not re-audit unchanged material.
+- **Verdict.** `✅` when all prior 🔴 are closed and the delta is clean; otherwise
+  `🔴` listing only the open/regressed/new-delta items. Never fail a round on a
+  gap that was visible and unreported in an earlier round you could have raised.
+
 ## Output
 
 Follow the severity triage skeleton (`_shared/triage-output.md`). Unit-specific
@@ -97,8 +118,8 @@ Verdict tokens: `✅ No issues`, `🔴 N issues (M major)`, `🟡 N suggestions`
 
 ## Style and Constraints
 
-- Use analogies to convey why something is a problem. Limit findings to the 5–7 most
-  important, actionable, evidence-backed items; when uncertain, state the step may be
+- Use analogies to convey why something is a problem. Limit 🟡 findings to the 5–7 most
+  important, actionable, evidence-backed items (🔴 is governed by the Round Protocol); when uncertain, state the step may be
   intentional and needs confirmation. Name well-constructed portions explicitly.
 
 ## Memory

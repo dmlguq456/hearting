@@ -8,6 +8,7 @@ sys.path.insert(0, str(ROOT / "utilities"))
 from dispatch_contract import (
     DispatchContractError,
     GOVERNOR_RESERVATION_ENV,
+    parse_registry_metadata,
     resolve_global_registry,
 )
 from worker_bootstrap import assigned_contract, worker_type_for_kind
@@ -274,6 +275,47 @@ def has_model_selection(adapter_args):
     )
 
 
+
+# Batched-correction rounds (core/CONVENTIONS.md §1.1, unit Round Protocol).
+# A route node dispatched again after a failed gate is a correction round, not a
+# fresh pass. The registry is the one durable count of prior attempts for the
+# exact route/node, so the round number is derived here and stamped into the
+# worker assignment; the owner's free-text prompt cannot silently turn round N
+# into "a fresh independent audit" again (observed 2026-08-24 rt-08dd7ba8: twelve
+# execute/impl-review rounds, each FAIL on a new finding).
+def prior_round_attempts(jobs, route_id, node_id, *, exclude_slug=None, exclude_attempt=None):
+ """Return the prior registry rows for one exact route/node as (slug, note) pairs."""
+ prior=[]
+ try:
+  lines=Path(jobs).read_text(encoding="utf-8",errors="replace").splitlines()
+ except OSError:
+  return prior
+ for line in lines:
+  cols=line.rstrip("\n").split("\t")
+  if len(cols)<6: continue
+  meta=parse_registry_metadata(cols[5])
+  if meta.get("route")!=route_id or meta.get("route_node")!=node_id: continue
+  if meta.get("stage_authority")=="0": continue
+  if exclude_slug and cols[4]==exclude_slug: continue
+  if exclude_attempt and meta.get("attempt_id")==exclude_attempt: continue
+  prior.append((cols[4],meta.get("note","")))
+ return prior
+
+def round_protocol_block(round_no, worker_type, node_id, prior):
+ """Render the assignment block that scopes a correction round."""
+ if round_no<2: return ""
+ history="; ".join(f"{slug} ({note or 'open'})" for slug,note in prior)
+ head=(f"Round protocol (round {round_no} of route node `{node_id}`; prior attempts: {history}):\n"
+       "- This is a correction round, not a fresh pass. One correction consumes one unit of the intensity retry budget and must close the whole prior 🔴 list at once.\n")
+ if worker_type=="review":
+  body=("- Apply your unit's Round Protocol for round >= 2: read the prior round's review artifact first (the owner assignment names it; otherwise locate the latest `round_{N-1}.md` / `*_fix{M}.md` under the cycle's `_internal/`).\n"
+        "- Decide the verdict by exactly two questions: is every prior 🔴 closed, and did the delta introduce a correctness defect? Report each prior 🔴 as closed/open/regressed with evidence.\n"
+        "- A finding that is neither a prior 🔴 nor a delta-introduced defect is 🟡 `deferred` and cannot flip the verdict. Do not re-audit unchanged material, even if the assignment above asks for a fresh independent review.\n")
+ else:
+  body=("- Read the failing review artifact first and close every 🔴 it lists together, including the follow-on gaps it named; do not fix one finding and return for another audit.\n"
+        "- Record, in the stage artifact, each prior 🔴 with the change that closes it so the closure re-review can verify it item by item.\n")
+ return "\n\n"+head+body
+
 def child_env(environ=None):
     """Return the node-wrapper environment without ancestor-only bindings.
 
@@ -416,7 +458,11 @@ def main():
  except ValueError as e:
   raise SystemExit(str(e))
  contract=assigned_contract(capability=route["capability"],worker_type=worker_type,route_node=node["id"],completion_gate=node.get("completion_gate"),root=ROOT)
- argv=[sys.executable,str(wrapper),"--"+a.action,"--worktree",route["cwd"],"--slug",a.slug,"--capability",route["capability"],"--capability-mode",route["capability_mode"],"--qa",a.qa,"--intensity",route["effective_intensity"],"--dispatch-depth",str(node.get("dispatch_depth",1)),"--worker-type",worker_type,"--unit",node.get("unit",""),"--assigned-contract",contract,"--owner",route["capability"],"--route-file",str(Path(a.route).resolve()),"--route-id",route["route_id"],"--route-hash",route["route_hash"],"--route-node",node["id"],"--registry-digest",route["registry_digest"],"--write-scope",";".join(node["write_scope"]),"--completion-gate",node["completion_gate"],"--jobs",str(registry.path),"--prompt-text",a.prompt_text]
+ prior_rounds=prior_round_attempts(registry.path,route["route_id"],node["id"],exclude_slug=a.slug,exclude_attempt=a.attempt_id) if not a.subsession_id else []
+ round_no=len(prior_rounds)+1
+ prompt_text=a.prompt_text+round_protocol_block(round_no,worker_type,node["id"],prior_rounds)
+ if round_no>=2: print(f"correction_round={round_no}")
+ argv=[sys.executable,str(wrapper),"--"+a.action,"--worktree",route["cwd"],"--slug",a.slug,"--capability",route["capability"],"--capability-mode",route["capability_mode"],"--qa",a.qa,"--intensity",route["effective_intensity"],"--dispatch-depth",str(node.get("dispatch_depth",1)),"--worker-type",worker_type,"--unit",node.get("unit",""),"--assigned-contract",contract,"--owner",route["capability"],"--route-file",str(Path(a.route).resolve()),"--route-id",route["route_id"],"--route-hash",route["route_hash"],"--route-node",node["id"],"--registry-digest",route["registry_digest"],"--write-scope",";".join(node["write_scope"]),"--completion-gate",node["completion_gate"],"--jobs",str(registry.path),"--prompt-text",prompt_text]
  unit=node.get("unit","")
  if unit and not unit.startswith("_kernel/"):
   argv += ["--worker-mode",unit]

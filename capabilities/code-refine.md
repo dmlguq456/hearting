@@ -23,6 +23,8 @@ Adapters may expose this capability through native commands, skill files, prompt
 
 This sub-capability follows `core/CONVENTIONS.md §1`: correction and review rigor is derived from intensity rather than independently selected. `code-refine` is optional correction of an existing durable plan after user memo, plan-check feedback, or verification failure. It is not an automatic stage in `direct` or `quick`; `quick` records residual plan concerns instead of opening a repeated review/fix loop.
 
+One `code-refine` pass is one batched correction: it takes the complete 🔴 list of the failing `plan-check` round (and any follow-on gaps that round named) and closes all of them in a single revision, rather than fixing one finding and returning for another audit. The re-review afterwards is the reviewer's closure check for that round, scoped to the prior 🔴 items and the changed steps.
+
 
 ## Artifact Ownership
 

@@ -103,7 +103,7 @@ At the end of each phase:
    - Require every reviewer to write its report and return only the path and a one-line verdict.
 3. Read the review files and act:
    - Advisory-only findings: record them in the checklist and continue.
-   - Minor critical finding: re-enter the execute boundary to fix it once and re-review to `phase_{NN}_fix.md`; treat a remaining critical finding as major.
+   - Critical findings that do not require rollback: re-enter the execute boundary **once** and fix every 🔴 of the review together (plus the follow-on gaps it named); then re-review to `phase_{NN}_fix{M}.md` as a closure check that names the round and the prior review path — never a fresh full audit, and never a full `execute` redispatch. Treat a critical finding still open after that single batched fix as major.
    - Major critical finding: roll back the phase automatically and continue under the family autonomy policy.
      1. Restore every `old_string` recorded in the phase logs.
      2. If rollback fails, read `$SAFETY_COMMIT`, run `git checkout .`, mark all steps `[FAIL]` with `Reverted by git checkout due to rollback failure in Phase N`, and stop at Final Report.

@@ -69,6 +69,8 @@ Rigor is an assurance budget inside the graph selected by intensity. It does not
 | `thorough` | `thorough` | Deeper or multi-axis review | Keep declared groups and realize their thorough width, commonly adding an implementation-risk, failure-mode, or contrarian third leg | Broader evidence and adequacy review | Up to two corrections |
 | `adversarial` | `adversarial` | Hostile owner-plan critique | Realize the adversarial route width and any selected security, contradiction, or failure-mode perspective | Verification plus adversarial evidence | Two corrections plus one selected adversary pass |
 
+A correction in the retry budget is one **batched** pass that closes every blocking finding of the failing round together; the review that follows is a closure check of that list plus the delta (unit Round Protocol), never a fresh full audit. The budget therefore counts rounds, not findings.
+
 Two properties cut across every rigor tier and do not scale away at low intensity:
 
 1. **Adversarial stance is universal (all tiers, including `direct` and `quick`).** Any review or self-check that runs adopts a refute-by-default posture: it actively tries to falsify the artifact's correctness claims, enumerates the concrete failure modes it can substantiate, and treats inadequate evidence as *not proven* rather than a pass. This is a stance inside whatever check already runs, not an added stage, so it adds no dispatch at `direct`/`quick`. It is what makes review adversarial before any separate adversary *pass* exists.

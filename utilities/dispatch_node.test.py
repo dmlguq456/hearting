@@ -583,5 +583,80 @@ class MainMaterializationTest(unittest.TestCase):
         self.assertEqual(run.call_count, 1)
 
 
+class RoundProtocolTest(unittest.TestCase):
+    """Batched-correction rounds: a node redispatched after prior attempts of the
+    same route/node gets a `Round protocol` block stamped into its assignment,
+    scoping a review to a closure check and a stage to one batched fix."""
+
+    def _rows(self, node, n, extra=""):
+        pipe = ("capability=autopilot-code,attempt_schema_version=2,registered_worker=1,"
+                "route=rt-fixture,route_node=" + node + ",note=dead-worker-fail" + extra)
+        return "".join(
+            f"2026-08-24T00:00:0{i}Z\tdone\t/repo\t/wt\tslug-r{i}\t{pipe},attempt_id=att-{node}-{i}\n"
+            for i in range(1, n + 1)
+        )
+
+    def _launch(self, node, rows, slug="slug-next", extra_argv=()):
+        captured = {}
+
+        def fake_run(cmd, **kwargs):
+            captured["argv"] = cmd
+            return mock.Mock(returncode=0)
+
+        route = make_route(node, tuples=[])
+        printed = []
+        with tempfile.TemporaryDirectory() as td:
+            jobs = Path(td) / ".dispatch" / "jobs.log"
+            jobs.parent.mkdir()
+            jobs.write_text(rows)
+            route_path = Path(td) / "route.json"
+            route_path.write_text(json.dumps(route))
+            argv = ["dispatch-node.py", "--route", str(route_path), "--node", node["id"],
+                    "--adapter", "claude", "--slug", slug, "--action", "dry-run",
+                    "--prompt-text", "Perform a fresh independent pass.", *extra_argv]
+            with mock.patch.object(sys, "argv", argv), \
+                 mock.patch.dict(N.os.environ, {"AGENT_DISPATCH_JOBS": str(jobs)}, clear=True), \
+                 mock.patch.object(N.subprocess, "run", side_effect=fake_run), \
+                 mock.patch("builtins.print", side_effect=lambda *a, **k: printed.append(" ".join(map(str, a)))):
+                try:
+                    N.main()
+                except SystemExit:
+                    pass
+        cmd = captured["argv"]
+        return cmd[cmd.index("--prompt-text") + 1], printed
+
+    def test_first_round_has_no_block(self):
+        node = make_node(depth=1, dispatch_fallback=[])
+        prompt, printed = self._launch(node, "")
+        self.assertEqual(prompt, "Perform a fresh independent pass.")
+        self.assertFalse([l for l in printed if l.startswith("correction_round=")])
+
+    def test_stage_round_is_batched_fix(self):
+        node = make_node(depth=1, dispatch_fallback=[])
+        prompt, printed = self._launch(node, self._rows("execute", 2))
+        self.assertIn("Round protocol (round 3 of route node `execute`", prompt)
+        self.assertIn("slug-r1 (dead-worker-fail); slug-r2 (dead-worker-fail)", prompt)
+        self.assertIn("close every 🔴 it lists together", prompt)
+        self.assertNotIn("closed/open/regressed", prompt)
+        self.assertIn("correction_round=3", printed)
+
+    def test_review_round_is_closure_check(self):
+        node = dict(make_node(depth=1, dispatch_fallback=[]), id="impl-review",
+                    kind="review-worker", unit="qa/code-review", completion_gate="code-impl-review")
+        prompt, _ = self._launch(node, self._rows("impl-review", 1) + self._rows("execute", 5))
+        self.assertIn("Round protocol (round 2 of route node `impl-review`", prompt)
+        self.assertIn("closed/open/regressed", prompt)
+        self.assertIn("even if the assignment above asks for a fresh independent review", prompt)
+        self.assertTrue(prompt.startswith("Perform a fresh independent pass."))
+
+    def test_own_slug_subsession_and_other_routes_are_not_rounds(self):
+        node = make_node(depth=1, dispatch_fallback=[])
+        rows = (self._rows("execute", 1).replace("slug-r1", "slug-next")
+                + self._rows("execute", 1, extra=",stage_authority=0").replace("att-execute-1", "att-sub")
+                + self._rows("execute", 1).replace("route=rt-fixture", "route=rt-other").replace("att-execute-1", "att-other"))
+        prompt, _ = self._launch(node, rows)
+        self.assertNotIn("Round protocol", prompt)
+
+
 if __name__ == "__main__":
     unittest.main()

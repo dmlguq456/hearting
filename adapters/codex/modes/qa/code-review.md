@@ -81,6 +81,27 @@ instructions. If the working tree (or an ancestor) contains
 drift from the stack, API contract, and data model — a dispatched worker must check
 this itself; it receives no caller mode signal.
 
+## Round Protocol
+
+A review node may run more than once on the same route. The round number and the
+prior review path arrive in the dispatch assignment (`Round protocol` block); when
+absent, treat the pass as round 1. Every round returns one closed finding set — the
+gate must converge, not peel one layer per pass.
+
+- **Round 1 — front-load.** List **every** blocker you can substantiate now, grouped
+  by cause, and for each proposed correction also name the follow-on gaps that
+  correction will predictably open (new steps, callers, allowlists, ordering, tests).
+  The 5–7 cap below applies to 🟡 only; 🔴 is never truncated to stay under it.
+- **Round ≥ 2 — closure check, not a fresh audit.** Read the prior round's 🔴 list
+  first. Your verdict is decided by exactly two questions: (1) is every prior 🔴
+  closed, and (2) did the delta since that round introduce a correctness defect?
+  Report each prior 🔴 as `closed` / `open` / `regressed` with evidence. A finding
+  that is neither a prior 🔴 nor a defect introduced by the delta goes to 🟡 as
+  `deferred` and cannot flip the verdict. Do not re-audit unchanged material.
+- **Verdict.** `✅` when all prior 🔴 are closed and the delta is clean; otherwise
+  `🔴` listing only the open/regressed/new-delta items. Never fail a round on a
+  gap that was visible and unreported in an earlier round you could have raised.
+
 ## Review Criteria
 
 - **Bug potential**: runtime errors, logic errors, type mismatches
@@ -112,7 +133,8 @@ Verdict tokens: `✅ No issues`, `🔴 N issues (M major)`, `🟡 N suggestions`
 
 - Use analogies to convey "why something is a problem" intuitively. Show before/after
   code for fix suggestions.
-- Limit output to the 5–7 most important findings. When uncertain, say the behavior may
+- Limit 🟡 output to the 5–7 most important findings (🔴 is governed by the Round
+  Protocol above). When uncertain, say the behavior may
   be intentional and name the fact to confirm.
 - Unchanged code is NOT a review target (but verify interactions with changed code).
 - Style-only issues (whitespace, quote types): briefly mention in 🟡 or omit.
