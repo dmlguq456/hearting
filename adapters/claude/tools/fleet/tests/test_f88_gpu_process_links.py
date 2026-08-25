@@ -163,7 +163,7 @@ class GpuProcessAndResourceRenderTest(unittest.TestCase):
             self.assertTrue(all(render._dw(render._plain(row)) <= width for row in rows))
             text = "\n".join(render._plain(row) for row in rows)
             self.assertIn("python train.py", text)
-            for owner in ("job:train", "run:one", "CX/sid-exac", "↳"):
+            for owner in ("job:train", "run:one", "CX/sid-exac"):
                 self.assertNotIn(owner, text)
             process_text = "\n".join(render._plain(row) for row in
                                      render._gpu_process_rows(

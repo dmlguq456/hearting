@@ -4010,7 +4010,7 @@ def _gpu_process_rows(gpu, indent, width):
         command = _gpu_safe_text(process.get("command"))
         if not command:
             command = os.path.basename(_gpu_safe_text(process.get("process_name"))) or "process"
-        row = [(indent + "    ", None), ("→ ", "dim"), (command, "dim")]
+        row = [(indent + "    ", None), ("↳ ", "dim"), (command, "dim")]
         rows.append(_clip_segs(row, width)[0])
     return rows
 
