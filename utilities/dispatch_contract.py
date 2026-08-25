@@ -162,6 +162,15 @@ ATTEMPT_MUTABLE_METADATA = {
     "artifact_proof_observer_ns",
     "artifact_proof_verdict",
     "artifact_proof_sealed_at",
+    "recovery_id",
+    "retry_ordinal",
+    "retry_attempt_id",
+    "retry_claimed_at",
+    "start_permitted",
+    "cancellation_quiescence_receipt",
+    "cancellation_receipt_digest",
+    "quiescence_pgid_proof",
+    "quiescence_descendant_proof",
 }
 ATTEMPT_TERMINAL_EVIDENCE_KEYS = {
     "api_status",
@@ -180,6 +189,8 @@ ATTEMPT_TERMINAL_EVIDENCE_KEYS = {
     "prior_failure_class",
     "conflicting_classifier_source",
     "conflicting_failure_class",
+    "receipt_state",
+    "marker_state",
 }
 _MODULE_ROOT = Path(__file__).resolve().parents[1]
 _CAPACITY_TERMINAL_RE = re.compile(
@@ -205,6 +216,14 @@ def codex_standard_owner_network_enabled(
 GOVERNOR_RESERVATION_ENV = "AGENT_MODEL_GOVERNOR_RESERVATION_TOKEN"
 PID_HOST_NAMESPACE_PROOF = "nspid-procfs-root-v1"
 GROUP_REAP_PROOF = "pgid-empty-v1"
+RECOVERY_CONTRACT_VERSION = 1
+ATTEMPT_CANCELLATION_QUIESCENCE_RECEIPT = (
+    "attempt-cancellation-quiescence-receipt-v1"
+)
+NAMESPACE_PORTABLE_TEARDOWN_RECEIPT = "namespace-portable-teardown-receipt-v1"
+AUTOMATIC_RECEIPTLESS_CLASSIFIER = "automatic-receipt-unavailable-v1"
+CANCELLATION_QUIESCENCE_MAX_WAIT_SECONDS = 2.0
+CANCELLATION_QUIESCENCE_POLL_SECONDS = 0.05
 REPLICA_RESERVATION_ROW_KEYS = (
     "reservation_kind",
     "batch_declared_size",
@@ -367,6 +386,39 @@ class DispatchContractError(ValueError):
         self.detail = detail or reason
 
 
+def _recovery_identity_digest(identity: dict[str, str]) -> str:
+    if any(not value for value in identity.values()):
+        raise DispatchContractError("recovery-identity-incomplete")
+    encoded = json.dumps(
+        identity,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return "rec-" + hashlib.sha256(encoded).hexdigest()
+
+
+def recovery_id(
+    *,
+    source_route_id: str,
+    source_route_hash: str,
+    node_or_group_leg: str,
+    original_attempt_id: str,
+    cancellation_receipt_digest: str,
+) -> str:
+    """Return the stable identity for one receipt-unavailable recovery."""
+
+    return _recovery_identity_digest(
+        {
+            "source_route_id": source_route_id,
+            "source_route_hash": source_route_hash,
+            "node_or_group_leg": node_or_group_leg,
+            "original_attempt_id": original_attempt_id,
+            "cancellation_receipt_digest": cancellation_receipt_digest,
+        }
+    )
+
+
 @dataclass(frozen=True)
 class RegistrySelection:
     path: Path
@@ -416,6 +468,36 @@ class ProcessQuiescence:
 
 
 @dataclass(frozen=True)
+class MarkerBoundDeliveryResult:
+    """One exact marker/row/owned-child snapshot from the jobs lock."""
+
+    marker: dict[str, object] | None
+    marker_digest: str
+    row_revision: str
+    row_digest: str
+    status: str
+    verdict: str
+    quiescent: bool
+    owned_children: int
+    advanced: bool
+    supervisor_terminal: bool = False
+
+
+@dataclass(frozen=True)
+class MarkerBoundCompletionProof:
+    """Full immutable marker-chain proof prepared before the jobs lock."""
+
+    marker: dict[str, object]
+    marker_path: Path
+    marker_digest: str
+    route_id: str
+    route_hash: str
+    node_id: str
+    attempt_id: str
+    immutable_file_digests: tuple[tuple[str, str], ...]
+
+
+@dataclass(frozen=True)
 class AuthoritativeProcessIdentity:
     """One exact PID/start identity valid in the current observer namespace."""
 
@@ -431,6 +513,35 @@ class ProcessGroupObservation:
     state: str
     members: tuple[tuple[int, str, str], ...] = ()
     reason: str = ""
+
+
+@dataclass(frozen=True)
+class QuiescenceProof:
+    """Attempt-bound evidence that both cancellation process sets are empty."""
+
+    proven: bool
+    reason: str
+    attempt_id: str
+    source: str
+    pgid: int | None
+    process_group_state: str
+    descendant_state: str
+    namespace_authority: bool
+    binding_digest: str
+    portable_receipt_digest: str = ""
+
+
+@dataclass(frozen=True)
+class RecoveryRetryClaim:
+    """Durable one-retry admission result for one recovery identity."""
+
+    recovery_id: str
+    original_attempt_id: str
+    retry_ordinal: int
+    retry_attempt_id: str
+    state: str
+    reason: str
+    start_permitted: bool
 
 
 @dataclass(frozen=True)
@@ -1426,6 +1537,166 @@ def _detached_group_drain_receipt(metadata: dict[str, str]) -> bool:
         and metadata.get("attempt_descendant_proof") == ATTEMPT_DESCENDANT_PROOF
         and metadata.get("attempt_descendant_observer_ns") == observer_namespace
     )
+
+
+_CANCELLATION_QUIESCENCE_BINDING_KEYS = (
+    "attempt_id",
+    "route_id",
+    "route_hash",
+    "route_node",
+    "batch_route_id",
+    "batch_route_node",
+    "parallel_group",
+    "parallel_leg_index",
+    "pid",
+    "pid_start",
+    "pid_scope",
+    "pid_host",
+    "pid_host_start",
+    "pid_host_ns",
+    "pid_host_proof",
+    "pid_ns",
+    "pid_observer_ns",
+    "pgid",
+    "pgid_host",
+    "launch_lifecycle",
+    "launch_outcome",
+    "group_reap_proof",
+    "group_reap_pgid",
+    "attempt_descendant_proof",
+    "attempt_descendant_observer_ns",
+)
+
+
+def _canonical_sha256(payload: dict[str, object]) -> str:
+    encoded = json.dumps(
+        payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+    return "sha256:" + hashlib.sha256(encoded).hexdigest()
+
+
+def _cancellation_quiescence_binding_digest(metadata: dict[str, str]) -> str:
+    return _canonical_sha256(
+        {
+            key: metadata.get(key, "")
+            for key in _CANCELLATION_QUIESCENCE_BINDING_KEYS
+        }
+    )
+
+
+def _portable_teardown_receipt_digest(metadata: dict[str, str]) -> str:
+    """Digest the trusted watcher seal without depending on observer visibility."""
+
+    return _canonical_sha256(
+        {
+            "receipt_type": NAMESPACE_PORTABLE_TEARDOWN_RECEIPT,
+            "attempt_id": metadata.get("attempt_id", ""),
+            "pid": metadata.get("pid", ""),
+            "pid_start": metadata.get("pid_start", ""),
+            "pgid": metadata.get("pgid", ""),
+            "observer_namespace": metadata.get("pid_observer_ns", ""),
+            "process_group_state": "empty",
+            "process_group_proof": metadata.get("group_reap_proof", ""),
+            "descendant_state": "empty",
+            "descendant_proof": metadata.get("attempt_descendant_proof", ""),
+        }
+    )
+
+
+def prove_attempt_quiescence(
+    metadata: dict[str, str],
+    *,
+    max_wait_seconds: float = CANCELLATION_QUIESCENCE_MAX_WAIT_SECONDS,
+    poll_seconds: float = CANCELLATION_QUIESCENCE_POLL_SECONDS,
+) -> QuiescenceProof:
+    """Prove exact cancellation quiescence with one explicitly bounded wait.
+
+    The primary path requires a complete empty PGID observation and a complete
+    empty attempt-tag scan from an authoritative namespace.  A trusted detached
+    watcher receipt is the only portable alternative; a currently visible
+    member in either set always wins over that older receipt.
+    """
+
+    attempt_id = metadata.get("attempt_id", "")
+    raw_pid = metadata.get("pid", "")
+    raw_pgid = metadata.get("pgid", "")
+    binding_digest = _cancellation_quiescence_binding_digest(metadata)
+    invalid_identity = bool(
+        not attempt_id
+        or not raw_pid.isdigit()
+        or not metadata.get("pid_start")
+        or not raw_pgid.isdigit()
+        or raw_pgid != raw_pid
+    )
+    if invalid_identity:
+        return QuiescenceProof(
+            False,
+            "cancellation-quiescence-unproven",
+            attempt_id,
+            "exact-teardown",
+            int(raw_pgid) if raw_pgid.isdigit() else None,
+            "unverifiable",
+            "unverifiable",
+            False,
+            binding_digest,
+        )
+    if max_wait_seconds < 0 or poll_seconds <= 0:
+        raise DispatchContractError("cancellation-quiescence-wait-invalid")
+
+    pgid = int(raw_pgid)
+    deadline = time.monotonic() + min(max_wait_seconds, 30.0)
+    while True:
+        group = process_group_observation(pgid)
+        descendants = attempt_tagged_descendants(metadata)
+        namespace_authority = attempt_scan_namespace_authority(metadata)
+        portable = _detached_group_drain_receipt(metadata)
+
+        if group.state == "empty" and descendants.state == "empty" and namespace_authority:
+            return QuiescenceProof(
+                True,
+                "cancellation-quiescence-proven",
+                attempt_id,
+                "exact-teardown",
+                pgid,
+                "empty",
+                "empty",
+                True,
+                binding_digest,
+            )
+
+        visible_live = group.state == "populated" or descendants.state == "populated"
+        if not visible_live and portable:
+            return QuiescenceProof(
+                True,
+                "cancellation-quiescence-proven",
+                attempt_id,
+                "authenticated-namespace-portable",
+                pgid,
+                "empty",
+                "empty",
+                True,
+                binding_digest,
+                _portable_teardown_receipt_digest(metadata),
+            )
+
+        if (
+            group.state == "unverifiable"
+            or descendants.state == "unverifiable"
+            or not namespace_authority
+            or time.monotonic() >= deadline
+        ):
+            return QuiescenceProof(
+                False,
+                "cancellation-quiescence-unproven",
+                attempt_id,
+                "exact-teardown",
+                pgid,
+                group.state,
+                descendants.state,
+                namespace_authority,
+                binding_digest,
+            )
+        time.sleep(min(poll_seconds, max(0.0, deadline - time.monotonic())))
 
 
 def _artifact_proof_receipt(metadata: dict[str, str]) -> bool:
@@ -3893,6 +4164,675 @@ def _atomic_registry_replace(jobs: Path, lines: list[str]) -> None:
             os.unlink(tmp_name)
         except FileNotFoundError:
             pass
+
+
+def _cancellation_quiescence_receipt_record(
+    metadata: dict[str, str], proof: QuiescenceProof
+) -> dict[str, object]:
+    return {
+        "contract_version": RECOVERY_CONTRACT_VERSION,
+        "receipt_type": ATTEMPT_CANCELLATION_QUIESCENCE_RECEIPT,
+        "attempt_id": proof.attempt_id,
+        "route_id": metadata.get("route_id", ""),
+        "route_hash": metadata.get("route_hash", ""),
+        "node_or_group_leg": metadata.get("route_node", "")
+        or metadata.get("batch_route_node", ""),
+        "proof_source": proof.source,
+        "binding_digest": proof.binding_digest,
+        "process_group": {
+            "pgid": str(proof.pgid or ""),
+            "state": "empty",
+            "proof": GROUP_REAP_PROOF,
+        },
+        "attempt_tagged_descendants": {
+            "attempt_id": proof.attempt_id,
+            "state": "empty",
+            "proof": ATTEMPT_DESCENDANT_PROOF,
+        },
+        "namespace_authority": proof.namespace_authority,
+        "portable_receipt_digest": proof.portable_receipt_digest,
+    }
+
+
+def seal_cancellation_quiescence_receipt(
+    jobs: Path, attempt_id: str, proof: QuiescenceProof
+) -> str:
+    """Atomically seal one cancellation-only receipt and return its digest."""
+
+    if (
+        not proof.proven
+        or proof.reason != "cancellation-quiescence-proven"
+        or proof.attempt_id != attempt_id
+        or proof.process_group_state != "empty"
+        or proof.descendant_state != "empty"
+        or not proof.namespace_authority
+    ):
+        raise DispatchContractError("cancellation-quiescence-unproven")
+    ensure_global_registry_writable(jobs)
+    with Path(f"{jobs}.lock").open("a", encoding="utf-8") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        lines = jobs.read_text(encoding="utf-8", errors="replace").splitlines()
+        matches: list[tuple[int, list[str], dict[str, str]]] = []
+        for index, line in enumerate(lines):
+            fields = line.split("\t")
+            if len(fields) != 6:
+                continue
+            metadata = parse_registry_metadata(fields[5])
+            if metadata.get("attempt_id") == attempt_id:
+                matches.append((index, fields, metadata))
+        if len(matches) != 1:
+            raise DispatchContractError(
+                "attempt-row-not-unique", f"attempt_id={attempt_id} rows={len(matches)}"
+            )
+        index, fields, metadata = matches[0]
+        validate_attempt_metadata(metadata)
+
+        if proof.binding_digest != _cancellation_quiescence_binding_digest(metadata):
+            raise DispatchContractError("cancellation-quiescence-proof-drift")
+        current_pgid = metadata.get("pgid", "")
+        if not current_pgid.isdigit() or proof.pgid != int(current_pgid):
+            raise DispatchContractError("cancellation-quiescence-proof-drift")
+        if proof.source == "authenticated-namespace-portable":
+            if (
+                not _detached_group_drain_receipt(metadata)
+                or proof.portable_receipt_digest
+                != _portable_teardown_receipt_digest(metadata)
+            ):
+                raise DispatchContractError("cancellation-portable-receipt-invalid")
+        elif proof.source != "exact-teardown" or proof.portable_receipt_digest:
+            raise DispatchContractError("cancellation-quiescence-proof-source-invalid")
+
+        receipt_digest = _canonical_sha256(
+            _cancellation_quiescence_receipt_record(metadata, proof)
+        )
+        existing_type = metadata.get("cancellation_quiescence_receipt", "")
+        existing_digest = metadata.get("cancellation_receipt_digest", "")
+        if existing_type or existing_digest:
+            if (
+                existing_type == ATTEMPT_CANCELLATION_QUIESCENCE_RECEIPT
+                and existing_digest == receipt_digest
+                and metadata.get("quiescence_pgid_proof") == GROUP_REAP_PROOF
+                and metadata.get("quiescence_descendant_proof")
+                == ATTEMPT_DESCENDANT_PROOF
+            ):
+                return existing_digest
+            raise DispatchContractError("cancellation-quiescence-receipt-conflict")
+        fields[5] = _updated_attempt_metadata(
+            fields[5],
+            {
+                "cancellation_quiescence_receipt":
+                    ATTEMPT_CANCELLATION_QUIESCENCE_RECEIPT,
+                "cancellation_receipt_digest": receipt_digest,
+                "quiescence_pgid_proof": GROUP_REAP_PROOF,
+                "quiescence_descendant_proof": ATTEMPT_DESCENDANT_PROOF,
+            },
+        )
+        lines[index] = "\t".join(fields)
+        _atomic_registry_replace(jobs, lines)
+        return receipt_digest
+
+
+def _stable_recovery_attempt_id(recovery_identity: str) -> str:
+    encoded = f"{recovery_identity}\0retry_ordinal=1".encode("utf-8")
+    return "att-retry-" + hashlib.sha256(encoded).hexdigest()[:32]
+
+
+def _existing_recovery_claim(
+    metadata: dict[str, str], original_attempt_id: str
+) -> RecoveryRetryClaim:
+    recovery_identity = metadata.get("recovery_id", "")
+    if metadata.get("attempt_id") != original_attempt_id:
+        raise DispatchContractError("recovery-claim-original-attempt-mismatch")
+    if metadata.get("note") == "receipt-unavailable-retry-exhausted":
+        return RecoveryRetryClaim(
+            recovery_identity,
+            original_attempt_id,
+            0,
+            "",
+            "exhausted",
+            "receipt-unavailable-retry-exhausted",
+            False,
+        )
+    retry_attempt_id = metadata.get("retry_attempt_id", "")
+    if metadata.get("retry_ordinal") != "1" or not retry_attempt_id:
+        raise DispatchContractError("recovery-claim-incomplete")
+    return RecoveryRetryClaim(
+        recovery_identity,
+        original_attempt_id,
+        1,
+        retry_attempt_id,
+        "claimed",
+        "recovery-retry-claimed",
+        True,
+    )
+
+
+def claim_recovery_retry(
+    jobs: Path,
+    *,
+    recovery_id: str,
+    source_route_id: str,
+    source_route_hash: str,
+    node_or_group_leg: str,
+    original_attempt_id: str,
+    remaining_cascade: int,
+) -> RecoveryRetryClaim:
+    """CAS one stable retry claim, or seal its permanent exhausted terminal."""
+
+    if (
+        not recovery_id
+        or not source_route_id
+        or not source_route_hash
+        or not node_or_group_leg
+        or not original_attempt_id
+        or type(remaining_cascade) is not int
+    ):
+        raise DispatchContractError("recovery-claim-identity-incomplete")
+    ensure_global_registry_writable(jobs)
+    with Path(f"{jobs}.lock").open("a", encoding="utf-8") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        lines = jobs.read_text(encoding="utf-8", errors="replace").splitlines()
+        rows: list[tuple[int, list[str], dict[str, str]]] = []
+        existing: list[dict[str, str]] = []
+        for index, line in enumerate(lines):
+            fields = line.split("\t")
+            if len(fields) != 6:
+                continue
+            metadata = parse_registry_metadata(fields[5])
+            if metadata.get("attempt_id") == original_attempt_id:
+                rows.append((index, fields, metadata))
+            if metadata.get("recovery_id") == recovery_id:
+                existing.append(metadata)
+
+        if existing:
+            if len(existing) != 1:
+                raise DispatchContractError("recovery-claim-not-unique")
+            return _existing_recovery_claim(existing[0], original_attempt_id)
+        if len(rows) != 1:
+            raise DispatchContractError(
+                "attempt-row-not-unique",
+                f"attempt_id={original_attempt_id} rows={len(rows)}",
+            )
+        index, fields, metadata = rows[0]
+        validate_attempt_metadata(metadata)
+        if metadata.get("recovery_id"):
+            raise DispatchContractError("recovery-claim-conflict")
+        if (
+            metadata.get("cancellation_quiescence_receipt")
+            != ATTEMPT_CANCELLATION_QUIESCENCE_RECEIPT
+            or metadata.get("quiescence_pgid_proof") != GROUP_REAP_PROOF
+            or metadata.get("quiescence_descendant_proof")
+            != ATTEMPT_DESCENDANT_PROOF
+            or not re.fullmatch(
+                r"sha256:[0-9a-f]{64}",
+                metadata.get("cancellation_receipt_digest", ""),
+            )
+        ):
+            raise DispatchContractError("cancellation-quiescence-receipt-required")
+        expected_recovery_id = _recovery_identity_digest(
+            {
+                "source_route_id": source_route_id,
+                "source_route_hash": source_route_hash,
+                "node_or_group_leg": node_or_group_leg,
+                "original_attempt_id": original_attempt_id,
+                "cancellation_receipt_digest":
+                    metadata["cancellation_receipt_digest"],
+            }
+        )
+        if recovery_id != expected_recovery_id:
+            raise DispatchContractError("recovery-claim-identity-mismatch")
+        if (
+            metadata.get("route_id") != source_route_id
+            or metadata.get("route_hash") != source_route_hash
+        ):
+            raise DispatchContractError("recovery-claim-source-route-mismatch")
+
+        route_claims = {
+            claim_metadata.get("recovery_id", "")
+            for line in lines
+            if len((claim_fields := line.split("\t"))) == 6
+            and (claim_metadata := parse_registry_metadata(claim_fields[5])).get(
+                "route_id"
+            ) == source_route_id
+            and claim_metadata.get("retry_ordinal") == "1"
+            and claim_metadata.get("recovery_id")
+            and claim_metadata.get("recovery_id") != recovery_id
+        }
+        effective_remaining = max(0, remaining_cascade - len(route_claims))
+        claimed_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        if effective_remaining < 1:
+            prior = {
+                "prior_terminal_note": metadata.get("note", ""),
+                "prior_classifier_source": metadata.get("classifier_source", ""),
+                "prior_failure_class": metadata.get("failure_class", ""),
+            }
+            fields[1] = "done"
+            fields[5] = _updated_attempt_metadata(
+                fields[5],
+                {
+                    "recovery_id": recovery_id,
+                    "retry_claimed_at": claimed_at,
+                    "note": "receipt-unavailable-retry-exhausted",
+                    "failure_class": "blocked",
+                    "classifier_source": AUTOMATIC_RECEIPTLESS_CLASSIFIER,
+                    "reconcile_reason": "receipt-unavailable-retry-exhausted",
+                    **{key: value for key, value in prior.items() if value},
+                },
+                terminal=True,
+            )
+            result = RecoveryRetryClaim(
+                recovery_id,
+                original_attempt_id,
+                0,
+                "",
+                "exhausted",
+                "receipt-unavailable-retry-exhausted",
+                False,
+            )
+        else:
+            retry_attempt_id = _stable_recovery_attempt_id(recovery_id)
+            fields[5] = _updated_attempt_metadata(
+                fields[5],
+                {
+                    "recovery_id": recovery_id,
+                    "retry_ordinal": "1",
+                    "retry_attempt_id": retry_attempt_id,
+                    "retry_claimed_at": claimed_at,
+                },
+            )
+            result = RecoveryRetryClaim(
+                recovery_id,
+                original_attempt_id,
+                1,
+                retry_attempt_id,
+                "claimed",
+                "recovery-retry-claimed",
+                True,
+            )
+        lines[index] = "\t".join(fields)
+        _atomic_registry_replace(jobs, lines)
+        return result
+
+
+def seal_recovery_blocked(
+    jobs: Path,
+    *,
+    original_attempt_id: str,
+    recovery_id: str,
+    reason: str = "receipt-unavailable-retry-exhausted",
+) -> bool:
+    """Seal one recovery as a canonical permanent no-start terminal."""
+
+    if not original_attempt_id or not recovery_id:
+        raise DispatchContractError("recovery-block-identity-incomplete")
+    ensure_global_registry_writable(jobs)
+    with Path(f"{jobs}.lock").open("a", encoding="utf-8") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        lines = jobs.read_text(encoding="utf-8", errors="replace").splitlines()
+        matches: list[tuple[int, list[str], dict[str, str]]] = []
+        for index, line in enumerate(lines):
+            fields = line.split("\t")
+            if len(fields) != 6:
+                continue
+            metadata = parse_registry_metadata(fields[5])
+            if metadata.get("attempt_id") == original_attempt_id:
+                matches.append((index, fields, metadata))
+        if len(matches) != 1:
+            raise DispatchContractError(
+                "attempt-row-not-unique",
+                f"attempt_id={original_attempt_id} rows={len(matches)}",
+            )
+        index, fields, metadata = matches[0]
+        validate_attempt_metadata(metadata)
+        if metadata.get("recovery_id") not in {None, "", recovery_id}:
+            raise DispatchContractError("recovery-block-identity-conflict")
+        if (
+            fields[1] == "done"
+            and metadata.get("recovery_id") == recovery_id
+            and metadata.get("note") == "receipt-unavailable-retry-exhausted"
+            and metadata.get("failure_class") == "blocked"
+            and metadata.get("start_permitted") == "0"
+        ):
+            return False
+        fields[1] = "done"
+        fields[5] = _updated_attempt_metadata(
+            fields[5],
+            {
+                "recovery_id": recovery_id,
+                "note": "receipt-unavailable-retry-exhausted",
+                "failure_class": "blocked",
+                "classifier_source": AUTOMATIC_RECEIPTLESS_CLASSIFIER,
+                "reconcile_reason": reason or "receipt-unavailable-retry-exhausted",
+                "start_permitted": "0",
+                "retry_attempt_id": "",
+                "retry_ordinal": "",
+            },
+            terminal=True,
+        )
+        lines[index] = "\t".join(fields)
+        _atomic_registry_replace(jobs, lines)
+        return True
+
+
+_MARKER_BOUND_PROCESS_KEYS = (
+    "pid",
+    "pid_start",
+    "pid_scope",
+    "pid_host",
+    "pid_host_start",
+    "pid_host_ns",
+    "pid_host_proof",
+    "pid_ns",
+    "pid_observer_ns",
+    "pgid",
+    "pgid_host",
+    "launch_lifecycle",
+    "launch_outcome",
+    "group_reap_proof",
+    "group_reap_pgid",
+    "attempt_descendant_proof",
+    "attempt_descendant_observer_ns",
+    "post_exit_receipt_substitute",
+)
+
+
+def marker_bound_process_identity(
+    metadata: dict[str, str],
+) -> tuple[tuple[str, str], ...]:
+    """Return the process-evidence generation observed before jobs locking."""
+
+    return tuple((key, metadata.get(key, "")) for key in _MARKER_BOUND_PROCESS_KEYS)
+
+
+def _marker_bound_row_verdict(metadata: dict[str, str]) -> str:
+    failure_class = metadata.get("failure_class", "").lower()
+    if failure_class == "pass" or metadata.get("note") in {
+        "completed-marker",
+        "completed-supervisor",
+    }:
+        return "PASS"
+    if failure_class == "fail":
+        return "FAIL"
+    if failure_class == "blocked":
+        return "BLOCKED"
+    return ""
+
+
+def _marker_bound_prepare_marker_proof(
+    metadata: dict[str, str], attempt_id: str
+) -> MarkerBoundCompletionProof | None:
+    """Prove the full immutable marker chain before taking the jobs lock."""
+
+    raw_path = metadata.get("completion_marker", "")
+    if not raw_path:
+        return None
+    marker_path = Path(raw_path)
+    if not marker_path.is_absolute() or marker_path.is_symlink():
+        return None
+    try:
+        marker_bytes = marker_path.read_bytes()
+    except OSError:
+        return None
+    if not marker_bytes or len(marker_bytes) > 65_536:
+        return None
+    try:
+        marker = json.loads(marker_bytes.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError):
+        return None
+    if not isinstance(marker, dict):
+        return None
+    expected = {
+        "route_id": metadata.get("route_id", ""),
+        "route_hash": metadata.get("route_hash", ""),
+        "node_id": metadata.get("route_node", ""),
+        "attempt_id": attempt_id,
+    }
+    if any(not value or marker.get(key) != value for key, value in expected.items()):
+        return None
+    route_path = Path(metadata.get("route_file", ""))
+    if not route_path.is_absolute() or route_path.is_symlink():
+        return None
+    try:
+        route_bytes = route_path.read_bytes()
+        route = json.loads(route_bytes.decode("utf-8"))
+    except (OSError, UnicodeDecodeError, ValueError):
+        return None
+    if (
+        not isinstance(route, dict)
+        or route.get("route_id") != metadata.get("route_id")
+        or route.get("route_hash") != metadata.get("route_hash")
+        or not isinstance(route.get("nodes"), list)
+    ):
+        return None
+    nodes = [
+        node
+        for node in route["nodes"]
+        if isinstance(node, dict) and node.get("id") == metadata.get("route_node")
+    ]
+    evidence_record = marker.get("evidence")
+    if not isinstance(evidence_record, dict):
+        return None
+    evidence_path = Path(str(evidence_record.get("path", "")))
+    history_path = marker_path.parent / f"{metadata.get('route_node', '')}.{marker.get('sequence', 0)}.json"
+    dependency_paths = [route_path, evidence_path, history_path]
+    if marker.get("stage_authority") == "owner-chain":
+        dependency_paths.append(Path(str(marker.get("subsession_manifest", ""))))
+    elif nodes and nodes[0].get("kind") != "resource-runner":
+        safe_attempt = "".join(
+            character if character.isalnum() or character in "._-" else "_"
+            for character in attempt_id
+        )
+        dependency_paths.append(
+            marker_path.parent
+            / f"{metadata.get('route_node', '')}.{safe_attempt}.attempt.json"
+        )
+    dependency_bytes: list[tuple[Path, bytes]] = []
+    try:
+        for dependency_path in dependency_paths:
+            if not dependency_path.is_absolute():
+                return None
+            dependency_bytes.append((dependency_path, dependency_path.read_bytes()))
+    except OSError:
+        return None
+    if dependency_bytes[0][1] != route_bytes:
+        return None
+    if len(nodes) != 1 or not completion_marker_is_current(
+        route, nodes[0], marker_path, marker
+    ):
+        return None
+    try:
+        if marker_path.read_bytes() != marker_bytes:
+            return None
+        if any(path.read_bytes() != raw for path, raw in dependency_bytes):
+            return None
+    except OSError:
+        return None
+    return MarkerBoundCompletionProof(
+        marker=marker,
+        marker_path=marker_path,
+        marker_digest=hashlib.sha256(marker_bytes).hexdigest(),
+        route_id=metadata.get("route_id", ""),
+        route_hash=metadata.get("route_hash", ""),
+        node_id=metadata.get("route_node", ""),
+        attempt_id=attempt_id,
+        immutable_file_digests=tuple(
+            (str(path), hashlib.sha256(raw).hexdigest())
+            for path, raw in dependency_bytes
+        ),
+    )
+
+
+def _marker_bound_current_marker(
+    metadata: dict[str, str],
+    attempt_id: str,
+    proof: MarkerBoundCompletionProof | None,
+) -> tuple[dict[str, object] | None, str]:
+    """CAS only current marker bytes against a pre-lock immutable-chain proof."""
+
+    if proof is None or (
+        metadata.get("completion_marker") != str(proof.marker_path)
+        or metadata.get("route_id") != proof.route_id
+        or metadata.get("route_hash") != proof.route_hash
+        or metadata.get("route_node") != proof.node_id
+        or attempt_id != proof.attempt_id
+    ):
+        return None, ""
+    try:
+        marker_bytes = proof.marker_path.read_bytes()
+    except OSError:
+        return None, ""
+    digest = hashlib.sha256(marker_bytes).hexdigest()
+    if digest != proof.marker_digest:
+        return None, ""
+    try:
+        marker = json.loads(marker_bytes.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError):
+        return None, ""
+    if marker != proof.marker:
+        return None, ""
+    return marker, digest
+
+
+def _marker_bound_latest_rows(lines: list[str]) -> dict[str, tuple[int, list[str], str]]:
+    latest: dict[str, tuple[int, list[str], str]] = {}
+    for index, raw in enumerate(lines):
+        fields = raw.split("\t")
+        if len(fields) != 6:
+            continue
+        attempt_id = parse_registry_metadata(fields[5]).get("attempt_id", "")
+        if attempt_id:
+            if attempt_id in latest:
+                raise DispatchContractError(
+                    "attempt-row-not-unique", f"attempt_id={attempt_id} rows=2+"
+                )
+            latest[attempt_id] = (index, fields, raw)
+    return latest
+
+
+def marker_bound_delivery_transaction(
+    jobs: Path,
+    attempt_id: str,
+    *,
+    parent_attempt_id: str,
+    expected_row_revision: str,
+    expected_process_identity: tuple[tuple[str, str], ...],
+    process_observation: ProcessQuiescence,
+    advance: bool = True,
+) -> MarkerBoundDeliveryResult:
+    """Classify and optionally advance one marker-bound attempt under one lock.
+
+    Process inspection belongs to the caller.  This transaction compares that
+    pre-lock observation with the exact row generation and process identity,
+    reads only the canonical registry and its immutable marker while locked,
+    and performs at most one in-process registry replacement.
+    """
+
+    if not attempt_id or not parent_attempt_id:
+        raise DispatchContractError("delivery-identity-incomplete")
+    try:
+        prelock_lines = jobs.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        prelock_lines = []
+    prelock_rows = _marker_bound_latest_rows(prelock_lines)
+    prelock_current = prelock_rows.get(attempt_id)
+    marker_proof = None
+    if prelock_current is not None:
+        marker_proof = _marker_bound_prepare_marker_proof(
+            parse_registry_metadata(prelock_current[1][5]), attempt_id
+        )
+    ensure_global_registry_writable(jobs)
+    with Path(f"{jobs}.lock").open("a", encoding="utf-8") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        lines = jobs.read_text(encoding="utf-8", errors="replace").splitlines()
+        latest = _marker_bound_latest_rows(lines)
+        current = latest.get(attempt_id)
+        if current is None:
+            return MarkerBoundDeliveryResult(None, "", "", "", "", "", False, 0, False)
+
+        index, fields, raw = current
+        metadata = parse_registry_metadata(fields[5])
+        revision = hashlib.sha256(raw.encode("utf-8")).hexdigest()
+        observation_current = bool(
+            expected_row_revision
+            and revision == expected_row_revision
+            and marker_bound_process_identity(metadata) == expected_process_identity
+        )
+
+        def owned_open_count(rows: dict[str, tuple[int, list[str], str]]) -> int:
+            count = 0
+            for _order, child_fields, _raw in rows.values():
+                child_metadata = parse_registry_metadata(child_fields[5])
+                if (
+                    child_metadata.get("parent_attempt_id") == parent_attempt_id
+                    and child_metadata.get("registered_worker") == "1"
+                    and child_fields[1] in {"open", "running"}
+                ):
+                    count += 1
+            return count
+
+        owned_children = owned_open_count(latest)
+        marker, marker_digest = _marker_bound_current_marker(
+            metadata, attempt_id, marker_proof
+        )
+        verdict = _marker_bound_row_verdict(metadata)
+        quiescent = observation_current and process_observation.state == "quiescent"
+        advanced = False
+        if (
+            advance
+            and observation_current
+            and fields[1] in {"open", "running"}
+            and marker is not None
+            and quiescent
+            and owned_children == 0
+            and verdict in {"", "PASS"}
+        ):
+            fields[1] = "done"
+            fields[5] = _updated_attempt_metadata(
+                fields[5],
+                {
+                    "note": "completed-marker",
+                    "failure_class": "pass",
+                    "classifier_source": "marker-bound-delivery-v1",
+                },
+                terminal=True,
+            )
+            lines[index] = "\t".join(fields)
+            _atomic_registry_replace(jobs, lines)
+            advanced = True
+
+        # Re-read exactly once before returning.  A concurrent writer cannot
+        # enter until this lock is released, and our own replace is the sole
+        # allowed mutation in this scope.
+        refreshed_lines = jobs.read_text(
+            encoding="utf-8", errors="replace"
+        ).splitlines()
+        refreshed = _marker_bound_latest_rows(refreshed_lines)
+        current = refreshed.get(attempt_id)
+        if current is None:
+            return MarkerBoundDeliveryResult(None, "", "", "", "", "", False, 0, advanced)
+        _index, refreshed_fields, refreshed_raw = current
+        refreshed_metadata = parse_registry_metadata(refreshed_fields[5])
+        refreshed_marker, refreshed_marker_digest = _marker_bound_current_marker(
+            refreshed_metadata, attempt_id, marker_proof
+        )
+        refreshed_revision = hashlib.sha256(
+            refreshed_raw.encode("utf-8")
+        ).hexdigest()
+        return MarkerBoundDeliveryResult(
+            marker=refreshed_marker,
+            marker_digest=refreshed_marker_digest,
+            row_revision=refreshed_revision,
+            row_digest=refreshed_revision,
+            status=refreshed_fields[1],
+            verdict=_marker_bound_row_verdict(refreshed_metadata),
+            quiescent=quiescent,
+            owned_children=owned_open_count(refreshed),
+            advanced=advanced,
+            supervisor_terminal=(
+                refreshed_metadata.get("note") == "completed-supervisor"
+                and refreshed_metadata.get("failure_class") == "pass"
+            ),
+        )
 
 
 def attempt_launch_is_available(jobs: Path, attempt_id: str) -> bool:

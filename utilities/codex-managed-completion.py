@@ -22,14 +22,23 @@ from dispatch_completion_join import (  # noqa: E402
     JoinContractError,
     MANAGED_SESSION_PARENT_DELIVERY,
     OPEN_STATES,
+    advance_delivery_timing,
     current_children,
     current_session_children,
+    delivery_timing_fields,
+    receipt_with_delivery_observability,
+    validate_delivery_timing,
 )
 
 
 MAX_RESPONSE_BYTES = 16 * 1024
 MAX_RECEIPT_BYTES = 2048
-ALLOWED_REASONS = {"registry-closed", "terminal-observed"}
+ALLOWED_REASONS = {
+    "registry-closed",
+    "terminal-observed",
+    "row-advanced",
+    "terminal-failure-or-unclosed",
+}
 REQUIRED_ACTIONS = {
     "complete-open", "inspect-done-failure", "advance-completed",
 }
@@ -226,11 +235,26 @@ def normalize_receipt(
         if harness not in {"codex", "claude"}:
             raise CompletionError("registry-child-harness-invalid")
         harnesses[row.attempt_id] = harness
+    try:
+        timing = validate_delivery_timing(
+            receipt.get("delivery_timing", delivery_timing_fields())
+        )
+        observed_ns = time.monotonic_ns()
+        if timing["last_child_terminal_ns"] is None:
+            timing = advance_delivery_timing(
+                timing, "last_child_terminal_ns", at_ns=observed_ns
+            )
+        timing = advance_delivery_timing(
+            timing, "join_completed_ns", at_ns=observed_ns
+        )
+    except JoinContractError as exc:
+        raise CompletionError("delivery-timing-invalid") from exc
     normalized = {
         "schema_version": 2,
         "state": "ready",
         "parent_attempt_id": delivery_parent_id,
         "job_registry": str(jobs),
+        "delivery_timing": timing,
         "children": [
             {
                 "attempt_id": attempt_id,
@@ -245,6 +269,14 @@ def normalize_receipt(
             for attempt_id in sorted(attempts)
         ],
     }
+    try:
+        normalized = receipt_with_delivery_observability(
+            normalized,
+            jobs=jobs,
+            timing=timing,
+        )
+    except JoinContractError as exc:
+        raise CompletionError("delivery-classification-failed") from exc
     if len(canonical(normalized).encode("utf-8")) > MAX_RECEIPT_BYTES:
         raise CompletionError("typed-receipt-oversized")
     return normalized

@@ -20,6 +20,11 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1]
 SUPERVISOR = ROOT / "utilities" / "claude-session-supervisor.py"
 PARENT = "att-parent"
+DELIVERY_TIMING_POINTS = (
+    "last_child_terminal_ns", "join_completed_ns", "same_thread_resume_ns",
+    "exact_harvest_ns", "next_stage_start_ns", "final_report_marker_ns",
+    "owner_terminal_envelope_ns",
+)
 
 
 def seal_route(value: dict) -> dict:
@@ -136,6 +141,13 @@ class ClaudeSessionSupervisorTest(unittest.TestCase):
                 for line in sys.stdin:
                     payload = json.loads(line)
                     prompt = payload['message']['content'][0]['text']
+                    if '--failure-detail' in prompt:
+                        with open(state_path, encoding='utf-8') as state_handle:
+                            state_value = json.load(state_handle)
+                        state_value.pop('outbox', None)
+                        state_value['phase'] = 'running-turn'
+                        with open(state_path, 'w', encoding='utf-8') as state_handle:
+                            json.dump(state_value, state_handle)
                     with open(state_path, encoding='utf-8') as state_handle:
                         delivered = json.load(state_handle)['delivered_attempt_ids']
                     with open(os.environ['FAKE_TRACE'], 'a', encoding='utf-8') as h:
@@ -161,8 +173,19 @@ class ClaudeSessionSupervisorTest(unittest.TestCase):
                 with open(trace, 'a', encoding='utf-8') as h:
                     h.write(json.dumps({'event':'join-start','time':time.monotonic()}) + '\\n')
                 time.sleep(0.2)
-                with open(jobs, 'a', encoding='utf-8') as h:
-                    for attempt in attempts:
+                with open(jobs, encoding='utf-8') as h:
+                    lines = h.read().splitlines()
+                kept, current = [], {}
+                for line in lines:
+                    fields = line.split('\\t')
+                    metadata = dict(part.split('=', 1) for part in fields[5].split(',') if '=' in part) if len(fields) == 6 else {}
+                    attempt = metadata.get('attempt_id')
+                    if attempt in attempts:
+                        current[attempt] = fields
+                    else:
+                        kept.append(line)
+                for attempt in attempts:
+                        fields = current[attempt]
                         route_file = os.environ.get('FAKE_TERMINAL_ROUTE')
                         terminal = ''
                         if route_file:
@@ -181,11 +204,11 @@ class ClaudeSessionSupervisorTest(unittest.TestCase):
                                         f"route_node=report,completion_marker={marker}")
                         else:
                             terminal = ',failure_class=pass,note=completed-supervisor'
-                        h.write('2026-07-23T00:00:01Z\\tdone\\t/repo\\t/wt\\tchild\\t'
-                                'attempt_schema_version=2,dispatch_depth=2,transport=headless,'
-                                'execution_surface=registered-headless,registered_worker=1,'
-                                f'attempt_id={attempt},parent_attempt_id={parent}'
-                                f'{terminal}\\n')
+                        fields[1] = 'done'
+                        fields[5] += terminal
+                        kept.append('\\t'.join(fields))
+                with open(jobs, 'w', encoding='utf-8') as h:
+                    h.write('\\n'.join(kept) + '\\n')
                 with open(trace, 'a', encoding='utf-8') as h:
                     h.write(json.dumps({'event':'join-end','time':time.monotonic()}) + '\\n')
                 print(json.dumps({'schema_version':2,'state':'ready','parent_attempt_id':parent,
@@ -324,6 +347,21 @@ class ClaudeSessionSupervisorTest(unittest.TestCase):
         self.assertEqual(len(starts), 2, rows)
         self.assertEqual(len(completed), 2, rows)
         self.assertEqual(len(joins), 1, rows)
+        self.assertEqual(joins[0]["delivery_timing_schema_version"], 1)
+        self.assertIsInstance(joins[0]["join_completed_ns"], int)
+        self.assertIn('"delivery_classification":"attention"', turns[1]["prompt"])
+        timing_events = [
+            row for row in rows
+            if row.get("type") == "dispatch.supervisor.delivery-timing"
+        ]
+        self.assertEqual(len(timing_events), 1, rows)
+        timing = timing_events[0]
+        points = [timing[point] for point in DELIVERY_TIMING_POINTS]
+        self.assertIsNone(timing["next_stage_start_ns"])
+        observed_points = [value for value in points if value is not None]
+        self.assertTrue(all(isinstance(value, int) for value in observed_points), timing)
+        self.assertEqual(observed_points, sorted(observed_points))
+        self.assertEqual(timing["same_thread_resume_count"], 1)
         self.assertEqual(len(teardowns), 1, rows)
         self.assertEqual(teardowns[0]["reason"], "route-terminal")
         self.assertTrue(all(row["transport"] == "stream-json" for row in starts))
@@ -494,6 +532,14 @@ class ClaudeSessionSupervisorTest(unittest.TestCase):
                 """\
                 import json, os, sys
                 state_path = os.environ['AGENT_DISPATCH_COMPLETION_STATE_FILE']
+                prompt = sys.stdin.read()
+                if '--failure-detail' in prompt:
+                    with open(state_path, encoding='utf-8') as h:
+                        state_value = json.load(h)
+                    state_value.pop('outbox', None)
+                    state_value['phase'] = 'running-turn'
+                    with open(state_path, 'w', encoding='utf-8') as h:
+                        json.dump(state_value, h)
                 with open(state_path, encoding='utf-8') as h:
                     delivered = json.load(h)['delivered_attempt_ids']
                 turn = len(delivered) + 1
@@ -763,13 +809,24 @@ class ClaudeSessionSupervisorTest(unittest.TestCase):
                                        'readiness': 'pending', 'reason': 'process-alive',
                                        'required_action': 'complete-open'}} for attempt in attempts]}}))
                 else:
-                    with open(jobs, 'a', encoding='utf-8') as h:
-                        for attempt in attempts:
-                            h.write('2026-07-23T00:00:01Z\\tdone\\t/repo\\t/wt\\tchild\\t'
-                                    'attempt_schema_version=2,dispatch_depth=2,transport=headless,'
-                                    'execution_surface=registered-headless,registered_worker=1,'
-                                    f'attempt_id={{attempt}},parent_attempt_id={{parent}},'
-                                    'failure_class=pass,note=completed-supervisor\\n')
+                    with open(jobs, encoding='utf-8') as h:
+                        lines = h.read().splitlines()
+                    kept, current = [], {{}}
+                    for line in lines:
+                        fields = line.split('\\t')
+                        metadata = dict(part.split('=', 1) for part in fields[5].split(',') if '=' in part) if len(fields) == 6 else {{}}
+                        attempt = metadata.get('attempt_id')
+                        if attempt in attempts:
+                            current[attempt] = fields
+                        else:
+                            kept.append(line)
+                    for attempt in attempts:
+                        fields = current[attempt]
+                        fields[1] = 'done'
+                        fields[5] += ',failure_class=pass,note=completed-supervisor'
+                        kept.append('\\t'.join(fields))
+                    with open(jobs, 'w', encoding='utf-8') as h:
+                        h.write('\\n'.join(kept) + '\\n')
                     print(json.dumps({{'schema_version': 2, 'state': 'ready',
                         'parent_attempt_id': parent,
                         'children': [{{'attempt_id': attempt, 'status': 'done',

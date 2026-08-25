@@ -158,7 +158,8 @@ def validate_route_contract(route_path: str | Path, node_id: str, cwd: str | Pat
                             current_attempt: str | None = None,
                             model_role: str | None = None,
                             model_profile: str | None = None,
-                            enforce_model_binding: bool = False) -> tuple[dict, dict, dict]:
+                            enforce_model_binding: bool = False,
+                            launch_phase: str | None = None) -> tuple[dict, dict, dict]:
     path = Path(route_path)
     if not path.is_absolute() or not path.is_file():
         raise _fail("route-record-missing", f"route path must be an existing absolute file: {path}")
@@ -167,6 +168,16 @@ def validate_route_contract(route_path: str | Path, node_id: str, cwd: str | Pat
     rid = raw.get("route_id", "unknown")
     try: route = ROUTE.verify_route(raw, cwd)
     except (ValueError, KeyError) as exc: raise _fail("route-verification-failed", str(exc), rid) from exc
+    if launch_phase is not None:
+        compatible, mismatches = ROUTE.revalidate_launch_compatibility(route)
+        if mismatches.get("tuple") == "absent-legacy":
+            raise _fail("launch-compatibility-tuple-required", launch_phase, rid)
+        if not compatible:
+            raise _fail(
+                "launch-runtime-root-mismatch",
+                json.dumps({"phase": launch_phase, "mismatches": mismatches}, sort_keys=True),
+                rid,
+            )
     actual_cwd = Path(cwd)
     actual_root = Path(artifact_root)
     if not actual_cwd.is_absolute(): raise _fail("cwd-not-absolute", str(actual_cwd), rid)
@@ -223,12 +234,14 @@ def main() -> int:
     parser.add_argument("--unit", default=None,
                         help="catalog unit the caller intends to run; must match the sealed node")
     parser.add_argument("--current-attempt")
+    parser.add_argument("--launch-phase", choices=("dry-run", "register", "start"))
     args = parser.parse_args()
     try:
         route, node, git = validate_route_contract(args.route, args.node, args.cwd, args.artifact_root,
             args.capability, args.intensity, args.write_scope, args.route_id, args.route_hash, args.registry_digest,
             current_attempt=args.current_attempt, model_role=args.model_role,
-            model_profile=args.model_profile, enforce_model_binding=True)
+            model_profile=args.model_profile, enforce_model_binding=True,
+            launch_phase=args.launch_phase)
         # Unit binding: a worker may not run a bare or substituted persona against a
         # sealed node (2026-07-22 verify finding). Empty/None observed == unbound claim.
         expected_unit = node.get("unit") or None

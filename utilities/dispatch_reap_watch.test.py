@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -154,6 +155,7 @@ class DispatchReapWatchTest(unittest.TestCase):
             self.assertIn(
                 f"attempt_descendant_observer_ns={identity['pid_observer_ns']}", row
             )
+            self.assertFalse((base / "degradations").exists())
 
     def test_open_missing_result_is_closed_after_exact_group_drain(self):
         with tempfile.TemporaryDirectory() as td:
@@ -173,6 +175,15 @@ class DispatchReapWatchTest(unittest.TestCase):
                     "attempt_id": attempt,
                     "launch_lifecycle": "detached",
                     "log_file": str(base / "missing.jsonl"),
+                    "route_id": "rt-reap-leg",
+                    "route_hash": "sha256:reap-leg",
+                    "route_node": "impl-review-alternative",
+                    "fallback_ordinal": "1",
+                    "parallel_group": "impl-review",
+                    "batch_declared_size": "2",
+                    "batch_parallel_leg_index": "1",
+                    "harness": "codex",
+                    "leg_class": "peer",
                 }.items()
             )
             jobs.write_text(
@@ -198,6 +209,93 @@ class DispatchReapWatchTest(unittest.TestCase):
             self.assertIn("\tdone\t", row)
             self.assertIn("note=dead-missing-result", row)
             self.assertIn("dispatch-reap-missing-result-v1", row)
+            ledger = base / "degradations" / "rt-reap-leg.jsonl"
+            with ledger.open(encoding="utf-8") as stream:
+                events = [json.loads(line) for line in stream]
+            self.assertEqual(len(events), 1)
+            self.assertEqual(events[0]["writer"], "dispatch-reap-watch.py")
+            self.assertEqual(events[0]["kind"], "leg-failure")
+            self.assertEqual(events[0]["route_id"], "rt-reap-leg")
+            self.assertEqual(events[0]["route_hash"], "sha256:reap-leg")
+            self.assertEqual(events[0]["route_node"], "impl-review-alternative")
+            self.assertEqual(events[0]["parallel_group"], "impl-review")
+            self.assertEqual(events[0]["parallel_leg_index"], "1")
+            self.assertEqual(events[0]["parallel_leg_count"], "2")
+            self.assertEqual(events[0]["attempt_id"], attempt)
+            self.assertEqual(events[0]["reason"], "dead-missing-result")
+
+            replay = subprocess.run(
+                [
+                    sys.executable,
+                    str(WATCH),
+                    "--jobs", str(jobs),
+                    "--attempt-id", attempt,
+                    "--pid", str(worker.pid),
+                    "--pid-start", identity["pid_start"],
+                    "--pgid", identity["pgid"],
+                    "--interval", "0.02",
+                ],
+                check=False,
+            )
+            self.assertEqual(replay.returncode, 0)
+            with ledger.open(encoding="utf-8") as stream:
+                replayed_events = [json.loads(line) for line in stream]
+            self.assertEqual(replayed_events, events)
+
+    def test_ledger_failure_does_not_change_missing_result_close(self):
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            jobs = base / "jobs.log"
+            attempt = "att-degradation-write-failure"
+            worker = subprocess.Popen(
+                ["sleep", "0.08"],
+                env={**os.environ, D.ATTEMPT_DESCENDANT_ENV: attempt},
+                start_new_session=True,
+            )
+            identity = D.process_launch_identity(worker.pid)
+            metadata = ",".join(
+                f"{key}={value}"
+                for key, value in {
+                    **identity,
+                    "attempt_id": attempt,
+                    "launch_lifecycle": "detached",
+                    "log_file": str(base / "missing.jsonl"),
+                    "route_id": "rt-ledger-failure",
+                    "route_hash": "sha256:ledger-failure",
+                    "route_node": "test-alternative",
+                    "parallel_group": "test",
+                    "batch_declared_size": "2",
+                    "batch_parallel_leg_index": "1",
+                }.items()
+            )
+            jobs.write_text(
+                "2026-08-09T00:00:00Z\topen\t/repo\t/wt\tworker\t"
+                f"{CURRENT},{metadata}\n",
+                encoding="utf-8",
+            )
+            (base / "degradations").write_text("not-a-directory", encoding="utf-8")
+            watcher = subprocess.Popen(
+                [
+                    sys.executable,
+                    str(WATCH),
+                    "--jobs", str(jobs),
+                    "--attempt-id", attempt,
+                    "--pid", str(worker.pid),
+                    "--pid-start", identity["pid_start"],
+                    "--pgid", identity["pgid"],
+                    "--interval", "0.02",
+                ]
+            )
+            worker.wait(timeout=5)
+            self.assertEqual(watcher.wait(timeout=5), 0)
+            row = jobs.read_text(encoding="utf-8")
+            self.assertIn("\tdone\t", row)
+            self.assertIn("note=dead-missing-result", row)
+            self.assertIn("dispatch-reap-missing-result-v1", row)
+            self.assertEqual(
+                (base / "degradations").read_text(encoding="utf-8"),
+                "not-a-directory",
+            )
 
     def test_live_parent_defers_missing_result_close(self):
         with tempfile.TemporaryDirectory() as td:

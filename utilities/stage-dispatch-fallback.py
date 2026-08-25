@@ -135,10 +135,11 @@ def compact_diagnostic(output: str, limit: int = 1000) -> str:
     return value[:limit] or "-"
 
 
-def load_node(route_path: Path, node_id: str) -> tuple[dict, dict]:
+def load_node(route_path: Path, node_id: str, launch_phase: str) -> tuple[dict, dict]:
     route = json.loads(route_path.read_text(encoding="utf-8"))
     verify = subprocess.run(
-        [sys.executable, str(ROOT / "utilities/capability-route.py"), "verify", "--route", str(route_path)],
+        [sys.executable, str(ROOT / "utilities/capability-route.py"), "verify", "--route", str(route_path),
+         "--launch-phase", launch_phase],
         cwd=ROOT,
         text=True,
         capture_output=True,
@@ -1334,9 +1335,20 @@ def main() -> int:
                 "legacy-broker-route-read-only",76,
                 contract_version=str(raw_contract or 1),child_spawned="0",
             )
-        route, node = load_node(args.route, args.node)
+        route, node = load_node(args.route, args.node, args.action)
     except (OSError, ValueError, json.JSONDecodeError) as exc:
-        return fail("invalid-fallback-route", 65, detail=str(exc))
+        detail = str(exc)
+        if "launch-runtime-root-mismatch" in detail:
+            return fail(
+                "launch-runtime-root-mismatch", 65, detail=detail,
+                registered="0", started="0", child_spawned="0",
+            )
+        if "launch-compatibility-tuple-required" in detail:
+            return fail(
+                "launch-compatibility-tuple-required", 65, detail=detail,
+                registered="0", started="0", child_spawned="0",
+            )
+        return fail("invalid-fallback-route", 65, detail=detail)
     contract = route.get("dispatch_contract_version") or route.get("broker_contract_version")
     if contract != 3:
         return fail("legacy-broker-route-read-only", 76, contract_version=str(contract or 1), child_spawned="0")

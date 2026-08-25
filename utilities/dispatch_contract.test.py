@@ -10,6 +10,27 @@ from replica_batch_contract import build_manifest
 
 CURRENT="attempt_schema_version=2,dispatch_depth=2,transport=headless,execution_surface=registered-headless,registered_worker=1,fallback_hop=same-harness-headless"
 
+def cancellation_metadata(attempt="att-cancellation-proof",portable=False):
+ metadata={
+  "attempt_id":attempt,"route_id":"rt-recovery",
+  "route_hash":"sha256:"+"4"*64,"route_node":"execute",
+  "pid":"41","pid_start":"900","pgid":"41",
+  "pid_scope":"namespace-local","pid_observer_ns":"pid:[401]",
+  "pid_ns":"pid:[401]","launch_lifecycle":"detached",
+ }
+ if portable:
+  metadata.update({
+   "launch_outcome":"governed-process-group-drained",
+   "group_reap_proof":D.GROUP_REAP_PROOF,"group_reap_pgid":"41",
+   "attempt_descendant_proof":D.ATTEMPT_DESCENDANT_PROOF,
+   "attempt_descendant_observer_ns":"pid:[401]",
+  })
+ return metadata
+
+def attempt_row(metadata,status="open"):
+ pipe=CURRENT+","+",".join(f"{key}={value}" for key,value in metadata.items())
+ return f"2026-08-25T00:00:00Z\t{status}\t/r\t/w\texecute\t{pipe}"
+
 class DispatchContractTest(unittest.TestCase):
  def test_versioned_source_registry_fallback_matrix(self):
   with tempfile.TemporaryDirectory() as td:
@@ -69,6 +90,490 @@ class DispatchContractTest(unittest.TestCase):
            "sandbox":"workspace-write"}
    values.update(changed)
    self.assertFalse(D.codex_standard_owner_network_enabled(**values), changed)
+
+ def test_recovery_identity_is_canonical_and_process_stable(self):
+  identity={
+   "source_route_id":"rt-source",
+   "source_route_hash":"sha256:"+"1"*64,
+   "node_or_group_leg":"execute/leg-1",
+   "original_attempt_id":"att-original",
+   "cancellation_receipt_digest":"sha256:"+"2"*64,
+  }
+  expected="rec-"+hashlib.sha256(json.dumps(
+   identity,ensure_ascii=False,sort_keys=True,separators=(",",":"),
+  ).encode("utf-8")).hexdigest()
+  self.assertEqual(D.recovery_id(**identity),expected)
+  self.assertEqual(D.recovery_id(
+   cancellation_receipt_digest=identity["cancellation_receipt_digest"],
+   original_attempt_id=identity["original_attempt_id"],
+   node_or_group_leg=identity["node_or_group_leg"],
+   source_route_hash=identity["source_route_hash"],
+   source_route_id=identity["source_route_id"],
+  ),expected)
+  code=("import json,sys;from pathlib import Path;"
+        "sys.path.insert(0,sys.argv[1]);import dispatch_contract as D;"
+        "print(D.recovery_id(**json.loads(sys.argv[2])))")
+  ordered=json.dumps(identity)
+  reversed_order=json.dumps(dict(reversed(tuple(identity.items()))))
+  observed=[subprocess.run(
+   [sys.executable,"-c",code,str(P.parent),payload],
+   check=True,text=True,capture_output=True,
+  ).stdout.strip() for payload in (ordered,reversed_order)]
+  self.assertEqual(observed,[expected,expected])
+
+ def test_recovery_identity_rejects_every_incomplete_field(self):
+  identity={
+   "source_route_id":"rt-source",
+   "source_route_hash":"sha256:"+"1"*64,
+   "node_or_group_leg":"execute",
+   "original_attempt_id":"att-original",
+   "cancellation_receipt_digest":"sha256:"+"2"*64,
+  }
+  for key in identity:
+   with self.subTest(key=key):
+    incomplete={**identity,key:""}
+    with self.assertRaises(D.DispatchContractError) as caught:
+     D.recovery_id(**incomplete)
+    self.assertEqual(caught.exception.reason,"recovery-identity-incomplete")
+
+ def test_recovery_metadata_round_trips_through_annotate_and_close(self):
+  with tempfile.TemporaryDirectory() as td:
+   jobs=Path(td)/"jobs.log";attempt="att-recovery-schema"
+   row=(f"2026-08-25T00:00:00Z\topen\t/r\t/w\texecute\t{CURRENT},"
+        f"route_id=rt-source,route_node=execute,attempt_id={attempt}")
+   self.assertTrue(D.claim_attempt_row(jobs,attempt,row))
+   rid=D.recovery_id(
+    source_route_id="rt-source",source_route_hash="sha256:"+"1"*64,
+    node_or_group_leg="execute",original_attempt_id=attempt,
+    cancellation_receipt_digest="sha256:"+"2"*64)
+   mutable={
+    "recovery_id":rid,
+    "retry_ordinal":"1",
+    "retry_attempt_id":"att-retry-schema",
+    "retry_claimed_at":"2026-08-25T00:00:01Z",
+    "cancellation_quiescence_receipt":
+     D.ATTEMPT_CANCELLATION_QUIESCENCE_RECEIPT,
+    "cancellation_receipt_digest":"sha256:"+"2"*64,
+    "quiescence_pgid_proof":D.GROUP_REAP_PROOF,
+    "quiescence_descendant_proof":D.ATTEMPT_DESCENDANT_PROOF,
+   }
+   self.assertTrue(D.annotate_attempt_row(jobs,attempt,mutable))
+   annotated=D.parse_registry_metadata(jobs.read_text().strip().split("\t",5)[5])
+   D.validate_attempt_metadata(annotated)
+   self.assertEqual({key:annotated[key] for key in mutable},mutable)
+   terminal={
+    "classifier_source":D.AUTOMATIC_RECEIPTLESS_CLASSIFIER,
+    "failure_class":"cancelled",
+    "receipt_state":"unavailable",
+    "marker_state":"absent",
+   }
+   self.assertTrue(D.close_attempt_row_if(
+    jobs,attempt,"cancelled-receipt-unavailable",lambda _fields:True,
+    evidence=terminal))
+   fields=jobs.read_text().strip().split("\t",5)
+   closed=D.parse_registry_metadata(fields[5])
+   D.validate_attempt_metadata(closed)
+   self.assertEqual(fields[1],"done")
+   self.assertEqual({key:closed[key] for key in mutable},mutable)
+   self.assertEqual({key:closed[key] for key in terminal},terminal)
+
+ def test_cancellation_quiescence_requires_both_empty_sets_and_authority(self):
+  metadata=cancellation_metadata()
+  cases=(
+   ("both-empty",D.ProcessGroupObservation("empty"),
+    D.ProcessGroupObservation("empty"),True,True),
+   ("descendants-unverifiable",D.ProcessGroupObservation("empty"),
+    D.ProcessGroupObservation("unverifiable",reason="foreign"),True,False),
+   ("group-populated",D.ProcessGroupObservation(
+     "populated",((41,"900","S"),)),
+    D.ProcessGroupObservation("empty"),True,False),
+   ("foreign-namespace",D.ProcessGroupObservation("empty"),
+    D.ProcessGroupObservation("empty"),False,False),
+  )
+  for name,group,descendants,authority,expected in cases:
+   with self.subTest(name=name),mock.patch.object(
+    D,"process_group_observation",return_value=group,
+   ),mock.patch.object(
+    D,"attempt_tagged_descendants",return_value=descendants,
+   ),mock.patch.object(
+    D,"attempt_scan_namespace_authority",return_value=authority,
+   ):
+    proof=D.prove_attempt_quiescence(metadata,max_wait_seconds=0)
+   self.assertEqual(proof.proven,expected)
+   self.assertEqual(
+    proof.reason,
+    "cancellation-quiescence-proven" if expected
+    else "cancellation-quiescence-unproven")
+
+ def test_cancellation_quiescence_wait_is_bounded(self):
+  metadata=cancellation_metadata()
+  populated=D.ProcessGroupObservation("populated",((41,"900","S"),))
+  with mock.patch.object(
+   D,"process_group_observation",return_value=populated,
+  ),mock.patch.object(
+   D,"attempt_tagged_descendants",return_value=D.ProcessGroupObservation("empty"),
+  ),mock.patch.object(
+   D,"attempt_scan_namespace_authority",return_value=True,
+  ),mock.patch.object(
+   D.time,"monotonic",side_effect=(10.0,10.05,10.05,10.2),
+  ),mock.patch.object(D.time,"sleep") as sleep:
+   proof=D.prove_attempt_quiescence(
+    metadata,max_wait_seconds=0.1,poll_seconds=0.05)
+  self.assertFalse(proof.proven)
+  self.assertEqual(sleep.call_count,1)
+
+ def test_authenticated_portable_teardown_is_equal_but_live_evidence_wins(self):
+  metadata=cancellation_metadata(portable=True)
+  unverifiable=D.ProcessGroupObservation("unverifiable",reason="foreign")
+  with mock.patch.object(
+   D,"process_group_observation",return_value=unverifiable,
+  ),mock.patch.object(
+   D,"attempt_tagged_descendants",return_value=unverifiable,
+  ),mock.patch.object(
+   D,"attempt_scan_namespace_authority",return_value=False,
+  ):
+   portable=D.prove_attempt_quiescence(metadata,max_wait_seconds=0)
+  self.assertTrue(portable.proven)
+  self.assertEqual(portable.source,"authenticated-namespace-portable")
+  self.assertRegex(portable.portable_receipt_digest,r"^sha256:[0-9a-f]{64}$")
+
+  with mock.patch.object(
+   D,"process_group_observation",return_value=D.ProcessGroupObservation(
+    "populated",((41,"900","S"),)),
+  ),mock.patch.object(
+   D,"attempt_tagged_descendants",return_value=unverifiable,
+  ),mock.patch.object(
+   D,"attempt_scan_namespace_authority",return_value=False,
+  ):
+   stale=D.prove_attempt_quiescence(metadata,max_wait_seconds=0)
+  self.assertFalse(stale.proven)
+
+ def test_cancellation_receipt_seals_exact_and_portable_paths_once(self):
+  for portable in (False,True):
+   with self.subTest(portable=portable),tempfile.TemporaryDirectory() as td:
+    jobs=Path(td)/"jobs.log";metadata=cancellation_metadata(portable=portable)
+    jobs.write_text(attempt_row(metadata)+"\n",encoding="utf-8")
+    group=(D.ProcessGroupObservation("unverifiable",reason="foreign")
+           if portable else D.ProcessGroupObservation("empty"))
+    descendants=(D.ProcessGroupObservation("unverifiable",reason="foreign")
+                 if portable else D.ProcessGroupObservation("empty"))
+    with mock.patch.object(
+     D,"process_group_observation",return_value=group,
+    ),mock.patch.object(
+     D,"attempt_tagged_descendants",return_value=descendants,
+    ),mock.patch.object(
+     D,"attempt_scan_namespace_authority",return_value=not portable,
+    ):
+     proof=D.prove_attempt_quiescence(metadata,max_wait_seconds=0)
+    with mock.patch.object(
+     D,"_atomic_registry_replace",wraps=D._atomic_registry_replace,
+    ) as replace:
+     digest=D.seal_cancellation_quiescence_receipt(
+      jobs,metadata["attempt_id"],proof)
+     replay=D.seal_cancellation_quiescence_receipt(
+      jobs,metadata["attempt_id"],proof)
+    self.assertEqual(replay,digest)
+    self.assertEqual(replace.call_count,1)
+    sealed=D.parse_registry_metadata(jobs.read_text().strip().split("\t",5)[5])
+    self.assertEqual(
+     sealed["cancellation_quiescence_receipt"],
+     D.ATTEMPT_CANCELLATION_QUIESCENCE_RECEIPT)
+    self.assertEqual(sealed["cancellation_receipt_digest"],digest)
+    self.assertEqual(sealed["quiescence_pgid_proof"],D.GROUP_REAP_PROOF)
+    self.assertEqual(
+     sealed["quiescence_descendant_proof"],D.ATTEMPT_DESCENDANT_PROOF)
+
+ def test_stored_cancellation_receipt_revalidates_binding_and_digest(self):
+  with tempfile.TemporaryDirectory() as td:
+   jobs=Path(td)/"jobs.log";metadata=cancellation_metadata()
+   jobs.write_text(attempt_row(metadata)+"\n",encoding="utf-8")
+   empty=D.ProcessGroupObservation("empty")
+   with mock.patch.object(D,"process_group_observation",return_value=empty), \
+        mock.patch.object(D,"attempt_tagged_descendants",return_value=empty), \
+        mock.patch.object(D,"attempt_scan_namespace_authority",return_value=True):
+    proof=D.prove_attempt_quiescence(metadata,max_wait_seconds=0)
+   D.seal_cancellation_quiescence_receipt(jobs,metadata["attempt_id"],proof)
+   raw=jobs.read_text().strip().split("\t",5)
+   drifted=D._updated_attempt_metadata(raw[5],{"pid_start":"901"})
+   jobs.write_text("\t".join((*raw[:5],drifted))+"\n")
+   with self.assertRaises(D.DispatchContractError) as caught:
+    D.seal_cancellation_quiescence_receipt(jobs,metadata["attempt_id"],proof)
+   self.assertEqual(caught.exception.reason,"cancellation-quiescence-proof-drift")
+
+   jobs.write_text(attempt_row(metadata)+"\n",encoding="utf-8")
+   digest=D.seal_cancellation_quiescence_receipt(jobs,metadata["attempt_id"],proof)
+   raw=jobs.read_text().strip().split("\t",5)
+   forged=D._updated_attempt_metadata(
+    raw[5],{"cancellation_receipt_digest":"sha256:"+"f"*64})
+   jobs.write_text("\t".join((*raw[:5],forged))+"\n")
+   with self.assertRaises(D.DispatchContractError) as caught:
+    D.seal_cancellation_quiescence_receipt(jobs,metadata["attempt_id"],proof)
+   self.assertEqual(caught.exception.reason,"cancellation-quiescence-receipt-conflict")
+   self.assertNotEqual(digest,"sha256:"+"f"*64)
+
+ def test_recovery_retry_claim_is_stable_and_idempotent(self):
+  with tempfile.TemporaryDirectory() as td:
+   jobs=Path(td)/"jobs.log";metadata=cancellation_metadata()
+   jobs.write_text(attempt_row(metadata)+"\n",encoding="utf-8")
+   empty=D.ProcessGroupObservation("empty")
+   with mock.patch.object(
+    D,"process_group_observation",return_value=empty,
+   ),mock.patch.object(
+    D,"attempt_tagged_descendants",return_value=empty,
+   ),mock.patch.object(
+    D,"attempt_scan_namespace_authority",return_value=True,
+   ):
+    proof=D.prove_attempt_quiescence(metadata,max_wait_seconds=0)
+   receipt=D.seal_cancellation_quiescence_receipt(
+    jobs,metadata["attempt_id"],proof)
+   rid=D.recovery_id(
+    source_route_id=metadata["route_id"],
+    source_route_hash=metadata["route_hash"],node_or_group_leg="execute",
+    original_attempt_id=metadata["attempt_id"],
+    cancellation_receipt_digest=receipt)
+   kwargs=dict(
+    recovery_id=rid,source_route_id=metadata["route_id"],
+    source_route_hash=metadata["route_hash"],node_or_group_leg="execute",
+    original_attempt_id=metadata["attempt_id"],remaining_cascade=7)
+   with mock.patch.object(
+    D,"_atomic_registry_replace",wraps=D._atomic_registry_replace,
+   ) as replace:
+    first=D.claim_recovery_retry(jobs,**kwargs)
+    replay=D.claim_recovery_retry(jobs,**{**kwargs,"remaining_cascade":0})
+   self.assertEqual(replay,first)
+   self.assertTrue(first.start_permitted)
+   self.assertEqual(first.retry_ordinal,1)
+   self.assertEqual(first.retry_attempt_id,D._stable_recovery_attempt_id(rid))
+   self.assertEqual(replace.call_count,1)
+   self.assertEqual(len(jobs.read_text().splitlines()),1)
+   claimed=D.parse_registry_metadata(jobs.read_text().strip().split("\t",5)[5])
+   self.assertEqual(claimed["retry_attempt_id"],first.retry_attempt_id)
+   self.assertEqual(claimed["retry_ordinal"],"1")
+   self.assertTrue(D.seal_recovery_blocked(
+    jobs,original_attempt_id=metadata["attempt_id"],recovery_id=rid))
+   blocked=D.parse_registry_metadata(jobs.read_text().strip().split("\t",5)[5])
+   self.assertEqual(blocked["start_permitted"],"0")
+   self.assertFalse(blocked.get("retry_attempt_id"))
+   self.assertFalse(blocked.get("retry_ordinal"))
+
+ def test_recovery_retry_exhaustion_is_permanent_and_never_claims_start(self):
+  with tempfile.TemporaryDirectory() as td:
+   jobs=Path(td)/"jobs.log";metadata=cancellation_metadata()
+   metadata.update({
+    "cancellation_quiescence_receipt":
+     D.ATTEMPT_CANCELLATION_QUIESCENCE_RECEIPT,
+    "cancellation_receipt_digest":"sha256:"+"7"*64,
+    "quiescence_pgid_proof":D.GROUP_REAP_PROOF,
+    "quiescence_descendant_proof":D.ATTEMPT_DESCENDANT_PROOF,
+   })
+   jobs.write_text(attempt_row(metadata,status="done")+"\n",encoding="utf-8")
+   rid=D.recovery_id(
+    source_route_id=metadata["route_id"],
+    source_route_hash=metadata["route_hash"],node_or_group_leg="execute",
+    original_attempt_id=metadata["attempt_id"],
+    cancellation_receipt_digest=metadata["cancellation_receipt_digest"])
+   kwargs=dict(
+    recovery_id=rid,source_route_id=metadata["route_id"],
+    source_route_hash=metadata["route_hash"],node_or_group_leg="execute",
+    original_attempt_id=metadata["attempt_id"],remaining_cascade=0)
+   with mock.patch.object(
+    D,"_atomic_registry_replace",wraps=D._atomic_registry_replace,
+   ) as replace:
+    exhausted=D.claim_recovery_retry(jobs,**kwargs)
+    replay=D.claim_recovery_retry(jobs,**{**kwargs,"remaining_cascade":3})
+   self.assertEqual(replay,exhausted)
+   self.assertFalse(exhausted.start_permitted)
+   self.assertEqual(exhausted.reason,"receipt-unavailable-retry-exhausted")
+   self.assertEqual(replace.call_count,1)
+   fields=jobs.read_text().strip().split("\t",5)
+   sealed=D.parse_registry_metadata(fields[5])
+   self.assertEqual(fields[1],"done")
+   self.assertEqual(sealed["note"],"receipt-unavailable-retry-exhausted")
+   self.assertEqual(sealed["failure_class"],"blocked")
+   self.assertNotIn("retry_attempt_id",sealed)
+   self.assertFalse(D.attempt_launch_is_available(jobs,metadata["attempt_id"]))
+
+ def test_route_wide_retry_limit_is_recomputed_inside_claim_lock(self):
+  with tempfile.TemporaryDirectory() as td:
+   jobs=Path(td)/"jobs.log";rows=[];identities=[]
+   for index in range(2):
+    metadata=cancellation_metadata(f"att-route-cas-{index}")
+    metadata.update({
+     "cancellation_quiescence_receipt":D.ATTEMPT_CANCELLATION_QUIESCENCE_RECEIPT,
+     "cancellation_receipt_digest":"sha256:"+str(index+7)*64,
+     "quiescence_pgid_proof":D.GROUP_REAP_PROOF,
+     "quiescence_descendant_proof":D.ATTEMPT_DESCENDANT_PROOF,
+    })
+    rows.append(attempt_row(metadata,status="done"))
+    identities.append((metadata,D.recovery_id(
+     source_route_id=metadata["route_id"],source_route_hash=metadata["route_hash"],
+     node_or_group_leg="execute",original_attempt_id=metadata["attempt_id"],
+     cancellation_receipt_digest=metadata["cancellation_receipt_digest"])))
+   jobs.write_text("\n".join(rows)+"\n")
+   metadata,rid=identities[0]
+   first=D.claim_recovery_retry(
+    jobs,recovery_id=rid,source_route_id=metadata["route_id"],
+    source_route_hash=metadata["route_hash"],node_or_group_leg="execute",
+    original_attempt_id=metadata["attempt_id"],remaining_cascade=1)
+   with jobs.open("a") as stream:
+    stream.write(attempt_row({
+     **cancellation_metadata(first.retry_attempt_id),
+     "recovery_id":rid,"retry_ordinal":"1",
+    })+"\n")
+   metadata,rid=identities[1]
+   second=D.claim_recovery_retry(
+    jobs,recovery_id=rid,source_route_id=metadata["route_id"],
+    source_route_hash=metadata["route_hash"],node_or_group_leg="execute",
+    original_attempt_id=metadata["attempt_id"],remaining_cascade=1)
+   claims=[first,second]
+   self.assertEqual([claim.start_permitted for claim in claims],[True,False])
+   self.assertEqual(claims[1].reason,"receipt-unavailable-retry-exhausted")
+
+ def test_four_field_marker_never_advances_to_false_pass(self):
+  with tempfile.TemporaryDirectory() as td:
+   base=Path(td);jobs=base/"jobs.log";attempt="att-marker-delivery"
+   marker=base/"execute.json"
+   marker.write_text(json.dumps({
+    "schema_version":2,"route_id":"rt-delivery",
+    "route_hash":"sha256:"+"3"*64,"node_id":"execute",
+    "attempt_id":attempt,
+   }),encoding="utf-8")
+   metadata=(f"{CURRENT},attempt_id={attempt},route_id=rt-delivery,"
+             f"route_hash=sha256:{'3'*64},route_node=execute,"
+             f"completion_marker={marker},launch_outcome=never-launched")
+   raw=f"2026-08-25T00:00:00Z\topen\t/r\t/w\texecute\t{metadata}"
+   jobs.write_text(raw+"\n",encoding="utf-8")
+   parsed=D.parse_registry_metadata(metadata)
+   with mock.patch.object(
+    D,"_updated_attempt_metadata",wraps=D._updated_attempt_metadata,
+   ) as update, mock.patch.object(
+    D,"_atomic_registry_replace",wraps=D._atomic_registry_replace,
+   ) as replace, mock.patch.object(
+    D,"attempt_process_quiescence",
+    side_effect=AssertionError("process inspection inside jobs lock"),
+   ) as process:
+    result=D.marker_bound_delivery_transaction(
+     jobs,attempt,parent_attempt_id=attempt,
+     expected_row_revision=hashlib.sha256(raw.encode()).hexdigest(),
+     expected_process_identity=D.marker_bound_process_identity(parsed),
+     process_observation=D.ProcessQuiescence("quiescent","fixture"),
+    )
+   self.assertFalse(result.advanced)
+   self.assertEqual((result.status,result.verdict),("open",""))
+   self.assertTrue(result.quiescent)
+   self.assertEqual(result.owned_children,0)
+   self.assertEqual(update.call_count,0)
+   self.assertEqual(replace.call_count,0)
+   process.assert_not_called()
+   current=jobs.read_text(encoding="utf-8").strip()
+   self.assertEqual(result.row_revision,hashlib.sha256(current.encode()).hexdigest())
+
+ def test_duplicate_exact_attempt_or_owned_child_fails_closed(self):
+  with tempfile.TemporaryDirectory() as td:
+   base=Path(td);jobs=base/"jobs.log";attempt="att-marker-duplicate"
+   marker=base/"execute.json";marker.write_text("{}")
+   metadata=(f"{CURRENT},attempt_id={attempt},route_id=rt-delivery,"
+             f"route_hash=sha256:{'3'*64},route_node=execute,"
+             f"completion_marker={marker},launch_outcome=never-launched")
+   raw=f"2026-08-25T00:00:00Z\topen\t/r\t/w\texecute\t{metadata}"
+   child=(f"2026-08-25T00:00:01Z\topen\t/r\t/w\tchild\t{CURRENT},"
+          f"attempt_id=att-owned-child,parent_attempt_id={attempt}")
+   parsed=D.parse_registry_metadata(metadata)
+   for duplicate in (raw,child):
+    with self.subTest(duplicate=duplicate.split("\t")[4]):
+     jobs.write_text("\n".join((raw,child,duplicate))+"\n")
+     with self.assertRaises(D.DispatchContractError) as caught:
+      D.marker_bound_delivery_transaction(
+       jobs,attempt,parent_attempt_id=attempt,
+       expected_row_revision=hashlib.sha256(raw.encode()).hexdigest(),
+       expected_process_identity=D.marker_bound_process_identity(parsed),
+       process_observation=D.ProcessQuiescence("quiescent","fixture"))
+     self.assertEqual(caught.exception.reason,"attempt-row-not-unique")
+
+ def test_full_marker_chain_is_proved_before_jobs_lock_and_advances_once(self):
+  with tempfile.TemporaryDirectory() as td:
+   base=Path(td);jobs=base/"jobs.log";attempt="att-marker-full"
+   route_path=base/"route.json";marker_path=base/"execute.json"
+   evidence=base/"evidence.md";evidence.write_text("verified\n")
+   route={
+    "route_id":"rt-delivery","route_hash":"sha256:"+"5"*64,
+    "registry_digest":"sha256:"+"6"*64,
+    "nodes":[{"id":"execute","completion_gate":"code-execute","dispatch_depth":2}],
+   }
+   route_path.write_text(json.dumps(route))
+   marker={
+    "schema_version":2,"sequence":1,"route_id":route["route_id"],
+    "route_hash":route["route_hash"],"registry_digest":route["registry_digest"],
+    "node_id":"execute","completion_gate":"code-execute","attempt_id":attempt,
+    "dispatch_depth":2,"transport":"headless",
+    "execution_surface":"registered-headless","registered_worker":True,
+    "fallback_hop":"same-harness-headless",
+    "evidence":{"path":str(evidence),"sha256":hashlib.sha256(evidence.read_bytes()).hexdigest()},
+   }
+   marker_path.write_text(json.dumps(marker))
+   history=base/"execute.1.json";history.write_text(json.dumps(marker))
+   link=base/f"execute.{attempt}.attempt.json"
+   link.write_text(json.dumps({
+    "schema_version":2,"route_id":route["route_id"],"node_id":"execute",
+    "attempt_id":attempt,"dispatch_depth":2,"transport":"headless",
+    "execution_surface":"registered-headless","registered_worker":True,
+    "fallback_hop":"same-harness-headless",
+    "evidence_sha256":marker["evidence"]["sha256"],
+    "completion_marker":str(marker_path),"completion_marker_history":str(history),
+   }))
+   metadata=(f"{CURRENT},attempt_id={attempt},route_id={route['route_id']},"
+             f"route_hash={route['route_hash']},route_node=execute,"
+             f"route_file={route_path},completion_marker={marker_path},"
+             "launch_outcome=never-launched")
+   raw=f"2026-08-25T00:00:00Z\topen\t/r\t/w\texecute\t{metadata}"
+   jobs.write_text(raw+"\n")
+   guarded={route_path.resolve(),evidence.resolve(),history.resolve(),link.resolve()}
+   original_read_text=Path.read_text;original_read_bytes=Path.read_bytes
+   def assert_unlocked(path):
+    if path.resolve() not in guarded: return
+    with Path(f"{jobs}.lock").open("a") as probe:
+     fcntl.flock(probe.fileno(),fcntl.LOCK_EX|fcntl.LOCK_NB)
+     fcntl.flock(probe.fileno(),fcntl.LOCK_UN)
+   def checked_read_text(path,*args,**kwargs):
+    assert_unlocked(path);return original_read_text(path,*args,**kwargs)
+   def checked_read_bytes(path,*args,**kwargs):
+    assert_unlocked(path);return original_read_bytes(path,*args,**kwargs)
+   parsed=D.parse_registry_metadata(metadata)
+   with mock.patch.object(Path,"read_text",checked_read_text), \
+        mock.patch.object(Path,"read_bytes",checked_read_bytes):
+    result=D.marker_bound_delivery_transaction(
+     jobs,attempt,parent_attempt_id=attempt,
+     expected_row_revision=hashlib.sha256(raw.encode()).hexdigest(),
+     expected_process_identity=D.marker_bound_process_identity(parsed),
+     process_observation=D.ProcessQuiescence("quiescent","fixture"))
+   self.assertTrue(result.advanced)
+   self.assertEqual((result.status,result.verdict),("done","PASS"))
+
+ def test_marker_bound_delivery_revision_drift_refuses_false_pass(self):
+  with tempfile.TemporaryDirectory() as td:
+   base=Path(td);jobs=base/"jobs.log";attempt="att-marker-drift"
+   marker=base/"execute.json"
+   marker.write_text(json.dumps({
+    "route_id":"rt-delivery","route_hash":"sha256:"+"4"*64,
+    "node_id":"execute","attempt_id":attempt,
+   }),encoding="utf-8")
+   metadata=(f"{CURRENT},attempt_id={attempt},route_id=rt-delivery,"
+             f"route_hash=sha256:{'4'*64},route_node=execute,"
+             f"completion_marker={marker},launch_outcome=never-launched")
+   raw=f"2026-08-25T00:00:00Z\topen\t/r\t/w\texecute\t{metadata}"
+   jobs.write_text(raw+"\n",encoding="utf-8")
+   parsed=D.parse_registry_metadata(metadata)
+   with mock.patch.object(D,"_atomic_registry_replace") as replace:
+    result=D.marker_bound_delivery_transaction(
+     jobs,attempt,parent_attempt_id=attempt,
+     expected_row_revision="0"*64,
+     expected_process_identity=D.marker_bound_process_identity(parsed),
+     process_observation=D.ProcessQuiescence("quiescent","stale"),
+    )
+   self.assertFalse(result.advanced)
+   self.assertFalse(result.quiescent)
+   self.assertEqual((result.status,result.verdict),("open",""))
+   replace.assert_not_called()
 
  def owner_row(self,attempt,pid,start,slug="owner",extra=""):
   return (f"2026-07-23T00:00:00Z\topen\t/repo\t/wt\t{slug}\t"

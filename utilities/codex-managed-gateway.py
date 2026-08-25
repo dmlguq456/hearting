@@ -36,6 +36,13 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from tools.fleet import interaction as fleet_interaction
+from dispatch_completion_join import (  # noqa: E402
+    DELIVERY_TIMING_POINTS,
+    JoinContractError,
+    advance_delivery_timing,
+    delivery_timing_fields,
+    validate_delivery_timing,
+)
 
 
 MAX_FRAME_BYTES = 16 * 1024 * 1024
@@ -55,11 +62,16 @@ ID_PATTERN = re.compile(r"^[A-Za-z0-9._:@/+\-=]{1,256}$")
 FLEET_SESSION_PATTERN = re.compile(r"^[A-Za-z0-9._-]{1,256}$")
 ALLOWED_RECEIPT_KEYS = {
     "schema_version", "state", "parent_attempt_id", "job_registry", "children",
+    "delivery_timing", "delivery_classification",
 }
 ALLOWED_CHILD_KEYS = {
     "attempt_id", "status", "readiness", "reason", "required_action", "harness",
+    "delivery_classification",
 }
-ALLOWED_REASONS = {"registry-closed", "terminal-observed"}
+ALLOWED_REASONS = {
+    "registry-closed", "terminal-observed", "row-advanced",
+    "terminal-failure-or-unclosed",
+}
 REQUIRED_ACTIONS = {
     "complete-open", "inspect-done-failure", "advance-completed",
 }
@@ -508,7 +520,8 @@ class ManagedGateway:
             return
         allowed = {
             "epoch", "method", "thread_id", "turn_id", "delivery_id",
-            "action", "status", "reason",
+            "action", "status", "reason", "delivery_timing_schema_version",
+            *DELIVERY_TIMING_POINTS,
         }
         row = {
             "event": event,
@@ -1282,6 +1295,7 @@ class ManagedGateway:
             harness = raw.get("harness", "unknown")
             status = raw.get("status")
             required_action = raw.get("required_action")
+            delivery_state = raw.get("delivery_classification")
             if (
                 attempt_id in observed
                 or status not in {"open", "running", "done"}
@@ -1299,6 +1313,25 @@ class ManagedGateway:
                     and status != "done"
                 )
                 or harness not in {"codex", "claude", "unknown"}
+                or delivery_state not in {"success", "attention"}
+                or (
+                    delivery_state == "success"
+                    and required_action != "advance-completed"
+                )
+                or (
+                    delivery_state == "attention"
+                    and required_action == "advance-completed"
+                )
+                or (
+                    delivery_state == "attention"
+                    and status in {"open", "running"}
+                    and required_action != "complete-open"
+                )
+                or (
+                    delivery_state == "attention"
+                    and status == "done"
+                    and required_action != "inspect-done-failure"
+                )
             ):
                 raise GatewayError("receipt-child-contract-invalid")
             observed.add(attempt_id)
@@ -1310,14 +1343,35 @@ class ManagedGateway:
                     "reason": str(raw["reason"]),
                     "required_action": str(required_action),
                     "harness": str(harness),
+                    "delivery_classification": str(delivery_state),
                 }
             )
+        aggregate = (
+            "success"
+            if children and {child["delivery_classification"] for child in children} == {"success"}
+            else "attention"
+        )
+        if receipt.get("delivery_classification") != aggregate:
+            raise GatewayError("receipt-delivery-classification-invalid")
+        try:
+            delivery_timing = validate_delivery_timing(
+                receipt.get("delivery_timing")
+            )
+        except JoinContractError as exc:
+            raise GatewayError("receipt-delivery-timing-invalid") from exc
+        if any(
+            delivery_timing[point] is not None
+            for point in DELIVERY_TIMING_POINTS[2:]
+        ):
+            raise GatewayError("receipt-delivery-timing-phase-invalid")
         normalized = {
             "schema_version": 2,
             "state": "ready",
             "parent_attempt_id": parent_attempt_id,
             "job_registry": raw_jobs,
             "children": children,
+            "delivery_classification": aggregate,
+            "delivery_timing": delivery_timing,
         }
         receipt_bytes = canonical(normalized).encode("utf-8")
         if len(receipt_bytes) > MAX_RECEIPT_BYTES:
@@ -1555,6 +1609,9 @@ class ManagedGateway:
             turn_id=state.active_turn_id,
             delivery_id=pending.delivery_id,
             action=action,
+            **advance_delivery_timing(
+                pending.receipt["delivery_timing"], "same_thread_resume_ns"
+            ),
         )
         if self.fault == "after-send" and not self._fault_used:
             self._fault_used = True

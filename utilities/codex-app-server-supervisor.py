@@ -16,19 +16,23 @@ from typing import Any
 from dispatch_completion_join import (
     JoinContractError,
     SupervisorOutbox,
+    advance_delivery_timing,
     consume_advance_completed_outbox,
     close_wrapper_pass,
     current_children,
+    delivery_timing_fields,
     exact_attempt_row,
     prepare_supervisor_outbox,
     refresh_supervisor_outbox_actions,
     reconcile_finished_children,
     read_supervisor_phase_state,
     receipt_with_current_actions,
+    receipt_with_delivery_observability,
     remove_supervisor_state,
     runtime_wait_requested,
     start_retry_prompt,
     unstarted_child_attempts,
+    validate_delivery_timing,
     write_supervisor_state,
 )
 from dispatch_contract import DispatchContractError, hold_supervisor_lease
@@ -191,10 +195,12 @@ def _typed_receipt(value: Any, parent_attempt_id: str, attempts: set[str]) -> di
         "state": value["state"],
         "parent_attempt_id": parent_attempt_id,
         "children": children,
+        "delivery_timing": value.get("delivery_timing", delivery_timing_fields()),
     }
 
 
 def run_join(args: argparse.Namespace, attempts: set[str]) -> dict[str, Any]:
+    started_ns = time.monotonic_ns()
     command = shlex.split(args.join_command) if args.join_command else [
         sys.executable,
         str(ROOT / "utilities" / "dispatch_completion_join.py"),
@@ -226,7 +232,33 @@ def run_join(args: argparse.Namespace, attempts: set[str]) -> dict[str, Any]:
         raise SupervisorError("join-receipt-json-invalid") from exc
     if result.returncode not in {0, 3}:
         raise SupervisorError("join-process-contract-failed")
-    return _typed_receipt(value, args.parent_attempt_id, attempts)
+    receipt = _typed_receipt(value, args.parent_attempt_id, attempts)
+    completed_ns = time.monotonic_ns()
+    join_timing = validate_delivery_timing(receipt["delivery_timing"])
+    if join_timing["last_child_terminal_ns"] is None:
+        join_timing = advance_delivery_timing(
+            join_timing, "last_child_terminal_ns", at_ns=completed_ns
+        )
+    join_timing = advance_delivery_timing(
+        join_timing, "join_completed_ns", at_ns=completed_ns
+    )
+    observed = receipt_with_delivery_observability(
+        receipt,
+        jobs=Path(args.jobs),
+        timing=join_timing,
+    )
+    emit(
+        {
+            "type": "dispatch.supervisor.join-observed",
+            "parent_attempt_id": args.parent_attempt_id,
+            "attempt_count": len(attempts),
+            "duration_seconds": round(
+                (completed_ns - started_ns) / 1_000_000_000, 3
+            ),
+            **observed["delivery_timing"],
+        }
+    )
+    return observed
 
 
 def settle_runtime_wait_children(
@@ -559,6 +591,8 @@ def main(argv: list[str] | None = None) -> int:
     lease_acquired = False
     delivered: set[str] = set()
     active_outbox: SupervisorOutbox | None = None
+    delivery_timing = delivery_timing_fields()
+    same_thread_resume_count = 0
     lease_exit: tuple[object, object, object] = (None, None, None)
     try:
         lease.__enter__()
@@ -580,6 +614,7 @@ def main(argv: list[str] | None = None) -> int:
                         args.parent_attempt_id,
                         set(active_outbox.attempt_ids),
                     ),
+                    jobs=Path(args.jobs),
                 )
                 active_outbox = refreshed.outbox
             if active_outbox is not None:
@@ -587,6 +622,9 @@ def main(argv: list[str] | None = None) -> int:
                     raise SupervisorError("supervisor-outbox-receipt-missing")
                 prompt = completion_prompt(
                     active_outbox.receipt, active_outbox, jobs=args.jobs
+                )
+                delivery_timing = validate_delivery_timing(
+                    active_outbox.receipt["delivery_timing"]
                 )
         server = AppServer(command, args.worktree, runtime_env)
         server.request(
@@ -621,6 +659,17 @@ def main(argv: list[str] | None = None) -> int:
         next_prompt = prompt
         continuations = 0
         while True:
+            if active_outbox is not None and active_outbox.receipt is not None:
+                if delivery_timing["same_thread_resume_ns"] is None:
+                    same_thread_resume_count += 1
+                delivery_timing = advance_delivery_timing(
+                    delivery_timing, "same_thread_resume_ns"
+                )
+                resumed_receipt = dict(active_outbox.receipt)
+                resumed_receipt["delivery_timing"] = delivery_timing
+                next_prompt = completion_prompt(
+                    resumed_receipt, active_outbox, jobs=args.jobs
+                )
             if active_outbox is None:
                 write_supervisor_state(
                     state_path, args.parent_attempt_id, delivered, phase="running-turn"
@@ -630,7 +679,11 @@ def main(argv: list[str] | None = None) -> int:
             )
             rows = current_children(Path(args.jobs), args.parent_attempt_id)
             current = {row.attempt_id: row for row in rows}
+            completed_delivery = False
             if active_outbox is not None:
+                delivery_timing = advance_delivery_timing(
+                    delivery_timing, "exact_harvest_ns"
+                )
                 consume_advance_completed_outbox(
                     state_path, args.parent_attempt_id, rows
                 )
@@ -655,6 +708,7 @@ def main(argv: list[str] | None = None) -> int:
                             args.parent_attempt_id,
                             set(active_outbox.attempt_ids),
                         ),
+                        jobs=Path(args.jobs),
                     )
                     active_outbox = refreshed.outbox
                     next_prompt = completion_prompt(
@@ -662,10 +716,15 @@ def main(argv: list[str] | None = None) -> int:
                     )
                     continuations += 1
                     continue
+                completed_delivery = True
             new_attempts = set(current).difference(delivered)
             unstarted = unstarted_child_attempts(
                 [current[attempt] for attempt in new_attempts]
             )
+            if completed_delivery and new_attempts and not unstarted:
+                delivery_timing = advance_delivery_timing(
+                    delivery_timing, "next_stage_start_ns"
+                )
             wait_requested = runtime_wait_requested(final_text)
             if wait_requested and (not new_attempts or unstarted):
                 rows, settled = settle_runtime_wait_children(args, delivered)
@@ -745,6 +804,9 @@ def main(argv: list[str] | None = None) -> int:
                     joined_rows = current_children(
                         Path(args.jobs), args.parent_attempt_id, new_attempts
                     )
+                delivery_timing = validate_delivery_timing(
+                    receipt["delivery_timing"]
+                )
                 emit(
                     {
                         "type": "dispatch.supervisor.resumed",
@@ -759,7 +821,9 @@ def main(argv: list[str] | None = None) -> int:
                     state_path,
                     args.parent_attempt_id,
                     delivered,
-                    receipt_with_current_actions(receipt, joined_rows),
+                    receipt_with_current_actions(
+                        receipt, joined_rows, jobs=Path(args.jobs)
+                    ),
                     joined_rows,
                 )
                 delivered = set(prepared.delivered_attempt_ids)
@@ -795,10 +859,27 @@ def main(argv: list[str] | None = None) -> int:
                 continuations += 1
                 continue
 
+            if delivery_timing["join_completed_ns"] is not None:
+                delivery_timing = advance_delivery_timing(
+                    delivery_timing, "final_report_marker_ns"
+                )
             terminal = classify_codex_result(final_text)
             if not reconcile(args, terminal):
                 return 70
+            if delivery_timing["join_completed_ns"] is not None:
+                delivery_timing = advance_delivery_timing(
+                    delivery_timing, "owner_terminal_envelope_ns"
+                )
             emit({"type": "turn.completed", "thread_id": thread_id})
+            if delivery_timing["join_completed_ns"] is not None:
+                emit(
+                    {
+                        "type": "dispatch.supervisor.delivery-timing",
+                        "parent_attempt_id": args.parent_attempt_id,
+                        "same_thread_resume_count": same_thread_resume_count,
+                        **delivery_timing,
+                    }
+                )
             return 0 if terminal.failure_class == "pass" else 3
     except (DispatchContractError, JoinContractError, SupervisorError) as exc:
         lease_exit = (type(exc), exc, exc.__traceback__)

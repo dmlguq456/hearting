@@ -123,6 +123,14 @@ def supervise(manifest: dict, parent: str, jobs: Path, max_seconds: int) -> int:
     return 0 if receipt["complete"] else 1
 
 
+LAUNCH_PHASE_BY_ACTION = {
+    "check": "dry-run",
+    "register": "register",
+    "start": "start",
+    "run": "start",
+}
+
+
 def main() -> int:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("action", choices=("check", "register", "start", "run"))
@@ -140,7 +148,8 @@ def main() -> int:
         manifest = load_manifest(args.manifest, route=route_record, node=node)
         verify = subprocess.run(
             [sys.executable, str(ROOT / "utilities/capability-route.py"), "verify",
-             "--route", manifest["route_file"], "--cwd", manifest["worktree"]],
+             "--route", manifest["route_file"], "--cwd", manifest["worktree"],
+             "--launch-phase", LAUNCH_PHASE_BY_ACTION[args.action]],
             cwd=ROOT, check=False,
         )
         if verify.returncode:

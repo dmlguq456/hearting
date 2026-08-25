@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import importlib.util
+import json
 import os
 from pathlib import Path
 import signal
@@ -21,6 +22,80 @@ SPEC.loader.exec_module(L)
 
 
 class LaunchFenceTest(unittest.TestCase):
+    def test_runtime_root_mismatch_is_reported_without_payload_exec(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            route_path = Path(temp_dir, "route.json")
+            route_path.write_text("{}", encoding="utf-8")
+            gate_read, gate_write = os.pipe()
+            os.write(gate_write, b"1")
+            os.close(gate_write)
+            failure_read, failure_write = os.pipe()
+            try:
+                with mock.patch.object(L, "set_parent_death_signal"), \
+                     mock.patch.object(L.os, "getppid", return_value=123), \
+                     mock.patch.object(L.ROUTE, "verify_route", return_value={}), \
+                     mock.patch.object(
+                         L.ROUTE, "revalidate_launch_compatibility",
+                         return_value=(False, {
+                             "runtime_root": {"expected": "sealed", "observed": "drifted"}
+                         }),
+                     ), \
+                     mock.patch.object(L, "mark_attempt_launch_started") as mark, \
+                     mock.patch.object(L.os, "execvpe") as execvpe:
+                    result = L.cli([
+                        "--parent-pid", "123", "--gate-fd", str(gate_read),
+                        "--failure-fd", str(failure_write),
+                        "--jobs", str(Path(temp_dir, "jobs.log")),
+                        "--attempt-id", "att-fence-drift",
+                        "--route-file", str(route_path),
+                        "--launch-phase", "start", "--", "payload",
+                    ])
+                failure_write = -1
+                self.assertEqual(result, 70)
+                failure = json.loads(os.read(failure_read, 16384))
+                self.assertEqual(failure["schema_version"], 1)
+                self.assertEqual(failure["reason"], "launch-runtime-root-mismatch")
+                self.assertIn("runtime_root", failure["detail"])
+                mark.assert_not_called()
+                execvpe.assert_not_called()
+            finally:
+                os.close(failure_read)
+                if failure_write >= 0:
+                    os.close(failure_write)
+
+    def test_launch_tuple_absent_and_incompatible_never_commit_or_exec(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            route_path = Path(temp_dir, "route.json")
+            route_path.write_text("{}", encoding="utf-8")
+            for case, compatibility, reason in (
+                ("absent", (True, {"tuple": "absent-legacy"}),
+                 "launch-compatibility-tuple-required"),
+                ("incompatible", (False, {"runtime_root": {"expected": "a", "observed": "b"}}),
+                 "launch-runtime-root-mismatch"),
+            ):
+                with self.subTest(case=case), \
+                     mock.patch.object(L, "set_parent_death_signal"), \
+                     mock.patch.object(L.os, "getppid", return_value=123), \
+                     mock.patch.object(L.os, "read", return_value=b"1"), \
+                     mock.patch.object(L.os, "close"), \
+                     mock.patch.object(L.ROUTE, "verify_route", return_value={}), \
+                     mock.patch.object(
+                         L.ROUTE, "revalidate_launch_compatibility",
+                         return_value=compatibility,
+                     ), \
+                     mock.patch.object(L, "mark_attempt_launch_started") as mark, \
+                     mock.patch.object(L.os, "execvpe") as execvpe:
+                    with self.assertRaisesRegex(ValueError, reason):
+                        L.main([
+                            "--parent-pid", "123", "--gate-fd", "9",
+                            "--jobs", str(Path(temp_dir, "jobs.log")),
+                            "--attempt-id", f"att-{case}",
+                            "--route-file", str(route_path),
+                            "--launch-phase", "start", "--", "payload",
+                        ])
+                mark.assert_not_called()
+                execvpe.assert_not_called()
+
     def test_eof_before_publication_executes_nothing(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             marker = Path(temp_dir, "marker")

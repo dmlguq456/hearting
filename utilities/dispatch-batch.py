@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import fcntl
 import hashlib
 import importlib.util
 import itertools
@@ -39,7 +40,11 @@ from dispatch_contract import (  # noqa: E402
     validate_dispatch_log_dir,
 )
 from dispatch_lifecycle import select_launch_lifecycle  # noqa: E402
-from replica_batch_contract import DIGEST, build_manifest  # noqa: E402
+from replica_batch_contract import (  # noqa: E402
+    DIGEST,
+    ReplicaBatchContractError,
+    build_manifest,
+)
 from dispatch_degradation import record_degradation  # noqa: E402
 from dispatch_quality_peer import quality_peer_families  # noqa: E402
 from stage_session_contract import validate_subdivision_or_fallback  # noqa: E402
@@ -130,7 +135,7 @@ def fail(reason: str, code: int, **fields: object) -> int:
     return code
 
 
-def load_route(route_path: Path) -> dict[str, object]:
+def load_route(route_path: Path, launch_phase: str = "dry-run") -> dict[str, object]:
     try:
         route = json.loads(route_path.read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
@@ -146,6 +151,8 @@ def load_route(route_path: Path) -> dict[str, object]:
             str(route_path),
             "--cwd",
             str(route.get("cwd", "")),
+            "--launch-phase",
+            launch_phase,
         ],
         text=True,
         stdout=subprocess.DEVNULL,
@@ -153,8 +160,180 @@ def load_route(route_path: Path) -> dict[str, object]:
         check=False,
     )
     if verify.returncode:
-        raise BatchError("route-record-invalid", verify.stderr.strip()[:512])
+        detail = verify.stderr.strip()[:512]
+        if "launch-runtime-root-mismatch" in detail:
+            raise BatchError("launch-runtime-root-mismatch", detail)
+        if "launch-compatibility-tuple-required" in detail:
+            raise BatchError("launch-compatibility-tuple-required", detail)
+        raise BatchError("route-record-invalid", detail)
     return route
+
+
+PARTIAL_PEER_KEYS = (
+    "node_id",
+    "terminal_attempt_id",
+    "marker_path",
+    "marker_digest",
+    "verdict",
+    "quiescence_proof_digest",
+    "output_evidence_digest",
+    "contract_hash",
+)
+
+
+def record_digest(value: object) -> str:
+    encoded = json.dumps(value, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    return "sha256:" + hashlib.sha256(encoded).hexdigest()
+
+
+def load_partial_continuation(
+    path: Path,
+    source_route: dict[str, object],
+    parallel_group: str,
+    launch_phase: str,
+) -> tuple[dict[str, object], dict[str, object]]:
+    """Load one official continuation and bind it to the exact source group."""
+
+    continuation = load_route(path.resolve(), launch_phase)
+    partial = continuation.get("partial_group_continuation")
+    if (
+        continuation.get("continuation_contract_version") != 1
+        or continuation.get("source_route_id") != source_route.get("route_id")
+        or continuation.get("source_route_hash") != source_route.get("route_hash")
+        or not isinstance(partial, dict)
+        or partial.get("contract_version") != 1
+        or partial.get("source_group_id") != parallel_group
+    ):
+        raise BatchError("partial-continuation-binding-mismatch")
+    realized = partial.get("realized_peer_set")
+    if (
+        not isinstance(realized, list)
+        or not realized
+        or partial.get("reused_peer_set_proof_digest") != record_digest(realized)
+    ):
+        raise BatchError("partial-continuation-peer-proof-invalid")
+    replacement_identity = record_digest({
+        "source_route_id": source_route["route_id"],
+        "source_route_hash": source_route["route_hash"],
+        "source_group_id": parallel_group,
+        "failed_source_attempt_id": partial.get("failed_source_attempt_id"),
+        "gap_leg_id": partial.get("gap_leg_id"),
+        "reused_peer_set_proof_digest": partial.get("reused_peer_set_proof_digest"),
+    })
+    if (
+        partial.get("replacement_leg_identity") != replacement_identity
+        or partial.get("replacement_attempt_id")
+        != "att-" + replacement_identity.split(":", 1)[1][:48]
+    ):
+        raise BatchError("partial-continuation-replacement-identity-invalid")
+    return continuation, partial
+
+
+def revalidate_partial_peers(
+    route: dict[str, object],
+    nodes: list[dict[str, object]],
+    partial: dict[str, object],
+) -> list[dict[str, object]]:
+    """Recompute every reused peer proof from current marker/registry evidence."""
+
+    gap = str(partial.get("gap_leg_id", ""))
+    by_id = {str(node.get("id")): node for node in nodes}
+    expected_ids = set(by_id) - {gap}
+    realized = partial.get("realized_peer_set")
+    if (
+        gap not in by_id
+        or not isinstance(realized, list)
+        or {str(row.get("node_id")) for row in realized if isinstance(row, dict)}
+        != expected_ids
+    ):
+        raise BatchError("partial-continuation-peer-set-incomplete")
+    current_rows: list[dict[str, object]] = []
+    try:
+        for sealed in realized:
+            node_id = str(sealed["node_id"])
+            current, _last_turn = ROUTE_MODULE._continuation_reused_evidence(
+                route, by_id[node_id]
+            )
+            current_row = {key: current[key] for key in PARTIAL_PEER_KEYS}
+            if current_row != sealed:
+                raise BatchError(
+                    "partial-continuation-peer-proof-drift", f"node={node_id}"
+                )
+            current_rows.append(current_row)
+    except (KeyError, TypeError, ValueError) as exc:
+        if isinstance(exc, BatchError):
+            raise
+        raise BatchError("partial-continuation-peer-proof-drift", str(exc)) from exc
+    if record_digest(current_rows) != partial.get("reused_peer_set_proof_digest"):
+        raise BatchError("partial-continuation-peer-proof-drift")
+    return current_rows
+
+
+def partial_source_assignments(
+    jobs: Path,
+    route: dict[str, object],
+    nodes: list[dict[str, object]],
+    partial: dict[str, object],
+    parent_identity: dict[str, str],
+) -> list[tuple[dict[str, object], str, str, int]]:
+    """Recover the original sealed adapter tuple instead of reallocating a retry."""
+
+    attempts = {
+        str(peer["node_id"]): str(peer["terminal_attempt_id"])
+        for peer in partial["realized_peer_set"]
+    }
+    attempts[str(partial["gap_leg_id"])] = str(partial["failed_source_attempt_id"])
+    try:
+        with Path(f"{jobs}.lock").open("a", encoding="utf-8") as lock:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+            lines = jobs.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError as exc:
+        raise BatchError("batch-registry-unreadable", str(exc)) from exc
+    rows: dict[str, tuple[list[str], dict[str, str]]] = {}
+    for node_id, attempt_id in attempts.items():
+        exact = []
+        for line in lines:
+            fields = line.split("\t")
+            if len(fields) != 6:
+                continue
+            metadata = parse_registry_metadata(fields[5])
+            if metadata.get("attempt_id") == attempt_id:
+                exact.append((fields, metadata))
+        if len(exact) != 1:
+            raise BatchError(
+                "partial-continuation-source-row-not-unique",
+                f"node={node_id}:attempt_id={attempt_id}:rows={len(exact)}",
+            )
+        rows[node_id] = exact[0]
+    assignments = []
+    for node in nodes:
+        node_id = str(node["id"])
+        _fields, metadata = rows[node_id]
+        try:
+            validate_attempt_metadata(metadata)
+            adapter = metadata.get("batch_harness") or metadata["harness"]
+            hop = metadata["batch_fallback_hop"]
+            ordinal = int(metadata["batch_fallback_ordinal"])
+            selected = DISPATCH_NODE.resolve_checked_tuple(
+                route, node, adapter, parent_identity=parent_identity
+            )
+        except (
+            DispatchContractError,
+            DISPATCH_NODE.DispatchNodeError,
+            KeyError,
+            ValueError,
+        ) as exc:
+            raise BatchError(
+                "partial-continuation-source-assignment-invalid",
+                f"node={node_id}:{exc}",
+            ) from exc
+        if selected.fallback_hop != hop or selected.ordinal != ordinal:
+            raise BatchError(
+                "partial-continuation-source-assignment-drift",
+                f"node={node_id}",
+            )
+        assignments.append((node, adapter, hop, ordinal))
+    return assignments
 
 
 def parallel_nodes(route: dict[str, object], group: str) -> list[dict[str, object]]:
@@ -583,6 +762,7 @@ def assign_harnesses(
 def stable_attempt_id(
     route: dict[str, object], node: dict[str, object], slug: str, parent: str,
     parent_attempt_id: str, adapter: str, ordinal: int,
+    superseding_recovery_discriminator: str = "",
 ) -> str:
     # Display labels are deliberately excluded. One exact parent generation,
     # route node and selected fallback tuple must always resolve to the same
@@ -595,10 +775,184 @@ def stable_attempt_id(
         "target_harness": adapter,
         "fallback_ordinal": ordinal,
     }
+    if superseding_recovery_discriminator:
+        if not DIGEST.fullmatch(superseding_recovery_discriminator):
+            raise BatchError("partial-continuation-replacement-identity-invalid")
+        # The discriminator is already the compiler's canonical digest over
+        # source route/group/gap/peer evidence. Reusing its digest component
+        # keeps compiler and executor on one stable replacement attempt.
+        return "att-" + superseding_recovery_discriminator.split(":", 1)[1][:48]
     digest = hashlib.sha256(
         json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
     ).hexdigest()
     return "att-" + digest[:48]
+
+
+def manifest_members(legs: list[dict[str, object]]) -> list[dict[str, object]]:
+    return [
+        {
+            "assignment_sha256": str(leg["assignment_sha256"]),
+            "attempt_id": str(leg["attempt_id"]),
+            "route_node": str(leg["node"]),
+            "harness": str(leg["adapter"]),
+            "fallback_hop": str(leg["hop"]),
+            "fallback_ordinal": int(leg["ordinal"]),
+            "model_profile": str(leg["model_profile"]),
+            "perspective": str(leg["perspective"]),
+            "parallel_leg_index": int(leg["parallel_leg_index"]),
+            "leg_class": str(leg["leg_class"]),
+            **(
+                {"auxiliary_check": str(leg["auxiliary_check"])}
+                if leg.get("leg_class") == "auxiliary"
+                else {}
+            ),
+        }
+        for leg in legs
+    ]
+
+
+def _write_once_json(path: Path, payload: dict[str, object]) -> None:
+    data = json.dumps(payload, separators=(",", ":"), sort_keys=True) + "\n"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:
+        if path.read_text(encoding="utf-8") != data:
+            raise BatchError("partial-continuation-replacement-seal-conflict")
+        return
+    with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+        handle.write(data)
+        handle.flush()
+        os.fsync(handle.fileno())
+
+
+def _recovery_replacement_attempt(metadata: dict[str, str]) -> str:
+    """Return one live retry claim, refusing every permanent blocked seal."""
+
+    if (
+        metadata.get("start_permitted") == "0"
+        or metadata.get("note") == "receipt-unavailable-retry-exhausted"
+        or metadata.get("failure_class") == "blocked"
+    ):
+        raise BatchError("receipt-unavailable-retry-exhausted")
+    retry_attempt = metadata.get("retry_attempt_id", "")
+    if retry_attempt:
+        if (
+            metadata.get("retry_ordinal") != "1"
+            or not metadata.get("recovery_id")
+        ):
+            raise BatchError("partial-continuation-recovery-claim-invalid")
+        return retry_attempt
+    if metadata.get("recovery_id"):
+        raise BatchError("receipt-unavailable-retry-exhausted")
+    return ""
+
+
+def prepare_partial_replacement(
+    jobs: Path,
+    route: dict[str, object],
+    partial: dict[str, object],
+    source_manifest: dict[str, object],
+    source_manifest_digest: str,
+    source_leg_digests: dict[str, str],
+    *,
+    apply: bool,
+) -> dict[str, object]:
+    """CAS the exact gap replacement identity before governor reservation."""
+
+    original_attempt = str(partial["failed_source_attempt_id"])
+    gap = str(partial["gap_leg_id"])
+    try:
+        with Path(f"{jobs}.lock").open("a", encoding="utf-8") as lock:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+            lines = jobs.read_text(encoding="utf-8", errors="replace").splitlines()
+            exact: list[tuple[list[str], dict[str, str]]] = []
+            for line in lines:
+                fields = line.split("\t")
+                if len(fields) != 6:
+                    continue
+                metadata = parse_registry_metadata(fields[5])
+                if metadata.get("attempt_id") == original_attempt:
+                    exact.append((fields, metadata))
+            if len(exact) != 1:
+                raise BatchError(
+                    "partial-continuation-gap-row-not-unique",
+                    f"attempt_id={original_attempt}:rows={len(exact)}",
+                )
+            fields, metadata = exact[0]
+            validate_attempt_metadata(metadata)
+            expected = {
+                "route_id": str(route["route_id"]),
+                "route_node": gap,
+                "batch_group": str(partial["source_group_id"]),
+                "batch_manifest_sha256": source_manifest_digest,
+                "batch_leg_sha256": source_leg_digests[original_attempt],
+            }
+            mismatches = [
+                key for key, value in expected.items() if metadata.get(key) != value
+            ]
+            if (
+                mismatches
+                or fields[1] != "done"
+                or metadata.get("note") == "completed-marker"
+            ):
+                raise BatchError(
+                    "partial-continuation-gap-source-invalid",
+                    ",".join(mismatches) or f"status={fields[1]}:note={metadata.get('note','')}",
+                )
+            retry_attempt = _recovery_replacement_attempt(metadata)
+            retry_claim_reused = bool(retry_attempt)
+            if retry_claim_reused:
+                replacement_attempt = retry_attempt
+            else:
+                replacement_attempt = stable_attempt_id(
+                    route,
+                    next(
+                        node for node in route["nodes"]
+                        if isinstance(node, dict) and node.get("id") == gap
+                    ),
+                    "",
+                    "",
+                    str(source_manifest["parent_attempt_id"]),
+                    str(next(
+                        member["harness"] for member in source_manifest["members"]
+                        if member["route_node"] == gap
+                    )),
+                    int(next(
+                        member["fallback_ordinal"] for member in source_manifest["members"]
+                        if member["route_node"] == gap
+                    )),
+                    str(partial["replacement_leg_identity"]),
+                )
+            if replacement_attempt == original_attempt:
+                raise BatchError("partial-continuation-replacement-attempt-reused")
+            seal = {
+                "schema_version": 1,
+                "continuation_id": str(partial.get("continuation_id") or ""),
+                "source_route_id": str(route["route_id"]),
+                "source_route_hash": str(route["route_hash"]),
+                "source_group_id": str(partial["source_group_id"]),
+                "source_batch_manifest_digest": source_manifest_digest,
+                "failed_source_attempt_id": original_attempt,
+                "gap_leg_id": gap,
+                "reused_peer_set_proof_digest": str(
+                    partial["reused_peer_set_proof_digest"]
+                ),
+                "replacement_leg_identity": str(partial["replacement_leg_identity"]),
+                "replacement_attempt_id": replacement_attempt,
+                "retry_claim_reused": retry_claim_reused,
+            }
+            if apply:
+                identity = str(partial["replacement_leg_identity"]).split(":", 1)[1]
+                _write_once_json(
+                    jobs.parent / "recovery" / "partial-group" / f"{identity}.json",
+                    seal,
+                )
+            return seal
+    except OSError as exc:
+        raise BatchError("batch-registry-unreadable", str(exc)) from exc
+    except DispatchContractError as exc:
+        raise BatchError("partial-continuation-gap-source-invalid", exc.detail) from exc
 
 
 def parallel_slug(prefix: str, node_id: str) -> str:
@@ -624,6 +978,9 @@ def reserve_batch(
     manifest: dict[str, object],
     manifest_digest: str,
     peers: list[dict[str, str]] | None = None,
+    source_manifest: dict[str, object] | None = None,
+    continuation: dict[str, object] | None = None,
+    replacement_seal: dict[str, object] | None = None,
 ) -> list[str]:
     count = len(pending_legs)
     encoded_manifest = json.dumps(manifest, separators=(",", ":"), sort_keys=True)
@@ -650,6 +1007,20 @@ def reserve_batch(
             *(
                 ["--batch-peers-json", json.dumps(peers, separators=(",", ":"), sort_keys=True)]
                 if peers is not None else []
+            ),
+            *(
+                [
+                    "--batch-source-manifest",
+                    json.dumps(source_manifest, separators=(",", ":"), sort_keys=True),
+                    "--batch-continuation",
+                    json.dumps(continuation, separators=(",", ":"), sort_keys=True),
+                    "--batch-replacement-seal",
+                    json.dumps(replacement_seal, separators=(",", ":"), sort_keys=True),
+                ]
+                if source_manifest is not None
+                and continuation is not None
+                and replacement_seal is not None
+                else []
             ),
         ],
         text=True,
@@ -1274,6 +1645,11 @@ def main(argv: list[str] | None = None) -> int:
         help="optional SD-103 parallel subdivision manifest; a disjointness "
         "violation falls back to a single session instead of raising",
     )
+    parser.add_argument(
+        "--continuation",
+        type=Path,
+        help="official partial_group_continuation authorizing one exact gap replacement",
+    )
     args = parser.parse_args(argv)
     if args.parallel_group and args.replica_group and args.parallel_group != args.replica_group:
         parser.error("--parallel-group and --replica-group aliases must match")
@@ -1284,10 +1660,23 @@ def main(argv: list[str] | None = None) -> int:
 
     agent_home = None
     route: dict[str, object] = {}
+    continuation_record: dict[str, object] | None = None
+    partial: dict[str, object] | None = None
     try:
         route_path = args.route.resolve()
-        route = load_route(route_path)
+        route = load_route(route_path, args.action)
         nodes = parallel_nodes(route, args.parallel_group)
+        if args.continuation is not None:
+            continuation_record, partial = load_partial_continuation(
+                args.continuation,
+                route,
+                args.parallel_group,
+                args.action,
+            )
+            partial = {
+                **partial,
+                "continuation_id": continuation_record["continuation_id"],
+            }
         if getattr(args, "subdivision_manifest", None):
             node = next(
                 (candidate for candidate in nodes if candidate.get("id") == args.parallel_group),
@@ -1360,6 +1749,10 @@ def main(argv: list[str] | None = None) -> int:
             parent_identity=parent_identity,
             jobs=jobs,
         )
+        if partial is not None:
+            assignments = partial_source_assignments(
+                jobs, route, nodes, partial, parent_identity
+            )
         self_slug = os.environ.get("AGENT_DISPATCH_SELF_SLUG", "")
         parent_attempt = os.environ.get("AGENT_DISPATCH_ATTEMPT_ID", "")
         if not self_slug or args.parent != self_slug or not parent_attempt:
@@ -1378,7 +1771,16 @@ def main(argv: list[str] | None = None) -> int:
             expected_transport=parent_identity["parent_transport"],
             expected_sandbox=parent_identity["parent_sandbox"],
         )
+        gated_nodes = (
+            {
+                str(partial["gap_leg_id"])
+            }
+            if partial is not None
+            else {str(node["id"]) for node, _, _, _ in assignments}
+        )
         for node, _, _, _ in assignments:
+            if str(node["id"]) not in gated_nodes:
+                continue
             completion_marker_gate(
                 str(route_path), str(node["id"]), args.action, agent_home, jobs
             )
@@ -1398,6 +1800,17 @@ def main(argv: list[str] | None = None) -> int:
         # only on the exception object and died here, leaving PRD 13.30.2's "no
         # silent path" with nothing typed anywhere in the cycle.
         extra = {}
+        if reason in {
+            "launch-runtime-root-mismatch",
+            "launch-compatibility-tuple-required",
+        }:
+            extra.update({
+                "admitted": "0",
+                "spawned": "0",
+                "registered": "0",
+                "started": "0",
+                "child_spawned": "0",
+            })
         degradation_reason = getattr(exc, "degradation_reason", None)
         if degradation_reason:
             extra["degradation_reason"] = degradation_reason
@@ -1472,6 +1885,76 @@ def main(argv: list[str] | None = None) -> int:
             leg["subsession_id"] = str(session["subsession_id"])
             leg["fixed_files"] = list(session["fixed_files"])
         legs.append(leg)
+    source_manifest: dict[str, object] | None = None
+    replacement_seal: dict[str, object] | None = None
+    if partial is not None:
+        source_attempts = {
+            str(peer["node_id"]): str(peer["terminal_attempt_id"])
+            for peer in partial["realized_peer_set"]
+        }
+        source_attempts[str(partial["gap_leg_id"])] = str(
+            partial["failed_source_attempt_id"]
+        )
+        if set(source_attempts) != {str(leg["node"]) for leg in legs}:
+            return fail(
+                "partial-continuation-peer-set-incomplete",
+                65,
+                admitted=0,
+                spawned=0,
+            )
+        for leg in legs:
+            leg["attempt_id"] = source_attempts[str(leg["node"])]
+        try:
+            source_manifest, source_manifest_digest, source_leg_digests = build_manifest(
+                parallel_group=args.parallel_group,
+                route_id=str(route["route_id"]),
+                parent_attempt_id=parent_attempt,
+                independence=independence,
+                required_independence_axes=required_axes,
+                realized_independence_axes=realized_axes,
+                degradation_reason=degradation_reason,
+                members=manifest_members(legs),
+            )
+        except ReplicaBatchContractError as exc:
+            return fail(
+                "partial-continuation-source-manifest-invalid",
+                65,
+                detail=str(exc),
+                admitted=0,
+                spawned=0,
+            )
+        if (
+            source_manifest_digest != partial.get("source_batch_manifest_digest")
+            or partial.get("leg_manifest_digests") != {
+                str(leg["node"]): source_leg_digests[str(leg["attempt_id"])]
+                for leg in legs
+            }
+            or int(partial.get("original_group_cardinality", 0)) != len(legs)
+        ):
+            return fail(
+                "partial-continuation-source-manifest-drift",
+                65,
+                admitted=0,
+                spawned=0,
+            )
+        try:
+            revalidate_partial_peers(route, nodes, partial)
+            replacement_seal = prepare_partial_replacement(
+                jobs,
+                route,
+                partial,
+                source_manifest,
+                source_manifest_digest,
+                source_leg_digests,
+                apply=args.action == "start",
+            )
+        except BatchError as exc:
+            return fail(exc.reason, 65, detail=exc.detail, admitted=0, spawned=0)
+        gap_leg = next(
+            leg for leg in legs if leg["node"] == partial["gap_leg_id"]
+        )
+        gap_leg["attempt_id"] = replacement_seal["replacement_attempt_id"]
+
     manifest, manifest_digest, leg_digests = build_manifest(
         parallel_group=args.parallel_group,
         route_id=str(route["route_id"]),
@@ -1480,26 +1963,7 @@ def main(argv: list[str] | None = None) -> int:
         required_independence_axes=required_axes,
         realized_independence_axes=realized_axes,
         degradation_reason=degradation_reason,
-        members=[
-            {
-                "assignment_sha256": assignment_digest,
-                "attempt_id": str(leg["attempt_id"]),
-                "route_node": str(leg["node"]),
-                "harness": str(leg["adapter"]),
-                "fallback_hop": str(leg["hop"]),
-                "fallback_ordinal": int(leg["ordinal"]),
-                "model_profile": str(leg["model_profile"]),
-                "perspective": str(leg["perspective"]),
-                "parallel_leg_index": int(leg["parallel_leg_index"]),
-                "leg_class": str(leg["leg_class"]),
-                **(
-                    {"auxiliary_check": str(leg["auxiliary_check"])}
-                    if leg.get("leg_class") == "auxiliary"
-                    else {}
-                ),
-            }
-            for leg in legs
-        ],
+        members=manifest_members(legs),
     )
 
     if args.action != "start":
@@ -1516,6 +1980,15 @@ def main(argv: list[str] | None = None) -> int:
             "launch_lifecycle": lifecycle,
             "legs": legs,
             "selection_diagnostics": diagnostics,
+            **(
+                {
+                    "continuation_id": continuation_record["continuation_id"],
+                    "replacement_attempt_id": replacement_seal["replacement_attempt_id"],
+                    "reused_peer_count": len(legs) - 1,
+                }
+                if continuation_record is not None and replacement_seal is not None
+                else {}
+            ),
         }, separators=(",", ":"), sort_keys=True))
         return 0
 
@@ -1531,6 +2004,19 @@ def main(argv: list[str] | None = None) -> int:
     pending_legs: list[dict[str, object]] = []
     try:
         for leg in legs:
+            if partial is not None and leg["node"] != partial["gap_leg_id"]:
+                results.append({
+                    **leg,
+                    "exit_code": 0,
+                    "registered": "0",
+                    "started": "0",
+                    "child_spawned": "0",
+                    "duplicate_attempt": "1",
+                    "check": "ok",
+                    "launch_state": "existing",
+                    "reason": "reused-successful-peer",
+                })
+                continue
             existing = existing_leg_result(
                 jobs,
                 leg,
@@ -1550,6 +2036,17 @@ def main(argv: list[str] | None = None) -> int:
                 results.append(existing)
     except BatchError as exc:
         return fail(exc.reason, 73, detail=exc.detail, admitted=0, spawned=0)
+
+    if partial is not None and (
+        len(pending_legs) > 1
+        or any(leg["node"] != partial["gap_leg_id"] for leg in pending_legs)
+    ):
+        return fail(
+            "partial-continuation-replacement-census-invalid",
+            73,
+            admitted=0,
+            spawned=0,
+        )
 
     # A stable failed attempt cannot be relaunched under the same identity. Do
     # not start an absent sibling and turn a prior terminal failure into a new
@@ -1613,6 +2110,13 @@ def main(argv: list[str] | None = None) -> int:
                     manifest=manifest,
                     manifest_digest=manifest_digest,
                     peers=peers,
+                    source_manifest=source_manifest if partial is not None else None,
+                    continuation=(
+                        continuation_record if partial is not None else None
+                    ),
+                    replacement_seal=(
+                        replacement_seal if partial is not None else None
+                    ),
                 )
             except BatchError as exc:
                 if exc.reason == "governor-atomic-admission-shortfall":
@@ -1793,6 +2297,13 @@ def main(argv: list[str] | None = None) -> int:
         interrupted_signal=interrupted_signal,
         selection_diagnostics=diagnostics,
     )
+    if continuation_record is not None and replacement_seal is not None:
+        receipt.update({
+            "continuation_id": continuation_record["continuation_id"],
+            "replacement_attempt_id": replacement_seal["replacement_attempt_id"],
+            "reused_peer_count": len(legs) - 1,
+            "original_group_cardinality": len(legs),
+        })
     _persist_launched_degradation(agent_home, route, diagnostics, results)
     _persist_sole_gate_degradation(agent_home, route, diagnostics, results)
     receipt["degradation_ledger"] = _record_failed_legs(route, results, agent_home) or "-"

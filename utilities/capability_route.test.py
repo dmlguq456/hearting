@@ -1297,10 +1297,15 @@ class TestRoute(unittest.TestCase):
          "--workflow-mode","tracked","--artifact-guard","true"]
   if output is not None: args+=["--output",str(output)]
   return args
- def _run_compile_cli(self,argv):
+ def _run_compile_cli(self,argv,*,env=None):
   import subprocess,sys
+  child_env=os.environ.copy()
+  child_env["AGENT_HOME"]=str(R.ROOT)
+  child_env.pop("CLAUDE_HOME",None)
+  if env: child_env.update(env)
   return subprocess.run(
-   [sys.executable,str(P),"compile",*argv],capture_output=True,text=True,cwd=str(R.ROOT))
+   [sys.executable,str(P),"compile",*argv],capture_output=True,text=True,
+   cwd=str(R.ROOT),env=child_env)
  def test_compile_output_omitted_writes_canonical_default(self):
   # F1: the previous version of this test never invoked the CLI at all -- it
   # called `write_once` on a path it built itself, so it exercised nothing
@@ -1312,10 +1317,30 @@ class TestRoute(unittest.TestCase):
    result=self._run_compile_cli(self._compile_cli_args(artifact_root))
    self.assertEqual(result.returncode,0,result.stderr)
    route=json.loads(result.stdout)
+   launch=route["launch_compatibility_tuple"]
+   self.assertEqual(launch["contract_version"],R.LAUNCH_COMPATIBILITY_TUPLE_VERSION)
+   self.assertEqual(launch["tuple_version"],R.LAUNCH_COMPATIBILITY_TUPLE_VERSION)
    expected=R.canonical_routes_dir(artifact_root)/f"{route['route_id']}.json"
    self.assertTrue(expected.is_file())
    self.assertIn(f"route_file={expected.resolve()}",result.stderr)
    self.assertEqual(json.loads(expected.read_text(encoding="utf-8"))["route_id"],route["route_id"])
+ def test_compile_runtime_root_mismatch_writes_nothing(self):
+  with tempfile.TemporaryDirectory() as tmp:
+   root=Path(tmp)
+   runtime=root/"runtime"; (runtime/"core").mkdir(parents=True)
+   (runtime/"core"/"CORE.md").write_text("other release\n",encoding="utf-8")
+   artifact_root=root/"artifacts"
+   jobs=root/"state"/"jobs.log"
+   result=self._run_compile_cli(
+    self._compile_cli_args(artifact_root),
+    env={"AGENT_HOME":str(runtime),"AGENT_DISPATCH_JOBS":str(jobs)},
+   )
+   self.assertEqual(result.returncode,64,result.stderr)
+   self.assertEqual(result.stdout,"")
+   self.assertIn("launch-runtime-root-mismatch",result.stderr)
+   self.assertIn("route_file_written=0 registered=0 started=0 child_spawned=0",result.stderr)
+   self.assertFalse((artifact_root/".runtime"/"routes").exists())
+   self.assertFalse(jobs.exists())
  def test_compile_output_outside_canonical_is_rejected(self):
   # F1: the previous version of this test asserted only that
   # `classify_route_location` returns "legacy-routes" for this path -- it
@@ -1420,6 +1445,319 @@ class TestRoute(unittest.TestCase):
     R.close_route(route,outside,commit="5"*40)
    self.assertFalse(R.outcome_path(outside).exists())
 
+class TestContinuation(unittest.TestCase):
+ def setUp(self):
+  self._tmp_home=tempfile.TemporaryDirectory()
+  (Path(self._tmp_home.name)/"core").mkdir(parents=True)
+  (Path(self._tmp_home.name)/"core"/"CORE.md").write_text(
+   "continuation fixture\n",encoding="utf-8")
+  self._previous_agent_home=os.environ.get("AGENT_HOME")
+  self._previous_dispatch_jobs=os.environ.get("AGENT_DISPATCH_JOBS")
+  os.environ["AGENT_HOME"]=self._tmp_home.name
+  os.environ.pop("AGENT_DISPATCH_JOBS",None)
+  self.addCleanup(self._restore)
+ def _restore(self):
+  if self._previous_agent_home is None: os.environ.pop("AGENT_HOME",None)
+  else: os.environ["AGENT_HOME"]=self._previous_agent_home
+  if self._previous_dispatch_jobs is None: os.environ.pop("AGENT_DISPATCH_JOBS",None)
+  else: os.environ["AGENT_DISPATCH_JOBS"]=self._previous_dispatch_jobs
+  self._tmp_home.cleanup()
+ def _dispatch(self):
+  row={
+   "parent_harness":"codex","parent_transport":"headless",
+   "parent_sandbox":R.WRAPPER_PARENT_SANDBOXES["codex"][0],
+   "child_harness":"codex","launch_authority":"conductor","status":"supported",
+   "probe_source":"continuation-fixture","probe_time":"2026-08-25T00:00:00Z",
+   "failure_class":"","checked_worktree":str(R.ROOT.resolve()),
+   "failure_scope":"none","codex_command":"ok","retry_on_isolated_worktree":0,
+  }
+  return {"tuples":[row],"native_subagent":[{
+   "harness":"codex","transport":"headless",
+   "execution_surface":"codex-native-subagent","registered_worker":False,
+   "status":"supported","check_source":"continuation-fixture",
+  }]}
+ def _source(self,artifact_root):
+  gate={
+   "spec_read":{"satisfied":True,"source":"canonical-prd-sha256"},
+   "drift_verdict":"within-spec","workflow_mode":"tracked",
+   "artifact_guard":{"satisfied":True,"source":"conductor-prechecked"},
+  }
+  route=R.compile_route(
+   "autopilot-code","dev","strong",R.ROOT,artifact_root,
+   predicates=[],signals=["shared-contract"],transport="headless",
+   tracking="tracked",tracked_gate_evidence=gate,
+   dispatch_evidence=self._dispatch(),
+  )
+  route["runtime_lineage"]={
+   "runtime":"codex","thread_id":"thread-source",
+   "node_turn_ids":{
+    str(node["id"]):f"turn-{node['id']}" for node in route["nodes"]
+   },
+  }
+  route["route_hash"]=R.route_hash(route)
+  route["route_id"]="rt-"+route["route_hash"].split(":",1)[1][:16]
+  return route
+ def _complete_node(self,route,node,evidence_root,attempt_id=None):
+  attempt_id=attempt_id or f"att-continuation-{node['id']}"
+  evidence=Path(evidence_root)/f"{node['id']}.md"
+  evidence.parent.mkdir(parents=True,exist_ok=True)
+  evidence.write_text(f"{node['id']} exact output\n",encoding="utf-8")
+  metadata={
+   "attempt_schema_version":2,"dispatch_depth":node["dispatch_depth"],
+   "transport":"headless","execution_surface":"registered-headless",
+   "registered_worker":"1","fallback_hop":"same-harness-headless",
+  }
+  R.complete_node(
+   route,node,node["id"],evidence,attempt_id=attempt_id,
+   explicit_attempt_metadata=metadata,
+  )
+  jobs=Path(route["launch_compatibility_tuple"]["jobs_path"]["path"])
+  link_path=R._attempt_completion_path(
+   route,node["id"],attempt_id,jobs=jobs
+  )
+  link=json.loads(link_path.read_text(encoding="utf-8"))
+  link.update({
+   "verdict":"PASS",
+   "quiescence_proof_digest":"sha256:"+re.sub("[^0-9a-f]","0",node["id"])[:1].ljust(64,"a"),
+   "last_turn_id":f"turn-{node['id']}",
+  })
+  R.atomic_write(link_path,link)
+  return evidence
+ def _complete_prefix(self,route,resume_from,evidence_root,skip=()):
+  evidence={}
+  for node in route["nodes"][:next(
+      index for index,row in enumerate(route["nodes"]) if row["id"]==resume_from
+  )]:
+   if node["id"] in skip: continue
+   evidence[node["id"]]=self._complete_node(route,node,evidence_root)
+  return evidence
+ def _build(self,source,**overrides):
+  args={
+   "resume_from_node":"test","requested_boundary":"test",
+   "reason":"resume-after-impl-review",
+   "artifact_root":source["artifact_root"],
+  }
+  args.update(overrides)
+  return R.build_continuation_route(source,**args)
+ def _assert_no_alias_key(self,value):
+  if isinstance(value,dict):
+   self.assertNotIn("evidence_digest",value)
+   for item in value.values(): self._assert_no_alias_key(item)
+  elif isinstance(value,list):
+   for item in value: self._assert_no_alias_key(item)
+ def test_at1_reuses_exact_prefix_and_publishes_suffix_only(self):
+  from unittest import mock
+  with tempfile.TemporaryDirectory() as tmp:
+   artifact=Path(tmp)/"artifacts"
+   source=self._source(artifact)
+   self._complete_prefix(source,"test",Path(tmp)/"evidence")
+   with mock.patch.object(
+       R,"compile_route",side_effect=AssertionError("generic compile forbidden")):
+    continuation=self._build(source)
+   reused_ids=[row["node_id"] for row in continuation["reused_nodes"]]
+   self.assertEqual(reused_ids,[
+    node["id"] for node in source["nodes"]
+    if source["nodes"].index(node)<next(
+     i for i,row in enumerate(source["nodes"]) if row["id"]=="test")
+   ])
+   self.assertTrue(all(row["new_attempt_count"]==0 for row in continuation["reused_nodes"]))
+   self.assertEqual(continuation["first_runnable_node"],"test")
+   self.assertEqual([node["id"] for node in continuation["nodes"]],["test","report"])
+   self.assertEqual(continuation["new_nodes"][0]["attempt_authority"],"granted")
+   self.assertEqual(continuation["new_nodes"][1]["attempt_authority"],"pending-dependency")
+   test_node=continuation["nodes"][0]
+   self.assertEqual(test_node["depends_on"],[])
+   self.assertEqual(
+    [row["node_id"] for row in test_node["reused_dependencies"]],
+    ["impl-review","impl-review-alternative"],
+   )
+   self.assertEqual(
+    continuation["source_evidence_digest"],
+    R.source_evidence_digest(source,reused_ids),
+   )
+   self._assert_no_alias_key(continuation)
+   self.assertTrue(continuation["source_route_supersession"]["source_verdict_preserved"])
+   self.assertEqual(len(continuation["supersession_edges"]),1)
+   R.verify_route(continuation,R.ROOT)
+   output=R.canonical_route_path(artifact,continuation["route_id"])
+   R.publish_continuation_route(continuation,source,output)
+   self.assertTrue(output.is_file())
+   self.assertFalse(R.completion_dir(continuation["route_id"]).exists())
+ def test_at2_boundary_and_first_runnable_blockers_are_disjoint(self):
+  with tempfile.TemporaryDirectory() as tmp:
+   source=self._source(Path(tmp)/"artifacts-request")
+   self._complete_prefix(source,"test",Path(tmp)/"evidence-request")
+   requested=self._build(source,requested_boundary="missing-boundary")
+   self.assertEqual(requested["requested_boundary_blocker"],"requested-boundary-unknown")
+   self.assertIsNone(requested["first_runnable_blocker"])
+   output=Path(tmp)/"artifacts-request"/".runtime"/"routes"/"blocked.json"
+   with self.assertRaisesRegex(ValueError,"continuation-boundary-blocked"):
+    R.publish_continuation_route(requested,source,output)
+   self.assertFalse(output.exists())
+
+   source=self._source(Path(tmp)/"artifacts-first")
+   self._complete_prefix(
+    source,"test",Path(tmp)/"evidence-first",skip={"execute"})
+   first=self._build(source)
+   self.assertIsNone(first["requested_boundary_blocker"])
+   self.assertIn("continuation-source-node-unverified:execute",first["first_runnable_blocker"])
+   output=Path(tmp)/"artifacts-first"/".runtime"/"routes"/"blocked.json"
+   with self.assertRaisesRegex(ValueError,"continuation-boundary-blocked"):
+    R.publish_continuation_route(first,source,output)
+   self.assertFalse(output.exists())
+   self.assertTrue(all(row["new_attempt_count"]==0 for row in first["reused_nodes"]))
+   self.assertFalse((Path(self._tmp_home.name)/".dispatch"/"jobs.log").exists())
+ def test_at3_marker_evidence_and_contract_drift_never_publish(self):
+  for mutation in ("marker","evidence","contract"):
+   with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as tmp:
+    source=self._source(Path(tmp)/f"artifacts-{mutation}")
+    evidence=self._complete_prefix(
+     source,"test",Path(tmp)/f"evidence-{mutation}")
+    continuation=self._build(source)
+    if mutation=="marker":
+     jobs=Path(source["launch_compatibility_tuple"]["jobs_path"]["path"])
+     marker_path=R.completion_dir(
+      source["route_id"],jobs=jobs
+     )/"impl-review.json"
+     marker=json.loads(marker_path.read_text(encoding="utf-8"))
+     marker["tampered"]=True
+     R.atomic_write(marker_path,marker)
+    elif mutation=="evidence":
+     evidence["impl-review"].write_text("changed output\n",encoding="utf-8")
+    else:
+     next(
+      node for node in source["nodes"] if node["id"]=="impl-review"
+     )["contract_tampered"]=True
+    output=R.canonical_route_path(source["artifact_root"],continuation["route_id"])
+    with self.assertRaisesRegex(ValueError,"continuation-source-evidence-drift"):
+     R.publish_continuation_route(continuation,source,output)
+    self.assertFalse(output.exists())
+    self.assertTrue(all(row["new_attempt_count"]==0 for row in continuation["reused_nodes"]))
+ def test_at4_resume_fork_and_ephemeral_lineage(self):
+  with tempfile.TemporaryDirectory() as tmp:
+   source=self._source(Path(tmp)/"artifacts")
+   self._complete_prefix(source,"test",Path(tmp)/"evidence")
+   resumed=self._build(source)
+   self.assertEqual(resumed["lineage_operation"],"resume")
+   self.assertEqual(resumed["runtime_lineage"]["thread_id"],"thread-source")
+   self.assertEqual(
+    resumed["runtime_lineage"]["lastTurnId"],"turn-impl-review-alternative")
+   forked=self._build(
+    source,lineage_operation="fork",thread_id="thread-source",
+    new_thread_id="thread-fork",forked_from_id="thread-source",
+    last_turn_id="turn-impl-review-alternative",
+   )
+   self.assertEqual(forked["runtime_lineage"],{
+    "operation":"fork","thread_id":"thread-fork",
+    "forkedFromId":"thread-source",
+    "lastTurnId":"turn-impl-review-alternative","ephemeral":False,
+   })
+   with self.assertRaisesRegex(ValueError,"continuation-last-turn-mismatch"):
+    self._build(
+     source,lineage_operation="fork",thread_id="thread-source",
+     new_thread_id="thread-fork",forked_from_id="thread-source",
+     last_turn_id="turn-wrong",
+    )
+   with self.assertRaisesRegex(ValueError,"continuation-ephemeral-forbidden"):
+    self._build(source,ephemeral=True)
+ def test_source_evidence_uses_sealed_jobs_not_ambient_registry(self):
+  with tempfile.TemporaryDirectory() as tmp:
+   source=self._source(Path(tmp)/"artifacts")
+   self._complete_prefix(source,"test",Path(tmp)/"evidence")
+   sealed=source["launch_compatibility_tuple"]["jobs_path"]["path"]
+   other=str(Path(tmp)/"other-state"/"jobs.log")
+   self.assertNotEqual(sealed,other)
+   os.environ["AGENT_DISPATCH_JOBS"]=other
+   continuation=self._build(source)
+   self.assertEqual(continuation["first_runnable_node"],"test")
+   self.assertIsNone(continuation["first_runnable_blocker"])
+   self.assertFalse(Path(other).exists())
+ def test_partial_group_continuation_seals_exact_peer_set(self):
+  from replica_batch_contract import build_manifest
+  with tempfile.TemporaryDirectory() as tmp:
+   source=self._source(Path(tmp)/"artifacts")
+   members=[
+    node for node in source["nodes"] if node.get("parallel_group")=="plan-check"
+   ]
+   attempts={members[0]["id"]:"att-peer",members[1]["id"]:"att-gap"}
+   self._complete_node(
+    source,members[0],Path(tmp)/"evidence",attempt_id=attempts[members[0]["id"]])
+   raw_members=[]
+   harnesses=("codex","claude")
+   for index,node in enumerate(members):
+    raw_members.append({
+     "assignment_sha256":"sha256:"+"a"*64,
+     "attempt_id":attempts[node["id"]],"route_node":node["id"],
+     "harness":harnesses[index],"fallback_hop":"same-harness-headless",
+     "fallback_ordinal":1,"model_profile":node["model_profile"],
+     "perspective":node["perspective"],"parallel_leg_index":index,
+     "leg_class":node.get("leg_class") or "peer",
+    })
+   realized=["cross-harness"]
+   if len({row["model_profile"] for row in raw_members})>1:
+    realized.append("model-profile")
+   if len({row["perspective"] for row in raw_members})==len(raw_members):
+    realized.append("perspective")
+   manifest,_digest,_legs=build_manifest(
+    parallel_group="plan-check",route_id=source["route_id"],
+    parent_attempt_id="att-parent",independence="cross-harness",
+    members=raw_members,required_independence_axes=["cross-harness"],
+    realized_independence_axes=realized,
+   )
+   partial=R.partial_group_continuation(
+    source,source_group_id="plan-check",source_batch_manifest=manifest,
+    failed_source_attempt_id="att-gap",gap_leg_id=members[1]["id"],
+   )
+   self.assertEqual(partial["original_group_cardinality"],2)
+   self.assertEqual(len(partial["realized_peer_set"]),1)
+   self.assertEqual(partial["realized_peer_set"][0]["terminal_attempt_id"],"att-peer")
+   self.assertTrue(partial["reused_peer_set_proof_digest"].startswith("sha256:"))
+   self.assertTrue(partial["replacement_attempt_id"].startswith("att-"))
+ def test_continuation_cli_publishes_and_reports_zero_write_blocker(self):
+  import subprocess,sys
+  with tempfile.TemporaryDirectory() as tmp:
+   previous_home=os.environ.get("AGENT_HOME")
+   previous_jobs=os.environ.get("AGENT_DISPATCH_JOBS")
+   jobs=str(Path(tmp)/"state"/"jobs.log")
+   os.environ["AGENT_HOME"]=str(R.ROOT)
+   os.environ["AGENT_DISPATCH_JOBS"]=jobs
+   try:
+    artifact=Path(tmp)/"artifacts"
+    source=self._source(artifact)
+    self._complete_prefix(source,"test",Path(tmp)/"evidence")
+    source_path=Path(tmp)/"source-route.json"
+    source_path.write_text(json.dumps(source),encoding="utf-8")
+    env=os.environ.copy()
+    command=[
+     sys.executable,str(P),"continuation","--source-route",str(source_path),
+     "--resume-from-node","test","--requested-boundary","test",
+     "--reason","cli-fixture","--artifact-root",str(artifact),
+    ]
+    success=subprocess.run(
+     command,capture_output=True,text=True,cwd=str(R.ROOT),env=env)
+    self.assertEqual(success.returncode,0,success.stderr)
+    route=json.loads(success.stdout)
+    output=R.canonical_route_path(artifact,route["route_id"])
+    self.assertTrue(output.is_file())
+    self.assertIn(f"route_file={output.resolve()}",success.stderr)
+    blocked=subprocess.run(
+     [*command[:command.index("--requested-boundary")+1],"missing",
+      *command[command.index("--requested-boundary")+2:]],
+     capture_output=True,text=True,cwd=str(R.ROOT),env=env,
+    )
+    self.assertEqual(blocked.returncode,64,blocked.stderr)
+    self.assertIn('"requested_boundary_blocker": "requested-boundary-unknown"',blocked.stderr)
+    self.assertIn(
+     "route_file_written=0 predecessor_attempts=0 registered=0 "
+     "started=0 child_spawned=0",blocked.stderr,
+    )
+   finally:
+    if previous_home is None: os.environ.pop("AGENT_HOME",None)
+    else: os.environ["AGENT_HOME"]=previous_home
+    if previous_jobs is None: os.environ.pop("AGENT_DISPATCH_JOBS",None)
+    else: os.environ["AGENT_DISPATCH_JOBS"]=previous_jobs
+
+
 class TestValidationBasis(unittest.TestCase):
  """B-2: sealed `validation_basis` provenance and its classifier (task-brief §2, plan §5.1)."""
  def setUp(self):
@@ -1454,6 +1792,99 @@ class TestValidationBasis(unittest.TestCase):
   self.assertIsInstance(vb["runtime_root_validated"],bool)
   self.assertIsInstance(vb["runtime_root_match"],bool)
   R.verify_route(route,R.ROOT)
+ def test_fresh_compile_seals_and_revalidates_launch_tuple(self):
+  route=R.compile_route(**self.args())
+  launch=route["launch_compatibility_tuple"]
+  self.assertEqual(launch["contract_version"],1)
+  self.assertEqual(launch["tuple_version"],1)
+  self.assertEqual(set(launch),{
+   "contract_version","tuple_version","registry_root","launch_home",
+   "runtime_root","grounding_roots","wrapper_root","jobs_path",
+  })
+  for identity in [
+   launch["registry_root"],launch["launch_home"],launch["runtime_root"],
+   launch["grounding_roots"]["cwd"],launch["grounding_roots"]["artifact_root"],
+   launch["wrapper_root"],launch["jobs_path"],
+  ]:
+   self.assertEqual(set(identity),{
+    "kind","path","release_id","content_digest","binding_digest",
+   })
+   self.assertTrue(identity["content_digest"].startswith("sha256:"))
+   self.assertTrue(identity["binding_digest"].startswith("sha256:"))
+  self.assertEqual(route["route_hash"],R.route_hash(route))
+  R.verify_route(route,R.ROOT)
+  self.assertEqual(R.revalidate_launch_compatibility(route),(True,{}))
+ def test_plain_verify_is_unchanged_and_launch_phase_rejects_tamper(self):
+  import subprocess,sys
+  route=R.compile_route(**self.args())
+  tampered=json.loads(json.dumps(route))
+  tampered["launch_compatibility_tuple"]["runtime_root"]["release_id"]="release:tampered"
+  tampered=self._reseal(tampered)
+  with tempfile.TemporaryDirectory() as tmp:
+   route_path=Path(tmp)/"route.json"
+   route_path.write_text(json.dumps(tampered),encoding="utf-8")
+   env=os.environ.copy(); env["AGENT_HOME"]=self._tmp_home.name
+   env.pop("AGENT_DISPATCH_JOBS",None)
+   plain=subprocess.run(
+    [sys.executable,str(P),"verify","--route",str(route_path),"--cwd",str(R.ROOT)],
+    capture_output=True,text=True,cwd=str(R.ROOT),env=env,
+   )
+   self.assertEqual(plain.returncode,0,plain.stderr)
+   self.assertEqual(
+    plain.stdout,
+    f"route_id={tampered['route_id']}\nroute_hash={tampered['route_hash']}\n",
+   )
+   self.assertEqual(plain.stderr,"")
+   launch=subprocess.run(
+    [sys.executable,str(P),"verify","--route",str(route_path),"--cwd",str(R.ROOT),
+     "--launch-phase","start"],
+    capture_output=True,text=True,cwd=str(R.ROOT),env=env,
+   )
+   self.assertEqual(launch.returncode,64,launch.stderr)
+   self.assertIn("launch-runtime-root-mismatch phase=start mismatch=runtime_root",launch.stderr)
+   self.assertIn("registered=0 started=0 child_spawned=0",launch.stderr)
+ def test_legacy_tuple_absence_is_read_only_compatible(self):
+  import subprocess,sys
+  route=R.compile_route(**self.args())
+  legacy=json.loads(json.dumps(route)); legacy.pop("launch_compatibility_tuple")
+  legacy=self._reseal(legacy)
+  self.assertEqual(
+   R.revalidate_launch_compatibility(legacy),(True,{"tuple":"absent-legacy"}),
+  )
+  with tempfile.TemporaryDirectory() as tmp:
+   route_path=Path(tmp)/"legacy.json"
+   route_path.write_text(json.dumps(legacy),encoding="utf-8")
+   env=os.environ.copy(); env["AGENT_HOME"]=self._tmp_home.name
+   env.pop("AGENT_DISPATCH_JOBS",None)
+   plain=subprocess.run(
+    [sys.executable,str(P),"verify","--route",str(route_path)],
+    capture_output=True,text=True,cwd=str(R.ROOT),env=env,
+   )
+   self.assertEqual(plain.returncode,0,plain.stderr)
+   launch=subprocess.run(
+    [sys.executable,str(P),"verify","--route",str(route_path),"--launch-phase","dry-run"],
+    capture_output=True,text=True,cwd=str(R.ROOT),env=env,
+   )
+   self.assertEqual(launch.returncode,64,launch.stderr)
+   self.assertIn("launch-compatibility-tuple-required",launch.stderr)
+   self.assertIn("registered=0 started=0 child_spawned=0",launch.stderr)
+ def test_close_still_accepts_launch_tuple_mismatch(self):
+  import subprocess,sys
+  with tempfile.TemporaryDirectory() as tmp:
+   artifact_root=Path(tmp)/"artifacts"
+   route=R.compile_route(**self.args(artifact_root=artifact_root))
+   route["launch_compatibility_tuple"]["runtime_root"]["content_digest"]="sha256:"+"f"*64
+   route=self._reseal(route)
+   route_path=R.canonical_route_path(artifact_root,route["route_id"])
+   R.write_once(route_path,route)
+   env=os.environ.copy(); env["AGENT_HOME"]=self._tmp_home.name
+   env.pop("AGENT_DISPATCH_JOBS",None)
+   result=subprocess.run(
+    [sys.executable,str(P),"close","--route",str(route_path),"--commit","d"*40],
+    capture_output=True,text=True,cwd=str(R.ROOT),env=env,
+   )
+   self.assertEqual(result.returncode,0,result.stderr)
+   self.assertTrue(R.outcome_path(route_path).is_file())
  def test_relative_runtime_root_candidate_seals_an_absolute_path(self):
   previous=os.environ.get("AGENT_HOME")
   os.environ["AGENT_HOME"]=os.path.relpath(self._tmp_home.name,os.getcwd())
