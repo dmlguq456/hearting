@@ -47,6 +47,8 @@ class CutoverTest(unittest.TestCase):
         self.w("spec/comp/prd.md", "# comp prd\n")
         self.w("analysis_project/code/overview.md", "analysis\n")
         self.w("plans/keep/self-write.md", "excluded\n")
+        self.w("research/topic/.gitignore", "*.tmp\n")
+        self.w("research/topic/_internal/notes.md", "internal\n")
         # W7-style relocated shared spec (no reference.json) and its map
         self.w(f"shared/spec/{W7_REF}/revisions/{W7_RREV}/prd.md", "# prd v1\n")
         self.w("plans/2026-01-01_a/old.md", "old\n")
@@ -63,6 +65,8 @@ class CutoverTest(unittest.TestCase):
             {"path": "plans/2026-01-01_a/plan.md", "kind": "file", "disposition": "w6-baseline-legacy", "detail": "cycle-candidate:plans"},
             {"path": "plans/2026-01-02_b/final_report.md", "kind": "file", "disposition": "post-w7-arrival", "detail": "cycle-candidate:plans"},
             {"path": "research/topic/report.md", "kind": "file", "disposition": "w6-baseline-legacy", "detail": "cycle-candidate:research"},
+            {"path": "research/topic/.gitignore", "kind": "file", "disposition": "w6-baseline-legacy", "detail": "cycle-candidate:research"},
+            {"path": "research/topic/_internal/notes.md", "kind": "file", "disposition": "w6-baseline-legacy", "detail": "cycle-candidate:research"},
             {"path": "spec/prd.md", "kind": "file", "disposition": "after-cutoff-after_cutoff_drift", "detail": "cycle-candidate:spec"},
             {"path": "plans/keep/self-write.md", "kind": "file", "disposition": "post-w7-arrival", "detail": "cycle-candidate:plans"},
             {"path": "plans/2026-01-01_a/old.md", "kind": "file", "disposition": "w7-source-preserved", "detail": "cycle-candidate:plans"},
@@ -108,7 +112,10 @@ class CutoverTest(unittest.TestCase):
 
     def test_migrate_delta_copies_candidates_and_snapshots_shared(self):
         report, sealed = self.migrate()
-        self.assertEqual(report["copied_by_bucket"], {"plans": 2, "research": 1})  # w7-source-preserved rows are not re-copied
+        self.assertEqual(report["copied_by_bucket"], {"plans": 2, "research": 2})  # w7-source-preserved rows are not re-copied
+        self.assertEqual(report["skipped_hidden_components"], ["research/topic/.gitignore"])
+        self.assertTrue((Path(report["cycle_dir"]) / "artifacts/research/topic/_internal/notes.md").is_file())
+        self.assertFalse((Path(report["cycle_dir"]) / "artifacts/research/topic/.gitignore").exists())
         self.assertEqual(report["shared_snapshots"], {"spec": 2, "analysis": 1})
         self.assertEqual(report["excluded_files"], 1)
         cycle_dir = Path(report["cycle_dir"])
@@ -183,7 +190,8 @@ class CutoverTest(unittest.TestCase):
         self.assertEqual(out["kept"][0]["source"], "plans/2026-01-02_b/final_report.md")
         self.assertFalse((self.root / "spec/prd.md").exists())
         self.assertFalse((self.root / "plans/2026-01-01_a").exists())
-        self.assertFalse((self.root / "research").exists())
+        self.assertFalse((self.root / "research/topic/report.md").exists())
+        self.assertTrue((self.root / "research/topic/.gitignore").is_file(), "unmigrated hidden file is kept")
         self.assertFalse((self.root / "analysis_project").exists())
         self.assertTrue((self.root / "plans/keep/self-write.md").is_file())
         self.assertTrue((self.root / "plans/2026-01-02_b/final_report.md").is_file())
@@ -197,6 +205,26 @@ class CutoverTest(unittest.TestCase):
         self.assertTrue(adm.verify_index(self.root).ok)
         # canonical prd now resolves to the shared revision
         self.assertTrue(C.prd_candidates(self.root)[0].startswith(str(self.root / "shared/spec")))
+
+    def test_seal_prunes_hidden_copies_left_by_an_earlier_run(self):
+        route, route_file = self.route()
+        report = C.migrate_delta(self.root, census_rows=self.rows, route_file=route_file, capability="autopilot-code",
+                                 intensity="direct", excludes=["plans/keep"], approval_receipt_sha256=None, campaign_id=None)
+        run_dir = Path(report["run_dir"])
+        stray = Path(report["cycle_dir"]) / "artifacts/research/topic/.gitignore"
+        stray.write_text("*.tmp\n")
+        rel = os.path.relpath(stray, self.root)
+        with open(run_dir / "journal.jsonl", "a") as fh:
+            fh.write(json.dumps({"schema_version": C.JOURNAL_SCHEMA, "row_ordinal": 999, "action": "create_destination", "kind": "file",
+                                 "source_locator": "research/topic/.gitignore", "target_locator": rel, "sha256": "x", "size": 6}) + "\n")
+        with open(run_dir / "compatibility-map.jsonl", "a") as fh:
+            fh.write(json.dumps({"schema_version": C.MAP_SCHEMA, "kind": "file", "source_locator": "research/topic/.gitignore", "target_locator": rel}) + "\n")
+        self.close(route, route_file)
+        sealed = C.migrate_seal(self.root, run_dir=run_dir, spec_reference=W7_REF)
+        self.assertEqual(sealed["state"], "sealed")
+        self.assertEqual(sealed["pruned_hidden_copies"], ["research/topic/.gitignore"])
+        self.assertFalse(stray.exists())
+        self.assertFalse(any(".gitignore" in r["target_locator"] for r in C._read_jsonl(run_dir / "compatibility-map.jsonl")))
 
     def test_adopt_campaign_lists_existing_cycles_and_allows_join(self):
         camp = "camp_" + "e" * 32

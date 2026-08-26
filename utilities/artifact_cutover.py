@@ -103,6 +103,37 @@ def _excluded(rel: str, excludes: Sequence[str]) -> bool:
     return any(rel == e or rel.startswith(e.rstrip("/") + "/") for e in excludes)
 
 
+def _has_hidden_component(rel: str) -> bool:
+    return any(part.startswith(".") for part in rel.split("/"))
+
+
+def _prune_hidden_copies(root: Path, run_dir: Path, report: Dict[str, Any]) -> List[str]:
+    """Remove copied targets whose locator has a hidden component (an earlier
+    migrate-delta copied them before the D-6 rule was applied) and rewrite the
+    journal, inverse and map without them."""
+    pruned: List[str] = []
+    for name in ("journal.jsonl", "inverse.jsonl", "compatibility-map.jsonl"):
+        path = run_dir / name
+        if not path.is_file():
+            continue
+        kept = []
+        for row in _read_jsonl(path):
+            target = row.get("target_locator", "")
+            if row.get("kind", "file") == "file" and _has_hidden_component(target):
+                if name == "journal.jsonl":
+                    victim = root / target
+                    if victim.is_file() and not os.path.islink(str(victim)):
+                        victim.unlink()
+                    pruned.append(row.get("source_locator", target))
+                continue
+            kept.append(row)
+        report["digests"][name.split(".")[0].replace("compatibility-map", "compatibility_map")] = _write_jsonl(path, kept)
+    if pruned:
+        report["skipped_hidden_components"] = sorted(set(report.get("skipped_hidden_components", [])) | set(pruned))
+        report["journal_rows"] = len(_read_jsonl(run_dir / "journal.jsonl"))
+    return pruned
+
+
 def migrations_dir(root: Path) -> Path:
     return P.producer_dir(root) / "migrations"
 
@@ -193,9 +224,13 @@ def migrate_delta(root: Path, *, census_rows: Path, route_file: Path, capability
 
     cycle_refs = _identity_refs(identity, begun["campaign_id"], begun["cycle_id"])
     per_bucket: Dict[str, int] = {}
+    skipped_hidden: List[str] = []
     for row in candidates:
         rel = row["path"]
         bucket = rel.split("/", 1)[0]
+        if _has_hidden_component(rel):
+            skipped_hidden.append(rel)  # D-6 locators cannot name dot-files; stays legacy
+            continue
         if bucket in SHARED_SNAPSHOT:
             continue  # shared kinds are snapshotted whole below
         if bucket not in CYCLE_BUCKETS:
@@ -217,6 +252,9 @@ def migrate_delta(root: Path, *, census_rows: Path, route_file: Path, capability
             rel = entry.relative_to(root).as_posix()
             if _excluded(rel, excludes):
                 continue
+            if _has_hidden_component(rel):
+                skipped_hidden.append(rel)
+                continue
             target_rel = os.path.relpath(str(cycle_dir / "artifacts" / staged / entry.relative_to(base).as_posix()), str(root))
             copy_one(rel, target_rel, cycle_refs)
             n += 1
@@ -234,6 +272,7 @@ def migrate_delta(root: Path, *, census_rows: Path, route_file: Path, capability
         "census_rows": str(Path(census_rows).resolve()), "census_rows_sha256": _sha(Path(census_rows)),
         "candidates_total": len(candidates), "copied_by_bucket": per_bucket, "shared_snapshots": snapshot_counts,
         "journal_rows": len(journal), "excluded_prefixes": list(excludes), "excluded_files": len(skipped_excluded),
+        "skipped_hidden_components": skipped_hidden,
         "digests": digests, "sources_touched": False,
     }
     P._write_atomic(run_dir / "report.json", P._json_bytes(report))
@@ -252,6 +291,7 @@ def migrate_seal(root: Path, *, run_dir: Path, primary: Optional[str] = None,
         return report
     identity = P.artifact_lifecycle.read_root_identity(root)
     cycle_id = report["cycle_id"]
+    report["pruned_hidden_copies"] = _prune_hidden_copies(root, run_dir, report)
     sealed = P.finalize(root, cycle_id=cycle_id, primary=primary)
     if sealed["status"] not in ("sealed", "already-sealed"):
         raise CutoverError("finalize-failed", sealed.get("status", "?"))

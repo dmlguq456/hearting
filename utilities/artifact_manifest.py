@@ -26,7 +26,10 @@ _DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 _MEDIA_TYPE_RE = re.compile(
     r"^[a-z0-9][a-z0-9!#$&^_.+-]{0,126}/[a-z0-9][a-z0-9!#$&^_.+-]{0,126}$"
 )
-_LOCATOR_COMPONENT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+# A leading underscore is the harness's own cycle-internal convention
+# (`_internal/`, CORE.md §3 C-INT) and is therefore a valid locator component;
+# a leading dot stays a hidden component (rejected above).
+_LOCATOR_COMPONENT_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9._-]{0,127}$")
 _CONTROL_CHAR_RE = re.compile(r"[\x00-\x1f\x7f]")
 
 _MAX_LOCATOR_COMPONENTS = 32

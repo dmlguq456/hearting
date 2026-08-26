@@ -313,6 +313,9 @@ class TestLocatorSafety(unittest.TestCase):
 
     def test_rejects_hidden_component_locator(self):
         self.assertIn("locator-hidden-component", _codes(m.validate_locators(self._with_path(".hidden"))))
+        # W7C: `_internal/` (CORE §3 C-INT) is a legitimate cycle-relative component.
+        self.assertNotIn("locator-invalid-component", _codes(m.validate_locators(self._with_path("plans/c/_internal/reviews/r.md"))))
+        self.assertNotIn("locator-hidden-component", _codes(m.validate_locators(self._with_path("plans/c/_internal/reviews/r.md"))))
 
     def test_rejects_empty_or_trailing_slash_locator(self):
         self.assertIn("locator-empty", _codes(m.validate_locators(self._with_path(""))))
