@@ -767,8 +767,9 @@ def verify_index(root: Path) -> artifact_manifest.ValidationReport:
         return artifact_manifest.ValidationReport(ok=False, violations=(v,))
     stable_row_count = len(rebuilt.stable_ids) + len(rebuilt.event_ids)
     if stable_row_count >= _INDEX_ROW_WARN_COUNT or len(rebuilt_bytes) >= _INDEX_BYTE_WARN_SIZE:
+        # Advisory only (W7E): the index still verifies; the size asks for a sharding review.
         v = Violation("index-size-warning", "$", "index row/byte count crossed the sharding-review threshold")
-        return artifact_manifest.ValidationReport(ok=False, violations=(v,))
+        return artifact_manifest.ValidationReport(ok=True, violations=(), warnings=(v,))
     return artifact_manifest.ValidationReport(ok=True, violations=())
 
 

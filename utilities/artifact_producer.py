@@ -640,7 +640,23 @@ def _bucket_type(rel: str) -> str:
     return BUCKET_TYPES.get(first, "file")
 
 
-def _enumerate_output(directory: Path) -> Tuple[List[Tuple[str, bytes]], List[str]]:
+def _unmanifestable_reason(rel: str) -> Optional[str]:
+    """Why a relocated legacy file cannot carry a D-6 locator (None when it can)."""
+    for part in rel.split("/"):
+        if part.startswith("."):
+            return "hidden-component"
+        if not artifact_manifest._LOCATOR_COMPONENT_RE.match(part):
+            return "invalid-component"
+    return None
+
+
+def _enumerate_output(directory: Path, *, exclude_hidden: bool = False,
+                      excluded: Optional[List[str]] = None) -> Tuple[List[Tuple[str, bytes]], List[str]]:
+    """Regular files under `artifacts/`.  With `exclude_hidden`, files whose path
+    cannot be a D-6 locator (a dot-component such as `.git/`/`.claude/` runtime
+    residue, or a component longer than the locator limit) are left out of the
+    manifest and reported through `excluded` instead of failing validation
+    (W7E retrospective seal of relocated legacy trees)."""
     rows: List[Tuple[str, bytes]] = []
     violations: List[str] = []
     artifacts = directory / "artifacts"
@@ -656,6 +672,10 @@ def _enumerate_output(directory: Path) -> Tuple[List[Tuple[str, bytes]], List[st
             continue
         if not rel.startswith("artifacts/"):
             violations.append(f"file-outside-artifacts:{rel}")
+            continue
+        if exclude_hidden and _unmanifestable_reason(rel) is not None:
+            if excluded is not None:
+                excluded.append(rel)
             continue
         if not _REL_RE.match(rel) or ".." in rel.split("/"):
             violations.append(f"unsafe-locator:{rel}")
@@ -841,6 +861,7 @@ def finalize(
     allocator: Optional[artifact_identity.IdAllocator] = None,
     now: Optional[float] = None,
     crash_after_manifest: bool = False,
+    exclude_hidden: bool = False,
 ) -> Dict[str, Any]:
     root = Path(root).resolve()
     if state not in {"completed", "abandoned"}:
@@ -861,7 +882,8 @@ def finalize(
         route = load_route(root, Path(record["route_file"]))
         if route["route_hash"] != record["route_hash"]:
             raise ProducerError("route-hash-drift", cycle_id)
-        rows, violations = _enumerate_output(directory)
+        excluded_hidden: List[str] = []
+        rows, violations = _enumerate_output(directory, exclude_hidden=exclude_hidden, excluded=excluded_hidden)
         if violations:
             raise ProducerError("output-invalid", ";".join(violations))
         if not rows:
@@ -914,7 +936,7 @@ def finalize(
             raise artifact_admission.AdmissionRecoveryRequired(
                 f"cycle {cycle_id} manifest published but post-publish update failed; run recover"
             ) from exc
-        return {
+        return {"excluded_hidden": excluded_hidden, 
             "status": "sealed", "cycle_id": cycle_id, "campaign_id": record["campaign_id"],
             "manifest_digest": digest, "manifest_path": str(manifest_path),
             "artifact_count": len(rows), "lineage_committed": True, "cycle_state": document["cycle"]["state"],

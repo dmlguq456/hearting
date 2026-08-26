@@ -93,11 +93,13 @@ class Violation:
 class ValidationReport:
     ok: bool
     violations: Tuple[Violation, ...]
+    warnings: Tuple[Violation, ...] = ()
 
     def to_payload(self) -> Dict[str, Any]:
         return {
             "ok": self.ok,
             "violations": [v.to_payload() for v in self.violations],
+            "warnings": [v.to_payload() for v in self.warnings],
         }
 
     def merged(self, other: "ValidationReport") -> "ValidationReport":

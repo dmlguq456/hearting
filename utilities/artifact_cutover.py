@@ -331,6 +331,97 @@ def migrate_seal(root: Path, *, run_dir: Path, primary: Optional[str] = None,
     return report
 
 
+def _tree_digest(directory: Path) -> Dict[str, Any]:
+    """Byte-conservation witness: sorted (rel, size, sha256) over every regular file."""
+    rows = []
+    for entry in P._walk_files(directory):
+        if os.path.islink(str(entry)) or not entry.is_file():
+            continue
+        rows.append((entry.relative_to(directory).as_posix(), entry.stat().st_size, _sha(entry)))
+    rows.sort()
+    payload = "\n".join(f"{r}\t{n}\t{d}" for r, n, d in rows).encode("utf-8")
+    return {"file_count": len(rows), "byte_count": sum(n for _, n, _ in rows),
+            "tree_sha256": hashlib.sha256(payload).hexdigest()}
+
+
+def seal_legacy_cycle(root: Path, *, cycle_dir: Path, route_file: Path, capability: str = "autopilot-code",
+                      title: Optional[str] = None, started_on: Optional[str] = None,
+                      primary: Optional[str] = None, exclude_hidden: bool = False,
+                      allocator=None) -> Dict[str, Any]:
+    """W7E: adopt a producer record for an existing `campaigns/<camp>/cycles/<cyc>` directory
+    that was created outside the producer (the W7 relocation), then run the ordinary
+    finalize (manifest build, validation, index apply).  Bytes under `artifacts/` are
+    never touched; the route must already be closed (this is a retrospective seal)."""
+    root = Path(root).resolve()
+    _require_active(root)
+    directory = Path(cycle_dir).resolve()
+    try:
+        rel = directory.relative_to(root)
+    except ValueError as exc:
+        raise CutoverError("cycle-dir-outside-root", str(directory)) from exc
+    parts = rel.parts
+    if len(parts) != 4 or parts[0] != "campaigns" or parts[2] != "cycles":
+        raise CutoverError("cycle-dir-shape-invalid", str(rel))
+    campaign_id, cycle_id = parts[1], parts[3]
+    if not (directory / "artifacts").is_dir():
+        raise CutoverError("artifacts-dir-missing", str(rel))
+    if (directory / "manifest.json").exists():
+        raise CutoverError("manifest-already-present", str(rel))
+    existing = P.read_cycle_record(root, cycle_id)
+    if existing is not None and existing.get("state") != "no-lineage":
+        raise CutoverError("cycle-record-exists", existing.get("state", "?"))
+    campaign = P.read_campaign(root, campaign_id)
+    if campaign is None:
+        raise CutoverError("campaign-unknown", campaign_id)
+    if capability not in P.ENTRY_CAPABILITIES:
+        raise CutoverError("capability-unknown", capability)
+    route = P.load_route(root, Path(route_file))
+    if not P.route_is_closed(root, route):
+        raise CutoverError("route-not-closed", route["route_id"])
+    if route["capability"] != capability:
+        raise CutoverError("route-capability-mismatch", f"{route['capability']}!={capability}")
+    before = _tree_digest(directory / "artifacts")
+    alloc = allocator or P.artifact_identity.IdAllocator()
+    record = {
+        "schema_version": 1, "contract": P.CONTRACT, "cycle_id": cycle_id, "campaign_id": campaign_id,
+        "producer_id": alloc.allocate("producer"), "parent_cycle_id": None,
+        "capability": capability, "route_capability": route["capability"], "intensity": route["effective_intensity"],
+        "route_id": route["route_id"], "route_hash": route["route_hash"],
+        "route_file": str(Path(route_file).resolve()), "node_id": None, "state": "open",
+        "started_on": started_on or _now(), "sealed_on": None, "manifest_digest": None,
+        "title": title or f"{capability} legacy cycle (retrospective seal)",
+        "adopted": {"kind": "seal-legacy-cycle", "adopted_on": _now(), "tree_before": before},
+    }
+    P._write_cycle_record(root, record, exclusive=existing is None)
+    if cycle_id not in campaign.get("cycles", []):
+        campaign["cycles"] = list(campaign.get("cycles", [])) + [cycle_id]
+        P._write_campaign(root, campaign, exclusive=False)
+    try:
+        sealed = P.finalize(root, cycle_id=cycle_id, primary=primary, allocator=alloc, exclude_hidden=exclude_hidden)
+    except P.ProducerError as exc:
+        # Leave no half-adopted record behind; the directory itself is untouched.
+        P.cycle_record_path(root, cycle_id).unlink(missing_ok=True)
+        raise CutoverError("finalize-failed", f"{exc.code}: {exc.detail}") from exc
+    if sealed.get("status") != "sealed":
+        P.cycle_record_path(root, cycle_id).unlink(missing_ok=True)
+        raise CutoverError("finalize-failed", sealed.get("status", "?"))
+    after = _tree_digest(directory / "artifacts")
+    if after != before:
+        raise CutoverError("bytes-changed", json.dumps({"before": before, "after": after}))
+    excluded = list(sealed.get("excluded_hidden") or [])
+    if excluded:
+        # Durable trace of what the manifest deliberately does not list.
+        sealed_record = P.read_cycle_record(root, cycle_id) or {}
+        sealed_record.setdefault("adopted", {})["hidden_excluded"] = [
+            {"path": rel, "reason": P._unmanifestable_reason(rel), "sha256": _sha(directory / rel),
+             "byte_size": (directory / rel).stat().st_size} for rel in excluded]
+        P._write_cycle_record(root, sealed_record, exclusive=False)
+    return {"status": "sealed", "cycle_id": cycle_id, "campaign_id": campaign_id, "route_id": route["route_id"],
+            "producer_id": record["producer_id"], "manifest_digest": sealed["manifest_digest"],
+            "artifact_count": sealed["artifact_count"], "hidden_excluded": len(excluded),
+            "tree": after, "bytes_unchanged": True}
+
+
 def adopt_campaign(root: Path, campaign_id: str, *, title: str, goal: str) -> Dict[str, Any]:
     """Create `campaign.json` for a W7-relocated campaign directory that has none.
 
@@ -632,6 +723,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     p.add_argument("--primary")
     p.add_argument("--spec-reference")
     p.add_argument("--analysis-reference")
+    p = sub.add_parser("seal-legacy-cycle")
+    p.add_argument("--artifact-root", required=True)
+    p.add_argument("--cycle-dir", required=True)
+    p.add_argument("--route", required=True, help="a closed route owned by the sealing session")
+    p.add_argument("--capability", default="autopilot-code")
+    p.add_argument("--title")
+    p.add_argument("--started-on", help="RFC3339 start instant of the original transaction")
+    p.add_argument("--primary")
+    p.add_argument("--exclude-hidden", action="store_true",
+                   help="leave files that cannot carry a D-6 locator (dot components, over-long components) out of the manifest; recorded in the cycle record")
     p = sub.add_parser("compat-close")
     p.add_argument("--artifact-root", required=True)
     p.add_argument("--map", action="append", required=True)
@@ -656,6 +757,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                                    approval_receipt_sha256=args.approval_receipt_sha256, campaign_id=args.campaign)
         elif args.command == "adopt-campaign":
             result = adopt_campaign(root, args.campaign, title=args.title, goal=args.goal)
+        elif args.command == "seal-legacy-cycle":
+            result = seal_legacy_cycle(root, cycle_dir=Path(args.cycle_dir), route_file=Path(args.route),
+                                       capability=args.capability, title=args.title, started_on=args.started_on,
+                                       primary=args.primary, exclude_hidden=args.exclude_hidden)
         elif args.command == "migrate-seal":
             result = migrate_seal(root, run_dir=Path(args.run_dir), primary=args.primary,
                                   spec_reference=args.spec_reference, analysis_reference=args.analysis_reference)

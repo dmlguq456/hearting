@@ -12,6 +12,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import artifact_admission as adm  # noqa: E402
 import artifact_lifecycle as L  # noqa: E402
+import artifact_manifest as M  # noqa: E402
 import artifact_producer as P  # noqa: E402
 import artifact_cutover as C  # noqa: E402
 
@@ -240,6 +241,69 @@ class CutoverTest(unittest.TestCase):
         with self.assertRaises(C.CutoverError) as ctx:
             C.adopt_campaign(self.root, "camp_" + "f" * 32, title="x", goal="y")
         self.assertEqual(ctx.exception.code, "campaign-dir-missing")
+
+    def _external_cycle(self):
+        camp = "camp_" + "7" * 32
+        cyc = "cyc_" + "7" * 32
+        base = self.root / "campaigns" / camp / "cycles" / cyc / "artifacts"
+        self.w(f"campaigns/{camp}/cycles/{cyc}/artifacts/plans/2026-01-01_x/plan.md", "relocated plan\n")
+        self.w(f"campaigns/{camp}/cycles/{cyc}/artifacts/plans/2026-01-01_x/_internal/note.md", "internal\n")
+        self.w(f"campaigns/{camp}/cycles/{cyc}/artifacts/documents/d.md", "doc\n")
+        self.w(f"campaigns/{camp}/cycles/{cyc}/artifacts/plans/2026-01-01_x/.claude/settings.json", "{}\n")
+        self.w(f"campaigns/{camp}/cycles/{cyc}/artifacts/plans/2026-01-01_x/{'l' * 140}.txt", "long\n")
+        C.adopt_campaign(self.root, camp, title="w7", goal="g")
+        return camp, cyc, base.parent
+
+    def test_seal_legacy_cycle_builds_manifest_without_touching_bytes(self):
+        camp, cyc, cycle_dir = self._external_cycle()
+        before = C._tree_digest(cycle_dir / "artifacts")
+        route, route_file = self.route("debug")
+        with self.assertRaises(C.CutoverError) as ctx:
+            C.seal_legacy_cycle(self.root, cycle_dir=cycle_dir, route_file=route_file)
+        self.assertEqual(ctx.exception.code, "route-not-closed")
+        self.assertIsNone(P.read_cycle_record(self.root, cyc))
+        self.close(route, route_file)
+        with self.assertRaises(C.CutoverError) as ctx:  # hidden residue fails D-6 unless excluded
+            C.seal_legacy_cycle(self.root, cycle_dir=cycle_dir, route_file=route_file)
+        self.assertIn("locator-hidden-component", ctx.exception.detail)
+        self.assertIsNone(P.read_cycle_record(self.root, cyc))
+        result = C.seal_legacy_cycle(self.root, cycle_dir=cycle_dir, route_file=route_file,
+                                     title="W7 relocation", started_on="2026-08-25T00:00:00Z",
+                                     primary="plans/2026-01-01_x/plan.md", exclude_hidden=True)
+        self.assertEqual(result["status"], "sealed")
+        self.assertEqual(result["artifact_count"], 3)
+        self.assertEqual(result["hidden_excluded"], 2)
+        excluded = P.read_cycle_record(self.root, cyc)["adopted"]["hidden_excluded"]
+        self.assertEqual(sorted(row["reason"] for row in excluded), ["hidden-component", "invalid-component"])
+        self.assertTrue(all(row["sha256"] and row["byte_size"] for row in excluded))
+        self.assertTrue(result["bytes_unchanged"])
+        self.assertEqual(result["tree"], before)
+        self.assertEqual(C._tree_digest(cycle_dir / "artifacts"), before)
+        record = P.read_cycle_record(self.root, cyc)
+        self.assertEqual((record["state"], record["route_id"], record["started_on"]),
+                         ("sealed", route["route_id"], "2026-08-25T00:00:00Z"))
+        self.assertEqual(record["adopted"]["kind"], "seal-legacy-cycle")
+        document = json.loads((cycle_dir / "manifest.json").read_text())
+        self.assertTrue(M.validate(document).ok)
+        self.assertEqual(len(document["artifact_revisions"]), 3)
+        self.assertIn(cyc, adm.load_index(self.root).manifests)
+        self.assertTrue(adm.verify_index(self.root).ok)
+        with self.assertRaises(C.CutoverError) as ctx:
+            C.seal_legacy_cycle(self.root, cycle_dir=cycle_dir, route_file=route_file)
+        self.assertEqual(ctx.exception.code, "manifest-already-present")
+        self.assertEqual(P.check_write(self.root, cycle_dir / "artifacts" / "new.md")["reason"], "cycle-not-open")
+
+    def test_seal_legacy_cycle_rejects_bad_shapes(self):
+        route, route_file = self.route("debug")
+        self.close(route, route_file)
+        with self.assertRaises(C.CutoverError) as ctx:
+            C.seal_legacy_cycle(self.root, cycle_dir=self.root / "plans", route_file=route_file)
+        self.assertEqual(ctx.exception.code, "cycle-dir-shape-invalid")
+        camp, cyc, cycle_dir = self._external_cycle()
+        with self.assertRaises(C.CutoverError) as ctx:
+            C.seal_legacy_cycle(self.root, cycle_dir=cycle_dir, route_file=route_file, capability="autopilot-spec")
+        self.assertEqual(ctx.exception.code, "route-capability-mismatch")
+        self.assertIsNone(P.read_cycle_record(self.root, cyc))
 
     def test_retire_refuses_backup_inside_root(self):
         report, sealed = self.migrate()
