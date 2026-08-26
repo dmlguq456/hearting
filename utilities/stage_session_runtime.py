@@ -9,7 +9,15 @@ from pathlib import Path
 import subprocess
 import sys
 
+import artifact_producer
 from dispatch_contract import DispatchContractError, validate_attempt_metadata
+
+STATE_BUCKET = (".runtime", "stage-sessions")
+
+
+def default_state_dir(artifact_root: Path, route_id: str) -> Path:
+    """`<artifact-root>/.runtime/stage-sessions/<route_id>` (CORE §3 `C-RT`)."""
+    return Path(artifact_root).joinpath(*STATE_BUCKET) / route_id
 
 
 def add_arguments(parser: argparse.ArgumentParser) -> None:
@@ -89,13 +97,23 @@ def bind(args: argparse.Namespace, *, artifact_root: str | Path, action: str) ->
     state_dir = (
         Path(args.state_dir).resolve()
         if args.state_dir
-        else root / "plans" / "stage-sessions" / args.route_id / "_internal" / "state"
+        else default_state_dir(root, args.route_id)
     )
     try:
         state_dir.relative_to(root)
     except ValueError as exc:
         raise DispatchContractError("subsession-state-dir-outside-artifact-root", str(state_dir)) from exc
     args.state_ledger = str(state_dir / f"{args.attempt_id}.md")
+    # W7D: the ledger is runtime state, never a durable artifact.  Once the
+    # producer cutover is active a legacy top-level bucket (the pre-W7D
+    # default was `plans/stage-sessions/...`) is write-denied, so the same
+    # oracle hooks use decides here before anything is created.
+    verdict = artifact_producer.check_write(root, Path(args.state_ledger))
+    if verdict.get("verdict") != "allow":
+        raise DispatchContractError(
+            "subsession-state-dir-write-denied",
+            f"{verdict.get('reason')}: {args.state_ledger}",
+        )
     args.fixed_files_sha256 = _sha_files(args.fixed_file)
     args.narrow_verify_sha256 = _sha_text(args.narrow_verify)
     args.phase_brief_sha256 = hashlib.sha256(phase_brief.read_bytes()).hexdigest()

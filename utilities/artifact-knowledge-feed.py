@@ -4,6 +4,15 @@
 The command surface is intentionally closed and read-only with respect to the
 artifact root and Cairn. Mapping and feed files are written only to explicit,
 external caller-selected paths; scan and export never invoke a model.
+
+Bucket resolution (W7D). A bucket is observed at every layout that can hold
+it, in this fixed order: producer cycles
+(`campaigns/<camp>/cycles/<cyc>/artifacts/<bucket>/`), the latest shared
+revision for a shared kind (`shared/spec|research/<ref>/revisions/<rrev>/`),
+and finally the legacy top-level `<bucket>/` as a read-only fallback. Cycle
+locators are root-relative paths, so a relocated cycle is a different
+population member from its retired legacy locator; the mapping namespace is
+re-seeded per seal epoch.
 """
 from __future__ import annotations
 
@@ -20,6 +29,9 @@ import subprocess
 import sys
 import tempfile
 from typing import Any, Iterable, NamedTuple, Sequence
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import artifact_reader  # noqa: E402
 
 
 SCHEMA = "hearting-artifact-knowledge-feed/v1"
@@ -237,19 +249,28 @@ def _real_directories(base: Path, *, excluded: set[str] | None = None) -> list[P
     return directories
 
 
-def _bucket(root: Path, name: str, *, optional: bool = False) -> Path | None:
-    path = root / name
+def _check_bucket_dir(path: Path) -> None:
     try:
         mode = os.lstat(path).st_mode
-    except FileNotFoundError:
-        if optional:
-            return None
-        raise FeedError("inventory-incomplete", "required artifact bucket is missing", EXIT_DRIFT)
     except OSError as exc:
         raise FeedError("inventory-incomplete", "artifact bucket is unavailable", EXIT_DRIFT) from exc
     if not stat.S_ISDIR(mode) or stat.S_ISLNK(mode):
         raise FeedError("inventory-incomplete", "artifact bucket is unavailable", EXIT_DRIFT)
-    return path
+
+
+def _bucket_bases(root: Path, name: str, *, optional: bool = False) -> list[Path]:
+    """Every directory that holds bucket `name`: cycle layout, shared revision, legacy fallback."""
+    try:
+        candidates = artifact_reader.bucket_dirs(root, name)
+    except OSError as exc:
+        raise FeedError("inventory-incomplete", "artifact bucket is unavailable", EXIT_DRIFT) from exc
+    bases: list[Path] = []
+    for path, _meta in candidates:
+        _check_bucket_dir(path)
+        bases.append(path)
+    if not bases and not optional:
+        raise FeedError("inventory-incomplete", "required artifact bucket is missing", EXIT_DRIFT)
+    return bases
 
 
 def _is_regular_nofollow(path: Path) -> bool:
@@ -269,54 +290,53 @@ def d23_cycles(root: Path, selection: str) -> list[Cycle]:
     cycles: list[Cycle] = []
     names = ("plans",) if selection == "plans" else REQUIRED_BUCKETS + DECLARED_OPTIONAL_BUCKETS
     for name in names:
-        base = _bucket(root, name, optional=name in DECLARED_OPTIONAL_BUCKETS)
-        if base is None:
-            continue
-        excluded = {"_scratch"} if name == "plans" else {"_internal"} if name == "spec" else set()
-        for directory in _real_directories(base, excluded=excluded):
-            cycles.append(
-                Cycle(
-                    locator=_locator(root, directory, directory=True),
-                    bucket=name,
-                    physical_dir=directory,
-                    fallback=False,
-                    members=(),
+        for base in _bucket_bases(root, name, optional=name in DECLARED_OPTIONAL_BUCKETS):
+            base_locator = _locator(root, base, directory=True)
+            excluded = {"_scratch"} if name == "plans" else {"_internal"} if name == "spec" else set()
+            for directory in _real_directories(base, excluded=excluded):
+                cycles.append(
+                    Cycle(
+                        locator=_locator(root, directory, directory=True),
+                        bucket=name,
+                        physical_dir=directory,
+                        fallback=False,
+                        members=(),
+                    )
                 )
-            )
 
-        if name == "spec":
-            loose_names = {"prd.md", "pipeline_state.yaml", "pipeline_summary.md"}
-            members = tuple(
-                Path(entry.path)
-                for entry in _scan_directory(base)
-                if entry.name in loose_names and _is_regular_nofollow(Path(entry.path))
-            )
-            if members:
-                cycles.append(
-                    Cycle(
-                        "spec/_unscoped-legacy-component/",
-                        "spec",
-                        base,
-                        True,
-                        tuple(sorted(members, key=lambda path: _utf8_key(path.name))),
-                    )
+            if name == "spec":
+                loose_names = {"prd.md", "pipeline_state.yaml", "pipeline_summary.md"}
+                members = tuple(
+                    Path(entry.path)
+                    for entry in _scan_directory(base)
+                    if entry.name in loose_names and _is_regular_nofollow(Path(entry.path))
                 )
-        elif name == "documents":
-            members = tuple(
-                Path(entry.path)
-                for entry in _scan_directory(base)
-                if entry.name.lower().endswith(".md") and _is_regular_nofollow(Path(entry.path))
-            )
-            if members:
-                cycles.append(
-                    Cycle(
-                        "documents/_loose-documents/",
-                        "documents",
-                        base,
-                        True,
-                        tuple(sorted(members, key=lambda path: _utf8_key(path.name))),
+                if members:
+                    cycles.append(
+                        Cycle(
+                            base_locator + "_unscoped-legacy-component/",
+                            "spec",
+                            base,
+                            True,
+                            tuple(sorted(members, key=lambda path: _utf8_key(path.name))),
+                        )
                     )
+            elif name == "documents":
+                members = tuple(
+                    Path(entry.path)
+                    for entry in _scan_directory(base)
+                    if entry.name.lower().endswith(".md") and _is_regular_nofollow(Path(entry.path))
                 )
+                if members:
+                    cycles.append(
+                        Cycle(
+                            base_locator + "_loose-documents/",
+                            "documents",
+                            base,
+                            True,
+                            tuple(sorted(members, key=lambda path: _utf8_key(path.name))),
+                        )
+                    )
 
     cycles.sort(key=lambda cycle: _utf8_key(cycle.locator))
     locators = [cycle.locator for cycle in cycles]
@@ -372,7 +392,7 @@ def _inventory(root: Path, selection: str) -> tuple[list[dict[str, Any]], str]:
         if kind != "directory":
             return
         for entry in _scan_directory(path):
-            if locator == "plans/" and entry.name == "_scratch":
+            if locator in plans_bases and entry.name == "_scratch":
                 continue
             child = Path(entry.path)
             try:
@@ -383,12 +403,17 @@ def _inventory(root: Path, selection: str) -> tuple[list[dict[str, Any]], str]:
             child_locator = locator + entry.name + ("/" if is_directory else "")
             visit(child, _safe_locator(child_locator, directory=is_directory))
 
+    plans_bases: set[str] = set()
     for name in names:
-        base = _bucket(root, name, optional=name in DECLARED_OPTIONAL_BUCKETS)
-        if base is None:
+        bases = _bucket_bases(root, name, optional=name in DECLARED_OPTIONAL_BUCKETS)
+        if not bases:
             rows.append({"locator": name + "/", "kind": "declared-absent"})
             continue
-        visit(base, name + "/")
+        for base in bases:
+            base_locator = _locator(root, base, directory=True)
+            if name == "plans":
+                plans_bases.add(base_locator)
+            visit(base, base_locator)
 
     rows.sort(key=lambda row: _utf8_key(str(row["locator"])))
     encoded = canonical(rows)
@@ -707,7 +732,7 @@ def build_feed(
     declared_absent = [
         name
         for name in DECLARED_OPTIONAL_BUCKETS
-        if not (artifact_root / name).exists()
+        if not _bucket_bases(artifact_root, name, optional=True)
     ] if selection == "all-d23" else []
 
     feed = {

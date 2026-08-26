@@ -370,17 +370,27 @@ case "$cmd" in
     # (round_1-corrected plan.md Step 1.4). Only appended when set — the gate
     # itself falls through to the marker when no route is resolved.
     set -- ; [ -n "${AGENT_ROUTE_FILE:-}" ] && set -- --route "$AGENT_ROUTE_FILE"
+    # W7D: the artifact write cutover moved cycle output to
+    # campaigns/<c>/cycles/<c>/artifacts/<bucket>/ and the shared spec reference to
+    # shared/spec/<ref>/revisions/<rev>/, so the same gate must fire there; the
+    # legacy top-level buckets stay matched as a read-only fallback. Blueprint
+    # matching moved to a basename case so every layout gates the same seven files.
     case "$file" in
-      */.agent_reports/plans/*|*/.claude_reports/plans/*)
+      */.agent_reports/plans/*|*/.claude_reports/plans/*|\
+      */campaigns/*/cycles/*/artifacts/plans/*)
         "$ROOT/hooks/spec-skill-gate.sh" --skill autopilot-code --cwd "$(dirname "$file")" --session "$sid" "$@" ;;
-      */.agent_reports/spec/prd.md|*/.claude_reports/spec/prd.md|\
-      */.agent_reports/spec/stack.md|*/.claude_reports/spec/stack.md|\
-      */.agent_reports/spec/stack_decision.md|*/.claude_reports/spec/stack_decision.md|\
-      */.agent_reports/spec/ship.md|*/.claude_reports/spec/ship.md|\
-      */.agent_reports/spec/api_contract.md|*/.claude_reports/spec/api_contract.md|\
-      */.agent_reports/spec/data_model.md|*/.claude_reports/spec/data_model.md|\
-      */.agent_reports/spec/ui_flow.md|*/.claude_reports/spec/ui_flow.md)
-        "$ROOT/hooks/spec-skill-gate.sh" --skill autopilot-spec --cwd "$(dirname "$file")" --session "$sid" "$@" ;;
+      */.agent_reports/spec/*|*/.claude_reports/spec/*|\
+      */campaigns/*/cycles/*/artifacts/spec/*|\
+      */shared/spec/*/revisions/*)
+        # Authored blueprints only. `_internal/**` holds harness-written snapshots
+        # (spec version history) and stays ungated, as it was before the cutover.
+        case "$file" in
+          */_internal/*) : ;;
+          *) case "${file##*/}" in
+               prd.md|stack.md|stack_decision.md|ship.md|api_contract.md|data_model.md|ui_flow.md)
+                 "$ROOT/hooks/spec-skill-gate.sh" --skill autopilot-spec --cwd "$(dirname "$file")" --session "$sid" "$@" ;;
+             esac ;;
+        esac ;;
     esac
     if [ -n "$turn" ]; then
       "$0" material-route check --tool Write --file "$file" --cwd "$(dirname "$file")" --session "$sid" --turn "$turn"

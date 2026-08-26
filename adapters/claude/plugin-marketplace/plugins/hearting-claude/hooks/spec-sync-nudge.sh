@@ -43,7 +43,7 @@ EOF
 
 # Core logic uses portable Python for safe regex, glob, and JSON escaping.
 NUDGE_PY='
-import os, sys, json, re, glob
+import os, sys, json, re, glob, subprocess
 
 MODE = os.environ.get("SSN_MODE", "stdin")
 FMT = os.environ.get("SSN_FORMAT", "claude-json")
@@ -76,14 +76,37 @@ if not file_path:
 if not os.path.isabs(file_path):
     file_path = os.path.join(cwd, file_path)
 
+def reader_spec_dir(root):
+    # W7D: after the artifact write cutover the spec tree lives under
+    # campaigns/*/cycles/*/artifacts/spec or shared/spec/*/revisions/*.
+    # Shelled out rather than imported — the plugin projection rebases
+    # AGENT_HOME onto its data dir, so a missing resolver must degrade to the
+    # legacy walk above, never fail the hook.
+    script = os.path.join(os.environ.get("AGENT_HOME", ""), "utilities", "artifact_reader.py")
+    if not os.path.isfile(script):
+        return None
+    try:
+        r = subprocess.run([sys.executable, script, "spec-dir", "--artifact-root", root],
+                           capture_output=True, text=True, timeout=5)
+        return json.loads(r.stdout).get("path") if r.returncode == 0 else None
+    except Exception:
+        return None
+
 def find_spec_dir(start):
     d = os.path.dirname(os.path.abspath(start)); prev = None
+    roots = []
     while d and d != prev:
         for art in (".agent_reports", ".claude_reports"):
             spec = os.path.join(d, art, "spec")
             if os.path.isfile(os.path.join(spec, "pipeline_state.yaml")):
-                return spec
+                return spec                                   # legacy spec/ wins (read-only fallback)
+            if os.path.isdir(os.path.join(d, art)):
+                roots.append(os.path.join(d, art))
         prev, d = d, os.path.dirname(d)
+    for root in roots:   # no legacy spec/ → resolve the cycle/shared spec tree
+        found = reader_spec_dir(root)
+        if found:
+            return found
     return None
 
 spec_dir = find_spec_dir(file_path)
@@ -141,7 +164,13 @@ def bounded(line, tok):
     return re.search(r"(?<![A-Za-z0-9_])" + re.escape(tok) + r"(?![A-Za-z0-9_])", line) is not None
 
 hits, cap = [], int(os.environ.get("SPEC_SYNC_HITS", "8"))
-base = os.path.dirname(spec_dir)
+# Hits are shown relative to the artifact root so the layout stays legible
+# whether the spec tree is a cycle dir, a shared revision, or legacy spec/ (W7D).
+base, probe = os.path.dirname(spec_dir), spec_dir
+while probe and probe != os.path.dirname(probe):
+    if os.path.basename(probe) in (".agent_reports", ".claude_reports"):
+        base = probe; break
+    probe = os.path.dirname(probe)
 for mf in md:
     try:
         with open(mf, encoding="utf-8") as fh:

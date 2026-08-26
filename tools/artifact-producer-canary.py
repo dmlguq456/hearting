@@ -9,6 +9,11 @@ cases the W7C contract requires.  Nothing under the real artifact root, the
 installed harness, or the dispatch registry is touched.
 
 Exit 0 only when every canary, negative, and recovery check passes.
+
+`--live-root <artifact-root>` (W7D) runs the same 36 begin -> write -> finalize
+canaries against an already-activated live root: one probe file per cycle
+under one canary campaign, only the read-only negatives, no crash/recovery
+cases, and no activation, fixture home, or environment mutation.
 """
 from __future__ import annotations
 
@@ -92,7 +97,7 @@ def compile_for(capability, mode, intensity, root):
                            dispatch_evidence=dispatch_evidence(), **common)
 
 
-def close_route(route, route_file, scratch):
+def close_route(route, route_file, scratch, commit="b" * 40):
     evidence = scratch / f"evidence-{route['route_id']}.txt"
     evidence.write_text("canary terminal evidence\n", encoding="utf-8")
     for node in route["nodes"]:
@@ -108,7 +113,7 @@ def close_route(route, route_file, scratch):
         }
         R.write_completion_marker(route, node, node["id"], evidence,
                                   attempt_id=f"att-canary-{node['id']}", attempt_metadata=metadata)
-    outcome, _ = R.close_route(route, route_file, commit="b" * 40, summary="canary")
+    outcome, _ = R.close_route(route, route_file, commit=commit, summary="canary")
     if not outcome.get("terminal_gate_proven"):
         raise RuntimeError(f"terminal gate not proven: {outcome}")
 
@@ -123,12 +128,22 @@ def entry_capabilities():
 
 
 class Canary:
-    def __init__(self, workdir: Path):
+    def __init__(self, workdir: Path, *, live_root: Path | None = None, campaign_key: str | None = None):
         self.workdir = workdir
+        self.scratch = workdir / "scratch"
+        self.scratch.mkdir(parents=True)
+        self.live = live_root is not None
+        self.campaign_key = campaign_key
+        self.commit = "b" * 40
+        if self.live:
+            self.root = Path(live_root).resolve()
+            if not P.is_active(self.root):
+                raise RuntimeError(f"live root is not cutover-active: {self.root}")
+            head = os.popen(f"git -C {R.ROOT} rev-parse HEAD").read().strip()
+            self.commit = head or self.commit
+            return
         self.root = workdir / "artifact-root"
         self.root.mkdir(parents=True)
-        self.scratch = workdir / "scratch"
-        self.scratch.mkdir()
         home = workdir / "agent-home"
         (home / "core").mkdir(parents=True)
         (home / "core" / "CORE.md").write_text("canary fixture\n", encoding="utf-8")
@@ -144,14 +159,16 @@ class Canary:
         route = compile_for(capability, mode, intensity, self.root)
         binding = L.admit_runtime_route(self.root, route)
         route_file = Path(binding.route_file)
-        begun = P.begin(self.root, route_file=route_file, capability=capability, intensity=intensity)
+        begun = P.begin(self.root, route_file=route_file, capability=capability, intensity=intensity,
+                        campaign_key=self.campaign_key, title="artifact producer canary",
+                        goal="one probe artifact per capability x intensity")
         assert begun["status"] == "begun", begun
         row["cycle_id"], row["campaign_id"], row["producer_id"] = begun["cycle_id"], begun["campaign_id"], begun["producer_id"]
         cycle_dir = Path(begun["cycle_dir"])
         assert sorted(os.listdir(cycle_dir)) == ["artifacts"], "ids issued before first write"
         row["checks"].append("ids-issued-before-first-write")
         bucket = BUCKET[capability]
-        target = cycle_dir / "artifacts" / bucket / f"{capability}-{intensity}" / "final_report.md"
+        target = cycle_dir / "artifacts" / bucket / f"{capability}-{intensity}" / ("probe.md" if self.live else "final_report.md")
         verdict = P.check_write(self.root, target)
         assert verdict["verdict"] == "allow" and verdict["bucket"] == bucket, verdict
         row["checks"].append("check-write-allows-open-cycle")
@@ -168,17 +185,18 @@ class Canary:
             joined = P.begin(self.root, route_file=route_file, capability=capability, intensity=intensity,
                              node_id=stage_node)
             assert joined["status"] == "resumed" and joined["cycle_id"] == begun["cycle_id"], joined
-            (cycle_dir / "artifacts" / bucket / f"{capability}-{intensity}" / "stage.md").write_text(
-                f"stage {stage_node}\n", encoding="utf-8")
+            if not self.live:  # live canaries write exactly one probe file
+                (cycle_dir / "artifacts" / bucket / f"{capability}-{intensity}" / "stage.md").write_text(
+                    f"stage {stage_node}\n", encoding="utf-8")
             row["checks"].append(f"stage-worker-joined:{stage_node}")
-        close_route(route, route_file, self.scratch)
+        close_route(route, route_file, self.scratch, commit=self.commit)
         sealed = P.finalize(self.root, cycle_id=begun["cycle_id"])
         assert sealed["status"] == "sealed" and sealed["cycle_state"] == "completed", sealed
         document = json.loads((cycle_dir / "manifest.json").read_text(encoding="utf-8"))
         report = m.validate(document)
         assert report.ok, [v.code for v in report.violations]
         completion = L.evaluate_cycle_completion(document, content_root=cycle_dir, route_file=route_file,
-                                                 expected_root_id=ROOT_ID)
+                                                 expected_root_id=self.root_id())
         assert completion.status == "complete", completion.to_payload()
         assert begun["cycle_id"] in adm.load_index(self.root).manifests
         row["checks"].append("finalize-sealed-manifest-valid-index-applied")
@@ -189,6 +207,12 @@ class Canary:
         row["artifact_count"] = sealed["artifact_count"]
         row["status"] = "pass"
         return row
+
+    def root_id(self):
+        if not self.live:
+            return ROOT_ID
+        identity = L.read_root_identity(self.root)
+        return getattr(identity, "artifact_root_id", None) or identity["artifact_root_id"]
 
     def negatives(self):
         rows = []
@@ -227,6 +251,8 @@ class Canary:
             verdict = P.check_write(self.root, self.root / "campaigns" / ("camp_" + "3" * 32) / "cycles" / ("cyc_" + "4" * 32) / "artifacts" / "a.md")
             assert verdict["reason"] == "cycle-unknown", verdict
         case("unknown-cycle-denied", unknown_cycle_denied)
+        if self.live:  # the remaining negatives create lineage or rely on fixture ids
+            return rows
 
         def research_without_promotion():
             route = compile_for("autopilot-research", "technology", "direct", self.root)
@@ -341,11 +367,18 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument("--output", help="write the JSON report here")
     parser.add_argument("--keep", action="store_true", help="keep the temporary artifact root")
+    parser.add_argument("--live-root", help="run the canaries against this cutover-active live artifact root")
+    parser.add_argument("--campaign-key", default="artifact-producer-canary",
+                        help="campaign key that groups the live canary cycles")
     args = parser.parse_args(argv)
     started = time.time()
     tmp = tempfile.mkdtemp(prefix="w7c-canary-")
-    canary = Canary(Path(tmp))
-    report = {"schema_version": 1, "kind": "w7c-producer-canary", "artifact_root": str(canary.root),
+    if args.live_root:
+        canary = Canary(Path(tmp), live_root=Path(args.live_root), campaign_key=args.campaign_key)
+    else:
+        canary = Canary(Path(tmp))
+    report = {"schema_version": 1, "kind": "w7d-live-producer-canary" if canary.live else "w7c-producer-canary",
+              "artifact_root": str(canary.root), "mode": "live" if canary.live else "fixture",
               "harness_source_commit": None, "canaries": [], "negatives": [], "recovery": []}
     try:
         report["harness_source_commit"] = os.popen(f"git -C {ROOT} rev-parse HEAD").read().strip() or None
@@ -360,7 +393,7 @@ def main(argv=None):
                                            "status": "fail", "error": f"{type(exc).__name__}: {exc}",
                                            "trace": traceback.format_exc()})
     report["negatives"] = canary.negatives()
-    report["recovery"] = canary.recovery()
+    report["recovery"] = [] if canary.live else canary.recovery()
     report["producer_status"] = P.status(canary.root)
     passed = sum(1 for r in report["canaries"] if r.get("status") == "pass")
     neg_passed = sum(1 for r in report["negatives"] if r.get("status") == "pass")
@@ -376,7 +409,8 @@ def main(argv=None):
     if not args.keep:
         import shutil
         shutil.rmtree(tmp, ignore_errors=True)
-        report["artifact_root"] = None
+        if not canary.live:
+            report["artifact_root"] = None
     text = json.dumps(report, indent=2, sort_keys=True) + "\n"
     if args.output:
         Path(args.output).write_text(text, encoding="utf-8")

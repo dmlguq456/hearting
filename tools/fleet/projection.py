@@ -340,6 +340,33 @@ def _projection_from_record(entity, record, route_id, jobs, node_evidence=None, 
     )
 
 
+_ARTIFACT_READER = None
+
+
+def _artifact_reader():
+    """`utilities/artifact_reader.py` (W7D read-side layout resolver), or None.
+
+    Same lazy `sys.path` shape as `_grounding_home`. Fleet only reads the
+    artifact root, so a checkout without the resolver degrades to the legacy
+    top-level buckets instead of raising."""
+    global _ARTIFACT_READER
+    if _ARTIFACT_READER is None:
+        _ARTIFACT_READER = False
+        for candidate in Path(__file__).resolve().parents:
+            utilities_dir = candidate / "utilities"
+            if not (utilities_dir / "artifact_reader.py").is_file():
+                continue
+            if str(utilities_dir) not in sys.path:
+                sys.path.insert(0, str(utilities_dir))
+            try:
+                import artifact_reader
+            except Exception:
+                break
+            _ARTIFACT_READER = artifact_reader
+            break
+    return _ARTIFACT_READER or None
+
+
 def _artifact_candidates(entity, artifact_root=None):
     slug = _field(entity, "slug") or _field(entity, "key")
     if not slug:
@@ -350,12 +377,16 @@ def _artifact_candidates(entity, artifact_root=None):
             value = os.path.realpath(os.path.expanduser(str(value)))
             roots.extend((value, os.path.join(value, ".agent_reports")))
     candidates = set()
+    reader = _artifact_reader()
     for root in roots:
-        for pattern in (os.path.join(root, "plans", "*_%s" % slug),
-                        os.path.join(root, "*_%s" % slug)):
-            for path in glob.glob(pattern):
-                if os.path.isdir(path):
-                    candidates.add(os.path.realpath(path))
+        # W7D: plan cycles live under campaigns/*/cycles/*/artifacts/plans; the
+        # top-level plans/ stays a read-only fallback (both come back from
+        # glob_bucket). `root` itself may already be the plans dir.
+        matches = (reader.glob_bucket(Path(root), "plans", "*_%s" % slug) if reader is not None
+                   else glob.glob(os.path.join(root, "plans", "*_%s" % slug)))
+        for path in [str(m) for m in matches] + glob.glob(os.path.join(root, "*_%s" % slug)):
+            if os.path.isdir(path):
+                candidates.add(os.path.realpath(path))
     return sorted(candidates)
 
 
@@ -579,11 +610,17 @@ def _strip_comment(value):
 
 
 def _spec_pipeline_state_path(root, slug):
+    reader = _artifact_reader()
     for reports_dir in (".agent_reports", ".claude_reports"):
-        base = os.path.join(root, reports_dir, "spec")
-        path = os.path.join(base, slug, "pipeline_state.yaml") if slug else os.path.join(base, "pipeline_state.yaml")
-        if os.path.isfile(path):
-            return path
+        artifacts = os.path.join(root, reports_dir)
+        # W7D: cycle spec trees and the latest shared/spec revision first, the
+        # legacy top-level spec/ last as a read-only fallback.
+        bases = ([str(b) for b, _ in reader.bucket_dirs(Path(artifacts), "spec")] if reader is not None
+                 else [os.path.join(artifacts, "spec")])
+        for base in bases:
+            path = os.path.join(base, slug, "pipeline_state.yaml") if slug else os.path.join(base, "pipeline_state.yaml")
+            if os.path.isfile(path):
+                return path
     return None
 
 

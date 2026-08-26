@@ -112,7 +112,10 @@ def main():
         emit({"status":"blocked","reason":exc.code,"detail":exc.detail,"artifact_root":str(artifact)},args.events); return 65
     spec_base=spec_base.resolve()
     spec_root=(Path(args.spec_root).expanduser() if args.spec_root else spec_base)
-    if not spec_root.is_absolute(): spec_root=artifact/spec_root
+    # A relative component root is relative to the resolved spec bucket, which
+    # is the open cycle's `artifacts/spec` once the cutover is active (W7D fix:
+    # `artifact/<component>` pointed outside the cycle and was always blocked).
+    if not spec_root.is_absolute(): spec_root=spec_base/spec_root
     spec_root=spec_root.resolve()
     try: spec_root.relative_to(spec_base)
     except ValueError:

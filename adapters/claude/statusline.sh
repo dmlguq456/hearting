@@ -230,7 +230,7 @@ else segs_arr+=("${DIM}⎇ no-git${RST}"); fi
 # 도는 headless 파이프·루프 상세 ("N shells" 배지의 중간 단계 — 무엇이·얼마나·뭘 하는지)
 jobs_lbl=$(COLUMNS=100000 ps -eo pid=,etime=,args= 2>/dev/null | python3 -c '
 # COLUMNS 고정 필수 — CC 가 statusline env 에 터미널 폭을 넣고, ps 는 파이프여도 COLUMNS 로 args 를 잘라 /autopilot- 매칭이 전멸한다 (2026-06-11 실측)
-import sys, re, os
+import sys, re, os, glob
 CWD = sys.argv[1] if len(sys.argv) > 1 else ""
 def related(jcwd):
     # 프로젝트 파이프는 같은 디렉토리 트리의 세션에만 표시 (전사 루프는 무조건)
@@ -256,28 +256,35 @@ def live_stage(jcwd, slug, fb):
     # worktree slug → plans/*_<slug>/ 산출물로 실제 파이프 단계 유도 (argv 라벨이 정적 → 실시간 반영). fb = argv 추정 단계.
     if not jcwd or not slug: return fb
     ar = ".agent_reports" if os.path.isdir(jcwd + "/.agent_reports") else ".claude_reports"
-    base = jcwd + "/" + ar + "/plans"
-    try: cand = sorted(d for d in os.listdir(base) if d.endswith("_" + slug))
-    except Exception: cand = []
+    # W7D — cutover 후 cycle 산출물은 campaigns/*/cycles/*/artifacts/plans 에 있고
+    # 최상위 plans/ 는 읽기 전용 레거시 폴백(뒤에 붙임). 정본 리졸버는
+    # utilities/artifact_reader.py 지만 statusline 은 매 렌더 경로라 import 40ms 를
+    # 피해 같은 레이아웃을 glob 로 미러링한다 (읽기만, 아티팩트 쓰기 없음).
+    bases = sorted(glob.glob(jcwd + "/" + ar + "/campaigns/*/cycles/*/artifacts/plans"))
+    if os.path.isdir(jcwd + "/" + ar + "/plans"): bases.append(jcwd + "/" + ar + "/plans")
+    def kids(b):
+        try: return [b + "/" + d for d in os.listdir(b)]
+        except Exception: return []
+    cand = sorted((d for b in bases for d in kids(b) if os.path.basename(d).endswith("_" + slug)), key=os.path.basename)
     if not cand:
         # slug 불일치 폴백 — 헤드리스 autopilot-code 가 plan 폴더를 _task 기반_ slug 로 만들면
         # (예: worktree=detail-perf / plan=…_detail-modal-perf) 정확 매칭이 실패해 stage 가 안 뜬다.
         # 워크트리 slug 와 하이픈 토큰 겹침이 최대인 plan 폴더로 폴백(겹침 0 이면 argv 추정 유지).
         stoks = set(t for t in slug.split("-") if t)
-        try: dirs = [d for d in os.listdir(base) if not d.startswith(".") and os.path.isdir(base + "/" + d)]
-        except Exception: dirs = []
+        dirs = [d for b in bases for d in kids(b) if not os.path.basename(d).startswith(".") and os.path.isdir(d)]
         best, bestn, bestm = None, 0, -1.0
         for d in dirs:
-            if os.path.exists(base + "/" + d + "/pipeline_summary.md"): continue   # 완료(done) 폴더는 폴백 후보 제외 — 새 worktree slug 가 옛 done 폴더와 generic 토큰 1개만 겹쳐 "done"으로 오인되는 것 방지(정확 매칭 경로는 보존)
-            dslug = d.split("_", 1)[-1] if "_" in d else d
+            if os.path.exists(d + "/pipeline_summary.md"): continue   # 완료(done) 폴더는 폴백 후보 제외 — 새 worktree slug 가 옛 done 폴더와 generic 토큰 1개만 겹쳐 "done"으로 오인되는 것 방지(정확 매칭 경로는 보존)
+            name = os.path.basename(d)
+            dslug = name.split("_", 1)[-1] if "_" in name else name
             n = len(stoks & set(t for t in dslug.split("-") if t))
-            try: m = os.path.getmtime(base + "/" + d)
+            try: m = os.path.getmtime(d)
             except Exception: m = 0.0
             if n > bestn or (n == bestn and n > 0 and m > bestm):
                 best, bestn, bestm = d, n, m
         if not best or bestn == 0: return fb   # plan 폴더 전 or 무관 → argv 추정 유지
         cand = [best]
-    pd = base + "/" + cand[-1]
+    pd = cand[-1]
     if os.path.exists(pd + "/pipeline_summary.md"): return "done"
     if has_entries(pd + "/test_logs"): return "test"
     if has_entries(pd + "/dev_logs"): return "exec"

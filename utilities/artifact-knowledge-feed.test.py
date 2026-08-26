@@ -226,6 +226,72 @@ class FeedUnitTests(unittest.TestCase):
                 feed.validate_feed(forged)
 
 
+class LayeredLayoutTests(unittest.TestCase):
+    """W7D: buckets are observed at cycle, shared, and legacy layouts."""
+
+    def _cycle_root(self, base: Path) -> tuple[Path, Path]:
+        root = base / "artifacts"
+        cyc = root / "campaigns" / ("camp_" + "a" * 32) / "cycles" / ("cyc_" + "b" * 32) / "artifacts"
+        (cyc / "plans" / "2026-08-26_relocated").mkdir(parents=True)
+        (cyc / "plans" / "2026-08-26_relocated" / "plan.md").write_text("plan", encoding="utf-8")
+        (cyc / "plans" / "2026-08-26_relocated" / "final_report.md").write_text("done", encoding="utf-8")
+        return root, cyc
+
+    def test_cycle_layout_alone_satisfies_the_required_plans_bucket(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root, _ = self._cycle_root(Path(tmp))
+            population = feed.d23_population(root, "plans")
+            self.assertEqual(
+                population,
+                ["campaigns/camp_" + "a" * 32 + "/cycles/cyc_" + "b" * 32 + "/artifacts/plans/2026-08-26_relocated/"],
+            )
+            produced = feed.build_feed(root, "plans", fixed_mapping(root), "2026-08-26T00:00:00Z")
+            self.assertEqual(produced["population_count"], 1)
+            self.assertEqual(produced["rows"][0]["producer_evidence"]["summary_state"], "usable")
+
+    def test_legacy_bucket_is_a_read_only_fallback_after_cycle_dirs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root, _ = self._cycle_root(Path(tmp))
+            (root / "plans" / "2026-01-01_legacy").mkdir(parents=True)
+            (root / "plans" / "_scratch" / "ignored").mkdir(parents=True)
+            population = feed.d23_population(root, "plans")
+            self.assertEqual(len(population), 2)
+            self.assertTrue(population[0].startswith("campaigns/"))
+            self.assertEqual(population[1], "plans/2026-01-01_legacy/")
+            rows, _digest = feed._inventory(root, "plans")
+            self.assertFalse(any("_scratch" in row["locator"] for row in rows))
+
+    def test_shared_spec_revision_is_observed_for_the_spec_bucket(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root, cyc = self._cycle_root(Path(tmp))
+            for name in ("research", "documents"):
+                (cyc / name).mkdir()
+            ref = root / "shared" / "spec" / ("ref_" + "c" * 32)
+            rev = ref / "revisions" / ("rrev_" + "d" * 32)
+            (rev / "component").mkdir(parents=True)
+            (rev / "component" / "prd.md").write_text("prd", encoding="utf-8")
+            (rev / "prd.md").write_text("root prd", encoding="utf-8")
+            (rev / "_internal").mkdir()
+            (ref / "reference.json").write_text(
+                json.dumps({"latest_revision_id": "rrev_" + "d" * 32, "updated_on": "2026-08-26T00:00:00Z"}),
+                encoding="utf-8",
+            )
+            population = feed.d23_population(root, "all-d23")
+            shared_prefix = "shared/spec/ref_" + "c" * 32 + "/revisions/rrev_" + "d" * 32 + "/"
+            self.assertIn(shared_prefix + "component/", population)
+            self.assertIn(shared_prefix + "_unscoped-legacy-component/", population)
+            self.assertFalse(any(loc.endswith("/_internal/") for loc in population))
+            produced = feed.build_feed(root, "all-d23", fixed_mapping(root, "all-d23"), "2026-08-26T00:00:00Z")
+            self.assertEqual(sorted(produced["declared_absent_buckets"]), ["designs", "experiments"])
+
+    def test_missing_bucket_at_every_layout_is_inventory_incomplete(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root, _ = self._cycle_root(Path(tmp))
+            with self.assertRaises(feed.FeedError) as caught:
+                feed.d23_population(root, "all-d23")
+            self.assertEqual(caught.exception.code, "inventory-incomplete")
+
+
 class FeedCliTests(unittest.TestCase):
     def test_closed_grammar_returns_canonical_usage_error(self):
         status, stdout, stderr = run_main(["ingest"])

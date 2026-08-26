@@ -44,6 +44,11 @@ from dispatch_contract import (  # noqa: E402
 from dispatch_completion_join import read_supervisor_phase_state  # noqa: E402
 from codex_dispatch_terminal import terminal_envelope_observed  # noqa: E402
 
+try:  # W7D read-side layout resolver; absent on a pre-cutover checkout.
+    import artifact_reader  # noqa: E402
+except Exception:  # a monitor must never fail to import over a read helper
+    artifact_reader = None
+
 from .. import model
 from ..model import ContextEvidence, DispatchJob, etime_to_min
 from ..token_budget import parse_codex_token_count, telemetry_from_explicit
@@ -1886,31 +1891,41 @@ def _find_plan_dir(jcwd, slug, key=None, capability=None, worker_role=None,
     never left `pre` (user 2026-07-20: "fleet이 여전히 pre에만 깜빡이는거야?")."""
     if not _is_code_job(key, capability, worker_role) or not jcwd or not slug:
         return None
-    if artifact_root and os.path.isdir(os.path.join(artifact_root, "plans")):
-        base = os.path.join(artifact_root, "plans")
-    else:
+
+    # W7D: plan cycles live under campaigns/*/cycles/*/artifacts/plans; the
+    # top-level plans/ stays a read-only fallback and is searched last.
+    def bases_for(root):
+        if artifact_reader is not None:
+            return [str(b) for b, _ in artifact_reader.bucket_dirs(Path(root), "plans")]
+        legacy = os.path.join(root, "plans")
+        return [legacy] if os.path.isdir(legacy) else []
+
+    def children(base):
+        try:
+            return [os.path.join(base, d) for d in os.listdir(base)]
+        except OSError:
+            return []
+
+    bases = bases_for(artifact_root) if artifact_root else []
+    if not bases:
         ar = ".agent_reports" if os.path.isdir(os.path.join(jcwd, ".agent_reports")) else ".claude_reports"
-        base = os.path.join(jcwd, ar, "plans")
-    try:
-        cand = sorted(d for d in os.listdir(base) if d.endswith("_" + slug))
-    except OSError:
-        cand = []
+        bases = bases_for(os.path.join(jcwd, ar))
+    cand = sorted((d for base in bases for d in children(base)
+                   if os.path.basename(d).endswith("_" + slug)), key=os.path.basename)
     if not cand:
         # slug mismatch fallback: pick the plan folder with max hyphen-token overlap
         stoks = set(t for t in slug.split("-") if t)
-        try:
-            dirs = [d for d in os.listdir(base)
-                    if not d.startswith(".") and os.path.isdir(os.path.join(base, d))]
-        except OSError:
-            dirs = []
+        dirs = [d for base in bases for d in children(base)
+                if not os.path.basename(d).startswith(".") and os.path.isdir(d)]
         best, bestn, bestm = None, 0, -1.0
         for d in dirs:
-            if os.path.exists(os.path.join(base, d, "pipeline_summary.md")):
+            if os.path.exists(os.path.join(d, "pipeline_summary.md")):
                 continue                      # skip done folders (avoid generic-token false "done")
-            dslug = d.split("_", 1)[-1] if "_" in d else d
+            name = os.path.basename(d)
+            dslug = name.split("_", 1)[-1] if "_" in name else name
             n = len(stoks & set(t for t in dslug.split("-") if t))
             try:
-                mt = os.path.getmtime(os.path.join(base, d))
+                mt = os.path.getmtime(d)
             except OSError:
                 mt = 0.0
             if n > bestn or (n == bestn and n > 0 and mt > bestm):
@@ -1918,7 +1933,7 @@ def _find_plan_dir(jcwd, slug, key=None, capability=None, worker_role=None,
         if not best or bestn == 0:
             return None
         cand = [best]
-    return os.path.join(base, cand[-1])
+    return cand[-1]
 
 
 def live_stage(jcwd, slug, fallback, capability=None, worker_role=None, artifact_root=None):
@@ -1969,7 +1984,11 @@ def resolve_plan_qa_artifact(job):
                       os.path.join(root, ".claude_reports")))
     candidates = set()
     for root in roots:
-        for path in glob.glob(os.path.join(root, "plans", "*_%s" % slug)):
+        # W7D: cycle plans dirs plus the legacy top-level plans/ read-only fallback.
+        matches = (artifact_reader.glob_bucket(Path(root), "plans", "*_%s" % slug)
+                   if artifact_reader is not None
+                   else glob.glob(os.path.join(root, "plans", "*_%s" % slug)))
+        for path in (str(m) for m in matches):
             if os.path.isdir(path):
                 candidates.add(os.path.realpath(path))
     if len(candidates) != 1:

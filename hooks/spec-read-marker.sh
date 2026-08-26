@@ -16,6 +16,21 @@ Without arguments, reads Claude hook JSON from stdin.
 EOF
 }
 
+# True when the legacy bucket still carries a governing prd.md (root or a
+# one-level component); `_internal/` never counts.
+legacy_has_prd() {
+  legacy=$1
+  [ -d "$legacy" ] || return 1
+  [ -f "$legacy/prd.md" ] && return 0
+  for d in "$legacy"/*/; do
+    [ -d "$d" ] || continue
+    d="${d%/}"
+    [ "$(basename "$d")" = "_internal" ] && continue
+    [ -f "$d/prd.md" ] && return 0
+  done
+  return 1
+}
+
 mark_read() {
   fp=$1
   sid=$2
@@ -75,8 +90,11 @@ mark_read() {
   fi
   canonical=$("$ARTIFACT_ROOT_RESOLVER" "$file_root" 2>/dev/null) || return 0
   if [ -n "$shared_prd" ]; then
-    # Only a read of the canonical (legacy-absent) layout under this root counts.
-    [ -d "$canonical/spec" ] && return 0
+    # A shared/spec read counts only while the legacy `spec/` bucket holds no
+    # prd.md candidate — the same precedence spec-skill-gate.sh applies. The
+    # bucket directory itself may survive retirement (W7D: it keeps excluded
+    # `_internal/` evidence), so its mere existence is not the test.
+    legacy_has_prd "$canonical/spec" && return 0
     canonical_prd="$fp"
   elif [ -z "$slug" ]; then
     canonical_prd="$canonical/spec/prd.md"

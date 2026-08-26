@@ -143,6 +143,36 @@ def artifact_root(cwd: Path) -> Path:
         return legacy
     return agent
 
+
+# W7D read-side resolver for the post-cutover artifact layout; False once a
+# lookup failed so a partial install degrades to the legacy buckets silently.
+_ARTIFACT_READER = None
+
+
+def _artifact_reader():
+    """Return ``utilities/artifact_reader.py`` as a module, or None.
+
+    Resolved from the harness checkout that holds this file first, then
+    AGENT_HOME — mem.py is read-only toward the artifact root, so a missing
+    resolver must degrade to the legacy top-level buckets, never raise.
+    """
+    global _ARTIFACT_READER
+    if _ARTIFACT_READER is None:
+        _ARTIFACT_READER = False
+        for base in (MEM_MODULE_DIR.parents[1] / "utilities", AGENT_HOME / "utilities"):
+            if not (base / "artifact_reader.py").is_file():
+                continue
+            if str(base) not in sys.path:
+                sys.path.insert(0, str(base))
+            try:
+                import artifact_reader
+            except Exception:
+                break
+            _ARTIFACT_READER = artifact_reader
+            break
+    return _ARTIFACT_READER or None
+
+
 # Auto-commit prefix distinguishes synchronized dumps from manual commits.
 AUTO_DUMP_MSG_PREFIX = "chore: dump — auto-sync"
 
@@ -4392,12 +4422,16 @@ def curate_artifacts():
         out.append("UNMERGED BRANCHES (work may still be active):")
         out.append(nm)
     ar = artifact_root(cwd)
-    plans = ar / "plans"
-    if plans.is_dir():
+    reader = _artifact_reader()
+    # Cycle output (campaigns/*/cycles/*/artifacts/plans) first, then the
+    # legacy top-level plans/ as a read-only fallback.
+    if reader is not None:
+        plan_dirs = [d for d, _ in reader.iter_bucket_children(ar, "plans")]
+    else:
+        plan_dirs = [d for d in (ar / "plans").iterdir() if d.is_dir()] if (ar / "plans").is_dir() else []
+    if plan_dirs:
         rows = []
-        for p in sorted(plans.iterdir(), reverse=True):
-            if not p.is_dir():
-                continue
+        for p in sorted(plan_dirs, key=lambda d: d.name, reverse=True):
             dl = p / "dev_logs"
             state = "dev_logs present" if dl.is_dir() and any(dl.iterdir()) else "plan only"
             rows.append(f"  {p.name} ({state})")
@@ -4406,7 +4440,8 @@ def curate_artifacts():
         if rows:
             out.append("PLANS (dev_logs indicate started or completed cycles):")
             out.extend(rows)
-    ps = ar / "spec" / "pipeline_state.yaml"
+    spec = reader.spec_dir(ar) if reader is not None else None
+    ps = (spec[0] if spec else ar / "spec") / "pipeline_state.yaml"
     if ps.is_file():
         try:
             txt = ps.read_text(encoding="utf-8")
