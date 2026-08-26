@@ -2566,6 +2566,7 @@ def _scan_jobs_log(path, seen_slugs, seen_keys=None, registry_priority=0,
         ts, status, repo, worktree, _slug, pipe = fields
         row_age_min = _iso_elapsed_min(ts)
         afterglow = False
+        dead_terminal_owner = False
         row_terminal_mismatch = False
         if status not in ("open", "running"):
             # F-64: before dropping a terminal row, let process truth veto the registry
@@ -2583,7 +2584,15 @@ def _scan_jobs_log(path, seen_slugs, seen_keys=None, registry_priority=0,
             # Every other terminal word — and any `done` older than the window — is dropped
             # exactly as before, so the row self-clears on the next tick past the window.
             elif status != "done" or row_age_min is None or row_age_min > DONE_AFTERGLOW_MIN:
-                continue                      # newest state is terminal → not live
+                # F-83: a dispatch-depth-1 owner the supervisor closed as `dead-*` keeps its
+                # row past the afterglow window while its bound route still has open work.
+                # Dropping it left the owning main session with no card, so the route fell
+                # back to the legacy multi-line stage surface (user 2026-08-26 "stage 형식이
+                # old 스타일로 박스없이 남아있잖아"). `_retain_dead_terminal_owners` drops
+                # it again once the route closes or a newer owner binds the same route.
+                if not _dead_terminal_owner_row(status, _parse_pipe_meta(pipe or "")):
+                    continue                  # newest state is terminal → not live
+                dead_terminal_owner = True
             else:
                 afterglow = True
         cwd = worktree if worktree not in ("-", "(main-tree)") else ""
@@ -2685,6 +2694,9 @@ def _scan_jobs_log(path, seen_slugs, seen_keys=None, registry_priority=0,
         job._log_file = meta.get("log_file")
         job._launch_home = meta.get("launch_home")
         job._registry_path = path
+        job._dead_terminal_owner = dead_terminal_owner
+        if dead_terminal_owner:
+            job.note = meta.get("note") or "dead-runtime-exit"
         job._registry_metadata = dict(meta)
         job._registry_repo = repo
         job._registry_worktree = cwd
@@ -2850,6 +2862,86 @@ def _orphan_registry_module():
             mod = False
         _ORPHAN_REGISTRY_MOD = mod
     return _ORPHAN_REGISTRY_MOD or None
+
+
+def _dead_terminal_owner_row(status, meta):
+    """F-83: a `done` dispatch-depth-1 owner row whose closure was a typed death."""
+    if status != "done" or not isinstance(meta, dict):
+        return False
+    if meta.get("worker_type") != "owner":
+        return False
+    if _parse_depth(meta.get("dispatch_depth", meta.get("depth"))) != 1:
+        return False
+    if not meta.get("attempt_id"):
+        return False
+    note = meta.get("note") or ""
+    return note.startswith("dead-") or meta.get("failure_class") == "runtime"
+
+
+def _retain_dead_terminal_owners(jobs, now, jobs_path=None):
+    """F-83: keep a supervisor-closed dead owner visible only while its route is
+    incomplete and no newer owner attempt binds the same route; otherwise drop it.
+    Read-only against the registry the row came from (SD-64/71 primitives via
+    dispatch-registry.py) — never the first candidate path, which may be another
+    harness home's registry."""
+    dead = [j for j in jobs if getattr(j, "_dead_terminal_owner", False)]
+    if not dead:
+        return jobs
+    registry = _orphan_registry_module()
+    if registry is None:
+        return [j for j in jobs if not getattr(j, "_dead_terminal_owner", False)]
+    from pathlib import Path as _Path
+    rows_by_path = {}
+
+    def _rows_for(path):
+        if path not in rows_by_path:
+            try:
+                rows_by_path[path] = registry.read_rows(_Path(path))
+            except Exception:
+                rows_by_path[path] = []
+        return rows_by_path[path]
+
+    class _Args:
+        pass
+
+    drop = set()
+    for j in dead:
+        path = getattr(j, "_registry_path", None) or jobs_path
+        rows = _rows_for(path) if path else []
+        row = next((r for r in rows if r["meta"].get("attempt_id") == j.attempt_id), None)
+        if row is None:
+            drop.add(id(j)); continue
+        route_id = row["meta"].get("owner_route_id") or row["meta"].get("route_id") or ""
+        # A newer owner attempt bound to the same route supersedes this dead one.
+        superseded = any(
+            r["order"] > row["order"]
+            and r["meta"].get("worker_type") == "owner"
+            and r["meta"].get("attempt_id") not in (None, "", j.attempt_id)
+            and (r["meta"].get("owner_route_id") or r["meta"].get("route_id")) == route_id
+            for r in rows
+        )
+        if superseded or not route_id:
+            drop.add(id(j)); continue
+        args = _Args()
+        args.agent_home = _Path(_registry_home())
+        args.jobs = _Path(path)
+        args.integration_ref = None
+        args.now = now
+        try:
+            incomplete, record_status = registry.route_incomplete(
+                row, args.agent_home, rows, args.jobs
+            )
+        except Exception:
+            incomplete, record_status = None, "error"
+        if record_status != "ok" or not incomplete:
+            drop.add(id(j)); continue
+        j.liveness = "dead"
+        try:
+            _, route_file, _ = registry.resolve_owner_route(row, rows)
+            j.resume_boundary = registry.resume_boundary(route_file, incomplete) or "-"
+        except Exception:
+            j.resume_boundary = "-"
+    return [j for j in jobs if id(j) not in drop]
 
 
 def _annotate_orphan_conductors(jobs, now, jobs_path=None):
@@ -3065,6 +3157,7 @@ def collect(jobs_path=None, harness_filter=None):
         _enrich_attempt_summary(j)
     for j in jobs:
         j.liveness = _dispatch_liveness(j, now, codex_index=codex_index)
+    jobs = _retain_dead_terminal_owners(jobs, now, jobs_path=jobs_path)
     _annotate_orphan_conductors(jobs, now, jobs_path=jobs_path)
     # F-15c(a): a registry-only row (source="jobs") that turns out to be genuinely working
     # re-derives its breadcrumb from the real plan artifacts instead of the raw jobs.log

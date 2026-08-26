@@ -2648,6 +2648,12 @@ def _dispatch_row(j, orphan=False, parent_model=None, parent_harness=None, is_la
             # always names the exact node a dispatch-depth-0 decision would resume from.
             boundary = getattr(j, "resume_boundary", None) or "-"
             segs.append(("⚠ ORPHANED resume=%s" % boundary, "g_dead"))
+        elif getattr(j, "_dead_terminal_owner", False):
+            # F-83: the supervisor's typed closure word plus the resume node, so the ✕ card
+            # says why the owner left and where a depth-0 decision would pick the route up.
+            boundary = getattr(j, "resume_boundary", None) or "-"
+            segs.append(("✕ %s resume=%s" % (getattr(j, "note", None) or "dead", boundary),
+                         "g_dead"))
         else:
             # P2-11: a dead job's last-known stage replaces the redundant "last seen <age>"
             # (the time column already shows elapsed) — "dead @exec" tells you WHERE it died.
@@ -5474,7 +5480,12 @@ def _build_lines(sessions, jobs, section, narrow, malformed, layout="wide", memo
         group_sessions = g["sessions"] if show_sessions else []
         group_jobs = _visible_group_jobs(g["jobs"], show_sessions, show_jobs)
         if not _SHOW_ALL:
-            group_jobs = [j for j in group_jobs if j.liveness != "dead"]
+            # F-83: a supervisor-closed dead depth-1 owner whose route still has open
+            # work stays on the board as its own ✕ card (collector `_dead_terminal_owner`).
+            # Hiding it left the owning session card-less, so the route leaked out as the
+            # legacy multi-line stage surface (user 2026-08-26).
+            group_jobs = [j for j in group_jobs
+                          if j.liveness != "dead" or getattr(j, "_dead_terminal_owner", False)]
         if not group_sessions and not group_jobs:
             continue    # empty-group suppression per --section: no dangling header
 
@@ -5630,6 +5641,12 @@ def _build_lines(sessions, jobs, section, narrow, malformed, layout="wide", memo
                 loops_jobs.append(j)
             else:
                 orphans.append(j)
+        if not _SHOW_ALL:
+            # F-83: the route-open dead owner exemption above exists so a LIVE session keeps
+            # its card; an owner whose session is gone is ordinary dead history and stays
+            # behind `a`/--all like every other dead row.
+            orphans = [j for j in orphans
+                       if not (j.liveness == "dead" and getattr(j, "_dead_terminal_owner", False))]
 
         gcwd = "" if name in ("loops", _SYSTEM_GROUP) else (group_sessions[0].cwd if group_sessions else
                 (group_jobs[0].cwd if group_jobs else ""))
