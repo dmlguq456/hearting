@@ -198,7 +198,7 @@ def load_evidence(root: Path, e2e3: Path, baseline: Path, manifest: Path, w7c_sc
     }
 
 
-def run(root: Path, ev: dict, run_id: int) -> dict:
+def run(root: Path, ev: dict, run_id: int, rows_output=None) -> dict:
     started = time.time()
     rows = []
     dispositions: Counter = Counter()
@@ -213,6 +213,8 @@ def run(root: Path, ev: dict, run_id: int) -> dict:
             assert "shared" not in detail, (rel, detail)
         rows.append({"path": rel, "kind": kind, "disposition": disposition, "detail": detail})
     unclassified = [r for r in rows if r["disposition"] == "unclassified"]
+    if rows_output:
+        Path(rows_output).write_text("".join(json.dumps(r, sort_keys=True) + "\n" for r in rows), encoding="utf-8")
     digest = hashlib.sha256(json.dumps(rows, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
     return {
         "run": run_id, "started_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(started)),
@@ -232,6 +234,7 @@ def main(argv=None) -> int:
     parser.add_argument("--w7c-scope", default="", help="root-relative W7C transaction self-write scope")
     parser.add_argument("--runs", type=int, default=2)
     parser.add_argument("--output", required=True)
+    parser.add_argument("--rows-output", help="also write every classified row as jsonl (input for artifact_cutover.py migrate-delta)")
     args = parser.parse_args(argv)
     root = Path(args.artifact_root).resolve()
     ev = load_evidence(root, Path(args.w7_e2e3_evidence), Path(args.w6_baseline), Path(args.w6_manifest), args.w7c_scope)
@@ -243,7 +246,7 @@ def main(argv=None) -> int:
             or ev["evidence_sha256"]["w6-relocation-manifest.jsonl"] != ev["delta_meta"]["manifest_sha256"]:
         print(json.dumps({"status": "blocked", "reason": "w6-evidence-digest-mismatch"}))
         return 65
-    runs = [run(root, ev, i + 1) for i in range(max(1, args.runs))]
+    runs = [run(root, ev, i + 1, rows_output=args.rows_output) for i in range(max(1, args.runs))]
     stable = len({r["rows_sha256"] for r in runs}) == 1
     report = {
         "schema_version": 1, "kind": "w7c-delta-census", "mode": "read-only",

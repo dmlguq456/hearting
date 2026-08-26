@@ -48,7 +48,26 @@ $d/prd.md"
     fi
   done
 
+  # W7C (gate G4): once the legacy `spec/` bucket is retired, the canonical
+  # prd.md candidates live in the latest immutable `shared/spec/` revision.
+  if [ -z "$candidates" ] && [ -d "$artifact_root/shared/spec" ] && command -v python3 >/dev/null 2>&1; then
+    candidates=$(python3 "$SCRIPT_DIR/../utilities/artifact_cutover.py" resolve-legacy \
+      --artifact-root "$artifact_root" --prd-candidates 2>/dev/null)
+  fi
+
   [ -n "$candidates" ] && root=$(dirname "$artifact_root")
+}
+
+# Marker key for one prd.md candidate: `spec/prd.md` and
+# `shared/spec/<ref>/revisions/<rrev>/prd.md` share the root key; a component
+# prd (`spec/<slug>/prd.md` or `.../<rrev>/<slug>/prd.md`) keys by its slug.
+prd_slug() {
+  parent=$(dirname "$1")
+  parent_base=$(basename "$parent")
+  case "$parent_base" in
+    spec|rrev_*) printf '' ;;
+    *) printf '%s' "$parent_base" ;;
+  esac
 }
 
 check_gate() {
@@ -106,9 +125,8 @@ check_gate() {
   for candidate in $candidates; do
     IFS=$IFS_OLD
     total=$((total + 1))
-    parent=$(dirname "$candidate")
-    parent_base=$(basename "$parent")
-    if [ "$parent_base" = spec ]; then
+    parent_base=$(prd_slug "$candidate")
+    if [ -z "$parent_base" ]; then
       marker_name="${sid}__${key}"
     else
       slug_key=$(printf '%s' "$parent_base" | sed 's#[/ ]#_#g')

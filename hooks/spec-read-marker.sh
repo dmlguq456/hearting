@@ -26,9 +26,26 @@ mark_read() {
   esac
 
   slug=""
+  shared_prd=""
   case "$fp" in
     */.agent_reports/spec/prd.md) ;;
     */.claude_reports/spec/prd.md) ;;
+    */.agent_reports/shared/spec/*/revisions/*/prd.md|*/.claude_reports/shared/spec/*/revisions/*/prd.md)
+      # W7C: an immutable shared/spec revision read counts as the canonical
+      # prd read once the legacy bucket is retired. `<rrev>/prd.md` is the
+      # root spec; `<rrev>/<slug>/prd.md` is a one-level component spec.
+      [ "$(basename "$fp")" = prd.md ] || return 0
+      d1=$(dirname "$fp")
+      case "$(basename "$d1")" in
+        rrev_*) shared_prd="root" ;;
+        _internal) return 0 ;;
+        *)
+          case "$(basename "$(dirname "$d1")")" in
+            rrev_*) slug=$(basename "$d1"); shared_prd="component" ;;
+            *) return 0 ;;
+          esac ;;
+      esac
+      ;;
     *)
       # Structural depth check for a one-level sub-spec: .../<agent-reports-dir>/spec/<slug>/prd.md.
       # A `case` glob's `*` matches `/`, so a literal pattern here would also swallow
@@ -48,13 +65,20 @@ mark_read() {
   esac
   [ -f "$fp" ] || return 0
 
-  if [ -z "$slug" ]; then
+  if [ -n "$shared_prd" ]; then
+    reports_dir=${fp%/shared/spec/*}
+    file_root=$(dirname "$reports_dir")
+  elif [ -z "$slug" ]; then
     file_root=$(dirname "$(dirname "$(dirname "$fp")")")
   else
     file_root=$(dirname "$d3")
   fi
   canonical=$("$ARTIFACT_ROOT_RESOLVER" "$file_root" 2>/dev/null) || return 0
-  if [ -z "$slug" ]; then
+  if [ -n "$shared_prd" ]; then
+    # Only a read of the canonical (legacy-absent) layout under this root counts.
+    [ -d "$canonical/spec" ] && return 0
+    canonical_prd="$fp"
+  elif [ -z "$slug" ]; then
     canonical_prd="$canonical/spec/prd.md"
   else
     canonical_prd="$canonical/spec/$slug/prd.md"
