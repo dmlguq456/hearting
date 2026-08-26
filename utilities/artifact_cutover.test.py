@@ -198,6 +198,21 @@ class CutoverTest(unittest.TestCase):
         # canonical prd now resolves to the shared revision
         self.assertTrue(C.prd_candidates(self.root)[0].startswith(str(self.root / "shared/spec")))
 
+    def test_adopt_campaign_lists_existing_cycles_and_allows_join(self):
+        camp = "camp_" + "e" * 32
+        cyc = "cyc_" + "e" * 32
+        (self.root / "campaigns" / camp / "cycles" / cyc / "artifacts").mkdir(parents=True)
+        record = C.adopt_campaign(self.root, camp, title="w7", goal="g")
+        self.assertEqual(record["cycles"], [cyc])
+        self.assertEqual(C.adopt_campaign(self.root, camp, title="x", goal="y")["title"], "w7")
+        route, route_file = self.route("debug")
+        begun = P.begin(self.root, route_file=route_file, capability="autopilot-code", intensity="direct", campaign_id=camp)
+        self.assertEqual(begun["campaign_id"], camp)
+        self.assertEqual(P.read_campaign(self.root, camp)["cycles"], [cyc, begun["cycle_id"]])
+        with self.assertRaises(C.CutoverError) as ctx:
+            C.adopt_campaign(self.root, "camp_" + "f" * 32, title="x", goal="y")
+        self.assertEqual(ctx.exception.code, "campaign-dir-missing")
+
     def test_retire_refuses_backup_inside_root(self):
         report, sealed = self.migrate()
         with self.assertRaises(C.CutoverError) as ctx:

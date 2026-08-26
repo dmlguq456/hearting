@@ -291,6 +291,35 @@ def migrate_seal(root: Path, *, run_dir: Path, primary: Optional[str] = None,
     return report
 
 
+def adopt_campaign(root: Path, campaign_id: str, *, title: str, goal: str) -> Dict[str, Any]:
+    """Create `campaign.json` for a W7-relocated campaign directory that has none.
+
+    The W7 E2/E3 relocation created `campaigns/<camp>/cycles/<cyc>/artifacts/`
+    additively without producer records; adopting the campaign lists its
+    existing cycle directories so `begin --campaign` can join it.
+    """
+    root = Path(root).resolve()
+    _require_active(root)
+    if not artifact_identity.is_well_formed(campaign_id, "campaign"):
+        raise CutoverError("campaign-id-malformed", campaign_id)
+    existing = P.read_campaign(root, campaign_id)
+    if existing is not None:
+        return existing
+    directory = P.campaign_dir(root, campaign_id)
+    if not directory.is_dir() or os.path.islink(str(directory)):
+        raise CutoverError("campaign-dir-missing", str(directory))
+    cycles_dir = directory / "cycles"
+    cycles = sorted(p.name for p in cycles_dir.iterdir()
+                    if p.is_dir() and artifact_identity.is_well_formed(p.name, "cycle")) if cycles_dir.is_dir() else []
+    record = {
+        "schema_version": 1, "contract": P.CONTRACT, "campaign_id": campaign_id, "key": f"adopted:{campaign_id}",
+        "title": title, "goal": goal, "completion_criterion": {"statement": "every cycle sealed with a manifest"},
+        "state": "active", "created_on": _now(), "adopted_from": "w7-e2-e3-relocation", "cycles": cycles,
+    }
+    P._write_campaign(root, record, exclusive=True)
+    return record
+
+
 def _adopt_reference(root: Path, kind: str, ref_id: str, *, title: str) -> Dict[str, Any]:
     """Create `reference.json` for a W7-relocated shared reference that has none."""
     if not artifact_identity.is_well_formed(ref_id, "shared_reference"):
@@ -552,6 +581,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     p.add_argument("--campaign")
     p.add_argument("--exclude", action="append", default=[])
     p.add_argument("--approval-receipt-sha256")
+    p = sub.add_parser("adopt-campaign")
+    p.add_argument("--artifact-root", required=True)
+    p.add_argument("--campaign", required=True)
+    p.add_argument("--title", default="W7 relocation campaign")
+    p.add_argument("--goal", default="artifact knowledge index relocation (W7) and its W7C delta")
     p = sub.add_parser("migrate-seal")
     p.add_argument("--artifact-root", required=True)
     p.add_argument("--run-dir", required=True)
@@ -580,6 +614,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             result = migrate_delta(root, census_rows=Path(args.census_rows), route_file=Path(args.route),
                                    capability=args.capability, intensity=args.intensity, excludes=args.exclude,
                                    approval_receipt_sha256=args.approval_receipt_sha256, campaign_id=args.campaign)
+        elif args.command == "adopt-campaign":
+            result = adopt_campaign(root, args.campaign, title=args.title, goal=args.goal)
         elif args.command == "migrate-seal":
             result = migrate_seal(root, run_dir=Path(args.run_dir), primary=args.primary,
                                   spec_reference=args.spec_reference, analysis_reference=args.analysis_reference)
