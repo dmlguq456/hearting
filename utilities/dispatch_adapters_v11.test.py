@@ -306,6 +306,7 @@ class AdapterV11Test(unittest.TestCase):
      self.assertIn("launch_lifecycle_requested=detached",output)
      self.assertIn("launch_lifecycle=foreground-scoped",output)
      self.assertIn("launch_lifecycle_reselection=promoted-wrapper-scope",output)
+     self.assertIn("launch_lifecycle_override=absent",output)
      self.assertIn("worker_exit=0",output)
      self.assertIn("worker_failure=-",output)
      self.assertNotIn("nested-sandbox-lifetime",output)
@@ -313,6 +314,7 @@ class AdapterV11Test(unittest.TestCase):
      self.assertIn("launch_lifecycle_requested=detached",row)
      self.assertIn("launch_lifecycle=foreground-scoped",row)
      self.assertIn("launch_lifecycle_reselection=promoted-wrapper-scope",row)
+     self.assertIn("launch_lifecycle_override=absent",row)
      self.assertNotIn("dead-nested-sandbox-lifetime",row)
      self.assertIn("parent_attempt_id=att-parent-fixture",row)
      self.assertIn("pid_host=",row);self.assertIn("pid_host_start=",row)
@@ -358,6 +360,7 @@ class AdapterV11Test(unittest.TestCase):
     self.assertIn("launch_lifecycle_requested=detached",output)
     self.assertIn("launch_lifecycle=foreground-scoped",output)
     self.assertIn("launch_lifecycle_reselection=promoted-wrapper-scope",output)
+    self.assertIn("launch_lifecycle_override=absent",output)
     self.assertIn("worker_exit=0",output)
     self.assertNotIn("dead-nested-sandbox-lifetime",row)
     self.assertIn("launch_outcome=governed-process-reaped",row)
@@ -434,11 +437,18 @@ class AdapterV11Test(unittest.TestCase):
         "AGENT_DISPATCH_ALLOW_NAMESPACED_SPAWN":"1",
         "XDG_STATE_HOME":str(root/"state"),
         "FAKE_CHILD_COUNT":str(count)}
+   # T-3: declare the scope explicitly (host-like, override honored) instead
+   # of inheriting the test host's /proc, which may not be host-like in a
+   # container — keeping the concurrency assertions as the real subject.
+   resolution=wrapper.reconcile_launch_lifecycle(
+    wrapper.DETACHED,{"AGENT_DISPATCH_ALLOW_NAMESPACED_SPAWN":"1"},
+    evidence={"lifecycle_selector_source":"host-like"})
    codes=[]
    def invoke(): codes.append(wrapper.main(argv))
    with mock.patch.dict(os.environ,env,clear=True), \
         mock.patch.object(wrapper,"check_runtime_projection",return_value=0), \
-        mock.patch.object(wrapper,"ensure_runtime_home_projection",return_value=None):
+        mock.patch.object(wrapper,"ensure_runtime_home_projection",return_value=None), \
+        mock.patch.object(wrapper,"reconcile_launch_lifecycle",return_value=resolution):
     threads=[threading.Thread(target=invoke) for _ in range(2)]
     for thread in threads: thread.start()
     for thread in threads: thread.join(timeout=20)
@@ -452,5 +462,75 @@ class AdapterV11Test(unittest.TestCase):
    self.assertIn("launch_claimed=1",jobs.read_text(encoding="utf-8"))
    self.assertIn("pid_scope=namespace-local",jobs.read_text(encoding="utf-8"))
    self.assertIn("launch_lifecycle=detached",jobs.read_text(encoding="utf-8"))
+
+ def test_all_wrappers_report_override_rejected_for_transient_scope(self):
+  # W-1
+  for harness in ("codex","claude"):
+   with self.subTest(harness=harness), tempfile.TemporaryDirectory() as td:
+    root=Path(td); repo,art=self.fixture(root); jobs=root/"jobs.log"; logs=root/"logs"; fakebin=root/"bin"; fakebin.mkdir()
+    fake=fakebin/harness; fake.write_text("#!/bin/sh\nexit 0\n",encoding="utf-8"); fake.chmod(0o755)
+    self.seed_parent(jobs,repo,harness=harness)
+    command=self.command(harness,"start",repo,jobs,logs)+["--foreground-timeout","2"]
+    wrapper=self.load_wrapper(harness); argv=["dispatch-headless.py",*command[2:]]
+    resolution=wrapper.reconcile_launch_lifecycle(
+     wrapper.DETACHED,{"AGENT_DISPATCH_ALLOW_NAMESPACED_SPAWN":"1"},
+     evidence={"lifecycle_selector_source":"pid1-class",
+               "lifecycle_nspid_width":"1","lifecycle_pid1_class":"non-system-init"})
+    env={**os.environ,"PATH":str(fakebin)+os.pathsep+os.environ.get("PATH",""),
+         "AGENT_HOME":str(ROOT),"AGENT_ARTIFACT_ROOT":str(art),
+         "AGENT_DISPATCH_JOBS":str(jobs),"AGENT_DISPATCH_CHILD":"1",
+         "AGENT_DISPATCH_ATTEMPT_ID":"att-parent-fixture",
+         "AGENT_DISPATCH_ALLOW_NAMESPACED_SPAWN":"1",
+         "XDG_STATE_HOME":str(root/"state")}
+    stream=io.StringIO()
+    patches=[mock.patch.dict(os.environ,env,clear=True),
+             mock.patch.object(wrapper,"reconcile_launch_lifecycle",return_value=resolution)]
+    if hasattr(wrapper,"check_runtime_projection"): patches.append(mock.patch.object(wrapper,"check_runtime_projection",return_value=0))
+    if hasattr(wrapper,"ensure_runtime_home_projection"): patches.append(mock.patch.object(wrapper,"ensure_runtime_home_projection",return_value=None))
+    for patch in patches: patch.start()
+    try:
+     with redirect_stdout(stream): code=wrapper.main(argv)
+    finally:
+     for patch in reversed(patches): patch.stop()
+    output=stream.getvalue()
+    self.assertEqual(code,0,output)
+    self.assertIn("launch_lifecycle_override=rejected",output)
+    self.assertIn("launch_lifecycle_reselection=override-rejected-transient-scope",output)
+    row=jobs.read_text(encoding="utf-8")
+    self.assertIn("launch_lifecycle_override=rejected",row)
+    self.assertIn("launch_lifecycle_reselection=override-rejected-transient-scope",row)
+ def test_all_wrappers_report_override_absent_without_override_env(self):
+  # W-2
+  for harness in ("codex","claude"):
+   with self.subTest(harness=harness), tempfile.TemporaryDirectory() as td:
+    root=Path(td); repo,art=self.fixture(root); jobs=root/"jobs.log"; logs=root/"logs"; fakebin=root/"bin"; fakebin.mkdir()
+    fake=fakebin/harness; fake.write_text("#!/bin/sh\nexit 0\n",encoding="utf-8"); fake.chmod(0o755)
+    self.seed_parent(jobs,repo,harness=harness)
+    command=self.command(harness,"start",repo,jobs,logs)+["--foreground-timeout","2"]
+    wrapper=self.load_wrapper(harness); argv=["dispatch-headless.py",*command[2:]]
+    resolution=wrapper.reconcile_launch_lifecycle(
+     wrapper.DETACHED,{},evidence={
+      "lifecycle_selector_source":"pid1-class",
+      "lifecycle_nspid_width":"1",
+      "lifecycle_pid1_class":"non-system-init",
+     })
+    env={**os.environ,"PATH":str(fakebin)+os.pathsep+os.environ.get("PATH",""),
+         "AGENT_HOME":str(ROOT),"AGENT_ARTIFACT_ROOT":str(art),
+         "AGENT_DISPATCH_JOBS":str(jobs),"AGENT_DISPATCH_CHILD":"1",
+         "AGENT_DISPATCH_ATTEMPT_ID":"att-parent-fixture",
+         "XDG_STATE_HOME":str(root/"state")}
+    stream=io.StringIO()
+    patches=[mock.patch.dict(os.environ,env,clear=True),
+             mock.patch.object(wrapper,"reconcile_launch_lifecycle",return_value=resolution)]
+    if hasattr(wrapper,"check_runtime_projection"): patches.append(mock.patch.object(wrapper,"check_runtime_projection",return_value=0))
+    if hasattr(wrapper,"ensure_runtime_home_projection"): patches.append(mock.patch.object(wrapper,"ensure_runtime_home_projection",return_value=None))
+    for patch in patches: patch.start()
+    try:
+     with redirect_stdout(stream): code=wrapper.main(argv)
+    finally:
+     for patch in reversed(patches): patch.stop()
+    output=stream.getvalue()
+    self.assertEqual(code,0,output)
+    self.assertIn("launch_lifecycle_override=absent",output)
 
 if __name__=="__main__": unittest.main()

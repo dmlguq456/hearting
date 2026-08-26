@@ -15,6 +15,7 @@ sys.path.insert(0, str(ROOT / "utilities"))
 from dispatch_completion_join import (  # noqa: E402
     JoinContractError,
     classify_supervised_shell_command,
+    classify_supervised_shell_command_reason,
     current_children,
     pending_attempt_ids,
     read_supervisor_phase_state,
@@ -169,13 +170,55 @@ def main() -> int:
     if allowed:
         return 0
 
-    attempts = ",".join(sorted(guarded_attempts))
+    # D4: name the ACTUAL registry status per attempt, not "open" for every
+    # one -- a done row with a typed dead-worker note was previously
+    # misreported as open (`open_attempts` unioned everything, and the text
+    # then lied about it).
+    statuses = ",".join(
+        f"{attempt}:{indexed[attempt].status if attempt in indexed else 'unknown'}"
+        for attempt in sorted(guarded_attempts)
+    )
+    if state is None:
+        admitted_shape = (
+            "another exact parent-bound dispatch-node start or checked "
+            "dispatch-batch start (no batch delivered yet)"
+        )
+    elif state.phase in {"deliverable", "recovery"} and state.outbox is not None:
+        if actionable:
+            admitted_shape = "exact preflight harvest for " + ",".join(
+                f"{attempt}:{required}" for attempt, required in sorted(actionable.items())
+            )
+        else:
+            admitted_shape = "advance the route (no attempt requires harvest)"
+    elif delivered_open:
+        admitted_shape = (
+            "exact preflight harvest --status open --mark-done for "
+            + ",".join(sorted(delivered_open))
+        )
+    else:
+        admitted_shape = "another exact parent-bound dispatch-node start or checked dispatch-batch start"
+    reason_suffix = ""
+    if tool_name == "Bash" and isinstance(command, str) and action is None:
+        rejection_reason = classify_supervised_shell_command_reason(
+            base=Path(str(payload.get("cwd") or os.getcwd())),
+            command=command,
+            open_attempt_ids=guarded_attempts,
+            parent_slug=os.environ.get("AGENT_DISPATCH_SELF_SLUG", ""),
+            jobs=registry,
+            parent_attempt_id=parent_attempt,
+            route_file=(
+                Path(os.environ["AGENT_ROUTE_FILE"])
+                if os.environ.get("AGENT_ROUTE_FILE")
+                else None
+            ),
+            route_id=os.environ.get("AGENT_ROUTE_ID", ""),
+        )
+        if rejection_reason:
+            reason_suffix = f"; command_rejection_reason={rejection_reason}"
     return deny(
-        "runtime-supervised-parent: open registered child attempt(s) "
-        f"{attempts}; a new undelivered batch admits only another exact "
-        "parent-bound dispatch-node start or checked dispatch-batch start, "
-        "while a delivered batch admits only the current exact preflight harvest; "
-        f"outbox_row_state={row_state}"
+        "runtime-supervised-parent: guarded registered child attempt(s) "
+        f"{statuses}; the current phase admits only {admitted_shape}; "
+        f"outbox_row_state={row_state}{reason_suffix}"
     )
 
 

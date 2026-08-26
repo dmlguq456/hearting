@@ -225,5 +225,30 @@ class OpencodeGap1TerminalClassificationTest(unittest.TestCase):
                 self.assertEqual(result.reconcile_reason, "terminal-event-missing")
 
 
+    def test_attention_and_abandonment_terminals_stay_distinct(self):
+        # D-6b: three constructors, three notes -- assert all three together
+        # so no future edit can collapse them.
+        attention = SUPERVISOR.classify_supervisor_attention_terminal(
+            "codex", "guard-and-supervisor-command-vocabulary-mismatch"
+        )
+        abandonment = SUPERVISOR.classify_supervisor_abandonment_terminal(
+            "codex", "identical-redelivery-bound"
+        )
+        error = SUPERVISOR.classify_supervisor_error("codex", "protocol-mismatch")
+        self.assertEqual(attention.note, "owner-attention-unactionable")
+        self.assertEqual(attention.failure_class, "protocol")
+        self.assertEqual(abandonment.note, "owner-redelivery-abandoned")
+        self.assertEqual(abandonment.failure_class, "runtime")
+        self.assertEqual(error.note, "dead-protocol")
+        notes = {attention.note, abandonment.note, error.note}
+        self.assertEqual(len(notes), 3, notes)
+        # classify_supervisor_error cannot be tricked into either new note by
+        # feeding it a new reason string -- it derives note only from
+        # _PROTOCOL_REASON_RE.
+        for reason in ("owner-attention-unactionable", "owner-redelivery-abandoned"):
+            drifted = SUPERVISOR.classify_supervisor_error("codex", reason)
+            self.assertIn(drifted.note, {"dead-protocol", "dead-runtime-exit"})
+
+
 if __name__ == "__main__":
     unittest.main()

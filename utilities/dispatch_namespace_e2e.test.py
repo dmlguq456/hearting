@@ -269,9 +269,25 @@ class CodexNamespaceE2E(unittest.TestCase):
                 "FAKE_EVIDENCE": str(evidence),
                 "XDG_STATE_HOME": str(base / "state"),
             }
+            # T-2: declare the scope explicitly (host-like, override honored)
+            # instead of relying on the test host's/bwrap's real /proc state,
+            # which is namespace-scoped here by construction — the override no
+            # longer reaches detached from a transient scope, so this fixture
+            # must assert what it was written to test (the detached path) via
+            # an explicit resolution rather than an inherited one.
+            lifecycle_resolution = wrapper.reconcile_launch_lifecycle(
+                wrapper.DETACHED,
+                {"AGENT_DISPATCH_ALLOW_NAMESPACED_SPAWN": "1"},
+                evidence={"lifecycle_selector_source": "host-like"},
+            )
             output = io.StringIO()
             with ExitStack() as stack:
                 stack.enter_context(mock.patch.dict(os.environ, env, clear=True))
+                stack.enter_context(mock.patch.object(
+                    wrapper,
+                    "reconcile_launch_lifecycle",
+                    return_value=lifecycle_resolution,
+                ))
                 stack.enter_context(mock.patch.object(
                     wrapper, "check_runtime_projection", return_value=0
                 ))

@@ -235,6 +235,41 @@ def classify_supervisor_error(
     )
 
 
+def classify_supervisor_attention_terminal(runtime: str, reason: str) -> SupervisorTerminal:
+    """A supervisor <-> guard contract failure: no admitted command satisfies
+    a receipt the supervisor is about to (or has just) prescribed (D2a proof).
+
+    Sealed only from that proof, never from an exhausted redelivery bound --
+    see ``classify_supervisor_abandonment_terminal`` for that separate ground.
+    """
+
+    return SupervisorTerminal(
+        "owner-attention-unactionable",
+        "protocol",
+        "dispatch.supervisor.redelivery-suppressed",
+        reason[:240].replace(",", ";"),
+        "70",
+    )
+
+
+def classify_supervisor_abandonment_terminal(runtime: str, reason: str) -> SupervisorTerminal:
+    """A policy stop: the receipt was proven satisfiable and the owner did
+    not act within ``--max-identical-redeliveries`` (D2b bound).
+
+    This claims no more than that. It is never sealed from a non-advancing
+    row alone, and it must never be confused with
+    ``classify_supervisor_attention_terminal``'s protocol-failure ground.
+    """
+
+    return SupervisorTerminal(
+        "owner-redelivery-abandoned",
+        "runtime",
+        "dispatch.supervisor.redelivery-suppressed",
+        reason[:240].replace(",", ";"),
+        "70",
+    )
+
+
 def reconcile_supervisor_terminal(
     jobs: str | Path,
     attempt_id: str,

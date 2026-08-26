@@ -1238,8 +1238,11 @@ def validate_route_record(args: argparse.Namespace) -> int:
 
 def main(argv: list[str]) -> int:
     args = parser().parse_args(argv[1:])
+    # parent_sandbox is used here only to tighten the override gate, never to
+    # loosen it, so consuming it before the tuple-validity check at :1136 is
+    # safe even though it has not yet been validated.
     args.launch_lifecycle_resolution = reconcile_launch_lifecycle(
-        args.launch_lifecycle, dict(os.environ)
+        args.launch_lifecycle, dict(os.environ), parent_sandbox=args.parent_sandbox
     )
     args.launch_lifecycle_requested = args.launch_lifecycle_resolution.requested
     args.launch_lifecycle = args.launch_lifecycle_resolution.effective
@@ -1922,6 +1925,7 @@ def main(argv: list[str]) -> int:
     print(f"launch_lifecycle={args.launch_lifecycle}")
     print(f"launch_lifecycle_requested={args.launch_lifecycle_requested}")
     print(f"launch_lifecycle_reselection={args.launch_lifecycle_resolution.reselection}")
+    print(f"launch_lifecycle_override={args.launch_lifecycle_resolution.override}")
     print(f"worker_exit={getattr(args, 'worker_exit', '-')}")
     print(f"worker_failure={getattr(args, 'worker_failure', None) or '-'}")
     early_death = getattr(args, "early_death", None)

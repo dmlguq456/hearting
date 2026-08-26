@@ -26,6 +26,8 @@ JOIN = importlib.util.module_from_spec(SPEC)
 assert SPEC.loader is not None
 sys.modules[SPEC.name] = JOIN
 SPEC.loader.exec_module(JOIN)
+sys.path.insert(0, str(HERE))
+import dispatch_contract as D  # noqa: E402
 
 # D-42 hermeticity: `classify_supervised_shell_command` and the supervisor
 # state readers consult the LIVE session's dispatch environment on purpose, so
@@ -1277,6 +1279,250 @@ class DispatchCompletionJoinTest(unittest.TestCase):
                 route_file=route_file,
                 route_id=route_id,
             )
+        )
+
+
+def sealed_cancellation_metadata() -> dict[str, str]:
+    # A dead-but-locally-scannable identity: this is the wedge's real shape --
+    # a supervisor/operator observer that CAN see the process is gone (same
+    # namespace, pid genuinely absent) but was blocked from trusting that
+    # local read without a durable receipt. pid_observer_ns matches this
+    # process's own namespace so authoritative_process_identities finds a
+    # local candidate; pid=99999996 is a pid that does not exist.
+    observer = os.readlink("/proc/self/ns/pid")
+    return {
+        "pid_scope": "namespace-local",
+        "pid": "99999996", "pid_start": "1", "pgid": "99999996",
+        "pid_observer_ns": observer, "pid_ns": observer,
+        "cancellation_quiescence_receipt": D.ATTEMPT_CANCELLATION_QUIESCENCE_RECEIPT,
+        "cancellation_receipt_digest": "sha256:" + "c" * 64,
+        "quiescence_pgid_proof": D.GROUP_REAP_PROOF,
+        "quiescence_descendant_proof": D.ATTEMPT_DESCENDANT_PROOF,
+    }
+
+
+def sealed_cancellation_metadata_without_receipt() -> dict[str, str]:
+    observer = os.readlink("/proc/self/ns/pid")
+    return {
+        "pid_scope": "namespace-local",
+        "pid": "99999996", "pid_start": "1", "pgid": "99999996",
+        "pid_observer_ns": observer, "pid_ns": observer,
+    }
+
+
+def load_supervisor(name: str):
+    spec = importlib.util.spec_from_file_location(
+        f"harvest_parity_{name}", HERE / f"{name}.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+class HarvestVocabularyTest(unittest.TestCase):
+    """DC-3, DC-4 (plan SS5.7 / SS3.4 D1, D1b): one harvest vocabulary."""
+
+    def setUp(self):
+        self.claude = load_supervisor("claude-session-supervisor")
+        self.codex = load_supervisor("codex-app-server-supervisor")
+        self.jobs = "/fixture/jobs.log"
+        self.base = {"attempt_id": "att-a"}
+        self.open_ids = {"att-a"}
+
+    def _classify(self, line: str):
+        # base is the worker cwd in production (registered-parent-park.py
+        # derives it the same way); codex's completion_prompt emits a
+        # ROOT-relative path, so base must actually be ROOT for the relative
+        # form to resolve to the real contract path.
+        return JOIN.classify_supervised_shell_command(
+            base=JOIN.ROOT,
+            command=line,
+            open_attempt_ids=self.open_ids,
+            parent_slug="fixture-slug",
+            jobs=Path(self.jobs),
+        )
+
+    def test_incident_command_with_jobs_now_classifies(self):
+        # D-1: the exact command string the incident denied.
+        line = (
+            f"{self.claude.SHARED_HARVEST_SURFACE} harvest --jobs {self.jobs} "
+            "--attempt-id att-a --status done --failure-detail"
+        )
+        action = self._classify(line)
+        self.assertIsNotNone(action)
+        self.assertEqual(action.kind, "harvest")
+        self.assertEqual(action.attempt_id, "att-a")
+        self.assertEqual(action.status, "done")
+        self.assertTrue(action.failure_detail)
+
+    def test_open_status_with_jobs_and_mark_done_classifies(self):
+        # D-2
+        line = (
+            f"{self.claude.SHARED_HARVEST_SURFACE} harvest --jobs {self.jobs} "
+            "--attempt-id att-a --status open --mark-done"
+        )
+        action = self._classify(line)
+        self.assertIsNotNone(action)
+        self.assertTrue(action.mark_done)
+
+    def test_jobs_supplied_twice_or_valueless_is_rejected(self):
+        # D-3: the value-option arity check still rejects malformed --jobs.
+        twice = (
+            f"{self.claude.SHARED_HARVEST_SURFACE} harvest --jobs {self.jobs} "
+            f"--jobs {self.jobs} --attempt-id att-a --status open --mark-done"
+        )
+        self.assertIsNone(self._classify(twice))
+        valueless = (
+            f"{self.claude.SHARED_HARVEST_SURFACE} harvest --jobs "
+            "--attempt-id att-a --status open --mark-done"
+        )
+        self.assertIsNone(self._classify(valueless))
+
+    def test_jobs_pointed_at_another_registry_is_rejected(self):
+        line = (
+            f"{self.claude.SHARED_HARVEST_SURFACE} harvest --jobs /other/jobs.log "
+            "--attempt-id att-a --status open --mark-done"
+        )
+        self.assertIsNone(self._classify(line))
+
+    def test_precheck_on_satisfiable_receipt_is_the_only_in_tree_outcome(self):
+        # D-6a: with D1 applied, the precheck must never itself find an
+        # unsatisfiable line for any producer/required_action combination.
+        for required_action in ("complete-open", "inspect-done-failure", "advance-completed"):
+            receipt = {"children": [{"attempt_id": "att-a", "required_action": required_action}]}
+            for prompt in (
+                self.claude.completion_prompt(receipt, jobs=self.jobs),
+                self.codex.completion_prompt(receipt, jobs=self.jobs),
+            ):
+                lines = JOIN.harvest_command_lines(prompt)
+                satisfiable, reason = JOIN.supervisor_receipt_satisfiable(
+                    lines,
+                    base=JOIN.ROOT,
+                    open_attempt_ids=self.open_ids,
+                    parent_slug="fixture-slug",
+                    jobs=Path(self.jobs),
+                )
+                self.assertTrue(satisfiable, (required_action, lines, reason))
+
+    def test_producer_guard_parity_no_hand_written_literals(self):
+        # D-4: the durable guard against vocabulary drift. Every line either
+        # producer can emit, for every required_action value, must classify.
+        receipts = [
+            {"children": [{"attempt_id": "att-a", "required_action": action}]}
+            for action in ("complete-open", "inspect-done-failure", "advance-completed")
+        ]
+        prompts = []
+        for receipt in receipts:
+            prompts.append(self.claude.completion_prompt(receipt, jobs=self.jobs))
+            prompts.append(self.codex.completion_prompt(receipt, jobs=self.jobs))
+        prompts.append(self.claude.remediation_prompt({"att-a"}, jobs=self.jobs))
+        prompts.append(self.codex.remediation_prompt({"att-a"}))
+        checked_any = False
+        for prompt in prompts:
+            for line in JOIN.harvest_command_lines(prompt):
+                checked_any = True
+                self.assertIsNotNone(
+                    self._classify(line), f"guard rejected producer line: {line!r}"
+                )
+        self.assertTrue(checked_any, "no harvest lines were generated to check")
+
+
+class OwnerReleaseJoinTest(unittest.TestCase):
+    """J-1..J-3, J-6, J-7 (plan SS5.4): the cancellation receipt clears the wedge."""
+
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.jobs = self.root / "jobs.log"
+
+    def test_open_namespace_local_row_with_no_receipt_stays_pending(self):
+        # J-1 (regression: the wedge as it exists today). Same locally-dead
+        # identity as J-2/J-3 but with no cancellation receipt and a status
+        # that forces the terminal-receipt gate (done), so this is the exact
+        # wedge the guard clause exists to leave closed absent a receipt.
+        self.jobs.write_text(
+            row("done", "att-j1", "att-parent", "j1",
+                process_metadata=sealed_cancellation_metadata_without_receipt()),
+            encoding="utf-8",
+        )
+        self.assertIn(
+            "att-j1",
+            JOIN.pending_attempt_ids(JOIN.current_children(self.jobs, "att-parent")),
+        )
+
+    def test_automatic_seal_and_close_clears_readiness(self):
+        # J-2
+        self.jobs.write_text(
+            row("done", "att-j2", "att-parent", "j2",
+                process_metadata={
+                    **sealed_cancellation_metadata(),
+                    "failure_class": "cancelled",
+                    "note": "cancelled-receipt-unavailable",
+                }),
+            encoding="utf-8",
+        )
+        self.assertNotIn(
+            "att-j2",
+            JOIN.pending_attempt_ids(JOIN.current_children(self.jobs, "att-parent")),
+        )
+
+    def test_manually_cancelled_and_sealed_row_clears_readiness(self):
+        # J-3 (closes incident item 4)
+        self.jobs.write_text(
+            row("done", "att-j3", "att-parent", "j3",
+                process_metadata={
+                    **sealed_cancellation_metadata(),
+                    "failure_class": "cancelled",
+                    "note": "cancelled-receipt-unavailable",
+                    "classifier_source": "operator-receiptless-cancel-v1",
+                }),
+            encoding="utf-8",
+        )
+        self.assertNotIn(
+            "att-j3",
+            JOIN.pending_attempt_ids(JOIN.current_children(self.jobs, "att-parent")),
+        )
+
+    def test_sd79_negative_cancelled_row_is_not_a_general_successor_pass(self):
+        # J-6 (SD-79 negative, end-to-end)
+        self.jobs.write_text(
+            row("done", "att-j6", "att-parent", "j6",
+                process_metadata={
+                    **sealed_cancellation_metadata(),
+                    "failure_class": "cancelled",
+                    "note": "cancelled-receipt-unavailable",
+                }),
+            encoding="utf-8",
+        )
+        rows = JOIN.current_children(self.jobs, "att-parent")
+        self.assertNotIn("att-j6", JOIN.pending_attempt_ids(rows))
+        meta = rows[0].metadata
+        self.assertEqual(D.post_exit_receipt_reason(meta), "")
+        self.assertEqual(D.cancellation_receipt_reason(meta), "cancellation-receipt-sealed")
+
+    def test_genuine_detached_drain_receipt_stays_ready(self):
+        # J-7 (regression: the healthy path -- a real portable post-exit
+        # receipt, not the new cancellation receipt)
+        self.jobs.write_text(
+            row("done", "att-j7", "att-parent", "j7",
+                process_metadata={
+                    "pid_scope": "namespace-local",
+                    "pid": "41", "pid_start": "900", "pgid": "41",
+                    "pid_observer_ns": "pid:[401]", "pid_ns": "pid:[401]",
+                    "launch_lifecycle": "detached",
+                    "launch_outcome": "governed-process-group-drained",
+                    "group_reap_proof": D.GROUP_REAP_PROOF,
+                    "group_reap_pgid": "41",
+                    "attempt_descendant_proof": D.ATTEMPT_DESCENDANT_PROOF,
+                    "attempt_descendant_observer_ns": "pid:[401]",
+                }),
+            encoding="utf-8",
+        )
+        self.assertNotIn(
+            "att-j7",
+            JOIN.pending_attempt_ids(JOIN.current_children(self.jobs, "att-parent")),
         )
 
 

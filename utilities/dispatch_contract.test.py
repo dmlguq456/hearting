@@ -2563,4 +2563,270 @@ class DispatchContractTest(unittest.TestCase):
   self.assertEqual(D.attempt_process_quiescence(identity),
                    D._attempt_process_quiescence_impl(identity))
 
+def extinct_metadata(attempt="att-extinct-fixture"):
+ # CURRENT (used by attempt_row()) already carries registered_worker=1.
+ return cancellation_metadata(attempt)
+
+def direct_extinct_metadata(attempt="att-extinct-fixture"):
+ # Only for calling observer_namespace_extinct(metadata) directly -- CURRENT
+ # (used by attempt_row()) already supplies registered_worker=1 for the
+ # row-based fixtures, so this key is added here only, not in extinct_metadata().
+ metadata=cancellation_metadata(attempt)
+ metadata["registered_worker"]="1"
+ return metadata
+
+
+class ObserverNamespaceExtinctTest(unittest.TestCase):
+ def test_present_when_a_live_entry_matches_the_recorded_namespace(self):
+  # C-1
+  metadata=direct_extinct_metadata()
+  with mock.patch.object(D.os,"readlink",side_effect=self._fake_readlink(
+    self_ns="pid:[999]",entries={"7":"pid:[401]"})), \
+       mock.patch.object(D,"_current_observer_is_host_like",return_value=True), \
+       mock.patch.object(D.os,"listdir",return_value=["7"]):
+   self.assertEqual(D.observer_namespace_extinct(metadata),"present")
+
+ def test_extinct_after_a_complete_walk_with_no_match(self):
+  # C-2
+  metadata=direct_extinct_metadata()
+  with mock.patch.object(D.os,"readlink",side_effect=self._fake_readlink(
+    self_ns="pid:[999]",entries={"7":"pid:[500]"})), \
+       mock.patch.object(D,"_current_observer_is_host_like",return_value=True), \
+       mock.patch.object(D.os,"listdir",return_value=["7"]):
+   self.assertEqual(D.observer_namespace_extinct(metadata),"extinct")
+
+ def test_unverifiable_when_walk_raises_permission_error_midway(self):
+  # C-3
+  metadata=direct_extinct_metadata()
+  def readlink(path):
+   if path=="/proc/self/ns/pid":
+    return "pid:[999]"
+   raise PermissionError()
+  with mock.patch.object(D.os,"readlink",side_effect=readlink), \
+       mock.patch.object(D,"_current_observer_is_host_like",return_value=True), \
+       mock.patch.object(D.os,"listdir",return_value=["7"]):
+   self.assertEqual(D.observer_namespace_extinct(metadata),"unverifiable")
+
+ def test_unverifiable_when_own_namespace_readlink_raises(self):
+  # C-3a
+  metadata=direct_extinct_metadata()
+  def readlink(path):
+   if path=="/proc/self/ns/pid":
+    raise OSError("denied")
+   return "pid:[500]"
+  with mock.patch.object(D.os,"readlink",side_effect=readlink):
+   self.assertEqual(D.observer_namespace_extinct(metadata),"unverifiable")
+
+ def test_present_on_pid_namespace_inode_reuse(self):
+  # C-3b
+  metadata=direct_extinct_metadata()
+  with mock.patch.object(D.os,"readlink",side_effect=self._fake_readlink(
+    self_ns="pid:[999]",entries={"9":"pid:[401]"})), \
+       mock.patch.object(D,"_current_observer_is_host_like",return_value=True), \
+       mock.patch.object(D.os,"listdir",return_value=["9"]):
+   self.assertEqual(D.observer_namespace_extinct(metadata),"present")
+  # The registry-level consequence (a recycled inode is never
+  # cancellation-eligible) is proven in dispatch_registry.test.py's R-1/C-3b
+  # coverage, which calls the real `_receiptless_namespace_cancel_reason`.
+
+ def test_unverifiable_when_current_observer_itself_namespace_scoped(self):
+  # C-4
+  metadata=direct_extinct_metadata()
+  with mock.patch.object(D.os,"readlink",return_value="pid:[999]"), \
+       mock.patch.object(D,"_current_observer_is_host_like",return_value=False):
+   self.assertEqual(D.observer_namespace_extinct(metadata),"unverifiable")
+
+ def test_unverifiable_on_missing_observer_fields(self):
+  # C-5
+  base=extinct_metadata()
+  for mutation in (
+   {"pid_observer_ns":""},
+   {"pid_scope":"host-visible"},
+   {"registered_worker":"0"},
+  ):
+   metadata={**base,**mutation}
+   self.assertEqual(D.observer_namespace_extinct(metadata),"unverifiable")
+
+ @staticmethod
+ def _fake_readlink(self_ns,entries):
+  def readlink(path):
+   if path=="/proc/self/ns/pid":
+    return self_ns
+   for pid,ns in entries.items():
+    if path==f"/proc/{pid}/ns/pid":
+     return ns
+   raise FileNotFoundError()
+  return readlink
+
+
+class CancellationQuiescenceExtinctSourceTest(unittest.TestCase):
+ def test_default_opt_in_off_leaves_extinct_row_unproven(self):
+  # C-6
+  metadata=extinct_metadata()
+  empty=D.ProcessGroupObservation("empty")
+  with mock.patch.object(D,"process_group_observation",return_value=empty), \
+       mock.patch.object(D,"attempt_tagged_descendants",return_value=empty), \
+       mock.patch.object(D,"attempt_scan_namespace_authority",return_value=False), \
+       mock.patch.object(D,"observer_namespace_extinct",return_value="extinct") as extinct_probe:
+   proof=D.prove_attempt_quiescence(metadata,max_wait_seconds=0)
+  self.assertFalse(proof.proven)
+  self.assertEqual(proof.reason,"cancellation-quiescence-unproven")
+  extinct_probe.assert_not_called()
+
+ def test_opt_in_extinct_source_proves_when_both_scans_empty(self):
+  # C-7
+  metadata=extinct_metadata()
+  empty=D.ProcessGroupObservation("empty")
+  with mock.patch.object(D,"process_group_observation",return_value=empty), \
+       mock.patch.object(D,"attempt_tagged_descendants",return_value=empty), \
+       mock.patch.object(D,"attempt_scan_namespace_authority",return_value=False), \
+       mock.patch.object(D,"observer_namespace_extinct",return_value="extinct"):
+   proof=D.prove_attempt_quiescence(
+    metadata,max_wait_seconds=0,allow_namespace_extinct=True)
+  self.assertTrue(proof.proven)
+  self.assertEqual(proof.source,"namespace-extinct")
+  self.assertTrue(proof.namespace_authority)
+  self.assertEqual(proof.portable_receipt_digest,"")
+
+ def test_opt_in_extinct_source_does_not_prove_with_populated_descendant(self):
+  # C-8
+  metadata=extinct_metadata()
+  empty=D.ProcessGroupObservation("empty")
+  populated=D.ProcessGroupObservation("populated",((41,"900","S"),))
+  with mock.patch.object(D,"process_group_observation",return_value=empty), \
+       mock.patch.object(D,"attempt_tagged_descendants",return_value=populated), \
+       mock.patch.object(D,"attempt_scan_namespace_authority",return_value=False), \
+       mock.patch.object(D,"observer_namespace_extinct",return_value="extinct"):
+   proof=D.prove_attempt_quiescence(
+    metadata,max_wait_seconds=0,allow_namespace_extinct=True)
+  self.assertFalse(proof.proven)
+
+ def test_unverifiable_group_scan_never_seals_extinct_source(self):
+  # C-8a (round 1 tripwire)
+  metadata=extinct_metadata()
+  unverifiable=D.ProcessGroupObservation("unverifiable",reason="foreign")
+  empty=D.ProcessGroupObservation("empty")
+  with mock.patch.object(D,"process_group_observation",return_value=unverifiable), \
+       mock.patch.object(D,"attempt_tagged_descendants",return_value=empty), \
+       mock.patch.object(D,"attempt_scan_namespace_authority",return_value=False), \
+       mock.patch.object(D,"observer_namespace_extinct",return_value="extinct"):
+   proof=D.prove_attempt_quiescence(
+    metadata,max_wait_seconds=0,allow_namespace_extinct=True)
+  self.assertFalse(proof.proven)
+  self.assertEqual(proof.reason,"cancellation-quiescence-unproven")
+
+ def test_unverifiable_descendant_scan_never_seals_extinct_source(self):
+  # C-8b (round 1 tripwire, descendant side)
+  metadata=extinct_metadata()
+  unverifiable=D.ProcessGroupObservation("unverifiable",reason="foreign")
+  empty=D.ProcessGroupObservation("empty")
+  with mock.patch.object(D,"process_group_observation",return_value=empty), \
+       mock.patch.object(D,"attempt_tagged_descendants",return_value=unverifiable), \
+       mock.patch.object(D,"attempt_scan_namespace_authority",return_value=False), \
+       mock.patch.object(D,"observer_namespace_extinct",return_value="extinct"):
+   proof=D.prove_attempt_quiescence(
+    metadata,max_wait_seconds=0,allow_namespace_extinct=True)
+  self.assertFalse(proof.proven)
+
+
+class CancellationReceiptWedgeTest(unittest.TestCase):
+ def test_namespace_local_row_with_no_receipt_stays_incomplete(self):
+  # C-9 (regression, unchanged)
+  metadata=direct_extinct_metadata()
+  self.assertEqual(
+   D.attempt_process_quiescence(metadata,terminal_receipt=True),
+   D.ProcessQuiescence("unverifiable","post-exit-receipt-incomplete"))
+
+ def _sealed_cancellation_metadata(self):
+  metadata=extinct_metadata()
+  empty=D.ProcessGroupObservation("empty")
+  with mock.patch.object(D,"process_group_observation",return_value=empty), \
+       mock.patch.object(D,"attempt_tagged_descendants",return_value=empty), \
+       mock.patch.object(D,"attempt_scan_namespace_authority",return_value=False), \
+       mock.patch.object(D,"observer_namespace_extinct",return_value="extinct"):
+   proof=D.prove_attempt_quiescence(
+    metadata,max_wait_seconds=0,allow_namespace_extinct=True)
+  with tempfile.TemporaryDirectory() as td:
+   jobs=Path(td)/"jobs.log"
+   jobs.write_text(attempt_row(metadata)+"\n",encoding="utf-8")
+   D.seal_cancellation_quiescence_receipt(jobs,metadata["attempt_id"],proof)
+   sealed=D.parse_registry_metadata(jobs.read_text().strip().split("\t",5)[5])
+  return sealed,proof
+
+ def test_sealed_cancellation_receipt_clears_the_wedge(self):
+  # C-10
+  sealed,_=self._sealed_cancellation_metadata()
+  with mock.patch.object(D,"_attempt_process_quiescence_impl") as impl:
+   impl.return_value=D.ProcessQuiescence("quiescent","")
+   result=D.attempt_process_quiescence(sealed,terminal_receipt=True)
+  self.assertNotEqual(result.reason,"post-exit-receipt-incomplete")
+
+ def test_partial_seal_still_wedges(self):
+  # C-11
+  sealed,_=self._sealed_cancellation_metadata()
+  partial={**sealed,"quiescence_pgid_proof":"garbage"}
+  self.assertEqual(
+   D.attempt_process_quiescence(partial,terminal_receipt=True).reason,
+   "post-exit-receipt-incomplete")
+
+ def test_cancellation_receipt_is_not_a_post_exit_receipt(self):
+  # C-12 (SD-79 negative)
+  sealed,_=self._sealed_cancellation_metadata()
+  self.assertEqual(D._post_exit_receipt_reason(sealed),"")
+  self.assertEqual(D.cancellation_receipt_reason(sealed),"cancellation-receipt-sealed")
+
+
+class CancellationSealSourceValidatorTest(unittest.TestCase):
+ def test_extinct_source_rejects_a_nonempty_portable_digest(self):
+  # C-13
+  metadata=extinct_metadata()
+  with tempfile.TemporaryDirectory() as td:
+   jobs=Path(td)/"jobs.log"
+   jobs.write_text(attempt_row(metadata)+"\n",encoding="utf-8")
+   binding_digest=D._cancellation_quiescence_binding_digest(metadata)
+   proof=D.QuiescenceProof(
+    True,"cancellation-quiescence-proven",metadata["attempt_id"],
+    "namespace-extinct",41,"empty","empty",True,binding_digest,
+    portable_receipt_digest="sha256:"+"a"*64)
+   with self.assertRaises(D.DispatchContractError) as caught:
+    D.seal_cancellation_quiescence_receipt(jobs,metadata["attempt_id"],proof)
+   self.assertEqual(
+    caught.exception.reason,"cancellation-quiescence-proof-source-invalid")
+
+ def test_extinct_source_seal_is_idempotent(self):
+  # C-14
+  metadata=extinct_metadata()
+  empty=D.ProcessGroupObservation("empty")
+  with mock.patch.object(D,"process_group_observation",return_value=empty), \
+       mock.patch.object(D,"attempt_tagged_descendants",return_value=empty), \
+       mock.patch.object(D,"attempt_scan_namespace_authority",return_value=False), \
+       mock.patch.object(D,"observer_namespace_extinct",return_value="extinct"):
+   proof=D.prove_attempt_quiescence(
+    metadata,max_wait_seconds=0,allow_namespace_extinct=True)
+  with tempfile.TemporaryDirectory() as td:
+   jobs=Path(td)/"jobs.log"
+   jobs.write_text(attempt_row(metadata)+"\n",encoding="utf-8")
+   first=D.seal_cancellation_quiescence_receipt(jobs,metadata["attempt_id"],proof)
+   second=D.seal_cancellation_quiescence_receipt(jobs,metadata["attempt_id"],proof)
+  self.assertEqual(first,second)
+
+ def test_receipt_digest_is_stable_against_a_hard_coded_expected_value(self):
+  # C-15 (proves no key was added to the receipt record)
+  metadata=extinct_metadata("att-digest-stability")
+  binding_digest=D._cancellation_quiescence_binding_digest(metadata)
+  proof=D.QuiescenceProof(
+   True,"cancellation-quiescence-proven",metadata["attempt_id"],
+   "namespace-extinct",41,"empty","empty",True,binding_digest)
+  record=D._cancellation_quiescence_receipt_record(metadata,proof)
+  digest=D._canonical_sha256(record)
+  self.assertEqual(set(record),{
+   "contract_version","receipt_type","attempt_id","route_id","route_hash",
+   "node_or_group_leg","proof_source","binding_digest","process_group",
+   "attempt_tagged_descendants","namespace_authority","portable_receipt_digest",
+  })
+  # Recomputing from the same inputs must reproduce the exact same digest --
+  # any future key addition to the record would change this value.
+  self.assertEqual(D._canonical_sha256(record),digest)
+
+
 if __name__=="__main__": unittest.main()

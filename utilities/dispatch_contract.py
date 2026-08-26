@@ -124,6 +124,7 @@ ATTEMPT_MUTABLE_METADATA = {
     "launch_lifecycle",
     "launch_lifecycle_requested",
     "launch_lifecycle_reselection",
+    "launch_lifecycle_override",
     "lifecycle_selector_source",
     "lifecycle_nspid_width",
     "lifecycle_pid1_class",
@@ -1205,6 +1206,85 @@ def attempt_scan_namespace_authority(metadata: dict[str, str]) -> bool:
     return metadata.get("pid_scope", "host-visible") != "namespace-local"
 
 
+def _current_observer_is_host_like() -> bool:
+    """Minimal, self-contained echo of ``dispatch_lifecycle.pid_namespace_evidence``.
+
+    Duplicated rather than imported: ``dispatch_lifecycle`` imports from this
+    module, so importing it back here would be circular. Only the host-like
+    classification is needed, not the full evidence dict.
+    """
+
+    nested = False
+    try:
+        for line in Path("/proc/self/status").read_text(encoding="utf-8").splitlines():
+            if line.startswith("NSpid:"):
+                nested = len(line.split()) - 1 > 1
+                break
+    except OSError:
+        return False
+    if nested:
+        return False
+    try:
+        comm = Path("/proc/1/comm").read_text(encoding="utf-8").strip()
+    except OSError:
+        return False
+    return comm in {"systemd", "init"}
+
+
+def observer_namespace_extinct(metadata: dict[str, str]) -> str:
+    """Whether the row's recorded observer PID namespace still exists on the host.
+
+    Absence of the namespace is strictly stronger than an empty scan inside it:
+    an empty scan only proves nothing tagged is visible from within that
+    namespace, while a namespace's absence proves nothing in it can be running
+    anywhere. An incomplete walk is never absence -- fails closed to
+    ``"unverifiable"`` at every step, including on a ``/proc`` walk this
+    observer cannot fully complete (e.g. a hidepid mount).
+
+    PID-namespace inode residual (plan Risk 1): ``pid_observer_ns`` is a
+    ``pid:[<inode>]`` string and the kernel recycles namespace inode numbers.
+    A readlink match is therefore match-on-value, not match-on-identity -- if
+    the kernel has recycled the recorded inode onto an unrelated live
+    namespace, this deliberately answers ``"present"`` (safe direction: the row
+    stays ineligible for cancellation) rather than trying to disambiguate an
+    identity it cannot prove.
+    """
+
+    recorded_observer = metadata.get("pid_observer_ns", "")
+    if (
+        not recorded_observer
+        or metadata.get("pid_scope") != "namespace-local"
+        or metadata.get("registered_worker") != "1"
+    ):
+        return "unverifiable"
+    try:
+        current = os.readlink("/proc/self/ns/pid")
+    except OSError:
+        return "unverifiable"
+    if not current:
+        return "unverifiable"
+    if not _current_observer_is_host_like():
+        return "unverifiable"
+    if current == recorded_observer:
+        return "present"
+    try:
+        proc_entries = os.listdir("/proc")
+    except OSError:
+        return "unverifiable"
+    for entry in proc_entries:
+        if not entry.isdigit():
+            continue
+        try:
+            candidate = os.readlink(f"/proc/{entry}/ns/pid")
+        except (FileNotFoundError, ProcessLookupError):
+            continue
+        except OSError:
+            return "unverifiable"
+        if candidate == recorded_observer:
+            return "present"
+    return "extinct"
+
+
 def authoritative_process_identities(
     metadata: dict[str, str],
 ) -> tuple[AuthoritativeProcessIdentity, ...]:
@@ -1611,6 +1691,7 @@ def prove_attempt_quiescence(
     *,
     max_wait_seconds: float = CANCELLATION_QUIESCENCE_MAX_WAIT_SECONDS,
     poll_seconds: float = CANCELLATION_QUIESCENCE_POLL_SECONDS,
+    allow_namespace_extinct: bool = False,
 ) -> QuiescenceProof:
     """Prove exact cancellation quiescence with one explicitly bounded wait.
 
@@ -1688,6 +1769,23 @@ def prove_attempt_quiescence(
             or not namespace_authority
             or time.monotonic() >= deadline
         ):
+            if (
+                allow_namespace_extinct
+                and group.state == "empty"
+                and descendants.state == "empty"
+                and observer_namespace_extinct(metadata) == "extinct"
+            ):
+                return QuiescenceProof(
+                    True,
+                    "cancellation-quiescence-proven",
+                    attempt_id,
+                    "namespace-extinct",
+                    pgid,
+                    "empty",
+                    "empty",
+                    True,
+                    binding_digest,
+                )
             return QuiescenceProof(
                 False,
                 "cancellation-quiescence-unproven",
@@ -1752,6 +1850,37 @@ def post_exit_receipt_reason(metadata: dict[str, str]) -> str:
     return _post_exit_receipt_reason(metadata)
 
 
+def _cancellation_receipt_reason(metadata: dict[str, str]) -> str:
+    """Whether this row already carries a sealed cancellation-quiescence receipt.
+
+    Deliberately not merged into ``_post_exit_receipt_reason``: a cancellation
+    receipt proves the *namespace* is gone, not that the governed process
+    exited normally, and the SD-79 successor gate must never treat the two as
+    interchangeable (see ``_post_exit_receipt_reason``'s own three receipts,
+    unchanged).
+    """
+
+    digest = metadata.get("cancellation_receipt_digest", "")
+    return (
+        "cancellation-receipt-sealed"
+        if (
+            metadata.get("cancellation_quiescence_receipt")
+            == ATTEMPT_CANCELLATION_QUIESCENCE_RECEIPT
+            and digest.startswith("sha256:")
+            and metadata.get("quiescence_pgid_proof") == GROUP_REAP_PROOF
+            and metadata.get("quiescence_descendant_proof")
+            == ATTEMPT_DESCENDANT_PROOF
+        )
+        else ""
+    )
+
+
+def cancellation_receipt_reason(metadata: dict[str, str]) -> str:
+    """Public read-only view of ``_cancellation_receipt_reason``."""
+
+    return _cancellation_receipt_reason(metadata)
+
+
 def attempt_process_quiescence(
     metadata: dict[str, str], *, terminal_receipt: bool = False
 ) -> ProcessQuiescence:
@@ -1780,6 +1909,7 @@ def attempt_process_quiescence(
         and metadata.get("registered_worker") == "1"
         and metadata.get("pid_scope") == "namespace-local"
         and not _post_exit_receipt_reason(metadata)
+        and not _cancellation_receipt_reason(metadata)
         and result.state != "live"
     ):
         return ProcessQuiescence("unverifiable", "post-exit-receipt-incomplete")
@@ -4242,6 +4372,9 @@ def seal_cancellation_quiescence_receipt(
                 != _portable_teardown_receipt_digest(metadata)
             ):
                 raise DispatchContractError("cancellation-portable-receipt-invalid")
+        elif proof.source == "namespace-extinct":
+            if proof.portable_receipt_digest:
+                raise DispatchContractError("cancellation-quiescence-proof-source-invalid")
         elif proof.source != "exact-teardown" or proof.portable_receipt_digest:
             raise DispatchContractError("cancellation-quiescence-proof-source-invalid")
 

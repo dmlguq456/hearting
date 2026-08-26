@@ -32,6 +32,7 @@ from dispatch_contract import (ARTIFACT_PROOF_RECEIPT,
                                close_attempt_row,
                                close_attempt_row_if,
                                exact_process_group_signal_authority,
+                               observer_namespace_extinct,
                                parse_registry_metadata,
                                process_group_observation,
                                process_observation,
@@ -858,6 +859,8 @@ def _receiptless_namespace_cancel_reason(row, args):
         return "observer-namespace-unavailable"
     if meta.get("pid_observer_ns") in {None, "", observer_namespace}:
         return "namespace-not-foreign"
+    if observer_namespace_extinct(meta) != "extinct":
+        return "namespace-not-extinct"
     if _marker_backed_repair(row, args.agent_home, args.jobs):
         return "completion-marker-present"
     terminal = inspect_terminal_attempt(
@@ -1097,6 +1100,24 @@ def cancel_receiptless_namespace(rows, args):
         reason = _receiptless_namespace_cancel_reason(row, args)
     closed = False
     revalidated = None
+    receipt_digest = ""
+    if args.apply and row is not None and not reason:
+        attempt_id = row["meta"].get("attempt_id", "")
+        proof = prove_attempt_quiescence(
+            row["meta"],
+            max_wait_seconds=args.cancellation_wait,
+            allow_namespace_extinct=True,
+        )
+        if not proof.proven:
+            reason = "cancellation-quiescence-unproven"
+        else:
+            try:
+                receipt_digest = seal_cancellation_quiescence_receipt(
+                    args.jobs, attempt_id, proof
+                )
+            except DispatchContractError as exc:
+                reason = exc.reason
+
     if args.apply and row is not None and not reason:
         attempt_id = row["meta"].get("attempt_id", "")
 
@@ -1131,6 +1152,7 @@ def cancel_receiptless_namespace(rows, args):
         "eligible": bool(row is not None and not reason),
         "reason": reason or "legacy-namespace-receipt-unavailable",
         "proposed_note": "cancelled-receipt-unavailable",
+        "receipt_digest": receipt_digest or None,
         "revalidated": revalidated,
         "closed": closed,
     }
@@ -1157,7 +1179,9 @@ def _automatic_receiptless_result(rows, args):
     revalidated = None
     if not reason:
         proof = prove_attempt_quiescence(
-            row["meta"], max_wait_seconds=args.cancellation_wait
+            row["meta"],
+            max_wait_seconds=args.cancellation_wait,
+            allow_namespace_extinct=True,
         )
         if not proof.proven:
             reason = "cancellation-quiescence-unproven"
@@ -1182,7 +1206,9 @@ def _automatic_receiptless_result(rows, args):
                 if _receiptless_namespace_cancel_reason(fresh, args):
                     return False
                 current = prove_attempt_quiescence(
-                    fresh["meta"], max_wait_seconds=args.cancellation_wait
+                    fresh["meta"],
+                    max_wait_seconds=args.cancellation_wait,
+                    allow_namespace_extinct=True,
                 )
                 return bool(
                     current.proven

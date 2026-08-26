@@ -10,8 +10,8 @@ stayed ``open`` (later surfaced as Fleet ORPHANED):
   1. the outer-subprocess deadline seam, where ``foreground_timeout <= 0`` (the
      wrapper's "wait indefinitely" sentinel) collapsed to the shortest wall;
   2. the foreground-scoped x namespace-local *executed* launch cell, which existing
-     suites never drive (they force the AGENT_DISPATCH_ALLOW_NAMESPACED_SPAWN
-     override back to detached).
+     suites never drive (they force it to detached via a host-like evidence
+     override, which no longer reaches detached from a transient scope).
 
 The other axis-cells (host/namespace detection, clean-exit, marker, heartbeat,
 no-progress, capacity, orphan) are already covered by dispatch_lifecycle.test.py,
@@ -108,10 +108,11 @@ class NamespaceLocalForegroundCellTest(unittest.TestCase):
     """foreground-scoped x namespace-local — the executed cell today's bug lived in.
 
     Existing coverage only drives the OVERRIDE path
-    (AGENT_DISPATCH_ALLOW_NAMESPACED_SPAWN=1 -> detached). Without the override a
-    namespace-local child selects the foreground-scoped path, so wait_foreground
-    runs against it — exactly the pid=29 case that was abandoned. Guard that this
-    cell is real and the wait path actually reaps its child.
+    (AGENT_DISPATCH_ALLOW_NAMESPACED_SPAWN=1 with host-like evidence -> detached).
+    Without the override a namespace-local child selects the foreground-scoped
+    path, so wait_foreground runs against it — exactly the pid=29 case that was
+    abandoned. Guard that this cell is real and the wait path actually reaps its
+    child.
     """
 
     def test_namespace_local_selects_foreground_scoped(self):

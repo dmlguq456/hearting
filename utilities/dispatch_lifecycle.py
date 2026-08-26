@@ -101,17 +101,52 @@ def pid_namespace_scoped(
     }
 
 
+TRANSIENT_SELECTOR_SOURCES = ("nspid-vector", "pid1-class", "proc-unreadable")
+HOST_LIKE_SELECTOR_SOURCE = "host-like"
+SANDBOXED_PARENT_SANDBOXES = ("workspace-write",)
+
+
+def _override_admissible(
+    env: Mapping[str, str], evidence: Mapping[str, str], parent_sandbox: str | None
+) -> bool:
+    """Whether an ``AGENT_DISPATCH_ALLOW_NAMESPACED_SPAWN`` assertion may be honored.
+
+    Override presence is a precondition checked by the caller. It is admissible
+    only for a launcher whose own observed scope is host-like (not one of the
+    transient selector sources) and whose sealed parent sandbox is not a checked
+    sandboxed value — a registered headless owner inside a tool sandbox cannot
+    assert that its PID namespace outlives the tool call.
+    """
+
+    if evidence.get("lifecycle_selector_source") != HOST_LIKE_SELECTOR_SOURCE:
+        return False
+    sandbox = parent_sandbox if parent_sandbox is not None else env.get(
+        "AGENT_DISPATCH_CURRENT_SANDBOX", ""
+    )
+    return sandbox not in SANDBOXED_PARENT_SANDBOXES
+
+
 def select_launch_lifecycle(
     environ: Mapping[str, str] | None = None,
     *,
     namespace_scoped: bool | None = None,
+    parent_sandbox: str | None = None,
+    evidence: Mapping[str, str] | None = None,
 ) -> str:
     """Choose the lifecycle for an actual dispatch-chain launcher scope."""
 
     env = os.environ if environ is None else environ
+    if evidence is not None:
+        observed = dict(evidence)
+    elif namespace_scoped is not None:
+        observed = {
+            "lifecycle_selector_source": "pid1-class" if namespace_scoped else "host-like"
+        }
+    else:
+        observed = pid_namespace_evidence()
     if env.get("AGENT_DISPATCH_ALLOW_NAMESPACED_SPAWN") == "1":
-        return DETACHED
-    scoped = pid_namespace_scoped() if namespace_scoped is None else namespace_scoped
+        return DETACHED if _override_admissible(env, observed, parent_sandbox) else FOREGROUND_SCOPED
+    scoped = observed.get("lifecycle_selector_source") in TRANSIENT_SELECTOR_SOURCES
     return FOREGROUND_SCOPED if scoped else DETACHED
 
 
@@ -121,12 +156,14 @@ class LifecycleResolution:
     effective: str
     reselection: str
     evidence: dict[str, str]
+    override: str = "absent"
 
     def metadata(self) -> dict[str, str]:
         return {
             "launch_lifecycle_requested": self.requested,
             "launch_lifecycle": self.effective,
             "launch_lifecycle_reselection": self.reselection,
+            "launch_lifecycle_override": self.override,
             **self.evidence,
         }
 
@@ -136,6 +173,7 @@ def reconcile_launch_lifecycle(
     environ: Mapping[str, str] | None = None,
     *,
     evidence: Mapping[str, str] | None = None,
+    parent_sandbox: str | None = None,
 ) -> LifecycleResolution:
     """Re-evaluate a provisional caller selection in the wrapper's scope."""
 
@@ -143,28 +181,32 @@ def reconcile_launch_lifecycle(
         raise ValueError(f"unknown launch lifecycle: {requested}")
     env = os.environ if environ is None else environ
     observed = dict(evidence) if evidence is not None else pid_namespace_evidence()
-    scoped = observed.get("lifecycle_selector_source") in {
-        "nspid-vector", "pid1-class", "proc-unreadable"
-    }
-    actual = (
-        DETACHED
-        if env.get("AGENT_DISPATCH_ALLOW_NAMESPACED_SPAWN") == "1"
-        else FOREGROUND_SCOPED if scoped else DETACHED
-    )
+    scoped = observed.get("lifecycle_selector_source") in TRANSIENT_SELECTOR_SOURCES
+    override_set = env.get("AGENT_DISPATCH_ALLOW_NAMESPACED_SPAWN") == "1"
+    if override_set:
+        admissible = _override_admissible(env, observed, parent_sandbox)
+        actual = DETACHED if admissible else FOREGROUND_SCOPED
+        override = "honored" if admissible else "rejected"
+    else:
+        actual = FOREGROUND_SCOPED if scoped else DETACHED
+        override = "absent"
     effective = (
         FOREGROUND_SCOPED
         if requested == DETACHED and actual == FOREGROUND_SCOPED
         else requested
     )
+    if override == "rejected":
+        reselection = "override-rejected-transient-scope"
+    elif effective != requested:
+        reselection = "promoted-wrapper-scope"
+    else:
+        reselection = "retained-wrapper-scope"
     return LifecycleResolution(
         requested=requested,
         effective=effective,
-        reselection=(
-            "promoted-wrapper-scope"
-            if effective != requested
-            else "retained-wrapper-scope"
-        ),
+        reselection=reselection,
         evidence=observed,
+        override=override,
     )
 
 

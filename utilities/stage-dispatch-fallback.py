@@ -1088,6 +1088,11 @@ def direct_env() -> dict[str, str]:
         for key, value in os.environ.items()
         if not key.startswith("AGENT_DISPATCH_BROKER_")
         and not key.startswith("AGENT_OWNER_ROUTE_")
+        # Defense in depth only, not the fix: blocks accidental inheritance
+        # into the child's own environment. The override gate reads the
+        # launcher's own environment, not the child's, so this alone does not
+        # address the incident.
+        and key != "AGENT_DISPATCH_ALLOW_NAMESPACED_SPAWN"
     }
 
 

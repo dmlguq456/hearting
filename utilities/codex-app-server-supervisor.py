@@ -35,7 +35,11 @@ from dispatch_completion_join import (
     validate_delivery_timing,
     write_supervisor_state,
 )
-from dispatch_contract import DispatchContractError, hold_supervisor_lease
+from dispatch_contract import (
+    AUTOMATIC_RECEIPTLESS_CLASSIFIER,
+    DispatchContractError,
+    hold_supervisor_lease,
+)
 from dispatch_continuation_budget import (
     positive_continuation_limit,
     resolve_continuation_budget,
@@ -356,6 +360,86 @@ def runtime_reconcile(args: argparse.Namespace, rows: dict[str, Any],
         )
         if not reason:
             closed.add(attempt)
+    return closed
+
+
+def runtime_receiptless_cancel(
+    args: argparse.Namespace, unresolved: set[str]
+) -> set[str]:
+    """Bounded, exact-attempt automatic receiptless cancel, once per repark.
+
+    Deliberately a sibling of ``runtime_reconcile``, not a widening of it:
+    that helper's whole contract is closure from a child's own terminal
+    evidence with no registry-mutating subprocess, while this is the opposite
+    case -- a close for a child that produced no evidence at all. Scope is
+    fixed to this supervisor's own registered children for this parked batch
+    (``unresolved``, i.e. ``new_attempts``); never ``--all``, never a sibling
+    or older attempt. Closure is proven only from the parsed decision JSON
+    (``closed == 1`` and a ``sha256:``-prefixed ``receipt_digest`` and the
+    automatic classifier source) -- a zero exit status with ``closed=0`` (the
+    ordinary not-eligible outcome) is silent and is never treated as a close.
+    """
+
+    closed: set[str] = set()
+    for attempt in sorted(unresolved):
+        command = [
+            sys.executable,
+            str(ROOT / "utilities" / "dispatch-registry.py"),
+            "reconcile",
+            "--attempt", attempt,
+            "--automatic-cancel-receiptless",
+            "--apply",
+            "--jobs", args.jobs,
+        ]
+        try:
+            result = subprocess.run(
+                command,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                timeout=60.0,
+                check=False,
+            )
+            record = json.loads(result.stdout)
+            decision = record["decisions"][0]
+        except (OSError, subprocess.TimeoutExpired, TypeError, ValueError,
+                LookupError):
+            emit(
+                {
+                    "type": "dispatch.supervisor.receiptless-cancel-skipped",
+                    "parent_attempt_id": args.parent_attempt_id,
+                    "attempt_id": attempt,
+                    "reason": "receiptless-cancel-process-failed",
+                }
+            )
+            continue
+        digest = decision.get("receipt_digest") or ""
+        if (
+            result.returncode == 0
+            and decision.get("closed") == 1
+            and digest.startswith("sha256:")
+            and record.get("classifier_source") == AUTOMATIC_RECEIPTLESS_CLASSIFIER
+        ):
+            closed.add(attempt)
+            emit(
+                {
+                    "type": "dispatch.supervisor.receiptless-cancelled",
+                    "parent_attempt_id": args.parent_attempt_id,
+                    "attempt_id": attempt,
+                    "receipt_digest": digest,
+                    "classifier_source": AUTOMATIC_RECEIPTLESS_CLASSIFIER,
+                }
+            )
+        elif result.returncode != 0 or decision.get("closed") != 0:
+            emit(
+                {
+                    "type": "dispatch.supervisor.receiptless-cancel-skipped",
+                    "parent_attempt_id": args.parent_attempt_id,
+                    "attempt_id": attempt,
+                    "reason": decision.get("reason") or "receiptless-cancel-process-failed",
+                }
+            )
+        # An ordinary closed=0 not-eligible outcome is silent: no event.
     return closed
 
 
@@ -787,6 +871,7 @@ def main(argv: list[str] | None = None) -> int:
                     reparks += 1
                     if reparks > args.max_join_reparks:
                         raise SupervisorError("join-timeout-repark-exceeded")
+                    runtime_receiptless_cancel(args, set(new_attempts))
                     emit(
                         {
                             "type": "dispatch.supervisor.reparked",

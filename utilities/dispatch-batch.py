@@ -2202,6 +2202,11 @@ def main(argv: list[str] | None = None) -> int:
                 key: value
                 for key, value in os.environ.items()
                 if not key.startswith("AGENT_OWNER_ROUTE_")
+                # Defense in depth only, not the fix: this blocks accidental
+                # inheritance into the child's own environment. It does not
+                # address the incident, since the override gate reads the
+                # launcher's own environment, not the child's.
+                and key != "AGENT_DISPATCH_ALLOW_NAMESPACED_SPAWN"
             }
             env.update({
                 GOVERNOR_RESERVATION_ENV: token,

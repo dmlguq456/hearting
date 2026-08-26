@@ -37,19 +37,82 @@ class LifecycleTest(unittest.TestCase):
             comm.write_text("bwrap\n", encoding="utf-8")
             self.assertTrue(L.pid_namespace_scoped(status, comm))
 
-    def test_selection_preserves_detached_compatibility_and_override(self):
+    def test_selection_preserves_detached_compatibility(self):
         self.assertEqual(
             L.select_launch_lifecycle({}, namespace_scoped=False), L.DETACHED
         )
         self.assertEqual(
             L.select_launch_lifecycle({}, namespace_scoped=True), L.FOREGROUND_SCOPED
         )
+
+    def test_override_promoted_for_transient_pid1_class_scope(self):
+        # A-1
         self.assertEqual(
             L.select_launch_lifecycle(
                 {"AGENT_DISPATCH_ALLOW_NAMESPACED_SPAWN": "1"},
-                namespace_scoped=True,
+                evidence={
+                    "lifecycle_selector_source": "pid1-class",
+                    "lifecycle_pid1_class": "non-system-init",
+                    "lifecycle_nspid_width": "1",
+                },
+            ),
+            L.FOREGROUND_SCOPED,
+        )
+
+    def test_override_retained_for_host_like_scope_no_sandbox(self):
+        # A-2 (anchor falsifier #1)
+        self.assertEqual(
+            L.select_launch_lifecycle(
+                {"AGENT_DISPATCH_ALLOW_NAMESPACED_SPAWN": "1"},
+                evidence={"lifecycle_selector_source": "host-like"},
             ),
             L.DETACHED,
+        )
+
+    def test_override_rejected_for_host_like_scope_workspace_write_sandbox(self):
+        # A-3
+        self.assertEqual(
+            L.select_launch_lifecycle(
+                {"AGENT_DISPATCH_ALLOW_NAMESPACED_SPAWN": "1"},
+                evidence={"lifecycle_selector_source": "host-like"},
+                parent_sandbox="workspace-write",
+            ),
+            L.FOREGROUND_SCOPED,
+        )
+
+    def test_override_rejected_for_env_derived_sandbox_label(self):
+        # A-4
+        self.assertEqual(
+            L.select_launch_lifecycle(
+                {
+                    "AGENT_DISPATCH_ALLOW_NAMESPACED_SPAWN": "1",
+                    "AGENT_DISPATCH_CURRENT_SANDBOX": "workspace-write",
+                },
+                evidence={"lifecycle_selector_source": "host-like"},
+                parent_sandbox=None,
+            ),
+            L.FOREGROUND_SCOPED,
+        )
+
+    def test_override_rejected_for_every_transient_selector_source(self):
+        # A-5
+        for source in ("nspid-vector", "pid1-class", "proc-unreadable"):
+            self.assertEqual(
+                L.select_launch_lifecycle(
+                    {"AGENT_DISPATCH_ALLOW_NAMESPACED_SPAWN": "1"},
+                    evidence={"lifecycle_selector_source": source},
+                ),
+                L.FOREGROUND_SCOPED,
+                source,
+            )
+
+    def test_selection_namespace_scoped_keyword_unchanged_without_override(self):
+        # A-6
+        self.assertEqual(
+            L.select_launch_lifecycle({}, namespace_scoped=True), L.FOREGROUND_SCOPED
+        )
+        self.assertEqual(
+            L.select_launch_lifecycle({}, namespace_scoped=False), L.DETACHED
         )
 
     def test_wrapper_reselection_promotes_detached_without_failed_attempt(self):
@@ -69,18 +132,52 @@ class LifecycleTest(unittest.TestCase):
             resolution.metadata()["lifecycle_selector_source"], "pid1-class"
         )
 
-    def test_wrapper_reselection_respects_long_lived_namespace_override(self):
+    def test_wrapper_reselection_retains_override_only_for_host_like_scope(self):
+        # A-8
         resolution = L.reconcile_launch_lifecycle(
             L.DETACHED,
             {"AGENT_DISPATCH_ALLOW_NAMESPACED_SPAWN": "1"},
-            evidence={
-                "lifecycle_selector_source": "nspid-vector",
-                "lifecycle_nspid_width": "2",
-                "lifecycle_pid1_class": "non-system-init",
-            },
+            evidence={"lifecycle_selector_source": "host-like"},
         )
         self.assertEqual(resolution.effective, L.DETACHED)
         self.assertEqual(resolution.reselection, "retained-wrapper-scope")
+        self.assertEqual(resolution.override, "honored")
+        self.assertEqual(resolution.metadata()["launch_lifecycle_override"], "honored")
+
+    def test_wrapper_reselection_rejects_override_for_transient_scope(self):
+        # A-7
+        resolution = L.reconcile_launch_lifecycle(
+            L.DETACHED,
+            {"AGENT_DISPATCH_ALLOW_NAMESPACED_SPAWN": "1"},
+            evidence={"lifecycle_selector_source": "pid1-class"},
+        )
+        self.assertEqual(resolution.effective, L.FOREGROUND_SCOPED)
+        self.assertEqual(resolution.reselection, "override-rejected-transient-scope")
+        self.assertEqual(resolution.override, "rejected")
+        self.assertEqual(
+            resolution.metadata()["launch_lifecycle_override"], "rejected"
+        )
+
+    def test_wrapper_reselection_reports_rejection_even_without_delta(self):
+        # A-9
+        resolution = L.reconcile_launch_lifecycle(
+            L.FOREGROUND_SCOPED,
+            {"AGENT_DISPATCH_ALLOW_NAMESPACED_SPAWN": "1"},
+            evidence={"lifecycle_selector_source": "pid1-class"},
+        )
+        self.assertEqual(resolution.effective, L.FOREGROUND_SCOPED)
+        self.assertEqual(resolution.reselection, "override-rejected-transient-scope")
+
+    def test_wrapper_reselection_promotes_without_override_unchanged(self):
+        # A-10 (regression, verbatim intent of prior :55-68 test)
+        resolution = L.reconcile_launch_lifecycle(
+            L.DETACHED,
+            {},
+            evidence={"lifecycle_selector_source": "pid1-class"},
+        )
+        self.assertEqual(resolution.effective, L.FOREGROUND_SCOPED)
+        self.assertEqual(resolution.reselection, "promoted-wrapper-scope")
+        self.assertEqual(resolution.override, "absent")
 
     def test_foreground_wait_reports_success_and_child_signal(self):
         success = subprocess.Popen(["sh", "-c", "exit 0"], start_new_session=True)

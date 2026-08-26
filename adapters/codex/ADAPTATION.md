@@ -647,8 +647,15 @@ before attempt registration. A transient wrapper promotes `detached` to
 `foreground-scoped`, supervises the child until exit, and forwards termination
 signals; durable scopes retain `detached`. Wrapper output and the exact jobs row
 record the requested lifecycle, effective lifecycle, reselection result, and
-bounded namespace evidence. `AGENT_DISPATCH_ALLOW_NAMESPACED_SPAWN=1` remains the checked
-long-lived-namespace override and preserves detached behavior.
+bounded namespace evidence. `AGENT_DISPATCH_ALLOW_NAMESPACED_SPAWN=1` is the
+checked long-lived-namespace override, but it is honored only when the
+launcher's own observed scope is host-like and its sealed parent sandbox is
+not a checked sandboxed value; a `codex/headless/workspace-write` owner
+sandbox is never an eligible asserter, so the override there always promotes
+to `foreground-scoped` (`launch_lifecycle_override=rejected`). When the
+runtime hands a foreground `dispatch-batch` call to the background, that call
+has not failed — poll `dispatch-current --route <id>` or wait at the runtime
+join instead of switching lifecycle.
 For a foreground Codex child whose actual parent tuple is
 `codex/headless/workspace-write`, the child uses `danger-full-access` only as
 its inner runtime setting because nested mount setup is unsupported there; the

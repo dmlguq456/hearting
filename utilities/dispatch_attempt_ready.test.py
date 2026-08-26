@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import importlib.util
+import os
 from pathlib import Path
+import sys
 import tempfile
 import unittest
 
@@ -15,6 +17,30 @@ SPEC = importlib.util.spec_from_file_location(
 READY = importlib.util.module_from_spec(SPEC)
 assert SPEC.loader is not None
 SPEC.loader.exec_module(READY)
+sys.path.insert(0, str(ROOT / "utilities"))
+import dispatch_contract as D  # noqa: E402
+
+
+def sealed_cancellation_metadata(attempt: str) -> dict[str, str]:
+    observer = os.readlink("/proc/self/ns/pid")
+    return {
+        "attempt_schema_version": "2",
+        "dispatch_depth": "2",
+        "transport": "headless",
+        "execution_surface": "registered-headless",
+        "registered_worker": "1",
+        "fallback_hop": "same-harness-headless",
+        "attempt_id": attempt,
+        "pid_scope": "namespace-local",
+        "pid": "99999996", "pid_start": "1", "pgid": "99999996",
+        "pid_observer_ns": observer, "pid_ns": observer,
+        "cancellation_quiescence_receipt": D.ATTEMPT_CANCELLATION_QUIESCENCE_RECEIPT,
+        "cancellation_receipt_digest": "sha256:" + "e" * 64,
+        "quiescence_pgid_proof": D.GROUP_REAP_PROOF,
+        "quiescence_descendant_proof": D.ATTEMPT_DESCENDANT_PROOF,
+        "failure_class": "cancelled",
+        "note": "cancelled-receipt-unavailable",
+    }
 
 
 class DispatchAttemptReadyTest(unittest.TestCase):
@@ -128,6 +154,26 @@ class DispatchAttemptReadyTest(unittest.TestCase):
         child = receipt["children"][0]
         self.assertEqual(receipt["state"], "terminal")
         self.assertEqual(child["observed_reason"], "terminal-observed")
+
+    def test_automatically_cancelled_row_is_no_longer_pending(self):
+        # J-4
+        fields = ["2026-08-26T00:00:00Z", "done", "/r", "/w", "cancelled-auto", ""]
+        metadata = sealed_cancellation_metadata("att-j4-automatic")
+        metadata["classifier_source"] = "automatic-receipt-unavailable-v1"
+        receipt = READY.classify([(fields, metadata)])
+        child = receipt["children"][0]
+        self.assertNotEqual(child["readiness"], "pending")
+        self.assertNotEqual(child.get("process_reason"), "post-exit-receipt-incomplete")
+
+    def test_manually_cancelled_row_is_no_longer_pending(self):
+        # J-5: "manually-cancelled row no longer readiness=pending"
+        fields = ["2026-08-26T00:00:00Z", "done", "/r", "/w", "cancelled-manual", ""]
+        metadata = sealed_cancellation_metadata("att-j5-manual")
+        metadata["classifier_source"] = "operator-receiptless-cancel-v1"
+        receipt = READY.classify([(fields, metadata)])
+        child = receipt["children"][0]
+        self.assertNotEqual(child["readiness"], "pending")
+        self.assertNotEqual(child.get("process_reason"), "post-exit-receipt-incomplete")
 
 
 if __name__ == "__main__":

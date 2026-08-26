@@ -83,6 +83,31 @@ def required_action_for_attempt(status: str, metadata: dict[str, str]) -> str:
     return "inspect-done-failure"
 
 
+def harvest_command_lines(prompt: str) -> list[str]:
+    """Extract the exact harvest command lines a supervisor prompt prescribes.
+
+    Both ``completion_prompt`` and ``remediation_prompt`` (in either
+    supervisor) emit each harvest command on its own line, second shell token
+    ``harvest``; every other line is prose. Used by the producer<->guard
+    parity fixture (plan SS3.4 D1b) so that fixture never needs a
+    hand-written command literal.
+    """
+
+    lines = []
+    for line in prompt.splitlines():
+        try:
+            tokens = shlex.split(line, posix=True)
+        except ValueError:
+            continue
+        if (
+            len(tokens) >= 2
+            and tokens[1] == "harvest"
+            and tokens[0].endswith("preflight.sh")
+        ):
+            lines.append(line)
+    return lines
+
+
 @dataclass(frozen=True)
 class ChildRow:
     order: int
@@ -1542,6 +1567,60 @@ def _bound_dispatch_node_start(
     return not any(row.metadata.get("route_node") == node_id for row in context.rows)
 
 
+def supervisor_outbox_delivery_identity(
+    outbox: SupervisorOutbox | None,
+) -> tuple[str, tuple[tuple[str, str], ...]]:
+    """Pure identity of a delivered outbox, for the D2b unchanged-delivery test.
+
+    No I/O, no mutation -- both supervisors compare this tuple across passes
+    to decide whether a redelivery is identical to the last one.
+    """
+
+    if outbox is None:
+        return ("", ())
+    return (outbox.receipt_digest, outbox.row_revisions)
+
+
+def supervisor_receipt_satisfiable(
+    command_lines: list[str],
+    *,
+    base: Path,
+    open_attempt_ids: set[str],
+    parent_slug: str,
+    jobs: Path | None = None,
+    parent_attempt_id: str = "",
+    route_file: Path | None = None,
+    route_id: str = "",
+) -> tuple[bool, str]:
+    """D2a: prove a receipt satisfiable BEFORE delivering it, or name why not.
+
+    Runs every command line the supervisor is about to prescribe through the
+    real ``classify_supervised_shell_command`` -- the exact guard the park
+    hook enforces -- with the same guarded-attempt set. Pure: no I/O beyond
+    what the classifier itself performs (none, on this call shape), no
+    mutation. The caller must derive ``open_attempt_ids`` exactly as
+    ``hooks/registered-parent-park.py``'s ``guarded_attempts`` does (D-6c) --
+    a precheck computing that set differently from the hook would report
+    satisfiable for a command the guard then denies, which is worse than no
+    precheck at all.
+    """
+
+    for line in command_lines:
+        action = classify_supervised_shell_command(
+            base=base,
+            command=line,
+            open_attempt_ids=open_attempt_ids,
+            parent_slug=parent_slug,
+            jobs=jobs,
+            parent_attempt_id=parent_attempt_id,
+            route_file=route_file,
+            route_id=route_id,
+        )
+        if action is None:
+            return False, f"unrecognized-or-unadmitted-command:{line}"
+    return True, ""
+
+
 def classify_supervised_shell_command(
     *,
     base: Path,
@@ -1571,13 +1650,19 @@ def classify_supervised_shell_command(
     ):
         options = _parse_long_options(
             tokens[2:],
-            {"--attempt-id", "--status", "--completion"},
+            {"--attempt-id", "--status", "--completion", "--jobs"},
             {"--mark-done", "--keep-home", "--failure-detail"},
         )
         if options is None or len(options.get("--attempt-id", [])) != 1:
             return None
         if any(len(values) != 1 for values in options.values()):
             return None
+        supplied_jobs = options.get("--jobs", [])
+        if supplied_jobs and jobs is not None:
+            if Path(supplied_jobs[0]).resolve(strict=False) != Path(jobs).resolve(strict=False):
+                # A harvest pointed at another registry is not the prescribed
+                # command, even though it otherwise parses.
+                return None
         attempt = options["--attempt-id"][0]
         status = options.get("--status", ["open"])[0]
         if attempt not in open_attempt_ids or status not in {"open", "done", "all"}:
@@ -1715,6 +1800,85 @@ def classify_supervised_shell_command(
     ):
         return None
     return SupervisorShellAction("dispatch")
+
+
+def classify_supervised_shell_command_reason(
+    *,
+    base: Path,
+    command: str,
+    open_attempt_ids: set[str],
+    parent_slug: str,
+    jobs: Path | None = None,
+    parent_attempt_id: str = "",
+    route_file: Path | None = None,
+    route_id: str = "",
+) -> str:
+    """Typed reason a Bash command failed ``classify_supervised_shell_command``.
+
+    A parallel accessor, not a change to the existing function's return type
+    (the frozen ``SupervisorShellAction`` is consumed by the hook and every
+    existing fixture). Re-parses the command on the denial path only -- never
+    called for an admitted command. One of ``unrecognized-surface``,
+    ``unknown-option``, ``shell-composition``, ``attempt-not-guarded``.
+    """
+
+    if not command or re_search_shell_composition(command):
+        return "shell-composition"
+    try:
+        tokens = shlex.split(command, posix=True)
+    except ValueError:
+        return "shell-composition"
+    if not tokens:
+        return "unrecognized-surface"
+
+    if (
+        len(tokens) >= 2
+        and _local_contract_path(base, tokens[0], "adapters/codex/bin/preflight.sh")
+        and tokens[1] == "harvest"
+    ):
+        options = _parse_long_options(
+            tokens[2:],
+            {"--attempt-id", "--status", "--completion", "--jobs"},
+            {"--mark-done", "--keep-home", "--failure-detail"},
+        )
+        if (
+            options is None
+            or len(options.get("--attempt-id", [])) != 1
+            or any(len(values) != 1 for values in options.values())
+        ):
+            return "unknown-option"
+        attempt = options["--attempt-id"][0]
+        if attempt not in open_attempt_ids:
+            return "attempt-not-guarded"
+        status = options.get("--status", ["open"])[0]
+        supplied_jobs = options.get("--jobs", [])
+        if status not in {"open", "done", "all"} or (
+            supplied_jobs
+            and jobs is not None
+            and Path(supplied_jobs[0]).resolve(strict=False)
+            != Path(jobs).resolve(strict=False)
+        ):
+            return "unknown-option"
+        return ""
+
+    dispatch_tokens = tokens
+    if tokens[0] in {"python", "python3"}:
+        if len(tokens) < 2:
+            return "unrecognized-surface"
+        dispatch_tokens = tokens[1:]
+    recognized_surface = (
+        _local_contract_path(base, dispatch_tokens[0], "adapters/codex/bin/preflight.sh")
+        or _local_contract_path(base, dispatch_tokens[0], "utilities/dispatch-batch.py")
+        or _local_contract_path(base, dispatch_tokens[0], "utilities/dispatch-node.py")
+    )
+    if not recognized_surface:
+        return "unrecognized-surface"
+    # A recognized launcher surface with anything else wrong (bad option,
+    # wrong action, unbound route/group, attempt outside the guarded set for
+    # the exact-batch/exact-node checks) -- classify_supervised_shell_command
+    # itself is the source of truth for admission; this accessor only names
+    # the coarse category once that function has already said no.
+    return "unknown-option"
 
 
 def re_search_shell_composition(command: str) -> bool:

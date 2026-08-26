@@ -757,6 +757,11 @@ class RegistryTest(unittest.TestCase):
    live.wait()
 
  def test_explicit_receiptless_namespace_cancel_is_typed_not_completion(self):
+  # R-7: declares the namespace explicitly extinct (module/D-level mock)
+  # rather than depending on this test process's own real /proc state, which
+  # this suite may itself be running inside a nested PID namespace (see
+  # dispatch_contract.py's observer_namespace_extinct fail-closed rule).
+  module=self.load_registry_module("manual_receiptless_typed")
   attempt="att-receiptless-cancel"
   empty_log=self.base/"receiptless.codex.jsonl"
   empty_log.write_text(json.dumps({"type":"system","subtype":"init"})+"\n")
@@ -770,12 +775,30 @@ class RegistryTest(unittest.TestCase):
   heartbeat_value=json.loads(heartbeat.read_text())
   heartbeat_value["updated_at"]=time.time()-3600
   heartbeat.write_text(json.dumps(heartbeat_value))
-  dry=json.loads(self.invoke(
-   "reconcile","--attempt",attempt,"--cancel-receiptless-namespace").stdout)
+  currentize_registry(self.jobs)
+  args=self.cancellation_args(attempt)
+  empty=D.ProcessGroupObservation("empty")
+  with mock.patch.object(module,"attempt_tagged_descendants",return_value=empty), \
+       mock.patch.object(D,"process_group_observation",return_value=empty), \
+       mock.patch.object(D,"attempt_tagged_descendants",return_value=empty), \
+       mock.patch.object(D,"attempt_scan_namespace_authority",return_value=False), \
+       mock.patch.object(module,"observer_namespace_extinct",return_value="extinct"), \
+       mock.patch.object(D,"observer_namespace_extinct",return_value="extinct"), \
+       contextlib.redirect_stdout(io.StringIO()) as stream:
+   module.cancel_receiptless_namespace(module.read_rows(self.jobs),
+    types.SimpleNamespace(**{**vars(args),"apply":False}))
+  dry=json.loads(stream.getvalue())
   self.assertEqual(dry["closed"],0)
   self.assertTrue(dry["decisions"][0]["eligible"],dry)
-  applied=json.loads(self.invoke(
-   "reconcile","--attempt",attempt,"--cancel-receiptless-namespace","--apply").stdout)
+  with mock.patch.object(module,"attempt_tagged_descendants",return_value=empty), \
+       mock.patch.object(D,"process_group_observation",return_value=empty), \
+       mock.patch.object(D,"attempt_tagged_descendants",return_value=empty), \
+       mock.patch.object(D,"attempt_scan_namespace_authority",return_value=False), \
+       mock.patch.object(module,"observer_namespace_extinct",return_value="extinct"), \
+       mock.patch.object(D,"observer_namespace_extinct",return_value="extinct"), \
+       contextlib.redirect_stdout(io.StringIO()) as stream:
+   module.cancel_receiptless_namespace(module.read_rows(self.jobs),args)
+  applied=json.loads(stream.getvalue())
   self.assertEqual(applied["closed"],1,applied)
   text=self.jobs.read_text()
   self.assertIn("note=cancelled-receipt-unavailable",text)
@@ -787,6 +810,14 @@ class RegistryTest(unittest.TestCase):
   self.assertNotIn("automatic-receipt-unavailable-v1",text)
   self.assertNotIn("receipt_state=",text)
   self.assertNotIn("marker_state=",text)
+  # New in this cycle: the manual path now also seals a cancellation
+  # quiescence receipt (B6b), which is what makes the row join-acceptable.
+  metadata=D.parse_registry_metadata(text.strip().split("\t",5)[5])
+  self.assertEqual(metadata["cancellation_quiescence_receipt"],
+                   D.ATTEMPT_CANCELLATION_QUIESCENCE_RECEIPT)
+  self.assertTrue(metadata["cancellation_receipt_digest"].startswith("sha256:"))
+  self.assertEqual(metadata["quiescence_pgid_proof"],D.GROUP_REAP_PROOF)
+  self.assertEqual(metadata["quiescence_descendant_proof"],D.ATTEMPT_DESCENDANT_PROOF)
 
  def cancellation_row(self,attempt,portable=False,extra=""):
   metadata={
@@ -831,6 +862,8 @@ class RegistryTest(unittest.TestCase):
        mock.patch.object(D,"process_group_observation",return_value=populated), \
        mock.patch.object(D,"attempt_tagged_descendants",return_value=D.ProcessGroupObservation("empty")), \
        mock.patch.object(D,"attempt_scan_namespace_authority",return_value=True), \
+       mock.patch.object(module,"observer_namespace_extinct",return_value="extinct"), \
+       mock.patch.object(D,"observer_namespace_extinct",return_value="extinct"), \
        contextlib.redirect_stdout(io.StringIO()) as stream:
    self.assertEqual(module.automatic_cancel_receiptless(
     module.read_rows(self.jobs),self.cancellation_args(attempt)),0)
@@ -854,6 +887,8 @@ class RegistryTest(unittest.TestCase):
          mock.patch.object(D,"process_group_observation",return_value=observation), \
          mock.patch.object(D,"attempt_tagged_descendants",return_value=observation), \
          mock.patch.object(D,"attempt_scan_namespace_authority",return_value=not portable), \
+         mock.patch.object(module,"observer_namespace_extinct",return_value="extinct"), \
+         mock.patch.object(D,"observer_namespace_extinct",return_value="extinct"), \
          contextlib.redirect_stdout(io.StringIO()) as stream:
      self.assertEqual(module.automatic_cancel_receiptless(
       module.read_rows(self.jobs),self.cancellation_args(attempt)),0)
@@ -888,7 +923,8 @@ class RegistryTest(unittest.TestCase):
         mock.patch.object(module,"inspect_terminal_attempt",return_value={"state":"absent"}), \
         mock.patch.object(module,"attempt_tagged_descendants",return_value=D.ProcessGroupObservation("empty")), \
         mock.patch.object(module,"attempt_process_quiescence",return_value=D.ProcessQuiescence("quiescent",reason)), \
-        mock.patch.object(module,"classify_attempt_evidence",return_value=None):
+        mock.patch.object(module,"classify_attempt_evidence",return_value=None), \
+        mock.patch.object(module,"observer_namespace_extinct",return_value="extinct"):
     self.assertEqual(module._receiptless_namespace_cancel_reason(row,args),"")
 
  def test_false_evidence_matrix_never_creates_pass_or_terminal_class_mix(self):
@@ -913,6 +949,8 @@ class RegistryTest(unittest.TestCase):
        mock.patch.object(D,"process_group_observation",return_value=populated), \
        mock.patch.object(D,"attempt_tagged_descendants",return_value=D.ProcessGroupObservation("empty")), \
        mock.patch.object(D,"attempt_scan_namespace_authority",return_value=False), \
+       mock.patch.object(module,"observer_namespace_extinct",return_value="extinct"), \
+       mock.patch.object(D,"observer_namespace_extinct",return_value="extinct"), \
        contextlib.redirect_stdout(io.StringIO()) as stream:
    module.automatic_cancel_receiptless(
     module.read_rows(self.jobs),self.cancellation_args(attempt))
@@ -935,6 +973,7 @@ class RegistryTest(unittest.TestCase):
        mock.patch.object(D,"process_group_observation",return_value=empty), \
        mock.patch.object(D,"attempt_tagged_descendants",return_value=empty), \
        mock.patch.object(D,"attempt_scan_namespace_authority",return_value=True), \
+       mock.patch.object(module,"observer_namespace_extinct",return_value="extinct"), \
        contextlib.redirect_stdout(io.StringIO()):
    module.automatic_cancel_receiptless(module.read_rows(self.jobs),args)
   budget=types.SimpleNamespace(retry_slots=1,source="bound-route")
@@ -962,6 +1001,7 @@ class RegistryTest(unittest.TestCase):
        mock.patch.object(D,"process_group_observation",return_value=empty), \
        mock.patch.object(D,"attempt_tagged_descendants",return_value=empty), \
        mock.patch.object(D,"attempt_scan_namespace_authority",return_value=True), \
+       mock.patch.object(module,"observer_namespace_extinct",return_value="extinct"), \
        contextlib.redirect_stdout(io.StringIO()):
    module.automatic_cancel_receiptless(module.read_rows(self.jobs),args)
   budget=types.SimpleNamespace(retry_slots=0,source="bound-route")
@@ -1001,6 +1041,11 @@ class RegistryTest(unittest.TestCase):
   self.assertEqual(self.jobs.read_bytes(),before)
 
  def test_receiptless_cancel_refuses_fresh_exact_heartbeat(self):
+  # Declares the namespace explicitly extinct so eligibility reaches the
+  # deeper attempt-evidence check this fixture actually targets, instead of
+  # depending on this test process's own real /proc state (see R-7's
+  # comment above for why).
+  module=self.load_registry_module("manual_receiptless_fresh_heartbeat")
   attempt="att-receiptless-heartbeat"
   empty_log=self.base/"receiptless-heartbeat.codex.jsonl"
   empty_log.write_text(json.dumps({"type":"system","subtype":"init"})+"\n")
@@ -1010,13 +1055,20 @@ class RegistryTest(unittest.TestCase):
           "pid_observer_ns=pid:[extinct],harness=codex,"
           f"log_file={empty_log}"),
   )+"\n")
-  applied=json.loads(self.invoke(
-   "reconcile","--attempt",attempt,"--cancel-receiptless-namespace","--apply").stdout)
+  currentize_registry(self.jobs)
+  with mock.patch.object(module,"observer_namespace_extinct",return_value="extinct"), \
+       contextlib.redirect_stdout(io.StringIO()) as stream:
+   module.cancel_receiptless_namespace(
+    module.read_rows(self.jobs),self.cancellation_args(attempt))
+  applied=json.loads(stream.getvalue())
   self.assertEqual(applied["closed"],0)
   self.assertEqual(applied["decisions"][0]["reason"],"attempt-evidence-active")
   self.assertIn("\topen\t",self.jobs.read_text())
 
  def test_receiptless_cancel_refuses_live_tagged_attempt(self):
+  # See the fresh-heartbeat fixture's comment above for why the namespace is
+  # declared explicitly extinct here.
+  module=self.load_registry_module("manual_receiptless_live_tagged")
   attempt="att-receiptless-live"
   empty_log=self.base/"receiptless-live.codex.jsonl"
   empty_log.write_text(json.dumps({"type":"system","subtype":"init"})+"\n")
@@ -1031,8 +1083,12 @@ class RegistryTest(unittest.TestCase):
            "pid_observer_ns=pid:[extinct],harness=codex,"
            f"log_file={empty_log}"),
    )+"\n")
-   applied=json.loads(self.invoke(
-    "reconcile","--attempt",attempt,"--cancel-receiptless-namespace","--apply").stdout)
+   currentize_registry(self.jobs)
+   with mock.patch.object(module,"observer_namespace_extinct",return_value="extinct"), \
+        contextlib.redirect_stdout(io.StringIO()) as stream:
+    module.cancel_receiptless_namespace(
+     module.read_rows(self.jobs),self.cancellation_args(attempt))
+   applied=json.loads(stream.getvalue())
    self.assertEqual(applied["closed"],0)
    self.assertEqual(applied["decisions"][0]["reason"],"attempt-descendant-live")
    self.assertIn("\topen\t",self.jobs.read_text())
@@ -1043,6 +1099,216 @@ class RegistryTest(unittest.TestCase):
   result=self.invoke("reconcile","--route","r-ghost","--cancel-receiptless-namespace","--apply")
   self.assertEqual(result.returncode,64)
   self.assertIn("exact-attempt-cancel-required",result.stdout)
+
+ # R-1..R-11 (plan SS5.3 / B-15): extinct-namespace eligibility tightening.
+ def test_foreign_but_present_namespace_is_not_extinct_eligible(self):
+  # R-1
+  module=self.load_registry_module("r1_foreign_present")
+  attempt="att-r1-foreign-present"
+  self.jobs.write_text(self.cancellation_row(attempt))
+  with mock.patch.object(module,"observer_namespace_extinct",return_value="present"), \
+       contextlib.redirect_stdout(io.StringIO()) as stream:
+   module.cancel_receiptless_namespace(
+    module.read_rows(self.jobs),self.cancellation_args(attempt))
+  applied=json.loads(stream.getvalue())
+  self.assertEqual(applied["closed"],0)
+  self.assertEqual(applied["decisions"][0]["reason"],"namespace-not-extinct")
+  self.assertIn("\topen\t",self.jobs.read_text())
+
+ def test_automatic_extinct_and_envelope_absent_closes_with_receipt(self):
+  # R-2
+  module=self.load_registry_module("r2_automatic_extinct")
+  attempt="att-r2-automatic-extinct"
+  self.jobs.write_text(self.cancellation_row(attempt))
+  empty=D.ProcessGroupObservation("empty")
+  with mock.patch.object(module,"attempt_tagged_descendants",return_value=empty), \
+       mock.patch.object(module,"inspect_terminal_attempt",return_value={"state":"absent"}), \
+       mock.patch.object(D,"process_group_observation",return_value=empty), \
+       mock.patch.object(D,"attempt_tagged_descendants",return_value=empty), \
+       mock.patch.object(D,"attempt_scan_namespace_authority",return_value=False), \
+       mock.patch.object(module,"observer_namespace_extinct",return_value="extinct"), \
+       mock.patch.object(D,"observer_namespace_extinct",return_value="extinct"), \
+       contextlib.redirect_stdout(io.StringIO()) as stream:
+   module.automatic_cancel_receiptless(
+    module.read_rows(self.jobs),self.cancellation_args(attempt))
+  record=json.loads(stream.getvalue())
+  decision=record["decisions"][0]
+  self.assertEqual(record["closed"],1,record)
+  self.assertEqual(record["classifier_source"],"automatic-receipt-unavailable-v1")
+  self.assertEqual(decision["proof_source"],"namespace-extinct")
+  self.assertTrue(decision["receipt_digest"].startswith("sha256:"))
+  fields=self.jobs.read_text().strip().split("\t",5)
+  metadata=D.parse_registry_metadata(fields[5])
+  self.assertEqual(fields[1],"done")
+  self.assertEqual(metadata["classifier_source"],"automatic-receipt-unavailable-v1")
+  self.assertEqual(metadata["reconcile_reason"],"automatic-cancelled-receipt-unavailable")
+  self.assertEqual(metadata["note"],"cancelled-receipt-unavailable")
+  self.assertEqual(metadata["failure_class"],"cancelled")
+
+ def test_extinct_but_envelope_present_stays_open(self):
+  # R-3
+  module=self.load_registry_module("r3_envelope_present")
+  attempt="att-r3-envelope-present"
+  self.jobs.write_text(self.cancellation_row(attempt))
+  with mock.patch.object(module,"observer_namespace_extinct",return_value="extinct"), \
+       mock.patch.object(module,"_marker_backed_repair",return_value=False), \
+       mock.patch.object(module,"inspect_terminal_attempt",
+                         return_value={"state":"valid","verdict":"PASS"}), \
+       contextlib.redirect_stdout(io.StringIO()) as stream:
+   module.cancel_receiptless_namespace(
+    module.read_rows(self.jobs),self.cancellation_args(attempt))
+  applied=json.loads(stream.getvalue())
+  self.assertEqual(applied["closed"],0)
+  self.assertTrue(applied["decisions"][0]["reason"].startswith("terminal-envelope-"))
+  self.assertIn("\topen\t",self.jobs.read_text())
+
+ def test_present_observer_namespace_is_untouched(self):
+  # R-4 (regression: observer == current, unrelated to extinction)
+  module=self.load_registry_module("r4_namespace_present")
+  attempt="att-r4-namespace-present"
+  observer=os.readlink("/proc/self/ns/pid")
+  self.jobs.write_text(self.cancellation_row(
+   attempt,extra=f",pid_observer_ns={observer},pid_ns={observer}"))
+  with contextlib.redirect_stdout(io.StringIO()) as stream:
+   module.cancel_receiptless_namespace(
+    module.read_rows(self.jobs),self.cancellation_args(attempt))
+  applied=json.loads(stream.getvalue())
+  self.assertEqual(applied["closed"],0)
+  self.assertEqual(applied["decisions"][0]["reason"],"namespace-not-foreign")
+  self.assertIn("\topen\t",self.jobs.read_text())
+
+ def test_extinct_with_completion_marker_present_stays_open(self):
+  # R-5
+  module=self.load_registry_module("r5_marker_present")
+  attempt="att-r5-marker-present"
+  self.jobs.write_text(self.cancellation_row(attempt))
+  with mock.patch.object(module,"observer_namespace_extinct",return_value="extinct"), \
+       mock.patch.object(module,"_marker_backed_repair",return_value=True), \
+       contextlib.redirect_stdout(io.StringIO()) as stream:
+   module.cancel_receiptless_namespace(
+    module.read_rows(self.jobs),self.cancellation_args(attempt))
+  applied=json.loads(stream.getvalue())
+  self.assertEqual(applied["closed"],0)
+  self.assertEqual(applied["decisions"][0]["reason"],"completion-marker-present")
+  self.assertIn("\topen\t",self.jobs.read_text())
+
+ def test_extinct_with_live_attempt_descendant_stays_open(self):
+  # R-6
+  module=self.load_registry_module("r6_descendant_live")
+  attempt="att-r6-descendant-live"
+  self.jobs.write_text(self.cancellation_row(attempt))
+  populated=D.ProcessGroupObservation("populated",((41,"900","S"),))
+  with mock.patch.object(module,"observer_namespace_extinct",return_value="extinct"), \
+       mock.patch.object(module,"_marker_backed_repair",return_value=False), \
+       mock.patch.object(module,"inspect_terminal_attempt",return_value={"state":"absent"}), \
+       mock.patch.object(module,"attempt_tagged_descendants",return_value=populated), \
+       contextlib.redirect_stdout(io.StringIO()) as stream:
+   module.cancel_receiptless_namespace(
+    module.read_rows(self.jobs),self.cancellation_args(attempt))
+  applied=json.loads(stream.getvalue())
+  self.assertEqual(applied["closed"],0)
+  self.assertEqual(applied["decisions"][0]["reason"],"attempt-descendant-live")
+  self.assertIn("\topen\t",self.jobs.read_text())
+
+ def test_manual_closure_recovery_gate_rejects_and_automatic_admits(self):
+  # R-8 / R-9: manual closure is not SD-106-recovery-eligible; automatic is.
+  recovery_spec=importlib.util.spec_from_file_location(
+   "dispatch_recovery_r8r9",ROOT/"utilities/dispatch-recovery.py")
+  recovery=importlib.util.module_from_spec(recovery_spec)
+  sys.modules[recovery_spec.name]=recovery
+  recovery_spec.loader.exec_module(recovery)
+
+  manual_module=self.load_registry_module("r8_manual")
+  manual_attempt="att-r8-manual"
+  self.jobs.write_text(self.cancellation_row(manual_attempt))
+  empty=D.ProcessGroupObservation("empty")
+  with mock.patch.object(manual_module,"attempt_tagged_descendants",return_value=empty), \
+       mock.patch.object(manual_module,"_marker_backed_repair",return_value=False), \
+       mock.patch.object(manual_module,"inspect_terminal_attempt",return_value={"state":"absent"}), \
+       mock.patch.object(D,"process_group_observation",return_value=empty), \
+       mock.patch.object(D,"attempt_tagged_descendants",return_value=empty), \
+       mock.patch.object(D,"attempt_scan_namespace_authority",return_value=False), \
+       mock.patch.object(manual_module,"observer_namespace_extinct",return_value="extinct"), \
+       mock.patch.object(D,"observer_namespace_extinct",return_value="extinct"), \
+       contextlib.redirect_stdout(io.StringIO()):
+   manual_module.cancel_receiptless_namespace(
+    manual_module.read_rows(self.jobs),self.cancellation_args(manual_attempt))
+  manual_fields=self.jobs.read_text().strip().split("\t",5)
+  manual_meta=D.parse_registry_metadata(manual_fields[5])
+  manual_snapshot=recovery.AttemptSnapshot(
+   status=manual_fields[1],repo=manual_fields[2],worktree=manual_fields[3],
+   slug=manual_fields[4],metadata=manual_meta,row_digest="")
+  self.assertIsNone(recovery._cancellation_evidence(manual_snapshot))
+
+  automatic_module=self.load_registry_module("r9_automatic")
+  automatic_attempt="att-r9-automatic"
+  self.jobs.write_text(self.cancellation_row(automatic_attempt))
+  with mock.patch.object(automatic_module,"attempt_tagged_descendants",return_value=empty), \
+       mock.patch.object(automatic_module,"inspect_terminal_attempt",return_value={"state":"absent"}), \
+       mock.patch.object(D,"process_group_observation",return_value=empty), \
+       mock.patch.object(D,"attempt_tagged_descendants",return_value=empty), \
+       mock.patch.object(D,"attempt_scan_namespace_authority",return_value=False), \
+       mock.patch.object(automatic_module,"observer_namespace_extinct",return_value="extinct"), \
+       mock.patch.object(D,"observer_namespace_extinct",return_value="extinct"), \
+       contextlib.redirect_stdout(io.StringIO()):
+   automatic_module.automatic_cancel_receiptless(
+    automatic_module.read_rows(self.jobs),self.cancellation_args(automatic_attempt))
+  automatic_fields=self.jobs.read_text().strip().split("\t",5)
+  automatic_meta=D.parse_registry_metadata(automatic_fields[5])
+  automatic_snapshot=recovery.AttemptSnapshot(
+   status=automatic_fields[1],repo=automatic_fields[2],worktree=automatic_fields[3],
+   slug=automatic_fields[4],metadata=automatic_meta,row_digest="")
+  self.assertIsNotNone(recovery._cancellation_evidence(automatic_snapshot))
+
+ def test_automatic_cancel_receiptless_is_idempotent_across_two_runs(self):
+  # R-10
+  module=self.load_registry_module("r10_idempotent")
+  attempt="att-r10-idempotent"
+  self.jobs.write_text(self.cancellation_row(attempt))
+  empty=D.ProcessGroupObservation("empty")
+  with mock.patch.object(module,"attempt_tagged_descendants",return_value=empty), \
+       mock.patch.object(module,"inspect_terminal_attempt",return_value={"state":"absent"}), \
+       mock.patch.object(D,"process_group_observation",return_value=empty), \
+       mock.patch.object(D,"attempt_tagged_descendants",return_value=empty), \
+       mock.patch.object(D,"attempt_scan_namespace_authority",return_value=False), \
+       mock.patch.object(module,"observer_namespace_extinct",return_value="extinct"), \
+       mock.patch.object(D,"observer_namespace_extinct",return_value="extinct"), \
+       contextlib.redirect_stdout(io.StringIO()):
+   module.automatic_cancel_receiptless(module.read_rows(self.jobs),self.cancellation_args(attempt))
+  first_digest=D.parse_registry_metadata(
+   self.jobs.read_text().strip().split("\t",5)[5])["cancellation_receipt_digest"]
+  stream=io.StringIO()
+  with contextlib.redirect_stdout(stream):
+   module.automatic_cancel_receiptless(module.read_rows(self.jobs),self.cancellation_args(attempt))
+  second=json.loads(stream.getvalue())
+  self.assertEqual(second["closed"],0)
+  second_meta=D.parse_registry_metadata(self.jobs.read_text().strip().split("\t",5)[5])
+  self.assertEqual(second_meta["cancellation_receipt_digest"],first_digest)
+
+ def test_existing_exact_and_portable_proof_source_assertions_still_pass(self):
+  # R-11 (regression: exact-teardown / authenticated-namespace-portable proof
+  # sources are unaffected by the new namespace-extinct source)
+  module=self.load_registry_module("r11_existing_sources")
+  for portable in (False,True):
+   with self.subTest(portable=portable):
+    attempt=f"att-r11-{'portable' if portable else 'exact'}"
+    self.jobs.write_text(self.cancellation_row(attempt,portable=portable))
+    observation=(D.ProcessGroupObservation("unverifiable",reason="foreign")
+                 if portable else D.ProcessGroupObservation("empty"))
+    with mock.patch.object(module,"attempt_tagged_descendants",return_value=D.ProcessGroupObservation("empty")), \
+         mock.patch.object(D,"process_group_observation",return_value=observation), \
+         mock.patch.object(D,"attempt_tagged_descendants",return_value=observation), \
+         mock.patch.object(D,"attempt_scan_namespace_authority",return_value=not portable), \
+         mock.patch.object(module,"observer_namespace_extinct",return_value="extinct"), \
+         mock.patch.object(D,"observer_namespace_extinct",return_value="extinct"), \
+         contextlib.redirect_stdout(io.StringIO()) as stream:
+     module.automatic_cancel_receiptless(
+      module.read_rows(self.jobs),self.cancellation_args(attempt))
+    record=json.loads(stream.getvalue())
+    self.assertEqual(record["closed"],1,record)
+    self.assertEqual(
+     record["decisions"][0]["proof_source"],
+     "authenticated-namespace-portable" if portable else "exact-teardown")
 
 
 class ArtifactProofReceiptSealTest(unittest.TestCase):

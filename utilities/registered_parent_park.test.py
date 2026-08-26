@@ -3,11 +3,13 @@
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import hashlib
 import os
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -17,6 +19,14 @@ HOOK = ROOT / "hooks" / "registered-parent-park.py"
 PARENT = "att-claude-owner"
 CHILD = "att-claude-child-a"
 SLUG = "owner"
+
+sys.path.insert(0, str(ROOT / "utilities"))
+_JOIN_SPEC = importlib.util.spec_from_file_location(
+    "dispatch_completion_join_park_parity", ROOT / "utilities" / "dispatch_completion_join.py"
+)
+JOIN = importlib.util.module_from_spec(_JOIN_SPEC)
+sys.modules[_JOIN_SPEC.name] = JOIN
+_JOIN_SPEC.loader.exec_module(JOIN)
 
 
 class RegisteredParentParkTest(unittest.TestCase):
@@ -280,6 +290,121 @@ class RegisteredParentParkTest(unittest.TestCase):
                 + "\n"
             )
         self.assert_denied("Bash", batch)
+
+    def test_denial_reports_the_actual_status_not_open_for_a_done_row(self) -> None:
+        # D-9: a `done` row must never be reported as "open" in the denial.
+        original = self.jobs.read_text(encoding="utf-8").rstrip("\n")
+        receipt = {
+            "schema_version": 2, "state": "ready", "parent_attempt_id": PARENT,
+            "children": [{
+                "attempt_id": CHILD, "status": "open",
+                "required_action": "complete-open",
+            }],
+        }
+        self.write_outbox_state(receipt, original)
+        self.jobs.write_text(
+            original.replace("\topen\t", "\tdone\t")
+            + ",failure_class=fail,note=dead-worker-fail\n",
+            encoding="utf-8",
+        )
+        result = self.invoke(
+            "Bash",
+            f"adapters/codex/bin/preflight.sh harvest --attempt-id {CHILD} "
+            "--status open --mark-done",
+        )
+        reason = result["hookSpecificOutput"]["permissionDecisionReason"]
+        self.assertIn(f"{CHILD}:done", reason)
+        self.assertNotIn(f"{CHILD}:open", reason)
+
+    def test_denial_reason_unrecognized_surface(self) -> None:
+        # D-10a
+        self.write_state([])
+        result = self.invoke("Bash", "curl https://example.invalid")
+        reason = result["hookSpecificOutput"]["permissionDecisionReason"]
+        self.assertIn("command_rejection_reason=unrecognized-surface", reason)
+
+    def test_denial_reason_unknown_option(self) -> None:
+        # D-10b
+        self.write_state([CHILD])
+        result = self.invoke(
+            "Bash",
+            f"adapters/codex/bin/preflight.sh harvest --attempt-id {CHILD} "
+            "--status open --not-a-real-flag",
+        )
+        reason = result["hookSpecificOutput"]["permissionDecisionReason"]
+        self.assertIn("command_rejection_reason=unknown-option", reason)
+
+    def test_denial_reason_shell_composition(self) -> None:
+        # D-10c
+        self.write_state([CHILD])
+        result = self.invoke(
+            "Bash",
+            f"adapters/codex/bin/preflight.sh harvest --attempt-id {CHILD} "
+            "--status open --mark-done && rm -rf /tmp/x",
+        )
+        reason = result["hookSpecificOutput"]["permissionDecisionReason"]
+        self.assertIn("command_rejection_reason=shell-composition", reason)
+
+    def test_denial_reason_attempt_not_guarded(self) -> None:
+        # D-10d
+        self.write_state([CHILD])
+        result = self.invoke(
+            "Bash",
+            "adapters/codex/bin/preflight.sh harvest --attempt-id "
+            "att-not-in-registry --status open --mark-done",
+        )
+        reason = result["hookSpecificOutput"]["permissionDecisionReason"]
+        self.assertIn("command_rejection_reason=attempt-not-guarded", reason)
+
+    def test_precheck_agrees_with_the_real_guard_on_every_prescribed_line(self) -> None:
+        # D-6c: the D2a precheck must derive base/open_attempt_ids/parent_slug/
+        # jobs exactly as the hook does, and its verdict must equal the hook's
+        # actual admit/deny decision for the same lines.
+        self.write_state([CHILD])
+        admitted_line = (
+            f"adapters/codex/bin/preflight.sh harvest --attempt-id {CHILD} --status open"
+        )
+        denied_line = f"utilities/dispatch-wait.sh --attempt-id {CHILD} --max 600"
+        guarded_attempts = {CHILD}  # open row, no outbox -- matches setUp's single child
+        for line, hook_admits in ((admitted_line, True), (denied_line, False)):
+            with self.subTest(line=line):
+                precheck_satisfiable, _ = JOIN.supervisor_receipt_satisfiable(
+                    [line],
+                    base=ROOT,
+                    open_attempt_ids=guarded_attempts,
+                    parent_slug=SLUG,
+                    jobs=self.jobs,
+                    parent_attempt_id=PARENT,
+                    route_file=self.route,
+                    route_id=self.route_id,
+                )
+                hook_result = self.invoke("Bash", line)
+                hook_admitted = hook_result is None
+                self.assertEqual(precheck_satisfiable, hook_admits)
+                self.assertEqual(hook_admitted, hook_admits)
+                self.assertEqual(precheck_satisfiable, hook_admitted)
+
+    def test_existing_admission_and_denial_outcomes_are_unchanged(self) -> None:
+        # D-11: regression -- D4 changes text and adds a reason accessor,
+        # never the decision. Re-runs a representative slice of the existing
+        # fixtures above and checks only the boolean admit/deny outcome.
+        self.write_state([])
+        dispatch = (
+            f"python3 utilities/dispatch-node.py --route {self.route} "
+            "--node test --adapter codex --action start --slug child-b "
+            f"--parent owner -- --jobs {self.jobs} "
+            f"--parent-attempt-id {PARENT}"
+        )
+        self.assertIsNone(self.invoke("Bash", dispatch))
+        self.assert_denied("Bash", f"utilities/dispatch-wait.sh --attempt-id {CHILD}")
+        self.write_state([CHILD])
+        self.assertIsNone(
+            self.invoke(
+                "Bash",
+                f"adapters/codex/bin/preflight.sh harvest --attempt-id {CHILD} --status open",
+            )
+        )
+        self.assert_denied("Bash", f"utilities/dispatch-wait.sh --attempt-id {CHILD} --max 600")
 
 
 if __name__ == "__main__":

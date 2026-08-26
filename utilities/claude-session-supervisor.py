@@ -23,6 +23,7 @@ from dispatch_completion_join import (
     consume_advance_completed_outbox,
     current_children,
     delivery_timing_fields,
+    harvest_command_lines,
     prepare_supervisor_outbox,
     refresh_supervisor_outbox_actions,
     reconcile_finished_children,
@@ -32,6 +33,8 @@ from dispatch_completion_join import (
     remove_supervisor_state,
     runtime_wait_requested,
     start_retry_prompt,
+    supervisor_outbox_delivery_identity,
+    supervisor_receipt_satisfiable,
     unstarted_child_attempts,
     validate_delivery_timing,
     write_supervisor_state,
@@ -44,6 +47,8 @@ from dispatch_continuation_budget import (
 from dispatch_supervisor_terminal import (
     SupervisorTerminal,
     classify_claude_result,
+    classify_supervisor_abandonment_terminal,
+    classify_supervisor_attention_terminal,
     classify_supervisor_error,
     reconcile_supervisor_terminal,
 )
@@ -657,6 +662,7 @@ def parser() -> argparse.ArgumentParser:
     value.add_argument("--join-interval", type=float, default=2.0)
     value.add_argument("--join-timeout", type=float, default=3600.0)
     value.add_argument("--max-join-reparks", type=int, default=6)
+    value.add_argument("--max-identical-redeliveries", type=int, default=2)
     value.add_argument("--turn-timeout", type=float, default=7200.0)
     value.add_argument("--max-continuations", type=positive_continuation_limit)
     value.add_argument("--route-file")
@@ -750,6 +756,23 @@ def main(argv: list[str] | None = None) -> int:
             if active_outbox is not None:
                 if active_outbox.receipt is None:
                     raise SupervisorError("supervisor-outbox-receipt-missing")
+                # D3: a supervisor that restarts onto an open-but-finished
+                # child must not hand the owner an unsatisfiable receipt. The
+                # park path's own pre-receipt runtime_reconcile is already
+                # correct; this is the narrowed survivor of the assignment's
+                # D2 for the recovery path specifically.
+                runtime_reconcile(
+                    args,
+                    {
+                        row.attempt_id: row
+                        for row in current_children(
+                            Path(args.jobs),
+                            args.parent_attempt_id,
+                            set(active_outbox.attempt_ids),
+                        )
+                    },
+                    set(active_outbox.attempt_ids),
+                )
                 refreshed = refresh_supervisor_outbox_actions(
                     state_path,
                     args.parent_attempt_id,
