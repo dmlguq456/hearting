@@ -24,6 +24,10 @@ import artifact_lifecycle as L  # noqa: E402
 import artifact_producer as P  # noqa: E402
 
 SCHEMA = "hearting-w8-handoff-bundle/v1"
+NOTES_SCHEMA = "cairn-w8-notes/v1"
+# Cairn PRD §76.5 14항 body-free column allowlist. Anything else is refused before the bundle is written.
+NOTE_ALLOWED_KEYS = frozenset({"id", "parent_id", "page_no", "repo", "source_dir", "source_capability", "trashed_at", "revision"})
+NOTE_FORBIDDEN_KEYS = frozenset({"body", "title", "generated_title", "excerpt", "summary"})
 
 
 def sha_file(path: Path) -> str:
@@ -51,9 +55,70 @@ def canonical(obj) -> str:
     return json.dumps(obj, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
 
 
+class NotesInputError(ValueError):
+    pass
+
+
+def _forbidden_keys(obj, found=None):
+    found = [] if found is None else found
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            if str(k).lower() in NOTE_FORBIDDEN_KEYS:
+                found.append(str(k))
+            _forbidden_keys(v, found)
+    elif isinstance(obj, list):
+        for v in obj:
+            _forbidden_keys(v, found)
+    return found
+
+
+def load_notes(path: Path):
+    """Load the Cairn-exported body-free note population (`cairn-w8-notes/v1`).
+
+    Cairn owns the note population (Hearting has no read access to `l2_notes`), so
+    the export is produced on the Cairn side with the §76.5 SELECT allowlist and
+    handed here only to be digest-sealed next to the other bundle rows.  This
+    loader is a gate, not a transformer: exact key set per row, no body/title
+    anywhere in the document, unique ids, deterministic order.
+    """
+    doc = read_json(path)
+    if not isinstance(doc, dict) or not isinstance(doc.get("notes"), list):
+        raise NotesInputError("notes input must be an object with a 'notes' list")
+    if doc.get("schema", NOTES_SCHEMA) != NOTES_SCHEMA:
+        raise NotesInputError(f"unsupported notes schema: {doc.get('schema')}")
+    forbidden = _forbidden_keys(doc)
+    if forbidden:
+        raise NotesInputError("body-bearing keys are not allowed: " + ",".join(sorted(set(forbidden))))
+    rows = []
+    seen = set()
+    for i, row in enumerate(doc["notes"]):
+        if not isinstance(row, dict):
+            raise NotesInputError(f"note #{i} is not an object")
+        keys = set(row)
+        if keys != NOTE_ALLOWED_KEYS:
+            raise NotesInputError(f"note #{i} key set must be exactly {sorted(NOTE_ALLOWED_KEYS)}; got {sorted(keys)}")
+        if not isinstance(row["id"], str) or not row["id"]:
+            raise NotesInputError(f"note #{i} id must be a non-empty string")
+        if row["id"] in seen:
+            raise NotesInputError(f"duplicate note id: {row['id']}")
+        seen.add(row["id"])
+        for k in ("parent_id", "repo", "source_dir", "source_capability", "trashed_at"):
+            if row[k] is not None and not isinstance(row[k], str):
+                raise NotesInputError(f"note {row['id']} field {k} must be string or null")
+        for k in ("page_no", "revision"):
+            if row[k] is not None and not isinstance(row[k], int):
+                raise NotesInputError(f"note {row['id']} field {k} must be int or null")
+        rows.append({k: row[k] for k in sorted(NOTE_ALLOWED_KEYS)})
+    rows.sort(key=lambda r: r["id"])
+    meta = {k: doc[k] for k in ("exported_at", "source", "cairn_source_commit", "repository_hint") if k in doc}
+    return rows, meta
+
+
 class Bundle:
     def __init__(self, root: Path, bundle_dir: Path, cycles, w7_evidence: Path, w7c_run: Path,
-                 retirement_run: Path, backup_tar: Path | None, census_runs):
+                 retirement_run: Path, backup_tar: Path | None, census_runs, notes=None, notes_meta=None):
+        self.notes = notes
+        self.notes_meta = notes_meta or {}
         self.root = root
         self.dir = bundle_dir
         self.cycle_ids = cycles
@@ -244,6 +309,7 @@ class Bundle:
                 "report_bundle_receipts": [], "decoder": "utilities/artifact_receipt.py (D-12 v1/v2/v3 exact decoders)",
                 "approval_receipts_found": receipts,
                 "existing_note_ids": None,
+                "existing_notes": ("notes.json" if self.notes is not None else None),
                 "note": "no report-bundle publication receipt exists under this root; a W8 exact receipt↔artifact_id join must be produced by note-publication (artifact-sink.sh) v3 lineage, and existing note IDs must come from Cairn (not read here)"}
 
     def report_granularity(self, population):
@@ -282,10 +348,23 @@ class Bundle:
                 "artifact_population": Counter(r["identity_class"] for r in population),
                 "dispositions": Counter(r["disposition"] for r in population),
                 "legacy_mapping": Counter(r["state"] for r in mapping), "mapping_conflicts": len(conflicts),
-                "existing_note_candidates": None,
+                "existing_note_candidates": self.existing_note_counts(),
                 "unresolved_ship_gate": ["dev_logs/ undeclared top-level container (PRD §16.5, D-38 ship_eligible=false)",
                                          "index-size-warning (sharding review) advisory"],
-                "note": "existing_note_candidates requires Cairn read access, which W7E did not have"}
+                "note": ("existing_note_candidates counts the Cairn body-free export sealed as notes.json; disposition is Cairn W9's"
+                         if self.notes is not None else
+                         "existing_note_candidates requires Cairn read access, which this bundle did not have")}
+
+    def existing_note_counts(self):
+        if self.notes is None:
+            return None
+        active = [n for n in self.notes if n["trashed_at"] is None]
+        return {"total": len(self.notes), "active": len(active), "trashed": len(self.notes) - len(active),
+                "active_by_repo": dict(sorted(Counter(n["repo"] for n in active).items(), key=lambda kv: str(kv[0])))}
+
+    def existing_notes(self):
+        return {"schema": NOTES_SCHEMA, "row": "existing notes", "columns": sorted(NOTE_ALLOWED_KEYS),
+                "body_free": True, **self.notes_meta, "counts": self.existing_note_counts(), "notes": self.notes}
 
     def approval_boundary(self, bundle_digest_seed):
         def aid(stage):
@@ -317,6 +396,8 @@ class Bundle:
         self.write("publication-evidence.json", self.publication_evidence())
         self.write("report-granularity.json", self.report_granularity(population))
         self.write("candidate-scope.json", self.candidate_scope(population))
+        if self.notes is not None:
+            self.write("notes.json", self.existing_notes())
         self.write("expected-totals.json", self.expected_totals(population, mapping, conflicts))
         seed = "|".join(f"{n}:{m['sha256']}" for n, m in sorted(self.files.items()))
         self.write("approval-boundary.json", self.approval_boundary(seed))
@@ -327,7 +408,8 @@ class Bundle:
                           "integrity census": "integrity-census.json", "legacy mapping": ["legacy-mapping.jsonl", "legacy-mapping-conflicts.json"],
                           "publication evidence": "publication-evidence.json", "report granularity": "report-granularity.json",
                           "candidate scope": "candidate-scope.json", "expected totals": "expected-totals.json",
-                          "approval boundary": "approval-boundary.json"},
+                          "approval boundary": "approval-boundary.json",
+                          **({"existing notes": "notes.json"} if self.notes is not None else {})},
                  "files": self.files}
         index["bundle_digest"] = sha_text(canonical(self.files))
         self.write("handoff.json", index)
@@ -344,7 +426,14 @@ def main(argv=None):
     ap.add_argument("--retirement-run", required=True)
     ap.add_argument("--backup-tar")
     ap.add_argument("--census", help="delta-census json to cite")
+    ap.add_argument("--notes", help="Cairn body-free note export (cairn-w8-notes/v1) to seal as notes.json")
     args = ap.parse_args(argv)
+    notes = notes_meta = None
+    if args.notes:
+        try:
+            notes, notes_meta = load_notes(Path(args.notes))
+        except NotesInputError as exc:
+            raise SystemExit(f"notes input rejected: {exc}")
     root = Path(args.artifact_root).resolve()
     bundle_dir = Path(args.bundle_dir).resolve()
     verdict = P.check_write(root, bundle_dir / "handoff.json")
@@ -356,7 +445,7 @@ def main(argv=None):
         census = {"path": args.census, "sha256": sha_file(Path(args.census)), "runs": c.get("runs"), "stable": c.get("stable_across_runs"),
                   "unclassified_total": c.get("unclassified_total")}
     b = Bundle(root, bundle_dir, args.cycle, Path(args.w7_evidence), Path(args.w7c_run), Path(args.retirement_run),
-               Path(args.backup_tar).expanduser() if args.backup_tar else None, census)
+               Path(args.backup_tar).expanduser() if args.backup_tar else None, census, notes, notes_meta)
     index = b.build()
     print(json.dumps({"bundle_dir": str(bundle_dir), "bundle_digest": index["bundle_digest"],
                       "files": {k: v["sha256"] for k, v in index["files"].items()}}, indent=1))
