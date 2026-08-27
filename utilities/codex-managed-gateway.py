@@ -39,8 +39,12 @@ from tools.fleet import interaction as fleet_interaction
 from dispatch_completion_join import (  # noqa: E402
     DELIVERY_TIMING_POINTS,
     JoinContractError,
+    STAGE_ADVANCE_RECEIPT_KEY,
+    STAGE_ADVANCE_SCHEMA_VERSION,
     advance_delivery_timing,
     delivery_timing_fields,
+    receipt_with_stage_advance,
+    typed_stage_advance_block,
     validate_delivery_timing,
 )
 
@@ -489,6 +493,7 @@ class ManagedGateway:
         ledger_path: Path,
         trace_path: Path | None = None,
         fault: str = "none",
+        accept_stage_advance: bool = False,
     ) -> None:
         self.listen_path = listen_path
         self.upstream_path = upstream_path
@@ -496,6 +501,10 @@ class ManagedGateway:
         self.ledger = DeliveryLedger(ledger_path)
         self.trace_path = trace_path
         self.fault = fault
+        # SD-110 13.32.1-(3)B: whether this gateway has negotiated the v3
+        # receipt schema. Defaults False -- an un-negotiated gateway takes the
+        # literal, unmodified v2 validation path (A-18 byte-identity).
+        self._accept_stage_advance = accept_stage_advance
         self._fault_used = False
         self._lock = threading.RLock()
         self._stop = threading.Event()
@@ -1249,17 +1258,35 @@ class ManagedGateway:
             request.get("sealed_batch_id"), "sealed-batch-id-invalid"
         )
         receipt = request.get("receipt")
+        allowed_receipt_keys = ALLOWED_RECEIPT_KEYS
+        allowed_schema_versions = {2}
+        if self._accept_stage_advance:
+            allowed_receipt_keys = ALLOWED_RECEIPT_KEYS | {STAGE_ADVANCE_RECEIPT_KEY}
+            allowed_schema_versions = {2, STAGE_ADVANCE_SCHEMA_VERSION}
         if (
             not isinstance(receipt, dict)
-            or set(receipt) - ALLOWED_RECEIPT_KEYS
+            or set(receipt) - allowed_receipt_keys
         ):
             raise GatewayError("receipt-shape-invalid")
         if (
-            receipt.get("schema_version") != 2
+            receipt.get("schema_version") not in allowed_schema_versions
             or receipt.get("state") != "ready"
             or receipt.get("parent_attempt_id") != parent_attempt_id
         ):
             raise GatewayError("receipt-identity-invalid")
+        stage_advance = None
+        if (
+            self._accept_stage_advance
+            and receipt.get("schema_version") == STAGE_ADVANCE_SCHEMA_VERSION
+        ):
+            try:
+                stage_advance = typed_stage_advance_block(
+                    receipt.get(STAGE_ADVANCE_RECEIPT_KEY)
+                )
+            except JoinContractError as exc:
+                raise GatewayError("receipt-stage-advance-invalid") from exc
+        elif STAGE_ADVANCE_RECEIPT_KEY in receipt:
+            raise GatewayError("receipt-shape-invalid")
         raw_jobs = receipt.get("job_registry")
         if (
             not isinstance(raw_jobs, str)
@@ -1373,6 +1400,10 @@ class ManagedGateway:
             "delivery_classification": aggregate,
             "delivery_timing": delivery_timing,
         }
+        if stage_advance is not None:
+            normalized = receipt_with_stage_advance(
+                normalized, negotiated=True, stage_advance_record=stage_advance,
+            )
         receipt_bytes = canonical(normalized).encode("utf-8")
         if len(receipt_bytes) > MAX_RECEIPT_BYTES:
             raise GatewayError("receipt-oversized")

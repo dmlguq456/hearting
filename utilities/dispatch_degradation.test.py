@@ -1,19 +1,27 @@
 #!/usr/bin/env python3
+import ast
+import hashlib
 import json
 import multiprocessing
 import os
+from pathlib import Path
 import stat
 import subprocess
 import sys
 import tempfile
 import time
 import unittest
+from unittest import mock
 
 from dispatch_degradation import record_degradation
+import dispatch_stage_advance as SA
 
 TOOLS = os.path.dirname(os.path.dirname(os.path.abspath(__file__))) + "/tools"
 if TOOLS not in sys.path:
     sys.path.insert(0, TOOLS)
+
+UTILITIES = Path(__file__).resolve().parent
+ROOT = UTILITIES.parent
 
 
 class DegradationWriterTest(unittest.TestCase):
@@ -217,6 +225,151 @@ record_degradation(agent_home=sys.argv[1], route_id='rt-race', route_node='execu
                     )
                 )
             )
+
+
+class SD110LedgerIsolationTest(unittest.TestCase):
+    """C-21/C-22 (plan.md §6): SD-110 leaves SD-93's sealed ledger contract
+    untouched, and a normal runtime stage advance produces zero ledger
+    events -- 13.32.1-(5) says the degradation ledger is unrelated
+    observation surface, SD-109's "no ledger row for normal completion"
+    text extends unchanged to SD-110's own "normal advance"."""
+
+    def test_row_composition_and_writer_allowlist_are_the_pre_sd110_frozen_sets(self):
+        import dispatch_degradation as DEG
+
+        self.assertEqual(DEG._KINDS, {"degradation", "chain-exhausted", "leg-failure"})
+        self.assertEqual(
+            DEG._WRITERS,
+            {
+                "stage-dispatch-fallback.py",
+                "dispatch-batch.py",
+                "capability-route.py",
+                "dispatch-reap-watch.py",
+            },
+        )
+        # Neither `dispatch_stage_advance.py` nor either session supervisor is
+        # on the writer allowlist -- SD-110 has no ledger-writer identity.
+        self.assertNotIn("dispatch_stage_advance.py", DEG._WRITERS)
+        self.assertNotIn("claude-session-supervisor.py", DEG._WRITERS)
+        self.assertNotIn("codex-app-server-supervisor.py", DEG._WRITERS)
+
+    def test_event_id_dedup_key_and_required_fields_are_unchanged(self):
+        import dispatch_degradation as DEG
+        from fleet.collectors import dispatch as FLEET_DISPATCH
+
+        self.assertEqual(
+            FLEET_DISPATCH._DEGRADATION_REQUIRED,
+            {
+                "schema_version", "kind", "ts", "route_id", "route_node",
+                "route_hash", "dispatch_depth", "fallback_hop",
+                "execution_surface", "writer",
+            },
+        )
+        # `_event_id` dedup identity is a fixed field tuple hashed to a
+        # stable `dg-` prefixed digest -- same row, same event id, always.
+        row = {
+            "kind": "degradation", "route_id": "rt-dedup", "route_node": "execute",
+            "attempt_id": "att-1", "parallel_leg_index": None,
+            "parallel_leg_count": None, "fallback_ordinal": None,
+            "writer": "stage-dispatch-fallback.py",
+        }
+        self.assertEqual(DEG._event_id(row), DEG._event_id(dict(row)))
+        self.assertTrue(DEG._event_id(row).startswith("dg-"))
+
+    def test_stage_advance_modules_never_reference_the_degradation_ledger(self):
+        for relative in (
+            "utilities/dispatch_stage_advance.py",
+            "utilities/claude-session-supervisor.py",
+            "utilities/codex-app-server-supervisor.py",
+        ):
+            path = ROOT / relative
+            source = path.read_text(encoding="utf-8")
+            self.assertNotIn(
+                "dispatch_degradation", source,
+                f"{relative} must not reference the SD-93 ledger module",
+            )
+
+    def _fixture_route(self):
+        nodes = [
+            {
+                "id": "a", "depends_on": [], "terminal": False,
+                "advance_class": "runtime-eligible", "commit_expected": False,
+                "unit": "dev/backend", "completion_gate": "gate",
+                "write_scope": ["out/**"], "inputs": ["in"], "outputs": ["out"],
+                "continuation": {"kind": "inline-next"},
+            },
+            {
+                "id": "b", "depends_on": ["a"], "terminal": False,
+                "advance_class": "runtime-eligible", "commit_expected": False,
+                "unit": "dev/backend", "completion_gate": "gate",
+                "write_scope": ["out/**"], "inputs": ["in"], "outputs": ["out"],
+                "continuation": {"kind": "inline-next"},
+            },
+        ]
+        payload = {
+            "capability": "fixture-cap", "capability_mode": "dev",
+            "effective_intensity": "standard", "nodes": nodes,
+            "advance_generation": 0,
+        }
+        canonical = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        digest = "sha256:" + hashlib.sha256(canonical.encode()).hexdigest()
+        payload["route_hash"] = digest
+        payload["route_id"] = "rt-" + digest.split(":", 1)[1][:16]
+        return payload
+
+    def test_normal_advance_writes_no_ledger_file_and_never_calls_the_writer(self):
+        route = self._fixture_route()
+
+        class FakeServices:
+            def close_gate(self, request, *, node, terminal_attempt_id, artifact):
+                return {"closed": True, "node": node, "artifact": artifact}
+
+            def claim(self, request, *, stage_advance_id, claim_key, successor_node):
+                return SA.StageAdvanceClaim(
+                    stage_advance_id=stage_advance_id, claim_key=claim_key,
+                    successor_attempt_id="att-b-0001", replayed=False,
+                )
+
+            def start_successor(self, request, *, claim, successor, slug, prompt_file):
+                assert prompt_file.is_file()
+                return {"registered": True, "started": True, "child_spawned": True, "slug": slug}
+
+            def observe_record(self, request, *, stage_advance_id):
+                return None
+
+            def process_quiescence(self, request, *, attempt_id):
+                return True
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            jobs = root / "jobs.registry"
+            jobs.touch()
+            route_file = root / "route.json"
+            route_file.write_text(json.dumps(route), encoding="utf-8")
+            request = SA.StageAdvanceRequest(
+                jobs=jobs, route_file=route_file, predecessor_node="a",
+                predecessor_terminal_attempt_id="att-a-0001",
+                parent_attempt_id="att-parent-0001", supervisor_phase="parked",
+                delivered_open_attempt_ids=frozenset(), receipt_schema_negotiated=3,
+                harness="claude", worktree=str(root),
+            )
+            marker_dir = root / "completion" / route["route_id"]
+            marker_dir.mkdir(parents=True)
+            (marker_dir / "a.json").write_text(json.dumps({
+                "schema_version": 2, "route_id": route["route_id"],
+                "route_hash": route["route_hash"], "node_id": "a",
+                "attempt_id": "att-a-0001",
+                "evidence": {"path": "/tmp/fixture-artifact.md", "state": "verified"},
+            }), encoding="utf-8")
+            with mock.patch.object(
+                SA.ROUTE, "completion_dir", return_value=marker_dir
+            ), mock.patch.object(
+                SA, "gate_evidence", return_value=("verdict: PASS", None)
+            ), mock.patch("dispatch_degradation.record_degradation") as writer:
+                result = SA.coordinate_stage_advance(request, FakeServices())
+            self.assertEqual(result.outcome, "advanced")
+            writer.assert_not_called()
+            self.assertFalse((root / ".dispatch" / "degradations").exists())
 
 
 if __name__ == "__main__":

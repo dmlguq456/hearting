@@ -1856,5 +1856,128 @@ class FinishedChildClosure(unittest.TestCase):
         self.assertIn("dead-worker-blocked", lines[0])
 
 
+class StageAdvanceReceiptNegotiationTest(unittest.TestCase):
+    """SD-110 plan.md §6 A-18 (receipt v1/v2 byte-identity for un-negotiated
+    consumers, proved with golden-byte comparison rather than mere successful
+    decode) and A-19 (every refusal reason still delivers a receipt that is
+    byte-identical to pre-SD-110, regardless of whether the consumer has
+    negotiated the v3 schema)."""
+
+    def _record(self, *, outcome, reason=""):
+        advanced = outcome == "advanced"
+        return {
+            "schema_version": 1,
+            "stage_advance_id": "sadv-" + "0" * 64,
+            "route_id": "rt-0000000000000000",
+            "route_hash": "sha256:" + "0" * 64,
+            "predecessor_node": "plan",
+            "predecessor_terminal_attempt_id": "att-plan",
+            "successor_node": "execute" if advanced else None,
+            "successor_attempt_id": "att-execute" if advanced else None,
+            "claim_key": (
+                ["sha256:" + "0" * 64, "execute", 0] if advanced else None
+            ),
+            "brief_template_digest": ("sha256:" + "1" * 64) if advanced else "",
+            "outcome": outcome,
+            "reason": reason,
+            "registered": advanced,
+            "started": advanced,
+            "child_spawned": advanced,
+        }
+
+    def test_stage_advance_receipt_block_is_the_flat_record_shape(self):
+        record = self._record(outcome="advanced")
+        block = JOIN.stage_advance_receipt_block(record)
+        self.assertEqual(set(block), set(JOIN.STAGE_ADVANCE_RECEIPT_FIELDS))
+        expected = {
+            field: record[field] for field in JOIN.STAGE_ADVANCE_RECEIPT_FIELDS
+        }
+        self.assertEqual(
+            json.dumps(block, sort_keys=True), json.dumps(expected, sort_keys=True)
+        )
+
+    def test_a18_unnegotiated_or_recordless_receipt_is_byte_identical(self):
+        receipt = {
+            "schema_version": 2,
+            "state": "ready",
+            "parent_attempt_id": "att-parent",
+            "children": [],
+        }
+        golden = json.dumps(receipt, sort_keys=True)
+        advanced = self._record(outcome="advanced")
+        # un-negotiated consumer: literally returns the same object.
+        out = JOIN.receipt_with_stage_advance(
+            receipt, negotiated=False, stage_advance_record=advanced
+        )
+        self.assertIs(out, receipt)
+        self.assertEqual(json.dumps(out, sort_keys=True), golden)
+        # negotiated consumer, no stage-advance attempt this delivery.
+        out = JOIN.receipt_with_stage_advance(
+            receipt, negotiated=True, stage_advance_record=None
+        )
+        self.assertIs(out, receipt)
+        self.assertEqual(json.dumps(out, sort_keys=True), golden)
+
+    def test_a19_every_refusal_reason_is_byte_identical_even_when_negotiated(self):
+        import dispatch_stage_advance as SA  # noqa: PLC0415
+
+        receipt = {
+            "schema_version": 2,
+            "state": "ready",
+            "parent_attempt_id": "att-parent",
+            "children": [],
+        }
+        golden = json.dumps(receipt, sort_keys=True)
+        self.assertEqual(len(SA.REFUSAL_REASONS), 16)
+        for reason in SA.REFUSAL_REASONS:
+            with self.subTest(reason=reason):
+                out = JOIN.receipt_with_stage_advance(
+                    receipt,
+                    negotiated=True,
+                    stage_advance_record=self._record(
+                        outcome="refused", reason=reason
+                    ),
+                )
+                self.assertIs(out, receipt)
+                self.assertEqual(json.dumps(out, sort_keys=True), golden)
+
+    def test_negotiated_advanced_outcome_attaches_v3_block_only(self):
+        receipt = {
+            "schema_version": 2,
+            "state": "ready",
+            "parent_attempt_id": "att-parent",
+            "children": [],
+        }
+        record = self._record(outcome="advanced")
+        out = JOIN.receipt_with_stage_advance(
+            receipt, negotiated=True, stage_advance_record=record
+        )
+        self.assertIsNot(out, receipt)
+        self.assertEqual(out["schema_version"], JOIN.STAGE_ADVANCE_SCHEMA_VERSION)
+        self.assertEqual(out["state"], receipt["state"])
+        self.assertEqual(out["parent_attempt_id"], receipt["parent_attempt_id"])
+        self.assertEqual(
+            out[JOIN.STAGE_ADVANCE_RECEIPT_KEY],
+            JOIN.stage_advance_receipt_block(record),
+        )
+
+    def test_typed_stage_advance_block_strict_decode(self):
+        record = self._record(outcome="advanced")
+        block = JOIN.stage_advance_receipt_block(record)
+        self.assertEqual(JOIN.typed_stage_advance_block(block), block)
+        with self.assertRaises(JOIN.JoinContractError):
+            JOIN.typed_stage_advance_block({**block, "outcome": "bogus"})
+        with self.assertRaises(JOIN.JoinContractError):
+            JOIN.typed_stage_advance_block({**block, "registered": "true"})
+        with self.assertRaises(JOIN.JoinContractError):
+            JOIN.typed_stage_advance_block(
+                {k: v for k, v in block.items() if k != "reason"}
+            )
+        with self.assertRaises(JOIN.JoinContractError):
+            JOIN.typed_stage_advance_block({**block, "schema_version": 2})
+        with self.assertRaises(JOIN.JoinContractError):
+            JOIN.typed_stage_advance_block("not-a-dict")
+
+
 if __name__ == "__main__":
     unittest.main()

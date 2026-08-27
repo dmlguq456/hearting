@@ -1,5 +1,5 @@
 {
-  "schema_version": 9,
+  "schema_version": 10,
   "intensities": [
     "direct",
     "quick",
@@ -132,7 +132,9 @@
             "model_profile": "light",
             "continuation": {
               "kind": "inline-next"
-            }
+            },
+            "advance_class": "runtime-eligible",
+            "commit_expected": false
           },
           {
             "id": "verify",
@@ -166,7 +168,9 @@
             "continuation": {
               "kind": "human-gate",
               "gate": "explicit-handback"
-            }
+            },
+            "advance_class": "runtime-eligible",
+            "commit_expected": false
           },
           {
             "id": "handback",
@@ -195,7 +199,10 @@
             "unit": "_kernel/owner",
             "model_profile": "deep",
             "terminal": true,
-            "terminal_gate": "apply-handback"
+            "terminal_gate": "apply-handback",
+            "advance_class": "model-required",
+            "model_required_reason": "terminal-report",
+            "commit_expected": false
           }
         ],
         "owner_dispatch_depth": 1,
@@ -331,7 +338,9 @@
             "model_profile": "balanced-deep",
             "continuation": {
               "kind": "inline-next"
-            }
+            },
+            "advance_class": "runtime-eligible",
+            "commit_expected": false
           },
           {
             "id": "plan",
@@ -366,7 +375,9 @@
             "model_profile": "balanced-deep",
             "continuation": {
               "kind": "inline-next"
-            }
+            },
+            "advance_class": "runtime-eligible",
+            "commit_expected": false
           },
           {
             "id": "plan-check",
@@ -398,7 +409,9 @@
             "model_profile": "light",
             "continuation": {
               "kind": "inline-next"
-            }
+            },
+            "advance_class": "runtime-eligible",
+            "commit_expected": false
           },
           {
             "id": "execute",
@@ -444,7 +457,9 @@
               "min_intensity": "strong",
               "max_slices": 4,
               "disjointness": "exact-fixed-files"
-            }
+            },
+            "advance_class": "runtime-eligible",
+            "commit_expected": true
           },
           {
             "id": "impl-review",
@@ -477,7 +492,9 @@
             "model_profile": "light",
             "continuation": {
               "kind": "inline-next"
-            }
+            },
+            "advance_class": "runtime-eligible",
+            "commit_expected": false
           },
           {
             "id": "test",
@@ -513,7 +530,9 @@
             "continuation": {
               "kind": "inline-next"
             },
-            "parent_cross_preference": true
+            "parent_cross_preference": true,
+            "advance_class": "runtime-eligible",
+            "commit_expected": false
           },
           {
             "id": "report",
@@ -548,7 +567,10 @@
             "unit": "editorial/report",
             "model_profile": "light",
             "terminal": true,
-            "terminal_gate": "code-report"
+            "terminal_gate": "code-report",
+            "advance_class": "model-required",
+            "model_required_reason": "terminal-report",
+            "commit_expected": false
           }
         ],
         "owner_dispatch_depth": 1,
@@ -823,7 +845,9 @@
             "continuation": {
               "kind": "human-gate",
               "gate": "direction-confirmation"
-            }
+            },
+            "advance_class": "runtime-eligible",
+            "commit_expected": false
           },
           {
             "id": "build",
@@ -859,7 +883,9 @@
             "model_profile": "balanced-deep",
             "continuation": {
               "kind": "inline-next"
-            }
+            },
+            "advance_class": "runtime-eligible",
+            "commit_expected": false
           },
           {
             "id": "visual-verify",
@@ -893,7 +919,9 @@
             "model_profile": "light",
             "continuation": {
               "kind": "inline-next"
-            }
+            },
+            "advance_class": "runtime-eligible",
+            "commit_expected": false
           },
           {
             "id": "critic-review",
@@ -927,7 +955,9 @@
             "model_profile": "light",
             "continuation": {
               "kind": "inline-next"
-            }
+            },
+            "advance_class": "runtime-eligible",
+            "commit_expected": false
           },
           {
             "id": "handoff",
@@ -961,7 +991,10 @@
             "unit": "editorial/report",
             "model_profile": "light",
             "terminal": true,
-            "terminal_gate": "design-handoff"
+            "terminal_gate": "design-handoff",
+            "advance_class": "model-required",
+            "model_required_reason": "terminal-report",
+            "commit_expected": false
           }
         ],
         "owner_dispatch_depth": 1,
@@ -1163,7 +1196,9 @@
             "model_profile": "balanced-deep",
             "continuation": {
               "kind": "inline-next"
-            }
+            },
+            "advance_class": "runtime-eligible",
+            "commit_expected": false
           },
           {
             "id": "strategy-review",
@@ -1195,7 +1230,9 @@
             "model_profile": "light",
             "continuation": {
               "kind": "inline-next"
-            }
+            },
+            "advance_class": "runtime-eligible",
+            "commit_expected": false
           },
           {
             "id": "draft-production",
@@ -1226,7 +1263,9 @@
             "model_profile": "balanced-deep",
             "continuation": {
               "kind": "inline-next"
-            }
+            },
+            "advance_class": "runtime-eligible",
+            "commit_expected": false
           },
           {
             "id": "quality-review",
@@ -1258,7 +1297,9 @@
             "model_profile": "light",
             "continuation": {
               "kind": "inline-next"
-            }
+            },
+            "advance_class": "runtime-eligible",
+            "commit_expected": false
           },
           {
             "id": "fact-verify",
@@ -1290,7 +1331,9 @@
             "model_profile": "light",
             "continuation": {
               "kind": "inline-next"
-            }
+            },
+            "advance_class": "runtime-eligible",
+            "commit_expected": false
           },
           {
             "id": "finalize",
@@ -1324,7 +1367,10 @@
             "unit": "editorial/report",
             "model_profile": "light",
             "terminal": true,
-            "terminal_gate": "draft-finalize"
+            "terminal_gate": "draft-finalize",
+            "advance_class": "model-required",
+            "model_required_reason": "terminal-report",
+            "commit_expected": false
           }
         ],
         "owner_dispatch_depth": 1,
@@ -1583,7 +1629,9 @@
             "model_profile": "light",
             "continuation": {
               "kind": "inline-next"
-            }
+            },
+            "advance_class": "runtime-eligible",
+            "commit_expected": false
           },
           {
             "id": "smoke",
@@ -1617,7 +1665,9 @@
             "continuation": {
               "kind": "human-gate",
               "gate": "full-run-authorization"
-            }
+            },
+            "advance_class": "runtime-eligible",
+            "commit_expected": false
           },
           {
             "id": "full-run",
@@ -1646,7 +1696,10 @@
             "unit": "_kernel/resource",
             "continuation": {
               "kind": "supervised"
-            }
+            },
+            "advance_class": "model-required",
+            "model_required_reason": "operator-pinned",
+            "commit_expected": false
           },
           {
             "id": "run-verify",
@@ -1680,7 +1733,9 @@
             "model_profile": "balanced-deep",
             "continuation": {
               "kind": "inline-next"
-            }
+            },
+            "advance_class": "runtime-eligible",
+            "commit_expected": false
           },
           {
             "id": "handoff",
@@ -1710,7 +1765,10 @@
             "unit": "_kernel/owner",
             "model_profile": "deep",
             "terminal": true,
-            "terminal_gate": "lab-setup-handoff"
+            "terminal_gate": "lab-setup-handoff",
+            "advance_class": "model-required",
+            "model_required_reason": "terminal-report",
+            "commit_expected": false
           }
         ],
         "owner_dispatch_depth": 1,
@@ -1890,7 +1948,10 @@
             "unit": "_kernel/resource",
             "continuation": {
               "kind": "supervised"
-            }
+            },
+            "advance_class": "model-required",
+            "model_required_reason": "operator-pinned",
+            "commit_expected": false
           },
           {
             "id": "metrics",
@@ -1923,7 +1984,9 @@
             "model_profile": "balanced-deep",
             "continuation": {
               "kind": "inline-next"
-            }
+            },
+            "advance_class": "runtime-eligible",
+            "commit_expected": false
           },
           {
             "id": "media",
@@ -1954,7 +2017,9 @@
             "model_profile": "balanced-deep",
             "continuation": {
               "kind": "inline-next"
-            }
+            },
+            "advance_class": "runtime-eligible",
+            "commit_expected": false
           },
           {
             "id": "report",
@@ -1991,7 +2056,9 @@
             "model_profile": "light",
             "continuation": {
               "kind": "inline-next"
-            }
+            },
+            "advance_class": "runtime-eligible",
+            "commit_expected": false
           },
           {
             "id": "independent-verify",
@@ -2026,7 +2093,9 @@
             "model_profile": "light",
             "continuation": {
               "kind": "inline-next"
-            }
+            },
+            "advance_class": "runtime-eligible",
+            "commit_expected": false
           },
           {
             "id": "publish",
@@ -2058,7 +2127,10 @@
             "model_profile": "deep",
             "continuation": {
               "kind": "inline-next"
-            }
+            },
+            "advance_class": "model-required",
+            "model_required_reason": "operator-pinned",
+            "commit_expected": false
           },
           {
             "id": "sync",
@@ -2088,7 +2160,10 @@
             "unit": "_kernel/owner",
             "model_profile": "deep",
             "terminal": true,
-            "terminal_gate": "lab-sync"
+            "terminal_gate": "lab-sync",
+            "advance_class": "model-required",
+            "model_required_reason": "terminal-report",
+            "commit_expected": false
           }
         ],
         "owner_dispatch_depth": 1,
@@ -2241,7 +2316,9 @@
             "continuation": {
               "kind": "human-gate",
               "gate": "preview-disposition"
-            }
+            },
+            "advance_class": "runtime-eligible",
+            "commit_expected": false
           },
           {
             "id": "transaction",
@@ -2275,7 +2352,10 @@
             "unit": "_kernel/owner",
             "model_profile": "deep",
             "terminal": true,
-            "terminal_gate": "refine-transaction"
+            "terminal_gate": "refine-transaction",
+            "advance_class": "model-required",
+            "model_required_reason": "terminal-report",
+            "commit_expected": false
           }
         ],
         "owner_dispatch_depth": 1,
@@ -2421,7 +2501,9 @@
             "model_profile": "balanced-deep",
             "continuation": {
               "kind": "inline-next"
-            }
+            },
+            "advance_class": "runtime-eligible",
+            "commit_expected": false
           },
           {
             "id": "synthesis",
@@ -2454,7 +2536,9 @@
             "continuation": {
               "kind": "inline-next"
             },
-            "parent_cross_preference": true
+            "parent_cross_preference": true,
+            "advance_class": "runtime-eligible",
+            "commit_expected": false
           },
           {
             "id": "report",
@@ -2486,7 +2570,9 @@
             "model_profile": "balanced-deep",
             "continuation": {
               "kind": "inline-next"
-            }
+            },
+            "advance_class": "runtime-eligible",
+            "commit_expected": false
           },
           {
             "id": "claim-verify",
@@ -2518,7 +2604,10 @@
             "unit": "research/claim-verify",
             "model_profile": "light",
             "terminal": true,
-            "terminal_gate": "research-claims"
+            "terminal_gate": "research-claims",
+            "advance_class": "model-required",
+            "model_required_reason": "terminal-report",
+            "commit_expected": false
           }
         ],
         "owner_dispatch_depth": 1,
@@ -2699,7 +2788,10 @@
             "model_profile": "deep",
             "continuation": {
               "kind": "inline-next"
-            }
+            },
+            "advance_class": "model-required",
+            "model_required_reason": "operator-pinned",
+            "commit_expected": false
           },
           {
             "id": "security-review",
@@ -2733,7 +2825,9 @@
             "continuation": {
               "kind": "human-gate",
               "gate": "deploy-authorization"
-            }
+            },
+            "advance_class": "runtime-eligible",
+            "commit_expected": false
           },
           {
             "id": "release-review",
@@ -2767,7 +2861,9 @@
             "continuation": {
               "kind": "human-gate",
               "gate": "deploy-authorization"
-            }
+            },
+            "advance_class": "runtime-eligible",
+            "commit_expected": false
           },
           {
             "id": "deploy",
@@ -2800,7 +2896,10 @@
             "model_profile": "deep",
             "continuation": {
               "kind": "inline-next"
-            }
+            },
+            "advance_class": "model-required",
+            "model_required_reason": "operator-pinned",
+            "commit_expected": false
           },
           {
             "id": "post-deploy-verify",
@@ -2833,7 +2932,10 @@
             "model_profile": "light",
             "terminal": true,
             "terminal_gate": "ship-post-deploy-verify",
-            "parent_cross_preference": true
+            "parent_cross_preference": true,
+            "advance_class": "model-required",
+            "model_required_reason": "terminal-report",
+            "commit_expected": false
           }
         ],
         "owner_dispatch_depth": 1,
@@ -3020,7 +3122,9 @@
             "model_profile": "balanced-deep",
             "continuation": {
               "kind": "inline-next"
-            }
+            },
+            "advance_class": "runtime-eligible",
+            "commit_expected": false
           },
           {
             "id": "review",
@@ -3055,7 +3159,9 @@
             "model_profile": "balanced-deep",
             "continuation": {
               "kind": "inline-next"
-            }
+            },
+            "advance_class": "runtime-eligible",
+            "commit_expected": false
           },
           {
             "id": "prd-transaction",
@@ -3101,7 +3207,10 @@
             "unit": "_kernel/owner",
             "model_profile": "deep",
             "terminal": true,
-            "terminal_gate": "spec-atomic-transaction"
+            "terminal_gate": "spec-atomic-transaction",
+            "advance_class": "model-required",
+            "model_required_reason": "terminal-report",
+            "commit_expected": false
           }
         ],
         "owner_dispatch_depth": 1,
@@ -3277,7 +3386,9 @@
             "model_profile": "balanced-deep",
             "continuation": {
               "kind": "inline-next"
-            }
+            },
+            "advance_class": "runtime-eligible",
+            "commit_expected": false
           },
           {
             "id": "qa",
@@ -3308,7 +3419,10 @@
             "unit": "qa/code-review",
             "model_profile": "light",
             "terminal": true,
-            "terminal_gate": "analysis-qa"
+            "terminal_gate": "analysis-qa",
+            "advance_class": "model-required",
+            "model_required_reason": "terminal-report",
+            "commit_expected": false
           }
         ],
         "owner_dispatch_depth": 1,
@@ -3389,7 +3503,9 @@
             "model_profile": "balanced-deep",
             "continuation": {
               "kind": "inline-next"
-            }
+            },
+            "advance_class": "runtime-eligible",
+            "commit_expected": false
           },
           {
             "id": "verify",
@@ -3420,7 +3536,10 @@
             "unit": "research/fact-check",
             "model_profile": "light",
             "terminal": true,
-            "terminal_gate": "profile-verify"
+            "terminal_gate": "profile-verify",
+            "advance_class": "model-required",
+            "model_required_reason": "terminal-report",
+            "commit_expected": false
           }
         ],
         "owner_dispatch_depth": 1,
@@ -3502,7 +3621,9 @@
             "model_profile": "light",
             "continuation": {
               "kind": "inline-next"
-            }
+            },
+            "advance_class": "runtime-eligible",
+            "commit_expected": false
           },
           {
             "id": "report",
@@ -3531,7 +3652,10 @@
             "unit": "editorial/polish",
             "model_profile": "balanced-deep",
             "terminal": true,
-            "terminal_gate": "audit-report"
+            "terminal_gate": "audit-report",
+            "advance_class": "model-required",
+            "model_required_reason": "terminal-report",
+            "commit_expected": false
           }
         ],
         "owner_dispatch_depth": 1,

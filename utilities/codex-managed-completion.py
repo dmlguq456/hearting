@@ -27,6 +27,7 @@ from dispatch_completion_join import (  # noqa: E402
     current_session_children,
     delivery_timing_fields,
     receipt_with_delivery_observability,
+    receipt_with_stage_advance,
     validate_delivery_timing,
 )
 
@@ -173,6 +174,8 @@ def normalize_receipt(
     parent_session_id: str | None,
     delivery_parent_id: str,
     attempts: set[str],
+    accept_stage_advance: bool = False,
+    stage_advance_record: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     identity_name = (
         "parent_session_id" if parent_session_id else "parent_attempt_id"
@@ -277,6 +280,12 @@ def normalize_receipt(
         )
     except JoinContractError as exc:
         raise CompletionError("delivery-classification-failed") from exc
+    if accept_stage_advance:
+        normalized = receipt_with_stage_advance(
+            normalized,
+            negotiated=True,
+            stage_advance_record=stage_advance_record,
+        )
     if len(canonical(normalized).encode("utf-8")) > MAX_RECEIPT_BYTES:
         raise CompletionError("typed-receipt-oversized")
     return normalized

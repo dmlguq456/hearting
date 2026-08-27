@@ -2829,4 +2829,63 @@ class CancellationSealSourceValidatorTest(unittest.TestCase):
   self.assertEqual(D._canonical_sha256(record),digest)
 
 
+class StageAdvanceClaimTest(unittest.TestCase):
+ """SD-110 A-4/A-11: `claim_stage_advance`'s CAS store, and the fail-closed
+ handoff of cancelled/receiptless successor rows back to SD-105/106."""
+
+ def test_A4_duplicate_successor_claim_conflicts_zero_processes(self):
+  with tempfile.TemporaryDirectory() as td:
+   jobs=Path(td)/"jobs.log"
+   jobs.write_text("",encoding="utf-8")
+   D.claim_stage_advance(
+    jobs,stage_advance_id="sadv-"+"a"*64,route_hash="sha256:"+"1"*64,
+    successor_node="execute",advance_generation=0,
+    source_route_id="rt-a4",predecessor_attempt_id="att-first")
+   with self.assertRaises(D.DispatchContractError) as ctx:
+    D.claim_stage_advance(
+     jobs,stage_advance_id="sadv-"+"b"*64,route_hash="sha256:"+"1"*64,
+     successor_node="execute",advance_generation=0,
+     source_route_id="rt-a4",predecessor_attempt_id="att-second")
+  self.assertEqual(ctx.exception.reason,"stage-advance-claim-conflict")
+
+ def test_A4_same_stage_advance_id_replays_the_same_claim(self):
+  with tempfile.TemporaryDirectory() as td:
+   jobs=Path(td)/"jobs.log"
+   jobs.write_text("",encoding="utf-8")
+   kwargs=dict(
+    stage_advance_id="sadv-"+"c"*64,route_hash="sha256:"+"2"*64,
+    successor_node="test",advance_generation=0,
+    source_route_id="rt-a4b",predecessor_attempt_id="att-only")
+   first=D.claim_stage_advance(jobs,**kwargs)
+   second=D.claim_stage_advance(jobs,**kwargs)
+  self.assertTrue(second.replayed)
+  self.assertEqual(first.successor_attempt_id,second.successor_attempt_id)
+  self.assertEqual(first.claim_key,second.claim_key)
+
+ def test_A11_cancelled_successor_row_is_started_not_reclaimable(self):
+  # A cancelled/receiptless successor row must still count as "started" so
+  # `runnable_successors` (dispatch_stage_advance.py) never reclaims it --
+  # its recovery is SD-105/106's `claim_recovery_retry`, never stage advance
+  # (plan-check round 1, non-blocking finding 1).
+  import dispatch_stage_advance as SA
+  with tempfile.TemporaryDirectory() as td:
+   jobs=Path(td)/"jobs.log"
+   metadata_cancelled=(
+    "route_id=rt-a11,route_node=execute,"
+    "note=automatic-receipt-unavailable-v1")
+   metadata_receiptless=(
+    "route_id=rt-a11,route_node=impl-review,"
+    "note=operator-receiptless-cancel-v1")
+   metadata_intent_only=(
+    "route_id=rt-a11,route_node=test,cancellation_intent=1")
+   lines=[
+    "\t".join(["job","done","worktree","worktree","slug",metadata_cancelled]),
+    "\t".join(["job","done","worktree","worktree","slug",metadata_receiptless]),
+    "\t".join(["job","open","worktree","worktree","slug",metadata_intent_only]),
+   ]
+   jobs.write_text("\n".join(lines)+"\n",encoding="utf-8")
+   started=SA.started_nodes(jobs,"rt-a11",0)
+  self.assertEqual(started,frozenset({"execute","impl-review","test"}))
+
+
 if __name__=="__main__": unittest.main()

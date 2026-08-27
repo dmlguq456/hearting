@@ -32,6 +32,7 @@ from dispatch_completion_join import (
     read_supervisor_phase_state,
     receipt_with_current_actions,
     receipt_with_delivery_observability,
+    receipt_with_stage_advance,
     remove_supervisor_state,
     runtime_wait_requested,
     start_retry_prompt,
@@ -47,6 +48,7 @@ from dispatch_continuation_budget import (
     positive_continuation_limit,
     resolve_continuation_budget,
 )
+import dispatch_stage_advance as stage_advance
 from dispatch_supervisor_terminal import (
     SupervisorTerminal,
     classify_claude_result,
@@ -186,6 +188,125 @@ def terminal_route_completion(
     return terminal_nodes if proven == set(terminal_nodes) else ()
 
 
+def attempt_stage_advance(
+    args: argparse.Namespace,
+    current_rows: list[object],
+    new_attempts: set[str],
+    delivery_timing: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    """SD-110: best-effort runtime-owned advance for each just-joined
+    route-bound child, immediately before the existing SD-78
+    `terminal_route_completion` decision. `parked` phase and the
+    delivered-outbox intersection stay this supervisor's own predicates
+    (§13.32.1-(2)7) -- the core never recomputes them, it only consumes the
+    booleans this function derives.
+
+    `delivery_timing` (this join round's own `last_child_terminal_ns` /
+    `join_completed_ns`, already stamped by the ordinary SD-109 join loop) is
+    reused as the canary's timing basis (block 6, checklist 6.1) -- an
+    advanced outcome stamps `next_stage_start_ns` fresh and leaves
+    `same_thread_resume_ns`/`exact_harvest_ns` explicitly `null` (no model
+    turn occurred). A refusal never carries timing; it has no "next stage".
+
+    Off by default (`--enable-stage-advance`): with the flag unset this
+    function is a no-op and the existing delivery path is byte-identical, the
+    same construction block 3 already proved for the receipt itself. A
+    refusal -- of ANY kind, including an unexpected exception from the real
+    services boundary -- never propagates; it is exactly as inert as not
+    having called this function at all, because every refusal reason already
+    means "perform today's unchanged delivery" (§13.32.1-(4)).
+
+    §13.32.1-(2)6/(3)B: `receipt_schema_negotiated=3` and "the model-facing
+    delivery actually carries the `stage_advance` v3 block" are ONE
+    negotiation decision, not two independently-toggled ones -- an advance
+    the model is never told about is exactly the state (3)B forbids. This
+    function's own `--enable-stage-advance` gate (above) is that single
+    condition: it is the only thing that lets `receipt_schema_negotiated`
+    become anything other than 2, and it is also the boolean the caller must
+    pass as `receipt_with_stage_advance(..., negotiated=...)` when attaching
+    this function's return value to the delivered receipt (see the
+    `run_join`/`attempt_stage_advance` call site). The durable
+    `stage_advance_record_v1` for the first `outcome == "advanced"` boundary
+    this round is returned so the caller can do exactly that; `None` when
+    nothing advanced (including when the flag is off, in which case this
+    function is the byte-identical no-op described above).
+    """
+
+    if not getattr(args, "enable_stage_advance", False):
+        return None
+    if not args.route_file or not args.route_id or not args.route_hash:
+        return None
+    advanced_record: dict[str, Any] | None = None
+    open_children = any(
+        getattr(row, "status", "") in {"open", "running"} for row in current_rows
+    )
+    by_attempt = {row.attempt_id: row for row in current_rows}
+    for attempt_id in sorted(new_attempts):
+        row = by_attempt.get(attempt_id)
+        if row is None:
+            continue
+        metadata = getattr(row, "metadata", {}) or {}
+        node = metadata.get("route_node")
+        if (
+            not node
+            or getattr(row, "status", "") != "done"
+            or metadata.get("route_id") != args.route_id
+            or metadata.get("route_hash") != args.route_hash
+        ):
+            continue
+        request = stage_advance.StageAdvanceRequest(
+            jobs=Path(args.jobs),
+            route_file=Path(args.route_file),
+            predecessor_node=node,
+            predecessor_terminal_attempt_id=attempt_id,
+            parent_attempt_id=args.parent_attempt_id,
+            supervisor_phase="running-turn" if open_children else "parked",
+            delivered_open_attempt_ids=frozenset(),
+            receipt_schema_negotiated=3,
+            harness="claude",
+            worktree=args.worktree,
+        )
+        try:
+            result = stage_advance.coordinate_stage_advance(
+                request, stage_advance.RealStageAdvanceServices()
+            )
+        except Exception as exc:  # advance is optional; never break delivery
+            emit(
+                {
+                    "type": "dispatch.supervisor.stage-advance-refused",
+                    "parent_attempt_id": args.parent_attempt_id,
+                    "advance_mode": "runtime-deterministic",
+                    "route_hash": args.route_hash,
+                    "predecessor_node": node,
+                    "successor_node": None,
+                    "outcome": "refused",
+                    "reason": getattr(exc, "reason", type(exc).__name__),
+                }
+            )
+            continue
+        timing = delivery_timing or {}
+        event = stage_advance.stage_advance_event_fields(
+            route_hash=args.route_hash,
+            predecessor_node=node,
+            result=result,
+            last_child_terminal_ns=timing.get("last_child_terminal_ns"),
+            join_completed_ns=timing.get("join_completed_ns"),
+            next_stage_start_ns=(
+                time.monotonic_ns() if result.outcome == "advanced" else None
+            ),
+        )
+        event["parent_attempt_id"] = args.parent_attempt_id
+        emit(event)
+        if result.outcome == "advanced" and advanced_record is None and result.record_path is not None:
+            try:
+                advanced_record = json.loads(
+                    result.record_path.read_text(encoding="utf-8")
+                )
+            except (OSError, ValueError):
+                advanced_record = None
+    return advanced_record
+
+
 def terminal_handoff_result(
     result: dict[str, Any], rows: list[object], terminal_nodes: tuple[str, ...]
 ) -> dict[str, Any]:
@@ -236,7 +357,14 @@ def reconcile(args: argparse.Namespace, terminal: SupervisorTerminal) -> bool:
         return False
 
 
-def typed_receipt(value: object, parent_attempt_id: str, attempts: set[str]) -> dict[str, Any]:
+def typed_receipt(
+    value: object,
+    parent_attempt_id: str,
+    attempts: set[str],
+    *,
+    accept_stage_advance: bool = False,
+    stage_advance_record: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     if not isinstance(value, dict) or value.get("schema_version") != 2:
         raise SupervisorError("join-receipt-schema-invalid")
     if value.get("state") not in {"ready", "timeout"}:
@@ -285,13 +413,20 @@ def typed_receipt(value: object, parent_attempt_id: str, attempts: set[str]) -> 
         )
     if observed != attempts:
         raise SupervisorError("join-receipt-attempt-set-mismatch")
-    return {
+    receipt = {
         "schema_version": 2,
         "state": value["state"],
         "parent_attempt_id": parent_attempt_id,
         "children": children,
         "delivery_timing": value.get("delivery_timing", delivery_timing_fields()),
     }
+    if accept_stage_advance:
+        receipt = receipt_with_stage_advance(
+            receipt,
+            negotiated=True,
+            stage_advance_record=stage_advance_record,
+        )
+    return receipt
 
 
 def run_join(args: argparse.Namespace, attempts: set[str]) -> dict[str, Any]:
@@ -780,6 +915,18 @@ def parser() -> argparse.ArgumentParser:
         default="auto",
     )
     value.add_argument("--join-command", default=os.environ.get("AGENT_DISPATCH_JOIN_COMMAND"))
+    value.add_argument(
+        "--enable-stage-advance",
+        action="store_true",
+        default=False,
+        help=(
+            "SD-110: attempt runtime-owned eligible-linear stage advance for "
+            "each just-joined route-bound child before the model resume "
+            "decision. Off by default -- landing behind this flag refuses "
+            "with stage-advance-receipt-schema-unsupported and changes "
+            "nothing about existing delivery."
+        ),
+    )
     return value
 
 
@@ -1161,6 +1308,21 @@ def main(argv: list[str] | None = None) -> int:
                     receipt["delivery_timing"]
                 )
                 current_rows = current_children(Path(args.jobs), args.parent_attempt_id)
+                advanced_record = attempt_stage_advance(
+                    args, current_rows, set(new_attempts), delivery_timing
+                )
+                # §13.32.1-(2)6/(3)B: the same `--enable-stage-advance` gate
+                # that let `attempt_stage_advance` negotiate `3` internally is
+                # the negotiation the model-facing receipt must honor too --
+                # `receipt_with_stage_advance` is a no-op unless both
+                # `negotiated` is true AND an outcome=="advanced" record was
+                # actually found, so an un-negotiated or refused round stays
+                # byte-identical v2.
+                receipt = receipt_with_stage_advance(
+                    receipt,
+                    negotiated=getattr(args, "enable_stage_advance", False),
+                    stage_advance_record=advanced_record,
+                )
                 terminal_nodes = terminal_route_completion(args, current_rows)
                 if terminal_nodes:
                     emit(

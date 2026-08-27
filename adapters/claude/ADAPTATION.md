@@ -208,6 +208,27 @@ main/orchestrator chooses per job and the wrapper only reflects that choice:
   only a current exact group leader; retries with the same slug are never
   targeted.
 
+- **SD-110 session-resume supervisor call site.** `attempt_stage_advance` runs
+  in `claude-session-supervisor.py` immediately before the existing
+  `terminal_route_completion` decision, once per just-joined route-bound
+  child. Behind `--enable-stage-advance` (off by default), it derives
+  `parked`/`running-turn` from the same owned/open-children predicate the
+  supervisor already computes, calls `coordinate_stage_advance` with
+  `RealStageAdvanceServices`, and never lets a refusal — typed or an
+  unexpected exception — propagate past a `dispatch.supervisor.stage-advance`
+  or `-refused` canary event. With the flag off, or on any refusal, delivery
+  is byte-identical to pre-SD-110. Eligibility negotiation
+  (`receipt_schema_negotiated`) and delivery negotiation
+  (`receipt_with_stage_advance`'s `negotiated`) are the same
+  `--enable-stage-advance` boolean, not two independently toggled ones: the
+  durable `stage_advance_record_v1` this function returns for an
+  `outcome == "advanced"` boundary is fed straight into
+  `receipt_with_stage_advance` before the join receipt is used for the next
+  resume, so an advance the model is never told about cannot occur. That
+  attachment call is a no-op unless both an actual advance happened and the
+  same flag is on, so the ordinary v1/v2 delivery path stays untouched at
+  every other boundary and refusal.
+
 Codex and future adapters should preserve the dispatch invariant, but must map
 it onto their own thread/subagent/session/status surfaces instead of copying the
 Claude statusline or `claude -p` process model.

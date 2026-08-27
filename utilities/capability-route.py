@@ -727,6 +727,7 @@ def build_continuation_route(
         "human_gate_bindings":json.loads(json.dumps(route.get("human_gate_bindings") or [])),
     }
     route["launch_compatibility_tuple"]=launch
+    route["advance_generation"]=int(source_route.get("advance_generation") or 0)+1
     digest=route_hash(route)
     route["route_hash"]=digest
     route["route_id"]="rt-"+digest.split(":",1)[1][:16]
@@ -1497,7 +1498,8 @@ def _compile_from_recipe(registry, recipe, capability, capability_mode, requeste
       "launch_compatibility_tuple":{
           "contract_version":LAUNCH_COMPATIBILITY_TUPLE_VERSION,
           **launch_compatibility_tuple(artifact_root=artifact,cwd=cwd),
-      }}
+      },
+      "advance_generation":0}
     if checked_dispatch is not None:
         payload["dispatch_evidence_scope_version"]=DISPATCH_EVIDENCE_SCOPE_VERSION
     if composed:

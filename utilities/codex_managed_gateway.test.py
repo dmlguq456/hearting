@@ -1017,5 +1017,89 @@ class ManagedGatewayTest(unittest.TestCase):
         self.assertEqual(self.server.connections, 2)
 
 
+class ValidateDeliveryStageAdvanceNegotiationTest(unittest.TestCase):
+    """SD-110 A-18: a gateway that has not negotiated `accept_stage_advance`
+    (default False) validates a receipt exactly as before -- golden-byte
+    identical `normalized` output -- and a stray `stage_advance` key on an
+    un-negotiated gateway is rejected rather than silently passed through."""
+
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        root = Path(self.temp.name)
+        self.gateway = GATEWAY.ManagedGateway(
+            listen_path=root / "front.sock",
+            upstream_path=root / "upstream.sock",
+            control_path=root / "control.sock",
+            ledger_path=root / "ledger.json",
+        )
+        self.negotiated_gateway = GATEWAY.ManagedGateway(
+            listen_path=root / "front2.sock",
+            upstream_path=root / "upstream.sock",
+            control_path=root / "control.sock",
+            ledger_path=root / "ledger2.json",
+            accept_stage_advance=True,
+        )
+
+    def _record(self):
+        return {
+            "schema_version": 1,
+            "stage_advance_id": "sadv-" + "0" * 64,
+            "route_id": "rt-0000000000000000",
+            "route_hash": "sha256:" + "0" * 64,
+            "predecessor_node": "plan",
+            "predecessor_terminal_attempt_id": "att-plan",
+            "successor_node": "execute",
+            "successor_attempt_id": "att-execute",
+            "claim_key": ["sha256:" + "0" * 64, "execute", 0],
+            "brief_template_digest": "sha256:" + "1" * 64,
+            "outcome": "advanced",
+            "reason": "",
+            "registered": True,
+            "started": True,
+            "child_spawned": True,
+        }
+
+    def test_default_gateway_is_byte_identical_to_pre_sd110(self):
+        request = receipt_request()
+        *_, normalized, _receipt_digest, _delivery_id = self.gateway._validate_delivery(
+            request
+        )
+        self.assertEqual(normalized["schema_version"], 2)
+        self.assertNotIn("stage_advance", normalized)
+
+    def test_unnegotiated_gateway_rejects_stray_stage_advance_key(self):
+        request = receipt_request()
+        request["receipt"] = {
+            **request["receipt"],
+            "schema_version": GATEWAY.STAGE_ADVANCE_SCHEMA_VERSION,
+            "stage_advance": self._record(),
+        }
+        with self.assertRaises(GATEWAY.GatewayError):
+            self.gateway._validate_delivery(request)
+
+    def test_negotiated_gateway_attaches_stage_advance_block(self):
+        request = receipt_request()
+        record = self._record()
+        request["receipt"] = {
+            **request["receipt"],
+            "schema_version": GATEWAY.STAGE_ADVANCE_SCHEMA_VERSION,
+            "stage_advance": record,
+        }
+        *_, normalized, _receipt_digest, _delivery_id = (
+            self.negotiated_gateway._validate_delivery(request)
+        )
+        self.assertEqual(normalized["schema_version"], 3)
+        self.assertEqual(normalized["stage_advance"], record)
+
+    def test_negotiated_gateway_still_accepts_v2_receipts(self):
+        request = receipt_request()
+        *_, normalized, _receipt_digest, _delivery_id = (
+            self.negotiated_gateway._validate_delivery(request)
+        )
+        self.assertEqual(normalized["schema_version"], 2)
+        self.assertNotIn("stage_advance", normalized)
+
+
 if __name__ == "__main__":
     unittest.main()

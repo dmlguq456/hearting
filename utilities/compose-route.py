@@ -252,6 +252,19 @@ def build_recipe(
         else:
             node["continuation"] = {"kind": "inline-next"}
 
+    # SD-110 §2.1: the same three-rule seal as an enumerated recipe's
+    # `capabilities/topologies.json` authoring. Every composed node is
+    # dispatch_depth 2 (line ~203), so rule 2 (non-dispatch-depth-2 ->
+    # operator-pinned) never fires here; a composed recipe never assembles a
+    # source-tree-writing node, so `commit_expected` is always False.
+    for node in nodes:
+        if node.get("terminal") is True:
+            node["advance_class"] = "model-required"
+            node["model_required_reason"] = "terminal-report"
+        else:
+            node["advance_class"] = "runtime-eligible"
+        node["commit_expected"] = False
+
     if not quick_write_scope:
         quick_write_scope = sorted(
             {s for node in nodes for s in node["write_scope"] if not _scope_touches_spec(s)}

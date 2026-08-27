@@ -826,3 +826,30 @@ enforcement begins only after the integrated source is installed as
 - **Fallback:** untrusted/uninstalled hooks require explicit ledger commands;
   checked registered headless remains authoritative. Native helpers stay within
   one slice, mutate serially, return summary only, and have no gate authority.
+
+## SD-110 App Server supervisor realization
+
+`attempt_stage_advance` in `codex-app-server-supervisor.py` mirrors the Claude
+session-resume realization function for function (kept in sync by hand, each
+supervisor a self-contained process boundary): behind the same
+`--enable-stage-advance` flag (off by default), it calls
+`coordinate_stage_advance` with `RealStageAdvanceServices`, never lets a
+refusal propagate past its own `dispatch.supervisor.stage-advance`/`-refused`
+canary event, and feeds the durable `stage_advance_record_v1` it returns into
+`receipt_with_stage_advance` under the identical flag before the receipt is
+used for the next resume — the same single eligibility/delivery negotiation
+decision documented in `core/OPERATIONS.md` §5.10 and the Claude adapter's own
+call-site entry.
+
+**Recorded asymmetry.** This supervisor's call site sits at its own
+symmetric park point — immediately after `validate_delivery_timing`, before
+the receipt enters the model's resume outbox — not at a
+`terminal_route_completion` call, because this supervisor has no
+`terminal_route_completion` precedent to sit in front of (Claude's fast-path
+short-circuit for an already-fully-terminal route has no App Server
+equivalent). `coordinate_stage_advance` is a distinct, unrelated function
+from that fast path, so the missing precedent narrows nothing about SD-110
+eligibility here; it only means this supervisor's own resume/terminal
+handling for a route that is NOT advanced continues exactly as it did before
+this cycle, without a comparable terminal shortcut. No SD-110 code path was
+added or held back to compensate for this asymmetry.

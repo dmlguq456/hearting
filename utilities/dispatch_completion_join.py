@@ -43,6 +43,28 @@ from codex_dispatch_terminal import (  # noqa: E402
 )
 OPEN_STATES = frozenset({"open", "running"})
 SCHEMA_VERSION = 2
+# SD-110 13.32.1-(3)B: a second, additive receipt schema for consumers that
+# have explicitly negotiated it. SCHEMA_VERSION above -- what this module's
+# own join subprocess (`main`/`_join_snapshot`) emits -- never changes.
+STAGE_ADVANCE_SCHEMA_VERSION = 3
+STAGE_ADVANCE_RECEIPT_KEY = "stage_advance"
+STAGE_ADVANCE_RECEIPT_FIELDS = (
+    "schema_version",
+    "stage_advance_id",
+    "route_id",
+    "route_hash",
+    "predecessor_node",
+    "predecessor_terminal_attempt_id",
+    "successor_node",
+    "successor_attempt_id",
+    "claim_key",
+    "brief_template_digest",
+    "outcome",
+    "reason",
+    "registered",
+    "started",
+    "child_spawned",
+)
 STATE_SCHEMA_VERSION = 2
 PARENT_SESSION_STATE_SCHEMA_VERSION = 1
 STATE_PHASES = frozenset({"parked", "deliverable", "running-turn", "recovery", "terminal"})
@@ -2481,6 +2503,62 @@ def main(argv: list[str] | None = None) -> int:
 def _row_worktree(row: ChildRow) -> str:
     fields = str(getattr(row, "raw", "")).split("\t")
     return fields[3] if len(fields) == 6 else ""
+
+
+def stage_advance_receipt_block(record: dict[str, object]) -> dict[str, object]:
+    """Render the closed `stage_advance` v3 receipt block from a durable
+    `stage_advance_record_v1` (`dispatch_stage_advance.stage_advance_record`,
+    13.32.1-(3)B). Never includes `phases` -- that key is transaction-internal
+    bookkeeping, not part of the receipt contract."""
+
+    return {field: record.get(field) for field in STAGE_ADVANCE_RECEIPT_FIELDS}
+
+
+def receipt_with_stage_advance(
+    receipt: dict[str, object],
+    *,
+    negotiated: bool,
+    stage_advance_record: dict[str, object] | None = None,
+) -> dict[str, object]:
+    """The only place a delivery receipt's `schema_version` becomes 3.
+
+    An un-negotiated consumer, a delivery with no stage-advance attempt, or a
+    refused stage-advance outcome all return the identical `receipt` object
+    unmodified. Refusal must stay byte-identical to the pre-SD-110 receipt
+    (A-19, 13.32.1-(4): "모든 거부는... 기존 delivery 경로를 그대로 수행한다") --
+    that invariant is enforced here rather than left to each caller to
+    remember, so only an `outcome == "advanced"` record can ever change the
+    receipt a negotiated consumer sees.
+    """
+
+    if (
+        not negotiated
+        or stage_advance_record is None
+        or stage_advance_record.get("outcome") != "advanced"
+    ):
+        return receipt
+    return {
+        **receipt,
+        "schema_version": STAGE_ADVANCE_SCHEMA_VERSION,
+        STAGE_ADVANCE_RECEIPT_KEY: stage_advance_receipt_block(stage_advance_record),
+    }
+
+
+def typed_stage_advance_block(value: object) -> dict[str, object]:
+    """Strict decode of a v3 receipt's `stage_advance` block. Raises
+    `JoinContractError` on any shape deviation -- a negotiated consumer never
+    passes an unvalidated block through to the model."""
+
+    if not isinstance(value, dict) or set(value) != set(STAGE_ADVANCE_RECEIPT_FIELDS):
+        raise JoinContractError("stage-advance-block-shape-invalid")
+    if value.get("schema_version") != 1:
+        raise JoinContractError("stage-advance-block-schema-invalid")
+    if value.get("outcome") not in ("advanced", "refused"):
+        raise JoinContractError("stage-advance-block-outcome-invalid")
+    for flag in ("registered", "started", "child_spawned"):
+        if not isinstance(value.get(flag), bool):
+            raise JoinContractError("stage-advance-block-flags-invalid")
+    return dict(value)
 
 
 def route_completion_evidence(

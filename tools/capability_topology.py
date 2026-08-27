@@ -22,6 +22,17 @@ PARALLEL_ID_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 # terminal node" -- keep in sync with capability-route.py's
 # `_TERMINAL_PARALLEL_GROUP_GRANDFATHER`.
 TERMINAL_PARALLEL_GROUP_GRANDFATHER = {("autopilot-research", "claim-verify")}
+# SD-110 13.32.1-(0): sealed closed vocabulary for the model-required reason a
+# node carries when advance_class is model-required. Do not infer defaults.
+MODEL_REQUIRED_REASONS = {
+    "authored-brief",
+    "arbiter-or-merge",
+    "conditional-extension",
+    "terminal-report",
+    "commit-boundary",
+    "parallel-group-member",
+    "operator-pinned",
+}
 # D9 / AC 5: an auxiliary leg's verdict enum may not carry any unconditionally
 # blocking token. `findings` is deliberately absent because the five auxiliary
 # units use it as their non-blocking finding carrier.
@@ -888,6 +899,26 @@ def _validate_recipe(recipe, registry, standard_plus_owner_profile):
                 )
         if not node.get("inputs") or not node.get("outputs") or not node.get("write_scope"):
             raise TopologyError(f"{recipe['capability']}:{node['id']}: inputs/outputs/write_scope required")
+        advance_class = node.get("advance_class")
+        if advance_class not in ("runtime-eligible", "model-required"):
+            raise TopologyError(
+                f"{recipe['capability']}:{node['id']}: advance_class must be "
+                "runtime-eligible or model-required"
+            )
+        model_required_reason = node.get("model_required_reason")
+        if advance_class == "model-required":
+            if model_required_reason not in MODEL_REQUIRED_REASONS:
+                raise TopologyError(
+                    f"{recipe['capability']}:{node['id']}: model_required_reason "
+                    f"must be one of {sorted(MODEL_REQUIRED_REASONS)}"
+                )
+        elif model_required_reason is not None:
+            raise TopologyError(
+                f"{recipe['capability']}:{node['id']}: model_required_reason is only "
+                "valid when advance_class is model-required"
+            )
+        if "commit_expected" not in node or isinstance(node["commit_expected"], bool) is False:
+            raise TopologyError(f"{recipe['capability']}:{node['id']}: commit_expected must be a boolean")
         if node.get("parent_cross_preference") is not None and not isinstance(
             node.get("parent_cross_preference"), bool
         ):
@@ -1269,7 +1300,7 @@ def _validate_producer_lifecycle(registry):
 
 
 def validate_registry(registry, manifest=None):
-    if registry.get("schema_version") != 9:
+    if registry.get("schema_version") != 10:
         raise TopologyError("legacy topology registry is read-only")
     _validate_activation_conditions(registry)
     _validate_workflow_vocabulary(registry)

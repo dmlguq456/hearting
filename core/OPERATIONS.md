@@ -352,6 +352,31 @@ The SD-92 advanced-thread clause accepts only a gateway-witnessed fork lineage
 or an exact same-thread resume. An unrelated thread switch remains
 `managed-gateway-not-ready` and cannot inherit the predecessor's completion.
 
+**SD-110 runtime-owned deterministic stage advance.** At an eligible-linear
+boundary — completion gate proven, exactly one non-terminal runnable
+successor, predecessor `commit_expected: false`, delivery consumer
+negotiated receipt schema v3, supervisor phase parked with no owned or
+delivered-open child, successor lifecycle detached — the per-process session
+supervisor (Claude session-resume, Codex App Server) closes the completion
+gate and starts the successor itself, and the owner model does not resume
+for that boundary. Every other boundary and every refusal leaves today's
+path unchanged: the model resumes exactly once, receives the ordinary
+delivery receipt, and performs gate close, dispatch, merge, arbitration, or
+commit itself. The runtime advance authority is exactly three things — a
+runnable-successor census, a checked successor start, and a crash-idempotent
+transaction between them — never a new launch authority: it calls the same
+checked wrapper a model turn would call, with the same argument shape, and
+holds no git, merge, push, worktree-cleanup, or user-facing-report
+authority. The one start surface is `stage-dispatch-fallback.py --start`;
+`dispatch-node.py --action start` is not wired as a runtime-advance caller in
+this cycle, and `dispatch-batch.py --parallel-group` is out of scope for
+runtime advance entirely. Delivery stays receipt-vocabulary-compatible: v1/v2
+consumers see a byte-identical receipt and the advance does not proceed for
+them; only a negotiated v3 consumer can ever receive the separate
+`stage_advance` block, and the negotiation that permits eligibility (2)6 and
+the negotiation that gates that block's delivery are the same single
+decision, never two independently toggled ones.
+
 ### §5.10a. Completion Delivery Clarifications (SD-92/97)
 
 - The interactive Claude `asyncRewake` bridge recognizes both an exact

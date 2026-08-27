@@ -15,6 +15,7 @@ import tempfile
 import textwrap
 from types import SimpleNamespace
 import unittest
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -1258,6 +1259,273 @@ class ClaudeSessionSupervisorTest(unittest.TestCase):
         self.assertIn("continuation-limit-exceeded", result.stdout + result.stderr)
         registry = self.jobs.read_text(encoding="utf-8")
         self.assertIn("\topen\t", registry)
+
+
+class TypedReceiptStageAdvanceNegotiationTest(unittest.TestCase):
+    """SD-110 A-18: an un-negotiated (default) call takes the literal,
+    unmodified v2 path -- golden-byte identical to the pre-SD-110 receipt."""
+
+    def _join_value(self):
+        return {
+            "schema_version": 2,
+            "state": "ready",
+            "parent_attempt_id": PARENT,
+            "children": [
+                {
+                    "attempt_id": "att-child",
+                    "status": "done",
+                    "readiness": "ready",
+                    "reason": "registry-closed",
+                    "required_action": "advance-completed",
+                }
+            ],
+        }
+
+    def test_default_call_is_byte_identical_to_pre_sd110(self):
+        value = self._join_value()
+        receipt = supervisor.typed_receipt(value, PARENT, {"att-child"})
+        golden = json.dumps(receipt, sort_keys=True)
+        negotiated_but_recordless = supervisor.typed_receipt(
+            value, PARENT, {"att-child"}, accept_stage_advance=True
+        )
+        self.assertEqual(receipt["schema_version"], 2)
+        self.assertNotIn("stage_advance", receipt)
+        self.assertEqual(json.dumps(negotiated_but_recordless, sort_keys=True), golden)
+
+    def test_negotiated_advanced_record_attaches_v3_block(self):
+        value = self._join_value()
+        record = {
+            "schema_version": 1,
+            "stage_advance_id": "sadv-" + "0" * 64,
+            "route_id": "rt-0000000000000000",
+            "route_hash": "sha256:" + "0" * 64,
+            "predecessor_node": "plan",
+            "predecessor_terminal_attempt_id": "att-plan",
+            "successor_node": "execute",
+            "successor_attempt_id": "att-execute",
+            "claim_key": ["sha256:" + "0" * 64, "execute", 0],
+            "brief_template_digest": "sha256:" + "1" * 64,
+            "outcome": "advanced",
+            "reason": "",
+            "registered": True,
+            "started": True,
+            "child_spawned": True,
+        }
+        receipt = supervisor.typed_receipt(
+            value,
+            PARENT,
+            {"att-child"},
+            accept_stage_advance=True,
+            stage_advance_record=record,
+        )
+        self.assertEqual(receipt["schema_version"], 3)
+        self.assertEqual(receipt["stage_advance"], record)
+
+
+class StageAdvanceWiringTest(unittest.TestCase):
+    """Block 4: `attempt_stage_advance` wiring at the `terminal_route_completion`
+    call site -- `coordinate_stage_advance` itself is fully covered by
+    `dispatch_stage_advance.test.py`; this only proves the supervisor extracts
+    the right predecessor/phase inputs, emits the right canary event, defaults
+    to a byte-identical no-op, and never lets an advance exception escape."""
+
+    def setUp(self) -> None:
+        self.events: list[dict] = []
+        self._orig_emit = supervisor.emit
+        supervisor.emit = self.events.append
+        self.addCleanup(lambda: setattr(supervisor, "emit", self._orig_emit))
+
+    def _args(self, **overrides):
+        base = SimpleNamespace(
+            route_file="/tmp/sd110-fixture-route.json",
+            route_id="rt-fixture0000000",
+            route_hash="sha256:" + "a" * 64,
+            jobs="/tmp/sd110-fixture-jobs",
+            parent_attempt_id=PARENT,
+            worktree="/wt",
+            enable_stage_advance=False,
+        )
+        base.__dict__.update(overrides)
+        return base
+
+    def _row(self, attempt_id, *, status="done", route_node="a",
+             route_id="rt-fixture0000000", route_hash="sha256:" + "a" * 64):
+        return SimpleNamespace(
+            attempt_id=attempt_id,
+            status=status,
+            metadata={
+                "route_node": route_node,
+                "route_id": route_id,
+                "route_hash": route_hash,
+            },
+        )
+
+    def test_disabled_by_default_is_a_byte_identical_no_op(self):
+        args = self._args()
+        rows = [self._row("att-child")]
+        with mock.patch.object(
+            supervisor.stage_advance, "coordinate_stage_advance"
+        ) as coordinate:
+            supervisor.attempt_stage_advance(args, rows, {"att-child"})
+        coordinate.assert_not_called()
+        self.assertEqual(self.events, [])
+
+    def test_enabled_advanced_emits_stage_advance_event(self):
+        args = self._args(enable_stage_advance=True)
+        rows = [self._row("att-child")]
+        fake_result = supervisor.stage_advance.StageAdvanceResult(
+            outcome="advanced", reason="", stage_advance_id="sadv-fixture",
+            successor_node="b", successor_attempt_id="att-b",
+            claim_key=(args.route_hash, "b", 0),
+            brief_template_digest="sha256:" + "b" * 64, gate_closed=True,
+            registered=True, started=True, child_spawned=True, record_path=None,
+        )
+        timing = {"last_child_terminal_ns": 1000, "join_completed_ns": 2000}
+        with mock.patch.object(
+            supervisor.stage_advance, "coordinate_stage_advance",
+            return_value=fake_result,
+        ) as coordinate:
+            supervisor.attempt_stage_advance(args, rows, {"att-child"}, timing)
+        coordinate.assert_called_once()
+        request = coordinate.call_args[0][0]
+        self.assertEqual(request.predecessor_node, "a")
+        self.assertEqual(request.predecessor_terminal_attempt_id, "att-child")
+        self.assertEqual(request.parent_attempt_id, PARENT)
+        self.assertEqual(request.supervisor_phase, "parked")
+        self.assertEqual(request.receipt_schema_negotiated, 3)
+        self.assertIsInstance(
+            coordinate.call_args[0][1], supervisor.stage_advance.RealStageAdvanceServices
+        )
+        self.assertEqual(len(self.events), 1)
+        event = self.events[0]
+        self.assertEqual(event["type"], "dispatch.supervisor.stage-advance")
+        self.assertEqual(event["advance_mode"], "runtime-deterministic")
+        self.assertEqual(event["outcome"], "advanced")
+        self.assertEqual(event["predecessor_node"], "a")
+        self.assertEqual(event["successor_node"], "b")
+        canary = event["delivery_timing"]
+        self.assertEqual(canary["last_child_terminal_ns"], 1000)
+        self.assertEqual(canary["join_completed_ns"], 2000)
+        self.assertIsNone(canary["same_thread_resume_ns"])
+        self.assertIsNone(canary["exact_harvest_ns"])
+        self.assertIsInstance(canary["next_stage_start_ns"], int)
+        self.assertEqual(event["route_hash"], args.route_hash)
+        self.assertEqual(event["parent_attempt_id"], PARENT)
+
+    def test_open_sibling_reports_running_turn_phase(self):
+        args = self._args(enable_stage_advance=True)
+        rows = [self._row("att-child"), self._row("att-open", status="open")]
+        fake_result = supervisor.stage_advance.StageAdvanceResult(
+            outcome="refused", reason="stage-advance-phase-ineligible",
+            stage_advance_id="", successor_node=None, successor_attempt_id=None,
+            claim_key=None, brief_template_digest="", gate_closed=False,
+            registered=False, started=False, child_spawned=False, record_path=None,
+        )
+        with mock.patch.object(
+            supervisor.stage_advance, "coordinate_stage_advance",
+            return_value=fake_result,
+        ) as coordinate:
+            supervisor.attempt_stage_advance(args, rows, {"att-child"})
+        request = coordinate.call_args[0][0]
+        self.assertEqual(request.supervisor_phase, "running-turn")
+        self.assertEqual(self.events[0]["type"], "dispatch.supervisor.stage-advance-refused")
+        self.assertNotIn("delivery_timing", self.events[0])
+
+    def test_route_binding_mismatch_is_skipped_without_a_call(self):
+        args = self._args(enable_stage_advance=True)
+        rows = [self._row("att-child", route_id="rt-different000000")]
+        with mock.patch.object(
+            supervisor.stage_advance, "coordinate_stage_advance"
+        ) as coordinate:
+            supervisor.attempt_stage_advance(args, rows, {"att-child"})
+        coordinate.assert_not_called()
+        self.assertEqual(self.events, [])
+
+    def test_service_exception_is_swallowed_as_a_refusal_event_never_raises(self):
+        args = self._args(enable_stage_advance=True)
+        rows = [self._row("att-child")]
+        with mock.patch.object(
+            supervisor.stage_advance, "coordinate_stage_advance",
+            side_effect=RuntimeError("boom"),
+        ):
+            supervisor.attempt_stage_advance(args, rows, {"att-child"})
+        self.assertEqual(len(self.events), 1)
+        event = self.events[0]
+        self.assertEqual(event["type"], "dispatch.supervisor.stage-advance-refused")
+        self.assertEqual(event["outcome"], "refused")
+        self.assertEqual(event["reason"], "RuntimeError")
+
+    def test_advanced_outcome_returns_the_durable_record_for_receipt_delivery(self):
+        """§13.32.1-(2)6/(3)B: `attempt_stage_advance` reads the durable
+        `stage_advance_record_v1` off disk (the same file
+        `RealStageAdvanceServices` would have fsynced) so the call site can
+        feed it straight into `receipt_with_stage_advance` under the SAME
+        `enable_stage_advance` condition that produced `receipt_schema_negotiated
+        == 3` above -- never a second, independently-toggled decision."""
+
+        args = self._args(enable_stage_advance=True)
+        rows = [self._row("att-child")]
+        with tempfile.TemporaryDirectory() as tmp:
+            record_path = Path(tmp) / "sadv-fixture.json"
+            record = {
+                "schema_version": 1,
+                "stage_advance_id": "sadv-fixture",
+                "route_id": "rt-fixture0000000",
+                "route_hash": args.route_hash,
+                "predecessor_node": "a",
+                "predecessor_terminal_attempt_id": "att-child",
+                "successor_node": "b",
+                "successor_attempt_id": "att-b",
+                "claim_key": [args.route_hash, "b", 0],
+                "brief_template_digest": "sha256:" + "b" * 64,
+                "outcome": "advanced",
+                "reason": "",
+                "registered": True,
+                "started": True,
+                "child_spawned": True,
+            }
+            record_path.write_text(json.dumps(record), encoding="utf-8")
+            fake_result = supervisor.stage_advance.StageAdvanceResult(
+                outcome="advanced", reason="", stage_advance_id="sadv-fixture",
+                successor_node="b", successor_attempt_id="att-b",
+                claim_key=(args.route_hash, "b", 0),
+                brief_template_digest="sha256:" + "b" * 64, gate_closed=True,
+                registered=True, started=True, child_spawned=True,
+                record_path=record_path,
+            )
+            with mock.patch.object(
+                supervisor.stage_advance, "coordinate_stage_advance",
+                return_value=fake_result,
+            ):
+                returned = supervisor.attempt_stage_advance(args, rows, {"att-child"})
+        self.assertEqual(returned, record)
+
+        base_receipt = {
+            "schema_version": 2,
+            "state": "ready",
+            "parent_attempt_id": PARENT,
+            "children": [],
+        }
+        # The single condition ON: this is the only path that may ever
+        # produce a v3 delivery.
+        negotiated_delivery = join.receipt_with_stage_advance(
+            base_receipt, negotiated=True, stage_advance_record=returned
+        )
+        self.assertEqual(negotiated_delivery["schema_version"], 3)
+        self.assertEqual(
+            negotiated_delivery["stage_advance"]["outcome"], "advanced"
+        )
+        # The same condition OFF (mirrors `--enable-stage-advance` unset, or
+        # any caller that fails to thread the boolean through): an
+        # `outcome == "advanced"` record must never coexist with a v2
+        # delivery. This is the exact defect round 4 closes -- assert it can
+        # never regress.
+        un_negotiated_delivery = join.receipt_with_stage_advance(
+            base_receipt, negotiated=False, stage_advance_record=returned
+        )
+        self.assertEqual(un_negotiated_delivery["schema_version"], 2)
+        self.assertNotIn("stage_advance", un_negotiated_delivery)
+        self.assertIs(un_negotiated_delivery, base_receipt)
 
 
 if __name__ == "__main__":

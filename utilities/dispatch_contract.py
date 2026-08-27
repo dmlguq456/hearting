@@ -4592,6 +4592,107 @@ def claim_recovery_retry(
         return result
 
 
+@dataclass(frozen=True)
+class StageAdvanceRegistryClaim:
+    """SD-110 claim result: no predecessor identity in `claim_key`
+    (`§13.32.1-(3)C`) -- distinct from `RecoveryRetryClaim`, which mutates an
+    EXISTING attempt row. A stage-advance successor has no row yet, so this
+    claim lives in its own CAS store under the same canonical registry lock."""
+
+    stage_advance_id: str
+    claim_key: tuple
+    successor_attempt_id: str
+    replayed: bool
+
+
+def _stage_advance_claim_key_digest(claim_key: tuple) -> str:
+    return hashlib.sha256(
+        json.dumps(list(claim_key), sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
+def _stable_stage_advance_attempt_id(stage_advance_id: str, successor_node: str) -> str:
+    encoded = f"{stage_advance_id}\0{successor_node}".encode("utf-8")
+    return "att-stage-advance-" + hashlib.sha256(encoded).hexdigest()[:32]
+
+
+def claim_stage_advance(
+    jobs: Path,
+    *,
+    stage_advance_id: str,
+    route_hash: str,
+    successor_node: str,
+    advance_generation: int,
+    source_route_id: str,
+    predecessor_attempt_id: str,
+) -> StageAdvanceRegistryClaim:
+    """CAS one stable stage-advance claim inside `<jobs>.lock`, or replay the
+    identical claim for a repeated `stage_advance_id` (A-16). A distinct
+    `claim_key` already claimed by a DIFFERENT `stage_advance_id` is
+    `stage-advance-claim-conflict` (A-4) -- one generation, one successor, one
+    claimant, no matter which predecessor closed first.
+    """
+
+    if (
+        not stage_advance_id.startswith("sadv-")
+        or not route_hash
+        or not successor_node
+        or not source_route_id
+        or not predecessor_attempt_id
+        or type(advance_generation) is not int
+    ):
+        raise DispatchContractError("stage-advance-claim-identity-incomplete")
+    ensure_global_registry_writable(jobs)
+    claim_key = (route_hash, successor_node, advance_generation)
+    claims_dir = jobs.parent / "stage_advance" / "claims"
+    claim_path = claims_dir / f"{_stage_advance_claim_key_digest(claim_key)}.json"
+    with Path(f"{jobs}.lock").open("a", encoding="utf-8") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        if claim_path.is_file():
+            try:
+                existing = json.loads(claim_path.read_text(encoding="utf-8"))
+            except (OSError, ValueError) as exc:
+                raise DispatchContractError("stage-advance-claim-record-invalid") from exc
+            if existing.get("stage_advance_id") == stage_advance_id:
+                return StageAdvanceRegistryClaim(
+                    stage_advance_id=stage_advance_id,
+                    claim_key=claim_key,
+                    successor_attempt_id=existing["successor_attempt_id"],
+                    replayed=True,
+                )
+            raise DispatchContractError("stage-advance-claim-conflict")
+        successor_attempt_id = _stable_stage_advance_attempt_id(
+            stage_advance_id, successor_node
+        )
+        record = {
+            "stage_advance_id": stage_advance_id,
+            "claim_key": list(claim_key),
+            "successor_attempt_id": successor_attempt_id,
+            "source_route_id": source_route_id,
+            "predecessor_attempt_id": predecessor_attempt_id,
+            "claimed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        }
+        claims_dir.mkdir(parents=True, exist_ok=True)
+        fd, temp_name = tempfile.mkstemp(prefix=".claim.", dir=str(claims_dir))
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                json.dump(record, handle, sort_keys=True, separators=(",", ":"))
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temp_name, claim_path)
+        finally:
+            try:
+                os.unlink(temp_name)
+            except FileNotFoundError:
+                pass
+    return StageAdvanceRegistryClaim(
+        stage_advance_id=stage_advance_id,
+        claim_key=claim_key,
+        successor_attempt_id=successor_attempt_id,
+        replayed=False,
+    )
+
+
 def seal_recovery_blocked(
     jobs: Path,
     *,

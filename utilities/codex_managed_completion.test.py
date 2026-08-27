@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -18,6 +19,17 @@ ROOT = Path(__file__).resolve().parents[1]
 SIDECAR = ROOT / "utilities" / "codex-managed-completion.py"
 PARENT = "att-parent"
 SESSION = "thread-managed-parent"
+
+
+def load_completion_module():
+    sys.path.insert(0, str(ROOT / "utilities"))
+    spec = importlib.util.spec_from_file_location(
+        "codex_managed_completion_unit", SIDECAR
+    )
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
 
 
 def row(
@@ -460,6 +472,93 @@ raise SystemExit(3 if state == 'timeout' else 0)
         self.assertEqual(result.returncode, 65)
         self.assertIn("registered-child-never-launched", result.stdout)
         self.assertFalse(self.control_path.exists())
+
+
+class NormalizeReceiptStageAdvanceNegotiationTest(unittest.TestCase):
+    """SD-110 A-18: an un-negotiated (default) call to `normalize_receipt`
+    takes the literal, unmodified v2 path -- golden-byte identical to the
+    pre-SD-110 receipt."""
+
+    def setUp(self):
+        self.module = load_completion_module()
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.jobs = Path(self.temp.name) / "jobs.tsv"
+        self.jobs.write_text(row("att-child", harness="codex"), encoding="utf-8")
+
+    def _raw_receipt(self):
+        return {
+            "schema_version": 2,
+            "state": "ready",
+            "parent_attempt_id": PARENT,
+            "children": [
+                {
+                    "attempt_id": "att-child",
+                    "status": "done",
+                    "readiness": "ready",
+                    "reason": "registry-closed",
+                    "required_action": "advance-completed",
+                }
+            ],
+        }
+
+    def _normalize(self, **extra):
+        return self.module.normalize_receipt(
+            self._raw_receipt(),
+            jobs=self.jobs,
+            parent_attempt_id=PARENT,
+            parent_session_id=None,
+            delivery_parent_id=PARENT,
+            attempts={"att-child"},
+            **extra,
+        )
+
+    @staticmethod
+    def _without_live_timing(value):
+        # `delivery_timing` embeds `time.monotonic_ns()` observed at call
+        # time, so two independent calls legitimately differ there. The
+        # byte-identity claim under test is about `schema_version` and the
+        # `stage_advance` key, not wall-clock timing -- mask it out.
+        masked = dict(value)
+        masked["delivery_timing"] = "MASKED"
+        return masked
+
+    def test_default_call_is_byte_identical_to_pre_sd110(self):
+        normalized = self._normalize()
+        golden = json.dumps(self._without_live_timing(normalized), sort_keys=True)
+        negotiated_but_recordless = self._normalize(accept_stage_advance=True)
+        self.assertEqual(normalized["schema_version"], 2)
+        self.assertNotIn("stage_advance", normalized)
+        self.assertEqual(
+            json.dumps(
+                self._without_live_timing(negotiated_but_recordless), sort_keys=True
+            ),
+            golden,
+        )
+
+    def test_negotiated_advanced_record_attaches_v3_block(self):
+        record = {
+            "schema_version": 1,
+            "stage_advance_id": "sadv-" + "0" * 64,
+            "route_id": "rt-0000000000000000",
+            "route_hash": "sha256:" + "0" * 64,
+            "predecessor_node": "plan",
+            "predecessor_terminal_attempt_id": "att-plan",
+            "successor_node": "execute",
+            "successor_attempt_id": "att-execute",
+            "claim_key": ["sha256:" + "0" * 64, "execute", 0],
+            "brief_template_digest": "sha256:" + "1" * 64,
+            "outcome": "advanced",
+            "reason": "",
+            "registered": True,
+            "started": True,
+            "child_spawned": True,
+        }
+        normalized = self._normalize(
+            accept_stage_advance=True, stage_advance_record=record
+        )
+        self.assertEqual(normalized["schema_version"], 3)
+        self.assertEqual(normalized["stage_advance"], record)
 
 
 if __name__ == "__main__":

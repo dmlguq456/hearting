@@ -562,3 +562,18 @@ DBs, caches, `.env*`, build output, dispatch logs, or worktrees into this repo.
   gate or helper parity is claimed. Use the checked registered-headless surface
   where eligible, otherwise the recorded inline fallback; the one stage gate is
   unchanged.
+
+## SD-110 runtime-owned deterministic stage advance — not an advance target
+
+OpenCode has no per-process session supervisor realization comparable to
+Claude session-resume or the Codex App Server, and the same route-owned
+dispatch-depth-2 evidence gap recorded above means SD-110's eligibility
+predicates cannot be locally proven here. This adapter therefore carries no
+`attempt_stage_advance` call site and no `--enable-stage-advance` flag: every
+OpenCode-bound boundary keeps today's unchanged model-turn delivery path
+regardless of `advance_class`. Its delivery receipts stay a plain v1/v2
+consumer — no `accept_stage_advance` negotiation exists on this surface — so
+it can never receive a `stage_advance` v3 block, and no route compiled for an
+OpenCode-owned node is a runtime-advance source or target. This is a parity
+gap, not a rejected design: the moment OpenCode exposes its own route-owned
+dispatch-depth-2 evidence, this section is the one to revisit.
