@@ -2055,4 +2055,42 @@ class TestValidationBasis(unittest.TestCase):
    outcome,created=R.close_route(verified,path,commit="d"*40)
    self.assertTrue(created)
 
+class GroundingCwdLineageTest(unittest.TestCase):
+ """SD-107 × SD-67/69: the mutation worktree's HEAD may move along its first-parent line."""
+ def _repo(self,tmp):
+  import subprocess
+  root=Path(tmp)/"wt"; root.mkdir()
+  def git(*a): subprocess.run(["git","-C",str(root),*a],check=True,capture_output=True,text=True)
+  git("init","-q"); git("config","user.email","t@t"); git("config","user.name","t")
+  (root/"a").write_text("1"); git("add","."); git("commit","-q","-m","a")
+  base=subprocess.run(["git","-C",str(root),"rev-parse","HEAD"],capture_output=True,text=True).stdout.strip()
+  return root,git,base
+ def test_same_head_with_dirty_suffix_is_accepted(self):
+  with tempfile.TemporaryDirectory() as tmp:
+   root,_,base=self._repo(tmp)
+   self.assertTrue(R._grounding_cwd_lineage_ok(root,base,base+"+dirty:abc"))
+ def test_first_parent_descendant_is_accepted(self):
+  import subprocess
+  with tempfile.TemporaryDirectory() as tmp:
+   root,git,base=self._repo(tmp)
+   (root/"b").write_text("2"); git("add","."); git("commit","-q","-m","b")
+   head=subprocess.run(["git","-C",str(root),"rev-parse","HEAD"],capture_output=True,text=True).stdout.strip()
+   self.assertTrue(R._grounding_cwd_lineage_ok(root,base,head))
+   self.assertFalse(R._grounding_cwd_lineage_ok(root,head,base))
+ def test_foreign_or_non_git_revision_stays_mismatch(self):
+  with tempfile.TemporaryDirectory() as tmp:
+   root,_,base=self._repo(tmp)
+   self.assertFalse(R._grounding_cwd_lineage_ok(root,base,"f"*40))
+   self.assertFalse(R._grounding_cwd_lineage_ok(root,"tree:abc",base))
+   self.assertFalse(R._grounding_cwd_lineage_ok(root,base,"release:v1:abc"))
+ def test_revalidate_accepts_cwd_drift_only_with_lineage(self):
+  route={"artifact_root":str(R.ROOT),"cwd":str(R.ROOT)}
+  route["launch_compatibility_tuple"]={"contract_version":1,**R.launch_compatibility_tuple(artifact_root=R.ROOT,cwd=R.ROOT)}
+  ok,_=R.revalidate_launch_compatibility(route); self.assertTrue(ok)
+  drift=json.loads(json.dumps(route))
+  drift["launch_compatibility_tuple"]["grounding_roots"]["cwd"]["release_id"]="f"*40
+  ok,mismatches=R.revalidate_launch_compatibility(drift)
+  self.assertFalse(ok); self.assertIn("grounding_roots.cwd",mismatches)
+
+
 if __name__=="__main__": unittest.main()

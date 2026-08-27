@@ -726,3 +726,41 @@ class RegistryConfirmArmTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RegistryCanonicalJobsFallbackTest(RegistryConfirmArmTest):
+    """An unexpanded `--jobs "$J"` plus no AGENT_DISPATCH_JOBS still arms from the
+    canonical registry the wrapper actually wrote (2026-08-26 incident)."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.environment.stop()
+        self.no_env = mock.patch.dict(os.environ, {}, clear=False)
+        self.no_env.start()
+        os.environ.pop("AGENT_DISPATCH_JOBS", None)
+        self.addCleanup(self.no_env.stop)
+        self.canonical = mock.patch.object(rewake, "_canonical_jobs", return_value=str(self.jobs))
+        self.canonical.start()
+        self.addCleanup(self.canonical.stop)
+
+    def payload(self, *, stdout: str = "status=start\nattempt_id=att-owner-1", **replacements):
+        payload = super().payload(stdout=stdout, **replacements)
+        payload["tool_input"] = {
+            "command": 'cd $AGENT_HOME && python3 utilities/dispatch-owner.py --start '
+                       '--jobs "$J" --slug owner 2>&1 | tee out.txt | grep -E "^(status|attempt_id)="'
+        }
+        return payload
+
+    def test_unexpanded_jobs_variable_falls_back_to_canonical_registry(self) -> None:
+        launch = rewake.registry_launch(self.payload())
+        self.assertIsNotNone(launch)
+        assert launch is not None
+        self.assertEqual(launch.attempt_id, "att-owner-1")
+        self.assertEqual(launch.jobs, self.jobs)
+        self.assertEqual(launch.armed, "registry")
+
+    def test_without_canonical_registry_it_still_never_arms(self) -> None:
+        self.canonical.stop()
+        with mock.patch.object(rewake, "_canonical_jobs", return_value=None):
+            self.assertIsNone(rewake.registry_launch(self.payload()))
+        self.canonical.start()

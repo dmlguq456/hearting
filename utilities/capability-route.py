@@ -242,6 +242,35 @@ def _launch_tuple_roots(payload):
     )
     return roots
 
+_GIT_SHA=re.compile(r"[0-9a-f]{40}")
+
+def _grounding_cwd_lineage_ok(path, sealed_release, actual_release):
+    """SD-107 × SD-67/69: the route cwd is the mutation worktree, so its HEAD legitimately
+    moves during the route (an execute stage dirties it; the owner commits after the gate).
+    Accept that drift only along the sealed revision's first-parent line — same HEAD with a
+    dirty suffix, or a HEAD whose first-parent history contains the sealed commit. Any other
+    shape (rebase, reset, foreign checkout, non-git tree) stays a mismatch."""
+    def base(value):
+        if not isinstance(value,str):
+            return None
+        head=value.split("+",1)[0]
+        return head if _GIT_SHA.fullmatch(head) else None
+    sealed=base(sealed_release); actual=base(actual_release)
+    if sealed is None or actual is None:
+        return False
+    if sealed == actual:
+        return True
+    try:
+        probe=subprocess.run(
+            ["git","-C",str(path),"rev-list","--first-parent",actual],
+            text=True,capture_output=True,timeout=30,
+        )
+    except (OSError,subprocess.TimeoutExpired):
+        return False
+    if probe.returncode != 0:
+        return False
+    return sealed in probe.stdout.split()
+
 def revalidate_launch_compatibility(route):
     """Compare a route's sealed launch tuple with this process's current roots."""
     sealed=route.get("launch_compatibility_tuple")
@@ -271,6 +300,14 @@ def revalidate_launch_compatibility(route):
             changed["unresolved"]={
                 "expected":expected.get("unresolved"),"actual":actual.get("unresolved"),
             }
+        if (
+            changed and name == "grounding_roots.cwd"
+            and set(changed) <= {"release_id","content_digest","binding_digest"}
+            and _grounding_cwd_lineage_ok(
+                actual.get("path"),expected.get("release_id"),actual.get("release_id"),
+            )
+        ):
+            changed={}
         if changed:
             mismatches[name]={
                 "expected":expected,"actual":actual,"fields":sorted(changed),

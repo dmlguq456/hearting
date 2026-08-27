@@ -216,6 +216,22 @@ def _row_age(stamp: str, now: float) -> float | None:
     return now - moment.timestamp()
 
 
+def _canonical_jobs() -> str | None:
+    """The installed harness's own registry — the path every wrapper writes by default.
+
+    A launch command that spells `--jobs "$J"` hands this hook an unexpanded shell
+    variable, and the hook's own environment carries no `AGENT_DISPATCH_JOBS`; both
+    left a real, session-bound owner row unarmed (observed 2026-08-26, two owner
+    attempts in a row). The canonical root is deterministic from the agent home, so
+    it is the last resort before giving up — the row match itself stays exact."""
+    try:
+        from dispatch_contract import resolve_dispatch_state_root  # noqa: WPS433
+
+        return str(resolve_dispatch_state_root(_resolve_agent_home(), None) / "jobs.log")
+    except Exception:  # noqa: BLE001 — absence beats misattribution
+        return None
+
+
 def registry_launch(payload: object) -> Launch | None:
     """Arm from the wrapper-written registry when stdout was filtered away.
 
@@ -239,6 +255,7 @@ def registry_launch(payload: object) -> Launch | None:
         _validated_jobs(_single(fields, "job_registry"))
         or _validated_jobs(_command_jobs(command))
         or _validated_jobs(os.environ.get("AGENT_DISPATCH_JOBS"))
+        or _validated_jobs(_canonical_jobs())
     )
     if jobs is None:
         return None
