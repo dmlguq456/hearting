@@ -32,7 +32,7 @@ from dispatch_completion_join import (  # noqa: E402
 
 
 ATTEMPT = re.compile(r"att-[A-Za-z0-9._-]{1,240}\Z")
-DEFAULT_INTERVAL_SECONDS = 20
+DEFAULT_INTERVAL_SECONDS = 5  # one readiness probe costs ~0.1s; 20s dominated the wake tail (2026-08-27)
 DEFAULT_MAX_SECONDS = 21_600
 DEFAULT_ARM_WINDOW_SECONDS = 600
 MAXIMUM_CLOCK_SKEW_SECONDS = 60
