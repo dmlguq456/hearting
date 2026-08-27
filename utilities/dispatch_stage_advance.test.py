@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 import sys
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest import mock
 
@@ -231,7 +232,10 @@ class FanInStaggeredTest(unittest.TestCase):
             completion_dir = capability_route_completion_dir(sandbox, route["route_id"])
             (completion_dir / "a.json").write_text("{}", encoding="utf-8")
             (completion_dir / "b1.json").write_text("{}", encoding="utf-8")
-            sandbox.add_registry_row({"route_id": route["route_id"], "route_node": "b1"})
+            sandbox.add_registry_row({
+                "route_id": route["route_id"], "route_node": "b1",
+                "route_hash": route["route_hash"],
+            })
 
             request_b2 = make_request(sandbox, route_file, predecessor_node="b2")
             with mock.patch.object(SA, "gate_evidence", return_value=PASS_EVIDENCE):
@@ -264,13 +268,75 @@ class BlockedAmbiguousTest(unittest.TestCase):
         sandbox = Sandbox()
         try:
             route_file = sandbox.write_route(route)
-            sandbox.add_registry_row({"route_id": route["route_id"], "route_node": "x"})
+            sandbox.add_registry_row({
+                "route_id": route["route_id"], "route_node": "x",
+                "route_hash": route["route_hash"],
+            })
             request = make_request(sandbox, route_file, predecessor_node="a")
             with mock.patch.object(SA, "gate_evidence", return_value=PASS_EVIDENCE):
                 services = FakeServices()
                 result = SA.coordinate_stage_advance(request, services)
             self.assertEqual(result.reason, "stage-advance-successor-blocked")
             self.assertEqual(services.start_calls, 0)
+        finally:
+            sandbox.close()
+
+
+class StartedNodesGenerationScopeTest(unittest.TestCase):
+    """🟡5 correction: `started_nodes` used to filter by `route_id` alone and
+    silently discard the third argument, trusting -- without checking -- that
+    `route_id` always 1:1-encodes `advance_generation` (true today because
+    `capability-route.py`'s continuation compile hashes `advance_generation`
+    into the payload that derives `route_id`, but nowhere enforced or tested
+    at this function's boundary). Scope by `route_hash`, which is already
+    recorded on every registry row via the existing `--route-hash`
+    start-wrapper plumbing (§4.2) -- no new metadata plumbing required -- and
+    prove a stale row bound to a foreign/old-generation `route_hash` does not
+    block re-advancing that node under the CURRENT generation."""
+
+    def test_same_route_id_different_route_hash_is_not_started(self):
+        jobs = Path(tempfile.mkdtemp()) / "jobs.registry"
+        jobs.touch()
+        pipe = "route_id=rt-shared0000000,route_node=x,route_hash=sha256:" + "a" * 64
+        jobs.write_text(
+            "\t".join(["job", "open", "worktree", "worktree", "slug", pipe]) + "\n",
+            encoding="utf-8",
+        )
+        # Same route_id, but the CURRENT generation's route_hash differs from
+        # the row's -- must not count as started (fail-closed for the
+        # CURRENT generation's freedom to advance, not for the stale row).
+        self.assertEqual(
+            SA.started_nodes(jobs, "rt-shared0000000", "sha256:" + "b" * 64),
+            frozenset(),
+        )
+        # Same route_id AND same route_hash -- counts as started.
+        self.assertEqual(
+            SA.started_nodes(jobs, "rt-shared0000000", "sha256:" + "a" * 64),
+            frozenset({"x"}),
+        )
+
+    def test_old_generation_row_does_not_block_re_advance(self):
+        """End-to-end through `coordinate_stage_advance`: a stale registry
+        row for node `x`, tagged with a foreign `route_hash` (simulating a
+        prior SD-104 continuation generation), must not make `x` appear
+        `started` for the CURRENT route -- `x` must remain the unique
+        runnable successor and advance normally."""
+
+        route = make_route([node("a"), node("x", depends_on=("a",))])
+        sandbox = Sandbox()
+        try:
+            route_file = sandbox.write_route(route)
+            sandbox.add_registry_row({
+                "route_id": route["route_id"], "route_node": "x",
+                "route_hash": "sha256:" + "f" * 64,  # foreign generation
+            })
+            request = make_request(sandbox, route_file, predecessor_node="a")
+            with mock.patch.object(SA, "gate_evidence", return_value=PASS_EVIDENCE):
+                services = FakeServices()
+                result = SA.coordinate_stage_advance(request, services)
+            self.assertEqual(result.outcome, "advanced")
+            self.assertEqual(result.successor_node, "x")
+            self.assertEqual(services.start_calls, 1)
         finally:
             sandbox.close()
 
@@ -474,7 +540,7 @@ class PhaseIneligibleTest(unittest.TestCase):
         finally:
             sandbox.close()
 
-    def test_running_turn_phase_refuses(self):
+    def test_unknown_phase_refuses(self):
         route = make_route([node("a"), node("b", depends_on=("a",))])
         sandbox = Sandbox()
         try:
@@ -483,6 +549,36 @@ class PhaseIneligibleTest(unittest.TestCase):
             services = FakeServices()
             result = SA.coordinate_stage_advance(request, services)
             self.assertEqual(result.reason, "stage-advance-phase-ineligible")
+        finally:
+            sandbox.close()
+
+    def test_running_turn_phase_refuses_even_with_no_delivered_open_children(self):
+        """T1 correction (round-1 blocking finding 1): §13.32.1-(2)7 requires
+        `parked` and forbids advance in `running-turn` unconditionally --
+        "`running-turn`에서는 절대 실행하지 않는다." Drive the literal string
+        `running-turn` (not a stand-in like `unknown-phase`) WITH an empty
+        `delivered_open_attempt_ids`, exactly the shape the real supervisors
+        used to construct when any current child was open -- the shape that
+        let a live path start a successor while another child remained
+        open. This must refuse on phase alone, never falling through to the
+        (now-also-refusing) empty-delivered-set check for the wrong reason."""
+
+        route = make_route([node("a"), node("b", depends_on=("a",))])
+        sandbox = Sandbox()
+        try:
+            route_file = sandbox.write_route(route)
+            request = make_request(
+                sandbox, route_file, predecessor_node="a",
+                phase="running-turn", delivered=frozenset(),
+            )
+            services = FakeServices()
+            with mock.patch.object(SA, "gate_evidence", return_value=PASS_EVIDENCE):
+                result = SA.coordinate_stage_advance(request, services)
+            self.assertEqual(result.outcome, "refused")
+            self.assertEqual(result.reason, "stage-advance-phase-ineligible")
+            self.assertEqual(services.close_gate_calls, 0)
+            self.assertEqual(services.claim_calls, 0)
+            self.assertEqual(services.start_calls, 0)
         finally:
             sandbox.close()
 
@@ -553,6 +649,76 @@ class EligibleLinearAdvanceTest(unittest.TestCase):
             sandbox.close()
 
 
+class ConcurrentDuplicateStartTest(unittest.TestCase):
+    """T3 correction (round-1 blocking finding 2): the record load used to
+    happen outside any lock (`<jobs>.lock` only covers the claim CAS), so two
+    coordinators racing the same just-closed predecessor could each load a
+    record with no `started` phase from stale snapshots and both call
+    `start_successor` -- the crash fixture in
+    `dispatch_stage_advance_crash.test.py` is sequential and cannot see this.
+    Race two REAL threads (not a mocked serialization) through
+    `coordinate_stage_advance` for the identical `stage_advance_id`, with an
+    artificial delay inside `start_successor` sized to widen the window a
+    stale-snapshot race would need, and assert exactly one process spawn
+    total across both racers."""
+
+    def test_two_racing_coordinators_spawn_exactly_one_successor(self):
+        import threading  # noqa: PLC0415
+        import time as time_mod  # noqa: PLC0415
+
+        route = make_route([node("a"), node("b", depends_on=("a",))])
+        sandbox = Sandbox()
+        try:
+            route_file = sandbox.write_route(route)
+            request = make_request(sandbox, route_file, predecessor_node="a")
+
+            start_calls = []
+            start_lock = threading.Lock()
+
+            class RacingServices(FakeServices):
+                def start_successor(self, request, *, claim, successor, slug, prompt_file):
+                    # Widen the critical section so a missing lock (T3's bug)
+                    # would reliably let the second racer's stale in-memory
+                    # snapshot reach this call too, before the first racer's
+                    # write lands.
+                    time_mod.sleep(0.05)
+                    with start_lock:
+                        start_calls.append(claim.successor_attempt_id)
+                    return super().start_successor(
+                        request, claim=claim, successor=successor,
+                        slug=slug, prompt_file=prompt_file,
+                    )
+
+            results = [None, None]
+
+            def racer(index):
+                results[index] = SA.coordinate_stage_advance(request, RacingServices())
+
+            # Patched once for the whole race (not per-thread): two
+            # `mock.patch.object` context managers on the same target,
+            # entering/exiting at different real-clock moments across
+            # threads, would race each other's restore and could hand the
+            # still-blocked racer the real (unmocked) `gate_evidence`.
+            with mock.patch.object(SA, "gate_evidence", return_value=PASS_EVIDENCE):
+                threads = [
+                    threading.Thread(target=racer, args=(0,)),
+                    threading.Thread(target=racer, args=(1,)),
+                ]
+                for thread in threads:
+                    thread.start()
+                for thread in threads:
+                    thread.join(timeout=10)
+
+            self.assertEqual(len(start_calls), 1, start_calls)
+            for result in results:
+                self.assertIsNotNone(result)
+                self.assertEqual(result.outcome, "advanced")
+                self.assertEqual(result.successor_node, "b")
+                self.assertTrue(result.child_spawned)
+        finally:
+            sandbox.close()
+
+
 class SuccessorStartFailedTest(unittest.TestCase):
     """A-13's `stage-advance-successor-start-failed` leg (§13.32.1-(3)D):
     gate close succeeded, `services.start_successor` raised a typed
@@ -596,6 +762,149 @@ class SuccessorStartFailedTest(unittest.TestCase):
             self.assertEqual(result2.stage_advance_id, result.stage_advance_id)
             self.assertEqual(services.start_calls, 1)
             self.assertEqual(services.close_gate_calls, 1)
+        finally:
+            sandbox.close()
+
+
+class TypedStartFailureRefusalMappingTest(unittest.TestCase):
+    """T3 correction (round-1 blocking finding 3): every nonzero
+    `start_successor` outcome used to collapse into the single generic
+    `stage-advance-successor-start-failed` refusal, regardless of the typed
+    reason `StageAdvanceError` actually carried -- erasing three distinct
+    §13.32.1-(4) refusal-table rows that A-12/A-13 require to be
+    distinguishable. Drive each of the three through the injected services
+    boundary (the same seam `RealStageAdvanceServices.start_successor` uses
+    after classifying a real wrapper failure -- see
+    `WrapperFailureClassificationTest` below for that half) and assert
+    `coordinate_stage_advance` preserves the distinct reason rather than
+    flattening it."""
+
+    class _TypedFailingStartServices(FakeServices):
+        def __init__(self, reason):
+            super().__init__()
+            self._reason = reason
+
+        def start_successor(self, request, *, claim, successor, slug, prompt_file):
+            self.start_calls += 1
+            raise SA.StageAdvanceError(self._reason, "typed-wrapper-failure")
+
+    def _assert_reason_preserved(self, reason):
+        route = make_route([node("a"), node("b", depends_on=("a",))])
+        sandbox = Sandbox()
+        try:
+            route_file = sandbox.write_route(route)
+            request = make_request(sandbox, route_file, predecessor_node="a")
+            services = self._TypedFailingStartServices(reason)
+            with mock.patch.object(SA, "gate_evidence", return_value=PASS_EVIDENCE):
+                result = SA.coordinate_stage_advance(request, services)
+            self.assertEqual(result.outcome, "refused")
+            self.assertEqual(result.reason, reason)
+            self.assertTrue(result.gate_closed)
+            self.assertTrue(result.registered)
+            self.assertFalse(result.started)
+            self.assertFalse(result.child_spawned)
+            # Durable record agrees -- A-12's `route_file_written` etc are
+            # 0/0/0/0 for these, but the RECORD's own `reason` must not have
+            # been silently rewritten back to the generic fallback.
+            on_disk = json.loads(result.record_path.read_text(encoding="utf-8"))
+            self.assertEqual(on_disk["reason"], reason)
+        finally:
+            sandbox.close()
+
+    def test_launch_compatibility_mismatch_reason_preserved(self):
+        self._assert_reason_preserved("stage-advance-launch-compatibility-mismatch")
+
+    def test_harness_unavailable_reason_preserved(self):
+        self._assert_reason_preserved("stage-advance-harness-unavailable")
+
+    def test_lifecycle_unsupported_reason_preserved(self):
+        self._assert_reason_preserved("stage-advance-lifecycle-unsupported")
+
+    def test_unrecognized_reason_falls_back_to_generic(self):
+        """Defense against a services-boundary bug: a reason string outside
+        the closed `REFUSAL_REASONS` enum must not leak into the durable
+        record or the model-facing result -- it degrades to the generic
+        refusal instead."""
+
+        route = make_route([node("a"), node("b", depends_on=("a",))])
+        sandbox = Sandbox()
+        try:
+            route_file = sandbox.write_route(route)
+            request = make_request(sandbox, route_file, predecessor_node="a")
+            services = self._TypedFailingStartServices("not-a-real-refusal-reason")
+            with mock.patch.object(SA, "gate_evidence", return_value=PASS_EVIDENCE):
+                result = SA.coordinate_stage_advance(request, services)
+            self.assertEqual(result.reason, "stage-advance-successor-start-failed")
+        finally:
+            sandbox.close()
+
+
+class WrapperFailureClassificationTest(unittest.TestCase):
+    """T3 correction, deterministic-wrapper-output half (round-1 blocking
+    finding 3 / 🟡 finding 6): `RealStageAdvanceServices.start_successor`
+    itself must classify `stage-dispatch-fallback.py --start`'s own typed
+    `reason=` vocabulary into the three refusal-table rows, purely as a
+    function of that string -- no live spawn, no credentials, matching the
+    honest no-credential limitation `stage-advance-installed-layout.test.sh`
+    already documents for A-1 and keeps unchanged."""
+
+    def test_launch_compatibility_mismatch_reasons(self):
+        for reason in ("launch-runtime-root-mismatch", "launch-compatibility-tuple-required"):
+            with self.subTest(reason=reason):
+                self.assertEqual(
+                    SA._classify_wrapper_start_failure(reason),
+                    "stage-advance-launch-compatibility-mismatch",
+                )
+
+    def test_harness_unavailable_reason(self):
+        self.assertEqual(
+            SA._classify_wrapper_start_failure("fallback-chain-exhausted"),
+            "stage-advance-harness-unavailable",
+        )
+
+    def test_lifecycle_unsupported_reason(self):
+        self.assertEqual(
+            SA._classify_wrapper_start_failure("unsupported-native-execution-surface"),
+            "stage-advance-lifecycle-unsupported",
+        )
+
+    def test_unclassified_reason_falls_back_to_generic(self):
+        for reason in ("", "parent-identity-missing", "some-future-reason-nobody-mapped-yet"):
+            with self.subTest(reason=reason):
+                self.assertEqual(
+                    SA._classify_wrapper_start_failure(reason),
+                    "stage-advance-successor-start-failed",
+                )
+
+    def test_real_start_successor_maps_a_deterministic_failing_wrapper_run(self):
+        """End-to-end through `RealStageAdvanceServices.start_successor`
+        itself (not just the pure classifier): a mocked `subprocess.run`
+        stands in for `stage-dispatch-fallback.py --start` printing a
+        deterministic typed failure on stdout, exactly the shape block ④'s
+        real wrapper invocation parses via `FALLBACK.output_fields`."""
+
+        services = SA.RealStageAdvanceServices()
+        route = make_route([node("a"), node("b", depends_on=("a",))])
+        sandbox = Sandbox()
+        try:
+            route_file = sandbox.write_route(route)
+            request = make_request(sandbox, route_file, predecessor_node="a")
+            claim = SA.StageAdvanceClaim(
+                stage_advance_id="sadv-fixture", claim_key=(route["route_hash"], "b", 0),
+                successor_attempt_id="att-fixture", replayed=False,
+            )
+            fake_completed = SimpleNamespace(
+                returncode=79,
+                stdout="check=failed\nreason=fallback-chain-exhausted\n",
+                stderr="",
+            )
+            with mock.patch.object(SA.subprocess, "run", return_value=fake_completed):
+                with self.assertRaises(SA.StageAdvanceError) as ctx:
+                    services.start_successor(
+                        request, claim=claim, successor=node("b"), slug="slug",
+                        prompt_file=route_file,  # any existing file path
+                    )
+            self.assertEqual(ctx.exception.reason, "stage-advance-harness-unavailable")
         finally:
             sandbox.close()
 

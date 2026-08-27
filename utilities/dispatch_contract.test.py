@@ -2870,21 +2870,22 @@ class StageAdvanceClaimTest(unittest.TestCase):
   import dispatch_stage_advance as SA
   with tempfile.TemporaryDirectory() as td:
    jobs=Path(td)/"jobs.log"
+   route_hash="sha256:"+"a"*64
    metadata_cancelled=(
-    "route_id=rt-a11,route_node=execute,"
+    "route_id=rt-a11,route_node=execute,route_hash="+route_hash+","
     "note=automatic-receipt-unavailable-v1")
    metadata_receiptless=(
-    "route_id=rt-a11,route_node=impl-review,"
+    "route_id=rt-a11,route_node=impl-review,route_hash="+route_hash+","
     "note=operator-receiptless-cancel-v1")
    metadata_intent_only=(
-    "route_id=rt-a11,route_node=test,cancellation_intent=1")
+    "route_id=rt-a11,route_node=test,route_hash="+route_hash+",cancellation_intent=1")
    lines=[
     "\t".join(["job","done","worktree","worktree","slug",metadata_cancelled]),
     "\t".join(["job","done","worktree","worktree","slug",metadata_receiptless]),
     "\t".join(["job","open","worktree","worktree","slug",metadata_intent_only]),
    ]
    jobs.write_text("\n".join(lines)+"\n",encoding="utf-8")
-   started=SA.started_nodes(jobs,"rt-a11",0)
+   started=SA.started_nodes(jobs,"rt-a11",route_hash)
   self.assertEqual(started,frozenset({"execute","impl-review","test"}))
 
 

@@ -2517,25 +2517,30 @@ def stage_advance_receipt_block(record: dict[str, object]) -> dict[str, object]:
 def receipt_with_stage_advance(
     receipt: dict[str, object],
     *,
-    negotiated: bool,
     stage_advance_record: dict[str, object] | None = None,
 ) -> dict[str, object]:
     """The only place a delivery receipt's `schema_version` becomes 3.
 
-    An un-negotiated consumer, a delivery with no stage-advance attempt, or a
-    refused stage-advance outcome all return the identical `receipt` object
-    unmodified. Refusal must stay byte-identical to the pre-SD-110 receipt
-    (A-19, 13.32.1-(4): "모든 거부는... 기존 delivery 경로를 그대로 수행한다") --
-    that invariant is enforced here rather than left to each caller to
-    remember, so only an `outcome == "advanced"` record can ever change the
-    receipt a negotiated consumer sees.
+    A delivery with no stage-advance attempt, or a refused stage-advance
+    outcome, returns the identical `receipt` object unmodified. Refusal must
+    stay byte-identical to the pre-SD-110 receipt (A-19, 13.32.1-(4): "모든
+    거부는... 기존 delivery 경로를 그대로 수행한다") -- that invariant is enforced
+    here rather than left to each caller to remember, so only an
+    `outcome == "advanced"` record can ever change the receipt a consumer
+    sees.
+
+    There is deliberately no separate `negotiated` flag. `outcome ==
+    "advanced"` is reachable ONLY if `dispatch_stage_advance.
+    coordinate_stage_advance` already required `receipt_schema_negotiated ==
+    3` from its caller -- it refuses `stage-advance-receipt-schema-
+    unsupported` before ever producing a record otherwise. A second,
+    independently-settable "negotiated" bool here could disagree with that
+    fact (13.32.1-(3)B's forbidden state: advanced outcome, un-negotiated
+    delivery); collapsing to one token makes that combination unrepresentable
+    instead of merely "not currently produced".
     """
 
-    if (
-        not negotiated
-        or stage_advance_record is None
-        or stage_advance_record.get("outcome") != "advanced"
-    ):
+    if stage_advance_record is None or stage_advance_record.get("outcome") != "advanced":
         return receipt
     return {
         **receipt,

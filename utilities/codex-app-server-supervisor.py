@@ -132,10 +132,12 @@ def attempt_stage_advance(
     delivery actually carries the `stage_advance` v3 block" are ONE
     negotiation decision -- an advance the model is never told about is
     exactly the state (3)B forbids. This function's own
-    `--enable-stage-advance` gate (above) is that single condition; the
-    caller must pass it as `receipt_with_stage_advance(..., negotiated=...)`
-    when attaching this function's return value to the delivered receipt
-    (see the `run_join`/`attempt_stage_advance` call site). The durable
+    `--enable-stage-advance` gate (above) is the only thing that lets
+    `receipt_schema_negotiated` become anything other than 2, and
+    `receipt_with_stage_advance` no longer takes an independent `negotiated`
+    flag -- it derives the same fact from whether the returned record itself
+    carries `outcome == "advanced"`, which is unreachable unless this gate
+    already fired. The durable
     `stage_advance_record_v1` for the first `outcome == "advanced"` boundary
     this round is returned so the caller can do exactly that; `None` when
     nothing advanced.
@@ -146,9 +148,12 @@ def attempt_stage_advance(
     if not args.route_file or not args.route_id or not args.route_hash:
         return None
     advanced_record: dict[str, Any] | None = None
-    open_children = any(
-        getattr(row, "status", "") in {"open", "running"} for row in current_rows
-    )
+    open_attempt_ids = frozenset(
+        getattr(row, "attempt_id", "")
+        for row in current_rows
+        if getattr(row, "status", "") in {"open", "running"}
+    ) - {""}
+    open_children = bool(open_attempt_ids)
     by_attempt = {row.attempt_id: row for row in current_rows}
     for attempt_id in sorted(new_attempts):
         row = by_attempt.get(attempt_id)
@@ -170,7 +175,7 @@ def attempt_stage_advance(
             predecessor_terminal_attempt_id=attempt_id,
             parent_attempt_id=args.parent_attempt_id,
             supervisor_phase="running-turn" if open_children else "parked",
-            delivered_open_attempt_ids=frozenset(),
+            delivered_open_attempt_ids=open_attempt_ids,
             receipt_schema_negotiated=3,
             harness="codex",
             worktree=args.worktree,
@@ -363,7 +368,6 @@ def _typed_receipt(
     if accept_stage_advance:
         receipt = receipt_with_stage_advance(
             receipt,
-            negotiated=True,
             stage_advance_record=stage_advance_record,
         )
     return receipt
@@ -1233,7 +1237,6 @@ def main(argv: list[str] | None = None) -> int:
                 # is true AND an outcome=="advanced" record was found.
                 receipt = receipt_with_stage_advance(
                     receipt,
-                    negotiated=getattr(args, "enable_stage_advance", False),
                     stage_advance_record=advanced_record,
                 )
                 emit(

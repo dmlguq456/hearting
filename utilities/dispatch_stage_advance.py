@@ -15,7 +15,9 @@ cost rather than requiring a real process kill.
 
 from __future__ import annotations
 
+import contextlib
 from dataclasses import dataclass
+import fcntl
 import hashlib
 import importlib.util
 import json
@@ -242,6 +244,37 @@ def stage_advance_record_path(jobs: Path, stage_advance_id: str) -> Path:
     return jobs.parent / "stage_advance" / f"{stage_advance_id}.json"
 
 
+@contextlib.contextmanager
+def _stage_advance_transaction_lock(jobs: Path, stage_advance_id: str):
+    """Serialize the ENTIRE gate-close -> intent -> register -> start
+    transition for one `stage_advance_id` across concurrent coordinator
+    processes (T3 correction, round-1 blocking finding 2).
+
+    `dispatch_contract.claim_stage_advance` already CASes the *claim* itself
+    under `<jobs>.lock`, but the record load that decides whether this
+    process even attempts gate-close/claim/start
+    (`coordinate_stage_advance`'s `_load_record` above) happened outside any
+    lock. Two coordinators racing the same just-closed predecessor could both
+    load a record with no `started` phase from stale snapshots and both call
+    `start_successor`, because each held its own in-memory `record` dict and
+    never re-read the other's write. A distinct exclusive flock, keyed by the
+    deterministic `stage_advance_id` (not the shared `<jobs>.lock`, which
+    would serialize unrelated advances against each other), makes the second
+    racer block until the first has fully committed or refused, then observe
+    that committed record via the ordinary `_load_record` replay path instead
+    of independently reaching `start_successor`."""
+
+    lock_dir = jobs.parent / "stage_advance" / "locks"
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    lock_path = lock_dir / f"{stage_advance_id}.lock"
+    with lock_path.open("a", encoding="utf-8") as handle:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
 def completed_nodes(jobs: Path, route_id: str) -> FrozenSet[str]:
     """Canonical completion authority ONLY — the marker directory
     (`capability-route.py:completion_dir`). Never a supervisor-local ledger."""
@@ -263,10 +296,22 @@ def completed_nodes(jobs: Path, route_id: str) -> FrozenSet[str]:
     return frozenset(out)
 
 
-def started_nodes(jobs: Path, route_id: str, generation: int) -> FrozenSet[str]:
-    """Every node id with ANY registry row bound to this route (cancelled rows
-    included — their recovery is SD-105/106's `claim_recovery_retry` path, not
-    stage advance). Fail-closed direction (§4.1)."""
+def started_nodes(jobs: Path, route_id: str, route_hash: str) -> FrozenSet[str]:
+    """Every node id with ANY registry row bound to this exact
+    `(route_id, route_hash)` pair (cancelled rows included — their recovery
+    is SD-105/106's `claim_recovery_retry` path, not stage advance).
+
+    Scoping by `route_hash` — rather than `route_id` alone — is what actually
+    pins `advance_generation` (§4.2): a distinct generation always compiles
+    to a distinct `route_hash` (`advance_generation` is hashed into the route
+    payload, `capability-route.py` continuation compile), and `route_hash` is
+    already recorded on every registry row via the existing `--route-hash`
+    start-wrapper plumbing, so no new metadata is required. Fail-closed
+    direction (§4.1): a row that matches `route_id` but was bound to a
+    different generation's `route_hash` is excluded here so the *current*
+    generation can re-advance a node its predecessor generation already
+    started — filtering on `route_id` alone silently trusted that coupling
+    without checking it."""
 
     if not jobs.is_file():
         return frozenset()
@@ -277,6 +322,8 @@ def started_nodes(jobs: Path, route_id: str, generation: int) -> FrozenSet[str]:
             continue
         metadata = dict(part.split("=", 1) for part in fields[5].split(",") if "=" in part)
         if metadata.get("route_id") != route_id:
+            continue
+        if metadata.get("route_hash") != route_hash:
             continue
         node = metadata.get("route_node")
         if node:
@@ -643,7 +690,11 @@ def coordinate_stage_advance(
         if checkpoint is not None:
             checkpoint(name)
 
-    if request.supervisor_phase not in ("parked", "running-turn"):
+    # §13.32.1-(2)7: advance runs only in `parked` phase, owned open children
+    # 0. `running-turn` is refused unconditionally -- "running-turn에서는
+    # 절대 실행하지 않는다" -- never as a function of the (caller-supplied)
+    # delivered-open set.
+    if request.supervisor_phase != "parked":
         return _refused("stage-advance-phase-ineligible")
     if request.delivered_open_attempt_ids:
         return _refused("stage-advance-phase-ineligible")
@@ -663,7 +714,7 @@ def coordinate_stage_advance(
     route_id = route.get("route_id")
     completed = completed_nodes(request.jobs, route_id)
     generation = advance_generation(route)
-    started = started_nodes(request.jobs, route_id, generation)
+    started = started_nodes(request.jobs, route_id, route.get("route_hash"))
     rows = _stage_advance_rows(request.jobs)
 
     structural = classify_boundary(route, request, rows, completed, started)
@@ -692,147 +743,163 @@ def coordinate_stage_advance(
         successor_node=successor_id,
         gate_evidence_digest=gate_evidence_digest,
     )
-    record_path = stage_advance_record_path(request.jobs, stage_advance_id)
-    seed = stage_advance_record(
-        stage_advance_id=stage_advance_id,
-        route=route,
-        request=request,
-        successor_node=successor_id,
-    )
-    record = _load_record(record_path, seed)
-
-    if record.get("outcome") is not None:
-        return _result_from_record(record, record_path)
-
-    template, brief_digest = render_stage_brief(route, successor_node_dict)
-    generation = advance_generation(route)
-    claim_key = (route.get("route_hash"), successor_id, generation)
-
-    if "gate_closed" not in record["phases"]:
-        cp("before-gate-close")
-        gate_result = services.close_gate(
-            request,
-            node=request.predecessor_node,
-            terminal_attempt_id=request.predecessor_terminal_attempt_id,
-            artifact=evidence,
-        )
-        record["phases"]["gate_closed"] = {
-            "committed_at_ns": time.time_ns(),
-            "evidence": gate_result,
-        }
-        _sync_flat_fields(record)
-        _atomic_json(record_path, record)
-
-    if structural == "stage-advance-commit-expected":
-        record["outcome"] = "refused"
-        record["reason"] = "stage-advance-commit-expected"
-        _sync_flat_fields(record)
-        _atomic_json(record_path, record)
-        return _refused(
-            "stage-advance-commit-expected",
+    with _stage_advance_transaction_lock(request.jobs, stage_advance_id):
+        record_path = stage_advance_record_path(request.jobs, stage_advance_id)
+        seed = stage_advance_record(
             stage_advance_id=stage_advance_id,
+            route=route,
+            request=request,
             successor_node=successor_id,
-            gate_closed=True,
-            record_path=record_path,
         )
+        record = _load_record(record_path, seed)
 
-    if "intent" not in record["phases"]:
-        cp("before-intent")
-        record["phases"]["intent"] = {
-            "committed_at_ns": time.time_ns(),
-            "claim_key": list(claim_key),
-            "successor_node": successor_id,
-            "brief_template_digest": brief_digest,
-        }
-        _sync_flat_fields(record)
-        _atomic_json(record_path, record)
+        if record.get("outcome") is not None:
+            return _result_from_record(record, record_path)
 
-    if "registered" not in record["phases"]:
-        cp("before-register")
-        try:
-            claim = services.claim(
+        template, brief_digest = render_stage_brief(route, successor_node_dict)
+        generation = advance_generation(route)
+        claim_key = (route.get("route_hash"), successor_id, generation)
+
+        if "gate_closed" not in record["phases"]:
+            cp("before-gate-close")
+            gate_result = services.close_gate(
                 request,
-                stage_advance_id=stage_advance_id,
-                claim_key=claim_key,
-                successor_node=successor_id,
+                node=request.predecessor_node,
+                terminal_attempt_id=request.predecessor_terminal_attempt_id,
+                artifact=evidence,
             )
-        except DispatchContractError as exc:
-            if exc.reason == "stage-advance-claim-conflict":
-                return _refused(
-                    "stage-advance-claim-conflict",
-                    stage_advance_id=stage_advance_id,
-                    successor_node=successor_id,
-                    gate_closed=True,
-                    record_path=record_path,
-                )
-            raise
-        record["phases"]["registered"] = {
-            "committed_at_ns": time.time_ns(),
-            "claim": {
-                "stage_advance_id": claim.stage_advance_id,
-                "claim_key": list(claim.claim_key),
-                "successor_attempt_id": claim.successor_attempt_id,
-                "replayed": claim.replayed,
-            },
-        }
-        _sync_flat_fields(record)
-        _atomic_json(record_path, record)
-    else:
-        claim_evidence = record["phases"]["registered"]["claim"]
-        claim = StageAdvanceClaim(
-            stage_advance_id=claim_evidence["stage_advance_id"],
-            claim_key=tuple(claim_evidence["claim_key"]),
-            successor_attempt_id=claim_evidence["successor_attempt_id"],
-            replayed=True,
-        )
-
-    if "started" not in record["phases"]:
-        cp("before-start")
-        prompt_dir = record_path.parent / "prompts"
-        prompt_dir.mkdir(parents=True, exist_ok=True)
-        prompt_file = prompt_dir / f"{stage_advance_id}.md"
-        prompt_file.write_text(template, encoding="utf-8")
-        slug = advance_slug(route_id, successor_id, generation)
-        try:
-            start_result = services.start_successor(
-                request,
-                claim=claim,
-                successor=successor_node_dict,
-                slug=slug,
-                prompt_file=prompt_file,
-            )
-        except StageAdvanceError as exc:
-            # §13.32.1-(3)D: gate close succeeded, successor start failed is a
-            # normal typed re-park point -- marker 1, start 0 -- never an
-            # uncaught crash that would deny the model its resume turn.
-            record["phases"]["started"] = {
+            record["phases"]["gate_closed"] = {
                 "committed_at_ns": time.time_ns(),
-                "result": {"child_spawned": False, "reason": exc.reason},
+                "evidence": gate_result,
             }
-            record["outcome"] = "refused"
-            record["reason"] = "stage-advance-successor-start-failed"
             _sync_flat_fields(record)
             _atomic_json(record_path, record)
-            cp("after-start")
+
+        if structural == "stage-advance-commit-expected":
+            record["outcome"] = "refused"
+            record["reason"] = "stage-advance-commit-expected"
+            _sync_flat_fields(record)
+            _atomic_json(record_path, record)
             return _refused(
-                "stage-advance-successor-start-failed",
+                "stage-advance-commit-expected",
                 stage_advance_id=stage_advance_id,
                 successor_node=successor_id,
                 gate_closed=True,
-                registered=True,
                 record_path=record_path,
             )
-        record["phases"]["started"] = {
-            "committed_at_ns": time.time_ns(),
-            "result": start_result,
-        }
-        record["outcome"] = "advanced"
-        record["reason"] = ""
-        _sync_flat_fields(record)
-        _atomic_json(record_path, record)
-        cp("after-start")
 
-    return _result_from_record(record, record_path)
+        if "intent" not in record["phases"]:
+            cp("before-intent")
+            record["phases"]["intent"] = {
+                "committed_at_ns": time.time_ns(),
+                "claim_key": list(claim_key),
+                "successor_node": successor_id,
+                "brief_template_digest": brief_digest,
+            }
+            _sync_flat_fields(record)
+            _atomic_json(record_path, record)
+
+        if "registered" not in record["phases"]:
+            cp("before-register")
+            try:
+                claim = services.claim(
+                    request,
+                    stage_advance_id=stage_advance_id,
+                    claim_key=claim_key,
+                    successor_node=successor_id,
+                )
+            except DispatchContractError as exc:
+                if exc.reason == "stage-advance-claim-conflict":
+                    return _refused(
+                        "stage-advance-claim-conflict",
+                        stage_advance_id=stage_advance_id,
+                        successor_node=successor_id,
+                        gate_closed=True,
+                        record_path=record_path,
+                    )
+                raise
+            record["phases"]["registered"] = {
+                "committed_at_ns": time.time_ns(),
+                "claim": {
+                    "stage_advance_id": claim.stage_advance_id,
+                    "claim_key": list(claim.claim_key),
+                    "successor_attempt_id": claim.successor_attempt_id,
+                    "replayed": claim.replayed,
+                },
+            }
+            _sync_flat_fields(record)
+            _atomic_json(record_path, record)
+        else:
+            claim_evidence = record["phases"]["registered"]["claim"]
+            claim = StageAdvanceClaim(
+                stage_advance_id=claim_evidence["stage_advance_id"],
+                claim_key=tuple(claim_evidence["claim_key"]),
+                successor_attempt_id=claim_evidence["successor_attempt_id"],
+                replayed=True,
+            )
+
+        if "started" not in record["phases"]:
+            cp("before-start")
+            prompt_dir = record_path.parent / "prompts"
+            prompt_dir.mkdir(parents=True, exist_ok=True)
+            prompt_file = prompt_dir / f"{stage_advance_id}.md"
+            prompt_file.write_text(template, encoding="utf-8")
+            slug = advance_slug(route_id, successor_id, generation)
+            try:
+                start_result = services.start_successor(
+                    request,
+                    claim=claim,
+                    successor=successor_node_dict,
+                    slug=slug,
+                    prompt_file=prompt_file,
+                )
+            except StageAdvanceError as exc:
+                # §13.32.1-(3)D: gate close succeeded, successor start failed is a
+                # normal typed re-park point -- marker 1, start 0 -- never an
+                # uncaught crash that would deny the model its resume turn.
+                #
+                # T3 correction (round-1 blocking finding 3): every prior
+                # nonzero `start_successor` outcome collapsed to the single
+                # generic `stage-advance-successor-start-failed` reason here,
+                # regardless of the typed reason the exception actually
+                # carried -- erasing the three distinct refusal-table rows
+                # (`launch-compatibility-mismatch`, `harness-unavailable`,
+                # `lifecycle-unsupported`) `RealStageAdvanceServices.
+                # start_successor` (or a test-injected services boundary) had
+                # already classified. Use the exception's own typed reason;
+                # only an unrecognized reason (a services boundary bug, not a
+                # real wrapper failure) falls back to the generic one.
+                reason = exc.reason if exc.reason in REFUSAL_REASONS else (
+                    "stage-advance-successor-start-failed"
+                )
+                record["phases"]["started"] = {
+                    "committed_at_ns": time.time_ns(),
+                    "result": {"child_spawned": False, "reason": reason},
+                }
+                record["outcome"] = "refused"
+                record["reason"] = reason
+                _sync_flat_fields(record)
+                _atomic_json(record_path, record)
+                cp("after-start")
+                return _refused(
+                    reason,
+                    stage_advance_id=stage_advance_id,
+                    successor_node=successor_id,
+                    gate_closed=True,
+                    registered=True,
+                    record_path=record_path,
+                )
+            record["phases"]["started"] = {
+                "committed_at_ns": time.time_ns(),
+                "result": start_result,
+            }
+            record["outcome"] = "advanced"
+            record["reason"] = ""
+            _sync_flat_fields(record)
+            _atomic_json(record_path, record)
+            cp("after-start")
+
+        return _result_from_record(record, record_path)
 
 
 def _result_from_record(record: dict, record_path: Path) -> StageAdvanceResult:
@@ -961,6 +1028,43 @@ def _load_and_verify_route(route_file: Path) -> dict:
 # --------------------------------------------------------------------------
 
 
+# T3 correction (round-1 blocking finding 3): `stage-dispatch-fallback.py
+# --start`'s own typed `reason=` vocabulary, not a parallel one invented
+# here. `launch-runtime-root-mismatch` / `launch-compatibility-tuple-required`
+# are its SD-107 launch-compatibility-tuple revalidation failures (the ONLY
+# other source was the local self-hash check in `_load_and_verify_route`,
+# which never observes a REAL wrapper failure). `fallback-chain-exhausted` is
+# what the wrapper emits once every candidate hop has been skipped as
+# unsupported/failed/usage-limited -- "harness-unavailable" in the refusal
+# table's words. `unsupported-native-execution-surface` is the wrapper
+# refusing to service a launch lifecycle its own launch fence cannot host.
+_WRAPPER_LAUNCH_COMPATIBILITY_MISMATCH_REASONS = frozenset({
+    "launch-runtime-root-mismatch",
+    "launch-compatibility-tuple-required",
+})
+_WRAPPER_HARNESS_UNAVAILABLE_REASONS = frozenset({
+    "fallback-chain-exhausted",
+})
+_WRAPPER_LIFECYCLE_UNSUPPORTED_REASONS = frozenset({
+    "unsupported-native-execution-surface",
+})
+
+
+def _classify_wrapper_start_failure(reason: str) -> str:
+    """Map one `stage-dispatch-fallback.py --start` typed `reason=` value to
+    its §13.32.1-(4) refusal row. Anything not in the closed sets above falls
+    back to the generic `stage-advance-successor-start-failed` -- the same
+    outcome every wrapper failure used to collapse to unconditionally."""
+
+    if reason in _WRAPPER_LAUNCH_COMPATIBILITY_MISMATCH_REASONS:
+        return "stage-advance-launch-compatibility-mismatch"
+    if reason in _WRAPPER_HARNESS_UNAVAILABLE_REASONS:
+        return "stage-advance-harness-unavailable"
+    if reason in _WRAPPER_LIFECYCLE_UNSUPPORTED_REASONS:
+        return "stage-advance-lifecycle-unsupported"
+    return "stage-advance-successor-start-failed"
+
+
 class RealStageAdvanceServices:
     """Checked subprocess boundary. `close_gate` calls
     `capability-route.py complete` (the identical command
@@ -1079,9 +1183,10 @@ class RealStageAdvanceServices:
             ) from exc
         fields = FALLBACK.output_fields((completed.stdout or "") + (completed.stderr or ""))
         if completed.returncode != 0 or fields.get("check") == "failed":
+            wrapper_reason = fields.get("reason") or ""
             raise StageAdvanceError(
-                "stage-advance-successor-start-failed",
-                fields.get("reason") or (completed.stderr or completed.stdout or "")[:200],
+                _classify_wrapper_start_failure(wrapper_reason),
+                wrapper_reason or (completed.stderr or completed.stdout or "")[:200],
             )
         return {
             "child_spawned": fields.get("child_spawned", "1") != "0",

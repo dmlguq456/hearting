@@ -1392,6 +1392,7 @@ class StageAdvanceWiringTest(unittest.TestCase):
         self.assertEqual(request.predecessor_terminal_attempt_id, "att-child")
         self.assertEqual(request.parent_attempt_id, PARENT)
         self.assertEqual(request.supervisor_phase, "parked")
+        self.assertEqual(request.delivered_open_attempt_ids, frozenset())
         self.assertEqual(request.receipt_schema_negotiated, 3)
         self.assertIsInstance(
             coordinate.call_args[0][1], supervisor.stage_advance.RealStageAdvanceServices
@@ -1413,8 +1414,19 @@ class StageAdvanceWiringTest(unittest.TestCase):
         self.assertEqual(event["parent_attempt_id"], PARENT)
 
     def test_open_sibling_reports_running_turn_phase(self):
+        """T1 correction (round-1 blocking finding 1): the real intersection
+        of currently open/running attempt ids must reach the core as
+        `delivered_open_attempt_ids`, not an unconditional empty frozenset --
+        that constant is exactly what let a live path start a successor
+        while another child remained open, because the one guard meant to
+        catch it (`request.delivered_open_attempt_ids`) could never fire."""
+
         args = self._args(enable_stage_advance=True)
-        rows = [self._row("att-child"), self._row("att-open", status="open")]
+        rows = [
+            self._row("att-child"),
+            self._row("att-open", status="open"),
+            self._row("att-running", status="running"),
+        ]
         fake_result = supervisor.stage_advance.StageAdvanceResult(
             outcome="refused", reason="stage-advance-phase-ineligible",
             stage_advance_id="", successor_node=None, successor_attempt_id=None,
@@ -1428,6 +1440,9 @@ class StageAdvanceWiringTest(unittest.TestCase):
             supervisor.attempt_stage_advance(args, rows, {"att-child"})
         request = coordinate.call_args[0][0]
         self.assertEqual(request.supervisor_phase, "running-turn")
+        self.assertEqual(
+            request.delivered_open_attempt_ids, frozenset({"att-open", "att-running"})
+        )
         self.assertEqual(self.events[0]["type"], "dispatch.supervisor.stage-advance-refused")
         self.assertNotIn("delivery_timing", self.events[0])
 
@@ -1509,23 +1524,33 @@ class StageAdvanceWiringTest(unittest.TestCase):
         # The single condition ON: this is the only path that may ever
         # produce a v3 delivery.
         negotiated_delivery = join.receipt_with_stage_advance(
-            base_receipt, negotiated=True, stage_advance_record=returned
+            base_receipt, stage_advance_record=returned
         )
         self.assertEqual(negotiated_delivery["schema_version"], 3)
         self.assertEqual(
             negotiated_delivery["stage_advance"]["outcome"], "advanced"
         )
-        # The same condition OFF (mirrors `--enable-stage-advance` unset, or
-        # any caller that fails to thread the boolean through): an
-        # `outcome == "advanced"` record must never coexist with a v2
-        # delivery. This is the exact defect round 4 closes -- assert it can
-        # never regress.
-        un_negotiated_delivery = join.receipt_with_stage_advance(
-            base_receipt, negotiated=False, stage_advance_record=returned
+        # T1 correction: `receipt_with_stage_advance` no longer accepts an
+        # independent `negotiated` bool that could disagree with the
+        # `enable_stage_advance` gate that produced `returned` in the first
+        # place -- `--enable-stage-advance` unset means `attempt_stage_advance`
+        # itself returns `None` (asserted elsewhere), so the only way to reach
+        # a v2 delivery here is `stage_advance_record=None`. An
+        # `outcome == "advanced"` record can therefore never coexist with a
+        # v2 delivery: the incoherent combination round 4 fixed is now
+        # unrepresentable, not merely untriggered.
+        import inspect  # noqa: PLC0415
+
+        self.assertNotIn(
+            "negotiated",
+            inspect.signature(join.receipt_with_stage_advance).parameters,
         )
-        self.assertEqual(un_negotiated_delivery["schema_version"], 2)
-        self.assertNotIn("stage_advance", un_negotiated_delivery)
-        self.assertIs(un_negotiated_delivery, base_receipt)
+        recordless_delivery = join.receipt_with_stage_advance(
+            base_receipt, stage_advance_record=None
+        )
+        self.assertEqual(recordless_delivery["schema_version"], 2)
+        self.assertNotIn("stage_advance", recordless_delivery)
+        self.assertIs(recordless_delivery, base_receipt)
 
 
 if __name__ == "__main__":

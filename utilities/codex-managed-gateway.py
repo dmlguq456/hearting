@@ -1402,7 +1402,7 @@ class ManagedGateway:
         }
         if stage_advance is not None:
             normalized = receipt_with_stage_advance(
-                normalized, negotiated=True, stage_advance_record=stage_advance,
+                normalized, stage_advance_record=stage_advance,
             )
         receipt_bytes = canonical(normalized).encode("utf-8")
         if len(receipt_bytes) > MAX_RECEIPT_BYTES:

@@ -1896,7 +1896,7 @@ class StageAdvanceReceiptNegotiationTest(unittest.TestCase):
             json.dumps(block, sort_keys=True), json.dumps(expected, sort_keys=True)
         )
 
-    def test_a18_unnegotiated_or_recordless_receipt_is_byte_identical(self):
+    def test_a18_recordless_or_refused_receipt_is_byte_identical(self):
         receipt = {
             "schema_version": 2,
             "state": "ready",
@@ -1904,21 +1904,33 @@ class StageAdvanceReceiptNegotiationTest(unittest.TestCase):
             "children": [],
         }
         golden = json.dumps(receipt, sort_keys=True)
-        advanced = self._record(outcome="advanced")
-        # un-negotiated consumer: literally returns the same object.
-        out = JOIN.receipt_with_stage_advance(
-            receipt, negotiated=False, stage_advance_record=advanced
-        )
+        # no stage-advance attempt this delivery.
+        out = JOIN.receipt_with_stage_advance(receipt, stage_advance_record=None)
         self.assertIs(out, receipt)
         self.assertEqual(json.dumps(out, sort_keys=True), golden)
-        # negotiated consumer, no stage-advance attempt this delivery.
+        # a refused record is equally inert -- no separate "negotiated" flag
+        # can make a refused outcome carry the v3 block.
         out = JOIN.receipt_with_stage_advance(
-            receipt, negotiated=True, stage_advance_record=None
+            receipt, stage_advance_record=self._record(outcome="refused")
         )
         self.assertIs(out, receipt)
         self.assertEqual(json.dumps(out, sort_keys=True), golden)
 
-    def test_a19_every_refusal_reason_is_byte_identical_even_when_negotiated(self):
+    def test_no_negotiated_kwarg_exists(self):
+        """T1 correction: `receipt_with_stage_advance` used to accept an
+        independent `negotiated` bool that could disagree with the record's
+        own `outcome` (13.32.1-(3)B's forbidden state -- advanced outcome,
+        un-negotiated delivery). Asserting the parameter is entirely gone
+        (not merely defaulted) is what makes that combination
+        unrepresentable rather than "not currently produced": a future call
+        site cannot resurrect the second knob by accident."""
+
+        import inspect  # noqa: PLC0415
+
+        params = inspect.signature(JOIN.receipt_with_stage_advance).parameters
+        self.assertNotIn("negotiated", params)
+
+    def test_a19_every_refusal_reason_is_byte_identical(self):
         import dispatch_stage_advance as SA  # noqa: PLC0415
 
         receipt = {
@@ -1933,7 +1945,6 @@ class StageAdvanceReceiptNegotiationTest(unittest.TestCase):
             with self.subTest(reason=reason):
                 out = JOIN.receipt_with_stage_advance(
                     receipt,
-                    negotiated=True,
                     stage_advance_record=self._record(
                         outcome="refused", reason=reason
                     ),
@@ -1941,7 +1952,7 @@ class StageAdvanceReceiptNegotiationTest(unittest.TestCase):
                 self.assertIs(out, receipt)
                 self.assertEqual(json.dumps(out, sort_keys=True), golden)
 
-    def test_negotiated_advanced_outcome_attaches_v3_block_only(self):
+    def test_advanced_outcome_attaches_v3_block(self):
         receipt = {
             "schema_version": 2,
             "state": "ready",
@@ -1949,9 +1960,7 @@ class StageAdvanceReceiptNegotiationTest(unittest.TestCase):
             "children": [],
         }
         record = self._record(outcome="advanced")
-        out = JOIN.receipt_with_stage_advance(
-            receipt, negotiated=True, stage_advance_record=record
-        )
+        out = JOIN.receipt_with_stage_advance(receipt, stage_advance_record=record)
         self.assertIsNot(out, receipt)
         self.assertEqual(out["schema_version"], JOIN.STAGE_ADVANCE_SCHEMA_VERSION)
         self.assertEqual(out["state"], receipt["state"])

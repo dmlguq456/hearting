@@ -283,7 +283,6 @@ def normalize_receipt(
     if accept_stage_advance:
         normalized = receipt_with_stage_advance(
             normalized,
-            negotiated=True,
             stage_advance_record=stage_advance_record,
         )
     if len(canonical(normalized).encode("utf-8")) > MAX_RECEIPT_BYTES:

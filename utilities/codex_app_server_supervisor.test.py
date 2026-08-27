@@ -972,6 +972,7 @@ class StageAdvanceWiringTest(unittest.TestCase):
         self.assertEqual(request.predecessor_terminal_attempt_id, "att-child")
         self.assertEqual(request.parent_attempt_id, PARENT)
         self.assertEqual(request.supervisor_phase, "parked")
+        self.assertEqual(request.delivered_open_attempt_ids, frozenset())
         self.assertEqual(request.harness, "codex")
         self.assertEqual(request.receipt_schema_negotiated, 3)
         self.assertIsInstance(
@@ -995,8 +996,17 @@ class StageAdvanceWiringTest(unittest.TestCase):
         self.assertIsInstance(canary["next_stage_start_ns"], int)
 
     def test_open_sibling_reports_running_turn_phase(self):
+        """T1 correction (round-1 blocking finding 1): the real open/running
+        attempt-id intersection must reach the core, not an unconditional
+        empty frozenset -- mirrors
+        claude_session_supervisor.test.py's symmetric assertion."""
+
         args = self._args(enable_stage_advance=True)
-        rows = [self._row("att-child"), self._row("att-open", status="open")]
+        rows = [
+            self._row("att-child"),
+            self._row("att-open", status="open"),
+            self._row("att-running", status="running"),
+        ]
         fake_result = self.module.stage_advance.StageAdvanceResult(
             outcome="refused", reason="stage-advance-phase-ineligible",
             stage_advance_id="", successor_node=None, successor_attempt_id=None,
@@ -1010,6 +1020,9 @@ class StageAdvanceWiringTest(unittest.TestCase):
             self.module.attempt_stage_advance(args, rows, {"att-child"})
         request = coordinate.call_args[0][0]
         self.assertEqual(request.supervisor_phase, "running-turn")
+        self.assertEqual(
+            request.delivered_open_attempt_ids, frozenset({"att-open", "att-running"})
+        )
         self.assertEqual(self.events[0]["type"], "dispatch.supervisor.stage-advance-refused")
         self.assertNotIn("delivery_timing", self.events[0])
 
@@ -1090,18 +1103,27 @@ class StageAdvanceWiringTest(unittest.TestCase):
             "children": [],
         }
         negotiated_delivery = self.module.receipt_with_stage_advance(
-            base_receipt, negotiated=True, stage_advance_record=returned
+            base_receipt, stage_advance_record=returned
         )
         self.assertEqual(negotiated_delivery["schema_version"], 3)
         self.assertEqual(
             negotiated_delivery["stage_advance"]["outcome"], "advanced"
         )
-        un_negotiated_delivery = self.module.receipt_with_stage_advance(
-            base_receipt, negotiated=False, stage_advance_record=returned
+        # T1 correction: no independent `negotiated` bool exists anymore --
+        # see the symmetric assertion/comment in
+        # claude_session_supervisor.test.py.
+        import inspect  # noqa: PLC0415
+
+        self.assertNotIn(
+            "negotiated",
+            inspect.signature(self.module.receipt_with_stage_advance).parameters,
         )
-        self.assertEqual(un_negotiated_delivery["schema_version"], 2)
-        self.assertNotIn("stage_advance", un_negotiated_delivery)
-        self.assertIs(un_negotiated_delivery, base_receipt)
+        recordless_delivery = self.module.receipt_with_stage_advance(
+            base_receipt, stage_advance_record=None
+        )
+        self.assertEqual(recordless_delivery["schema_version"], 2)
+        self.assertNotIn("stage_advance", recordless_delivery)
+        self.assertIs(recordless_delivery, base_receipt)
 
 
 if __name__ == "__main__":
