@@ -144,7 +144,7 @@ echo "ok   - compile: real route compiled through the symlinked installed layout
 echo "== phase 2+3: seal a predecessor row + run RealStageAdvanceServices end to end =="
 env -u AGENT_HOME -u CLAUDE_HOME HOME="$RUNENV_HOME" AGENT_DISPATCH_JOBS="$JOBS" \
   python3 - "$ROUTE_FILE" "$JOBS" "$WORKTREE" "$ARTIFACT_PATH" "$TMP" "$REAL_ARTIFACT_ROOT" <<'PYEOF'
-import json, sys, time
+import json, os, subprocess, sys, time
 from pathlib import Path
 
 route_file, jobs, worktree, artifact_path, tmp, real_artifact_root = sys.argv[1:7]
@@ -400,6 +400,169 @@ if not verify_result.gate_closed:
     ok("A-5: gate close 0 on evidence-unreadable, as the reason table requires")
 else:
     bad("A-5: gate_closed was True on an evidence-unreadable refusal")
+
+# --- phase 6 (round-2 correction, impl-review finding F6): real
+# installed-layout proof for the `stage-dispatch-fallback.py --start` typed
+# `reason=` values `_classify_wrapper_start_failure` maps -- through the REAL
+# wrapper subprocess and the REAL `capability-route.py verify` subprocess it
+# execs internally (never a mocked `subprocess.run`), on JSON copies of the
+# SAME real route phase 1 compiled. Only fields the wrapper itself
+# real-checks are mutated, and each copy's `route_hash`/`route_id` is
+# recomputed for real with `SA.ROUTE.route_hash` so the copy stays
+# internally tamper-evident (never a route the wrapper would refuse for a
+# reason OTHER than the one under test).
+#
+# Two of the three rows this round was asked to prove are exercised for real
+# below: `stage-advance-launch-compatibility-mismatch` (wrapper reason
+# `launch-compatibility-tuple-required`, decided by `capability-route.py
+# verify --launch-phase start`'s `launch_compatibility_tuple` revalidation)
+# and the generic-fallback row (wrapper reason `legacy-broker-route-read-only`,
+# decided by the wrapper's own `dispatch_contract_version` gate). Both
+# checks run BEFORE the wrapper's per-hop candidate loop, so proving them
+# needs no live harness spawn and no credentials -- unlike A-1 above.
+#
+# The other two rows (`stage-advance-harness-unavailable` /
+# `fallback-chain-exhausted`, and `stage-advance-lifecycle-unsupported` /
+# `unsupported-native-execution-surface`) are NOT exercised for real here.
+# This was verified empirically against the real wrapper in this same
+# sandbox, not assumed: (a) `fallback-chain-exhausted` is the wrapper's
+# trailing failure after its per-node hop loop runs out of hops, but the
+# loop's mandatory last hop (`inline`, required by `load_node`'s own
+# ORDER-equality check) unconditionally returns its own compile-time-fixed
+# `reason=runtime-unavailable` first -- the trailing `fail(...)` call is
+# unreachable through any `--start` invocation on a schema-valid route,
+# independent of live credentials. (b) `unsupported-native-execution-surface`
+# requires a `native-subagent` hop candidate whose harness has no
+# `codex`/`claude` surface mapping, but `capability-route.py verify` recomputes
+# each dispatch-depth-2 node's expected fallback chain from the route's own
+# embedded `dispatch_evidence` and refuses the route if the node's
+# `fallback_hops` differ (`fallback differs from checked evidence`), and that
+# same evidence's own native-subagent normalizer rejects any harness outside
+# {codex, claude} at compile time -- so no route that would pass real
+# `verify` can carry the unsupported-harness candidate this reason needs.
+# Both remain proven only at the unit level (`WrapperFailureClassificationTest`
+# in dispatch_stage_advance.test.py, pure-classifier plus a mocked
+# `subprocess.run`) -- a stated gap, not a faked green.
+print("== phase 6: real wrapper subprocess proof for two typed start-failure reasons ==")
+self_slug = os.environ.get("AGENT_DISPATCH_SELF_SLUG") or "att-sd110-owner-fixture"
+verify_node = next(n for n in route["nodes"] if n["id"] == result.successor_node)
+saved_dispatch_jobs_env = os.environ.get("AGENT_DISPATCH_JOBS")
+
+
+def rehash(mutated):
+    mutated["route_hash"] = SA.ROUTE.route_hash(mutated)
+    mutated["route_id"] = "rt-" + mutated["route_hash"].split(":", 1)[1][:16]
+
+
+def real_wrapper_case(mutated_route, label):
+    """Run the REAL wrapper --start subprocess twice on the same mutated,
+    rehashed route copy: once directly (to inspect its raw output fields --
+    the `registered=`/`started=`/`child_spawned=` side-effect proof) and
+    once through `RealStageAdvanceServices.start_successor` itself (to prove
+    the classifier `_classify_wrapper_start_failure` actually sees and maps
+    that same real output, not a stand-in)."""
+
+    case_jobs = Path(tmp) / f"jobs-{label}" / "jobs.log"
+    case_jobs.parent.mkdir(parents=True, exist_ok=True)
+    case_jobs.touch()
+    mutated_route_file = Path(tmp) / f"{label}.json"
+    mutated_route_file.write_text(json.dumps(mutated_route), encoding="utf-8")
+    os.environ["AGENT_DISPATCH_JOBS"] = str(case_jobs)
+    raw_command = [
+        sys.executable, str(SA.ROOT / "utilities" / "stage-dispatch-fallback.py"),
+        "--route", str(mutated_route_file), "--node", verify_node["id"], "--slug", label,
+        "--parent", self_slug, "--capability-mode", mutated_route.get("capability_mode") or "",
+        "--worker-mode", verify_node.get("unit") or "", "--qa", "standard",
+        "--model-role", "fast implementer", "--prompt-file", str(mutated_route_file),
+        "--jobs", str(case_jobs), "--start",
+    ]
+    raw = subprocess.run(raw_command, text=True, capture_output=True)
+    raw_fields = SA.FALLBACK.output_fields((raw.stdout or "") + (raw.stderr or ""))
+
+    req = SA.StageAdvanceRequest(
+        jobs=case_jobs, route_file=mutated_route_file, predecessor_node="apply",
+        predecessor_terminal_attempt_id="att-sd110-apply-fixture",
+        parent_attempt_id=self_slug, supervisor_phase="parked",
+        delivered_open_attempt_ids=frozenset(), receipt_schema_negotiated=3,
+        harness="claude", worktree=worktree,
+    )
+    claim = SA.StageAdvanceClaim(
+        stage_advance_id=f"sadv-{label}", claim_key=(mutated_route["route_hash"], verify_node["id"], 0),
+        successor_attempt_id=f"att-{label}-successor", replayed=False,
+    )
+    try:
+        SA.RealStageAdvanceServices().start_successor(
+            req, claim=claim, successor=verify_node, slug=label, prompt_file=mutated_route_file,
+        )
+    except SA.StageAdvanceError as exc:
+        mapped_reason = exc.reason
+    else:
+        mapped_reason = None
+    return raw_fields, mapped_reason
+
+
+# --- case A: launch-compatibility-mismatch, real wrapper reason
+# `launch-compatibility-tuple-required` (missing/legacy launch compatibility
+# tuple -- the same real revalidation `capability-route.py verify
+# --launch-phase start` performs for a live launch, never mocked).
+route_mismatch = json.loads(json.dumps(route))
+route_mismatch.pop("launch_compatibility_tuple", None)
+rehash(route_mismatch)
+mismatch_raw, mismatch_mapped = real_wrapper_case(route_mismatch, "sd110-f6-mismatch")
+print(f"     case A raw wrapper fields: reason={mismatch_raw.get('reason')} "
+      f"registered={mismatch_raw.get('registered')} started={mismatch_raw.get('started')} "
+      f"child_spawned={mismatch_raw.get('child_spawned')}")
+if mismatch_raw.get("reason") == "launch-compatibility-tuple-required":
+    ok("case A: real wrapper subprocess emits the real "
+       "reason=launch-compatibility-tuple-required for a missing launch compatibility tuple")
+else:
+    bad("case A: unexpected raw wrapper reason", str(mismatch_raw.get("reason")))
+if (mismatch_raw.get("registered"), mismatch_raw.get("started"), mismatch_raw.get("child_spawned")) == ("0", "0", "0"):
+    ok("case A: real wrapper output proves zero side effects "
+       "(registered=0 started=0 child_spawned=0)")
+else:
+    bad("case A: expected registered=0 started=0 child_spawned=0", str(mismatch_raw))
+if mismatch_mapped == "stage-advance-launch-compatibility-mismatch":
+    ok("case A: RealStageAdvanceServices.start_successor classifies the real "
+       "wrapper failure as stage-advance-launch-compatibility-mismatch")
+else:
+    bad("case A: expected mapped reason stage-advance-launch-compatibility-mismatch",
+        str(mismatch_mapped))
+
+# --- case B: an unclassified real wrapper reason (`legacy-broker-route-read-only`,
+# from the wrapper's own `dispatch_contract_version` gate -- outside all three
+# closed classification sets) still degrades to the generic
+# stage-advance-successor-start-failed, proven through the real wrapper, not
+# an injected string.
+route_legacy = json.loads(json.dumps(route))
+route_legacy["dispatch_contract_version"] = 1
+rehash(route_legacy)
+legacy_raw, legacy_mapped = real_wrapper_case(route_legacy, "sd110-f6-legacy")
+print(f"     case B raw wrapper fields: reason={legacy_raw.get('reason')}")
+if legacy_raw.get("reason") == "legacy-broker-route-read-only":
+    ok("case B: real wrapper subprocess emits the real "
+       "reason=legacy-broker-route-read-only for a downgraded dispatch_contract_version")
+else:
+    bad("case B: unexpected raw wrapper reason", str(legacy_raw.get("reason")))
+if legacy_mapped == "stage-advance-successor-start-failed":
+    ok("case B: an unclassified real wrapper reason still falls back to "
+       "stage-advance-successor-start-failed, not a crash and not a silent drop")
+else:
+    bad("case B: expected mapped reason stage-advance-successor-start-failed",
+        str(legacy_mapped))
+
+if saved_dispatch_jobs_env is None:
+    os.environ.pop("AGENT_DISPATCH_JOBS", None)
+else:
+    os.environ["AGENT_DISPATCH_JOBS"] = saved_dispatch_jobs_env
+
+print(
+    "note - F6: stage-advance-harness-unavailable (fallback-chain-exhausted) and "
+    "stage-advance-lifecycle-unsupported (unsupported-native-execution-surface) stay "
+    "unit-only-proven -- verified unreachable through any real --start invocation on a "
+    "schema-valid route in this sandbox (see the phase 6 header comment above for the "
+    "concrete reason), not a live-credential gap and not asserted here."
+)
 
 print("---")
 if fails == 0:
