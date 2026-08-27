@@ -2093,4 +2093,21 @@ class GroundingCwdLineageTest(unittest.TestCase):
   self.assertFalse(ok); self.assertIn("grounding_roots.cwd",mismatches)
 
 
+class ContinuationSealedJobsFallbackTest(unittest.TestCase):
+ """A pruned release tree must not strand a continuation on its sealed jobs root."""
+ def test_missing_sealed_root_falls_back_to_canonical(self):
+  route={"launch_compatibility_tuple":{"jobs_path":{"path":"/nonexistent-release/.dispatch/jobs.log"}}}
+  resolved=R._continuation_source_jobs(route)
+  self.assertTrue(str(resolved).endswith("/.dispatch/jobs.log"))
+  self.assertNotIn("nonexistent-release",str(resolved))
+ def test_existing_sealed_root_is_preserved(self):
+  with tempfile.TemporaryDirectory() as tmp:
+   d=Path(tmp)/".dispatch"; d.mkdir()
+   route={"launch_compatibility_tuple":{"jobs_path":{"path":str(d/"jobs.log")}}}
+   self.assertEqual(R._continuation_source_jobs(route),d/"jobs.log")
+ def test_unresolved_binding_still_fails_closed(self):
+  with self.assertRaises(ValueError):
+   R._continuation_source_jobs({"launch_compatibility_tuple":{"jobs_path":{"path":"relative/jobs.log"}}})
+
+
 if __name__=="__main__": unittest.main()

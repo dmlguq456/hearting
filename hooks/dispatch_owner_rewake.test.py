@@ -764,3 +764,24 @@ class RegistryCanonicalJobsFallbackTest(RegistryConfirmArmTest):
         with mock.patch.object(rewake, "_canonical_jobs", return_value=None):
             self.assertIsNone(rewake.registry_launch(self.payload()))
         self.canonical.start()
+
+
+class PreflightLaunchSurfaceTest(unittest.TestCase):
+    """`preflight.sh dispatch-owner --start` is a recognized owner-start surface."""
+
+    def test_preflight_wrapper_start_is_recognized(self) -> None:
+        self.assertEqual(
+            rewake._start_surface(
+                '"$AGENT_HOME/adapters/codex/bin/preflight.sh" dispatch-owner '
+                "--start --slug s --jobs /tmp/j.log"
+            ),
+            "dispatch-owner",
+        )
+        self.assertEqual(
+            rewake._start_surface("preflight.sh dispatch-node --action start --node plan"),
+            "dispatch-node",
+        )
+
+    def test_unrelated_mentions_still_never_arm(self) -> None:
+        self.assertIsNone(rewake._start_surface("grep dispatch-owner --start jobs.log"))
+        self.assertIsNone(rewake._start_surface("cat preflight.sh dispatch-owner"))

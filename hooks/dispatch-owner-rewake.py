@@ -108,7 +108,13 @@ def _start_surface(command: str) -> str | None:
             continue
         if index:
             launcher = Path(parts[index - 1]).name
-            if re.fullmatch(r"python(?:3(?:\.\d+)?)?", launcher) is None:
+            # `preflight.sh dispatch-owner --start` is the adapters' documented
+            # launch surface; recognizing only a python launcher left every such
+            # owner unarmed (observed 2026-08-27, cairn att-092eb89f/att-5da8bc24).
+            if (
+                re.fullmatch(r"python(?:3(?:\.\d+)?)?", launcher) is None
+                and launcher != "preflight.sh"
+            ):
                 continue
         end = index + 1
         while end < len(parts) and parts[end] not in separators:

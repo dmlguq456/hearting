@@ -327,7 +327,18 @@ def _continuation_source_jobs(source_route):
     )
     if not isinstance(jobs,str) or not jobs or not Path(jobs).is_absolute():
         raise ValueError("continuation-source-jobs-binding-unresolved")
-    return Path(jobs).resolve(strict=False)
+    sealed=Path(jobs).resolve(strict=False)
+    if sealed.parent.is_dir():
+        return sealed
+    # A managed release upgrade prunes old release trees, and the sealed
+    # `.dispatch` root lives inside one (observed 2026-08-27: rt-eab5eba8's
+    # v2.80.1 root vanished while its migrated completion markers live under
+    # the current release). The markers/attempt links that continuation reads
+    # are migrated to the canonical live root, and every marker is still
+    # verified against the route binding and exact attempt link — so when the
+    # sealed root itself is gone, resolve the live canonical root instead of
+    # refusing with a dangling path.
+    return resolve_dispatch_state_root(resolve_agent_home(),None)/"jobs.log"
 
 def _continuation_reused_evidence(route, node):
     """Read one reusable node from its canonical marker and exact attempt link."""
