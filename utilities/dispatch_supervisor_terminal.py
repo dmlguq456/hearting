@@ -241,6 +241,10 @@ def classify_supervisor_attention_terminal(runtime: str, reason: str) -> Supervi
 
     Sealed only from that proof, never from an exhausted redelivery bound --
     see ``classify_supervisor_abandonment_terminal`` for that separate ground.
+
+    ``runtime`` is unused today and kept only for signature parity with
+    ``classify_supervisor_error``, so the three constructors stay callable
+    through one shape.
     """
 
     return SupervisorTerminal(
@@ -259,6 +263,8 @@ def classify_supervisor_abandonment_terminal(runtime: str, reason: str) -> Super
     This claims no more than that. It is never sealed from a non-advancing
     row alone, and it must never be confused with
     ``classify_supervisor_attention_terminal``'s protocol-failure ground.
+
+    ``runtime`` is unused today, for the same signature-parity reason.
     """
 
     return SupervisorTerminal(
