@@ -365,7 +365,14 @@ class RegisteredParentParkTest(unittest.TestCase):
             f"adapters/codex/bin/preflight.sh harvest --attempt-id {CHILD} --status open"
         )
         denied_line = f"utilities/dispatch-wait.sh --attempt-id {CHILD} --max 600"
-        guarded_attempts = {CHILD}  # open row, no outbox -- matches setUp's single child
+        # Derived by the one helper the hook itself now calls, so this parity
+        # cannot be preserved by a fixture that happens to agree while the two
+        # derivations drift apart.
+        guarded_attempts = JOIN.supervisor_guarded_attempt_ids(
+            JOIN.current_children(self.jobs, PARENT),
+            JOIN.read_supervisor_phase_state(self.state, PARENT).outbox,
+        )
+        self.assertEqual(guarded_attempts, {CHILD})
         for line, hook_admits in ((admitted_line, True), (denied_line, False)):
             with self.subTest(line=line):
                 precheck_satisfiable, _ = JOIN.supervisor_receipt_satisfiable(

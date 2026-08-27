@@ -2155,6 +2155,28 @@ def pending_attempt_ids(rows: list[ChildRow]) -> set[str]:
     return pending
 
 
+def supervisor_guarded_attempt_ids(
+    rows: list[ChildRow],
+    outbox: "SupervisorOutbox | None",
+) -> set[str]:
+    """The exact attempt set ``hooks/registered-parent-park.py`` guards on.
+
+    One derivation, two callers: the park hook enforces it, and a supervisor
+    D2a precheck (``supervisor_receipt_satisfiable``) must answer with the
+    same set or it can report a command satisfiable that the guard then
+    denies -- worse than no precheck at all (plan SS3.4 D2a, fixture D-6c).
+    Reads log files through ``pending_attempt_ids``; mutates nothing.
+    """
+
+    guarded = {row.attempt_id for row in rows if row.status in {"open", "running"}}
+    guarded.update(pending_attempt_ids(rows))
+    if outbox is not None:
+        guarded.update(
+            set(outbox.attempt_ids).difference(outbox.consumed_attempt_ids)
+        )
+    return guarded
+
+
 def _liveness_state(
     row: ChildRow,
     command: list[str],

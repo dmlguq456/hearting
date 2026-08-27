@@ -35,6 +35,7 @@ def seal_route(value: dict) -> dict:
     value["route_id"] = "rt-" + value["route_hash"].split(":", 1)[1][:16]
     return value
 sys.path.insert(0, str(ROOT / "utilities"))
+import dispatch_completion_join as join  # noqa: E402
 _SPEC = importlib.util.spec_from_file_location("claude_session_supervisor", SUPERVISOR)
 supervisor = importlib.util.module_from_spec(_SPEC)
 assert _SPEC.loader is not None
@@ -975,6 +976,258 @@ class ClaudeSessionSupervisorTest(unittest.TestCase):
         for turn in turns[1:]:
             self.assertTrue(turn["resume"])
             self.assertNotIn("Runtime completion contract violation", turn["prompt"])
+
+    # -- Phase D2 (plan SS3.4 D2a/D2b, checklist DC-6/DC-7/DC-8b/DC-14) --
+
+    def _events(self, stdout: str) -> list[dict]:
+        rows = []
+        for line in stdout.splitlines():
+            try:
+                value = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(value, dict):
+                rows.append(value)
+        return rows
+
+    def _turn_starts(self) -> list[dict]:
+        return [
+            json.loads(line)
+            for line in self.trace.read_text().splitlines()
+            if json.loads(line)["event"] == "turn-start"
+        ]
+
+    def _divergent_surface_supervisor(self) -> Path:
+        """A supervisor launched on a path whose harvest surface no guard admits.
+
+        Reproduces the shape D2a exists to catch: the supervisor prescribes a
+        command string the park guard cannot classify, so no model turn and no
+        number of re-deliveries could ever satisfy the receipt. Built by
+        launching through a symlink directory, exactly as the 2026-08-14
+        release-rotation deadlock did.
+        """
+
+        link = self.base / "detached-launch"
+        link.mkdir()
+        for module in (ROOT / "utilities").glob("*.py"):
+            (link / module.name).symlink_to(module)
+        return link / "claude-session-supervisor.py"
+
+    def test_d5_unsatisfiable_receipt_is_never_delivered_and_seals_protocol(self):
+        self.jobs.write_text(owner_row(self.lease) + child_row(), encoding="utf-8")
+        cmd = self.command_with_join(self._non_closing_join())
+        cmd[1] = str(self._divergent_surface_supervisor())
+        result = subprocess.run(
+            cmd,
+            input="initial assignment",
+            text=True,
+            capture_output=True,
+            env=self.child_env(FAKE_TRACE=str(self.trace)),
+            timeout=20,
+        )
+        self.assertEqual(result.returncode, 70, result.stderr + result.stdout)
+        events = self._events(result.stdout)
+        unsatisfiable = [
+            row for row in events
+            if row.get("type") == "dispatch.supervisor.receipt-unsatisfiable"
+        ]
+        self.assertEqual(len(unsatisfiable), 1, events)
+        self.assertEqual(unsatisfiable[0]["reason"], "unrecognized-surface")
+        # The row, not the event, is the evidence that a terminal was sealed.
+        registry = self.jobs.read_text(encoding="utf-8")
+        self.assertIn("note=owner-attention-unactionable", registry)
+        self.assertIn("failure_class=protocol", registry)
+        self.assertNotIn("note=owner-redelivery-abandoned", registry)
+        self.assertNotIn("note=dead-runtime-exit", registry)
+        # Not delivered at all: only the initial turn ever ran.
+        self.assertEqual(len(self._turn_starts()), 1, self.trace.read_text())
+
+    def test_d5a_actionable_but_unexecuted_receipt_is_redelivered_not_sealed(self):
+        # The round-2 tripwire. An open row whose required action stays
+        # `complete-open` because the owner has not run the command yet is a
+        # legitimate state: a non-advancing row must never seal on its own.
+        self.jobs.write_text(owner_row(self.lease) + child_row(), encoding="utf-8")
+        result = subprocess.run(
+            self.command_with_join(self._non_closing_join()),
+            input="initial assignment",
+            text=True,
+            capture_output=True,
+            env=self.child_env(FAKE_TRACE=str(self.trace)),
+            timeout=30,
+        )
+        turns = self._turn_starts()
+        # initial + first delivery + at least one re-delivery after the first
+        # unchanged pass.
+        self.assertGreaterEqual(len(turns), 3, self.trace.read_text())
+        events = self._events(result.stdout)
+        suppressed = [
+            row for row in events
+            if row.get("type") == "dispatch.supervisor.redelivery-suppressed"
+        ]
+        # Exactly one suppression, and only after the bound -- never on the
+        # first unchanged pass.
+        self.assertEqual(
+            [row["resolution"] for row in suppressed],
+            ["identical-redelivery-bound"],
+            events,
+        )
+        self.assertEqual(suppressed[0]["identical_redeliveries"], 3, events)
+
+    def test_d5b_identical_bound_seals_abandonment_never_attention_or_budget(self):
+        self.jobs.write_text(owner_row(self.lease) + child_row(), encoding="utf-8")
+        result = subprocess.run(
+            self.command_with_join(self._non_closing_join()),
+            input="initial assignment",
+            text=True,
+            capture_output=True,
+            env=self.child_env(FAKE_TRACE=str(self.trace)),
+            timeout=30,
+        )
+        self.assertEqual(result.returncode, 70, result.stderr + result.stdout)
+        registry = self.jobs.read_text(encoding="utf-8")
+        self.assertIn("note=owner-redelivery-abandoned", registry)
+        self.assertIn("failure_class=runtime", registry)
+        self.assertNotIn("note=owner-attention-unactionable", registry)
+        # DC-8b: the continuation budget must never be what stops an identical
+        # prompt -- that is the defect this bound replaces.
+        combined = result.stdout + result.stderr
+        self.assertNotIn("continuation-limit-exceeded", combined)
+        # The route node stays incomplete, so SD-106 same-node redispatch
+        # remains available: no completion marker is published by the seal.
+        self.assertEqual(
+            list((self.base / "supervisor-state").glob("**/completion/**")), []
+        )
+        self.assertNotIn("completion_marker=", registry)
+
+    def test_d6_in_place_row_advance_resumes_the_normal_loop(self):
+        # An unchanged outbox buys in-place work first. When that work advances
+        # the row, the loop resumes normally and the counter resets.
+        counter = self.base / "advancing_join.count"
+        counter.write_text("0", encoding="utf-8")
+        script = self.base / "fake_join_advancing.py"
+        script.write_text(
+            textwrap.dedent(
+                """\
+                import json, sys
+                counter_path = COUNTER_PATH
+                jobs = sys.argv[sys.argv.index('--jobs') + 1]
+                parent = sys.argv[sys.argv.index('--parent-attempt-id') + 1]
+                attempts = [sys.argv[i + 1] for i, v in enumerate(sys.argv) if v == '--attempt-id']
+                with open(counter_path, encoding='utf-8') as handle:
+                    calls = int(handle.read()) + 1
+                with open(counter_path, 'w', encoding='utf-8') as handle:
+                    handle.write(str(calls))
+                status, action = 'open', 'complete-open'
+                if calls >= 2:
+                    with open(jobs, encoding='utf-8') as handle:
+                        lines = handle.read().splitlines()
+                    out = []
+                    for line in lines:
+                        fields = line.split(TAB)
+                        if len(fields) == 6 and 'attempt_id=att-child,' in fields[5] + ',':
+                            fields[1] = 'done'
+                            fields[5] += ',failure_class=pass,note=completed-supervisor'
+                        out.append(TAB.join(fields))
+                    with open(jobs, 'w', encoding='utf-8') as handle:
+                        handle.write('\\n'.join(out) + '\\n')
+                    status, action = 'done', 'advance-completed'
+                print(json.dumps({'schema_version': 2, 'state': 'ready',
+                    'parent_attempt_id': parent,
+                    'children': [{'attempt_id': a, 'status': status, 'readiness': 'ready',
+                                  'reason': 'registry-closed',
+                                  'required_action': action} for a in attempts]}))
+                """
+            )
+            .replace("COUNTER_PATH", repr(str(counter)))
+            .replace("TAB", repr("\t")),
+            encoding="utf-8",
+        )
+        self.jobs.write_text(owner_row(self.lease) + child_row(), encoding="utf-8")
+        result = subprocess.run(
+            self.command_with_join(script),
+            input="initial assignment",
+            text=True,
+            capture_output=True,
+            env=self.child_env(FAKE_TRACE=str(self.trace)),
+            timeout=30,
+        )
+        events = self._events(result.stdout)
+        suppressed = [
+            row for row in events
+            if row.get("type") == "dispatch.supervisor.redelivery-suppressed"
+        ]
+        self.assertEqual([row["resolution"] for row in suppressed], ["row-advanced"], events)
+        registry = self.jobs.read_text(encoding="utf-8")
+        self.assertNotIn("note=owner-redelivery-abandoned", registry)
+        self.assertNotIn("note=owner-attention-unactionable", registry)
+
+    def test_d7_ordinary_advance_suppresses_nothing_and_spends_one_continuation(self):
+        # Regression: the normal path -- a receipt whose row advances between
+        # passes -- must be byte-identical to its pre-D2 behaviour.
+        self.jobs.write_text(owner_row(self.lease) + child_row(), encoding="utf-8")
+        result = self.run_supervisor()
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        events = self._events(result.stdout)
+        for kind in (
+            "dispatch.supervisor.redelivery-suppressed",
+            "dispatch.supervisor.receipt-unsatisfiable",
+        ):
+            self.assertEqual([row for row in events if row.get("type") == kind], [], events)
+        resumed = [row for row in events if row.get("type") == "dispatch.supervisor.resumed"]
+        self.assertEqual([row["continuation_ordinal"] for row in resumed], [1], events)
+        self.assertEqual(len(self._turn_starts()), 2, self.trace.read_text())
+
+    def test_d8_recovered_outbox_reconciles_before_the_first_refresh(self):
+        # D3: a supervisor restarting onto an open-but-finished child must
+        # reconcile before it refreshes, or it hands the owner a receipt whose
+        # prescribed action the registry has already made impossible.
+        self.jobs.write_text(
+            owner_row(self.lease) + self._blocked_child_row(), encoding="utf-8"
+        )
+        receipt = {
+            "schema_version": 2,
+            "state": "ready",
+            "parent_attempt_id": PARENT,
+            "children": [
+                {
+                    "attempt_id": "att-child",
+                    "status": "open",
+                    "readiness": "ready",
+                    "reason": "terminal-observed",
+                    "required_action": "complete-open",
+                }
+            ],
+            "delivery_timing": {
+                "delivery_timing_schema_version": 1,
+                **{point: None for point in DELIVERY_TIMING_POINTS},
+            },
+        }
+        rows = join.current_children(self.jobs, PARENT, {"att-child"})
+        join.prepare_supervisor_outbox(self.state, PARENT, set(), receipt, rows)
+        result = subprocess.run(
+            self.command_with_join(self._non_closing_join()),
+            input="initial assignment",
+            text=True,
+            capture_output=True,
+            env=self.child_env(FAKE_TRACE=str(self.trace)),
+            timeout=30,
+        )
+        events = self._events(result.stdout)
+        kinds = [row.get("type") for row in events]
+        self.assertIn("dispatch.supervisor.reconciled", kinds, events)
+        # Reconcile precedes the first turn the recovered receipt is delivered on.
+        self.assertLess(
+            kinds.index("dispatch.supervisor.reconciled"),
+            kinds.index("dispatch.supervisor.turn-started"),
+            events,
+        )
+        # And what it then delivers is satisfiable.
+        self.assertEqual(
+            [row for row in events
+             if row.get("type") == "dispatch.supervisor.receipt-unsatisfiable"],
+            [],
+            events,
+        )
 
     def test_live_unresolved_child_still_raises(self):
         # Fix 4 must not become "never fail": a genuinely unresolved, live

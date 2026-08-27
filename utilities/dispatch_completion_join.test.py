@@ -1405,6 +1405,32 @@ class HarvestVocabularyTest(unittest.TestCase):
                 )
                 self.assertTrue(satisfiable, (required_action, lines, reason))
 
+    def test_guarded_attempt_ids_is_the_hooks_own_derivation(self):
+        # D-6a (extension): the precheck's guarded set is the park hook's set.
+        # open|running, plus non-quiescent rows, plus the outbox's unconsumed
+        # attempts -- one function, so a supervisor cannot answer satisfiable
+        # for a command the guard then denies.
+        rows = [
+            # `done` with no terminal evidence is still non-quiescent, so it
+            # stays guarded: process liveness alone cannot release the guard at
+            # the closure boundary.
+            JOIN.ChildRow(0, "done", "child-a", "att-a", "", {}),
+            JOIN.ChildRow(1, "open", "child-b", "att-b", "", {}),
+        ]
+        self.assertEqual(
+            JOIN.supervisor_guarded_attempt_ids(rows, None), {"att-a", "att-b"}
+        )
+        outbox = JOIN.SupervisorOutbox(
+            "receipt-1", "digest-1", frozenset({"att-c", "att-d"}), (),
+            None, frozenset({"att-d"}),
+        )
+        # att-c is an unconsumed outbox attempt and joins the set; att-d was
+        # consumed and does not.
+        self.assertEqual(
+            JOIN.supervisor_guarded_attempt_ids(rows, outbox),
+            {"att-a", "att-b", "att-c"},
+        )
+
     def test_producer_guard_parity_no_hand_written_literals(self):
         # D-4: the durable guard against vocabulary drift. Every line either
         # producer can emit, for every required_action value, must classify.

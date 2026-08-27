@@ -626,6 +626,46 @@ class CodexAppServerSupervisorTest(unittest.TestCase):
         registry = self.jobs.read_text(encoding="utf-8")
         self.assertIn("dead-worker-blocked", registry)
 
+    def test_d12_identical_redelivery_bound_seals_abandonment(self):
+        # D-12: the codex loop carries the same bound as the claude one. Before
+        # it, an open row the owner never harvested was re-delivered until the
+        # continuation budget was spent and the owner died `dead-runtime-exit`.
+        self.jobs.write_text(owner_row(self.lease) + child_row(), encoding="utf-8")
+        result = subprocess.run(
+            self.command_with_join(self._non_closing_join()),
+            input="initial assignment",
+            text=True,
+            capture_output=True,
+            env={
+                **os.environ,
+                "FAKE_TRACE": str(self.trace),
+                "AGENT_ARTIFACT_ROOT": str(self.artifact_root),
+            },
+            timeout=30,
+        )
+        self.assertEqual(result.returncode, 70, result.stderr + result.stdout)
+        events = [
+            json.loads(line)
+            for line in result.stdout.splitlines()
+            if line.startswith("{")
+        ]
+        suppressed = [
+            row for row in events
+            if row.get("type") == "dispatch.supervisor.redelivery-suppressed"
+        ]
+        self.assertEqual(
+            [row["resolution"] for row in suppressed],
+            ["identical-redelivery-bound"],
+            events,
+        )
+        registry = self.jobs.read_text(encoding="utf-8")
+        self.assertIn("note=owner-redelivery-abandoned", registry)
+        self.assertIn("failure_class=runtime", registry)
+        self.assertNotIn("note=owner-attention-unactionable", registry)
+        self.assertNotIn(
+            "continuation-limit-exceeded", result.stdout + result.stderr
+        )
+
     def test_live_unresolved_child_still_raises(self):
         log = self.base / "att-live.codex.jsonl"
         route = self.base / "route.json"

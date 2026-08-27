@@ -20,6 +20,7 @@ from dispatch_completion_join import (  # noqa: E402
     pending_attempt_ids,
     read_supervisor_phase_state,
     required_action_for_attempt,
+    supervisor_guarded_attempt_ids,
     supervisor_outbox_row_state,
 )
 
@@ -93,7 +94,10 @@ def main() -> int:
         if state is not None and state.outbox is not None
         else set()
     )
-    guarded_attempts = open_attempts.union(outbox_attempts)
+    # One derivation shared with the supervisors' D2a precheck: a precheck that
+    # computed this set differently would report a command satisfiable that this
+    # guard then denies (plan SS3.4 D2a, fixture D-6c).
+    guarded_attempts = supervisor_guarded_attempt_ids(rows, state.outbox if state else None)
     if not guarded_attempts:
         return 0
     tool_name = payload.get("tool_name")

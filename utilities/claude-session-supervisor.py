@@ -20,6 +20,8 @@ from dispatch_completion_join import (
     JoinContractError,
     SupervisorOutbox,
     advance_delivery_timing,
+    classify_supervised_shell_command,
+    classify_supervised_shell_command_reason,
     consume_advance_completed_outbox,
     current_children,
     delivery_timing_fields,
@@ -33,6 +35,7 @@ from dispatch_completion_join import (
     remove_supervisor_state,
     runtime_wait_requested,
     start_retry_prompt,
+    supervisor_guarded_attempt_ids,
     supervisor_outbox_delivery_identity,
     supervisor_receipt_satisfiable,
     unstarted_child_attempts,
@@ -431,6 +434,106 @@ def runtime_reconcile(args: argparse.Namespace, rows: dict[str, Any],
     return closed
 
 
+def receipt_satisfiability(
+    args: argparse.Namespace, prompt: str, outbox: SupervisorOutbox | None
+) -> tuple[bool, str]:
+    """D2a: prove every command a prompt prescribes is admitted, before delivery.
+
+    The verdict is ``supervisor_receipt_satisfiable``'s alone -- one traversal
+    of the real ``classify_supervised_shell_command``, with the guarded set
+    derived by the same helper the park hook uses. The second traversal only
+    names the category for the emitted event; it can never flip the verdict.
+    A prompt that prescribes no command (the initial brief, a start retry) is
+    vacuously satisfiable.
+    """
+
+    lines = harvest_command_lines(prompt)
+    if not lines:
+        return True, ""
+    classifier_args: dict[str, Any] = {
+        "base": Path(args.worktree),
+        "open_attempt_ids": supervisor_guarded_attempt_ids(
+            current_children(Path(args.jobs), args.parent_attempt_id), outbox
+        ),
+        "parent_slug": os.environ.get("AGENT_DISPATCH_SELF_SLUG", ""),
+        "jobs": Path(args.jobs),
+        "parent_attempt_id": args.parent_attempt_id,
+        "route_file": Path(args.route_file) if args.route_file else None,
+        "route_id": args.route_id,
+    }
+    satisfiable, reason = supervisor_receipt_satisfiable(lines, **classifier_args)
+    if satisfiable:
+        return True, ""
+    failing = next(
+        (
+            line
+            for line in lines
+            if classify_supervised_shell_command(command=line, **classifier_args)
+            is None
+        ),
+        "",
+    )
+    if not failing:
+        return False, reason
+    return False, classify_supervised_shell_command_reason(
+        command=failing, **classifier_args
+    )
+
+
+def seal_receipt_unsatisfiable(args: argparse.Namespace, reason: str) -> int:
+    """D2a terminal: no admitted command can satisfy the prompt about to ship.
+
+    A *proof*, not an inference from a non-advancing row: the supervisor and
+    the park guard disagree about the command vocabulary, so no model turn and
+    no number of re-deliveries can change the outcome. ``protocol``, because
+    this is a contract failure between two runtime components -- never an
+    owner failure (plan SS3.4 D2a/D2c).
+    """
+
+    emit(
+        {
+            "type": "dispatch.supervisor.receipt-unsatisfiable",
+            "parent_attempt_id": args.parent_attempt_id,
+            "reason": reason,
+        }
+    )
+    detail = f"receipt-unsatisfiable:{reason}"
+    if not reconcile(args, classify_supervisor_attention_terminal("claude", detail)):
+        return 70
+    emit(
+        {
+            "type": "dispatch.supervisor.redelivery-suppressed",
+            "parent_attempt_id": args.parent_attempt_id,
+            "resolution": "receipt-unsatisfiable",
+            "reason": reason,
+        }
+    )
+    return 70
+
+
+def seal_redelivery_abandoned(args: argparse.Namespace, identical: int) -> int:
+    """D2b terminal: the receipt was proven satisfiable and the owner did not act.
+
+    A *policy stop*, claiming nothing about why. It closes the owner attempt
+    row and publishes no completion marker, so the route node stays incomplete
+    and remains available to ordinary SD-106 same-node redispatch.
+    """
+
+    detail = f"identical-redelivery-bound:{identical}"
+    emit(
+        {
+            "type": "dispatch.supervisor.redelivery-suppressed",
+            "parent_attempt_id": args.parent_attempt_id,
+            "resolution": "identical-redelivery-bound",
+            "identical_redeliveries": identical,
+        }
+    )
+    if not reconcile(args, classify_supervisor_abandonment_terminal("claude", detail)):
+        return 70
+    emit({"type": "dispatch.supervisor.error", "reason": detail})
+    return 70
+
+
 def remediation_prompt(attempts: set[str], *, jobs: str = "") -> str:
     # Same route-bound-success dependency as completion_prompt() above.
     jobs_argument = f"--jobs {shlex.quote(jobs)} " if jobs else ""
@@ -731,6 +834,8 @@ def main(argv: list[str] | None = None) -> int:
     same_thread_resume_count = 0
     remediated: set[tuple[str, ...]] = set()
     launch_remediated: set[tuple[str, ...]] = set()
+    last_delivery_identity: tuple[str, tuple[tuple[str, str], ...]] = ("", ())
+    identical_redeliveries = 0
     next_prompt = initial_prompt
     continuations = 0
     resume = False
@@ -806,6 +911,17 @@ def main(argv: list[str] | None = None) -> int:
                 write_supervisor_state(
                     state_path, args.parent_attempt_id, delivered, phase="running-turn"
                 )
+            # D2a, one choke point for every producer: no prompt leaves this
+            # supervisor until the park guard is proven to admit each command it
+            # prescribes. With D1's harvest vocabulary applied this must never
+            # fire -- it is a permanent tripwire against exactly the drift that
+            # deadlocked att-30344fd4, not an expected path.
+            satisfiable, unsatisfiable_reason = receipt_satisfiability(
+                args, next_prompt, active_outbox
+            )
+            if not satisfiable:
+                return seal_receipt_unsatisfiable(args, unsatisfiable_reason)
+            last_delivery_identity = supervisor_outbox_delivery_identity(active_outbox)
             turn_ordinal += 1
             turn_started_ns = time.monotonic_ns()
             emit(
@@ -886,21 +1002,74 @@ def main(argv: list[str] | None = None) -> int:
                     else None
                 )
                 if active_outbox is not None:
-                    if continuations >= args.max_continuations:
-                        raise SupervisorError("continuation-limit-exceeded")
                     if active_outbox.receipt is None:
                         raise SupervisorError("supervisor-outbox-receipt-missing")
-                    refreshed = refresh_supervisor_outbox_actions(
+                    outbox_attempts = set(active_outbox.attempt_ids)
+                    active_outbox = refresh_supervisor_outbox_actions(
                         state_path,
                         args.parent_attempt_id,
                         current_children(
                             Path(args.jobs),
                             args.parent_attempt_id,
-                            set(active_outbox.attempt_ids),
+                            outbox_attempts,
                         ),
                         jobs=Path(args.jobs),
-                    )
-                    active_outbox = refreshed.outbox
+                    ).outbox
+                    # D2b. An owner that has simply not run the command yet is a
+                    # legitimate state, so a non-advancing row alone never seals
+                    # anything. An unchanged outbox first buys in-place work --
+                    # no model turn, no continuation spend -- and only a bound
+                    # exhausted after that stops the loop.
+                    if (
+                        supervisor_outbox_delivery_identity(active_outbox)
+                        == last_delivery_identity
+                    ):
+                        runtime_reconcile(
+                            args,
+                            {
+                                row.attempt_id: row
+                                for row in current_children(
+                                    Path(args.jobs),
+                                    args.parent_attempt_id,
+                                    outbox_attempts,
+                                )
+                            },
+                            outbox_attempts,
+                        )
+                        run_join(args, outbox_attempts)
+                        active_outbox = refresh_supervisor_outbox_actions(
+                            state_path,
+                            args.parent_attempt_id,
+                            current_children(
+                                Path(args.jobs),
+                                args.parent_attempt_id,
+                                outbox_attempts,
+                            ),
+                            jobs=Path(args.jobs),
+                        ).outbox
+                        if (
+                            supervisor_outbox_delivery_identity(active_outbox)
+                            != last_delivery_identity
+                        ):
+                            emit(
+                                {
+                                    "type": "dispatch.supervisor.redelivery-suppressed",
+                                    "parent_attempt_id": args.parent_attempt_id,
+                                    "resolution": "row-advanced",
+                                    "identical_redeliveries": identical_redeliveries,
+                                }
+                            )
+                            identical_redeliveries = 0
+                        else:
+                            identical_redeliveries += 1
+                            if identical_redeliveries > args.max_identical_redeliveries:
+                                return seal_redelivery_abandoned(
+                                    args, identical_redeliveries
+                                )
+                    else:
+                        identical_redeliveries = 0
+                    if continuations >= args.max_continuations:
+                        raise SupervisorError("continuation-limit-exceeded")
                     next_prompt = completion_prompt(
                         active_outbox.receipt or {}, active_outbox, jobs=args.jobs
                     )
