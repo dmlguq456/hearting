@@ -2878,6 +2878,31 @@ def _dead_terminal_owner_row(status, meta):
     return note.startswith("dead-") or meta.get("failure_class") == "runtime"
 
 
+def _route_lineage(route_id, route_file, limit=32):
+    """Return {route_id, every source route it supersedes via SD-104 continuation edges}.
+    Follows `source_route_supersession.from_route_id` through sibling route files in the
+    same `.runtime/routes/` directory; unreadable links just end the walk."""
+    out = set()
+    if not route_id:
+        return out
+    out.add(route_id)
+    path = route_file
+    for _ in range(limit):
+        if not path or not os.path.isfile(path):
+            break
+        try:
+            with open(path, encoding="utf-8") as fh:
+                edge = (json.load(fh).get("source_route_supersession") or {})
+        except (OSError, ValueError):
+            break
+        parent = edge.get("from_route_id")
+        if not parent or parent in out:
+            break
+        out.add(parent)
+        path = os.path.join(os.path.dirname(path), "%s.json" % parent)
+    return out
+
+
 def _retain_dead_terminal_owners(jobs, now, jobs_path=None):
     """F-83: keep a supervisor-closed dead owner visible only while its route is
     incomplete and no newer owner attempt binds the same route; otherwise drop it.
@@ -2912,12 +2937,16 @@ def _retain_dead_terminal_owners(jobs, now, jobs_path=None):
         if row is None:
             drop.add(id(j)); continue
         route_id = row["meta"].get("owner_route_id") or row["meta"].get("route_id") or ""
-        # A newer owner attempt bound to the same route supersedes this dead one.
+        # A newer owner attempt bound to the same route — or to a continuation route whose
+        # SD-104 supersession chain leads back to it — supersedes this dead one.
         superseded = any(
             r["order"] > row["order"]
             and r["meta"].get("worker_type") == "owner"
             and r["meta"].get("attempt_id") not in (None, "", j.attempt_id)
-            and (r["meta"].get("owner_route_id") or r["meta"].get("route_id")) == route_id
+            and route_id in _route_lineage(
+                r["meta"].get("owner_route_id") or r["meta"].get("route_id"),
+                r["meta"].get("owner_route_file") or r["meta"].get("route_file"),
+            )
             for r in rows
         )
         if superseded or not route_id:

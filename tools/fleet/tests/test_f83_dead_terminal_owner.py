@@ -91,6 +91,29 @@ class DeadTerminalOwnerTest(unittest.TestCase):
             jobs = self._collect(td, home, [row])
             self.assertEqual([j.slug for j in jobs if j.slug == "owner-f83-plain"], [])
 
+    def test_continuation_lineage_supersedes_dead_owner(self):
+        with tempfile.TemporaryDirectory() as td:
+            home = os.path.join(td, "home")
+            self._markers(home, "rt-f83-src", ["plan"])
+            self._markers(home, "rt-f83-cont", ["plan"])
+            routes = os.path.join(td, "routes"); os.makedirs(routes)
+            src = os.path.join(routes, "rt-f83-src.json")
+            cont = os.path.join(routes, "rt-f83-cont.json")
+            nodes = [{"id": "plan", "depends_on": []}, {"id": "execute", "depends_on": ["plan"]},
+                     {"id": "test", "depends_on": ["execute"]}, {"id": "report", "depends_on": ["test"]}]
+            with open(src, "w", encoding="utf-8") as fh:
+                json.dump({"route_id": "rt-f83-src", "nodes": nodes}, fh)
+            with open(cont, "w", encoding="utf-8") as fh:
+                json.dump({"route_id": "rt-f83-cont", "nodes": nodes,
+                           "source_route_supersession": {"from_route_id": "rt-f83-src"}}, fh)
+            rows = [_ROW.format(slug="owner-f83-src", rid="rt-f83-src", rf=src, att="att-f83-src",
+                                note="dead-runtime-exit"),
+                    _ROW.format(slug="owner-f83-cont", rid="rt-f83-cont", rf=cont, att="att-f83-cont",
+                                note="dead-runtime-exit").replace("\tdone\t", "\topen\t")]
+            jobs = self._collect(td, home, rows)
+            self.assertEqual([j.slug for j in jobs if j.slug == "owner-f83-src"], [])
+            self.assertEqual(dispatch._route_lineage("rt-f83-cont", cont), {"rt-f83-cont", "rt-f83-src"})
+
 
 if __name__ == "__main__":
     unittest.main()
