@@ -2912,6 +2912,10 @@ def _retain_dead_terminal_owners(jobs, now, jobs_path=None):
     dead = [j for j in jobs if getattr(j, "_dead_terminal_owner", False)]
     if not dead:
         return jobs
+    # F-83c bound: a dead owner the operator abandoned without a lineage/worktree successor
+    # (fresh route in a fresh worktree) would otherwise linger forever; six hours keeps the
+    # card actionable while recent and folds it behind --all afterwards.
+    RETAIN_DEAD_OWNER_MAX_MIN = 360
     registry = _orphan_registry_module()
     if registry is None:
         return [j for j in jobs if not getattr(j, "_dead_terminal_owner", False)]
@@ -2936,16 +2940,31 @@ def _retain_dead_terminal_owners(jobs, now, jobs_path=None):
         row = next((r for r in rows if r["meta"].get("attempt_id") == j.attempt_id), None)
         if row is None:
             drop.add(id(j)); continue
+        if (j.elapsed_min or 0) > RETAIN_DEAD_OWNER_MAX_MIN:
+            drop.add(id(j)); continue
         route_id = row["meta"].get("owner_route_id") or row["meta"].get("route_id") or ""
-        # A newer owner attempt bound to the same route — or to a continuation route whose
-        # SD-104 supersession chain leads back to it — supersedes this dead one.
+        # A newer owner attempt supersedes this dead one when it binds the same route, a
+        # continuation route whose SD-104 supersession chain leads back to it, or — F-83c —
+        # the same worktree and capability under a freshly compiled route: an operator who
+        # re-routes instead of continuing has moved on, and the dead card would otherwise
+        # accumulate forever (observed 2026-08-27: four ✕ owners stacked in home-os while a
+        # fifth live owner worked the same worktree on new route ids).
+        worktree = row.get("worktree") or ""
+        capability = row["meta"].get("capability") or row["meta"].get("owner") or ""
         superseded = any(
             r["order"] > row["order"]
             and r["meta"].get("worker_type") == "owner"
             and r["meta"].get("attempt_id") not in (None, "", j.attempt_id)
-            and route_id in _route_lineage(
-                r["meta"].get("owner_route_id") or r["meta"].get("route_id"),
-                r["meta"].get("owner_route_file") or r["meta"].get("route_file"),
+            and (
+                route_id in _route_lineage(
+                    r["meta"].get("owner_route_id") or r["meta"].get("route_id"),
+                    r["meta"].get("owner_route_file") or r["meta"].get("route_file"),
+                )
+                or (
+                    worktree
+                    and (r.get("worktree") or "") == worktree
+                    and (r["meta"].get("capability") or r["meta"].get("owner") or "") == capability
+                )
             )
             for r in rows
         )

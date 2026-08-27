@@ -43,13 +43,16 @@ class DeadTerminalOwnerTest(unittest.TestCase):
             return dispatch.collect(jobs_path=jobs_path)
 
     def test_route_open_dead_owner_is_retained_as_dead_card(self):
+        from datetime import datetime, timezone, timedelta
         with tempfile.TemporaryDirectory() as td:
             home = os.path.join(td, "home")
             rid = "rt-f83-open"
             self._markers(home, rid, ["plan"])
             rf = self._route(td, rid)
-            jobs = self._collect(td, home, [_ROW.format(
-                slug="owner-f83", rid=rid, rf=rf, att="att-f83-owner", note="dead-runtime-exit")])
+            fresh = (datetime.now(timezone.utc) - timedelta(minutes=30)).isoformat().replace("+00:00", "Z")
+            row = _ROW.format(slug="owner-f83", rid=rid, rf=rf, att="att-f83-owner",
+                              note="dead-runtime-exit").replace("2026-07-19T00:00:00Z", fresh)
+            jobs = self._collect(td, home, [row])
             owner = next(j for j in jobs if j.slug == "owner-f83")
             self.assertEqual(owner.liveness, "dead")
             self.assertEqual(owner.note, "dead-runtime-exit")
@@ -113,6 +116,29 @@ class DeadTerminalOwnerTest(unittest.TestCase):
             jobs = self._collect(td, home, rows)
             self.assertEqual([j.slug for j in jobs if j.slug == "owner-f83-src"], [])
             self.assertEqual(dispatch._route_lineage("rt-f83-cont", cont), {"rt-f83-cont", "rt-f83-src"})
+
+    def test_new_route_same_worktree_supersedes_dead_owner(self):
+        with tempfile.TemporaryDirectory() as td:
+            home = os.path.join(td, "home")
+            self._markers(home, "rt-f83-old", ["plan"])
+            rf_old = self._route(td, "rt-f83-old")
+            rows = [_ROW.format(slug="owner-f83-old", rid="rt-f83-old", rf=rf_old,
+                                att="att-f83-old", note="dead-runtime-exit"),
+                    _ROW.format(slug="owner-f83-new", rid="rt-f83-new", rf="/absent.json",
+                                att="att-f83-new", note="dead-runtime-exit").replace("\tdone\t", "\topen\t")]
+            jobs = self._collect(td, home, rows)
+            self.assertEqual([j.slug for j in jobs if j.slug == "owner-f83-old"], [])
+
+    def test_dead_owner_older_than_six_hours_folds_away(self):
+        with tempfile.TemporaryDirectory() as td:
+            home = os.path.join(td, "home")
+            self._markers(home, "rt-f83-aged", ["plan"])
+            rf = self._route(td, "rt-f83-aged")
+            row = _ROW.format(slug="owner-f83-aged", rid="rt-f83-aged", rf=rf,
+                              att="att-f83-aged", note="dead-runtime-exit")
+            jobs = self._collect(td, home, [row])
+            # fixture timestamp 2026-07-19 is far older than the 6h retention window
+            self.assertEqual([j.slug for j in jobs if j.slug == "owner-f83-aged"], [])
 
 
 if __name__ == "__main__":
