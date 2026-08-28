@@ -58,12 +58,14 @@ from dispatch_contract import (  # noqa: E402
     resolve_model_governor_root,
     replica_batch_expectation,
     reserve_governor_token,
+    runtime_ancestry_binding,
     spawn_claimed_attempt,
     supervisor_lease_path,
     validate_nested_eligibility,
     wait_governor_reservation_claim,
 )
 from dispatch_summary import launch_summary_owner  # noqa: E402
+from dispatch_completion_join import materialize_after_terminal_close  # noqa: E402
 from dispatch_lifecycle import (  # noqa: E402
     DETACHED,
     FOREGROUND_SCOPED,
@@ -1117,6 +1119,22 @@ def append_job(jobs: Path, args: argparse.Namespace) -> bool:
         f",parent_completion_delivery={args.parent_completion_delivery}"
         f",parent_completion_reason={args.parent_completion_reason}"
     )
+    if args.parent_completion_delivery == "claude-parent-runtime":
+        # SD-111 P2 round 2 C-3 (2-a-5): the carrier-1 claim gate needs proof
+        # that the hook process it eventually runs in descends from the same
+        # runtime session this row's owner launched under. Ancestor-resolution
+        # failure writes none of the three fields (partial recording would let
+        # a hook falsely treat "unresolved" as "matches") -- carrier 1 then
+        # fails closed on this row and completion still reaches the user via
+        # exact harvest (§3.2.1 second fork).
+        ancestry = runtime_ancestry_binding(os.getpid())
+        if ancestry is not None:
+            ancestry_pid, ancestry_start, ancestry_ns = ancestry
+            pipe += (
+                f",parent_runtime_pid={ancestry_pid}"
+                f",parent_runtime_pid_start={ancestry_start}"
+                f",parent_runtime_ns={ancestry_ns}"
+            )
     if args.profile:
         pipe += f",profile={args.profile}"
     # launch_home seals the resolved AGENT_HOME this wrapper launched under, so a
@@ -1191,7 +1209,10 @@ def close_job_row(jobs: Path, slug: str, worktree: str, reason: str, reset: str,
         evidence = {"reset": reset} if reset else {}
         if reason == "capacity":
             evidence.update(failure_class="capacity", detected_by="anchored-early-exit")
-        return close_attempt_row(jobs, attempt_id, f"dead-{reason}", evidence=evidence)
+        closed = close_attempt_row(jobs, attempt_id, f"dead-{reason}", evidence=evidence)
+        if closed:
+            materialize_after_terminal_close(jobs, attempt_id)
+        return closed
     if not jobs.is_file():
         return False
     with jobs_lock(jobs):
@@ -2273,6 +2294,8 @@ def main(argv: list[str]) -> int:
                         "log_file": str(log_path),
                     },
                 )
+                if terminal_closed:
+                    materialize_after_terminal_close(jobs, args.attempt_id)
                 args.worker_failure = terminal_note
             if outcome.failure and not terminal_closed:
                 close_job_row(

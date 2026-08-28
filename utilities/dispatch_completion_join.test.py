@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import contextlib
 import hashlib
 import importlib.util
@@ -1986,6 +1987,397 @@ class StageAdvanceReceiptNegotiationTest(unittest.TestCase):
             JOIN.typed_stage_advance_block({**block, "schema_version": 2})
         with self.assertRaises(JOIN.JoinContractError):
             JOIN.typed_stage_advance_block("not-a-dict")
+
+
+class CanonicalReceiptAndSealTest(unittest.TestCase):
+    """SD-111 P0: canonical digest selection and receipt-body sealing (D-2/C-2)."""
+
+    def _receipt(self, **overrides):
+        base = {
+            "schema_version": 2,
+            "state": "delivered",
+            "parent_attempt_id": "att-0000000000000000000000000000aaaa",
+            "job_registry": "/tmp/sd111p0/jobs.log",
+            "children": [
+                {
+                    "attempt_id": "att-0000000000000000000000000000bbbb",
+                    "status": "done",
+                    "readiness": "ready",
+                    "reason": "terminal-failure-or-unclosed",
+                    "required_action": "inspect-done-failure",
+                    "harness": "claude",
+                    "delivery_classification": "attention",
+                }
+            ],
+            "delivery_classification": "attention",
+        }
+        base.update(overrides)
+        return base
+
+    def test_a_two_carrier_context_renders_are_byte_identical(self):
+        # No render actually depends on process-local state once
+        # delivery_timing is excluded; two independent computations over the
+        # same logical receipt must agree exactly (probe 2 reproduction).
+        receipt = self._receipt()
+        first = JOIN.canonical_receipt_digest(receipt)
+        second = JOIN.canonical_receipt_digest(json.loads(json.dumps(receipt)))
+        self.assertEqual(first, second)
+
+    def test_b_digest_unaffected_by_one_sided_timing_stamp(self):
+        receipt = self._receipt()
+        untouched = JOIN.canonical_receipt_digest(receipt)
+        stamped = JOIN.stamp_delivery_receipt(receipt, "join_completed_ns", at_ns=123)
+        self.assertIn("delivery_timing", stamped)
+        self.assertNotIn("delivery_timing", receipt)
+        self.assertEqual(untouched, JOIN.canonical_receipt_digest(stamped))
+
+    def test_c_armed_and_out_of_vocabulary_keys_never_reach_the_canonical_body(self):
+        receipt = self._receipt(
+            armed="registry",
+            launch_home="/home/example",
+            harvest_command="python3 utilities/dispatch-registry.py --harvest",
+        )
+        canonical = JOIN.canonical_delivery_receipt(receipt)
+        self.assertNotIn("armed", canonical)
+        self.assertNotIn("launch_home", canonical)
+        self.assertNotIn("harvest_command", canonical)
+        self.assertEqual(set(canonical) - {"children"}, JOIN.CANONICAL_RECEIPT_KEYS - {"children"})
+        body = json.dumps(canonical, separators=(",", ":"), sort_keys=True)
+        self.assertNotIn("armed=", body)
+
+    def test_d_seal_unseal_round_trips_the_worst_case_2048_byte_body(self):
+        # Build a receipt whose canonical JSON encoding is exactly
+        # MAX_DELIVERY_RECEIPT_BYTES (2048) UTF-8 bytes -- SD-108's own limit
+        # -- by padding one child's `reason` (an ALLOWED_REASONS-typed field
+        # in production, but seal/unseal never validates receipt semantics,
+        # only bytes) with filler up to the exact byte target.
+        receipt = self._receipt()
+        encoded_without_filler = json.dumps(
+            receipt, separators=(",", ":"), sort_keys=True
+        ).encode("utf-8")
+        filler_len = JOIN.MAX_DELIVERY_RECEIPT_BYTES - len(encoded_without_filler)
+        self.assertGreater(filler_len, 0)
+        receipt["job_registry"] = receipt["job_registry"] + ("x" * filler_len)
+        body_bytes = json.dumps(receipt, separators=(",", ":"), sort_keys=True).encode("utf-8")
+        self.assertEqual(len(body_bytes), JOIN.MAX_DELIVERY_RECEIPT_BYTES)
+
+        sealed = JOIN.seal_delivery_receipt(receipt)
+        self.assertNotIn("=", sealed)
+        self.assertNotIn("(", sealed)
+        self.assertNotIn(",", sealed)
+        self.assertFalse(any(c.isspace() for c in sealed))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            jobs = Path(tmp) / "jobs.log"
+            digest = JOIN.canonical_receipt_digest(receipt)
+            pipe = ",".join([
+                "attempt_id=att-0000000000000000000000000000aaaa",
+                "delivery_intent=1",
+                f"delivery_receipt_digest={digest}",
+                f"delivery_receipt_b64={sealed}",
+                "note=completed-marker",
+            ])
+            line = "\t".join(["done", "done", "/repo", "/wt", "slug", pipe])
+            jobs.write_text(line + "\n", encoding="utf-8")
+
+            reread = jobs.read_text(encoding="utf-8").splitlines()
+            fields = reread[0].split("\t")
+            metadata = D.parse_registry_metadata(fields[5])
+            self.assertEqual(metadata["delivery_receipt_b64"], sealed)
+
+            restored = JOIN.unseal_delivery_receipt(metadata["delivery_receipt_b64"])
+            self.assertEqual(restored, receipt)
+            self.assertEqual(JOIN.canonical_receipt_digest(restored), digest)
+
+        tools_dir = str(HERE.parent / "tools")
+        if tools_dir not in sys.path:
+            sys.path.insert(0, tools_dir)
+        from fleet.collectors import dispatch as fleet_dispatch  # noqa: E402
+
+        fleet_meta = fleet_dispatch._parse_pipe_meta(pipe)
+        self.assertEqual(fleet_meta.get("delivery_receipt_b64"), sealed)
+        self.assertEqual(fleet_meta.get("delivery_receipt_digest"), digest)
+        self.assertEqual(fleet_meta.get("delivery_intent"), "1")
+
+    def test_oversized_receipt_body_is_refused_before_sealing(self):
+        receipt = self._receipt(job_registry="x" * JOIN.MAX_DELIVERY_RECEIPT_BYTES)
+        with self.assertRaises(JOIN.JoinContractError):
+            JOIN.seal_delivery_receipt(receipt)
+
+    def test_unseal_rejects_malformed_input(self):
+        with self.assertRaises(JOIN.JoinContractError):
+            JOIN.unseal_delivery_receipt("")
+        with self.assertRaises(JOIN.JoinContractError):
+            JOIN.unseal_delivery_receipt("not base64!!")
+        with self.assertRaises(JOIN.JoinContractError):
+            JOIN.unseal_delivery_receipt(base64.standard_b64encode(b"[1,2]").decode("ascii"))
+
+
+class MaterializePendingDeliveryTest(unittest.TestCase):
+    """SD-111 P2 round 2 C-1: carrier-independent idempotent materializer.
+
+    The invariant under test: after a delivery-owing terminal transition
+    commits, a pending record exists even though no carrier (rewake hook,
+    session sweep) ever ran -- this suite never imports or calls one.
+    """
+
+    CURRENT_METADATA = (
+        "attempt_schema_version=2,dispatch_depth=2,transport=headless,"
+        "execution_surface=registered-headless,registered_worker=1,"
+        "fallback_hop=same-harness-headless"
+    )
+
+    def _row(self, attempt="att-materialize-fixture"):
+        pipe = ",".join([
+            self.CURRENT_METADATA,
+            f"attempt_id={attempt}",
+            "parent_attempt_id=att-materialize-parent",
+            "parent_completion_delivery=claude-parent-runtime",
+            "parent_sid=sess-materialize-fixture",
+            "route_id=rt-materialize-fixture",
+            "route_node=execute",
+            "harness=claude",
+        ])
+        return f"2026-08-28T00:00:00Z\topen\t/r\t/w\texecute\t{pipe}"
+
+    def _close_and_get_fields(self, jobs, attempt="att-materialize-fixture"):
+        self.assertTrue(D.close_attempt_row(jobs, attempt, "completed-marker"))
+        line = jobs.read_text(encoding="utf-8").splitlines()[0]
+        return line.split("\t")
+
+    def test_materialize_creates_record_from_intent_stamped_row(self):
+        with tempfile.TemporaryDirectory() as td:
+            jobs = Path(td) / "jobs.log"
+            jobs.write_text(self._row() + "\n", encoding="utf-8")
+            fields = self._close_and_get_fields(jobs)
+            path = JOIN.materialize_pending_delivery(jobs, fields)
+            self.assertIsNotNone(path)
+            self.assertTrue(path.is_file())
+            record = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(record["state"], "pending")
+            self.assertEqual(record["attempts"], 0)
+            self.assertEqual(record["recipient_kind"], "claude-parent-runtime")
+            self.assertEqual(record["attempt_ids"], ["att-materialize-fixture"])
+            self.assertEqual(
+                record["receipt"]["children"][0]["attempt_id"], "att-materialize-fixture"
+            )
+
+    def test_materialize_returns_none_without_delivery_intent(self):
+        with tempfile.TemporaryDirectory() as td:
+            jobs = Path(td) / "jobs.log"
+            pipe = f"{self.CURRENT_METADATA},attempt_id=att-no-recipient"
+            jobs.write_text(
+                f"2026-08-28T00:00:00Z\topen\t/r\t/w\texecute\t{pipe}\n", encoding="utf-8"
+            )
+            self.assertTrue(D.close_attempt_row(jobs, "att-no-recipient", "completed-marker"))
+            fields = jobs.read_text(encoding="utf-8").splitlines()[0].split("\t")
+            self.assertIsNone(JOIN.materialize_pending_delivery(jobs, fields))
+
+    def test_trigger_1_then_trigger_2_converge_on_one_record(self):
+        # Trigger 1 (in-process, right after lock release) and trigger 2
+        # (reconcile backstop) both call this same function; N calls for one
+        # row must produce exactly one file (round 2 C-1).
+        with tempfile.TemporaryDirectory() as td:
+            jobs = Path(td) / "jobs.log"
+            jobs.write_text(self._row() + "\n", encoding="utf-8")
+            fields = self._close_and_get_fields(jobs)
+            first_path = JOIN.materialize_pending_delivery(jobs, fields)
+            second_path = JOIN.materialize_pending_delivery(jobs, fields)
+            self.assertEqual(first_path, second_path)
+            directory = first_path.parent
+            self.assertEqual(len(list(directory.glob("*.json"))), 1)
+
+    def test_trigger_2_alone_recovers_from_a_skipped_trigger_1_crash(self):
+        # Model the crash window explicitly: the row closed (terminal intent
+        # committed) but the in-process trigger 1 call never happened (as if
+        # the launcher died right after releasing the lock). Trigger 2 -- the
+        # reconcile backstop, modeled here as the sole materialize call --
+        # must still produce the record on its own.
+        with tempfile.TemporaryDirectory() as td:
+            jobs = Path(td) / "jobs.log"
+            jobs.write_text(self._row() + "\n", encoding="utf-8")
+            fields = self._close_and_get_fields(jobs)
+            # Trigger 1 deliberately skipped here.
+            path = JOIN.materialize_pending_delivery(jobs, fields)
+            self.assertIsNotNone(path)
+            self.assertTrue(path.is_file())
+
+    def test_zero_carrier_materialize_invariant_no_claim_no_emit(self):
+        # §4.4's core invariant, restated as a test: a pending record exists
+        # after the terminal transition even though no carrier ran. This test
+        # imports neither hooks/dispatch-owner-rewake.py nor
+        # dispatch_session_sweep -- there is no carrier import to call.
+        with tempfile.TemporaryDirectory() as td:
+            jobs = Path(td) / "jobs.log"
+            jobs.write_text(self._row() + "\n", encoding="utf-8")
+            fields = self._close_and_get_fields(jobs)
+            path = JOIN.materialize_pending_delivery(jobs, fields)
+            record = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(record["state"], "pending")
+            self.assertIsNone(record["claim_owner"])
+            self.assertIsNone(record["claimed_at_ns"])
+            self.assertEqual(record["attempts"], 0)
+
+    def test_identity_conflict_receipt_digest_mismatch_fails_closed(self):
+        with tempfile.TemporaryDirectory() as td:
+            jobs = Path(td) / "jobs.log"
+            jobs.write_text(self._row() + "\n", encoding="utf-8")
+            fields = self._close_and_get_fields(jobs)
+            metadata = D.parse_registry_metadata(fields[5])
+            corrupted = dict(metadata)
+            corrupted["delivery_receipt_digest"] = "0" * 64
+            pipe = ",".join(f"{k}={v}" for k, v in corrupted.items())
+            fields[5] = pipe
+            import dispatch_pending_delivery as PD  # noqa: E402
+            with self.assertRaises(PD.PendingDeliveryError) as ctx:
+                JOIN.materialize_pending_delivery(jobs, fields)
+            self.assertEqual(ctx.exception.reason, "pending-delivery-identity-conflict")
+
+
+class ReconcilePendingDeliveryTest(unittest.TestCase):
+    """SD-111 P2 trigger 2 + expiry actor (§2-b-2/§2-c).
+
+    ``reconcile_pending_delivery`` is the bounded-cadence backstop wired into
+    `dispatch-registry.py reconcile --apply` -- it is exercised here directly
+    against a synthetic ``jobs.log`` + pending-delivery tree, never through a
+    live registry.
+    """
+
+    CURRENT_METADATA = (
+        "attempt_schema_version=2,dispatch_depth=1,transport=headless,"
+        "execution_surface=registered-headless,registered_worker=1,"
+        "fallback_hop=same-harness-headless"
+    )
+
+    def _row(self, attempt, *, ancestry=None):
+        pipe = ",".join(filter(None, [
+            self.CURRENT_METADATA,
+            f"attempt_id={attempt}",
+            "parent_attempt_id=att-reconcile-parent",
+            "parent_completion_delivery=claude-parent-runtime",
+            f"parent_sid=sess-{attempt}",
+            "route_id=rt-reconcile-fixture",
+            "route_node=execute",
+            "harness=claude",
+            (
+                f"parent_runtime_pid={ancestry[0]},parent_runtime_pid_start={ancestry[1]}"
+                if ancestry else None
+            ),
+        ]))
+        return f"2026-08-28T00:00:00Z\topen\t/r\t/w\texecute\t{pipe}"
+
+    def test_materializes_a_row_intent_stamped_but_not_yet_materialized(self):
+        with tempfile.TemporaryDirectory() as td:
+            jobs = Path(td) / "jobs.log"
+            jobs.write_text(self._row("att-reconcile-a") + "\n", encoding="utf-8")
+            self.assertTrue(D.close_attempt_row(jobs, "att-reconcile-a", "completed-marker"))
+            # Trigger 1 deliberately skipped -- models the crash window.
+            result = JOIN.reconcile_pending_delivery(jobs)
+            self.assertEqual(result["materialized"], 1)
+            root = jobs.resolve(strict=False).parent
+            self.assertEqual(len(list((root / "pending-delivery").glob("*/*.json"))), 1)
+
+    def test_second_pass_is_a_no_op(self):
+        with tempfile.TemporaryDirectory() as td:
+            jobs = Path(td) / "jobs.log"
+            jobs.write_text(self._row("att-reconcile-b") + "\n", encoding="utf-8")
+            self.assertTrue(D.close_attempt_row(jobs, "att-reconcile-b", "completed-marker"))
+            first = JOIN.reconcile_pending_delivery(jobs)
+            self.assertEqual(first["materialized"], 1)
+            second = JOIN.reconcile_pending_delivery(jobs)
+            self.assertEqual(second["materialized"], 0)
+            root = jobs.resolve(strict=False).parent
+            self.assertEqual(len(list((root / "pending-delivery").glob("*/*.json"))), 1)
+
+    def test_expires_a_record_whose_owning_runtime_process_is_provably_dead(self):
+        with tempfile.TemporaryDirectory() as td:
+            jobs = Path(td) / "jobs.log"
+            dead_ancestry = ("999999999", "123456789")
+            jobs.write_text(
+                self._row("att-reconcile-c", ancestry=dead_ancestry) + "\n", encoding="utf-8"
+            )
+            self.assertTrue(D.close_attempt_row(jobs, "att-reconcile-c", "completed-marker"))
+            # Materialize and expire both happen in the same pass here --
+            # the freshly materialized record is already on disk by the time
+            # this call's own expiry sweep runs.
+            first = JOIN.reconcile_pending_delivery(jobs)
+            self.assertEqual(first["materialized"], 1)
+            self.assertEqual(first["expired"], 1)
+            root = jobs.resolve(strict=False).parent
+            record_file = next((root / "pending-delivery").glob("*/*.json"))
+            record = json.loads(record_file.read_text(encoding="utf-8"))
+            self.assertEqual(record["state"], "expired")
+            self.assertEqual(record["expiry_reason"], "recipient-session-gone")
+            # Expired records are never deleted (§10.2).
+            self.assertTrue(record_file.is_file())
+
+    def test_never_expires_a_record_whose_owning_process_is_alive(self):
+        with tempfile.TemporaryDirectory() as td:
+            jobs = Path(td) / "jobs.log"
+            alive_ancestry = (str(os.getpid()), D.process_start_ticks(os.getpid()))
+            jobs.write_text(
+                self._row("att-reconcile-d", ancestry=alive_ancestry) + "\n", encoding="utf-8"
+            )
+            self.assertTrue(D.close_attempt_row(jobs, "att-reconcile-d", "completed-marker"))
+            JOIN.reconcile_pending_delivery(jobs)
+            second = JOIN.reconcile_pending_delivery(jobs)
+            self.assertEqual(second["expired"], 0)
+            root = jobs.resolve(strict=False).parent
+            record_file = next((root / "pending-delivery").glob("*/*.json"))
+            record = json.loads(record_file.read_text(encoding="utf-8"))
+            self.assertEqual(record["state"], "pending")
+
+    def test_never_expires_a_record_whose_owning_process_is_only_inaccessible(self):
+        # F-1 regression: a permission/namespace/procfs denial ("inaccessible")
+        # must not be conflated with "missing" and expire a live session's
+        # pending record. `_proc_observation` is dispatch_contract's own
+        # distinguishing primitive (PermissionError -> "inaccessible" vs
+        # FileNotFoundError -> "missing"); patching it directly is the exact
+        # boundary the review's suggested fix names.
+        with tempfile.TemporaryDirectory() as td:
+            jobs = Path(td) / "jobs.log"
+            ancestry = ("424242", "111222333")
+            jobs.write_text(
+                self._row("att-reconcile-f", ancestry=ancestry) + "\n", encoding="utf-8"
+            )
+            self.assertTrue(D.close_attempt_row(jobs, "att-reconcile-f", "completed-marker"))
+            # Patch from the very first pass: the fixture pid is synthetic
+            # and not a real process, so an unpatched real `_proc_observation`
+            # would itself report "missing" and mask the regression this
+            # test is for.
+            with mock.patch.object(
+                D, "_proc_observation", return_value=("inaccessible", "", "")
+            ):
+                first = JOIN.reconcile_pending_delivery(jobs)
+                self.assertEqual(first["materialized"], 1)
+                second = JOIN.reconcile_pending_delivery(jobs)
+            self.assertEqual(second["expired"], 0)
+            root = jobs.resolve(strict=False).parent
+            record_file = next((root / "pending-delivery").glob("*/*.json"))
+            record = json.loads(record_file.read_text(encoding="utf-8"))
+            self.assertEqual(record["state"], "pending")
+
+    def test_never_expires_when_ancestry_fields_are_absent(self):
+        with tempfile.TemporaryDirectory() as td:
+            jobs = Path(td) / "jobs.log"
+            jobs.write_text(self._row("att-reconcile-e") + "\n", encoding="utf-8")
+            self.assertTrue(D.close_attempt_row(jobs, "att-reconcile-e", "completed-marker"))
+            first = JOIN.reconcile_pending_delivery(jobs)
+            self.assertEqual(first["materialized"], 1)
+            second = JOIN.reconcile_pending_delivery(jobs)
+            self.assertEqual(second["expired"], 0)
+            self.assertEqual(second["skipped"], 1)
+            root = jobs.resolve(strict=False).parent
+            record_file = next((root / "pending-delivery").glob("*/*.json"))
+            record = json.loads(record_file.read_text(encoding="utf-8"))
+            self.assertEqual(record["state"], "pending")
+
+    def test_no_delivery_rows_is_a_clean_no_op(self):
+        with tempfile.TemporaryDirectory() as td:
+            jobs = Path(td) / "jobs.log"
+            jobs.write_text("fixture\n", encoding="utf-8")
+            result = JOIN.reconcile_pending_delivery(jobs)
+            self.assertEqual(result, {"materialized": 0, "expired": 0, "skipped": 0})
 
 
 if __name__ == "__main__":

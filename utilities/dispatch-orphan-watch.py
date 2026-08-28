@@ -22,6 +22,7 @@ from dispatch_contract import (
     supervisor_lease_path,
 )
 from dispatch_completion_join import (
+    materialize_after_terminal_close,
     read_supervisor_phase_state,
     remove_supervisor_state,
 )
@@ -147,10 +148,15 @@ def reconcile_exact_exit(args) -> int:
             metadata.get("log_file"), metadata.get("harness", "unknown")
         )
         try:
-            reconcile_supervisor_terminal(args.jobs, args.attempt_id, terminal)
+            outcome = reconcile_supervisor_terminal(args.jobs, args.attempt_id, terminal)
         except Exception:
             _remove_supervisor_state(args)
             return 70
+        # SD-111 P2 trigger 1: dispatch_supervisor_terminal cannot import
+        # dispatch_completion_join (circular), so its own docstring asks the
+        # caller to close the gap when the row actually closed.
+        if outcome == "closed":
+            materialize_after_terminal_close(Path(args.jobs), args.attempt_id)
         status = attempt_status(args.jobs, args.attempt_id)
 
     exact_result = None

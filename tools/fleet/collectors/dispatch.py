@@ -17,6 +17,7 @@ statusline.sh:131-171) so the label reflects live progress, not the static argv.
 """
 import json
 import glob
+import hashlib
 import os
 import re
 import shlex
@@ -3060,6 +3061,96 @@ def _annotate_orphan_conductors(jobs, now, jobs_path=None):
             j.resume_boundary = boundary or "-"
 
 
+def _pending_delivery_counts(paths):
+    """SD-111 P6: read-only pending/expired visibility. Never transitions
+    any state -- glob + json.loads only, mirroring the enumeration pattern
+    `dispatch_completion_join.reconcile_pending_delivery()` already uses
+    (`pending_root.glob("*/*.json")`). Fleet's F-27 control module is the
+    only fleet surface with write authority; this collector has none.
+
+    `pending` is the sum of two terms (plan §1.6-1, §9 R-9 -- both are
+    mandatory): rows that stamped `delivery_intent` but have no
+    materialized record yet (the crash window between the terminal commit
+    and trigger 1/2, or a state root this collector cannot see), plus
+    records already on disk in `pending`/`claimed`/`sent-ambiguous`.
+    Omitting the first term would make an un-materialized completion
+    silently invisible -- reproducing in miniature the exact problem
+    SD-111 exists to fix. `expired` is exposed as its own count; expired
+    records are never deleted, so this only counts, never removes.
+
+    Enumeration failure fails open: a bad line, an unreadable directory, or
+    a corrupt record is skipped, never raised -- the caller keeps every row
+    it already had either way.
+    """
+
+    intent_rows = set()
+    for path in paths:
+        try:
+            lines = Path(path).read_text(encoding="utf-8", errors="replace").splitlines()
+        except OSError:
+            continue
+        for line in lines:
+            fields = line.split("\t")
+            if len(fields) != 6:
+                continue
+            meta = _parse_pipe_meta(fields[5] or "")
+            if meta.get("delivery_intent") != "1":
+                continue
+            attempt_id = meta.get("attempt_id") or ""
+            if not attempt_id:
+                continue
+            intent_rows.add(
+                (attempt_id, meta.get("parent_sid") or "", meta.get("delivery_id") or "")
+            )
+
+    pending = 0
+    expired = 0
+    all_records = set()
+    seen_roots = set()
+    for path in paths:
+        try:
+            root = dispatch_state_root(path)
+        except (OSError, TypeError, ValueError):
+            continue
+        if root in seen_roots:
+            continue
+        seen_roots.add(root)
+        pending_root = root / "pending-delivery"
+        if not pending_root.is_dir():
+            continue
+        try:
+            record_files = list(pending_root.glob("*/*.json"))
+        except OSError:
+            continue
+        for record_file in record_files:
+            try:
+                record = json.loads(record_file.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            if not isinstance(record, dict):
+                continue
+            delivery_id = record.get("delivery_id")
+            recipient_digest = record.get("recipient_digest")
+            if delivery_id and recipient_digest:
+                all_records.add((delivery_id, recipient_digest))
+            state = record.get("state")
+            if state in {"pending", "claimed", "sent-ambiguous"}:
+                pending += 1
+            elif state == "expired":
+                expired += 1
+
+    unmaterialized = 0
+    for _attempt_id, parent_sid, delivery_id in intent_rows:
+        if not parent_sid or not delivery_id:
+            unmaterialized += 1
+            continue
+        recipient_digest = hashlib.sha256(parent_sid.encode("utf-8")).hexdigest()
+        if (delivery_id, recipient_digest) not in all_records:
+            unmaterialized += 1
+
+    return {"pending": pending + unmaterialized, "expired": expired}
+
+
 def collect(jobs_path=None, harness_filter=None):
     """Return merged [DispatchJob]. harness_filter does not restrict dispatch — the section
     is cross-harness by design (jobs, not sessions)."""
@@ -3241,6 +3332,13 @@ def collect(jobs_path=None, harness_filter=None):
         },
         jobs=jobs,
     )
+    # SD-111 P6: same "stash on the module for the render header" pattern as
+    # last_malformed/last_route_nodes above -- additive, no return-signature
+    # change. Enumeration failure fails open: keep every job row, drop the count.
+    try:
+        collect.last_pending_delivery = _pending_delivery_counts(paths)
+    except Exception:
+        collect.last_pending_delivery = None
     return jobs
 
 
@@ -3249,3 +3347,4 @@ collect.last_registry_splits = {}
 collect.last_route_nodes = {}
 collect.last_terminal_attempts = {}
 collect.last_degradations = {}
+collect.last_pending_delivery = None

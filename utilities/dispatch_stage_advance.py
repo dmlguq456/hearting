@@ -897,6 +897,18 @@ def coordinate_stage_advance(
             record["reason"] = ""
             _sync_flat_fields(record)
             _atomic_json(record_path, record)
+            # F-2 / A-17: this is the one place a runtime-eligible advance's
+            # success actually becomes true. The predecessor row already
+            # carries an ordinary delivery intent (stamped before this was
+            # known) -- supersede it now so §13.33.1-(8)'s "no model
+            # delivery" holds for the eligible-linear success path. The
+            # advance result above is already committed to disk by this
+            # point; F-6: `supersede_pending_delivery_for_advance` is itself
+            # total (never raises), so this call can only ever add a
+            # best-effort cleanup outcome, never take back the advance.
+            JOIN.supersede_pending_delivery_for_advance(
+                request.jobs, request.predecessor_terminal_attempt_id
+            )
             cp("after-start")
 
         return _result_from_record(record, record_path)

@@ -19,6 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "utilities"))
 from dispatch_contract import (  # noqa: E402
     DispatchContractError,
     resolve_agent_home as _resolve_agent_home,
+    runtime_ancestry_binding,
 )
 from dispatch_completion_join import (  # noqa: E402
     CurrentDeliveryState,
@@ -29,6 +30,11 @@ from dispatch_completion_join import (  # noqa: E402
     delivery_classification,
     delivery_required_action,
 )
+import dispatch_pending_delivery as pending_delivery  # noqa: E402
+# SD-111 P3 §4.4: carrier 1 must never create a pending-delivery record --
+# it only claims one trigger 1/2 already produced. The materializer function
+# from dispatch_completion_join is deliberately absent from this import
+# block; DispatchOwnerRewakeMaterializeAbsenceTest statically asserts that.
 
 
 ATTEMPT = re.compile(r"att-[A-Za-z0-9._-]{1,240}\Z")
@@ -44,6 +50,7 @@ REGISTRY_OWNER_START = {
     "launch_started": "1",
 }
 SUCCESS_NOTIFICATION = "\x1b]9;Hearting dispatch completed\x07"
+CLAIM_LEASE_SECONDS = 30.0
 
 
 @dataclass(frozen=True)
@@ -523,6 +530,80 @@ def _attention_has_open_child(message: str) -> bool:
     return bool(match and int(match.group(1)) > 0)
 
 
+def _incarnation_binding_matches(metadata: dict[str, str]) -> bool:
+    """SD-111 P2 round 2 C-3: the recorded launch-time triple must match this
+    hook process's own walk exactly on all three fields. Absence, a partial
+    recording, or any mismatch is a fail-closed no (§3.2.1's fork)."""
+
+    recorded = (
+        metadata.get("parent_runtime_pid", ""),
+        metadata.get("parent_runtime_pid_start", ""),
+        metadata.get("parent_runtime_ns", ""),
+    )
+    if not all(recorded):
+        return False
+    observed = runtime_ancestry_binding(os.getpid())
+    if observed is None:
+        return False
+    return recorded == observed
+
+
+@dataclass(frozen=True)
+class ClaimWin:
+    claim_owner: str
+    recipient_key: str
+    delivery_id: str
+    root: Path
+
+
+def _delivery_owing_row(launch: Launch) -> dict[str, str] | None:
+    """Return the row's metadata only when it is a genuine delivery-owing
+    terminal completion (`done` + `delivery_intent` stamped, §4.3.1) -- the
+    claim gate governs exactly this population. A still-open/running row
+    (e.g. `wait_for_attempt` timed out or hit a bridge error) has taken no
+    terminal edge yet and carries no intent; gating *that* notice behind
+    claim would silence a live diagnostic forever, which is the opposite of
+    what SD-111 exists to prevent, so it is deliberately left ungated."""
+
+    try:
+        row = current_attempt_row(launch.jobs, launch.attempt_id)
+    except (JoinContractError, OSError):
+        return None
+    if row is None or row.status != "done" or row.metadata.get("delivery_intent") != "1":
+        return None
+    return row.metadata
+
+
+def _carrier_one_claim(launch: Launch, metadata: dict[str, str]) -> ClaimWin | None:
+    """P3 claim gate. Never creates a record (§4.4 -- carrier 1 only claims
+    what trigger 1/2 already materialized); returns the winning claim on
+    success, or ``None`` on any refusal -- claim lost, record already
+    acked/claimed, record not yet materialized, or the incarnation binding
+    does not match. Every ``None`` path is a silent, zero-notice exit-0 per
+    SD-97 (no re-delivery)."""
+
+    if not _incarnation_binding_matches(metadata):
+        return None
+    delivery_id = metadata.get("delivery_id", "")
+    recipient_key = metadata.get("parent_sid", "")
+    if not delivery_id or not recipient_key:
+        return None
+    root = launch.jobs.resolve(strict=False).parent
+    claim_owner = f"claude-async-rewake:{os.getpid()}:{time.monotonic_ns()}"
+    try:
+        pending_delivery.claim(
+            root,
+            recipient_key,
+            delivery_id,
+            claim_owner=claim_owner,
+            lease_seconds=CLAIM_LEASE_SECONDS,
+            require_generation_proof=False,
+        )
+    except pending_delivery.PendingDeliveryError:
+        return None
+    return ClaimWin(claim_owner, recipient_key, delivery_id, root)
+
+
 def main() -> int:
     try:
         payload: Any = json.load(sys.stdin)
@@ -537,10 +618,35 @@ def main() -> int:
         state, message = classified_receipt(
             launch, "bridge-error", "readiness-helper-missing", root
         )
-        return emit_receipt(state, message, block=_attention_has_open_child(message))
-    state, reason = wait_for_attempt(launch, readiness)
-    state, message = classified_receipt(launch, state, reason, root)
-    return emit_receipt(state, message, block=_attention_has_open_child(message))
+    else:
+        wait_state, wait_reason = wait_for_attempt(launch, readiness)
+        state, message = classified_receipt(launch, wait_state, wait_reason, root)
+    block = _attention_has_open_child(message)
+    if block:
+        # A live owned child is still open -- no delivery-owing terminal
+        # transition has happened yet (§4.3.1 stamps intent only at
+        # open|running -> done), so there is nothing to claim. This keeps
+        # Claude from stopping prematurely; SD-111's claim gate does not
+        # apply to it.
+        return emit_receipt(state, message, block=True)
+    owing = _delivery_owing_row(launch)
+    if owing is None:
+        # Not (yet) a delivery-owing terminal completion -- still open/
+        # running (timeout, bridge error) or a non-SD-111 row. Emit exactly
+        # as before the claim gate existed; only a genuine delivery-owing
+        # terminal notice is claim-gated.
+        return emit_receipt(state, message, block=False)
+    win = _carrier_one_claim(launch, owing)
+    if win is None:
+        return 0
+    exit_code = emit_receipt(state, message, block=False)
+    try:
+        pending_delivery.mark_sent_ambiguous(
+            win.root, win.recipient_key, win.delivery_id, claim_owner=win.claim_owner,
+        )
+    except pending_delivery.PendingDeliveryError:
+        pass
+    return exit_code
 
 
 if __name__ == "__main__":

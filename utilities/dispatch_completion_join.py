@@ -35,8 +35,11 @@ from dispatch_contract import (  # noqa: E402
     marker_bound_delivery_transaction,
     marker_bound_process_identity,
     observed_attempt_liveness,
+    parse_registry_metadata,
+    process_identity_disposition,
     reconcile_attempt_terminal,
 )
+import dispatch_pending_delivery as pending_delivery  # noqa: E402
 from codex_dispatch_terminal import (  # noqa: E402
     inspect_terminal_attempt,
     terminal_envelope_observed,
@@ -87,10 +90,347 @@ DELIVERY_TIMING_POINTS = (
     "final_report_marker_ns",
     "owner_terminal_envelope_ns",
 )
+# SD-111 D-2/C-2: mirrors codex-managed-gateway.py's ALLOWED_RECEIPT_KEYS /
+# ALLOWED_CHILD_KEYS minus "delivery_timing". Duplicated (not imported) because
+# codex-managed-gateway.py imports this module already -- importing back would
+# be circular. Keep both lists synchronized by hand; §11 forbids widening
+# either vocabulary.
+CANONICAL_RECEIPT_KEYS = frozenset({
+    "schema_version", "state", "parent_attempt_id", "job_registry", "children",
+    "delivery_classification",
+})
+CANONICAL_CHILD_KEYS = frozenset({
+    "attempt_id", "status", "readiness", "reason", "required_action", "harness",
+    "delivery_classification",
+})
+MAX_DELIVERY_RECEIPT_BYTES = 2048
 
 
 class JoinContractError(RuntimeError):
     """A registry or liveness boundary could not be proved."""
+
+
+def canonical_delivery_receipt(receipt: dict[str, object]) -> dict[str, object]:
+    """Select only the digest-material keys of one v2 receipt (SD-111 D-2).
+
+    ``delivery_timing`` is process-local (``time.monotonic_ns()``) and is
+    excluded on purpose -- it is observability, not completion identity. This
+    projection never becomes the record's stored ``receipt`` field (that is
+    the sealed original, round 2 C-2); it exists only to compute a stable
+    digest/``delivery_id`` across carriers.
+    """
+
+    if not isinstance(receipt, dict):
+        raise JoinContractError("delivery-receipt-invalid")
+    canonical: dict[str, object] = {
+        key: value for key, value in receipt.items() if key in CANONICAL_RECEIPT_KEYS
+    }
+    raw_children = receipt.get("children")
+    if isinstance(raw_children, list):
+        canonical["children"] = [
+            {key: value for key, value in child.items() if key in CANONICAL_CHILD_KEYS}
+            for child in raw_children
+            if isinstance(child, dict)
+        ]
+    return canonical
+
+
+def canonical_receipt_digest(receipt: dict[str, object]) -> str:
+    """Return the sha256 hex digest of the timing-excluded canonical receipt."""
+
+    canonical = canonical_delivery_receipt(receipt)
+    encoded = json.dumps(canonical, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def seal_delivery_receipt(receipt: dict[str, object]) -> str:
+    """Encode the exact v2 receipt body as unpadded standard base64 (C-2).
+
+    The materializer restores these bytes verbatim -- it never regenerates
+    the receipt -- so record.receipt is byte-identical to what the terminal
+    writer saw, including ``delivery_timing``.
+    """
+
+    if not isinstance(receipt, dict):
+        raise JoinContractError("delivery-receipt-invalid")
+    encoded = json.dumps(receipt, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    if len(encoded) > MAX_DELIVERY_RECEIPT_BYTES:
+        raise JoinContractError("pending-delivery-oversized")
+    return base64.standard_b64encode(encoded).decode("ascii").rstrip("=")
+
+
+def unseal_delivery_receipt(encoded: str) -> dict[str, object]:
+    """Decode a sealed receipt body back into the exact original dict."""
+
+    if not isinstance(encoded, str) or not encoded:
+        raise JoinContractError("delivery-receipt-invalid")
+    padded = encoded + "=" * (-len(encoded) % 4)
+    try:
+        decoded = base64.standard_b64decode(padded.encode("ascii"))
+    except ValueError as exc:
+        raise JoinContractError("delivery-receipt-invalid") from exc
+    try:
+        value = json.loads(decoded.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError) as exc:
+        raise JoinContractError("delivery-receipt-invalid") from exc
+    if not isinstance(value, dict):
+        raise JoinContractError("delivery-receipt-invalid")
+    return value
+
+
+def materialize_pending_delivery(jobs: Path, row_fields: list[str]) -> Path | None:
+    """Carrier-independent idempotent materializer (SD-111 P2 round 2 C-1).
+
+    Turns one already-intent-stamped row into its durable pending-delivery
+    record. Never acquires the registry lock -- the row is read from
+    ``row_fields`` already in the caller's hand, exactly the property that
+    keeps a ``registry.lock -> record.lock`` nesting from ever existing
+    (§4.4, the reason direction B was chosen over A). Two independent
+    triggers call this: (1) in-process, right after the terminal transaction
+    commits and the registry lock is released, and (2) the dispatch
+    reconcile path's idempotent backstop. Both converge on
+    ``dispatch_pending_delivery.create``'s ``O_EXCL`` + identity-verify
+    semantics, so N calls for the same row produce exactly one record.
+
+    Returns the record path, or ``None`` if the row carries no delivery
+    intent (nothing to materialize).
+    """
+
+    if len(row_fields) != 6:
+        raise JoinContractError("delivery-receipt-invalid")
+    metadata = parse_registry_metadata(row_fields[5])
+    if metadata.get("delivery_intent") != "1":
+        return None
+    required = (
+        "delivery_id", "delivery_recipient_kind", "delivery_receipt_digest",
+        "delivery_receipt_b64", "delivery_row_revision", "attempt_id",
+        "parent_sid",
+    )
+    if any(not metadata.get(key) for key in required):
+        raise pending_delivery.PendingDeliveryError(
+            "delivery-persistence-refused", "intent-fields-incomplete"
+        )
+    receipt = unseal_delivery_receipt(metadata["delivery_receipt_b64"])
+    root = jobs.resolve(strict=False).parent
+    record = pending_delivery.create(
+        root,
+        recipient_kind=metadata["delivery_recipient_kind"],
+        recipient_key=metadata["parent_sid"],
+        delivery_id=metadata["delivery_id"],
+        session_generation=metadata.get("session_generation", ""),
+        session_generation_supported=metadata.get("session_generation_supported", "0"),
+        attempt_ids=[metadata["attempt_id"]],
+        parent_attempt_id=metadata.get("parent_attempt_id", ""),
+        route_id=metadata.get("route_id", ""),
+        route_node=metadata.get("route_node", ""),
+        receipt=receipt,
+        receipt_digest=metadata["delivery_receipt_digest"],
+        row_revisions={metadata["attempt_id"]: metadata["delivery_row_revision"]},
+    )
+    return pending_delivery.record_path(root, metadata["parent_sid"], record["delivery_id"])
+
+
+def materialize_after_terminal_close(jobs: Path, attempt_id: str) -> Path | None:
+    """SD-111 P2 trigger 1 -- shared helper. Call once, right after a
+    lock-releasing terminal close (`close_attempt_row`, `close_attempt_row_if`,
+    `reconcile_attempt_terminal`'s `closed` outcome, or
+    `marker_bound_delivery_transaction`'s `advanced` outcome) returns.  Never
+    from inside the registry lock, never from a carrier.
+
+    Reads the just-closed row unlocked -- by the time this runs the delivery
+    identity fields are already write-once immutable (§4.4), so an unlocked
+    read is exactly as safe as `current_attempt_row` already is for every
+    other terminal-evidence consumer -- and materializes its pending-delivery
+    record if the row carries intent.
+
+    Never raises. The row is already durably closed by the time this call
+    happens, so a materialize failure here must never look like the close
+    itself failed; it is recorded as ``delivery-persistence-refused`` on
+    stderr and swallowed. Idempotent with every other trigger 1/2 call site
+    (`dispatch_pending_delivery.create`'s O_EXCL + identity-verify semantics
+    converge N calls on one record).
+    """
+
+    try:
+        row = current_attempt_row(jobs, attempt_id)
+        if row is None:
+            return None
+        return materialize_pending_delivery(jobs, row.raw.split("\t"))
+    except (JoinContractError, pending_delivery.PendingDeliveryError, OSError) as exc:
+        sys.stderr.write(
+            f"delivery-persistence-refused attempt_id={attempt_id} reason={exc}\n"
+        )
+        return None
+
+
+def supersede_pending_delivery_for_advance(jobs: Path, predecessor_attempt_id: str) -> str:
+    """SD-111 F-2 / A-17 -- an SD-110 eligible-linear runtime advance carries
+    no model delivery at all (PRD §13.33.1-(8)). No discriminator exists at
+    intent-stamp time (the predecessor row closes through the ordinary W2
+    edge and gets its ordinary intent stamp before eligible-linear success is
+    even decided -- see plan §4.3.1), so the successful advance transaction
+    itself -- the one place "this completion will never be delivered to a
+    model" becomes true -- supersedes the predecessor's record here.
+
+    Materializes first if the trigger-1/trigger-2 crash window has not
+    closed yet, then expires as ``receipt-row-superseded`` (§13.33.1-(7)),
+    the same reason SD-106 uses when a retry's new receipt obsoletes an old
+    one. Expired, never deleted. A-18's refusal counter-case never reaches
+    this function -- only an actually-advanced successor does.
+
+    Never raises, full stop -- the caller commits the advance before this
+    runs (F-6: a committed advance's outcome must never be unwound by
+    delivery-layer cleanup), so every step here, including the initial row
+    read and the expiry call's own lock/IO, is armored. A read or lock
+    failure is reported the same way `materialize_after_terminal_close`
+    already reports its own persistence failures: the typed
+    ``delivery-persistence-refused`` outcome, never a raised exception. Every
+    other ordinary "nothing to supersede" case (no recipient declared, no
+    intent stamped, record already terminal) returns its own short typed
+    outcome string, all for the caller's own logging only.
+    """
+
+    try:
+        row = current_attempt_row(jobs, predecessor_attempt_id)
+    except (JoinContractError, OSError) as exc:
+        return f"delivery-persistence-refused:{exc}"
+    if row is None:
+        return "row-missing"
+    metadata = row.metadata
+    if metadata.get("delivery_intent") != "1":
+        return "no-intent"
+    recipient_key = metadata.get("parent_sid", "")
+    delivery_id = metadata.get("delivery_id", "")
+    if not recipient_key or not delivery_id:
+        return "delivery-identity-incomplete"
+    root = jobs.resolve(strict=False).parent
+    try:
+        materialize_pending_delivery(jobs, row.raw.split("\t"))
+    except (JoinContractError, pending_delivery.PendingDeliveryError, OSError):
+        pass
+    try:
+        pending_delivery.expire_if_due(
+            root, recipient_key, delivery_id,
+            actor="dispatch-reconcile",
+            reason="receipt-row-superseded",
+            liveness="known",
+        )
+    except pending_delivery.PendingDeliveryError as exc:
+        return f"expire-refused:{exc.reason}"
+    except OSError as exc:
+        return f"delivery-persistence-refused:{exc}"
+    return "superseded"
+
+
+def reconcile_pending_delivery(jobs: Path) -> dict[str, int]:
+    """SD-111 P2 trigger 2 + the single declared expiry actor (§2-b-2/§2-c).
+
+    Meant to run on the same bounded cadence as ``dispatch-registry.py
+    reconcile --apply`` (the existing "dispatch reconcile path" -- no new
+    driver process is introduced; this function is called from there).  Two
+    independent sweeps, neither depending on the other:
+
+    1. **Materialize backstop.** Any row with ``delivery_intent`` stamped
+       that trigger 1 has not yet turned into a record (the crash window
+       between the terminal commit and trigger 1's in-process call) is
+       materialized here, idempotently converging with any other trigger.
+    2. **Expiry.** Any open-state (``pending``/``claimed``/``sent-ambiguous``)
+       record whose owning row's recorded launch-time incarnation
+       (``parent_runtime_pid``/``parent_runtime_pid_start``, §2-a-5) is
+       provably dead expires under the one declared actor
+       ``dispatch-reconcile`` (§10.2). A record whose liveness cannot be
+       determined -- fields absent, owning row gone, digest mismatch -- is
+       left untouched: unknown liveness never expires.
+
+    Never raises; each row/record is handled independently so one bad row or
+    record cannot stop the sweep. Observers (fleet, sweep hooks) have no call
+    path to this function -- only this reconcile driver does.
+    """
+
+    root = jobs.resolve(strict=False).parent
+    result = {"materialized": 0, "expired": 0, "skipped": 0}
+    try:
+        lines = jobs.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        lines = []
+    rows_by_attempt: dict[str, dict[str, str]] = {}
+    for line in lines:
+        fields = line.split("\t")
+        if len(fields) != 6:
+            continue
+        metadata = parse_registry_metadata(fields[5])
+        attempt_id = metadata.get("attempt_id", "")
+        if attempt_id:
+            rows_by_attempt[attempt_id] = metadata
+        if attempt_id and metadata.get("delivery_intent") == "1":
+            record_file = None
+            if metadata.get("parent_sid") and metadata.get("delivery_id"):
+                try:
+                    record_file = pending_delivery.record_path(
+                        root, metadata["parent_sid"], metadata["delivery_id"]
+                    )
+                except pending_delivery.PendingDeliveryError:
+                    record_file = None
+            if record_file is not None and not record_file.is_file():
+                if materialize_after_terminal_close(jobs, attempt_id) is not None:
+                    result["materialized"] += 1
+
+    pending_root = root / "pending-delivery"
+    if pending_root.is_dir():
+        for record_file in pending_root.glob("*/*.json"):
+            try:
+                record = json.loads(record_file.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            if not isinstance(record, dict) or record.get("state") not in {
+                "pending", "claimed", "sent-ambiguous",
+            }:
+                continue
+            owner_metadata = None
+            attempt_ids = record.get("attempt_ids")
+            if isinstance(attempt_ids, list):
+                for candidate in attempt_ids:
+                    if candidate in rows_by_attempt:
+                        owner_metadata = rows_by_attempt[candidate]
+                        break
+            if owner_metadata is None:
+                result["skipped"] += 1
+                continue
+            recipient_key = owner_metadata.get("parent_sid", "")
+            if (
+                not recipient_key
+                or pending_delivery.recipient_digest(recipient_key)
+                != record.get("recipient_digest")
+            ):
+                result["skipped"] += 1
+                continue
+            raw_pid = owner_metadata.get("parent_runtime_pid", "")
+            pid_start = owner_metadata.get("parent_runtime_pid_start", "")
+            if not raw_pid or not pid_start:
+                result["skipped"] += 1
+                continue
+            try:
+                disposition = process_identity_disposition(int(raw_pid), pid_start)
+            except ValueError:
+                result["skipped"] += 1
+                continue
+            # F-1: only a positive "dead" determination expires. "live" and
+            # "unresolved" (e.g. a transient procfs/permission/namespace
+            # denial) both leave the record pending -- an inaccessible
+            # observation is not a session-gone observation.
+            if disposition != "dead":
+                continue
+            try:
+                pending_delivery.expire_if_due(
+                    root, recipient_key, record["delivery_id"],
+                    actor="dispatch-reconcile",
+                    reason="recipient-session-gone",
+                    liveness="known",
+                )
+                result["expired"] += 1
+            except pending_delivery.PendingDeliveryError:
+                pass
+    return result
 
 
 def required_action_for_attempt(status: str, metadata: dict[str, str]) -> str:
@@ -2070,6 +2410,9 @@ def current_delivery_state(
         process_observation=process,
         advance=advance,
     )
+    if result.advanced:
+        # SD-111 P2 trigger 1: the registry lock already released above.
+        materialize_after_terminal_close(jobs, attempt_id)
     return CurrentDeliveryState(
         marker=result.marker,
         marker_digest=result.marker_digest,
@@ -2737,7 +3080,7 @@ def close_wrapper_pass(row: ChildRow, *, jobs: str | Path) -> str:
     ):
         return ""
     try:
-        reconcile_attempt_terminal(
+        outcome = reconcile_attempt_terminal(
             Path(jobs),
             row.attempt_id,
             "dead-route-completion-rejected",
@@ -2749,6 +3092,8 @@ def close_wrapper_pass(row: ChildRow, *, jobs: str | Path) -> str:
         )
     except DispatchContractError:
         return reason
+    if outcome == "closed":
+        materialize_after_terminal_close(Path(jobs), row.attempt_id)
     return reason
 
 
@@ -2778,7 +3123,7 @@ def _close_invalid_envelope_child(
     if observed.state != "reconcile-needed" or observed.process_state != "quiescent":
         return False
     try:
-        return close_attempt_row(
+        closed = close_attempt_row(
             Path(jobs),
             row.attempt_id,
             note,
@@ -2789,6 +3134,9 @@ def _close_invalid_envelope_child(
         )
     except DispatchContractError:
         return False
+    if closed:
+        materialize_after_terminal_close(Path(jobs), row.attempt_id)
+    return closed
 
 
 def run_route_completion(command: list[str]) -> str:

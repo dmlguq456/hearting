@@ -281,6 +281,11 @@ def reconcile_supervisor_terminal(
     attempt_id: str,
     terminal: SupervisorTerminal,
 ) -> str:
+    # SD-111 P2 trigger 1: this module cannot import
+    # dispatch_completion_join.materialize_after_terminal_close (circular --
+    # dispatch_completion_join -> codex_dispatch_terminal ->
+    # dispatch_supervisor_terminal), so every caller of this function must
+    # call it itself when the return value is "closed".
     return reconcile_attempt_terminal(
         Path(jobs),
         attempt_id,

@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import base64
 from contextlib import contextmanager
 from dataclasses import dataclass
 import errno
@@ -192,6 +193,21 @@ ATTEMPT_TERMINAL_EVIDENCE_KEYS = {
     "conflicting_failure_class",
     "receipt_state",
     "marker_state",
+    # SD-111 P2 (D-4): the delivery-intent 8-field allowlist. Stamped once by
+    # `_delivery_intent_values()` at the one `open|running -> done` edge a row
+    # actually takes (W1-W4); immutable afterward (§4.4) -- a later
+    # `_updated_attempt_metadata` call with a *different* value for any of
+    # these raises `attempt-immutable-metadata-mutation` the same as any
+    # other terminal-evidence key.
+    "delivery_intent",
+    "delivery_id",
+    "delivery_recipient_kind",
+    "delivery_recipient_digest",
+    "delivery_receipt_digest",
+    "delivery_row_revision",
+    "delivery_intent_at_ns",
+    "delivery_receipt_b64",
+    "delivery_persistence_refused",
 }
 _MODULE_ROOT = Path(__file__).resolve().parents[1]
 _CAPACITY_TERMINAL_RE = re.compile(
@@ -861,6 +877,74 @@ def process_namespace_identity(pid: int | str = "self") -> str | None:
         return None
 
 
+def _runtime_ancestry_proc_stat(pid: int) -> dict[str, int] | None:
+    """`ppid`/`start` for one PID -- same two /proc/<pid>/stat fields
+    ``compute-hosts.py``'s own ``proc_stat()`` reads (SD-111 §3.2.1: same
+    algorithm, reimplemented here because that name lives inside
+    ``PROBE_SCRIPT``, a string template shipped to remote hosts for SSH
+    execution, not an importable module-level function -- §3.2.1's "reuse the
+    primitive unchanged" cannot mean a Python import of it. See the P2 dev
+    log for this plan/reality mismatch)."""
+
+    try:
+        raw = Path("/proc") / str(pid) / "stat"
+        text = raw.read_text(encoding="utf-8", errors="replace")
+        rest = text[text.rfind(")") + 2:].split()
+        return {"ppid": int(rest[1]), "start": int(rest[19])}
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def _runtime_ancestry_harness_process(pid: int) -> str | None:
+    """Same algorithm as ``compute-hosts.py``'s embedded ``harness_process()``
+    (see ``_runtime_ancestry_proc_stat`` docstring for why this is a
+    reimplementation, not an import)."""
+
+    names = {"claude": "claude", "codex": "codex", "opencode": "opencode"}
+    try:
+        comm = (Path("/proc") / str(pid) / "comm").read_text().strip().lower()
+    except OSError:
+        comm = ""
+    if comm in names:
+        return names[comm]
+    try:
+        with (Path("/proc") / str(pid) / "cmdline").open("rb") as handle:
+            argv0 = handle.read(4096).split(b"\0", 1)[0]
+        base = os.path.basename(argv0.decode("utf-8", errors="ignore")).lower()
+    except OSError:
+        base = ""
+    return names.get(base)
+
+
+def runtime_ancestry_binding(pid: int) -> tuple[str, str, str] | None:
+    """SD-111 P2 round 2 C-3: walk `pid`'s /proc ancestry for the nearest
+    Claude runtime session process.
+
+    Used both at launch time (2-a-5, `append_job()` records the launcher's
+    own binding) and at carrier-1 claim time (P3, the hook re-derives its own
+    binding and compares). Returns `(pid, start_ticks, pid_ns)` as strings,
+    or `None` if no ancestor resolves to the "claude" harness -- callers must
+    write all three fields or none (partial recording is forbidden).
+    """
+
+    current = pid
+    seen: set[int] = set()
+    depth = 0
+    while current > 0 and current not in seen and depth < 128:
+        seen.add(current)
+        found = _runtime_ancestry_proc_stat(current)
+        if found is None:
+            return None
+        if _runtime_ancestry_harness_process(current) == "claude":
+            ns = process_namespace_identity(current)
+            if not ns:
+                return None
+            return (str(current), str(found["start"]), ns)
+        current = found["ppid"]
+        depth += 1
+    return None
+
+
 def process_state(pid: int) -> str | None:
     """Return the one-letter proc state; zombies are not live workers."""
 
@@ -882,6 +966,29 @@ def process_identity_is_live(pid: int, expected_start: str) -> bool:
         and actual_start == expected_start
         and state != "Z"
     )
+
+
+def process_identity_disposition(pid: int, expected_start: str) -> str:
+    """Return 'dead', 'live', or 'unresolved', distinguishing absence from denial.
+
+    'dead' only for a positive determination: visibility 'missing', or
+    'present' with a mismatched start tick (a different process reused the
+    pid) or a zombie state. 'inaccessible' (permission/namespace/procfs
+    denial) and any other non-determination is 'unresolved', never 'dead' --
+    an expiry actor must not convert "cannot tell" into "session is gone"
+    (SD-111 F-1, PRD §13.33.1-(7), A-10).
+    """
+
+    if not expected_start:
+        return "unresolved"
+    visibility, actual_start, state = _proc_observation(pid)
+    if visibility == "missing":
+        return "dead"
+    if visibility != "present":
+        return "unresolved"
+    if actual_start != expected_start or state == "Z":
+        return "dead"
+    return "live"
 
 
 def supervisor_lease_path(jobs: str | Path, attempt_id: str) -> Path:
@@ -5358,14 +5465,14 @@ def marker_bound_delivery_transaction(
             and verdict in {"", "PASS"}
         ):
             fields[1] = "done"
+            values = {
+                "note": "completed-marker",
+                "failure_class": "pass",
+                "classifier_source": "marker-bound-delivery-v1",
+            }
+            values.update(_delivery_intent_values(fields, {**metadata, **values}))
             fields[5] = _updated_attempt_metadata(
-                fields[5],
-                {
-                    "note": "completed-marker",
-                    "failure_class": "pass",
-                    "classifier_source": "marker-bound-delivery-v1",
-                },
-                terminal=True,
+                fields[5], values, terminal=True,
             )
             lines[index] = "\t".join(fields)
             _atomic_registry_replace(jobs, lines)
@@ -5648,6 +5755,131 @@ def _row_identity(fields: list[str]) -> tuple[str, ...] | None:
     return None
 
 
+# SD-111 D-2/C-2: duplicated (not imported) from dispatch_completion_join's
+# CANONICAL_RECEIPT_KEYS/CANONICAL_CHILD_KEYS/canonical_receipt_digest/
+# seal_delivery_receipt -- dispatch_completion_join imports THIS module, so
+# the reverse import would be circular. Keep every copy of this vocabulary
+# (here, dispatch_completion_join.py, dispatch_pending_delivery.py)
+# synchronized by hand; §11 forbids widening it.
+_CANONICAL_RECEIPT_KEYS = frozenset({
+    "schema_version", "state", "parent_attempt_id", "job_registry", "children",
+    "delivery_classification",
+})
+_CANONICAL_CHILD_KEYS = frozenset({
+    "attempt_id", "status", "readiness", "reason", "required_action", "harness",
+    "delivery_classification",
+})
+_MAX_DELIVERY_RECEIPT_BYTES = 2048
+_DELIVERY_INTENT_IMMUTABLE_KEYS = frozenset({
+    "delivery_intent", "delivery_id", "delivery_recipient_digest", "delivery_receipt_digest",
+})
+# SD-111 §4.3.1: fixed markers for the two explicit delivery exclusions,
+# found by grep against the actual writer (round 2 required this be resolved
+# by full-value equality, never substring match, before P2 wiring):
+#   - SD-105 cancellation: `utilities/dispatch-registry.py` closes the row via
+#     `close_attempt_row_if(..., evidence={"note": "cancelled-receipt-unavailable", ...})`
+#     (W4) -- exact `note` value, confirmed 2026-08-28.
+#   - SD-110 eligible-linear success: NOT wired. `dispatch_stage_advance.py`
+#     never mutates the predecessor row -- `claim_stage_advance` only writes a
+#     separate claim-record file, and the predecessor's own terminal edge
+#     (whichever of W1-W4 it took) happens *before* stage-advance is even
+#     attempted, so no fixed marker exists on the row at intent-stamp time.
+#     Per the plan's safe default (§4.3.1/§9 R-17) this exclusion is left
+#     UNIMPLEMENTED: a record is created for these rows too. See the P2 dev
+#     log for the full grep trail.
+_SD105_CANCELLED_NOTE = "cancelled-receipt-unavailable"
+
+
+def _delivery_intent_values(fields: list[str], metadata: dict[str, str]) -> dict[str, str]:
+    """Compute the one-time delivery-intent stamp for a row that just took its
+    `open|running -> done` edge (W1-W4), or {} if none is owed.
+
+    Pure: no lock, no I/O, no registry read beyond the row already in hand.
+    Called from inside the same `<jobs>.lock` the writer already holds, right
+    before `_updated_attempt_metadata(..., terminal=True)`.
+    """
+
+    if not metadata.get("parent_completion_delivery") or not metadata.get("parent_sid"):
+        return {}
+    if metadata.get("delivery_intent"):
+        # Already stamped -- W1-W4 share one lock and this function only ever
+        # runs once per row's single open|running->done edge, but a repaired/
+        # conflict path re-invoking this defensively must still no-op.
+        return {}
+    if metadata.get("note") == _SD105_CANCELLED_NOTE:
+        return {}
+
+    attempt_id = metadata.get("attempt_id", "")
+    if not attempt_id:
+        return {}
+    recipient_kind = metadata["parent_completion_delivery"]
+    recipient_key = metadata["parent_sid"]
+    parent_attempt_id = metadata.get("parent_attempt_id", "")
+    route_id = metadata.get("route_id", "")
+    route_node = metadata.get("route_node", "")
+    is_success = (
+        metadata.get("failure_class") == "pass"
+        or metadata.get("note") in {"completed-marker", "completed-supervisor"}
+    )
+    child = {
+        "attempt_id": attempt_id,
+        "status": "done",
+        "readiness": "ready",
+        "harness": metadata.get("harness", ""),
+        "required_action": "advance-completed" if is_success else "inspect-done-failure",
+        "delivery_classification": "success" if is_success else "attention",
+    }
+    if not is_success:
+        child["reason"] = "terminal-failure-or-unclosed"
+    receipt = {
+        "schema_version": 2,
+        "state": "delivered",
+        "parent_attempt_id": parent_attempt_id,
+        "job_registry": "",
+        "children": [child],
+        "delivery_classification": child["delivery_classification"],
+    }
+    canonical = {key: value for key, value in receipt.items() if key in _CANONICAL_RECEIPT_KEYS}
+    canonical["children"] = [
+        {key: value for key, value in child.items() if key in _CANONICAL_CHILD_KEYS}
+    ]
+    canonical_bytes = json.dumps(canonical, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    receipt_digest = hashlib.sha256(canonical_bytes).hexdigest()
+
+    receipt_bytes = json.dumps(receipt, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    if len(receipt_bytes) > _MAX_DELIVERY_RECEIPT_BYTES:
+        # Stamp failure must not block row closure (§4.4): the caller records
+        # this typed refusal on its own evidence key and proceeds to close.
+        return {"delivery_persistence_refused": "pending-delivery-oversized"}
+    sealed = base64.standard_b64encode(receipt_bytes).decode("ascii").rstrip("=")
+
+    row_revision = hashlib.sha256(
+        "\t".join(fields).encode("utf-8")
+    ).hexdigest()
+    identity_material = json.dumps(
+        {
+            "recipient_key": recipient_key,
+            "attempt_ids": [attempt_id],
+            "receipt_digest": receipt_digest,
+            "row_revisions": {attempt_id: row_revision},
+        },
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    delivery_id = "delivery-" + hashlib.sha256(identity_material).hexdigest()[:32]
+
+    return {
+        "delivery_intent": "1",
+        "delivery_id": delivery_id,
+        "delivery_recipient_kind": recipient_kind,
+        "delivery_recipient_digest": hashlib.sha256(recipient_key.encode("utf-8")).hexdigest(),
+        "delivery_receipt_digest": receipt_digest,
+        "delivery_row_revision": row_revision,
+        "delivery_intent_at_ns": str(time.monotonic_ns()),
+        "delivery_receipt_b64": sealed,
+    }
+
+
 def _updated_attempt_metadata(
     pipe: str,
     values: dict[str, str],
@@ -5686,6 +5918,20 @@ def _updated_attempt_metadata(
             raise DispatchContractError(
                 "attempt-launch-outcome-conflict",
                 f"existing={metadata.get(key)} requested={value}",
+            )
+        if (
+            key in _DELIVERY_INTENT_IMMUTABLE_KEYS
+            and metadata.get(key)
+            and metadata.get(key) != value
+        ):
+            # SD-111 §4.4: delivery_intent/delivery_id/delivery_recipient_digest/
+            # delivery_receipt_digest are write-once. `_delivery_intent_values`
+            # already refuses to re-stamp a row that has one (the ordinary
+            # path never reaches here with a changed value); this is the
+            # defense-in-depth the plan asks for at the low-level writer too.
+            raise DispatchContractError(
+                "pending-delivery-identity-conflict",
+                f"key={key} existing={metadata.get(key)} requested={value}",
             )
         replace[key] = value
     retained = [
@@ -5726,6 +5972,7 @@ def close_attempt_row(
                 key: value for key, value in (evidence or {}).items()
                 if value not in (None, "")
             })
+            values.update(_delivery_intent_values(fields, {**metadata, **values}))
             try:
                 fields[5] = _updated_attempt_metadata(
                     fields[5], values, terminal=True
@@ -5879,6 +6126,7 @@ def reconcile_attempt_terminal(
                 if value not in (None, "")
             }
         )
+        values.update(_delivery_intent_values(fields, {**metadata, **values}))
         fields[1] = "done"
         fields[5] = _updated_attempt_metadata(fields[5], values, terminal=True)
         lines[index] = "\t".join(fields)
@@ -6025,6 +6273,7 @@ def close_attempt_row_if(
                 key: value for key, value in (evidence or {}).items()
                 if value not in (None, "")
             })
+            values.update(_delivery_intent_values(fields, {**metadata, **values}))
             try:
                 fields[5] = _updated_attempt_metadata(
                     fields[5], values, terminal=True

@@ -60,6 +60,7 @@ from dispatch_contract import (  # noqa: E402
     resolve_model_governor_root,
     replica_batch_expectation,
     reserve_governor_token,
+    runtime_ancestry_binding,
     spawn_claimed_attempt,
     supervisor_lease_path,
     validate_nested_eligibility,
@@ -109,6 +110,7 @@ from dispatch_completion_join import (  # noqa: E402
     JoinContractError,
     close_wrapper_pass,
     exact_attempt_row,
+    materialize_after_terminal_close,
 )
 from codex_managed_dispatch import (  # noqa: E402
     MANAGED_PARENT_DELIVERY,
@@ -1452,6 +1454,19 @@ def append_job(jobs: Path, args: argparse.Namespace) -> bool:
         f"parent_completion_delivery={args.parent_completion_delivery},"
         f"parent_completion_reason={getattr(args, 'parent_completion_reason', 'unspecified')}"
     )
+    if args.parent_completion_delivery == "claude-parent-runtime":
+        # SD-111 P2 round 2 C-3 (2-a-5), sibling parity with the Claude
+        # adapter (core/ADAPTATION.md §2.0) -- Codex never sets this delivery
+        # value today (its own native carrier owns Codex completions), so
+        # this branch is structurally present but a no-op in practice.
+        ancestry = runtime_ancestry_binding(os.getpid())
+        if ancestry is not None:
+            ancestry_pid, ancestry_start, ancestry_ns = ancestry
+            pipe += (
+                f",parent_runtime_pid={ancestry_pid}"
+                f",parent_runtime_pid_start={ancestry_start}"
+                f",parent_runtime_ns={ancestry_ns}"
+            )
     if args.resolved_completion_delivery == "app-server-supervised":
         pipe += (
             f",supervisor_lease={SUPERVISOR_LEASE_KIND}"
@@ -1664,7 +1679,10 @@ def close_job_row(jobs: Path, slug: str, worktree: str, reason: str, reset: str,
         evidence = {"reset": reset} if reset else {}
         if reason == "capacity":
             evidence.update(failure_class="capacity", detected_by="anchored-early-exit")
-        return close_attempt_row(jobs, attempt_id, f"dead-{reason}", evidence=evidence)
+        closed = close_attempt_row(jobs, attempt_id, f"dead-{reason}", evidence=evidence)
+        if closed:
+            materialize_after_terminal_close(jobs, attempt_id)
+        return closed
     if not jobs.is_file():
         return False
     with jobs_lock(jobs):
@@ -2854,6 +2872,8 @@ def main(argv: list[str]) -> int:
                         "log_file": str(log_path),
                     },
                 )
+                if terminal_closed:
+                    materialize_after_terminal_close(jobs, args.attempt_id)
                 args.worker_failure = terminal_note
             if outcome.failure and not terminal_closed:
                 close_job_row(

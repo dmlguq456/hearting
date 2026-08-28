@@ -359,6 +359,15 @@
             "timeout": 20
           }
         ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$HOME/.claude/hooks/dispatch-session-sweep.py\"",
+            "timeout": 10
+          }
+        ]
       }
     ],
     "Stop": [
@@ -410,6 +419,15 @@
             "type": "command",
             "command": "bash \"$HOME/.claude/hooks/mem-recall-inject.sh\"",
             "timeout": 3
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$HOME/.claude/hooks/dispatch-session-sweep.py\"",
+            "timeout": 10
           }
         ]
       },

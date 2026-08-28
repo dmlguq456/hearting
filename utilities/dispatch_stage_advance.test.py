@@ -402,6 +402,172 @@ class ArbiterDeclaredTest(unittest.TestCase):
             sandbox.close()
 
 
+DC_CURRENT = (
+    "attempt_schema_version=2,dispatch_depth=2,transport=headless,"
+    "execution_surface=registered-headless,registered_worker=1,"
+    "fallback_hop=same-harness-headless"
+)
+
+
+class SupersedePendingDeliveryTest(unittest.TestCase):
+    """SD-111 F-2 / A-17: an eligible-linear runtime advance that actually
+    succeeds must not leave the predecessor's ordinary delivery-owing
+    completion as a live pending record (PRD §13.33.1-(8): the advance
+    negotiation itself has no model delivery). A-18, the counter-case, is
+    also here: a *refused* advance must leave that record exactly as an
+    ordinary successful completion would."""
+
+    def _predecessor_row(self, sandbox: Sandbox, attempt_id: str, *, route: dict):
+        import dispatch_contract as DC
+
+        metadata = {
+            "attempt_id": attempt_id,
+            "parent_attempt_id": "att-a17-parent",
+            "parent_completion_delivery": "claude-parent-runtime",
+            "parent_sid": f"sess-{attempt_id}",
+            "route_id": route["route_id"],
+            "route_hash": route["route_hash"],
+            "route_node": "a",
+            "harness": "claude",
+        }
+        pipe = ",".join(
+            [DC_CURRENT] + [f"{key}={value}" for key, value in metadata.items()]
+        )
+        line = f"2026-08-28T00:00:00Z\topen\t/r\t/w\ta\t{pipe}"
+        with sandbox.jobs.open("a", encoding="utf-8") as handle:
+            handle.write(line + "\n")
+        self.assertTrue(DC.close_attempt_row(sandbox.jobs, attempt_id, "completed-marker"))
+        return DC
+
+    def test_a17_successful_advance_supersedes_the_predecessor_record(self):
+        route = make_route([node("a"), node("b", depends_on=("a",))])
+        sandbox = Sandbox()
+        try:
+            route_file = sandbox.write_route(route)
+            attempt_id = "att-a17-fixture"
+            DC = self._predecessor_row(sandbox, attempt_id, route=route)
+            request = make_request(
+                sandbox, route_file, predecessor_node="a",
+                predecessor_terminal_attempt_id=attempt_id,
+            )
+            with mock.patch.object(SA, "gate_evidence", return_value=PASS_EVIDENCE):
+                services = FakeServices()
+                result = SA.coordinate_stage_advance(request, services)
+            self.assertEqual(result.outcome, "advanced")
+
+            import dispatch_completion_join as JOIN
+            import dispatch_pending_delivery as PD
+
+            fresh = JOIN.current_attempt_row(sandbox.jobs, attempt_id)
+            self.assertEqual(fresh.metadata.get("delivery_intent"), "1")
+            root = sandbox.jobs.resolve(strict=False).parent
+            record_path = PD.record_path(
+                root, fresh.metadata["parent_sid"], fresh.metadata["delivery_id"]
+            )
+            self.assertTrue(record_path.is_file())
+            record = json.loads(record_path.read_text(encoding="utf-8"))
+            self.assertEqual(record["state"], "expired")
+            self.assertEqual(record["expiry_reason"], "receipt-row-superseded")
+        finally:
+            sandbox.close()
+
+    def test_a18_refused_advance_leaves_the_ordinary_record_untouched(self):
+        # A-18: `b`'s terminal successor makes this boundary refuse before
+        # any spawn -- the predecessor's ordinary delivery-owing completion
+        # must reach the normal pending state, exactly as any other
+        # successful completion would.
+        route = make_route([
+            node("a"),
+            node("b", depends_on=("a",), terminal=True,
+                 advance_class="model-required", model_required_reason="terminal-report"),
+        ])
+        sandbox = Sandbox()
+        try:
+            route_file = sandbox.write_route(route)
+            attempt_id = "att-a18-fixture-2"
+            DC = self._predecessor_row(sandbox, attempt_id, route=route)
+            request = make_request(
+                sandbox, route_file, predecessor_node="a",
+                predecessor_terminal_attempt_id=attempt_id,
+            )
+            with mock.patch.object(SA, "gate_evidence", return_value=PASS_EVIDENCE):
+                services = FakeServices()
+                result = SA.coordinate_stage_advance(request, services)
+            self.assertEqual(result.outcome, "refused")
+            self.assertEqual(services.start_calls, 0)
+
+            import dispatch_completion_join as JOIN
+            import dispatch_pending_delivery as PD
+
+            fresh = JOIN.current_attempt_row(sandbox.jobs, attempt_id)
+            self.assertEqual(fresh.metadata.get("delivery_intent"), "1")
+            root = sandbox.jobs.resolve(strict=False).parent
+            record_path = PD.record_path(
+                root, fresh.metadata["parent_sid"], fresh.metadata["delivery_id"]
+            )
+            self.assertFalse(record_path.is_file())
+        finally:
+            sandbox.close()
+
+    def test_f6_supersede_registry_read_failure_never_unwinds_a_committed_advance(self):
+        # F-6 (impl-review round 2): `supersede_pending_delivery_for_advance`
+        # runs after the advance result is already committed to disk. A
+        # transient registry-read failure inside it must never surface as a
+        # raised exception out of `coordinate_stage_advance` -- that would
+        # turn an already-successful advance into a caller-visible failure.
+        route = make_route([node("a"), node("b", depends_on=("a",))])
+        sandbox = Sandbox()
+        try:
+            route_file = sandbox.write_route(route)
+            attempt_id = "att-f6-fixture"
+            self._predecessor_row(sandbox, attempt_id, route=route)
+            request = make_request(
+                sandbox, route_file, predecessor_node="a",
+                predecessor_terminal_attempt_id=attempt_id,
+            )
+            import dispatch_completion_join as JOIN
+
+            with mock.patch.object(SA, "gate_evidence", return_value=PASS_EVIDENCE), \
+                 mock.patch.object(
+                     JOIN, "current_attempt_row",
+                     side_effect=JOIN.JoinContractError("registry-unreadable"),
+                 ):
+                services = FakeServices()
+                result = SA.coordinate_stage_advance(request, services)
+            self.assertEqual(result.outcome, "advanced")
+            self.assertEqual(result.reason, "")
+        finally:
+            sandbox.close()
+
+    def test_f6_supersede_expiry_os_error_never_unwinds_a_committed_advance(self):
+        # F-6 companion: the `expire_if_due` lock/IO path can also raise
+        # `OSError` (not just `PendingDeliveryError`); that must be equally
+        # inert to the already-committed advance result.
+        route = make_route([node("a"), node("b", depends_on=("a",))])
+        sandbox = Sandbox()
+        try:
+            route_file = sandbox.write_route(route)
+            attempt_id = "att-f6-fixture-2"
+            self._predecessor_row(sandbox, attempt_id, route=route)
+            request = make_request(
+                sandbox, route_file, predecessor_node="a",
+                predecessor_terminal_attempt_id=attempt_id,
+            )
+            import dispatch_completion_join as JOIN
+
+            with mock.patch.object(SA, "gate_evidence", return_value=PASS_EVIDENCE), \
+                 mock.patch.object(
+                     JOIN.pending_delivery, "expire_if_due",
+                     side_effect=OSError("disk full"),
+                 ):
+                services = FakeServices()
+                result = SA.coordinate_stage_advance(request, services)
+            self.assertEqual(result.outcome, "advanced")
+            self.assertEqual(result.reason, "")
+        finally:
+            sandbox.close()
+
+
 class TerminalNodeTest(unittest.TestCase):
     def test_terminal_successor_refuses_before_tuple_unsealed(self):
         # A-8: successor is BOTH terminal AND model-required/tuple-unsealed by

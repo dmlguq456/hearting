@@ -1201,6 +1201,28 @@ class DispatchContractTest(unittest.TestCase):
   self.assertEqual(observation.state,"unverifiable")
   self.assertIn("procfs-enumeration",observation.reason)
 
+ def test_process_identity_disposition_distinguishes_dead_live_and_unresolved(self):
+  # F-1: 'inaccessible' (permission/namespace/procfs denial) must be
+  # 'unresolved', never 'dead' -- collapsing it into 'dead' is exactly the
+  # defect the review found in the reconcile expiry caller.
+  with mock.patch.object(
+      D,"_proc_observation",return_value=("missing","","")):
+   self.assertEqual(D.process_identity_disposition(123,"42"),"dead")
+  with mock.patch.object(
+      D,"_proc_observation",return_value=("inaccessible","","")):
+   self.assertEqual(D.process_identity_disposition(123,"42"),"unresolved")
+  with mock.patch.object(
+      D,"_proc_observation",return_value=("present","99","R")):
+   # start tick mismatch: pid reused by a different process -- positively dead.
+   self.assertEqual(D.process_identity_disposition(123,"42"),"dead")
+  with mock.patch.object(
+      D,"_proc_observation",return_value=("present","42","Z")):
+   self.assertEqual(D.process_identity_disposition(123,"42"),"dead")
+  with mock.patch.object(
+      D,"_proc_observation",return_value=("present","42","R")):
+   self.assertEqual(D.process_identity_disposition(123,"42"),"live")
+  self.assertEqual(D.process_identity_disposition(123,""),"unresolved")
+
  def test_known_group_member_outranks_partial_procfs_scan_failure(self):
   entries=(Path("/proc/101"),Path("/proc/102"))
   stat="101 (worker) "+" ".join(["S","1","77"]+["0"]*16+["42"])
@@ -3058,6 +3080,432 @@ class NestedJobsVocabByteIdentityTest(unittest.TestCase):
    with self.assertRaises(D.DispatchContractError) as caught:
     D.resolve_global_registry(root,None,2,"start",{})
    self.assertEqual(caught.exception.reason,"global-registry-unset")
+
+
+class DeliveryIntentValuesTest(unittest.TestCase):
+    """SD-111 P2 (D-4): `_delivery_intent_values` pure function + wiring into
+    the four `open|running -> done` writers (W1-W4)."""
+
+    def _metadata(self, **overrides):
+        base = {
+            "attempt_id": "att-delivery-intent",
+            "parent_attempt_id": "att-delivery-parent",
+            "parent_completion_delivery": "claude-parent-runtime",
+            "parent_sid": "sess-delivery-intent",
+            "route_id": "rt-delivery-intent",
+            "route_node": "execute",
+            "harness": "claude",
+        }
+        base.update(overrides)
+        return base
+
+    def _fields(self, metadata, status="done"):
+        pipe = ",".join(f"{k}={v}" for k, v in metadata.items())
+        return f"2026-08-28T00:00:00Z\t{status}\t/r\t/w\texecute\t{pipe}".split("\t")
+
+    def test_no_recipient_declared_yields_no_intent(self):
+        metadata = {"attempt_id": "att-legacy", "note": "completed-marker", "failure_class": "pass"}
+        self.assertEqual(D._delivery_intent_values(self._fields(metadata), metadata), {})
+
+    def test_success_stamps_advance_completed_intent(self):
+        metadata = self._metadata(note="completed-marker", failure_class="pass")
+        fields = self._fields(metadata)
+        intent = D._delivery_intent_values(fields, metadata)
+        self.assertEqual(intent["delivery_intent"], "1")
+        self.assertTrue(intent["delivery_id"].startswith("delivery-"))
+        self.assertEqual(len(intent["delivery_id"]), len("delivery-") + 32)
+        self.assertEqual(
+            intent["delivery_recipient_digest"],
+            hashlib.sha256(b"sess-delivery-intent").hexdigest(),
+        )
+        self.assertEqual(intent["delivery_recipient_kind"], "claude-parent-runtime")
+        restored = json.loads(
+            D.base64.standard_b64decode(
+                intent["delivery_receipt_b64"] + "=" * (-len(intent["delivery_receipt_b64"]) % 4)
+            )
+        )
+        self.assertEqual(restored["children"][0]["delivery_classification"], "success")
+        self.assertEqual(restored["children"][0]["required_action"], "advance-completed")
+        self.assertNotIn("reason", restored["children"][0])
+        canonical = {k: v for k, v in restored.items() if k in D._CANONICAL_RECEIPT_KEYS}
+        canonical["children"] = [
+            {k: v for k, v in c.items() if k in D._CANONICAL_CHILD_KEYS}
+            for c in restored["children"]
+        ]
+        digest = hashlib.sha256(
+            json.dumps(canonical, separators=(",", ":"), sort_keys=True).encode("utf-8")
+        ).hexdigest()
+        self.assertEqual(intent["delivery_receipt_digest"], digest)
+
+    def test_failure_stamps_inspect_done_failure_intent(self):
+        metadata = self._metadata(note="dead-fixture", failure_class="fail")
+        intent = D._delivery_intent_values(self._fields(metadata), metadata)
+        restored = json.loads(
+            D.base64.standard_b64decode(
+                intent["delivery_receipt_b64"] + "=" * (-len(intent["delivery_receipt_b64"]) % 4)
+            )
+        )
+        self.assertEqual(restored["children"][0]["delivery_classification"], "attention")
+        self.assertEqual(restored["children"][0]["required_action"], "inspect-done-failure")
+        self.assertEqual(restored["children"][0]["reason"], "terminal-failure-or-unclosed")
+
+    def test_already_stamped_row_never_restamps(self):
+        metadata = self._metadata(
+            note="completed-marker", failure_class="pass",
+            delivery_intent="1", delivery_id="delivery-" + "a" * 32,
+        )
+        self.assertEqual(D._delivery_intent_values(self._fields(metadata), metadata), {})
+
+    def test_sd105_cancellation_marker_excludes_intent(self):
+        metadata = self._metadata(
+            note="cancelled-receipt-unavailable", failure_class="cancelled",
+        )
+        self.assertEqual(D._delivery_intent_values(self._fields(metadata), metadata), {})
+
+    def test_two_renders_of_the_same_row_are_byte_identical(self):
+        # delivery_intent_at_ns is a fresh time.monotonic_ns() stamp on each
+        # call by design (it is observability, not identity) -- everything
+        # that IS identity must still match across two independent renders.
+        metadata = self._metadata(note="completed-marker", failure_class="pass")
+        fields = self._fields(metadata)
+        first = D._delivery_intent_values(fields, dict(metadata))
+        second = D._delivery_intent_values(fields, dict(metadata))
+        for key in (
+            "delivery_intent", "delivery_id", "delivery_recipient_kind",
+            "delivery_recipient_digest", "delivery_receipt_digest",
+            "delivery_row_revision", "delivery_receipt_b64",
+        ):
+            self.assertEqual(first[key], second[key], key)
+
+
+class DeliveryIntentWiringTest(unittest.TestCase):
+    """Integration: each of W1-W4 stamps the intent exactly once; the two
+    reconcile_attempt_terminal repair branches never do (§4.3)."""
+
+    def _row(self, jobs_status="open", **meta_overrides):
+        metadata = {
+            **{
+                "attempt_id": "att-w-fixture",
+                "parent_attempt_id": "att-w-parent",
+                "parent_completion_delivery": "claude-parent-runtime",
+                "parent_sid": "sess-w-fixture",
+                "route_id": "rt-w-fixture",
+                "route_node": "execute",
+                "harness": "claude",
+            },
+            **meta_overrides,
+        }
+        return attempt_row(metadata, status=jobs_status)
+
+    def test_w2_close_attempt_row_stamps_intent(self):
+        with tempfile.TemporaryDirectory() as td:
+            jobs = Path(td) / "jobs.log"
+            jobs.write_text(self._row() + "\n", encoding="utf-8")
+            self.assertTrue(D.close_attempt_row(jobs, "att-w-fixture", "completed-marker"))
+            line = jobs.read_text(encoding="utf-8").splitlines()[0]
+            metadata = D.parse_registry_metadata(line.split("\t")[5])
+            self.assertEqual(metadata.get("delivery_intent"), "1")
+            self.assertIn("delivery_receipt_b64", metadata)
+
+    def test_w4_close_attempt_row_if_stamps_intent(self):
+        with tempfile.TemporaryDirectory() as td:
+            jobs = Path(td) / "jobs.log"
+            jobs.write_text(self._row() + "\n", encoding="utf-8")
+            self.assertTrue(
+                D.close_attempt_row_if(jobs, "att-w-fixture", "completed-marker", lambda _f: True)
+            )
+            metadata = D.parse_registry_metadata(
+                jobs.read_text(encoding="utf-8").splitlines()[0].split("\t")[5]
+            )
+            self.assertEqual(metadata.get("delivery_intent"), "1")
+
+    def test_w4_sd105_exclusion_leaves_no_intent(self):
+        with tempfile.TemporaryDirectory() as td:
+            jobs = Path(td) / "jobs.log"
+            jobs.write_text(self._row() + "\n", encoding="utf-8")
+            self.assertTrue(
+                D.close_attempt_row_if(
+                    jobs, "att-w-fixture", "cancelled-receipt-unavailable", lambda _f: True,
+                    evidence={"note": "cancelled-receipt-unavailable", "failure_class": "cancelled"},
+                )
+            )
+            metadata = D.parse_registry_metadata(
+                jobs.read_text(encoding="utf-8").splitlines()[0].split("\t")[5]
+            )
+            self.assertNotIn("delivery_intent", metadata)
+
+    def test_w3_reconcile_attempt_terminal_closed_branch_stamps_intent(self):
+        with tempfile.TemporaryDirectory() as td:
+            jobs = Path(td) / "jobs.log"
+            jobs.write_text(self._row() + "\n", encoding="utf-8")
+            outcome = D.reconcile_attempt_terminal(jobs, "att-w-fixture", "completed-marker")
+            self.assertEqual(outcome, "closed")
+            metadata = D.parse_registry_metadata(
+                jobs.read_text(encoding="utf-8").splitlines()[0].split("\t")[5]
+            )
+            self.assertEqual(metadata.get("delivery_intent"), "1")
+
+    def test_w3_repaired_terminal_branch_never_stamps_or_overwrites_intent(self):
+        with tempfile.TemporaryDirectory() as td:
+            jobs = Path(td) / "jobs.log"
+            jobs.write_text(self._row() + "\n", encoding="utf-8")
+            first = D.reconcile_attempt_terminal(
+                jobs, "att-w-fixture", "completed-marker",
+                evidence={"failure_class": "pass"},
+            )
+            self.assertEqual(first, "closed")
+            before = D.parse_registry_metadata(
+                jobs.read_text(encoding="utf-8").splitlines()[0].split("\t")[5]
+            )
+            self.assertEqual(before.get("delivery_intent"), "1")
+            outcome = D.reconcile_attempt_terminal(
+                jobs, "att-w-fixture", "supervisor-repair",
+                evidence={
+                    "failure_class": "fail",
+                    "classifier_source": "supervisor-terminal-v1",
+                },
+            )
+            self.assertEqual(outcome, "repaired-terminal")
+            after = D.parse_registry_metadata(
+                jobs.read_text(encoding="utf-8").splitlines()[0].split("\t")[5]
+            )
+            self.assertEqual(after.get("delivery_intent"), before.get("delivery_intent"))
+            self.assertEqual(after.get("delivery_id"), before.get("delivery_id"))
+            self.assertEqual(
+                after.get("delivery_receipt_digest"), before.get("delivery_receipt_digest")
+            )
+
+    def test_w1_marker_bound_delivery_transaction_stamps_intent(self):
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            jobs = base / "jobs.log"
+            attempt = "att-w1-fixture"
+            route_path = base / "route.json"
+            marker_path = base / "execute.json"
+            evidence = base / "evidence.md"
+            evidence.write_text("verified\n")
+            route = {
+                "route_id": "rt-w1", "route_hash": "sha256:" + "5" * 64,
+                "registry_digest": "sha256:" + "6" * 64,
+                "nodes": [{"id": "execute", "completion_gate": "code-execute", "dispatch_depth": 2}],
+            }
+            route_path.write_text(json.dumps(route))
+            marker = {
+                "schema_version": 2, "sequence": 1, "route_id": route["route_id"],
+                "route_hash": route["route_hash"], "registry_digest": route["registry_digest"],
+                "node_id": "execute", "completion_gate": "code-execute", "attempt_id": attempt,
+                "dispatch_depth": 2, "transport": "headless",
+                "execution_surface": "registered-headless", "registered_worker": True,
+                "fallback_hop": "same-harness-headless",
+                "evidence": {
+                    "path": str(evidence),
+                    "sha256": hashlib.sha256(evidence.read_bytes()).hexdigest(),
+                },
+            }
+            marker_path.write_text(json.dumps(marker))
+            history = base / "execute.1.json"
+            history.write_text(json.dumps(marker))
+            link = base / f"execute.{attempt}.attempt.json"
+            link.write_text(json.dumps({
+                "schema_version": 2, "route_id": route["route_id"], "node_id": "execute",
+                "attempt_id": attempt, "dispatch_depth": 2, "transport": "headless",
+                "execution_surface": "registered-headless", "registered_worker": True,
+                "fallback_hop": "same-harness-headless",
+                "evidence_sha256": marker["evidence"]["sha256"],
+                "completion_marker": str(marker_path), "completion_marker_history": str(history),
+            }))
+            metadata_pipe = (
+                f"{CURRENT},attempt_id={attempt},route_id={route['route_id']},"
+                f"route_hash={route['route_hash']},route_node=execute,"
+                f"route_file={route_path},completion_marker={marker_path},"
+                "launch_outcome=never-launched,"
+                "parent_completion_delivery=claude-parent-runtime,"
+                "parent_sid=sess-w1-fixture,parent_attempt_id=att-w1-parent,"
+                "harness=claude"
+            )
+            raw = f"2026-08-25T00:00:00Z\topen\t/r\t/w\texecute\t{metadata_pipe}"
+            jobs.write_text(raw + "\n", encoding="utf-8")
+            parsed = D.parse_registry_metadata(metadata_pipe)
+            result = D.marker_bound_delivery_transaction(
+                jobs, attempt, parent_attempt_id=attempt,
+                expected_row_revision=hashlib.sha256(raw.encode()).hexdigest(),
+                expected_process_identity=D.marker_bound_process_identity(parsed),
+                process_observation=D.ProcessQuiescence("quiescent", "fixture"),
+            )
+            self.assertTrue(result.advanced)
+            metadata = D.parse_registry_metadata(
+                jobs.read_text(encoding="utf-8").splitlines()[0].split("\t")[5]
+            )
+            self.assertEqual(metadata.get("delivery_intent"), "1")
+            self.assertEqual(metadata.get("delivery_recipient_kind"), "claude-parent-runtime")
+
+    def test_immutable_delivery_fields_reject_mutation_at_the_low_level_writer(self):
+        pipe = (
+            "delivery_intent=1,delivery_id=delivery-" + "a" * 32
+            + ",delivery_recipient_digest=" + "b" * 64
+            + ",delivery_receipt_digest=" + "c" * 64
+        )
+        with self.assertRaises(D.DispatchContractError) as caught:
+            D._updated_attempt_metadata(
+                pipe, {"delivery_id": "delivery-" + "z" * 32}, terminal=True,
+            )
+        self.assertEqual(caught.exception.reason, "pending-delivery-identity-conflict")
+
+    def test_oversized_receipt_body_refuses_stamp_but_still_closes_the_row(self):
+        with tempfile.TemporaryDirectory() as td:
+            jobs = Path(td) / "jobs.log"
+            jobs.write_text(
+                self._row(parent_attempt_id="att-w-parent-" + "x" * 2200) + "\n",
+                encoding="utf-8",
+            )
+            self.assertTrue(D.close_attempt_row(jobs, "att-w-fixture", "completed-marker"))
+            metadata = D.parse_registry_metadata(
+                jobs.read_text(encoding="utf-8").splitlines()[0].split("\t")[5]
+            )
+            self.assertNotIn("delivery_intent", metadata)
+            self.assertEqual(
+                metadata.get("delivery_persistence_refused"), "pending-delivery-oversized"
+            )
+
+    def test_static_scan_every_terminal_edge_goes_through_delivery_intent_values(self):
+        # R-11: a W-site that calls _updated_attempt_metadata(..., terminal=True)
+        # without first merging _delivery_intent_values(...) would silently
+        # never create a delivery record for that edge. `rg` is unavailable on
+        # this machine (plan §10.2) -- this scan uses pure Python line
+        # scanning, never `rg`, so it is not a vacuous pass.
+        #
+        # Every `terminal=True` call site in the module falls into exactly
+        # one of two buckets, and this scan asserts *both* directions so
+        # neither an accidental omission (a W-site silently loses the merge)
+        # nor an accidental widening (a §4.3-excluded site starts stamping,
+        # e.g. `repaired-terminal` clobbering an existing intent) passes
+        # unnoticed:
+        #   - the four W1-W4 open|running->done edges: MUST merge
+        #     _delivery_intent_values(...) first (marker_bound_delivery_
+        #     transaction's advance branch, close_attempt_row,
+        #     reconcile_attempt_terminal's `closed` branch, close_attempt_row_if).
+        #   - every other site (seal_recovery_blocked-style already-terminal
+        #     sealers, and reconcile_attempt_terminal's `repaired-terminal`/
+        #     `terminal-conflict` branches, §4.3 exclusion table): MUST NOT.
+        source = (Path(__file__).with_name("dispatch_contract.py")).read_text(encoding="utf-8")
+        lines = source.splitlines()
+        sites = [
+            index for index, line in enumerate(lines)
+            if "terminal=True" in line and "`" not in line  # skip the one docstring mention
+        ]
+        self.assertEqual(len(sites), 8, "unexpected count of terminal=True call sites -- "
+                          "a new one was added without updating this fixture's bucket split")
+        wired = 0
+        for index in sites:
+            window = "\n".join(lines[max(0, index - 6):index])
+            if "_delivery_intent_values" in window:
+                wired += 1
+        self.assertEqual(
+            wired, 4,
+            "exactly 4 sites (W1-W4) must merge _delivery_intent_values(...); "
+            f"found {wired}",
+        )
+
+    def test_a18_eligible_linear_candidate_still_gets_ordinary_receipt_and_record(self):
+        # A-18, the counter-case to A-17: SD-110 eligible-linear success
+        # exclusion is unimplemented (§4.3.1, no marker exists at intent-
+        # stamp time -- see the P2 dev log). This is the plan's own safe
+        # default, not a bug, but it must be proven not to *break* anything:
+        # a row shaped exactly like an eligible-linear predecessor candidate
+        # (dispatch_depth=2, note=completed-marker, failure_class=pass --
+        # precisely what `dispatch_stage_advance.py`'s
+        # `claim_stage_advance`/`coordinate_stage_advance` would read off a
+        # *closed* predecessor row) still gets its ordinary byte-identical
+        # intent stamp and enters the pending-delivery record path exactly
+        # like any other successful completion -- "leave it unexcluded"
+        # never means "leave it unstamped".
+        # `dispatch_stage_advance.py`/its test file are out of this phase's
+        # fixed files (P4's route-advance integration owns that surface), so
+        # this proves the invariant at the W-level this phase does own.
+        with tempfile.TemporaryDirectory() as td:
+            jobs = Path(td) / "jobs.log"
+            metadata = {
+                "attempt_id": "att-a18-fixture",
+                "parent_attempt_id": "att-a18-parent",
+                "parent_completion_delivery": "claude-parent-runtime",
+                "parent_sid": "sess-a18-fixture",
+                "route_id": "rt-a18-fixture",
+                "route_node": "execute",
+                "harness": "claude",
+            }
+            jobs.write_text(attempt_row(metadata) + "\n", encoding="utf-8")
+            self.assertTrue(
+                D.close_attempt_row(jobs, "att-a18-fixture", "completed-marker")
+            )
+            line = jobs.read_text(encoding="utf-8").splitlines()[0]
+            fields = line.split("\t")
+            after = D.parse_registry_metadata(fields[5])
+            # Ordinary receipt: unchanged classification/note, no SD-110
+            # marker suppressed anything.
+            self.assertEqual(after.get("note"), "completed-marker")
+            # Record path entered: the same 8-key intent stamp any other
+            # successful W2 close produces.
+            self.assertEqual(after.get("delivery_intent"), "1")
+            self.assertIn("delivery_receipt_b64", after)
+            self.assertIn("delivery_id", after)
+
+
+class RuntimeAncestryBindingTest(unittest.TestCase):
+    """SD-111 P2 round 2 C-3 (2-a-5): the launch-time incarnation walk.
+
+    ``compute-hosts.py``'s own ``proc_stat``/``harness_process`` turned out
+    to live inside ``PROBE_SCRIPT``, a string shipped to remote hosts over
+    SSH, not an importable module-level function (see the P2 dev log) --
+    ``runtime_ancestry_binding`` reimplements the same two small reads
+    in-module. This fixture measures the walk against this test process's
+    *own* real ancestry, which is itself a live descendant of a `claude`
+    runtime process (the interactive session that dispatched this worker) --
+    the same structural relationship a hook process has to its runtime.
+    """
+
+    def test_own_process_resolves_a_claude_ancestor(self):
+        # F-5: this is an opportunistic extra, not the assertion the suite
+        # rests on -- a sandbox with no real Claude ancestor in this
+        # process's /proc tree (e.g. a nested `claude -p` runner, or a CI
+        # container with no harness ancestor) must skip, not fail. The
+        # deterministic binding *logic* is covered everywhere-runnable by
+        # the three tests below; this stays fixture-measured / live-unproven
+        # (§7.1) either way -- a pass here never upgrades that grade.
+        result = D.runtime_ancestry_binding(os.getpid())
+        if result is None:
+            raise unittest.SkipTest(
+                "no live claude ancestor observable in this process's /proc "
+                "tree -- environment limitation, not a code regression"
+            )
+        pid, start, ns = result
+        self.assertTrue(pid.isdigit())
+        self.assertTrue(start.isdigit())
+        self.assertTrue(ns)
+
+    def test_no_claude_ancestor_returns_none(self):
+        # A process tree with no `claude` comm/argv0 anywhere in it (mocked)
+        # must return None, not raise and not guess.
+        def fake_stat(pid):
+            return {1: {"ppid": 0, "start": 10}}.get(pid)
+
+        with mock.patch.object(D, "_runtime_ancestry_proc_stat", side_effect=fake_stat), \
+             mock.patch.object(D, "_runtime_ancestry_harness_process", return_value=None):
+            self.assertIsNone(D.runtime_ancestry_binding(1))
+
+    def test_unresolvable_ancestor_stat_returns_none(self):
+        with mock.patch.object(D, "_runtime_ancestry_proc_stat", return_value=None):
+            self.assertIsNone(D.runtime_ancestry_binding(999999))
+
+    def test_missing_namespace_identity_returns_none_not_partial(self):
+        # A resolved claude ancestor whose namespace link is unreadable must
+        # not return a two-of-three partial tuple.
+        def fake_stat(pid):
+            return {42: {"ppid": 0, "start": 99}}.get(pid)
+
+        with mock.patch.object(D, "_runtime_ancestry_proc_stat", side_effect=fake_stat), \
+             mock.patch.object(D, "_runtime_ancestry_harness_process", return_value="claude"), \
+             mock.patch.object(D, "process_namespace_identity", return_value=None):
+            self.assertIsNone(D.runtime_ancestry_binding(42))
 
 
 if __name__=="__main__": unittest.main()

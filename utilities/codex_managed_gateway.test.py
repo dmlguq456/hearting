@@ -1101,5 +1101,120 @@ class ValidateDeliveryStageAdvanceNegotiationTest(unittest.TestCase):
         self.assertNotIn("stage_advance", normalized)
 
 
+class DeliveryLedgerProjectionTest(unittest.TestCase):
+    """SD-111 P5 (A-23, `structural`): single public entry point onto the
+    ledger. This asserts design enforcement -- `_transition` is private,
+    `project_from_pending_delivery` is the only public state-transition
+    method, and a malformed record leaves the ledger unchanged -- not the
+    absence of a second independent commit path anywhere in the file
+    (plan §7.1-4 forbids reporting this as "measured PASS")."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory(prefix="sd111-p5-")
+        self.ledger_path = Path(self._tmp.name) / "ledger.json"
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _record(self, **overrides):
+        base = {
+            "delivery_id": "delivery-" + "a" * 32,
+            "state": "pending",
+            "receipt_digest": "d" * 64,
+            "parent_attempt_id": "att-" + "b" * 32,
+            "receipt": {"job_registry": "/tmp/sd111p5/jobs.log"},
+        }
+        base.update(overrides)
+        return base
+
+    def test_transition_is_private_and_projection_is_the_only_public_entry_point(self):
+        self.assertFalse(hasattr(GATEWAY.DeliveryLedger, "transition"))
+        self.assertTrue(hasattr(GATEWAY.DeliveryLedger, "_transition"))
+        public_transition_methods = [
+            name
+            for name in vars(GATEWAY.DeliveryLedger)
+            if not name.startswith("_")
+            and callable(getattr(GATEWAY.DeliveryLedger, name))
+            and name not in {"get"}
+        ]
+        self.assertEqual(public_transition_methods, ["project_from_pending_delivery"])
+
+    def test_static_scan_no_ledger_mutation_outside_transition(self):
+        """`self.value[...] = ...` (the only line that actually mutates ledger
+        state) appears exactly once in the whole file, inside `_transition` --
+        i.e. there is no second, independent write path."""
+
+        source = (ROOT / "utilities" / "codex-managed-gateway.py").read_text(
+            encoding="utf-8"
+        )
+        lines = source.splitlines()
+        mutation_lines = [
+            i for i, line in enumerate(lines)
+            if 'self.value["deliveries"][delivery_id] = row' in line
+        ]
+        self.assertEqual(len(mutation_lines), 1)
+
+    def test_projection_pending_state_maps_to_prepared(self):
+        ledger = GATEWAY.DeliveryLedger(self.ledger_path)
+        record = self._record(state="pending")
+        row = ledger.project_from_pending_delivery(record)
+        self.assertEqual(row["state"], "prepared")
+        self.assertEqual(ledger.get(record["delivery_id"])["state"], "prepared")
+
+    def test_projection_state_map_covers_every_pending_delivery_state(self):
+        ledger = GATEWAY.DeliveryLedger(self.ledger_path)
+
+        # pending -> prepared, on a fresh delivery_id (the ledger's own
+        # `None -> "prepared"` legal entry transition).
+        did_a = "delivery-" + "1" * 32
+        row = ledger.project_from_pending_delivery(self._record(delivery_id=did_a, state="pending"))
+        self.assertEqual(row["state"], "prepared")
+
+        # claimed -> prepared, a fresh id (both pending-delivery states
+        # project onto the ledger's one "not yet sent" state).
+        did_b = "delivery-" + "2" * 32
+        row = ledger.project_from_pending_delivery(self._record(delivery_id=did_b, state="claimed"))
+        self.assertEqual(row["state"], "prepared")
+
+        # sent-ambiguous -> sent, driven through its legal prior state.
+        did_c = "delivery-" + "3" * 32
+        ledger.project_from_pending_delivery(self._record(delivery_id=did_c, state="pending"))
+        row = ledger.project_from_pending_delivery(self._record(delivery_id=did_c, state="sent-ambiguous"))
+        self.assertEqual(row["state"], "sent")
+
+        # acked -> accepted, driven through prepared -> sent -> accepted.
+        did_d = "delivery-" + "4" * 32
+        ledger.project_from_pending_delivery(self._record(delivery_id=did_d, state="pending"))
+        ledger.project_from_pending_delivery(self._record(delivery_id=did_d, state="sent-ambiguous"))
+        row = ledger.project_from_pending_delivery(self._record(delivery_id=did_d, state="acked"))
+        self.assertEqual(row["state"], "accepted")
+
+        # expired -> rejected, driven through its legal prior state.
+        did_e = "delivery-" + "5" * 32
+        ledger.project_from_pending_delivery(self._record(delivery_id=did_e, state="pending"))
+        row = ledger.project_from_pending_delivery(self._record(delivery_id=did_e, state="expired"))
+        self.assertEqual(row["state"], "rejected")
+
+    def test_malformed_record_raises_and_leaves_ledger_unchanged(self):
+        ledger = GATEWAY.DeliveryLedger(self.ledger_path)
+        ledger.project_from_pending_delivery(self._record(state="pending"))
+        before = json.loads(json.dumps(ledger.value))
+        with self.assertRaises(GATEWAY.GatewayError):
+            ledger.project_from_pending_delivery(self._record(state="not-a-real-state"))
+        self.assertEqual(ledger.value, before)
+        with self.assertRaises(GATEWAY.GatewayError):
+            ledger.project_from_pending_delivery({"delivery_id": "delivery-x", "state": "pending"})
+        self.assertEqual(ledger.value, before)
+        with self.assertRaises(GATEWAY.GatewayError):
+            ledger.project_from_pending_delivery("not-a-dict")
+        self.assertEqual(ledger.value, before)
+
+    def test_projection_failure_does_not_persist_a_partial_write(self):
+        ledger = GATEWAY.DeliveryLedger(self.ledger_path)
+        with self.assertRaises(GATEWAY.GatewayError):
+            ledger.project_from_pending_delivery(self._record(state="expired"))
+        self.assertFalse(self.ledger_path.exists())
+
+
 if __name__ == "__main__":
     unittest.main()

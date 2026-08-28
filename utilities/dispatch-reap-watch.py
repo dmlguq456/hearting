@@ -29,6 +29,7 @@ from dispatch_completion_join import (
     close_finished_child,
     close_wrapper_pass,
     exact_attempt_row,
+    materialize_after_terminal_close,
 )
 from dispatch_degradation import record_degradation
 
@@ -224,6 +225,7 @@ def watch(args: argparse.Namespace) -> int:
             },
         )
         if closed:
+            materialize_after_terminal_close(args.jobs, args.attempt_id)
             record_missing_result_degradation(metadata, args)
         return 0
 

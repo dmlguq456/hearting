@@ -724,6 +724,322 @@ class RegistryConfirmArmTest(unittest.TestCase):
         self.assertEqual(launch.attempt_id, "att-owner-1")
 
 
+import dispatch_contract as D  # noqa: E402
+import dispatch_completion_join as JOIN  # noqa: E402
+
+
+class CarrierOneClaimGateTest(unittest.TestCase):
+    """SD-111 P3 (C-3): carrier 1 only emits when it wins a claim on an
+    already-materialized record, gated first by the incarnation-ancestry
+    binding. Never materializes -- DispatchOwnerRewakeMaterializeAbsenceTest
+    statically asserts that."""
+
+    ANCESTRY = ("111", "222", "pid:[333]")
+
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name)
+        self.jobs = self.root / "jobs.log"
+
+    def payload(self):
+        output = "\n".join((
+            "check=ok", "status=start", "dispatch_depth=1", "worker_type=owner",
+            "parent_completion_delivery=claude-parent-runtime",
+            "parent_session_id=session-1", f"job_registry={self.jobs}",
+            "attempt_id=att-owner-1", "registered=1", "started=1",
+        ))
+        return {
+            "hook_event_name": "PostToolUse",
+            "tool_name": "Bash",
+            "session_id": "session-1",
+            "tool_input": {
+                "command": "python3 utilities/dispatch-owner.py --start --slug owner"
+            },
+            "tool_response": {"stdout": output, "stderr": ""},
+        }
+
+    def _open_row(self, *, ancestry=ANCESTRY, with_ancestry=True):
+        pipe = (
+            "attempt_schema_version=2,dispatch_depth=1,transport=headless,"
+            "execution_surface=registered-headless,registered_worker=1,"
+            "fallback_hop=same-harness-headless,attempt_id=att-owner-1,"
+            "parent_attempt_id=att-owner-parent,"
+            "parent_completion_delivery=claude-parent-runtime,parent_sid=session-1,"
+            "route_id=rt-owner,route_node=report,harness=claude"
+        )
+        if with_ancestry:
+            pipe += (
+                f",parent_runtime_pid={ancestry[0]}"
+                f",parent_runtime_pid_start={ancestry[1]}"
+                f",parent_runtime_ns={ancestry[2]}"
+            )
+        self.jobs.write_text(
+            f"2026-08-25T00:00:00Z\topen\t/repo\t/wt\towner\t{pipe}\n", encoding="utf-8"
+        )
+
+    def _close_and_materialize(self):
+        self.assertTrue(D.close_attempt_row(self.jobs, "att-owner-1", "completed-marker"))
+        fields = self.jobs.read_text(encoding="utf-8").splitlines()[0].split("\t")
+        path = JOIN.materialize_pending_delivery(self.jobs, fields)
+        self.assertIsNotNone(path)
+        return path
+
+    def _run_main(self):
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with mock.patch.object(rewake.sys, "stdin", io.StringIO(json.dumps(self.payload()))), \
+             mock.patch.object(rewake.sys, "stdout", stdout), \
+             mock.patch.object(rewake.sys, "stderr", stderr), \
+             mock.patch.object(
+                 rewake, "wait_for_attempt", return_value=("ready", "terminal-quiescent")
+             ):
+            code = rewake.main()
+        return code, stdout.getvalue(), stderr.getvalue()
+
+    def test_claim_win_emits_and_transitions_to_sent_ambiguous(self):
+        self._open_row()
+        record_path = self._close_and_materialize()
+        with mock.patch.object(rewake, "runtime_ancestry_binding", return_value=self.ANCESTRY):
+            code, stdout, stderr = self._run_main()
+        self.assertEqual(code, 0)
+        # No completion-marker fixture here, so classification lands on
+        # "attention" (required_action=inspect-done-failure), not "success"
+        # -- the point of this test is that the notice is emitted at all
+        # (byte-identical to the pre-claim-gate `classified_receipt` output)
+        # and the record transitions, not which of the two it is.
+        self.assertIn("Hearting dispatch requires attention", stdout)
+        self.assertIn("systemMessage", stdout)
+        self.assertEqual(stderr, "")
+        record = json.loads(record_path.read_text(encoding="utf-8"))
+        self.assertEqual(record["state"], "sent-ambiguous")
+
+    def test_claim_lost_when_already_claimed_is_silent(self):
+        self._open_row()
+        record_path = self._close_and_materialize()
+        record = json.loads(record_path.read_text(encoding="utf-8"))
+        root = self.jobs.resolve(strict=False).parent
+        rewake.pending_delivery.claim(
+            root, "session-1", record["delivery_id"],
+            claim_owner="someone-else", lease_seconds=30.0,
+        )
+        with mock.patch.object(rewake, "runtime_ancestry_binding", return_value=self.ANCESTRY):
+            code, stdout, stderr = self._run_main()
+        self.assertEqual(code, 0)
+        self.assertEqual(stdout, "")
+        self.assertEqual(stderr, "")
+
+    def test_acked_record_is_silent(self):
+        self._open_row()
+        record_path = self._close_and_materialize()
+        record = json.loads(record_path.read_text(encoding="utf-8"))
+        root = self.jobs.resolve(strict=False).parent
+        rewake.pending_delivery.claim(
+            root, "session-1", record["delivery_id"],
+            claim_owner="someone-else", lease_seconds=30.0,
+        )
+        rewake.pending_delivery.ack(
+            root, "session-1", record["delivery_id"], acked_by="codex-managed-gateway",
+        )
+        with mock.patch.object(rewake, "runtime_ancestry_binding", return_value=self.ANCESTRY):
+            code, stdout, stderr = self._run_main()
+        self.assertEqual(code, 0)
+        self.assertEqual(stdout, "")
+        self.assertEqual(stderr, "")
+
+    def test_record_not_yet_materialized_crash_window_is_silent(self):
+        # Intent stamped (row closed), but neither trigger 1 nor trigger 2
+        # has materialized a record yet -- the hook must never materialize
+        # it itself (§4.4) and must go silent, not raise.
+        self._open_row()
+        self.assertTrue(D.close_attempt_row(self.jobs, "att-owner-1", "completed-marker"))
+        with mock.patch.object(rewake, "runtime_ancestry_binding", return_value=self.ANCESTRY):
+            code, stdout, stderr = self._run_main()
+        self.assertEqual(code, 0)
+        self.assertEqual(stdout, "")
+        self.assertEqual(stderr, "")
+
+    def test_second_incarnation_mismatch_reads_claims_and_injects_nothing(self):
+        # Same session_id, different runtime process (pid, start) than the
+        # one recorded at launch -- carrier 1 must not claim or emit.
+        self._open_row(ancestry=self.ANCESTRY)
+        record_path = self._close_and_materialize()
+        other_incarnation = ("999", "888", "pid:[777]")
+        with mock.patch.object(
+            rewake, "runtime_ancestry_binding", return_value=other_incarnation
+        ):
+            code, stdout, stderr = self._run_main()
+        self.assertEqual(code, 0)
+        self.assertEqual(stdout, "")
+        self.assertEqual(stderr, "")
+        record = json.loads(record_path.read_text(encoding="utf-8"))
+        self.assertEqual(record["state"], "pending")
+        self.assertEqual(record["attempts"], 0)
+        self.assertIsNone(record["claim_owner"])
+
+    def test_missing_ancestry_fields_is_silent(self):
+        # A row from before 2-a-5 (or a non-Claude harness) carries no
+        # parent_runtime_* fields at all -- fail closed, not "trust it".
+        self._open_row(with_ancestry=False)
+        record_path = self._close_and_materialize()
+        with mock.patch.object(rewake, "runtime_ancestry_binding", return_value=self.ANCESTRY):
+            code, stdout, stderr = self._run_main()
+        self.assertEqual(code, 0)
+        self.assertEqual(stdout, "")
+        self.assertEqual(stderr, "")
+        record = json.loads(record_path.read_text(encoding="utf-8"))
+        self.assertEqual(record["state"], "pending")
+
+    def test_still_open_row_is_ungated_by_the_claim_mechanism(self):
+        # No terminal edge has happened yet (still open) -- SD-111's claim
+        # gate must not silence this, or a live timeout/bridge-error
+        # diagnostic could vanish forever with no future trigger to recover
+        # it. Regression guard for the claim-gate addition itself.
+        self._open_row()
+        with mock.patch.object(rewake, "runtime_ancestry_binding", return_value=self.ANCESTRY):
+            code, stdout, stderr = self._run_main()
+        self.assertEqual(code, 0)
+        self.assertIn("state=attention", stdout)
+
+
+class DispatchOwnerRewakeMaterializeAbsenceTest(unittest.TestCase):
+    def test_hook_module_never_imports_the_materializer(self):
+        source = MODULE_PATH.read_text(encoding="utf-8")
+        self.assertNotIn("materialize_pending_delivery", source)
+
+
+class A12ArmingFailureFixture(unittest.TestCase):
+    """SD-111 A-12 (round 2 C-4 full replacement, plan §7).
+
+    Reproduces the three real arming failures -- stdout truncation, missing
+    ``AGENT_DISPATCH_JOBS`` with no other jobs source, and an unrecognized
+    launcher string -- then counts *independently*: carrier invocations
+    (this hook's own emitted notices), terminal edges (the row closing),
+    and pending records. The row closes and materializes exactly like the
+    real launcher process would (§2-b-1) -- this fixture calls
+    `close_attempt_row`/`materialize_after_terminal_close` directly to model
+    that separate process, never through the hook, which never
+    materializes (§4.4).
+    """
+
+    ATTEMPT = "att-a12-fixture"
+
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name)
+        self.jobs = self.root / "jobs.log"
+        pipe = (
+            "attempt_schema_version=2,dispatch_depth=1,transport=headless,"
+            "execution_surface=registered-headless,registered_worker=1,"
+            "fallback_hop=same-harness-headless,"
+            f"attempt_id={self.ATTEMPT},parent_attempt_id=att-a12-parent,"
+            "parent_completion_delivery=claude-parent-runtime,parent_sid=session-a12,"
+            "route_id=rt-a12-fixture,route_node=report,harness=claude"
+        )
+        self.jobs.write_text(
+            f"2026-08-25T00:00:00Z\topen\t/repo\t/wt\towner\t{pipe}\n", encoding="utf-8"
+        )
+
+    def _run_main_with(self, payload, *, env=None):
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        clean_env = {
+            k: v for k, v in os.environ.items() if k != "AGENT_DISPATCH_JOBS"
+        }
+        clean_env.update(env or {})
+        with mock.patch.object(rewake.sys, "stdin", io.StringIO(json.dumps(payload))), \
+             mock.patch.object(rewake.sys, "stdout", stdout), \
+             mock.patch.object(rewake.sys, "stderr", stderr), \
+             mock.patch.object(rewake.os, "environ", clean_env), \
+             mock.patch.object(rewake, "_canonical_jobs", return_value=None):
+            code = rewake.main()
+        return code, stdout.getvalue(), stderr.getvalue()
+
+    def _terminal_edge_and_recover(self):
+        """Models the real launcher: close the row, materialize (trigger 1),
+        then recover by exact harvest -- entirely independent of the hook."""
+
+        self.assertTrue(D.close_attempt_row(self.jobs, self.ATTEMPT, "completed-marker"))
+        record_path = JOIN.materialize_after_terminal_close(self.jobs, self.ATTEMPT)
+        self.assertIsNotNone(record_path)
+        records = list((self.root / "pending-delivery").glob("*/*.json"))
+        self.assertEqual(len(records), 1)
+        record = json.loads(record_path.read_text(encoding="utf-8"))
+        claimed = rewake.pending_delivery.claim(
+            self.root, "session-a12", record["delivery_id"],
+            claim_owner="exact-harvest", lease_seconds=30.0,
+        )
+        self.assertEqual(claimed["state"], "claimed")
+        acked = rewake.pending_delivery.ack(
+            self.root, "session-a12", record["delivery_id"], acked_by="exact-harvest",
+        )
+        self.assertEqual(acked["state"], "acked")
+
+    def test_condition_1_stdout_truncation_zero_carrier_one_terminal_edge_one_record(self):
+        payload = {
+            "hook_event_name": "PostToolUse",
+            "tool_name": "Bash",
+            "session_id": "session-a12",
+            "tool_input": {
+                "command": "python3 utilities/dispatch-owner.py --start --slug owner"
+            },
+            # Piped through `| tail` or `> /dev/null` in practice -- the
+            # receipt fast path (parse_launch) never even sees a candidate.
+            "tool_response": {"stdout": "", "stderr": ""},
+        }
+        code, stdout, stderr = self._run_main_with(payload)
+        self.assertEqual(code, 0)
+        self.assertEqual(stdout, "")
+        self.assertEqual(stderr, "")
+        self._terminal_edge_and_recover()
+
+    def test_condition_2_no_jobs_source_zero_carrier_one_terminal_edge_one_record(self):
+        # stdout is present but the one field registry_launch would need
+        # (job_registry) is missing -- and no other jobs source (env,
+        # --jobs, canonical) resolves either.
+        output = "\n".join((
+            "check=ok", "status=start", "dispatch_depth=1", "worker_type=owner",
+            "parent_completion_delivery=claude-parent-runtime",
+            "parent_session_id=session-a12", f"attempt_id={self.ATTEMPT}",
+            "registered=1", "started=1",
+        ))
+        payload = {
+            "hook_event_name": "PostToolUse",
+            "tool_name": "Bash",
+            "session_id": "session-a12",
+            "tool_input": {
+                "command": "python3 utilities/dispatch-owner.py --start --slug owner"
+            },
+            "tool_response": {"stdout": output, "stderr": ""},
+        }
+        code, stdout, stderr = self._run_main_with(payload)
+        self.assertEqual(code, 0)
+        self.assertEqual(stdout, "")
+        self.assertEqual(stderr, "")
+        self._terminal_edge_and_recover()
+
+    def test_condition_3_unrecognized_launcher_zero_carrier_one_terminal_edge_one_record(self):
+        output = "\n".join((
+            "check=ok", "status=start", "dispatch_depth=1", "worker_type=owner",
+            "parent_completion_delivery=claude-parent-runtime",
+            "parent_session_id=session-a12", f"job_registry={self.jobs}",
+            f"attempt_id={self.ATTEMPT}", "registered=1", "started=1",
+        ))
+        payload = {
+            "hook_event_name": "PostToolUse",
+            "tool_name": "Bash",
+            "session_id": "session-a12",
+            "tool_input": {"command": "bash -c 'echo hi'"},
+            "tool_response": {"stdout": output, "stderr": ""},
+        }
+        code, stdout, stderr = self._run_main_with(payload)
+        self.assertEqual(code, 0)
+        self.assertEqual(stdout, "")
+        self.assertEqual(stderr, "")
+        self._terminal_edge_and_recover()
+
+
 if __name__ == "__main__":
     unittest.main()
 
