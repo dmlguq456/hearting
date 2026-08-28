@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import fcntl, hashlib, json, os, subprocess, sys, tempfile, time, unittest
+import fcntl, hashlib, json, os, stat, subprocess, sys, tempfile, time, unittest
 from unittest import mock
 from pathlib import Path
 
@@ -39,8 +39,12 @@ class DispatchContractTest(unittest.TestCase):
    bundle=runtime/".harness"/"bundles"/"bundle-id"/"source"
    release=base/".local"/"share"/"hearting"/"releases"/"v2.41.0"
    checkout=base/"hearting-checkout"
-   bundle.mkdir(parents=True);release.mkdir(parents=True);checkout.mkdir()
+   userhome=base/"userhome"
+   bundle.mkdir(parents=True);release.mkdir(parents=True);checkout.mkdir();userhome.mkdir()
+   stable_env={"HOME":str(userhome)}
+   stable_jobs=(userhome/".local"/"state"/"hearting"/"dispatch"/"jobs.log").resolve()
 
+   # Bundle activation-owned root is unaffected by chain-3 supersession.
    selected=D.resolve_global_registry(bundle,None,1,"start",{})
    self.assertEqual(selected.path,runtime/".harness"/"dispatch"/"jobs.log")
    self.assertEqual(selected.source,"activation-runtime")
@@ -48,16 +52,18 @@ class DispatchContractTest(unittest.TestCase):
     D.resolve_dispatch_state_root(bundle,environ={}),
     runtime/".harness"/"dispatch")
 
-   # State-root chain (3): the shared managed release keeps its release-relative
-   # registry — rotation succession (_cleanup_releases, release-lifecycle T-1/T-2)
-   # carries that state into the successor release, so fail-closing here would
-   # break the established succession contract.
+   # State-root chain (3) supersession (SD-112 §13.33.2-(8), B-16): a shared
+   # managed release now defaults to the stable per-user root instead of its
+   # release-relative tree. Succession moves file *contents* into the
+   # successor release, not the sealed `jobs_path` *identity* that
+   # `revalidate_launch_compatibility` compares -- exactly the drift this
+   # migration closes.
+   release_selected=D.resolve_global_registry(release,None,1,"start",stable_env)
+   self.assertEqual(release_selected.path,stable_jobs)
+   self.assertEqual(release_selected.source,"stable-state-root")
    self.assertEqual(
-    D.resolve_global_registry(release,None,1,"start",{}).path,
-    (release/".dispatch"/"jobs.log").resolve())
-   self.assertEqual(
-    D.resolve_dispatch_state_root(release,environ={}),
-    (release/".dispatch").resolve())
+    D.resolve_dispatch_state_root(release,environ=stable_env),
+    stable_jobs.parent)
 
    internal=bundle/".dispatch"/"jobs.log"
    for resolver in (
@@ -72,11 +78,32 @@ class DispatchContractTest(unittest.TestCase):
      resolver()
     self.assertEqual(caught.exception.reason,"versioned-source-registry-fallback")
 
-   maintained=checkout/".dispatch"/"jobs.log"
+   # Maintainer checkout also defaults to the stable root now; only an
+   # explicit chain ①/② selection picks the checkout-local `.dispatch`
+   # (decision 2 / "isolated opt-in").
+   checkout_selected=D.resolve_global_registry(checkout,None,1,"start",stable_env)
+   self.assertEqual(checkout_selected.path,stable_jobs)
+   self.assertEqual(checkout_selected.source,"stable-state-root")
    self.assertEqual(
-    D.resolve_global_registry(checkout,None,1,"start",{}).path,maintained)
+    D.resolve_dispatch_state_root(checkout,environ=stable_env),
+    stable_jobs.parent)
+
+   isolated=checkout/".dispatch"/"jobs.log"
+   isolated_selected=D.resolve_global_registry(checkout,str(isolated),1,"start",{})
+   self.assertEqual(isolated_selected.path,isolated.resolve())
    self.assertEqual(
-    D.resolve_dispatch_state_root(checkout,environ={}),maintained.parent)
+    D.resolve_dispatch_state_root(checkout,explicit_jobs=isolated,environ={}),
+    isolated.resolve().parent)
+
+   # B-16: `environ={}` must never fabricate a real user home. With none of
+   # HARNESS_STATE_ROOT/XDG_STATE_HOME/HOME set, the chain-③ fallback fails
+   # closed *before* touching the filesystem instead of guessing a default.
+   with self.assertRaises(D.DispatchContractError) as caught:
+    D.resolve_global_registry(checkout,None,1,"start",{})
+   self.assertEqual(caught.exception.reason,"dispatch-state-root-unresolved")
+   with self.assertRaises(D.DispatchContractError) as caught:
+    D.resolve_dispatch_state_root(checkout,environ={})
+   self.assertEqual(caught.exception.reason,"dispatch-state-root-unresolved")
 
  def test_codex_standard_owner_network_profile_is_exactly_scoped(self):
   self.assertTrue(D.codex_standard_owner_network_enabled(
@@ -2887,6 +2914,150 @@ class StageAdvanceClaimTest(unittest.TestCase):
    jobs.write_text("\n".join(lines)+"\n",encoding="utf-8")
    started=SA.started_nodes(jobs,"rt-a11",route_hash)
   self.assertEqual(started,frozenset({"execute","impl-review","test"}))
+
+
+class LegacyReadWindowClosePureTest(unittest.TestCase):
+ """B-13a: pure four-condition truth table. Never touches the filesystem and
+ never calls `_succeed_dispatch_state()` -- that reachability question is
+ Slice 3's B-13b."""
+ def test_all_four_true_is_eligible(self):
+  self.assertTrue(D.legacy_read_window_may_close(
+   supported_releases_elapsed=2,legacy_bound_open_writers=0,delta=0,legacy_read_hits=0))
+ def test_more_than_minimum_releases_still_eligible(self):
+  self.assertTrue(D.legacy_read_window_may_close(
+   supported_releases_elapsed=5,legacy_bound_open_writers=0,delta=0,legacy_read_hits=0))
+ def test_each_condition_individually_flipped_keeps_window_open(self):
+  base=dict(supported_releases_elapsed=2,legacy_bound_open_writers=0,delta=0,legacy_read_hits=0)
+  for field,bad in (
+   ("supported_releases_elapsed",1),
+   ("legacy_bound_open_writers",1),
+   ("delta",1),
+   ("legacy_read_hits",1),
+  ):
+   values=dict(base); values[field]=bad
+   self.assertFalse(D.legacy_read_window_may_close(**values),field)
+
+
+class DispatchStateModeEnforcementTest(unittest.TestCase):
+ """B-12: new dispatch root 0700 / new migration-journal 0600; an existing
+ wide mode is a typed refusal, never a chmod. `geteuid()==0` leaves the
+ negative fixtures SKIP=unproven -- root bypasses POSIX permission checks.
+
+ Mode enforcement in `ensure_global_registry_writable` is scoped to the
+ stable per-user dispatch root only (`_is_stable_dispatch_root`), so every
+ fixture here pins `HOME` to make `jobs.parent` resolve to that root -- a
+ non-stable dispatch root (Codex bundle, legacy release/checkout, or any
+ other fixture-owned tree) keeps the historical mode-agnostic mkdir, proven
+ unaffected by the dedicated non-stable test below and the unrelated
+ suites this mode enforcement must not regress."""
+ # `stable_state_root` reads HARNESS_STATE_ROOT -> XDG_STATE_HOME -> HOME in
+ # that order, so pinning HOME alone leaves an ambient XDG_STATE_HOME (or an
+ # installer-owned HARNESS_STATE_ROOT) owning the real stable root --
+ # `_is_stable_dispatch_root(self._stable_jobs.parent)` then reads false and
+ # mode enforcement never fires. Pin the whole chain, per the isolation
+ # pattern in `dispatch_state_root_rotation.test.py`.
+ _STABLE_ROOT_ENV=("HOME","XDG_STATE_HOME","HARNESS_STATE_ROOT")
+ def setUp(self):
+  self._tmp=tempfile.TemporaryDirectory()
+  self._home=Path(self._tmp.name)/"home"; self._home.mkdir()
+  self._stable_jobs=self._home/".local"/"state"/"hearting"/"dispatch"/"jobs.log"
+  self._prev_env={key:os.environ.get(key) for key in self._STABLE_ROOT_ENV}
+  os.environ.pop("XDG_STATE_HOME",None)
+  os.environ.pop("HARNESS_STATE_ROOT",None)
+  os.environ["HOME"]=str(self._home)
+  self.addCleanup(self._restore)
+ def _restore(self):
+  for key,value in self._prev_env.items():
+   if value is None: os.environ.pop(key,None)
+   else: os.environ[key]=value
+  self._tmp.cleanup()
+ def test_new_dispatch_root_forces_0700(self):
+  D.ensure_global_registry_writable(self._stable_jobs)
+  self.assertEqual(stat.S_IMODE(self._stable_jobs.parent.stat().st_mode),0o700)
+ def test_non_stable_dispatch_root_keeps_mode_agnostic_mkdir(self):
+  # Proves the scoping: an ordinary (non-stable) dispatch root is untouched
+  # by mode enforcement, matching every other suite's existing fixtures.
+  legacy=Path(self._tmp.name)/"release-v1"/".dispatch"/"jobs.log"
+  D.ensure_global_registry_writable(legacy)
+  mode=stat.S_IMODE(legacy.parent.stat().st_mode)
+  self.assertNotEqual(mode,0o700)
+ def test_new_migration_journal_forces_0600(self):
+  journal=self._stable_jobs.parent/D.MIGRATION_JOURNAL_FILENAME
+  D._ensure_new_file_mode(journal,0o600)
+  self.assertTrue(journal.is_file())
+  self.assertEqual(stat.S_IMODE(journal.stat().st_mode),0o600)
+ @unittest.skipIf(os.geteuid()==0,"SKIP=unproven: root bypasses POSIX mode checks")
+ def test_existing_wide_dispatch_root_is_typed_refusal_not_chmod(self):
+  self._stable_jobs.parent.mkdir(parents=True,mode=0o755)
+  os.chmod(self._stable_jobs.parent,0o755)
+  with self.assertRaises(D.DispatchContractError) as caught:
+   D.ensure_global_registry_writable(self._stable_jobs)
+  self.assertEqual(caught.exception.reason,"dispatch-state-root-mode-violation")
+  self.assertEqual(stat.S_IMODE(self._stable_jobs.parent.stat().st_mode),0o755)
+ @unittest.skipIf(os.geteuid()==0,"SKIP=unproven: root bypasses POSIX mode checks")
+ def test_existing_wide_migration_journal_is_typed_refusal_not_chmod(self):
+  journal=self._stable_jobs.parent/D.MIGRATION_JOURNAL_FILENAME
+  journal.parent.mkdir(parents=True)
+  journal.write_text("",encoding="utf-8")
+  os.chmod(journal,0o644)
+  with self.assertRaises(D.DispatchContractError) as caught:
+   D._ensure_new_file_mode(journal,0o600)
+  self.assertEqual(caught.exception.reason,"dispatch-state-root-mode-violation")
+  self.assertEqual(stat.S_IMODE(journal.stat().st_mode),0o644)
+ def test_symlink_stable_root_is_refused(self):
+  real=Path(self._tmp.name)/"real"; real.mkdir(mode=0o700); os.chmod(real,0o700)
+  self._stable_jobs.parent.parent.mkdir(parents=True)
+  self._stable_jobs.parent.symlink_to(real)
+  with self.assertRaises(D.DispatchContractError) as caught:
+   D.ensure_global_registry_writable(self._stable_jobs)
+  self.assertEqual(caught.exception.reason,"dispatch-state-root-unwritable")
+
+
+class LogDirBoundaryStableRootTest(unittest.TestCase):
+ """B-17: `validate_dispatch_log_dir` is unchanged by the stable-root
+ migration -- it derives its boundary from whatever `jobs.log` path it is
+ given, stable or legacy, with false positives at 0."""
+ def test_logs_subdir_of_stable_root_is_accepted(self):
+  with tempfile.TemporaryDirectory() as td:
+   jobs=Path(td)/"userhome"/".local"/"state"/"hearting"/"dispatch"/"jobs.log"
+   result=D.validate_dispatch_log_dir(jobs,None)
+   self.assertEqual(result,jobs.parent/"logs")
+ def test_outside_root_and_root_itself_and_symlink_are_rejected(self):
+  with tempfile.TemporaryDirectory() as td:
+   jobs=Path(td)/"stable"/"dispatch"/"jobs.log"
+   jobs.parent.mkdir(parents=True)
+   state_root=jobs.parent
+   outside=Path(td)/"elsewhere"
+   with self.assertRaises(D.DispatchContractError) as caught:
+    D.validate_dispatch_log_dir(jobs,outside)
+   self.assertEqual(caught.exception.reason,"log-dir-outside-dispatch-state-root")
+   with self.assertRaises(D.DispatchContractError) as caught:
+    D.validate_dispatch_log_dir(jobs,state_root)
+   self.assertEqual(caught.exception.reason,"log-dir-outside-dispatch-state-root")
+   real=Path(td)/"real-logs"; real.mkdir()
+   link=state_root/"logs"; link.symlink_to(real)
+   with self.assertRaises(D.DispatchContractError) as caught:
+    D.validate_dispatch_log_dir(jobs,None)
+   self.assertEqual(caught.exception.reason,"log-dir-outside-dispatch-state-root")
+
+
+class NestedJobsVocabByteIdentityTest(unittest.TestCase):
+ """B-18: inherited/explicit registry-mismatch and inherited-unset typed
+ vocabulary is unchanged by the stable-root migration."""
+ def test_mismatched_explicit_and_inherited_is_noncanonical_nested_jobs(self):
+  with tempfile.TemporaryDirectory() as td:
+   root=Path(td)
+   explicit=(root/"a"/"jobs.log").resolve(); inherited=(root/"b"/"jobs.log").resolve()
+   with self.assertRaises(D.DispatchContractError) as caught:
+    D.resolve_global_registry(
+     root,str(explicit),2,"start",{"AGENT_DISPATCH_JOBS":str(inherited)})
+   self.assertEqual(caught.exception.reason,"noncanonical-nested-jobs")
+ def test_nested_start_without_inherited_is_global_registry_unset(self):
+  with tempfile.TemporaryDirectory() as td:
+   root=Path(td)
+   with self.assertRaises(D.DispatchContractError) as caught:
+    D.resolve_global_registry(root,None,2,"start",{})
+   self.assertEqual(caught.exception.reason,"global-registry-unset")
 
 
 if __name__=="__main__": unittest.main()

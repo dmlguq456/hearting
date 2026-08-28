@@ -801,6 +801,13 @@ sys.path.insert(0, str(root / "utilities"))
 import distribution as d
 import dispatch_contract as dc
 
+# SD-112 chain-3 supersession (§13.33.2-(8)): the env-less fallback no
+# longer resolves relative to whatever release `current` points at -- it
+# always lands under the stable per-user root now. A session that resolved
+# its dispatch state directly under a specific release is only possible
+# through an explicit override (isolated opt-in / a legacy pre-SD-112
+# process), so this fixture pins one explicitly instead of relying on the
+# retired implicit fallback.
 os.environ.pop("AGENT_DISPATCH_JOBS", None)
 
 releases = d.data_root() / "releases"
@@ -820,9 +827,11 @@ for i, name in enumerate(names):
 oldest, newest = release_dirs[0], release_dirs[3]
 
 # A session ran while `current` pointed at the release that is about to
-# rotate away, with no AGENT_DISPATCH_JOBS -- chain (3) puts its dispatch
-# state directly under that release.
-state_root_before = dc.resolve_dispatch_state_root(oldest)
+# rotate away, explicitly registered under that release's `.dispatch`
+# (isolated/legacy override -- the only way release-embedded state exists
+# post-SD-112).
+os.environ["AGENT_DISPATCH_JOBS"] = str(oldest / ".dispatch" / "jobs.log")
+state_root_before = dc.resolve_dispatch_state_root(oldest, environ=os.environ)
 assert state_root_before == oldest / ".dispatch"
 completion_dir = state_root_before / "completion" / "rt-chain3-fixture"
 completion_dir.mkdir(parents=True)
@@ -845,10 +854,18 @@ assert migrated.is_file(), (
 )
 assert json.loads(migrated.read_text())["route_id"] == "rt-chain3-fixture"
 
-# And it must be reachable through the same derivation a later reader with
-# no AGENT_DISPATCH_JOBS would use, resolved via the now-current release.
-state_root_after = dc.resolve_dispatch_state_root(d.current_path().resolve())
+# And it must be reachable through the same explicit derivation a later
+# writer bound to that same release would use.
+os.environ["AGENT_DISPATCH_JOBS"] = str(newest / ".dispatch" / "jobs.log")
+state_root_after = dc.resolve_dispatch_state_root(d.current_path().resolve(), environ=os.environ)
 assert state_root_after == newest / ".dispatch"
+
+# SD-112 §13.33.2-(6): an env-less reader's *write* root is the stable root
+# now (chain-3 supersession), but the carried-forward release-embedded tree
+# stays a legacy *read* candidate through the multi-root window, not lost.
+os.environ.pop("AGENT_DISPATCH_JOBS", None)
+legacy_read_candidates = dc.dispatch_state_roots(d.current_path().resolve(), environ=os.environ)
+assert (newest / ".dispatch") in legacy_read_candidates
 assert (state_root_after / "completion" / "rt-chain3-fixture" / "plan.json").is_file()
 PY
 echo "ok - chain-(3) dispatch state survives release rotation via _cleanup_releases succession"
@@ -1074,8 +1091,10 @@ for i, name in enumerate(names):
 
 oldest, newest = release_dirs[0], release_dirs[3]
 
-# chain-(3) dispatch state on the release about to rotate away.
-state_root_before = dc.resolve_dispatch_state_root(oldest)
+# SD-112 chain-3 supersession: pin an explicit override for the
+# release-embedded write, matching the earlier succession fixture above.
+os.environ["AGENT_DISPATCH_JOBS"] = str(oldest / ".dispatch" / "jobs.log")
+state_root_before = dc.resolve_dispatch_state_root(oldest, environ=os.environ)
 completion_dir = state_root_before / "completion" / "rt-fail-fixture"
 completion_dir.mkdir(parents=True)
 marker_path = completion_dir / "plan.json"
@@ -1143,7 +1162,10 @@ for i, name in enumerate(names):
 
 oldest, newest = release_dirs[0], release_dirs[3]
 
-state_root_before = dc.resolve_dispatch_state_root(oldest)
+# SD-112 chain-3 supersession: pin an explicit override for the
+# release-embedded write (see the carry-forward fixtures above).
+os.environ["AGENT_DISPATCH_JOBS"] = str(oldest / ".dispatch" / "jobs.log")
+state_root_before = dc.resolve_dispatch_state_root(oldest, environ=os.environ)
 completion_dir = state_root_before / "completion" / "rt-malformed-fixture"
 completion_dir.mkdir(parents=True)
 marker_path = completion_dir / "plan.json"
@@ -1206,7 +1228,10 @@ for i, name in enumerate(names):
 
 oldest, newest = release_dirs[0], release_dirs[3]
 
-state_root_before = dc.resolve_dispatch_state_root(oldest)
+# SD-112 chain-3 supersession: pin an explicit override for the
+# release-embedded write (see the carry-forward fixtures above).
+os.environ["AGENT_DISPATCH_JOBS"] = str(oldest / ".dispatch" / "jobs.log")
+state_root_before = dc.resolve_dispatch_state_root(oldest, environ=os.environ)
 completion_dir = state_root_before / "completion" / "rt-reanchor-fail-fixture"
 completion_dir.mkdir(parents=True)
 sidecar = completion_dir / "plan.att-reanchor-fail.attempt.json"
@@ -1242,3 +1267,221 @@ assert "dispatch state carry-forward incomplete" in diagnostic, (
 assert str(oldest) in diagnostic
 PY
 echo "ok - _cleanup_releases keeps a release instead of deleting it when a re-anchor write fails"
+
+# SD-112 B-10 (§13.33.2-(4)/(7), cycle-2 gate): an isolated `harness update`
+# whose stable dispatch state root cannot be created must stop at M0 with
+# the exact typed refusal, no release ever created/deleted, and no
+# completed migration journal record -- never a warning-and-continue.
+python3 - "$ROOT" "$TMP" <<'PY'
+import json, os, stat, subprocess, sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+tmp = Path(sys.argv[2])
+sys.path.insert(0, str(root / "tools/install"))
+import distribution as d
+
+b10_home = tmp / "b10-home"
+xdg_state_parent = b10_home / ".local" / "state"
+xdg_state_parent.mkdir(parents=True)
+hearting_dir = xdg_state_parent / "hearting"
+hearting_dir.mkdir()
+# Pre-create the distribution lock file so `_distribution_lock()` can still
+# open it (needs only search on the parent, not write) -- the write that
+# must fail is `dispatch/` creation inside this now-read-only parent, not
+# the lock itself (B-10's own design note: state root exists, only the
+# `dispatch/` creation point fails).
+(hearting_dir / "distribution.lock").touch()
+
+shell_uid_out = subprocess.run(["id", "-u"], capture_output=True, text=True).stdout.strip()
+shell_gid_out = subprocess.run(["id", "-g"], capture_output=True, text=True).stdout.strip()
+shell_groups_out = subprocess.run(["id", "-G"], capture_output=True, text=True).stdout.strip()
+b10_executor = {
+    "user": subprocess.run(["id", "-un"], capture_output=True, text=True).stdout.strip(),
+    "uid": shell_uid_out,
+    "euid": str(os.geteuid()),
+    "gids": shell_groups_out,
+}
+b10_non_root_detection = {
+    "shell_uid": shell_uid_out,
+    "python_euid": str(os.geteuid()),
+    "matched": shell_uid_out == str(os.geteuid()),
+    "method": "id -u + os.geteuid",
+}
+
+os.chmod(hearting_dir, 0o500)
+try:
+    os.environ["HOME"] = str(b10_home)
+    os.environ["XDG_STATE_HOME"] = str(xdg_state_parent)
+    os.environ.pop("HARNESS_STATE_ROOT", None)
+    import importlib
+    importlib.reload(d)
+
+    releases_before = list((d.data_root() / "releases").iterdir()) if (d.data_root() / "releases").is_dir() else []
+
+    started_at = d._utc_now()
+    typed_refusal = None
+    try:
+        d._install_or_update(
+            repository="acme/hearting", version="v1", runtimes=["claude"],
+            bootstrap=True, channel="stable", pinned_version=None,
+        )
+    except d.DistributionError as exc:
+        typed_refusal = str(exc)
+    finished_at = d._utc_now()
+
+    releases_after = list((d.data_root() / "releases").iterdir()) if (d.data_root() / "releases").is_dir() else []
+
+    b10_fixture_execution = {
+        "command": "_install_or_update(bootstrap=True)",
+        "exit_code": 0 if typed_refusal is not None else 1,
+        "started_at": started_at,
+        "finished_at": finished_at,
+    }
+    assert typed_refusal is not None, "expected dispatch-state-root-unwritable, got no refusal"
+    assert "dispatch-state-root-unwritable" in typed_refusal, typed_refusal
+    assert releases_after == releases_before, "M0 must refuse before any release is created"
+    m0_stopped = True
+    release_deletions = 0
+    completed_journal_records = 0
+
+    is_root = os.geteuid() == 0
+    if is_root or not b10_non_root_detection["matched"]:
+        b10_grade = {"result": "unproven"}
+    else:
+        b10_grade = {
+            "result": "pass",
+            "m0_stopped": m0_stopped,
+            "typed_refusal": "dispatch-state-root-unwritable",
+            "release_deletions": release_deletions,
+            "completed_journal_records": completed_journal_records,
+        }
+    print(json.dumps({
+        "b10_fixture_execution": b10_fixture_execution,
+        "b10_executor": b10_executor,
+        "b10_non_root_detection": b10_non_root_detection,
+        "b10_grade": b10_grade,
+    }, default=str))
+    assert b10_grade["result"] in ("pass", "unproven")
+finally:
+    os.chmod(hearting_dir, 0o700)
+PY
+echo "ok - B-10: isolated harness update refuses at M0 with dispatch-state-root-unwritable (typed refusal, zero deletions, zero completed journal)"
+
+# SD-112 B-7/B-8 (§13.33.2-(5)): source deletion preconditions -- an
+# unreconciled legacy-bound delta blocks pruning with a typed refusal, and
+# the release list is left unchanged (never a warn-and-continue).
+python3 - "$ROOT" "$TMP" <<'PY'
+import os, sys, time
+from pathlib import Path
+
+root = Path(sys.argv[1])
+tmp = Path(sys.argv[2])
+sys.path.insert(0, str(root / "tools/install"))
+import distribution as d
+
+b78_home = tmp / "b78-home"
+os.environ["HOME"] = str(b78_home)
+os.environ["XDG_STATE_HOME"] = str(b78_home / ".local" / "state")
+os.environ.pop("HARNESS_STATE_ROOT", None)
+os.environ["HARNESS_DATA_ROOT"] = str(b78_home / ".local" / "share" / "hearting")
+os.environ.pop("AGENT_DISPATCH_JOBS", None)
+import importlib
+importlib.reload(d)
+
+releases = d.data_root() / "releases"
+releases.mkdir(parents=True, exist_ok=True)
+
+future = time.time() + 70_000_000
+def make_release(name, ts):
+    rel = releases / name
+    (rel / "core").mkdir(parents=True)
+    (rel / "core" / "CORE.md").write_text("fixture\n")
+    os.utime(rel, (ts, ts))
+    return rel
+
+v1 = make_release("v-b78-1", future)
+(v1 / ".dispatch").mkdir(parents=True)
+(v1 / ".dispatch" / "jobs.log").write_text(
+    "2026-08-01T00:00:00Z\tdone\t/r\t/w\tatt-b78\t"
+    "attempt_schema_version=2,registered_worker=1,attempt_id=att-b78,harness=claude\n"
+)
+d.current_path().parent.mkdir(parents=True, exist_ok=True)
+d.current_path().symlink_to(v1)
+migration = d.run_dispatch_state_migration(v1 / ".dispatch", environ=os.environ)
+assert migration["status"] == "completed", migration
+
+# A legacy-bound writer keeps writing to v1's `.dispatch` AFTER promotion,
+# and the stable side already has a *different*, out-of-band copy at that
+# same relative path -- additive-only carry-forward skips a destination
+# that already exists, so this is exactly the "reconciliation left a real
+# mismatch behind" case the final delta digest check (not the sweep call's
+# own boolean) must catch.
+(v1 / ".dispatch" / "logs").mkdir(parents=True)
+(v1 / ".dispatch" / "logs" / "late.txt").write_text("late write\n")
+stable_root_for_delta = d.stable_state_root(os.environ)
+(stable_root_for_delta / "logs").mkdir(parents=True, exist_ok=True)
+(stable_root_for_delta / "logs" / "late.txt").write_text("stale out-of-band copy\n")
+
+v2 = make_release("v-b78-2", future + 1)
+v3 = make_release("v-b78-3", future + 2)
+d.current_path().unlink()
+d.current_path().symlink_to(v3)
+
+releases_before = sorted(p.name for p in releases.iterdir())
+d._cleanup_releases(keep=set())
+releases_after = sorted(p.name for p in releases.iterdir())
+
+assert v1.exists(), "unreconciled delta must block v1's deletion (B-7/B-8)"
+assert releases_before == releases_after, "release list must be unchanged when deletion is blocked"
+assert (v1 / ".dispatch" / "logs" / "late.txt").is_file(), "late write must survive untouched"
+PY
+echo "ok - B-7/B-8: unreconciled legacy-bound delta blocks source deletion, release list unchanged"
+
+# SD-112 B-12 (§13.33.2-(7)): new stable dispatch root is 0700, new migration
+# journal is 0600; a pre-existing wide-mode root/file is refused, never
+# chmod'ed.
+python3 - "$ROOT" "$TMP" <<'PY'
+import os, stat, sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+tmp = Path(sys.argv[2])
+sys.path.insert(0, str(root / "tools/install"))
+import distribution as d
+
+def mode(path):
+    return stat.S_IMODE(path.stat().st_mode)
+
+if os.geteuid() == 0:
+    print("SKIP=unproven (running as root, mode enforcement is not observable)")
+else:
+    b12_home = tmp / "b12-home"
+    os.environ["HOME"] = str(b12_home)
+    os.environ["XDG_STATE_HOME"] = str(b12_home / ".local" / "state")
+    os.environ.pop("HARNESS_STATE_ROOT", None)
+    stable = d.stable_state_root(os.environ)
+    assert not stable.exists()
+    d._migration_m0_preflight(b12_home / "nonexistent" / ".dispatch", stable)
+    assert mode(stable) == 0o700, oct(mode(stable))
+
+    journal = stable / "migration-journal.jsonl"
+    d._append_migration_journal(stable, {"record_version": 1, "status": "open", "migration_id": "b12"})
+    assert mode(journal) == 0o600, oct(mode(journal))
+
+    # Pre-existing wide-mode root: typed refusal, never chmod'ed.
+    wide_home = tmp / "b12-wide-home"
+    os.environ["HOME"] = str(wide_home)
+    os.environ["XDG_STATE_HOME"] = str(wide_home / ".local" / "state")
+    wide_stable = d.stable_state_root(os.environ)
+    wide_stable.mkdir(parents=True)
+    os.chmod(wide_stable, 0o755)
+    try:
+        d._migration_m0_preflight(wide_home / "nonexistent" / ".dispatch", wide_stable)
+    except d.DistributionError as exc:
+        assert "dispatch-state-root-mode-violation" in str(exc), str(exc)
+    else:
+        raise AssertionError("pre-existing wide-mode stable root must be refused, not accepted")
+    assert mode(wide_stable) == 0o755, "must never chmod a pre-existing root"
+PY
+echo "ok - B-12: new dispatch root 0700 and journal 0600; pre-existing wide-mode root refused without chmod"

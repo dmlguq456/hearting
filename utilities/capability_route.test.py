@@ -2096,10 +2096,30 @@ class GroundingCwdLineageTest(unittest.TestCase):
 class ContinuationSealedJobsFallbackTest(unittest.TestCase):
  """A pruned release tree must not strand a continuation on its sealed jobs root."""
  def test_missing_sealed_root_falls_back_to_canonical(self):
-  route={"launch_compatibility_tuple":{"jobs_path":{"path":"/nonexistent-release/.dispatch/jobs.log"}}}
-  resolved=R._continuation_source_jobs(route)
-  self.assertTrue(str(resolved).endswith("/.dispatch/jobs.log"))
-  self.assertNotIn("nonexistent-release",str(resolved))
+  # SD-112 §13.33.2-(8): the env-less canonical answer is the stable state
+  # root (`.../hearting/dispatch/jobs.log`), no longer a release-relative
+  # `.dispatch/jobs.log`. Pin the resolution chain so this asserts the
+  # resolver's canonical answer rather than whichever root the ambient
+  # environment happens to name.
+  with tempfile.TemporaryDirectory() as tmp:
+   home=Path(tmp)/"home"; home.mkdir()
+   prior={
+    key:os.environ.get(key)
+    for key in ("HOME","XDG_STATE_HOME","HARNESS_STATE_ROOT","AGENT_DISPATCH_JOBS")
+   }
+   try:
+    for key in ("XDG_STATE_HOME","HARNESS_STATE_ROOT","AGENT_DISPATCH_JOBS"):
+     os.environ.pop(key,None)
+    os.environ["HOME"]=str(home)
+    route={"launch_compatibility_tuple":{"jobs_path":{"path":"/nonexistent-release/.dispatch/jobs.log"}}}
+    resolved=R._continuation_source_jobs(route)
+    self.assertEqual(
+     resolved,home/".local"/"state"/"hearting"/"dispatch"/"jobs.log")
+    self.assertNotIn("nonexistent-release",str(resolved))
+   finally:
+    for key,value in prior.items():
+     if value is None: os.environ.pop(key,None)
+     else: os.environ[key]=value
  def test_existing_sealed_root_is_preserved(self):
   with tempfile.TemporaryDirectory() as tmp:
    d=Path(tmp)/".dispatch"; d.mkdir()
@@ -2108,6 +2128,159 @@ class ContinuationSealedJobsFallbackTest(unittest.TestCase):
  def test_unresolved_binding_still_fails_closed(self):
   with self.assertRaises(ValueError):
    R._continuation_source_jobs({"launch_compatibility_tuple":{"jobs_path":{"path":"relative/jobs.log"}}})
+
+
+class MigrationAliasContinuationTest(unittest.TestCase):
+ """SD-112 §13.33.2-(3)/(6) decision 1/4: a completed, structurally-valid
+ migration-alias record relieves a `jobs_path`-only mismatch -- B-3 (pruned
+ release continuation), B-4 (sealed-tuple alias/forgery), B-5 (pre-start
+ route, no completion marker ever touched by any fixture here)."""
+ def setUp(self):
+  self._tmp=tempfile.TemporaryDirectory()
+  self._home=Path(self._tmp.name)/"home"; self._home.mkdir()
+  self._stable_jobs=self._home/".local"/"state"/"hearting"/"dispatch"/"jobs.log"
+  self._stable_jobs.parent.mkdir(parents=True)
+  self._journal=self._stable_jobs.parent/"migration-journal.jsonl"
+  # After SD-112 the compat shim resolves to this fixture's OWN stable root,
+  # so the shim target and `self._stable_jobs` coincide. Point the alias
+  # record at a second, distinct fixture-owned stable jobs.log -- the shape a
+  # record written against a different installer-owned state root has -- so
+  # the precedence assertions below stay real proofs instead of coincidences.
+  self._alias_jobs=(
+   Path(self._tmp.name)/"migrated-state"/"hearting"/"dispatch"/"jobs.log")
+  self._alias_jobs.parent.mkdir(parents=True)
+  # The legacy (pruned-release) directory is deliberately never created --
+  # a live directory here would defeat the "dangling" fixture shape.
+  self._legacy_jobs=Path(self._tmp.name)/"pruned-release"/".dispatch"/"jobs.log"
+  # The alias journal is looked up through `stable_state_root(os.environ)`,
+  # which reads HARNESS_STATE_ROOT -> XDG_STATE_HOME -> HOME. Pinning HOME
+  # alone leaves an ambient XDG_STATE_HOME pointing the lookup at a journal
+  # this fixture never wrote, so every positive-alias assertion would fail
+  # for an environment reason. Pin the whole chain, per the isolation
+  # pattern in `dispatch_state_root_rotation.test.py`.
+  self._prev_env={
+   key:os.environ.get(key)
+   for key in ("HOME","XDG_STATE_HOME","HARNESS_STATE_ROOT","AGENT_DISPATCH_JOBS")
+  }
+  os.environ.pop("XDG_STATE_HOME",None)
+  os.environ.pop("HARNESS_STATE_ROOT",None)
+  os.environ["HOME"]=str(self._home)
+  self.addCleanup(self._restore)
+ def _restore(self):
+  for key,value in self._prev_env.items():
+   if value is None: os.environ.pop(key,None)
+   else: os.environ[key]=value
+  self._tmp.cleanup()
+ def _write_journal(self,record):
+  with self._journal.open("a",encoding="utf-8") as fh:
+   fh.write(json.dumps(record)+"\n")
+ def _completed_record(self,**overrides):
+  record={
+   "record_version":1,"migration_id":"mig-fixture-1","status":"completed",
+   "legacy_jobs_identity":{
+    "path":str(self._legacy_jobs.resolve()),"content_digest":"sha256:"+"a"*64,
+   },
+   "stable_jobs_identity":{
+    "path":str(self._alias_jobs.resolve()),"content_digest":"sha256:"+"b"*64,
+   },
+   "source_digest":"sha256:"+"c"*64,"target_digest":"sha256:"+"d"*64,
+  }
+  record.update(overrides)
+  return record
+
+ # --- B-3: continuation resolves a pruned source via the completed alias,
+ # checked before -- and independent of the coincidence of -- the compat shim.
+ def test_continuation_resolves_pruned_source_via_completed_alias(self):
+  self._write_journal(self._completed_record())
+  route={"launch_compatibility_tuple":{"jobs_path":{"path":str(self._legacy_jobs)}}}
+  resolved=R._continuation_source_jobs(route)
+  self.assertEqual(resolved,self._alias_jobs.resolve())
+  shim_target=R.resolve_dispatch_state_root(R.resolve_agent_home(),None)/"jobs.log"
+  self.assertNotEqual(shim_target,resolved,
+   "fixture must prove alias precedence, not shim coincidence")
+ def test_continuation_falls_back_to_shim_when_no_alias(self):
+  route={"launch_compatibility_tuple":{"jobs_path":{"path":str(self._legacy_jobs)}}}
+  resolved=R._continuation_source_jobs(route)
+  self.assertEqual(
+   resolved,R.resolve_dispatch_state_root(R.resolve_agent_home(),None)/"jobs.log")
+ def test_continuation_ignores_incomplete_or_forged_alias(self):
+  self._write_journal(self._completed_record(status="open"))
+  self._write_journal(self._completed_record(
+   migration_id="mig-fixture-2",source_digest=None))
+  route={"launch_compatibility_tuple":{"jobs_path":{"path":str(self._legacy_jobs)}}}
+  resolved=R._continuation_source_jobs(route)
+  self.assertNotEqual(resolved,self._alias_jobs.resolve())
+  self.assertEqual(
+   resolved,R.resolve_dispatch_state_root(R.resolve_agent_home(),None)/"jobs.log")
+
+ # --- B-4/B-5: revalidate_launch_compatibility jobs_path-only alias relief.
+ def _route_with_sealed_jobs_path(self,legacy_path):
+  sealed=json.loads(json.dumps(
+   R.launch_compatibility_tuple(artifact_root=R.ROOT,cwd=R.ROOT)))
+  jobs_path=dict(sealed["jobs_path"])
+  jobs_path["path"]=str(legacy_path)
+  jobs_path["binding_digest"]=R._sha256_record({
+   "kind":"jobs_path","path":str(legacy_path),
+   "release_id":jobs_path["release_id"],"content_digest":jobs_path["content_digest"],
+  })
+  sealed["jobs_path"]=jobs_path
+  return {
+   "artifact_root":str(R.ROOT),"cwd":str(R.ROOT),
+   "route_hash":"sha256:"+"e"*64,
+   "launch_compatibility_tuple":{"contract_version":1,**sealed},
+  }
+ def test_revalidate_accepts_jobs_path_only_via_completed_alias(self):
+  # B-5: pre-start route -- no completion marker file exists anywhere in
+  # this fixture, and revalidate/alias never look for one.
+  os.environ["AGENT_DISPATCH_JOBS"]=str(self._stable_jobs)
+  actual=R.launch_compatibility_tuple(artifact_root=R.ROOT,cwd=R.ROOT)
+  self._write_journal(self._completed_record(
+   stable_jobs_identity={
+    "path":actual["jobs_path"]["path"],"content_digest":"sha256:"+"b"*64,
+   },
+  ))
+  route=self._route_with_sealed_jobs_path(self._legacy_jobs)
+  ok,mismatches=R.revalidate_launch_compatibility(route)
+  self.assertTrue(ok,mismatches)
+  self.assertNotIn("jobs_path",mismatches)
+ def test_revalidate_rejects_incomplete_or_forged_alias(self):
+  os.environ["AGENT_DISPATCH_JOBS"]=str(self._stable_jobs)
+  actual=R.launch_compatibility_tuple(artifact_root=R.ROOT,cwd=R.ROOT)
+  self._write_journal(self._completed_record(
+   status="open",
+   stable_jobs_identity={
+    "path":actual["jobs_path"]["path"],"content_digest":"sha256:"+"b"*64,
+   },
+  ))
+  route=self._route_with_sealed_jobs_path(self._legacy_jobs)
+  ok,mismatches=R.revalidate_launch_compatibility(route)
+  self.assertFalse(ok)
+  self.assertIn("jobs_path",mismatches)
+ def test_revalidate_rejects_completed_alias_with_wrong_route_hash(self):
+  os.environ["AGENT_DISPATCH_JOBS"]=str(self._stable_jobs)
+  actual=R.launch_compatibility_tuple(artifact_root=R.ROOT,cwd=R.ROOT)
+  self._write_journal(self._completed_record(
+   stable_jobs_identity={
+    "path":actual["jobs_path"]["path"],"content_digest":"sha256:"+"b"*64,
+   },
+   route_hash="sha256:"+"f"*64,
+  ))
+  route=self._route_with_sealed_jobs_path(self._legacy_jobs)
+  ok,mismatches=R.revalidate_launch_compatibility(route)
+  self.assertFalse(ok)
+  self.assertIn("jobs_path",mismatches)
+ def test_revalidate_accepts_completed_alias_with_matching_route_hash(self):
+  os.environ["AGENT_DISPATCH_JOBS"]=str(self._stable_jobs)
+  actual=R.launch_compatibility_tuple(artifact_root=R.ROOT,cwd=R.ROOT)
+  route=self._route_with_sealed_jobs_path(self._legacy_jobs)
+  self._write_journal(self._completed_record(
+   stable_jobs_identity={
+    "path":actual["jobs_path"]["path"],"content_digest":"sha256:"+"b"*64,
+   },
+   route_hash=route["route_hash"],
+  ))
+  ok,mismatches=R.revalidate_launch_compatibility(route)
+  self.assertTrue(ok,mismatches)
 
 
 if __name__=="__main__": unittest.main()

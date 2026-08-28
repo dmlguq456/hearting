@@ -46,6 +46,7 @@ from dispatch_contract import (  # noqa: E402
     PRELAUNCH_PROCESS_BLOCK_REASONS,
     codex_standard_owner_network_enabled,
     dispatch_state_root,
+    dispatch_state_roots,
     ensure_global_registry_writable,
     headless_attempt_policy,
     launch_orphan_watch,
@@ -1749,7 +1750,8 @@ def write_reset_cache(agent_home: Path, harness: str, reason: str, reset: str, j
     Best-effort — a cache write failure never blocks dispatch bookkeeping.
     """
     try:
-        cache = (dispatch_state_root(jobs) if jobs else agent_home / ".dispatch") / f"usage-reset.{harness}"
+        state_root = dispatch_state_root(jobs) if jobs else dispatch_state_roots(agent_home)[0]
+        cache = state_root / f"usage-reset.{harness}"
         cache.parent.mkdir(parents=True, exist_ok=True)
         ts = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
         cache.write_text(f"{ts} {reason} {reset}\n", encoding="utf-8")
@@ -2027,10 +2029,11 @@ def validate_route_record(args: argparse.Namespace) -> int:
     # Run the dependency gate before runtime-projection and parent-registry
     # diagnostics so an invalid DAG edge is the stable first failure. The
     # authoritative registry path is revalidated immediately before claim.
-    early_jobs = Path(
-        args.jobs
-        or os.environ.get("AGENT_DISPATCH_JOBS", "")
-        or args.agent_home / ".dispatch" / "jobs.log"
+    explicit_or_inherited_jobs = args.jobs or os.environ.get("AGENT_DISPATCH_JOBS", "")
+    early_jobs = (
+        Path(explicit_or_inherited_jobs)
+        if explicit_or_inherited_jobs
+        else dispatch_state_roots(args.agent_home)[0] / "jobs.log"
     )
     try:
         completion_marker_gate(
@@ -2235,7 +2238,10 @@ def main(argv: list[str]) -> int:
         if rc != 0:
             return rc
         if args.profile:
-            home_root = resolve_agent_home() / ".dispatch" / "homes"
+            profile_registry = resolve_global_registry(
+                args.agent_home, args.jobs, args.dispatch_depth, action
+            )
+            home_root = dispatch_state_root(profile_registry.path) / "homes"
             build_home = resolve_agent_home() / "tools" / "profile" / "build-home.py"
             check_result = subprocess.run(
                 ["python3", str(build_home), args.profile, "--check"],

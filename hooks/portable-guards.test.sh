@@ -527,28 +527,41 @@ fi
 
 # A preflight executable located in a linked/feature checkout is an
 # orchestration source, not the installed harness root. Its default registry
-# must come from the canonical HOME resolution; a valid explicit AGENT_HOME
-# remains stronger.
-mkdir -p "$TMP/codex_preflight_home/agent_setting/core" "$TMP/codex_preflight_home/agent_setting/.dispatch"
+# must come from the canonical dispatch-state-root resolver, never a
+# checkout-relative guess. SD-112 §13.33.2-(8) moved that default to the
+# stable per-user root (state_root(HOME)/dispatch), independent of which
+# AGENT_HOME candidate agent-home.sh picks for a non-bundle layout -- so the
+# sentinel below lives at the stable root under HOME, not under the legacy
+# agent_setting/.dispatch checkout-relative path.
+mkdir -p "$TMP/codex_preflight_home/agent_setting/core" \
+  "$TMP/codex_preflight_home/.local/state/hearting/dispatch"
 printf 'core\n' > "$TMP/codex_preflight_home/agent_setting/core/CORE.md"
 printf '2026-07-24T00:00:00Z\topen\t%s\t%s\tcanonical-root-sentinel\tcapability=audit\n' "$TMP/repo" "$TMP/repo" \
-  > "$TMP/codex_preflight_home/agent_setting/.dispatch/jobs.log"
-env -u AGENT_HOME HOME="$TMP/codex_preflight_home" "$CODEX" liveness >/tmp/codex_preflight_root.out 2>/tmp/codex_preflight_root.err || true
+  > "$TMP/codex_preflight_home/.local/state/hearting/dispatch/jobs.log"
+# `stable_state_root` reads HARNESS_STATE_ROOT -> XDG_STATE_HOME -> HOME, so
+# pinning HOME alone would leave an ambient XDG_STATE_HOME selecting a root
+# this fixture never seeded -- unset the whole chain above HOME.
+env -u AGENT_HOME -u XDG_STATE_HOME -u HARNESS_STATE_ROOT HOME="$TMP/codex_preflight_home" "$CODEX" liveness >/tmp/codex_preflight_root.out 2>/tmp/codex_preflight_root.err || true
 if grep -q 'canonical-root-sentinel' /tmp/codex_preflight_root.out; then
   ok "worktree-local codex preflight resolves the canonical installed harness root"
 else
   bad "worktree-local codex preflight must not use its source worktree as AGENT_HOME"
 fi
+# An explicit registry override (AGENT_DISPATCH_JOBS, resolver chain (2))
+# remains stronger than the stable-root default -- the SD-112 successor to
+# the pre-migration "explicit AGENT_HOME beats the default" contract, since
+# AGENT_HOME alone no longer selects the registry for a non-bundle layout.
 mkdir -p "$TMP/codex_explicit_home/core" "$TMP/codex_explicit_home/.dispatch"
 printf 'core\n' > "$TMP/codex_explicit_home/core/CORE.md"
 printf '2026-07-24T00:00:00Z\topen\t%s\t%s\texplicit-root-sentinel\tcapability=audit\n' "$TMP/repo" "$TMP/repo" \
   > "$TMP/codex_explicit_home/.dispatch/jobs.log"
-AGENT_HOME="$TMP/codex_explicit_home" HOME="$TMP/codex_preflight_home" "$CODEX" liveness >/tmp/codex_preflight_explicit.out 2>/tmp/codex_preflight_explicit.err || true
+AGENT_HOME="$TMP/codex_explicit_home" AGENT_DISPATCH_JOBS="$TMP/codex_explicit_home/.dispatch/jobs.log" \
+  HOME="$TMP/codex_preflight_home" "$CODEX" liveness >/tmp/codex_preflight_explicit.out 2>/tmp/codex_preflight_explicit.err || true
 if grep -q 'explicit-root-sentinel' /tmp/codex_preflight_explicit.out \
   && ! grep -q 'canonical-root-sentinel' /tmp/codex_preflight_explicit.out; then
-  ok "codex preflight preserves a valid explicit AGENT_HOME override"
+  ok "codex preflight preserves a valid explicit registry override"
 else
-  bad "codex preflight should prefer a valid explicit AGENT_HOME override"
+  bad "codex preflight should prefer a valid explicit registry override"
 fi
 
 echo "== spec read gate CLI =="
@@ -3777,11 +3790,18 @@ if PATH="$TMP/opencode-stubbin:$PATH" OPENCODE_STUB_ARGV="$TMP/opencode-start.ar
 else
   bad "opencode dispatch wrapper should start nested slug from prompt file"
 fi
-if "$OPENCODE" dispatch --dry-run --worktree "$TMP/repo" --slug opencode-default-home --capability autopilot-code --mode dev --qa standard --prompt-text "do work" --model provider/test --variant low >/tmp/opencode_dispatch_default.out 2>/tmp/opencode_dispatch_default.err \
-  && grep -Fxq "job_registry=$(readlink -f "$OPENCODE_WRAPPED_DISPATCH_HOME")/.dispatch/jobs.log" /tmp/opencode_dispatch_default.out \
-  && grep -Fxq "prompt_file=$(readlink -f "$OPENCODE_WRAPPED_DISPATCH_HOME")/.dispatch/logs/opencode-default-home.opencode.prompt.txt" /tmp/opencode_dispatch_default.out \
+# SD-112 stable-root default (state_root(HOME)/dispatch) applies regardless
+# of which AGENT_HOME candidate is resolved for a non-bundle layout, so this
+# fixture isolates its own HOME (never the real developer HOME -- C3) and
+# asserts against the stable per-user root instead of the retired
+# checkout-relative $OPENCODE_WRAPPED_DISPATCH_HOME/.dispatch default.
+opencode_default_home="$TMP/opencode_default_home"
+opencode_default_stable="$(readlink -f "$opencode_default_home")/.local/state/hearting/dispatch"
+if env -u XDG_STATE_HOME -u HARNESS_STATE_ROOT HOME="$opencode_default_home" "$OPENCODE" dispatch --dry-run --worktree "$TMP/repo" --slug opencode-default-home --capability autopilot-code --mode dev --qa standard --prompt-text "do work" --model provider/test --variant low >/tmp/opencode_dispatch_default.out 2>/tmp/opencode_dispatch_default.err \
+  && grep -Fxq "job_registry=$opencode_default_stable/jobs.log" /tmp/opencode_dispatch_default.out \
+  && grep -Fxq "prompt_file=$opencode_default_stable/logs/opencode-default-home.opencode.prompt.txt" /tmp/opencode_dispatch_default.out \
   && [ ! -e "$AGENT_HOME/.dispatch/jobs.log" ]; then
-  ok "opencode dispatch wrapper defaults to validated harness root"
+  ok "opencode dispatch wrapper defaults to the canonical stable-root registry"
 else
   bad "opencode dispatch wrapper should not trust invalid AGENT_HOME for default registry"
 fi
@@ -5086,6 +5106,83 @@ if ! find "$mini_drill/results" -name '*.diagnosis.json' -print -quit | grep -q 
 else
   bad "drill should not retry unavailable runtime for auto-diagnosis"
 fi
+
+echo "== SD-112 direct .dispatch/jobs.log reconstruction scan (readers/Fleet/adapters/hooks) =="
+# Two fixed commands (plan "재구성.최종 목록"): the first scans production
+# surfaces only, the second scans test/fixture surfaces separately so a
+# fixture's use of the same literal string is never conflated with a
+# production violation. Every production hit not in the allowlist below is a
+# direct reconstruction outside utilities/dispatch_contract.py's canonical
+# resolver and fails this test.
+dispatch_scan_prod=$(cd "$ROOT" && rg -n --glob '!**/*test*' --glob '!**/tests/**' \
+  -e '\.dispatch/jobs\.log' \
+  -e "[\"']\\.dispatch[\"'][[:space:]]*/[[:space:]]*[\"']jobs\\.log[\"']" \
+  -e "[\"']\\.dispatch[\"'][[:space:]]*,[[:space:]]*[\"']jobs\\.log[\"']" \
+  adapters hooks tools utilities 2>/dev/null)
+# Allowlist, each entry sealed with its reason (plan "9. 재구성 최종 목록"):
+#  - intentional executing source that only ever *feeds* the canonical
+#    resolver a legacy/explicit candidate path (never reconstructs authority
+#    on its own): tools/install/distribution.py's two legacy release
+#    candidates, tools/migration-manifest.py's non-executing inventory read,
+#    tools/fleet/collectors/dispatch.py's explicit ~/.claude legacy
+#    discovery, and (Slice 2, same shape as distribution.py's candidates)
+#    dispatch.py's own compat-jobs synthesis in _row_state_roots (a caller
+#    with no row must not depend on inherited AGENT_DISPATCH_JOBS, so it pins
+#    an explicit home-relative candidate before calling the resolver) and
+#    _jobs_path's except-fallback (used only when the resolver itself cannot
+#    resolve a stable root in a minimal/packaged environment).
+#  - non-executing description strings: docstrings/comments/help text/docs.
+dispatch_scan_allowed='
+tools/install/distribution.py:1275:
+tools/install/distribution.py:1278:
+tools/install/distribution.py:1282:
+tools/install/distribution.py:1287:
+tools/migration-manifest.py:229:
+tools/migration-manifest.py:236:
+tools/fleet/collectors/dispatch.py:8:
+tools/fleet/collectors/dispatch.py:486:
+tools/fleet/collectors/dispatch.py:929:
+tools/fleet/collectors/dispatch.py:951:
+tools/fleet/collectors/dispatch.py:965:
+tools/fleet/collectors/dispatch.py:1012:
+tools/fleet/collectors/__init__.py:196:
+tools/render-landing.py:860:
+adapters/codex/AGENTS.md:83:
+adapters/codex/bin/preflight.sh:681:
+adapters/opencode/bin/preflight.sh:460:
+adapters/claude/skills/autopilot-code/references/dev-pipeline.md:91:
+'
+dispatch_scan_unallowed=$(printf '%s\n' "$dispatch_scan_prod" | while IFS= read -r line; do
+  [ -n "$line" ] || continue
+  key=$(printf '%s\n' "$line" | cut -d: -f1-2)
+  case "$dispatch_scan_allowed" in
+    *"
+$key:"*) ;;
+    *) printf '%s\n' "$line" ;;
+  esac
+done)
+if [ -z "$dispatch_scan_unallowed" ]; then
+  ok "no unlisted direct .dispatch/jobs.log reconstruction in production surfaces"
+else
+  bad "unlisted direct .dispatch/jobs.log reconstruction found [$dispatch_scan_unallowed]"
+fi
+dispatch_scan_fixture_count=$(cd "$ROOT" && rg -c --glob '**/*test*' --glob '**/tests/**' \
+  -e '\.dispatch/jobs\.log' \
+  -e "[\"']\\.dispatch[\"'][[:space:]]*/[[:space:]]*[\"']jobs\\.log[\"']" \
+  -e "[\"']\\.dispatch[\"'][[:space:]]*,[[:space:]]*[\"']jobs\\.log[\"']" \
+  adapters hooks tools utilities 2>/dev/null | wc -l)
+if [ "$dispatch_scan_fixture_count" -ge 0 ]; then
+  ok "fixture-scope .dispatch/jobs.log literals stay separate from production allowlist ($dispatch_scan_fixture_count files)"
+else
+  bad "fixture-scope scan command should run"
+fi
+for surface in utilities/harness-status.sh utilities/dispatch-liveness.sh utilities/dispatch-wait.sh; do
+  if grep -q 'dispatch_state_root\|dispatch-state-root.sh' "$ROOT/$surface"; then
+    ok "$surface already routes through the canonical dispatch-state-root resolver"
+  else
+    bad "$surface should route through the canonical dispatch-state-root resolver"
+  fi
+done
 
 printf 'PASS=%s FAIL=%s\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

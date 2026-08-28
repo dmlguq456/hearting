@@ -27,7 +27,10 @@ from dispatch_contract import (
     ensure_global_registry_writable,
     parse_registry_metadata,
     resolve_agent_home,
+    resolve_completed_alias,
+    resolve_dangling_registry,
     resolve_dispatch_state_root,
+    stable_state_root,
     validate_attempt_metadata,
 )
 from stage_session_contract import load_manifest
@@ -271,6 +274,32 @@ def _grounding_cwd_lineage_ok(path, sealed_release, actual_release):
         return False
     return sealed in probe.stdout.split()
 
+def _jobs_path_alias_relieves_mismatch(route, expected, actual):
+    """SD-112 §13.33.2-(3) decision 1: a `jobs_path`-only mismatch may be
+    relieved by a `completed`, structurally-valid migration-alias record --
+    and only that axis. The sealed tuple and open-row `jobs_path` are never
+    rewritten; this only widens what `revalidate_launch_compatibility`
+    accepts as equivalent. `expected` is the sealed (legacy) jobs_path
+    identity, `actual` this process's fresh (current) one."""
+    expected_path=expected.get("path")
+    actual_path=actual.get("path")
+    if not expected_path or not actual_path:
+        return False
+    try:
+        stable_root=stable_state_root(os.environ)
+    except DispatchContractError:
+        return False
+    record=resolve_completed_alias(stable_root,expected_path)
+    if record is None:
+        return False
+    target=(record.get("stable_jobs_identity") or {}).get("path")
+    if target != actual_path:
+        return False
+    record_route_hash=record.get("route_hash")
+    if record_route_hash is not None and record_route_hash != route.get("route_hash"):
+        return False
+    return True
+
 def revalidate_launch_compatibility(route):
     """Compare a route's sealed launch tuple with this process's current roots."""
     sealed=route.get("launch_compatibility_tuple")
@@ -308,6 +337,11 @@ def revalidate_launch_compatibility(route):
             )
         ):
             changed={}
+        if (
+            changed and name == "jobs_path"
+            and _jobs_path_alias_relieves_mismatch(route,expected,actual)
+        ):
+            changed={}
         if changed:
             mismatches[name]={
                 "expected":expected,"actual":actual,"fields":sorted(changed),
@@ -328,16 +362,23 @@ def _continuation_source_jobs(source_route):
     if not isinstance(jobs,str) or not jobs or not Path(jobs).is_absolute():
         raise ValueError("continuation-source-jobs-binding-unresolved")
     sealed=Path(jobs).resolve(strict=False)
-    if sealed.parent.is_dir():
+    resolution=resolve_dangling_registry(sealed)
+    if resolution.status=="exact":
         return sealed
-    # A managed release upgrade prunes old release trees, and the sealed
-    # `.dispatch` root lives inside one (observed 2026-08-27: rt-eab5eba8's
-    # v2.80.1 root vanished while its migrated completion markers live under
-    # the current release). The markers/attempt links that continuation reads
-    # are migrated to the canonical live root, and every marker is still
-    # verified against the route binding and exact attempt link — so when the
-    # sealed root itself is gone, resolve the live canonical root instead of
-    # refusing with a dangling path.
+    if resolution.status=="aliased":
+        # Decision 1/4: alias is evaluated before the compat shim below --
+        # digest-verified equivalence must win over an unvalidated path swap.
+        return resolution.jobs_path
+    # Compat shim (SD-112 §13.33.2-(3)/(6)): kept intentionally, not removed
+    # this cycle. A managed release upgrade prunes old release trees, and the
+    # sealed `.dispatch` root lives inside one (observed 2026-08-27:
+    # rt-eab5eba8's v2.80.1 root vanished while its migrated completion
+    # markers live under the current release). The markers/attempt links that
+    # continuation reads are migrated to the canonical live root, and every
+    # marker is still verified against the route binding and exact attempt
+    # link -- so when the sealed root itself is gone and no alias resolved it,
+    # resolve the live canonical root instead of refusing with a dangling
+    # path. Both branches above still apply first.
     return resolve_dispatch_state_root(resolve_agent_home(),None)/"jobs.log"
 
 def _continuation_reused_evidence(route, node):

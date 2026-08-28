@@ -88,15 +88,20 @@ class HarvestTest(unittest.TestCase):
         self.temp.cleanup()
 
     def env(self):
-        # completion_dir() resolves the dispatch state root ahead of
-        # AGENT_HOME/.dispatch, preferring an inherited AGENT_DISPATCH_JOBS --
-        # clear it so this fixture's real registry never leaks in.
+        # SD-112 chain-3 supersession (§13.33.2-(8)): the env-less fallback
+        # no longer resolves under AGENT_HOME/.dispatch at all -- it always
+        # lands under the stable per-user root now, which for `**os.environ`
+        # would be this machine's REAL $HOME. Pin an explicit
+        # AGENT_DISPATCH_JOBS under this fixture's isolated `self.home`
+        # instead of relying on the retired implicit fallback, so this
+        # fixture's registry stays isolated exactly as the comment always
+        # intended, and never leaks into real per-user state.
         env = {
             **os.environ,
             "AGENT_HOME": str(self.home),
             "AGENT_ARTIFACT_ROOT": str(self.artifact),
         }
-        env.pop("AGENT_DISPATCH_JOBS", None)
+        env["AGENT_DISPATCH_JOBS"] = str(self.home / ".dispatch" / "jobs.log")
         return env
 
     def current_row(self, attempt, slug="worker"):
@@ -248,7 +253,13 @@ class HarvestTest(unittest.TestCase):
         old = os.environ.get("AGENT_HOME")
         os.environ["AGENT_HOME"] = str(self.home)
         old_jobs = os.environ.get("AGENT_DISPATCH_JOBS")
-        os.environ.pop("AGENT_DISPATCH_JOBS", None)
+        # SD-112 chain-3 supersession: write_completion_marker() resolves its
+        # own dispatch state root independently of the explicit `jobs=`
+        # registry path below (the marker location and the registry lookup
+        # are two different resolutions) via AGENT_DISPATCH_JOBS/fallback --
+        # the env-less fallback no longer lands under AGENT_HOME/.dispatch,
+        # so pin it explicitly to keep the marker isolated under `self.home`.
+        os.environ["AGENT_DISPATCH_JOBS"] = str(self.home / ".dispatch" / "jobs.log")
         try:
             with self.assertRaisesRegex(ValueError, "attempt-row-absent"):
                 ROUTE.complete_node(
@@ -411,7 +422,9 @@ class HarvestTest(unittest.TestCase):
         old = os.environ.get("AGENT_HOME")
         os.environ["AGENT_HOME"] = str(self.home)
         old_jobs = os.environ.get("AGENT_DISPATCH_JOBS")
-        os.environ.pop("AGENT_DISPATCH_JOBS", None)
+        # SD-112 chain-3 supersession -- see
+        # test_routed_harvest_replays_shared_completion_for_one_exact_attempt.
+        os.environ["AGENT_DISPATCH_JOBS"] = str(self.home / ".dispatch" / "jobs.log")
         try:
             with self.assertRaisesRegex(ValueError, "attempt-row-absent"):
                 ROUTE.complete_node(

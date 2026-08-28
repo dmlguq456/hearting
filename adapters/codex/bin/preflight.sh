@@ -780,7 +780,12 @@ EOF
     ;;
   liveness)
     shift
-    jobs=${AGENT_DISPATCH_JOBS:-"$AGENT_ROOT/.dispatch/jobs.log"}
+    if [ -n "${AGENT_DISPATCH_JOBS:-}" ]; then
+      jobs=$AGENT_DISPATCH_JOBS
+    else
+      state_root=$(AGENT_HOME="$AGENT_ROOT" "$ROOT/utilities/dispatch-state-root.sh") || exit $?
+      jobs="$state_root/jobs.log"
+    fi
     if [ "$#" -gt 0 ] && [ "${1#--}" = "$1" ]; then jobs=$1; shift; fi
     current_jobs=$(mktemp)
     trap 'rm -f "$current_jobs"' EXIT

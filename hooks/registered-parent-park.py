@@ -23,6 +23,7 @@ from dispatch_completion_join import (  # noqa: E402
     supervisor_guarded_attempt_ids,
     supervisor_outbox_row_state,
 )
+from dispatch_contract import dispatch_state_roots  # noqa: E402
 
 
 def deny(reason: str) -> int:
@@ -45,10 +46,8 @@ def jobs_path() -> Path:
     override = os.environ.get("AGENT_DISPATCH_JOBS")
     if override:
         return Path(override)
-    agent_home = os.environ.get("AGENT_HOME")
-    if agent_home and (Path(agent_home) / "core" / "CORE.md").is_file():
-        return Path(agent_home) / ".dispatch" / "jobs.log"
-    return ROOT / ".dispatch" / "jobs.log"
+    agent_home = Path(os.environ.get("AGENT_HOME") or ROOT)
+    return dispatch_state_roots(agent_home)[0] / "jobs.log"
 
 
 def mapping(value: object) -> dict[str, Any]:

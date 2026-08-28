@@ -41,6 +41,7 @@ from dispatch_contract import (  # noqa: E402
     close_attempt_row,
     completion_marker_gate,
     dispatch_state_root,
+    dispatch_state_roots,
     PRELAUNCH_PROCESS_BLOCK_REASONS,
     ensure_global_registry_writable,
     headless_attempt_policy,
@@ -965,7 +966,8 @@ def write_reset_cache(agent_home: Path, harness: str, reason: str, reset: str, j
     Best-effort — a cache write failure never blocks dispatch bookkeeping.
     """
     try:
-        cache = (dispatch_state_root(jobs) if jobs else agent_home / ".dispatch") / f"usage-reset.{harness}"
+        state_root = dispatch_state_root(jobs) if jobs else dispatch_state_roots(agent_home)[0]
+        cache = state_root / f"usage-reset.{harness}"
         cache.parent.mkdir(parents=True, exist_ok=True)
         ts = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
         cache.write_text(f"{ts} {reason} {reset}\n", encoding="utf-8")
@@ -1216,10 +1218,11 @@ def validate_route_record(args: argparse.Namespace) -> int:
             child_spawned="0",
         )
     args.route_validation=result.stdout.strip()
-    early_jobs = Path(
-        args.jobs
-        or os.environ.get("AGENT_DISPATCH_JOBS", "")
-        or args.agent_home / ".dispatch" / "jobs.log"
+    explicit_or_inherited_jobs = args.jobs or os.environ.get("AGENT_DISPATCH_JOBS", "")
+    early_jobs = (
+        Path(explicit_or_inherited_jobs)
+        if explicit_or_inherited_jobs
+        else dispatch_state_roots(args.agent_home)[0] / "jobs.log"
     )
     try:
         completion_marker_gate(

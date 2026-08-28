@@ -485,13 +485,18 @@ def _row_state_roots(job=None, agent_home=None):
         # registry the observer process happened to inherit.
         jobs = os.path.join(str(home), ".dispatch", "jobs.log")
     try:
-        return tuple(str(path) for path in dispatch_state_roots(Path(home), jobs=jobs))
+        candidates = tuple(str(path) for path in dispatch_state_roots(Path(home), jobs=jobs))
     except (OSError, TypeError, ValueError):
         legacy = os.path.join(str(home), ".dispatch")
         if jobs:
             canonical = os.path.dirname(os.path.realpath(jobs))
             return (canonical,) if canonical == legacy else (canonical, legacy)
         return (legacy,)
+    # The row (or its home-derived default) owns exactly one write root; a
+    # legacy/stable read-window fallback belongs to the dangling-registry
+    # classifier (route.py's _route_state_roots), not to this profile/session
+    # home lookup, which must stay pinned to the row's own registry.
+    return candidates[:1]
 
 
 def _codex_sessions_dirs_for_profile(profile, slug, job=None):
@@ -936,7 +941,14 @@ def _jobs_path(override=None):
     if env:
         return env
     home = _registry_home()
-    return os.path.join(home, ".dispatch", "jobs.log")
+    try:
+        return str(dispatch_state_roots(Path(home))[0] / "jobs.log")
+    except (OSError, TypeError, ValueError):
+        # A packaged/minimal environment missing HOME/XDG_STATE_HOME/
+        # HARNESS_STATE_ROOT cannot resolve the stable per-user root; fall back
+        # to the legacy home-relative default so Fleet degrades instead of
+        # raising out of a read-only scan.
+        return os.path.join(str(home), ".dispatch", "jobs.log")
 
 
 def _opencode_config_home():

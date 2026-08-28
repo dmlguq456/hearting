@@ -3540,7 +3540,37 @@ def _validated_registry_path(path: str | Path, field: str) -> Path:
     return candidate
 
 
-def _fallback_registry(agent_home: Path) -> Path:
+def state_root(environ: dict[str, str] | os._Environ[str]) -> Path:
+    """The one per-user state root: `HARNESS_STATE_ROOT` (installer-owned) or
+    `$XDG_STATE_HOME/hearting` or `$HOME/.local/state/hearting`, read only from
+    the passed mapping so an isolation test's `environ={}` never touches the
+    live process environment or creates a real user home (SD-112 §13.33.2-(1))."""
+
+    harness_state_root = environ.get("HARNESS_STATE_ROOT")
+    if harness_state_root:
+        return _absolute(harness_state_root, "harness-state-root")
+    xdg_state_home = environ.get("XDG_STATE_HOME")
+    if xdg_state_home:
+        return _absolute(xdg_state_home, "xdg-state-home") / "hearting"
+    home = environ.get("HOME")
+    if not home:
+        raise DispatchContractError(
+            "dispatch-state-root-unresolved",
+            "none of HARNESS_STATE_ROOT, XDG_STATE_HOME, HOME are set",
+        )
+    return _absolute(home, "home") / ".local" / "state" / "hearting"
+
+
+def stable_state_root(environ: dict[str, str] | os._Environ[str]) -> Path:
+    """The canonical release-independent dispatch state root (SD-112
+    §13.33.2-(1)): `state_root(environ) / "dispatch"`."""
+
+    return state_root(environ) / "dispatch"
+
+
+def _fallback_registry(
+    agent_home: Path, environ: dict[str, str] | os._Environ[str]
+) -> Path:
     home = Path(agent_home).expanduser()
     resolved_home = home.resolve(strict=False)
     layout, runtime_home = _versioned_source_layout(resolved_home)
@@ -3549,16 +3579,15 @@ def _fallback_registry(agent_home: Path) -> Path:
         return (runtime_home / ".harness" / "dispatch" / "jobs.log").resolve(
             strict=False
         )
-    if layout == "shared-release":
-        # State-root chain (3): a shared managed release is user-writable and its
-        # dispatch state is carried into the successor release by the
-        # _cleanup_releases succession before pruning (release-lifecycle T-1/T-2),
-        # so an env-less session under `hearting/releases/<v>` keeps the
-        # release-relative registry instead of failing closed. Only bundle-source
-        # trees — which no reader accepts as registry authority — are redirected
-        # or rejected above.
-        return resolved_home / ".dispatch" / "jobs.log"
-    return home / ".dispatch" / "jobs.log"
+    # State-root chain (3) supersession (SD-112 §13.33.2-(8)): a shared managed
+    # release and a maintainer checkout both default to the stable per-user
+    # root now. Release succession moves file *contents*, not the `jobs_path`
+    # *identity* that `revalidate_launch_compatibility` seals, which is exactly
+    # the failure mode this migration closes. A checkout-local `.dispatch` is
+    # reachable only through an explicit chain ①/② override (`explicit_jobs` or
+    # `AGENT_DISPATCH_JOBS`), resolved by callers before they ever reach this
+    # fallback, or as a legacy read candidate in `dispatch_state_roots()`.
+    return stable_state_root(environ) / "jobs.log"
 
 
 def resolve_global_registry(
@@ -3617,8 +3646,14 @@ def resolve_global_registry(
         return RegistrySelection(inherited, "inherited-env", True)
     if explicit:
         return RegistrySelection(explicit, "root-explicit", False)
-    fallback = _fallback_registry(agent_home).resolve(strict=False)
-    source = "activation-runtime" if fallback.parent.name == "dispatch" else "agent-home"
+    fallback = _fallback_registry(agent_home, env).resolve(strict=False)
+    source = "agent-home"
+    if fallback.parent.name == "dispatch":
+        try:
+            is_stable = fallback.parent == stable_state_root(env)
+        except DispatchContractError:
+            is_stable = False
+        source = "stable-state-root" if is_stable else "activation-runtime"
     return RegistrySelection(fallback, source, False)
 
 
@@ -3679,29 +3714,111 @@ def resolve_dispatch_state_root(
         return dispatch_state_root(
             _validated_registry_path(inherited, "agent-dispatch-jobs")
         )
-    return _fallback_registry(agent_home).parent
+    return _fallback_registry(agent_home, env).parent
 
 
 def dispatch_state_roots(
-    agent_home: Path, jobs: str | Path | None = None
+    agent_home: Path,
+    jobs: str | Path | None = None,
+    *,
+    environ: dict[str, str] | os._Environ[str] | None = None,
 ) -> tuple[Path, ...]:
-    """Read order for dispatch state: canonical state root first, legacy
-    agent-home-relative tree second. Deduplicated. The writer uses only
-    `dispatch_state_roots(...)[0]`; only readers should iterate the tuple.
+    """Read order for dispatch state (SD-112 §13.33.2-(6)): the canonical
+    write root the resolver actually chose, then the stable per-user root (a
+    no-op once the two coincide, which is the common case now that chain-3
+    defaults to stable), then the legacy agent-home/active-release-relative
+    tree. Deduplicated, read-only past index 0 -- the writer uses only
+    `dispatch_state_roots(...)[0]`, which is always
+    `resolve_dispatch_state_root()`'s result and never a hardcoded stable
+    literal; stable-first is a *consequence* of that resolution, not an
+    override applied here.
     """
 
-    canonical = resolve_dispatch_state_root(agent_home, explicit_jobs=jobs)
-    legacy = Path(agent_home) / ".dispatch"
-    if canonical == legacy:
-        return (canonical,)
-    return (canonical, legacy)
+    env = os.environ if environ is None else environ
+    canonical = resolve_dispatch_state_root(agent_home, explicit_jobs=jobs, environ=env)
+    candidates = [canonical]
+    try:
+        stable = stable_state_root(env)
+    except DispatchContractError:
+        stable = None
+    if stable is not None and stable not in candidates:
+        candidates.append(stable)
+    legacy = Path(agent_home).expanduser().resolve(strict=False) / ".dispatch"
+    if legacy not in candidates:
+        candidates.append(legacy)
+    return tuple(candidates)
+
+
+def _mode_bits(path: Path) -> int:
+    return stat.S_IMODE(path.stat().st_mode)
+
+
+def _ensure_new_directory_mode(path: Path, mode: int) -> None:
+    """Force `mode` only when `path` doesn't exist yet. An existing symlink,
+    non-directory, or mode wider than `mode` is a typed refusal -- never a
+    chmod of something this process didn't just create (SD-112 §13.33.2-(7)).
+    """
+
+    if path.is_symlink():
+        raise DispatchContractError(
+            "dispatch-state-root-unwritable", f"{path}: refusing symlink"
+        )
+    if path.exists():
+        if not path.is_dir():
+            raise DispatchContractError(
+                "dispatch-state-root-unwritable", f"{path}: not a directory"
+            )
+        existing = _mode_bits(path)
+        if existing != mode:
+            raise DispatchContractError(
+                "dispatch-state-root-mode-violation",
+                f"{path}: mode={oct(existing)} expected={oct(mode)}",
+            )
+        return
+    path.mkdir(parents=True, exist_ok=False)
+    os.chmod(path, mode)  # mkdir's `mode=` is masked by umask; force exact bits.
+
+
+def _is_stable_dispatch_root(dispatch_root: Path) -> bool:
+    """Only the stable per-user dispatch root is mode-enforced by
+    `ensure_global_registry_writable` (SD-112 §13.33.2-(7)); every other
+    dispatch root keeps its historical, mode-agnostic creation path. Compared
+    lexically (`.absolute()`, not `.resolve()`): a symlinked stable root must
+    still compare equal so the symlink refusal in `_ensure_new_directory_mode`
+    actually fires instead of silently falling through as "not stable"."""
+
+    try:
+        stable = stable_state_root(os.environ)
+    except DispatchContractError:
+        return False
+    return Path(dispatch_root).expanduser().absolute() == stable
 
 
 def ensure_global_registry_writable(path: Path) -> None:
-    """Open the global registry and its lock before any child spawn."""
+    """Open the global registry and its lock before any child spawn.
+
+    Mode enforcement (`0700` on first creation, typed refusal -- never a
+    chmod -- if the root already exists with a different mode, is a symlink,
+    or is not a directory) applies only when `path.parent` *is* the stable
+    per-user dispatch root (SD-112 §13.33.2-(7)). Every other dispatch root --
+    Codex bundle, shared-release/checkout legacy, or any fixture-owned tree --
+    keeps today's plain `mkdir(parents=True, exist_ok=True)` with no mode
+    check: countless existing fixtures across this suite create or copy those
+    directories with an ordinary umask-derived mode (commonly `0o775`, e.g.
+    release-succession's `shutil.copytree`), and retrofitting strict mode
+    equality onto every one of those call sites is out of this slice's fence.
+    `jobs.log` itself stays append-only and mode-agnostic for the same reason.
+    `state_root()`'s own ancestry (e.g. `~/.local/state`,
+    `~/.local/state/hearting`) is never touched by this function.
+    """
 
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
+        dispatch_root = path.parent
+        dispatch_root.parent.mkdir(parents=True, exist_ok=True)
+        if _is_stable_dispatch_root(dispatch_root):
+            _ensure_new_directory_mode(dispatch_root, 0o700)
+        else:
+            dispatch_root.mkdir(parents=True, exist_ok=True)
         lock_path = Path(f"{path}.lock")
         with lock_path.open("a", encoding="utf-8") as lock:
             fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
@@ -3711,6 +3828,183 @@ def ensure_global_registry_writable(path: Path) -> None:
             fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
     except OSError as exc:
         raise DispatchContractError("global-registry-unwritable", f"{path}: {exc}") from exc
+
+
+def _ensure_new_file_mode(path: Path, mode: int) -> None:
+    """Force `mode` only when `path` doesn't exist yet, mirroring
+    `_ensure_new_directory_mode` for the migration journal and other stable
+    per-user files (SD-112 §13.33.2-(7)). Never chmods an existing file."""
+
+    if path.is_symlink():
+        raise DispatchContractError(
+            "dispatch-state-root-unwritable", f"{path}: refusing symlink"
+        )
+    if path.exists():
+        if not path.is_file():
+            raise DispatchContractError(
+                "dispatch-state-root-unwritable", f"{path}: not a regular file"
+            )
+        existing = _mode_bits(path)
+        if existing != mode:
+            raise DispatchContractError(
+                "dispatch-state-root-mode-violation",
+                f"{path}: mode={oct(existing)} expected={oct(mode)}",
+            )
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode)
+    os.close(fd)
+
+
+MIGRATION_ALIAS_RECORD_VERSION = 1
+MIGRATION_JOURNAL_FILENAME = "migration-journal.jsonl"
+
+
+def migration_journal_path(
+    environ: dict[str, str] | os._Environ[str] | None = None,
+) -> Path:
+    """The one canonical migration-alias journal location: fixed under the
+    stable per-user root, never derived from a legacy route path (decision 1
+    -- putting it under the legacy path it aliases *away from* would make
+    finding the journal depend on the alias it is supposed to resolve)."""
+
+    env = os.environ if environ is None else environ
+    return stable_state_root(env) / MIGRATION_JOURNAL_FILENAME
+
+
+def read_migration_journal(stable_root: Path) -> list[dict]:
+    """Best-effort parse of the append-only migration-alias journal. A
+    malformed line is skipped, not raised -- the journal is evidence consumed
+    by a fail-closed validator, not a strict schema gate on its own."""
+
+    path = Path(stable_root) / MIGRATION_JOURNAL_FILENAME
+    if not path.is_file():
+        return []
+    records: list[dict] = []
+    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            record = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(record, dict):
+            records.append(record)
+    return records
+
+
+def _alias_record_valid(record: dict) -> bool:
+    """Structural completeness of one `completed` migration-alias record.
+    Forged or partially-written records (missing digests/paths) never pass,
+    so `resolve_completed_alias` stays fail-closed by construction."""
+
+    if record.get("record_version") != MIGRATION_ALIAS_RECORD_VERSION:
+        return False
+    if record.get("status") != "completed":
+        return False
+    legacy = record.get("legacy_jobs_identity")
+    target = record.get("stable_jobs_identity")
+    if not isinstance(legacy, dict) or not isinstance(target, dict):
+        return False
+    for identity in (legacy, target):
+        if not identity.get("path") or not identity.get("content_digest"):
+            return False
+    if not record.get("source_digest") or not record.get("target_digest"):
+        return False
+    return True
+
+
+def resolve_completed_alias(stable_root: Path, legacy_jobs_path: str | Path) -> dict | None:
+    """The most recent structurally-valid `completed` alias record whose
+    `legacy_jobs_identity.path` matches `legacy_jobs_path`, or `None`. Route
+    hash / attempt link, when present on the record, are returned for the
+    caller to verify too (decision 1); this function only proves the record
+    is a well-formed completed alias, not that any particular route may use
+    it."""
+
+    target_path = str(Path(legacy_jobs_path).expanduser().resolve(strict=False))
+    match = None
+    for record in read_migration_journal(stable_root):
+        if not _alias_record_valid(record):
+            continue
+        if record["legacy_jobs_identity"]["path"] != target_path:
+            continue
+        match = record  # append-only journal; the latest completed record wins
+    return match
+
+
+class DanglingRegistryResolution(NamedTuple):
+    status: str  # "exact" | "aliased" | "compat-window" | "unresolved"
+    jobs_path: Path | None
+    alias_record: dict | None
+
+
+def resolve_dangling_registry(
+    sealed_jobs: str | Path,
+    *,
+    environ: dict[str, str] | os._Environ[str] | None = None,
+    window_open: bool = True,
+) -> DanglingRegistryResolution:
+    """Classify one absolute sealed `jobs.log` path against current
+    filesystem/journal state (SD-112 §13.33.2-(3)/(6), decision 4).
+    `capability-route.py`'s continuation resolver and (Slice 2) Fleet's row
+    mapping share this one judgement instead of deriving their own.
+
+    exact          sealed_jobs's parent directory still exists -- use it
+                    directly, no alias/window involved.
+    aliased        parent is gone, but the stable migration journal has a
+                    structurally-valid `completed` record mapping sealed_jobs
+                    to a live stable jobs.log. Checked before compat-window
+                    (decision 1): an unvalidated path substitution must never
+                    look like the normal path.
+    compat-window  parent is gone, no alias, and the legacy read window is
+                    still open. This cycle never closes the window, so
+                    `window_open` defaults `True`; a future cycle can pass
+                    the real judgement once `legacy_read_window_may_close()`
+                    is wired to an authoritative count.
+    unresolved     parent is gone, no alias, and the window is closed.
+    """
+
+    sealed = Path(sealed_jobs).expanduser().resolve(strict=False)
+    if sealed.parent.is_dir():
+        return DanglingRegistryResolution("exact", sealed, None)
+    env = os.environ if environ is None else environ
+    try:
+        stable_root = stable_state_root(env)
+    except DispatchContractError:
+        stable_root = None
+    if stable_root is not None:
+        record = resolve_completed_alias(stable_root, sealed)
+        if record is not None:
+            target = Path(record["stable_jobs_identity"]["path"])
+            if target.parent.is_dir():
+                return DanglingRegistryResolution("aliased", target, record)
+    if window_open:
+        return DanglingRegistryResolution("compat-window", None, None)
+    return DanglingRegistryResolution("unresolved", None, None)
+
+
+LEGACY_READ_WINDOW_MIN_SUPPORTED_RELEASES = 2
+
+
+def legacy_read_window_may_close(
+    *,
+    supported_releases_elapsed: int,
+    legacy_bound_open_writers: int,
+    delta: int,
+    legacy_read_hits: int,
+) -> bool:
+    """Pure four-condition truth table (SD-112 §13.33.2-(6), B-13a). Never
+    touches the filesystem and never calls `_succeed_dispatch_state()`; actual
+    post-promotion delta reachability is Slice 3's B-13b, not this slice's."""
+
+    return (
+        supported_releases_elapsed >= LEGACY_READ_WINDOW_MIN_SUPPORTED_RELEASES
+        and legacy_bound_open_writers == 0
+        and delta == 0
+        and legacy_read_hits == 0
+    )
 
 
 def ensure_launch_broker(

@@ -612,8 +612,10 @@ capability uses them directly.
 early-limit-death detection homomorphically: `--early-exit-watch <secs>` watches a
 just-launched `codex exec` child; if it exits within the window and its log tail matches a
 limit/auth `DEATH_PATTERN`, the wrapper closes its own `jobs.log` row to
-`done,note=dead-<reason>[,reset=<x>]`, writes `.dispatch/usage-reset.codex` (SD-16
-usage-check cache), and surfaces `early_death=`/`row_closed=` on stdout. No retry — detection,
+`done,note=dead-<reason>[,reset=<x>]`, writes `usage-reset.codex` under the
+canonical dispatch state root (the registry's parent directory, SD-112
+§13.33.2 — never a release-relative path; SD-16 usage-check cache), and
+surfaces `early_death=`/`row_closed=` on stdout. No retry — detection,
 closure, and surfacing only; re-dispatch/harness failover is the orchestrator's semantic
 zone (⑧). `adapters/codex/bin/dispatch-liveness.py` adds a `LIMIT_RE` log-tail scan (axis 6,
 SD-15b) that judges an open row DEAD when its dispatch log shows a limit/auth pattern,

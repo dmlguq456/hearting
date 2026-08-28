@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """SD-56 fixtures: completion marker canonical write + start-time gate."""
+import contextlib
 import copy
 import importlib.util
 import json
@@ -45,9 +46,43 @@ class CompletionMarkerTest(unittest.TestCase):
         (self.agent_home / "core" / "CORE.md").write_text("fixture\n", encoding="utf-8")
         self.jobs = self.base / "jobs.log"
         self.logs = self.base / "logs"
+        # SD-112 §13.33.2-(8): the env-less dispatch state root is the stable
+        # per-user root, no longer AGENT_HOME/.dispatch. Give the fixture its
+        # own HOME so that root is fixture-owned (see `base_env`), and expect
+        # markers there.
+        self.stable_home = self.base / "stable-home"
+        self.stable_home.mkdir()
+        self.stable_dispatch = (
+            self.stable_home / ".local" / "state" / "hearting" / "dispatch"
+        )
 
     def tearDown(self):
         self.temp.cleanup()
+
+    @contextlib.contextmanager
+    def stable_root_env(self):
+        """Pin in-process stable-root resolution to this fixture's own HOME.
+
+        Subprocess flows get this through `base_env`. The `classify` fixtures
+        below call `dispatch-registry.py` in-process, where
+        `dispatch_state_roots()` reads the ambient `os.environ` instead and
+        would hunt for markers under the invoking developer's real state root.
+        """
+        prior = {
+            key: os.environ.get(key)
+            for key in ("HOME", "XDG_STATE_HOME", "HARNESS_STATE_ROOT")
+        }
+        os.environ.pop("XDG_STATE_HOME", None)
+        os.environ.pop("HARNESS_STATE_ROOT", None)
+        os.environ["HOME"] = str(self.stable_home)
+        try:
+            yield
+        finally:
+            for key, value in prior.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
 
     def compile_route(self):
         rows = [
@@ -127,15 +162,21 @@ class CompletionMarkerTest(unittest.TestCase):
         # completion_dir() resolves the dispatch state root ahead of
         # AGENT_HOME/.dispatch (I-2 unification), preferring an inherited
         # AGENT_DISPATCH_JOBS -- clear it so the invoking shell's real
-        # registry never leaks into this fixture's agent-home-relative marker
+        # registry never leaks into this fixture's stable-root-relative marker
         # expectations.
         env = {
             **os.environ,
             "AGENT_HOME": str(self.agent_home),
             "AGENT_ARTIFACT_ROOT": str(self.artifact),
             "OPENCODE_CONFIG_CONTENT": "{}",
+            # `stable_state_root` reads HARNESS_STATE_ROOT -> XDG_STATE_HOME
+            # -> HOME; inheriting any of the three would send this fixture's
+            # env-less markers into the invoking developer's real state root.
+            "HOME": str(self.stable_home),
         }
         env.pop("AGENT_DISPATCH_JOBS", None)
+        env.pop("XDG_STATE_HOME", None)
+        env.pop("HARNESS_STATE_ROOT", None)
         # A depth-1 owner session that launched this test process exports
         # AGENT_OWNER_ROUTE_FILE/ID/HASH; inherited verbatim, the wrapper
         # child reads it as a real owner binding and verify_route() fails
@@ -210,7 +251,7 @@ class CompletionMarkerTest(unittest.TestCase):
         evidence.write_text("plan body\n", encoding="utf-8")
         result = self.complete(route_path, "plan", evidence)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        canonical = self.agent_home / ".dispatch" / "completion" / route["route_id"] / "plan.json"
+        canonical = self.stable_dispatch / "completion" / route["route_id"] / "plan.json"
         self.assertTrue(canonical.is_file())
         marker = json.loads(canonical.read_text(encoding="utf-8"))
         self.assertEqual(marker["route_id"], route["route_id"])
@@ -320,7 +361,7 @@ class CompletionMarkerTest(unittest.TestCase):
         evidence.write_text("plan body\n", encoding="utf-8")
         completed = self.complete(route_path, "plan", evidence)
         self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
-        directory = self.agent_home / ".dispatch" / "completion" / route["route_id"]
+        directory = self.stable_dispatch / "completion" / route["route_id"]
         canonical = directory / "plan.json"
         marker = json.loads(canonical.read_text(encoding="utf-8"))
         marker.pop("schema_version")
@@ -340,7 +381,7 @@ class CompletionMarkerTest(unittest.TestCase):
         evidence.write_text("v1\n", encoding="utf-8")
         first = self.complete(route_path, "plan", evidence)
         self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
-        directory = self.agent_home / ".dispatch" / "completion" / route["route_id"]
+        directory = self.stable_dispatch / "completion" / route["route_id"]
         history_1 = directory / "plan.1.json"
         canonical = directory / "plan.json"
         self.assertTrue(history_1.is_file())
@@ -382,7 +423,7 @@ class CompletionMarkerTest(unittest.TestCase):
         evidence.write_text("first\n", encoding="utf-8")
         first = self.complete(route_path, "plan", evidence)
         self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
-        directory = self.agent_home / ".dispatch" / "completion" / route["route_id"]
+        directory = self.stable_dispatch / "completion" / route["route_id"]
         canonical = directory / "plan.json"
         before = canonical.read_bytes()
 
@@ -416,7 +457,7 @@ class CompletionMarkerTest(unittest.TestCase):
             },
         )
         self.assertEqual(inline.returncode, 0, inline.stdout + inline.stderr)
-        directory = self.agent_home / ".dispatch" / "completion" / route["route_id"]
+        directory = self.stable_dispatch / "completion" / route["route_id"]
         first = json.loads((directory / "plan.1.json").read_text())
         second = json.loads((directory / "plan.2.json").read_text())
         latest = json.loads((directory / "plan.json").read_text())
@@ -449,7 +490,7 @@ class CompletionMarkerTest(unittest.TestCase):
             jobs=self.jobs, attempt_id="att-registered-second",
         )
         self.assertEqual(registered.returncode, 0, registered.stdout + registered.stderr)
-        directory = self.agent_home / ".dispatch" / "completion" / route["route_id"]
+        directory = self.stable_dispatch / "completion" / route["route_id"]
         first = json.loads((directory / "execute.1.json").read_text())
         second = json.loads((directory / "execute.2.json").read_text())
         self.assertEqual(first["execution_surface"], "inline")
@@ -485,7 +526,7 @@ class CompletionMarkerTest(unittest.TestCase):
             },
         )
         self.assertEqual(claude.returncode, 0, claude.stdout + claude.stderr)
-        directory = self.agent_home / ".dispatch" / "completion" / route["route_id"]
+        directory = self.stable_dispatch / "completion" / route["route_id"]
         first = json.loads((directory / "test.1.json").read_text())
         second = json.loads((directory / "test.2.json").read_text())
         self.assertEqual(first["execution_surface"], "codex-native-subagent")
@@ -563,7 +604,7 @@ class CompletionMarkerTest(unittest.TestCase):
         )
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("attempt-row-terminal-without-completion", result.stderr)
-        directory = self.agent_home / ".dispatch" / "completion" / route["route_id"]
+        directory = self.stable_dispatch / "completion" / route["route_id"]
         self.assertFalse((directory / "plan.json").exists())
         self.assertFalse((directory / "plan.1.json").exists())
 
@@ -591,7 +632,7 @@ class CompletionMarkerTest(unittest.TestCase):
             ))
         results = [process.communicate(timeout=20) + (process.returncode,) for process in processes]
         self.assertTrue(all(code == 0 for _, _, code in results), results)
-        directory = self.agent_home / ".dispatch" / "completion" / route["route_id"]
+        directory = self.stable_dispatch / "completion" / route["route_id"]
         first = json.loads((directory / "plan.1.json").read_text())
         second = json.loads((directory / "plan.2.json").read_text())
         canonical = json.loads((directory / "plan.json").read_text())
@@ -612,7 +653,7 @@ class CompletionMarkerTest(unittest.TestCase):
         )
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("attempt-row-absent", result.stdout + result.stderr)
-        canonical = self.agent_home / ".dispatch" / "completion" / route["route_id"] / "plan.json"
+        canonical = self.stable_dispatch / "completion" / route["route_id"] / "plan.json"
         self.assertTrue(canonical.is_file(), "marker must be preserved even when the row close fails")
 
     def test_complete_unwritable_jobs_marker_preserved_then_reconcile_repairs(self):
@@ -630,7 +671,7 @@ class CompletionMarkerTest(unittest.TestCase):
             )
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("row-close-failed", result.stdout + result.stderr)
-            canonical = self.agent_home / ".dispatch" / "completion" / route["route_id"] / "plan.json"
+            canonical = self.stable_dispatch / "completion" / route["route_id"] / "plan.json"
             self.assertTrue(canonical.is_file())
         finally:
             unwritable_dir.chmod(0o700)
@@ -659,14 +700,16 @@ class CompletionMarkerTest(unittest.TestCase):
             key = (row["meta"].get("route_id"), row["meta"].get("route_node"))
             if all(key): newest[key] = row["order"]
         current_row = next(r for r in rows if r["meta"].get("attempt_id") == "att-unwritable")
-        category, reason, note = registry.classify(current_row, args, newest, rows)
+        with self.stable_root_env():
+            category, reason, note = registry.classify(current_row, args, newest, rows)
         self.assertEqual(note, "completed-marker")
         self.assertEqual(category, "marker-backed-stale")
         # The unrelated dead attempt has no marker linkage, so it still
         # falls through to the pre-existing generic dead-exact-pid path
         # rather than being folded into the SD-70 completed-marker repair.
         unrelated_row = next(r for r in rows if r["meta"].get("attempt_id") == "att-unrelated")
-        _, _, unrelated_note = registry.classify(unrelated_row, args, newest, rows)
+        with self.stable_root_env():
+            _, _, unrelated_note = registry.classify(unrelated_row, args, newest, rows)
         self.assertEqual(unrelated_note, "dead-exact-pid")
         self.assertNotEqual(unrelated_note, "completed-marker")
 
@@ -701,7 +744,7 @@ class CompletionMarkerTest(unittest.TestCase):
         self.assertNotEqual(replay.returncode, 0)
         self.assertIn("attempt-row-absent", replay.stdout + replay.stderr)
 
-        directory = self.agent_home / ".dispatch" / "completion" / route["route_id"]
+        directory = self.stable_dispatch / "completion" / route["route_id"]
         prior_link = json.loads((directory / "plan.att-prior-link.attempt.json").read_text())
         latest_link = json.loads((directory / "plan.attempt.json").read_text())
         self.assertEqual(prior_link["attempt_id"], "att-prior-link")
@@ -725,7 +768,8 @@ class CompletionMarkerTest(unittest.TestCase):
         for row in rows:
             key = (row["meta"].get("route_id"), row["meta"].get("route_node"))
             if all(key): newest[key] = row["order"]
-        category, _, note = registry.classify(prior_row, args, newest, rows)
+        with self.stable_root_env():
+            category, _, note = registry.classify(prior_row, args, newest, rows)
         self.assertEqual(category, "marker-backed-stale")
         self.assertEqual(note, "completed-marker")
 
@@ -750,7 +794,7 @@ class CompletionMarkerTest(unittest.TestCase):
         result = self.complete(route_path, "plan", evidence, jobs=self.jobs,
                                attempt_id="att-supervised")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        directory = self.agent_home / ".dispatch" / "completion" / route["route_id"]
+        directory = self.stable_dispatch / "completion" / route["route_id"]
         canonical = directory / "plan.json"
         self.assertTrue(canonical.is_file())
         status, meta = self.read_row("att-supervised")
@@ -776,7 +820,7 @@ class CompletionMarkerTest(unittest.TestCase):
                                attempt_id="att-supervised-blocked")
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("attempt-row-terminal-without-completion", result.stderr)
-        directory = self.agent_home / ".dispatch" / "completion" / route["route_id"]
+        directory = self.stable_dispatch / "completion" / route["route_id"]
         self.assertFalse((directory / "plan.json").exists())
         status, meta = self.read_row("att-supervised-blocked")
         self.assertEqual(status, "done")
@@ -798,7 +842,7 @@ class CompletionMarkerTest(unittest.TestCase):
                 if "att-supervised-dup" in line]
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0].count("completion_marker="), 1)
-        directory = self.agent_home / ".dispatch" / "completion" / route["route_id"]
+        directory = self.stable_dispatch / "completion" / route["route_id"]
         self.assertTrue((directory / "plan.1.json").is_file())
         self.assertFalse((directory / "plan.2.json").exists())   # no second history write
 
@@ -896,7 +940,7 @@ class CompletionMarkerTest(unittest.TestCase):
             self.assertEqual(status, "done")
             self.assertEqual(meta.get("note"), "completed-marker")
             self.assertNotEqual(meta.get("note"), "dead-missing-result")
-            directory = self.agent_home / ".dispatch" / "completion" / route["route_id"]
+            directory = self.stable_dispatch / "completion" / route["route_id"]
             self.assertTrue((directory / "plan.json").is_file())
         finally:
             parent.kill()

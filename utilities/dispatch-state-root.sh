@@ -1,9 +1,13 @@
 #!/usr/bin/env sh
 # Print the canonical dispatch state root: the parent directory of the
-# resolved canonical dispatch registry. No new env var -- the only override
-# surface remains AGENT_DISPATCH_JOBS, matching
+# resolved canonical dispatch registry. Two override surfaces (SD-112
+# §13.33.2-(8)): AGENT_DISPATCH_JOBS (registry-specifying, unchanged) and the
+# installer-owned HARNESS_STATE_ROOT (install state root -- consumed inside
+# stable_state_root(), never read directly here). This matches
 # utilities/dispatch_contract.py's resolve_dispatch_state_root() chain
-# (explicit jobs path arg -> inherited AGENT_DISPATCH_JOBS -> AGENT_HOME/.dispatch).
+# (explicit jobs path arg -> inherited AGENT_DISPATCH_JOBS -> checked
+# fallback, which defaults to the stable per-user root for a shared release
+# or maintainer checkout, and to activation-owned state for a Codex bundle).
 #
 # Usage: dispatch-state-root.sh [jobs-path]
 #   When needed, AGENT_HOME is resolved through agent-home.sh before the shared
