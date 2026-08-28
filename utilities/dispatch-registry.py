@@ -54,6 +54,10 @@ from codex_dispatch_terminal import (  # noqa: E402
     inspect_terminal_attempt,
     inspect_terminal_log,
 )
+from dispatch_completion_join import (  # noqa: E402
+    materialize_after_terminal_close,
+    reconcile_pending_delivery,
+)
 from dispatch_summary import ensure_attempt_owner  # noqa: E402
 _cleanup_spec = importlib.util.spec_from_file_location("worktree_cleanup", ROOT / "utilities/worktree-cleanup.py")
 cleanup = importlib.util.module_from_spec(_cleanup_spec)
@@ -765,6 +769,8 @@ def repair_stale_row(rows, args):
             "failure_class": "pass",
         },
     )
+    if closed:
+        materialize_after_terminal_close(args.jobs, args.attempt)
     fresh_rows = read_rows(args.jobs)
     fresh = next(
         (item for item in fresh_rows if item["meta"].get("attempt_id") == args.attempt),
@@ -818,6 +824,8 @@ def reconcile(rows, args):
                           "reconcile_reason": reason},
             )
             revalidated = bool(closed)
+            if closed:
+                materialize_after_terminal_close(args.jobs, row["meta"]["attempt_id"])
             if not closed and fresh_decision:
                 reason = f"revalidation-veto:{fresh_decision.get('category')}:{fresh_decision.get('reason')}"
             if closed and note == "dead-parent-orphaned":
@@ -836,6 +844,12 @@ def reconcile(rows, args):
               "apply": args.apply, "classifier_source": ATTEMPT_CLASSIFIER_SOURCE,
               "attempted": len(selected), "closed": sum(item["closed"] for item in decisions),
               "decisions": decisions[:256]}
+    if args.apply:
+        # SD-111 P2 §2-b-2/§2-c: this `reconcile` call is the existing
+        # bounded-cadence "dispatch reconcile path" -- the materialize
+        # backstop and the single declared expiry actor share its cadence
+        # rather than introducing a new driver process.
+        record["pending_delivery"] = reconcile_pending_delivery(args.jobs)
     if args.audit:
         cleanup.append_audit(args.audit, record)
     print(json.dumps(record, sort_keys=True)); return 0
@@ -1145,6 +1159,8 @@ def cancel_receiptless_namespace(rows, args):
             },
         )
         revalidated = bool(closed)
+        if closed:
+            materialize_after_terminal_close(args.jobs, attempt_id)
         if not closed:
             reason = "revalidation-veto"
     decision = {
@@ -1231,6 +1247,8 @@ def _automatic_receiptless_result(rows, args):
                 },
             )
             revalidated = bool(closed)
+            if closed:
+                materialize_after_terminal_close(args.jobs, attempt_id)
             if not closed:
                 reason = "cancellation-quiescence-unproven"
     decision = {
@@ -1651,6 +1669,7 @@ def _close_cascade_child(
             teardown_claim=teardown_claim,
         )
         if closed:
+            materialize_after_terminal_close(args.jobs, child_attempt)
             return True, selected_note
         if decision.get("reason", "").startswith("terminal:"):
             continue
@@ -1975,6 +1994,7 @@ def emit_orphan_status(rows, args):
                 },
             )
             if closed:
+                materialize_after_terminal_close(args.jobs, row["meta"]["attempt_id"])
                 cascade = cascade_orphan_children(row, route_id, args)
         print("check=ok\norphan=1")
         print(f"route_id={route_id}")

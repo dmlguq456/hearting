@@ -17,7 +17,10 @@ from dispatch_contract import (DispatchContractError, close_attempt_row,
                                resolve_agent_home as _resolve_agent_home,
                                resolve_dispatch_state_root,
                                validate_attempt_metadata)  # noqa: E402
-from dispatch_completion_join import route_completion_evidence  # noqa: E402
+from dispatch_completion_join import (  # noqa: E402
+    materialize_after_terminal_close,
+    route_completion_evidence,
+)
 _route_spec = importlib.util.spec_from_file_location(
     "capability_route", ROOT / "utilities" / "capability-route.py"
 )
@@ -215,7 +218,9 @@ def main(argv: list[str]) -> int:
                         _complete_routed_attempt_from_terminal_evidence(
                             jobs, metadata, target[3]
                         )
-                elif not close_attempt_row(jobs, attempt_id, "harvest-complete"):
+                elif close_attempt_row(jobs, attempt_id, "harvest-complete"):
+                    materialize_after_terminal_close(jobs, attempt_id)
+                else:
                     raise ValueError("attempt-row-not-open")
             except (KeyError, OSError, TypeError, ValueError) as exc:
                 print(f"check=failed\nreason={exc}")

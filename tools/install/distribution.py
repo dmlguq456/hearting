@@ -17,6 +17,7 @@ import os
 import plistlib
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tarfile
@@ -1183,6 +1184,15 @@ def _succeed_registry_rows(stale_jobs: Path, live_jobs: Path) -> bool:
                 # vouch for completeness.
                 _reject("merge-invariant-violated")
                 return False
+            if merged == live_text.splitlines():
+                # No-op merge: skip the write entirely rather than
+                # `os.replace`-ing an identical file. A repeat carry-forward
+                # call (e.g. a second rotation's succession pass over
+                # already-fully-merged state) must never mint a new inode or
+                # ctime for unchanged content -- SD-112 B-1 depends on the
+                # stable registry's device/inode/ctime staying put across
+                # rotations that have nothing new to carry.
+                return True
             try:
                 _atomic_registry_write(live_jobs, merged)
             except OSError:
@@ -1192,6 +1202,498 @@ def _succeed_registry_rows(stale_jobs: Path, live_jobs: Path) -> bool:
         _reject("lock-unavailable")
         return False
     return True
+
+
+def _mode_bits(path: Path) -> int:
+    return stat.S_IMODE(path.stat().st_mode)
+
+
+def _env_absolute(value: str, field: str) -> Path:
+    path = Path(value).expanduser()
+    if not path.is_absolute():
+        raise DistributionError(f"{field} must be an absolute path: {path}")
+    return path
+
+
+def stable_state_root(environ: dict[str, str]) -> Path:
+    """Standalone stdlib-only mirror of `utilities/dispatch_contract.py`'s
+    `stable_state_root()` (SD-112 decision 6). The installer cannot import
+    `utilities/` -- it is embedded in the install.sh asset before a harness
+    root exists -- so this copy is bound to that runtime helper by a parity
+    fixture instead of a shared import: both must resolve
+    `HARNESS_STATE_ROOT` / `XDG_STATE_HOME` / `HOME` from the *passed*
+    mapping only (never `os.environ` directly) to the same absolute path,
+    `.../dispatch`, for the same env matrix.
+    """
+
+    harness_state_root = environ.get("HARNESS_STATE_ROOT")
+    if harness_state_root:
+        base = _env_absolute(harness_state_root, "HARNESS_STATE_ROOT")
+    else:
+        xdg_state_home = environ.get("XDG_STATE_HOME")
+        if xdg_state_home:
+            base = _env_absolute(xdg_state_home, "XDG_STATE_HOME") / "hearting"
+        else:
+            home = environ.get("HOME")
+            if not home:
+                raise DistributionError(
+                    "dispatch-state-root-unresolved: none of HARNESS_STATE_ROOT, "
+                    "XDG_STATE_HOME, HOME are set"
+                )
+            base = _env_absolute(home, "HOME") / ".local" / "state" / "hearting"
+    return base / "dispatch"
+
+
+def _ensure_new_directory_mode(path: Path, mode: int) -> None:
+    """Force `mode` only when `path` doesn't exist yet -- an existing
+    symlink, non-directory, or a different mode is a typed refusal, never a
+    chmod of something this process didn't just create (SD-112 §13.33.2-(7),
+    mirrors `dispatch_contract._ensure_new_directory_mode`)."""
+
+    if path.is_symlink():
+        raise DistributionError(f"dispatch-state-root-unwritable: {path}: refusing symlink")
+    if path.exists():
+        if not path.is_dir():
+            raise DistributionError(f"dispatch-state-root-unwritable: {path}: not a directory")
+        existing = _mode_bits(path)
+        if existing != mode:
+            raise DistributionError(
+                f"dispatch-state-root-mode-violation: {path}: "
+                f"mode={oct(existing)} expected={oct(mode)}"
+            )
+        return
+    path.mkdir(parents=True, exist_ok=False)
+    os.chmod(path, mode)
+
+
+def _ensure_new_file_mode(path: Path, mode: int) -> None:
+    """`_ensure_new_directory_mode` for a stable-root file (the migration
+    journal): force `mode` only on first creation, never chmod an existing
+    file."""
+
+    if path.is_symlink():
+        raise DistributionError(f"dispatch-state-root-unwritable: {path}: refusing symlink")
+    if path.exists():
+        if not path.is_file():
+            raise DistributionError(f"dispatch-state-root-unwritable: {path}: not a regular file")
+        existing = _mode_bits(path)
+        if existing != mode:
+            raise DistributionError(
+                f"dispatch-state-root-mode-violation: {path}: "
+                f"mode={oct(existing)} expected={oct(mode)}"
+            )
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode)
+    os.close(fd)
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _alias_digest(hex_digest: str) -> str:
+    """Journal digests use the repository-wide `sha256:<64 hex>` spelling.
+
+    `_sha256_file`/`_scoped_tree_digest` return bare hex because the copy
+    verifier only ever compares them to each other. The migration journal is
+    read by `dispatch_contract._alias_record_valid`, which fails closed on any
+    digest that is not well formed, so every value that reaches a record has
+    to carry the prefix -- the same spelling `route_hash` and the launch
+    compatibility tuple already use.
+    """
+
+    return "sha256:" + hex_digest
+
+
+def _migration_relative_files(root: Path) -> list[str]:
+    """Every regular file under `root`, relative-posix, excluding the
+    registry (merged separately with terminal precedence, not byte-compared)."""
+
+    if not root.is_dir():
+        return []
+    out = []
+    for path in root.rglob("*"):
+        if path.is_file() and not path.is_symlink():
+            relative = path.relative_to(root).as_posix()
+            if relative in _REGISTRY_CARRY_NAMES:
+                continue
+            out.append(relative)
+    return sorted(out)
+
+
+def _scoped_tree_digest(root: Path, relatives: list[str]) -> str:
+    digest = hashlib.sha256()
+    for relative in relatives:
+        path = root / relative
+        file_digest = _sha256_file(path) if path.is_file() else ""
+        digest.update(relative.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(file_digest.encode("utf-8"))
+        digest.update(b"\n")
+    return digest.hexdigest()
+
+
+def _tree_total_bytes(root: Path) -> int:
+    if not root.is_dir():
+        return 0
+    total = 0
+    for path in root.rglob("*"):
+        if path.is_file() and not path.is_symlink():
+            try:
+                total += path.stat().st_size
+            except OSError:
+                pass
+    return total
+
+
+def _count_open_rows(jobs_path: Path) -> int:
+    if not jobs_path.is_file():
+        return 0
+    try:
+        text = jobs_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return 0
+    count = 0
+    for line in text.splitlines():
+        if not line.strip():
+            continue
+        fields = line.split("\t")
+        if len(fields) >= 2 and fields[1] == "open":
+            count += 1
+    return count
+
+
+MIGRATION_ALIAS_RECORD_VERSION = 1
+MIGRATION_JOURNAL_FILENAME = "migration-journal.jsonl"
+
+
+def _migration_journal_path(stable_root: Path) -> Path:
+    return stable_root / MIGRATION_JOURNAL_FILENAME
+
+
+def _append_migration_journal(stable_root: Path, record: dict) -> None:
+    path = _migration_journal_path(stable_root)
+    try:
+        _ensure_new_file_mode(path, 0o600)
+        with open(path, "a", encoding="utf-8") as handle:
+            handle.write(json.dumps(record, sort_keys=True, ensure_ascii=False) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+    except OSError as exc:
+        raise DistributionError(
+            f"dispatch-state-root-unwritable: journal write failed: {path}: {exc}"
+        ) from exc
+
+
+def _read_migration_journal(stable_root: Path) -> list[dict]:
+    path = _migration_journal_path(stable_root)
+    if not path.is_file():
+        return []
+    records: list[dict] = []
+    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            record = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(record, dict):
+            records.append(record)
+    return records
+
+
+def _latest_completed_alias(stable_root: Path, legacy_jobs_path: Path) -> Optional[dict]:
+    target_path = str(Path(legacy_jobs_path).expanduser().resolve(strict=False))
+    match = None
+    for record in _read_migration_journal(stable_root):
+        if record.get("record_version") != MIGRATION_ALIAS_RECORD_VERSION:
+            continue
+        if record.get("status") != "completed":
+            continue
+        legacy = record.get("legacy_jobs_identity")
+        if not isinstance(legacy, dict) or legacy.get("path") != target_path:
+            continue
+        match = record  # append-only journal; the latest completed record wins
+    return match
+
+
+def _dispatch_migration_promoted(environ: dict[str, str]) -> bool:
+    """M4 promotion switch (decision 3): true once *any* structurally-valid
+    `completed` migration-alias record exists in the stable journal. This is
+    the one and only signal `_succeed_dispatch_state()` uses to retarget."""
+
+    try:
+        stable_root = stable_state_root(environ)
+    except DistributionError:
+        return False
+    for record in _read_migration_journal(stable_root):
+        if (
+            record.get("record_version") == MIGRATION_ALIAS_RECORD_VERSION
+            and record.get("status") == "completed"
+        ):
+            return True
+    return False
+
+
+def _migration_m0_preflight(source_dispatch: Path, stable_root: Path) -> dict:
+    """M0 preflight (SD-112 §13.33.2-(4)): create/verify the stable root is
+    writable, measure cross-device-ness and legacy inventory (open row
+    count, total bytes -- SD-OPEN-14 observability). Failure is a typed
+    refusal that blocks the entire `harness update`, never just pruning."""
+
+    try:
+        stable_root.parent.mkdir(parents=True, exist_ok=True)
+        _ensure_new_directory_mode(stable_root, 0o700)
+        probe = stable_root / f".m0-write-probe-{uuid.uuid4().hex}"
+        probe.write_bytes(b"")
+        probe.unlink()
+    except OSError as exc:
+        raise DistributionError(f"dispatch-state-root-unwritable: {stable_root}: {exc}") from exc
+
+    cross_device = True
+    if source_dispatch.is_dir():
+        try:
+            cross_device = os.stat(source_dispatch).st_dev != os.stat(stable_root).st_dev
+        except OSError:
+            cross_device = True
+    return {
+        "cross_device": cross_device,
+        "open_rows": _count_open_rows(source_dispatch / "jobs.log"),
+        "total_bytes": _tree_total_bytes(source_dispatch),
+    }
+
+
+def _atomic_migrate_copy(source: Path, destination: Path) -> bool:
+    """M2 per-file atomic copy for the new migration path only (decision 8):
+    copy to a same-directory `.tmp`, verify the digest, fsync the file,
+    `os.replace`, fsync the parent directory. Cross-device safe -- this never
+    relies on `os.rename` across filesystems, always a real copy. Returns
+    False (leaving no partial destination) on any verification failure."""
+
+    try:
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        source_digest = _sha256_file(source)
+    except OSError:
+        return False
+    fd, tmp_name = tempfile.mkstemp(
+        prefix=f".{destination.name}.migrate-", dir=str(destination.parent)
+    )
+    ok = False
+    try:
+        with os.fdopen(fd, "wb") as tmp_handle, open(source, "rb") as src:
+            shutil.copyfileobj(src, tmp_handle)
+            tmp_handle.flush()
+            os.fsync(tmp_handle.fileno())
+        if _sha256_file(Path(tmp_name)) != source_digest:
+            return False
+        os.replace(tmp_name, destination)
+        ok = True
+    except OSError:
+        return False
+    finally:
+        if not ok and os.path.exists(tmp_name):
+            try:
+                os.unlink(tmp_name)
+            except OSError:
+                pass
+    dir_fd = os.open(str(destination.parent), os.O_RDONLY)
+    try:
+        os.fsync(dir_fd)
+    finally:
+        os.close(dir_fd)
+    return True
+
+
+def _migrate_tree_additive(source_root: Path, target_root: Path) -> bool:
+    """M2 additive copy + the copy-side half of M3 verification, mirroring
+    `_succeed_dispatch_state`'s additive discipline (destination existing
+    wins, nothing already there is ever clobbered) but per-file atomic
+    (`_atomic_migrate_copy`) instead of `shutil.copy2` -- this is the new
+    migration copy path only; `_succeed_dispatch_state`'s own `copy2`
+    semantics are unchanged (decision 8)."""
+
+    ok = True
+    touched_dirs: set[Path] = set()
+    for source in source_root.rglob("*"):
+        if not source.is_file() or source.is_symlink():
+            continue
+        relative = source.relative_to(source_root)
+        if relative.as_posix() in _REGISTRY_CARRY_NAMES:
+            continue
+        if relative.as_posix() == MIGRATION_JOURNAL_FILENAME:
+            continue
+        destination = target_root / relative
+        if destination.exists():
+            continue
+        if not _atomic_migrate_copy(source, destination):
+            ok = False
+            continue
+        touched_dirs.add(destination.parent)
+    if not _succeed_registry_rows(source_root / "jobs.log", target_root / "jobs.log"):
+        ok = False
+    for source in source_root.rglob("*.attempt.json"):
+        if not source.is_file():
+            continue
+        destination = target_root / source.relative_to(source_root)
+        if destination.exists():
+            touched_dirs.add(destination.parent)
+    for directory in touched_dirs:
+        if not _reanchor_succeeded_attempt_links(directory, source_root, target_root):
+            ok = False
+    return ok
+
+
+def _migration_verify(source_root: Path, target_root: Path) -> bool:
+    """M3: every source file (outside the registry-carry set) exists at its
+    destination -- a retry-safe re-check independent of what the copy pass's
+    own return value claimed (mirrors `_succeed_dispatch_state`'s review V-1
+    guard: a no-op retry pass must not read as success unless the files are
+    actually all there)."""
+
+    for source in source_root.rglob("*"):
+        if not source.is_file() or source.is_symlink():
+            continue
+        relative = source.relative_to(source_root)
+        if relative.as_posix() in _REGISTRY_CARRY_NAMES:
+            continue
+        if relative.as_posix() == MIGRATION_JOURNAL_FILENAME:
+            continue
+        if not (target_root / relative).is_file():
+            return False
+    return True
+
+
+def run_dispatch_state_migration(
+    source_dispatch: Path, *, environ: dict[str, str] | None = None
+) -> dict:
+    """M0-M6 (SD-112 §13.33.2-(4)): migrate one release-embedded `.dispatch`
+    tree into the stable canonical dispatch state root, verify it, and (M4)
+    append a `completed` migration-alias record once verified -- the one
+    switch `_succeed_dispatch_state()` and `_migration_deletion_precondition`
+    use to retarget. Idempotent per source jobs.log identity+content: a
+    second call against the same, unchanged source is a no-op
+    (`already-completed`, zero copies). M1-M3/M5 failures never raise --
+    they abort just this migration attempt (status `aborted`); only M0
+    (stable root unwritable) raises and blocks the caller's whole update."""
+
+    env = os.environ if environ is None else environ
+    stable_root = stable_state_root(env)
+    m0 = _migration_m0_preflight(source_dispatch, stable_root)
+
+    if not source_dispatch.is_dir() or not any(source_dispatch.iterdir()):
+        return {"status": "no-op", "migration_id": None, **m0}
+
+    source_jobs = source_dispatch / "jobs.log"
+    legacy_path_identity = str(source_jobs.expanduser().resolve(strict=False))
+    relatives = _migration_relative_files(source_dispatch)
+    source_digest = _alias_digest(_scoped_tree_digest(source_dispatch, relatives))
+    # A legacy tree with no jobs.log has no registry to alias. The tree still
+    # migrates and still promotes, but the resulting record carries an empty
+    # digest and is therefore not a claimable alias -- continuation falls
+    # through to the compat window, which is the correct answer here.
+    source_jobs_digest = (
+        _alias_digest(_sha256_file(source_jobs)) if source_jobs.is_file() else ""
+    )
+
+    existing = _latest_completed_alias(stable_root, source_jobs)
+    if (
+        existing is not None
+        and existing.get("legacy_jobs_identity", {}).get("content_digest") == source_jobs_digest
+        and existing.get("source_digest") == source_digest
+    ):
+        return {"status": "already-completed", "migration_id": existing.get("migration_id"), **m0}
+
+    migration_id = hashlib.sha256(
+        f"{legacy_path_identity}:{source_digest}:{source_jobs_digest}".encode("utf-8")
+    ).hexdigest()[:32]
+
+    legacy_identity = {"path": legacy_path_identity, "content_digest": source_jobs_digest}
+    _append_migration_journal(
+        stable_root,
+        {
+            "record_version": MIGRATION_ALIAS_RECORD_VERSION,
+            "migration_id": migration_id,
+            "status": "open",
+            "legacy_jobs_identity": legacy_identity,
+            "target_root": str(stable_root),
+            "started_at": _utc_now(),
+            "source_inventory_digest": source_digest,
+        },
+    )  # M1
+
+    copy_ok = _migrate_tree_additive(source_dispatch, stable_root)  # M2
+    verify_ok = copy_ok and _migration_verify(source_dispatch, stable_root)  # M3
+
+    if not verify_ok:
+        _append_migration_journal(
+            stable_root,
+            {
+                "record_version": MIGRATION_ALIAS_RECORD_VERSION,
+                "migration_id": migration_id,
+                "status": "aborted",
+                "reason": "copy-or-verify-failed",
+                "legacy_jobs_identity": legacy_identity,
+            },
+        )  # M5
+        return {"status": "aborted", "migration_id": migration_id, **m0}
+
+    target_jobs = stable_root / "jobs.log"
+    target_jobs_digest = (
+        _alias_digest(_sha256_file(target_jobs)) if target_jobs.is_file() else ""
+    )
+    _append_migration_journal(
+        stable_root,
+        {
+            "record_version": MIGRATION_ALIAS_RECORD_VERSION,
+            "migration_id": migration_id,
+            "status": "completed",
+            "legacy_jobs_identity": legacy_identity,
+            "stable_jobs_identity": {
+                "path": str(target_jobs.expanduser().resolve(strict=False)),
+                "content_digest": target_jobs_digest,
+            },
+            "source_digest": source_digest,
+            "target_digest": _alias_digest(_scoped_tree_digest(stable_root, relatives)),
+            "completed_at": _utc_now(),
+        },
+    )  # M4
+    return {"status": "completed", "migration_id": migration_id, **m0}
+
+
+def _migration_deletion_precondition(candidate: Path, environ: dict[str, str]) -> tuple[bool, str]:
+    """Source-deletion precondition (SD-112 §13.33.2-(5)): once migration is
+    promoted, a candidate's leftover `.dispatch` may be deleted only after
+    (1) the journal is `completed` (implied by promotion), (2) its
+    legacy-bound writers are quiescent/reconciled -- the caller's
+    `_succeed_dispatch_state(candidate)` carry-forward already did that sweep
+    (M6) -- and (3) the final delta digest verifies clean here. Any
+    undecidable or failed state is a typed refusal
+    (`dispatch-state-migration-blocked-live-attempt`), never a
+    warn-and-continue; the retention floor in `_cleanup_releases` is a time
+    delay, not evidence, and plays no part in this decision."""
+
+    if not _dispatch_migration_promoted(environ):
+        return True, ""
+    stale_dispatch = candidate / ".dispatch"
+    if not stale_dispatch.is_dir():
+        return True, ""
+    stable_root = stable_state_root(environ)
+    for relative in _migration_relative_files(stale_dispatch):
+        target = stable_root / relative
+        if not target.is_file():
+            return False, "dispatch-state-migration-blocked-live-attempt:delta-unreconciled"
+        try:
+            if _sha256_file(stale_dispatch / relative) != _sha256_file(target):
+                return False, "dispatch-state-migration-blocked-live-attempt:delta-digest-mismatch"
+        except OSError:
+            return False, "dispatch-state-migration-blocked-live-attempt:delta-unreadable"
+    return True, ""
 
 
 def _succeed_dispatch_state(candidate: Path) -> bool:
@@ -1219,13 +1721,23 @@ def _succeed_dispatch_state(candidate: Path) -> bool:
     stale_dispatch = candidate / ".dispatch"
     if not stale_dispatch.is_dir():
         return True
-    try:
-        live_release = current_path().resolve(strict=True)
-    except OSError:
-        return False
-    if live_release == candidate:
-        return True
-    live_dispatch = live_release / ".dispatch"
+    if _dispatch_migration_promoted(os.environ):
+        # Decision 3: the *only* switch is an M4 `completed` journal record.
+        # Post-promotion every carry-forward retargets straight to the
+        # stable root -- never `stable_state_root()/"dispatch"` (that would
+        # double-nest; `stable_state_root()` already *is* the dispatch root).
+        try:
+            live_dispatch = stable_state_root(os.environ)
+        except DistributionError:
+            return False
+    else:
+        try:
+            live_release = current_path().resolve(strict=True)
+        except OSError:
+            return False
+        if live_release == candidate:
+            return True
+        live_dispatch = live_release / ".dispatch"
     touched_dirs: set[Path] = set()
     ok = True
     for source in stale_dispatch.rglob("*"):
@@ -1263,9 +1775,78 @@ def _succeed_dispatch_state(candidate: Path) -> bool:
         if destination.exists():
             touched_dirs.add(destination.parent)
     for directory in touched_dirs:
-        if not _reanchor_succeeded_attempt_links(directory, candidate, live_release):
+        if not _reanchor_succeeded_attempt_links(directory, stale_dispatch, live_dispatch):
             ok = False
     return ok
+
+
+def _stable_registry_snapshot(environ: dict[str, str]) -> list[dict]:
+    """Parse the stable per-user registry once, outside `_cleanup_releases`'s
+    per-candidate loop (decision 2), into attempt-id-normalized open rows
+    that carry a `launch_home`. An absent stable registry returns an empty
+    snapshot -- candidate/live-release evaluation keeps working exactly as
+    before (decision 2, "부재는 빈 snapshot"). An unreadable, malformed, or
+    internally-conflicting registry is a typed refusal
+    (`registry-unreadable:<stable-jobs-path>`) that stops cleanup/update
+    outright -- never a silent skip, since silently skipping an unparseable
+    stable registry could quietly stop protecting a release it should be
+    protecting.
+
+    Normalization: a byte-identical duplicate line collapses to one row: an
+    `open`+`terminal` (`running`/`done`) duplicate for the same attempt id
+    keeps only the terminal row (a stale open row must never hold a release
+    hostage once its attempt finished); two *different* open rows for the
+    same attempt id with different `launch_home` values are a genuine
+    conflict, not a duplicate, and fail closed the same way.
+    """
+
+    try:
+        stable_root = stable_state_root(environ)
+    except DistributionError:
+        return []
+    jobs = stable_root / "jobs.log"
+    if not jobs.is_file():
+        return []
+    try:
+        text = jobs.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise DistributionError(f"registry-unreadable:{jobs}") from exc
+
+    rank = {"open": 0, "running": 1, "done": 2}
+    by_attempt: dict[str, dict] = {}
+    seen_lines: set[str] = set()
+    for line in text.splitlines():
+        if not line.strip():
+            continue
+        if line in seen_lines:
+            continue
+        seen_lines.add(line)
+        fields = line.split("\t")
+        if len(fields) < 6:
+            raise DistributionError(f"registry-unreadable:{jobs}")
+        status = fields[1]
+        attempt_id = fields[4]
+        pipe = fields[5]
+        launch_home = None
+        for item in pipe.split(","):
+            if item.startswith("launch_home="):
+                launch_home = item[len("launch_home="):]
+                break
+        entry = {
+            "status": status,
+            "launch_home": launch_home,
+            "rank": rank.get(status, 0),
+            "fields": fields,
+        }
+        existing = by_attempt.get(attempt_id)
+        if existing is None:
+            by_attempt[attempt_id] = entry
+            continue
+        if existing["rank"] == entry["rank"] == 0 and existing["launch_home"] != entry["launch_home"]:
+            raise DistributionError(f"registry-unreadable:{jobs}")
+        if entry["rank"] > existing["rank"]:
+            by_attempt[attempt_id] = entry
+    return [entry for entry in by_attempt.values() if entry["status"] == "open"]
 
 
 def _release_reference_registries(candidate: Path) -> list[Path]:
@@ -1288,8 +1869,18 @@ def _release_reference_registries(candidate: Path) -> list[Path]:
     return registries
 
 
-def _release_in_use(candidate: Path) -> tuple[bool, str]:
-    """Return (in_use, reason). Undecidable evidence returns (True, ...)."""
+def _release_in_use(candidate: Path, stable_snapshot: list[dict]) -> tuple[bool, str]:
+    """Return (in_use, reason). Undecidable evidence returns (True, ...).
+
+    `stable_snapshot` is `_stable_registry_snapshot()`'s pre-parsed result --
+    the third reference-registry source (decision 2): the stable per-user
+    registry's `launch_home`-bearing open rows. `launch_home`, `commonpath`,
+    and the two-registry `is_live_registry` branch below are byte-for-byte
+    unchanged; the stable source is purely additive and evaluated after them.
+    A stable-registry open row with no `launch_home` is never candidate-local
+    authority on its own (unlike a candidate-local legacy row) -- it is not
+    scoped to any one release.
+    """
 
     try:
         candidate_real = os.path.realpath(candidate)
@@ -1335,6 +1926,26 @@ def _release_in_use(candidate: Path) -> tuple[bool, str]:
                 continue
             if not is_live_registry:
                 return True, "legacy-open-row-in-release-registry"
+
+    for entry in stable_snapshot:
+        launch_home = entry["launch_home"]
+        if launch_home is None:
+            continue
+        try:
+            home_real = os.path.realpath(launch_home)
+            common = os.path.commonpath((candidate_real, home_real))
+        except (OSError, ValueError):
+            continue
+        if common == candidate_real:
+            fields = entry["fields"]
+            pipe = fields[5]
+            attempt_id = None
+            for item in pipe.split(","):
+                if item.startswith("attempt_id="):
+                    attempt_id = item[len("attempt_id="):]
+                    break
+            identifier = attempt_id or fields[4]
+            return True, f"open-attempt:{identifier}"
     return False, ""
 
 
@@ -1342,6 +1953,10 @@ def _cleanup_releases(keep: set[Path]) -> None:
     releases = data_root() / "releases"
     if not releases.is_dir() or releases.is_symlink():
         return
+    # Parsed once, outside the per-candidate loop (decision 2) -- an
+    # unreadable/malformed stable registry raises here and aborts the whole
+    # cleanup pass rather than being silently re-attempted per candidate.
+    stable_snapshot = _stable_registry_snapshot(os.environ)
     candidates = sorted(
         (path for path in releases.iterdir() if path.is_dir() and not path.is_symlink()),
         key=lambda path: path.stat().st_mtime,
@@ -1352,7 +1967,7 @@ def _cleanup_releases(keep: set[Path]) -> None:
         if candidate in keep or retained < 2:
             retained += 1
             continue
-        in_use, why = _release_in_use(candidate)
+        in_use, why = _release_in_use(candidate, stable_snapshot)
         if in_use:
             print(
                 f"harness release: {candidate} is still referenced by a live dispatch "
@@ -1364,6 +1979,14 @@ def _cleanup_releases(keep: set[Path]) -> None:
             print(
                 f"harness release: dispatch state carry-forward incomplete for "
                 f"{candidate}; keeping the release instead of deleting it",
+                file=sys.stderr,
+            )
+            continue
+        ok, blocked_reason = _migration_deletion_precondition(candidate, os.environ)
+        if not ok:
+            print(
+                f"harness release: {blocked_reason} for {candidate}; keeping it "
+                "instead of deleting it",
                 file=sys.stderr,
             )
             continue
@@ -1388,6 +2011,16 @@ def _install_or_update(
 
     data_root().parent.mkdir(parents=True, exist_ok=True)
     with _distribution_lock():
+        # M0 preflight (SD-112 §13.33.2-(4)/B-10): a stable dispatch state
+        # root that cannot be created/written refuses the entire update --
+        # never just prune -- before any download, activation, or rotation
+        # happens. `dispatch-state-root-unwritable` propagates unchanged.
+        try:
+            _current_legacy_dispatch = current_path().resolve(strict=True) / ".dispatch"
+        except OSError:
+            _current_legacy_dispatch = current_path() / ".dispatch"
+        _migration_m0_preflight(_current_legacy_dispatch, stable_state_root(os.environ))
+
         previous_state = _load_state()
         if bootstrap and previous_state:
             bootstrap = False
@@ -1557,6 +2190,18 @@ def _install_or_update(
                     file=sys.stderr,
                 )
         _cleanup_releases(keep)
+        # M1-M6: migrate whatever legacy dispatch state just landed under the
+        # newly-activated release into the stable root and, once verified,
+        # promote it (M4). Unlike M0 above, a migration-internal failure here
+        # never fails the update that already succeeded -- it is recorded
+        # `aborted` in the journal and retried on the next update call.
+        try:
+            run_dispatch_state_migration(target / ".dispatch", environ=os.environ)
+        except DistributionError as exc:
+            print(
+                f"harness release: dispatch state migration deferred: {exc}",
+                file=sys.stderr,
+            )
         return {
             "status": "installed" if previous_state is None else "updated",
             "version": release["version"],

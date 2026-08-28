@@ -79,6 +79,84 @@ class RuntimeRootSeparationTest(unittest.TestCase):
             self.assertEqual(rows["rt-sealed"][0]["event_id"], "dg-sealed")
 
 
+# --- B-3/B-14 (Slice 2): Fleet reader's _route_state_roots must observe the
+# same dangling-registry classification as capability-route.py's continuation
+# resolver and the registry/route readers -- exact canonical row, no
+# duplicates, and a preserved row-owned `[:1]` for exact/aliased rows.
+class RouteStateRootsDanglingRegistryTest(unittest.TestCase):
+
+    def _write_completed_alias(self, stable_dispatch_dir, legacy_jobs, stable_jobs):
+        stable_dispatch_dir.mkdir(parents=True, exist_ok=True)
+        journal = stable_dispatch_dir / "migration-journal.jsonl"
+        # Round-1 hardening (`_alias_record_valid`) rejects any digest that is
+        # not an exact `sha256:<64 hex>`; a bare "deadbeef" fixture would make
+        # this test measure the rejection path instead of the alias path.
+        import hashlib
+        def _digest(seed):
+            return "sha256:" + hashlib.sha256(seed.encode("utf-8")).hexdigest()
+        record = {
+            "record_version": 1,
+            "status": "completed",
+            "legacy_jobs_identity": {
+                "path": str(Path(legacy_jobs).resolve(strict=False)),
+                "content_digest": _digest(str(legacy_jobs)),
+            },
+            "stable_jobs_identity": {
+                "path": str(Path(stable_jobs).resolve(strict=False)),
+                "content_digest": _digest(str(stable_jobs)),
+            },
+            "source_digest": _digest("source"),
+            "target_digest": _digest("target"),
+        }
+        with open(journal, "a", encoding="utf-8") as handle:
+            handle.write(json.dumps(record) + "\n")
+
+    def test_exact_row_registry_stays_one_root(self):
+        with tempfile.TemporaryDirectory() as td:
+            live = Path(td) / "release" / ".dispatch"
+            live.mkdir(parents=True)
+            jobs = live / "jobs.log"
+            jobs.write_text("", encoding="utf-8")
+            job = DispatchJob(key="code", slug="live-row", route_id="rt-exact")
+            job._launch_home = str(Path(td) / "release")
+            job._registry_path = str(jobs)
+            roots = route._route_state_roots("rt-exact", [job])
+        self.assertEqual(roots, [os.path.realpath(str(live))])
+
+    def test_dangling_row_with_completed_alias_resolves_to_one_stable_root(self):
+        with tempfile.TemporaryDirectory() as td, mock.patch.dict(
+            os.environ, {"HARNESS_STATE_ROOT": os.path.join(td, "state")}, clear=False
+        ):
+            pruned_release = Path(td) / "pruned-release" / ".dispatch"
+            legacy_jobs = pruned_release / "jobs.log"  # parent never created: pruned
+            stable_dispatch = Path(td) / "state" / "dispatch"
+            stable_jobs = stable_dispatch / "jobs.log"
+            stable_dispatch.mkdir(parents=True)
+            stable_jobs.write_text("", encoding="utf-8")
+            self._write_completed_alias(stable_dispatch, legacy_jobs, stable_jobs)
+            job = DispatchJob(key="code", slug="aliased-row", route_id="rt-aliased")
+            job._launch_home = str(Path(td) / "pruned-release")
+            job._registry_path = str(legacy_jobs)
+            roots = route._route_state_roots("rt-aliased", [job])
+        self.assertEqual(roots, [os.path.realpath(str(stable_dispatch))])
+
+    def test_dangling_row_without_alias_uses_full_compat_window(self):
+        with tempfile.TemporaryDirectory() as td, mock.patch.dict(
+            os.environ, {"HARNESS_STATE_ROOT": os.path.join(td, "state")}, clear=False
+        ):
+            pruned_release = Path(td) / "pruned-release" / ".dispatch"
+            legacy_jobs = pruned_release / "jobs.log"  # parent never created, no alias
+            job = DispatchJob(key="code", slug="dangling-row", route_id="rt-dangling")
+            job._launch_home = str(Path(td) / "pruned-release")
+            job._registry_path = str(legacy_jobs)
+            roots = route._route_state_roots("rt-dangling", [job])
+        # No completed alias and the compat window is open (default): the same
+        # governor/liveness common helper (dispatch_state_roots) supplies every
+        # read candidate instead of collapsing to a single unproven root.
+        self.assertGreater(len(roots), 1)
+        self.assertEqual(len(roots), len(set(roots)))
+
+
 class RenderDispatchPresentationTest(unittest.TestCase):
 
     def test_inline_marker_gate_counts_as_group_gate_pass(self):

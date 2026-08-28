@@ -40,6 +40,10 @@ _HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _HERE not in sys.path:
     sys.path.insert(0, _HERE)
 from fleet import titles  # noqa: E402
+_UTILITIES = Path(__file__).resolve().parents[2] / "utilities"
+if str(_UTILITIES) not in sys.path:
+    sys.path.insert(0, str(_UTILITIES))
+from dispatch_contract import dispatch_state_roots  # noqa: E402
 
 DELTA_CAP = 65536
 TEXT_CAP = 2000
@@ -787,7 +791,9 @@ def selected_providers():
         )
         policy = defaults.query_profile_policy(config, "mini")
         allocation = defaults.query_allocation(config)
-        jobs = Path(os.environ.get("AGENT_DISPATCH_JOBS") or home / ".dispatch" / "jobs.log")
+        jobs = (Path(os.environ["AGENT_DISPATCH_JOBS"])
+                if os.environ.get("AGENT_DISPATCH_JOBS")
+                else dispatch_state_roots(home)[0] / "jobs.log")
         states = {name: "ok" for name in PROVIDER_ORDER}
         usage = subprocess.run(
             [str(home / "utilities" / "usage-check.sh"), "--harness", "all", "--jobs", str(jobs)],
@@ -815,6 +821,10 @@ def selected_providers():
             policy, states, counts, allocation["harness_order"], scores,
             strategy=allocation["strategy"],
             usage_gate_used_percent=allocation["usage_gate_used_percent"],
+            # This display worker has no dispatch-depth placement preference.
+            preferred=None,
+            affinity_weight=allocation.get("depth_affinity_weight", 0.5),
+            headroom_exponent=allocation.get("usage_headroom_exponent", 1),
         )
         band_order = ("relief", "primary", "last_resort") if promoted else (
             "primary", "relief", "last_resort"

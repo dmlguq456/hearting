@@ -140,7 +140,10 @@ def _scalar(value):
     try:
         return int(value)
     except ValueError:
-        return value
+        try:
+            return float(value)
+        except ValueError:
+            return value
 
 
 def parse_yaml_subset(text):
@@ -356,7 +359,10 @@ def validate(config, capmap):
         if not isinstance(allocation, dict):
             errors.append(f"allocation must be a mapping for schema v{version}")
         else:
-            unknown_allocation = sorted(set(allocation) - {"strategy", "window", "usage_gate_used_percent"})
+            unknown_allocation = sorted(set(allocation) - {
+                "strategy", "window", "usage_gate_used_percent", "depth_affinity",
+                "depth_affinity_weight", "usage_headroom_exponent",
+            })
             for key in unknown_allocation:
                 errors.append(f"unknown allocation key: {key!r}")
             strategy = allocation.get("strategy")
@@ -370,6 +376,17 @@ def validate(config, capmap):
             gate = allocation.get("usage_gate_used_percent", DEFAULT_USAGE_GATE_USED_PERCENT)
             if not isinstance(gate, int) or not 0 <= gate <= 100:
                 errors.append("allocation.usage_gate_used_percent must be an integer from 0 to 100")
+            depth_affinity = allocation.get("depth_affinity", {})
+            if not isinstance(depth_affinity, dict) or not set(depth_affinity) <= {"owner", "worker"}:
+                errors.append("allocation.depth_affinity keys must be a subset of owner and worker")
+            elif any(value not in enabled for value in depth_affinity.values()):
+                errors.append("allocation.depth_affinity values must name enabled harnesses")
+            weight = allocation.get("depth_affinity_weight", 0.5)
+            if isinstance(weight, bool) or not isinstance(weight, (int, float)) or not 0.0 <= weight <= 1.0:
+                errors.append("allocation.depth_affinity_weight must be a number from 0.0 to 1.0")
+            exponent = allocation.get("usage_headroom_exponent", 1)
+            if isinstance(exponent, bool) or not isinstance(exponent, int) or not 1 <= exponent <= 4:
+                errors.append("allocation.usage_headroom_exponent must be an integer from 1 to 4")
     elif allocation is not None:
         errors.append("allocation requires schema_version 2 or 3")
 
@@ -478,20 +495,25 @@ def query_profile_policy(config, profile):
 
 
 def query_allocation(config):
+    neutral = {"depth_affinity": {}, "depth_affinity_weight": 0.5, "usage_headroom_exponent": 1}
     allocation = config.get("allocation")
     if config.get("schema_version") in {2, 3} and isinstance(allocation, dict):
-        return {
+        result = {
             "strategy": allocation["strategy"],
             "window": allocation["window"],
             "usage_gate_used_percent": allocation.get("usage_gate_used_percent", DEFAULT_USAGE_GATE_USED_PERCENT),
             "harness_order": list(query_owners(config)),
         }
-    return {
+        result.update({key: allocation.get(key, value) for key, value in neutral.items()})
+        return result
+    result = {
         "strategy": "config-order",
         "window": 0,
         "usage_gate_used_percent": DEFAULT_USAGE_GATE_USED_PERCENT,
         "harness_order": list(query_owners(config)),
     }
+    result.update(neutral)
+    return result
 
 
 def query_opencode_policy(config):
@@ -553,6 +575,9 @@ def main(argv):
         print(f"strategy={allocation['strategy']}")
         print(f"window={allocation['window']}")
         print(f"usage_gate_used_percent={allocation['usage_gate_used_percent']}")
+        print("depth_affinity=" + ",".join(f"{key}:{allocation['depth_affinity'][key]}" for key in sorted(allocation["depth_affinity"])))
+        print(f"depth_affinity_weight={allocation['depth_affinity_weight']}")
+        print(f"usage_headroom_exponent={allocation['usage_headroom_exponent']}")
         print("harness_order=" + ",".join(allocation["harness_order"]))
         return 0
     if op == "opencode-policy":

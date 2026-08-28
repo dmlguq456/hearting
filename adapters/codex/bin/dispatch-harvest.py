@@ -28,6 +28,7 @@ from dispatch_completion_join import (  # noqa: E402
     consume_supervisor_outbox_attempts,
     consume_parent_session_attempt,
     JoinContractError,
+    materialize_after_terminal_close,
     parent_session_state_path,
     read_supervisor_phase_state,
     required_action_for_attempt,
@@ -328,7 +329,9 @@ def main(argv: list[str]) -> int:
                         _complete_routed_attempt_from_terminal_evidence(
                             jobs, metadata, target[3]
                         )
-                elif not close_attempt_row(jobs, attempt_id, "harvest-complete"):
+                elif close_attempt_row(jobs, attempt_id, "harvest-complete"):
+                    materialize_after_terminal_close(jobs, attempt_id)
+                else:
                     raise ValueError("attempt-row-not-open")
             except (KeyError, OSError, TypeError, ValueError) as exc:
                 print(f"check=failed\nreason={exc}")

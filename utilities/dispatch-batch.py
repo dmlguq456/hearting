@@ -666,6 +666,28 @@ def assign_harnesses(
                 return index
         return len(bands) + 1
 
+    # SD-16 depth affinity, resolved once for the whole search rather than per
+    # combination. `balanced` carries the preference inside the shared deficit
+    # (a soft target share), so it needs no separate term here and must not get
+    # one -- a hard include-preference would turn the configured 0.65 weight
+    # into a pin. `capacity-aware` has no share arithmetic and scores whole
+    # combinations rather than a ranked band, so it cannot reuse `rank_band`'s
+    # in-class reorder; it asks the same shared margin oracle whether the
+    # preferred family is close enough to the best gauge to be preferred at all,
+    # and then prefers combinations that include it.
+    depth_preferred = (
+        CAPACITY.preferred_for_depth(allocation, 2)
+        if isinstance(allocation, dict) else None
+    )
+    depth_affinity_active = (
+        isinstance(allocation, dict)
+        and allocation.get("strategy") not in {None, "balanced"}
+        and CAPACITY.within_affinity_margin(
+            capacity, depth_preferred, usable,
+            affinity_weight=allocation.get("depth_affinity_weight", 0.5),
+        )
+    )
+
     def score(rows: tuple[tuple[str, str, int], ...]) -> tuple:
         affinity_misses = sum(
             1
@@ -710,7 +732,12 @@ def assign_harnesses(
                 # share. Candidate pool is `usable` (the whole family pool),
                 # not the legs in this one group, because a target share is
                 # only defined over the full candidate set.
-                deficit = CAPACITY.allocation_deficit(capacity, counts, usable)
+                deficit = CAPACITY.allocation_deficit(
+                    capacity, counts, usable,
+                    preferred=CAPACITY.preferred_for_depth(allocation, 2),
+                    affinity_weight=allocation.get("depth_affinity_weight", 0.5),
+                    headroom_exponent=allocation.get("usage_headroom_exponent", 1),
+                )
                 gate_order = (gated_legs, 0.0)
                 allocation_order = (
                     0.0,
@@ -722,11 +749,20 @@ def assign_harnesses(
                 -sum(CAPACITY.ordering_score(capacity, row[0]) for row in rows),
                 sum(counts.get(row[0], 0) for row in rows),
             )
+        # Strictly after independence, gate, band, and the sealed per-stage
+        # affinity cell, so a configured depth preference can never collapse the
+        # group onto one family, place a gated harness, cross a quality band, or
+        # override an explicit per-stage affinity.
+        depth_affinity_miss = (
+            0 if not depth_affinity_active or depth_preferred in {row[0] for row in rows}
+            else 1
+        )
         return (
             -len({row[0] for row in rows}),
             *gate_order,  # B-1: the balanced usage gate precedes quality band
             sum(band_rank(node, row[0]) for node, row in zip(nodes, rows)),
             affinity_misses,
+            depth_affinity_miss,
             *allocation_order,
             sum(row[2] for row in rows),
             tuple(order.get(row[0], len(order)) for row in rows),

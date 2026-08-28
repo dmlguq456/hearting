@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import base64
 from contextlib import contextmanager
 from dataclasses import dataclass
 import errno
@@ -192,6 +193,21 @@ ATTEMPT_TERMINAL_EVIDENCE_KEYS = {
     "conflicting_failure_class",
     "receipt_state",
     "marker_state",
+    # SD-111 P2 (D-4): the delivery-intent 8-field allowlist. Stamped once by
+    # `_delivery_intent_values()` at the one `open|running -> done` edge a row
+    # actually takes (W1-W4); immutable afterward (§4.4) -- a later
+    # `_updated_attempt_metadata` call with a *different* value for any of
+    # these raises `attempt-immutable-metadata-mutation` the same as any
+    # other terminal-evidence key.
+    "delivery_intent",
+    "delivery_id",
+    "delivery_recipient_kind",
+    "delivery_recipient_digest",
+    "delivery_receipt_digest",
+    "delivery_row_revision",
+    "delivery_intent_at_ns",
+    "delivery_receipt_b64",
+    "delivery_persistence_refused",
 }
 _MODULE_ROOT = Path(__file__).resolve().parents[1]
 _CAPACITY_TERMINAL_RE = re.compile(
@@ -861,6 +877,74 @@ def process_namespace_identity(pid: int | str = "self") -> str | None:
         return None
 
 
+def _runtime_ancestry_proc_stat(pid: int) -> dict[str, int] | None:
+    """`ppid`/`start` for one PID -- same two /proc/<pid>/stat fields
+    ``compute-hosts.py``'s own ``proc_stat()`` reads (SD-111 §3.2.1: same
+    algorithm, reimplemented here because that name lives inside
+    ``PROBE_SCRIPT``, a string template shipped to remote hosts for SSH
+    execution, not an importable module-level function -- §3.2.1's "reuse the
+    primitive unchanged" cannot mean a Python import of it. See the P2 dev
+    log for this plan/reality mismatch)."""
+
+    try:
+        raw = Path("/proc") / str(pid) / "stat"
+        text = raw.read_text(encoding="utf-8", errors="replace")
+        rest = text[text.rfind(")") + 2:].split()
+        return {"ppid": int(rest[1]), "start": int(rest[19])}
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def _runtime_ancestry_harness_process(pid: int) -> str | None:
+    """Same algorithm as ``compute-hosts.py``'s embedded ``harness_process()``
+    (see ``_runtime_ancestry_proc_stat`` docstring for why this is a
+    reimplementation, not an import)."""
+
+    names = {"claude": "claude", "codex": "codex", "opencode": "opencode"}
+    try:
+        comm = (Path("/proc") / str(pid) / "comm").read_text().strip().lower()
+    except OSError:
+        comm = ""
+    if comm in names:
+        return names[comm]
+    try:
+        with (Path("/proc") / str(pid) / "cmdline").open("rb") as handle:
+            argv0 = handle.read(4096).split(b"\0", 1)[0]
+        base = os.path.basename(argv0.decode("utf-8", errors="ignore")).lower()
+    except OSError:
+        base = ""
+    return names.get(base)
+
+
+def runtime_ancestry_binding(pid: int) -> tuple[str, str, str] | None:
+    """SD-111 P2 round 2 C-3: walk `pid`'s /proc ancestry for the nearest
+    Claude runtime session process.
+
+    Used both at launch time (2-a-5, `append_job()` records the launcher's
+    own binding) and at carrier-1 claim time (P3, the hook re-derives its own
+    binding and compares). Returns `(pid, start_ticks, pid_ns)` as strings,
+    or `None` if no ancestor resolves to the "claude" harness -- callers must
+    write all three fields or none (partial recording is forbidden).
+    """
+
+    current = pid
+    seen: set[int] = set()
+    depth = 0
+    while current > 0 and current not in seen and depth < 128:
+        seen.add(current)
+        found = _runtime_ancestry_proc_stat(current)
+        if found is None:
+            return None
+        if _runtime_ancestry_harness_process(current) == "claude":
+            ns = process_namespace_identity(current)
+            if not ns:
+                return None
+            return (str(current), str(found["start"]), ns)
+        current = found["ppid"]
+        depth += 1
+    return None
+
+
 def process_state(pid: int) -> str | None:
     """Return the one-letter proc state; zombies are not live workers."""
 
@@ -882,6 +966,29 @@ def process_identity_is_live(pid: int, expected_start: str) -> bool:
         and actual_start == expected_start
         and state != "Z"
     )
+
+
+def process_identity_disposition(pid: int, expected_start: str) -> str:
+    """Return 'dead', 'live', or 'unresolved', distinguishing absence from denial.
+
+    'dead' only for a positive determination: visibility 'missing', or
+    'present' with a mismatched start tick (a different process reused the
+    pid) or a zombie state. 'inaccessible' (permission/namespace/procfs
+    denial) and any other non-determination is 'unresolved', never 'dead' --
+    an expiry actor must not convert "cannot tell" into "session is gone"
+    (SD-111 F-1, PRD §13.33.1-(7), A-10).
+    """
+
+    if not expected_start:
+        return "unresolved"
+    visibility, actual_start, state = _proc_observation(pid)
+    if visibility == "missing":
+        return "dead"
+    if visibility != "present":
+        return "unresolved"
+    if actual_start != expected_start or state == "Z":
+        return "dead"
+    return "live"
 
 
 def supervisor_lease_path(jobs: str | Path, attempt_id: str) -> Path:
@@ -3540,7 +3647,37 @@ def _validated_registry_path(path: str | Path, field: str) -> Path:
     return candidate
 
 
-def _fallback_registry(agent_home: Path) -> Path:
+def state_root(environ: dict[str, str] | os._Environ[str]) -> Path:
+    """The one per-user state root: `HARNESS_STATE_ROOT` (installer-owned) or
+    `$XDG_STATE_HOME/hearting` or `$HOME/.local/state/hearting`, read only from
+    the passed mapping so an isolation test's `environ={}` never touches the
+    live process environment or creates a real user home (SD-112 §13.33.2-(1))."""
+
+    harness_state_root = environ.get("HARNESS_STATE_ROOT")
+    if harness_state_root:
+        return _absolute(harness_state_root, "harness-state-root")
+    xdg_state_home = environ.get("XDG_STATE_HOME")
+    if xdg_state_home:
+        return _absolute(xdg_state_home, "xdg-state-home") / "hearting"
+    home = environ.get("HOME")
+    if not home:
+        raise DispatchContractError(
+            "dispatch-state-root-unresolved",
+            "none of HARNESS_STATE_ROOT, XDG_STATE_HOME, HOME are set",
+        )
+    return _absolute(home, "home") / ".local" / "state" / "hearting"
+
+
+def stable_state_root(environ: dict[str, str] | os._Environ[str]) -> Path:
+    """The canonical release-independent dispatch state root (SD-112
+    §13.33.2-(1)): `state_root(environ) / "dispatch"`."""
+
+    return state_root(environ) / "dispatch"
+
+
+def _fallback_registry(
+    agent_home: Path, environ: dict[str, str] | os._Environ[str]
+) -> Path:
     home = Path(agent_home).expanduser()
     resolved_home = home.resolve(strict=False)
     layout, runtime_home = _versioned_source_layout(resolved_home)
@@ -3549,16 +3686,15 @@ def _fallback_registry(agent_home: Path) -> Path:
         return (runtime_home / ".harness" / "dispatch" / "jobs.log").resolve(
             strict=False
         )
-    if layout == "shared-release":
-        # State-root chain (3): a shared managed release is user-writable and its
-        # dispatch state is carried into the successor release by the
-        # _cleanup_releases succession before pruning (release-lifecycle T-1/T-2),
-        # so an env-less session under `hearting/releases/<v>` keeps the
-        # release-relative registry instead of failing closed. Only bundle-source
-        # trees — which no reader accepts as registry authority — are redirected
-        # or rejected above.
-        return resolved_home / ".dispatch" / "jobs.log"
-    return home / ".dispatch" / "jobs.log"
+    # State-root chain (3) supersession (SD-112 §13.33.2-(8)): a shared managed
+    # release and a maintainer checkout both default to the stable per-user
+    # root now. Release succession moves file *contents*, not the `jobs_path`
+    # *identity* that `revalidate_launch_compatibility` seals, which is exactly
+    # the failure mode this migration closes. A checkout-local `.dispatch` is
+    # reachable only through an explicit chain ①/② override (`explicit_jobs` or
+    # `AGENT_DISPATCH_JOBS`), resolved by callers before they ever reach this
+    # fallback, or as a legacy read candidate in `dispatch_state_roots()`.
+    return stable_state_root(environ) / "jobs.log"
 
 
 def resolve_global_registry(
@@ -3617,8 +3753,14 @@ def resolve_global_registry(
         return RegistrySelection(inherited, "inherited-env", True)
     if explicit:
         return RegistrySelection(explicit, "root-explicit", False)
-    fallback = _fallback_registry(agent_home).resolve(strict=False)
-    source = "activation-runtime" if fallback.parent.name == "dispatch" else "agent-home"
+    fallback = _fallback_registry(agent_home, env).resolve(strict=False)
+    source = "agent-home"
+    if fallback.parent.name == "dispatch":
+        try:
+            is_stable = fallback.parent == stable_state_root(env)
+        except DispatchContractError:
+            is_stable = False
+        source = "stable-state-root" if is_stable else "activation-runtime"
     return RegistrySelection(fallback, source, False)
 
 
@@ -3679,29 +3821,111 @@ def resolve_dispatch_state_root(
         return dispatch_state_root(
             _validated_registry_path(inherited, "agent-dispatch-jobs")
         )
-    return _fallback_registry(agent_home).parent
+    return _fallback_registry(agent_home, env).parent
 
 
 def dispatch_state_roots(
-    agent_home: Path, jobs: str | Path | None = None
+    agent_home: Path,
+    jobs: str | Path | None = None,
+    *,
+    environ: dict[str, str] | os._Environ[str] | None = None,
 ) -> tuple[Path, ...]:
-    """Read order for dispatch state: canonical state root first, legacy
-    agent-home-relative tree second. Deduplicated. The writer uses only
-    `dispatch_state_roots(...)[0]`; only readers should iterate the tuple.
+    """Read order for dispatch state (SD-112 §13.33.2-(6)): the canonical
+    write root the resolver actually chose, then the stable per-user root (a
+    no-op once the two coincide, which is the common case now that chain-3
+    defaults to stable), then the legacy agent-home/active-release-relative
+    tree. Deduplicated, read-only past index 0 -- the writer uses only
+    `dispatch_state_roots(...)[0]`, which is always
+    `resolve_dispatch_state_root()`'s result and never a hardcoded stable
+    literal; stable-first is a *consequence* of that resolution, not an
+    override applied here.
     """
 
-    canonical = resolve_dispatch_state_root(agent_home, explicit_jobs=jobs)
-    legacy = Path(agent_home) / ".dispatch"
-    if canonical == legacy:
-        return (canonical,)
-    return (canonical, legacy)
+    env = os.environ if environ is None else environ
+    canonical = resolve_dispatch_state_root(agent_home, explicit_jobs=jobs, environ=env)
+    candidates = [canonical]
+    try:
+        stable = stable_state_root(env)
+    except DispatchContractError:
+        stable = None
+    if stable is not None and stable not in candidates:
+        candidates.append(stable)
+    legacy = Path(agent_home).expanduser().resolve(strict=False) / ".dispatch"
+    if legacy not in candidates:
+        candidates.append(legacy)
+    return tuple(candidates)
+
+
+def _mode_bits(path: Path) -> int:
+    return stat.S_IMODE(path.stat().st_mode)
+
+
+def _ensure_new_directory_mode(path: Path, mode: int) -> None:
+    """Force `mode` only when `path` doesn't exist yet. An existing symlink,
+    non-directory, or mode wider than `mode` is a typed refusal -- never a
+    chmod of something this process didn't just create (SD-112 §13.33.2-(7)).
+    """
+
+    if path.is_symlink():
+        raise DispatchContractError(
+            "dispatch-state-root-unwritable", f"{path}: refusing symlink"
+        )
+    if path.exists():
+        if not path.is_dir():
+            raise DispatchContractError(
+                "dispatch-state-root-unwritable", f"{path}: not a directory"
+            )
+        existing = _mode_bits(path)
+        if existing != mode:
+            raise DispatchContractError(
+                "dispatch-state-root-mode-violation",
+                f"{path}: mode={oct(existing)} expected={oct(mode)}",
+            )
+        return
+    path.mkdir(parents=True, exist_ok=False)
+    os.chmod(path, mode)  # mkdir's `mode=` is masked by umask; force exact bits.
+
+
+def _is_stable_dispatch_root(dispatch_root: Path) -> bool:
+    """Only the stable per-user dispatch root is mode-enforced by
+    `ensure_global_registry_writable` (SD-112 §13.33.2-(7)); every other
+    dispatch root keeps its historical, mode-agnostic creation path. Compared
+    lexically (`.absolute()`, not `.resolve()`): a symlinked stable root must
+    still compare equal so the symlink refusal in `_ensure_new_directory_mode`
+    actually fires instead of silently falling through as "not stable"."""
+
+    try:
+        stable = stable_state_root(os.environ)
+    except DispatchContractError:
+        return False
+    return Path(dispatch_root).expanduser().absolute() == stable
 
 
 def ensure_global_registry_writable(path: Path) -> None:
-    """Open the global registry and its lock before any child spawn."""
+    """Open the global registry and its lock before any child spawn.
+
+    Mode enforcement (`0700` on first creation, typed refusal -- never a
+    chmod -- if the root already exists with a different mode, is a symlink,
+    or is not a directory) applies only when `path.parent` *is* the stable
+    per-user dispatch root (SD-112 §13.33.2-(7)). Every other dispatch root --
+    Codex bundle, shared-release/checkout legacy, or any fixture-owned tree --
+    keeps today's plain `mkdir(parents=True, exist_ok=True)` with no mode
+    check: countless existing fixtures across this suite create or copy those
+    directories with an ordinary umask-derived mode (commonly `0o775`, e.g.
+    release-succession's `shutil.copytree`), and retrofitting strict mode
+    equality onto every one of those call sites is out of this slice's fence.
+    `jobs.log` itself stays append-only and mode-agnostic for the same reason.
+    `state_root()`'s own ancestry (e.g. `~/.local/state`,
+    `~/.local/state/hearting`) is never touched by this function.
+    """
 
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
+        dispatch_root = path.parent
+        dispatch_root.parent.mkdir(parents=True, exist_ok=True)
+        if _is_stable_dispatch_root(dispatch_root):
+            _ensure_new_directory_mode(dispatch_root, 0o700)
+        else:
+            dispatch_root.mkdir(parents=True, exist_ok=True)
         lock_path = Path(f"{path}.lock")
         with lock_path.open("a", encoding="utf-8") as lock:
             fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
@@ -3711,6 +3935,223 @@ def ensure_global_registry_writable(path: Path) -> None:
             fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
     except OSError as exc:
         raise DispatchContractError("global-registry-unwritable", f"{path}: {exc}") from exc
+
+
+def _ensure_new_file_mode(path: Path, mode: int) -> None:
+    """Force `mode` only when `path` doesn't exist yet, mirroring
+    `_ensure_new_directory_mode` for the migration journal and other stable
+    per-user files (SD-112 §13.33.2-(7)). Never chmods an existing file."""
+
+    if path.is_symlink():
+        raise DispatchContractError(
+            "dispatch-state-root-unwritable", f"{path}: refusing symlink"
+        )
+    if path.exists():
+        if not path.is_file():
+            raise DispatchContractError(
+                "dispatch-state-root-unwritable", f"{path}: not a regular file"
+            )
+        existing = _mode_bits(path)
+        if existing != mode:
+            raise DispatchContractError(
+                "dispatch-state-root-mode-violation",
+                f"{path}: mode={oct(existing)} expected={oct(mode)}",
+            )
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode)
+    os.close(fd)
+
+
+MIGRATION_ALIAS_RECORD_VERSION = 1
+MIGRATION_JOURNAL_FILENAME = "migration-journal.jsonl"
+
+
+def migration_journal_path(
+    environ: dict[str, str] | os._Environ[str] | None = None,
+) -> Path:
+    """The one canonical migration-alias journal location: fixed under the
+    stable per-user root, never derived from a legacy route path (decision 1
+    -- putting it under the legacy path it aliases *away from* would make
+    finding the journal depend on the alias it is supposed to resolve)."""
+
+    env = os.environ if environ is None else environ
+    return stable_state_root(env) / MIGRATION_JOURNAL_FILENAME
+
+
+def read_migration_journal(stable_root: Path) -> list[dict]:
+    """Best-effort parse of the append-only migration-alias journal. A
+    malformed line is skipped, not raised -- the journal is evidence consumed
+    by a fail-closed validator, not a strict schema gate on its own."""
+
+    path = Path(stable_root) / MIGRATION_JOURNAL_FILENAME
+    if not path.is_file():
+        return []
+    records: list[dict] = []
+    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            record = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(record, dict):
+            records.append(record)
+    return records
+
+
+MIGRATION_ALIAS_DIGEST_PATTERN = re.compile(r"sha256:[0-9a-f]{64}")
+
+
+def _alias_digest_well_formed(value: object) -> bool:
+    """`sha256:` + 64 lowercase hex, nothing else.
+
+    Presence alone is not evidence: a record carrying `"content_digest": "x"`
+    is as structurally "complete" as a real one, so a truthiness check lets a
+    hand-written journal line relieve a sealed `jobs_path` mismatch. The
+    recorded digests cannot be recomputed later -- the legacy registry is
+    pruned by the migration that wrote the record, and the stable registry
+    keeps appending rows afterwards, so its content digest legitimately
+    diverges the moment the next attempt registers. Shape is therefore the
+    strongest check available on the digest fields themselves; liveness of the
+    target is checked separately, against the filesystem, in
+    `resolve_dangling_registry`.
+    """
+
+    return isinstance(value, str) and MIGRATION_ALIAS_DIGEST_PATTERN.fullmatch(value) is not None
+
+
+def _alias_record_valid(record: dict) -> bool:
+    """Structural validity of one `completed` migration-alias record.
+    Forged or partially-written records (missing, malformed, or
+    non-absolute identities) never pass, so `resolve_completed_alias` stays
+    fail-closed by construction."""
+
+    if record.get("record_version") != MIGRATION_ALIAS_RECORD_VERSION:
+        return False
+    if record.get("status") != "completed":
+        return False
+    legacy = record.get("legacy_jobs_identity")
+    target = record.get("stable_jobs_identity")
+    if not isinstance(legacy, dict) or not isinstance(target, dict):
+        return False
+    for identity in (legacy, target):
+        path = identity.get("path")
+        if not isinstance(path, str) or not path or not Path(path).is_absolute():
+            return False
+        if not _alias_digest_well_formed(identity.get("content_digest")):
+            return False
+    if not _alias_digest_well_formed(record.get("source_digest")):
+        return False
+    if not _alias_digest_well_formed(record.get("target_digest")):
+        return False
+    # Optional by contract (SD-112 §13.33.2-(3): verified only "when present"),
+    # but a present-and-malformed value is a broken record, not an absent one --
+    # accepting it would let a forgery opt out of the extra verification simply
+    # by writing garbage into the field.
+    route_hash = record.get("route_hash")
+    if route_hash is not None and not _alias_digest_well_formed(route_hash):
+        return False
+    return True
+
+
+def resolve_completed_alias(stable_root: Path, legacy_jobs_path: str | Path) -> dict | None:
+    """The most recent structurally-valid `completed` alias record whose
+    `legacy_jobs_identity.path` matches `legacy_jobs_path`, or `None`. Route
+    hash / attempt link, when present on the record, are returned for the
+    caller to verify too (decision 1); this function only proves the record
+    is a well-formed completed alias, not that any particular route may use
+    it."""
+
+    target_path = str(Path(legacy_jobs_path).expanduser().resolve(strict=False))
+    match = None
+    for record in read_migration_journal(stable_root):
+        if not _alias_record_valid(record):
+            continue
+        if record["legacy_jobs_identity"]["path"] != target_path:
+            continue
+        match = record  # append-only journal; the latest completed record wins
+    return match
+
+
+class DanglingRegistryResolution(NamedTuple):
+    status: str  # "exact" | "aliased" | "compat-window" | "unresolved"
+    jobs_path: Path | None
+    alias_record: dict | None
+
+
+def resolve_dangling_registry(
+    sealed_jobs: str | Path,
+    *,
+    environ: dict[str, str] | os._Environ[str] | None = None,
+    window_open: bool = True,
+) -> DanglingRegistryResolution:
+    """Classify one absolute sealed `jobs.log` path against current
+    filesystem/journal state (SD-112 §13.33.2-(3)/(6), decision 4).
+    `capability-route.py`'s continuation resolver and (Slice 2) Fleet's row
+    mapping share this one judgement instead of deriving their own.
+
+    exact          sealed_jobs's parent directory still exists -- use it
+                    directly, no alias/window involved.
+    aliased        parent is gone, but the stable migration journal has a
+                    structurally-valid `completed` record mapping sealed_jobs
+                    to a live stable jobs.log. Checked before compat-window
+                    (decision 1): an unvalidated path substitution must never
+                    look like the normal path.
+    compat-window  parent is gone, no alias, and the legacy read window is
+                    still open. This cycle never closes the window, so
+                    `window_open` defaults `True`; a future cycle can pass
+                    the real judgement once `legacy_read_window_may_close()`
+                    is wired to an authoritative count.
+    unresolved     parent is gone, no alias, and the window is closed.
+    """
+
+    sealed = Path(sealed_jobs).expanduser().resolve(strict=False)
+    if sealed.parent.is_dir():
+        return DanglingRegistryResolution("exact", sealed, None)
+    env = os.environ if environ is None else environ
+    try:
+        stable_root = stable_state_root(env)
+    except DispatchContractError:
+        stable_root = None
+    if stable_root is not None:
+        record = resolve_completed_alias(stable_root, sealed)
+        if record is not None:
+            target = Path(record["stable_jobs_identity"]["path"])
+            # The docstring's promise is a *live* stable jobs.log, so require
+            # the file itself. A present parent directory proves nothing about
+            # the alias: a stale or forged record naming any existing
+            # directory would otherwise resurrect a registry that is not
+            # there, and the caller would bind a route to it. Without the file
+            # this is not an alias -- fall through to the compat window.
+            if target.is_file():
+                return DanglingRegistryResolution("aliased", target, record)
+    if window_open:
+        return DanglingRegistryResolution("compat-window", None, None)
+    return DanglingRegistryResolution("unresolved", None, None)
+
+
+LEGACY_READ_WINDOW_MIN_SUPPORTED_RELEASES = 2
+
+
+def legacy_read_window_may_close(
+    *,
+    supported_releases_elapsed: int,
+    legacy_bound_open_writers: int,
+    delta: int,
+    legacy_read_hits: int,
+) -> bool:
+    """Pure four-condition truth table (SD-112 §13.33.2-(6), B-13a). Never
+    touches the filesystem and never calls `_succeed_dispatch_state()`; actual
+    post-promotion delta reachability is Slice 3's B-13b, not this slice's."""
+
+    return (
+        supported_releases_elapsed >= LEGACY_READ_WINDOW_MIN_SUPPORTED_RELEASES
+        and legacy_bound_open_writers == 0
+        and delta == 0
+        and legacy_read_hits == 0
+    )
 
 
 def ensure_launch_broker(
@@ -5024,14 +5465,14 @@ def marker_bound_delivery_transaction(
             and verdict in {"", "PASS"}
         ):
             fields[1] = "done"
+            values = {
+                "note": "completed-marker",
+                "failure_class": "pass",
+                "classifier_source": "marker-bound-delivery-v1",
+            }
+            values.update(_delivery_intent_values(fields, {**metadata, **values}))
             fields[5] = _updated_attempt_metadata(
-                fields[5],
-                {
-                    "note": "completed-marker",
-                    "failure_class": "pass",
-                    "classifier_source": "marker-bound-delivery-v1",
-                },
-                terminal=True,
+                fields[5], values, terminal=True,
             )
             lines[index] = "\t".join(fields)
             _atomic_registry_replace(jobs, lines)
@@ -5314,6 +5755,131 @@ def _row_identity(fields: list[str]) -> tuple[str, ...] | None:
     return None
 
 
+# SD-111 D-2/C-2: duplicated (not imported) from dispatch_completion_join's
+# CANONICAL_RECEIPT_KEYS/CANONICAL_CHILD_KEYS/canonical_receipt_digest/
+# seal_delivery_receipt -- dispatch_completion_join imports THIS module, so
+# the reverse import would be circular. Keep every copy of this vocabulary
+# (here, dispatch_completion_join.py, dispatch_pending_delivery.py)
+# synchronized by hand; §11 forbids widening it.
+_CANONICAL_RECEIPT_KEYS = frozenset({
+    "schema_version", "state", "parent_attempt_id", "job_registry", "children",
+    "delivery_classification",
+})
+_CANONICAL_CHILD_KEYS = frozenset({
+    "attempt_id", "status", "readiness", "reason", "required_action", "harness",
+    "delivery_classification",
+})
+_MAX_DELIVERY_RECEIPT_BYTES = 2048
+_DELIVERY_INTENT_IMMUTABLE_KEYS = frozenset({
+    "delivery_intent", "delivery_id", "delivery_recipient_digest", "delivery_receipt_digest",
+})
+# SD-111 §4.3.1: fixed markers for the two explicit delivery exclusions,
+# found by grep against the actual writer (round 2 required this be resolved
+# by full-value equality, never substring match, before P2 wiring):
+#   - SD-105 cancellation: `utilities/dispatch-registry.py` closes the row via
+#     `close_attempt_row_if(..., evidence={"note": "cancelled-receipt-unavailable", ...})`
+#     (W4) -- exact `note` value, confirmed 2026-08-28.
+#   - SD-110 eligible-linear success: NOT wired. `dispatch_stage_advance.py`
+#     never mutates the predecessor row -- `claim_stage_advance` only writes a
+#     separate claim-record file, and the predecessor's own terminal edge
+#     (whichever of W1-W4 it took) happens *before* stage-advance is even
+#     attempted, so no fixed marker exists on the row at intent-stamp time.
+#     Per the plan's safe default (§4.3.1/§9 R-17) this exclusion is left
+#     UNIMPLEMENTED: a record is created for these rows too. See the P2 dev
+#     log for the full grep trail.
+_SD105_CANCELLED_NOTE = "cancelled-receipt-unavailable"
+
+
+def _delivery_intent_values(fields: list[str], metadata: dict[str, str]) -> dict[str, str]:
+    """Compute the one-time delivery-intent stamp for a row that just took its
+    `open|running -> done` edge (W1-W4), or {} if none is owed.
+
+    Pure: no lock, no I/O, no registry read beyond the row already in hand.
+    Called from inside the same `<jobs>.lock` the writer already holds, right
+    before `_updated_attempt_metadata(..., terminal=True)`.
+    """
+
+    if not metadata.get("parent_completion_delivery") or not metadata.get("parent_sid"):
+        return {}
+    if metadata.get("delivery_intent"):
+        # Already stamped -- W1-W4 share one lock and this function only ever
+        # runs once per row's single open|running->done edge, but a repaired/
+        # conflict path re-invoking this defensively must still no-op.
+        return {}
+    if metadata.get("note") == _SD105_CANCELLED_NOTE:
+        return {}
+
+    attempt_id = metadata.get("attempt_id", "")
+    if not attempt_id:
+        return {}
+    recipient_kind = metadata["parent_completion_delivery"]
+    recipient_key = metadata["parent_sid"]
+    parent_attempt_id = metadata.get("parent_attempt_id", "")
+    route_id = metadata.get("route_id", "")
+    route_node = metadata.get("route_node", "")
+    is_success = (
+        metadata.get("failure_class") == "pass"
+        or metadata.get("note") in {"completed-marker", "completed-supervisor"}
+    )
+    child = {
+        "attempt_id": attempt_id,
+        "status": "done",
+        "readiness": "ready",
+        "harness": metadata.get("harness", ""),
+        "required_action": "advance-completed" if is_success else "inspect-done-failure",
+        "delivery_classification": "success" if is_success else "attention",
+    }
+    if not is_success:
+        child["reason"] = "terminal-failure-or-unclosed"
+    receipt = {
+        "schema_version": 2,
+        "state": "delivered",
+        "parent_attempt_id": parent_attempt_id,
+        "job_registry": "",
+        "children": [child],
+        "delivery_classification": child["delivery_classification"],
+    }
+    canonical = {key: value for key, value in receipt.items() if key in _CANONICAL_RECEIPT_KEYS}
+    canonical["children"] = [
+        {key: value for key, value in child.items() if key in _CANONICAL_CHILD_KEYS}
+    ]
+    canonical_bytes = json.dumps(canonical, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    receipt_digest = hashlib.sha256(canonical_bytes).hexdigest()
+
+    receipt_bytes = json.dumps(receipt, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    if len(receipt_bytes) > _MAX_DELIVERY_RECEIPT_BYTES:
+        # Stamp failure must not block row closure (§4.4): the caller records
+        # this typed refusal on its own evidence key and proceeds to close.
+        return {"delivery_persistence_refused": "pending-delivery-oversized"}
+    sealed = base64.standard_b64encode(receipt_bytes).decode("ascii").rstrip("=")
+
+    row_revision = hashlib.sha256(
+        "\t".join(fields).encode("utf-8")
+    ).hexdigest()
+    identity_material = json.dumps(
+        {
+            "recipient_key": recipient_key,
+            "attempt_ids": [attempt_id],
+            "receipt_digest": receipt_digest,
+            "row_revisions": {attempt_id: row_revision},
+        },
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    delivery_id = "delivery-" + hashlib.sha256(identity_material).hexdigest()[:32]
+
+    return {
+        "delivery_intent": "1",
+        "delivery_id": delivery_id,
+        "delivery_recipient_kind": recipient_kind,
+        "delivery_recipient_digest": hashlib.sha256(recipient_key.encode("utf-8")).hexdigest(),
+        "delivery_receipt_digest": receipt_digest,
+        "delivery_row_revision": row_revision,
+        "delivery_intent_at_ns": str(time.monotonic_ns()),
+        "delivery_receipt_b64": sealed,
+    }
+
+
 def _updated_attempt_metadata(
     pipe: str,
     values: dict[str, str],
@@ -5352,6 +5918,20 @@ def _updated_attempt_metadata(
             raise DispatchContractError(
                 "attempt-launch-outcome-conflict",
                 f"existing={metadata.get(key)} requested={value}",
+            )
+        if (
+            key in _DELIVERY_INTENT_IMMUTABLE_KEYS
+            and metadata.get(key)
+            and metadata.get(key) != value
+        ):
+            # SD-111 §4.4: delivery_intent/delivery_id/delivery_recipient_digest/
+            # delivery_receipt_digest are write-once. `_delivery_intent_values`
+            # already refuses to re-stamp a row that has one (the ordinary
+            # path never reaches here with a changed value); this is the
+            # defense-in-depth the plan asks for at the low-level writer too.
+            raise DispatchContractError(
+                "pending-delivery-identity-conflict",
+                f"key={key} existing={metadata.get(key)} requested={value}",
             )
         replace[key] = value
     retained = [
@@ -5392,6 +5972,7 @@ def close_attempt_row(
                 key: value for key, value in (evidence or {}).items()
                 if value not in (None, "")
             })
+            values.update(_delivery_intent_values(fields, {**metadata, **values}))
             try:
                 fields[5] = _updated_attempt_metadata(
                     fields[5], values, terminal=True
@@ -5545,6 +6126,7 @@ def reconcile_attempt_terminal(
                 if value not in (None, "")
             }
         )
+        values.update(_delivery_intent_values(fields, {**metadata, **values}))
         fields[1] = "done"
         fields[5] = _updated_attempt_metadata(fields[5], values, terminal=True)
         lines[index] = "\t".join(fields)
@@ -5691,6 +6273,7 @@ def close_attempt_row_if(
                 key: value for key, value in (evidence or {}).items()
                 if value not in (None, "")
             })
+            values.update(_delivery_intent_values(fields, {**metadata, **values}))
             try:
                 fields[5] = _updated_attempt_metadata(
                     fields[5], values, terminal=True

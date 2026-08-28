@@ -44,6 +44,14 @@ set -u
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 AGENT_HOME="${AGENT_HOME:-$("$SCRIPT_DIR/../utilities/agent-home.sh")}"
 LIVENESS="$SCRIPT_DIR/../utilities/dispatch-liveness.sh"
+canonical_jobs() {
+  if [ -n "${AGENT_DISPATCH_JOBS:-}" ]; then
+    printf '%s\n' "$AGENT_DISPATCH_JOBS"
+  else
+    root=$($SCRIPT_DIR/../utilities/dispatch-state-root.sh 2>/dev/null) || return 65
+    printf '%s/jobs.log\n' "$root"
+  fi
+}
 
 [ "${MEM_DISTILL:-}" = "1" ] && { cat >/dev/null 2>&1; exit 0; }
 
@@ -101,7 +109,7 @@ if [ "$#" -gt 0 ]; then
       *) echo "conductor-stop-gate: unknown arg '$1'" >&2; exit 64 ;;
     esac
   done
-  [ -n "$jobs" ] || jobs="${AGENT_DISPATCH_JOBS:-$AGENT_HOME/.dispatch/jobs.log}"
+  [ -n "$jobs" ] || jobs=$(canonical_jobs) || exit $?
   decide "$self" "$jobs" "$stop_active" || true
   exit 0
 fi
@@ -112,6 +120,6 @@ input=$(cat 2>/dev/null)
 stop_active=$(printf '%s' "$input" | grep -o '"stop_hook_active"[[:space:]]*:[[:space:]]*true' | head -1)
 [ -n "$stop_active" ] && stop_active="true" || stop_active="false"
 self="${AGENT_DISPATCH_SELF_SLUG:-}"
-jobs="${AGENT_DISPATCH_JOBS:-$AGENT_HOME/.dispatch/jobs.log}"
+jobs=$(canonical_jobs) || exit $?
 decide "$self" "$jobs" "$stop_active" || true
 exit 0

@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import copy
 from dataclasses import dataclass, field
 import hashlib
 import json
@@ -380,7 +381,63 @@ class DeliveryLedger:
         row = self.value["deliveries"].get(delivery_id)
         return dict(row) if isinstance(row, dict) else None
 
-    def transition(
+    # SD-111 P5 (A-23): the pending-delivery record is the single authority
+    # over completion-delivery state; this ledger is its projection, never a
+    # second independent commit. `_transition` is private -- the class's own
+    # internal completion machinery (below) still calls it directly, but no
+    # external module may. `project_from_pending_delivery` is the ledger's
+    # only public state-transition entry point. Graded `structural` (plan
+    # §7.1-4): one public entry point is design enforcement, not proof that
+    # no second commit path exists anywhere in this file.
+    _PENDING_DELIVERY_LEDGER_STATE = {
+        "pending": "prepared",
+        "claimed": "prepared",
+        "sent-ambiguous": "sent",
+        "acked": "accepted",
+        "expired": "rejected",
+    }
+
+    def project_from_pending_delivery(self, record: dict[str, Any]) -> dict[str, Any]:
+        """Project one already-authoritative `dispatch_pending_delivery`
+        record's state onto this ledger. A malformed or unrecognized record
+        raises a typed `GatewayError` and leaves the ledger at exactly its
+        value before this call -- a projection failure never applies
+        partially and never manufactures a second authority (§4.4's
+        "materialization is not a carrier side effect" invariant, applied
+        here to projection instead)."""
+
+        if not isinstance(record, dict):
+            raise GatewayError("ledger-projection-source-invalid")
+        delivery_id = record.get("delivery_id")
+        state = self._PENDING_DELIVERY_LEDGER_STATE.get(record.get("state"))
+        receipt_digest = record.get("receipt_digest")
+        parent_attempt_id = record.get("parent_attempt_id")
+        if (
+            not isinstance(delivery_id, str) or not delivery_id
+            or state is None
+            or not isinstance(receipt_digest, str) or not receipt_digest
+            or not isinstance(parent_attempt_id, str) or not parent_attempt_id
+        ):
+            raise GatewayError("ledger-projection-source-invalid")
+        receipt = record.get("receipt")
+        thread_id = ""
+        if isinstance(receipt, dict) and isinstance(receipt.get("job_registry"), str):
+            thread_id = receipt["job_registry"]
+        snapshot = copy.deepcopy(self.value)
+        try:
+            return self._transition(
+                delivery_id,
+                state,
+                thread_id=thread_id,
+                parent_attempt_id=parent_attempt_id,
+                sealed_batch_id=delivery_id,
+                receipt_digest=receipt_digest,
+            )
+        except GatewayError:
+            self.value = snapshot
+            raise
+
+    def _transition(
         self,
         delivery_id: str,
         state: str,
@@ -1543,7 +1600,7 @@ class ManagedGateway:
                         "reason": "thread-not-owned-by-current-tui",
                     }
                 if existing is None:
-                    self.ledger.transition(
+                    self.ledger._transition(
                         delivery_id, "prepared", **identity
                     )
                 pending = PendingInternal(
@@ -1620,7 +1677,7 @@ class ManagedGateway:
             state.steer_ready = False
             state.pending_start_id = key
             state.pending_start_owner = "completion"
-        self.ledger.transition(
+        self.ledger._transition(
             pending.delivery_id,
             "sent",
             action=action,
@@ -1652,7 +1709,7 @@ class ManagedGateway:
         self, pending: PendingInternal, action: str
     ) -> None:
         try:
-            self.ledger.transition(
+            self.ledger._transition(
                 pending.delivery_id,
                 "accepted",
                 action=action,
@@ -1687,7 +1744,7 @@ class ManagedGateway:
         self, pending: PendingInternal, reason: str
     ) -> None:
         try:
-            self.ledger.transition(
+            self.ledger._transition(
                 pending.delivery_id,
                 "rejected",
                 reason=reason,

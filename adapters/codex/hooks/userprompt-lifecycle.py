@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import signal
@@ -27,6 +28,9 @@ if str(UTILITIES) not in sys.path:
 from fleet.token_accounting import record_accounting  # noqa: E402
 from fleet.token_budget import DIRECTIVE_TEXTS  # noqa: E402
 from session_summary_trigger import launch_trigger  # noqa: E402
+
+SD111_SWEEP_RECIPIENT_KIND = "codex-stop-hook"
+SD111_SWEEP_SESSION_GENERATION = "unsupported"
 
 
 @dataclass
@@ -279,6 +283,54 @@ def token_budget_context(current_cwd: str, sid: str) -> str:
     return contribution
 
 
+def _sd111_sweep_marker(root: Path, sid: str) -> Path:
+    digest = hashlib.sha256(sid.encode("utf-8")).hexdigest()
+    return root / "session-sweep-markers" / f"{digest}.marker"
+
+
+def sd111_first_prompt_sweep(sid: str) -> None:
+    """SD-111 P4 -- Codex carrier 2. There is no confirmed Codex
+    SessionStart-equivalent surface (plan §P4), so this runs at the first
+    UserPromptSubmit of a session only -- gated by a durable per-session
+    marker file, never on every turn. Codex is measured `unproven` for
+    session-generation proof (§3.5), so the sweep is always refused with
+    `pending-delivery-generation-unproven`; that refusal is the point.
+    Fail-open end to end: any failure here is swallowed and never surfaces to
+    the prompt.
+    """
+
+    if not sid:
+        return
+    try:
+        from dispatch_contract import dispatch_state_roots, resolve_agent_home
+        from dispatch_session_sweep import sweep
+    except Exception:
+        return
+    try:
+        roots = dispatch_state_roots(resolve_agent_home())
+    except Exception:
+        return
+    if not roots:
+        return
+    marker = _sd111_sweep_marker(roots[0], sid)
+    if marker.exists():
+        return
+    try:
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.touch(exist_ok=True)
+    except OSError:
+        return
+    seen: set[Path] = set()
+    for root in roots:
+        if root in seen:
+            continue
+        seen.add(root)
+        try:
+            sweep(root, SD111_SWEEP_RECIPIENT_KIND, sid, SD111_SWEEP_SESSION_GENERATION)
+        except Exception:
+            continue
+
+
 def main() -> int:
     payload = load_payload()
     # Dispatch prompts carry their own explicit status/prompt-signal/mode
@@ -303,6 +355,7 @@ def main() -> int:
     sid = session_id(payload)
     if interaction_sid:
         launch_trigger("codex", interaction_sid, "initial")
+    sd111_first_prompt_sweep(sid)
 
     parts = []
     parts.append(candidate_context(payload, current_cwd, sid))

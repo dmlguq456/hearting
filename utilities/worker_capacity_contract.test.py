@@ -243,12 +243,15 @@ class WorkerCapacityContractTest(unittest.TestCase):
             evidence.write_text("combined gate PASS\n")
             prior = os.environ.get("AGENT_HOME")
             os.environ["AGENT_HOME"] = str(agent_home)
-            # completion_dir() resolves the dispatch state root ahead of
-            # AGENT_HOME/.dispatch, preferring an inherited AGENT_DISPATCH_JOBS
-            # -- clear it so this in-process test isn't sensitive to the
-            # invoking shell's real registry.
+            # SD-112 chain-3 supersession (§13.33.2-(8)): completion_dir()'s
+            # env-less fallback no longer resolves under AGENT_HOME/.dispatch
+            # at all -- it always lands under the stable per-user root now.
+            # Pin an explicit AGENT_DISPATCH_JOBS under this fixture's
+            # isolated `agent_home` instead, so this in-process test stays
+            # isolated from the invoking shell's real registry exactly as
+            # the comment always intended.
             prior_jobs = os.environ.get("AGENT_DISPATCH_JOBS")
-            os.environ.pop("AGENT_DISPATCH_JOBS", None)
+            os.environ["AGENT_DISPATCH_JOBS"] = str(agent_home / ".dispatch" / "jobs.log")
             try:
                 route["_route_file"] = str(route_path)
                 marker, receipt = ROUTE.complete_subsession_stage(

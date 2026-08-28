@@ -397,6 +397,77 @@ class FallbackTest(unittest.TestCase):
   # dropped -- they stay reachable later in rank as fallback hops.
   self.assertEqual(context["rank"][0],"opencode")
   self.assertEqual(set(context["rank"]),{"claude","codex","opencode"})
+ def _depth_affinity_node(self,depth):
+  return {
+   "harness_affinity":"diverse",
+   "dispatch_depth":depth,
+   "harness_policy":{"primary":["claude","codex"],"relief":[],
+                     "last_resort":["opencode"],"promote_relief_below":0},
+   "fallback_hops":[
+    {"ordinal":1,"fallback_hop":"same-harness-headless","candidates":[
+     {"child_harness":"claude","status":"supported"}]},
+    {"ordinal":2,"fallback_hop":"cross-harness-headless","candidates":[
+     {"child_harness":"codex","status":"supported"},
+     {"child_harness":"opencode","status":"supported"}]},
+    {"ordinal":3,"fallback_hop":"native-subagent","candidates":[]},
+    {"ordinal":4,"fallback_hop":"inline","candidates":[]},
+   ],
+  }
+ def _depth_affinity_route(self,order,*,affinity=True):
+  allocation={"strategy":"balanced","window":30,"usage_gate_used_percent":90,
+              "harness_order":list(order)}
+  if affinity:
+   allocation.update({"depth_affinity":{"owner":"claude","worker":"codex"},
+                      "depth_affinity_weight":0.65,"usage_headroom_exponent":2})
+  return {"dispatch_allocation":allocation}
+ def _depth_affinity_rank(self,order,depth,*,affinity=True):
+  with mock.patch.object(F,"_usage_states",return_value={
+      "claude":"ok","codex":"ok","opencode":"ok"}), \
+      mock.patch.object(F.CAPACITY,"capacity_scores",return_value={
+       "claude":80,"codex":80,"opencode":80}):
+   _hops,context=F.ordered_fallback_hops(
+    self._depth_affinity_route(order,affinity=affinity),
+    self._depth_affinity_node(depth),self.jobs)
+  return context["rank"]
+ def test_depth_affinity_leads_at_its_own_depth_and_flips_at_the_other(self):
+  # Equal headroom and an empty registry, so the neutral order is exactly the
+  # declared one. The preference is read from the node's own dispatch_depth:
+  # owner->claude at depth 1, worker->codex at depth 2. Both declared orders are
+  # exercised so each depth is shown flipping a neutral head, not just agreeing
+  # with it.
+  self.assertEqual(self._depth_affinity_rank(["claude","codex","opencode"],2,
+                                             affinity=False)[0],"claude")
+  self.assertEqual(self._depth_affinity_rank(["claude","codex","opencode"],2)[0],"codex")
+  self.assertEqual(self._depth_affinity_rank(["claude","codex","opencode"],1)[0],"claude")
+  self.assertEqual(self._depth_affinity_rank(["codex","claude","opencode"],1,
+                                             affinity=False)[0],"codex")
+  self.assertEqual(self._depth_affinity_rank(["codex","claude","opencode"],1)[0],"claude")
+  self.assertEqual(self._depth_affinity_rank(["codex","claude","opencode"],2)[0],"codex")
+ def test_explicit_capacity_bias_beats_configured_depth_affinity(self):
+  # D6/A1: `preferred_for_depth` returns None while a valid HARNESS_CAPACITY_BIAS
+  # is set, so the configured preference is neutralized at its single source and
+  # the resulting order is identical to the same inputs with the keys absent.
+  # No consumer re-reads the env var for this feature, and no re-hoist was added.
+  for order in (["claude","codex","opencode"],["codex","claude","opencode"]):
+   for bias in ("claude","codex"):
+    with mock.patch.dict(os.environ,{"HARNESS_CAPACITY_BIAS":bias}):
+     configured=self._depth_affinity_rank(order,2)
+     absent=self._depth_affinity_rank(order,2,affinity=False)
+    self.assertEqual(configured,absent)
+    self.assertEqual(configured[0],bias)
+ def test_depth_affinity_cannot_lift_a_gated_harness_over_an_ungated_peer(self):
+  # DP-24: the gate bit is the outermost element of the balanced sort key, so a
+  # depth preference for a gated harness never crosses the class boundary.
+  with mock.patch.object(F,"_usage_states",return_value={
+      "claude":"ok","codex":"ok","opencode":"ok"}), \
+      mock.patch.object(F.CAPACITY,"capacity_scores",return_value={
+       "claude":80,"codex":5,"opencode":80}):
+   _hops,context=F.ordered_fallback_hops(
+    self._depth_affinity_route(["claude","codex","opencode"]),
+    self._depth_affinity_node(2),self.jobs)
+  self.assertEqual(context["rank"][0],"claude")
+  self.assertEqual(context["rank"][-1],"codex")
+  self.assertEqual(set(context["rank"]),{"claude","codex","opencode"})
  def test_balanced_stage_affinity_cannot_lift_a_gated_harness(self):
   node={
    "harness_affinity":"claude",

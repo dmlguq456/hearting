@@ -34,6 +34,7 @@ from dispatch_contract import (  # noqa: E402
     DispatchContractError,
     reconcile_attempt_terminal,
 )
+from dispatch_completion_join import materialize_after_terminal_close  # noqa: E402
 
 # SIGTERM → wait → (ASK AGAIN) → SIGKILL. This is the wait, not an auto-escalation timer:
 # nothing escalates when it expires; the UI re-prompts and the user decides again.
@@ -311,4 +312,13 @@ def close_registry_row(jobs, attempt_id):
         )
     except (DispatchContractError, OSError):
         return False
+    # SD-111 P2 trigger 1. Not a new fleet transition authority: this
+    # function already performs the terminal `open|running -> done` write
+    # above (reconcile_attempt_terminal), and only this module (F-27, a
+    # human-confirmed control action, never the read-only collector) may do
+    # that. Materializing merely turns intent this call site already stamped
+    # into its durable record -- it commits no state fleet did not already
+    # commit one line above.
+    if result == "closed":
+        materialize_after_terminal_close(Path(jobs), attempt_id)
     return result == "closed"

@@ -213,6 +213,45 @@ function collectCandidates(args) {
   return (result.stdout || "").trim()
 }
 
+// SD-111 P4 -- OpenCode carrier 2. Called only from "chat.message" (turn
+// identity), never from "experimental.chat.system.transform" (which the
+// header comment above documents as re-firing on every model call --
+// title generation, the answering turn, and every tool-loop continuation).
+// A22 asserts zero re-injection there; this function must never be called
+// from that handler. OpenCode is measured `documented-only` for
+// session-generation proof (§3.5), so the sweep this spawns is always
+// refused with `pending-delivery-generation-unproven` -- fire-and-forget,
+// fail-open, must never block or throw into the turn.
+function sd111SessionSweep(sid) {
+  if (!sid || isWorkerSession()) return
+  const script = [
+    "import sys",
+    "sys.path.insert(0, sys.argv[2])",
+    "try:",
+    "    from dispatch_contract import dispatch_state_roots, resolve_agent_home",
+    "    from dispatch_session_sweep import sweep",
+    "    roots = dispatch_state_roots(resolve_agent_home())",
+    "except Exception:",
+    "    roots = ()",
+    "for r in roots:",
+    "    try:",
+    "        sweep(r, 'opencode-turn', sys.argv[1], 'unsupported')",
+    "    except Exception:",
+    "        pass",
+  ].join("\n")
+  try {
+    const child = spawn("python3", ["-c", script, sid, path.join(root, "utilities")], {
+      cwd: root,
+      env: { ...process.env, AGENT_HOME: root },
+      detached: true,
+      stdio: "ignore",
+    })
+    child.unref()
+  } catch {
+    // best-effort; carrier 2 must never block a turn
+  }
+}
+
 function appendContext(output, text) {
   if (!text) return
   if (!Array.isArray(output.system)) output.system = []
@@ -271,6 +310,7 @@ export const AgentHarnessGuards = async (ctx) => {
     const eventSid = input.sessionID || output?.message?.sessionID || ""
     const sid = eventSid || "opencode-plugin"
     spawnSummary(eventSid, "initial")
+    sd111SessionSweep(sid)
     const prompt = promptText(output)
     const turn = input.messageID || output?.message?.id || ""
     if (prompt) promptBySession.set(sid, prompt)

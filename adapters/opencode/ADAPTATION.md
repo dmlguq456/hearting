@@ -458,7 +458,9 @@ they are not OpenCode runtime support.
 detection: `--early-exit-watch <secs>` watches a just-launched `opencode run` child; on a
 clean exit within the window whose log tail matches a limit/auth `DEATH_PATTERN`, the wrapper
 closes its own `jobs.log` row to `done,note=dead-<reason>[,reset=<x>]`, writes
-`.dispatch/usage-reset.opencode` (SD-16 cache), and surfaces `early_death=`/`row_closed=`. It
+`usage-reset.opencode` under the canonical dispatch state root (the
+registry's parent directory, SD-112 §13.33.2 — never a release-relative path;
+SD-16 cache), and surfaces `early_death=`/`row_closed=`. It
 also adds a `jobs_lock` flock so the SD-15 row-rewrite and concurrent appends cannot interleave.
 No retry — detection/closure/surfacing only.
 

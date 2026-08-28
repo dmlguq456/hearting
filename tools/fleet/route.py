@@ -331,7 +331,7 @@ def _dispatch_state_roots(home=None, jobs=None):
             if str(utilities_dir) not in sys.path:
                 sys.path.insert(0, str(utilities_dir))
             try:
-                from dispatch_contract import dispatch_state_roots
+                from dispatch_contract import dispatch_state_roots, resolve_dangling_registry
 
                 return [
                     str(root)
@@ -523,6 +523,52 @@ def gate_mark(record, node_id, home=None, state_roots=None):
     return True
 
 
+def _resolve_dangling_registry(jobs):
+    """Lazy, tolerant lookup of ``dispatch_contract.resolve_dangling_registry``.
+
+    Mirrors ``_dispatch_state_roots``'s own on-demand ``sys.path`` wiring --
+    this module stays stdlib-only until it actually needs the shared contract
+    (module docstring). Any resolution failure returns ``None`` so the caller
+    falls back to the full candidate list instead of guessing at a one-root
+    reduction it cannot prove.
+    """
+
+    here = Path(__file__).resolve()
+    for candidate in here.parents:
+        utilities_dir = candidate / "utilities"
+        if (utilities_dir / "dispatch_contract.py").is_file():
+            if str(utilities_dir) not in sys.path:
+                sys.path.insert(0, str(utilities_dir))
+            try:
+                from dispatch_contract import resolve_dangling_registry
+
+                return resolve_dangling_registry(jobs)
+            except Exception:
+                return None
+    return None
+
+
+def _row_roots_for_registry(candidates, registry_path):
+    """One row-owned root for an exact/aliased registry; the full read-order
+    candidate list for a genuinely dangling row still inside the
+    compatibility window, or when the classifier itself is unavailable.
+
+    ``exact`` keeps the row's own directory (``candidates[0]``, already
+    derived from ``registry_path``). ``aliased`` must NOT reuse that same
+    stale directory -- it substitutes the alias record's live stable target
+    instead, which is the whole point of the alias.
+    """
+
+    resolution = _resolve_dangling_registry(registry_path)
+    if resolution is None:
+        return candidates
+    if resolution.status == "exact":
+        return candidates[:1]
+    if resolution.status == "aliased" and resolution.jobs_path is not None:
+        return [str(resolution.jobs_path.parent)]
+    return candidates
+
+
 def _route_state_roots(route_id, jobs, home=None, node_evidence=None):
     """Return route-owned state roots, with observer state only as a last fallback.
 
@@ -538,16 +584,17 @@ def _route_state_roots(route_id, jobs, home=None, node_evidence=None):
         launch_home = getattr(job, "_launch_home", None) or home or _completion_home()
         registry_path = getattr(job, "_registry_path", None)
         candidates = _dispatch_state_roots(launch_home, jobs=registry_path)
-        # dispatch_state_roots deliberately includes an agent-home legacy read
-        # fallback. Once the row names an exact registry, that fallback belongs
-        # to the observer/launcher and is not route evidence.
-        roots.extend(candidates[:1] if registry_path else candidates)
+        if registry_path:
+            roots.extend(_row_roots_for_registry(candidates, registry_path))
+        else:
+            roots.extend(candidates)
     for evidence in (node_evidence or {}).values():
         if not isinstance(evidence, dict):
             continue
         registry_path = evidence.get("_registry_path")
         if registry_path:
-            roots.extend(_dispatch_state_roots(home, jobs=registry_path)[:1])
+            candidates = _dispatch_state_roots(home, jobs=registry_path)
+            roots.extend(_row_roots_for_registry(candidates, registry_path))
     if not roots:
         roots.extend(_dispatch_state_roots(home))
     result = []

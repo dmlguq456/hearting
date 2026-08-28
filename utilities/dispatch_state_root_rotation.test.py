@@ -218,11 +218,25 @@ class IdempotentRepublishAcrossSpellingTest(unittest.TestCase):
             "execution_surface": "inline",
             "kind": "stage",
         }
+        # SD-112 §13.33.2-(8) chain-3 supersession: the env-less fallback no
+        # longer resolves relative to AGENT_HOME at all (pointer vs resolved
+        # spelling is no longer part of its path derivation), so this
+        # fixture must pin an isolated stable root instead of asserting
+        # AGENT_HOME's own spelling ends up embedded in it -- and must not
+        # touch the real developer HOME (C3) doing so.
+        self.stable_home = self.base / "stable-home"
         self.prior_env = {
             key: os.environ.get(key)
-            for key in ("AGENT_HOME", "AGENT_DISPATCH_JOBS")
+            for key in ("AGENT_HOME", "AGENT_DISPATCH_JOBS", "HOME", "XDG_STATE_HOME", "HARNESS_STATE_ROOT")
         }
         os.environ.pop("AGENT_DISPATCH_JOBS", None)
+        os.environ.pop("XDG_STATE_HOME", None)
+        os.environ.pop("HARNESS_STATE_ROOT", None)
+        os.environ["HOME"] = str(self.stable_home)
+        self.stable_completion = (
+            self.stable_home / ".local" / "state" / "hearting" / "dispatch"
+            / "completion" / "rt-p1"
+        )
 
     def tearDown(self):
         for key, value in self.prior_env.items():
@@ -241,15 +255,14 @@ class IdempotentRepublishAcrossSpellingTest(unittest.TestCase):
     def test_republish_with_resolved_spelling_is_idempotent(self):
         self._publish(self.current)
         sidecars = list(
-            (self.release / ".dispatch" / "completion" / "rt-p1").glob(
-                "plan.att-*.attempt.json"
-            )
+            self.stable_completion.glob("plan.att-*.attempt.json")
         )
         self.assertEqual(len(sidecars), 1)
         original_bytes = sidecars[0].read_bytes()
         recorded = json.loads(original_bytes)
-        # Chain-3 with a symlinked AGENT_HOME records pointer form.
-        self.assertIn(str(self.current), recorded["completion_marker"])
+        # Chain-3 no longer varies by AGENT_HOME spelling at all -- the
+        # marker always lands under the one stable root.
+        self.assertIn(str(self.stable_home), recorded["completion_marker"])
 
         # Same attempt, same files, AGENT_HOME now spelled as the resolved
         # release: must not raise, and must not rewrite the origin bytes.
@@ -296,11 +309,20 @@ class FleetGateMarkSpellingFlipTest(unittest.TestCase):
             }],
         }
         self.node = self.route["nodes"][0]
+        # SD-112 §13.33.2-(8) chain-3 supersession (see
+        # IdempotentRepublishAcrossSpellingTest): the env-less fallback no
+        # longer varies by AGENT_HOME spelling, so pin an isolated stable
+        # root instead of the release tree, and never touch the real
+        # developer HOME (C3) doing so.
+        self.stable_home = self.base / "stable-home"
         self.prior_env = {
             key: os.environ.get(key)
-            for key in ("AGENT_HOME", "AGENT_DISPATCH_JOBS")
+            for key in ("AGENT_HOME", "AGENT_DISPATCH_JOBS", "HOME", "XDG_STATE_HOME", "HARNESS_STATE_ROOT")
         }
         os.environ.pop("AGENT_DISPATCH_JOBS", None)
+        os.environ.pop("XDG_STATE_HOME", None)
+        os.environ.pop("HARNESS_STATE_ROOT", None)
+        os.environ["HOME"] = str(self.stable_home)
         self.addCleanup(self._restore_env)
 
     def _restore_env(self):
@@ -317,13 +339,14 @@ class FleetGateMarkSpellingFlipTest(unittest.TestCase):
             attempt_id="att-gm1", attempt_metadata=None,
         )
         sidecar = (
-            self.release / ".dispatch" / "completion" / "rt-gm1"
-            / "plan.att-gm1.attempt.json"
+            self.stable_home / ".local" / "state" / "hearting" / "dispatch"
+            / "completion" / "rt-gm1" / "plan.att-gm1.attempt.json"
         )
         self.assertTrue(sidecar.is_file())
         recorded = json.loads(sidecar.read_text())
-        # Chain-3 with a symlinked AGENT_HOME records pointer form.
-        self.assertIn(str(self.current), recorded["completion_marker"])
+        # Chain-3 no longer varies by AGENT_HOME spelling -- the marker
+        # always lands under the one stable root, regardless of it.
+        self.assertIn(str(self.stable_home), recorded["completion_marker"])
 
         # gate_mark is called with `home` spelled as the resolved release,
         # NOT the pointer form the marker was written under -- the
@@ -471,6 +494,11 @@ class IdempotentRepublishAcrossRotationSuccessionTest(unittest.TestCase):
 
     def _publish(self, home):
         os.environ["AGENT_HOME"] = str(home)
+        # SD-112 chain-3 supersession: the env-less fallback no longer
+        # resolves under a specific release at all, so this fixture -- which
+        # exercises _succeed_dispatch_state's release-embedded carry-forward
+        # -- must pin the registry explicitly to keep landing there.
+        os.environ["AGENT_DISPATCH_JOBS"] = str(Path(home) / ".dispatch" / "jobs.log")
         return ROUTE._publish_completion_locked(
             self.route, self.node, "plan", self.evidence,
             attempt_id="att-succ", attempt_metadata=None,
@@ -648,6 +676,9 @@ class PrefixCollisionRotationSuccessionTest(unittest.TestCase):
 
     def _publish(self, home, node_id):
         os.environ["AGENT_HOME"] = str(home)
+        # SD-112 chain-3 supersession: see IdempotentRepublishAcrossRotation
+        # SuccessionTest -- pin the registry explicitly under `home`.
+        os.environ["AGENT_DISPATCH_JOBS"] = str(Path(home) / ".dispatch" / "jobs.log")
         return ROUTE._publish_completion_locked(
             self.route, self.node, node_id, self.evidence,
             attempt_id=f"att-{node_id}", attempt_metadata=None,
@@ -770,6 +801,9 @@ class SymlinkedDataRootRotationSuccessionTest(unittest.TestCase):
 
     def _publish(self, home):
         os.environ["AGENT_HOME"] = str(home)
+        # SD-112 chain-3 supersession: see IdempotentRepublishAcrossRotation
+        # SuccessionTest -- pin the registry explicitly under `home`.
+        os.environ["AGENT_DISPATCH_JOBS"] = str(Path(home) / ".dispatch" / "jobs.log")
         return ROUTE._publish_completion_locked(
             self.route, self.node, "plan", self.evidence,
             attempt_id="att-symroot", attempt_metadata=None,
@@ -960,7 +994,12 @@ class RegistryRepairStaleRowTest(unittest.TestCase):
             key: os.environ.get(key) for key in ("AGENT_HOME", "AGENT_DISPATCH_JOBS")
         }
         os.environ["AGENT_HOME"] = str(self.home)
-        os.environ.pop("AGENT_DISPATCH_JOBS", None)
+        # SD-112 chain-3 supersession: the env-less fallback no longer
+        # resolves under `self.home` at all, so pin the registry explicitly
+        # to the location this fixture already prepared (`self.jobs`) and
+        # passes to `dispatch-registry.py --jobs` -- never touch the real
+        # developer HOME (C3) via the old checkout-relative fallback.
+        os.environ["AGENT_DISPATCH_JOBS"] = str(self.jobs)
         self.addCleanup(self._restore_env)
 
     def _restore_env(self):
@@ -1135,6 +1174,585 @@ class RegistryRowIdentityParityTest(unittest.TestCase):
                     DISTRIBUTION._registry_row_identity(fields),
                     DC._row_identity(fields),
                 )
+
+
+class StableStateRootParityTest(unittest.TestCase):
+    """SD-112 decision 6: `tools/install/distribution.py`'s standalone
+    `stable_state_root()` mirror must resolve to the exact same absolute
+    path as `utilities/dispatch_contract.py`'s runtime helper for the same
+    env matrix -- the installer cannot import `utilities/` (bootstrap
+    constraint), so the two copies are bound together by this fixture
+    instead of a shared import."""
+
+    def _matrix(self, base):
+        return [
+            {"HOME": str(base / "home1")},
+            {"HOME": str(base / "home2"), "XDG_STATE_HOME": str(base / "xdg2")},
+            {
+                "HOME": str(base / "home3"),
+                "XDG_STATE_HOME": str(base / "xdg3"),
+                "HARNESS_STATE_ROOT": str(base / "hsr3"),
+            },
+            {"HOME": str(base / "home4"), "HARNESS_STATE_ROOT": str(base / "hsr4")},
+        ]
+
+    def test_installer_mirror_matches_runtime_helper_across_env_matrix(self):
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            for env in self._matrix(base):
+                with self.subTest(env=env):
+                    self.assertEqual(
+                        DISTRIBUTION.stable_state_root(env),
+                        DC.stable_state_root(env),
+                    )
+
+    def test_installer_mirror_empty_environ_never_touches_live_home(self):
+        with self.assertRaises(DISTRIBUTION.DistributionError):
+            DISTRIBUTION.stable_state_root({})
+        with self.assertRaises(DC.DispatchContractError):
+            DC.stable_state_root({})
+
+
+class MigrationAliasWriterReaderParityTest(unittest.TestCase):
+    """SD-112 §13.33.2-(3)/(4): the record the installer writes at M4 must be
+    one the runtime's alias reader actually accepts.
+
+    The two sides live in different modules that cannot import each other, so
+    nothing but this fixture stops them from drifting. They did drift once:
+    the writer emitted bare hex digests while the reader's contract is the
+    repository-wide `sha256:<64 hex>` spelling -- invisible for as long as the
+    reader only checked that the field was non-empty.
+    """
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.base = Path(self.temp.name)
+        self.prior_env = {
+            key: os.environ.get(key)
+            for key in ("AGENT_HOME", "AGENT_DISPATCH_JOBS", "HOME", "XDG_STATE_HOME", "HARNESS_STATE_ROOT", "HARNESS_DATA_ROOT")
+        }
+        os.environ.pop("AGENT_DISPATCH_JOBS", None)
+        os.environ.pop("XDG_STATE_HOME", None)
+        os.environ.pop("HARNESS_STATE_ROOT", None)
+        os.environ["HOME"] = str(self.base / "stable-home")
+        os.environ["HARNESS_DATA_ROOT"] = str(self.base / "data")
+        self.addCleanup(self._restore_env)
+
+    def _restore_env(self):
+        for key, value in self.prior_env.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+    def _migrate_one_release(self):
+        release = DISTRIBUTION.data_root() / "releases" / "v-alias-parity"
+        (release / "core").mkdir(parents=True)
+        (release / "core" / "CORE.md").write_text("fixture\n", encoding="utf-8")
+        legacy_dispatch = release / ".dispatch"
+        legacy_dispatch.mkdir(parents=True)
+        (legacy_dispatch / "jobs.log").write_text(
+            "2026-08-01T00:00:00Z\tdone\t/r\t/w\tatt-alias\t"
+            "attempt_schema_version=2,registered_worker=1,attempt_id=att-alias,"
+            "harness=claude\n",
+            encoding="utf-8",
+        )
+        result = DISTRIBUTION.run_dispatch_state_migration(
+            legacy_dispatch, environ=os.environ
+        )
+        self.assertEqual(result["status"], "completed")
+        return legacy_dispatch / "jobs.log"
+
+    def test_installer_written_record_is_accepted_by_the_runtime_reader(self):
+        legacy_jobs = self._migrate_one_release()
+        stable_root = DC.stable_state_root(os.environ)
+        record = DC.resolve_completed_alias(stable_root, legacy_jobs)
+        self.assertIsNotNone(
+            record,
+            "the M4 record the installer just wrote must pass the runtime's "
+            "own structural validation",
+        )
+        self.assertTrue(DC._alias_record_valid(record))
+        for value in (
+            record["legacy_jobs_identity"]["content_digest"],
+            record["stable_jobs_identity"]["content_digest"],
+            record["source_digest"],
+            record["target_digest"],
+        ):
+            self.assertTrue(DC._alias_digest_well_formed(value), value)
+
+    def test_pruned_source_resolves_through_the_written_record(self):
+        legacy_jobs = self._migrate_one_release()
+        shutil.rmtree(legacy_jobs.parent)
+        resolution = DC.resolve_dangling_registry(legacy_jobs, environ=os.environ)
+        self.assertEqual(resolution.status, "aliased")
+        self.assertEqual(
+            resolution.jobs_path, DC.stable_state_root(os.environ) / "jobs.log"
+        )
+
+
+class MigrationAliasRecordValidationTest(unittest.TestCase):
+    """SD-112 §13.33.2-(3): `completed` plus a filled-in field is not a
+    digest check. Each case below is a record that is *structurally complete*
+    in the old sense and must still be refused."""
+
+    def _record(self, **overrides):
+        record = {
+            "record_version": DC.MIGRATION_ALIAS_RECORD_VERSION,
+            "status": "completed",
+            "legacy_jobs_identity": {
+                "path": "/legacy/.dispatch/jobs.log",
+                "content_digest": "sha256:" + "a" * 64,
+            },
+            "stable_jobs_identity": {
+                "path": "/stable/hearting/dispatch/jobs.log",
+                "content_digest": "sha256:" + "b" * 64,
+            },
+            "source_digest": "sha256:" + "c" * 64,
+            "target_digest": "sha256:" + "d" * 64,
+        }
+        record.update(overrides)
+        return record
+
+    def test_well_formed_record_is_accepted(self):
+        self.assertTrue(DC._alias_record_valid(self._record()))
+        self.assertTrue(
+            DC._alias_record_valid(
+                self._record(route_hash="sha256:" + "e" * 64)
+            )
+        )
+
+    def test_non_digest_content_digest_is_refused(self):
+        for bad in ("x", "sha256:", "sha256:" + "a" * 63, "a" * 64, "SHA256:" + "a" * 64,
+                    "sha256:" + "A" * 64, 1, None):
+            with self.subTest(bad=bad):
+                record = self._record()
+                record["stable_jobs_identity"]["content_digest"] = bad
+                self.assertFalse(DC._alias_record_valid(record))
+
+    def test_non_digest_tree_digest_is_refused(self):
+        for field in ("source_digest", "target_digest"):
+            with self.subTest(field=field):
+                self.assertFalse(DC._alias_record_valid(self._record(**{field: "x"})))
+
+    def test_relative_or_empty_identity_path_is_refused(self):
+        for bad in ("relative/jobs.log", "", None, 7):
+            with self.subTest(bad=bad):
+                record = self._record()
+                record["legacy_jobs_identity"]["path"] = bad
+                self.assertFalse(DC._alias_record_valid(record))
+
+    def test_present_but_malformed_route_hash_is_refused(self):
+        # Absent is allowed (verified only when present); garbage is not --
+        # otherwise a forgery opts out of the extra check for free.
+        self.assertFalse(DC._alias_record_valid(self._record(route_hash="nope")))
+
+
+class MigrationM0ToM4PromotionTest(unittest.TestCase):
+    """SD-112 M0-M4 + B-1/B-13b: a full migration run promotes a
+    release-embedded `.dispatch` tree into the stable root, and the stable
+    registry's `jobs.log` identity (path, device, inode, ctime) survives
+    two subsequent rotations that have nothing new to carry -- the
+    cycle-2 gate for SD-111."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.base = Path(self.temp.name)
+        self.prior_env = {
+            key: os.environ.get(key)
+            for key in ("AGENT_HOME", "AGENT_DISPATCH_JOBS", "HOME", "XDG_STATE_HOME", "HARNESS_STATE_ROOT", "HARNESS_DATA_ROOT")
+        }
+        self.stable_home = self.base / "stable-home"
+        os.environ.pop("AGENT_DISPATCH_JOBS", None)
+        os.environ.pop("XDG_STATE_HOME", None)
+        os.environ.pop("HARNESS_STATE_ROOT", None)
+        os.environ["HOME"] = str(self.stable_home)
+        os.environ["HARNESS_DATA_ROOT"] = str(self.base / "data")
+        self.addCleanup(self._restore_env)
+
+    def _restore_env(self):
+        for key, value in self.prior_env.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+    def _make_release(self, name, ts):
+        rel = DISTRIBUTION.data_root() / "releases" / name
+        (rel / "core").mkdir(parents=True)
+        (rel / "core" / "CORE.md").write_text("fixture\n", encoding="utf-8")
+        os.utime(rel, (ts, ts))
+        return rel
+
+    def _stable_jobs_observation(self, label, stable_jobs):
+        st = stable_jobs.stat()
+        return {
+            "label": label,
+            "jobs_path": str(stable_jobs),
+            "st_dev": st.st_dev,
+            "st_ino": st.st_ino,
+            "st_ctime_ns": st.st_ctime_ns,
+        }
+
+    def test_b1_stable_jobs_identity_survives_three_rotations(self):
+        import time
+
+        future = time.time() + 60_000_000
+        v1 = self._make_release("v-b1-1", future)
+
+        (v1 / ".dispatch").mkdir(parents=True)
+        (v1 / ".dispatch" / "jobs.log").write_text(
+            "2026-08-01T00:00:00Z\tdone\t/r\t/w\tatt-b1\t"
+            "attempt_schema_version=2,registered_worker=1,attempt_id=att-b1,"
+            "harness=claude\n",
+            encoding="utf-8",
+        )
+        DISTRIBUTION.current_path().parent.mkdir(parents=True, exist_ok=True)
+        DISTRIBUTION.current_path().symlink_to(v1)
+
+        result = DISTRIBUTION.run_dispatch_state_migration(
+            v1 / ".dispatch", environ=os.environ
+        )
+        self.assertEqual(result["status"], "completed")
+        self.assertTrue(DISTRIBUTION._dispatch_migration_promoted(os.environ))
+
+        stable_root = DISTRIBUTION.stable_state_root(os.environ)
+        stable_jobs = stable_root / "jobs.log"
+        observations = [self._stable_jobs_observation("v1_post_migration", stable_jobs)]
+
+        v2 = self._make_release("v-b1-2", future + 1)
+        DISTRIBUTION.current_path().unlink()
+        DISTRIBUTION.current_path().symlink_to(v2)
+        DISTRIBUTION._cleanup_releases(keep=set())
+        # Retention floor: only 2 candidates exist (v1, v2) -- neither is
+        # pruned yet, and B-13b's "no new delta" claim needs a call that has
+        # nothing left to carry.
+        self.assertTrue(v1.exists())
+        observations.append(self._stable_jobs_observation("v2_post_rotation", stable_jobs))
+
+        v3 = self._make_release("v-b1-3", future + 2)
+        DISTRIBUTION.current_path().unlink()
+        DISTRIBUTION.current_path().symlink_to(v3)
+        DISTRIBUTION._cleanup_releases(keep=set())
+        self.assertFalse(v1.exists(), "v1 should be pruned once retention floor moves past it")
+        observations.append(self._stable_jobs_observation("v3_post_rotation", stable_jobs))
+
+        path_same = len({o["jobs_path"] for o in observations}) == 1
+        device_inode_same = len({(o["st_dev"], o["st_ino"]) for o in observations}) == 1
+        no_recreation = len({o["st_ctime_ns"] for o in observations}) == 1
+        stable_text = stable_jobs.read_text(encoding="utf-8")
+        stable_lines = [line for line in stable_text.splitlines() if line.strip()]
+        owner_terminal = len(stable_lines) == 1 and stable_lines[0].split("\t")[1] == "done"
+        stable_digest_preserved = len(stable_lines) == 1
+
+        grade = {
+            "result": "pass" if all(
+                [path_same, device_inode_same, no_recreation, owner_terminal, stable_digest_preserved]
+            ) else "fail",
+            "conditions": {
+                "path_same": path_same,
+                "device_inode_same": device_inode_same,
+                "no_recreation": no_recreation,
+                "owner_terminal": owner_terminal,
+                "stable_digest_preserved": stable_digest_preserved,
+            },
+        }
+        self.assertEqual(grade["result"], "pass", grade)
+
+        # B-13b: promoted _succeed_dispatch_state carries no new delta across
+        # the two rotations above -- active-release `.dispatch` never grew.
+        self.assertFalse((v2 / ".dispatch" / "jobs.log").exists())
+        self.assertFalse((v3 / ".dispatch" / "jobs.log").exists())
+
+
+class MigrationIdempotencyAndAbortTest(unittest.TestCase):
+    """SD-112 B-9/B-11: a copy/verify fault aborts the migration (no
+    promotion, no partial canonical file, legacy source unharmed), and a
+    second run against the same, unchanged source is a true no-op."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.base = Path(self.temp.name)
+        self.source = self.base / "release" / ".dispatch"
+        self.source.mkdir(parents=True)
+        (self.source / "jobs.log").write_text(
+            "2026-08-01T00:00:00Z\tdone\t/r\t/w\tatt-x\t"
+            "attempt_schema_version=2,registered_worker=1,attempt_id=att-x,"
+            "harness=claude\n",
+            encoding="utf-8",
+        )
+        (self.source / "logs").mkdir()
+        (self.source / "logs" / "note.txt").write_text("hello\n", encoding="utf-8")
+        self.env = {"HOME": str(self.base / "home")}
+
+    def test_idempotent_rerun_copies_nothing_and_stays_completed(self):
+        first = DISTRIBUTION.run_dispatch_state_migration(self.source, environ=self.env)
+        self.assertEqual(first["status"], "completed")
+        stable_root = DISTRIBUTION.stable_state_root(self.env)
+        note = stable_root / "logs" / "note.txt"
+        before_stat = note.stat()
+
+        second = DISTRIBUTION.run_dispatch_state_migration(self.source, environ=self.env)
+        self.assertEqual(second["status"], "already-completed")
+        after_stat = note.stat()
+        self.assertEqual(before_stat.st_ino, after_stat.st_ino)
+        self.assertEqual(before_stat.st_mtime_ns, after_stat.st_mtime_ns)
+
+        journal = DISTRIBUTION._read_migration_journal(stable_root)
+        completed = [r for r in journal if r.get("status") == "completed"]
+        self.assertEqual(len(completed), 1)
+
+    def test_copy_fault_aborts_without_promotion_or_partial_file(self):
+        # Sabotage the copy destination the same way the existing T-2
+        # rotation fixture does: pre-create the target file's parent as a
+        # plain file so mkdir(parents=True) raises inside the copy loop.
+        env = {"HOME": str(self.base / "home-fault")}
+        stable_root = DISTRIBUTION.stable_state_root(env)
+        stable_root.mkdir(parents=True)
+        os.chmod(stable_root, 0o700)
+        (stable_root / "logs").write_text("not a directory\n", encoding="utf-8")
+
+        result = DISTRIBUTION.run_dispatch_state_migration(self.source, environ=env)
+        self.assertEqual(result["status"], "aborted")
+        self.assertFalse(DISTRIBUTION._dispatch_migration_promoted(env))
+
+        journal = DISTRIBUTION._read_migration_journal(stable_root)
+        statuses = [r.get("status") for r in journal]
+        self.assertIn("aborted", statuses)
+        self.assertNotIn("completed", statuses)
+
+        # No partial canonical registry -- the additive copy loop never
+        # reaches jobs.log's own merge step's aftermath being mistaken for
+        # a completed file; the legacy source itself must be untouched.
+        self.assertTrue((self.source / "jobs.log").is_file())
+        self.assertIn("att-x", (self.source / "jobs.log").read_text(encoding="utf-8"))
+
+
+class StableRegistrySnapshotAndDeletionPreconditionTest(unittest.TestCase):
+    """SD-112 §13.33.2-(5)/decision 2: the stable registry's third
+    reference-registry source and the post-promotion deletion precondition.
+    """
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.base = Path(self.temp.name)
+        self.env = {"HOME": str(self.base / "home")}
+        self.stable_root = DISTRIBUTION.stable_state_root(self.env)
+
+    def _row(self, status, attempt_id, launch_home=None):
+        pipe = f"attempt_id={attempt_id},harness=claude"
+        if launch_home is not None:
+            pipe += f",launch_home={launch_home}"
+        return f"2026-08-01T00:00:00Z\t{status}\t/r\t/w\t{attempt_id}\t{pipe}"
+
+    def test_missing_stable_registry_is_an_empty_snapshot(self):
+        self.assertEqual(DISTRIBUTION._stable_registry_snapshot(self.env), [])
+
+    def test_unreadable_malformed_stable_registry_raises_typed_refusal(self):
+        self.stable_root.mkdir(parents=True)
+        (self.stable_root / "jobs.log").write_text("not\tenough\tfields\n", encoding="utf-8")
+        with self.assertRaises(DISTRIBUTION.DistributionError) as ctx:
+            DISTRIBUTION._stable_registry_snapshot(self.env)
+        self.assertIn("registry-unreadable", str(ctx.exception))
+
+    def test_duplicate_and_conflicting_rows_normalize_per_decision_2(self):
+        self.stable_root.mkdir(parents=True)
+        candidate = self.base / "candidate-release"
+        candidate.mkdir()
+        byte_identical = self._row("open", "att-dup", str(candidate))
+        open_then_done = [
+            self._row("open", "att-term", str(candidate)),
+            self._row("done", "att-term", str(candidate)),
+        ]
+        conflicting_open = [
+            self._row("open", "att-conflict", str(candidate)),
+            self._row("open", "att-conflict", str(self.base / "other-release")),
+        ]
+        (self.stable_root / "jobs.log").write_text(
+            "\n".join(
+                [byte_identical, byte_identical] + open_then_done + conflicting_open
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        with self.assertRaises(DISTRIBUTION.DistributionError):
+            DISTRIBUTION._stable_registry_snapshot(self.env)
+
+        # Isolate the two normalization rules that do NOT involve a
+        # conflict, without the conflicting rows above short-circuiting them.
+        (self.stable_root / "jobs.log").write_text(
+            "\n".join([byte_identical, byte_identical] + open_then_done) + "\n",
+            encoding="utf-8",
+        )
+        snapshot = DISTRIBUTION._stable_registry_snapshot(self.env)
+        attempt_ids = {entry["fields"][4] for entry in snapshot}
+        # att-dup collapses to one open row; att-term's terminal `done` row
+        # wins over its earlier `open` row and is excluded from the open set.
+        self.assertEqual(attempt_ids, {"att-dup"})
+
+    def test_stable_open_row_with_launch_home_blocks_candidate_deletion(self):
+        self.stable_root.mkdir(parents=True)
+        candidate = self.base / "candidate-release"
+        candidate.mkdir()
+        (self.stable_root / "jobs.log").write_text(
+            self._row("open", "att-live", str(candidate)) + "\n", encoding="utf-8"
+        )
+        snapshot = DISTRIBUTION._stable_registry_snapshot(self.env)
+        in_use, why = DISTRIBUTION._release_in_use(candidate, snapshot)
+        self.assertTrue(in_use)
+        self.assertIn("open-attempt:att-live", why)
+
+    def test_stable_open_row_without_launch_home_does_not_retain(self):
+        self.stable_root.mkdir(parents=True)
+        candidate = self.base / "candidate-release"
+        candidate.mkdir()
+        (self.stable_root / "jobs.log").write_text(
+            self._row("open", "att-unscoped") + "\n", encoding="utf-8"
+        )
+        snapshot = DISTRIBUTION._stable_registry_snapshot(self.env)
+        in_use, _why = DISTRIBUTION._release_in_use(candidate, snapshot)
+        self.assertFalse(in_use)
+
+    def test_deletion_precondition_blocks_on_unreconciled_delta(self):
+        candidate = self.base / "candidate-release"
+        (candidate / ".dispatch" / "logs").mkdir(parents=True)
+        (candidate / ".dispatch" / "logs" / "late-write.txt").write_text(
+            "late\n", encoding="utf-8"
+        )
+        self.stable_root.mkdir(parents=True)
+        (self.stable_root / "migration-journal.jsonl").write_text(
+            json.dumps({
+                "record_version": 1,
+                "migration_id": "fixture",
+                "status": "completed",
+                "legacy_jobs_identity": {"path": "/nonexistent/jobs.log", "content_digest": "d"},
+                "stable_jobs_identity": {"path": str(self.stable_root / "jobs.log"), "content_digest": "d"},
+                "source_digest": "s",
+                "target_digest": "t",
+            }) + "\n",
+            encoding="utf-8",
+        )
+        ok, reason = DISTRIBUTION._migration_deletion_precondition(candidate, self.env)
+        self.assertFalse(ok)
+        self.assertIn("dispatch-state-migration-blocked-live-attempt", reason)
+
+    def test_deletion_precondition_passes_once_delta_reconciled(self):
+        candidate = self.base / "candidate-release"
+        (candidate / ".dispatch" / "logs").mkdir(parents=True)
+        source_file = candidate / ".dispatch" / "logs" / "late-write.txt"
+        source_file.write_text("late\n", encoding="utf-8")
+        self.stable_root.mkdir(parents=True)
+        target_file = self.stable_root / "logs" / "late-write.txt"
+        target_file.parent.mkdir(parents=True)
+        target_file.write_text("late\n", encoding="utf-8")
+        (self.stable_root / "migration-journal.jsonl").write_text(
+            json.dumps({
+                "record_version": 1,
+                "migration_id": "fixture",
+                "status": "completed",
+                "legacy_jobs_identity": {"path": "/nonexistent/jobs.log", "content_digest": "d"},
+                "stable_jobs_identity": {"path": str(self.stable_root / "jobs.log"), "content_digest": "d"},
+                "source_digest": "s",
+                "target_digest": "t",
+            }) + "\n",
+            encoding="utf-8",
+        )
+        ok, reason = DISTRIBUTION._migration_deletion_precondition(candidate, self.env)
+        self.assertTrue(ok, reason)
+
+
+class PostPromotionPruneAliasIntegrationTest(unittest.TestCase):
+    """SD-112 B-3/B-14 rotation legs (installer side): after a real M0-M4
+    promotion AND a real `_cleanup_releases` prune of the source release,
+    the completed alias record must let both `capability-route.py`'s
+    continuation resolver (`resolve_dangling_registry`, B-3) and Fleet's row
+    reader (`_row_roots_for_registry`, B-14) reach the exact same stable
+    canonical row -- one root, no duplicates, no stale reference to the
+    now-deleted release."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.base = Path(self.temp.name)
+        self.prior_env = {
+            key: os.environ.get(key)
+            for key in ("AGENT_HOME", "AGENT_DISPATCH_JOBS", "HOME", "XDG_STATE_HOME", "HARNESS_STATE_ROOT", "HARNESS_DATA_ROOT")
+        }
+        os.environ.pop("AGENT_DISPATCH_JOBS", None)
+        os.environ.pop("HARNESS_STATE_ROOT", None)
+        os.environ["HOME"] = str(self.base / "stable-home")
+        os.environ["XDG_STATE_HOME"] = str(self.base / "stable-home" / ".local" / "state")
+        os.environ["HARNESS_DATA_ROOT"] = str(self.base / "data")
+        self.addCleanup(self._restore_env)
+
+    def _restore_env(self):
+        for key, value in self.prior_env.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+    def test_alias_reaches_one_stable_row_after_migration_and_prune(self):
+        import time
+
+        future = time.time() + 80_000_000
+        v1 = DISTRIBUTION.data_root() / "releases" / "v-b3b14-1"
+        (v1 / "core").mkdir(parents=True)
+        (v1 / "core" / "CORE.md").write_text("fixture\n", encoding="utf-8")
+        os.utime(v1, (future, future))
+
+        legacy_jobs = v1 / ".dispatch" / "jobs.log"
+        legacy_jobs.parent.mkdir(parents=True)
+        legacy_jobs.write_text(
+            "2026-08-01T00:00:00Z\tdone\t/r\t/w\tatt-b3b14\t"
+            "attempt_schema_version=2,registered_worker=1,attempt_id=att-b3b14,"
+            "route_id=rt-b3b14,harness=claude\n",
+            encoding="utf-8",
+        )
+        completion_dir = v1 / ".dispatch" / "completion" / "rt-b3b14"
+        completion_dir.mkdir(parents=True)
+        (completion_dir / "plan.json").write_text(
+            json.dumps({"schema_version": 2, "route_id": "rt-b3b14", "node_id": "plan"}),
+            encoding="utf-8",
+        )
+
+        DISTRIBUTION.current_path().parent.mkdir(parents=True, exist_ok=True)
+        DISTRIBUTION.current_path().symlink_to(v1)
+
+        result = DISTRIBUTION.run_dispatch_state_migration(v1 / ".dispatch", environ=os.environ)
+        self.assertEqual(result["status"], "completed")
+        stable_root = DISTRIBUTION.stable_state_root(os.environ)
+        self.assertTrue((stable_root / "completion" / "rt-b3b14" / "plan.json").is_file())
+
+        v2 = DISTRIBUTION.data_root() / "releases" / "v-b3b14-2"
+        (v2 / "core").mkdir(parents=True)
+        (v2 / "core" / "CORE.md").write_text("fixture\n", encoding="utf-8")
+        os.utime(v2, (future + 1, future + 1))
+        v3 = DISTRIBUTION.data_root() / "releases" / "v-b3b14-3"
+        (v3 / "core").mkdir(parents=True)
+        (v3 / "core" / "CORE.md").write_text("fixture\n", encoding="utf-8")
+        os.utime(v3, (future + 2, future + 2))
+        DISTRIBUTION.current_path().unlink()
+        DISTRIBUTION.current_path().symlink_to(v3)
+        DISTRIBUTION._cleanup_releases(keep=set())
+        self.assertFalse(v1.exists(), "v1 must actually be pruned for this to be a real B-3/B-14 test")
+
+        # B-3: capability-route's continuation resolver reaches the stable
+        # row through the alias, not the now-deleted release path.
+        resolution = DC.resolve_dangling_registry(legacy_jobs, environ=os.environ)
+        self.assertEqual(resolution.status, "aliased")
+        self.assertEqual(resolution.jobs_path, stable_root / "jobs.log")
+
+        # B-14: Fleet's row reader collapses to exactly the alias target,
+        # one root, not the stale candidate list.
+        roots = FLEET_ROUTE._row_roots_for_registry(
+            [str(legacy_jobs.parent)], str(legacy_jobs)
+        )
+        self.assertEqual(roots, [str(stable_root)])
 
 
 if __name__ == "__main__":

@@ -25,6 +25,7 @@ from dispatch_completion_join import (
     delivery_timing_fields,
     exact_attempt_row,
     harvest_command_lines,
+    materialize_after_terminal_close,
     prepare_supervisor_outbox,
     refresh_supervisor_outbox_actions,
     reconcile_finished_children,
@@ -223,9 +224,14 @@ def attempt_stage_advance(
 
 def reconcile(args: argparse.Namespace, terminal: SupervisorTerminal) -> bool:
     try:
-        reconcile_supervisor_terminal(
+        outcome = reconcile_supervisor_terminal(
             args.jobs, args.parent_attempt_id, terminal
         )
+        # SD-111 P2 trigger 1: dispatch_supervisor_terminal cannot import this
+        # module (circular), so its own docstring asks the caller to close
+        # the gap when the row actually closed.
+        if outcome == "closed":
+            materialize_after_terminal_close(Path(args.jobs), args.parent_attempt_id)
         return True
     except Exception as exc:
         emit(

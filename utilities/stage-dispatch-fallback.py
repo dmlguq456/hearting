@@ -306,6 +306,9 @@ def ordered_fallback_hops(
             scores,
             strategy=allocation["strategy"],
             usage_gate_used_percent=allocation.get("usage_gate_used_percent", 90),
+            preferred=CAPACITY.preferred_for_depth(allocation, int(node.get("dispatch_depth", 2))),
+            affinity_weight=allocation.get("depth_affinity_weight", 0.5),
+            headroom_exponent=allocation.get("usage_headroom_exponent", 1),
         )
         band_order = ("relief", "primary", "last_resort") if relief_promoted else (
             "primary", "relief", "last_resort"

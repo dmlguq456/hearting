@@ -35,6 +35,7 @@ from dispatch_contract import (  # noqa: E402
     validate_attempt_metadata,
 )
 from codex_dispatch_terminal import inspect_terminal_log  # noqa: E402
+from dispatch_completion_join import materialize_after_terminal_close  # noqa: E402
 
 KINDS = {"registry", "tool", "file", "artifact", "test", "terminal"}
 
@@ -473,6 +474,8 @@ def watchdog(args, now):
                               "detected_by": "progress-watchdog",
                               "capacity_log": str(capacity_path or "")},
                 )
+                if closed:
+                    materialize_after_terminal_close(args.jobs, args.attempt_id)
                 if not closed:
                     refreshed = exact_row(args.jobs, args.attempt_id)
                     closed = bool(refreshed and refreshed[1].get("note") == "dead-capacity")
@@ -550,6 +553,8 @@ def watchdog(args, now):
                         "log_file": terminal["log_file"],
                     },
                 )
+                if closed:
+                    materialize_after_terminal_close(args.jobs, args.attempt_id)
                 if not closed:
                     refreshed = exact_row(args.jobs, args.attempt_id)
                     closed = bool(
@@ -632,6 +637,7 @@ def watchdog(args, now):
                 if not closed:
                     state["action"] = "fail-closed-row-changed"
                 else:
+                    materialize_after_terminal_close(args.jobs, args.attempt_id)
                     state["action"] = "interrupted"
                     state["terminal_action"] = "dead-no-progress"
                     state["signalled_pid"] = signalled_pid
