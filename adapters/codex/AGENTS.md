@@ -51,7 +51,7 @@ and `ADAPTATION.md`; command output is authoritative for current support.
 | token/UI | `preflight.sh token-budget`, `preflight.sh ui-info`, `preflight.sh tui-config` |
 | delegation/QA | `preflight.sh subagent-info --check`, `preflight.sh qa-policy <level> [code|research|doc|general]` |
 | readiness/loops | `preflight.sh doctor [--runtime]`, `preflight.sh loop-info <oncall|note|study|drill|runtime-watch>` |
-| dispatch control | `preflight.sh dispatch-wait --attempt-id <id> --max 300..600`, `preflight.sh liveness`, `preflight.sh harvest`, `preflight.sh dispatch-reconcile` |
+| dispatch control | `preflight.sh dispatch-wait --attempt-id <id> --max 300..600` (operator recovery only — never a model route; a supervised parent ends its turn and the gateway injects completion), `preflight.sh liveness`, `preflight.sh harvest`, `preflight.sh dispatch-reconcile` |
 | dispatch readiness | `preflight.sh dispatch-readiness --worktree <path> --jobs <jobs.log> --owner-harness <h>... --child-harness <h>... --output <evidence.json>` |
 | managed Codex | `preflight.sh managed-entry [--check] --codex-home <private-dir> --state-dir <private-dir> --workspace <dir> [--jobs <jobs.log>]` |
 | install | `install-runtime-projection.sh [--install-plugin] [--skills-mode native|plugin|both]`, `check-runtime-projection.sh`, `preflight.sh runtime-projection --require-hook-trust` |
