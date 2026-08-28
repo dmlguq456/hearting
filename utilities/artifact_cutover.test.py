@@ -485,6 +485,29 @@ class CloseoutTest(unittest.TestCase):
         ]
         self.assertEqual(len(targets), len(set(targets)))
 
+    def test_foreign_artifact_root_route_is_residue_not_canonicalized(self):
+        foreign = dict(self.dead_route)
+        foreign["artifact_root"] = str(Path(self._tmp.name) / "foreign" / ".agent_reports")
+        foreign["route_hash"] = R.route_hash(foreign)
+        foreign["route_id"] = "rt-" + foreign["route_hash"].split(":", 1)[-1][:16]
+        alias = self.root / ".runtime" / "routes" / "foreign-root-alias.json"
+        alias.write_text(json.dumps(foreign) + "\n", encoding="utf-8")
+
+        package = C.route_sweep_package(
+            self.root,
+            jobs=[self.jobs],
+            preserve_routes=[self.residue_route["route_id"]],
+        )
+        action = next(
+            row for row in package["plan"]["actions"]
+            if row.get("route_id") == foreign["route_id"]
+        )
+
+        self.assertEqual(action["action"], "migrate-residue")
+        self.assertFalse(action["root_match"])
+        self.assertEqual(action["route_artifact_root"], foreign["artifact_root"])
+        self.assertIn(".runtime/routes/foreign-root-alias.json", package["plan"]["residue_paths"])
+
     def test_canonicalize_closes_after_move_and_recovers_existing_target(self):
         alias_route, canonical = self.route("audit")
         route_bytes = canonical.read_bytes()
@@ -511,6 +534,52 @@ class CloseoutTest(unittest.TestCase):
         self.assertTrue(target.is_file())
         self.assertTrue(target.with_name(target.stem + ".outcome.json").is_file())
         self.assertFalse(alias.exists())
+
+    def test_prebackup_recovery_restores_partial_canonical_move(self):
+        alias_route, canonical = self.route("audit")
+        route_bytes = canonical.read_bytes()
+        canonical.unlink()
+        alias = canonical.with_name("partial-alias.json")
+        alias.write_bytes(route_bytes)
+        route_package, closeout_package = self.packages()
+        action = next(
+            row for row in route_package["plan"]["actions"]
+            if row.get("route_id") == alias_route["route_id"]
+        )
+        self.assertEqual(action["action"], "canonicalize")
+        target = self.root / action["target_paths"][0]
+        os.replace(alias, target)
+
+        journal_path = C._closeout_journal(
+            self.root,
+            "residue-" + closeout_package["plan_sha256"].split(":", 1)[-1],
+        )
+        P._write_atomic(journal_path, P._json_bytes({
+            "schema_version": 1,
+            "kind": "w7f-closeout-residue-journal",
+            "plan_sha256": closeout_package["plan_sha256"],
+            "route_sweep_plan_sha256": route_package["plan_sha256"],
+            "phase": "prepared",
+            "closeout_package": closeout_package,
+            "route_sweep_package": route_package,
+        }))
+
+        result = C.recover_closeout_prebackup(
+            self.root,
+            journal_path=journal_path,
+            reason="fixture-partial-move",
+        )
+
+        self.assertEqual((result["status"], result["phase"]),
+                         ("aborted-prebackup", "aborted-prebackup"))
+        self.assertTrue(alias.is_file())
+        self.assertFalse(target.exists())
+        again = C.recover_closeout_prebackup(
+            self.root,
+            journal_path=journal_path,
+            reason="fixture-repeat",
+        )
+        self.assertEqual(again["status"], "already-aborted")
 
     def test_explicit_alive_route_cycle_is_a_typed_quiescence_hold(self):
         live_route, live_route_file = self.route("audit")

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """W7C approval-gate executors: delta migration, compatibility switch, source retirement.
 
-All three run only against an artifact root whose producer cutover is active
+These commands run only against an artifact root whose producer cutover is active
 (`artifact_producer.py activate`, gate G1) and every mutation is journaled:
 
   migrate-delta   G2  copy the census-classified cycle candidates into one open
@@ -31,6 +31,9 @@ All three run only against an artifact root whose producer cutover is active
   approval-package
                   W7F bind byte-identical route and residue dry-runs into the
                       human-gate package.  It is always emitted unauthorized.
+  recover-closeout-prebackup
+                  W7F restore route aliases after an apply failure that stopped
+                      in the prepared phase, before any backup or source retire.
 """
 from __future__ import annotations
 
@@ -266,7 +269,13 @@ def build_route_sweep_plan(
             route = None
         valid = _valid_route_identity(route, routes)
         route_id = str(route.get("route_id", "")) if isinstance(route, dict) else ""
-        exact = valid and path.name == f"{route_id}.json"
+        route_artifact_root = str(route.get("artifact_root", "")) if isinstance(route, dict) else ""
+        root_match = bool(
+            valid
+            and route_artifact_root
+            and Path(route_artifact_root).resolve(strict=False) == root
+        )
+        exact = root_match and path.name == f"{route_id}.json"
         outcome = path.with_name(path.stem + ".outcome.json")
         closed = False
         if outcome.is_file() and isinstance(route, dict):
@@ -281,16 +290,20 @@ def build_route_sweep_plan(
         consumed.add(path.name)
         if outcome.is_file():
             consumed.add(outcome.name)
-        liveness = _route_liveness(route_id, attempts) if valid else {"state": "dead", "attempts": []}
+        liveness = _route_liveness(route_id, attempts) if root_match else {"state": "dead", "attempts": []}
         sources = [rel] + ([os.path.relpath(outcome, root)] if outcome.is_file() else [])
         base = {
             "route_id": route_id or None,
             "route_hash": route.get("route_hash") if isinstance(route, dict) else None,
+            "route_artifact_root": route_artifact_root or None,
+            "root_match": root_match,
             "source_paths": sources,
             "closed": closed,
             "liveness": liveness,
         }
-        if route_id in preserve:
+        if valid and not root_match:
+            action = "migrate-residue"
+        elif route_id in preserve:
             action = "preserve-explicit"
         elif liveness["state"] == "alive":
             action = "preserve-live"
@@ -330,6 +343,8 @@ def build_route_sweep_plan(
             "action": "migrate-residue",
             "route_id": None,
             "route_hash": None,
+            "route_artifact_root": None,
+            "root_match": False,
             "source_paths": [os.path.relpath(path, root)],
             "closed": False,
             "liveness": {"state": "dead", "attempts": []},
@@ -707,6 +722,97 @@ def _closeout_journal(root: Path, name: str) -> Path:
     path = P.producer_dir(root) / "closeout" / f"{name}.json"
     path.parent.mkdir(parents=True, exist_ok=True)
     return path
+
+
+def recover_closeout_prebackup(root: Path, *, journal_path: Path, reason: str) -> Dict[str, Any]:
+    """Abort a prepared closeout and restore partial canonical route moves.
+
+    This recovery is intentionally unavailable after backup starts.  Route
+    closure is append-only, so a partially applied close-abandoned action is
+    also outside the recoverable shape and must roll forward instead.
+    """
+
+    root = Path(root).resolve()
+    _require_active(root)
+    journal_path = Path(journal_path).resolve()
+    expected_parent = (P.producer_dir(root) / "closeout").resolve()
+    if journal_path.parent != expected_parent or not journal_path.is_file():
+        raise CutoverError("closeout-recovery-journal-invalid", str(journal_path))
+    journal = json.loads(journal_path.read_text(encoding="utf-8"))
+    if journal.get("kind") != "w7f-closeout-residue-journal":
+        raise CutoverError("closeout-recovery-journal-invalid", str(journal_path))
+    if journal.get("phase") == "aborted-prebackup":
+        return {"status": "already-aborted", **journal}
+    if journal.get("phase") != "prepared":
+        raise CutoverError("closeout-recovery-phase-invalid", str(journal.get("phase")))
+    route_package = journal.get("route_sweep_package")
+    closeout_package = journal.get("closeout_package")
+    identity = P.artifact_lifecycle.read_root_identity(root)
+    if identity is None or not isinstance(route_package, dict) or not isinstance(closeout_package, dict):
+        raise CutoverError("closeout-recovery-package-missing", str(journal_path))
+    _validate_closeout_pair(closeout_package, route_package, identity.artifact_root_id)
+    route_digest = route_package["plan_sha256"]
+    route_journal_path = _closeout_journal(
+        root, f"route-sweep-{route_digest.split(':', 1)[-1]}"
+    )
+    route_journal = (
+        json.loads(route_journal_path.read_text(encoding="utf-8"))
+        if route_journal_path.is_file()
+        else {
+            "schema_version": 1,
+            "kind": "w7f-route-sweep-journal",
+            "plan_sha256": route_digest,
+            "phase": "applying",
+            "applied": [],
+        }
+    )
+    if (
+        route_journal.get("kind") != "w7f-route-sweep-journal"
+        or route_journal.get("plan_sha256") != route_digest
+        or route_journal.get("phase") not in {"applying", "aborted-prebackup"}
+    ):
+        raise CutoverError("route-recovery-journal-invalid", str(route_journal_path))
+    if any(row.get("action") == "close-abandoned" for row in route_journal.get("applied", [])):
+        raise CutoverError("route-recovery-nonreversible-close", str(route_journal_path))
+
+    restored = []
+    for row in reversed(route_package["plan"]["actions"]):
+        if row.get("action") != "canonicalize":
+            continue
+        source = root / row["source_paths"][0]
+        target = root / row["target_paths"][0]
+        source_outcome = source.with_name(source.stem + ".outcome.json")
+        target_outcome = target.with_name(target.stem + ".outcome.json")
+        if source.exists() and target.exists():
+            raise CutoverError("route-recovery-collision", str(target))
+        if not source.exists() and target.is_file() and not target.is_symlink():
+            route = json.loads(target.read_text(encoding="utf-8"))
+            if route.get("route_hash") != row.get("route_hash"):
+                raise CutoverError("route-recovery-target-mismatch", str(target))
+            source.parent.mkdir(parents=True, exist_ok=True)
+            os.replace(target, source)
+            if target_outcome.exists():
+                if source_outcome.exists():
+                    raise CutoverError("route-recovery-collision", str(source_outcome))
+                os.replace(target_outcome, source_outcome)
+            restored.append({"route_id": row.get("route_id"), "source": row["source_paths"][0]})
+        elif not source.is_file() or source.is_symlink() or target.exists() or target_outcome.exists():
+            raise CutoverError("route-recovery-shape-invalid", row["source_paths"][0])
+
+    route_journal.update({
+        "phase": "aborted-prebackup",
+        "abort_reason": reason,
+        "restored": restored,
+    })
+    P._write_atomic(route_journal_path, P._json_bytes(route_journal))
+    journal.update({
+        "phase": "aborted-prebackup",
+        "abort_reason": reason,
+        "route_recovery_journal": str(route_journal_path),
+        "restored_routes": restored,
+    })
+    P._write_atomic(journal_path, P._json_bytes(journal))
+    return {"status": "aborted-prebackup", **journal}
 
 
 def _apply_route_sweep_plan(root: Path, package: Dict[str, Any]) -> Dict[str, Any]:
@@ -1874,6 +1980,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     p.add_argument("--route-plan", required=True)
     p.add_argument("--closeout-plan", required=True)
     p.add_argument("--output", required=True)
+    p = sub.add_parser("recover-closeout-prebackup")
+    p.add_argument("--artifact-root", required=True)
+    p.add_argument("--journal", required=True)
+    p.add_argument("--reason", required=True)
     args = parser.parse_args(argv)
     root = Path(args.artifact_root)
     try:
@@ -1963,6 +2073,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             )
             sys.stdout.buffer.write(_emit_package(package, Path(args.output)))
             return OK
+        elif args.command == "recover-closeout-prebackup":
+            result = recover_closeout_prebackup(
+                root,
+                journal_path=Path(args.journal),
+                reason=args.reason,
+            )
         else:  # pragma: no cover
             parser.error("unknown command")
             return 64

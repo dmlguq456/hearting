@@ -54,6 +54,7 @@ unset CLAUDE_CODE_SESSION_ID CODEX_SESSION_ID \
   MEM_DISTILL MEM_DISTILL_ENABLE CODEX_DISPATCH_SANDBOX_FORCE
 DISPATCH_RESOLVER_HOME="$TMP/dispatch-resolver-home"
 DISPATCH_RESOLVER_XDG="$TMP/dispatch-resolver-xdg"
+DISPATCH_RESOLVER_STATE="$(readlink -f "$DISPATCH_RESOLVER_HOME")/.local/state/hearting/dispatch"
 mkdir -p "$DISPATCH_RESOLVER_HOME" "$DISPATCH_RESOLVER_XDG"
 ln -s "$ROOT" "$DISPATCH_RESOLVER_HOME/hearting"
 # Adapter wrappers resolve their installed runtime pointer; invoking the Python
@@ -1326,8 +1327,8 @@ else
 fi
 if AGENT_HOME="$TMP/not-agent-home" HOME="$DISPATCH_RESOLVER_HOME" XDG_DATA_HOME="$DISPATCH_RESOLVER_XDG" CODEX_DISPATCH_SANDBOX_FORCE=danger-full-access \
   "$CODEX" dispatch --dry-run --worktree "$TMP/repo" --slug codex-default-home --capability autopilot-code --mode dev --qa standard --prompt-text "do work" --model gpt-test --reasoning low >/tmp/codex_dispatch_default.out 2>/tmp/codex_dispatch_default.err \
-  && grep -Fxq "job_registry=$(readlink -f "$CODEX_WRAPPED_DISPATCH_HOME")/.dispatch/jobs.log" /tmp/codex_dispatch_default.out \
-  && grep -Fxq "prompt_file=$(readlink -f "$CODEX_WRAPPED_DISPATCH_HOME")/.dispatch/logs/codex-default-home.codex.prompt.txt" /tmp/codex_dispatch_default.out \
+  && grep -Fxq "job_registry=$DISPATCH_RESOLVER_STATE/jobs.log" /tmp/codex_dispatch_default.out \
+  && grep -Fxq "prompt_file=$DISPATCH_RESOLVER_STATE/logs/codex-default-home.codex.prompt.txt" /tmp/codex_dispatch_default.out \
   && [ ! -e "$TMP/not-agent-home/.dispatch/jobs.log" ]; then
   ok "codex dispatch wrapper defaults to validated harness root"
 else
@@ -1335,8 +1336,8 @@ else
 fi
 if AGENT_HOME="$TMP/not-agent-home" HOME="$DISPATCH_RESOLVER_HOME" XDG_DATA_HOME="$DISPATCH_RESOLVER_XDG" CODEX_DISPATCH_SANDBOX_FORCE=danger-full-access \
   python3 "$ROOT/adapters/codex/bin/dispatch-headless.py" --dry-run --worktree "$TMP/repo" --slug codex-direct-home --capability autopilot-code --mode dev --qa standard --prompt-text "do work" --model gpt-test --reasoning low >/tmp/codex_dispatch_direct.out 2>/tmp/codex_dispatch_direct.err \
-  && grep -Fxq "job_registry=$(readlink -f "$CODEX_DIRECT_DISPATCH_HOME")/.dispatch/jobs.log" /tmp/codex_dispatch_direct.out \
-  && grep -Fxq "prompt_file=$(readlink -f "$CODEX_DIRECT_DISPATCH_HOME")/.dispatch/logs/codex-direct-home.codex.prompt.txt" /tmp/codex_dispatch_direct.out; then
+  && grep -Fxq "job_registry=$DISPATCH_RESOLVER_STATE/jobs.log" /tmp/codex_dispatch_direct.out \
+  && grep -Fxq "prompt_file=$DISPATCH_RESOLVER_STATE/logs/codex-direct-home.codex.prompt.txt" /tmp/codex_dispatch_direct.out; then
   ok "codex dispatch script ignores invalid AGENT_HOME"
 else
   bad "codex dispatch script should validate AGENT_HOME"
@@ -3818,8 +3819,8 @@ else
 fi
 if AGENT_HOME="$TMP/not-agent-home" HOME="$DISPATCH_RESOLVER_HOME" XDG_DATA_HOME="$DISPATCH_RESOLVER_XDG" \
   python3 "$ROOT/adapters/opencode/bin/dispatch-headless.py" --dry-run --worktree "$TMP/repo" --slug opencode-direct-home --capability autopilot-code --mode dev --qa standard --prompt-text "do work" --model provider/test --variant low >/tmp/opencode_dispatch_direct.out 2>/tmp/opencode_dispatch_direct.err \
-  && grep -Fxq "job_registry=$(readlink -f "$OPENCODE_DIRECT_DISPATCH_HOME")/.dispatch/jobs.log" /tmp/opencode_dispatch_direct.out \
-  && grep -Fxq "prompt_file=$(readlink -f "$OPENCODE_DIRECT_DISPATCH_HOME")/.dispatch/logs/opencode-direct-home.opencode.prompt.txt" /tmp/opencode_dispatch_direct.out; then
+  && grep -Fxq "job_registry=$DISPATCH_RESOLVER_STATE/jobs.log" /tmp/opencode_dispatch_direct.out \
+  && grep -Fxq "prompt_file=$DISPATCH_RESOLVER_STATE/logs/opencode-direct-home.opencode.prompt.txt" /tmp/opencode_dispatch_direct.out; then
   ok "opencode dispatch script ignores invalid AGENT_HOME"
 else
   bad "opencode dispatch script should validate AGENT_HOME"
@@ -5146,24 +5147,25 @@ dispatch_scan_prod=$(cd "$ROOT" && rg -n --glob '!**/*test*' --glob '!**/tests/*
 #    resolve a stable root in a minimal/packaged environment).
 #  - non-executing description strings: docstrings/comments/help text/docs.
 dispatch_scan_allowed='
-tools/install/distribution.py:1275:
-tools/install/distribution.py:1278:
-tools/install/distribution.py:1282:
-tools/install/distribution.py:1287:
+tools/install/distribution.py:1856:
+tools/install/distribution.py:1859:
+tools/install/distribution.py:1863:
+tools/install/distribution.py:1868:
 tools/migration-manifest.py:229:
 tools/migration-manifest.py:236:
 tools/fleet/collectors/dispatch.py:8:
-tools/fleet/collectors/dispatch.py:486:
-tools/fleet/collectors/dispatch.py:929:
-tools/fleet/collectors/dispatch.py:951:
-tools/fleet/collectors/dispatch.py:965:
-tools/fleet/collectors/dispatch.py:1012:
+tools/fleet/collectors/dispatch.py:487:
+tools/fleet/collectors/dispatch.py:930:
+tools/fleet/collectors/dispatch.py:952:
+tools/fleet/collectors/dispatch.py:966:
+tools/fleet/collectors/dispatch.py:1013:
 tools/fleet/collectors/__init__.py:196:
 tools/render-landing.py:860:
 adapters/codex/AGENTS.md:83:
 adapters/codex/bin/preflight.sh:681:
 adapters/opencode/bin/preflight.sh:460:
 adapters/claude/skills/autopilot-code/references/dev-pipeline.md:91:
+adapters/claude/plugin-marketplace/plugins/hearting-claude/skills/autopilot-code/references/dev-pipeline.md:91:
 '
 dispatch_scan_unallowed=$(printf '%s\n' "$dispatch_scan_prod" | while IFS= read -r line; do
   [ -n "$line" ] || continue
