@@ -343,8 +343,18 @@ class WorkProjectionTest(unittest.TestCase):
             route_hash=other["route_hash"], route_node="claim-a",
             liveness="working",
         )
-        projection.attach_projections([], [owner, conflict], now=100.0)
+        # F-88: mixed generations — a live child still on the sealed route plus
+        # a child on another route is genuinely ambiguous and stays fail-closed.
+        projection.attach_projections([], [owner, child, conflict], now=100.0)
         self.assertEqual(owner.work_projection.ambiguity, "owner-route-conflict")
+        # F-88: when EVERY route-carrying child has moved to one verified
+        # successor route (the owner re-compiled mid-attempt), the owner adopts
+        # the successor instead of blanking its stage projection.
+        projection.attach_projections([], [owner, conflict], now=100.0)
+        self.assertEqual(owner.work_projection.source, "route-exact")
+        self.assertEqual(owner.work_projection.route_id, other["route_id"])
+        self.assertEqual(owner.work_projection.route_node, "claim-a")
+        self.assertIsNone(owner.work_projection.ambiguity)
 
     def test_owner_projection_collapses_parallel_active_nodes(self):
         record = {

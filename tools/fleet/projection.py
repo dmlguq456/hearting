@@ -937,8 +937,38 @@ def resolve_work_projection(entity, jobs=(), route_records=None, node_evidence=N
             for child in children
         )
         if child_conflict:
-            return WorkProjection(source="none", node_state="unknown",
-                                  ambiguity=OWNER_ROUTE_CONFLICT)
+            # F-88: an owner may legally re-compile its route mid-attempt (re-plan
+            # loops), so the launch-sealed owner binding can point at a superseded
+            # route while every live child carries the successor (observed live
+            # 2026-08-28: owner sealed to a continuation route, children on the
+            # third re-compiled route, card blanked for the rest of the cycle).
+            # When ALL route-carrying children named by the stable owner-link
+            # contracts agree on ONE non-owner route and that record verifies,
+            # the owner has demonstrably moved on — project the successor instead
+            # of refusing. Mixed generations (a live child still on the sealed
+            # route) or an unverifiable successor record stay fail-closed.
+            child_routes = {_field(child, "route_id")
+                            for child in children if _field(child, "route_id")}
+            successor = None
+            if (len(child_routes) == 1
+                    and owner_binding["route_id"] not in child_routes):
+                carrier = next(child for child in children
+                               if _field(child, "route_id"))
+                successor, _s_failure = _route_record_values(
+                    _field(carrier, "route_id"), _field(carrier, "route_file"),
+                    _field(carrier, "route_hash"), route_records=route_records,
+                )
+            if successor is None:
+                return WorkProjection(source="none", node_state="unknown",
+                                      ambiguity=OWNER_ROUTE_CONFLICT)
+            successor_rid = successor.get("route_id")
+            same_jobs = [j for j in jobs
+                         if _field(j, "route_id") == successor_rid]
+            return _projection_from_record(
+                entity, successor, successor_rid, same_jobs,
+                node_evidence=(node_evidence or {}).get(successor_rid, {}),
+                now=now, owner=True, degradations=degradations,
+            )
         same_jobs = [j for j in jobs
                      if _field(j, "route_id") == owner_binding["route_id"]]
         return _projection_from_record(
