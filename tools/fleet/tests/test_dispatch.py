@@ -88,19 +88,25 @@ class RouteStateRootsDanglingRegistryTest(unittest.TestCase):
     def _write_completed_alias(self, stable_dispatch_dir, legacy_jobs, stable_jobs):
         stable_dispatch_dir.mkdir(parents=True, exist_ok=True)
         journal = stable_dispatch_dir / "migration-journal.jsonl"
+        # Round-1 hardening (`_alias_record_valid`) rejects any digest that is
+        # not an exact `sha256:<64 hex>`; a bare "deadbeef" fixture would make
+        # this test measure the rejection path instead of the alias path.
+        import hashlib
+        def _digest(seed):
+            return "sha256:" + hashlib.sha256(seed.encode("utf-8")).hexdigest()
         record = {
             "record_version": 1,
             "status": "completed",
             "legacy_jobs_identity": {
                 "path": str(Path(legacy_jobs).resolve(strict=False)),
-                "content_digest": "deadbeef",
+                "content_digest": _digest(str(legacy_jobs)),
             },
             "stable_jobs_identity": {
                 "path": str(Path(stable_jobs).resolve(strict=False)),
-                "content_digest": "deadbeef",
+                "content_digest": _digest(str(stable_jobs)),
             },
-            "source_digest": "deadbeef",
-            "target_digest": "deadbeef",
+            "source_digest": _digest("source"),
+            "target_digest": _digest("target"),
         }
         with open(journal, "a", encoding="utf-8") as handle:
             handle.write(json.dumps(record) + "\n")
