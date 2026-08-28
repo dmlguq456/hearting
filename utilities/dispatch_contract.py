@@ -3894,10 +3894,32 @@ def read_migration_journal(stable_root: Path) -> list[dict]:
     return records
 
 
+MIGRATION_ALIAS_DIGEST_PATTERN = re.compile(r"sha256:[0-9a-f]{64}")
+
+
+def _alias_digest_well_formed(value: object) -> bool:
+    """`sha256:` + 64 lowercase hex, nothing else.
+
+    Presence alone is not evidence: a record carrying `"content_digest": "x"`
+    is as structurally "complete" as a real one, so a truthiness check lets a
+    hand-written journal line relieve a sealed `jobs_path` mismatch. The
+    recorded digests cannot be recomputed later -- the legacy registry is
+    pruned by the migration that wrote the record, and the stable registry
+    keeps appending rows afterwards, so its content digest legitimately
+    diverges the moment the next attempt registers. Shape is therefore the
+    strongest check available on the digest fields themselves; liveness of the
+    target is checked separately, against the filesystem, in
+    `resolve_dangling_registry`.
+    """
+
+    return isinstance(value, str) and MIGRATION_ALIAS_DIGEST_PATTERN.fullmatch(value) is not None
+
+
 def _alias_record_valid(record: dict) -> bool:
-    """Structural completeness of one `completed` migration-alias record.
-    Forged or partially-written records (missing digests/paths) never pass,
-    so `resolve_completed_alias` stays fail-closed by construction."""
+    """Structural validity of one `completed` migration-alias record.
+    Forged or partially-written records (missing, malformed, or
+    non-absolute identities) never pass, so `resolve_completed_alias` stays
+    fail-closed by construction."""
 
     if record.get("record_version") != MIGRATION_ALIAS_RECORD_VERSION:
         return False
@@ -3908,9 +3930,21 @@ def _alias_record_valid(record: dict) -> bool:
     if not isinstance(legacy, dict) or not isinstance(target, dict):
         return False
     for identity in (legacy, target):
-        if not identity.get("path") or not identity.get("content_digest"):
+        path = identity.get("path")
+        if not isinstance(path, str) or not path or not Path(path).is_absolute():
             return False
-    if not record.get("source_digest") or not record.get("target_digest"):
+        if not _alias_digest_well_formed(identity.get("content_digest")):
+            return False
+    if not _alias_digest_well_formed(record.get("source_digest")):
+        return False
+    if not _alias_digest_well_formed(record.get("target_digest")):
+        return False
+    # Optional by contract (SD-112 §13.33.2-(3): verified only "when present"),
+    # but a present-and-malformed value is a broken record, not an absent one --
+    # accepting it would let a forgery opt out of the extra verification simply
+    # by writing garbage into the field.
+    route_hash = record.get("route_hash")
+    if route_hash is not None and not _alias_digest_well_formed(route_hash):
         return False
     return True
 
@@ -3978,7 +4012,13 @@ def resolve_dangling_registry(
         record = resolve_completed_alias(stable_root, sealed)
         if record is not None:
             target = Path(record["stable_jobs_identity"]["path"])
-            if target.parent.is_dir():
+            # The docstring's promise is a *live* stable jobs.log, so require
+            # the file itself. A present parent directory proves nothing about
+            # the alias: a stale or forged record naming any existing
+            # directory would otherwise resurrect a registry that is not
+            # there, and the caller would bind a route to it. Without the file
+            # this is not an alias -- fall through to the compat window.
+            if target.is_file():
                 return DanglingRegistryResolution("aliased", target, record)
     if window_open:
         return DanglingRegistryResolution("compat-window", None, None)

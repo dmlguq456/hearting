@@ -1213,6 +1213,142 @@ class StableStateRootParityTest(unittest.TestCase):
             DC.stable_state_root({})
 
 
+class MigrationAliasWriterReaderParityTest(unittest.TestCase):
+    """SD-112 §13.33.2-(3)/(4): the record the installer writes at M4 must be
+    one the runtime's alias reader actually accepts.
+
+    The two sides live in different modules that cannot import each other, so
+    nothing but this fixture stops them from drifting. They did drift once:
+    the writer emitted bare hex digests while the reader's contract is the
+    repository-wide `sha256:<64 hex>` spelling -- invisible for as long as the
+    reader only checked that the field was non-empty.
+    """
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.base = Path(self.temp.name)
+        self.prior_env = {
+            key: os.environ.get(key)
+            for key in ("AGENT_HOME", "AGENT_DISPATCH_JOBS", "HOME", "XDG_STATE_HOME", "HARNESS_STATE_ROOT", "HARNESS_DATA_ROOT")
+        }
+        os.environ.pop("AGENT_DISPATCH_JOBS", None)
+        os.environ.pop("XDG_STATE_HOME", None)
+        os.environ.pop("HARNESS_STATE_ROOT", None)
+        os.environ["HOME"] = str(self.base / "stable-home")
+        os.environ["HARNESS_DATA_ROOT"] = str(self.base / "data")
+        self.addCleanup(self._restore_env)
+
+    def _restore_env(self):
+        for key, value in self.prior_env.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+    def _migrate_one_release(self):
+        release = DISTRIBUTION.data_root() / "releases" / "v-alias-parity"
+        (release / "core").mkdir(parents=True)
+        (release / "core" / "CORE.md").write_text("fixture\n", encoding="utf-8")
+        legacy_dispatch = release / ".dispatch"
+        legacy_dispatch.mkdir(parents=True)
+        (legacy_dispatch / "jobs.log").write_text(
+            "2026-08-01T00:00:00Z\tdone\t/r\t/w\tatt-alias\t"
+            "attempt_schema_version=2,registered_worker=1,attempt_id=att-alias,"
+            "harness=claude\n",
+            encoding="utf-8",
+        )
+        result = DISTRIBUTION.run_dispatch_state_migration(
+            legacy_dispatch, environ=os.environ
+        )
+        self.assertEqual(result["status"], "completed")
+        return legacy_dispatch / "jobs.log"
+
+    def test_installer_written_record_is_accepted_by_the_runtime_reader(self):
+        legacy_jobs = self._migrate_one_release()
+        stable_root = DC.stable_state_root(os.environ)
+        record = DC.resolve_completed_alias(stable_root, legacy_jobs)
+        self.assertIsNotNone(
+            record,
+            "the M4 record the installer just wrote must pass the runtime's "
+            "own structural validation",
+        )
+        self.assertTrue(DC._alias_record_valid(record))
+        for value in (
+            record["legacy_jobs_identity"]["content_digest"],
+            record["stable_jobs_identity"]["content_digest"],
+            record["source_digest"],
+            record["target_digest"],
+        ):
+            self.assertTrue(DC._alias_digest_well_formed(value), value)
+
+    def test_pruned_source_resolves_through_the_written_record(self):
+        legacy_jobs = self._migrate_one_release()
+        shutil.rmtree(legacy_jobs.parent)
+        resolution = DC.resolve_dangling_registry(legacy_jobs, environ=os.environ)
+        self.assertEqual(resolution.status, "aliased")
+        self.assertEqual(
+            resolution.jobs_path, DC.stable_state_root(os.environ) / "jobs.log"
+        )
+
+
+class MigrationAliasRecordValidationTest(unittest.TestCase):
+    """SD-112 §13.33.2-(3): `completed` plus a filled-in field is not a
+    digest check. Each case below is a record that is *structurally complete*
+    in the old sense and must still be refused."""
+
+    def _record(self, **overrides):
+        record = {
+            "record_version": DC.MIGRATION_ALIAS_RECORD_VERSION,
+            "status": "completed",
+            "legacy_jobs_identity": {
+                "path": "/legacy/.dispatch/jobs.log",
+                "content_digest": "sha256:" + "a" * 64,
+            },
+            "stable_jobs_identity": {
+                "path": "/stable/hearting/dispatch/jobs.log",
+                "content_digest": "sha256:" + "b" * 64,
+            },
+            "source_digest": "sha256:" + "c" * 64,
+            "target_digest": "sha256:" + "d" * 64,
+        }
+        record.update(overrides)
+        return record
+
+    def test_well_formed_record_is_accepted(self):
+        self.assertTrue(DC._alias_record_valid(self._record()))
+        self.assertTrue(
+            DC._alias_record_valid(
+                self._record(route_hash="sha256:" + "e" * 64)
+            )
+        )
+
+    def test_non_digest_content_digest_is_refused(self):
+        for bad in ("x", "sha256:", "sha256:" + "a" * 63, "a" * 64, "SHA256:" + "a" * 64,
+                    "sha256:" + "A" * 64, 1, None):
+            with self.subTest(bad=bad):
+                record = self._record()
+                record["stable_jobs_identity"]["content_digest"] = bad
+                self.assertFalse(DC._alias_record_valid(record))
+
+    def test_non_digest_tree_digest_is_refused(self):
+        for field in ("source_digest", "target_digest"):
+            with self.subTest(field=field):
+                self.assertFalse(DC._alias_record_valid(self._record(**{field: "x"})))
+
+    def test_relative_or_empty_identity_path_is_refused(self):
+        for bad in ("relative/jobs.log", "", None, 7):
+            with self.subTest(bad=bad):
+                record = self._record()
+                record["legacy_jobs_identity"]["path"] = bad
+                self.assertFalse(DC._alias_record_valid(record))
+
+    def test_present_but_malformed_route_hash_is_refused(self):
+        # Absent is allowed (verified only when present); garbage is not --
+        # otherwise a forgery opts out of the extra check for free.
+        self.assertFalse(DC._alias_record_valid(self._record(route_hash="nope")))
+
+
 class MigrationM0ToM4PromotionTest(unittest.TestCase):
     """SD-112 M0-M4 + B-1/B-13b: a full migration run promotes a
     release-embedded `.dispatch` tree into the stable root, and the stable

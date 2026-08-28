@@ -1296,6 +1296,20 @@ def _sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _alias_digest(hex_digest: str) -> str:
+    """Journal digests use the repository-wide `sha256:<64 hex>` spelling.
+
+    `_sha256_file`/`_scoped_tree_digest` return bare hex because the copy
+    verifier only ever compares them to each other. The migration journal is
+    read by `dispatch_contract._alias_record_valid`, which fails closed on any
+    digest that is not well formed, so every value that reaches a record has
+    to carry the prefix -- the same spelling `route_hash` and the launch
+    compatibility tuple already use.
+    """
+
+    return "sha256:" + hex_digest
+
+
 def _migration_relative_files(root: Path) -> list[str]:
     """Every regular file under `root`, relative-posix, excluding the
     registry (merged separately with terminal precedence, not byte-compared)."""
@@ -1578,8 +1592,14 @@ def run_dispatch_state_migration(
     source_jobs = source_dispatch / "jobs.log"
     legacy_path_identity = str(source_jobs.expanduser().resolve(strict=False))
     relatives = _migration_relative_files(source_dispatch)
-    source_digest = _scoped_tree_digest(source_dispatch, relatives)
-    source_jobs_digest = _sha256_file(source_jobs) if source_jobs.is_file() else ""
+    source_digest = _alias_digest(_scoped_tree_digest(source_dispatch, relatives))
+    # A legacy tree with no jobs.log has no registry to alias. The tree still
+    # migrates and still promotes, but the resulting record carries an empty
+    # digest and is therefore not a claimable alias -- continuation falls
+    # through to the compat window, which is the correct answer here.
+    source_jobs_digest = (
+        _alias_digest(_sha256_file(source_jobs)) if source_jobs.is_file() else ""
+    )
 
     existing = _latest_completed_alias(stable_root, source_jobs)
     if (
@@ -1624,7 +1644,9 @@ def run_dispatch_state_migration(
         return {"status": "aborted", "migration_id": migration_id, **m0}
 
     target_jobs = stable_root / "jobs.log"
-    target_jobs_digest = _sha256_file(target_jobs) if target_jobs.is_file() else ""
+    target_jobs_digest = (
+        _alias_digest(_sha256_file(target_jobs)) if target_jobs.is_file() else ""
+    )
     _append_migration_journal(
         stable_root,
         {
@@ -1637,7 +1659,7 @@ def run_dispatch_state_migration(
                 "content_digest": target_jobs_digest,
             },
             "source_digest": source_digest,
-            "target_digest": _scoped_tree_digest(stable_root, relatives),
+            "target_digest": _alias_digest(_scoped_tree_digest(stable_root, relatives)),
             "completed_at": _utc_now(),
         },
     )  # M4

@@ -2149,6 +2149,10 @@ class MigrationAliasContinuationTest(unittest.TestCase):
   self._alias_jobs=(
    Path(self._tmp.name)/"migrated-state"/"hearting"/"dispatch"/"jobs.log")
   self._alias_jobs.parent.mkdir(parents=True)
+  # `resolve_dangling_registry` requires the alias target to be a live file,
+  # not merely a live parent directory -- an alias that names a registry
+  # which is not there resolves nothing.
+  self._alias_jobs.write_text("",encoding="utf-8")
   # The legacy (pruned-release) directory is deliberately never created --
   # a live directory here would defeat the "dangling" fixture shape.
   self._legacy_jobs=Path(self._tmp.name)/"pruned-release"/".dispatch"/"jobs.log"
@@ -2203,6 +2207,24 @@ class MigrationAliasContinuationTest(unittest.TestCase):
   resolved=R._continuation_source_jobs(route)
   self.assertEqual(
    resolved,R.resolve_dispatch_state_root(R.resolve_agent_home(),None)/"jobs.log")
+ def test_continuation_ignores_alias_whose_target_file_is_absent(self):
+  # The record is completely well formed and its target directory exists;
+  # only the registry file is missing. A stale or forged record naming any
+  # live directory must not resurrect a registry that is not there.
+  self._alias_jobs.unlink()
+  self._write_journal(self._completed_record())
+  route={"launch_compatibility_tuple":{"jobs_path":{"path":str(self._legacy_jobs)}}}
+  resolved=R._continuation_source_jobs(route)
+  self.assertNotEqual(resolved,self._alias_jobs.resolve())
+  self.assertEqual(
+   resolved,R.resolve_dispatch_state_root(R.resolve_agent_home(),None)/"jobs.log")
+ def test_continuation_ignores_malformed_digest_alias(self):
+  # `completed` plus a filled-in field is not a digest check.
+  self._write_journal(self._completed_record(
+   source_digest="not-a-digest",migration_id="mig-fixture-bad-digest"))
+  route={"launch_compatibility_tuple":{"jobs_path":{"path":str(self._legacy_jobs)}}}
+  resolved=R._continuation_source_jobs(route)
+  self.assertNotEqual(resolved,self._alias_jobs.resolve())
  def test_continuation_ignores_incomplete_or_forged_alias(self):
   self._write_journal(self._completed_record(status="open"))
   self._write_journal(self._completed_record(
