@@ -549,9 +549,29 @@ class GovernorTest(unittest.TestCase):
                 encoding="utf-8",
             )
             dead_pid = "99999999"
-            terminal_peer_metadata = metadata(peer, note="completed-marker") + (
-                ",failure_class=pass,"
+            # DR-1 (2026-08-28): an explicit non-pass class still refuses even with a
+            # current marker on disk.
+            failed_peer_metadata = metadata(peer, note="completed-marker") + (
+                ",failure_class=blocked,"
                 f"pid={dead_pid},pid_start=1,pgid={dead_pid},"
+                f"pid_observer_ns={os.readlink('/proc/self/ns/pid')}"
+            )
+            jobs.write_text(
+                f"2026-07-24T00:00:00Z\tdone\t{temp_dir}\t{temp_dir}\tpeer\t"
+                f"{failed_peer_metadata}\n"
+                f"2026-07-24T00:01:00Z\tdone\t{temp_dir}\t{temp_dir}\tgap\t"
+                f"{gap_metadata}\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(
+                ValueError, "partial continuation peer is not immutable terminal success"
+            ):
+                self.reserve_batch(temp_dir, 1, batch)
+            # DR-1: the ordinary completion path leaves no failure_class on the row
+            # (live registry 45:1), so an ABSENT class must defer to the marker-verified
+            # proof and be accepted as immutable terminal success.
+            terminal_peer_metadata = metadata(peer, note="completed-marker") + (
+                f",pid={dead_pid},pid_start=1,pgid={dead_pid},"
                 f"pid_observer_ns={os.readlink('/proc/self/ns/pid')}"
             )
             jobs.write_text(

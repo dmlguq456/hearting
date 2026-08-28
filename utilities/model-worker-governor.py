@@ -783,7 +783,13 @@ def _validate_batch_peer(
     if require_terminal_success and (
         fields[1] != "done"
         or metadata.get("note") != "completed-marker"
-        or metadata.get("failure_class") != "pass"
+        # DR-1 (2026-08-28): the ordinary completion path — worker self-close, then the
+        # owner's `complete` publishing the marker — never wrote `failure_class=pass`
+        # (live registry: 45 completed-marker rows, 44 without the field), so requiring
+        # it made every sanctioned gap replacement refuse. An absent class defers to the
+        # marker-verified proof below (marker current + completion readiness); an explicit
+        # non-pass class still refuses here.
+        or metadata.get("failure_class") not in (None, "", "-", "pass")
     ):
         raise ValueError(
             "partial continuation peer is not immutable terminal success"

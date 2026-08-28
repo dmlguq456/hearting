@@ -3024,6 +3024,10 @@ def complete_node(
                 f",note=completed-marker,completion_marker={canonical_marker_path}"
                 f",completion_marker_history={history_marker_path}"
             )
+            # DR-1: seal the pass verdict alongside the marker so partial-continuation
+            # peer checks see immutable terminal success without re-deriving it.
+            if row_metadata.get("failure_class") in (None,"","-"):
+                row_fields[5] += ",failure_class=pass"
             lines[row_index]="\t".join(row_fields)
             _atomic_registry_replace(jobs_path,lines)
             return marker, {
