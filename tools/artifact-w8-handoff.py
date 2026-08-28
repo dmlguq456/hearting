@@ -55,6 +55,24 @@ def canonical(obj) -> str:
     return json.dumps(obj, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
 
 
+PRIMARY_NAMES = ("final_report.md", "report.md", "prd.md", "plan.md")
+
+
+def pick_primary(rows):
+    """Report landing page: by NAME PRIORITY first, then the shallowest path.
+
+    Members are listed by locator, so a plain "first row whose name is in the set" picked
+    `_internal/prompts/plan.md` over the report's own `final_report.md` (2026-08-28 Cairn W10b:
+    10 of 12 residual hierarchy conflicts). The user-facing landing page is the highest-priority
+    name at the shallowest depth; the locator order of members carries no meaning here.
+    """
+    for name in PRIMARY_NAMES:
+        candidates = [r for r in rows if r["locator"].rsplit("/", 1)[1] == name]
+        if candidates:
+            return min(candidates, key=lambda r: (r["locator"].count("/"), r["locator"]))
+    return rows[0]
+
+
 class NotesInputError(ValueError):
     pass
 
@@ -324,7 +342,7 @@ class Bundle:
         proposal = []
         for key, rows in sorted(groups.items()):
             rows.sort(key=lambda r: r["locator"])
-            primary = next((r for r in rows if r["locator"].rsplit("/", 1)[1] in ("final_report.md", "report.md", "prd.md", "plan.md")), rows[0])
+            primary = pick_primary(rows)
             proposal.append({"report_locator": key, "cycle_id": rows[0]["cycle_id"], "member_count": len(rows),
                              "primary_artifact_id": primary["artifact_id"],
                              "ordered_member_set_digest": sha_text("\n".join(r["artifact_revision_id"] for r in rows)),

@@ -71,5 +71,22 @@ class BundleNotesRowTest(unittest.TestCase):
         self.assertIsNone(b.existing_note_counts())
 
 
+
+class PickPrimaryTest(unittest.TestCase):
+    def rows(self, *locators):
+        return [{"locator": f"campaigns/c/cycles/y/artifacts/plans/x/{l}"} for l in sorted(locators)]
+
+    def test_name_priority_beats_locator_order(self):
+        rows = self.rows("_internal/prompts/plan.md", "evidence/a.json", "final_report.md")
+        self.assertTrue(w8.pick_primary(rows)["locator"].endswith("/x/final_report.md"))
+
+    def test_shallowest_path_wins_within_a_name(self):
+        rows = self.rows("plan/plan.md", "plan.md", "notes.md")
+        self.assertTrue(w8.pick_primary(rows)["locator"].endswith("/x/plan.md"))
+
+    def test_falls_back_to_first_row(self):
+        rows = self.rows("b.md", "a.md")
+        self.assertTrue(w8.pick_primary(rows)["locator"].endswith("/x/a.md"))
+
 if __name__ == "__main__":
     unittest.main()
