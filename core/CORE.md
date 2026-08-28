@@ -138,6 +138,20 @@ never orders a move or a delete.
 | `.git/`, `.agents/`, `.codex/`, `.probe-*/` | runtime residue that lives beside artifacts without being one | `C-LEG(runtime-residue)` |
 | `_scratch/` | the sole exact census exclusion | `C-SCR` |
 
+The following paths are a sealed-evidence exception set. These exact prefixes
+(and their descendants) or exact files take precedence over their parent
+top-level class. Census does not follow symlinks. The set is closed: adding,
+removing, or widening an entry requires a product-spec revision.
+
+| Exact path | Meaning | Disposition class |
+|---|---|---|
+| `plans/2026-08-24_artifact-knowledge-index-w7/` | sealed W7 knowledge-index evidence | `C-LEG(sealed-evidence)` |
+| `plans/2026-08-25_artifact-knowledge-index-w7-e1/` | sealed W7 E1 evidence | `C-LEG(sealed-evidence)` |
+| `plans/2026-08-25_artifact-knowledge-index-w7-e2-e3/` | sealed W7 E2/E3 evidence | `C-LEG(sealed-evidence)` |
+| `plans/2026-08-25_artifact-write-cutover-w7c/` | sealed W7C cutover evidence | `C-LEG(sealed-evidence)` |
+| `spec/artifact-path-contract/_internal/research/` | retained artifact-path-contract research evidence | `C-LEG(sealed-evidence)` |
+| `research/hermes-agent/.gitignore` | retained research repository-control evidence | `C-LEG(sealed-evidence)` |
+
 **Write cutover.** The legacy `C-DUR` buckets above (`analysis_project/`, `research/`, `spec/`, `plans/`, `documents/`, `experiments/`, `designs/`) are writable only while the producer cutover is inactive (`.runtime/artifact-producer/v1/cutover.json` absent). Once activated by the approval package, every new write must land under an open cycle's `campaigns/<camp>/cycles/<cyc>/artifacts/`, IDs are issued by `begin` before the first write, and `artifact_producer.py check-write` is the single allow/deny oracle for hooks and writers. The approval-gated follow-ups run through `utilities/artifact_cutover.py`: `migrate-delta`/`migrate-seal` copy the census-classified legacy delta into one sealed cycle and new shared revisions (sources preserved, journaled), `compat-close` records the map set legacy readers resolve through (`resolve-legacy`; the spec gate falls back to the latest `shared/spec/` revision), and `retire` deletes only digest-verified, backed-up sources. Existing legacy content stays readable; nothing is moved or deleted by activation. Readers resolve a bucket through `utilities/artifact_reader.py` (cycle dirs → latest shared revision → the legacy bucket as a read-only fallback, missing legacy paths via `resolve-legacy`); a reader that still opens `<root>/<bucket>/` directly sees only the retirement exclusions.
 
 **Population.** `_scratch/` is the sole exact census exclusion; no other name is

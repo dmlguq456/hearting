@@ -37,6 +37,14 @@ LEGACY_ROUTES = {"routes", "_routes", ".routes"}
 UNDECLARED_CONTAINERS = {"notes", "proposals", "spec-research-alternative", "research-alternative",
                          "release-config", "evidence", "dev_logs", "test_logs", "user_profile"}
 SHARED_KINDS = {"spec", "analysis", "research"}
+SEALED_EVIDENCE_PATHS = (
+    "plans/2026-08-24_artifact-knowledge-index-w7",
+    "plans/2026-08-25_artifact-knowledge-index-w7-e1",
+    "plans/2026-08-25_artifact-knowledge-index-w7-e2-e3",
+    "plans/2026-08-25_artifact-write-cutover-w7c",
+    "spec/artifact-path-contract/_internal/research",
+    "research/hermes-agent/.gitignore",
+)
 
 
 def sha256_file(path: Path) -> str:
@@ -84,6 +92,11 @@ def under(rel: str, prefixes) -> bool:
     return any(rel == p or rel.startswith(p + "/") for p in prefixes)
 
 
+def sealed_evidence_prefix(rel: str) -> str | None:
+    return next((prefix for prefix in SEALED_EVIDENCE_PATHS
+                 if rel == prefix or rel.startswith(prefix + "/")), None)
+
+
 def classify(rel: str, kind: str, ev: dict) -> tuple[str, str]:
     """Return (disposition, detail). Rule order is the authority."""
     top = rel.split("/", 1)[0]
@@ -93,6 +106,9 @@ def classify(rel: str, kind: str, ev: dict) -> tuple[str, str]:
         return "runtime-residue", top
     if kind == "symlink":
         return "symlink-row", top
+    sealed_prefix = sealed_evidence_prefix(rel)
+    if sealed_prefix is not None:
+        return "c-leg-sealed-evidence", sealed_prefix
     if top == "campaigns":
         if rel in ev["journal_target_ancestors"]:
             return "w7-relocated-target-ancestor", "campaigns"

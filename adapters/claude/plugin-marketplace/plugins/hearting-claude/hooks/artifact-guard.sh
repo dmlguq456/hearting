@@ -192,12 +192,23 @@ def patterns(scope):
         return ["^documents/*/*","^research/*/*"]
     root=scope[:-3] if scope.endswith("/**") else scope
     if scope in WORKTREE_ONLY or root=="source" or root.startswith("source/"): return []
-    return [scope.replace("<cycle>","*").replace("<topic>","*").replace("<component>","*").replace("/**","/*")]
+    return [scope.replace("<cycle>","*").replace("<topic>","*").replace("<component>","*")]
+def component_match(value, pattern):
+    values=value.split("/") if value else []
+    parts=pattern.split("/") if pattern else []
+    recursive=bool(parts and parts[-1]=="**")
+    if recursive:
+        parts=parts[:-1]
+        if len(values)<len(parts): return False
+    elif len(values)!=len(parts):
+        return False
+    return all(fnmatch.fnmatchcase(value_part, pattern_part)
+               for value_part,pattern_part in zip(values,parts))
 def bound(rel,pat):
     if pat.startswith("^"):
-        return fnmatch.fnmatch(rel,pat[1:])
+        return component_match(rel,pat[1:])
     segments=rel.split("/")
-    return any(fnmatch.fnmatch("/".join(segments[i:]),pat) for i in range(len(segments)))
+    return any(component_match("/".join(segments[i:]),pat) for i in range(len(segments)))
 try:
     route=json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
     if route.get("route_id")!=sys.argv[2]: raise ValueError("route id mismatch")

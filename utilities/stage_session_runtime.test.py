@@ -65,9 +65,11 @@ class StageSessionStateDirTests(unittest.TestCase):
         legacy = self.root / "plans" / "stage-sessions" / "rt-0123456789abcdef" / "_internal" / "state"
         args = _args(self.worktree, self.brief, self.fixed, state_dir=str(legacy))
         with self.assertRaises(DispatchContractError) as caught:
-            runtime.bind(args, artifact_root=self.root, action="dry-run")
+            runtime.bind(args, artifact_root=self.root, action="start")
         self.assertEqual(caught.exception.reason, "subsession-state-dir-write-denied")
         self.assertIn("legacy-top-level-write-denied", caught.exception.detail)
+        self.assertFalse(legacy.exists())
+        self.assertFalse(Path(str(legacy) + ".lock").exists())
         default = _args(self.worktree, self.brief, self.fixed)
         runtime.bind(default, artifact_root=self.root, action="dry-run")
         self.assertTrue(default.state_ledger.startswith(str(self.root / ".runtime" / "stage-sessions")))

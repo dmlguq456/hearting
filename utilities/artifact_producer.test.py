@@ -366,9 +366,60 @@ class FinalizeTest(ProducerTestBase):
         self.activate()
         route, route_file, result = self.begin()
         self.write_output(result)
-        self.close(route, route_file)
+        outcome, created = R.close_route(
+            route, route_file, commit="a" * 40, summary="abandoned fixture"
+        )
+        self.assertTrue(created)
+        self.assertFalse(outcome["terminal_gate_proven"])
         outcome = P.finalize(self.root, cycle_id=result["cycle_id"], state="abandoned")
         self.assertEqual(outcome["cycle_state"], "abandoned")
+        document = json.loads((Path(result["cycle_dir"]) / "manifest.json").read_text())
+        self.assertEqual(document["routes"][0]["terminal_marker"], "pending")
+        self.assertEqual(document["routes"][0]["terminal_evidence_id"], "")
+        self.assertFalse(any(e["event_type"] == "route.terminal.recorded" for e in document["events"]))
+
+    def test_completed_still_rejects_closed_route_without_terminal_evidence(self):
+        self.activate()
+        route, route_file, result = self.begin()
+        self.write_output(result)
+        outcome, _ = R.close_route(route, route_file, commit="a" * 40, summary="incomplete fixture")
+        self.assertFalse(outcome["terminal_gate_proven"])
+        with self.assertRaises(P.ProducerError) as caught:
+            P.finalize(self.root, cycle_id=result["cycle_id"])
+        self.assertEqual(caught.exception.code, "completion-terminal-marker-unverified")
+
+    def test_abandoned_finalize_can_adopt_an_explicit_legacy_root_output(self):
+        self.activate()
+        route, route_file, result = self.begin()
+        legacy = Path(result["cycle_dir"]) / "owner_brief.md"
+        legacy.write_text("owner brief\n", encoding="utf-8")
+        R.close_route(route, route_file, commit="a" * 40, summary="abandoned fixture")
+        outcome = P.finalize(
+            self.root,
+            cycle_id=result["cycle_id"],
+            state="abandoned",
+            adopt_root_outputs=["owner_brief.md"],
+        )
+        self.assertEqual(outcome["adopted_root_outputs"], ["owner_brief.md"])
+        self.assertFalse(legacy.exists())
+        self.assertTrue((Path(result["cycle_dir"]) / "artifacts" / "owner_brief.md").is_file())
+
+    def test_root_output_adoption_validates_all_sources_before_moving(self):
+        self.activate()
+        route, route_file, result = self.begin()
+        first = Path(result["cycle_dir"]) / "first.md"
+        first.write_text("first\n", encoding="utf-8")
+        R.close_route(route, route_file, commit="a" * 40, summary="abandoned fixture")
+        with self.assertRaises(P.ProducerError) as caught:
+            P.finalize(
+                self.root,
+                cycle_id=result["cycle_id"],
+                state="abandoned",
+                adopt_root_outputs=["first.md", "missing.md"],
+            )
+        self.assertEqual(caught.exception.code, "root-output-adoption-source-invalid")
+        self.assertTrue(first.is_file())
+        self.assertFalse((Path(result["cycle_dir"]) / "artifacts" / "first.md").exists())
 
     def test_finalize_rejects_symlink_and_out_of_artifacts_files(self):
         self.activate()

@@ -261,6 +261,25 @@ selects `assigned_contract=code-execute` and the portable implementer role. Pass
 `plan.md` path, retain the emitted attempt ID, yield for the typed receipt, and publish exact completion. Fallback
 to in-session only under the closed rules above.
 
+**Subdivision check (SD-103) — perform it explicitly before the single-session dispatch.**
+`execute` is the one node that carries a sealed `subdivision` permission
+(`min_intensity: strong`, `max_slices: 4`, `disjointness: exact-fixed-files`). When the
+route's effective intensity is `strong+` AND `plan.md` partitions the work into 2–4
+packages whose file ownership is exactly disjoint, do not default to one long serial
+session: build the slice manifest from the plan's declared `fixed_files` per package and
+admit the parallel slices with one `dispatch-batch.py --parallel-group execute --route
+<route-file> --parent <owner slug> --slug-prefix <prefix> --subdivision-manifest
+<chain.json> --start` call, then close the single stage gate with `capability-route.py
+complete --route <route-file> --node execute --evidence <stage evidence> --jobs <registry>
+--subsession-manifest <chain.json>`. Slices are
+no-commit workers; close the gate first, commit after. A typed `single-session-required`
+receipt means "run this stage as one ordinary session" — proceed single-session and record
+the reason; it is not a failure. At `standard` intensity, or when the plan's packages share
+files, subdivision is unavailable by contract — a declared serial sub-session split under
+the same route node is then the sanctioned way to bound session length. Record which of the
+three shapes (parallel slices / serial split / single session) was chosen and why in the
+dev log. `core/OPERATIONS.md §5.10` owns the manifest, baseline, and refusal vocabulary.
+
 Read plan frontmatter after harvest:
 
 - `done` → impl-review, then Step 4;

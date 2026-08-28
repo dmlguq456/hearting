@@ -38,6 +38,9 @@ class MaterialRouteGuardTest(unittest.TestCase):
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
+        self._original_agent_home = os.environ.get("AGENT_HOME")
+        os.environ["AGENT_HOME"] = str(ROOT)
+        self.addCleanup(self._restore_agent_home)
         self.base = Path(self.temp.name)
         self.repo = self.base / "project"
         self.repo.mkdir()
@@ -74,12 +77,21 @@ class MaterialRouteGuardTest(unittest.TestCase):
             "--workflow-mode", "untracked",
             "--artifact-guard", "preflight-passed",
         ]
-        result = subprocess.run(command, text=True, capture_output=True)
+        compile_env = os.environ.copy()
+        compile_env["AGENT_HOME"] = str(ROOT)
+        compile_env.pop("AGENT_DISPATCH_JOBS", None)
+        result = subprocess.run(command, text=True, capture_output=True, env=compile_env)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.route_id = json.loads(result.stdout)["route_id"]
         self.route = self.artifacts / ".runtime" / "routes" / f"{self.route_id}.json"
         self.assertTrue(self.route.is_file())
         self.receipts = self.base / "recall-opportunities"
+
+    def _restore_agent_home(self) -> None:
+        if self._original_agent_home is None:
+            os.environ.pop("AGENT_HOME", None)
+        else:
+            os.environ["AGENT_HOME"] = self._original_agent_home
 
     def opportunity(
         self, session: str = "session-a", *, turn: str = "", cwd: Path | None = None,
@@ -1036,7 +1048,7 @@ class MaterialRouteGuardTest(unittest.TestCase):
             args = [
                 wrapper_rel, "route", "--capability", "autopilot-code",
                 "--capability-mode", "dev", "--intensity", "direct",
-                "--cwd", str(target), "--artifact-root", str(target),
+                "--cwd", str(target), "--artifact-root", str(canonical),
             ]
             for predicate in PREDICATES:
                 args += ["--predicate", predicate]
@@ -1079,14 +1091,21 @@ class MaterialRouteGuardTest(unittest.TestCase):
         )
         for name, target, executable in cases:
             with self.subTest(case=name):
-                probe_command = compile_command(target).replace(wrapper_rel, executable, 1)
-                probe = subprocess.run(probe_command, shell=True, cwd=target, text=True, capture_output=True)
+                # Execute route compilation through the canonical launch root.
+                # The command handed to the post-tool parser still names the
+                # trusted linked wrapper, which is the behavior under test.
+                probe_command = compile_command(target).replace(
+                    wrapper_rel, str(canonical / wrapper_rel), 1
+                )
+                fixture_env = {**os.environ, "AGENT_HOME": str(canonical)}
+                probe = subprocess.run(
+                    probe_command, shell=True, cwd=target, text=True,
+                    capture_output=True, env=fixture_env,
+                )
                 self.assertEqual(probe.returncode, 0, probe.stderr)
                 route_id = json.loads(probe.stdout)["route_id"]
-                output = f".runtime/routes/{route_id}.json"
+                output = str(canonical / ".runtime" / "routes" / f"{route_id}.json")
                 command = compile_command(target, output).replace(wrapper_rel, executable, 1)
-                result = subprocess.run(command, shell=True, cwd=target, text=True, capture_output=True)
-                self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertEqual(
                     fixture_guard.route_compile_invocations(command, target)[0].effective_cwd,
                     target.resolve(),
@@ -1109,13 +1128,24 @@ class MaterialRouteGuardTest(unittest.TestCase):
                     )
                     self.assertEqual(allowed.returncode, 0, allowed.stderr)
 
-        cd_probe_command = f"cd {linked} && {compile_command(linked)}"
-        cd_probe = subprocess.run(cd_probe_command, shell=True, cwd=canonical, text=True, capture_output=True)
+        cd_probe_command = (
+            f"cd {linked} && "
+            + compile_command(linked).replace(wrapper_rel, str(canonical / wrapper_rel), 1)
+        )
+        fixture_env = {**os.environ, "AGENT_HOME": str(canonical)}
+        cd_probe = subprocess.run(
+            cd_probe_command, shell=True, cwd=canonical, text=True,
+            capture_output=True, env=fixture_env,
+        )
         self.assertEqual(cd_probe.returncode, 0, cd_probe.stderr)
         cd_route_id = json.loads(cd_probe.stdout)["route_id"]
-        cd_command = f"cd {linked} && {compile_command(linked, f'.runtime/routes/{cd_route_id}.json')}"
-        result = subprocess.run(cd_command, shell=True, cwd=canonical, text=True, capture_output=True)
-        self.assertEqual(result.returncode, 0, result.stderr)
+        cd_command = (
+            f"cd {linked} && "
+            + compile_command(
+                linked,
+                str(canonical / ".runtime" / "routes" / f"{cd_route_id}.json"),
+            )
+        )
         result = run_portable(cd_command, canonical, "preceding-cd-portable")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertTrue(fixture_guard.marker_path(canonical, "preceding-cd-portable").is_file())

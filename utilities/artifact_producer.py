@@ -778,7 +778,7 @@ def build_manifest(
             "actor": {"kind": "producer", "id": record["producer_id"]}, "recorded_at": when,
             "provenance": provenance(cycle_digest), "evidence_ids": [], "payload": {},
         })
-    if closed:
+    if closed and cycle_state == "completed":
         terminal_event_id = allocator.allocate("event")
         events.append({
             "event_id": terminal_event_id, "stream_id": allocator.allocate("stream"),
@@ -814,7 +814,7 @@ def build_manifest(
             "source_revision": f"{record['capability']}/{record['intensity']}/{ALGORITHM_VERSION}",
         },
     }
-    if closed:
+    if closed and cycle_state == "completed":
         binding, sealed_route = artifact_lifecycle.bind_existing_runtime_route(
             root, Path(record["route_file"]), expected_root_id=identity.artifact_root_id
         )
@@ -862,6 +862,7 @@ def finalize(
     now: Optional[float] = None,
     crash_after_manifest: bool = False,
     exclude_hidden: bool = False,
+    adopt_root_outputs: Sequence[str] = (),
 ) -> Dict[str, Any]:
     root = Path(root).resolve()
     if state not in {"completed", "abandoned"}:
@@ -882,6 +883,27 @@ def finalize(
         route = load_route(root, Path(record["route_file"]))
         if route["route_hash"] != record["route_hash"]:
             raise ProducerError("route-hash-drift", cycle_id)
+        adopted_root_outputs: List[str] = []
+        if adopt_root_outputs and state != "abandoned":
+            raise ProducerError("root-output-adoption-requires-abandoned")
+        adoption_moves: List[Tuple[str, Path, Path]] = []
+        seen_adoptions: set[str] = set()
+        for name in adopt_root_outputs:
+            if not name or name in {".", ".."} or "/" in name or "\\" in name:
+                raise ProducerError("root-output-adoption-name-invalid", name)
+            if name in seen_adoptions:
+                raise ProducerError("root-output-adoption-duplicate", name)
+            seen_adoptions.add(name)
+            source = directory / name
+            target = directory / "artifacts" / name
+            if source.is_symlink() or not source.is_file():
+                raise ProducerError("root-output-adoption-source-invalid", name)
+            if target.exists() or target.is_symlink():
+                raise ProducerError("root-output-adoption-target-exists", name)
+            adoption_moves.append((name, source, target))
+        for name, source, target in adoption_moves:
+            os.replace(source, target)
+            adopted_root_outputs.append(name)
         excluded_hidden: List[str] = []
         rows, violations = _enumerate_output(directory, exclude_hidden=exclude_hidden, excluded=excluded_hidden)
         if violations:
@@ -936,7 +958,7 @@ def finalize(
             raise artifact_admission.AdmissionRecoveryRequired(
                 f"cycle {cycle_id} manifest published but post-publish update failed; run recover"
             ) from exc
-        return {"excluded_hidden": excluded_hidden, 
+        return {"excluded_hidden": excluded_hidden, "adopted_root_outputs": adopted_root_outputs,
             "status": "sealed", "cycle_id": cycle_id, "campaign_id": record["campaign_id"],
             "manifest_digest": digest, "manifest_path": str(manifest_path),
             "artifact_count": len(rows), "lineage_committed": True, "cycle_state": document["cycle"]["state"],
@@ -1370,6 +1392,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     p.add_argument("--primary")
     p.add_argument("--publication", default="not-offered")
     p.add_argument("--allow-open-route", action="store_true")
+    p.add_argument("--adopt-root-output", action="append", default=[])
 
     p = sub.add_parser("admit-shared")
     p.add_argument("--artifact-root", required=True)
@@ -1428,7 +1451,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 Path(args.env_file).write_text(lines, encoding="utf-8")
         elif args.command == "finalize":
             result = finalize(root, cycle_id=args.cycle, state=args.state, primary=args.primary,
-                              publication=args.publication, allow_open_route=args.allow_open_route)
+                              publication=args.publication, allow_open_route=args.allow_open_route,
+                              adopt_root_outputs=args.adopt_root_output)
         elif args.command == "admit-shared":
             result = admit_shared(root, cycle_id=args.cycle, kind=args.kind, source=args.source,
                                   reference_id=args.reference, key=args.key, title=args.title,
