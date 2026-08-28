@@ -37,12 +37,34 @@ class RoutingConfigInstallTests(unittest.TestCase):
             text = path.read_text(encoding="utf-8")
             self.assertIn("primary: [claude, codex, opencode]", text)
             self.assertIn("strategy: balanced", text)
-            self.assertIn("usage_gate_used_percent: 90", text)
+            self.assertIn("usage_gate_used_percent: 85", text)
+            self.assertIn("owner: claude", text)
+            self.assertIn("worker: codex", text)
+            self.assertIn("depth_affinity_weight: 0.65", text)
+            self.assertIn("usage_headroom_exponent: 2", text)
             self.assertTrue(routing_config.validate()["ok"])
             path.write_text(text + "# user edit\n", encoding="utf-8")
             second = routing_config.ensure(["claude"])
             self.assertEqual(second["status"], "preserved")
             self.assertTrue(path.read_text(encoding="utf-8").endswith("# user edit\n"))
+
+    def test_render_omits_a_depth_affinity_cell_for_a_disabled_harness(self):
+        claude_only = routing_config.render(["claude"])
+        self.assertIn("owner: claude", claude_only)
+        self.assertNotIn("worker: codex", claude_only)
+        codex_only = routing_config.render(["codex"])
+        self.assertIn("worker: codex", codex_only)
+        self.assertNotIn("owner: claude", codex_only)
+        both = routing_config.render(["claude", "codex"])
+        self.assertIn("owner: claude", both)
+        self.assertIn("worker: codex", both)
+        # A cell naming a disabled harness would fail validate(); each rendering
+        # must therefore still be a valid config on its own.
+        capmap = DEFAULTS.load_topology_capabilities(DEFAULTS.default_topology_path())
+        for text in (claude_only, codex_only, both):
+            self.assertEqual(
+                DEFAULTS.validate(DEFAULTS.parse_yaml_subset(text), capmap), []
+            )
 
     def test_single_opencode_install_skips_invalid_user_policy(self):
         with self.assertRaisesRegex(ValueError, "quality-peer runtime"):

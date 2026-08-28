@@ -367,6 +367,25 @@ class DispatchOwnerTests(unittest.TestCase):
         self.assert_model_map(result, "codex")
         self.assertIn("selection_source=explicit", result.stdout)
 
+    def test_depth_one_affinity_and_new_fields_are_auditable(self):
+        config = self.balanced_quality_config()
+        text = config.read_text(encoding="utf-8").replace(
+            "usage_gate_used_percent: 90", "usage_gate_used_percent: 90\n  depth_affinity:\n    owner: claude\n    worker: codex\n  depth_affinity_weight: 0.65\n  usage_headroom_exponent: 2")
+        config.write_text(text, encoding="utf-8")
+        result = self.run_owner(config=config)
+        self.assertIn("depth_affinity=owner:claude,worker:codex", result.stdout)
+        self.assertIn("depth_affinity_weight=0.65", result.stdout)
+        self.assertIn("usage_headroom_exponent=2", result.stdout)
+
+    def test_explicit_adapter_beats_depth_affinity(self):
+        config = self.balanced_quality_config()
+        text = config.read_text(encoding="utf-8").replace(
+            "usage_gate_used_percent: 90", "usage_gate_used_percent: 90\n  depth_affinity:\n    owner: claude\n    worker: codex\n  depth_affinity_weight: 0.65\n  usage_headroom_exponent: 2")
+        config.write_text(text, encoding="utf-8")
+        result = self.run_owner(config=config, extra=("--adapter", "codex"))
+        self.assertIn("adapter=codex", result.stdout)
+        self.assertIn("selection_source=explicit", result.stdout)
+
     def test_explicit_opencode_relief_path_is_authorized(self):
         # SD-66 relief-only: opencode is never a configured/default candidate,
         # but an explicit --adapter opencode is a documented relief path and

@@ -1738,11 +1738,9 @@ def verify_route(route, expected_cwd=None, *, allow_stale_registry=False):
         raise ValueError("bare route dispatch-depth fields are forbidden")
     allocation = route.get("dispatch_allocation")
     if allocation is not None:
-        if not isinstance(allocation, dict) or set(allocation) not in ({
-            "strategy", "window", "harness_order"
-        }, {
-            "strategy", "window", "usage_gate_used_percent", "harness_order"
-        }):
+        required = {"strategy", "window", "harness_order"}
+        optional = {"usage_gate_used_percent", "depth_affinity", "depth_affinity_weight", "usage_headroom_exponent"}
+        if not isinstance(allocation, dict) or not required <= set(allocation) or set(allocation) - required - optional:
             raise ValueError("invalid dispatch_allocation shape")
         if allocation.get("strategy") not in {
             "config-order", "least-recent-attempts", "capacity-aware", "balanced"
@@ -1760,6 +1758,17 @@ def verify_route(route, expected_cwd=None, *, allow_stale_registry=False):
             not isinstance(gate, int) or not 0 <= gate <= 100
         ):
             raise ValueError("invalid dispatch_allocation usage gate")
+        affinity = allocation.get("depth_affinity", {})
+        if not isinstance(affinity, dict) or not set(affinity) <= {"owner", "worker"}:
+            raise ValueError("invalid dispatch_allocation depth affinity")
+        if any(value not in DEFAULTS.DISPATCHABLE_HARNESSES for value in affinity.values()):
+            raise ValueError("invalid dispatch_allocation depth affinity value")
+        weight = allocation.get("depth_affinity_weight", 0.5)
+        if isinstance(weight, bool) or not isinstance(weight, (int, float)) or not 0.0 <= weight <= 1.0:
+            raise ValueError("invalid dispatch_allocation affinity weight")
+        exponent = allocation.get("usage_headroom_exponent", 1)
+        if isinstance(exponent, bool) or not isinstance(exponent, int) or not 1 <= exponent <= 4:
+            raise ValueError("invalid dispatch_allocation headroom exponent")
         order = allocation.get("harness_order")
         if (
             not isinstance(order, list)

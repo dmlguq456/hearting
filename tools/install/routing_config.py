@@ -58,7 +58,11 @@ def render(enabled) -> str:
         "allocation:",
         "  strategy: balanced",
         "  window: 30",
-        "  usage_gate_used_percent: 90",
+        "  usage_gate_used_percent: 85",
+        "  depth_affinity:",
+        *[f"    {depth}: {harness}" for depth, harness in (("owner", "claude"), ("worker", "codex")) if harness in enabled],
+        "  depth_affinity_weight: 0.65",
+        "  usage_headroom_exponent: 2",
         # Omitted cells inherit the shipped profiles/dispatch-defaults.yaml
         # capability baseline; a cell written here always wins over it.
         "capabilities:",

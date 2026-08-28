@@ -173,6 +173,52 @@ def capacity_scores(*, stale_after: int = 3600, now: float | None = None) -> dic
 ORDERING_NEUTRAL_SCORE = 50.0
 
 
+def preferred_for_depth(allocation, depth):
+    """Configured depth preference, or None when an explicit env bias overrides it."""
+    bias = os.environ.get("HARNESS_CAPACITY_BIAS", "").strip().lower()
+    if bias in HARNESSES:
+        return None
+    affinity = allocation.get("depth_affinity") or {}
+    return affinity.get("owner" if depth == 1 else "worker")
+
+
+def affinity_margin(affinity_weight=0.5):
+    """Headroom points a preferred harness may trail the best candidate by.
+
+    `(weight - 0.5) * 200`: 0 at the neutral 0.5, 30 at the shipped 0.65, 100 at
+    a pin-like 1.0. A weight below 0.5 yields a negative margin and therefore
+    never reorders; it does not invert into a demotion.
+    """
+    return round((float(affinity_weight) - 0.5) * 200.0, 9)
+
+
+def within_affinity_margin(scores, preferred, candidates, *, affinity_weight=0.5):
+    """The single `capacity-aware` affinity oracle, shared by every consumer.
+
+    True when `preferred` may be hoisted inside its own already-eligible class.
+    Neutral weight, no preference, and a preferred harness outside `candidates`
+    are all False. An unknown or non-positive gauge is False as well, which is
+    `rank_band`'s capacity-aware exclusion, not a new rule: a harness that branch
+    would never rank cannot be hoisted by a preference either.
+
+    `dispatch-batch.py` scores whole combinations rather than a ranked band, so
+    it cannot reuse `rank_band`'s reorder; it asks this predicate instead, and
+    both consumers therefore share one margin definition.
+    """
+    if preferred is None or float(affinity_weight) == 0.5 or preferred not in candidates:
+        return False
+    value = scores.get(preferred)
+    if value is None or float(value) <= 0:
+        return False
+    known = [
+        float(scores[name]) for name in candidates
+        if scores.get(name) is not None and float(scores[name]) > 0
+    ]
+    if not known:
+        return False
+    return round(max(known) - float(value), 9) <= affinity_margin(affinity_weight)
+
+
 def ordering_score(scores, harness, neutral=ORDERING_NEUTRAL_SCORE):
     """Order candidates that checked evidence has ALREADY proven eligible.
 
@@ -194,7 +240,8 @@ def ordering_score(scores, harness, neutral=ORDERING_NEUTRAL_SCORE):
     return float(neutral) if value is None else float(value)
 
 
-def allocation_deficit(scores, counts, candidates, *, neutral=ORDERING_NEUTRAL_SCORE):
+def allocation_deficit(scores, counts, candidates, *, neutral=ORDERING_NEUTRAL_SCORE,
+                       preferred=None, affinity_weight=0.5, headroom_exponent=1):
     """Blend remaining headroom and round-robin balance into one continuous key.
 
     Headroom sets each candidate's *target share* of the next attempt; the
@@ -209,9 +256,28 @@ def allocation_deficit(scores, counts, candidates, *, neutral=ORDERING_NEUTRAL_S
     An unknown gauge takes the same neutral share `ordering_score` uses: it is
     not exclusion here (see `rank_band`'s capacity-aware branch for the
     exclusion semantics that must NOT be harmonised with this).
+
+    `preferred`/`affinity_weight` apply the configured depth affinity as a
+    multiplier on the target share (`weight` for the preferred candidate,
+    `(1-weight)/(n-1)` for each other); a neutral weight, an absent preference
+    or a single candidate leaves every multiplier at 1.0, so equal headroom
+    still reduces to exact round-robin. `headroom_exponent` sharpens the share
+    without moving any ordering boundary.
     """
+    n = len(candidates)
+    neutral_affinity = (
+        preferred is None or preferred not in candidates
+        or affinity_weight == 0.5 or n == 1
+    )
+    multipliers = {
+        name: (
+            1.0 if neutral_affinity else
+            affinity_weight if name == preferred else (1.0 - affinity_weight) / (n - 1)
+        ) for name in candidates
+    }
     shares = {
         name: (float(neutral) if scores.get(name) is None else max(0.0, float(scores[name])))
+        ** headroom_exponent * multipliers[name]
         for name in candidates
     }
     total = sum(shares.values())
@@ -249,13 +315,18 @@ def is_gated(scores, harness, *, usage_gate_used_percent=90):
     return value is not None and float(value) <= gate_cutoff(usage_gate_used_percent)
 
 
-def rank_band(candidates, states, counts, declared_order, scores, *, strategy="capacity-aware", usage_gate_used_percent=90):
+def rank_band(candidates, states, counts, declared_order, scores, *, strategy="capacity-aware", usage_gate_used_percent=90,
+              preferred=None, affinity_weight=0.5, headroom_exponent=1):
     """Rank eligible quality peers by headroom, then recent attempts and config order.
 
     Answers *eligibility*, not ordering: see `ordering_score` for the batch's
     separate ordering-only term over candidates already proven eligible here.
     Do not harmonise the two — an unknown gauge is exclusion here and neutral
     there, deliberately.
+
+    In capacity-aware ordering, the preferred harness may move to the front
+    only within a headroom margin of `(affinity_weight - 0.5) * 200`; a neutral
+    weight performs no reorder.
 
     Within `balanced`, the general (not-all-gated) branch is the one exception:
     it already sorts by `counts`/`declared_order`, i.e. it lives on the
@@ -280,7 +351,9 @@ def rank_band(candidates, states, counts, declared_order, scores, *, strategy="c
         if all_gated:
             key = lambda name: (-float(scores[name]), int(counts.get(name, 0)), order.get(name, len(order)))
         else:
-            deficit = allocation_deficit(scores, counts, candidates)
+            deficit = allocation_deficit(scores, counts, candidates, preferred=preferred,
+                                         affinity_weight=affinity_weight,
+                                         headroom_exponent=headroom_exponent)
             key = lambda name: (
                 1 if is_gated(scores, name, usage_gate_used_percent=usage_gate_used_percent) else 0,
                 # Rounded so two identical inputs can never diverge on float
@@ -331,6 +404,11 @@ def rank_band(candidates, states, counts, declared_order, scores, *, strategy="c
             order.get(name, len(order)),
         ),
     )
+    # Configured depth affinity, confined to this band and this eligibility
+    # class. The margin is the only condition, deliberately: DP-24 forbids a new
+    # soft threshold, and `counts` already breaks the ordinary sort above.
+    if within_affinity_margin(scores, preferred, ranked, affinity_weight=affinity_weight):
+        ranked = [preferred] + [name for name in ranked if name != preferred]
     bias = os.environ.get("HARNESS_CAPACITY_BIAS", "").strip().lower()
     if bias in ranked:
         ranked = [bias] + [name for name in ranked if name != bias]
@@ -360,12 +438,15 @@ def ordered_candidates(ranks, band_order, scores, *, strategy="capacity-aware", 
     return ungated + gated
 
 
-def select(policy, states, counts, declared_order, scores, *, strategy="capacity-aware", usage_gate_used_percent=90):
+def select(policy, states, counts, declared_order, scores, *, strategy="capacity-aware", usage_gate_used_percent=90,
+           preferred=None, affinity_weight=0.5, headroom_exponent=1):
     """Select one harness without allowing capacity to erase quality boundaries."""
     ranks = {
         band: rank_band(
             policy.get(band, []), states, counts, declared_order, scores,
             strategy=strategy, usage_gate_used_percent=usage_gate_used_percent,
+            preferred=preferred, affinity_weight=affinity_weight,
+            headroom_exponent=headroom_exponent,
         )
         for band in ("primary", "relief", "last_resort")
     }

@@ -356,6 +356,82 @@ class CapacityPolicyTests(unittest.TestCase):
             [name for _band, name in flat], ["opencode", "claude", "codex"],
         )
 
+    def test_equal_headroom_neutral_affinity_is_exact_round_robin_for_both_exponents(self):
+        for exponent in (1, 2):
+            for counts, expected in (({"claude": 3, "codex": 2}, {"claude": 0.0, "codex": 1.0}),
+                                     ({"claude": 2, "codex": 3}, {"claude": 1.0, "codex": 0.0})):
+                deficit = C.allocation_deficit({"claude": 80, "codex": 80}, counts,
+                    ["claude", "codex"], preferred=None, affinity_weight=.5,
+                    headroom_exponent=exponent)
+                self.assertEqual(deficit, expected)
+
+    def test_depth_affinity_flips_owner_and_worker_preference(self):
+        allocation = {"depth_affinity": {"owner": "claude", "worker": "codex"}}
+        self.assertEqual(C.preferred_for_depth(allocation, 1), "claude")
+        self.assertEqual(C.preferred_for_depth(allocation, 2), "codex")
+        for preferred, expected in (("claude", {"claude": 1.25, "codex": -.25}),
+                                    ("codex", {"claude": -.25, "codex": 1.25})):
+            self.assertEqual(C.allocation_deficit({"claude": 80, "codex": 80}, {"claude": 2, "codex": 2},
+                ["claude", "codex"], preferred=preferred, affinity_weight=.65,
+                headroom_exponent=2), expected)
+
+    def test_preferred_gated_harness_never_beats_ungated_peer(self):
+        ranked = C.rank_band(["claude", "codex"], self.states, self.counts,
+            ["claude", "codex"], {"claude": 5, "codex": 60}, strategy="balanced",
+            usage_gate_used_percent=90, preferred="claude", affinity_weight=1.0)
+        self.assertEqual(ranked, ["codex", "claude"])
+
+    def test_headroom_exponent_sharpens_share_without_forcing_order(self):
+        for exponent, expected in ((1, (.387096774194, .612903225806)),
+                                    (2, (.285148514851, .714851485149))):
+            d = C.allocation_deficit({"claude": 60, "codex": 95}, {"claude": 0, "codex": 0},
+                ["claude", "codex"], headroom_exponent=exponent)
+            self.assertAlmostEqual(d["claude"], expected[0], places=12)
+            self.assertAlmostEqual(d["codex"], expected[1], places=12)
+            self.assertEqual(C.rank_band(["claude", "codex"], self.states, self.counts,
+                ["claude", "codex"], {"claude": 60, "codex": 95}, strategy="balanced",
+                headroom_exponent=exponent), ["codex", "claude"])
+        for exponent, expected in ((1, (.539792387543, .460207612457)),
+                                   (2, (.425551261650, .574448738350))):
+            d = C.allocation_deficit({"claude": 60, "codex": 95}, {"claude": 0, "codex": 0},
+                ["claude", "codex"], preferred="claude", affinity_weight=.65,
+                headroom_exponent=exponent)
+            self.assertAlmostEqual(d["claude"], expected[0], places=12)
+            self.assertAlmostEqual(d["codex"], expected[1], places=12)
+
+    def test_capacity_aware_affinity_obeys_margin_and_unknown_exclusion(self):
+        kwargs = dict(preferred="codex", affinity_weight=.65)
+        self.assertEqual(C.rank_band(["claude", "codex"], self.states, self.counts,
+            ["claude", "codex"], {"claude": 80, "codex": 55}, **kwargs), ["codex", "claude"])
+        self.assertEqual(C.rank_band(["claude", "codex"], self.states, self.counts,
+            ["claude", "codex"], {"claude": 90, "codex": 55}, **kwargs), ["claude", "codex"])
+        ranked = C.rank_band(["claude", "codex"], self.states, self.counts,
+            ["claude", "codex"], {"claude": 80, "codex": None}, **kwargs)
+        self.assertEqual(ranked, ["claude"])
+
+    def test_affinity_never_overrides_large_recent_count_gap(self):
+        d = C.allocation_deficit({"claude": 80, "codex": 80}, {"claude": 10, "codex": 0},
+            ["claude", "codex"], preferred="claude", affinity_weight=.65, headroom_exponent=2)
+        self.assertAlmostEqual(d["claude"], -2.85, places=2)
+        self.assertAlmostEqual(d["codex"], 3.85, places=2)
+        # The recent-count dominance property lives in the `balanced` deficit.
+        # `capacity-aware` has no share arithmetic: there the margin is a
+        # deliberate in-class hoist modelled on HARNESS_CAPACITY_BIAS, and
+        # adding a count veto to it would be the new soft threshold DP-24
+        # forbids. Assert each strategy's own contract.
+        self.assertEqual(C.rank_band(["claude", "codex"], self.states, {"claude": 10, "codex": 0},
+            ["claude", "codex"], {"claude": 80, "codex": 80}, strategy="balanced",
+            preferred="claude", affinity_weight=.65, headroom_exponent=2), ["codex", "claude"])
+        self.assertEqual(C.rank_band(["claude", "codex"], self.states, {"claude": 10, "codex": 0},
+            ["claude", "codex"], {"claude": 80, "codex": 80},
+            preferred="claude", affinity_weight=.65, headroom_exponent=2), ["claude", "codex"])
+
+    def test_single_candidate_is_neutral_for_all_weights(self):
+        for weight in (0, .5, 1.0):
+            for exponent in (1, 2):
+                self.assertEqual(C.allocation_deficit({"claude": 80}, {"claude": 4}, ["claude"],
+                    preferred="claude", affinity_weight=weight, headroom_exponent=exponent), {"claude": 1.0})
+
 
 class CodexGaugeReaderTests(unittest.TestCase):
     """The codex gauge must not starve on idle: live probe first, rollout second.

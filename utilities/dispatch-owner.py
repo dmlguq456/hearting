@@ -309,6 +309,10 @@ def _audit(
         lines.append(f"allocation_strategy={allocation['strategy']}")
         lines.append(f"allocation_window={allocation['window']}")
         lines.append(f"usage_gate_used_percent={allocation.get('usage_gate_used_percent', 90)}")
+        affinity = allocation.get("depth_affinity") or {}
+        lines.append("depth_affinity=" + (",".join(f"{key}:{affinity[key]}" for key in sorted(affinity)) or "none"))
+        lines.append(f"depth_affinity_weight={allocation.get('depth_affinity_weight', 0.5)}")
+        lines.append(f"usage_headroom_exponent={allocation.get('usage_headroom_exponent', 1)}")
     for harness in _allocation.HARNESSES:
         if counts is not None:
             lines.append(f"attempt_count.{harness}={counts.get(harness, 0)}")
@@ -421,6 +425,9 @@ def main(argv):
                 policy, states, counts, allocation["harness_order"], capacity,
                 strategy=allocation["strategy"],
                 usage_gate_used_percent=allocation.get("usage_gate_used_percent", 90),
+                preferred=_capacity.preferred_for_depth(allocation, 1),
+                affinity_weight=allocation.get("depth_affinity_weight", 0.5),
+                headroom_exponent=allocation.get("usage_headroom_exponent", 1),
             )
             if selected:
                 source = "configured-" + allocation["strategy"]

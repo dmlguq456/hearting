@@ -991,6 +991,47 @@ class SecurityTest(_ConfigHomeMixin, unittest.TestCase):
         self.assertNotEqual(selected, "opencode")
         self.assertEqual(selected, "codex")
 
+    def test_title_provider_is_neutral_to_depth_affinity(self):
+        """The fleet titler is a display worker with no dispatch row and no depth.
+
+        A depth-2 `worker` preference must therefore not steer it (owner decision
+        D2); only `usage_headroom_exponent` reaches this call site.
+        """
+        path = os.path.join(self._tmp.name, "dispatch-defaults.yaml")
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write(
+                "schema_version: 3\n"
+                "harnesses:\n"
+                "  enabled: [claude, codex]\n"
+                "profiles:\n"
+                + "".join(
+                    "  %s:\n"
+                    "    primary: [claude, codex]\n"
+                    "    relief: []\n"
+                    "    last_resort: []\n"
+                    "    promote_relief_below: 0\n" % name
+                    for name in ("deep", "balanced-deep", "light", "mini")
+                )
+                + "allocation:\n"
+                "  strategy: balanced\n"
+                "  window: 30\n"
+                "  usage_gate_used_percent: 90\n"
+                "  depth_affinity:\n"
+                "    owner: claude\n"
+                "    worker: codex\n"
+                "  depth_affinity_weight: 1.0\n"
+                "  usage_headroom_exponent: 2\n"
+            )
+        os.environ["DISPATCH_DEFAULTS_CONFIG"] = path
+        jobs = os.path.join(self._tmp.name, "jobs.log")
+        open(jobs, "w", encoding="utf-8").close()
+        os.environ["AGENT_DISPATCH_JOBS"] = jobs
+        # Equal headroom, empty registry: a neutral call is exact round-robin,
+        # which the declared order resolves to claude. A pin-like weight 1.0
+        # worker preference would put codex first if the preference leaked in.
+        os.environ["HARNESS_CAPACITY_SCORES"] = "claude:80,codex:80"
+        self.assertEqual(rt.selected_providers()[0], "claude")
+
     def test_tight_primary_capacity_promotes_declared_opencode_relief(self):
         self._pin_quality_boundary_config()
         os.environ["HARNESS_CAPACITY_SCORES"] = "claude:20,codex:30,opencode:100"

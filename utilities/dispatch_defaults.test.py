@@ -37,6 +37,27 @@ class DispatchDefaultsV3Tests(unittest.TestCase):
         self.assertEqual(D.query_profile_policy(config, "deep")["primary"], ["claude", "codex"])
         self.assertEqual(D.query_profile_policy(config, "light")["relief"], ["opencode"])
 
+    def test_scalar_parses_decimal_weight_as_float(self):
+        value = D.parse_yaml_subset("allocation:\n  depth_affinity_weight: 0.65\n")["allocation"]["depth_affinity_weight"]
+        self.assertEqual(value, 0.65)
+        self.assertIs(type(value), float)
+
+    def test_allocation_validation_rejects_invalid_affinity_weight_and_exponent(self):
+        capmap = D.load_topology_capabilities(D.default_topology_path())
+        cases = [
+            ("depth_affinity_weight", 1.2, "depth_affinity_weight"),
+            ("usage_headroom_exponent", 0, "usage_headroom_exponent"),
+            ("depth_affinity", {"stage": "codex"}, "depth_affinity keys"),
+            ("depth_affinity", {"owner": "opencode"}, "enabled harnesses"),
+            ("depth_affinity_weight", True, "depth_affinity_weight"),
+            ("usage_headroom_exponent", True, "usage_headroom_exponent"),
+        ]
+        for key, value, fragment in cases:
+            config = self.config(); config["harnesses"]["enabled"] = ["claude", "codex"]
+            config["allocation"][key] = value
+            errors = D.validate(config, capmap)
+            self.assertTrue(any(fragment in error for error in errors), (key, errors))
+
     def test_each_enabled_harness_must_appear_once_per_profile(self):
         config = self.config()
         config["profiles"]["light"]["relief"] = []

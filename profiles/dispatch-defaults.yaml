@@ -22,7 +22,10 @@
 #   allocation:
 #     strategy: balanced
 #     window: 30                       # last exact registered attempts
-#     usage_gate_used_percent: 90
+#     usage_gate_used_percent: 85
+#     depth_affinity: {owner: claude, worker: codex}
+#     depth_affinity_weight: 0.65
+#     usage_headroom_exponent: 2
 #   capabilities:
 #     <capability-name>:
 #       <canonical-topology-node-id>: <claude|codex|opencode|diverse>
@@ -73,7 +76,12 @@ profiles:
 allocation:
   strategy: balanced
   window: 30
-  usage_gate_used_percent: 90
+  usage_gate_used_percent: 85
+  depth_affinity:
+    owner: claude
+    worker: codex
+  depth_affinity_weight: 0.65
+  usage_headroom_exponent: 2
 
 capabilities:
   # autopilot-code: canonical topology node ids are frame, plan, plan-check,

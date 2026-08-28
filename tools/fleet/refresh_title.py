@@ -821,6 +821,10 @@ def selected_providers():
             policy, states, counts, allocation["harness_order"], scores,
             strategy=allocation["strategy"],
             usage_gate_used_percent=allocation["usage_gate_used_percent"],
+            # This display worker has no dispatch-depth placement preference.
+            preferred=None,
+            affinity_weight=allocation.get("depth_affinity_weight", 0.5),
+            headroom_exponent=allocation.get("usage_headroom_exponent", 1),
         )
         band_order = ("relief", "primary", "last_resort") if promoted else (
             "primary", "relief", "last_resort"

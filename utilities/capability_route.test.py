@@ -1065,6 +1065,31 @@ class TestRoute(unittest.TestCase):
   legacy["route_id"]="rt-"+legacy["route_hash"].split(":",1)[1][:16]
   R.verify_route(legacy,R.ROOT)
 
+ def test_seal_round_trip_carries_depth_affinity_policy_and_accepts_legacy_shapes(self):
+  with dispatch_defaults_config(DD_CONFIG_A):
+   route=self._standard()
+  allocation=route["dispatch_allocation"]
+  allocation.update({"depth_affinity":{"owner":"claude","worker":"codex"},
+                     "depth_affinity_weight":.65,"usage_headroom_exponent":2})
+  route["route_hash"]=R.route_hash(route); route["route_id"]="rt-"+route["route_hash"].split(":",1)[1][:16]
+  R.verify_route(route,R.ROOT)
+  for keys in (("strategy","window","harness_order"),
+               ("strategy","window","usage_gate_used_percent","harness_order")):
+   legacy=json.loads(json.dumps(route)); legacy["dispatch_allocation"]={k:allocation[k] for k in keys}
+   legacy["route_hash"]=R.route_hash(legacy); legacy["route_id"]="rt-"+legacy["route_hash"].split(":",1)[1][:16]
+   R.verify_route(legacy,R.ROOT)
+
+ def test_verify_rejects_invalid_new_allocation_fields(self):
+  with dispatch_defaults_config(DD_CONFIG_A): route=self._standard()
+  for key,value in (("depth_affinity_weight",True),("depth_affinity_weight",1.2),
+                    ("depth_affinity",{"stage":"codex"}),
+                    ("depth_affinity",{"owner":"not-a-harness"}),
+                    ("usage_headroom_exponent",0)):
+   bad=json.loads(json.dumps(route)); bad["dispatch_allocation"][key]=value
+   bad["route_hash"]=R.route_hash(bad); bad["route_id"]="rt-"+bad["route_hash"].split(":",1)[1][:16]
+   with self.assertRaisesRegex(ValueError,"invalid dispatch_allocation"):
+    R.verify_route(bad,R.ROOT)
+
  def test_verify_rejects_short_balanced_window(self):
   with dispatch_defaults_config(DD_CONFIG_A):
    route=self._standard()

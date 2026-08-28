@@ -761,6 +761,113 @@ class DispatchBatchTest(unittest.TestCase):
         self.assertEqual(independence, "cross-harness")
         self.assertEqual({row[1] for row in rows}, {"claude", "codex"})
 
+    def _depth_affinity_route(self, strategy, *, weight=1.0, same_band=False,
+                              affinity=True):
+        """3-family fixture whose sealed policy pins the depth-2 worker preference.
+
+        `same_band=True` puts all three families in `primary` so `band_rank` --
+        which precedes every allocation term -- cannot decide the placement by
+        itself; that is required to observe the preference at all.
+        """
+        route = json.loads(json.dumps(self.route))
+        route["dispatch_allocation"] = {
+            "strategy": strategy,
+            "window": 30,
+            "usage_gate_used_percent": 90,
+            "harness_order": ["claude", "codex", "opencode"],
+        }
+        if affinity:
+            route["dispatch_allocation"].update({
+                "depth_affinity": {"owner": "claude", "worker": "codex"},
+                "depth_affinity_weight": weight,
+                "usage_headroom_exponent": 2,
+            })
+        policy = (
+            {"primary": ["claude", "codex", "opencode"], "relief": [],
+             "last_resort": [], "promote_relief_below": 0}
+            if same_band else
+            {"primary": ["claude", "codex"], "relief": [],
+             "last_resort": ["opencode"], "promote_relief_below": 0}
+        )
+        for node in route["nodes"]:
+            node["harness_affinity"] = "diverse"
+            node["harness_policy"] = dict(policy)
+            node["fallback_hops"][1]["candidates"].append(
+                {"child_harness": "opencode", "status": "supported"}
+            )
+        return route
+
+    def _assign(self, route, scores):
+        with mock.patch.object(
+            BATCH.DISPATCH_NODE, "resolve_checked_tuple", side_effect=resolve_side_effect
+        ), mock.patch.object(
+            BATCH.CAPACITY, "capacity_scores", return_value=scores
+        ):
+            return BATCH.assign_harnesses(
+                route, route["nodes"], allow_degraded=False, jobs=self.jobs
+            )
+
+    def test_depth_affinity_never_beats_cross_harness_independence_or_the_gate(self):
+        # `-distinct_families` is the outermost score element and `gate_order`
+        # precedes every allocation term, so a pin-like depth-2 preference for
+        # codex can neither collapse the group onto one family nor place codex
+        # once it is past the usage gate.
+        route = self._depth_affinity_route("balanced")
+        rows, independence, _diag = self._assign(
+            route, {"claude": 70.0, "codex": 80.0, "opencode": 60.0}
+        )
+        self.assertEqual(independence, "cross-harness")
+        self.assertEqual(len({row[1] for row in rows}), 2)
+        # codex is now gated (headroom 10 <= 100-90); an ungated combination exists.
+        rows, independence, _diag = self._assign(
+            route, {"claude": 70.0, "codex": 10.0, "opencode": 60.0}
+        )
+        self.assertEqual(independence, "cross-harness")
+        self.assertEqual({row[1] for row in rows}, {"claude", "opencode"})
+
+    def test_depth_affinity_changes_batch_placement_under_both_strategies(self):
+        """The reversion falsifier: with the preference removed the batch must
+        pick a different pair. `balanced` carries it in the shared deficit,
+        `capacity-aware` through the shared margin oracle. Both are asserted as
+        exact sets, so patching `preferred_for_depth` to None fails this test.
+        """
+        scores = {"claude": 70.0, "codex": 55.0, "opencode": 60.0}
+        for strategy in ("balanced", "capacity-aware"):
+            with self.subTest(strategy=strategy):
+                without, _i, _d = self._assign(
+                    self._depth_affinity_route(
+                        strategy, weight=0.65, same_band=True, affinity=False
+                    ),
+                    scores,
+                )
+                with_affinity, _i, _d = self._assign(
+                    self._depth_affinity_route(strategy, weight=0.65, same_band=True),
+                    scores,
+                )
+                self.assertEqual({row[1] for row in without}, {"claude", "opencode"})
+                self.assertEqual({row[1] for row in with_affinity}, {"claude", "codex"})
+
+    def test_capacity_aware_depth_affinity_stops_outside_the_margin(self):
+        """Weight 0.65 is a 30-point margin. codex trails the best gauge by 15
+        inside it and by 40 outside it; only the first may reorder."""
+        route = self._depth_affinity_route(
+            "capacity-aware", weight=0.65, same_band=True
+        )
+        inside, _i, _d = self._assign(
+            route, {"claude": 70.0, "codex": 55.0, "opencode": 60.0}
+        )
+        self.assertEqual({row[1] for row in inside}, {"claude", "codex"})
+        outside, _i, _d = self._assign(
+            route, {"claude": 95.0, "codex": 55.0, "opencode": 60.0}
+        )
+        self.assertEqual({row[1] for row in outside}, {"claude", "opencode"})
+        # An unknown gauge is excluded by capacity-aware and cannot be hoisted
+        # by a preference either -- the same rule, one oracle.
+        unknown, _i, _d = self._assign(
+            route, {"claude": 70.0, "codex": None, "opencode": 60.0}
+        )
+        self.assertEqual({row[1] for row in unknown}, {"claude", "opencode"})
+
     def test_balanced_batch_avoids_a_usage_gated_harness(self):
         # 2026-08-20 artifact-knowledge-index gen-1/gen-2: under balanced
         # allocation the inverted usage-gate term PREFERRED codex at 0%
