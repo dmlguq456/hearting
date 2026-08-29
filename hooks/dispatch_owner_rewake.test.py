@@ -581,8 +581,19 @@ class RegistryConfirmArmTest(unittest.TestCase):
         self.root = Path(self.temporary.name)
         self.jobs = self.root / "jobs.log"
         self.jobs.write_text(self.row(), encoding="utf-8")
+        # AGENT_HOME must resolve to a real checkout that carries
+        # utilities/dispatch-attempt-ready.py -- main() checks
+        # `readiness.is_file()` before calling the (here mocked)
+        # wait_for_attempt, so an isolated *empty* AGENT_HOME (unlike
+        # AGENT_DISPATCH_JOBS, which is a bare path) sends this suite down
+        # the readiness-helper-missing bridge-error branch instead of the
+        # path each test's `code == 2` assertion expects. This repo
+        # checkout is that real, self-contained checkout.
+        self.agent_home = MODULE_PATH.parents[1]
         self.environment = mock.patch.dict(
-            os.environ, {"AGENT_DISPATCH_JOBS": str(self.jobs)}, clear=False
+            os.environ,
+            {"AGENT_DISPATCH_JOBS": str(self.jobs), "AGENT_HOME": str(self.agent_home)},
+            clear=False,
         )
         self.environment.start()
         self.addCleanup(self.environment.stop)
@@ -747,6 +758,19 @@ class CarrierOneClaimGateTest(unittest.TestCase):
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name)
         self.jobs = self.root / "jobs.log"
+        # This suite's env was previously ambient (only exercised correctly
+        # because the invoking shell already had a real AGENT_HOME); under
+        # tools/run-tests.py isolation AGENT_HOME/HOME are unset. main()
+        # checks `(agent_home() / "utilities" / "dispatch-attempt-ready.py"
+        # ).is_file()` before the (here mocked) wait_for_attempt, so
+        # AGENT_HOME must resolve to a real checkout carrying that file --
+        # this repo checkout is that checkout.
+        self.agent_home = MODULE_PATH.parents[1]
+        self.environment = mock.patch.dict(
+            os.environ, {"AGENT_HOME": str(self.agent_home)}, clear=False
+        )
+        self.environment.start()
+        self.addCleanup(self.environment.stop)
 
     def payload(self):
         output = "\n".join((
