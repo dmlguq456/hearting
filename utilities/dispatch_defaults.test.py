@@ -2,6 +2,8 @@
 import importlib.util
 import os
 from pathlib import Path
+import subprocess
+import sys
 import tempfile
 import unittest
 from unittest import mock
@@ -30,6 +32,59 @@ class DispatchDefaultsV3Tests(unittest.TestCase):
             "allocation:\n  strategy: capacity-aware\n  window: 30\n"
             "capabilities:\n"
         )
+
+    def test_allocation_warnings_report_strategy_drift_and_inert_keys(self):
+        # Shipped default is balanced; a user file left on capacity-aware with
+        # the depth-affinity keys appended validates but must not stay silent.
+        config = self.config()
+        config["harnesses"]["enabled"] = ["claude", "codex"]
+        config["allocation"].update({
+            "usage_gate_used_percent": 85,
+            "depth_affinity": {"owner": "claude", "worker": "codex"},
+            "depth_affinity_weight": 0.65,
+            "usage_headroom_exponent": 2,
+        })
+        self.assertEqual(D.shipped_allocation_strategy(), "balanced")
+        warnings = D.allocation_warnings(config, "/tmp/user-owned.yaml")
+        self.assertTrue(any("allocation.strategy=capacity-aware differs from shipped default balanced" in w for w in warnings), warnings)
+        self.assertTrue(any(w.startswith("allocation.usage_headroom_exponent is inert") for w in warnings), warnings)
+        self.assertTrue(any(w.startswith("allocation.depth_affinity_weight is inert") for w in warnings), warnings)
+        self.assertTrue(any(w.startswith("allocation.usage_gate_used_percent is inert") for w in warnings), warnings)
+        # Adopting the shipped strategy clears every finding at once.
+        config["allocation"]["strategy"] = "balanced"
+        self.assertEqual(D.allocation_warnings(config, "/tmp/user-owned.yaml"), [])
+        # The shipped file itself is never reported as drifting from itself.
+        self.assertEqual(D.allocation_warnings(config, D.SHIPPED_CONFIG_PATH), [])
+
+    def test_validate_cli_prints_warnings_but_stays_valid(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "dispatch-defaults.yaml"
+            path.write_text(
+                "schema_version: 3\nharnesses:\n  enabled: [claude, codex]\nprofiles:\n"
+                + "".join(
+                    f"  {profile}:\n    primary: [claude, codex]\n    relief: []\n    last_resort: []\n    promote_relief_below: 0\n"
+                    for profile in ("deep", "balanced-deep", "light", "mini")
+                )
+                + "allocation:\n  strategy: capacity-aware\n  window: 30\n  usage_headroom_exponent: 2\ncapabilities:\n",
+                encoding="utf-8",
+            )
+            result = subprocess.run(
+                [sys.executable, str(MODULE), "validate", "--config", str(path)],
+                text=True, capture_output=True,
+            )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            lines = result.stdout.splitlines()
+            self.assertTrue(lines[0].endswith("is valid"), lines)
+            warnings = [line for line in lines if line.startswith("warning=")]
+            self.assertEqual(len(warnings), 2, lines)
+            self.assertIn("warning=allocation.strategy=capacity-aware differs from shipped default balanced", warnings[0])
+            self.assertEqual(warnings[1], "warning=allocation.usage_headroom_exponent is inert: ignored under capacity-aware")
+            shipped = subprocess.run(
+                [sys.executable, str(MODULE), "validate", "--config", str(D.SHIPPED_CONFIG_PATH)],
+                text=True, capture_output=True,
+            )
+            self.assertEqual(shipped.returncode, 0, shipped.stderr)
+            self.assertNotIn("warning=", shipped.stdout)
 
     def test_repo_v3_policy_validates(self):
         config = self.config()

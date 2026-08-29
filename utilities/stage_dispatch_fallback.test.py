@@ -82,6 +82,86 @@ class FallbackTest(unittest.TestCase):
   result=self.run_chain(self.route()); self.assertEqual(result.returncode,0,result.stdout+result.stderr)
   self.assertIn("selected_hop=cross-harness-headless",result.stdout); self.assertIn("child_harness=claude",result.stdout)
   self.assertIn("launch_authority=conductor",result.stdout); self.assertIn("broker_lifecycle=retired",result.stdout)
+ def test_allocation_receipt_row_is_written_beside_the_stdout_verdict(self):
+  # 2026-08-29: the rank/headroom verdict used to exist only on stdout, so a
+  # configured policy could sit inert for weeks with no way to tell. Driving
+  # `_emit_child_success` directly (the one success path every launch shape
+  # shares) must print the verdict AND leave a ledger row keyed by the attempt,
+  # carrying the sealed strategy, the preferred harness, and the inert-key
+  # finding. The CLI pairing lives in the next test.
+  path=self.route(same_status="supported"); route=json.loads(path.read_text())
+  node=next(n for n in route["nodes"] if n["id"]=="plan")
+  allocation={**route["dispatch_allocation"],"strategy":"capacity-aware"}
+  context={"strategy":"capacity-aware","window":30,"usage_gate_used_percent":85,
+           "allocation":allocation,"preferred":"codex",
+           "counts":{"claude":3,"codex":1,"opencode":0},"states":{"claude":"ok","codex":"ok","opencode":"unknown"},
+           "rank":["claude","codex"],"capacity":{"claude":79.0,"codex":74.0,"opencode":None},
+           "quality_band":"primary","relief_promoted":False,"parent_cross":"not-applicable",
+           "parent_cross_cause":"-","sole_gate":"ok","affinity":"diverse","owner_family":None,
+           "quality_peer_set":None,"eligible":["claude","codex"],"limited":[]}
+  row=self.tuple("claude","supported")
+  args=SimpleNamespace(action="dry-run",slug="fallback-plan",jobs=self.jobs,route=path)
+  import io,contextlib as _cl
+  out=io.StringIO()
+  with mock.patch.dict(os.environ,{"AGENT_HOME":str(ROOT),"AGENT_DISPATCH_JOBS":str(self.jobs)}), _cl.redirect_stdout(out):
+   F._emit_child_success(args,route,node,context,row,attempt_id="att-receipt",fallback_hop="cross-harness-headless")
+  receipt=dict(line.split("=",1) for line in out.getvalue().splitlines() if "=" in line)
+  self.assertEqual(receipt["allocation_rank"],"claude,codex")
+  self.assertEqual(receipt["allocation_preferred"],"codex")
+  self.assertEqual(receipt["allocation_inert_keys"],"depth_affinity_weight,usage_gate_used_percent,usage_headroom_exponent")
+  self.assertTrue(receipt["allocation_receipt"].startswith("al-"),receipt)
+  ledger=Path(self.tmp.name)/"allocation"/f"{route['route_id']}.jsonl"
+  self.assertEqual(receipt["allocation_ledger"],str(ledger)); self.assertTrue(ledger.is_file())
+  rows=[json.loads(line) for line in ledger.read_text(encoding="utf-8").splitlines() if line.strip()]
+  self.assertEqual(len(rows),1,rows); ledger_row=rows[0]
+  self.assertEqual(ledger_row["event_id"],receipt["allocation_receipt"])
+  self.assertEqual(ledger_row["child_harness"],"claude"); self.assertEqual(ledger_row["attempt_id"],"att-receipt")
+  self.assertEqual(ledger_row["route_node"],"plan"); self.assertEqual(ledger_row["unit"],"plan/plan-author")
+  self.assertEqual(ledger_row["action"],"dry-run"); self.assertEqual(ledger_row["writer"],"stage-dispatch-fallback.py")
+  self.assertEqual(ledger_row["strategy"],"capacity-aware"); self.assertEqual(ledger_row["preferred"],"codex")
+  self.assertIs(ledger_row["preferred_honored"],False)
+  self.assertEqual(sorted(ledger_row["inert_keys"]),["depth_affinity_weight","usage_gate_used_percent","usage_headroom_exponent"])
+  self.assertEqual(ledger_row["rank"],["claude","codex"]); self.assertEqual(ledger_row["fallback_hop"],"cross-harness-headless")
+  self.assertEqual(ledger_row["capacity"]["codex"],74.0); self.assertEqual(ledger_row["counts"]["claude"],3)
+  # A missing allocation context (no sealed policy) still leaves the child evidence.
+  out=io.StringIO()
+  with mock.patch.dict(os.environ,{"AGENT_HOME":str(ROOT),"AGENT_DISPATCH_JOBS":str(self.jobs)}), _cl.redirect_stdout(out):
+   F._emit_child_success(args,route,node,None,self.tuple("codex","supported"),attempt_id="att-bare",fallback_hop="same-harness-headless")
+  rows=[json.loads(line) for line in ledger.read_text(encoding="utf-8").splitlines() if line.strip()]
+  self.assertEqual(len(rows),2); self.assertEqual(rows[1]["child_harness"],"codex"); self.assertIsNone(rows[1]["strategy"])
+  self.assertIn("allocation_receipt=",out.getvalue())
+ def test_allocation_receipt_row_pairs_with_the_cli_verdict(self):
+  path=self.route(same_status="supported"); route=json.loads(path.read_text())
+  result=self.run_chain(path)
+  if "reason=launch-runtime-root-mismatch" in result.stdout:
+   # Pre-existing whole-suite condition (baseline MA-W1-147): the in-process
+   # compile and the CLI subprocess disagree on the grounding release id in
+   # this environment, before any allocation code runs. Skip loudly rather
+   # than pretend the CLI pairing was observed.
+   self.skipTest("MA-W1-147 launch-runtime-root-mismatch precedes allocation in this environment")
+  self.assertEqual(result.returncode,0,result.stdout+result.stderr)
+  receipt=dict(line.split("=",1) for line in result.stdout.splitlines() if "=" in line)
+  self.assertIn("allocation_rank",receipt,result.stdout)
+  self.assertEqual(receipt["allocation_preferred"],"codex")
+  self.assertEqual(receipt["allocation_inert_keys"],"-")
+  self.assertTrue(receipt["allocation_receipt"].startswith("al-"),receipt)
+  ledger=Path(self.tmp.name)/"allocation"/f"{route['route_id']}.jsonl"
+  self.assertEqual(receipt["allocation_ledger"],str(ledger))
+  self.assertTrue(ledger.is_file())
+  rows=[json.loads(line) for line in ledger.read_text(encoding="utf-8").splitlines() if line.strip()]
+  self.assertEqual(len(rows),1,rows); row=rows[0]
+  self.assertEqual(row["event_id"],receipt["allocation_receipt"])
+  self.assertEqual(row["child_harness"],receipt["child_harness"])
+  self.assertEqual(row["route_node"],"plan"); self.assertEqual(row["unit"],"plan/plan-author")
+  self.assertEqual(row["action"],"dry-run"); self.assertEqual(row["writer"],"stage-dispatch-fallback.py")
+  self.assertEqual(row["strategy"],route["dispatch_allocation"]["strategy"])
+  self.assertEqual(row["preferred"],"codex"); self.assertEqual(row["inert_keys"],{})
+  self.assertEqual(row["rank"],receipt["allocation_rank"].split(","))
+  self.assertEqual(row["fallback_hop"],receipt["selected_hop"])
+  self.assertEqual(row["attempt_id"],receipt["attempt_id"])
+  self.assertIn(row["preferred_honored"],(True,False))
+  self.assertEqual(row["preferred_honored"],row["child_harness"]=="codex")
+  for harness in ("claude","codex"): self.assertIn(harness,row["counts"])
  def test_wrapper_command_projects_selected_lifecycle_to_codex_and_claude(self):
   path=self.route(same_status="supported"); route=json.loads(path.read_text()); node=next(n for n in route["nodes"] if n["id"]=="plan")
   args=SimpleNamespace(action="dry-run",slug="stage",parent="owner",mode="dev/refactor",qa="standard",worker_role=None,model_role="deep maker",prompt_file=None,jobs=self.jobs,route=path,launch_lifecycle="foreground-scoped",foreground_timeout=123.0)

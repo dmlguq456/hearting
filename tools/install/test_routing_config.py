@@ -48,6 +48,40 @@ class RoutingConfigInstallTests(unittest.TestCase):
             self.assertEqual(second["status"], "preserved")
             self.assertTrue(path.read_text(encoding="utf-8").endswith("# user edit\n"))
 
+    def test_validate_reports_drift_for_a_preserved_legacy_strategy(self):
+        # DP-23: install never rewrites the user file, so a decision that only
+        # reached the shipped template (balanced-first, 2026-08-13) stays
+        # invisible unless validate() says so. Valid + warnings => "drift".
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {"XDG_CONFIG_HOME": tmp}, clear=False
+        ), mock.patch.object(routing_config.shutil, "which", return_value="/bin/runtime"):
+            created = routing_config.ensure(["claude", "codex"])
+            path = Path(created["path"])
+            fresh = routing_config.validate()
+            self.assertEqual(fresh["status"], "valid")
+            self.assertEqual(fresh["warnings"], [])
+            text = path.read_text(encoding="utf-8").replace(
+                "strategy: balanced", "strategy: capacity-aware"
+            )
+            path.write_text(text, encoding="utf-8")
+            drifted = routing_config.validate()
+            self.assertEqual(drifted["status"], "drift")
+            self.assertTrue(drifted["ok"])
+            joined = " ".join(drifted["warnings"])
+            self.assertIn("allocation.strategy=capacity-aware differs from shipped default balanced", joined)
+            self.assertIn("allocation.usage_headroom_exponent is inert", joined)
+            self.assertIn("allocation.depth_affinity_weight is inert", joined)
+            self.assertEqual(drifted["detail"], "; ".join(drifted["warnings"]))
+            # The registry surfaces the same state with a distinct mark and the detail line.
+            import user_config
+            rows = user_config.status(["dispatch-defaults"])
+            self.assertEqual(rows[0]["status"], "drift")
+            self.assertTrue(rows[0]["ok"])
+            rendered = user_config.lines(rows)
+            self.assertTrue(rendered[0].startswith("! dispatch-defaults"), rendered)
+            self.assertIn("drift warnings", rendered[0])
+            self.assertTrue(any("usage_headroom_exponent is inert" in line for line in rendered[1:]), rendered)
+
     def test_render_omits_a_depth_affinity_cell_for_a_disabled_harness(self):
         claude_only = routing_config.render(["claude"])
         self.assertIn("owner: claude", claude_only)

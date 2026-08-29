@@ -1513,6 +1513,58 @@ class DispatchBatchTest(unittest.TestCase):
             detail="usable=claude;codex=unsupported",
         )
 
+    def test_leg_allocation_receipts_persist_only_for_started_legs(self):
+        # 2026-08-29: each realized leg leaves an allocation row carrying the
+        # sealed policy and the preferred family beside the family it landed
+        # on; existing/failed legs leave nothing (same gate as degradations).
+        diagnostics = {
+            "capacity": {"claude": 30.0, "codex": 74.0, "opencode": None},
+            "sole_gate": "ok",
+            "allocation": {
+                "policy": {"strategy": "balanced", "window": 30, "depth_affinity": {"worker": "codex"}},
+                "preferred": "codex",
+                "counts": {"claude": 2, "codex": 1, "opencode": 0},
+            },
+        }
+        node_id = self.route["nodes"][0]["id"]
+        results = [
+            {"node": node_id, "adapter": "claude", "hop": "same-harness-headless",
+             "attempt_id": "att-a", "launch_state": "started", "parallel_group": "pg",
+             "parallel_leg_index": 0, "parallel_leg_count": 2},
+            {"node": node_id, "adapter": "codex", "hop": "cross-harness-headless",
+             "attempt_id": "att-b", "launch_state": "existing"},
+            {"node": node_id, "adapter": "codex", "hop": "cross-harness-headless",
+             "attempt_id": "att-c", "launch_state": "failed"},
+        ]
+        with mock.patch.object(
+            BATCH, "record_allocation_receipt",
+            return_value={"path": "/ledger/rt.jsonl", "event_id": "al-x"},
+        ) as record:
+            path = BATCH._persist_leg_allocations(
+                self.base, self.route, diagnostics, results, action="start"
+            )
+        self.assertEqual(path, "/ledger/rt.jsonl")
+        record.assert_called_once()
+        kwargs = record.call_args.kwargs
+        self.assertEqual(kwargs["route_id"], self.route["route_id"])
+        self.assertEqual(kwargs["route_node"], node_id)
+        self.assertEqual(kwargs["unit"], self.route["nodes"][0].get("unit"))
+        self.assertEqual(kwargs["writer"], "dispatch-batch.py")
+        self.assertEqual(kwargs["action"], "start")
+        self.assertEqual(kwargs["attempt_id"], "att-a")
+        self.assertEqual(kwargs["child_harness"], "claude")
+        self.assertEqual(kwargs["preferred"], "codex")
+        self.assertEqual(kwargs["allocation"]["strategy"], "balanced")
+        self.assertEqual(kwargs["counts"], {"claude": 2, "codex": 1, "opencode": 0})
+        self.assertEqual(kwargs["capacity"]["codex"], 74.0)
+        self.assertEqual(kwargs["parallel_leg_count"], 2)
+        self.assertEqual(kwargs["agent_home"], self.base)
+        with mock.patch.object(BATCH, "record_allocation_receipt") as record:
+            self.assertIsNone(BATCH._persist_leg_allocations(
+                self.base, self.route, diagnostics, results[1:], action="start"
+            ))
+        record.assert_not_called()
+
     def test_degraded_dry_run_writes_no_ledger_row(self):
         # G2: assign_harnesses is pure and only a validated newly-started child
         # can persist; a dry-run preview must leave no row behind.

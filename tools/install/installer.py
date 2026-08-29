@@ -297,6 +297,12 @@ def cmd_install(args):
                 "detail": routing["status"],
             }
         )
+        # A preserved file is never rewritten (DP-23), so install is the one
+        # moment to say out loud when it has drifted from the shipped policy.
+        if routing["status"] == "preserved":
+            routing_state = routing_config.validate()
+            if routing_state.get("status") == "drift":
+                lines.append("routing-config: drift — " + routing_state["detail"])
         try:
             bundle_config = report_bundle_config.ensure(
                 args.report_bundle_root, dry_run=args.dry_run
@@ -417,7 +423,9 @@ def cmd_verify(args):
     all_checks.append({
         "id": "routing-config.user-policy",
         "ok": routing["ok"],
-        "detail": routing["status"] + ": " + routing["path"],
+        "detail": routing["status"] + ": " + routing["path"] + (
+            " — " + routing["detail"] if routing["status"] == "drift" else ""
+        ),
     })
     if not routing["ok"]:
         ok = False

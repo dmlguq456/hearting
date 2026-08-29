@@ -12,6 +12,59 @@ HARNESSES = ("claude", "codex", "opencode")
 STRATEGY = "least-recent-attempts"
 BALANCED_STRATEGY = "balanced"
 
+# Which optional `allocation.*` keys each strategy actually reads. A key that
+# is present in a user config but absent here is *inert*: the file validates,
+# the route seals it, and nothing changes at dispatch time. That silent shape
+# is exactly the 2026-08-13 -> 2026-08-29 drift (balanced-first decided, local
+# file left on capacity-aware, depth-affinity keys appended on top), so the
+# table is the single source for validator warnings, install drift reports,
+# and the per-attempt allocation receipt.
+_STRATEGY_READS = {
+    "least-recent-attempts": frozenset(),
+    "capacity-aware": frozenset({"depth_affinity", "depth_affinity_weight"}),
+    "balanced": frozenset({
+        "usage_gate_used_percent", "depth_affinity",
+        "depth_affinity_weight", "usage_headroom_exponent",
+    }),
+}
+_OPTIONAL_ALLOCATION_KEYS = (
+    "usage_gate_used_percent", "depth_affinity",
+    "depth_affinity_weight", "usage_headroom_exponent",
+)
+_DEGRADED_UNDER = {
+    # capacity-aware only hoists the preferred harness inside a headroom
+    # margin of (weight-0.5)*200 points; it never changes a target share.
+    ("capacity-aware", "depth_affinity_weight"): "headroom-margin tie-break only (no share weighting)",
+}
+
+
+def inert_allocation_keys(allocation) -> dict[str, str]:
+    """Map each explicitly configured allocation key to why it has no effect.
+
+    Returns an empty mapping when every present key is read by the configured
+    strategy. Values are short reasons: ``ignored under <strategy>`` for keys
+    the strategy never reads, or the degraded-semantics note for keys it only
+    partially honors. Unknown strategies report nothing (the validator owns
+    that error).
+    """
+    if not isinstance(allocation, dict):
+        return {}
+    strategy = allocation.get("strategy")
+    reads = _STRATEGY_READS.get(strategy)
+    if reads is None:
+        return {}
+    inert: dict[str, str] = {}
+    for key in _OPTIONAL_ALLOCATION_KEYS:
+        if key not in allocation:
+            continue
+        if key not in reads:
+            inert[key] = f"ignored under {strategy}"
+            continue
+        note = _DEGRADED_UNDER.get((strategy, key))
+        if note:
+            inert[key] = note
+    return inert
+
 
 def _metadata(value: str) -> dict[str, str]:
     return {

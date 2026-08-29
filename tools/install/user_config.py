@@ -25,6 +25,7 @@ READINGS = {
     "absent": (True, "absent — optional"),
     "missing": (False, "missing — run `harness install`"),
     "invalid": (False, "invalid"),
+    "drift": (True, "valid — drift warnings, see detail"),
     "shipped-default": (True, "shipped default in use"),
 }
 
@@ -114,9 +115,9 @@ def status(ids=None) -> list[dict]:
 def lines(rows, *, verbose=False) -> list[str]:
     out = []
     for row in rows:
-        mark = "✓" if row["ok"] else "✗"
+        mark = "!" if row["status"] == "drift" else ("✓" if row["ok"] else "✗")
         out.append(f"{mark} {row['id']:<20} {row['reading']:<28} {row['path']}")
-        if verbose or row["status"] in {"template", "missing", "absent", "invalid"}:
+        if verbose or row["status"] in {"template", "missing", "absent", "invalid", "drift"}:
             if row["detail"]:
                 out.append(f"    {row['detail']}")
             if row["status"] in {"missing", "absent", "template"}:

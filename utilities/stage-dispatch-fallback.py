@@ -70,6 +70,8 @@ from dispatch_mode_contract import (  # noqa: E402
 )
 from worker_bootstrap import assigned_contract, worker_type_for_kind  # noqa: E402
 from dispatch_degradation import record_degradation  # noqa: E402
+from dispatch_allocation_receipt import record_allocation_receipt  # noqa: E402
+from dispatch_allocation import inert_allocation_keys  # noqa: E402
 from dispatch_quality_peer import quality_peer_families  # noqa: E402
 from dispatch_allocation import (  # noqa: E402
     HARNESSES as ALLOCATION_HARNESSES,
@@ -423,6 +425,8 @@ def ordered_fallback_hops(
     return ordered, {
         "strategy": allocation["strategy"],
         "window": allocation["window"],
+        "allocation": allocation,
+        "preferred": CAPACITY.preferred_for_depth(allocation, int(node.get("dispatch_depth", 2))),
         "usage_gate_used_percent": allocation.get("usage_gate_used_percent", 90),
         "counts": counts,
         "states": states,
@@ -477,7 +481,7 @@ def _recompute_verdicts_for_child(context, child_harness):
     return updated
 
 
-def _emit_child_success(args, route, node, context, row):
+def _emit_child_success(args, route, node, context, row, *, attempt_id=None, fallback_hop=None):
     """Emit the allocation receipt and persist degradations for the actual child.
 
     Recomputes `parent_cross`/`sole_gate` from the launched
@@ -495,6 +499,36 @@ def _emit_child_success(args, route, node, context, row):
         )
     emit_allocation(context)
     _persist_parent_cross_ledger(args, route, node, context)
+    receipt = _persist_allocation_receipt(
+        args, route, node, context, row, attempt_id=attempt_id, fallback_hop=fallback_hop,
+    )
+    if receipt is not None:
+        print(f"allocation_receipt={receipt['event_id']}")
+        print(f"allocation_ledger={receipt['path']}")
+
+
+def _persist_allocation_receipt(args, route, node, context, row, *, attempt_id=None, fallback_hop=None):
+    """Durable twin of the stdout allocation receipt (2026-08-29).
+
+    Until now the rank/headroom verdict existed only on the conductor's stdout,
+    so nobody could later tell whether a configured policy had fired. Best
+    effort: a ledger failure changes neither the launch nor the exit code.
+    """
+    context = context or {}
+    return record_allocation_receipt(
+        route_id=route.get("route_id"), route_node=node.get("id"),
+        route_hash=route.get("route_hash"), dispatch_depth=node.get("dispatch_depth", 2),
+        writer="stage-dispatch-fallback.py", action=getattr(args, "action", None),
+        attempt_id=attempt_id, slug=getattr(args, "slug", None), unit=node.get("unit"),
+        child_harness=row.get("child_harness"), fallback_hop=fallback_hop,
+        allocation=context.get("allocation"), preferred=context.get("preferred"),
+        rank=context.get("rank"), capacity=context.get("capacity"),
+        counts=context.get("counts"), states=context.get("states"),
+        quality_band=context.get("quality_band"), relief_promoted=context.get("relief_promoted"),
+        parent_cross=context.get("parent_cross"), sole_gate=context.get("sole_gate"),
+        affinity=context.get("affinity"), owner_family=context.get("owner_family"),
+        jobs=getattr(args, "jobs", None),
+    )
 
 
 def emit_allocation(context: dict | None) -> None:
@@ -514,6 +548,9 @@ def emit_allocation(context: dict | None) -> None:
             )
         print(f"quality_band={context.get('quality_band') or 'none'}")
         print(f"relief_promoted={int(bool(context.get('relief_promoted')))}")
+    print(f"allocation_preferred={context.get('preferred') or '-'}")
+    inert = inert_allocation_keys(context.get("allocation"))
+    print("allocation_inert_keys=" + (",".join(sorted(inert)) or "-"))
     print(f"parent_cross={context.get('parent_cross') or 'not-applicable'}")
     print(f"parent_cross_cause={context.get('parent_cross_cause') or '-'}")
     print(f"sole_gate={context.get('sole_gate') or 'ok'}")
@@ -1493,7 +1530,11 @@ def main() -> int:
                     )
                     if retry_state in {"success", "existing"}:
                         print("check=ok")
-                        _emit_child_success(args, route, node, allocation_context, row)
+                        _emit_child_success(
+                            args, route, node, allocation_context, row,
+                            attempt_id=retry_fields.get("attempt_id", "existing"),
+                            fallback_hop=hop["fallback_hop"],
+                        )
                         print(f"selected_hop={hop['fallback_hop']}")
                         print(f"fallback_ordinal={ordinal}")
                         print(f"child_harness={row['child_harness']}")
@@ -1594,7 +1635,10 @@ def main() -> int:
                                         attempt_trace="|".join(attempts))
                     if early != "capacity":
                         print("check=ok")
-                        _emit_child_success(args, route, node, allocation_context, row)
+                        _emit_child_success(
+                            args, route, node, allocation_context, row,
+                            attempt_id=attempt_id, fallback_hop=hop["fallback_hop"],
+                        )
                         print(f"selected_hop={hop['fallback_hop']}")
                         print(f"fallback_ordinal={ordinal}")
                         print(f"child_harness={row['child_harness']}")
@@ -1617,7 +1661,11 @@ def main() -> int:
                     )
                     if retry_state in {"success", "existing"}:
                         print("check=ok")
-                        _emit_child_success(args, route, node, allocation_context, row)
+                        _emit_child_success(
+                            args, route, node, allocation_context, row,
+                            attempt_id=retry_fields.get("attempt_id", "existing"),
+                            fallback_hop=hop["fallback_hop"],
+                        )
                         print(f"selected_hop={hop['fallback_hop']}")
                         print(f"fallback_ordinal={ordinal}")
                         print(f"child_harness={row['child_harness']}")

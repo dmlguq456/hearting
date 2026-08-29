@@ -107,9 +107,23 @@ def validate() -> dict:
         check=False,
     )
     detail = (result.stdout or result.stderr).strip()
-    return {
-        "status": "valid" if result.returncode == 0 else "invalid",
-        "ok": result.returncode == 0,
-        "path": str(path),
-        "detail": detail,
-    }
+    if result.returncode != 0:
+        return {"status": "invalid", "ok": False, "path": str(path), "detail": detail}
+    # `warning=` lines are the validator's drift findings: a legacy strategy
+    # that never adopted the shipped default, or keys the strategy ignores.
+    # Still ok (the file is valid) but surfaced as a distinct status so
+    # install, `harness verify`, and `harness config status` all show it.
+    warnings = [
+        line[len("warning="):].strip()
+        for line in result.stdout.splitlines()
+        if line.startswith("warning=")
+    ]
+    if warnings:
+        return {
+            "status": "drift",
+            "ok": True,
+            "path": str(path),
+            "detail": "; ".join(warnings),
+            "warnings": warnings,
+        }
+    return {"status": "valid", "ok": True, "path": str(path), "detail": detail, "warnings": []}

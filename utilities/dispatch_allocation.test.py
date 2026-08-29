@@ -65,6 +65,41 @@ class DispatchAllocationTest(unittest.TestCase):
                 ["claude", "opencode", "codex"],
             )
 
+    def test_inert_keys_name_every_configured_key_the_strategy_never_reads(self):
+        inert = self.allocation.inert_allocation_keys
+        full = {
+            "strategy": "capacity-aware", "window": 30, "usage_gate_used_percent": 85,
+            "depth_affinity": {"owner": "claude", "worker": "codex"},
+            "depth_affinity_weight": 0.65, "usage_headroom_exponent": 2,
+        }
+        # The 2026-08-29 finding: three of four optional keys were dead on the
+        # user's legacy strategy while the file validated cleanly.
+        capacity_aware = inert(full)
+        self.assertEqual(
+            sorted(capacity_aware),
+            ["depth_affinity_weight", "usage_gate_used_percent", "usage_headroom_exponent"],
+        )
+        self.assertIn("ignored under capacity-aware", capacity_aware["usage_headroom_exponent"])
+        self.assertIn("ignored under capacity-aware", capacity_aware["usage_gate_used_percent"])
+        self.assertIn("tie-break", capacity_aware["depth_affinity_weight"])
+        self.assertEqual(inert({**full, "strategy": "balanced"}), {})
+        legacy = inert({**full, "strategy": "least-recent-attempts"})
+        self.assertEqual(
+            sorted(legacy),
+            ["depth_affinity", "depth_affinity_weight", "usage_gate_used_percent", "usage_headroom_exponent"],
+        )
+
+    def test_inert_keys_only_report_keys_that_are_actually_present(self):
+        inert = self.allocation.inert_allocation_keys
+        self.assertEqual(inert({"strategy": "capacity-aware", "window": 30}), {})
+        self.assertEqual(
+            inert({"strategy": "capacity-aware", "window": 30, "usage_headroom_exponent": 2}),
+            {"usage_headroom_exponent": "ignored under capacity-aware"},
+        )
+        self.assertEqual(inert({"strategy": "no-such-strategy", "usage_headroom_exponent": 2}), {})
+        self.assertEqual(inert(None), {})
+        self.assertEqual(inert("balanced"), {})
+
 
 if __name__ == "__main__":
     unittest.main()

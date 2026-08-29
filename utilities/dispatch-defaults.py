@@ -29,6 +29,10 @@ class DefaultsConfigError(Exception):
     pass
 
 
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+from dispatch_allocation import inert_allocation_keys  # noqa: E402
+
+
 def _repo_root():
     # realpath, not abspath: the helper is projected into
     # adapters/<harness>/utilities/ as a symlink, and the shipped config and
@@ -530,6 +534,48 @@ def query_opencode_policy(config):
     return "unknown"
 
 
+def shipped_allocation_strategy():
+    """Strategy the shipped profiles/dispatch-defaults.yaml declares, or None."""
+    try:
+        with open(SHIPPED_CONFIG_PATH, encoding="utf-8") as f:
+            shipped = parse_yaml_subset(f.read())
+    except (OSError, DefaultsConfigError):
+        return None
+    allocation = shipped.get("allocation")
+    return allocation.get("strategy") if isinstance(allocation, dict) else None
+
+
+def allocation_warnings(config, config_path=None):
+    """Non-fatal drift findings for an already-valid allocation block.
+
+    Two shapes are reported, both of which validated silently before
+    2026-08-29:
+    - the user-owned file runs a strategy other than the shipped default, so a
+      decision recorded in the template never reached this host (DP-23 keeps
+      the file untouched by design — the report is the substitute);
+    - an optional key is present but the configured strategy never reads it
+      (or only honors a degraded form of it), so the key is inert.
+    """
+    allocation = config.get("allocation")
+    if not isinstance(allocation, dict):
+        return []
+    warnings = []
+    strategy = allocation.get("strategy")
+    shipped = shipped_allocation_strategy()
+    is_shipped_file = (
+        config_path is not None
+        and os.path.realpath(config_path) == os.path.realpath(SHIPPED_CONFIG_PATH)
+    )
+    if shipped and strategy and strategy != shipped and not is_shipped_file:
+        warnings.append(
+            f"allocation.strategy={strategy} differs from shipped default {shipped}"
+            " (user-owned file is never overwritten; edit it to adopt the decision)"
+        )
+    for key, why in inert_allocation_keys(allocation).items():
+        warnings.append(f"allocation.{key} is inert: {why}")
+    return warnings
+
+
 def _arg(args, flag, default=None):
     if flag in args:
         i = args.index(flag)
@@ -557,6 +603,11 @@ def main(argv):
 
     if op == "validate":
         print(f"dispatch-defaults: {config_path} is valid")
+        # Warnings never change the exit code: a valid file stays valid. They
+        # exist because "valid" alone hid two weeks of a balanced-first decision
+        # that never reached the user-owned file (2026-08-13 -> 2026-08-29).
+        for warning in allocation_warnings(config, config_path):
+            print(f"warning={warning}")
         return 0
     if op == "affinity":
         capability = _arg(rest, "--capability", "")

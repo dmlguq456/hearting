@@ -46,6 +46,7 @@ from replica_batch_contract import (  # noqa: E402
     build_manifest,
 )
 from dispatch_degradation import record_degradation  # noqa: E402
+from dispatch_allocation_receipt import record_allocation_receipt  # noqa: E402
 from dispatch_quality_peer import quality_peer_families  # noqa: E402
 from stage_session_contract import validate_subdivision_or_fallback  # noqa: E402
 from dispatch_allocation import (  # noqa: E402
@@ -403,6 +404,54 @@ def _persist_degradation(
         agent_home=agent_home,
         reason=reason, detail=detail[:512],
     )
+
+
+def _persist_leg_allocations(
+    agent_home: Path,
+    route: dict[str, object],
+    diagnostics: dict[str, object],
+    results: list[dict[str, object]],
+    *,
+    action: str | None = None,
+) -> str | None:
+    """One allocation receipt per realized leg (2026-08-29).
+
+    Records the sealed policy, the capacity/counts the placement score saw,
+    and the family the config preferred beside the family each leg actually
+    landed on. Same realization gate as `_persist_launched_degradation`: only a
+    started leg leaves evidence, and a ledger failure never changes the batch.
+    """
+    selection = diagnostics.get("allocation") or {}
+    units = {
+        str(node.get("id")): node.get("unit")
+        for node in route.get("nodes", [])
+        if isinstance(node, dict)
+    }
+    paths = []
+    for leg in results:
+        if leg.get("launch_state") != "started":
+            continue
+        receipt = record_allocation_receipt(
+            route_id=route.get("route_id"), route_node=leg.get("node"),
+            route_hash=route.get("route_hash"), dispatch_depth=2,
+            writer="dispatch-batch.py", action=action,
+            attempt_id=leg.get("attempt_id"),
+            unit=units.get(str(leg.get("node"))),
+            child_harness=leg.get("adapter") or leg.get("harness"),
+            fallback_hop=leg.get("hop"),
+            allocation=selection.get("policy"),
+            preferred=selection.get("preferred"),
+            counts=selection.get("counts"),
+            capacity=diagnostics.get("capacity"),
+            sole_gate=diagnostics.get("sole_gate"),
+            parallel_group=leg.get("parallel_group"),
+            parallel_leg_index=leg.get("parallel_leg_index"),
+            parallel_leg_count=leg.get("parallel_leg_count") or len(results),
+            agent_home=agent_home,
+        )
+        if receipt:
+            paths.append(receipt["path"])
+    return paths[-1] if paths else None
 
 
 def _persist_launched_degradation(
@@ -780,6 +829,14 @@ def assign_harnesses(
         },
         "capacity": {h: capacity.get(h) for h in SUPPORTED_BATCH_HARNESSES},
         "degradation_cause": degradation_cause,
+        # Sealed policy + the inputs the placement score actually saw, so the
+        # per-leg allocation receipt (2026-08-29) can say which family the
+        # config preferred beside the family each leg landed on.
+        "allocation": {
+            "policy": allocation if isinstance(allocation, dict) else None,
+            "preferred": depth_preferred,
+            "counts": {h: int(counts.get(h, 0)) for h in SUPPORTED_BATCH_HARNESSES},
+        },
     }
     if degradation_cause:
         detail = f"usable={','.join(usable) or '-'}"
@@ -2110,6 +2167,9 @@ def main(argv: list[str] | None = None) -> int:
             admitted=0,
             selection_diagnostics=diagnostics,
         )
+        receipt["allocation_ledger"] = _persist_leg_allocations(
+            agent_home, route, diagnostics, results, action=args.action
+        ) or "-"
         receipt["degradation_ledger"] = _record_failed_legs(route, results, agent_home) or "-"
         print(json.dumps(receipt, separators=(",", ":"), sort_keys=True))
         return 70
@@ -2347,6 +2407,9 @@ def main(argv: list[str] | None = None) -> int:
         })
     _persist_launched_degradation(agent_home, route, diagnostics, results)
     _persist_sole_gate_degradation(agent_home, route, diagnostics, results)
+    receipt["allocation_ledger"] = _persist_leg_allocations(
+        agent_home, route, diagnostics, results, action=args.action
+    ) or "-"
     receipt["degradation_ledger"] = _record_failed_legs(route, results, agent_home) or "-"
     print(json.dumps(receipt, separators=(",", ":"), sort_keys=True))
     if interrupted_signal:
