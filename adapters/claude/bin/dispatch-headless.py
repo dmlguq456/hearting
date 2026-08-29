@@ -1727,6 +1727,7 @@ def main(argv: list[str]) -> int:
         jobs = registry.path
         args.attempt_id = new_attempt_id(args.attempt_id) if action in ("register", "start") else args.attempt_id
         if action in ("register", "start"):
+            args.command_attempt_id = args.attempt_id
             ensure_global_registry_writable(jobs)
     except DispatchContractError as e:
         return fail(e.reason, 73, detail=e.detail, child_spawned="0")

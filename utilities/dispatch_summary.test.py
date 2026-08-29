@@ -392,7 +392,7 @@ class DispatchSummaryTest(unittest.TestCase):
             self.assertIn("pre_release=lambda identity: launch_summary_owner", source)
             self.assertIn(f'harness="{harness}"', source)
         opencode = (ROOT / "adapters" / "opencode" / "bin" / "dispatch-headless.py").read_text()
-        self.assertIn("if args.attempt_id else", opencode)
+        self.assertIn("args.command_attempt_id = args.attempt_id", opencode)
 
 
 if __name__ == "__main__":

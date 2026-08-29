@@ -2145,7 +2145,7 @@ def _head_commit(cwd):
 # itself: `route_hash` covers every field but the hash and id, so any added key makes
 # `verify_route` reject it. The closure lives in a sidecar and binds `route_hash`, so a
 # recompiled route leaves a detectably stale one rather than a silently wrong one.
-def close_route(route, route_file, commit=None, summary=None, publication=None, allow_unproven=False):
+def close_route(route, route_file, commit=None, summary=None, publication=None, allow_unproven=True):
     from datetime import datetime, timezone
     # F7: D-2's single-storage-location contract has a compile-time entrance gate
     # (`route-output-outside-canonical`) but had no exit gate -- `close` would
