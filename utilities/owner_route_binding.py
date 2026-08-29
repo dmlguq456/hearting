@@ -30,6 +30,45 @@ class OwnerRouteBinding:
     route_hash: str
 
 
+@dataclass(frozen=True)
+class QuickOwnerRouteBinding:
+    route_file: str
+    route_id: str
+    route_hash: str
+    route_node: str
+    registry_digest: str
+    write_scope: str
+    completion_gate: str
+
+
+def derive_quick_owner_binding(route_file: str | Path, *, worktree: str | Path,
+                               capability: str, capability_mode: str,
+                               intensity: str, harness: str) -> QuickOwnerRouteBinding:
+    """Derive the complete node tuple for the quick one-shot owner."""
+    path = Path(route_file).resolve()
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        route = ROUTE.verify_route(raw, expected_cwd=str(Path(worktree).resolve()))
+    except (OSError, TypeError, ValueError) as exc:
+        raise OwnerRouteBindingError("owner-route-verification-failed") from exc
+    if route.get("effective_intensity") != "quick":
+        raise OwnerRouteBindingError("quick-owner-route-required")
+    validate_owner_route_binding(path, worktree=worktree, capability=capability,
+                                 capability_mode=capability_mode, intensity=intensity,
+                                 harness=harness)
+    node = next((n for n in route.get("nodes", []) if n.get("id") == "one-shot"), None)
+    if not isinstance(node, dict):
+        raise OwnerRouteBindingError("quick-owner-node-missing")
+    scope = node.get("write_scope")
+    if isinstance(scope, list):
+        scope = ";".join(str(x) for x in scope)
+    fields = (route.get("route_id"), route.get("route_hash"), route.get("registry_digest"),
+              scope, node.get("completion_gate"))
+    if not all(isinstance(x, str) and x for x in fields):
+        raise OwnerRouteBindingError("quick-owner-binding-incomplete")
+    return QuickOwnerRouteBinding(str(path), fields[0], fields[1], "one-shot", fields[2], fields[3], fields[4])
+
+
 def _supported_owner_harnesses(route: dict) -> set[str]:
     if route.get("effective_intensity") == "quick":
         rows, field = route.get("registered_headless_candidates") or [], "harness"

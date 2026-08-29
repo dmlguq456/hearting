@@ -1279,6 +1279,7 @@ def main(argv: list[str]) -> int:
     args.worktree = str(Path(args.worktree).resolve())
     action = "start" if args.start else "register" if args.register else "dry-run"
     args.action = action
+    args.command_attempt_id = args.attempt_id
     if action == "dry-run":
         args.attempt_id = None
     if args.broker_request_id or args.launch_authority == "ancestor-broker":
@@ -1498,13 +1499,13 @@ def main(argv: list[str]) -> int:
         except DispatchContractError as exc:
             return fail(exc.reason, 65, detail=exc.detail, child_spawned="0")
     prompt_name = (
-        f"{args.slug}.{args.attempt_id}.opencode.prompt.txt"
-        if args.attempt_id
+        f"{args.slug}.{args.command_attempt_id}.opencode.prompt.txt"
+        if args.command_attempt_id
         else f"{args.slug}.opencode.prompt.txt"
     )
     prompt_path = log_dir / prompt_name
-    log_name = (f"{args.slug}.{args.attempt_id}.opencode.jsonl"
-                if args.attempt_id else f"{args.slug}.opencode.jsonl")
+    log_name = (f"{args.slug}.{args.command_attempt_id}.opencode.jsonl"
+                if args.command_attempt_id else f"{args.slug}.opencode.jsonl")
     log_path = log_dir / log_name
     args.log_path = log_path
     command = shell_command(args, prompt_path, log_path)

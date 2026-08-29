@@ -1240,6 +1240,16 @@ def main(argv: list[str] | None = None) -> int:
                 delivery_timing = advance_delivery_timing(
                     delivery_timing, "next_stage_start_ns"
                 )
+                emit({
+                    "type": "dispatch.supervisor.owner-boundary",
+                    "parent_attempt_id": args.parent_attempt_id,
+                    "previous_attempt_ids": sorted(set(current).difference(new_attempts)),
+                    "new_attempt_ids": sorted(new_attempts),
+                    "previous_count": len(set(current).difference(new_attempts)),
+                    "new_count": len(new_attempts),
+                    "ordinal": 1,
+                    **delivery_timing,
+                })
             empty_wait = (
                 not current
                 and runtime_wait_requested(result.get("result"))

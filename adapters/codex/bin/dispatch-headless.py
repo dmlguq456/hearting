@@ -1191,6 +1191,8 @@ def completion_lease_path(args: argparse.Namespace) -> Path:
 
 
 def shell_command(args: argparse.Namespace, prompt_path: Path, log_path: Path) -> str:
+    writer = [sys.executable, str(ROOT / "utilities" / "codex-jsonl-writer.py"),
+              "--log", str(log_path), "--attempt", str(getattr(args, "command_attempt_id", "") or ""), "--"]
     if getattr(args, "resolved_completion_delivery", "one-shot") == "app-server-supervised":
         command = [
             sys.executable,
@@ -1215,7 +1217,7 @@ def shell_command(args: argparse.Namespace, prompt_path: Path, log_path: Path) -
         if getattr(args, "max_continuations", None) is not None:
             command += ["--max-continuations", str(args.max_continuations)]
         if args.nested_headless_network or (
-            args.dispatch_depth == 2 and args.route_id and args.attempt_id
+            args.dispatch_depth == 2 and args.route_id and getattr(args, "command_attempt_id", None)
         ):
             command += [
                 "--writable-root",
@@ -1239,8 +1241,8 @@ def shell_command(args: argparse.Namespace, prompt_path: Path, log_path: Path) -
                 "--reasoning", args.resolved_model_settings["reasoning"],
             ]
         return (
-            " ".join(shlex.quote(x) for x in command)
-            + f" < {shlex.quote(str(prompt_path))} >> {shlex.quote(str(log_path))} 2>&1"
+            " ".join(shlex.quote(x) for x in [*writer, *command])
+            + f" < {shlex.quote(str(prompt_path))}"
         )
     cmd = [
         "codex",
@@ -1252,7 +1254,7 @@ def shell_command(args: argparse.Namespace, prompt_path: Path, log_path: Path) -
     ]
     if getattr(args, "report_bundle_root", None) is not None:
         cmd += ["--add-dir", str(args.report_bundle_root)]
-    if args.nested_headless_network or (args.dispatch_depth == 2 and args.route_id and args.attempt_id):
+    if args.nested_headless_network or (args.dispatch_depth == 2 and args.route_id and getattr(args, "command_attempt_id", None)):
         # A dispatch-depth-1 conductor must update the canonical attempt registry and
         # materialize child prompt/transcript files under the canonical dispatch
         # state root. A route-bound dispatch-depth-2 stage needs the same narrow
@@ -1303,7 +1305,7 @@ def shell_command(args: argparse.Namespace, prompt_path: Path, log_path: Path) -
         "--json",
         "-",
     ]
-    return " ".join(shlex.quote(x) for x in cmd) + f" < {shlex.quote(str(prompt_path))} >> {shlex.quote(str(log_path))} 2>&1"
+    return " ".join(shlex.quote(x) for x in [*writer, *cmd]) + f" < {shlex.quote(str(prompt_path))}"
 
 
 @contextmanager
@@ -2096,6 +2098,7 @@ def main(argv: list[str]) -> int:
     _bind_runtime_parent(args)
     action = "start" if args.start else "register" if args.register else "dry-run"
     args.action = action
+    args.command_attempt_id = args.attempt_id
     if action == "dry-run":
         # Preview output must never mint or echo an identity that resembles a
         # registered attempt receipt.
@@ -2406,8 +2409,8 @@ def main(argv: list[str]) -> int:
         except DispatchContractError as e:
             return fail(e.reason, 73, detail=e.detail, child_spawned="0")
     prompt_name = (
-        f"{args.slug}.{args.attempt_id}.codex.prompt.txt"
-        if args.attempt_id
+        f"{args.slug}.{getattr(args, 'command_attempt_id', None)}.codex.prompt.txt"
+        if getattr(args, "command_attempt_id", None)
         else f"{args.slug}.codex.prompt.txt"
     )
     prompt_path = log_dir / prompt_name
@@ -2416,8 +2419,8 @@ def main(argv: list[str]) -> int:
     # so harvesting the earlier row can accidentally select the newer verdict.
     # PID-less legacy readers still retain their slug-only fallback.
     log_name = (
-        f"{args.slug}.{args.attempt_id}.codex.jsonl"
-        if args.attempt_id
+        f"{args.slug}.{getattr(args, 'command_attempt_id', None)}.codex.jsonl"
+        if getattr(args, "command_attempt_id", None)
         else f"{args.slug}.codex.jsonl"
     )
     log_path = log_dir / log_name
