@@ -371,7 +371,10 @@ class FinalizeTest(ProducerTestBase):
         )
         self.assertTrue(created)
         self.assertFalse(outcome["terminal_gate_proven"])
-        outcome = P.finalize(self.root, cycle_id=result["cycle_id"], state="abandoned")
+        outcome = P.finalize(
+            self.root, cycle_id=result["cycle_id"], state="abandoned",
+            abandon_reason="route-unrecoverable",
+        )
         self.assertEqual(outcome["cycle_state"], "abandoned")
         document = json.loads((Path(result["cycle_dir"]) / "manifest.json").read_text())
         self.assertEqual(document["routes"][0]["terminal_marker"], "pending")
@@ -398,6 +401,7 @@ class FinalizeTest(ProducerTestBase):
             self.root,
             cycle_id=result["cycle_id"],
             state="abandoned",
+            abandon_reason="route-unrecoverable",
             adopt_root_outputs=["owner_brief.md"],
         )
         self.assertEqual(outcome["adopted_root_outputs"], ["owner_brief.md"])
@@ -415,6 +419,7 @@ class FinalizeTest(ProducerTestBase):
                 self.root,
                 cycle_id=result["cycle_id"],
                 state="abandoned",
+                abandon_reason="route-unrecoverable",
                 adopt_root_outputs=["first.md", "missing.md"],
             )
         self.assertEqual(caught.exception.code, "root-output-adoption-source-invalid")
@@ -579,6 +584,157 @@ class CliTest(ProducerTestBase):
         lines = dict(line.split("=", 1) for line in env_file.read_text().splitlines())
         self.assertEqual(lines["AGENT_ARTIFACT_CYCLE_ID"], payload["cycle_id"])
         self.assertEqual(lines["AGENT_ARTIFACT_CYCLE_DIR"], payload["cycle_dir"])
+
+
+class ReviewPublicationLeaseTest(ProducerTestBase):
+    """SD-117 §13.34.5-(2): L1 review-publication-lease enforcement."""
+
+    def test_review_round_one_fail_keeps_cycle_open_and_registered_publication_verdict_is_allow(self):
+        self.activate()
+        route, route_file, result = self.begin()
+        self.write_output(result)
+        # A review round-1 FAIL is not itself a finalize call -- SD-117 L3
+        # says the cycle stays `open` until something explicitly abandons or
+        # completes it, so a synthetic FAIL round leaves the record alone.
+        self.assertEqual(P.read_cycle_record(self.root, result["cycle_id"])["state"], "open")
+        self.close(route, route_file)
+        outcome = P.finalize(self.root, cycle_id=result["cycle_id"])
+        self.assertEqual(outcome["status"], "sealed")
+        self.assertEqual(P.read_cycle_record(self.root, result["cycle_id"])["state"], "sealed")
+
+    def test_abandon_with_live_lease_refuses_with_zero_event_and_record_delta(self):
+        self.activate()
+        route, route_file, result = self.begin()
+        self.write_output(result)
+        cycle_id = result["cycle_id"]
+        P.review_lease_acquire(self.root, cycle_id=cycle_id, attempt_id="att-reviewer")
+        before = P.read_cycle_record(self.root, cycle_id)
+        with self.assertRaises(P.ProducerError) as caught:
+            P.finalize(self.root, cycle_id=cycle_id, state="abandoned", abandon_reason="operator-decision")
+        self.assertEqual(caught.exception.code, "cycle-abandon-blocked-live-review")
+        after = P.read_cycle_record(self.root, cycle_id)
+        self.assertEqual(before, after)
+        self.assertTrue(Path(result["cycle_dir"]).exists())
+
+    def test_abandon_succeeds_after_deadline_and_later_write_is_cycle_not_open(self):
+        self.activate()
+        route, route_file, result = self.begin()
+        self.write_output(result)
+        cycle_id = result["cycle_id"]
+        past = 1_000_000_000.0
+        P.review_lease_acquire(
+            self.root, cycle_id=cycle_id, attempt_id="att-reviewer",
+            deadline_seconds=1, now=past,
+        )
+        outcome = P.finalize(
+            self.root, cycle_id=cycle_id, state="abandoned",
+            abandon_reason="lease-expired-no-publisher", allow_open_route=True,
+        )
+        self.assertEqual(outcome["status"], "sealed")
+        # Pre-existing behavior (unchanged by SD-117): a sealed cycle's
+        # `finalize()` short-circuits idempotently before the `state`
+        # argument is even inspected.
+        again = P.finalize(self.root, cycle_id=cycle_id, state="completed")
+        self.assertEqual(again["status"], "already-sealed")
+
+    def test_corrupt_lease_record_blocks_abandon(self):
+        self.activate()
+        route, route_file, result = self.begin()
+        self.write_output(result)
+        cycle_id = result["cycle_id"]
+        lease_dir = P._review_lease_dir(self.root, cycle_id)
+        lease_dir.mkdir(parents=True, exist_ok=True)
+        (lease_dir / "att-corrupt.json").write_text("{not json", encoding="utf-8")
+        with self.assertRaises(P.ProducerError) as caught:
+            P.finalize(self.root, cycle_id=cycle_id, state="abandoned", abandon_reason="operator-decision")
+        self.assertEqual(caught.exception.code, "cycle-abandon-blocked-live-review")
+
+    def test_double_acquire_and_double_release_are_idempotent(self):
+        self.activate()
+        route, route_file, result = self.begin()
+        cycle_id = result["cycle_id"]
+        first = P.review_lease_acquire(self.root, cycle_id=cycle_id, attempt_id="att-r")
+        second = P.review_lease_acquire(self.root, cycle_id=cycle_id, attempt_id="att-r")
+        self.assertEqual(first["status"], "acquired")
+        self.assertEqual(second["status"], "already-held")
+        release1 = P.review_lease_release(self.root, cycle_id=cycle_id, attempt_id="att-r")
+        release2 = P.review_lease_release(self.root, cycle_id=cycle_id, attempt_id="att-r")
+        self.assertEqual(release1["status"], "released")
+        self.assertEqual(release2["status"], "already-released")
+
+
+class AbandonReasonTest(ProducerTestBase):
+    """SD-117 §13.34.5-(2): L3 `abandon_reason` closed enum."""
+
+    def test_zero_row_cycle_seal_stays_no_lineage_with_directory_removed(self):
+        self.activate()
+        route, route_file, result = self.begin()
+        outcome = P.finalize(self.root, cycle_id=result["cycle_id"])
+        self.assertEqual(outcome["status"], "no-lineage")
+        self.assertFalse(Path(result["cycle_dir"]).exists())
+
+    def test_cycle_completed_injected_into_abandoned_stream_is_refused_by_unchanged_code(self):
+        self.activate()
+        route, route_file, result = self.begin()
+        self.write_output(result)
+        cycle_id = result["cycle_id"]
+        P.finalize(self.root, cycle_id=cycle_id, state="abandoned", abandon_reason="operator-decision",
+                  allow_open_route=True)
+        # Pre-existing behavior (unchanged by SD-117, E47-6): re-finalizing a
+        # sealed cycle short-circuits idempotently regardless of `state`.
+        again = P.finalize(self.root, cycle_id=cycle_id, state="completed")
+        self.assertEqual(again["status"], "already-sealed")
+
+    def test_every_cycle_abandoned_event_carries_closed_enum_reason_disjoint_from_review_verdicts(self):
+        self.activate()
+        route, route_file, result = self.begin()
+        self.write_output(result)
+        cycle_id = result["cycle_id"]
+        review_verdicts = {"PASS", "FAIL", "BLOCKED", "allow", "deny"}
+        self.assertEqual(P.ABANDON_REASONS & review_verdicts, set())
+        with self.assertRaises(P.ProducerError) as caught:
+            P.finalize(self.root, cycle_id=cycle_id, state="abandoned", abandon_reason="FAIL")
+        self.assertEqual(caught.exception.code, "abandon-reason-required")
+        outcome = P.finalize(self.root, cycle_id=cycle_id, state="abandoned", abandon_reason="operator-decision",
+                             allow_open_route=True)
+        document = json.loads((Path(result["cycle_dir"]) / "manifest.json").read_text())
+        abandoned_events = [e for e in document["events"] if e["event_type"] == "cycle.abandoned"]
+        self.assertEqual(len(abandoned_events), 1)
+        self.assertEqual(abandoned_events[0]["payload"]["abandon_reason"], "operator-decision")
+        self.assertNotIn(abandoned_events[0]["payload"]["abandon_reason"], review_verdicts)
+
+    def test_sealed_on_disk_write_verdicts_are_identical_to_prior_revision(self):
+        self.activate()
+        route, route_file, result = self.begin()
+        self.write_output(result)
+        self.close(route, route_file)
+        outcome = P.finalize(self.root, cycle_id=result["cycle_id"])
+        self.assertEqual(outcome["status"], "sealed")
+        target = Path(result["cycle_dir"]) / "artifacts" / "plans" / "cycle" / "extra.md"
+        verdict = P.check_write(self.root, target)
+        self.assertEqual(verdict["verdict"], "deny")
+        self.assertEqual(verdict["reason"], "cycle-not-open")
+
+    def test_force_abandon_ignoring_lease_requires_operator_override_live_review_reason(self):
+        self.activate()
+        route, route_file, result = self.begin()
+        self.write_output(result)
+        cycle_id = result["cycle_id"]
+        P.review_lease_acquire(self.root, cycle_id=cycle_id, attempt_id="att-reviewer")
+        with self.assertRaises(P.ProducerError) as caught:
+            P.finalize(
+                self.root, cycle_id=cycle_id, state="abandoned",
+                abandon_reason="operator-decision", force_abandon_ignoring_lease=True,
+            )
+        self.assertEqual(caught.exception.code, "abandon-reason-required")
+        outcome = P.finalize(
+            self.root, cycle_id=cycle_id, state="abandoned",
+            force_abandon_ignoring_lease=True, allow_open_route=True,
+        )
+        self.assertEqual(outcome["status"], "sealed")
+        document = json.loads((Path(result["cycle_dir"]) / "manifest.json").read_text())
+        abandoned_events = [e for e in document["events"] if e["event_type"] == "cycle.abandoned"]
+        self.assertEqual(abandoned_events[0]["payload"]["abandon_reason"], "operator-override-live-review")
 
 
 if __name__ == "__main__":

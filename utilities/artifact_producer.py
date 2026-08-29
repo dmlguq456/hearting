@@ -49,11 +49,23 @@ import artifact_identity  # noqa: E402
 import artifact_index  # noqa: E402
 import artifact_lifecycle  # noqa: E402
 import artifact_manifest  # noqa: E402
+from dispatch_contract import process_start_ticks  # noqa: E402
 
 PRODUCER_REL = ".runtime/artifact-producer/v1"
 CONTRACT = "artifact-producer/v1"
 ALGORITHM_VERSION = "w7c-producer/v1"
 OK, BLOCKED, USAGE = 0, 65, 64
+
+# SD-117 §13.34.5-(2): a cycle's abandonment sealing decision must always
+# name why -- a closed enum, disjoint from review verdict vocabulary
+# (PASS/FAIL/BLOCKED, allow/deny) so the two can never be confused (E47-7).
+ABANDON_REASONS = frozenset({
+    "operator-decision",
+    "route-unrecoverable",
+    "lease-expired-no-publisher",
+    "operator-override-live-review",
+})
+REVIEW_LEASE_REL = "review-leases"
 
 INTENSITIES = ("direct", "quick", "standard", "strong", "thorough", "adversarial")
 ENTRY_CAPABILITIES = (
@@ -709,6 +721,7 @@ def build_manifest(
     allow_open_route: bool,
     allocator: artifact_identity.IdAllocator,
     now: Optional[float],
+    abandon_reason: Optional[str] = None,
 ) -> Dict[str, Any]:
     identity = artifact_lifecycle.read_root_identity(root)
     if identity is None:
@@ -772,11 +785,12 @@ def build_manifest(
     else:
         cycle_state = "active"
     if cycle_state != "active":
+        payload = {"abandon_reason": abandon_reason} if cycle_state == "abandoned" else {}
         events.append({
             "event_id": allocator.allocate("event"), "stream_id": allocator.allocate("stream"),
             "stream_sequence": 1, "event_type": f"cycle.{cycle_state}", "target_id": record["cycle_id"],
             "actor": {"kind": "producer", "id": record["producer_id"]}, "recorded_at": when,
-            "provenance": provenance(cycle_digest), "evidence_ids": [], "payload": {},
+            "provenance": provenance(cycle_digest), "evidence_ids": [], "payload": payload,
         })
     if closed and cycle_state == "completed":
         terminal_event_id = allocator.allocate("event")
@@ -850,6 +864,130 @@ def _remove_empty_cycle(root: Path, record: Mapping[str, Any]) -> None:
             _write_campaign(root, campaign, exclusive=False)
 
 
+def _review_lease_dir(root: Path, cycle_id: str) -> Path:
+    return Path(root) / PRODUCER_REL / REVIEW_LEASE_REL / cycle_id
+
+
+def _review_lease_path(root: Path, cycle_id: str, attempt_id: str) -> Path:
+    return _review_lease_dir(root, cycle_id) / f"{attempt_id}.json"
+
+
+def _rfc3339_to_epoch(value: str) -> float:
+    return time.mktime(time.strptime(value, "%Y-%m-%dT%H:%M:%SZ")) - time.timezone
+
+
+def _lease_record_is_live(record: Optional[Dict[str, Any]], *, now: Optional[float] = None) -> bool:
+    """SD-105/SD-90 evidence hierarchy, cited not redefined (plan.md §6.2):
+    exact PID/start/PGID identity, a finite deadline, and judgment-impossible
+    inputs (corrupt record, unreadable /proc, clock anomaly, missing field)
+    read as *live* -- conservative, so an undecidable lease never lets an
+    abandon through (E47-4)."""
+
+    if record is None:
+        return False
+    if record.get("released_at") is not None:
+        return False
+    deadline = record.get("deadline")
+    if not isinstance(deadline, str):
+        return True
+    try:
+        deadline_ts = _rfc3339_to_epoch(deadline)
+    except (ValueError, OverflowError):
+        return True
+    when = time.time() if now is None else now
+    if when > deadline_ts:
+        return False
+    pid = record.get("pid")
+    pid_start = record.get("pid_start")
+    pgid = record.get("pgid")
+    if not isinstance(pid, int) or not isinstance(pid_start, str) or not pid_start or not isinstance(pgid, int):
+        return True
+    actual_start = process_start_ticks(pid)
+    if actual_start is None:
+        return False
+    if actual_start != pid_start:
+        return False
+    try:
+        actual_pgid = os.getpgid(pid)
+    except OSError:
+        return False
+    return actual_pgid == pgid
+
+
+def _live_review_lease(root: Path, cycle_id: str) -> Optional[Path]:
+    lease_dir = _review_lease_dir(root, cycle_id)
+    if not lease_dir.is_dir():
+        return None
+    for path in sorted(lease_dir.glob("*.json")):
+        record = _read_json(path)
+        if record is None:
+            # The glob already proved this file exists, so an unparseable
+            # read here is corruption, not absence -- conservative live
+            # (E47-4), unlike `_lease_record_is_live(None)` below which
+            # means "no lease file at this specific path".
+            return path
+        if _lease_record_is_live(record):
+            return path
+    return None
+
+
+def review_lease_acquire(
+    root: Path, *, cycle_id: str, attempt_id: str, deadline_seconds: float = 900.0,
+    now: Optional[float] = None,
+) -> Dict[str, Any]:
+    root = Path(root).resolve()
+    lock_fd = artifact_admission._acquire_lock(root, artifact_admission.LOCK_TIMEOUT_DEFAULT, now=now)
+    try:
+        path = _review_lease_path(root, cycle_id, attempt_id)
+        existing = _read_json(path)
+        when = time.time() if now is None else now
+        # E47-9: the same (cycle, attempt) re-acquiring its own still-live
+        # lease is an idempotent no-op -- zero state change.
+        if existing is not None and _lease_record_is_live(existing, now=when):
+            return {"status": "already-held", "cycle_id": cycle_id, "attempt_id": attempt_id}
+        pid = os.getpid()
+        record = {
+            "schema_version": 1, "cycle_id": cycle_id, "attempt_id": attempt_id,
+            "pid": pid, "pid_start": process_start_ticks(pid) or "",
+            "pgid": os.getpgrp(), "acquired_at": _rfc3339(when),
+            "deadline": _rfc3339(when + max(1.0, deadline_seconds)),
+            "released_at": None,
+        }
+        path.parent.mkdir(parents=True, exist_ok=True)
+        _write_atomic(path, _json_bytes(record), 0o600)
+        return {"status": "acquired", "cycle_id": cycle_id, "attempt_id": attempt_id}
+    finally:
+        artifact_admission._release_lock(root, lock_fd)
+
+
+def review_lease_release(
+    root: Path, *, cycle_id: str, attempt_id: str, now: Optional[float] = None,
+) -> Dict[str, Any]:
+    root = Path(root).resolve()
+    lock_fd = artifact_admission._acquire_lock(root, artifact_admission.LOCK_TIMEOUT_DEFAULT, now=now)
+    try:
+        path = _review_lease_path(root, cycle_id, attempt_id)
+        existing = _read_json(path)
+        if existing is None or existing.get("released_at") is not None:
+            # E47-9: releasing an already-released (or never-acquired) lease
+            # is an idempotent no-op.
+            return {"status": "already-released", "cycle_id": cycle_id, "attempt_id": attempt_id}
+        existing["released_at"] = _rfc3339(time.time() if now is None else now)
+        _write_atomic(path, _json_bytes(existing), 0o600)
+        return {"status": "released", "cycle_id": cycle_id, "attempt_id": attempt_id}
+    finally:
+        artifact_admission._release_lock(root, lock_fd)
+
+
+def review_lease_status(root: Path, *, cycle_id: str, attempt_id: Optional[str] = None) -> Dict[str, Any]:
+    root = Path(root).resolve()
+    if attempt_id is not None:
+        record = _read_json(_review_lease_path(root, cycle_id, attempt_id))
+        return {"cycle_id": cycle_id, "attempt_id": attempt_id, "live": _lease_record_is_live(record)}
+    live_path = _live_review_lease(root, cycle_id)
+    return {"cycle_id": cycle_id, "live": live_path is not None}
+
+
 def finalize(
     root: Path,
     *,
@@ -863,6 +1001,8 @@ def finalize(
     crash_after_manifest: bool = False,
     exclude_hidden: bool = False,
     adopt_root_outputs: Sequence[str] = (),
+    abandon_reason: Optional[str] = None,
+    force_abandon_ignoring_lease: bool = False,
 ) -> Dict[str, Any]:
     root = Path(root).resolve()
     if state not in {"completed", "abandoned"}:
@@ -879,6 +1019,21 @@ def finalize(
                     "manifest_digest": record.get("manifest_digest")}
         if record.get("state") != "open":
             raise ProducerError("cycle-not-open", record.get("state", "?"))
+        if state == "abandoned":
+            # SD-117 L1 before L3 (plan-check C-2): live-lease enforcement
+            # comes first -- a live registered review lease refuses the
+            # abandon outright, zero events, zero record-state change
+            # (E47-2), before the abandon_reason vocabulary is even
+            # consulted.
+            if not force_abandon_ignoring_lease:
+                if _live_review_lease(root, cycle_id) is not None:
+                    raise ProducerError("cycle-abandon-blocked-live-review", cycle_id)
+            elif abandon_reason not in (None, "operator-override-live-review"):
+                raise ProducerError("abandon-reason-required", str(abandon_reason))
+            if force_abandon_ignoring_lease:
+                abandon_reason = "operator-override-live-review"
+            if abandon_reason not in ABANDON_REASONS:
+                raise ProducerError("abandon-reason-required", str(abandon_reason))
         directory = cycle_dir(root, record["campaign_id"], cycle_id)
         route = load_route(root, Path(record["route_file"]))
         if route["route_hash"] != record["route_hash"]:
@@ -909,16 +1064,22 @@ def finalize(
         if violations:
             raise ProducerError("output-invalid", ";".join(violations))
         if not rows:
-            # D-9: no durable output, no lineage.
+            # D-9: no durable output, no lineage. Unchanged except that an
+            # abandoned empty cycle also carries its sealed abandon_reason
+            # (E47-5: `_remove_empty_cycle` call and returned `status` stay
+            # byte-identical either way).
             _remove_empty_cycle(root, record)
             record = dict(record)
             record["state"] = "abandoned" if state == "abandoned" else "no-lineage"
             record["sealed_on"] = _rfc3339(now)
+            if state == "abandoned":
+                record["abandon_reason"] = abandon_reason
             _write_cycle_record(root, record, exclusive=False)
             return {"status": "no-lineage", "cycle_id": cycle_id, "lineage_committed": False}
         document = build_manifest(
             root, record, route, rows, state=state, primary=primary,
             allow_open_route=allow_open_route, allocator=alloc, now=now,
+            abandon_reason=abandon_reason,
         )
         report = artifact_manifest.validate(document)
         if not report.ok:
@@ -1393,6 +1554,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     p.add_argument("--publication", default="not-offered")
     p.add_argument("--allow-open-route", action="store_true")
     p.add_argument("--adopt-root-output", action="append", default=[])
+    p.add_argument("--abandon-reason", choices=sorted(ABANDON_REASONS))
+    p.add_argument("--force-abandon-ignoring-lease", action="store_true")
+
+    p = sub.add_parser("review-lease")
+    p.add_argument("--artifact-root", required=True)
+    p.add_argument("--cycle", required=True)
+    p.add_argument("--attempt")
+    p.add_argument("--deadline-seconds", type=float, default=900.0)
+    p.add_argument("operation", choices=["acquire", "release", "status"])
 
     p = sub.add_parser("admit-shared")
     p.add_argument("--artifact-root", required=True)
@@ -1452,7 +1622,21 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         elif args.command == "finalize":
             result = finalize(root, cycle_id=args.cycle, state=args.state, primary=args.primary,
                               publication=args.publication, allow_open_route=args.allow_open_route,
-                              adopt_root_outputs=args.adopt_root_output)
+                              adopt_root_outputs=args.adopt_root_output,
+                              abandon_reason=args.abandon_reason,
+                              force_abandon_ignoring_lease=args.force_abandon_ignoring_lease)
+        elif args.command == "review-lease":
+            if args.operation == "acquire":
+                if not args.attempt:
+                    raise ProducerError("review-lease-attempt-required")
+                result = review_lease_acquire(root, cycle_id=args.cycle, attempt_id=args.attempt,
+                                              deadline_seconds=args.deadline_seconds)
+            elif args.operation == "release":
+                if not args.attempt:
+                    raise ProducerError("review-lease-attempt-required")
+                result = review_lease_release(root, cycle_id=args.cycle, attempt_id=args.attempt)
+            else:
+                result = review_lease_status(root, cycle_id=args.cycle, attempt_id=args.attempt)
         elif args.command == "admit-shared":
             result = admit_shared(root, cycle_id=args.cycle, kind=args.kind, source=args.source,
                                   reference_id=args.reference, key=args.key, title=args.title,
