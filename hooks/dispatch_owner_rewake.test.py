@@ -292,8 +292,10 @@ class DispatchOwnerRewakeTest(unittest.TestCase):
             rc = rewake.emit_receipt(
                 state, message, block=rewake._attention_has_open_child(message)
             )
-        self.assertEqual(rc, 0)
-        self.assertEqual(stderr.getvalue(), "")
+        # Non-blocking attention is still a terminal receipt: exit 2 wakes
+        # the idle session, the receipt is mirrored on stderr.
+        self.assertEqual(rc, 2)
+        self.assertIn("owned_children=0", stderr.getvalue())
         self.assertEqual(json.loads(stdout.getvalue())["systemMessage"], message)
 
     def test_only_a_real_open_owned_child_blocks_attention(self) -> None:
@@ -397,8 +399,9 @@ class DispatchOwnerRewakeTest(unittest.TestCase):
             sys, "stderr", success_stderr
         ):
             success_rc = rewake.emit_receipt("success", "completed")
-        self.assertEqual(success_rc, 0)
-        self.assertEqual(success_stderr.getvalue(), "")
+        # 2026-08-29: success exits 2 too (only exit 2 wakes an idle session).
+        self.assertEqual(success_rc, 2)
+        self.assertEqual(success_stderr.getvalue(), "completed\n")
         rendered = json.loads(success_stdout.getvalue())
         self.assertEqual(rendered["systemMessage"], "completed")
         self.assertIn("Hearting dispatch completed", rendered["terminalSequence"])
@@ -413,7 +416,7 @@ class DispatchOwnerRewakeTest(unittest.TestCase):
         self.assertEqual(attention_stdout.getvalue(), "")
         self.assertEqual(attention_stderr.getvalue(), "warning\n")
 
-    def test_promoted_success_renders_exit_zero_notification_and_attention_exits_two(
+    def test_promoted_success_and_attention_both_exit_two_to_wake(
         self,
     ) -> None:
         # SD-97 end to end: an earlier `attention/terminal-failure-or-unclosed`
@@ -442,8 +445,10 @@ class DispatchOwnerRewakeTest(unittest.TestCase):
         with mock.patch.object(sys, "stdout", stdout), mock.patch.object(
             sys, "stderr", stderr
         ):
-            self.assertEqual(rewake.emit_receipt(state, message), 0)
-        self.assertEqual(stderr.getvalue(), "")
+            # 2026-08-29: a terminal success must exit 2 -- Claude Code only
+            # wakes an idle session for an asyncRewake hook on exit code 2.
+            self.assertEqual(rewake.emit_receipt(state, message), 2)
+        self.assertIn("Hearting dispatch completed", stderr.getvalue())
         rendered = json.loads(stdout.getvalue())
         self.assertEqual(rendered["systemMessage"], message)
         self.assertIn("Hearting dispatch completed", rendered["terminalSequence"])
@@ -637,8 +642,9 @@ class RegistryConfirmArmTest(unittest.TestCase):
             mock.patch.object(
                 rewake, "wait_for_attempt", return_value=("ready", "terminal-quiescent")
             )
-        ) as wait, mock.patch.object(rewake.sys, "stdout", io.StringIO()) as stdout:
-            self.assertEqual(rewake.main(), 0)
+        ) as wait, mock.patch.object(rewake.sys, "stdout", io.StringIO()) as stdout, \
+             mock.patch.object(rewake.sys, "stderr", io.StringIO()):
+            self.assertEqual(rewake.main(), 2)
             message = json.loads(stdout.getvalue())["systemMessage"]
         self.assertEqual(wait.call_args.args[0].attempt_id, "att-owner-1")
         self.assertIn("armed=registry", message)
@@ -802,7 +808,9 @@ class CarrierOneClaimGateTest(unittest.TestCase):
         record_path = self._close_and_materialize()
         with mock.patch.object(rewake, "runtime_ancestry_binding", return_value=self.ANCESTRY):
             code, stdout, stderr = self._run_main()
-        self.assertEqual(code, 0)
+        # Terminal receipt -> exit 2 (the only exit code that wakes an idle
+        # Claude session), receipt mirrored on stderr.
+        self.assertEqual(code, 2)
         # No completion-marker fixture here, so classification lands on
         # "attention" (required_action=inspect-done-failure), not "success"
         # -- the point of this test is that the notice is emitted at all
@@ -810,7 +818,7 @@ class CarrierOneClaimGateTest(unittest.TestCase):
         # and the record transitions, not which of the two it is.
         self.assertIn("Hearting dispatch requires attention", stdout)
         self.assertIn("systemMessage", stdout)
-        self.assertEqual(stderr, "")
+        self.assertIn("Hearting dispatch requires attention", stderr)
         record = json.loads(record_path.read_text(encoding="utf-8"))
         self.assertEqual(record["state"], "sent-ambiguous")
 
@@ -898,7 +906,7 @@ class CarrierOneClaimGateTest(unittest.TestCase):
         self._open_row()
         with mock.patch.object(rewake, "runtime_ancestry_binding", return_value=self.ANCESTRY):
             code, stdout, stderr = self._run_main()
-        self.assertEqual(code, 0)
+        self.assertEqual(code, 2)
         self.assertIn("state=attention", stdout)
 
 

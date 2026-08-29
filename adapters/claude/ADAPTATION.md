@@ -151,8 +151,12 @@ main/orchestrator chooses per job and the wrapper only reflects that choice:
   ordinary Bash calls are silent no-ops, and no Background Bash monitor,
   `dispatch-wait`, progress recap, or periodic re-arm is created. Immediately
   before rendering, the hook re-reads the exact row and its sealed completion
-  evidence: success returns a clean terminal notification with exit zero, and
-  only attention exits two to wake Claude with warning context. Registered Claude
+  evidence: every terminal receipt, success or attention, exits two — Claude
+  Code wakes an idle session for an `asyncRewake` hook only on exit code 2 and
+  holds exit-0 output until the next user interaction (corrected 2026-08-29;
+  success still carries its structured notification on stdout). The
+  SessionStart/UserPromptSubmit sweep re-delivers any SD-111 pending record at
+  the next prompt as the durable backstop. Registered Claude
   owners keep one `--input-format stream-json` process for the route and submit
   each non-terminal joined receipt immediately. When the current rows and exact
   sealed markers prove every declared terminal node complete, the supervisor

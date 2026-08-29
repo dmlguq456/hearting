@@ -20,6 +20,7 @@ from dispatch_contract import (
     WRAPPER_PARENT_SANDBOXES,
     WRAPPER_TRANSPORTS,
     _atomic_registry_replace,
+    _delivery_intent_values,
     agent_home_equivalent,
     attempt_process_quiescence,
     completion_marker_is_current,
@@ -35,6 +36,7 @@ from dispatch_contract import (
 )
 from stage_session_contract import load_manifest
 from dispatch_degradation import record_degradation  # noqa: E402
+from dispatch_completion_join import materialize_after_terminal_close  # noqa: E402
 from replica_batch_contract import verify_manifest as verify_batch_manifest  # noqa: E402
 ORDER = {"direct":0,"quick":1,"standard":2,"strong":3,"thorough":4,"adversarial":5}
 TRACKING = {"tracked", "untracked"}
@@ -2955,7 +2957,38 @@ def complete_node(
     attempt_id=None,
     explicit_attempt_metadata=None,
 ):
-    """Atomically publish one exact-attempt completion and close only its row."""
+    """Atomically publish one exact-attempt completion and close only its row.
+
+    SD-111 trigger 1 for the `complete`-closed edge: when this call itself
+    closes the registered row (`status=closed`), the delivery-intent stamp was
+    appended inside the registry lock and the durable pending-delivery record
+    is materialized here, after every lock is released (the materializer must
+    never run under `<jobs>.lock`). Before 2026-08-29 this edge stamped no
+    intent at all, so a quick one-shot owner's completion left no record and
+    no carrier could ever deliver it.
+    """
+    marker, row = _complete_node_locked(
+        route, node, node_id, evidence,
+        jobs=jobs, attempt_id=attempt_id,
+        explicit_attempt_metadata=explicit_attempt_metadata,
+    )
+    if jobs and attempt_id and isinstance(row, dict) and row.get("status") == "closed":
+        try:
+            materialize_after_terminal_close(Path(jobs), attempt_id)
+        except Exception:  # noqa: BLE001 -- a committed close is never unwound by delivery-layer failure
+            pass
+    return marker, row
+
+
+def _complete_node_locked(
+    route,
+    node,
+    node_id,
+    evidence,
+    jobs=None,
+    attempt_id=None,
+    explicit_attempt_metadata=None,
+):
     if jobs and not attempt_id:
         raise ValueError("registered completion requires --attempt-id")
     if not jobs and attempt_id and explicit_attempt_metadata is None:
@@ -3078,6 +3111,14 @@ def complete_node(
             # peer checks see immutable terminal success without re-deriving it.
             if row_metadata.get("failure_class") in (None,"","-"):
                 row_fields[5] += ",failure_class=pass"
+            if not already_closed:
+                # SD-111 (§4.3.1): this is the row's one open|running -> done
+                # edge, so the delivery-intent stamp belongs here, inside the
+                # same registry lock, exactly like the supervisor-closed edges.
+                stamped=parse_registry_metadata(row_fields[5])
+                intent=_delivery_intent_values(row_fields,stamped)
+                if intent:
+                    row_fields[5] += "".join(f",{key}={value}" for key,value in intent.items())
             lines[row_index]="\t".join(row_fields)
             _atomic_registry_replace(jobs_path,lines)
             return marker, {

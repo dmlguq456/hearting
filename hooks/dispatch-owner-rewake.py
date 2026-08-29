@@ -504,8 +504,25 @@ def receipt(launch: Launch, state: str, reason: str, root: Path) -> str:
     return classified_receipt(launch, state, reason, root)[1]
 
 
+TERMINAL_STATES = frozenset({"success", "attention"})
+
+
 def emit_receipt(state: str, message: str, *, block: bool | None = None) -> int:
-    """Render success/nonblocking attention without a Stop block decision."""
+    """Render the receipt and choose the exit code that actually wakes Claude.
+
+    Claude Code delivers an `asyncRewake` hook's exit-0 output only "on the
+    next conversation turn" -- an idle session stays asleep until the user
+    types -- and wakes the session immediately only on exit code 2, showing
+    stderr (or stdout when stderr is empty) as a system reminder
+    (code.claude.com/docs/en/hooks, "Run hooks in the background"). Until
+    2026-08-29 a completed owner exited 0 here, so every successful
+    completion waited for the next user prompt and looked like a lost wake
+    (five observed "gap 4" incidents). Every terminal receipt -- success or
+    attention -- now exits 2 with the receipt on stderr; the structured
+    stdout payload is kept for success and non-blocking attention so a
+    transcript reader sees the same notice as before. Non-terminal bridge
+    states (timeout, bridge-error) keep exit 0: there is nothing to wake for.
+    """
 
     if block is None:
         block = state != "success"
@@ -520,6 +537,9 @@ def emit_receipt(state: str, message: str, *, block: bool | None = None) -> int:
                 separators=(",", ":"),
             )
         )
+        if state in TERMINAL_STATES:
+            print(message, file=sys.stderr)
+            return 2
         return 0
     print(message, file=sys.stderr)
     return 2

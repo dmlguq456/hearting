@@ -11,6 +11,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import subprocess
 from pathlib import Path
 import sys
 import tempfile
@@ -117,6 +118,79 @@ class SweepTest(IsolatedRootMixin, unittest.TestCase):
         )
         kwargs.update(overrides)
         return PD.create(**kwargs)
+
+    # -- 2026-08-29: Claude carrier 2 delivers (sweep_deliver / ack_delivered).
+
+    def test_deliver_claims_pending_record_without_generation_proof(self):
+        self._seed()
+        records, count = SWEEP.sweep_deliver(self.root, "claude-parent-runtime", "sess-owner")
+        self.assertEqual(count, 1)
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["state"], "claimed")
+        self.assertEqual(records[0]["attempts"], 1)
+        text = SWEEP._bounded_receipt_text(records[0])
+        self.assertIn("delivery_id=delivery-" + "a" * 32, text)
+        self.assertIn("attempt_id=att-0000000000000000000000000000bbbb", text)
+        self.assertNotIn("job_registry", text)
+
+    def test_deliver_then_ack_makes_record_terminal_and_silent_next_time(self):
+        self._seed()
+        records, _ = SWEEP.sweep_deliver(self.root, "claude-parent-runtime", "sess-owner")
+        self.assertEqual(SWEEP.ack_delivered(self.root, "sess-owner", records, acked_by="t"), 1)
+        again, count = SWEEP.sweep_deliver(self.root, "claude-parent-runtime", "sess-owner")
+        self.assertEqual(count, 1)
+        self.assertEqual(again, [])
+        state = PD.read(self.root, "sess-owner", "delivery-" + "a" * 32)["state"]
+        self.assertEqual(state, "acked")
+
+    def test_deliver_reclaims_sent_ambiguous_record_only_after_lease_expiry(self):
+        # The async rewake carrier leaves a record sent-ambiguous; a lost wake
+        # must be re-deliverable by the sweep once the lease has expired.
+        self._seed()
+        first = PD.claim(
+            self.root, "sess-owner", "delivery-" + "a" * 32,
+            claim_owner="rewake:1", lease_seconds=60.0,
+        )
+        PD.mark_sent_ambiguous(
+            self.root, "sess-owner", "delivery-" + "a" * 32, claim_owner="rewake:1"
+        )
+        early, _ = SWEEP.sweep_deliver(
+            self.root, "claude-parent-runtime", "sess-owner", now_ns=first["claim_deadline_ns"] - 1
+        )
+        self.assertEqual(early, [])
+        late, _ = SWEEP.sweep_deliver(
+            self.root, "claude-parent-runtime", "sess-owner", now_ns=first["claim_deadline_ns"] + 1
+        )
+        self.assertEqual(len(late), 1)
+        self.assertEqual(late[0]["attempts"], 2)
+
+    def test_deliver_ignores_foreign_session_and_foreign_recipient_kind(self):
+        self._seed()
+        self.assertEqual(
+            SWEEP.sweep_deliver(self.root, "claude-parent-runtime", "sess-other"), ([], 0)
+        )
+        records, count = SWEEP.sweep_deliver(self.root, "codex-stop-hook", "sess-owner")
+        self.assertEqual((records, count), ([], 1))
+
+    def test_hook_injects_additional_context_and_acks(self):
+        self._seed()
+        hook = Path(__file__).resolve().parents[1] / "hooks" / "dispatch-session-sweep.py"
+        env = dict(os.environ)
+        env["XDG_STATE_HOME"] = str(self.root.parent)
+        env["HARNESS_STATE_ROOT"] = str(self.root)
+        env["AGENT_DISPATCH_JOBS"] = str(self.root / "jobs.log")
+        proc = subprocess.run(
+            [sys.executable, str(hook)],
+            input=json.dumps({"session_id": "sess-owner", "hook_event_name": "UserPromptSubmit"}),
+            capture_output=True, text=True, env=env, check=False,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        payload = json.loads(proc.stdout)
+        context = payload["hookSpecificOutput"]["additionalContext"]
+        self.assertEqual(payload["hookSpecificOutput"]["hookEventName"], "UserPromptSubmit")
+        self.assertIn("att-0000000000000000000000000000bbbb", context)
+        state = PD.read(self.root, "sess-owner", "delivery-" + "a" * 32)["state"]
+        self.assertEqual(state, "acked")
 
     # -- A-21: generation-unproven claim refused, state unchanged. ---------
 
