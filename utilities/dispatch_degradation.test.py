@@ -45,12 +45,13 @@ class DegradationWriterTest(unittest.TestCase):
 
     def test_schema_bounds_and_route_shard(self):
         with tempfile.TemporaryDirectory() as home:
+            jobs = os.path.join(home, "dispatch", "jobs.log")
             path = record_degradation(agent_home=home, route_id="rt-test", route_node="exec",
                                       route_hash="sha256:test", dispatch_depth=1,
                                       fallback_hop="inline", execution_surface="inline",
                                       writer="stage-dispatch-fallback.py",
                                       reason="r" * 200, detail="d" * 600,
-                                      attempt_trace="t" * 3000)
+                                      attempt_trace="t" * 3000, jobs=jobs)
             with open(path, encoding="utf-8") as stream:
                 row = json.loads(stream.readline())
             self.assertEqual(set(("schema_version", "kind", "ts", "route_id", "route_node",
@@ -68,23 +69,24 @@ class DegradationWriterTest(unittest.TestCase):
         cases = ("readonly", "serialization", "lock")
         for case in cases:
             with self.subTest(case=case), tempfile.TemporaryDirectory() as home:
+                jobs = os.path.join(home, "dispatch", "jobs.log")
                 if case == "readonly":
-                    with open(os.path.join(home, ".dispatch"), "w", encoding="utf-8"):
+                    with open(os.path.join(home, "dispatch"), "w", encoding="utf-8"):
                         pass
                     result = record_degradation(agent_home=home, route_id="rt-ro",
                                                 route_node="execute", route_hash="h",
                                                 dispatch_depth=2, fallback_hop="inline",
                                                 execution_surface="inline",
-                                                writer="stage-dispatch-fallback.py")
+                                                writer="stage-dispatch-fallback.py", jobs=jobs)
                 elif case == "serialization":
                     result = record_degradation(agent_home=home, route_id="rt-json",
                                                 route_node="execute", route_hash="h",
                                                 dispatch_depth=2, fallback_hop="inline",
                                                 execution_surface="inline",
                                                 writer="stage-dispatch-fallback.py",
-                                                last_direct_failure=object())
+                                                last_direct_failure=object(), jobs=jobs)
                 else:
-                    root = os.path.join(home, ".dispatch", "degradations")
+                    root = os.path.join(home, "dispatch", "degradations")
                     os.makedirs(root)
                     lock_path = os.path.join(root, "rt-lock.jsonl.lock")
                     holder = subprocess.Popen([sys.executable, "-c", (
@@ -96,7 +98,7 @@ class DegradationWriterTest(unittest.TestCase):
                                                     route_node="execute", route_hash="h",
                                                     dispatch_depth=2, fallback_hop="inline",
                                                     execution_surface="inline",
-                                                    writer="stage-dispatch-fallback.py")
+                                                    writer="stage-dispatch-fallback.py", jobs=jobs)
                     finally:
                         holder.wait(timeout=2)
                 self.assertIsNone(result)
@@ -121,17 +123,18 @@ class DegradationWriterTest(unittest.TestCase):
 
     def test_subprocess_append_over_4096_bytes_has_no_torn_lines(self):
         with tempfile.TemporaryDirectory() as home:
+            jobs = os.path.join(home, "dispatch", "jobs.log")
             code = """import sys
 from dispatch_degradation import record_degradation
-record_degradation(agent_home=sys.argv[1], route_id='rt-race', route_node='execute', route_hash='h', dispatch_depth=2, fallback_hop='inline', execution_surface='inline', writer='stage-dispatch-fallback.py', detail='x'*5000, attempt_id=sys.argv[2])
+record_degradation(agent_home=sys.argv[1], route_id='rt-race', route_node='execute', route_hash='h', dispatch_depth=2, fallback_hop='inline', execution_surface='inline', writer='stage-dispatch-fallback.py', detail='x'*5000, attempt_id=sys.argv[2], jobs=sys.argv[3])
 """
-            processes = [subprocess.Popen([sys.executable, "-c", code, home, str(i)],
+            processes = [subprocess.Popen([sys.executable, "-c", code, home, str(i), jobs],
                                           cwd=os.path.dirname(__file__),
                                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                          for i in range(12)]
             for process in processes:
                 self.assertEqual(process.wait(timeout=5), 0)
-            path = os.path.join(home, ".dispatch", "degradations", "rt-race.jsonl")
+            path = os.path.join(home, "dispatch", "degradations", "rt-race.jsonl")
             with open(path, "rb") as stream:
                 lines = stream.readlines()
             self.assertEqual(len(lines), 12)
@@ -143,6 +146,7 @@ record_degradation(agent_home=sys.argv[1], route_id='rt-race', route_node='execu
         # R6/D7: every new typed-reason field added in v43 must be carried into
         # the ledger row verbatim, not silently dropped by the closed allowlist.
         with tempfile.TemporaryDirectory() as home:
+            jobs = os.path.join(home, "dispatch", "jobs.log")
             path = record_degradation(agent_home=home, route_id="rt-v43", route_node="execute",
                                       route_hash="sha256:v43", dispatch_depth=2,
                                       fallback_hop="cross-harness-headless",
@@ -153,7 +157,7 @@ record_degradation(agent_home=sys.argv[1], route_id='rt-race', route_node='execu
                                       parent_cross="degraded", cause="affinity-pinned",
                                       sole_gate="degraded",
                                       subsession_id="ss-v43-w1c-claude",
-                                      slice_manifest_sha256="sha256:slice")
+                                      slice_manifest_sha256="sha256:slice", jobs=jobs)
             self.assertIsNotNone(path)
             with open(path, encoding="utf-8") as stream:
                 row = json.loads(stream.readline())
@@ -171,11 +175,12 @@ record_degradation(agent_home=sys.argv[1], route_id='rt-race', route_node='execu
         # D7: without capability-route.py on the writer allowlist the SD-103
         # owner-side record would silently produce no row at all.
         with tempfile.TemporaryDirectory() as home:
+            jobs = os.path.join(home, "dispatch", "jobs.log")
             path = record_degradation(agent_home=home, route_id="rt-owner", route_node="execute",
                                       route_hash="sha256:owner", dispatch_depth=2,
                                       fallback_hop=None, execution_surface="registered-headless",
                                       writer="capability-route.py",
-                                      reason="subdivision-scope-violation")
+                                      reason="subdivision-scope-violation", jobs=jobs)
             self.assertIsNotNone(path)
             with open(path, encoding="utf-8") as stream:
                 row = json.loads(stream.readline())
@@ -184,6 +189,7 @@ record_degradation(agent_home=sys.argv[1], route_id='rt-race', route_node='execu
 
     def test_writer_allowlist_preserves_legacy_and_adds_reaper(self):
         with tempfile.TemporaryDirectory() as home:
+            jobs = os.path.join(home, "dispatch", "jobs.log")
             writers = (
                 "stage-dispatch-fallback.py",
                 "dispatch-batch.py",
@@ -202,6 +208,7 @@ record_degradation(agent_home=sys.argv[1], route_id='rt-race', route_node='execu
                         fallback_hop="same-harness-headless",
                         execution_surface="registered-headless",
                         writer=writer,
+                        jobs=jobs,
                     )
                     self.assertIsNotNone(path)
                     with open(path, encoding="utf-8") as stream:
@@ -216,12 +223,13 @@ record_degradation(agent_home=sys.argv[1], route_id='rt-race', route_node='execu
                 fallback_hop="same-harness-headless",
                 execution_surface="registered-headless",
                 writer="unknown-writer.py",
+                jobs=jobs,
             )
             self.assertIsNone(refused)
             self.assertFalse(
                 os.path.exists(
                     os.path.join(
-                        home, ".dispatch", "degradations", "rt-unknown-writer.jsonl"
+                        home, "dispatch", "degradations", "rt-unknown-writer.jsonl"
                     )
                 )
             )
