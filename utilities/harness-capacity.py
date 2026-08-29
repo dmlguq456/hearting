@@ -46,32 +46,48 @@ def _headroom(values) -> float | None:
 
 
 def _claude_score(now: float, stale_after: int) -> float | None:
+    """Account-wide headroom: merge every non-stale session's windows.
+
+    A single session file only ever reports the windows it happened to touch,
+    so picking one "winning" file (the old behaviour) could report a 51%
+    headroom window as the account's answer while a different, equally fresh
+    session file showed the same window at 1%. Instead, take each window
+    key's most-recently-observed `used_percentage` across all non-stale
+    files, then combine those per-window values into one headroom the same
+    way a single file always did.
+    """
     home = Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude")
     files = []
     try:
         files = sorted(
             (path for path in (home / ".statusline").glob("*.json") if path.is_file()),
-            key=lambda path: path.stat().st_mtime,
-            reverse=True,
+            key=lambda path: (-path.stat().st_mtime, path.name),
         )
     except OSError:
         return None
+    latest_used: dict[str, float] = {}
+    latest_mtime: dict[str, float] = {}
     for path in files[:12]:
         try:
-            if now - path.stat().st_mtime > stale_after:
+            mtime = path.stat().st_mtime
+            if now - mtime > stale_after:
                 break
             payload = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             continue
         limits = payload.get("rate_limits") or {}
-        score = _headroom(
-            row.get("used_percentage")
-            for row in limits.values()
-            if isinstance(row, dict)
-        )
-        if score is not None:
-            return score
-    return None
+        for key, row in limits.items():
+            if not isinstance(row, dict):
+                continue
+            used = row.get("used_percentage")
+            if not isinstance(used, (int, float)):
+                continue
+            if key not in latest_mtime or mtime > latest_mtime[key]:
+                latest_mtime[key] = mtime
+                latest_used[key] = used
+    if not latest_used:
+        return None
+    return _headroom(latest_used.values())
 
 
 def _codex_api_score() -> float | None:

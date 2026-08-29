@@ -433,6 +433,106 @@ class CapacityPolicyTests(unittest.TestCase):
                     preferred="claude", affinity_weight=weight, headroom_exponent=exponent), {"claude": 1.0})
 
 
+class ClaudeAccountAggregationTests(unittest.TestCase):
+    """C-6: account-wide claude headroom must merge windows, not pick one file.
+
+    Reproduces the 51<->1 oscillation: two session files are both fresh, but
+    each only reports one window, and the previous winner-take-all read of
+    "the single most-recent file" could answer 51 or 1 depending purely on
+    which file's mtime happened to sort first.
+    """
+
+    def _write(self, statusline_dir, name, rate_limits, mtime):
+        path = statusline_dir / name
+        path.write_text(json.dumps({"rate_limits": rate_limits}), encoding="utf-8")
+        os.utime(path, (mtime, mtime))
+        return path
+
+    def test_merges_windows_across_fresh_sessions_instead_of_picking_one_file(self):
+        with tempfile.TemporaryDirectory() as home:
+            statusline = Path(home) / ".statusline"
+            statusline.mkdir()
+            now = 1_000_000.0
+            # session A: only reports window "five_hour" at 49% used (51 headroom)
+            self._write(statusline, "a.json", {"five_hour": {"used_percentage": 49}}, now - 10)
+            # session B, slightly newer: only reports window "week" at 99% used (1 headroom)
+            self._write(statusline, "b.json", {"week": {"used_percentage": 99}}, now - 5)
+            with mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": home}):
+                score = C._claude_score(now, stale_after=3600)
+        # Both windows are live and must both count: headroom is the minimum
+        # across merged windows, i.e. 100 - max(49, 99) = 1, never a
+        # winner-take-all 51 from ignoring session B's window.
+        self.assertEqual(score, 1.0)
+
+    def test_stale_file_does_not_contribute_a_window(self):
+        with tempfile.TemporaryDirectory() as home:
+            statusline = Path(home) / ".statusline"
+            statusline.mkdir()
+            now = 1_000_000.0
+            self._write(statusline, "fresh.json", {"five_hour": {"used_percentage": 49}}, now - 10)
+            self._write(statusline, "stale.json", {"week": {"used_percentage": 99}}, now - 10_000)
+            with mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": home}):
+                score = C._claude_score(now, stale_after=3600)
+        self.assertEqual(score, 51.0)
+
+    def test_malformed_file_is_skipped_not_fatal(self):
+        with tempfile.TemporaryDirectory() as home:
+            statusline = Path(home) / ".statusline"
+            statusline.mkdir()
+            now = 1_000_000.0
+            bad = statusline / "bad.json"
+            bad.write_text("{not json", encoding="utf-8")
+            os.utime(bad, (now - 5, now - 5))
+            self._write(statusline, "ok.json", {"five_hour": {"used_percentage": 20}}, now - 3)
+            with mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": home}):
+                score = C._claude_score(now, stale_after=3600)
+        self.assertEqual(score, 80.0)
+
+    def test_same_window_key_takes_the_most_recent_mtime_value(self):
+        with tempfile.TemporaryDirectory() as home:
+            statusline = Path(home) / ".statusline"
+            statusline.mkdir()
+            now = 1_000_000.0
+            # Older file for the same window says 90% used; newer file says 10%.
+            self._write(statusline, "older.json", {"five_hour": {"used_percentage": 90}}, now - 20)
+            self._write(statusline, "newer.json", {"five_hour": {"used_percentage": 10}}, now - 5)
+            with mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": home}):
+                score = C._claude_score(now, stale_after=3600)
+        self.assertEqual(score, 90.0)
+
+    def test_equal_mtime_tie_is_deterministic(self):
+        with tempfile.TemporaryDirectory() as home:
+            statusline = Path(home) / ".statusline"
+            statusline.mkdir()
+            now = 1_000_000.0
+            tied = now - 5
+            self._write(statusline, "b_file.json", {"five_hour": {"used_percentage": 10}}, tied)
+            self._write(statusline, "a_file.json", {"five_hour": {"used_percentage": 40}}, tied)
+            with mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": home}):
+                first = C._claude_score(now, stale_after=3600)
+                second = C._claude_score(now, stale_after=3600)
+        # Deterministic across repeated calls, and pinned to the name-order
+        # tiebreak (alphabetically-first "a_file.json" wins the tie): 60.0.
+        self.assertEqual(first, second)
+        self.assertEqual(first, 60.0)
+
+    def test_no_files_returns_none(self):
+        with tempfile.TemporaryDirectory() as home:
+            (Path(home) / ".statusline").mkdir()
+            with mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": home}):
+                self.assertIsNone(C._claude_score(1_000_000.0, stale_after=3600))
+
+    def test_return_type_is_float_or_none(self):
+        with tempfile.TemporaryDirectory() as home:
+            statusline = Path(home) / ".statusline"
+            statusline.mkdir()
+            now = 1_000_000.0
+            self._write(statusline, "a.json", {"five_hour": {"used_percentage": 30}}, now - 5)
+            with mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": home}):
+                score = C._claude_score(now, stale_after=3600)
+        self.assertIsInstance(score, float)
+
+
 class CodexGaugeReaderTests(unittest.TestCase):
     """The codex gauge must not starve on idle: live probe first, rollout second.
 
