@@ -1,0 +1,22 @@
+# scope-placeholders.tsv — closed vocabulary for <...> placeholder tokens used
+# in capabilities/topologies.json write_scope / spec_scope entries.
+# tools/check-scope-placeholders.py asserts every <...> token found in a
+# write_scope/spec_scope value is registered here (scope_valid=yes or no).
+# hooks/artifact-guard.sh patterns() substitutes any <...> token with a
+# single-segment wildcard `*` at runtime (fail-safe); this file is the
+# build-time closed-vocabulary check (fail-closed).
+#
+# columns (tab-separated): token	scope_valid	meaning	substitution
+token	scope_valid	meaning	substitution
+<cycle>	yes	analysis/execution cycle id	*
+<topic>	yes	topic slug	*
+<component>	yes	component slug	*
+<mode>	yes	analyze-project mode slug	*
+<route>	no	route id (not used in scope values)	*
+<node>	no	route node id (not used in scope values)	*
+<path>	no	generic path placeholder (not used in scope values)	*
+<campaign>	no	campaign id (not used in scope values)	*
+<kind>	no	artifact kind (not used in scope values)	*
+<reference>	no	reference id (not used in scope values)	*
+<revision>	no	revision id (not used in scope values)	*
+<bucket>	no	legacy top-level bucket name (not used in scope values)	*

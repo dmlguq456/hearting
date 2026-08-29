@@ -40,6 +40,9 @@ jobs:
       - name: Verify unit-catalog contract
         run: python3 tools/check-unit-config.py
 
+      - name: Verify scope placeholder vocabulary
+        run: python3 tools/check-scope-placeholders.py
+
   install-lifecycle:
     runs-on: ubuntu-latest
     timeout-minutes: 20

@@ -184,7 +184,7 @@ case "$fp" in
       if [ -z "$route_node" ] || [ "$route_node" = "-" ]; then
         :
       elif ! python3 - "$route_file" "$route_id" "$route_node" "$cr" "$fp" <<'PY'
-import fnmatch,json,sys
+import fnmatch,json,re,sys
 from pathlib import Path
 WORKTREE_ONLY={"source-scoped"}
 def patterns(scope):
@@ -192,7 +192,9 @@ def patterns(scope):
         return ["^documents/*/*","^research/*/*"]
     root=scope[:-3] if scope.endswith("/**") else scope
     if scope in WORKTREE_ONLY or root=="source" or root.startswith("source/"): return []
-    return [scope.replace("<cycle>","*").replace("<topic>","*").replace("<component>","*")]
+    # Substitution vocabulary truth lives in capabilities/topologies.json;
+    # closed-vocabulary verification is owned by tools/check-scope-placeholders.py.
+    return [re.sub(r"<[a-z_]+>", "*", scope)]
 def component_match(value, pattern):
     values=value.split("/") if value else []
     parts=pattern.split("/") if pattern else []
