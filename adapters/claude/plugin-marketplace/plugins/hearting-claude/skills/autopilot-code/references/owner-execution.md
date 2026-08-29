@@ -78,7 +78,18 @@ by the dispatch-depth-1 owner). Full contract: `capabilities/autopilot-code.md`
 3. Pass the exported `AGENT_ARTIFACT_*` variables to every stage dispatch
    (the adapters forward them); stage workers call `begin --node <id>` and
    join the same cycle.
-4. Close the route, then `artifact_producer.py finalize --artifact-root <root>
+4. Run `capability-route.py complete` for the terminal node(s) before running
+   `capability-route.py close` on the same route — `close` reads the terminal
+   completion markers to decide `terminal_gate_proven`, and by default now
+   refuses (`route-close-before-complete`, exit 64) instead of permanently
+   sealing a `false` proof when `complete` has not run yet. `--allow-unproven`
+   exists only to record an intentionally abandoned route's honest `false`
+   outcome for recovery/cutover bookkeeping — never pass it to route past a
+   terminal node's ordinary completion. Never pass `--output` to
+   `complete`: it targets an existing artifact path 1:1 and a collision would
+   silently overwrite that artifact; the canonical completion marker location
+   is written regardless.
+5. Close the route, then `artifact_producer.py finalize --artifact-root <root>
    --cycle $AGENT_ARTIFACT_CYCLE_ID`; on `recovery-required`, run
    `artifact_producer.py recover` and retry.
-5. Only then, if this capability owns a shared kind, `admit-shared`.
+6. Only then, if this capability owns a shared kind, `admit-shared`.
