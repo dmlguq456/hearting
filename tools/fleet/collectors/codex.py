@@ -7,7 +7,9 @@ read from the read-only ``threads.title`` state DB with ``session_index.jsonl``
   · line 1  = session_meta  → payload.cwd (pid↔session match key)
   · last "token_count" event → payload.info.{last_token_usage, model_context_window}
       + payload.rate_limits.{primary,secondary}.used_percent and optional limit_window_seconds
-Model/effort default from ~/.codex/config.toml (top-level model / model_reasoning_effort).
+Model/effort come from the matched rollout's latest ``turn_context``. The active
+runtime home's top-level ``config.toml`` values are only a compatibility fallback
+for rollouts that predate that record.
 
 context% mirrors Codex's own formula: tokens_in_context_window() is the last
 request's total_tokens, and
@@ -50,6 +52,9 @@ _SUBAGENT_INDEX = {}                  # runtime home -> (read time, stamp, map, 
 _LIFECYCLE_CACHE_MAX = 512
 _LIFECYCLE_CACHE = OrderedDict()
 _LIFECYCLE_CACHE_EVICTIONS = 0
+_TURN_CONTEXT_CACHE_MAX = 512
+_TURN_CONTEXT_CACHE = OrderedDict()
+_TURN_CONTEXT_CACHE_EVICTIONS = 0
 _SUMMARY_BOUNDARY_SCAN = 1 << 20
 
 
@@ -412,6 +417,138 @@ def _config_model_effort(home):
         pass
     _CFG.update(ts=now, model=model, effort=effort)
     return model, effort
+
+
+def _turn_context_values(raw):
+    """Return non-empty model/effort values from one valid ``turn_context`` row."""
+    if b"turn_context" not in raw:
+        return None
+    try:
+        row = json.loads(raw)
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(row, dict) or row.get("type") != "turn_context":
+        return None
+    payload = row.get("payload")
+    if not isinstance(payload, dict):
+        return None
+    model = payload.get("model")
+    effort = payload.get("effort")
+    model = model.strip() if isinstance(model, str) and model.strip() else None
+    effort = effort.strip() if isinstance(effort, str) and effort.strip() else None
+    return (model, effort) if model or effort else None
+
+
+def _complete_jsonl_end(handle, size, chunk=65536):
+    """Byte boundary after the last complete JSONL row in ``handle``."""
+    if size <= 0:
+        return 0
+    handle.seek(size - 1)
+    if handle.read(1) == b"\n":
+        return size
+    end = size
+    while end > 0:
+        start = max(0, end - chunk)
+        handle.seek(start)
+        data = handle.read(end - start)
+        newline = data.rfind(b"\n")
+        if newline >= 0:
+            return start + newline + 1
+        end = start
+    return 0
+
+
+def _parse_latest_turn_context(path, chunk=65536):
+    """Return the latest valid rollout model/effort and its complete-row offset.
+
+    The cold path walks backward and stops at the first valid ``turn_context``;
+    it does not assume that the record fits in a fixed tail window. Callers can
+    then scan only newly appended complete rows on later ticks.
+    """
+    size = os.path.getsize(path)
+    with open(path, "rb") as handle:
+        complete_end = _complete_jsonl_end(handle, size, chunk)
+        end = complete_end
+        carry = b""
+        while end > 0:
+            start = max(0, end - chunk)
+            handle.seek(start)
+            data = handle.read(end - start) + carry
+            lines = data.splitlines()
+            if start > 0:
+                carry = lines.pop(0) if lines else data
+            for raw in reversed(lines):
+                values = _turn_context_values(raw)
+                if values is not None:
+                    return values, complete_end
+            end = start
+    return (None, None), complete_end
+
+
+def _parse_appended_turn_context(path, offset, size, previous):
+    """Fold complete rows appended after ``offset`` into a cached value."""
+    with open(path, "rb") as handle:
+        handle.seek(offset)
+        data = handle.read(max(0, size - offset))
+    newline = data.rfind(b"\n")
+    if newline < 0:
+        return previous, offset
+    values = previous
+    for raw in data[:newline + 1].splitlines():
+        candidate = _turn_context_values(raw)
+        if candidate is not None:
+            values = candidate
+    return values, offset + newline + 1
+
+
+def _rollout_model_effort(path, chunk=65536):
+    """Latest per-rollout model/effort with an append-aware, strong-stamp LRU."""
+    global _TURN_CONTEXT_CACHE_EVICTIONS
+    canonical = os.path.realpath(os.path.abspath(path))
+    try:
+        before = os.stat(canonical)
+    except OSError:
+        _TURN_CONTEXT_CACHE.pop(canonical, None)
+        return None, None
+    stamp = (
+        before.st_dev, before.st_ino, before.st_size,
+        before.st_mtime_ns, before.st_ctime_ns,
+    )
+    cached = _TURN_CONTEXT_CACHE.get(canonical)
+    if cached is not None and cached["stamp"] == stamp:
+        _TURN_CONTEXT_CACHE.move_to_end(canonical)
+        return cached["values"]
+    try:
+        if (cached is not None
+                and cached["identity"] == stamp[:2]
+                and before.st_size > cached["observed_size"]):
+            values, offset = _parse_appended_turn_context(
+                canonical, cached["offset"], before.st_size, cached["values"]
+            )
+        else:
+            values, offset = _parse_latest_turn_context(canonical, chunk)
+        after = os.stat(canonical)
+    except OSError:
+        _TURN_CONTEXT_CACHE.pop(canonical, None)
+        return None, None
+    after_stamp = (
+        after.st_dev, after.st_ino, after.st_size,
+        after.st_mtime_ns, after.st_ctime_ns,
+    )
+    if after_stamp != stamp:
+        return values
+    _TURN_CONTEXT_CACHE[canonical] = {
+        "identity": stamp[:2],
+        "observed_size": before.st_size,
+        "offset": offset,
+        "stamp": stamp,
+        "values": values,
+    }
+    _TURN_CONTEXT_CACHE.move_to_end(canonical)
+    while len(_TURN_CONTEXT_CACHE) > _TURN_CONTEXT_CACHE_MAX:
+        _TURN_CONTEXT_CACHE.popitem(last=False)
+        _TURN_CONTEXT_CACHE_EVICTIONS += 1
+    return values
 
 
 def _rollout_cwd(path):
@@ -1145,7 +1282,12 @@ def enrich(sess, tick=None):
         if not path and sess.pid not in tick.no_fallback_pids:
             path = _fallback_rollout(sess, home)
     if not path:
-        return                                       # no matching rollout → telemetry stays '—'
+        return                           # no rollout-specific telemetry; config fallback remains
+    rollout_model, rollout_effort = _rollout_model_effort(path)
+    if rollout_model:
+        sess.model = rollout_model
+    if rollout_effort:
+        sess.effort = rollout_effort
     # app-server is the session process in this client-server Codex version. Treating it as a
     # companion once cleared mtime and broke working-state detection. Its /proc/cwd matches the
     # project cwd, so cwd-matched
