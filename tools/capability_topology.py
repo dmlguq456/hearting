@@ -589,6 +589,8 @@ def _validate_conditional_extensions(recipe, registry, by_id, deps):
     ids = [row.get("id") for row in extensions if isinstance(row, dict)]
     if len(ids) != len(extensions) or len(ids) != len(set(ids)) or not all(ids):
         raise TopologyError(f"{recipe['capability']}: duplicate/empty conditional extension id")
+    if any(str(i).startswith("_") for i in ids):
+        raise TopologyError(f"{recipe['capability']}: route-node-id-reserved-prefix")
     node_ids = set(by_id)
     dependency_ids = {dep for node in by_id.values() for dep in node.get("depends_on", [])}
     terminal_ids = node_ids - dependency_ids
@@ -824,6 +826,8 @@ def _validate_recipe(recipe, registry, standard_plus_owner_profile):
     ids = [n.get("id") for n in nodes]
     if len(ids) != len(set(ids)) or not all(ids):
         raise TopologyError(f"{recipe['capability']}: duplicate/empty node id")
+    if any(str(i).startswith("_") for i in ids):
+        raise TopologyError(f"{recipe['capability']}: route-node-id-reserved-prefix")
     by_id = {n["id"]: n for n in nodes}
     actual_max_dispatch_depth = max(
         (

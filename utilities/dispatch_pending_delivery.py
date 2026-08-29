@@ -61,6 +61,19 @@ RECIPIENT_KINDS = frozenset({
     "opencode-turn",
 })
 
+CLAIM_AUTHORITIES = frozenset({"generation-proven", "deliverer-unproven"})
+
+# SD-113 §8 lazy upgrade: the grade §13.34.1-(7) assigns each recipient
+# kind's harness. `claude-parent-runtime` is the one measured-unsupported
+# harness this cycle (dispatch_session_sweep.sweep() always refuses its
+# generation-proof demand today) -- every other kind is generation-proven.
+# This is the contract's own mapping, not a guess, so it introduces no third
+# grade and CLAIM_AUTHORITIES stays a 2-value enum.
+_LEGACY_CLAIM_AUTHORITY_BY_RECIPIENT_KIND = {
+    "claude-parent-runtime": "deliverer-unproven",
+}
+_LEGACY_CLAIM_AUTHORITY_DEFAULT = "generation-proven"
+
 STATES = frozenset({"pending", "claimed", "sent-ambiguous", "acked", "expired"})
 OPEN_STATES = frozenset({"pending", "claimed", "sent-ambiguous"})
 
@@ -76,8 +89,8 @@ REQUIRED_FIELDS = (
     "session_generation", "session_generation_supported", "attempt_ids",
     "parent_attempt_id", "route_id", "route_node", "receipt_digest",
     "receipt", "row_revisions", "state", "created_at_ns", "claimed_at_ns",
-    "claim_owner", "claim_deadline_ns", "attempts", "last_attempt_at_ns",
-    "acked_at_ns", "acked_by", "expiry_reason", "lineage",
+    "claim_owner", "claim_deadline_ns", "claim_authority", "attempts",
+    "last_attempt_at_ns", "acked_at_ns", "acked_by", "expiry_reason", "lineage",
 )
 IMMUTABLE_FIELDS = ("delivery_id", "recipient_digest", "attempt_ids", "receipt_digest")
 
@@ -128,7 +141,19 @@ def record_path(root: Path, recipient_key: str, delivery_id: str) -> Path:
 
 
 def _validate_record(value: object) -> dict:
-    if not isinstance(value, dict) or set(value) != set(REQUIRED_FIELDS):
+    if not isinstance(value, dict):
+        raise PendingDeliveryError("delivery-persistence-refused", "record-shape-invalid")
+    keys = set(value)
+    if keys == set(REQUIRED_FIELDS) - {"claim_authority"}:
+        # SD-113 §8 lazy upgrade: a legacy v1 on-disk record (pre-`claim_
+        # authority`) is decided in memory at read time, never rewritten
+        # here -- the next normal CAS write (claim()) persists the upgrade.
+        value = dict(value)
+        value["claim_authority"] = _LEGACY_CLAIM_AUTHORITY_BY_RECIPIENT_KIND.get(
+            value.get("recipient_kind"), _LEGACY_CLAIM_AUTHORITY_DEFAULT
+        )
+        keys = set(value)
+    if keys != set(REQUIRED_FIELDS):
         raise PendingDeliveryError("delivery-persistence-refused", "record-shape-invalid")
     if value.get("schema_version") != SCHEMA_VERSION:
         raise PendingDeliveryError("delivery-persistence-refused", "schema-version-invalid")
@@ -140,6 +165,11 @@ def _validate_record(value: object) -> dict:
         raise PendingDeliveryError("delivery-persistence-refused", "attempt-ids-invalid")
     if not isinstance(value.get("attempts"), int):
         raise PendingDeliveryError("delivery-persistence-refused", "attempts-invalid")
+    if (
+        value.get("state") in {"claimed", "sent-ambiguous", "acked"}
+        and value.get("claim_authority") not in CLAIM_AUTHORITIES
+    ):
+        raise PendingDeliveryError("delivery-persistence-refused", "claim-authority-invalid")
     return value
 
 
@@ -229,7 +259,7 @@ def create(
     file, round 2 C-1)."""
 
     if recipient_kind not in RECIPIENT_KINDS:
-        raise PendingDeliveryError("pending-delivery-identity-conflict", "recipient_kind")
+        raise PendingDeliveryError("delivery-persistence-refused", "recipient-kind-unknown")
     if not attempt_ids or not parent_attempt_id or not route_id or not route_node:
         raise PendingDeliveryError("pending-delivery-identity-conflict", "identity-incomplete")
     computed_digest = _canonical_receipt_digest(receipt)
@@ -265,6 +295,7 @@ def create(
         "claimed_at_ns": None,
         "claim_owner": None,
         "claim_deadline_ns": None,
+        "claim_authority": "",
         "attempts": 0,
         "last_attempt_at_ns": None,
         "acked_at_ns": None,
@@ -326,6 +357,12 @@ def claim(
         updated["claimed_at_ns"] = now
         updated["claim_owner"] = claim_owner
         updated["claim_deadline_ns"] = now + int(lease_seconds * 1_000_000_000)
+        # SD-113 §13.34.1-(2): the grade is recorded in the same CAS write as
+        # the claim itself -- if `_write_unlocked` below cannot persist it,
+        # the whole claim raises and no claim is recorded.
+        updated["claim_authority"] = (
+            "generation-proven" if require_generation_proof else "deliverer-unproven"
+        )
         updated["attempts"] = value["attempts"] + 1
         updated["last_attempt_at_ns"] = now
         _write_unlocked(path, updated)

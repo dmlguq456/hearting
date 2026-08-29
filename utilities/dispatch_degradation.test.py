@@ -5,6 +5,7 @@ import json
 import multiprocessing
 import os
 from pathlib import Path
+import re
 import stat
 import subprocess
 import sys
@@ -66,42 +67,63 @@ class DegradationWriterTest(unittest.TestCase):
             self.assertTrue(row["attempt_trace"].endswith("…"))
 
     def test_failures_are_fail_open_and_return_none(self):
+        # B47-8: SD-93d (1)-(4) re-run for W5 (`dispatch_completion_join.py`)
+        # alongside the pre-existing W1 writer -- fail-open behavior must
+        # not depend on which registered writer triggered the failure.
         cases = ("readonly", "serialization", "lock")
-        for case in cases:
-            with self.subTest(case=case), tempfile.TemporaryDirectory() as home:
-                jobs = os.path.join(home, "dispatch", "jobs.log")
-                if case == "readonly":
-                    with open(os.path.join(home, "dispatch"), "w", encoding="utf-8"):
-                        pass
-                    result = record_degradation(agent_home=home, route_id="rt-ro",
-                                                route_node="execute", route_hash="h",
-                                                dispatch_depth=2, fallback_hop="inline",
-                                                execution_surface="inline",
-                                                writer="stage-dispatch-fallback.py", jobs=jobs)
-                elif case == "serialization":
-                    result = record_degradation(agent_home=home, route_id="rt-json",
-                                                route_node="execute", route_hash="h",
-                                                dispatch_depth=2, fallback_hop="inline",
-                                                execution_surface="inline",
-                                                writer="stage-dispatch-fallback.py",
-                                                last_direct_failure=object(), jobs=jobs)
-                else:
-                    root = os.path.join(home, "dispatch", "degradations")
-                    os.makedirs(root)
-                    lock_path = os.path.join(root, "rt-lock.jsonl.lock")
-                    holder = subprocess.Popen([sys.executable, "-c", (
-                        "import fcntl,time,sys; f=open(sys.argv[1],'a+'); "
-                        "fcntl.flock(f,fcntl.LOCK_EX); time.sleep(.5)"), lock_path])
-                    try:
-                        time.sleep(.05)
-                        result = record_degradation(agent_home=home, route_id="rt-lock",
+        writers = ("stage-dispatch-fallback.py", "dispatch_completion_join.py")
+        for writer in writers:
+            for case in cases:
+                with self.subTest(writer=writer, case=case), tempfile.TemporaryDirectory() as home:
+                    jobs = os.path.join(home, "dispatch", "jobs.log")
+                    if case == "readonly":
+                        with open(os.path.join(home, "dispatch"), "w", encoding="utf-8"):
+                            pass
+                        result = record_degradation(agent_home=home, route_id="rt-ro",
                                                     route_node="execute", route_hash="h",
                                                     dispatch_depth=2, fallback_hop="inline",
                                                     execution_surface="inline",
-                                                    writer="stage-dispatch-fallback.py", jobs=jobs)
-                    finally:
-                        holder.wait(timeout=2)
-                self.assertIsNone(result)
+                                                    writer=writer, jobs=jobs)
+                    elif case == "serialization":
+                        result = record_degradation(agent_home=home, route_id="rt-json",
+                                                    route_node="execute", route_hash="h",
+                                                    dispatch_depth=2, fallback_hop="inline",
+                                                    execution_surface="inline",
+                                                    writer=writer,
+                                                    last_direct_failure=object(), jobs=jobs)
+                    else:
+                        root = os.path.join(home, "dispatch", "degradations")
+                        os.makedirs(root)
+                        lock_path = os.path.join(root, "rt-lock.jsonl.lock")
+                        holder = subprocess.Popen([sys.executable, "-c", (
+                            "import fcntl,time,sys; f=open(sys.argv[1],'a+'); "
+                            "fcntl.flock(f,fcntl.LOCK_EX); time.sleep(.5)"), lock_path])
+                        try:
+                            time.sleep(.05)
+                            result = record_degradation(agent_home=home, route_id="rt-lock",
+                                                        route_node="execute", route_hash="h",
+                                                        dispatch_depth=2, fallback_hop="inline",
+                                                        execution_surface="inline",
+                                                        writer=writer, jobs=jobs)
+                        finally:
+                            holder.wait(timeout=2)
+                    self.assertIsNone(result)
+
+    def test_b47_8_w5_write_failure_is_harmless(self):
+        # SD-93d (1): a write failure for the W5 writer is swallowed --
+        # the caller (`_close_invalid_envelope_child`) never sees an
+        # exception and the invalid-envelope close itself is unaffected.
+        with tempfile.TemporaryDirectory() as home:
+            with open(os.path.join(home, "dispatch"), "w", encoding="utf-8"):
+                pass
+            jobs = os.path.join(home, "dispatch", "jobs.log")
+            result = record_degradation(agent_home=home, route_id="rt-w5-ro",
+                                        route_node="execute", route_hash="h",
+                                        dispatch_depth=2, fallback_hop=None,
+                                        execution_surface=None,
+                                        writer="dispatch_completion_join.py",
+                                        reason="invalid-envelope", jobs=jobs)
+            self.assertIsNone(result)
 
     def test_invalid_required_record_is_skipped_by_consumer(self):
         from fleet.collectors import dispatch
@@ -195,6 +217,7 @@ record_degradation(agent_home=sys.argv[1], route_id='rt-race', route_node='execu
                 "dispatch-batch.py",
                 "capability-route.py",
                 "dispatch-reap-watch.py",
+                "dispatch_completion_join.py",
             )
             for index, writer in enumerate(writers):
                 with self.subTest(writer=writer):
@@ -233,6 +256,83 @@ record_degradation(agent_home=sys.argv[1], route_id='rt-race', route_node='execu
                     )
                 )
             )
+            unattributed = os.path.join(home, "dispatch", "degradations", "_unattributed.jsonl")
+            self.assertTrue(os.path.exists(unattributed))
+            with open(unattributed, encoding="utf-8") as stream:
+                rows = [json.loads(line) for line in stream if line.strip()]
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0]["kind"], "writer-unregistered")
+            self.assertEqual(rows[0]["writer"], "unknown-writer.py")
+
+    def test_b47_4_no_writer_cardinality_assertion_anywhere(self):
+        # §4 ②-A: the writer allowlist must be sealed by enumeration, never
+        # by cardinality -- no reader may assert `len(_WRITERS)` or a
+        # "writer set has N members" claim anywhere in the repo.
+        scan_dirs = (
+            "utilities", "tools", "adapters", "hooks", "core",
+            "capabilities", "roles", "skills", "loops",
+        )
+        exclude_dirs = {
+            ".git", ".agent_reports", ".claude_reports", "__pycache__",
+            "node_modules",
+        }
+        exclude_prefixes = (
+            str(ROOT / "adapters" / "claude" / "skills"),
+            str(ROOT / "adapters" / "claude" / "plugin-marketplace"),
+        )
+        self_path = str(Path(__file__).resolve())
+        cardinality_patterns = [
+            re.compile(r"len\(\s*_WRITERS\s*\)"),
+            re.compile(r"_WRITERS\s*\)?\s*(==|!=)\s*4\b"),
+            re.compile(r"writer\s*집합(은|는)?\s*4"),
+            re.compile(r"4개의\s*writer"),
+            re.compile(r"W1\s*~\s*W4\b"),
+        ]
+        violations = []
+        for scan_dir in scan_dirs:
+            base = ROOT / scan_dir
+            if not base.is_dir():
+                continue
+            for pattern in ("*.py", "*.md", "*.tsv"):
+                for path in base.rglob(pattern):
+                    resolved = str(path.resolve())
+                    if resolved == self_path:
+                        continue
+                    if any(part in exclude_dirs for part in path.parts):
+                        continue
+                    if any(resolved.startswith(prefix) for prefix in exclude_prefixes):
+                        continue
+                    try:
+                        text = path.read_text(encoding="utf-8")
+                    except (OSError, UnicodeDecodeError):
+                        continue
+                    for lineno, line in enumerate(text.splitlines(), start=1):
+                        for cardinality_pattern in cardinality_patterns:
+                            if cardinality_pattern.search(line):
+                                violations.append(f"{path}:{lineno}: {line.strip()}")
+        self.assertEqual(violations, [], "writer-set cardinality assertion found:\n" + "\n".join(violations))
+
+        import dispatch_degradation as DEG
+        self.assertIn("dispatch_completion_join.py", DEG._WRITERS)
+        self.assertIn("writer-unregistered", DEG._KINDS)
+
+        with tempfile.TemporaryDirectory() as home:
+            jobs = os.path.join(home, "dispatch", "jobs.log")
+            refused = record_degradation(
+                agent_home=home, route_id="rt-b47-4", route_node="execute",
+                route_hash="h", dispatch_depth=2, writer="does-not-exist.py", jobs=jobs,
+            )
+            self.assertIsNone(refused)
+            unattributed = os.path.join(home, "dispatch", "degradations", "_unattributed.jsonl")
+            with open(unattributed, encoding="utf-8") as stream:
+                rows = [json.loads(line) for line in stream if line.strip()]
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0]["kind"], "writer-unregistered")
+            normal_rows = [
+                p for p in Path(home, "dispatch", "degradations").glob("*.jsonl")
+                if p.name != "_unattributed.jsonl"
+            ]
+            self.assertEqual(normal_rows, [])
 
 
 class SD110LedgerIsolationTest(unittest.TestCase):
@@ -245,7 +345,10 @@ class SD110LedgerIsolationTest(unittest.TestCase):
     def test_row_composition_and_writer_allowlist_are_the_pre_sd110_frozen_sets(self):
         import dispatch_degradation as DEG
 
-        self.assertEqual(DEG._KINDS, {"degradation", "chain-exhausted", "leg-failure"})
+        self.assertEqual(
+            DEG._KINDS,
+            {"degradation", "chain-exhausted", "leg-failure", "writer-unregistered"},
+        )
         self.assertEqual(
             DEG._WRITERS,
             {
@@ -253,6 +356,7 @@ class SD110LedgerIsolationTest(unittest.TestCase):
                 "dispatch-batch.py",
                 "capability-route.py",
                 "dispatch-reap-watch.py",
+                "dispatch_completion_join.py",
             },
         )
         # Neither `dispatch_stage_advance.py` nor either session supervisor is

@@ -1750,6 +1750,55 @@ class FinishedChildClosure(unittest.TestCase):
         lines = self.jobs.read_text(encoding="utf-8").strip().splitlines()
         self.assertIn("dead-worker-blocked", lines[0])
 
+    def test_b47_3_invalid_envelope_sets_class_and_ledger_delta_one(self):
+        # §4 (2)-A: `_close_invalid_envelope_child()` binds `failure_class`
+        # on `classifier_source`, not unconditionally -- only the default
+        # `completion-join-invalid-envelope-v1` path (a malformed handoff)
+        # gets the label, and it also writes exactly one W5 degradation row.
+        row = self.child(quiescent=True)
+        row.metadata["route_id"] = "rt-b47-3"
+        row.metadata["route_hash"] = "sha256:b47-3"
+        log = Path(row.metadata["log_file"])
+        log.write_text(
+            json.dumps({"type": "system", "subtype": "init"}) + "\n"
+            + json.dumps({
+                "type": "result", "subtype": "error", "is_error": True,
+                "result": "boom",
+            }) + "\n",
+            encoding="utf-8",
+        )
+        self.jobs.write_text(row.raw + "\n", encoding="utf-8")
+        reason = JOIN.close_finished_child(row, jobs=self.jobs)
+        self.assertEqual(reason, "")
+        text = self.jobs.read_text(encoding="utf-8")
+        self.assertIn("dead-invalid-envelope", text)
+        self.assertIn("failure_class=invalid-envelope", text)
+        ledger_path = self.base / "degradations" / "rt-b47-3.jsonl"
+        self.assertTrue(ledger_path.exists())
+        lines = ledger_path.read_text(encoding="utf-8").strip().splitlines()
+        self.assertEqual(len(lines), 1, "delta must be exactly one ledger row")
+        ledger_row = json.loads(lines[0])
+        self.assertEqual(ledger_row["writer"], "dispatch_completion_join.py")
+        self.assertEqual(ledger_row["reason"], "invalid-envelope")
+        self.assertEqual(ledger_row["route_id"], "rt-b47-3")
+        self.assertEqual(ledger_row["route_hash"], "sha256:b47-3")
+
+    def test_b47_3_dead_missing_result_never_gets_the_invalid_envelope_class(self):
+        # A-34: a distinct classifier_source (missing-result) must not carry
+        # the `invalid-envelope` failure_class or write a ledger row -- only
+        # the default classifier does (Appendix A regression guard).
+        row = self.child(quiescent=True)
+        row.metadata["route_id"] = "rt-b47-3-missing"
+        row.metadata["log_file"] = ""
+        self.jobs.write_text(row.raw + "\n", encoding="utf-8")
+        reason = JOIN.close_finished_child(row, jobs=self.jobs)
+        self.assertEqual(reason, "")
+        text = self.jobs.read_text(encoding="utf-8")
+        self.assertIn("dead-missing-result", text)
+        self.assertNotIn("failure_class=invalid-envelope", text)
+        ledger_path = self.base / "degradations" / "rt-b47-3-missing.jsonl"
+        self.assertFalse(ledger_path.exists())
+
     def test_live_process_blocked_row_stays_open(self):
         # Quiescence precondition must not be relaxed: a still-draining
         # worker (no terminal-envelope-implied quiescence and no exited
@@ -2309,6 +2358,189 @@ class MaterializePendingDeliveryTest(unittest.TestCase):
             with self.assertRaises(PD.PendingDeliveryError) as ctx:
                 JOIN.materialize_pending_delivery(jobs, fields)
             self.assertEqual(ctx.exception.reason, "pending-delivery-identity-conflict")
+
+    def _owner_row_variant(
+        self, attempt, *, worker_type, dispatch_depth, owner_route_id="rt-a47-3-owner"
+    ):
+        # A47-3: exercise the `worker_type=owner OR dispatch_depth=1` gate as
+        # an OR, not an AND -- one field set, the other left off its owner
+        # value, still must resolve through owner_route_id.
+        fields = [
+            f"attempt_schema_version=2,dispatch_depth={dispatch_depth},"
+            "transport=headless,execution_surface=registered-headless,"
+            f"registered_worker=1,fallback_hop=same-harness-headless,"
+            f"worker_type={worker_type},unit=_kernel/owner",
+            f"attempt_id={attempt}",
+            "parent_attempt_id=-",
+            "parent_completion_delivery=claude-parent-runtime",
+            f"parent_sid=sess-{attempt}",
+            "harness=claude",
+        ]
+        if owner_route_id:
+            fields.insert(-1, f"owner_route_id={owner_route_id}")
+            fields.insert(-1, "owner_route_hash=sha256:owner")
+        pipe = ",".join(fields)
+        return f"2026-08-28T00:00:00Z\topen\t/r\t/w\towner-slug\t{pipe}"
+
+    def test_a47_3_owner_row_identity_sentinels(self):
+        # Predicate: for every terminal row with worker_type=owner OR
+        # dispatch_depth=1, record.route_id == row.owner_route_id,
+        # record.route_node == "_owner", record.parent_attempt_id == "-" --
+        # and a plain dispatch-depth-2 stage row's identity is untouched.
+        with tempfile.TemporaryDirectory() as td:
+            jobs = Path(td) / "jobs.log"
+
+            # (a) worker_type=owner alone (dispatch_depth left at 2).
+            attempt_a = "att-a47-3-workertype-owner"
+            jobs.write_text(
+                self._owner_row_variant(
+                    attempt_a,
+                    worker_type="owner",
+                    dispatch_depth="2",
+                    owner_route_id="rt-a47-3-owner-a",
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            fields_a = self._close_and_get_fields(jobs, attempt_a)
+            metadata_a = D.parse_registry_metadata(fields_a[5])
+            self.assertEqual(
+                JOIN.pending_record_identity(metadata_a),
+                ("rt-a47-3-owner-a", JOIN.OWNER_ROUTE_NODE, JOIN.NO_PARENT_ATTEMPT),
+            )
+            record_a = json.loads(
+                JOIN.materialize_pending_delivery(jobs, fields_a).read_text(encoding="utf-8")
+            )
+            self.assertEqual(record_a["route_id"], "rt-a47-3-owner-a")
+            self.assertEqual(record_a["route_node"], JOIN.OWNER_ROUTE_NODE)
+            self.assertEqual(record_a["parent_attempt_id"], JOIN.NO_PARENT_ATTEMPT)
+
+            # (b) dispatch_depth=1 alone (worker_type left off "owner").
+            attempt_b = "att-a47-3-depth-one"
+            jobs.write_text(
+                self._owner_row_variant(
+                    attempt_b,
+                    worker_type="quick",
+                    dispatch_depth="1",
+                    owner_route_id="rt-a47-3-owner-b",
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            fields_b = self._close_and_get_fields(jobs, attempt_b)
+            metadata_b = D.parse_registry_metadata(fields_b[5])
+            self.assertEqual(
+                JOIN.pending_record_identity(metadata_b),
+                ("rt-a47-3-owner-b", JOIN.OWNER_ROUTE_NODE, JOIN.NO_PARENT_ATTEMPT),
+            )
+            record_b = json.loads(
+                JOIN.materialize_pending_delivery(jobs, fields_b).read_text(encoding="utf-8")
+            )
+            self.assertEqual(record_b["route_id"], "rt-a47-3-owner-b")
+            self.assertEqual(record_b["route_node"], JOIN.OWNER_ROUTE_NODE)
+            self.assertEqual(record_b["parent_attempt_id"], JOIN.NO_PARENT_ATTEMPT)
+
+            # (c) an ordinary stage row's identity is unchanged by any of the
+            # owner resolution above.
+            jobs.write_text(self._row() + "\n", encoding="utf-8")
+            stage_fields = self._close_and_get_fields(jobs)
+            stage_metadata = D.parse_registry_metadata(stage_fields[5])
+            self.assertEqual(
+                JOIN.pending_record_identity(stage_metadata),
+                ("rt-materialize-fixture", "execute", "att-materialize-parent"),
+            )
+
+    def test_a47_3_missing_owner_route_id_refused(self):
+        # Predicate: an owner-identified row with no owner_route_id resolves
+        # to route_id="", so `create()`'s identity check refuses it -- zero
+        # records, one typed identity-incomplete refusal.
+        with tempfile.TemporaryDirectory() as td:
+            jobs = Path(td) / "jobs.log"
+            attempt = "att-a47-3-missing-owner-route"
+            jobs.write_text(
+                self._owner_row_variant(
+                    attempt, worker_type="owner", dispatch_depth="1", owner_route_id=None
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            fields = self._close_and_get_fields(jobs, attempt)
+            metadata = D.parse_registry_metadata(fields[5])
+            self.assertEqual(
+                JOIN.pending_record_identity(metadata),
+                ("", JOIN.OWNER_ROUTE_NODE, JOIN.NO_PARENT_ATTEMPT),
+            )
+            import dispatch_pending_delivery as PD  # noqa: E402
+
+            with self.assertRaises(PD.PendingDeliveryError) as ctx:
+                JOIN.materialize_pending_delivery(jobs, fields)
+            self.assertEqual(ctx.exception.reason, "pending-delivery-identity-conflict")
+            self.assertEqual(ctx.exception.detail, "identity-incomplete")
+
+            self.assertIsNone(JOIN.materialize_after_terminal_close(jobs, attempt))
+            record_dir = Path(td) / "pending-delivery"
+            records = list(record_dir.rglob("*.json")) if record_dir.is_dir() else []
+            self.assertEqual(len(records), 0)
+            log = Path(td) / "logs" / JOIN.PENDING_DELIVERY_LOG
+            entries = [
+                json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()
+            ]
+            refusals = [e for e in entries if e["attempt_id"] == attempt]
+            self.assertEqual(len(refusals), 1)
+            self.assertIn("identity-incomplete", refusals[0]["reason"])
+
+    def test_a47_9_persistence_refusal_observed_row_close_unchanged(self):
+        # Predicate: forcing N materialize failures produces exactly N
+        # observed `delivery-persistence-refused` log entries, and none of
+        # them change whether the underlying row-close already succeeded --
+        # row status stays "done" (delta 0) regardless of the persistence
+        # outcome downstream of it.
+        with tempfile.TemporaryDirectory() as td:
+            jobs = Path(td) / "jobs.log"
+            attempts = ["att-a47-9-forced-a", "att-a47-9-forced-b"]
+            rows = "\n".join(self._row(attempt) for attempt in attempts) + "\n"
+            jobs.write_text(rows, encoding="utf-8")
+            for attempt in attempts:
+                self.assertTrue(D.close_attempt_row(jobs, attempt, "completed-marker"))
+
+            def _row_status(attempt):
+                for line in jobs.read_text(encoding="utf-8").splitlines():
+                    fields = line.split("\t")
+                    if D.parse_registry_metadata(fields[5]).get("attempt_id") == attempt:
+                        return fields[1]
+                return None
+
+            pre_status = {attempt: _row_status(attempt) for attempt in attempts}
+            self.assertEqual(set(pre_status.values()), {"done"})
+
+            import dispatch_pending_delivery as PD  # noqa: E402
+
+            with mock.patch.object(
+                JOIN.pending_delivery,
+                "create",
+                side_effect=PD.PendingDeliveryError("delivery-persistence-refused", "forced"),
+            ):
+                results = [
+                    JOIN.materialize_after_terminal_close(jobs, attempt)
+                    for attempt in attempts
+                ]
+            self.assertEqual(results, [None, None])
+
+            post_status = {attempt: _row_status(attempt) for attempt in attempts}
+            self.assertEqual(pre_status, post_status)
+
+            log = Path(td) / "logs" / JOIN.PENDING_DELIVERY_LOG
+            entries = [
+                json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()
+            ]
+            forced_refusals = [
+                e
+                for e in entries
+                if e["event"] == "delivery-persistence-refused" and e["attempt_id"] in attempts
+            ]
+            self.assertEqual(len(forced_refusals), len(attempts))
+            for entry in forced_refusals:
+                self.assertIn("forced", entry["reason"])
 
 
 class ReconcilePendingDeliveryTest(unittest.TestCase):

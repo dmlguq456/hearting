@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import importlib.util, json, os, subprocess, sys, tempfile, time, unittest
+import importlib.util, io, json, os, subprocess, sys, tempfile, time, unittest
 from types import SimpleNamespace
 from pathlib import Path
 from unittest import mock
@@ -73,6 +73,58 @@ class FallbackTest(unittest.TestCase):
   clean={k:v for k,v in os.environ.items() if not k.startswith("AGENT_DISPATCH_CURRENT_")}
   env={**clean,"AGENT_HOME":str(ROOT),"AGENT_ARTIFACT_ROOT":str(self.art),"AGENT_MODEL_GOVERNOR_ROOT":str(self.art/".runtime/model-worker-governor"),"AGENT_DISPATCH_JOBS":str(self.jobs),"AGENT_DISPATCH_SELF_SLUG":"owner","AGENT_DISPATCH_ATTEMPT_ID":"att-fallback-parent",**envkw}
   return subprocess.run(cmd,text=True,capture_output=True,env=env)
+ @contextlib.contextmanager
+ def dispatch_env(self,**envkw):
+  """The same env `run_chain` injects into its subprocess, applied to THIS
+  process instead (B47-1/2/5/6/7/10 fixtures). Must wrap both the route
+  compile (`self.route()`) and `run_inline()` -- the grounding tuple baked
+  into route.json at compile time must see the same `AGENT_DISPATCH_JOBS`/
+  `AGENT_ARTIFACT_ROOT` that `_dispatch()` resolves against later, or the
+  dry-run's own root-mismatch check (correctly) refuses. Also strips any
+  ambient `AGENT_DISPATCH_CURRENT_*` this test process happens to carry,
+  matching `run_chain`'s `clean` filter.
+  """
+  removed={k:os.environ.pop(k) for k in list(os.environ) if k.startswith("AGENT_DISPATCH_CURRENT_")}
+  env={"AGENT_ARTIFACT_ROOT":str(self.art),
+       "AGENT_MODEL_GOVERNOR_ROOT":str(self.art/".runtime/model-worker-governor"),
+       "AGENT_DISPATCH_JOBS":str(self.jobs),
+       "AGENT_DISPATCH_SELF_SLUG":"owner","AGENT_DISPATCH_ATTEMPT_ID":"att-fallback-parent",**envkw}
+  try:
+   with mock.patch.dict(os.environ,env):
+    yield
+  finally:
+   os.environ.update(removed)
+ def run_inline(self,path,*extra,seed=True):
+  """In-process `_dispatch()` call -- never spawns a subprocess, so it also
+  lets `mock.patch.object(F, ...)` (e.g. `_usage_states`) reach the code
+  under test. Call inside `with self.dispatch_env(): ...`.
+  """
+  if seed:self.seed_parent()
+  argv=["stage-dispatch-fallback.py","--route",str(path),"--node","plan","--slug","fallback-plan",
+        "--parent","owner","--capability-mode","dev","--worker-mode","plan/plan-author",
+        "--model-role","deep maker","--jobs",str(self.jobs),"--dry-run",*extra]
+  with mock.patch.object(sys,"argv",argv):
+   observation=F.LAUNCH_TUPLE.ReportOnlyObservation()
+   code=F._dispatch(observation)
+  return code,observation
+ def run_inline_main(self,path,*extra,seed=True):
+  """Like `run_inline()` but through `F.main()` -- exercises the try/finally
+  report-only wrapper (B47-5), not just `_dispatch()`."""
+  if seed:self.seed_parent()
+  argv=["stage-dispatch-fallback.py","--route",str(path),"--node","plan","--slug","fallback-plan",
+        "--parent","owner","--capability-mode","dev","--worker-mode","plan/plan-author",
+        "--model-role","deep maker","--jobs",str(self.jobs),"--dry-run",*extra]
+  with mock.patch.object(sys,"argv",argv):
+   code=F.main()
+  return code
+ def ledger_rows(self,route_id):
+  path=self.jobs.parent/"launch-tuple"/f"{route_id}.jsonl"
+  if not path.is_file():return []
+  return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+ def report_rows(self,route_id):
+  path=self.jobs.parent/"launch-tuple"/"_report"/f"{route_id}.jsonl"
+  if not path.is_file():return []
+  return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
  def run_register(self,path):
   self.seed_parent()
   cmd=[sys.executable,str(ROOT/"utilities/stage-dispatch-fallback.py"),"--route",str(path),"--node","plan","--slug","fallback-plan","--parent","owner","--capability-mode","dev","--worker-mode","plan/plan-author","--model-role","deep maker","--jobs",str(self.jobs),"--register"]
@@ -1168,5 +1220,256 @@ class FallbackTest(unittest.TestCase):
    source=path.read_text(encoding="utf-8")
    self.assertIn("PRELAUNCH_PROCESS_BLOCK_REASONS",source,path)
    self.assertNotIn('startswith("predecessor-process-")',source,path)
+
+
+class LaunchTupleReportOnlyTest(unittest.TestCase):
+ """SD-114 (2)-C: P1/P2/P3 producer wiring + report-only stage 1
+ byte-identical guarantee. Uses `FallbackTest.run_inline`/`dispatch_env`
+ in-process (never a subprocess) so the fixture is immune to this dev
+ worktree's known `AGENT_HOME`-vs-installed-release grounding digest
+ mismatch that breaks `run_chain`/`run_node`-based tests in this file
+ (pre-existing, unrelated to SD-114 -- see round3 dev log)."""
+
+ # A fully-specified but harness-mismatched parent identity forces every
+ # candidate down either P2 (codex, unsupported by the default fixture) or
+ # P3 (claude, supported but sealed to a different runtime) regardless of
+ # live capacity/usage-based re-ranking -- both hop kinds are always
+ # visited by the candidate loop, so this is deterministic across runs.
+ WRONG_PARENT = {"AGENT_DISPATCH_CURRENT_HARNESS": "opencode",
+                 "AGENT_DISPATCH_CURRENT_TRANSPORT": "headless",
+                 "AGENT_DISPATCH_CURRENT_SANDBOX": "workspace-write"}
+
+ def setUp(self):
+  self.base = FallbackTest("test_cross_harness_direct_precedes_inline")
+  self.base.setUp()
+  self.addCleanup(self.base.tearDown)
+
+ def _route_and_ledger(self, **usage_kwargs):
+  with self.base.dispatch_env(**self.WRONG_PARENT):
+   path = self.base.route(**usage_kwargs)
+   route_id = json.loads(path.read_text())["route_id"]
+  return path, route_id
+
+ # `_allocation_skip` is only ever assigned to a row that already matched
+ # the sealed parent identity (`ordered_fallback_hops`'s `headless` dict) --
+ # a mismatched parent routes the row to `trailing_rows` before usage
+ # limiting is even considered, so P1's fixture needs a MATCHING identity
+ # (unlike P2/P3, which need the mismatch). Both harnesses are marked
+ # usage-limited so nothing ever reaches a real wrapper subprocess spawn.
+ RIGHT_PARENT = {"AGENT_DISPATCH_CURRENT_HARNESS": "codex",
+                 "AGENT_DISPATCH_CURRENT_TRANSPORT": "headless",
+                 "AGENT_DISPATCH_CURRENT_SANDBOX": "workspace-write"}
+
+ def test_b47_1_allocation_skip_producer_fires(self):
+  # P1: a live-usage-limited candidate has exact pre-launch tuple evidence.
+  with self.base.dispatch_env(**self.RIGHT_PARENT):
+   path = self.base.route(same_status="supported")
+   route_id = json.loads(path.read_text())["route_id"]
+  with self.base.dispatch_env(**self.RIGHT_PARENT), \
+       mock.patch.object(F, "_usage_states",
+                         return_value=self.base._usage_states(limited=("codex", "claude"))):
+   code, observation = self.base.run_inline(path)
+  self.assertEqual(code, 79)
+  rows = self.base.ledger_rows(route_id)
+  by_key = {r["tuple_key"]: r for r in rows}
+  self.assertEqual(by_key["codex/headless/workspace-write/codex/conductor"]["rejection_class"],
+                    "allocation-skip")
+  self.assertEqual(by_key["codex/headless/workspace-write/codex/conductor"]["evidence_ref"],
+                    "usage-limited")
+  self.assertEqual(observation.unrecorded, 0)
+
+ def test_b47_1_candidate_unsupported_producer_fires(self):
+  # P2: codex is `status="unsupported"` by the default fixture.
+  path, route_id = self._route_and_ledger()
+  with self.base.dispatch_env(**self.WRONG_PARENT):
+   code, observation = self.base.run_inline(path)
+  self.assertEqual(code, 79)
+  rows = self.base.ledger_rows(route_id)
+  by_class = {r["rejection_class"]: r for r in rows}
+  self.assertIn("candidate-unsupported", by_class)
+  self.assertEqual(by_class["candidate-unsupported"]["tuple_key"],
+                    "codex/headless/workspace-write/codex/conductor")
+  self.assertEqual(observation.unrecorded, 0)
+
+ def test_b47_1_sealed_parent_not_live_producer_fires(self):
+  # P3: claude is supported, but WRONG_PARENT seals a different runtime, so
+  # `parent_runtime_failure()` returns the CANDIDATE_SCOPED
+  # `dispatch-evidence-parent-runtime-mismatch`.
+  path, route_id = self._route_and_ledger()
+  with self.base.dispatch_env(**self.WRONG_PARENT):
+   code, observation = self.base.run_inline(path)
+  self.assertEqual(code, 79)
+  rows = self.base.ledger_rows(route_id)
+  by_class = {r["rejection_class"]: r for r in rows}
+  self.assertIn("sealed-parent-not-live", by_class)
+  self.assertEqual(by_class["sealed-parent-not-live"]["tuple_key"],
+                    "codex/headless/workspace-write/claude/conductor")
+  self.assertEqual(by_class["sealed-parent-not-live"]["evidence_ref"],
+                    "dispatch-evidence-parent-runtime-mismatch")
+  self.assertEqual(observation.unrecorded, 0)
+
+ def test_b47_2_registry_failures_returns_nonempty(self):
+  # Regression pin (unrelated legacy axis, §5.4): `registry_failures()`
+  # itself must remain fully functional and unchanged by this cycle.
+  route = json.loads(self.base.route().read_text())
+  pipe = (f"capability=autopilot-code,route_id={route['route_id']},route_node=plan,"
+          "parent=owner,attempt_id=att-prior000000,parent_harness=codex,"
+          "parent_transport=headless,parent_sandbox=workspace-write,"
+          "child_harness=codex,launch_authority=conductor,note=dead-launch-error,"
+          "failure_class=launch-tuple")
+  self.base.jobs.write_text(
+   f"2026-07-16T00:00:00Z\tdone\t/repo\t{self.base.repo}\tfallback-plan\t{pipe}\n")
+  failures = F.registry_failures(self.base.jobs, route["route_id"], "plan")
+  self.assertNotEqual(failures, {})
+  self.assertIn("codex/headless/workspace-write/codex/conductor", failures)
+
+ def test_b47_5_report_only_stdout_byte_identical(self):
+  path, route_id = self._route_and_ledger()
+  with self.base.dispatch_env(**self.WRONG_PARENT):
+   self.assertEqual(self.base.ledger_rows(route_id), [])
+   buf1 = io.StringIO()
+   with contextlib.redirect_stdout(buf1):
+    code1, observation1 = self.base.run_inline(path)
+   self.assertNotIn("launch-tuple", buf1.getvalue())
+   buf2 = io.StringIO()
+   with contextlib.redirect_stdout(buf2):
+    code2, observation2 = self.base.run_inline(path)
+  self.assertEqual(code1, code2)
+  self.assertEqual(buf1.getvalue(), buf2.getvalue(),
+                    "selection output must be byte-identical whether or not "
+                    "the launch-tuple ledger already marks candidates spent")
+  self.assertEqual(set(observation2.spent),
+                    {"codex/headless/workspace-write/codex/conductor",
+                     "codex/headless/workspace-write/claude/conductor"})
+
+ def test_b47_5_report_written_on_unarmed_preprocessing_failure_and_armed_chain_exhausted(self):
+  # gap1 correction 3 (owner_arbitration.md 🟡-2 / plan.md §10-R5): this name
+  # used to say "every exit path" but only ever drove two of the source's
+  # twelve (plan.md §4 (2)-C's E1-E12 table). It exercises exactly:
+  #  - E1, unarmed: a genuine preprocessing failure (parent identity partially
+  #    exported, raised before `observation.arm()` is ever reached) writes
+  #    zero report rows.
+  #  - E12, armed: a fully-armed chain-exhausted exit writes exactly one.
+  # It does NOT drive:
+  #  - E8 (normal success, `return 0` after a real wrapper spawn): every
+  #    fixture in this class deliberately usage-limits or parent-mismatches
+  #    every candidate so nothing ever reaches a real wrapper subprocess
+  #    spawn (see the class docstring) -- reaching E8 needs `FallbackTest`'s
+  #    subprocess-spawning fixtures (e.g. `run_chain`), not this in-process one.
+  #  - E10 (native-subagent, `return 78`): every route this class compiles
+  #    passes `native="unsupported"` (the `route()` default), so the
+  #    same/cross-harness-headless hops never exhaust into the
+  #    native-subagent hop. Reaching E10 needs a `native="supported"` route,
+  #    which no fixture here builds.
+  with self.base.dispatch_env(AGENT_DISPATCH_CURRENT_HARNESS="codex"):
+   path = self.base.route(same_status="supported")
+   route_id = json.loads(path.read_text())["route_id"]
+   code = self.base.run_inline_main(path)
+  self.assertEqual(code, 73)
+  self.assertEqual(self.base.report_rows(route_id), [])
+
+  path2, route_id2 = self._route_and_ledger()
+  with self.base.dispatch_env(**self.WRONG_PARENT):
+   code2 = self.base.run_inline_main(path2)
+  self.assertEqual(code2, 79)
+  reports = self.base.report_rows(route_id2)
+  self.assertEqual(len(reports), 1)
+  self.assertEqual(reports[0]["route_id"], route_id2)
+  self.assertEqual(reports[0]["spent_seen"], 0)
+
+ def test_b47_5_stage_two_or_join_absent(self):
+  source = (Path(F_SPEC.origin)).read_text(encoding="utf-8")
+  self.assertNotIn("LAUNCH_TUPLE.spent_tuples", source[:source.index("def registry_failures")])
+  registry_failures_source = source[
+   source.index("def registry_failures"):source.index("def registry_rows")
+  ]
+  self.assertNotIn("spent_tuples", registry_failures_source)
+  self.assertNotIn("LAUNCH_TUPLE", registry_failures_source)
+  self.assertNotIn("launch-tuple/", registry_failures_source)
+  # `failed_tuples` gains new members through exactly the same call sites
+  # as before this cycle -- three `.add(` calls and the initial
+  # `set(...) | set(...)` construction, never through `observation.spent`.
+  self.assertEqual(source.count("failed_tuples.add("), 3)
+  self.assertNotIn("failed_tuples |=", source)
+  self.assertNotIn("failed_tuples.update(", source)
+
+ def test_b47_6_unknown_failure_class_suppresses_nothing(self):
+  # An arbitrary/unknown `rejection_class` string persisted directly to the
+  # ledger (bypassing the writer's own closed-enum refusal) must still
+  # suppress zero candidates -- stage 1 never reads the ledger for
+  # selection at all, regardless of its content.
+  path, route_id = self._route_and_ledger()
+  state_root = self.base.jobs.parent
+  root = state_root / "launch-tuple"
+  root.mkdir(parents=True)
+  garbage = {"schema_version": 1, "route_id": route_id, "route_node": "plan",
+             "route_hash": json.loads(path.read_text())["route_hash"],
+             "owner_attempt_id": "att-fallback-parent",
+             "tuple_key": "codex/headless/workspace-write/codex/conductor",
+             "rejection_class": "totally-unknown-value",
+             "evidence_ref": "garbage", "observed_at": time.time(),
+             "event_id": "lt-garbage"}
+  (root / f"{route_id}.jsonl").write_text(json.dumps(garbage) + "\n", encoding="utf-8")
+  with self.base.dispatch_env(**self.WRONG_PARENT):
+   buf = io.StringIO()
+   with contextlib.redirect_stdout(buf):
+    code, observation = self.base.run_inline(path)
+  self.assertEqual(code, 79)
+  self.assertIn("codex/headless/workspace-write/codex/conductor", observation.spent)
+  self.assertIn("skipped-nested-network-unconfirmed", buf.getvalue())
+  self.assertNotIn("skipped-totally-unknown-value", buf.getvalue())
+
+ def test_b47_7_axis_absent_corpus_selection_unchanged(self):
+  # gap1 correction 2 (owner_arbitration.md 🟡-1 / plan.md §4 (2)-C): B47-7's
+  # predicate is "a legacy registry corpus with the `launch_tuple_verdict`
+  # axis absent entirely selects identically once that axis exists." That
+  # corpus is `registry_failures()`'s own axis -- pre-revision
+  # `failure_class=launch-tuple` rows, same shape as B47-2's fixture -- never
+  # B47-5's spent-tuple ledger. This builds and asserts on that corpus on its
+  # own instead of re-invoking test_b47_5_report_only_stdout_byte_identical,
+  # which carries no registry-failure row and so never exercises this axis.
+  path, route_id = self._route_and_ledger()
+  same_key = "codex/headless/workspace-write/codex/conductor"
+  pipe = (f"capability=autopilot-code,route_id={route_id},route_node=plan,"
+          "parent=owner,attempt_id=att-prior-legacy0,parent_harness=codex,"
+          "parent_transport=headless,parent_sandbox=workspace-write,"
+          "child_harness=codex,launch_authority=conductor,note=dead-launch-error,"
+          "failure_class=launch-tuple")
+  with self.base.jobs.open("a", encoding="utf-8") as fh:
+   fh.write(f"2026-07-16T00:00:00Z\tdone\t/repo\t{self.base.repo}\tfallback-plan\t{pipe}\n")
+  legacy_failures = F.registry_failures(self.base.jobs, route_id, "plan")
+  self.assertIn(same_key, legacy_failures)
+
+  with self.base.dispatch_env(**self.WRONG_PARENT):
+   self.assertEqual(self.base.ledger_rows(route_id), [],
+                     "launch_tuple_verdict axis must be absent for the first run")
+   buf1 = io.StringIO()
+   with contextlib.redirect_stdout(buf1):
+    code1, observation1 = self.base.run_inline(path)
+   buf2 = io.StringIO()
+   with contextlib.redirect_stdout(buf2):
+    code2, observation2 = self.base.run_inline(path)
+  self.assertNotEqual(self.base.ledger_rows(route_id), [],
+                       "the second run must have populated the launch_tuple_verdict axis")
+  self.assertEqual(code1, code2)
+  self.assertEqual(buf1.getvalue(), buf2.getvalue(),
+                    "the legacy registry corpus's selection must stay unchanged "
+                    "once the launch_tuple_verdict axis exists alongside it")
+  for output in (buf1.getvalue(), buf2.getvalue()):
+   self.assertIn("skipped-prior-unchanged-failure", output)
+  for observation in (observation1, observation2):
+   self.assertIn(same_key, observation.failed_tuples)
+
+ def test_b47_10_consumer_only_skip_writes_no_evidence(self):
+  path, route_id = self._route_and_ledger()
+  cross_key = "codex/headless/workspace-write/claude/conductor"
+  with self.base.dispatch_env():
+   code, observation = self.base.run_inline(path, "--failed-tuple", cross_key)
+  self.assertEqual(code, 79)
+  rows = self.base.ledger_rows(route_id)
+  self.assertEqual({r["tuple_key"] for r in rows},
+                    {"codex/headless/workspace-write/codex/conductor"})
+  self.assertEqual({r["rejection_class"] for r in rows}, {"candidate-unsupported"})
+
 
 if __name__=="__main__": unittest.main()

@@ -69,6 +69,27 @@ successful wake. The single-ingress gateway may retain that exact delivery until
 idle and issue one `turn/start`; if the gateway loses that in-memory defer, its
 durable `sent` row is `sent-ambiguous` and must not be replayed automatically.
 
+## Registered Vocabulary Invariants (SD-113)
+
+Route node id namespace reserves the `_` prefix for dispatch-internal
+sentinels. A topology containing a `_`-prefixed node id fails closed at
+`capability-route.py compile` with `route-node-id-reserved-prefix`.
+
+The `delivery_intent` stamp vocabulary is a set equality with the stored
+`RECIPIENT_KINDS` enum (`utilities/dispatch_pending_delivery.py`): the stamp
+fires only when a row's recipient kind is a member of `RECIPIENT_KINDS`.
+`parent-runtime-supervised` is not a member of that set — its completion
+delivery is owned solely by the SD-78 supervisor outbox (`core/OPERATIONS.md`),
+which creates no pending-delivery record for it.
+
+Claim authority for a claimed-state pending record has two grades:
+`generation-proven` — full §13.33.1-(6) authority, including expiry and route
+judgment — and `deliverer-unproven`, which carries delivery authority only: it
+may claim a pending or lease-expired record by `session_id`/`recipient_digest`
+match alone, inject a bounded receipt, and ack, with no judgment authority. The
+record must persist the grade actually used in its `claim_authority` field; a
+writer that cannot persist the field must not claim.
+
 ## Adapter Rule
 
 Adapters may reuse scripts directly only when they can supply the expected input

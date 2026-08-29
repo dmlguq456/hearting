@@ -818,10 +818,15 @@ def reconcile(rows, args):
                 fresh_decision.update(category=fresh_category, reason=fresh_reason, note=fresh_note)
                 return fresh_note == note and fresh_category == category
 
+            reconcile_evidence = {"classifier_source": ATTEMPT_CLASSIFIER_SOURCE,
+                                  "reconcile_reason": reason}
+            if note == "dead-invalid-envelope":
+                # B47-3: this is the `classify()`-selected invalid-envelope
+                # note, the second of the two producers §4 ②-A names.
+                reconcile_evidence["failure_class"] = "invalid-envelope"
             closed = close_attempt_row_if(
                 args.jobs, row["meta"]["attempt_id"], note, still_safe,
-                evidence={"classifier_source": ATTEMPT_CLASSIFIER_SOURCE,
-                          "reconcile_reason": reason},
+                evidence=reconcile_evidence,
             )
             revalidated = bool(closed)
             if closed:

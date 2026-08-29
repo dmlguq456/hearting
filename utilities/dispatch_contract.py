@@ -22,6 +22,7 @@ import time
 import uuid
 from typing import Callable, Iterator, NamedTuple
 
+from dispatch_pending_delivery import RECIPIENT_KINDS
 from replica_batch_contract import (
     DIGEST,
     ReplicaBatchContractError,
@@ -404,6 +405,22 @@ class DispatchContractError(ValueError):
         super().__init__(detail or reason)
         self.reason = reason
         self.detail = detail or reason
+
+
+# SD-113 A47-2: the vocabulary `_delivery_intent_values()` recognizes as a
+# record-creating `parent_completion_delivery` stamp must equal
+# `dispatch_pending_delivery.RECIPIENT_KINDS` exactly -- documented here so a
+# future edit to either set is caught at import time instead of silently
+# drifting one guard's `{}` no-op out of sync with the other's acceptance.
+_KNOWN_DELIVERY_RECIPIENT_KINDS = frozenset({
+    "claude-parent-runtime", "codex-stop-hook", "codex-managed-gateway", "opencode-turn",
+})
+if _KNOWN_DELIVERY_RECIPIENT_KINDS != frozenset(RECIPIENT_KINDS):
+    raise DispatchContractError(
+        "delivery-intent-vocabulary-drift",
+        f"expected={sorted(_KNOWN_DELIVERY_RECIPIENT_KINDS)} "
+        f"actual={sorted(RECIPIENT_KINDS)}",
+    )
 
 
 def _recovery_identity_digest(identity: dict[str, str]) -> str:
@@ -5800,6 +5817,11 @@ def _delivery_intent_values(fields: list[str], metadata: dict[str, str]) -> dict
     """
 
     if not metadata.get("parent_completion_delivery") or not metadata.get("parent_sid"):
+        return {}
+    if metadata.get("parent_completion_delivery") not in RECIPIENT_KINDS:
+        # A47-10: `parent-runtime-supervised`/`poll-fallback` rows are the
+        # SD-78 supervisor outbox's own responsibility -- no stamp, no
+        # pending-delivery record, no `delivery_persistence_refused` either.
         return {}
     if metadata.get("delivery_intent"):
         # Already stamped -- W1-W4 share one lock and this function only ever

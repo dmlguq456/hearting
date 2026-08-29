@@ -218,6 +218,37 @@ class SweepTest(IsolatedRootMixin, unittest.TestCase):
             )
         self.assertEqual(ctx.exception.reason, "pending-delivery-generation-unproven")
 
+    # -- A47-8: claim_authority is per-claim, not sticky across a reclaim. -
+
+    def test_a47_8_carrier_timeout_keeps_pending_then_sweep_acks(self):
+        # A carrier-2 (sweep_deliver) claim that times out before ack is a
+        # deliverer-unproven claim that never got consumed -- the next
+        # sweep_deliver pass reclaims it back to pending (§13.34.1-(2): a
+        # timed-out claim is not a stuck grade). A record whose session
+        # later proves generation (session_generation_supported="1", unlike
+        # A-21's real-world unsupported fixtures above) can then be claimed
+        # and acked by carrier 1 (sweep) as generation-proven -- the grade
+        # recorded is whichever claim actually won, not whatever claimed it
+        # first.
+        self._seed("sess-owner", session_generation_supported="1")
+        delivery_id = "delivery-" + "a" * 32
+        first, _ = SWEEP.sweep_deliver(self.root, "claude-parent-runtime", "sess-owner")
+        self.assertEqual(len(first), 1)
+        self.assertEqual(first[0]["claim_authority"], "deliverer-unproven")
+        # Timeout: never acked. Lease expires; reclaim releases it to pending.
+        PD.reclaim(
+            self.root, "sess-owner", delivery_id, now_ns=first[0]["claim_deadline_ns"] + 1,
+        )
+        released = PD.read(self.root, "sess-owner", delivery_id)
+        self.assertEqual(released["state"], "pending")
+        outcome, count = SWEEP.sweep(self.root, "claude-parent-runtime", "sess-owner", "proven")
+        self.assertEqual((outcome, count), ("claimed", 1))
+        claimed = PD.read(self.root, "sess-owner", delivery_id)
+        self.assertEqual(claimed["state"], "claimed")
+        self.assertEqual(claimed["claim_authority"], "generation-proven")
+        acked = PD.ack(self.root, "sess-owner", delivery_id, acked_by="carrier-1")
+        self.assertEqual(acked["state"], "acked")
+
     # -- A-11(i): different session_id -> different digest -> dir absent. --
 
     def test_a11_foreign_session_reads_zero_claims_zero(self):

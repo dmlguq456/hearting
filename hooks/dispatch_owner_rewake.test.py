@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import ast
 from datetime import datetime, timedelta, timezone
 import hashlib
 import importlib.util
@@ -23,6 +24,24 @@ assert SPEC is not None and SPEC.loader is not None
 rewake = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = rewake
 SPEC.loader.exec_module(rewake)
+
+
+def _wait_for_attempt_bridge_states() -> frozenset[str]:
+    """Walk the module source for every state literal `wait_for_attempt`
+    can hand to `classified_receipt`/`emit_receipt`. Reading the AST instead
+    of hardcoding the list means a new bridge state added to the function
+    later is picked up by the exhaustive sweep automatically (A47-1)."""
+
+    tree = ast.parse(MODULE_PATH.read_text(encoding="utf-8"))
+    states: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == "wait_for_attempt":
+            for inner in ast.walk(node):
+                if isinstance(inner, ast.Return) and isinstance(inner.value, ast.Tuple):
+                    first = inner.value.elts[0]
+                    if isinstance(first, ast.Constant) and isinstance(first.value, str):
+                        states.add(first.value)
+    return frozenset(states)
 
 
 class DispatchOwnerRewakeTest(unittest.TestCase):
@@ -415,6 +434,53 @@ class DispatchOwnerRewakeTest(unittest.TestCase):
         self.assertEqual(attention_rc, 2)
         self.assertEqual(attention_stdout.getvalue(), "")
         self.assertEqual(attention_stderr.getvalue(), "warning\n")
+
+    def test_a47_1_exit_code_matches_terminal_state_sweep(self) -> None:
+        # A47-1: exhaustively sweep the module's real state vocabulary
+        # (TERMINAL_STATES plus every literal `wait_for_attempt` can return,
+        # read from source so a new state added later is covered without a
+        # test edit) and assert exit_code(state) == 2 for every
+        # state in TERMINAL_STATES and == 0 for every state that is not.
+        bridge_states = _wait_for_attempt_bridge_states()
+        vocabulary = bridge_states | rewake.TERMINAL_STATES
+        # Sanity: the vocabulary must actually contain both terminal and
+        # non-terminal members, otherwise this sweep would vacuously pass.
+        self.assertTrue(vocabulary & rewake.TERMINAL_STATES)
+        self.assertTrue(vocabulary - rewake.TERMINAL_STATES)
+
+        for state in sorted(vocabulary):
+            message = f"fixture message state={state} owned_children=0"
+            if state in rewake.TERMINAL_STATES:
+                # Terminal must exit 2 regardless of the caller-supplied
+                # block value, and regardless of the default-derived value.
+                for block in (None, True, False):
+                    stdout, stderr = io.StringIO(), io.StringIO()
+                    with mock.patch.object(sys, "stdout", stdout), mock.patch.object(
+                        sys, "stderr", stderr
+                    ):
+                        if block is None:
+                            rc = rewake.emit_receipt(state, message)
+                        else:
+                            rc = rewake.emit_receipt(state, message, block=block)
+                    self.assertEqual(
+                        rc, 2, f"terminal state {state!r} with block={block!r} must exit 2"
+                    )
+            else:
+                # Non-terminal bridge states (timeout, bridge-error, the
+                # unclassified `ready` snapshot) never carry an open owned
+                # child (classified_receipt forces owned_children=0 on this
+                # path), so `_attention_has_open_child` resolves block=False
+                # exactly as `main()` computes it -- the real call shape.
+                block = rewake._attention_has_open_child(message)
+                self.assertFalse(block)
+                stdout, stderr = io.StringIO(), io.StringIO()
+                with mock.patch.object(sys, "stdout", stdout), mock.patch.object(
+                    sys, "stderr", stderr
+                ):
+                    rc = rewake.emit_receipt(state, message, block=block)
+                self.assertEqual(
+                    rc, 0, f"non-terminal state {state!r} must exit 0 on the real call path"
+                )
 
     def test_promoted_success_and_attention_both_exit_two_to_wake(
         self,

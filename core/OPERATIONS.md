@@ -167,6 +167,12 @@ or terminal-row lease evidence fails closed. Phase edges append outer PID/start
 and before/after phase to the attempt-scoped transition audit. This shared rule
 supersedes the Codex-only lease wording later in this section.
 
+**`parent-runtime-supervised` completion delivery (SD-113).** A row whose
+`parent_completion_delivery = parent-runtime-supervised` never gets a
+pending-delivery record — its completion delivery is owned solely by the
+SD-78 supervisor outbox above, not by the `delivery_intent`/`RECIPIENT_KINDS`
+stamp path in `core/HOOKS.md`.
+
 `AGENT_DISPATCH_JOBS` is the sole canonical dispatch registry. Its default
 fallback (SD-112 §13.33.2) is the canonical dispatch state root's `jobs.log`:
 `${XDG_STATE_HOME:-$HOME/.local/state}/hearting/dispatch`, or the

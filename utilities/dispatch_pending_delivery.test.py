@@ -179,6 +179,60 @@ class CreateTest(IsolatedRootMixin, unittest.TestCase):
         lock_path = path.with_name(path.name + ".lock")
         self.assertEqual(stat.S_IMODE(lock_path.stat().st_mode), PD.FILE_MODE)
 
+    def test_a47_6_claim_authority_required_on_claimed_states(self):
+        kwargs, record = self._create()
+        self.assertEqual(record["claim_authority"], "")
+        claimed = PD.claim(
+            self.root, kwargs["recipient_key"], kwargs["delivery_id"],
+            claim_owner="carrier-1", lease_seconds=30,
+        )
+        self.assertEqual(claimed["claim_authority"], "deliverer-unproven")
+        broken = dict(claimed)
+        broken["claim_authority"] = ""
+        with self.assertRaises(PD.PendingDeliveryError) as ctx:
+            PD._validate_record(broken)
+        self.assertEqual(ctx.exception.reason, "delivery-persistence-refused")
+        self.assertEqual(ctx.exception.detail, "claim-authority-invalid")
+
+    def test_a47_6_legacy_v1_record_upgrades_to_deliverer_unproven(self):
+        kwargs, record = self._create(recipient_kind="claude-parent-runtime")
+        path = PD.record_path(self.root, kwargs["recipient_key"], kwargs["delivery_id"])
+        legacy = dict(record)
+        del legacy["claim_authority"]
+        legacy["state"] = "sent-ambiguous"
+        legacy["claim_owner"] = "legacy-owner"
+        legacy["claim_deadline_ns"] = 0
+        path.write_text(json.dumps(legacy), encoding="utf-8")
+        read_back = PD.read(self.root, kwargs["recipient_key"], kwargs["delivery_id"])
+        self.assertEqual(read_back["claim_authority"], "deliverer-unproven")
+        acked = PD.ack(self.root, kwargs["recipient_key"], kwargs["delivery_id"], acked_by="t")
+        self.assertEqual(acked["state"], "acked")
+
+    def test_a47_6_legacy_v1_record_other_kind_upgrades_to_generation_proven(self):
+        kwargs, record = self._create(recipient_kind="codex-stop-hook")
+        path = PD.record_path(self.root, kwargs["recipient_key"], kwargs["delivery_id"])
+        legacy = dict(record)
+        del legacy["claim_authority"]
+        legacy["state"] = "claimed"
+        legacy["claim_owner"] = "legacy-owner"
+        legacy["claim_deadline_ns"] = 0
+        path.write_text(json.dumps(legacy), encoding="utf-8")
+        read_back = PD.read(self.root, kwargs["recipient_key"], kwargs["delivery_id"])
+        self.assertEqual(read_back["claim_authority"], "generation-proven")
+
+    def test_a47_6_new_shape_missing_claim_authority_field_entirely_is_still_refused(self):
+        # A brand-new-shape record (all REQUIRED_FIELDS keys present) that
+        # simply omits claim_authority is NOT the legacy v1 shape (legacy is
+        # exactly REQUIRED_FIELDS - {claim_authority}, i.e. missing key) --
+        # confirm a record shaped exactly like the current REQUIRED_FIELDS
+        # set is required, not "any subset works".
+        kwargs, record = self._create()
+        broken = dict(record)
+        broken["unexpected_extra_field"] = "1"
+        with self.assertRaises(PD.PendingDeliveryError) as ctx:
+            PD._validate_record(broken)
+        self.assertEqual(ctx.exception.detail, "record-shape-invalid")
+
 
 class ClaimCasTest(IsolatedRootMixin, unittest.TestCase):
     def setUp(self):
@@ -287,6 +341,33 @@ class ClaimCasTest(IsolatedRootMixin, unittest.TestCase):
             PD.claim(
                 self.root, "sess-claim", self.kwargs["delivery_id"],
                 claim_owner="carrier-final", lease_seconds=1,
+            )
+        self.assertEqual(ctx.exception.reason, "pending-delivery-reclaim-exhausted")
+
+    def test_a47_7_deliverer_unproven_reclaim_bounded_and_single_authoritative(self):
+        # A47-7: RECLAIM_LIMIT=8 and pending-delivery-reclaim-exhausted stay
+        # current-behavior unchanged when re-run through the
+        # claim_authority=deliverer-unproven path (require_generation_proof
+        # =False) -- and every claim in the bounded chain records exactly
+        # one grade, never a mix.
+        deadline = None
+        for owner in range(PD.RECLAIM_LIMIT):
+            claimed = PD.claim(
+                self.root, "sess-claim", self.kwargs["delivery_id"],
+                claim_owner=f"carrier-{owner}", lease_seconds=1,
+                require_generation_proof=False,
+            )
+            self.assertEqual(claimed["claim_authority"], "deliverer-unproven")
+            deadline = claimed["claim_deadline_ns"]
+            PD.reclaim(
+                self.root, "sess-claim", self.kwargs["delivery_id"],
+                now_ns=deadline + 1,
+            )
+        with self.assertRaises(PD.PendingDeliveryError) as ctx:
+            PD.claim(
+                self.root, "sess-claim", self.kwargs["delivery_id"],
+                claim_owner="carrier-final", lease_seconds=1,
+                require_generation_proof=False,
             )
         self.assertEqual(ctx.exception.reason, "pending-delivery-reclaim-exhausted")
 

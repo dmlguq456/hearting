@@ -1,9 +1,14 @@
 #!/usr/bin/env python3
-import contextlib, importlib.util, io, json, os, re, tempfile, unittest
+import contextlib, hashlib, importlib.util, io, json, os, re, shutil, sys, tempfile, unittest
 from pathlib import Path
 
 P=Path(__file__).with_name("capability-route.py")
 S=importlib.util.spec_from_file_location("route",P); R=importlib.util.module_from_spec(S); S.loader.exec_module(R)
+FLEET_P=P.parent.parent/"tools"/"fleet"/"route.py"
+FLEET_S=importlib.util.spec_from_file_location("fleet_route",FLEET_P)
+FLEET_ROUTE=importlib.util.module_from_spec(FLEET_S); FLEET_S.loader.exec_module(FLEET_ROUTE)
+sys.path.insert(0,str(P.parent))
+import dispatch_contract as D
 ALL=["atomic-outcome","known-scope","no-shared-contract","no-resource-run","no-artifact-handoff","no-independent-verifier","focused-verification"]
 
 DD_CONFIG_A="""schema_version: 1
@@ -545,6 +550,99 @@ class TestRoute(unittest.TestCase):
   for recipe in r["recipes"]:
    for group in recipe["standard_plus"].get("parallel_groups",[]):
     self.assertNotEqual(group.get("node"),"post-deploy-verify")
+ def test_a47_4_reserved_node_id_prefix_rejected(self):
+  # A47-4: a `_`-prefixed standard_plus node id must fail-closed at
+  # `_validate_recipe` -- before `capability-route.py` ever reaches a
+  # `compile_route`/`write_once` call, so no route file can be written.
+  r=R.TOPO.load_registry()
+  broken=json.loads(json.dumps(r))
+  code=next(x for x in broken["recipes"] if x["capability"]=="autopilot-code")
+  code["standard_plus"]["nodes"][0]["id"]="_reserved"
+  with self.assertRaisesRegex(R.TOPO.TopologyError,"route-node-id-reserved-prefix"):
+   R.TOPO.validate_registry(broken)
+  with tempfile.TemporaryDirectory() as td:
+   self.assertEqual(list(Path(td).glob("*.json")),[])
+  # the unmodified registry still validates and compiles (no regression).
+  R.TOPO.validate_registry(R.TOPO.load_registry())
+ def test_a47_4_reserved_prefix_conditional_extension(self):
+  # A47-4: same predicate applied to conditional_extensions ids, reached
+  # from within the same `_validate_recipe` call via
+  # `_validate_conditional_extensions`.
+  r=R.TOPO.load_registry()
+  broken=json.loads(json.dumps(r))
+  code=next(x for x in broken["recipes"] if x["capability"]=="autopilot-code")
+  code["conditional_extensions"][0]["id"]="_reserved-extension"
+  with self.assertRaisesRegex(R.TOPO.TopologyError,"route-node-id-reserved-prefix"):
+   R.TOPO.validate_registry(broken)
+  with tempfile.TemporaryDirectory() as td:
+   self.assertEqual(list(Path(td).glob("*.json")),[])
+  R.TOPO.validate_registry(R.TOPO.load_registry())
+ def test_a47_5_complete_marker_path_stamps_intent(self):
+  # A47-5: every `open|running -> done` close edge stamps the delivery
+  # intent -- including the completion-marker (W1) route. dispatch_contract
+  # .test.py's own W1 test hand-crafts a synthetic marker shape; this proves
+  # capability-route.py's REAL `write_completion_marker()` output (the same
+  # shape `_join_group` above publishes) round-trips through dispatch_
+  # contract.marker_bound_delivery_transaction end-to-end.
+  route=self.compile_v3(self.dispatch(self.nested()))
+  node=next(n for n in route["nodes"] if n["id"]=="execute")
+  with tempfile.TemporaryDirectory() as td:
+   base=Path(td)
+   jobs=base/"jobs.log"
+   # Chain-(1) explicit AGENT_DISPATCH_JOBS override so completion_dir()'s
+   # resolve_dispatch_state_root() lands inside this test's own tempdir --
+   # never the real installed ~/.local/state/hearting/dispatch tree.
+   previous_dispatch_jobs=os.environ.get("AGENT_DISPATCH_JOBS")
+   os.environ["AGENT_DISPATCH_JOBS"]=str(jobs)
+   self.addCleanup(lambda: (
+    os.environ.pop("AGENT_DISPATCH_JOBS",None) if previous_dispatch_jobs is None
+    else os.environ.__setitem__("AGENT_DISPATCH_JOBS",previous_dispatch_jobs)
+   ))
+   evidence=base/"evidence.md"; evidence.write_text("verified\n",encoding="utf-8")
+   attempt_id="att-a47-5-fixture"
+   metadata={
+     "attempt_schema_version":2,"dispatch_depth":node["dispatch_depth"],
+     "transport":"headless","execution_surface":"registered-headless",
+     "registered_worker":"1","fallback_hop":"same-harness-headless",
+   }
+   marker=R.write_completion_marker(
+    route,node,"execute",evidence,attempt_id=attempt_id,attempt_metadata=metadata)
+   completion=R.completion_dir(route["route_id"])
+   R.atomic_write(completion/f"execute.{attempt_id}.attempt.json",{
+     "schema_version":2,"route_id":route["route_id"],"node_id":"execute",
+     "attempt_id":attempt_id,"dispatch_depth":marker["dispatch_depth"],
+     "transport":marker["transport"],"execution_surface":marker["execution_surface"],
+     "registered_worker":marker["registered_worker"],"fallback_hop":marker["fallback_hop"],
+     "evidence_sha256":marker["evidence"]["sha256"],
+     "completion_marker":str(completion/"execute.json"),
+     "completion_marker_history":str(completion/f"execute.{marker['sequence']}.json"),
+   })
+   route_path=base/"route.json"
+   route_path.write_text(json.dumps(route),encoding="utf-8")
+   marker_path=completion/"execute.json"
+   metadata_pipe=(
+     f"attempt_schema_version=2,dispatch_depth={node['dispatch_depth']},"
+     "transport=headless,execution_surface=registered-headless,registered_worker=1,"
+     f"fallback_hop=same-harness-headless,attempt_id={attempt_id},"
+     f"route_id={route['route_id']},route_hash={route['route_hash']},route_node=execute,"
+     f"route_file={route_path},completion_marker={marker_path},"
+     "launch_outcome=never-launched,"
+     "parent_completion_delivery=claude-parent-runtime,"
+     f"parent_sid=sess-a47-5,parent_attempt_id=att-a47-5-owner,harness=claude"
+   )
+   raw=f"2026-08-29T00:00:00Z\topen\t/r\t/w\texecute\t{metadata_pipe}"
+   jobs.write_text(raw+"\n",encoding="utf-8")
+   parsed=D.parse_registry_metadata(metadata_pipe)
+   result=D.marker_bound_delivery_transaction(
+     jobs,attempt_id,parent_attempt_id=attempt_id,
+     expected_row_revision=hashlib.sha256(raw.encode()).hexdigest(),
+     expected_process_identity=D.marker_bound_process_identity(parsed),
+     process_observation=D.ProcessQuiescence("quiescent","fixture"),
+   )
+   self.assertTrue(result.advanced)
+   after=D.parse_registry_metadata(jobs.read_text(encoding="utf-8").splitlines()[0].split("\t")[5])
+   self.assertEqual(after.get("delivery_intent"),"1")
+   self.assertEqual(after.get("delivery_recipient_kind"),"claude-parent-runtime")
  def test_ac24_plan_check_two_way_is_read_only_arbiter(self):
   # AC 24: the 2-way plan-check group merges under the stricter-wins review
   # merge contract; the check itself stays read-only (writes only its own
@@ -1545,6 +1643,95 @@ class TestRoute(unittest.TestCase):
    with self.assertRaisesRegex(ValueError,"route-close-outside-canonical-or-legacy"):
     R.close_route(route,outside,commit="5"*40)
    self.assertFalse(R.outcome_path(outside).exists())
+ def test_f47_1_new_route_records_carry_owner_attempt_and_family_key(self):
+  previous=os.environ.pop("AGENT_DISPATCH_ATTEMPT_ID",None)
+  try:
+   unowned=R.compile_route(**self.args())
+   self.assertEqual(unowned["owner_attempt_id"],"-")
+   self.assertEqual(
+    unowned["route_family_key"],
+    R.route_family_key(
+     unowned["capability"],unowned["cwd"],unowned["capability_mode"],"-"),
+   )
+   os.environ["AGENT_DISPATCH_ATTEMPT_ID"]="att-fixture-owner"
+   owned=R.compile_route(**self.args())
+   self.assertEqual(owned["owner_attempt_id"],"att-fixture-owner")
+   self.assertEqual(
+    owned["route_family_key"],
+    R.route_family_key(
+     owned["capability"],owned["cwd"],owned["capability_mode"],"att-fixture-owner"),
+   )
+   self.assertNotEqual(unowned["route_family_key"],owned["route_family_key"])
+  finally:
+   if previous is None: os.environ.pop("AGENT_DISPATCH_ATTEMPT_ID",None)
+   else: os.environ["AGENT_DISPATCH_ATTEMPT_ID"]=previous
+ def test_f47_2_route_hash_exclusion_parity_with_fleet(self):
+  # `base` is a genuine on-disk record shape: no `_fleet_*` key (fleet only
+  # ever adds that to its own in-memory copy after loading, never to what
+  # capability-route.py writes), no owner_attempt_id/route_family_key yet.
+  base={
+   "route_id":"rt-fixture0000000","route_hash":"sha256:"+"a"*64,
+   "capability":"autopilot-code","capability_mode":"dev","schema_version":2,
+   "nodes":[{"id":"execute"}],
+  }
+  digest=R.route_hash(base)
+  self.assertEqual(digest,FLEET_ROUTE.route_hash(base))  # ① genuine-record parity
+  sealed=dict(base,owner_attempt_id="att-fixture",route_family_key="sha256:"+"b"*64)
+  self.assertEqual(R.route_hash(sealed),digest)           # ② new exclusion, capability-route.py
+  self.assertEqual(FLEET_ROUTE.route_hash(sealed),digest) # ② new exclusion, fleet replica
+  annotated=dict(sealed,_fleet_schema_status="current")
+  self.assertEqual(FLEET_ROUTE.route_hash(annotated),digest)  # `_fleet_` exception preserved (R6)
+  schema_varied=dict(annotated,_fleet_schema_status="legacy-read-only")
+  self.assertEqual(FLEET_ROUTE.route_hash(schema_varied),digest)
+  owner_varied=dict(sealed,owner_attempt_id="att-other")
+  self.assertEqual(R.route_hash(owner_varied),digest)
+  self.assertEqual(FLEET_ROUTE.route_hash(owner_varied),digest)
+ def test_f47_2_selection_structurally_identical(self):
+  previous=os.environ.pop("AGENT_DISPATCH_ATTEMPT_ID",None)
+  try:
+   a=R.compile_route(**self.args())
+   os.environ["AGENT_DISPATCH_ATTEMPT_ID"]="att-fixture-owner"
+   b=R.compile_route(**self.args())
+  finally:
+   if previous is None: os.environ.pop("AGENT_DISPATCH_ATTEMPT_ID",None)
+   else: os.environ["AGENT_DISPATCH_ATTEMPT_ID"]=previous
+  self.assertNotEqual(a["owner_attempt_id"],b["owner_attempt_id"])
+  self.assertNotEqual(a["route_family_key"],b["route_family_key"])
+  a_reduced={k:v for k,v in a.items() if k not in ("owner_attempt_id","route_family_key")}
+  b_reduced={k:v for k,v in b.items() if k not in ("owner_attempt_id","route_family_key")}
+  self.assertEqual(a_reduced,b_reduced)
+  self.assertEqual(a["route_hash"],b["route_hash"])
+  self.assertEqual(a["route_id"],b["route_id"])
+ def test_f47_4_legacy_route_record_interpretation_unchanged(self):
+  route=R.compile_route(**self.args())
+  legacy=json.loads(json.dumps(route))
+  legacy.pop("owner_attempt_id",None); legacy.pop("route_family_key",None)
+  self.assertEqual(R.route_hash(legacy),route["route_hash"])
+  legacy["route_hash"]=R.route_hash(legacy)
+  legacy["route_id"]="rt-"+legacy["route_hash"].split(":",1)[1][:16]
+  self.assertEqual(legacy["route_id"],route["route_id"])
+  R.verify_route(legacy,R.ROOT)
+  diag=R.legacy_route_diagnostic(legacy)
+  self.assertEqual(diag["route_id"],legacy["route_id"])
+  self.assertEqual(FLEET_ROUTE.route_hash(legacy),route["route_hash"])
+ def test_f47_5_scope_overrun_detector(self):
+  """F47-5: SD-118's v47 scope excludes an `operation=recompile` edge, any
+  lineage-based compile rejection branch, and an exact-waste-formula output
+  symbol (plan.md §7.3). Scanned: the two files this package touches --
+  utilities/capability-route.py and tools/fleet/route.py. This test file is
+  excluded from its own scan (it must name the forbidden strings to assert
+  their absence elsewhere)."""
+  scanned=(
+   R.ROOT/"utilities"/"capability-route.py",
+   R.ROOT/"tools"/"fleet"/"route.py",
+  )
+  for path in scanned:
+   text=path.read_text(encoding="utf-8")
+   self.assertNotIn('"operation":"recompile"',text.replace(" ",""))
+   self.assertNotIn("'operation':'recompile'",text.replace(" ",""))
+   self.assertNotRegex(text,r"lineage.*reject|reject.*lineage")
+   self.assertNotIn("waste_exact",text)
+   self.assertNotIn("exact_waste",text)
 
 class TestContinuation(unittest.TestCase):
  def setUp(self):
@@ -1857,6 +2044,131 @@ class TestContinuation(unittest.TestCase):
     else: os.environ["AGENT_HOME"]=previous_home
     if previous_jobs is None: os.environ.pop("AGENT_DISPATCH_JOBS",None)
     else: os.environ["AGENT_DISPATCH_JOBS"]=previous_jobs
+ def test_f47_3_continuation_outputs_byte_identical(self):
+  """SD-118 (F47-3): the 6 SD-104 continuation outputs are byte-identical to a
+  golden captured before SD-118 touched capability-route.py/tools/fleet/route.py
+  (plan.md §7.2). Fixture is generated once via F47_3_EMIT_GOLDEN=1 and never
+  regenerated afterward -- this test only compares."""
+  golden_path=R.ROOT/"utilities"/"fixtures"/"f47-3-continuation-golden.json"
+  keys=(
+   "source_route_supersession","supersession_edges","continuation_id",
+   "reused_nodes","source_evidence_digest","continuation_contract_version",
+  )
+  # A random per-run tmp dir would make artifact_root/cwd part of the
+  # hashed identity differ run-to-run (route_hash/continuation_id inputs,
+  # not just printed paths), so this fixed root is reused and wiped every
+  # run instead -- only its string form gets tokenized out below.
+  # A hardcoded /tmp path, not tempfile.gettempdir(): tools/run-tests.py's
+  # isolated profile sets TMPDIR to a unique per-invocation directory, which
+  # would make gettempdir() (and therefore artifact_root/cwd, which are
+  # hashed into route identity, not just printed) drift on every isolated
+  # subprocess run and defeat the whole point of a fixed root.
+  root=Path("/tmp")/"hearting-f47-3-golden-fixture"
+  if root.exists(): shutil.rmtree(root)
+  root.mkdir(parents=True)
+  jobs=root/"state"/"jobs.log"
+  # `validation_basis.runtime_root` seals `resolve_agent_home()` into the
+  # route payload (route_hash input), so the class setUp()'s per-test random
+  # AGENT_HOME tmp dir must be pinned to this fixed path too, or route_hash
+  # (and everything downstream: route_id, continuation_id, edge ids) differs
+  # every run even with a frozen clock and a fixed artifact/evidence root.
+  agent_home=root/"agent-home"
+  (agent_home/"core").mkdir(parents=True)
+  (agent_home/"core"/"CORE.md").write_text("continuation fixture\n",encoding="utf-8")
+  previous_agent_home=os.environ.get("AGENT_HOME")
+  os.environ["AGENT_HOME"]=str(agent_home)
+  previous_jobs=os.environ.get("AGENT_DISPATCH_JOBS")
+  os.environ["AGENT_DISPATCH_JOBS"]=str(jobs)
+  # `_seal_dispatch_defaults()` reads dispatch-defaults config from
+  # `$XDG_CONFIG_HOME/hearting/dispatch-defaults.yaml` (or `~/.config/...`),
+  # NOT from AGENT_HOME -- an interactive dev shell with a real user config
+  # (e.g. an opencode depth-affinity override) computes a different
+  # `dispatch_defaults_digest`/`harness_affinity`/`last_resort` set than the
+  # sandboxed HOME the isolated test runner uses, which changes every hash
+  # downstream. Pin explicitly to the shipped repo default so the golden
+  # comparison is identical in both environments.
+  previous_defaults_config=os.environ.get("DISPATCH_DEFAULTS_CONFIG")
+  os.environ["DISPATCH_DEFAULTS_CONFIG"]=str(R.ROOT/"profiles"/"dispatch-defaults.yaml")
+  import datetime as _datetime_module
+  from unittest import mock
+  class _FrozenDatetime(_datetime_module.datetime):
+   @classmethod
+   def now(cls,tz=None):
+    return _datetime_module.datetime(2026,8,29,0,0,0,tzinfo=tz)
+  # `_launch_root_identity()` memoizes `_launch_source_revision()`/
+  # `_launch_content_digest()` results per resolved path at module scope, so
+  # an earlier test in the same process that already compiled a route for
+  # this same repo path (R.ROOT) leaves a REAL (dirty-state-sensitive) entry
+  # cached -- the mock.patch.object() below would then never even be called.
+  # Clearing these three caches for the duration guarantees the frozen
+  # values are what actually gets cached and used here, regardless of test
+  # execution order; they are restored afterward so no other test's cached
+  # identity is disturbed.
+  saved_caches=(
+   dict(R._LAUNCH_ROOT_IDENTITY_CACHE),
+   dict(R._LAUNCH_CONTENT_DIGEST_CACHE),
+   dict(R._LAUNCH_SOURCE_REVISION_CACHE),
+  )
+  R._LAUNCH_ROOT_IDENTITY_CACHE.clear()
+  R._LAUNCH_CONTENT_DIGEST_CACHE.clear()
+  R._LAUNCH_SOURCE_REVISION_CACHE.clear()
+  # `_git_commit()` shells out to `git rev-parse HEAD` and silently falls
+  # back to the literal string "unversioned" on any nonzero exit -- which is
+  # exactly what happens under a sandboxed HOME with no global gitconfig
+  # (git's "detected dubious ownership" safe.directory check, reproduced
+  # directly: `env -i PATH="$PATH" git -C <this worktree> rev-parse HEAD`
+  # exits 128). `source_commit` feeds route_hash, so this must be frozen too.
+  previous_owner_attempt=os.environ.pop("AGENT_DISPATCH_ATTEMPT_ID",None)
+  try:
+   with mock.patch("datetime.datetime",_FrozenDatetime), \
+        mock.patch.object(R,"_launch_source_revision",lambda path:"golden-fixed-revision"), \
+        mock.patch.object(R,"_launch_content_digest",lambda path:"sha256:"+"0"*64), \
+        mock.patch.object(R,"_git_commit",lambda cwd:"golden-fixed-commit"):
+    # write_completion_marker() stamps a real wall clock into `completed_at`
+    # (frozen above), and launch_compatibility_tuple() seals the *current
+    # uncommitted git diff* of the whole worktree into release_id/
+    # binding_digest via _launch_source_revision() -- both flow into
+    # route_hash and therefore into every hash in the 6 compared keys. Since
+    # this worktree is edited continuously across the SD-113/114/118 cycle
+    # (by this round and by sibling files), that diff is guaranteed to differ
+    # between golden capture and any later comparison unless frozen here too.
+    # Neither is an SD-118 concern -- both are pre-existing properties of
+    # shared helpers this test reuses, not of the two files SD-118 touches.
+    source=self._source(root/"artifacts")
+    self._complete_prefix(source,"test",root/"evidence")
+    continuation=self._build(source)
+  finally:
+   if previous_jobs is None: os.environ.pop("AGENT_DISPATCH_JOBS",None)
+   else: os.environ["AGENT_DISPATCH_JOBS"]=previous_jobs
+   if previous_agent_home is None: os.environ.pop("AGENT_HOME",None)
+   else: os.environ["AGENT_HOME"]=previous_agent_home
+   if previous_defaults_config is None: os.environ.pop("DISPATCH_DEFAULTS_CONFIG",None)
+   else: os.environ["DISPATCH_DEFAULTS_CONFIG"]=previous_defaults_config
+   if previous_owner_attempt is None: os.environ.pop("AGENT_DISPATCH_ATTEMPT_ID",None)
+   else: os.environ["AGENT_DISPATCH_ATTEMPT_ID"]=previous_owner_attempt
+   shutil.rmtree(root,ignore_errors=True)
+   R._LAUNCH_ROOT_IDENTITY_CACHE.clear(); R._LAUNCH_ROOT_IDENTITY_CACHE.update(saved_caches[0])
+   R._LAUNCH_CONTENT_DIGEST_CACHE.clear(); R._LAUNCH_CONTENT_DIGEST_CACHE.update(saved_caches[1])
+   R._LAUNCH_SOURCE_REVISION_CACHE.clear(); R._LAUNCH_SOURCE_REVISION_CACHE.update(saved_caches[2])
+  payload={key:continuation[key] for key in keys}
+  serialized=json.dumps(
+   payload,sort_keys=True,separators=(",",":"),ensure_ascii=False)
+  serialized=serialized.replace(str(root),"<state-root>")
+  if os.environ.get("F47_3_EMIT_GOLDEN")=="1":
+   golden_path.parent.mkdir(parents=True,exist_ok=True)
+   golden_path.write_text(json.dumps({
+    "base_commit":R._git_commit(R.ROOT),
+    "generated_before_sd118":True,
+    "payload":serialized,
+   },indent=2,ensure_ascii=False)+"\n",encoding="utf-8")
+   return
+  if not golden_path.is_file():
+   self.fail(
+    "utilities/fixtures/f47-3-continuation-golden.json missing -- "
+    "run once with F47_3_EMIT_GOLDEN=1 before touching capability-route.py "
+    "or tools/fleet/route.py (plan.md §7.2)")
+  golden=json.loads(golden_path.read_text(encoding="utf-8"))
+  self.assertEqual(serialized,golden["payload"])
 
 
 class TestValidationBasis(unittest.TestCase):

@@ -132,7 +132,8 @@ def _canonical(payload):
 def route_hash(record):
     bare = {
         k: v for k, v in record.items()
-        if k not in ("route_hash", "route_id") and not k.startswith("_fleet_")
+        if k not in ("route_hash", "route_id", "owner_attempt_id", "route_family_key")
+        and not k.startswith("_fleet_")
     }
     return "sha256:" + hashlib.sha256(_canonical(bare)).hexdigest()
 

@@ -44,6 +44,9 @@ from codex_dispatch_terminal import (  # noqa: E402
     inspect_terminal_attempt,
     terminal_envelope_observed,
 )
+from dispatch_degradation import record_degradation  # noqa: E402
+
+INVALID_ENVELOPE_CLASSIFIER_SOURCE = "completion-join-invalid-envelope-v1"
 OPEN_STATES = frozenset({"open", "running"})
 SCHEMA_VERSION = 2
 # SD-110 13.32.1-(3)B: a second, additive receipt schema for consumers that
@@ -3164,7 +3167,7 @@ def _close_invalid_envelope_child(
     jobs: str | Path,
     reason: str,
     note: str = "dead-invalid-envelope",
-    classifier_source: str = "completion-join-invalid-envelope-v1",
+    classifier_source: str = INVALID_ENVELOPE_CLASSIFIER_SOURCE,
     terminal_envelope: bool = True,
 ) -> bool:
     """Close a quiescent child whose terminal envelope can never legally complete.
@@ -3183,20 +3186,40 @@ def _close_invalid_envelope_child(
     )
     if observed.state != "reconcile-needed" or observed.process_state != "quiescent":
         return False
+    # B47-3: `failure_class` is bound to `classifier_source`, not to this
+    # function as a whole -- `dead-missing-result`/`dead-worker-blocked`/
+    # `dead-worker-fail` callers pass their own classifier_source and must
+    # stay unlabeled (Appendix A-34's regression risk).
+    evidence = {
+        "classifier_source": classifier_source,
+        "reconcile_reason": reason,
+    }
+    if classifier_source == INVALID_ENVELOPE_CLASSIFIER_SOURCE:
+        evidence["failure_class"] = "invalid-envelope"
     try:
         closed = close_attempt_row(
             Path(jobs),
             row.attempt_id,
             note,
-            evidence={
-                "classifier_source": classifier_source,
-                "reconcile_reason": reason,
-            },
+            evidence=evidence,
         )
     except DispatchContractError:
         return False
     if closed:
         materialize_after_terminal_close(Path(jobs), row.attempt_id)
+        if classifier_source == INVALID_ENVELOPE_CLASSIFIER_SOURCE:
+            record_degradation(
+                writer="dispatch_completion_join.py",
+                kind="degradation",
+                route_id=row.metadata.get("route_id"),
+                route_node=row.metadata.get("route_node"),
+                route_hash=row.metadata.get("route_hash"),
+                dispatch_depth=row.metadata.get("dispatch_depth"),
+                reason="invalid-envelope",
+                attempt_id=row.attempt_id,
+                classifier_source=classifier_source,
+                jobs=jobs,
+            )
     return closed
 
 

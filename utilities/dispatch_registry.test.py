@@ -101,6 +101,107 @@ class RegistryTest(unittest.TestCase):
   ensure.assert_called_once_with(self.jobs,"att-active0001")
   decision=json.loads(stream.getvalue())["decisions"][0]
   self.assertEqual(decision["summary_owner"],repaired)
+ def _reconcile_apply_args(self,attempt):
+  return types.SimpleNamespace(
+   session=None,route=None,node=None,attempt=attempt,job=None,
+   apply=True,audit=None,jobs=self.jobs,agent_home=self.base,
+   integration_ref=None,now=time.time(),cascade_grace=0,cascade_kill_wait=0)
+ def test_reconcile_attaches_failure_class_only_to_classify_selected_invalid_envelope_note(self):
+  # gap1 correction 1 (owner_arbitration.md): PRD §13.34.2-(4)'s second named
+  # producer row binds `failure_class=invalid-envelope` to the exact
+  # `dead-invalid-envelope` note `classify()` selects -- never to any other
+  # dead-* note the same function can return. Pins the negative axis the
+  # impl-review round-1 finding worried was missing, without changing the
+  # reconcile() source the owner ruled spec-literal.
+  module=self.load_registry_module("reconcile_note_matrix")
+  cases=(
+   ("dead-invalid-envelope",True),
+   ("dead-missing-result",False),
+   ("dead-worker-blocked",False),
+   ("dead-worker-fail",False),
+  )
+  for note,expect_failure_class in cases:
+   with self.subTest(note=note):
+    attempt=f"att-note-{note}"
+    self.jobs.write_text(
+     f"2026-07-16T00:00:00Z\topen\t/r\t/w\t{note}\troute_id=r9,route_node=test,attempt_id={attempt}\n")
+    currentize_registry(self.jobs)
+    rows=module.read_rows(self.jobs)
+    args=self._reconcile_apply_args(attempt)
+    stream=io.StringIO()
+    with mock.patch.object(
+      module,"classify",
+      return_value=("terminal-handoff",f"exact-terminal:{note}",note)), \
+     contextlib.redirect_stdout(stream):
+     self.assertEqual(module.reconcile(rows,args),0)
+    record=json.loads(stream.getvalue())
+    self.assertEqual(record["closed"],1,record)
+    fields=self.jobs.read_text().strip().split("\t",5)
+    self.assertEqual(fields[1],"done")
+    metadata=D.parse_registry_metadata(fields[5])
+    self.assertEqual(metadata.get("note"),note)
+    if expect_failure_class:
+     self.assertEqual(metadata.get("failure_class"),"invalid-envelope")
+    else:
+     self.assertNotIn("failure_class",metadata)
+ def test_reconcile_natural_dead_worker_blocked_note_excludes_failure_class(self):
+  # gap1 correction 1: same axis as above, but through a real (non-mocked)
+  # classify() -> inspect_terminal_log() run against an actual BLOCKED
+  # contract handoff, confirming the exclusion holds for a note that shows up
+  # in the real corpus and not only under a mocked classify() return.
+  attempt="att-worker-blocked";route="rt-worker-blocked";node="test"
+  log=self.base/"blocked.jsonl";artifact_root=self.base/".agent_reports";artifact_root.mkdir(exist_ok=True)
+  events=[
+   {"type":"item.completed","item":{"type":"agent_message",
+    "text":"artifact: -\nverdict: BLOCKED\nblocker: missing input"}},
+   {"type":"turn.completed"},
+  ]
+  log.write_text("\n".join(json.dumps(event) for event in events)+"\n")
+  with self.jobs.open("a") as out:
+   out.write(f"2026-07-16T00:00:04Z\topen\t/r\t{self.base}\tworker-blocked\t"
+             f"route_id={route},route_node={node},attempt_id={attempt},pid=99999994,pid_start=1,"
+             f"harness=codex,artifact_root={artifact_root},log_file={log}\n")
+  currentize_registry(self.jobs)
+  applied=self.invoke("reconcile","--attempt",attempt,"--apply")
+  record=json.loads(applied.stdout)
+  self.assertEqual(record["closed"],1,record)
+  self.assertEqual(record["decisions"][0]["category"],"terminal-handoff")
+  lines=[line for line in self.jobs.read_text().splitlines() if f"attempt_id={attempt}" in line]
+  self.assertEqual(len(lines),1,lines)
+  fields=lines[0].split("\t",5)
+  self.assertEqual(fields[1],"done")
+  metadata=D.parse_registry_metadata(fields[5])
+  self.assertEqual(metadata.get("note"),"dead-worker-blocked")
+  self.assertNotIn("failure_class",metadata)
+ def test_reconcile_still_safe_veto_blocks_stale_note_before_any_write(self):
+  # gap1 correction 1: `note` is never external input -- it is the local
+  # variable `classify()` just returned at dispatch-registry.py:798, and
+  # `still_safe()` re-derives it under the registry lock (:806-819) before
+  # `close_attempt_row_if` ever writes. If a concurrent mutation would make a
+  # fresh classify() pick a different note, the stale one must not reach the
+  # write path at all -- there is no route by which an arbitrary note gets
+  # attached, invalid-envelope or otherwise.
+  module=self.load_registry_module("reconcile_still_safe_veto")
+  attempt="att-note-race"
+  self.jobs.write_text(
+   f"2026-07-16T00:00:00Z\topen\t/r\t/w\tnote-race\troute_id=r9,route_node=test,attempt_id={attempt}\n")
+  currentize_registry(self.jobs)
+  rows=module.read_rows(self.jobs)
+  args=self._reconcile_apply_args(attempt)
+  calls=[("terminal-handoff","exact-terminal:dead-invalid-envelope","dead-invalid-envelope"),
+         ("active","exact-pid",None)]
+  stream=io.StringIO()
+  with mock.patch.object(module,"classify",side_effect=calls), \
+       mock.patch.object(module,"ensure_attempt_owner",
+                          return_value={"state":"skipped","reason":"test"}), \
+       contextlib.redirect_stdout(stream):
+   self.assertEqual(module.reconcile(rows,args),0)
+  decision=json.loads(stream.getvalue())["decisions"][0]
+  self.assertFalse(decision["closed"])
+  self.assertIn("revalidation-veto",decision["reason"])
+  fields=self.jobs.read_text().strip().split("\t",5)
+  self.assertEqual(fields[1],"open")
+  self.assertNotIn("failure_class",D.parse_registry_metadata(fields[5]))
  def test_terminal_handoff_closes_namespace_attempt_without_watchdog(self):
   attempt="att-sandbox-terminal";route="rt-sandbox";node="refs";log=self.base/"exact.jsonl"
   events=[

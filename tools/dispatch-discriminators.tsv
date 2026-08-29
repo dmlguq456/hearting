@@ -1,0 +1,4 @@
+discriminator	producer_symbol	evidence_input	write_site	fixture
+allocation-skip	P1:_allocation_skip	row["_allocation_skip"]	utilities/stage-dispatch-fallback.py:_dispatch (candidate loop, _allocation_skip branch)	utilities/stage_dispatch_fallback.test.py::test_b47_1_allocation_skip_producer_fires
+candidate-unsupported	P2:unsupported	row.get("failure_class") or row.get("status")	utilities/stage-dispatch-fallback.py:_dispatch (candidate loop, unsupported branch)	utilities/stage_dispatch_fallback.test.py::test_b47_1_candidate_unsupported_producer_fires
+sealed-parent-not-live	P3:parent_runtime_failure (CANDIDATE_SCOPED_PARENT_FAILURES)	parent_failure	utilities/stage-dispatch-fallback.py:_dispatch (candidate loop, scoped parent_failure branch)	utilities/stage_dispatch_fallback.test.py::test_b47_1_sealed_parent_not_live_producer_fires

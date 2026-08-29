@@ -3177,6 +3177,38 @@ class DeliveryIntentValuesTest(unittest.TestCase):
         ):
             self.assertEqual(first[key], second[key], key)
 
+    def test_a47_2_stamp_vocabulary_equals_recipient_kinds(self):
+        # SD-113 A47-2: dispatch_contract.py's own record of the vocabulary
+        # it recognizes must equal dispatch_pending_delivery.RECIPIENT_KINDS
+        # exactly -- imported directly (not duplicated), so this also proves
+        # the module-top self-check that raises DispatchContractError on
+        # drift did not fire (D itself imported cleanly above).
+        self.assertEqual(D._KNOWN_DELIVERY_RECIPIENT_KINDS, frozenset(D.RECIPIENT_KINDS))
+
+    def test_a47_10_supervised_rows_no_stamp_no_record_no_refusal(self):
+        # A47-10: `parent-runtime-supervised` (SD-78 supervisor outbox) and
+        # `poll-fallback` are not in RECIPIENT_KINDS -- neither stamp nor
+        # refusal is owed on those rows, only an empty dict.
+        for kind in ("parent-runtime-supervised", "poll-fallback"):
+            metadata = self._metadata(
+                parent_completion_delivery=kind, note="completed-marker", failure_class="pass",
+            )
+            result = D._delivery_intent_values(self._fields(metadata), metadata)
+            self.assertEqual(result, {}, kind)
+            self.assertNotIn("delivery_persistence_refused", result, kind)
+
+    def test_a47_11_a12_scoped_to_record_creating_kinds(self):
+        # A47-11: the new not-in-RECIPIENT_KINDS guard must not narrow A-12's
+        # existing scope -- every actual record-creating recipient kind still
+        # gets its ordinary stamp.
+        for kind in sorted(D.RECIPIENT_KINDS):
+            metadata = self._metadata(
+                parent_completion_delivery=kind, note="completed-marker", failure_class="pass",
+            )
+            intent = D._delivery_intent_values(self._fields(metadata), metadata)
+            self.assertEqual(intent["delivery_intent"], "1", kind)
+            self.assertEqual(intent["delivery_recipient_kind"], kind)
+
 
 class DeliveryIntentWiringTest(unittest.TestCase):
     """Integration: each of W1-W4 stamps the intent exactly once; the two
@@ -3448,6 +3480,40 @@ class DeliveryIntentWiringTest(unittest.TestCase):
             self.assertEqual(after.get("delivery_intent"), "1")
             self.assertIn("delivery_receipt_b64", after)
             self.assertIn("delivery_id", after)
+
+    def test_a47_5_every_close_edge_stamps_intent(self):
+        # A47-5: named acceptance test tying together the four independent
+        # W1-W4 wiring tests above (each already proves its own edge stamps)
+        # plus the static scan's "exactly 4 sites" count -- one place that
+        # asserts the acceptance predicate by name, not just by coincidence
+        # of four separately-named tests.
+        with tempfile.TemporaryDirectory() as td:
+            jobs = Path(td) / "jobs.log"
+            jobs.write_text(self._row() + "\n", encoding="utf-8")
+            self.assertTrue(D.close_attempt_row(jobs, "att-w-fixture", "completed-marker"))
+            metadata = D.parse_registry_metadata(
+                jobs.read_text(encoding="utf-8").splitlines()[0].split("\t")[5]
+            )
+            self.assertEqual(metadata.get("delivery_intent"), "1")  # W2
+        with tempfile.TemporaryDirectory() as td:
+            jobs = Path(td) / "jobs.log"
+            jobs.write_text(self._row() + "\n", encoding="utf-8")
+            self.assertTrue(
+                D.close_attempt_row_if(jobs, "att-w-fixture", "completed-marker", lambda _f: True)
+            )
+            metadata = D.parse_registry_metadata(
+                jobs.read_text(encoding="utf-8").splitlines()[0].split("\t")[5]
+            )
+            self.assertEqual(metadata.get("delivery_intent"), "1")  # W4
+        with tempfile.TemporaryDirectory() as td:
+            jobs = Path(td) / "jobs.log"
+            jobs.write_text(self._row() + "\n", encoding="utf-8")
+            outcome = D.reconcile_attempt_terminal(jobs, "att-w-fixture", "completed-marker")
+            self.assertEqual(outcome, "closed")
+            metadata = D.parse_registry_metadata(
+                jobs.read_text(encoding="utf-8").splitlines()[0].split("\t")[5]
+            )
+            self.assertEqual(metadata.get("delivery_intent"), "1")  # W3
 
 
 class RuntimeAncestryBindingTest(unittest.TestCase):

@@ -51,6 +51,8 @@ from dispatch_contract import (  # noqa: E402
     DispatchContractError,
     attempt_process_quiescence,
     parse_registry_metadata,
+    resolve_agent_home,
+    resolve_dispatch_state_root,
     resolve_global_registry,
     resolve_live_parent_attempt,
     validate_attempt_metadata,
@@ -72,6 +74,7 @@ from worker_bootstrap import assigned_contract, worker_type_for_kind  # noqa: E4
 from dispatch_degradation import record_degradation  # noqa: E402
 from dispatch_allocation_receipt import record_allocation_receipt  # noqa: E402
 from dispatch_allocation import inert_allocation_keys  # noqa: E402
+import dispatch_launch_tuple as LAUNCH_TUPLE  # noqa: E402
 from dispatch_quality_peer import quality_peer_families  # noqa: E402
 from dispatch_allocation import (  # noqa: E402
     HARNESSES as ALLOCATION_HARNESSES,
@@ -1328,7 +1331,7 @@ def capacity_retry(
     return "descend", retry_fields, retry_output
 
 
-def main() -> int:
+def _dispatch(observation: "LAUNCH_TUPLE.ReportOnlyObservation") -> int:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--route", type=Path, required=True)
     p.add_argument("--node", required=True)
@@ -1475,6 +1478,23 @@ def main() -> int:
         os.environ["AGENT_DISPATCH_SOLE_GATE"] = str(
             allocation_context.get("sole_gate") or "ok"
         )
+    # §6.1-(2)/§4 (2)-C: arm and confirm the report-only counters *before*
+    # the candidate loop -- there is no common post-loop point (E1-E12), so
+    # anything computed after the loop would miss the success/native/inline/
+    # chain-exhausted exits. `main()`'s `finally` reads this via `observation`
+    # however `_dispatch()` returns.
+    state_root = resolve_dispatch_state_root(resolve_agent_home(), args.jobs)
+    observation.arm(state_root, route, node, args.parent_attempt_id)
+    observation.universe = [
+        tuple_key(candidate_row)
+        for candidate_hop in fallback_hops
+        if candidate_hop["fallback_hop"] in {"same-harness-headless", "cross-harness-headless"}
+        for candidate_row in candidate_hop.get("candidates", [])
+    ]
+    observation.spent = LAUNCH_TUPLE.spent_tuples(
+        state_root, route["route_id"], node["id"], route_hash=route.get("route_hash")
+    )
+    observation.failed_tuples = frozenset(failed_tuples)
     recorded_prior_skips = set()
     for ordered_hop in fallback_hops:
         if ordered_hop.get("fallback_hop") not in {
@@ -1497,12 +1517,35 @@ def main() -> int:
                     attempts.append(
                         f"{ordinal}:{key}:skipped-{row['_allocation_skip']}"
                     )
+                    # P1 (B47-1/2): allocation-skip has exact pre-launch
+                    # tuple evidence at this point -- record it.
+                    p1_result = LAUNCH_TUPLE.record_rejection(
+                        state_root, route=route, node=node, tuple_key=key,
+                        rejection_class="allocation-skip",
+                        evidence_ref=str(row["_allocation_skip"]),
+                        owner_attempt_id=args.parent_attempt_id,
+                    )
+                    if isinstance(p1_result, tuple):
+                        observation.note_unrecorded(p1_result[1])
                     continue
                 unsupported = row.get("status") != "supported" or row.get("launch_authority") != "conductor"
                 if unsupported or key in failed_tuples:
                     reason = "prior-unchanged-failure" if key in failed_tuples else row.get("failure_class") or row.get("status")
                     if key not in recorded_prior_skips:
                         attempts.append(f"{ordinal}:{key}:skipped-{reason}")
+                    if unsupported:
+                        # P2 (B47-1/2/10): only the `unsupported` branch has
+                        # exact evidence -- a pure `key in failed_tuples`
+                        # consumer-only skip produces no evidence (B47-10).
+                        p2_evidence = str(row.get("failure_class") or row.get("status") or "unsupported")
+                        p2_result = LAUNCH_TUPLE.record_rejection(
+                            state_root, route=route, node=node, tuple_key=key,
+                            rejection_class="candidate-unsupported",
+                            evidence_ref=p2_evidence,
+                            owner_attempt_id=args.parent_attempt_id,
+                        )
+                        if isinstance(p2_result, tuple):
+                            observation.note_unrecorded(p2_result[1])
                     continue
                 parent_failure = parent_runtime_failure(args, route, row, parent_identity)
                 if parent_failure and parent_failure not in CANDIDATE_SCOPED_PARENT_FAILURES:
@@ -1516,6 +1559,17 @@ def main() -> int:
                         "reason": parent_failure,
                         "detail": "sealed parent identity is not the live dispatch-depth-1 owner",
                     })
+                    # P3 (B47-1/2): only the CANDIDATE_SCOPED_PARENT_FAILURES
+                    # branch reaches here -- the non-scoped case already
+                    # returned via fail() above.
+                    p3_result = LAUNCH_TUPLE.record_rejection(
+                        state_root, route=route, node=node, tuple_key=key,
+                        rejection_class="sealed-parent-not-live",
+                        evidence_ref=parent_failure,
+                        owner_attempt_id=args.parent_attempt_id,
+                    )
+                    if isinstance(p3_result, tuple):
+                        observation.note_unrecorded(p3_result[1])
                     continue
                 pending_capacity = [
                     item for item in capacity_context(
@@ -1766,6 +1820,21 @@ def main() -> int:
     )
     return fail("fallback-chain-exhausted", 79, attempt_trace="|".join(attempts),
                 degradation_ledger=str(ledger) if ledger else "-")
+
+
+def main() -> int:
+    """Single exit wrapper (§4 (2)-C round_1 finding R3): every `_dispatch()`
+    return -- E1-E12 and any propagated exception -- passes through this
+    `finally`, so the report-only finalizer runs exactly once per invocation
+    regardless of which of the 12 exit points fired. `armed=False` (any
+    preprocessing failure before the candidate loop arms the observation)
+    makes `write_report()` a no-op."""
+
+    observation = LAUNCH_TUPLE.ReportOnlyObservation()
+    try:
+        return _dispatch(observation)
+    finally:
+        LAUNCH_TUPLE.write_report(observation)
 
 
 if __name__ == "__main__":

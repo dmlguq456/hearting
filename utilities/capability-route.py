@@ -128,8 +128,17 @@ def canonical(payload):
     return json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",",":")).encode()
 
 def route_hash(payload):
-    bare={k:v for k,v in payload.items() if k not in ("route_hash","route_id")}
+    bare={k:v for k,v in payload.items() if k not in ("route_hash","route_id","owner_attempt_id","route_family_key")}
     return "sha256:"+hashlib.sha256(canonical(bare)).hexdigest()
+
+def route_family_key(capability,cwd,capability_mode,owner_attempt_id):
+    payload=[capability,str(cwd),capability_mode,owner_attempt_id]
+    digest=hashlib.sha256(json.dumps(payload,ensure_ascii=False,separators=(",",":")).encode()).hexdigest()
+    return "sha256:"+digest
+
+def _resolve_owner_attempt_id():
+    """`AGENT_DISPATCH_ATTEMPT_ID` inside an owner, else `-` (not-missing sentinel, F47-1)."""
+    return os.environ.get("AGENT_DISPATCH_ATTEMPT_ID") or "-"
 
 def _runtime_activation_module():
     """Load the installer identity implementation without copying its convention."""
@@ -774,6 +783,11 @@ def build_continuation_route(
     digest=route_hash(route)
     route["route_hash"]=digest
     route["route_id"]="rt-"+digest.split(":",1)[1][:16]
+    owner_attempt_id=_resolve_owner_attempt_id()
+    route["owner_attempt_id"]=owner_attempt_id
+    route["route_family_key"]=route_family_key(
+        route.get("capability"),route.get("cwd"),route.get("capability_mode"),owner_attempt_id,
+    )
     return route
 
 def _verify_continuation_route(route):
@@ -1549,6 +1563,9 @@ def _compile_from_recipe(registry, recipe, capability, capability_mode, requeste
         payload["composed"]=True
         payload["composed_recipe"]=json.loads(json.dumps(recipe))
     digest=route_hash(payload); payload["route_hash"]=digest; payload["route_id"]="rt-"+digest.split(":",1)[1][:16]
+    owner_attempt_id=_resolve_owner_attempt_id()
+    payload["owner_attempt_id"]=owner_attempt_id
+    payload["route_family_key"]=route_family_key(capability,cwd,capability_mode,owner_attempt_id)
     return payload
 
 class _ValidationBasisDegrade:
