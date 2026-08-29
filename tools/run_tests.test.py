@@ -300,6 +300,81 @@ class CompareBaselineFixture(RunTestsFixtureBase):
         result = run_runner(["--compare-baseline", "--base-report", str(base), "--head-report", str(head)])
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_known_fail_to_flaky_known_fail_is_not_regression(self):
+        base = self._write_report("base-flaky.tsv", [("a.test.py", "-", "KNOWN-FAIL")])
+        head = self._write_report("head-flaky.tsv", [("a.test.py", "-", "FLAKY-KNOWN-FAIL")])
+        result = run_runner(["--compare-baseline", "--base-report", str(base), "--head-report", str(head)])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout)["regression"], [])
+
+    def test_flaky_known_fail_to_pass_is_a_fix_not_regression(self):
+        base = self._write_report("base-flaky-pass.tsv", [("a.test.py", "-", "FLAKY-KNOWN-FAIL")])
+        head = self._write_report("head-flaky-pass.tsv", [("a.test.py", "-", "PASS")])
+        result = run_runner(["--compare-baseline", "--base-report", str(base), "--head-report", str(head)])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout)["fixed"], [{"suite_path": "a.test.py", "test_id": "-"}])
+
+
+class RetryFixture(RunTestsFixtureBase):
+    def write_retry_suite(self, mode: str):
+        write_suite(self.root, "retry.test.py", f"""
+            from pathlib import Path
+            import sys
+            p = Path('attempts.txt')
+            n = int(p.read_text()) + 1 if p.exists() else 1
+            p.write_text(str(n))
+            mode = {mode!r}
+            if mode == 'fail-pass' and n == 1: sys.exit(1)
+            if mode == 'pass-fail' and n > 1: sys.exit(1)
+            if mode == 'all-fail': sys.exit(1)
+            if mode == 'mismatch': raise ImportError('fixture mismatch')
+        """)
+
+    def baseline(self, kind="exit-nonzero"):
+        return [f"retry.test.py\t-\t{kind}\tisolated\tflaky-timing: intermittent\tMA-RETRY\t{TOMORROW}"]
+
+    def test_fail_pass_and_pass_fail_are_flaky(self):
+        for mode in ("fail-pass", "pass-fail"):
+            with self.subTest(mode=mode):
+                (self.root / "attempts.txt").unlink(missing_ok=True)
+                self.write_retry_suite(mode)
+                result, rows = self.run_fixture(self.baseline(), extra_args=["--retries", "1"])
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual([r["verdict"] for r in rows], ["FLAKY-KNOWN-FAIL"])
+
+    def test_all_pass_is_xpass_hard_failure(self):
+        self.write_retry_suite("all-pass")
+        result, rows = self.run_fixture(self.baseline(), extra_args=["--retries", "1"])
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(rows[0]["verdict"], "XPASS")
+
+    def test_all_fail_is_known_fail(self):
+        self.write_retry_suite("all-fail")
+        result, rows = self.run_fixture(self.baseline(), extra_args=["--retries", "1"])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(rows[0]["verdict"], "KNOWN-FAIL")
+
+    def test_non_flaky_baseline_runs_once_even_with_retries(self):
+        self.write_retry_suite("all-fail")
+        result, _rows = self.run_fixture(
+            [f"retry.test.py\t-\texit-nonzero\tisolated\tordinary\tMA-RETRY-ONCE\t{TOMORROW}"],
+            extra_args=["--retries", "3"],
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual((self.root / "attempts.txt").read_text(), "1")
+
+    def test_kind_mismatch_wins_over_flaky_aggregate(self):
+        self.write_retry_suite("mismatch")
+        result, rows = self.run_fixture(self.baseline(), extra_args=["--retries", "1"])
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(rows[0]["verdict"], "KIND-MISMATCH")
+
+    def test_flaky_detail_and_exit_code(self):
+        self.write_retry_suite("fail-pass")
+        result, rows = self.run_fixture(self.baseline(), extra_args=["--retries", "1"])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(rows[0]["detail"], "attempts=2; outcomes=known-fail,pass; policy=flaky-timing")
+
 
 class LiveStateLeakFixture(RunTestsFixtureBase):
     def test_leak_sweep_catches_a_suite_that_writes_to_live_state(self):

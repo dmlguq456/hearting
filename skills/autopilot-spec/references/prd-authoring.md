@@ -225,6 +225,10 @@ For one mode, include only that mode section. For combined modes, keep each sect
 
 ### Step 3.5: Coupled Updates When the PRD Changes
 
+### Step 3.6: Register the SD Caller
+
+For every new or changed SD, select the caller kind, register its anchor in `tools/sd-procedure-hooks.tsv`, name the procedure location in the PRD change memo (owner-execution, dev-pipeline, worker-types, or AGENTS.md), and pass `python3 tools/check-sd-procedure-hooks.py --prd <canonical-prd>`.
+
 Prevent drift between textual PRD content and Architecture Diagrams by updating every affected artifact in one transaction:
 
 | Change | Artifacts that must remain consistent |

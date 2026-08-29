@@ -13,7 +13,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 TSV = ROOT / "tools" / "dispatch-discriminators.tsv"
-EXPECTED_HEADER = ["discriminator", "producer_symbol", "evidence_input", "write_site", "fixture"]
+EXPECTED_HEADER = ["discriminator", "producer_symbol", "evidence_input", "write_site", "fixture", "consumer_entry_point"]
 CLOSED_REJECTION_CLASSES = {"allocation-skip", "candidate-unsupported", "sealed-parent-not-live"}
 
 
@@ -32,7 +32,7 @@ class DiscriminatorLedgerTest(unittest.TestCase):
         self.assertEqual(declared, CLOSED_REJECTION_CLASSES)
         self.assertEqual(len(rows), len(CLOSED_REJECTION_CLASSES), "one row per discriminator")
 
-        for discriminator, producer_symbol, evidence_input, write_site, fixture in rows:
+        for discriminator, producer_symbol, evidence_input, write_site, fixture, _consumer in rows:
             with self.subTest(discriminator=discriminator):
                 write_path_str, _, _write_hint = write_site.partition(":")
                 write_path = ROOT / write_path_str

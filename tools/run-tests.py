@@ -146,6 +146,29 @@ def build_installed_layout_env(tmpdir: Path, install_prefix: Path) -> dict[str, 
     return env
 
 
+def choose_suite_temp_parent() -> Path:
+    """Choose a writable temp parent outside every Git worktree."""
+    candidates = []
+    configured = os.environ.get("RUN_TESTS_TMP_ROOT")
+    if configured:
+        candidates.append(Path(configured))
+    candidates.extend((Path("/var/tmp"), Path(tempfile.gettempdir())))
+    for candidate in candidates:
+        try:
+            candidate.mkdir(parents=True, exist_ok=True)
+            if not os.access(candidate, os.W_OK):
+                continue
+            probe = subprocess.run(
+                ["git", "-C", str(candidate), "rev-parse", "--show-toplevel"],
+                env={}, capture_output=True, text=True,
+            )
+            if probe.returncode != 0:
+                return candidate
+        except OSError:
+            continue
+    raise SystemExit("temp-root-inside-git-tree")
+
+
 _INSTALLED_LAYOUT_LOCK = threading.Lock()
 _INSTALLED_LAYOUT_CACHE: dict[str, Path] = {}
 
@@ -160,7 +183,7 @@ def get_installed_layout_prefix() -> Path | None:
         cached = _INSTALLED_LAYOUT_CACHE.get("prefix")
         if cached is not None:
             return cached
-        tmp = Path(tempfile.mkdtemp(prefix="w1-installed-layout-"))
+        tmp = Path(tempfile.mkdtemp(prefix="w1-installed-layout-", dir=str(choose_suite_temp_parent())))
         env = build_isolated_env(tmp / "build-env")
         installer = ROOT / "tools" / "install" / "installer.py"
         if not installer.exists():
@@ -222,6 +245,27 @@ class SuiteResult:
 
 
 _UNITTEST_FAIL_RE = re.compile(r"^(FAIL|ERROR):\s+(\S+)\s+\(([\w.]+)\)", re.MULTILINE)
+
+
+def failure_signature(result: SuiteResult) -> str:
+    """Return a stable, compact signature for the first concrete failure."""
+    text = "\n".join((result.stderr or "", result.stdout or ""))
+    patterns = [
+        re.compile(r"^\s*(?:[\w.]+\.)?(?:[A-Za-z_]\w*)(?:Error|Exception):\s+.+$", re.MULTILINE),
+        re.compile(r"^\s*reason=[^\s].*$", re.MULTILINE),
+        re.compile(r"^\s*(?:ERROR|FAIL):\s+.+$", re.MULTILINE),
+    ]
+    line = ""
+    for pattern in patterns:
+        match = pattern.search(text)
+        if match:
+            line = match.group(0).strip()
+            break
+    if not line:
+        line = last_nonempty_line(text)
+    line = re.sub(r"\s+", " ", line)
+    line = re.sub(r"/(?:tmp|var/tmp)/[^ ]+", "<TMP>", line)
+    return f"{classify_kind(result)}:{line}" if line else classify_kind(result)
 
 
 def extract_failing_test_ids(stdout: str, stderr: str) -> list[str]:
@@ -528,9 +572,9 @@ def compare_baseline(base_report: Path, head_report: Path) -> int:
     def failing_keys(rows):
         keys = set()
         for row in rows:
-            if row["verdict"] not in ("PASS", "KNOWN-FAIL"):
+            if row["verdict"] not in ("PASS", "KNOWN-FAIL", "FLAKY-KNOWN-FAIL"):
                 keys.add((row["suite_path"], row["test_id"]))
-            elif row["verdict"] == "KNOWN-FAIL":
+            elif row["verdict"] in ("KNOWN-FAIL", "FLAKY-KNOWN-FAIL"):
                 # A known-fail in a --report-only run still represents an
                 # observed failure at that point in history.
                 keys.add((row["suite_path"], row["test_id"]))
@@ -564,6 +608,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--exclude", action="append", default=[])
     p.add_argument("--jobs", type=int, default=DEFAULT_JOBS)
     p.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT)
+    p.add_argument("--retries", type=int, default=0, help="extra attempts for flaky-timing baseline suites")
     p.add_argument(
         "--isolation",
         choices=ISOLATION_PROFILES,
@@ -602,7 +647,7 @@ def run_profile(
     tmp_roots: list[Path] = []
 
     def make_env(idx: int) -> dict[str, str]:
-        tmp = Path(tempfile.mkdtemp(prefix=f"w1-{profile}-{idx}-"))
+        tmp = Path(tempfile.mkdtemp(prefix=f"w1-{profile}-{idx}-", dir=str(choose_suite_temp_parent())))
         tmp_roots.append(tmp)
         if profile == "isolated":
             return build_isolated_env(tmp)
@@ -710,11 +755,32 @@ def main(argv: list[str]) -> int:
                 return 70
 
     all_results: list[SuiteResult] = []
+    results_by_suite: dict[str, list[SuiteResult]] = {}
     for profile in ISOLATION_PROFILES:
         batch = suites_by_profile[profile]
         if not batch:
             continue
-        all_results.extend(run_profile(batch, root, profile, args.jobs, args.timeout, install_prefix))
+        batch_results = run_profile(batch, root, profile, args.jobs, args.timeout, install_prefix)
+        all_results.extend(batch_results)
+        for result in batch_results:
+            results_by_suite.setdefault(result.relpath, []).append(result)
+
+    # Retries are deliberately limited to baseline rows explicitly marked as
+    # flaky-timing. Every attempt receives a fresh isolated environment.
+    if args.retries < 0:
+        print("--retries must be non-negative", file=sys.stderr)
+        return 64
+    if args.retries:
+        for suite in selected:
+            rel = suite_relpath(root, suite)
+            rows = [row for (sp, _), row in baseline.items() if sp == rel]
+            if not any(row["reason"].startswith("flaky-timing:") for row in rows):
+                continue
+            profile = profile_of[rel]
+            extra = run_profile([suite], root, profile, 1, args.timeout, install_prefix)
+            for attempt in range(args.retries - 1):
+                extra.extend(run_profile([suite], root, profile, 1, args.timeout, install_prefix))
+            results_by_suite[rel].extend(extra)
 
     # Undeclared/unneeded isolation opt-out detection: only for suites that
     # actually failed under `isolated` and have no declared opt-out anywhere.
@@ -733,7 +799,7 @@ def main(argv: list[str]) -> int:
             continue  # covered by baseline known-failure contract instead.
         if install_prefix is None:
             continue
-        env_tmp = Path(tempfile.mkdtemp(prefix="w1-isosense-"))
+        env_tmp = Path(tempfile.mkdtemp(prefix="w1-isosense-", dir=str(choose_suite_temp_parent())))
         try:
             probe_env = build_installed_layout_env(env_tmp, install_prefix)
             probe = run_suite(root / r, root, probe_env, "installed-layout", args.timeout)
@@ -774,10 +840,37 @@ def main(argv: list[str]) -> int:
             verdict_counts["ISOLATION-OPTOUT-UNNEEDED"] = verdict_counts.get("ISOLATION-OPTOUT-UNNEEDED", 0) + 1
             hard_failures.append(suite_path)
 
+    processed_flaky: set[str] = set()
     for result in all_results:
         needs_row = isolation_tsv.get(result.relpath)
         skip_leak = needs_row is not None and needs_row.get("needs") == "live-registry"
-        verdicts = classify_result(result, baseline, today)
+        attempt_results = results_by_suite.get(result.relpath, [result])
+        flaky_rows = [row for (sp, _), row in baseline.items() if sp == result.relpath and row["reason"].startswith("flaky-timing:")]
+        if args.retries and flaky_rows:
+            # all_results contains the first attempt for each suite; the
+            # retry attempts are retained in results_by_suite. Emit one
+            # aggregate row per flaky suite, not one row per attempt.
+            if result.relpath in processed_flaky:
+                continue
+            processed_flaky.add(result.relpath)
+            expected = {row["expected_failure_kind"] for row in flaky_rows}
+            outcomes = []
+            mismatch = False
+            for attempt in attempt_results:
+                if attempt.passed:
+                    outcomes.append("pass")
+                else:
+                    actual = classify_kind(attempt)
+                    if actual not in expected:
+                        mismatch = True
+                        outcomes.append("kind-mismatch")
+                    else:
+                        outcomes.append("known-fail")
+            detail = f"attempts={len(outcomes)}; outcomes={','.join(outcomes)}; policy=flaky-timing"
+            verdict = "KIND-MISMATCH" if mismatch else ("XPASS" if all(x == "pass" for x in outcomes) else "KNOWN-FAIL" if all(x == "known-fail" for x in outcomes) else "FLAKY-KNOWN-FAIL")
+            verdicts = [Verdict(result.relpath, "-", verdict, detail=detail)]
+        else:
+            verdicts = classify_result(result, baseline, today)
         for v in verdicts:
             verdict_counts[v.verdict] = verdict_counts.get(v.verdict, 0) + 1
             report_rows.append(
@@ -788,7 +881,7 @@ def main(argv: list[str]) -> int:
                     "kind": classify_kind(result) if not result.passed else "",
                     "isolation_profile": result.profile,
                     "duration_s": f"{result.duration_s:.2f}",
-                    "detail": v.detail,
+                    "detail": v.detail or (f"signature={failure_signature(result)}" if not result.passed else ""),
                 }
             )
             if v.verdict in HARD_FAIL_VERDICTS:
@@ -831,7 +924,7 @@ def main(argv: list[str]) -> int:
 
     total = len(selected)
     print(f"collected={total}")
-    for key in ("PASS", "FAIL", "ERROR", "TIMEOUT", "KNOWN-FAIL", "XPASS", "STALE", "EXPIRED", "KIND-MISMATCH",
+    for key in ("PASS", "FAIL", "ERROR", "TIMEOUT", "KNOWN-FAIL", "FLAKY-KNOWN-FAIL", "XPASS", "STALE", "EXPIRED", "KIND-MISMATCH",
                 "UNDECLARED-ISOLATION-OPTOUT", "ISOLATION-OPTOUT-UNNEEDED"):
         if key in verdict_counts:
             print(f"{key}={verdict_counts[key]}")

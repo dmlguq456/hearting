@@ -13,7 +13,11 @@ import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-CLEAN_ENV = {k: v for k, v in os.environ.items() if k != "AGENT_ARTIFACT_ROOT"}
+CLEAN_ENV = {k: v for k, v in os.environ.items() if not (
+    k in {"AGENT_HOME", "AGENT_DISPATCH_JOBS"}
+    or k.startswith("AGENT_DISPATCH_") or k.startswith("AGENT_ROUTE_")
+    or k.startswith("AGENT_ARTIFACT_")
+)}
 RUNNER = ROOT / "utilities" / "resource-runner.py"
 ROUTER = ROOT / "utilities" / "capability-route.py"
 SMOKE = ROOT / "tools" / "smoke-attestation.py"

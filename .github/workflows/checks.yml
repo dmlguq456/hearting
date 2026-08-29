@@ -106,4 +106,4 @@ jobs:
           persist-credentials: false
 
       - name: Run the full isolated test suite (C-3/C-4)
-        run: python3 tools/run-tests.py
+        run: python3 tools/run-tests.py --retries 1

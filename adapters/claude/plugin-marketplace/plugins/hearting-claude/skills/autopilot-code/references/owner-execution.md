@@ -50,6 +50,8 @@ Defaults:
 
 ## Critical Gates
 
+Before merge/commit: (1) run `python3 tools/generate.py`, (2) record new `utilities/*` and `tools/*` in the projected/deferred census, (3) run `python3 tools/generate.py --check`, and (4) run `./tools/check-adaptation-boundary.sh`. Step 4 is not redundant: `generate.py` fills Claude counterparts only for `loops/`, `scaffolds/`, `tools/memory`, `tools/install`, `tools/integrations`, and `tools/fleet`, so a new **top-level** `tools/<file>` passes `--check` and still fails the boundary guard — and `pre-push` runs both. Stage generated output with source; do not edit projections manually.
+
 1. Resolve the artifact root by preferring `.agent_reports` and falling back to legacy `.claude_reports`.
 2. Run git-state preflight and remember starting `HEAD`.
 3. If `spec/` exists, read `spec/prd.md` and emit `spec-significance`.
