@@ -19,6 +19,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -1753,6 +1754,142 @@ class PostPromotionPruneAliasIntegrationTest(unittest.TestCase):
             [str(legacy_jobs.parent)], str(legacy_jobs)
         )
         self.assertEqual(roots, [str(stable_root)])
+
+
+class RetentionContainmentGateTest(unittest.TestCase):
+    """SD-115 axis 1 (§13.34.3-(2)): a fourth, additive precondition on
+    `_cleanup_releases`'s deletion of a candidate release --
+    `attempt_ids(stable_after) superset-of attempt_ids(release_local_before)`
+    must hold, proven via `_surviving_dispatch_root` (plan.md §4.4/R1),
+    before `shutil.rmtree` runs."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.base = Path(self.temp.name)
+        self.prior_env = {
+            key: os.environ.get(key)
+            for key in ("AGENT_HOME", "AGENT_DISPATCH_JOBS", "HOME", "XDG_STATE_HOME", "HARNESS_STATE_ROOT", "HARNESS_DATA_ROOT")
+        }
+        os.environ.pop("AGENT_DISPATCH_JOBS", None)
+        os.environ.pop("XDG_STATE_HOME", None)
+        os.environ.pop("HARNESS_STATE_ROOT", None)
+        os.environ["HOME"] = str(self.base / "home")
+        os.environ["HARNESS_DATA_ROOT"] = str(self.base / "data")
+        self.addCleanup(self._restore_env)
+
+    def _restore_env(self):
+        for key, value in self.prior_env.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+    def _make_release(self, name, ts):
+        rel = DISTRIBUTION.data_root() / "releases" / name
+        (rel / "core").mkdir(parents=True)
+        (rel / "core" / "CORE.md").write_text("fixture\n", encoding="utf-8")
+        os.utime(rel, (ts, ts))
+        return rel
+
+    def _three_release_chain(self):
+        import time
+
+        future = time.time() + 60_000_000
+        v1 = self._make_release("v-c1-1", future)
+        v2 = self._make_release("v-c1-2", future + 1)
+        v3 = self._make_release("v-c1-3", future + 2)
+        (v1 / ".dispatch").mkdir(parents=True)
+        (v1 / ".dispatch" / "jobs.log").write_text(
+            _row("2026-08-01T00:00:00Z", "done", "att-c1"), encoding="utf-8"
+        )
+        DISTRIBUTION.current_path().parent.mkdir(parents=True, exist_ok=True)
+        DISTRIBUTION.current_path().symlink_to(v3)
+        return v1, v2, v3
+
+    def test_containment_holds_after_carry_forward_and_prune_proceeds(self):
+        v1, v2, v3 = self._three_release_chain()
+        DISTRIBUTION._cleanup_releases(keep=set())
+        self.assertFalse(v1.exists())
+        carried = (v3 / ".dispatch" / "jobs.log").read_text(encoding="utf-8")
+        self.assertIn("att-c1", carried)
+
+    def test_broken_containment_refuses_with_zero_deleted_files(self):
+        v1, v2, v3 = self._three_release_chain()
+        real = DISTRIBUTION._release_attempt_ids
+
+        def broken(dispatch_root):
+            ids = real(dispatch_root)
+            if dispatch_root == v1 / ".dispatch":
+                return ids | {"att-missing-from-surviving-root"}
+            return ids
+
+        with mock.patch.object(DISTRIBUTION, "_release_attempt_ids", side_effect=broken):
+            DISTRIBUTION._cleanup_releases(keep=set())
+        self.assertTrue(v1.exists(), "broken containment must refuse the delete")
+
+    def test_forced_prune_commits_gap_record_before_delete_and_refuses_when_commit_fails(self):
+        v1, v2, v3 = self._three_release_chain()
+        real = DISTRIBUTION._release_attempt_ids
+
+        def broken(dispatch_root):
+            ids = real(dispatch_root)
+            if dispatch_root == v1 / ".dispatch":
+                return ids | {"att-missing-from-surviving-root"}
+            return ids
+
+        with mock.patch.object(DISTRIBUTION, "_release_attempt_ids", side_effect=broken):
+            with mock.patch.object(DISTRIBUTION, "_commit_forced_prune_gap_record", return_value=False) as commit:
+                DISTRIBUTION._cleanup_releases(keep=set(), force_prune_unproven=True)
+            self.assertTrue(commit.called)
+            self.assertTrue(v1.exists(), "a failed gap-record commit must refuse the delete")
+
+            DISTRIBUTION._cleanup_releases(keep=set(), force_prune_unproven=True)
+        self.assertFalse(v1.exists(), "a successful gap-record commit must allow the forced delete")
+        stable_root = DISTRIBUTION.stable_state_root(os.environ)
+        gaps = (stable_root / "inventory" / "gaps.jsonl").read_text(encoding="utf-8").strip().splitlines()
+        self.assertEqual(len(gaps), 1)
+        row = json.loads(gaps[0])
+        self.assertEqual(row["discovered_by"], "forced-prune")
+        self.assertFalse(row["recoverable"])
+
+    def test_existing_three_preconditions_are_unchanged_and_ordered_before_containment(self):
+        v1, v2, v3 = self._three_release_chain()
+        with mock.patch.object(
+            DISTRIBUTION, "_release_in_use", return_value=(True, "open-attempt:att-live")
+        ) as in_use, mock.patch.object(
+            DISTRIBUTION, "_retention_containment_precondition"
+        ) as containment:
+            DISTRIBUTION._cleanup_releases(keep=set())
+        self.assertTrue(in_use.called)
+        containment.assert_not_called()
+        self.assertTrue(v1.exists())
+
+    def test_surviving_root_matches_succeed_dispatch_state_branch_before_and_after_promotion(self):
+        v1, v2, v3 = self._three_release_chain()
+        env = dict(os.environ)
+        non_promoted = DISTRIBUTION._surviving_dispatch_root(v1, env)
+        self.assertEqual(non_promoted, v3 / ".dispatch")
+
+        with mock.patch.object(DISTRIBUTION, "_dispatch_migration_promoted", return_value=True):
+            promoted = DISTRIBUTION._surviving_dispatch_root(v1, env)
+        self.assertEqual(promoted, DISTRIBUTION.stable_state_root(env))
+
+        # `current` resolves to v3 itself here -- self is never a carry-forward
+        # destination.
+        self.assertIsNone(DISTRIBUTION._surviving_dispatch_root(v3, env))
+
+    def test_installer_written_gap_row_is_readable_by_the_runtime_inventory_module(self):
+        v1, v2, v3 = self._three_release_chain()
+        stable_root = DISTRIBUTION.stable_state_root(os.environ)
+        self.assertTrue(DISTRIBUTION._commit_forced_prune_gap_record(v1, os.environ, "test-reason"))
+        sys.path.insert(0, str(ROOT / "utilities"))
+        import dispatch_registry_inventory as INV
+
+        gaps = INV.read_gaps(stable_root)
+        self.assertEqual(len(gaps), 1)
+        self.assertEqual(gaps[0]["discovered_by"], "forced-prune")
+        self.assertFalse(gaps[0]["recoverable"])
 
 
 if __name__ == "__main__":

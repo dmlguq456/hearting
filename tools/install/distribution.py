@@ -1696,6 +1696,87 @@ def _migration_deletion_precondition(candidate: Path, environ: dict[str, str]) -
     return True, ""
 
 
+def _release_attempt_ids(dispatch_root: Path) -> set[str] | None:
+    """`attempt_id=` set from `<dispatch_root>/jobs.log`. Absence is an empty
+    set (nothing to prove); a read/parse failure is `None` (proof
+    impossible) -- the two are never conflated (SD-115 §13.34.3-(2))."""
+
+    jobs = dispatch_root / "jobs.log"
+    if not jobs.is_file():
+        return set()
+    try:
+        text = jobs.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None
+    ids: set[str] = set()
+    for line in text.splitlines():
+        if not line.strip():
+            continue
+        fields = line.split("\t")
+        if len(fields) < 6:
+            return None
+        for item in fields[5].split(","):
+            if item.startswith("attempt_id="):
+                value = item[len("attempt_id="):]
+                if value:
+                    ids.add(value)
+    return ids
+
+
+def _retention_containment_precondition(
+    candidate: Path, environ: dict[str, str]
+) -> tuple[bool, str]:
+    """SD-115 axis 1 (§13.34.3-(2)): a fourth, additive precondition on
+    release deletion -- `attempt_ids(stable_after) superset-of
+    attempt_ids(release_local_before)`. Any undecidable input (unresolved
+    destination, unreadable registry) refuses exactly like a broken
+    containment proof: this precondition is never the one that is silently
+    skipped."""
+
+    before = _release_attempt_ids(candidate / ".dispatch")
+    surviving = _surviving_dispatch_root(candidate, environ)
+    if surviving is None:
+        return False, "dispatch-registry-retention-unproven:surviving-root-unresolved"
+    after = _release_attempt_ids(surviving)
+    if before is None or after is None:
+        return False, "dispatch-registry-retention-unproven:registry-unreadable"
+    if not before.issubset(after):
+        return False, f"dispatch-registry-retention-unproven:missing:{len(before - after)}"
+    return True, ""
+
+
+def _surviving_dispatch_root(candidate: Path, environ: dict[str, str]) -> Path | None:
+    """Resolve the dispatch root that survives this candidate's pruning
+    (SD-115 R1, plan.md §3): extracted verbatim from
+    `_succeed_dispatch_state`'s promotion branch so the containment gate
+    below and the carry-forward above can never disagree about the
+    destination. `attempt_ids(stable_after)` in the spec means this root --
+    whichever root carry-forward actually lands on -- not the stable root
+    read literally, since a pre-promotion update never touches the stable
+    root at all.
+
+    Returns `None` when the destination cannot be determined (a resolution
+    failure) or when `candidate` is itself the only live release (self is
+    never a carry-forward destination)."""
+
+    if _dispatch_migration_promoted(environ):
+        # Decision 3: the *only* switch is an M4 `completed` journal record.
+        # Post-promotion every carry-forward retargets straight to the
+        # stable root -- never `stable_state_root()/"dispatch"` (that would
+        # double-nest; `stable_state_root()` already *is* the dispatch root).
+        try:
+            return stable_state_root(environ)
+        except DistributionError:
+            return None
+    try:
+        live_release = current_path().resolve(strict=True)
+    except OSError:
+        return None
+    if live_release == candidate:
+        return None
+    return live_release / ".dispatch"
+
+
 def _succeed_dispatch_state(candidate: Path) -> bool:
     """Carry a pruned release's `.dispatch` tree forward into the live
     release before the candidate is deleted.
@@ -1721,23 +1802,9 @@ def _succeed_dispatch_state(candidate: Path) -> bool:
     stale_dispatch = candidate / ".dispatch"
     if not stale_dispatch.is_dir():
         return True
-    if _dispatch_migration_promoted(os.environ):
-        # Decision 3: the *only* switch is an M4 `completed` journal record.
-        # Post-promotion every carry-forward retargets straight to the
-        # stable root -- never `stable_state_root()/"dispatch"` (that would
-        # double-nest; `stable_state_root()` already *is* the dispatch root).
-        try:
-            live_dispatch = stable_state_root(os.environ)
-        except DistributionError:
-            return False
-    else:
-        try:
-            live_release = current_path().resolve(strict=True)
-        except OSError:
-            return False
-        if live_release == candidate:
-            return True
-        live_dispatch = live_release / ".dispatch"
+    live_dispatch = _surviving_dispatch_root(candidate, os.environ)
+    if live_dispatch is None:
+        return False
     touched_dirs: set[Path] = set()
     ok = True
     for source in stale_dispatch.rglob("*"):
@@ -1949,7 +2016,95 @@ def _release_in_use(candidate: Path, stable_snapshot: list[dict]) -> tuple[bool,
     return False, ""
 
 
-def _cleanup_releases(keep: set[Path]) -> None:
+def _canonical_json(row: dict) -> str:
+    return json.dumps(row, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def _gap_event_id(row: dict) -> str:
+    payload = {key: value for key, value in row.items() if key != "event_id"}
+    return hashlib.sha256(_canonical_json(payload).encode("utf-8")).hexdigest()
+
+
+def _gap_id(from_ts: str, to_ts: str, evidence_digest: str) -> str:
+    digest = hashlib.sha256(f"{from_ts}|{to_ts}|{evidence_digest}".encode("utf-8")).hexdigest()
+    return f"gap-{digest[:16]}"
+
+
+def _forced_prune_gap_interval(candidate: Path) -> tuple[str, str]:
+    now_ts = _utc_now()
+    jobs = candidate / ".dispatch" / "jobs.log"
+    if not jobs.is_file():
+        return now_ts, now_ts
+    try:
+        text = jobs.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return now_ts, now_ts
+    timestamps = [line.split("\t", 1)[0] for line in text.splitlines() if line.strip()]
+    if not timestamps:
+        return now_ts, now_ts
+    return min(timestamps), max(timestamps)
+
+
+def _commit_forced_prune_gap_record(candidate: Path, environ: dict[str, str], reason: str) -> bool:
+    """Installer-local mirror of `dispatch_registry_inventory.record_gap()`
+    (SD-115 §13.34.3-(2) operator override). The installer cannot import
+    `utilities/` (see `stable_state_root()` docstring), so this writer
+    duplicates the runtime leaf's JSON row shape byte-for-byte; a parity
+    fixture keeps the two in sync. Deletion proceeds only after this
+    returns True."""
+
+    try:
+        state_root = stable_state_root(environ)
+    except DistributionError:
+        return False
+    from_ts, to_ts = _forced_prune_gap_interval(candidate)
+    before = _release_attempt_ids(candidate / ".dispatch") or set()
+    evidence_digest = "sha256:" + hashlib.sha256(
+        _canonical_json({"missing_attempt_ids": sorted(before), "reason": reason}).encode("utf-8")
+    ).hexdigest()
+    inventory_root = state_root / "inventory"
+    lock_path = inventory_root / "gaps.lock"
+    inventory_root.mkdir(parents=True, exist_ok=True)
+    with open(str(lock_path), "a+b") as handle:
+        try:
+            import fcntl
+
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        except ImportError:
+            import msvcrt
+
+            msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+        try:
+            row = {
+                "schema_version": 1,
+                "gap_id": _gap_id(from_ts, to_ts, evidence_digest),
+                "from_ts": from_ts,
+                "to_ts": to_ts,
+                "evidence_digest": evidence_digest,
+                "cited_ledger_snapshot_digest": evidence_digest,
+                "recoverable": False,
+                "discovered_by": "forced-prune",
+                "recorded_at": _utc_now(),
+            }
+            row["event_id"] = _gap_event_id(row)
+            try:
+                fd = os.open(str(inventory_root / "gaps.jsonl"), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+                try:
+                    os.write(fd, (_canonical_json(row) + "\n").encode("utf-8"))
+                finally:
+                    os.close(fd)
+            except OSError:
+                return False
+            return True
+        finally:
+            try:
+                if "fcntl" in sys.modules:
+                    sys.modules["fcntl"].flock(handle.fileno(), sys.modules["fcntl"].LOCK_UN)
+            except OSError:
+                pass
+
+
+def _cleanup_releases(keep: set[Path], *, force_prune_unproven: bool = False) -> None:
     releases = data_root() / "releases"
     if not releases.is_dir() or releases.is_symlink():
         return
@@ -1990,6 +2145,22 @@ def _cleanup_releases(keep: set[Path]) -> None:
                 file=sys.stderr,
             )
             continue
+        containment_ok, containment_reason = _retention_containment_precondition(candidate, os.environ)
+        if not containment_ok:
+            if not force_prune_unproven:
+                print(
+                    f"harness release: {containment_reason} for {candidate}; keeping it "
+                    "instead of deleting it",
+                    file=sys.stderr,
+                )
+                continue
+            if not _commit_forced_prune_gap_record(candidate, os.environ, containment_reason):
+                print(
+                    f"harness release: registry-gap record commit failed for {candidate}; "
+                    "keeping it instead of deleting it",
+                    file=sys.stderr,
+                )
+                continue
         shutil.rmtree(candidate, ignore_errors=True)
 
 
@@ -2001,6 +2172,7 @@ def _install_or_update(
     bootstrap: bool,
     channel: str,
     pinned_version: Optional[str],
+    force_prune_unproven: bool = False,
 ) -> dict:
     repository = _validate_repository(repository)
     if version != "latest":
@@ -2189,7 +2361,7 @@ def _install_or_update(
                     f"{old_root}; rotated state may be stranded until the next update",
                     file=sys.stderr,
                 )
-        _cleanup_releases(keep)
+        _cleanup_releases(keep, force_prune_unproven=force_prune_unproven)
         # M1-M6: migrate whatever legacy dispatch state just landed under the
         # newly-activated release into the stable root and, once verified,
         # promote it (M4). Unlike M0 above, a migration-internal failure here
@@ -2256,6 +2428,7 @@ def update(
     version: Optional[str] = None,
     runtimes: Optional[Iterable[str]] = None,
     automatic: bool = False,
+    force_prune_unproven: bool = False,
 ) -> dict:
     state = _load_state()
     if not state:
@@ -2289,6 +2462,7 @@ def update(
         bootstrap=False,
         channel=channel,
         pinned_version=pinned_version,
+        force_prune_unproven=force_prune_unproven,
     )
 
 
@@ -2752,6 +2926,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--runtime", action="append", choices=[*RUNTIMES, "all"]
     )
     update_parser.add_argument("--auto", action="store_true", help=argparse.SUPPRESS)
+    update_parser.add_argument("--force-prune-unproven", action="store_true")
     update_parser.add_argument("--json", action="store_true")
     auto_parser = sub.add_parser("auto-update")
     auto_parser.add_argument("operation", choices=["status", "enable", "disable"])
@@ -2774,6 +2949,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                 args.version,
                 _runtime_values(args.runtime) if args.runtime else None,
                 args.auto,
+                args.force_prune_unproven,
             )
         else:
             result = auto_update(args.operation)

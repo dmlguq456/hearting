@@ -45,11 +45,16 @@ from dispatch_contract import (ARTIFACT_PROOF_RECEIPT,
                                dispatch_state_roots,
                                claim_recovery_retry,
                                reconcile_local_registry, resolve_agent_home,
+                               resolve_dispatch_state_root,
                                resolve_parent_extinction,
                                seal_cancellation_quiescence_receipt,
                                signal_exact_process_group,
                                validate_attempt_metadata)  # noqa: E402
 from dispatch_continuation_budget import resolve_continuation_budget  # noqa: E402
+from dispatch_registry_inventory import (  # noqa: E402
+    import_archive as inventory_import_archive,
+    inventory_query,
+)
 from codex_dispatch_terminal import (  # noqa: E402
     inspect_terminal_attempt,
     inspect_terminal_log,
@@ -2043,8 +2048,35 @@ def emit_orphan_scan(rows, args):
     return 0
 
 
+def emit_archive_import(state_root, args):
+    if not args.archive_source:
+        print("check=failed\nreason=archive-source-required"); return 64
+    archive_id, error, detail = inventory_import_archive(state_root, args.archive_source)
+    if error:
+        print(f"check=failed\nreason={error}\ndetail={detail}"); return 65
+    from dispatch_registry_inventory import read_archive
+    row_count = len(read_archive(state_root, archive_id))
+    import hashlib as _hashlib
+    content_digest = "sha256:" + _hashlib.sha256(Path(args.archive_source).read_bytes()).hexdigest()
+    print(f"check=ok\narchive_id={archive_id}\nrow_count={row_count}\ncontent_digest={content_digest}")
+    return 0
+
+
+def emit_inventory(state_root, args):
+    result = inventory_query(
+        state_root, from_ts=args.from_ts, to_ts=args.to_ts, include_archive=args.include_archive,
+    )
+    print(
+        "check=ok\n"
+        f"inventory_complete={'true' if result.inventory_complete else 'false'}\n"
+        f"reasons={','.join(result.reasons)}\n"
+        f"rows={len(result.rows)}"
+    )
+    return 0
+
+
 def main(argv):
-    p = argparse.ArgumentParser(description=__doc__); p.add_argument("operation", choices=("current", "liveness", "reconcile", "attempt-state", "orphan-status", "orphan-scan", "repair-stale-row"))
+    p = argparse.ArgumentParser(description=__doc__); p.add_argument("operation", choices=("current", "liveness", "reconcile", "attempt-state", "orphan-status", "orphan-scan", "repair-stale-row", "archive-import", "inventory"))
     p.add_argument("--jobs", type=Path); p.add_argument("--global-jobs", type=Path); p.add_argument("--local-jobs", type=Path)
     p.add_argument("--session"); p.add_argument("--route")
     p.add_argument("--node"); p.add_argument("--attempt"); p.add_argument("--job"); p.add_argument("--all", action="store_true")
@@ -2060,9 +2092,17 @@ def main(argv):
     p.add_argument("--cascade-grace", type=float, default=2.0, help=argparse.SUPPRESS)
     p.add_argument("--cascade-kill-wait", type=float, default=1.0, help=argparse.SUPPRESS)
     p.add_argument("--cancellation-wait", type=float, default=2.0, help=argparse.SUPPRESS)
+    p.add_argument("--archive-source", type=Path); p.add_argument("--archive-id")
+    p.add_argument("--from-ts"); p.add_argument("--to-ts")
+    p.add_argument("--include-archive", action="store_true")
     args = p.parse_args(argv[1:]); args.agent_home = args.agent_home or resolve_agent_home()
     if args.cascade_grace < 0 or args.cascade_kill_wait < 0 or args.cancellation_wait < 0:
         print("check=failed\nreason=invalid-cascade-timeout"); return 64
+    if args.operation in ("archive-import", "inventory"):
+        state_root = resolve_dispatch_state_root(args.agent_home, explicit_jobs=args.jobs, environ=os.environ)
+        if args.operation == "archive-import":
+            return emit_archive_import(state_root, args)
+        return emit_inventory(state_root, args)
     if args.operation == "attempt-state":
         if args.pid is None or not args.pid_start:
             print("check=failed\nreason=exact-identity-required"); return 64
