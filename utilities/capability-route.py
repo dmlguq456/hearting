@@ -2145,7 +2145,7 @@ def _head_commit(cwd):
 # itself: `route_hash` covers every field but the hash and id, so any added key makes
 # `verify_route` reject it. The closure lives in a sidecar and binds `route_hash`, so a
 # recompiled route leaves a detectably stale one rather than a silently wrong one.
-def close_route(route, route_file, commit=None, summary=None, publication=None):
+def close_route(route, route_file, commit=None, summary=None, publication=None, allow_unproven=False):
     from datetime import datetime, timezone
     # F7: D-2's single-storage-location contract has a compile-time entrance gate
     # (`route-output-outside-canonical`) but had no exit gate -- `close` would
@@ -2174,6 +2174,13 @@ def close_route(route, route_file, commit=None, summary=None, publication=None):
     # recompute this, so the sidecar's `terminal_gate_proven` reflects gate state at
     # the moment of THIS close, not at any later inspection.
     gates=terminal_gate_observation(route)
+    # C-25c: a `close` that lands before the terminal node's `complete` used to
+    # seal `terminal_gate_proven=false` permanently -- finalize could never
+    # prove the gate afterward even once `complete` actually ran. Refuse the
+    # close instead of writing that sidecar, unless the caller explicitly opts
+    # into recording the false proof (e.g. an intentionally abandoned route).
+    if terminal_gate_proven(gates) is False and not allow_unproven:
+        raise ValueError("route-close-before-complete")
     outcome={"schema_version":4 if publication is not None else OUTCOME_SCHEMA_VERSION,
              "route_id":route["route_id"],"route_hash":route["route_hash"],
              "route_file":str(Path(route_file).resolve()),"cwd":route["cwd"],
@@ -3591,6 +3598,8 @@ def main():
     cl=sub.add_parser("close"); cl.add_argument("--route",required=True)
     cl.add_argument("--commit",help="result commit; defaults to HEAD in the route cwd")
     cl.add_argument("--summary",help="one line naming what the route produced")
+    cl.add_argument("--allow-unproven",action="store_true",
+                     help="permit sealing terminal_gate_proven=false for a route closed before its terminal node completed")
     st=sub.add_parser("status"); st.add_argument("--artifact-root",required=True)
     st.add_argument("--open-only",action="store_true",help="list only routes with no recorded outcome")
     a=p.parse_args()
@@ -3746,7 +3755,7 @@ def main():
             if a.output: atomic_write(a.output, record)
             print(json.dumps(record,sort_keys=True))
         elif a.command=="close":
-            outcome,created=close_route(route,a.route,a.commit,a.summary)
+            outcome,created=close_route(route,a.route,a.commit,a.summary,allow_unproven=a.allow_unproven)
             print(json.dumps(outcome,sort_keys=True))
             if not created: print("capability-route: route already closed",file=sys.stderr)
             if outcome.get("terminal_gate_proven") is False:
@@ -3761,6 +3770,11 @@ def main():
             else:
                 evidence=Path(a.evidence).resolve()
                 if not evidence.is_file(): raise SystemExit("completion evidence missing")
+                # C-25b: check before completion runs, so a colliding `--output`
+                # neither overwrites the pre-existing file's bytes nor leaves a
+                # completion marker written behind a refused copy.
+                if a.output and Path(a.output).exists():
+                    raise ValueError("completion-output-exists")
                 raw_axes=(a.dispatch_depth,a.transport,a.execution_surface,a.registered_worker,a.fallback_hop)
                 explicit_attempt_metadata=None
                 if any(value is not None for value in raw_axes):

@@ -3175,5 +3175,152 @@ class DispatchBatchIntegrationTest(unittest.TestCase):
                     time.sleep(0.2)
 
 
+class GroupLegReviewRoundCapTest(unittest.TestCase):
+    """C-14: a realized parallel_group leg on a capped anchor (plan-check/
+    impl-review/test) must not bypass the round cap that dispatch-node.py
+    enforces for a single session -- one leg over budget refuses the whole
+    group (child 0) before the atomic reservation, not just that leg."""
+
+    def setUp(self) -> None:
+        governor_env = mock.patch.dict(os.environ, {"AGENT_MODEL_GOVERNOR_ROOT": ""})
+        governor_env.start()
+        self.addCleanup(governor_env.stop)
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.base = Path(self.temp.name)
+        self.route_path = self.base / "route.json"
+        self.route_path.write_text("{}", encoding="utf-8")
+        self.jobs = self.base / "jobs.log"
+
+    def _review_node(self, node_id, index, affinity):
+        return {
+            "id": node_id,
+            "dispatch_depth": 2,
+            "depends_on": ["execute"],
+            "replica_group": "impl-review",
+            "parallel_group": "impl-review",
+            "parallel_leg_index": index,
+            "parallel_leg_count": 2,
+            "parallel_independence_axes": ["cross-harness", "model-profile", "perspective"],
+            "model_profile": "balanced-deep" if index == 0 else "light",
+            "perspective": "primary-review" if index == 0 else "independent-review",
+            "harness_affinity": affinity,
+            "fallback_hops": [
+                candidate("codex", "same-harness-headless", 1),
+                candidate("claude", "cross-harness-headless", 2),
+            ],
+        }
+
+    def _route(self, effective_intensity):
+        return {
+            "route_id": "rt-fixture",
+            "route_hash": "sha256:fixture",
+            "cwd": str(self.base),
+            "effective_intensity": effective_intensity,
+            "nodes": [
+                self._review_node("impl-review", 0, "codex"),
+                self._review_node("impl-review-replica", 1, "claude"),
+            ],
+        }
+
+    def _rows(self, node_id, n):
+        pipe = ("capability=autopilot-code,attempt_schema_version=2,registered_worker=1,"
+                "route=rt-fixture,route_node=" + node_id + ",note=dead-worker-fail")
+        return "".join(
+            f"2026-08-24T00:00:0{i}Z\tdone\t{self.base}\t{self.base}\tslug-r{i}\t"
+            f"{pipe},attempt_id=att-{node_id}-{i}\n"
+            for i in range(1, n + 1)
+        )
+
+    def _run(self, route, prior_rows, *, probe_message="assignment must not run once the group round cap is exceeded"):
+        self.jobs.write_text(prior_rows, encoding="utf-8")
+        argv = [
+            "--route", str(self.route_path), "--replica-group", "impl-review",
+            "--action", "start", "--slug-prefix", "fixture", "--parent", "owner",
+            "--jobs", str(self.jobs),
+        ]
+        output = io.StringIO()
+        with mock.patch.object(BATCH, "load_route", return_value=route), \
+             mock.patch.object(BATCH, "resolve_agent_home", return_value=self.base), \
+             mock.patch.object(BATCH, "resolve_global_registry", return_value=SimpleNamespace(path=self.jobs)), \
+             mock.patch.object(
+                 BATCH, "assign_harnesses",
+                 side_effect=AssertionError(probe_message),
+             ), \
+             mock.patch.dict(os.environ, {
+                 "AGENT_DISPATCH_SELF_SLUG": "owner",
+                 "AGENT_DISPATCH_ATTEMPT_ID": "att-parent-fixture",
+                 "AGENT_DISPATCH_CURRENT_HARNESS": "codex",
+                 "AGENT_DISPATCH_CURRENT_TRANSPORT": "headless",
+                 "AGENT_DISPATCH_CURRENT_SANDBOX": "workspace-write",
+             }), \
+             contextlib.redirect_stdout(output):
+            result = BATCH.main(argv)
+        return result, output.getvalue()
+
+    def test_standard_group_leg_is_refused_at_the_third_round(self):
+        route = self._route("standard")
+        result, out = self._run(route, self._rows("impl-review", 2))
+        self.assertEqual(result, 65)
+        receipt = json.loads(out)
+        self.assertEqual(receipt["reason"], "review-round-budget-exhausted")
+        self.assertIn("route_node=impl-review", receipt["detail"])
+        self.assertIn("round=3", receipt["detail"])
+        self.assertIn("max_round=2", receipt["detail"])
+        self.assertEqual(
+            {key: receipt[key] for key in (
+                "admitted", "spawned", "registered", "started", "child_spawned"
+            )},
+            {"admitted": "0", "spawned": "0", "registered": "0",
+             "started": "0", "child_spawned": "0"},
+        )
+
+    def test_standard_group_leg_within_budget_proceeds_past_the_cap_check(self):
+        route = self._route("standard")
+        # assign_harnesses raising the probe AssertionError (rather than a
+        # caught BatchError receipt) proves the cap check let this leg
+        # through to assignment, exactly as an unexceeded budget should.
+        with self.assertRaisesRegex(
+            AssertionError, "assignment must not run once the group round cap is exceeded",
+        ):
+            self._run(route, self._rows("impl-review", 1))
+
+    def test_direct_group_leg_is_refused_at_the_second_round(self):
+        route = self._route("direct")
+        result, out = self._run(route, self._rows("impl-review", 1))
+        self.assertEqual(result, 65)
+        receipt = json.loads(out)
+        self.assertEqual(receipt["reason"], "review-round-budget-exhausted")
+        self.assertIn("max_round=1", receipt["detail"])
+
+    def test_uncapped_group_is_unaffected(self):
+        route = self._route("standard")
+        route["nodes"] = [replica_node("plan", "codex"), replica_node("plan-replica", "claude")]
+        argv = [
+            "--route", str(self.route_path), "--replica-group", "plan",
+            "--action", "start", "--slug-prefix", "fixture", "--parent", "owner",
+            "--jobs", str(self.jobs),
+        ]
+        self.jobs.write_text(self._rows("plan", 5), encoding="utf-8")
+        output = io.StringIO()
+        with mock.patch.object(BATCH, "load_route", return_value=route), \
+             mock.patch.object(BATCH, "resolve_agent_home", return_value=self.base), \
+             mock.patch.object(BATCH, "resolve_global_registry", return_value=SimpleNamespace(path=self.jobs)), \
+             mock.patch.object(
+                 BATCH, "assign_harnesses",
+                 side_effect=AssertionError("uncapped node must reach assignment"),
+             ), \
+             mock.patch.dict(os.environ, {
+                 "AGENT_DISPATCH_SELF_SLUG": "owner",
+                 "AGENT_DISPATCH_ATTEMPT_ID": "att-parent-fixture",
+                 "AGENT_DISPATCH_CURRENT_HARNESS": "codex",
+                 "AGENT_DISPATCH_CURRENT_TRANSPORT": "headless",
+                 "AGENT_DISPATCH_CURRENT_SANDBOX": "workspace-write",
+             }), \
+             contextlib.redirect_stdout(output):
+            with self.assertRaisesRegex(AssertionError, "uncapped node must reach assignment"):
+                BATCH.main(argv)
+
+
 if __name__ == "__main__":
     unittest.main()

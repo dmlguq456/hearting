@@ -835,7 +835,7 @@ def _apply_route_sweep_plan(root: Path, package: Dict[str, Any]) -> Dict[str, An
                 outcome = source.with_name(source.stem + ".outcome.json")
                 if not outcome.is_file():
                     route = json.loads(source.read_text(encoding="utf-8"))
-                    routes.close_route(route, source, summary="abandoned-closeout")
+                    routes.close_route(route, source, summary="abandoned-closeout", allow_unproven=True)
             applied.append({"action": action, "route_id": row.get("route_id")})
         else:
             target = root / row["target_paths"][0]
@@ -862,7 +862,7 @@ def _apply_route_sweep_plan(root: Path, package: Dict[str, Any]) -> Dict[str, An
                 # routes directory.  Move first, then close at the canonical
                 # path.  An existing target without an outcome is the durable
                 # crash-recovery shape after the route move.
-                routes.close_route(route, target, summary="abandoned-closeout")
+                routes.close_route(route, target, summary="abandoned-closeout", allow_unproven=True)
             applied.append({"action": action, "route_id": row.get("route_id")})
         journal = {
             "schema_version": 1,

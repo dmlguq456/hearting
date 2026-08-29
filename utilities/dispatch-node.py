@@ -301,6 +301,29 @@ def prior_round_attempts(jobs, route_id, node_id, *, exclude_slug=None, exclude_
   prior.append((cols[4],meta.get("note","")))
  return prior
 
+# C-14: only the plan-check/impl-review/test QA anchors carry a review/correction
+# budget under CONVENTIONS §1.1. `execute`/`report` are outside that budget (P2-27
+# review): execute's own retry mechanism is HEAD-lineage based, not round-counted,
+# so excluding it here cannot open an execute-side bypass of the cap.
+ROUND_CAPPED_NODE_IDS = frozenset({"plan-check", "impl-review", "test"})
+
+def max_review_rounds(effective_intensity):
+    """Tier-derived max round count for a capped anchor (CONVENTIONS §1.1 retry budget).
+
+    `direct`/`quick` run no automatic correction round (max 1: the first pass
+    only, matching the table's "One pass"/"None automatically"). `standard`/`strong`
+    get one correction (max 2). `thorough`/`adversarial` get two, including the
+    adversary pass that is not itself a correction (max 3). This is deliberately a
+    per-tier derivation, not a hardcoded `cap=2` -- a tier change moves the cap with it.
+    """
+    if effective_intensity in ("direct", "quick"):
+        return 1
+    if effective_intensity in ("standard", "strong"):
+        return 2
+    if effective_intensity in ("thorough", "adversarial"):
+        return 3
+    raise ValueError(f"unknown effective_intensity for review round cap: {effective_intensity}")
+
 def round_protocol_block(round_no, worker_type, node_id, prior):
  """Render the assignment block that scopes a correction round."""
  if round_no<2: return ""
@@ -460,6 +483,18 @@ def main():
  contract=assigned_contract(capability=route["capability"],worker_type=worker_type,route_node=node["id"],completion_gate=node.get("completion_gate"),root=ROOT)
  prior_rounds=prior_round_attempts(registry.path,route["route_id"],node["id"],exclude_slug=a.slug,exclude_attempt=a.attempt_id) if not a.subsession_id else []
  round_no=len(prior_rounds)+1
+ if a.node in ROUND_CAPPED_NODE_IDS and not a.subsession_id:
+  max_round=max_review_rounds(route["effective_intensity"])
+  if round_no>max_round:
+   print("check=failed")
+   print("reason=review-round-budget-exhausted")
+   print(f"route_id={route['route_id']}")
+   print(f"route_node={a.node}")
+   print(f"effective_intensity={route['effective_intensity']}")
+   print(f"round={round_no}")
+   print(f"max_round={max_round}")
+   print("child_spawned=0")
+   raise SystemExit(65)
  prompt_text=a.prompt_text+round_protocol_block(round_no,worker_type,node["id"],prior_rounds)
  if round_no>=2: print(f"correction_round={round_no}")
  argv=[sys.executable,str(wrapper),"--"+a.action,"--worktree",route["cwd"],"--slug",a.slug,"--capability",route["capability"],"--capability-mode",route["capability_mode"],"--qa",a.qa,"--intensity",route["effective_intensity"],"--dispatch-depth",str(node.get("dispatch_depth",1)),"--worker-type",worker_type,"--unit",node.get("unit",""),"--assigned-contract",contract,"--owner",route["capability"],"--route-file",str(Path(a.route).resolve()),"--route-id",route["route_id"],"--route-hash",route["route_hash"],"--route-node",node["id"],"--registry-digest",route["registry_digest"],"--write-scope",";".join(node["write_scope"]),"--completion-gate",node["completion_gate"],"--jobs",str(registry.path),"--prompt-text",prompt_text]

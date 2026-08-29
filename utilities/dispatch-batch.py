@@ -1835,6 +1835,25 @@ def main(argv: list[str] | None = None) -> int:
         ).path
         if args.log_dir is not None:
             args.log_dir = validate_dispatch_log_dir(jobs, args.log_dir)
+        # C-14: dispatch-node.py caps plan-check/impl-review/test rounds, but a
+        # realized parallel_group leg bypasses that wrapper entirely -- check
+        # every capped leg here too, before the atomic reservation, so one leg
+        # over budget refuses the whole group (child 0), not just that leg.
+        for capped_node in nodes:
+            capped_node_id = str(capped_node["id"])
+            if capped_node_id not in DISPATCH_NODE.ROUND_CAPPED_NODE_IDS:
+                continue
+            prior = DISPATCH_NODE.prior_round_attempts(jobs, route["route_id"], capped_node_id)
+            round_no = len(prior) + 1
+            max_round = DISPATCH_NODE.max_review_rounds(route["effective_intensity"])
+            if round_no > max_round:
+                raise BatchError(
+                    "review-round-budget-exhausted",
+                    f"route_id={route['route_id']} route_node={capped_node_id} "
+                    f"effective_intensity={route['effective_intensity']} "
+                    f"round={round_no} max_round={max_round}",
+                    route_node=capped_node_id,
+                )
         assignments, independence, diagnostics = assign_harnesses(
             route,
             nodes,
@@ -1896,6 +1915,7 @@ def main(argv: list[str] | None = None) -> int:
         if reason in {
             "launch-runtime-root-mismatch",
             "launch-compatibility-tuple-required",
+            "review-round-budget-exhausted",
         }:
             extra.update({
                 "admitted": "0",

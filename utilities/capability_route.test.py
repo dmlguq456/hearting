@@ -1195,7 +1195,7 @@ class TestRoute(unittest.TestCase):
   with tempfile.TemporaryDirectory() as tmp:
    artifact_root=Path(tmp); route=dict(route); route["artifact_root"]=str(artifact_root)
    path=artifact_root/"demo-route.json"; path.write_text(json.dumps(route),encoding="utf-8")
-   outcome,created=R.close_route(route,path,commit="0"*40,summary="demo")
+   outcome,created=R.close_route(route,path,commit="0"*40,summary="demo",allow_unproven=True)
    self.assertTrue(created); self.assertTrue(R.outcome_path(path).is_file())
    self.assertEqual(outcome["route_hash"],route["route_hash"]); self.assertEqual(outcome["route_id"],route["route_id"])
    self.assertEqual(outcome["head_commit"],"0"*40); self.assertEqual(outcome["summary"],"demo")
@@ -1209,13 +1209,12 @@ class TestRoute(unittest.TestCase):
    self.assertEqual(again["terminal_gate_proven"],False)
    # Idempotent re-close must not recompute: the sidecar's exact bytes are unchanged.
    self.assertEqual(R.outcome_path(path).read_bytes(),before)
- def test_close_records_false_and_warns_for_direct_unproven_gate(self):
-  # Red before P2: schema 2 outcomes carry neither `terminal_gate_proven` nor
-  # `terminal_gates`, and `close` never printed a warning at all -- this exercises the
-  # real CLI so the stderr contract, not just the in-process dict, is covered. Direct
-  # routes declare an `inline` terminal but nothing writes its marker in this test, so
-  # the aggregate must be `False`, never `None` -- a direct/inline close that silently
-  # reported "no terminal node" would hide every unproven direct closure.
+ def test_close_before_complete_is_refused_by_default(self):
+  # C-25c: `close` used to seal `terminal_gate_proven=false` permanently for
+  # any route closed before its terminal node completed -- finalize could
+  # never prove the gate afterward even once `complete` actually ran. The
+  # default contract is now a typed refusal that writes no sidecar at all,
+  # so `complete` (which must run first) is not locked out by an early close.
   import subprocess,sys
   with tempfile.TemporaryDirectory() as tmp:
    artifact_root=Path(tmp)
@@ -1225,6 +1224,28 @@ class TestRoute(unittest.TestCase):
    route_path=R.canonical_routes_dir(artifact_root)/f"{route['route_id']}.json"
    result=subprocess.run([sys.executable,str(P),"close","--route",str(route_path)],
                          capture_output=True,text=True,cwd=str(R.ROOT))
+   self.assertEqual(result.returncode,64,result.stdout)
+   self.assertIn("route-close-before-complete",result.stderr)
+   self.assertFalse(R.outcome_path(route_path).exists())
+ def test_close_records_false_and_warns_for_direct_unproven_gate_with_override(self):
+  # Red before P2: schema 2 outcomes carry neither `terminal_gate_proven` nor
+  # `terminal_gates`, and `close` never printed a warning at all -- this exercises the
+  # real CLI so the stderr contract, not just the in-process dict, is covered. Direct
+  # routes declare an `inline` terminal but nothing writes its marker in this test, so
+  # the aggregate must be `False`, never `None` -- a direct/inline close that silently
+  # reported "no terminal node" would hide every unproven direct closure.
+  # C-25c: this is now the explicit `--allow-unproven` override path; the
+  # default (no flag) is covered by test_close_before_complete_is_refused_by_default.
+  import subprocess,sys
+  with tempfile.TemporaryDirectory() as tmp:
+   artifact_root=Path(tmp)
+   compiled=self._run_compile_cli(self._compile_cli_args(artifact_root))
+   self.assertEqual(compiled.returncode,0,compiled.stderr)
+   route=json.loads(compiled.stdout)
+   route_path=R.canonical_routes_dir(artifact_root)/f"{route['route_id']}.json"
+   result=subprocess.run(
+    [sys.executable,str(P),"close","--route",str(route_path),"--allow-unproven"],
+    capture_output=True,text=True,cwd=str(R.ROOT))
    self.assertEqual(result.returncode,0,result.stderr)
    outcome=json.loads(result.stdout)
    self.assertEqual(outcome["schema_version"],3)
@@ -1232,6 +1253,13 @@ class TestRoute(unittest.TestCase):
    self.assertEqual(outcome["terminal_gates"]["inline"]["reason"],"completion-marker-absent")
    self.assertIn("terminal-gate-unproven",result.stderr)
    self.assertIn(route["route_id"],result.stderr)
+   before=R.outcome_path(route_path).read_bytes()
+   # Re-close (idempotent) must not recompute: exact bytes unchanged, override
+   # not required the second time since the sidecar already exists.
+   again=subprocess.run([sys.executable,str(P),"close","--route",str(route_path)],
+                        capture_output=True,text=True,cwd=str(R.ROOT))
+   self.assertEqual(again.returncode,0,again.stderr)
+   self.assertEqual(R.outcome_path(route_path).read_bytes(),before)
  def test_close_records_true_for_verified_terminal_marker(self):
   # Red before P2: the outcome had no gate observation at all, so there was nothing to
   # assert `True` against.
@@ -1272,7 +1300,7 @@ class TestRoute(unittest.TestCase):
    (root/"open-route.json").write_text(json.dumps(route),encoding="utf-8")
    closed=root/"closed-route.json"; closed.write_text(json.dumps(route),encoding="utf-8")
    (root/"unrelated.json").write_text(json.dumps({"note":"not a route"}),encoding="utf-8")
-   R.close_route(route,closed,commit="2"*40)
+   R.close_route(route,closed,commit="2"*40,allow_unproven=True)
    rows={Path(row["route_file"]).name:row for row in R.route_status(root)}
    self.assertEqual(set(rows),{"open-route.json","closed-route.json"})
    self.assertFalse(rows["open-route.json"]["closed"]); self.assertTrue(rows["closed-route.json"]["closed"])
@@ -1286,7 +1314,7 @@ class TestRoute(unittest.TestCase):
    root=Path(tmp)
    first=dict(first); first["artifact_root"]=str(root)
    path=root/"demo-route.json"; path.write_text(json.dumps(first),encoding="utf-8")
-   R.close_route(first,path,commit="3"*40)
+   R.close_route(first,path,commit="3"*40,allow_unproven=True)
    second=dict(second); second["artifact_root"]=str(root)
    path.write_text(json.dumps(second),encoding="utf-8")
    row=R.route_status(root)[0]
@@ -1349,6 +1377,54 @@ class TestRoute(unittest.TestCase):
    self.assertTrue(expected.is_file())
    self.assertIn(f"route_file={expected.resolve()}",result.stderr)
    self.assertEqual(json.loads(expected.read_text(encoding="utf-8"))["route_id"],route["route_id"])
+ def test_complete_output_collision_is_refused_and_preserves_original(self):
+  # C-25b: `complete --output` used to overwrite any existing file at that
+  # path unconditionally (`if a.output: atomic_write(a.output, marker)`),
+  # which could silently destroy a pre-existing owner artifact that happened
+  # to share the resolved path. The check must run before completion itself,
+  # so refusing it does not also touch the completion registry state.
+  import subprocess,sys
+  with tempfile.TemporaryDirectory() as tmp:
+   artifact_root=Path(tmp)
+   compiled=self._run_compile_cli(self._compile_cli_args(artifact_root))
+   self.assertEqual(compiled.returncode,0,compiled.stderr)
+   route=json.loads(compiled.stdout)
+   route_path=R.canonical_routes_dir(artifact_root)/f"{route['route_id']}.json"
+   node_id=route["nodes"][0]["id"]
+   evidence=artifact_root/"evidence.txt"
+   evidence.write_text("evidence\n",encoding="utf-8")
+   existing_output=artifact_root/"existing-artifact.md"
+   existing_output.write_text("pre-existing owner artifact\n",encoding="utf-8")
+   before=existing_output.read_bytes()
+   result=subprocess.run(
+    [sys.executable,str(P),"complete","--route",str(route_path),"--node",node_id,
+     "--evidence",str(evidence),"--output",str(existing_output)],
+    capture_output=True,text=True,cwd=str(R.ROOT))
+   self.assertEqual(result.returncode,64,result.stderr)
+   self.assertIn("completion-output-exists",result.stderr)
+   self.assertEqual(existing_output.read_bytes(),before)
+ def test_complete_output_absent_still_writes_the_marker_copy(self):
+  import subprocess,sys
+  with tempfile.TemporaryDirectory() as tmp:
+   artifact_root=Path(tmp)
+   compiled=self._run_compile_cli(self._compile_cli_args(artifact_root))
+   self.assertEqual(compiled.returncode,0,compiled.stderr)
+   route=json.loads(compiled.stdout)
+   route_path=R.canonical_routes_dir(artifact_root)/f"{route['route_id']}.json"
+   node_id=route["nodes"][0]["id"]
+   evidence=artifact_root/"evidence.txt"
+   evidence.write_text("evidence\n",encoding="utf-8")
+   output=artifact_root/"marker-copy.json"
+   child_env=os.environ.copy()
+   child_env["AGENT_HOME"]=str(R.ROOT)
+   child_env.pop("CLAUDE_HOME",None)
+   child_env["AGENT_DISPATCH_JOBS"]=str(Path(tmp)/"jobs.log")
+   result=subprocess.run(
+    [sys.executable,str(P),"complete","--route",str(route_path),"--node",node_id,
+     "--evidence",str(evidence),"--output",str(output)],
+    capture_output=True,text=True,cwd=str(R.ROOT),env=child_env)
+   self.assertEqual(result.returncode,0,result.stderr)
+   self.assertTrue(output.is_file())
  def test_compile_runtime_root_mismatch_writes_nothing(self):
   with tempfile.TemporaryDirectory() as tmp:
    root=Path(tmp)
@@ -1411,7 +1487,7 @@ class TestRoute(unittest.TestCase):
   with tempfile.TemporaryDirectory() as tmp:
    root=Path(tmp); route=dict(route); route["artifact_root"]=str(root)
    path=R.canonical_route_path(root,route["route_id"]); R.write_once(path,route)
-   outcome,_=R.close_route(route,path,commit="8"*40)
+   outcome,_=R.close_route(route,path,commit="8"*40,allow_unproven=True)
    self.assertEqual(outcome["schema_version"],3)
    self.assertNotIn("publication",outcome)
  def test_close_route_publication_present_bumps_schema_v4(self):
@@ -1419,7 +1495,7 @@ class TestRoute(unittest.TestCase):
   with tempfile.TemporaryDirectory() as tmp:
    root=Path(tmp); route=dict(route); route["artifact_root"]=str(root)
    path=R.canonical_route_path(root,route["route_id"]); R.write_once(path,route)
-   outcome,_=R.close_route(route,path,commit="9"*40,publication="failed")
+   outcome,_=R.close_route(route,path,commit="9"*40,publication="failed",allow_unproven=True)
    self.assertEqual(outcome["schema_version"],4)
    self.assertEqual(outcome["publication"],"failed")
  def test_close_route_on_alias_record_still_succeeds_with_drift_warning(self):
@@ -1429,7 +1505,7 @@ class TestRoute(unittest.TestCase):
    alias=R.canonical_routes_dir(root)/"existing-alias.json"; R.write_once(alias,route)
    stderr=io.StringIO()
    with contextlib.redirect_stderr(stderr):
-    outcome,created=R.close_route(route,alias,commit="a"*40)
+    outcome,created=R.close_route(route,alias,commit="a"*40,allow_unproven=True)
    self.assertTrue(created)
    self.assertEqual(outcome["route_location"],"canonical")
    self.assertTrue(R.outcome_path(alias).is_file())
@@ -1453,7 +1529,7 @@ class TestRoute(unittest.TestCase):
    route=dict(route); route["artifact_root"]=str(artifact_root)
    legacy=artifact_root/"_routes"/"demo-route.json"; legacy.parent.mkdir(parents=True)
    legacy.write_text(json.dumps(route),encoding="utf-8")
-   outcome,created=R.close_route(route,legacy,commit="4"*40,summary="legacy close")
+   outcome,created=R.close_route(route,legacy,commit="4"*40,summary="legacy close",allow_unproven=True)
    self.assertTrue(created)
    self.assertEqual(outcome["route_location"],"legacy-_routes")
    self.assertTrue(R.outcome_path(legacy).is_file())
@@ -1905,7 +1981,7 @@ class TestValidationBasis(unittest.TestCase):
    env=os.environ.copy(); env["AGENT_HOME"]=self._tmp_home.name
    env.pop("AGENT_DISPATCH_JOBS",None)
    result=subprocess.run(
-    [sys.executable,str(P),"close","--route",str(route_path),"--commit","d"*40],
+    [sys.executable,str(P),"close","--route",str(route_path),"--commit","d"*40,"--allow-unproven"],
     capture_output=True,text=True,cwd=str(R.ROOT),env=env,
    )
    self.assertEqual(result.returncode,0,result.stderr)
@@ -1925,7 +2001,7 @@ class TestValidationBasis(unittest.TestCase):
   with tempfile.TemporaryDirectory() as tmp:
    artifact_root=Path(tmp); route=dict(route); route["artifact_root"]=str(artifact_root)
    path=artifact_root/"demo-route.json"; path.write_text(json.dumps(route),encoding="utf-8")
-   outcome,created=R.close_route(route,path,commit="b"*40)
+   outcome,created=R.close_route(route,path,commit="b"*40,allow_unproven=True)
    self.assertTrue(created)
  def test_same_root_digest_change_still_reads_as_stale(self):
   route=R.compile_route(**self.args())
@@ -2038,7 +2114,7 @@ class TestValidationBasis(unittest.TestCase):
   with tempfile.TemporaryDirectory() as tmp:
    artifact_root=Path(tmp); verified=dict(verified); verified["artifact_root"]=str(artifact_root)
    path=artifact_root/"demo-route.json"; path.write_text(json.dumps(verified),encoding="utf-8")
-   outcome,created=R.close_route(verified,path,commit="c"*40)
+   outcome,created=R.close_route(verified,path,commit="c"*40,allow_unproven=True)
    self.assertTrue(created)
    self.assertIs(outcome["registry_current"],False)
  def test_unknown_basis_keys_are_tolerated(self):
@@ -2077,7 +2153,7 @@ class TestValidationBasis(unittest.TestCase):
   with tempfile.TemporaryDirectory() as tmp:
    artifact_root=Path(tmp); verified=dict(verified); verified["artifact_root"]=str(artifact_root)
    path=artifact_root/"demo-route.json"; path.write_text(json.dumps(verified),encoding="utf-8")
-   outcome,created=R.close_route(verified,path,commit="d"*40)
+   outcome,created=R.close_route(verified,path,commit="d"*40,allow_unproven=True)
    self.assertTrue(created)
 
 class GroundingCwdLineageTest(unittest.TestCase):

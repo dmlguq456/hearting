@@ -658,5 +658,144 @@ class RoundProtocolTest(unittest.TestCase):
         self.assertNotIn("Round protocol", prompt)
 
 
+class ReviewRoundCapTest(unittest.TestCase):
+    """C-14: plan-check/impl-review/test rounds are capped by tier-derived retry
+    budget (CONVENTIONS §1.1), not left unbounded. `execute`/`report` carry no
+    cap here -- their retry mechanism is HEAD-lineage based, not round-counted."""
+
+    def _rows(self, node, n):
+        pipe = ("capability=autopilot-code,attempt_schema_version=2,registered_worker=1,"
+                "route=rt-fixture,route_node=" + node + ",note=dead-worker-fail")
+        return "".join(
+            f"2026-08-24T00:00:0{i}Z\tdone\t/repo\t/wt\tslug-r{i}\t{pipe},attempt_id=att-{node}-{i}\n"
+            for i in range(1, n + 1)
+        )
+
+    def _run(self, node_id, prior_count, *, effective_intensity="standard", slug="slug-next"):
+        node = dict(make_node(depth=1, dispatch_fallback=[]), id=node_id,
+                    kind="review-worker", unit="qa/code-review", completion_gate="code-" + node_id)
+        route = make_route(node, tuples=[])
+        route["effective_intensity"] = effective_intensity
+        printed = []
+        code = None
+        launched = []
+
+        def fake_run(cmd, **kwargs):
+            launched.append(cmd)
+            return mock.Mock(returncode=0)
+
+        with tempfile.TemporaryDirectory() as td:
+            jobs = Path(td) / ".dispatch" / "jobs.log"
+            jobs.parent.mkdir()
+            jobs.write_text(self._rows(node_id, prior_count))
+            route_path = Path(td) / "route.json"
+            route_path.write_text(json.dumps(route))
+            argv = ["dispatch-node.py", "--route", str(route_path), "--node", node_id,
+                    "--adapter", "claude", "--slug", slug, "--action", "dry-run",
+                    "--prompt-text", "Perform a fresh independent pass."]
+            with mock.patch.object(sys, "argv", argv), \
+                 mock.patch.dict(N.os.environ, {"AGENT_DISPATCH_JOBS": str(jobs)}, clear=True), \
+                 mock.patch.object(N.subprocess, "run", side_effect=fake_run), \
+                 mock.patch("builtins.print", side_effect=lambda *a, **k: printed.append(" ".join(map(str, a)))):
+                try:
+                    N.main()
+                except SystemExit as exc:
+                    code = exc.code
+        # A capped rejection must stop before the wrapper launch (only the
+        # earlier route "verify" subprocess call, if any, may have run).
+        if code == 65:
+            self.assertTrue(
+                all("dispatch-headless.py" not in str(part) for cmd in launched for part in cmd),
+                launched,
+            )
+        return code, printed
+
+    def test_direct_and_quick_reject_the_second_round(self):
+        for intensity in ("direct", "quick"):
+            code, printed = self._run("plan-check", 1, effective_intensity=intensity)
+            self.assertEqual(code, 65)
+            self.assertIn("reason=review-round-budget-exhausted", printed)
+            self.assertIn("max_round=1", printed)
+            self.assertIn("round=2", printed)
+            self.assertIn("child_spawned=0", printed)
+
+    def test_direct_and_quick_allow_the_first_round(self):
+        for intensity in ("direct", "quick"):
+            code, printed = self._run("plan-check", 0, effective_intensity=intensity)
+            self.assertEqual(code, 0)
+            self.assertFalse([l for l in printed if l.startswith("reason=review-round-budget-exhausted")])
+
+    def test_standard_and_strong_reject_the_third_round(self):
+        for intensity in ("standard", "strong"):
+            code, printed = self._run("impl-review", 2, effective_intensity=intensity)
+            self.assertEqual(code, 65)
+            self.assertIn("reason=review-round-budget-exhausted", printed)
+            self.assertIn("max_round=2", printed)
+            self.assertIn("round=3", printed)
+
+    def test_standard_and_strong_allow_the_second_round(self):
+        for intensity in ("standard", "strong"):
+            code, printed = self._run("impl-review", 1, effective_intensity=intensity)
+            self.assertEqual(code, 0)
+
+    def test_thorough_and_adversarial_reject_the_fourth_round(self):
+        for intensity in ("thorough", "adversarial"):
+            code, printed = self._run("test", 3, effective_intensity=intensity)
+            self.assertEqual(code, 65)
+            self.assertIn("reason=review-round-budget-exhausted", printed)
+            self.assertIn("max_round=3", printed)
+            self.assertIn("round=4", printed)
+
+    def test_thorough_and_adversarial_allow_the_third_round(self):
+        for intensity in ("thorough", "adversarial"):
+            code, printed = self._run("test", 2, effective_intensity=intensity)
+            self.assertEqual(code, 0)
+
+    def test_execute_and_report_are_not_capped(self):
+        # Reproduces the rt-08dd7ba8 shape (12 execute rounds) for the anchor
+        # nodes that stay outside the review budget: execute's own retry
+        # mechanism is HEAD-lineage based, not round-counted (owner-scope-pack
+        # §C-14 "정합 요구").
+        for node_id in ("execute", "report"):
+            code, printed = self._run(node_id, 5, effective_intensity="direct")
+            self.assertEqual(code, 0)
+            self.assertFalse([l for l in printed if l.startswith("reason=review-round-budget-exhausted")])
+
+    def test_subsession_leg_is_excluded_from_the_cap(self):
+        node = dict(make_node(depth=1, dispatch_fallback=[]), id="plan-check",
+                    kind="review-worker", unit="qa/code-review", completion_gate="code-plan-check")
+        route = make_route(node, tuples=[])
+        route["effective_intensity"] = "direct"
+        printed = []
+        code = None
+        with tempfile.TemporaryDirectory() as td:
+            jobs = Path(td) / ".dispatch" / "jobs.log"
+            jobs.parent.mkdir()
+            jobs.write_text(self._rows("plan-check", 5))
+            route_path = Path(td) / "route.json"
+            route_path.write_text(json.dumps(route))
+            argv = ["dispatch-node.py", "--route", str(route_path), "--node", "plan-check",
+                    "--adapter", "claude", "--slug", "slug-sub", "--action", "dry-run",
+                    "--prompt-text", "Perform a fresh independent pass.",
+                    "--subsession-id", "sub-1", "--subsession-index", "1",
+                    "--subsession-count", "1", "--subsession-mode", "serial",
+                    "--session-chain-id", "chain-1", "--phase-brief", "brief",
+                    "--narrow-verify", "true", "--expected-round-trips", "1",
+                    "--stage-authority", "0", "--attempt-id", "att-sub-1"]
+            def fake_run(cmd, **kwargs):
+                return mock.Mock(returncode=0)
+
+            with mock.patch.object(sys, "argv", argv), \
+                 mock.patch.dict(N.os.environ, {"AGENT_DISPATCH_JOBS": str(jobs)}, clear=True), \
+                 mock.patch.object(N.subprocess, "run", side_effect=fake_run), \
+                 mock.patch("builtins.print", side_effect=lambda *a, **k: printed.append(" ".join(map(str, a)))):
+                try:
+                    N.main()
+                except SystemExit as exc:
+                    code = exc.code
+        self.assertEqual(code, 0)
+        self.assertFalse([l for l in printed if l.startswith("reason=review-round-budget-exhausted")])
+
+
 if __name__ == "__main__":
     unittest.main()
