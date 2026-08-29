@@ -1750,13 +1750,13 @@ class TestContinuation(unittest.TestCase):
   if self._previous_dispatch_jobs is None: os.environ.pop("AGENT_DISPATCH_JOBS",None)
   else: os.environ["AGENT_DISPATCH_JOBS"]=self._previous_dispatch_jobs
   self._tmp_home.cleanup()
- def _dispatch(self):
+ def _dispatch(self,worktree=None):
   row={
    "parent_harness":"codex","parent_transport":"headless",
    "parent_sandbox":R.WRAPPER_PARENT_SANDBOXES["codex"][0],
    "child_harness":"codex","launch_authority":"conductor","status":"supported",
    "probe_source":"continuation-fixture","probe_time":"2026-08-25T00:00:00Z",
-   "failure_class":"","checked_worktree":str(R.ROOT.resolve()),
+   "failure_class":"","checked_worktree":str((worktree or R.ROOT).resolve()),
    "failure_scope":"none","codex_command":"ok","retry_on_isolated_worktree":0,
   }
   return {"tuples":[row],"native_subagent":[{
@@ -1764,17 +1764,17 @@ class TestContinuation(unittest.TestCase):
    "execution_surface":"codex-native-subagent","registered_worker":False,
    "status":"supported","check_source":"continuation-fixture",
   }]}
- def _source(self,artifact_root):
+ def _source(self,artifact_root,cwd=None):
   gate={
    "spec_read":{"satisfied":True,"source":"canonical-prd-sha256"},
    "drift_verdict":"within-spec","workflow_mode":"tracked",
    "artifact_guard":{"satisfied":True,"source":"conductor-prechecked"},
   }
   route=R.compile_route(
-   "autopilot-code","dev","strong",R.ROOT,artifact_root,
+   "autopilot-code","dev","strong",cwd or R.ROOT,artifact_root,
    predicates=[],signals=["shared-contract"],transport="headless",
    tracking="tracked",tracked_gate_evidence=gate,
-   dispatch_evidence=self._dispatch(),
+   dispatch_evidence=self._dispatch(cwd),
   )
   route["runtime_lineage"]={
    "runtime":"codex","thread_id":"thread-source",
@@ -2134,7 +2134,11 @@ class TestContinuation(unittest.TestCase):
     # between golden capture and any later comparison unless frozen here too.
     # Neither is an SD-118 concern -- both are pre-existing properties of
     # shared helpers this test reuses, not of the two files SD-118 touches.
-    source=self._source(root/"artifacts")
+    # `cwd` is hashed into route identity (route_hash -> continuation_id);
+    # the checkout path (R.ROOT) would bind the golden to one worktree, so
+    # compile from a fixed cwd under the fixture root instead.
+    (root/"cwd").mkdir(parents=True,exist_ok=True)
+    source=self._source(root/"artifacts",cwd=root/"cwd")
     self._complete_prefix(source,"test",root/"evidence")
     continuation=self._build(source)
   finally:
@@ -2154,11 +2158,30 @@ class TestContinuation(unittest.TestCase):
   serialized=json.dumps(
    payload,sort_keys=True,separators=(",",":"),ensure_ascii=False)
   serialized=serialized.replace(str(root),"<state-root>")
+  # The checkout path itself is sealed into the route payload too
+  # (`validation_basis.registry_root`/`runtime_root` = R.ROOT), so a golden
+  # captured in one worktree failed in every other checkout and in CI
+  # (2026-08-30). Tokenize it the same way as the fixed state root.
+  serialized=serialized.replace(str(R.ROOT),"<repo-root>")
+  # route_hash seals the checkout-bound `validation_basis` roots (registry/
+  # unit-catalog/runtime), so every derived identity (route_id, continuation
+  # id, edge ids, marker digests) legitimately differs per checkout. Replace
+  # each such identity with a stable ordinal placeholder in order of first
+  # appearance: the golden then pins structure, ordering, and identity
+  # *relations* (same id -> same placeholder) instead of one worktree's hashes.
+  _ordinals={}
+  def _placeholder(match):
+    key=match.group(0)
+    kind=key.split(":",1)[0] if key.startswith("sha256:") else key.split("-",1)[0]
+    if key not in _ordinals: _ordinals[key]=f"<{kind}#{len(_ordinals)}>"
+    return _ordinals[key]
+  serialized=re.sub(r"sha256:[0-9a-f]{64}|rt-[0-9a-f]{16}|cont-[0-9a-f]{32}",_placeholder,serialized)
   if os.environ.get("F47_3_EMIT_GOLDEN")=="1":
    golden_path.parent.mkdir(parents=True,exist_ok=True)
    golden_path.write_text(json.dumps({
     "base_commit":R._git_commit(R.ROOT),
-    "generated_before_sd118":True,
+    "generated_before_sd118":False,
+    "note":"regenerated after tokenizing the checkout path; guards drift from the regeneration commit onward",
     "payload":serialized,
    },indent=2,ensure_ascii=False)+"\n",encoding="utf-8")
    return

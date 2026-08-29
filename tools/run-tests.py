@@ -666,6 +666,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "Without this flag the per-suite profile is decided by tools/test-isolation.tsv.",
     )
     p.add_argument("--report-only", action="store_true")
+    p.add_argument(
+        "--xpass-nonfatal", action="store_true",
+        help="report XPASS (baseline known-fail that passed) without failing the run; "
+             "for environments that did not seed the baseline (MA-W1-011)",
+    )
     p.add_argument("--report", type=Path, default=None)
     p.add_argument("--root", type=Path, default=ROOT)
     p.add_argument("--baseline", type=Path, default=ROOT / "tools" / "test-baseline.tsv")
@@ -834,6 +839,7 @@ def main(argv: list[str]) -> int:
     # Undeclared/unneeded isolation opt-out detection: only for suites that
     # actually failed under `isolated` and have no declared opt-out anywhere.
     hard_failures: list[str] = []
+    xpass_nonfatal: list[str] = []
     report_rows: list[dict[str, str]] = []
     verdict_counts: dict[str, int] = {}
 
@@ -934,7 +940,14 @@ def main(argv: list[str]) -> int:
                 }
             )
             if v.verdict in HARD_FAIL_VERDICTS:
-                hard_failures.append(f"{v.suite_path}::{v.test_id}")
+                if v.verdict == "XPASS" and args.xpass_nonfatal:
+                    # MA-W1-007/MA-W1-011: the known-failure baseline was seeded
+                    # in one environment; a suite that passes elsewhere is an
+                    # unexpected pass to review, not a regression. CI opts in
+                    # until the baseline carries an environment fingerprint.
+                    xpass_nonfatal.append(f"{v.suite_path}::{v.test_id}")
+                else:
+                    hard_failures.append(f"{v.suite_path}::{v.test_id}")
         _ = skip_leak  # per-suite leak exemption is enforced globally below
 
     for row in stale_rows:
@@ -981,6 +994,8 @@ def main(argv: list[str]) -> int:
     for profile in ISOLATION_PROFILES:
         print(f"profile[{profile}]={len(suites_by_profile[profile])}")
 
+    if xpass_nonfatal:
+        print(f"XPASS-NONFATAL={len(xpass_nonfatal)}")
     if args.report_only:
         return 0
     return 1 if hard_failures else 0

@@ -106,4 +106,6 @@ jobs:
           persist-credentials: false
 
       - name: Run the full isolated test suite (C-3/C-4)
-        run: python3 tools/run-tests.py --retries 1
+        # --xpass-nonfatal: the known-fail baseline is seeded on the maintainer host;
+        # suites that pass on the CI runner are reported, not failed (MA-W1-011).
+        run: python3 tools/run-tests.py --retries 1 --xpass-nonfatal
