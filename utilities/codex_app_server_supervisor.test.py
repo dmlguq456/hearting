@@ -372,6 +372,10 @@ class CodexAppServerSupervisorTest(unittest.TestCase):
         )
         self.assertFalse(self.state.exists())
         self.assertFalse(self.lease.exists())
+        self.assertEqual(
+            sum(row.get("type") == "dispatch.supervisor.owner-boundary" for row in rows),
+            0,
+        )
 
     def test_terminal_state_write_failure_does_not_replace_classified_exit(self):
         self.jobs.write_text(owner_row(self.lease), encoding="utf-8")
@@ -513,6 +517,30 @@ class CodexAppServerSupervisorTest(unittest.TestCase):
         registry = self.jobs.read_text(encoding="utf-8")
         self.assertIn("\tdone\t/repo\t/wt\towner\t", registry)
         self.assertIn("note=completed-supervisor", registry)
+        # Every completed child except the last is immediately followed, in
+        # the same owner turn, by the next child's dispatch -- one
+        # owner-boundary crossing per hand-off, none after the final child
+        # (there is no next dispatch to cross into).
+        boundaries = [row for row in rows if row.get("type") == "dispatch.supervisor.owner-boundary"]
+        self.assertEqual(len(boundaries), 12)
+        self.assertTrue(all(row["ordinal"] == 1 for row in boundaries))
+        self.assertTrue(all(row["parent_attempt_id"] == PARENT for row in boundaries))
+        for index, boundary in enumerate(boundaries, start=1):
+            self.assertEqual(boundary["new_attempt_ids"], [f"att-child-{index + 1}"])
+            self.assertEqual(boundary["new_count"], 1)
+            self.assertIn(f"att-child-{index}", boundary["previous_attempt_ids"])
+            self.assertEqual(boundary["previous_count"], index)
+            timing_order = [
+                boundary["last_child_terminal_ns"], boundary["join_completed_ns"],
+                boundary["same_thread_resume_ns"], boundary["exact_harvest_ns"],
+                boundary["next_stage_start_ns"],
+            ]
+            self.assertEqual(timing_order, sorted(timing_order))
+        self.assertFalse(any(
+            row.get("type") == "dispatch.supervisor.owner-boundary"
+            and "att-child-14" in row.get("new_attempt_ids", [])
+            for row in rows
+        ))
 
     def test_protocol_failure_emits_no_false_terminal(self):
         broken = self.base / "broken.py"
