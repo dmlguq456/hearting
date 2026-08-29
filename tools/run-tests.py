@@ -996,6 +996,13 @@ def main(argv: list[str]) -> int:
 
     if xpass_nonfatal:
         print(f"XPASS-NONFATAL={len(xpass_nonfatal)}")
+    if hard_failures:
+        # Name every hard failure in the summary: a CI log that only carries
+        # the counts cannot be diagnosed without the report artifact
+        # (2026-08-30, six CI-only failures with no suite names).
+        print(f"HARD-FAIL={len(hard_failures)}")
+        for item in hard_failures[:100]:
+            print(f"hard-fail: {item}")
     if args.report_only:
         return 0
     return 1 if hard_failures else 0
