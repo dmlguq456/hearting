@@ -91,20 +91,27 @@ class CodexNamespaceE2E(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as td:
             base = Path(td)
+            # A CI runner's real $HOME can be missing/read-only; git itself
+            # (not just this fixture's own subprocess env dicts further down)
+            # needs a writable HOME for its own temp-file/config operations,
+            # so this must exist before the very first git call.
+            home = base / "home"
+            home.mkdir()
+            git_env = {**os.environ, "HOME": str(home)}
             repo = base / "repo"
             repo.mkdir()
-            subprocess.run(["git", "init", "-q", str(repo)], check=True)
+            subprocess.run(["git", "init", "-q", str(repo)], check=True, env=git_env)
             subprocess.run(
                 ["git", "-C", str(repo), "config", "user.email", "fixture@example.invalid"],
-                check=True,
+                check=True, env=git_env,
             )
             subprocess.run(
                 ["git", "-C", str(repo), "config", "user.name", "Fixture"],
-                check=True,
+                check=True, env=git_env,
             )
             (repo / "tracked.txt").write_text("fixture\n", encoding="utf-8")
-            subprocess.run(["git", "-C", str(repo), "add", "tracked.txt"], check=True)
-            subprocess.run(["git", "-C", str(repo), "commit", "-qm", "fixture"], check=True)
+            subprocess.run(["git", "-C", str(repo), "add", "tracked.txt"], check=True, env=git_env)
+            subprocess.run(["git", "-C", str(repo), "commit", "-qm", "fixture"], check=True, env=git_env)
 
             artifact_root = base / ".agent_reports"
             artifact_root.mkdir()
@@ -145,6 +152,7 @@ class CodexNamespaceE2E(unittest.TestCase):
             with mock.patch.dict(os.environ, {
                 "AGENT_HOME": str(agent_home),
                 "AGENT_DISPATCH_JOBS": str(jobs),
+                "HOME": str(home),
             }):
                 route = ROUTE.compile_route(
                     "autopilot-code",
@@ -166,6 +174,7 @@ class CodexNamespaceE2E(unittest.TestCase):
                 "AGENT_HOME": str(agent_home),
                 "AGENT_ARTIFACT_ROOT": str(artifact_root),
                 "AGENT_MODEL_GOVERNOR_ROOT": str(model_governor_root),
+                "HOME": str(home),
             }
             fixture_env.pop("AGENT_DISPATCH_JOBS", None)
             for predecessor in node.get("depends_on", []):
@@ -259,6 +268,7 @@ class CodexNamespaceE2E(unittest.TestCase):
             env = {
                 **os.environ,
                 "PATH": str(fakebin) + os.pathsep + os.environ.get("PATH", ""),
+                "HOME": str(home),
                 "AGENT_HOME": str(agent_home),
                 "AGENT_ARTIFACT_ROOT": str(artifact_root),
                 "AGENT_MODEL_GOVERNOR_ROOT": str(model_governor_root),
