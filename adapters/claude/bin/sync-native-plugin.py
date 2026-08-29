@@ -63,6 +63,12 @@ HOOK_ADOPT = [
     "spec-sync-nudge.sh",
 ]
 
+# Same-directory helper modules a HOOK_ADOPT script imports/execs at runtime
+# (`$SCRIPT_DIR/<helper>`). Copied alongside their owning hook so the plugin
+# cache is self-contained, but never registered as their own hooks.json event
+# — they have no independent PreToolUse/PostToolUse binding of their own.
+HOOK_HELPER_FILES = ["artifact_write_targets.py"]
+
 # event/matcher/shell taken verbatim from adapters/claude/settings.json registration.
 _HOOK_EVENTS = {
     "git-state-guard.sh": "PreToolUse",
@@ -73,7 +79,7 @@ _HOOK_EVENTS = {
 }
 _HOOK_MATCHERS = {
     "git-state-guard.sh": "Edit|Write|MultiEdit|NotebookEdit",
-    "artifact-guard.sh": "Edit|Write|MultiEdit",
+    "artifact-guard.sh": "Edit|Write|MultiEdit|Bash",
     "spec-skill-gate.sh": "Skill",
     "spec-read-marker.sh": "Read",
     "spec-sync-nudge.sh": "Edit|Write|MultiEdit",
@@ -202,6 +208,8 @@ def sync() -> None:
     plugin_hooks.mkdir(parents=True)
     for name in HOOK_ADOPT:
         shutil.copy2(HOOKS_SOURCE / name, plugin_hooks / name)
+    for name in HOOK_HELPER_FILES:
+        shutil.copy2(HOOKS_SOURCE / name, plugin_hooks / name)
     write_json(plugin_hooks / "hooks.json", hooks_json())
 
     plugin_utils = PLUGIN_ROOT / "utilities"
@@ -265,9 +273,10 @@ def check() -> int:
             if path not in expected_agents:
                 stale.append(str(path.relative_to(ROOT)))
 
-    # hooks: adopted set only (hooks.json checked separately above).
-    expected_hooks = {PLUGIN_ROOT / "hooks" / name for name in HOOK_ADOPT}
-    for name in HOOK_ADOPT:
+    # hooks: adopted set + unregistered same-directory helper files (hooks.json
+    # checked separately above).
+    expected_hooks = {PLUGIN_ROOT / "hooks" / name for name in HOOK_ADOPT + HOOK_HELPER_FILES}
+    for name in HOOK_ADOPT + HOOK_HELPER_FILES:
         src_hook = HOOKS_SOURCE / name
         plugin_hook = PLUGIN_ROOT / "hooks" / name
         if not plugin_hook.exists() or plugin_hook.read_bytes() != src_hook.read_bytes():
