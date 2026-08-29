@@ -41,9 +41,22 @@ def _usage(event: object) -> dict[str, int] | None:
     return result or None
 
 
+def _usage_path(log: Path, attempt: str) -> Path | None:
+    if not attempt:
+        return None
+    # The codex log convention is "<slug>.<attempt>.codex.jsonl"; decompose that
+    # exact suffix so the sidecar lands at "<slug>.<attempt>.codex.usage.json"
+    # instead of duplicating the attempt segment via log.stem (which already
+    # contains it).  Any other log name falls back to appending the attempt.
+    known_suffix = f".{attempt}.codex.jsonl"
+    if log.name.endswith(known_suffix):
+        return log.with_name(log.name[: -len(".jsonl")] + ".usage.json")
+    return log.with_name(f"{log.stem}.{attempt}.usage.json")
+
+
 def run(log: Path, attempt: str, argv: list[str]) -> int:
     log.parent.mkdir(parents=True, exist_ok=True)
-    usage_path = log.with_name(f"{log.stem}.{attempt}.usage.json") if attempt else None
+    usage_path = _usage_path(log, attempt)
     child = subprocess.Popen(argv, stdin=sys.stdin, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     found_usage: dict[str, int] = {}
     with log.open("ab") as out:

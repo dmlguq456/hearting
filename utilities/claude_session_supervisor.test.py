@@ -598,6 +598,12 @@ class ClaudeSessionSupervisorTest(unittest.TestCase):
         # (there is no next dispatch to cross into).
         boundaries = [row for row in rows if row.get("type") == "dispatch.supervisor.owner-boundary"]
         self.assertEqual(len(boundaries), 12)
+        # "ordinal" is the position of this owner-boundary event within the
+        # (currently always single) batch of same-type events emitted at one
+        # crossing -- it is not a running crossing counter across the whole
+        # route, and no consumer reads it as one. The emitter always emits
+        # exactly one such event per crossing, so ordinal==1 on every one of
+        # the 12 crossings here is the intended, fixed value.
         self.assertTrue(all(row["ordinal"] == 1 for row in boundaries))
         self.assertTrue(all(row["parent_attempt_id"] == PARENT for row in boundaries))
         for index, boundary in enumerate(boundaries, start=1):

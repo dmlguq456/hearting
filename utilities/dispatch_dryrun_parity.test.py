@@ -222,6 +222,33 @@ class _IsolatedCliFixture(unittest.TestCase):
         env["AGENT_HOME"] = str(ROOT)
         return env
 
+    def _run_dry_only(self, wrapper, adapter_argv_tail, base, jobs, art, env):
+        dry = [
+            sys.executable, str(wrapper), "--dry-run",
+            "--worktree", str(base / "repo"),
+            "--capability", "autopilot-code", "--capability-mode", "dev",
+            "--qa", "standard", "--intensity", "standard",
+            "--attempt-id", ATTEMPT,
+            "--jobs", str(jobs), "--log-dir", str(base / "logs"),
+        ] + adapter_argv_tail
+        env = {**env, "AGENT_ARTIFACT_ROOT": str(art), "AGENT_DISPATCH_JOBS": str(jobs)}
+        result = subprocess.run(dry, text=True, capture_output=True, env=env)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        return dict(line.split("=", 1) for line in result.stdout.splitlines() if "=" in line)
+
+    def _assert_dry_run_has_no_side_effects(self, wrapper, adapter_argv_tail, base, jobs, art, env):
+        # C-19 canary: a dry-run must predict the paths/command a matching
+        # start would use (that parity is the point of C-19 -- see the
+        # module docstring and owner ruling in metrics.md), but it must never
+        # actually create those files or touch the jobs registry.
+        fields = self._run_dry_only(wrapper, adapter_argv_tail, base, jobs, art, env)
+        self.assertEqual(fields["preview"], "1")
+        self.assertEqual(fields["attempt_id"], "-")
+        self.assertFalse(Path(fields["prompt_file"]).exists(), "dry-run must not create the prompt file")
+        self.assertFalse(Path(fields["log_file"]).exists(), "dry-run must not create the log file")
+        if jobs.exists():
+            self.assertNotIn(ATTEMPT, jobs.read_text(), "dry-run must not add a jobs registry row")
+
     def _run_pair(self, wrapper, adapter_argv_tail, base, jobs, art, env):
         register = [
             sys.executable, str(wrapper), "--register",
@@ -271,6 +298,21 @@ class CodexCliDryRunParity(_IsolatedCliFixture):
                 _normalize(register_fields["command"], ATTEMPT),
             )
 
+    def test_dry_run_makes_no_files_or_registry_rows(self):
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            self._git_repo(base)
+            art = base / ".agent_reports"
+            art.mkdir()
+            jobs = base / "jobs.log"
+            env = self._isolated_env(base)
+            wrapper = ROOT / "adapters/codex/bin/dispatch-headless.py"
+            self._assert_dry_run_has_no_side_effects(
+                wrapper,
+                ["--slug", "codex-parity-canary", "--sandbox", "danger-full-access", "--model", "gpt-test", "--reasoning", "low"],
+                base, jobs, art, env,
+            )
+
 
 class ClaudeCliDryRunParity(_IsolatedCliFixture):
     def test_prompt_log_command_match_across_dry_run_and_register(self):
@@ -292,6 +334,19 @@ class ClaudeCliDryRunParity(_IsolatedCliFixture):
             self.assertEqual(dry_fields["log_file"], register_fields["log_file"])
             self.assertIn(ATTEMPT, dry_fields["prompt_file"])
 
+    def test_dry_run_makes_no_files_or_registry_rows(self):
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            self._git_repo(base)
+            art = base / ".agent_reports"
+            art.mkdir()
+            jobs = base / "jobs.log"
+            env = self._isolated_env(base)
+            wrapper = ROOT / "adapters/claude/bin/dispatch-headless.py"
+            self._assert_dry_run_has_no_side_effects(
+                wrapper, ["--slug", "claude-parity-canary", "--model", "claude-test", "--effort", "low"], base, jobs, art, env,
+            )
+
 
 class OpencodeCliDryRunParity(_IsolatedCliFixture):
     def test_prompt_log_command_match_across_dry_run_and_register(self):
@@ -312,6 +367,19 @@ class OpencodeCliDryRunParity(_IsolatedCliFixture):
             self.assertEqual(dry_fields["prompt_file"], register_fields["prompt_file"])
             self.assertEqual(dry_fields["log_file"], register_fields["log_file"])
             self.assertIn(ATTEMPT, dry_fields["prompt_file"])
+
+    def test_dry_run_makes_no_files_or_registry_rows(self):
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            self._git_repo(base)
+            art = base / ".agent_reports"
+            art.mkdir()
+            jobs = base / "jobs.log"
+            env = {**self._isolated_env(base), "OPENCODE_CONFIG_CONTENT": "{}"}
+            wrapper = ROOT / "adapters/opencode/bin/dispatch-headless.py"
+            self._assert_dry_run_has_no_side_effects(
+                wrapper, ["--slug", "opencode-parity-canary", "--model", "provider/test", "--variant", "low"], base, jobs, art, env,
+            )
 
 
 if __name__ == "__main__":
