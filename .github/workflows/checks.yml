@@ -91,3 +91,16 @@ jobs:
           HEARTING_REQUIRE_PIDNS: "1"
           PYTHONDONTWRITEBYTECODE: "1"
         run: python3 utilities/dispatch_namespace_e2e.test.py -v
+
+  full-test-suite:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - name: Check out the source
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Run the full isolated test suite (C-3/C-4)
+        run: python3 tools/run-tests.py
