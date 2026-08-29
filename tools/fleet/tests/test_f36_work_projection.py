@@ -356,6 +356,90 @@ class WorkProjectionTest(unittest.TestCase):
         self.assertEqual(owner.work_projection.route_node, "claim-a")
         self.assertIsNone(owner.work_projection.ambiguity)
 
+    def test_owner_binding_keeps_verified_successor_during_child_gap(self):
+        owner_record = route.load(REAL)
+        successor = route.load(COMPOSED)
+        owner = DispatchJob(
+            key="code", slug="owner", depth=1, worker_type="owner",
+            attempt_id="att-owner-gap", liveness="working",
+            owner_route_file=REAL, owner_route_id=owner_record["route_id"],
+            owner_route_hash=owner_record["route_hash"],
+        )
+        owner._registry_path = "/state/dispatch/jobs.log"
+        evidence = {
+            owner_record["route_id"]: {
+                "plan": {
+                    "parent": "owner", "parent_attempt_id": "att-owner-gap",
+                    "registry_order": 10,
+                    "_registry_path": "/state/dispatch/jobs.log",
+                    "route_file": REAL, "route_hash": owner_record["route_hash"],
+                    "status": "done", "note": "dead-worker-fail",
+                },
+            },
+            successor["route_id"]: {
+                "claim-a": {
+                    "parent": "owner", "parent_attempt_id": "att-owner-gap",
+                    "registry_order": 20,
+                    "_registry_path": "/state/dispatch/jobs.log",
+                    "route_file": COMPOSED, "route_hash": successor["route_hash"],
+                    "status": "done", "note": "completed-marker",
+                },
+            },
+        }
+
+        # No live child is present: this is the exact gap between two successor
+        # attempts that previously snapped the owner back to its launch route.
+        projection.attach_projections(
+            [], [owner], route_records={
+                owner_record["route_id"]: owner_record,
+                successor["route_id"]: successor,
+            }, node_evidence=evidence, now=100.0,
+        )
+        self.assertEqual(owner.work_projection.source, "route-exact")
+        self.assertEqual(owner.work_projection.route_id, successor["route_id"])
+        self.assertIsNone(owner.work_projection.ambiguity)
+        self.assertEqual(
+            [node_id for node_id, _state in render._projection_route_seq(owner)],
+            ["survey", "claim-a", "claim-b", "synth"],
+        )
+
+        # A newer row belonging to another owner generation cannot carry this
+        # owner's successor across the gap; exact attempt ownership wins over
+        # the reused display slug.
+        evidence[successor["route_id"]]["claim-a"]["parent_attempt_id"] = "att-other"
+        projection.attach_projections(
+            [], [owner], route_records={
+                owner_record["route_id"]: owner_record,
+                successor["route_id"]: successor,
+            }, node_evidence=evidence, now=100.0,
+        )
+        self.assertEqual(owner.work_projection.route_id, owner_record["route_id"])
+
+    def test_owner_gap_fails_closed_for_unverified_latest_successor(self):
+        owner_record = route.load(REAL)
+        successor = route.load(COMPOSED)
+        owner = DispatchJob(
+            key="code", slug="owner", depth=1, worker_type="owner",
+            attempt_id="att-owner-gap", liveness="working",
+            owner_route_file=REAL, owner_route_id=owner_record["route_id"],
+            owner_route_hash=owner_record["route_hash"],
+        )
+        owner._registry_path = "/state/dispatch/jobs.log"
+        evidence = {successor["route_id"]: {"claim-a": {
+            "parent": "owner", "parent_attempt_id": "att-owner-gap",
+            "registry_order": 20, "_registry_path": "/state/dispatch/jobs.log",
+            "route_file": COMPOSED, "route_hash": "sha256:not-the-route",
+            "status": "done",
+        }}}
+        projection.attach_projections(
+            [], [owner], route_records={
+                owner_record["route_id"]: owner_record,
+                successor["route_id"]: successor,
+            }, node_evidence=evidence, now=100.0,
+        )
+        self.assertEqual(owner.work_projection.ambiguity, "owner-route-conflict")
+        self.assertIsNone(owner.work_projection.route_id)
+
     def test_owner_projection_collapses_parallel_active_nodes(self):
         record = {
             "schema_version": 1,

@@ -2242,6 +2242,13 @@ def _scan_registry_evidence(paths):
                 "route_file": meta.get("route_file"),
                 "route_hash": meta.get("route_hash"),
                 "parent": meta.get("parent") or meta.get("parent_slug"),
+                # F-88 gap correction (2026-08-29): keep the exact owner
+                # generation and the row's stable registry position after the
+                # live child disappears.  Fleet can then retain a verified
+                # successor route between stage attempts without relying on a
+                # reused display slug or on terminal-update time.
+                "parent_attempt_id": meta.get("parent_attempt_id"),
+                "registry_order": registry_order,
                 # Keep route-owned state identity after the live row disappears.
                 # A standalone Fleet must not fall back to its ambient registry
                 # when resolving a terminal-only route's completion markers.

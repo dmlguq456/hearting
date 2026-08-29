@@ -15,11 +15,17 @@ CURRENT = (
 
 
 def registry_row(status, attempt, *, route_id="rt-f40", route_node="one-shot",
-                 slug="stage-worker", prefix=CURRENT):
+                 slug="stage-worker", prefix=CURRENT, parent=None,
+                 parent_attempt_id=None):
+    owner = ""
+    if parent is not None:
+        owner += f",parent={parent}"
+    if parent_attempt_id is not None:
+        owner += f",parent_attempt_id={parent_attempt_id}"
     pipe = (
         f"{prefix},dispatch_depth=2,capability=autopilot-code,"
         f"harness=claude,route_id={route_id},route_node={route_node},"
-        f"attempt_id={attempt}"
+        f"attempt_id={attempt}{owner}"
     )
     return (
         f"2026-07-24T00:00:00+00:00\t{status}\t/repo\t/work/shared\t"
@@ -87,7 +93,8 @@ class TerminalAttemptIndexTest(unittest.TestCase):
 
     def test_terminal_registered_stage_is_indexed_and_route_done_survives(self):
         temp, (routes, terminal) = self._snapshot(
-            registry_row("done", "att-terminal")
+            registry_row("done", "att-terminal", parent="owner",
+                         parent_attempt_id="att-owner")
         )
         self.addCleanup(temp.cleanup)
         self.assertEqual(terminal["att-terminal"]["route_node"], "one-shot")
@@ -96,6 +103,9 @@ class TerminalAttemptIndexTest(unittest.TestCase):
             routes["rt-f40"]["one-shot"]["_registry_path"],
             str(Path(temp.name) / "jobs.log"),
         )
+        self.assertEqual(routes["rt-f40"]["one-shot"]["parent_attempt_id"],
+                         "att-owner")
+        self.assertEqual(routes["rt-f40"]["one-shot"]["registry_order"], 0)
 
     def test_latest_row_wins_for_the_same_exact_attempt(self):
         temp, (_routes, terminal) = self._snapshot(

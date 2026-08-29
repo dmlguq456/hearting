@@ -287,6 +287,57 @@ def _evidence_owner_candidates(entity, node_evidence, route_records):
     return candidates
 
 
+def _latest_exact_owner_evidence_route(entity, node_evidence, route_records):
+    """Return the newest exact owner-linked route carried by registry evidence.
+
+    A depth-1 owner's launch binding does not change when the owner re-plans onto
+    a successor route.  F-88 therefore adopts the unanimous route of its live
+    children.  Between two child attempts, however, the live set is empty and
+    that rule used to snap the owner back to its launch route for a Fleet tick,
+    briefly resurfacing an old failed plan/plan-check node (user report,
+    2026-08-29).
+
+    Terminal-surviving node evidence closes only that observation gap.  It must
+    match the exact owner attempt and canonical registry, and registry row order
+    (the stable registration order) selects the latest generation.  A timestamp
+    cannot do this: an older generation's straggler may terminate later.  The
+    selected route tuple is still id/hash verified by ``_route_record_values``;
+    missing or conflicting proof stays fail-closed.
+    """
+    owner_attempt = _field(entity, "attempt_id")
+    owner_registry = _realpath(_field(entity, "_registry_path"))
+    if not owner_attempt or not owner_registry:
+        return None
+
+    ranked = []
+    for rid, nodes in (node_evidence or {}).items():
+        if not isinstance(rid, str) or not isinstance(nodes, dict):
+            continue
+        for evidence in nodes.values():
+            if not isinstance(evidence, dict):
+                continue
+            order = evidence.get("registry_order")
+            if (evidence.get("parent_attempt_id") != owner_attempt
+                    or _realpath(evidence.get("_registry_path")) != owner_registry
+                    or not isinstance(order, int) or isinstance(order, bool)):
+                continue
+            ranked.append((order, rid, evidence))
+    if not ranked:
+        return None
+
+    newest_order = max(item[0] for item in ranked)
+    newest = [item for item in ranked if item[0] == newest_order]
+    route_ids = {item[1] for item in newest}
+    if len(route_ids) != 1:
+        return (None, None, OWNER_ROUTE_CONFLICT)
+    _order, rid, carrier = newest[-1]
+    record, failure = _route_record_values(
+        rid, carrier.get("route_file"), carrier.get("route_hash"),
+        route_records=route_records,
+    )
+    return (rid, record, failure)
+
+
 def _terminal_route_projection(value):
     """Whether terminal-only evidence is history rather than current session work."""
     backing = getattr(value, "_route_view", None) or {}
@@ -930,6 +981,7 @@ def resolve_work_projection(entity, jobs=(), route_records=None, node_evidence=N
                 ambiguity=failure or ROUTE_RECORD_MISMATCH,
             )
         children = _owner_children(entity, jobs)
+        route_children = [child for child in children if _field(child, "route_id")]
         child_conflict = any(
             (_field(child, "route_id") and _field(child, "route_id") != owner_binding["route_id"])
             or (_field(child, "route_hash")
@@ -969,6 +1021,27 @@ def resolve_work_projection(entity, jobs=(), route_records=None, node_evidence=N
                 node_evidence=(node_evidence or {}).get(successor_rid, {}),
                 now=now, owner=True, degradations=degradations,
             )
+        if not route_children:
+            # F-88 gap correction: a verified successor remains the route of
+            # record while no live child row exists between attempts.  This is
+            # evidence recovery, not UI hysteresis; a fresh --once snapshot can
+            # reach the same answer from the canonical registry alone.
+            latest = _latest_exact_owner_evidence_route(
+                entity, node_evidence, route_records or {},
+            )
+            if latest is not None:
+                successor_rid, successor, successor_failure = latest
+                if successor_rid is None or successor_failure:
+                    return WorkProjection(source="none", node_state="unknown",
+                                          ambiguity=OWNER_ROUTE_CONFLICT)
+                if successor_rid != owner_binding["route_id"]:
+                    same_jobs = [j for j in jobs
+                                 if _field(j, "route_id") == successor_rid]
+                    return _projection_from_record(
+                        entity, successor, successor_rid, same_jobs,
+                        node_evidence=(node_evidence or {}).get(successor_rid, {}),
+                        now=now, owner=True, degradations=degradations,
+                    )
         same_jobs = [j for j in jobs
                      if _field(j, "route_id") == owner_binding["route_id"]]
         return _projection_from_record(
