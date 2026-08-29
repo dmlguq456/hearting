@@ -289,6 +289,136 @@ else
     || bad "nested target-artifact violation wrong exit"
 fi
 
+echo "== artifact guard Bash channel (C-2b, Tier A/B/C) =="
+# Bash-mode target resolution and Tier B observation placement are cwd-scoped
+# (matching the real runtime, where a PreToolUse hook inherits the session's
+# actual cwd) -- run this section from the fixture project root.
+cd "$TMP/proj" || exit 1
+CANON="$TMP/proj/.agent_reports"
+OBS_FILE="$CANON/.runtime/observations/undecidable-write-channel.jsonl"
+obs_count() { [ -f "$OBS_FILE" ] && wc -l < "$OBS_FILE" || echo 0; }
+
+# Required regression (2): Write tool and Bash heredoc get the same verdict
+# for the same path, both in-scope (exit 0) and out-of-scope (exit 2).
+if AGENT_ROUTE_FILE="$route_plan" AGENT_ROUTE_ID="$route_plan_id" AGENT_ROUTE_NODE=inline \
+  "$ART" --command "cat <<EOF > $TMP/proj/.agent_reports/plans/2026-08-03_fixture/plan/heredoc.md
+x
+EOF" >/tmp/art_bash_scope_in.out 2>/tmp/art_bash_scope_in.err; then
+  ok "regression (2): Bash heredoc write inside node scope matches Write tool (exit 0)"
+else
+  bad "regression (2): Bash heredoc in-scope should match Write tool exit 0"
+fi
+if AGENT_ROUTE_FILE="$route_plan" AGENT_ROUTE_ID="$route_plan_id" AGENT_ROUTE_NODE=inline \
+  "$ART" --command "cat <<EOF > $TMP/proj/.agent_reports/test_logs/bash-run.log
+x
+EOF" >/tmp/art_bash_scope_out.out 2>/tmp/art_bash_scope_out.err; then
+  bad "regression (2): Bash heredoc write outside node scope should be blocked like Write tool"
+else
+  [ "$?" -eq 2 ] && grep -q 'artifact-write-outside-node-scope' /tmp/art_bash_scope_out.err \
+    && ok "regression (2): Bash heredoc write outside node scope matches Write tool (exit 2)" \
+    || bad "regression (2): Bash heredoc out-of-scope failure missing structured reason"
+fi
+
+# Required regression (3): analysis_project/<mode>/** allows a real analyze
+# node scope path (reverses the C-2a real over-block record).
+route_analyze=$(fixture_route analyze-project code route-analyze)
+route_analyze_id=$(fixture_route_id "$route_analyze")
+mkdir -p "$TMP/proj/.agent_reports/analysis_project/code/mega-audit/cg"
+if AGENT_ROUTE_FILE="$route_analyze" AGENT_ROUTE_ID="$route_analyze_id" AGENT_ROUTE_NODE=inline \
+  "$ART" --command "echo x > $TMP/proj/.agent_reports/analysis_project/code/mega-audit/cg/00_overview.md" \
+  >/tmp/art_bash_mode.out 2>/tmp/art_bash_mode.err; then
+  ok "regression (3): analysis_project/<mode>/** admits a real analyze-mode path via Bash channel"
+else
+  bad "regression (3): analysis_project/<mode>/** should admit a real analyze-mode path"
+fi
+
+# Tier B: an interpreter-mediated write is undecidable -> pass, and is
+# recorded as an observation (digest only, never the raw command).
+before_obs=$(obs_count)
+if AGENT_ROUTE_FILE="$route_plan" AGENT_ROUTE_ID="$route_plan_id" AGENT_ROUTE_NODE=inline \
+  "$ART" --command "python3 -c \"open('$TMP/proj/.agent_reports/test_logs/pywrite.log','w')\"" \
+  >/tmp/art_tierb.out 2>/tmp/art_tierb.err; then
+  after_obs=$(obs_count)
+  [ "$after_obs" -eq $((before_obs + 1)) ] \
+    && ! grep -q "pywrite" "$OBS_FILE" \
+    && ok "Tier B: interpreter-mediated write passes and is observed (digest only)" \
+    || bad "Tier B: observation count/content mismatch"
+else
+  bad "Tier B: interpreter-mediated write must pass (fail-safe), not block"
+fi
+
+# sh -c depth-1 recursion is still decidable and still enforces node scope.
+if AGENT_ROUTE_FILE="$route_plan" AGENT_ROUTE_ID="$route_plan_id" AGENT_ROUTE_NODE=inline \
+  "$ART" --command "sh -c 'echo x > $TMP/proj/.agent_reports/test_logs/shc.log'" \
+  >/tmp/art_shc.out 2>/tmp/art_shc.err; then
+  bad "sh -c depth-1 recursion should still enforce node scope"
+else
+  [ "$?" -eq 2 ] && ok "sh -c depth-1 recursion still resolves to a literal, enforced target" \
+    || bad "sh -c depth-1 recursion wrong exit"
+fi
+
+# Required regression (5): canonical-root-boundary non-engagement. A literal
+# target outside the canonical artifact root is never handed to node-scope
+# matching -- exit 0, and no observation growth (Tier A decided it, cleanly).
+before_obs5=$(obs_count)
+bash_root_outside_case() {
+  desc=$1; command=$2
+  if AGENT_ROUTE_FILE="$route_plan" AGENT_ROUTE_ID="$route_plan_id" AGENT_ROUTE_NODE=inline \
+    "$ART" --command "$command" >/tmp/art_out5.out 2>/tmp/art_out5.err; then
+    ok "regression (5): $desc -> exit 0 (root-outside, guard does not engage)"
+  else
+    bad "regression (5): $desc should exit 0 (root-outside)"
+  fi
+}
+bash_root_outside_case "a: printf > /dev/null" "printf x >/dev/null"
+bash_root_outside_case "b: 2>&1 not mistaken for a file target" "some-cmd >/dev/null 2>&1"
+bash_root_outside_case "c: pipe to tee /tmp" "echo hi | tee $TMP/probe-c"
+bash_root_outside_case "d: cp artifact to /tmp" "cp $TMP/proj/.agent_reports/plans/2026-08-03_fixture/plan/plan.md $TMP/probe-d"
+bash_root_outside_case "e: rm a worktree source file" "rm $TMP/probe-e-touch-first 2>/dev/null; touch $TMP/probe-e-touch-first && rm $TMP/probe-e-touch-first"
+after_obs5=$(obs_count)
+[ "$after_obs5" -eq "$before_obs5" ] \
+  && ok "regression (5): root-outside cases grew no Tier B observations" \
+  || bad "regression (5): root-outside cases unexpectedly grew observations"
+
+# Required regression (6): the opposite direction. rm and redirects INSIDE the
+# canonical root are still judged: out-of-node-scope blocks (f/g), the node's
+# own scope and _internal pass (h/i). f and g pin `rm` to the exact opposite
+# verdict of case (5e) depending on which side of the root boundary it lands.
+mkdir -p "$TMP/proj/.agent_reports/test_logs/other-scope" "$TMP/proj/.agent_reports/plans/2026-08-03_fixture/plan/_internal"
+printf 'x\n' > "$TMP/proj/.agent_reports/test_logs/other-scope/x.md"
+if AGENT_ROUTE_FILE="$route_plan" AGENT_ROUTE_ID="$route_plan_id" AGENT_ROUTE_NODE=inline \
+  "$ART" --command "rm $TMP/proj/.agent_reports/test_logs/other-scope/x.md" \
+  >/tmp/art_out6f.out 2>/tmp/art_out6f.err; then
+  bad "regression (6f): rm inside canonical root but outside node scope should be blocked"
+else
+  [ "$?" -eq 2 ] && grep -q 'artifact-write-outside-node-scope' /tmp/art_out6f.err \
+    && ok "regression (6f): rm inside canonical root, outside node scope -> exit 2" \
+    || bad "regression (6f): missing structured reason"
+fi
+if AGENT_ROUTE_FILE="$route_plan" AGENT_ROUTE_ID="$route_plan_id" AGENT_ROUTE_NODE=inline \
+  "$ART" --command "echo x > $TMP/proj/.agent_reports/test_logs/other-scope/y.md" \
+  >/tmp/art_out6g.out 2>/tmp/art_out6g.err; then
+  bad "regression (6g): redirect inside canonical root but outside node scope should be blocked"
+else
+  [ "$?" -eq 2 ] && grep -q 'artifact-write-outside-node-scope' /tmp/art_out6g.err \
+    && ok "regression (6g): redirect inside canonical root, outside node scope -> exit 2" \
+    || bad "regression (6g): missing structured reason"
+fi
+if AGENT_ROUTE_FILE="$route_plan" AGENT_ROUTE_ID="$route_plan_id" AGENT_ROUTE_NODE=inline \
+  "$ART" --command "echo x > $TMP/proj/.agent_reports/plans/2026-08-03_fixture/plan/own.md" \
+  >/tmp/art_out6h.out 2>/tmp/art_out6h.err; then
+  ok "regression (6h): redirect inside the caller's own node scope -> exit 0"
+else
+  bad "regression (6h): redirect inside own node scope should pass"
+fi
+if AGENT_ROUTE_FILE="$route_plan" AGENT_ROUTE_ID="$route_plan_id" AGENT_ROUTE_NODE=inline \
+  "$ART" --command "echo x > $TMP/proj/.agent_reports/plans/2026-08-03_fixture/plan/_internal/x.md" \
+  >/tmp/art_out6i.out 2>/tmp/art_out6i.err; then
+  ok "regression (6i): redirect into _internal/ stays exempt -> exit 0"
+else
+  bad "regression (6i): _internal/ exemption should still hold on the Bash channel"
+fi
+
 echo "== source-only worktree artifact guard =="
 mkdir -p "$TMP/artrepo/.agent_reports/_internal" "$TMP/artrepo-wt"
 (

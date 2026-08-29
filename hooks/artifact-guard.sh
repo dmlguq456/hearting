@@ -10,6 +10,7 @@ set -euo pipefail
 
 fp=""
 sid=""
+cmd=""
 route_file="${AGENT_ROUTE_FILE:-}"
 route_id="${AGENT_ROUTE_ID:-unknown}"
 route_node="${AGENT_ROUTE_NODE:-}"
@@ -31,8 +32,11 @@ if [ "$#" -gt 0 ]; then
       --session)
         [ "$#" -ge 2 ] || { echo "artifact-guard: --session requires an id" >&2; exit 64; }
         sid="$2"; shift 2 ;;
+      --command)
+        [ "$#" -ge 2 ] || { echo "artifact-guard: --command requires a string" >&2; exit 64; }
+        cmd="$2"; shift 2 ;;
       --help|-h)
-        echo "usage: artifact-guard.sh --file <path> [--session <id>]"
+        echo "usage: artifact-guard.sh --file <path> [--session <id>] | --command <shell> [--session <id>]"
         exit 0 ;;
       *)
         echo "artifact-guard: unknown argument: $1" >&2
@@ -48,14 +52,73 @@ except Exception: d = {}
 ti = d.get("tool_input") or {}
 print("FP="+shlex.quote(ti.get("file_path","") or ""))
 print("SID="+shlex.quote(d.get("session_id","") or ""))
+print("TOOLNAME="+shlex.quote(d.get("tool_name","") or ""))
+print("CMD="+shlex.quote(ti.get("command","") or ""))
 ' 2>/dev/null)"
-  fp="${FP:-}"; sid="${SID:-}"
+  fp="${FP:-}"; sid="${SID:-}"; cmd="${CMD:-}"
 fi
-
-[ -z "$fp" ] && exit 0
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 ARTIFACT_ROOT_RESOLVER="$SCRIPT_DIR/../utilities/artifact-root.sh"
+
+# ---- Bash channel (Tier A/B, C-2b) ----
+# `file_path` is absent for Bash tool calls, so `fp` is empty here by
+# construction. Only enter Bash mode when a command was actually supplied
+# (never both fp and cmd non-empty from a single invocation).
+if [ -z "$fp" ] && [ -n "$cmd" ]; then
+  parsed=$(python3 "$SCRIPT_DIR/artifact_write_targets.py" --command "$cmd" --cwd "$PWD" 2>/dev/null) || parsed='{"decidable":[],"undecidable":[]}'
+
+  undecidable_count=$(printf '%s' "$parsed" | python3 -c 'import json,sys; print(len(json.load(sys.stdin).get("undecidable") or []))' 2>/dev/null || echo 0)
+  if [ "${undecidable_count:-0}" != "0" ] 2>/dev/null; then
+    canonical_for_obs=$("$ARTIFACT_ROOT_RESOLVER" "$PWD" 2>/dev/null) || canonical_for_obs=""
+    if [ -n "$canonical_for_obs" ]; then
+      obs_dir="$canonical_for_obs/.runtime/observations"
+      mkdir -p "$obs_dir" 2>/dev/null || true
+      python3 - "$obs_dir/undecidable-write-channel.jsonl" "$route_id" "$route_node" "${sid:-artifact-guard}" "$parsed" <<'PY' 2>/dev/null || true
+import hashlib, json, sys, time
+out_path, route_id, route_node, session, parsed_json = sys.argv[1:6]
+try:
+    parsed = json.loads(parsed_json)
+except Exception:
+    parsed = {"undecidable": []}
+lines = []
+for entry in parsed.get("undecidable") or []:
+    segment = str(entry.get("segment", ""))
+    lines.append(json.dumps({
+        "ts": time.time(),
+        "route_id": route_id,
+        "route_node": route_node,
+        "session": session,
+        "reason": entry.get("reason", "unknown"),
+        "segment_digest": hashlib.sha256(segment[:200].encode("utf-8", "replace")).hexdigest(),
+    }, sort_keys=True))
+if lines:
+    with open(out_path, "a", encoding="utf-8") as fh:
+        fh.write("\n".join(lines) + "\n")
+PY
+    fi
+  fi
+
+  decidable_targets=$(printf '%s' "$parsed" | python3 -c 'import json,sys
+for p in (json.load(sys.stdin).get("decidable") or []):
+    print(p)' 2>/dev/null || true)
+
+  if [ -n "$decidable_targets" ]; then
+    while IFS= read -r target; do
+      [ -z "$target" ] && continue
+      # Re-dispatch through the exact same single-target pipeline used for
+      # Edit/Write/MultiEdit (canonical-root boundary -> _internal exemption
+      # -> spec_touch -> node write_scope). That pipeline already emits its
+      # own route_failure JSON and exit 2 on denial; just propagate it.
+      "$0" --file "$target" --session "${sid:-artifact-guard}" || exit 2
+    done <<EOF
+$decidable_targets
+EOF
+  fi
+  exit 0
+fi
+
+[ -z "$fp" ] && exit 0
 
 case "$fp" in
   /*) ;;
