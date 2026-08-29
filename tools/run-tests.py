@@ -135,7 +135,11 @@ def build_installed_layout_env(tmpdir: Path, install_prefix: Path) -> dict[str, 
     env = build_isolated_env(tmpdir)
     releases_dir = install_prefix / "home" / ".local" / "share" / "hearting" / "releases"
     release_dirs = sorted(releases_dir.glob("*")) if releases_dir.is_dir() else []
-    agent_home = str(release_dirs[-1]) if release_dirs else str(install_prefix / "home")
+    # `installer.py install claude` (no bundled-release fixture set up) lands
+    # the runtime pointer at <HOME>/.claude, with hooks/utilities/tools
+    # symlinked from there -- the closest available "installed layout" shape
+    # when no releases/<v> bundle exists in this fixture.
+    agent_home = str(release_dirs[-1]) if release_dirs else str(install_prefix / "home" / ".claude")
     env["AGENT_HOME"] = agent_home
     env["XDG_DATA_HOME"] = str(install_prefix / "home" / ".local" / "share")
     env["XDG_STATE_HOME"] = str(install_prefix / "home" / ".local" / "state")
@@ -166,7 +170,7 @@ def get_installed_layout_prefix() -> Path | None:
         env["HOME"] = str(install_home)
         try:
             result = subprocess.run(
-                [sys.executable, str(installer), "--prefix", str(install_home), "--non-interactive"],
+                [sys.executable, str(installer), "install", "claude", "--scope", "global", "--yes", "--json"],
                 cwd=ROOT,
                 env=env,
                 capture_output=True,
@@ -175,7 +179,11 @@ def get_installed_layout_prefix() -> Path | None:
             )
         except Exception:
             return None
-        if result.returncode != 0:
+        try:
+            payload = json.loads(result.stdout or "{}")
+        except Exception:
+            return None
+        if any(not c.get("ok", True) for c in payload.get("checks", [])):
             return None
         _INSTALLED_LAYOUT_CACHE["prefix"] = tmp
         return tmp
