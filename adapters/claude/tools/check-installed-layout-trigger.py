@@ -1,0 +1,1 @@
+../../../tools/check-installed-layout-trigger.py

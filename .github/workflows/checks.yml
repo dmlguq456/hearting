@@ -65,6 +65,9 @@ jobs:
           ./tools/install/release-lifecycle.test.sh
           ./tools/install/extension-lifecycle.test.sh
 
+      - name: Check the installed-layout regression trigger (C-4)
+        run: python3 tools/check-installed-layout-trigger.py --base HEAD~1 --head HEAD
+
   dispatch-pid-namespace:
     runs-on: ubuntu-latest
     timeout-minutes: 20

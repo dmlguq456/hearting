@@ -1,0 +1,12 @@
+# tools/installed-layout-triggers.tsv — closed rule set for "this diff needs an
+# installed-layout regression run" (C-4 / core/CONVENTIONS.md §4.4).
+# tools/check-installed-layout-trigger.py owns evaluation against
+# `git diff --name-only`/`git diff -U0` between two revisions.
+#
+# columns (tab-separated): rule_id	kind	pattern	rationale
+rule_id	kind	pattern	rationale
+path-install	path	tools/install/**	Install/activation entry points are the direct installed-layout surface.
+diff-symbol-state-root	diff_symbol	state_root|stable_state_root|_fallback_registry|dispatch_state_roots|resolve_global_registry|HARNESS_STATE_ROOT|XDG_STATE_HOME|AGENT_HOME|\.local/(state|share)	A diff line touching state-root resolution symbols can change installed-vs-isolated behavior even outside tools/install/**.
+projection-surfaces	projection	tools/generate.py|tools/sync-entry-skill-layer.py|adapters/claude/bin/sync-native-plugin.py|capabilities/topologies.json|adapters/*/skills/**|adapters/claude/plugin-marketplace/**	Generated projection surfaces determine what an installed runtime actually finds on disk.
+resolver-scripts	resolver	utilities/artifact-root.sh|hooks/artifact-guard.sh	The two canonical-root/artifact-root resolvers are load-bearing for installed-vs-worktree distinction.
+fingerprint-filename	path	*installed-layout*	A changed file whose own name names installed-layout (e.g. an installed-layout regression harness) is direct evidence even when its diff touches no state-root symbol.

@@ -1,0 +1,7 @@
+# tools/test-isolation.tsv — declared isolation opt-out for tools/run-tests.py.
+# A suite listed here runs under the named non-default profile instead of the
+# `isolated` default (see tools/run-tests.py build_isolated_env /
+# build_installed_layout_env). Rows require execution evidence, not guesses.
+#
+# columns (tab-separated): suite_path	needs	reason	defect_id	review_by
+suite_path	needs	reason	defect_id	review_by

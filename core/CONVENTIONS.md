@@ -369,6 +369,32 @@ webpack build and required manual deletion before cleanup.
   `worktree-cleanup.py`; it does not change guarded-cleanup eligibility
   semantics, it only replaces the manual deletion step.
 
+### §4.4. Installed-Layout Regression Trigger
+
+A change can pass every check under an isolated worktree environment and
+still break once the harness runs from a real installed release layout
+(`AGENT_HOME`/`XDG_STATE_HOME`/`XDG_DATA_HOME` pointing at an installed
+copy rather than an unset, checkout-relative default). `tools/
+installed-layout-triggers.tsv` is the single owner of which diff shapes
+require an installed-layout regression run before landing — this document
+does not duplicate that rule list, only the obligation and its consequence.
+
+- When a diff fires a rule in `tools/installed-layout-triggers.tsv`
+  (checked with `tools/check-installed-layout-trigger.py --base <rev>
+  --head <rev>`), run the affected suites under the `installed-layout`
+  isolation profile (`tools/run-tests.py --isolation=installed-layout
+  --select <glob>`) before the change lands.
+- CI runs `tools/check-installed-layout-trigger.py` in the `install-lifecycle`
+  job and reports which rules fired for the diff; `--assert-ran <marker>`
+  exists for a caller (a future CI step or a runbook) that can prove the
+  installed-layout suites actually ran, and turns a fired-but-unproven
+  trigger into a hard failure. Wiring that proof automatically into CI is
+  not yet done — the reporting step is the trigger detector, not (yet) a
+  hard gate.
+- Suites that genuinely need the installed-layout profile to pass (not just
+  when this rule fires, but as a standing requirement) are declared in
+  `tools/test-isolation.tsv`, never inferred silently.
+
 ## §5. Skill Output Convention — T1/T2/T3
 
 Every autopilot capability and `analyze-project` follows this artifact structure. Existing artifacts keep their legacy flat layout; new invocations use this convention.
