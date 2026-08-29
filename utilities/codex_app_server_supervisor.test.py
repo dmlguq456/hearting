@@ -509,7 +509,8 @@ class CodexAppServerSupervisorTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
         rows = [json.loads(line) for line in result.stdout.splitlines()]
         budget = next(row for row in rows if row.get("type") == "dispatch.supervisor.continuation-budget")
-        self.assertEqual((budget["limit"], budget["source"]), (15, "bound-route"))
+        self.assertEqual((budget["ordinary"], budget["source"]), (15, "bound-route"))
+        self.assertEqual(budget["limit"], budget["ordinary"] + budget["reserved"])
         resumed = [row for row in rows if row.get("type") == "dispatch.supervisor.resumed"]
         self.assertEqual(len(resumed), 13)
         self.assertEqual(resumed[-1]["continuation_ordinal"], 13)
@@ -1158,6 +1159,91 @@ class StageAdvanceWiringTest(unittest.TestCase):
         self.assertEqual(recordless_delivery["schema_version"], 2)
         self.assertNotIn("stage_advance", recordless_delivery)
         self.assertIs(recordless_delivery, base_receipt)
+
+
+class ContinuationTripartiteBudgetTest(unittest.TestCase):
+    """SD-116 §13.34.4-(2), symmetric to claude_session_supervisor.test.py's
+    identically-named class."""
+
+    def test_identical_redelivery_spends_stall_only_and_existing_seal_is_unchanged(self):
+        case = CodexAppServerSupervisorTest()
+        case.setUp()
+        try:
+            case.jobs.write_text(owner_row(case.lease) + child_row(), encoding="utf-8")
+            result = subprocess.run(
+                case.command_with_join(case._non_closing_join()),
+                input="initial assignment",
+                text=True,
+                capture_output=True,
+                env={
+                    **os.environ,
+                    "FAKE_TRACE": str(case.trace),
+                    "AGENT_ARTIFACT_ROOT": str(case.artifact_root),
+                },
+                timeout=30,
+            )
+            self.assertEqual(result.returncode, 70, result.stderr + result.stdout)
+            registry = case.jobs.read_text(encoding="utf-8")
+            self.assertIn("note=owner-redelivery-abandoned", registry)
+            sys.path.insert(0, str(ROOT / "utilities"))
+            import dispatch_budget_record as BR
+            rows = BR.read_rows(case.jobs.parent, PARENT)
+            reservations = [row for row in rows if row.get("record_kind") == "reservation"]
+            stall_charged = [row for row in reservations if row["class"] == "stall"]
+            self.assertTrue(stall_charged, rows)
+        finally:
+            case.tearDown() if hasattr(case, "tearDown") else None
+
+    def test_runtime_wait_without_started_child_spends_stall_only(self):
+        case = CodexAppServerSupervisorTest()
+        case.setUp()
+        try:
+            case.jobs.write_text(owner_row(case.lease), encoding="utf-8")
+            result = case.run_supervisor(FAKE_DRY_RUN_FIRST="1", FAKE_JOBS=str(case.jobs))
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            sys.path.insert(0, str(ROOT / "utilities"))
+            import dispatch_budget_record as BR
+            rows = BR.read_rows(case.jobs.parent, PARENT)
+            reservations = [row for row in rows if row.get("record_kind") == "reservation"]
+            stall_charged = [row for row in reservations if row["class"] == "stall"]
+            self.assertTrue(stall_charged, rows)
+        finally:
+            case.tearDown() if hasattr(case, "tearDown") else None
+
+    def test_every_continuation_limit_exceeded_is_preceded_by_a_budget_warning_record(self):
+        case = CodexAppServerSupervisorTest()
+        case.setUp()
+        try:
+            case.jobs.write_text(owner_row(case.lease) + child_row(), encoding="utf-8")
+            result = subprocess.run(
+                case.command_with_join(case._non_closing_join()) + ["--max-continuations", "1"],
+                input="initial assignment",
+                text=True,
+                capture_output=True,
+                env={
+                    **os.environ,
+                    "FAKE_TRACE": str(case.trace),
+                    "AGENT_ARTIFACT_ROOT": str(case.artifact_root),
+                },
+                timeout=30,
+            )
+            self.assertEqual(result.returncode, 70, result.stderr + result.stdout)
+            registry = case.jobs.read_text(encoding="utf-8")
+            self.assertIn("reconcile_reason=continuation-limit-exceeded", registry)
+            sys.path.insert(0, str(ROOT / "utilities"))
+            import dispatch_budget_record as BR
+            rows = BR.read_rows(case.jobs.parent, PARENT)
+            warnings = [row for row in rows if row.get("record_kind") == "warning"]
+            self.assertTrue(warnings, rows)
+            self.assertEqual(warnings[-1]["reason"], "continuation-budget-exhausted")
+        finally:
+            case.tearDown() if hasattr(case, "tearDown") else None
+
+    def test_terminal_handoff_purpose_is_sealed_at_the_single_completion_receipt_site(self):
+        source = SUPERVISOR.read_text(encoding="utf-8")
+        self.assertEqual(source.count('"terminal-handoff" if open_or_running'), 1)
+        self.assertEqual(source.count("purpose=consumption_purpose"), 1)
+        self.assertIn("SD-116 R2: terminal-handoff is sealed here and only here", source)
 
 
 if __name__ == "__main__":

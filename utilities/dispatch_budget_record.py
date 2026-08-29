@@ -1,0 +1,206 @@
+"""SD-116 continuation-budget durable record leaf module (plan.md §5.4).
+
+A dependency leaf like `dispatch_launch_tuple.py`: imports only
+`dispatch_contract`'s resolvers and nothing else `dispatch_*`.
+
+Records live under `<dispatch_state_root>/supervisor-budget/<parent_attempt_id>.jsonl`
+(append-only, flock). Three `record_kind`s share this ledger --
+`reservation`, `warning`, `refusal` -- and are a separate vocabulary from
+the delivery receipt's `state`/`required_action`/`reason` enums (D47-8):
+receipt bytes never change because of this module.
+
+`reserve()` is a CAS append keyed on `(parent_attempt_id, ordinal)`: this
+module deliberately never uses an in-process counter as the sole admission
+evidence, because an in-process counter is always true and could never
+exercise D47-3's false branch under a forced write failure.
+"""
+from __future__ import annotations
+
+import errno
+import fcntl
+import hashlib
+import json
+import os
+import sys
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from dispatch_contract import resolve_agent_home  # noqa: E402
+from dispatch_contract import resolve_dispatch_state_root  # noqa: E402
+
+SCHEMA_VERSION = 1
+RECORD_KINDS = frozenset({"reservation", "warning", "refusal"})
+PURPOSES = frozenset({"ordinary", "terminal-handoff"})
+CLASSES = frozenset({"gross", "stall", "reserved"})
+REFUSAL_REASONS = frozenset({
+    "continuation-reserved-scope-violation",
+    "continuation-budget-unavailable",
+    "continuation-admission-refused",
+})
+_LOCK_DEADLINE_SECONDS = 0.25
+
+
+def _now(now: float | None) -> float:
+    return time.time() if now is None else now
+
+
+def _rfc3339(ts: float) -> str:
+    return datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _canonical(row: dict) -> str:
+    return json.dumps(row, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def _event_id(row: dict) -> str:
+    payload = {key: value for key, value in row.items() if key != "event_id"}
+    return hashlib.sha256(_canonical(payload).encode("utf-8")).hexdigest()
+
+
+def _ledger_path(state_root, parent_attempt_id: str) -> Path:
+    return Path(state_root) / "supervisor-budget" / f"{parent_attempt_id}.jsonl"
+
+
+def _parse_lines(text: str) -> list:
+    rows = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            rows.append(json.loads(line))
+        except ValueError:
+            continue
+    return rows
+
+
+def _with_lock(path: Path, fn):
+    os.makedirs(path.parent, exist_ok=True)
+    lock_path = Path(str(path) + ".lock")
+    deadline = time.monotonic() + _LOCK_DEADLINE_SECONDS
+    with open(str(lock_path), "a+") as lock:
+        while True:
+            try:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except (BlockingIOError, OSError) as exc:
+                if getattr(exc, "errno", None) not in (errno.EACCES, errno.EAGAIN) or time.monotonic() >= deadline:
+                    return None
+                time.sleep(0.005)
+        try:
+            return fn()
+        finally:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+
+
+def read_rows(state_root, parent_attempt_id: str) -> tuple:
+    path = _ledger_path(state_root, parent_attempt_id)
+    if not path.is_file():
+        return ()
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ()
+    return tuple(
+        row for row in _parse_lines(text)
+        if isinstance(row, dict) and row.get("schema_version") == SCHEMA_VERSION
+    )
+
+
+def _append(path: Path, row: dict) -> bool:
+    try:
+        payload = (_canonical(row) + "\n").encode("utf-8")
+        fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        try:
+            os.write(fd, payload)
+        finally:
+            os.close(fd)
+        return True
+    except OSError:
+        return False
+
+
+def reserve(
+    state_root, *, parent_attempt_id, route_id, route_hash, ordinal, purpose,
+    klass, remaining, now=None,
+) -> tuple:
+    """CAS append. A duplicate `(parent_attempt_id, ordinal)` is
+    `reservation-lost` -- the caller's admission is never granted twice for
+    the same ordinal, which is what makes `atomic_reservation_succeeds`
+    forceable to False for D47-3's negative branch."""
+
+    if purpose not in PURPOSES or klass not in CLASSES:
+        return (False, f"reservation-invalid:purpose={purpose!r},class={klass!r}")
+    path = _ledger_path(state_root, parent_attempt_id)
+
+    def _do():
+        for existing in read_rows(state_root, parent_attempt_id):
+            if existing.get("record_kind") == "reservation" and existing.get("ordinal") == ordinal:
+                return (False, "reservation-lost")
+        row = {
+            "schema_version": SCHEMA_VERSION,
+            "record_kind": "reservation",
+            "parent_attempt_id": parent_attempt_id,
+            "route_id": route_id,
+            "route_hash": route_hash,
+            "ordinal": ordinal,
+            "purpose": purpose,
+            "class": klass,
+            "gross_remaining": remaining.get("gross_remaining", 0),
+            "stall_remaining": remaining.get("stall_remaining", 0),
+            "reserved_remaining": remaining.get("reserved_remaining", 0),
+            "recorded_at": _rfc3339(_now(now)),
+        }
+        row["event_id"] = _event_id(row)
+        if not _append(path, row):
+            return (False, "reservation-unrecorded:write-failed")
+        return (True, "")
+
+    result = _with_lock(path, _do)
+    if result is None:
+        return (False, "reservation-unrecorded:lock-unavailable")
+    return result
+
+
+def _record_event(state_root, *, parent_attempt_id, record_kind, reason, remaining, now=None) -> tuple:
+    path = _ledger_path(state_root, parent_attempt_id)
+    row = {
+        "schema_version": SCHEMA_VERSION,
+        "record_kind": record_kind,
+        "parent_attempt_id": parent_attempt_id,
+        "reason": reason,
+        "gross_remaining": remaining.get("gross_remaining", 0),
+        "stall_remaining": remaining.get("stall_remaining", 0),
+        "reserved_remaining": remaining.get("reserved_remaining", 0),
+        "recorded_at": _rfc3339(_now(now)),
+    }
+    row["event_id"] = _event_id(row)
+
+    def _do():
+        unrecorded = f"continuation-budget-{record_kind}-unrecorded"
+        if not _append(path, row):
+            return (unrecorded, "write-failed")
+        return ("", "")
+
+    result = _with_lock(path, _do)
+    if result is None:
+        return (f"continuation-budget-{record_kind}-unrecorded", "lock-unavailable")
+    return result
+
+
+def record_warning(state_root, *, parent_attempt_id, reason, remaining, now=None) -> tuple:
+    return _record_event(
+        state_root, parent_attempt_id=parent_attempt_id, record_kind="warning",
+        reason=reason, remaining=remaining, now=now,
+    )
+
+
+def record_refusal(state_root, *, parent_attempt_id, reason, remaining, now=None) -> tuple:
+    if reason not in REFUSAL_REASONS:
+        return ("continuation-budget-refusal-unrecorded", f"unknown-reason:{reason!r}")
+    return _record_event(
+        state_root, parent_attempt_id=parent_attempt_id, record_kind="refusal",
+        reason=reason, remaining=remaining, now=now,
+    )

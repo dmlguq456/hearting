@@ -10,14 +10,36 @@ from pathlib import Path
 
 
 COMPATIBILITY_FLOOR = 12
+TERMINAL_RESERVE_DEFAULT = 1
 
 
 @dataclass(frozen=True)
 class ContinuationBudget:
+    """SD-116 §13.34.4-(2): `limit` is always `ordinary + reserved`.
+
+    Every existing call site in `resolve_continuation_budget()` below still
+    passes what used to be the whole `limit` -- `__post_init__` reinterprets
+    that value as `ordinary` (the gross-ceiling amount the pre-SD-116 code
+    already computed) and raises `limit` by `reserved` on top of it, so
+    `ordinary` never shrinks below the prior `limit` (D47-9) without editing
+    every call site individually."""
+
     limit: int
     source: str
     declared_nodes: int = 0
     retry_slots: int = 0
+    reserved: int = TERMINAL_RESERVE_DEFAULT
+    ordinary: int = 0
+    stall: int = 0
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "ordinary", self.limit)
+        object.__setattr__(self, "limit", self.limit + self.reserved)
+        # Finite and route-derived when a route is bound; otherwise generous
+        # enough that the pre-existing `max_identical_redeliveries` /
+        # `max_join_reparks` bounds -- not this counter -- remain the actual
+        # enforcement point for those patterns (G47 no-regression).
+        object.__setattr__(self, "stall", max(COMPATIBILITY_FLOOR, self.retry_slots + 1))
 
 
 def positive_continuation_limit(raw: str) -> int:
@@ -94,3 +116,101 @@ def resolve_continuation_budget(
         declared_nodes=len(node_ids),
         retry_slots=retry_slots,
     )
+
+
+@dataclass(frozen=True)
+class AdmitVerdict:
+    admitted: bool
+    purpose: str
+    charged: str
+    refusal: str
+    gross_remaining: int
+    stall_remaining: int
+    reserved_remaining: int
+
+
+class ContinuationLedger:
+    """Pure state machine (SD-116 §13.34.4-(2)): zero file access. The three
+    remainders never go negative via clamping -- every admit that would push
+    one below zero is refused instead (D47-4)."""
+
+    def __init__(self, budget: ContinuationBudget) -> None:
+        self._gross_remaining = budget.ordinary
+        self._stall_remaining = budget.stall
+        self._reserved_remaining = budget.reserved
+
+    @property
+    def gross_remaining(self) -> int:
+        return self._gross_remaining
+
+    @property
+    def stall_remaining(self) -> int:
+        return self._stall_remaining
+
+    @property
+    def reserved_remaining(self) -> int:
+        return self._reserved_remaining
+
+    def _verdict(self, *, admitted, purpose, charged, refusal) -> AdmitVerdict:
+        return AdmitVerdict(
+            admitted=admitted, purpose=purpose, charged=charged, refusal=refusal,
+            gross_remaining=self._gross_remaining,
+            stall_remaining=self._stall_remaining,
+            reserved_remaining=self._reserved_remaining,
+        )
+
+    def admit(self, *, purpose: str, stalled: bool, reservation_ok: bool) -> AdmitVerdict:
+        if purpose not in ("ordinary", "terminal-handoff"):
+            # `purpose` names an axis distinct from `class` (SD-116
+            # §13.34.4-(2)): a caller that names the reserved *class* on this
+            # axis is asking to spend the reserve outside the one sealed
+            # terminal-handoff site, which is a scope violation, not merely
+            # an unrecognized purpose.
+            refusal = (
+                "continuation-reserved-scope-violation" if purpose == "reserved"
+                else "continuation-budget-unavailable"
+            )
+            return self._verdict(admitted=False, purpose=purpose, charged="", refusal=refusal)
+        # D47-7: an unknown/stale/negative/mismatched budget state -- a
+        # negative remainder (corrupted ledger) or a reservation the caller
+        # could not atomically secure -- refuses uniformly with
+        # `continuation-budget-unavailable`, distinct from an ordinary
+        # exhaustion refusal below.
+        if (
+            self._gross_remaining < 0
+            or self._stall_remaining < 0
+            or self._reserved_remaining < 0
+            or not reservation_ok
+        ):
+            return self._verdict(
+                admitted=False, purpose=purpose, charged="",
+                refusal="continuation-budget-unavailable",
+            )
+        if purpose == "terminal-handoff":
+            if self._reserved_remaining > 0:
+                self._reserved_remaining -= 1
+                return self._verdict(admitted=True, purpose=purpose, charged="reserved", refusal="")
+            return self._verdict(
+                admitted=False, purpose=purpose, charged="", refusal="continuation-admission-refused",
+            )
+        # SD-116 R2: only the sealed completion-receipt consumption site may
+        # ever request purpose="terminal-handoff"; every other admit() call
+        # in this ledger's lifetime passes purpose="ordinary".
+        if stalled:
+            if self._stall_remaining > 0:
+                self._stall_remaining -= 1
+                return self._verdict(admitted=True, purpose=purpose, charged="stall", refusal="")
+            return self._verdict(
+                admitted=False, purpose=purpose, charged="", refusal="continuation-admission-refused",
+            )
+        # `stall_remaining` gates only the two no-progress patterns (identical
+        # redelivery, runtime-wait-without-started-child) routed through the
+        # `stalled=True` branch above -- it never blocks a real-progress
+        # gross spend, per §13.34.4-(2) "이 두 계열은 gross ceiling을 소비하지
+        # 않는다" (the inverse holds too: gross spends don't borrow from stall).
+        if self._gross_remaining > self._reserved_remaining:
+            self._gross_remaining -= 1
+            return self._verdict(admitted=True, purpose=purpose, charged="gross", refusal="")
+        return self._verdict(
+            admitted=False, purpose=purpose, charged="", refusal="continuation-admission-refused",
+        )

@@ -46,9 +46,11 @@ from dispatch_completion_join import (
 )
 from dispatch_contract import DispatchContractError, hold_supervisor_lease
 from dispatch_continuation_budget import (
+    ContinuationLedger,
     positive_continuation_limit,
     resolve_continuation_budget,
 )
+import dispatch_budget_record as budget_record
 import dispatch_stage_advance as stage_advance
 from dispatch_supervisor_terminal import (
     SupervisorTerminal,
@@ -695,6 +697,42 @@ def remediation_prompt(attempts: set[str], *, jobs: str = "") -> str:
     )
 
 
+def _admit_continuation(
+    ledger: ContinuationLedger, state_root, *, parent_attempt_id: str,
+    route_id: str, route_hash: str, ordinal: int, purpose: str, stalled: bool,
+):
+    """SD-116 §13.34.4-(2): try the atomic reservation write first, then feed
+    its outcome into `ledger.admit()` as `reservation_ok` -- this is what
+    lets a forced write failure exercise the admission equation's false
+    branch (D47-3) instead of an in-process counter that is always true. On
+    refusal, a budget-exhausted warning record always precedes the caller's
+    `SupervisorError` (D47-5); a warning-write failure is typed and never
+    spends budget or kills the owner (D47-10)."""
+
+    klass = "reserved" if purpose == "terminal-handoff" else ("stall" if stalled else "gross")
+    reservation_ok, _detail = budget_record.reserve(
+        state_root, parent_attempt_id=parent_attempt_id, route_id=route_id,
+        route_hash=route_hash, ordinal=ordinal, purpose=purpose, klass=klass,
+        remaining={
+            "gross_remaining": ledger.gross_remaining,
+            "stall_remaining": ledger.stall_remaining,
+            "reserved_remaining": ledger.reserved_remaining,
+        },
+    )
+    verdict = ledger.admit(purpose=purpose, stalled=stalled, reservation_ok=reservation_ok)
+    if not verdict.admitted:
+        budget_record.record_warning(
+            state_root, parent_attempt_id=parent_attempt_id,
+            reason="continuation-budget-exhausted",
+            remaining={
+                "gross_remaining": verdict.gross_remaining,
+                "stall_remaining": verdict.stall_remaining,
+                "reserved_remaining": verdict.reserved_remaining,
+            },
+        )
+    return verdict
+
+
 def claude_command(
     args: argparse.Namespace, session_id: str, resume: bool, *, stream: bool = False
 ) -> list[str]:
@@ -949,6 +987,8 @@ def main(argv: list[str] | None = None) -> int:
     )
     args.max_continuations = continuation_budget.limit
     args.max_join_reparks = max(1, args.max_join_reparks)
+    ledger = ContinuationLedger(continuation_budget)
+    budget_state_root = Path(args.jobs).parent
     initial_prompt = sys.stdin.read()
     if not initial_prompt.strip():
         terminal = classify_supervisor_error("claude", "initial-prompt-empty", 64)
@@ -980,6 +1020,9 @@ def main(argv: list[str] | None = None) -> int:
             "source": continuation_budget.source,
             "declared_nodes": continuation_budget.declared_nodes,
             "retry_slots": continuation_budget.retry_slots,
+            "ordinary": continuation_budget.ordinary,
+            "reserved": continuation_budget.reserved,
+            "stall": continuation_budget.stall,
         }
     )
     state_path = Path(args.state_file) if args.state_file else None
@@ -1215,15 +1258,27 @@ def main(argv: list[str] | None = None) -> int:
                                 }
                             )
                             identical_redeliveries = 0
+                            redelivery_stalled = False
                         else:
+                            # SD-116 R3: the identical-redelivery increment
+                            # branch is the only place a continuation is
+                            # classified as a stall spend.
                             identical_redeliveries += 1
+                            redelivery_stalled = True
                             if identical_redeliveries > args.max_identical_redeliveries:
                                 return seal_redelivery_abandoned(
                                     args, identical_redeliveries
                                 )
                     else:
                         identical_redeliveries = 0
-                    if continuations >= args.max_continuations:
+                        redelivery_stalled = False
+                    verdict = _admit_continuation(
+                        ledger, budget_state_root,
+                        parent_attempt_id=args.parent_attempt_id,
+                        route_id=args.route_id, route_hash=args.route_hash,
+                        ordinal=continuations, purpose="ordinary", stalled=redelivery_stalled,
+                    )
+                    if not verdict.admitted:
                         raise SupervisorError("continuation-limit-exceeded")
                     next_prompt = completion_prompt(
                         active_outbox.receipt or {}, active_outbox, jobs=args.jobs
@@ -1256,7 +1311,15 @@ def main(argv: list[str] | None = None) -> int:
             )
             if unstarted or empty_wait:
                 signature = tuple(sorted(unstarted))
-                if signature in launch_remediated or continuations >= args.max_continuations:
+                if signature in launch_remediated:
+                    raise SupervisorError("runtime-wait-without-started-child")
+                verdict = _admit_continuation(
+                    ledger, budget_state_root,
+                    parent_attempt_id=args.parent_attempt_id,
+                    route_id=args.route_id, route_hash=args.route_hash,
+                    ordinal=continuations, purpose="ordinary", stalled=True,
+                )
+                if not verdict.admitted:
                     raise SupervisorError("runtime-wait-without-started-child")
                 launch_remediated.add(signature)
                 emit(
@@ -1274,7 +1337,21 @@ def main(argv: list[str] | None = None) -> int:
                 resume = True
                 continue
             if new_attempts:
-                if continuations >= args.max_continuations:
+                # Cheap, non-mutating fail-fast: this round's real admission
+                # (and its single budget spend) is committed once, at the R2
+                # sealed site below, once the post-join purpose is knowable.
+                # This guard only skips the expensive park+join dance early
+                # when an ordinary admit could not possibly succeed anyway.
+                if not (ledger.gross_remaining > ledger.reserved_remaining):
+                    budget_record.record_warning(
+                        budget_state_root, parent_attempt_id=args.parent_attempt_id,
+                        reason="continuation-budget-exhausted",
+                        remaining={
+                            "gross_remaining": ledger.gross_remaining,
+                            "stall_remaining": ledger.stall_remaining,
+                            "reserved_remaining": ledger.reserved_remaining,
+                        },
+                    )
                     raise SupervisorError("continuation-limit-exceeded")
                 emit(
                     {
@@ -1400,6 +1477,25 @@ def main(argv: list[str] | None = None) -> int:
                         "continuation_ordinal": continuations + 1,
                     }
                 )
+                # SD-116 R2: terminal-handoff is sealed here and only here --
+                # zero open/running route-bound children AND the ordinary
+                # gross budget is already down to the reserve boundary
+                # (D47-4): the reserve exists to let a wrap-up turn land once
+                # ordinary spend is exhausted, not to be spent on every
+                # ordinary round where nothing happens to be running yet.
+                open_or_running = sum(1 for row in current_rows if row.status in {"open", "running"})
+                gross_exhausted = ledger.gross_remaining <= ledger.reserved_remaining
+                consumption_purpose = (
+                    "terminal-handoff" if open_or_running == 0 and gross_exhausted else "ordinary"
+                )
+                verdict = _admit_continuation(
+                    ledger, budget_state_root,
+                    parent_attempt_id=args.parent_attempt_id,
+                    route_id=args.route_id, route_hash=args.route_hash,
+                    ordinal=continuations, purpose=consumption_purpose, stalled=False,
+                )
+                if not verdict.admitted:
+                    raise SupervisorError("continuation-limit-exceeded")
                 prepared = prepare_supervisor_outbox(
                     state_path,
                     args.parent_attempt_id,
@@ -1436,7 +1532,15 @@ def main(argv: list[str] | None = None) -> int:
                         current = {row.attempt_id: row for row in rows}
                         continue
                 signature = tuple(sorted(unresolved))
-                if signature in remediated or continuations >= args.max_continuations:
+                if signature in remediated:
+                    raise SupervisorError("owned-children-remain-open-after-resume")
+                verdict = _admit_continuation(
+                    ledger, budget_state_root,
+                    parent_attempt_id=args.parent_attempt_id,
+                    route_id=args.route_id, route_hash=args.route_hash,
+                    ordinal=continuations, purpose="ordinary", stalled=False,
+                )
+                if not verdict.admitted:
                     raise SupervisorError("owned-children-remain-open-after-resume")
                 remediated.add(signature)
                 next_prompt = remediation_prompt(unresolved, jobs=args.jobs)
