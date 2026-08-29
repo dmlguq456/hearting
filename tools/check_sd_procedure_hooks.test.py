@@ -82,6 +82,45 @@ class HookCheckerFixture(unittest.TestCase):
         self.write_tsv(["SD-201\tprocedure-step\tdocs/procedure.md#Missing\twired"])
         self.assertNotEqual(self.run_checker("--check").returncode, 0)
 
+    def test_sd_mention_alone_never_substitutes_for_a_real_symbol(self):
+        # C-7 regression: `foo.py::missing` used to pass on the SD string alone.
+        (self.root / "foo.py").write_text("# SD-204 is mentioned here\nmissing()\n", encoding="utf-8")
+        for kind in ("producer-symbol", "gate-fixture"):
+            with self.subTest(kind=kind):
+                self.write_tsv([f"SD-204\t{kind}\tfoo.py::missing\twired"])
+                result = self.run_checker("--check")
+                self.assertNotEqual(result.returncode, 0, result.stdout)
+                self.assertIn("anchor SD-204", result.stderr)
+
+    def test_symbol_anchor_needs_both_a_definition_and_its_sd(self):
+        (self.root / "producer.py").write_text("def publish():\n    return 1\n", encoding="utf-8")
+        self.write_tsv(["SD-205\tproducer-symbol\tproducer.py::publish\twired"])
+        # symbol defined, SD absent -> still fails.
+        self.assertNotEqual(self.run_checker("--check").returncode, 0)
+        (self.root / "producer.py").write_text("def publish():\n    return 'SD-205'\n", encoding="utf-8")
+        self.assertEqual(self.run_checker("--check").returncode, 0)
+
+    def test_class_and_method_definitions_resolve_but_calls_do_not(self):
+        (self.root / "gate.py").write_text(
+            "class Gate:\n    def check(self):\n        return 'SD-206'\n", encoding="utf-8")
+        self.write_tsv(["SD-206\tgate-fixture\tgate.py::Gate.check\twired"])
+        self.assertEqual(self.run_checker("--check").returncode, 0)
+        self.write_tsv(["SD-206\tgate-fixture\tgate.py::run\twired"])
+        self.assertNotEqual(self.run_checker("--check").returncode, 0)
+
+    def test_procedure_step_needs_the_sd_inside_its_own_section(self):
+        (self.root / "docs").mkdir()
+        (self.root / "docs/procedure.md").write_text(
+            "## Step\nnothing here\n\n## Other\nSD-207\n", encoding="utf-8")
+        self.write_tsv(["SD-207\tprocedure-step\tdocs/procedure.md#Step\twired"])
+        self.assertNotEqual(self.run_checker("--check").returncode, 0)
+
+    def test_anchor_shape_must_match_the_declared_caller_kind(self):
+        (self.root / "docs").mkdir()
+        (self.root / "docs/procedure.md").write_text("## Step\nSD-208\n", encoding="utf-8")
+        self.write_tsv(["SD-208\tproducer-symbol\tdocs/procedure.md#Step\twired"])
+        self.assertNotEqual(self.run_checker("--check").returncode, 0)
+
     def test_write_mode_does_not_change_tsv(self):
         (self.root / "core").mkdir()
         (self.root / "core/HOOKS.md").write_text("## Invariant Catalog\nSD-111\n", encoding="utf-8")

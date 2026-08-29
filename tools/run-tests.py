@@ -146,27 +146,76 @@ def build_installed_layout_env(tmpdir: Path, install_prefix: Path) -> dict[str, 
     return env
 
 
+TEMP_PARENT_UNPROVEN_EXIT = 70
+
+
+def resolve_git_executable() -> str | None:
+    """Resolve the git binary explicitly. ``env={}`` on the probe means PATH
+    lookup would silently depend on the exec default, so a non-standard Git
+    install must be named rather than guessed."""
+    configured = os.environ.get("RUN_TESTS_GIT")
+    if configured:
+        return configured if os.access(configured, os.X_OK) else None
+    found = shutil.which("git")
+    if found:
+        return found
+    for fallback in ("/usr/bin/git", "/usr/local/bin/git", "/bin/git"):
+        if os.access(fallback, os.X_OK):
+            return fallback
+    return None
+
+
+def probe_git_containment(git_exe: str, candidate: Path) -> str:
+    """Classify one candidate: "outside" (proven non-repository), "inside"
+    (a real worktree), or "uncertain". Only a Git error that literally says
+    "not a git repository" proves "outside"; every other failure -- missing
+    binary, permission error, a broken or non-standard Git -- is uncertain
+    and must never be read as a safe candidate."""
+    try:
+        probe = subprocess.run(
+            [git_exe, "-C", str(candidate), "rev-parse", "--show-toplevel"],
+            env={}, capture_output=True, text=True,
+        )
+    except OSError:
+        return "uncertain"
+    if probe.returncode == 0:
+        return "inside" if probe.stdout.strip() else "uncertain"
+    stderr = (probe.stderr or "").lower()
+    if "not a git repository" in stderr or "not a git repo" in stderr:
+        return "outside"
+    return "uncertain"
+
+
 def choose_suite_temp_parent() -> Path:
-    """Choose a writable temp parent outside every Git worktree."""
-    candidates = []
+    """Choose a writable temp parent proven to sit outside every Git worktree."""
+    candidates: list[Path] = []
     configured = os.environ.get("RUN_TESTS_TMP_ROOT")
     if configured:
         candidates.append(Path(configured))
     candidates.extend((Path("/var/tmp"), Path(tempfile.gettempdir())))
+    git_exe = resolve_git_executable()
+    if git_exe is None:
+        print("temp-root-unproven: no usable git executable to probe candidates",
+              file=sys.stderr)
+        raise SystemExit(TEMP_PARENT_UNPROVEN_EXIT)
+    rejected: list[str] = []
     for candidate in candidates:
         try:
             candidate.mkdir(parents=True, exist_ok=True)
-            if not os.access(candidate, os.W_OK):
-                continue
-            probe = subprocess.run(
-                ["git", "-C", str(candidate), "rev-parse", "--show-toplevel"],
-                env={}, capture_output=True, text=True,
-            )
-            if probe.returncode != 0:
-                return candidate
-        except OSError:
+            writable = os.access(candidate, os.W_OK)
+        except OSError as exc:
+            rejected.append(f"{candidate}: unusable ({exc.__class__.__name__})")
             continue
-    raise SystemExit("temp-root-inside-git-tree")
+        if not writable:
+            rejected.append(f"{candidate}: not writable")
+            continue
+        verdict = probe_git_containment(git_exe, candidate)
+        if verdict == "outside":
+            return candidate
+        rejected.append(f"{candidate}: {verdict}")
+    print("temp-root-inside-git-tree: no candidate proven outside a Git worktree; "
+          + "; ".join(rejected), file=sys.stderr)
+    raise SystemExit(TEMP_PARENT_UNPROVEN_EXIT)
 
 
 _INSTALLED_LAYOUT_LOCK = threading.Lock()

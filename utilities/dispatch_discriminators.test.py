@@ -6,6 +6,7 @@ must name a real producer that actually writes that `rejection_class`
 literal at its declared `write_site`, and a fixture test that exists in the
 test file it names.
 """
+import ast
 import csv
 import sys
 import unittest
@@ -60,6 +61,51 @@ class DiscriminatorLedgerTest(unittest.TestCase):
         _header, rows = _rows()
         declared = {row[0] for row in rows}
         self.assertEqual(declared, LT.REJECTION_CLASSES)
+
+    def test_no_row_leaves_consumer_entry_point_blank(self):
+        # C-11: a blank consumer column must never read as "checked and fine".
+        # Every declared row names a real consumer entry point in a real file.
+        _header, rows = _rows()
+        for row in rows:
+            with self.subTest(discriminator=row[0]):
+                consumer = row[5].strip()
+                self.assertTrue(consumer, f"{row[0]} has a blank consumer_entry_point")
+                consumer_path = ROOT / consumer.partition("::")[0]
+                self.assertTrue(consumer_path.is_file(), consumer_path)
+
+    def test_capacity_is_not_a_row_in_this_ledger(self):
+        # docs/capacity-failover-gap.md must not claim an SD-59 row here: this
+        # ledger is the SD-93 rejection_class enum, and `capacity` is a
+        # failure_class on a different axis.
+        sys.path.insert(0, str(ROOT / "utilities"))
+        import dispatch_launch_tuple as LT
+
+        _header, rows = _rows()
+        self.assertNotIn("capacity", {row[0] for row in rows})
+        self.assertNotIn("capacity", LT.REJECTION_CLASSES)
+        doc = (ROOT / "docs/capacity-failover-gap.md").read_text(encoding="utf-8")
+        self.assertIn("행이 없다", doc)
+
+    def test_capacity_retry_has_no_supervised_join_caller(self):
+        # The documented gap itself: SD-59's retry is reachable only from the
+        # foreground `_dispatch` loop. A new caller elsewhere -- or a
+        # supervised-join wiring -- must break this and force a doc update.
+        source = (ROOT / "utilities/stage-dispatch-fallback.py").read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        functions = [n for n in ast.walk(tree)
+                     if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]
+        self.assertEqual({"capacity_retry", "capacity_context"} & {f.name for f in functions},
+                         {"capacity_retry", "capacity_context"})
+
+        def enclosing(lineno):
+            candidates = [f for f in functions if f.lineno <= lineno <= f.end_lineno]
+            return min(candidates, key=lambda f: f.end_lineno - f.lineno).name
+
+        callers = [enclosing(n.lineno) for n in ast.walk(tree)
+                   if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+                   and n.func.id == "capacity_retry"]
+        self.assertEqual(callers, ["_dispatch", "_dispatch"],
+                         f"capacity_retry callers changed: {callers}")
 
     def test_no_row_names_the_consumer_only_skip(self):
         # B47-10: `prior-unchanged-failure` (key in failed_tuples alone) is a

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Validate the SD caller declaration ledger without modifying it."""
 from __future__ import annotations
-import argparse, re, subprocess, sys
+import argparse, ast, re, subprocess, sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -23,19 +23,50 @@ def parse_rows(path):
         if row["status"] == "baseline" and row["anchor"] != "-": raise ValueError(f"baseline anchor {row['sd']}")
     return rows
 
+SYMBOL_KINDS = {"producer-symbol", "gate-fixture"}
+
+
+def symbol_is_defined(path, text, symbol):
+    """True only when `symbol` is really *defined* in `text`.
+
+    A mention of the name -- a call, a string, an import -- never counts.
+    Python is checked through the AST; shell scripts through a function
+    definition line. Any other suffix is unsupported and fails closed.
+    """
+    if path.suffix == ".py":
+        try: tree = ast.parse(text)
+        except SyntaxError: return False
+        wanted = symbol.split(".")[-1]
+        return any(isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+                   and node.name == wanted for node in ast.walk(tree))
+    if path.suffix == ".sh":
+        return re.search(r"^\s*(?:function\s+)?" + re.escape(symbol) + r"\s*\(\)\s*\{", text, re.M) is not None
+    return False
+
+
 def resolve_anchor(root, row):
+    """Resolve one ledger anchor. No fallback: a bare SD mention never passes."""
     if row["status"] == "baseline": return True
-    anchor = row["anchor"]
-    if "#" in anchor:
-        file, heading = anchor.split("#", 1); text = (root / file).read_text()
+    anchor, kind = row["anchor"], row["caller_kind"]
+    if kind == "procedure-step":
+        if "#" not in anchor: return False
+        file, heading = anchor.split("#", 1)
+        try: text = (root / file).read_text()
+        except OSError: return False
         marker = re.search(r"^#{2,6} .*" + re.escape(heading) + r"\s*$", text, re.M)
         if not marker: return False
         next_heading = re.search(r"^#{2,6} ", text[marker.end():], re.M)
         section = text[marker.end(): marker.end() + next_heading.start() if next_heading else None]
-        return row["sd"] in section
-    file, symbol = anchor.split("::", 1)
-    text = (root / file).read_text()
-    return re.search(r"(?:def|class)\s+" + re.escape(symbol) + r"\b", text) is not None or row["sd"] in text
+        # heading and in-section SD are two separate conditions, both required.
+        return bool(marker) and row["sd"] in section
+    if kind in SYMBOL_KINDS:
+        if "::" not in anchor: return False
+        file, symbol = anchor.split("::", 1)
+        path = root / file
+        try: text = path.read_text()
+        except OSError: return False
+        return symbol_is_defined(path, text, symbol) and row["sd"] in text
+    return False
 
 def previous_baseline_count(root, path):
     try:

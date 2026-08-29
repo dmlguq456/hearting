@@ -14,11 +14,22 @@ import sys
 import tempfile
 import textwrap
 import unittest
+from unittest import mock
 from datetime import date, timedelta
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 RUNNER = ROOT / "tools" / "run-tests.py"
+
+
+def load_runner_module():
+    """Import run-tests.py as a module for unit-level probe assertions."""
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("run_tests_under_test", RUNNER)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 TODAY = date.today().isoformat()
 YESTERDAY = (date.today() - timedelta(days=1)).isoformat()
@@ -374,6 +385,114 @@ class RetryFixture(RunTestsFixtureBase):
         result, rows = self.run_fixture(self.baseline(), extra_args=["--retries", "1"])
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(rows[0]["detail"], "attempts=2; outcomes=known-fail,pass; policy=flaky-timing")
+
+
+class TempParentProbeFixture(unittest.TestCase):
+    """C-5: the Git containment probe must distinguish a real "not a
+    repository" answer from any other probe failure."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.mod = load_runner_module()
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def fake_git(self, name: str, body: str) -> Path:
+        path = self.root / name
+        path.write_text("#!/bin/sh\n" + textwrap.dedent(body), encoding="utf-8")
+        path.chmod(0o755)
+        return path
+
+    def test_real_non_repository_is_accepted(self):
+        git = self.fake_git("git-none", """
+            echo 'fatal: not a git repository (or any of the parent directories): .git' >&2
+            exit 128
+        """)
+        self.assertEqual(self.mod.probe_git_containment(str(git), self.root), "outside")
+
+    def test_worktree_hit_is_inside(self):
+        git = self.fake_git("git-inside", """
+            echo /repo
+            exit 0
+        """)
+        self.assertEqual(self.mod.probe_git_containment(str(git), self.root), "inside")
+
+    def test_probe_error_is_uncertain_not_a_safe_candidate(self):
+        for name, body in (
+            ("git-perm", "echo 'fatal: could not read Error: Permission denied' >&2\nexit 128\n"),
+            ("git-broken", "echo 'error: object file is empty' >&2\nexit 1\n"),
+            ("git-silent", "exit 129\n"),
+            ("git-empty-ok", "exit 0\n"),
+        ):
+            with self.subTest(name=name):
+                git = self.fake_git(name, body)
+                self.assertEqual(self.mod.probe_git_containment(str(git), self.root), "uncertain")
+
+    def test_missing_binary_is_uncertain(self):
+        self.assertEqual(
+            self.mod.probe_git_containment(str(self.root / "no-such-git"), self.root),
+            "uncertain",
+        )
+
+    def test_non_standard_git_is_resolved_through_the_override(self):
+        git = self.fake_git("git-elsewhere", "exit 128\n")
+        with mock.patch.dict(os.environ, {"RUN_TESTS_GIT": str(git)}, clear=False):
+            self.assertEqual(self.mod.resolve_git_executable(), str(git))
+        with mock.patch.dict(os.environ, {"RUN_TESTS_GIT": str(self.root / "absent")}, clear=False):
+            self.assertIsNone(self.mod.resolve_git_executable())
+
+    def test_all_candidates_uncertain_exits_70(self):
+        # every probe uncertain (incl. /var/tmp) -> refuse, never guess.
+        git = self.fake_git("git-uncertain", "exit 129\n")
+        with mock.patch.dict(os.environ, {"RUN_TESTS_GIT": str(git),
+                                          "RUN_TESTS_TMP_ROOT": str(self.root)}, clear=False):
+            with self.assertRaises(SystemExit) as caught:
+                self.mod.choose_suite_temp_parent()
+        self.assertEqual(caught.exception.code, 70)
+
+    def test_unusable_candidate_is_skipped_before_the_probe(self):
+        # a configured root that cannot be made writable (the "/var/tmp is
+        # unavailable" shape) is rejected without being probed.
+        blocked = self.root / "blocked"
+        blocked.mkdir(mode=0o500)
+        good = self.root / "good"
+        good.mkdir()
+        git = self.fake_git("git-skip", f"""
+            case "$2" in
+              {blocked}) echo 'probed a candidate that should have been skipped' >&2; exit 0 ;;
+              {good}) echo 'fatal: not a git repository (or any of the parent directories): .git' >&2; exit 128 ;;
+              *) exit 129 ;;
+            esac
+        """)
+        with mock.patch.dict(os.environ, {"RUN_TESTS_GIT": str(git),
+                                          "RUN_TESTS_TMP_ROOT": str(blocked)}, clear=False):
+            with mock.patch.object(self.mod.tempfile, "gettempdir", return_value=str(good)):
+                self.assertEqual(self.mod.choose_suite_temp_parent(), good)
+
+    def test_no_git_executable_exits_70(self):
+        with mock.patch.dict(os.environ, {"RUN_TESTS_GIT": str(self.root / "absent")}, clear=False):
+            with self.assertRaises(SystemExit) as caught:
+                self.mod.choose_suite_temp_parent()
+        self.assertEqual(caught.exception.code, 70)
+
+    def test_first_uncertain_candidate_falls_through_to_the_next(self):
+        marker = self.root / "good"
+        marker.mkdir()
+        bad = self.root / "bad"
+        bad.mkdir()
+        git = self.fake_git("git-selective", f"""
+            case "$2" in
+              {marker}) echo 'fatal: not a git repository (or any of the parent directories): .git' >&2; exit 128 ;;
+              *) exit 129 ;;
+            esac
+        """)
+        with mock.patch.dict(os.environ, {"RUN_TESTS_GIT": str(git),
+                                          "RUN_TESTS_TMP_ROOT": str(bad)}, clear=False):
+            with mock.patch.object(self.mod.tempfile, "gettempdir", return_value=str(marker)):
+                chosen = self.mod.choose_suite_temp_parent()
+        self.assertEqual(chosen, marker)
 
 
 class LiveStateLeakFixture(RunTestsFixtureBase):
