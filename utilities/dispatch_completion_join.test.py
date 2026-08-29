@@ -2162,6 +2162,83 @@ class MaterializePendingDeliveryTest(unittest.TestCase):
                 record["receipt"]["children"][0]["attempt_id"], "att-materialize-fixture"
             )
 
+    OWNER_METADATA = (
+        "attempt_schema_version=2,dispatch_depth=1,transport=headless,"
+        "execution_surface=registered-headless,registered_worker=1,"
+        "fallback_hop=same-harness-headless,worker_type=owner,unit=_kernel/owner"
+    )
+
+    def _owner_row(self, attempt="att-materialize-owner"):
+        # Real dispatch-depth-1 owner shape (2026-08-29 mega-audit-af row):
+        # bound through owner_route_id, no route_id/route_node, no parent attempt.
+        pipe = ",".join([
+            self.OWNER_METADATA,
+            f"attempt_id={attempt}",
+            "parent_attempt_id=-",
+            "parent_completion_delivery=claude-parent-runtime",
+            "parent_sid=sess-materialize-owner",
+            "owner_route_id=rt-materialize-owner",
+            "owner_route_hash=sha256:owner",
+            "harness=claude",
+        ])
+        return f"2026-08-28T00:00:00Z\topen\t/r\t/w\towner-slug\t{pipe}"
+
+    def test_materialize_owner_row_resolves_identity_from_owner_route(self):
+        # Regression: before 2026-08-29 every owner terminal was refused as
+        # identity-incomplete (route_id/route_node empty) and the depth-0
+        # session never received a pending record.
+        with tempfile.TemporaryDirectory() as td:
+            jobs = Path(td) / "jobs.log"
+            jobs.write_text(self._owner_row() + "\n", encoding="utf-8")
+            fields = self._close_and_get_fields(jobs, "att-materialize-owner")
+            self.assertEqual(
+                JOIN.pending_record_identity(D.parse_registry_metadata(fields[5])),
+                ("rt-materialize-owner", JOIN.OWNER_ROUTE_NODE, JOIN.NO_PARENT_ATTEMPT),
+            )
+            path = JOIN.materialize_pending_delivery(jobs, fields)
+            self.assertIsNotNone(path)
+            record = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(record["route_id"], "rt-materialize-owner")
+            self.assertEqual(record["route_node"], "_owner")
+            self.assertEqual(record["parent_attempt_id"], "-")
+            self.assertEqual(record["recipient_kind"], "claude-parent-runtime")
+            self.assertEqual(record["state"], "pending")
+
+    def test_stage_row_identity_is_unchanged_by_owner_resolution(self):
+        with tempfile.TemporaryDirectory() as td:
+            jobs = Path(td) / "jobs.log"
+            jobs.write_text(self._row() + "\n", encoding="utf-8")
+            fields = self._close_and_get_fields(jobs)
+            self.assertEqual(
+                JOIN.pending_record_identity(D.parse_registry_metadata(fields[5])),
+                ("rt-materialize-fixture", "execute", "att-materialize-parent"),
+            )
+
+    def test_refused_materialize_leaves_a_durable_log_line(self):
+        # A depth-2 row with no route identity is still refused, but the
+        # refusal must now be traceable after the fact.
+        with tempfile.TemporaryDirectory() as td:
+            jobs = Path(td) / "jobs.log"
+            pipe = ",".join([
+                self.CURRENT_METADATA,
+                "attempt_id=att-materialize-broken",
+                "parent_attempt_id=att-materialize-parent",
+                "parent_completion_delivery=claude-parent-runtime",
+                "parent_sid=sess-materialize-fixture",
+                "harness=claude",
+            ])
+            jobs.write_text(
+                f"2026-08-28T00:00:00Z\topen\t/r\t/w\texecute\t{pipe}\n", encoding="utf-8"
+            )
+            self.assertTrue(D.close_attempt_row(jobs, "att-materialize-broken", "completed-marker"))
+            self.assertIsNone(JOIN.materialize_after_terminal_close(jobs, "att-materialize-broken"))
+            log = Path(td) / "logs" / JOIN.PENDING_DELIVERY_LOG
+            self.assertTrue(log.is_file())
+            entry = json.loads(log.read_text(encoding="utf-8").splitlines()[-1])
+            self.assertEqual(entry["event"], "delivery-persistence-refused")
+            self.assertEqual(entry["attempt_id"], "att-materialize-broken")
+            self.assertIn("identity-incomplete", entry["reason"])
+
     def test_materialize_returns_none_without_delivery_intent(self):
         with tempfile.TemporaryDirectory() as td:
             jobs = Path(td) / "jobs.log"

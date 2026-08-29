@@ -178,6 +178,65 @@ def unseal_delivery_receipt(encoded: str) -> dict[str, object]:
     return value
 
 
+OWNER_ROUTE_NODE = "_owner"
+NO_PARENT_ATTEMPT = "-"
+PENDING_DELIVERY_LOG = "dispatch-pending-delivery.log"
+
+
+def pending_record_identity(metadata: dict[str, str]) -> tuple[str, str, str]:
+    """Resolve the (route_id, route_node, parent_attempt_id) identity triple a
+    pending-delivery record requires from one terminal row's metadata.
+
+    A dispatch-depth-2 stage row carries ``route_id``/``route_node`` directly.
+    A dispatch-depth-1 owner row never does: the owner is bound to its route
+    through ``owner_route_id`` and owns no node, and its parent is the
+    depth-0 session (no parent attempt). Before 2026-08-29 the materializer
+    passed the empty strings straight through, so every owner terminal --
+    the one recipient the depth-0 wake actually depends on -- was refused as
+    ``identity-incomplete`` and no production record ever existed. Owner rows
+    now resolve to ``owner_route_id`` + the ``_owner`` node sentinel + the
+    ``-`` no-parent sentinel; stage rows are unchanged.
+    """
+
+    route_id = metadata.get("route_id") or ""
+    route_node = metadata.get("route_node") or ""
+    parent_attempt_id = metadata.get("parent_attempt_id") or ""
+    is_owner_row = (
+        metadata.get("worker_type") == "owner"
+        or metadata.get("dispatch_depth") == "1"
+    )
+    if is_owner_row:
+        route_id = route_id or metadata.get("owner_route_id") or ""
+        route_node = route_node or OWNER_ROUTE_NODE
+        parent_attempt_id = parent_attempt_id or NO_PARENT_ATTEMPT
+    return route_id, route_node, parent_attempt_id
+
+
+def _log_pending_delivery_refusal(jobs: Path, attempt_id: str, reason: str) -> None:
+    """Durable trace of a swallowed materialize failure. stderr alone is not
+    kept by any supervisor, so a refusal used to leave no evidence anywhere
+    (2026-08-29: three owner terminals refused, zero trace). Never raises."""
+
+    try:
+        root = jobs.resolve(strict=False).parent
+        log_dir = root / "logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        line = json.dumps(
+            {
+                "ts": time.time(),
+                "event": "delivery-persistence-refused",
+                "attempt_id": attempt_id,
+                "reason": reason,
+            },
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        with open(log_dir / PENDING_DELIVERY_LOG, "a", encoding="utf-8") as handle:
+            handle.write(line + "\n")
+    except OSError:
+        pass
+
+
 def materialize_pending_delivery(jobs: Path, row_fields: list[str]) -> Path | None:
     """Carrier-independent idempotent materializer (SD-111 P2 round 2 C-1).
 
@@ -212,6 +271,7 @@ def materialize_pending_delivery(jobs: Path, row_fields: list[str]) -> Path | No
         )
     receipt = unseal_delivery_receipt(metadata["delivery_receipt_b64"])
     root = jobs.resolve(strict=False).parent
+    route_id, route_node, parent_attempt_id = pending_record_identity(metadata)
     record = pending_delivery.create(
         root,
         recipient_kind=metadata["delivery_recipient_kind"],
@@ -220,9 +280,9 @@ def materialize_pending_delivery(jobs: Path, row_fields: list[str]) -> Path | No
         session_generation=metadata.get("session_generation", ""),
         session_generation_supported=metadata.get("session_generation_supported", "0"),
         attempt_ids=[metadata["attempt_id"]],
-        parent_attempt_id=metadata.get("parent_attempt_id", ""),
-        route_id=metadata.get("route_id", ""),
-        route_node=metadata.get("route_node", ""),
+        parent_attempt_id=parent_attempt_id,
+        route_id=route_id,
+        route_node=route_node,
         receipt=receipt,
         receipt_digest=metadata["delivery_receipt_digest"],
         row_revisions={metadata["attempt_id"]: metadata["delivery_row_revision"]},
@@ -260,6 +320,7 @@ def materialize_after_terminal_close(jobs: Path, attempt_id: str) -> Path | None
         sys.stderr.write(
             f"delivery-persistence-refused attempt_id={attempt_id} reason={exc}\n"
         )
+        _log_pending_delivery_refusal(jobs, attempt_id, str(exc))
         return None
 
 
