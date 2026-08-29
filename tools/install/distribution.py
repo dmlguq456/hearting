@@ -1804,6 +1804,18 @@ def _succeed_dispatch_state(candidate: Path) -> bool:
         return True
     live_dispatch = _surviving_dispatch_root(candidate, os.environ)
     if live_dispatch is None:
+        # base parity (C47-9): when `candidate` is itself the current live
+        # release (pre-promotion), there is no destination to carry state
+        # into and none needed -- base returned True for exactly this
+        # branch, so this stays True even though the containment gate reads
+        # the same `None` as `surviving-root-unresolved` (self-containment is
+        # not something to prove).
+        if not _dispatch_migration_promoted(os.environ):
+            try:
+                if current_path().resolve(strict=True) == candidate:
+                    return True
+            except OSError:
+                pass
         return False
     touched_dirs: set[Path] = set()
     ok = True

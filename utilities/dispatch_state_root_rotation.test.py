@@ -1879,6 +1879,15 @@ class RetentionContainmentGateTest(unittest.TestCase):
         # destination.
         self.assertIsNone(DISTRIBUTION._surviving_dispatch_root(v3, env))
 
+        # C47-9 (impl-review round 1 R-2): `_succeed_dispatch_state` must
+        # still return the base (3325bd7f) value for this exact branch even
+        # though `_surviving_dispatch_root` now reports `None` here --
+        # base's non-promoted `live_release == candidate` case returned
+        # True, and the containment gate reading the same `None` as
+        # `surviving-root-unresolved` must not change that.
+        (v3 / ".dispatch").mkdir(parents=True, exist_ok=True)
+        self.assertTrue(DISTRIBUTION._succeed_dispatch_state(v3))
+
     def test_installer_written_gap_row_is_readable_by_the_runtime_inventory_module(self):
         v1, v2, v3 = self._three_release_chain()
         stable_root = DISTRIBUTION.stable_state_root(os.environ)

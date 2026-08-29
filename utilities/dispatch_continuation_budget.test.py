@@ -90,6 +90,43 @@ class AdmissionGateTest(unittest.TestCase):
         self.assertFalse(verdict2.admitted)
         self.assertEqual(verdict2.refusal, "continuation-budget-unavailable")
 
+    def test_exhausted_stall_counter_does_not_block_a_real_progress_gross_admit(self):
+        # §13.34.4-(2) declares three separate remainders, not one equation
+        # gated on a single `stalled` axis: "① gross ceiling은 기존 상한을
+        # 유지한다" (the gross ceiling is a safety ceiling on its own, never
+        # replaced by the stall detector) together with "② ... 이 두 계열은
+        # gross ceiling을 소비하지 않는다" (the stall counter's two
+        # no-progress series never draw from the gross ceiling) is only
+        # satisfiable if the inverse also holds: an ordinary, real-progress
+        # (`stalled=False`) admit never draws from -- or gets blocked by --
+        # the stall counter. Reading the admission gate as one literal
+        # equation that ANDs `stall_remaining > 0` into every `purpose=
+        # "ordinary"` admit (stalled or not) would mean a single stall
+        # exhaustion permanently blocks all further gross-ceiling progress,
+        # which breaks ①'s "existing ceiling is preserved" guarantee the
+        # moment stall hits zero. This is the only reading that satisfies
+        # both clauses at once, so a `stall_remaining == 0`, real-progress
+        # `stalled=False` request with headroom on the gross ceiling must be
+        # admitted.
+        ledger = self._ledger(ordinary=3, reserved=1, stall=0)
+        verdict = ledger.admit(purpose="ordinary", stalled=False, reservation_ok=True)
+        self.assertTrue(verdict.admitted)
+        self.assertEqual(verdict.charged, "gross")
+        self.assertEqual(ledger.gross_remaining, 2)
+        self.assertEqual(ledger.stall_remaining, 0)
+
+    def test_exhausted_stall_counter_still_refuses_a_stalled_admit(self):
+        # Same starting state as above, but requested as `stalled=True` (the
+        # no-progress axis §13.34.4-(2)-② actually gates) -- this must be
+        # refused with a typed refusal even though the gross ceiling has
+        # headroom, because the stall counter -- not the gross ceiling -- is
+        # the one being spent on this axis.
+        ledger = self._ledger(ordinary=3, reserved=1, stall=0)
+        verdict = ledger.admit(purpose="ordinary", stalled=True, reservation_ok=True)
+        self.assertFalse(verdict.admitted)
+        self.assertEqual(verdict.refusal, "continuation-admission-refused")
+        self.assertEqual(ledger.gross_remaining, 3)
+
     def test_remainders_stay_non_negative_and_reserve_boundary_admits_terminal_handoff_only(self):
         ledger = self._ledger(ordinary=2, reserved=1, stall=5)
         first = ledger.admit(purpose="ordinary", stalled=False, reservation_ok=True)
