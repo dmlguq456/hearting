@@ -135,3 +135,4 @@ utilities/dispatch_progress.test.py	ProgressTest.test_delayed_capacity_line_clos
 utilities/dispatch_progress.test.py	ProgressTest.test_namespace_bound_outer_identity_can_interrupt_exact_group	assertion	isolated	flaky-timing: 1차 전량 실행 재현 중 3회 중 1회꼴로 간헐 실패 확인(타이밍 의존)	MA-W1-150	2026-11-27
 utilities/dispatch_progress.test.py	ProgressTest.test_warning_then_exact_interrupt	assertion	isolated	flaky-timing: 1차 전량 실행 재현 중 3회 중 1회꼴로 간헐 실패 확인(타이밍 의존)	MA-W1-150	2026-11-27
 utilities/workflow_supervisor.test.py	TestResourceLifecycle.test_sentinel_wrapper_persists_the_payload_exit_status	assertion	isolated	flaky-timing: 1차 전량 실행 재현 중 3회 중 1회꼴로 간헐 실패 확인(타이밍 의존)	MA-W1-151	2026-11-27
+tools/fleet/tests/test_token_budget.py	AccountingTest.test_store_rejects_extra_fields_and_serializes_concurrent_updates	assertion	isolated	flaky-timing: Phase 4 전량 재실행에서 1회 관측, 이후 3연속 재현 시도에서 3/3 PASS(동시성 타이밍 의존)	MA-W1-152	2026-11-27
