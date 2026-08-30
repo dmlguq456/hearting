@@ -39,7 +39,15 @@ REFUSAL_REASONS = frozenset({
     "continuation-budget-unavailable",
     "continuation-admission-refused",
 })
+# SD-116 (b)/(c): `warning` record reasons. Distinct from `REFUSAL_REASONS`
+# above -- both are `record_kind`-scoped vocabularies, never the delivery
+# receipt's `state`/`required_action`/`reason` enums (D47-8).
+WARNING_REASONS = frozenset({
+    "continuation-budget-exhausted",
+    "continuation-budget-warning",
+})
 _LOCK_DEADLINE_SECONDS = 0.25
+_NOTICE_KINDS = frozenset({"budget-warning", "budget-exhausted"})
 
 
 def _now(now: float | None) -> float:
@@ -191,9 +199,47 @@ def _record_event(state_root, *, parent_attempt_id, record_kind, reason, remaini
 
 
 def record_warning(state_root, *, parent_attempt_id, reason, remaining, now=None) -> tuple:
+    if reason not in WARNING_REASONS:
+        return ("continuation-budget-warning-unrecorded", f"unknown-reason:{reason!r}")
     return _record_event(
         state_root, parent_attempt_id=parent_attempt_id, record_kind="warning",
         reason=reason, remaining=remaining, now=now,
+    )
+
+
+def warning_already_emitted(state_root, *, parent_attempt_id, reason) -> bool:
+    """SD-116 (b): "exactly once" is judged from the durable record itself,
+    never an in-process flag -- the same CAS-over-counter reasoning `reserve()`
+    above already documents (a process-local flag is always trustworthy and
+    could never exercise a genuine duplicate-suppression check)."""
+
+    for row in read_rows(state_root, parent_attempt_id):
+        if row.get("record_kind") == "warning" and row.get("reason") == reason:
+            return True
+    return False
+
+
+def render_notice(kind: str, *, remaining: int, threshold: int) -> str:
+    """Pure prose renderer shared by the Claude and Codex supervisors (SD-116
+    (b)/(c)). Never touches receipt bytes -- callers attach the returned
+    string outside any `compact` receipt JSON (D47-8)."""
+
+    if kind not in _NOTICE_KINDS:
+        raise ValueError(f"unknown notice kind: {kind!r}")
+    if kind == "budget-warning":
+        return (
+            "[continuation-budget-warning] remaining={remaining} "
+            "(warning threshold={threshold}). This owner's ordinary "
+            "continuation budget is running low. Recommendation: wrap up "
+            "outstanding work now, prefer a partial report over further "
+            "exploration, and be ready to end the attempt as BLOCKED if the "
+            "budget is exhausted before the work completes."
+        ).format(remaining=remaining, threshold=threshold)
+    return (
+        "[continuation-budget-exhausted] remaining=0. This is the final "
+        "reserved turn: no further continuation will be granted after this "
+        "one. Use this turn only to record a partial report or hand off "
+        "cleanly; do not start new work."
     )
 
 

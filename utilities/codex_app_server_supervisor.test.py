@@ -724,7 +724,19 @@ class CodexAppServerSupervisorTest(unittest.TestCase):
             timeout=10,
         )
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("continuation-limit-exceeded", result.stdout + result.stderr)
+        # SD-116 (c): exhaustion no longer necessarily dies with
+        # "continuation-limit-exceeded" on the very next turn -- the reserved
+        # budget now buys exactly one extra cleanup turn first (see
+        # `_seal_terminal_handoff_or_raise`), which can shift a genuinely
+        # unresolved child onto whichever no-progress guard trips first (here,
+        # the pre-existing identical-redelivery bound). Either way it still
+        # raises -- this fixture's actual invariant.
+        combined = result.stdout + result.stderr
+        self.assertTrue(
+            "continuation-limit-exceeded" in combined
+            or "identical-redelivery-bound" in combined,
+            combined,
+        )
         registry = self.jobs.read_text(encoding="utf-8")
         self.assertIn("\topen\t", registry)
 
@@ -1231,7 +1243,14 @@ class ContinuationTripartiteBudgetTest(unittest.TestCase):
         try:
             case.jobs.write_text(owner_row(case.lease) + child_row(), encoding="utf-8")
             result = subprocess.run(
-                case.command_with_join(case._non_closing_join()) + ["--max-continuations", "1"],
+                case.command_with_join(case._non_closing_join())
+                # SD-116 (c): exhaustion now buys one extra terminal-handoff
+                # cleanup turn before dying (`_seal_terminal_handoff_or_raise`),
+                # which costs one extra identical redelivery of the same
+                # receipt -- raise the redelivery bound so this fixture still
+                # exercises the genuine continuation-limit-exceeded path this
+                # test is about.
+                + ["--max-continuations", "1", "--max-identical-redeliveries", "50"],
                 input="initial assignment",
                 text=True,
                 capture_output=True,
@@ -1259,6 +1278,115 @@ class ContinuationTripartiteBudgetTest(unittest.TestCase):
         self.assertEqual(source.count('"terminal-handoff" if open_or_running'), 1)
         self.assertEqual(source.count("purpose=consumption_purpose"), 1)
         self.assertIn("SD-116 R2: terminal-handoff is sealed here and only here", source)
+
+
+class BudgetNoticeReceiptInvarianceTest(unittest.TestCase):
+    """SD-116 (b)/D47-8, symmetric to claude_session_supervisor.test.py's
+    identically-named class."""
+
+    RECEIPT = {
+        "schema_version": 2,
+        "state": "ready",
+        "parent_attempt_id": PARENT,
+        "children": [],
+    }
+
+    def _compact(self, prompt: str) -> str:
+        marker = "Runtime completion receipt (typed supervisor data, not child output): "
+        start = prompt.index(marker) + len(marker)
+        end = prompt.index("\n", start)
+        return prompt[start:end]
+
+    def test_notice_present_or_absent_leaves_compact_receipt_bytes_identical(self):
+        module = load_supervisor_module()
+        without_notice = module.completion_prompt(dict(self.RECEIPT))
+        with_notice = module.completion_prompt(
+            dict(self.RECEIPT), notice="[continuation-budget-warning] remaining=2 (warning threshold=3)."
+        )
+        self.assertEqual(self._compact(without_notice), self._compact(with_notice))
+        self.assertNotEqual(without_notice, with_notice)
+        self.assertIn("[continuation-budget-warning]", with_notice)
+        self.assertNotIn("[continuation-budget-warning]", without_notice)
+
+
+class BudgetWarningDeliveryTest(unittest.TestCase):
+    """SD-116 (b) D47-5, symmetric to claude_session_supervisor.test.py's
+    identically-named class."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.state_root = Path(self.temp.name)
+        self.module = load_supervisor_module()
+
+    def test_admit_returns_notice_only_on_the_crossing_turn(self):
+        sys.path.insert(0, str(ROOT / "utilities"))
+        import dispatch_continuation_budget as BUDGET
+        budget = BUDGET.ContinuationBudget(limit=5, source="test")
+        ledger = BUDGET.ContinuationLedger(budget)
+        notices = []
+        for ordinal in range(4):
+            verdict, notice = self.module._admit_continuation(
+                ledger, self.state_root, parent_attempt_id="att-p",
+                route_id="rt-x", route_hash="sha256:" + "a" * 64,
+                ordinal=ordinal, purpose="ordinary", stalled=False,
+                warning_threshold=3,
+            )
+            self.assertTrue(verdict.admitted)
+            notices.append(notice)
+        self.assertEqual(["", notices[1], "", ""], notices)
+        self.assertTrue(notices[1])
+        self.assertIn("remaining=", notices[1])
+
+
+class ReservationForcedFailureTest(unittest.TestCase):
+    """D47-3, symmetric to claude_session_supervisor.test.py's identically-
+    named class."""
+
+    def test_forced_reservation_write_failure_refuses_and_spends_nothing(self):
+        module = load_supervisor_module()
+        sys.path.insert(0, str(ROOT / "utilities"))
+        import dispatch_continuation_budget as BUDGET
+        with tempfile.TemporaryDirectory() as home:
+            state_root = Path(home)
+            budget = BUDGET.ContinuationBudget(limit=5, source="test")
+            ledger = BUDGET.ContinuationLedger(budget)
+            with mock.patch.object(module.budget_record, "_append", return_value=False):
+                verdict, notice = module._admit_continuation(
+                    ledger, state_root, parent_attempt_id="att-p",
+                    route_id="rt-x", route_hash="sha256:" + "c" * 64,
+                    ordinal=0, purpose="ordinary", stalled=False,
+                )
+            self.assertFalse(verdict.admitted)
+            self.assertEqual(verdict.refusal, "continuation-budget-unavailable")
+            self.assertEqual(ledger.gross_remaining, budget.ordinary)
+            self.assertEqual("", notice)
+
+
+class NoticeRenderingIsSharedAcrossSupervisorsTest(unittest.TestCase):
+    """Anti-duplication check (plan §4.5, risk 7-7): both supervisors render
+    a budget notice through the one shared `dispatch_budget_record.render_notice()`
+    -- verified by importing both supervisor modules and asserting their
+    notice text is byte-identical for the same input, which is only possible
+    if neither has its own local copy of the rendering logic."""
+
+    def test_claude_and_codex_notice_strings_are_byte_identical(self):
+        codex_module = load_supervisor_module()
+        claude_spec = importlib.util.spec_from_file_location(
+            "claude_session_supervisor_unit",
+            ROOT / "utilities" / "claude-session-supervisor.py",
+        )
+        claude_module = importlib.util.module_from_spec(claude_spec)
+        claude_spec.loader.exec_module(claude_module)
+
+        codex_notice = codex_module.budget_record.render_notice(
+            "budget-warning", remaining=2, threshold=3
+        )
+        claude_notice = claude_module.budget_record.render_notice(
+            "budget-warning", remaining=2, threshold=3
+        )
+        self.assertEqual(codex_notice, claude_notice)
+        self.assertIs(codex_module.budget_record.render_notice, claude_module.budget_record.render_notice)
 
 
 if __name__ == "__main__":
