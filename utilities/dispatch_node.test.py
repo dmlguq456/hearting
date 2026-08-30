@@ -590,7 +590,7 @@ class RoundProtocolTest(unittest.TestCase):
 
     def _rows(self, node, n, extra=""):
         pipe = ("capability=autopilot-code,attempt_schema_version=2,registered_worker=1,"
-                "route=rt-fixture,route_node=" + node + ",note=dead-worker-fail" + extra)
+                "route_id=rt-fixture,route_node=" + node + ",note=dead-worker-fail" + extra)
         return "".join(
             f"2026-08-24T00:00:0{i}Z\tdone\t/repo\t/wt\tslug-r{i}\t{pipe},attempt_id=att-{node}-{i}\n"
             for i in range(1, n + 1)
@@ -653,7 +653,7 @@ class RoundProtocolTest(unittest.TestCase):
         node = make_node(depth=1, dispatch_fallback=[])
         rows = (self._rows("execute", 1).replace("slug-r1", "slug-next")
                 + self._rows("execute", 1, extra=",stage_authority=0").replace("att-execute-1", "att-sub")
-                + self._rows("execute", 1).replace("route=rt-fixture", "route=rt-other").replace("att-execute-1", "att-other"))
+                + self._rows("execute", 1).replace("route_id=rt-fixture", "route_id=rt-other").replace("att-execute-1", "att-other"))
         prompt, _ = self._launch(node, rows)
         self.assertNotIn("Round protocol", prompt)
 
@@ -665,7 +665,7 @@ class ReviewRoundCapTest(unittest.TestCase):
 
     def _rows(self, node, n):
         pipe = ("capability=autopilot-code,attempt_schema_version=2,registered_worker=1,"
-                "route=rt-fixture,route_node=" + node + ",note=dead-worker-fail")
+                "route_id=rt-fixture,route_node=" + node + ",note=dead-worker-fail")
         return "".join(
             f"2026-08-24T00:00:0{i}Z\tdone\t/repo\t/wt\tslug-r{i}\t{pipe},attempt_id=att-{node}-{i}\n"
             for i in range(1, n + 1)
@@ -750,6 +750,66 @@ class ReviewRoundCapTest(unittest.TestCase):
         for intensity in ("thorough", "adversarial"):
             code, printed = self._run("test", 2, effective_intensity=intensity)
             self.assertEqual(code, 0)
+
+    # The cap set is derived from a kind, not curated by hand. This is the gate:
+    # if a recipe gains a review node and the constant is not updated, this test
+    # fails rather than the node silently escaping the cap.
+    DECLARED_NON_REVIEW_CAPS = frozenset({"test"})
+
+    def test_capped_ids_equal_every_review_worker_node_in_topologies(self):
+        registry = json.loads((ROOT / "capabilities" / "topologies.json").read_text())
+        found = set()
+
+        def walk(obj):
+            if isinstance(obj, dict):
+                if obj.get("kind") == "review-worker" and "id" in obj:
+                    found.add(obj["id"])
+                for value in obj.values():
+                    walk(value)
+            elif isinstance(obj, list):
+                for value in obj:
+                    walk(value)
+
+        walk(registry)
+        self.assertEqual(
+            N.ROUND_CAPPED_NODE_IDS - self.DECLARED_NON_REVIEW_CAPS,
+            found,
+            "ROUND_CAPPED_NODE_IDS must equal the set of review-worker recipe "
+            "nodes, plus only the explicitly declared exceptions "
+            f"{sorted(self.DECLARED_NON_REVIEW_CAPS)}",
+        )
+
+    def test_every_capped_id_rejects_an_over_budget_round(self):
+        # Deliberately exhaustive rather than a representative sample: the
+        # defect being fixed was an id quietly missing from the cap set.
+        for node_id in sorted(N.ROUND_CAPPED_NODE_IDS):
+            with self.subTest(node_id=node_id):
+                code, printed = self._run(node_id, 2, effective_intensity="standard")
+                self.assertEqual(code, 65)
+                self.assertIn("reason=review-round-budget-exhausted", printed)
+                self.assertIn(f"route_node={node_id}", printed)
+
+    def test_cap_counts_rows_written_with_the_production_route_key(self):
+        # prior_round_attempts() filtered on `route=`, a key the registry writer
+        # never emits (it writes `route_id=`), so round_no was always 1 and the
+        # cap never fired anywhere. The old fixture minted `route=` too and was
+        # therefore green against the bug.
+        rows = self._rows("plan-check", 2)
+        self.assertIn("route_id=rt-fixture", rows)
+        self.assertNotIn("route=rt-fixture", rows)
+        with tempfile.TemporaryDirectory() as td:
+            jobs = Path(td) / "jobs.log"
+            jobs.write_text(rows)
+            prior = N.prior_round_attempts(jobs, "rt-fixture", "plan-check")
+        self.assertEqual(len(prior), 2)
+
+    def test_legacy_route_key_still_counts_as_compatibility(self):
+        legacy = self._rows("plan-check", 2).replace("route_id=rt-fixture", "route=rt-fixture")
+        with tempfile.TemporaryDirectory() as td:
+            jobs = Path(td) / "jobs.log"
+            jobs.write_text(legacy)
+            prior = N.prior_round_attempts(jobs, "rt-fixture", "plan-check")
+        self.assertEqual(len(prior), 2)
 
     def test_execute_and_report_are_not_capped(self):
         # Reproduces the rt-08dd7ba8 shape (12 execute rounds) for the anchor

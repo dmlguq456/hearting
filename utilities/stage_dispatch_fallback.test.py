@@ -130,6 +130,58 @@ class FallbackTest(unittest.TestCase):
   cmd=[sys.executable,str(ROOT/"utilities/stage-dispatch-fallback.py"),"--route",str(path),"--node","plan","--slug","fallback-plan","--parent","owner","--capability-mode","dev","--worker-mode","plan/plan-author","--model-role","deep maker","--jobs",str(self.jobs),"--register"]
   env={**os.environ,"AGENT_HOME":str(ROOT),"AGENT_ARTIFACT_ROOT":str(self.art),"AGENT_DISPATCH_JOBS":str(self.jobs),"AGENT_DISPATCH_SELF_SLUG":"owner","AGENT_DISPATCH_ATTEMPT_ID":"att-fallback-parent"}
   return subprocess.run(cmd,text=True,capture_output=True,env=env)
+ def run_review_inline(self,path,node_id="plan-check",worker_mode="qa/plan-review",model_role="fast reviewer",seed=True):
+  """`run_inline` for a capped review node (C-14). In-process like run_inline:
+  the subprocess `run_chain` path additionally binds a launch runtime root,
+  which is a separate axis and is independently unavailable here."""
+  if seed:self.seed_parent()
+  argv=["stage-dispatch-fallback.py","--route",str(path),"--node",node_id,"--slug",f"fallback-{node_id}",
+        "--parent","owner","--capability-mode","dev","--worker-mode",worker_mode,
+        "--model-role",model_role,"--jobs",str(self.jobs),"--dry-run"]
+  printed=[]
+  with mock.patch.object(sys,"argv",argv), \
+       mock.patch("builtins.print",side_effect=lambda *a,**k:printed.append(" ".join(map(str,a)))):
+   observation=F.LAUNCH_TUPLE.ReportOnlyObservation()
+   try:
+    code=F._dispatch(observation)
+   except SystemExit as exc:
+    code=exc.code
+  return code,printed
+ def seed_review_rounds(self,route_id,node_id,count):
+  """Prior closed rounds in the production registry shape (`route_id=`)."""
+  with self.jobs.open("a",encoding="utf-8") as fh:
+   for i in range(1,count+1):
+    fh.write(
+     f"2026-08-29T00:00:0{i}Z\tdone\t{self.repo}\t{self.repo}\tround-{node_id}-{i}\t"
+     "attempt_schema_version=2,dispatch_depth=2,registered_worker=1,"
+     f"route_id={route_id},route_node={node_id},note=dead-worker-fail,"
+     f"attempt_id=att-{node_id}-round-{i}\n")
+ def test_review_round_cap_rejects_the_over_budget_round(self):
+  # This wrapper carries ordinary standard+ depth-2 work and had no cap check
+  # at all, so the C-14 budget was unreachable on the path most dispatches
+  # take (rt-88b775ac ran plan-check r1..r4 unimpeded).
+  with self.dispatch_env():
+   path=self.route(same_status="supported")
+   route=json.loads(path.read_text())
+   cap=F.DISPATCH_NODE.max_review_rounds(route["effective_intensity"])
+   self.seed_parent()
+   self.seed_review_rounds(route["route_id"],"plan-check",cap)
+   code,printed=self.run_review_inline(path)
+  self.assertEqual(code,65,printed)
+  self.assertIn("reason=review-round-budget-exhausted",printed)
+  self.assertIn(f"round={cap+1}",printed)
+  self.assertIn(f"max_round={cap}",printed)
+  self.assertIn("child_spawned=0",printed)
+ def test_review_round_cap_allows_a_round_within_budget(self):
+  with self.dispatch_env():
+   path=self.route(same_status="supported")
+   route=json.loads(path.read_text())
+   cap=F.DISPATCH_NODE.max_review_rounds(route["effective_intensity"])
+   self.seed_parent()
+   self.seed_review_rounds(route["route_id"],"plan-check",cap-1)
+   code,printed=self.run_review_inline(path)
+  self.assertNotIn("reason=review-round-budget-exhausted",printed)
+
  def test_cross_harness_direct_precedes_inline(self):
   result=self.run_chain(self.route()); self.assertEqual(result.returncode,0,result.stdout+result.stderr)
   self.assertIn("selected_hop=cross-harness-headless",result.stdout); self.assertIn("child_harness=claude",result.stdout)
