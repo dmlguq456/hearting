@@ -21,6 +21,15 @@ _CLAUDE_SYMLINK_NAMES = [
 
 _CLAUDE_COPY_ONCE_NAMES = ["settings.json", "keybindings.json"]
 
+
+def claude_installer_owned_names():
+    """Public owner-name-set for `harness install claude` (INSTALL_LAYOUT.md
+    "owner-name-set reconciliation"). Runtime activation unions this with its
+    own native discovery names so the two legitimate owners of
+    ``$HOME/.claude`` symlinks converge on one set instead of drifting apart.
+    """
+    return set(_CLAUDE_SYMLINK_NAMES)
+
 _CLAUDE_TABLE = (
     [
         {"action": "symlink", "source": f"claude_setting/{name}", "dest_name": name}

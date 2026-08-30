@@ -34,6 +34,7 @@ if str(UTILITIES_ROOT) not in sys.path:
 
 import harness_manifest
 import model_config
+import projector
 import user_model_config
 
 
@@ -440,6 +441,16 @@ def _linked_entries(
             (source_root / "adapters/claude/utilities", home / "utilities", "hook_config"),
             (source_root / "adapters/claude/scaffolds", home / "scaffolds", "hook_config"),
             (source_root / "adapters/claude/statusline.sh", home / "statusline.sh", "hook_config"),
+            # Owner-name-set union (INSTALL_LAYOUT.md "owner-name-set
+            # reconciliation"): `harness install claude` also projects these
+            # three names (projector._CLAUDE_SYMLINK_NAMES). Once activation
+            # exists it takes over the union so the same active_root/bundle
+            # backs every harness-owned Claude symlink instead of leaving a
+            # mixed layout where some names still point at the installer's
+            # separate `claude_setting/` projection.
+            (source_root / "README.md", home / "README.md", "instructions"),
+            (source_root / "manifest.json", home / "manifest.json", "instructions"),
+            (source_root / "adapters/claude/loops", home / "loops", "hook_config"),
         ]
         entries.extend(_entry(src, dst, surface) for src, dst, surface in fixed)
         # agent-modes runtime surface retired with the team agents: the unit catalog is
@@ -1915,6 +1926,36 @@ def _bundle_checksum(active_root: Path) -> Optional[str]:
     return expected if _tree_digest(active_root) == expected else None
 
 
+def _capture_replaced_installer_targets(
+    previous: Optional[dict], desired: List[dict]
+) -> dict:
+    """Durable, write-once-per-dest record of what a dest pointed at before
+    activation first took it over (INSTALL_LAYOUT.md "owner-name-set
+    reconciliation"). Must run before `_apply_transaction` mutates any dest.
+
+    Carries every prior entry forward byte-for-byte -- a refresh or
+    re-activation never overwrites an already-recorded original target, only
+    adds an entry the first time a *new* dest becomes activation-owned (e.g. a
+    future owner-name-set union growing).
+    """
+    carried: dict = dict((previous or {}).get("replaced_installer_symlink_targets") or {})
+    previously_owned_dests = {
+        item.get("dest") for item in (previous or {}).get("owned_paths", []) if item.get("dest")
+    }
+    for item in desired:
+        dest_str = item["dest"]
+        if dest_str in carried or dest_str in previously_owned_dests:
+            continue
+        dest = Path(dest_str)
+        if not dest.is_symlink():
+            continue
+        try:
+            carried[dest_str] = os.readlink(dest)
+        except OSError:
+            continue
+    return carried
+
+
 def activate(
     runtime: str,
     mode: str,
@@ -1960,6 +2001,10 @@ def activate(
     packaged_checksum = _bundle_checksum(active_root) if mode == "packaged" else None
     if mode == "packaged" and packaged_checksum is None:
         raise ActivationError(f"packaged bundle checksum mismatch: {active_root}")
+    # Must run before _apply_transaction touches any dest below -- this is
+    # the only point where "what did the installer leave here" is still
+    # observable for a dest activation is about to adopt for the first time.
+    replaced_installer_symlink_targets = _capture_replaced_installer_targets(previous, desired)
 
     def commit_state(owned):
         config_changes = _prepare_runtime_config(runtime, active_root, previous, scope)
@@ -2014,6 +2059,7 @@ def activate(
                 ),
                 "model_config": model_config_action,
             },
+            "replaced_installer_symlink_targets": replaced_installer_symlink_targets,
             "activated_at": _utc_now(),
         }
         _atomic_json(previous_path, state)
@@ -2277,14 +2323,42 @@ def deactivate(runtime: str, scope: str = "global", dry_run: bool = False) -> di
     except ActivationError:
         desired = []
     trusted = _trusted_owned(runtime, state, desired, scope)
+    desired_by_dest = {item["dest"]: item for item in desired}
+    replaced_installer_symlink_targets = state.get("replaced_installer_symlink_targets") or {}
     removed = []
+    restored_installer_links = []
     for value in sorted(trusted):
         dest = Path(value)
         if not dest.is_symlink() and not dest.exists():
             continue
+        original_target = replaced_installer_symlink_targets.get(value)
+        restore_here = False
+        if original_target is not None and dest.is_symlink():
+            # Restore the installer's exact prior target only when the link
+            # activation put there is still exactly what activation put
+            # there -- a user who repointed it after activation keeps their
+            # change untouched (INSTALL_LAYOUT.md owner-name-set
+            # reconciliation, deactivate/uninstall restore condition).
+            desired_entry = desired_by_dest.get(value)
+            try:
+                current_raw_target = os.readlink(dest)
+            except OSError:
+                current_raw_target = None
+            if (
+                desired_entry is not None
+                and current_raw_target is not None
+                and current_raw_target == desired_entry["source"]
+            ):
+                restore_here = True
         if not dry_run:
             _remove_path(dest)
-        removed.append(value)
+            if restore_here:
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                dest.symlink_to(original_target)
+        if restore_here:
+            restored_installer_links.append(value)
+        else:
+            removed.append(value)
     restored = (
         _unmerge_claude_settings(state, scope, dry_run=dry_run)
         if runtime == "claude"
@@ -2299,6 +2373,7 @@ def deactivate(runtime: str, scope: str = "global", dry_run: bool = False) -> di
         "runtime": runtime,
         "status": "planned" if dry_run else "deactivated",
         "removed": removed,
+        "restored_installer_links": restored_installer_links,
         "restored_configs": restored,
     }
 

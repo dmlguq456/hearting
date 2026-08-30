@@ -1485,3 +1485,83 @@ else:
     assert mode(wide_stable) == 0o755, "must never chmod a pre-existing root"
 PY
 echo "ok - B-12: new dispatch root 0700 and journal 0600; pre-existing wide-mode root refused without chmod"
+
+# SD-115 §13.34.3-(2): a migration-delta content-mismatch (the same
+# unproven-ness B-7/B-8 exercises) routes through the identical
+# force_prune_unproven + gap-precommit gate as the containment precondition
+# -- it must never be force-overridable without a gap record landing first,
+# but WITH the force flag and a successful gap commit it stops blocking
+# deletion.
+python3 - "$ROOT" "$TMP" <<'PY'
+import json, os, sys, time
+from pathlib import Path
+
+root = Path(sys.argv[1])
+tmp = Path(sys.argv[2])
+sys.path.insert(0, str(root / "tools/install"))
+import distribution as d
+
+b78f_home = tmp / "b78-force-home"
+os.environ["HOME"] = str(b78f_home)
+os.environ["XDG_STATE_HOME"] = str(b78f_home / ".local" / "state")
+os.environ.pop("HARNESS_STATE_ROOT", None)
+os.environ["HARNESS_DATA_ROOT"] = str(b78f_home / ".local" / "share" / "hearting")
+os.environ.pop("AGENT_DISPATCH_JOBS", None)
+import importlib
+importlib.reload(d)
+
+releases = d.data_root() / "releases"
+releases.mkdir(parents=True, exist_ok=True)
+
+future = time.time() + 70_000_000
+def make_release(name, ts):
+    rel = releases / name
+    (rel / "core").mkdir(parents=True)
+    (rel / "core" / "CORE.md").write_text("fixture\n")
+    os.utime(rel, (ts, ts))
+    return rel
+
+v1 = make_release("v-b78f-1", future)
+(v1 / ".dispatch").mkdir(parents=True)
+(v1 / ".dispatch" / "jobs.log").write_text(
+    "2026-08-01T00:00:00Z\tdone\t/r\t/w\tatt-b78f\t"
+    "attempt_schema_version=2,registered_worker=1,attempt_id=att-b78f,harness=claude\n"
+)
+d.current_path().parent.mkdir(parents=True, exist_ok=True)
+d.current_path().symlink_to(v1)
+migration = d.run_dispatch_state_migration(v1 / ".dispatch", environ=os.environ)
+assert migration["status"] == "completed", migration
+
+(v1 / ".dispatch" / "logs").mkdir(parents=True)
+(v1 / ".dispatch" / "logs" / "late.txt").write_text("late write\n")
+stable_root_for_delta = d.stable_state_root(os.environ)
+(stable_root_for_delta / "logs").mkdir(parents=True, exist_ok=True)
+(stable_root_for_delta / "logs" / "late.txt").write_text("stale out-of-band copy\n")
+
+v2 = make_release("v-b78f-2", future + 1)
+v3 = make_release("v-b78f-3", future + 2)
+d.current_path().unlink()
+d.current_path().symlink_to(v3)
+
+gaps_path = stable_root_for_delta / "inventory" / "gaps.jsonl"
+assert not gaps_path.exists(), "no gap record should exist before a forced prune"
+
+# Without the force flag: identical to B-7/B-8, still blocked, zero deletions.
+releases_before = sorted(p.name for p in releases.iterdir())
+d._cleanup_releases(keep=set(), force_prune_unproven=False)
+assert v1.exists(), "unforced content-mismatch must still block deletion"
+assert sorted(p.name for p in releases.iterdir()) == releases_before
+assert not gaps_path.exists(), "an unforced block must never write a gap record"
+
+# With the force flag: a gap record for the content-mismatch is committed
+# BEFORE the release is deleted, then deletion proceeds.
+d._cleanup_releases(keep=set(), force_prune_unproven=True)
+assert not v1.exists(), "forced prune with a committed gap record must delete v1"
+assert gaps_path.is_file(), "forced prune must commit a gap record before deleting"
+rows = [json.loads(line) for line in gaps_path.read_text().splitlines() if line.strip()]
+assert rows, "gap record file must not be empty"
+last = rows[-1]
+assert last["recoverable"] is False, last
+assert last["discovered_by"] == "forced-prune", last
+PY
+echo "ok - SD-115: migration content-mismatch is force-overridable only via the same gap-precommit gate as containment"
