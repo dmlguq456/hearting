@@ -205,6 +205,42 @@ class ChainHeadMovedGuardAcceptanceTest(unittest.TestCase):
                     )
             self.assertEqual(ctx.exception.reason, "route-source-commit-mismatch")
 
+    def test_missing_agent_dispatch_jobs_short_circuits_before_reading_any_registry_row(self):
+        # impl-review round 1 finding 4: the previous version of this test
+        # only asserted the same top-level `route-source-commit-mismatch`
+        # reason as `test_control_a_...`/`test_control_b_...` above, which
+        # would also pass if a future regression made the missing-env case
+        # fall through to the genuine lineage evaluation and coincidentally
+        # fail there too -- it would pass for the wrong reason. This asserts
+        # the lineage helper's own result and internal short-circuit
+        # directly: with `AGENT_DISPATCH_JOBS` unset, `_qualifying_subsession_lineage()`
+        # returns `False` from its very first guard clause and never calls
+        # `FALLBACK.registry_rows()` at all -- unlike a genuine lineage
+        # mismatch (control A/B), which always reads the registry and then
+        # evaluates row content.
+        with tempfile.TemporaryDirectory() as td:
+            repo, route, path, jobs = self._prep(td)
+            with mock.patch.dict(os.environ, {}, clear=False):
+                os.environ.pop("AGENT_DISPATCH_JOBS", None)
+                with mock.patch.object(GUARD.FALLBACK, "registry_rows") as registry_rows:
+                    result = GUARD._qualifying_subsession_lineage(
+                        route["route_id"], "execute", "att-slice-2",
+                    )
+            self.assertFalse(result)
+            registry_rows.assert_not_called()
+
+        # Control: with the same otherwise-valid fixture and
+        # `AGENT_DISPATCH_JOBS` set, the same helper reads the registry and
+        # accepts -- proving the missing-env `False` above is a distinct
+        # code path, not a coincidentally-identical lineage refusal.
+        with tempfile.TemporaryDirectory() as td:
+            repo, route, path, jobs = self._prep(td)
+            with mock.patch.dict(os.environ, {"AGENT_DISPATCH_JOBS": str(jobs)}):
+                result = GUARD._qualifying_subsession_lineage(
+                    route["route_id"], "execute", "att-slice-2",
+                )
+            self.assertTrue(result)
+
 
 class ChainSerialRegisterAtomicityTest(unittest.TestCase):
     """`stage-session-chain.py`'s serial register loop side (WP5)."""

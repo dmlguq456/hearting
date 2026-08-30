@@ -9,10 +9,15 @@ Records live under `<dispatch_state_root>/supervisor-budget/<parent_attempt_id>.
 the delivery receipt's `state`/`required_action`/`reason` enums (D47-8):
 receipt bytes never change because of this module.
 
-`reserve()` is a CAS append keyed on `(parent_attempt_id, ordinal)`: this
-module deliberately never uses an in-process counter as the sole admission
-evidence, because an in-process counter is always true and could never
-exercise D47-3's false branch under a forced write failure.
+`reserve()` is a CAS append keyed on `(parent_attempt_id, ordinal, purpose)`:
+this module deliberately never uses an in-process counter as the sole
+admission evidence, because an in-process counter is always true and could
+never exercise D47-3's false branch under a forced write failure. `purpose`
+is part of the CAS key (impl-review round 1 finding 1) so that a
+`terminal-handoff` reservation at the same `ordinal` as the `ordinary`
+reservation it follows is never rejected as a duplicate of that unrelated
+purpose -- the two reservations are distinct admission decisions even when
+the caller reuses the turn's `ordinal` for both.
 """
 from __future__ import annotations
 
@@ -134,10 +139,14 @@ def reserve(
     state_root, *, parent_attempt_id, route_id, route_hash, ordinal, purpose,
     klass, remaining, now=None,
 ) -> tuple:
-    """CAS append. A duplicate `(parent_attempt_id, ordinal)` is
+    """CAS append. A duplicate `(parent_attempt_id, ordinal, purpose)` is
     `reservation-lost` -- the caller's admission is never granted twice for
-    the same ordinal, which is what makes `atomic_reservation_succeeds`
-    forceable to False for D47-3's negative branch."""
+    the same ordinal and purpose, which is what makes
+    `atomic_reservation_succeeds` forceable to False for D47-3's negative
+    branch. `purpose` is part of the key so a `terminal-handoff` reservation
+    sharing its `ordinal` with the `ordinary` reservation it follows is not
+    mistaken for a duplicate of that other purpose (impl-review round 1
+    finding 1)."""
 
     if purpose not in PURPOSES or klass not in CLASSES:
         return (False, f"reservation-invalid:purpose={purpose!r},class={klass!r}")
@@ -145,7 +154,11 @@ def reserve(
 
     def _do():
         for existing in read_rows(state_root, parent_attempt_id):
-            if existing.get("record_kind") == "reservation" and existing.get("ordinal") == ordinal:
+            if (
+                existing.get("record_kind") == "reservation"
+                and existing.get("ordinal") == ordinal
+                and existing.get("purpose") == purpose
+            ):
                 return (False, "reservation-lost")
         row = {
             "schema_version": SCHEMA_VERSION,

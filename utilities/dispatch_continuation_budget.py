@@ -104,15 +104,30 @@ def resolve_continuation_budget(
         block_reserved = sealed_block.get("reserved")
         block_limit = sealed_block.get("limit")
         block_declared_nodes = sealed_block.get("declared_nodes")
+        block_review_round_cap = sealed_block.get("review_round_cap")
+        block_gap = sealed_block.get("gap")
+        block_retry = sealed_block.get("retry")
         if (
             isinstance(block_ordinary, int) and not isinstance(block_ordinary, bool)
             and isinstance(block_reserved, int) and not isinstance(block_reserved, bool)
             and isinstance(block_limit, int) and not isinstance(block_limit, bool)
             and isinstance(block_declared_nodes, int) and not isinstance(block_declared_nodes, bool)
+            # impl-review round 1 finding 2: the compiler seals
+            # `review_round_cap`/`gap`/`retry` too (capability-route.py's
+            # `continuation_budget` literal); a malformed value here must
+            # degrade to the bound-route derivation exactly like a malformed
+            # `ordinary`/`reserved`/`limit`/`declared_nodes`, not be accepted
+            # as `sealed-block` unchecked.
+            and isinstance(block_review_round_cap, int) and not isinstance(block_review_round_cap, bool)
+            and isinstance(block_gap, int) and not isinstance(block_gap, bool)
+            and isinstance(block_retry, int) and not isinstance(block_retry, bool)
             and block_ordinary >= COMPATIBILITY_FLOOR
             and block_reserved >= 1
             and block_limit == block_ordinary + block_reserved
             and block_declared_nodes >= 0
+            and block_review_round_cap >= 1
+            and block_gap >= 0
+            and block_retry >= 0
         ):
             return ContinuationBudget(
                 block_ordinary,

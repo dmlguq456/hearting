@@ -312,6 +312,37 @@ class SealedBudgetBlockTest(unittest.TestCase):
             )
         self.assertEqual("bound-route", budget.source)
 
+    def test_malformed_review_round_cap_gap_or_retry_falls_through_to_legacy_derivation(self):
+        # impl-review round 1 finding 2: `review_round_cap`/`gap`/`retry`
+        # were unchecked -- a block with a garbage `review_round_cap` (or a
+        # negative `gap`/`retry`) was still accepted as `sealed-block`. Each
+        # of these must independently degrade to the bound-route derivation,
+        # exactly like a malformed `ordinary`/`reserved`/`limit`.
+        base = {
+            "contract_version": 1, "declared_nodes": 1, "review_round_cap": 2,
+            "gap": 1, "retry": 1, "reserved": 1, "ordinary": 22, "limit": 23,
+        }
+        malformations = [
+            {"review_round_cap": "bad"},
+            {"review_round_cap": True},
+            {"review_round_cap": 0},
+            {"gap": -1},
+            {"gap": "bad"},
+            {"retry": -1},
+            {"retry": "bad"},
+        ]
+        for override in malformations:
+            with self.subTest(override=override):
+                block = dict(base, **override)
+                with tempfile.TemporaryDirectory() as raw:
+                    route = Path(raw) / "route.json"
+                    value = self._sealed_route(block)
+                    route.write_text(json.dumps(value), encoding="utf-8")
+                    budget = MODULE.resolve_continuation_budget(
+                        route_file=route, route_id=value["route_id"], route_hash=value["route_hash"],
+                    )
+                self.assertEqual("bound-route", budget.source)
+
     def test_d47_6_floor_path_still_keeps_reserved_remaining_at_least_one(self):
         budget = MODULE.resolve_continuation_budget(route_file=None, route_id="", route_hash="")
         self.assertEqual("compatibility-floor", budget.source)
