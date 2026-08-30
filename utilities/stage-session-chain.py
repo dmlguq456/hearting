@@ -9,7 +9,6 @@ import os
 from pathlib import Path
 import subprocess
 import sys
-import time
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "utilities"))
@@ -21,10 +20,14 @@ from dispatch_contract import (  # noqa: E402
 
 
 def continuation_metrics(session_count: int) -> dict[str, int]:
-    """Return the M3+ comparison without depending on a live target checkout."""
+    """Return the projected (pre-execution) join comparison for `check`.
+
+    Actual `runtime_joins` is derived post-execution from the owner-resume
+    census (see dispatch_subsession_resume_record.py) and is not a value this
+    dry-run projection can assert.
+    """
     return {
         "baseline_runtime_joins": session_count,
-        "runtime_joins": 1,
         "continuation_reduction": max(0, session_count - 1),
     }
 
@@ -72,72 +75,19 @@ def run_checked(command: list[str]) -> subprocess.CompletedProcess[str]:
     return subprocess.run(command, cwd=ROOT, text=True, capture_output=True, check=False)
 
 
-def readiness(jobs: Path, attempt_id: str) -> tuple[int, dict]:
-    result = subprocess.run(
-        [sys.executable, str(ROOT / "utilities" / "dispatch-attempt-ready.py"),
-         "--jobs", str(jobs), "--attempt-id", attempt_id],
-        cwd=ROOT, text=True, capture_output=True, check=False,
-    )
-    try:
-        return result.returncode, json.loads(result.stdout)
-    except ValueError:
-        return 69, {"state": "contract-error", "detail": result.stderr or result.stdout}
-
-
-def supervise(manifest: dict, parent: str, jobs: Path, max_seconds: int) -> int:
-    if manifest["mode"] != "serial":
-        raise StageSessionError("parallel-subsession-use-dispatch-batch")
-    deadline = time.monotonic() + max_seconds
-    receipt = {"schema_version": 1, "chain_id": manifest["chain_id"], "sessions": []}
-    for session in manifest["sessions"]:
-        result = run_checked(
-            dispatch_command(manifest, session, "start", parent, jobs)
-        )
-        if result.returncode != 0:
-            receipt["sessions"].append({
-                "attempt_id": session["attempt_id"], "state": "launch-failed",
-                "exit_code": result.returncode,
-                "detail": (result.stderr or result.stdout)[-2000:],
-            })
-            break
-        while True:
-            code, state = readiness(jobs, session["attempt_id"])
-            if code == 0:
-                receipt["sessions"].append({"attempt_id": session["attempt_id"], "state": "ready"})
-                break
-            if code != 2 or time.monotonic() >= deadline:
-                receipt["sessions"].append({
-                    "attempt_id": session["attempt_id"],
-                    "state": "timeout" if code == 2 else "terminal-failure",
-                    "readiness": state,
-                })
-                break
-            time.sleep(2)
-        if receipt["sessions"][-1]["state"] != "ready":
-            break
-    receipt["complete"] = len(receipt["sessions"]) == len(manifest["sessions"]) and all(
-        item["state"] == "ready" for item in receipt["sessions"]
-    )
-    receipt_path = Path(manifest["_manifest_path"]).with_suffix(".receipt.json")
-    receipt_path.write_text(json.dumps(receipt, sort_keys=True, indent=2) + "\n", encoding="utf-8")
-    return 0 if receipt["complete"] else 1
-
-
 LAUNCH_PHASE_BY_ACTION = {
     "check": "dry-run",
     "register": "register",
     "start": "start",
-    "run": "start",
 }
 
 
 def main() -> int:
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("action", choices=("check", "register", "start", "run"))
+    p.add_argument("action", choices=("check", "register", "start"))
     p.add_argument("--manifest", required=True)
     p.add_argument("--parent", required=True)
     p.add_argument("--jobs")
-    p.add_argument("--max-seconds", type=int, default=3600)
     args = p.parse_args()
     try:
         envelope = json.loads(Path(args.manifest).resolve().read_text(encoding="utf-8"))
@@ -163,38 +113,42 @@ def main() -> int:
                 "manifest_sha256": manifest["_manifest_sha256"],
             }, sort_keys=True))
             return 0
-        args.jobs = resolve_global_registry(
-            ROOT,
-            args.jobs,
-            2,
-            "start" if args.action == "run" else args.action,
-        ).path
+        args.jobs = resolve_global_registry(ROOT, args.jobs, 2, args.action).path
         if manifest["mode"] != "serial":
             raise StageSessionError("parallel-subsession-use-dispatch-batch")
-        if args.action in {"register", "start"}:
-            for session in manifest["sessions"]:
-                result = run_checked(
-                    dispatch_command(
-                        manifest, session, "register", args.parent, args.jobs
-                    )
-                )
-                if result.returncode:
-                    print(result.stdout, end="")
-                    print(result.stderr, end="", file=sys.stderr)
-                    return result.returncode
+        for session in manifest["sessions"]:
+            result = run_checked(
+                dispatch_command(manifest, session, "register", args.parent, args.jobs)
+            )
+            if result.returncode:
+                print(result.stdout, end="")
+                print(result.stderr, end="", file=sys.stderr)
+                return result.returncode
+        if args.action == "register":
             print(f"chain_id={manifest['chain_id']}")
             print(f"registered_sessions={len(manifest['sessions'])}")
-            print("runtime_joins=1")
-            if args.action == "register":
-                return 0
-            # Keep the depth-1 owner process alive and join the entire serial
-            # chain in this one tool call. Detaching here would create an
-            # unsupervised continuation between the chain and its stage gate.
-            result = supervise(manifest, args.parent, Path(args.jobs), args.max_seconds)
-            receipt_path = Path(manifest["_manifest_path"]).with_suffix(".receipt.json")
-            print(f"chain_receipt={receipt_path}")
-            return result
-        return supervise(manifest, args.parent, Path(args.jobs), args.max_seconds)
+            return 0
+        # action == "start": advance beyond index 1 is owned by the
+        # non-model chain-advance checkpoint the supervisor drives internally
+        # (dispatch_subsession_advance.py), never by this process waiting in
+        # the foreground.
+        first_session = manifest["sessions"][0]
+        start_result = run_checked(
+            dispatch_command(manifest, first_session, "start", args.parent, args.jobs)
+        )
+        if start_result.returncode:
+            print(start_result.stdout, end="")
+            print(start_result.stderr, end="", file=sys.stderr)
+            return start_result.returncode
+        print(f"chain_id={manifest['chain_id']}")
+        print(f"chain_manifest_sha256={manifest['_manifest_sha256']}")
+        print(f"registered_sessions={len(manifest['sessions'])}")
+        print("registered=1")
+        print("started=1")
+        print(f"started_subsession_index={first_session['index']}")
+        print("child_spawned=1")
+        print("runtime_wait=registered-children")
+        return 0
     except (OSError, ValueError, StageSessionError, DispatchContractError) as exc:
         print(f"stage-session-chain: {exc}", file=sys.stderr)
         return 65

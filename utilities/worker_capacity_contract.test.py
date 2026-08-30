@@ -299,16 +299,16 @@ class WorkerCapacityContractTest(unittest.TestCase):
             with self.assertRaisesRegex(StageSessionError, "parallel-fixed-file-overlap"):
                 load_manifest(manifest_path, node=node)
 
-    def test_d_three_slice_fixture_reduces_runtime_joins_to_one(self):
+    def test_d_three_slice_fixture_projects_continuation_reduction(self):
         with tempfile.TemporaryDirectory() as td:
             _, _, _, node, manifest_path = self._fixture(td, session_count=3)
             manifest = load_manifest(manifest_path, node=node)
             receipt = CHAIN.continuation_metrics(len(manifest["sessions"]))
             self.assertEqual(receipt["baseline_runtime_joins"], 3)
-            self.assertEqual(receipt["runtime_joins"], 1)
             self.assertEqual(receipt["continuation_reduction"], 2)
+            self.assertNotIn("runtime_joins", receipt)
 
-    def test_d_serial_chain_supervises_three_sessions_in_one_join(self):
+    def test_d_start_spawns_only_index_one_and_returns_without_foreground_wait(self):
         with tempfile.TemporaryDirectory() as td:
             _, _, _, node, manifest_path = self._fixture(td, session_count=3)
             manifest = load_manifest(manifest_path, node=node)
@@ -316,20 +316,39 @@ class WorkerCapacityContractTest(unittest.TestCase):
             started: list[str] = []
 
             def launch(command):
-                started.append(command[command.index("--attempt-id") + 1])
+                started.append((
+                    command[command.index("--action") + 1],
+                    command[command.index("--attempt-id") + 1],
+                ))
                 return subprocess.CompletedProcess(command, 0, "", "")
 
-            with mock.patch.object(CHAIN, "run_checked", side_effect=launch), \
-                    mock.patch.object(CHAIN, "readiness", return_value=(0, {"state": "ready"})):
-                result = CHAIN.supervise(manifest, "fixture-owner", jobs, 30)
+            self.assertFalse(hasattr(CHAIN, "supervise"))
+            self.assertFalse(hasattr(CHAIN, "readiness"))
+            with mock.patch.object(sys, "argv", [
+                        "stage-session-chain.py", "start",
+                        "--manifest", str(manifest_path), "--parent", "fixture-owner",
+                        "--jobs", str(jobs),
+                    ]), \
+                    mock.patch.object(CHAIN, "load_manifest", return_value=manifest), \
+                    mock.patch.object(
+                        CHAIN.subprocess, "run", return_value=mock.Mock(returncode=0)
+                    ), \
+                    mock.patch.object(
+                        CHAIN, "resolve_global_registry",
+                        return_value=SimpleNamespace(path=jobs),
+                    ), \
+                    mock.patch.object(CHAIN, "run_checked", side_effect=launch):
+                result = CHAIN.main()
             self.assertEqual(result, 0)
             self.assertEqual(
                 started,
-                ["att-stage-session-1", "att-stage-session-2", "att-stage-session-3"],
+                [
+                    ("register", "att-stage-session-1"),
+                    ("register", "att-stage-session-2"),
+                    ("register", "att-stage-session-3"),
+                    ("start", "att-stage-session-1"),
+                ],
             )
-            receipt = json.loads(manifest_path.with_suffix(".receipt.json").read_text())
-            self.assertTrue(receipt["complete"])
-            self.assertEqual(len(receipt["sessions"]), 3)
 
     def test_registry_keeps_subsessions_first_class(self):
         rows = [

@@ -142,7 +142,7 @@ usage: preflight.sh write <file> [session-id] [turn-id]
        preflight.sh broker <status|stop> --jobs <jobs.log> [--root <broker-root>]  # legacy drain only
        preflight.sh dispatch [--dry-run|--register|--start] --worktree <path> --slug <slug> --capability <name> --capability-mode <mode> [--worker-mode <family/mode>] --qa <level> [--intensity <level>] [--dispatch-depth 1|2] [--parent <slug>] [--worker-type owner|stage|review|support] [--unit <unit>] [--assigned-contract <capability>] [--owner <capability>] [--agent <agent>] (--model-profile <deep|balanced-deep|light|mini> [--model-role <role>]|--model-role <role>|--model <model> --variant <variant>|--inherit-model-settings) [--prompt-file <file>|--prompt-text <text>] [--jobs <jobs.log>] [--log-dir <dir>]
        preflight.sh dispatch-chain --route <route.json> --node <id> --slug <slug> --parent <slug> [--capability-mode <mode>] [--worker-mode <family/mode>] [--model-role <role>] [--dry-run|--register|--start]
-       preflight.sh dispatch-session-chain <check|register|start|run> --manifest <chain.json> --parent <slug> [--jobs <jobs.log>] [--max-seconds N]
+       preflight.sh dispatch-session-chain <check|register|start> --manifest <chain.json> --parent <slug> [--jobs <jobs.log>]
        preflight.sh stage-heartbeat --attempt-id <id> --route-id <id> --route-node <id> --jobs <jobs.log> --phase <phase> --kind <kind> --evidence <ref>
        preflight.sh dispatch-current --jobs <jobs.log> (--session <id>|--route <id>|--node <id>|--attempt <id>|--job <slug>) [--all]
        preflight.sh dispatch-reconcile --jobs <jobs.log> (--session <id>|--route <id>|--node <id>|--attempt <id>|--job <slug>) [--apply]
