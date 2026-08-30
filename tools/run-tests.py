@@ -33,7 +33,12 @@ ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_TIMEOUT = 600
 DEFAULT_JOBS = 4
 
-PRUNE_DIRS = {".git", "__pycache__", "node_modules"}
+PRUNE_DIRS = {".git", "__pycache__", "node_modules",
+    # Artifact roots are never test corpus: a stale repo copy under
+    # .agent_reports/_scratch/ once inflated the census 295 -> 1240 suites and
+    # made the full run hang past every timeout (2026-08-30).
+    ".agent_reports", ".claude_reports",
+}
 
 EXPECTED_FAILURE_KINDS = {"exit-nonzero", "timeout", "error", "missing-binary", "assertion"}
 ISOLATION_PROFILES = ("isolated", "installed-layout", "live-registry", "ci-like")

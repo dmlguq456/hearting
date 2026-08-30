@@ -198,6 +198,20 @@ class StaleFixture(RunTestsFixtureBase):
         self.assertEqual(verdicts, {"STALE"})
 
 
+class ArtifactRootsAreNotTestCorpus(unittest.TestCase):
+    def test_suites_under_an_artifact_root_are_not_collected(self):
+        mod = load_runner_module()
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / "utilities").mkdir()
+            (root / "utilities" / "real.test.py").write_text("import sys\nsys.exit(0)\n", encoding="utf-8")
+            for bucket in (".agent_reports/_scratch/copy/utilities", ".claude_reports/legacy"):
+                (root / bucket).mkdir(parents=True)
+                (root / bucket / "stale.test.py").write_text("import sys\nsys.exit(1)\n", encoding="utf-8")
+            found = [mod.suite_relpath(root, s) for s in mod.collect_suites(root)]
+        self.assertEqual(found, ["utilities/real.test.py"])
+
+
 class FingerprintScopedSiblingRows(unittest.TestCase):
     """One (suite, test) key may carry several rows only when each carries a
     distinct, non-empty fingerprint; load picks the row for the current
