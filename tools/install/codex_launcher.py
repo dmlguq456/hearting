@@ -184,6 +184,76 @@ def _manage_profile(bin_dir: Path, policy: str) -> dict:
     return state
 
 
+def _profile_restore_metadata(before: dict, *, owned: bool) -> dict:
+    """Persist only the evidence needed to remove our block safely.
+
+    Shell profiles can contain credentials, so launcher state must never copy
+    their bytes.  A digest and length are enough to recognize the untouched
+    prefix and remove the separator that Hearting inserted with its block.
+    """
+    if not owned:
+        return {"schema": 1, "owned": False}
+    kind = str(before.get("kind", "missing"))
+    payload = before.get("payload", b"") if kind == "file" else b""
+    if not isinstance(payload, bytes):
+        raise CodexLauncherError("shell profile preimage is invalid")
+    separator = b"" if not payload or payload.endswith(b"\n") else b"\n"
+    return {
+        "schema": 1,
+        "owned": True,
+        "before_kind": kind,
+        "before_sha256": _digest(payload),
+        "before_length": len(payload),
+        "before_mode": int(before.get("mode", 0o600)),
+        "separator_hex": separator.hex(),
+    }
+
+
+def _unmanage_profile(profile: dict, target: Path) -> dict:
+    """Remove exactly one Hearting-owned profile block, preserving all else."""
+    restore = profile.get("restore")
+    if profile.get("policy") != "manage" or not isinstance(restore, dict) or not restore.get("owned"):
+        return {"status": "not-owned"}
+    raw_path = profile.get("path")
+    if not isinstance(raw_path, str) or not raw_path:
+        raise CodexLauncherError("managed shell profile lacks its recorded path")
+    path = Path(raw_path).expanduser().absolute()
+    if not path.exists() and not path.is_symlink():
+        return {"status": "already-absent", "path": str(path)}
+    _validate_profile_path(path)
+    data = path.read_bytes()
+    starts = data.count(PROFILE_START)
+    ends = data.count(PROFILE_END)
+    if starts == 0 and ends == 0:
+        return {"status": "already-absent", "path": str(path)}
+    if starts != 1 or ends != 1:
+        raise CodexLauncherError("managed shell profile block is ambiguous")
+    start = data.find(PROFILE_START)
+    marker_end = data.find(PROFILE_END, start) + len(PROFILE_END)
+    if data[start:marker_end] != _profile_block(target.parent).rstrip(b"\n"):
+        raise CodexLauncherError("managed shell profile block has drifted")
+    removal_end = marker_end + (1 if data[marker_end:marker_end + 1] == b"\n" else 0)
+    removal_start = start
+    try:
+        before_length = int(restore["before_length"])
+        separator = bytes.fromhex(str(restore.get("separator_hex", "")))
+    except (KeyError, TypeError, ValueError) as exc:
+        raise CodexLauncherError("managed shell profile restore metadata is invalid") from exc
+    prefix = data[:before_length]
+    if (
+        start == before_length + len(separator)
+        and data[before_length:start] == separator
+        and _digest(prefix) == restore.get("before_sha256")
+    ):
+        removal_start = before_length
+    updated = data[:removal_start] + data[removal_end:]
+    if not updated and restore.get("before_kind") == "missing":
+        path.unlink()
+    else:
+        _atomic_bytes(path, updated, stat.S_IMODE(path.stat().st_mode))
+    return {"status": "removed", "path": str(path)}
+
+
 def _path_precedence(target: Path) -> str:
     entries = [Path(item).expanduser().absolute() for item in os.environ.get("PATH", "").split(os.pathsep) if item]
     try:
@@ -628,7 +698,12 @@ def install(
                 if isinstance(recorded_mode, int):
                     previous_mode = recorded_mode
                 if _wrapper_matches(target, payload_digest) and str(real) == recorded_real:
-                    return {"action": "managed-launcher", "status": "unchanged", "target": str(target), "real_command": str(real), "protected": mode == "protected-path-v1", "mode": mode}
+                    recorded_profile = existing.get("profile", {})
+                    if mode != "protected-path-v1" or profile_policy != "manage":
+                        return {"action": "managed-launcher", "status": "unchanged", "target": str(target), "real_command": str(real), "protected": mode == "protected-path-v1", "mode": mode}
+                    current_profile = _profile_state(bin_dir)
+                    if current_profile.get("health") == "exact" and isinstance(recorded_profile, dict) and recorded_profile.get("policy") == "manage":
+                        return {"action": "managed-launcher", "status": "unchanged", "target": str(target), "real_command": str(real), "protected": True, "mode": mode, "profile": current_profile}
                 recorded_digest = str(existing.get("wrapper_sha256", existing.get("ingress_sha256", "")))
                 if target.is_file() and not target.is_symlink() and not _wrapper_matches(target, recorded_digest):
                     raise CodexLauncherError(f"Codex launcher drift would clobber a foreign file: {target}")
@@ -643,11 +718,27 @@ def install(
         profile_before = None
         profile = {"health": "not-applicable"}
         if mode == "protected-path-v1":
-            profile_path = _profile_path()
-            if profile_path is not None and profile_policy == "manage":
-                _validate_profile_path(profile_path)
-                profile_before = _snapshot_path(profile_path)
-            profile = _manage_profile(bin_dir, profile_policy)
+            existing_profile = existing.get("profile", {}) if isinstance(existing, dict) else {}
+            if profile_policy == "manage":
+                profile_path = _profile_path()
+                if profile_path is not None:
+                    _validate_profile_path(profile_path)
+                    profile_state_before = _profile_state(bin_dir)
+                    profile_before = _snapshot_path(profile_path)
+                else:
+                    profile_state_before = {"health": "ambiguous-or-unsupported-profile"}
+                profile = _manage_profile(bin_dir, profile_policy)
+                profile["restore"] = _profile_restore_metadata(
+                    profile_before or {"kind": "missing"},
+                    owned=profile_state_before.get("health") == "missing",
+                )
+            elif isinstance(existing_profile, dict) and existing_profile.get("policy") == "manage":
+                # A runtime refresh often uses the default deny policy.  It
+                # may update wrapper bytes but must retain ownership evidence
+                # for a profile block installed by an earlier explicit grant.
+                profile = dict(existing_profile)
+            else:
+                profile = _manage_profile(bin_dir, profile_policy)
         transaction_id = f"{os.getpid()}-{time.time_ns()}"
         migration = {"from_schema": existing.get("schema") if existing else None, "status": "migrated" if existing and existing.get("schema") == 1 else "none", "transaction_id": transaction_id}
         if existing and existing.get("schema") == 1:
@@ -701,35 +792,36 @@ def uninstall(
     _validate_state_directory(codex_home, create=False)
     state_file = state_path(codex_home)
     with _LauncherLock(lock_path(codex_home)):
-      state = _load_state(state_file)
-    if state is None:
-        return {"action": "managed-launcher", "status": "not-installed"}
-    target = Path(str(state.get("wrapper_path", "")))
-    expected = str(state.get("wrapper_sha256", ""))
-    # A protected install is self-describing.  In particular, schema-1
-    # migration changes the ingress directory, so uninstall without an
-    # explicit bin_dir must follow the recorded schema-2 target rather than
-    # reconstructing the caller's current environment.
-    requested_target = (
-        Path(str(state.get("wrapper_path", ""))).expanduser().absolute()
-        if bin_dir is None
-        else wrapper_path(bin_dir.expanduser().absolute())
-    )
-    if target != requested_target:
-        raise CodexLauncherError("installed Codex launcher uses a different bin directory")
-    if target.exists() and not _wrapper_matches(target, expected):
-        raise CodexLauncherError(f"refusing to overwrite modified Codex launcher: {target}")
-    if dry_run:
-        return {"action": "managed-launcher", "status": "planned-restore", "target": str(target)}
-    previous = state.get("previous_wrapper")
-    if not isinstance(previous, dict):
-        raise CodexLauncherError("installed Codex launcher lacks restoration metadata")
-    _restore_wrapper(target, previous)
-    previous_mode = state.get("previous_codex_home_mode")
-    if isinstance(previous_mode, int) and codex_home.is_dir() and not codex_home.is_symlink():
-        os.chmod(codex_home, previous_mode)
-    state_file.unlink(missing_ok=True)
-    return {"action": "managed-launcher", "status": "restored", "target": str(target), "protected": state.get("mode") == "protected-path-v1"}
+        state = _load_state(state_file)
+        if state is None:
+            return {"action": "managed-launcher", "status": "not-installed"}
+        target = Path(str(state.get("wrapper_path", "")))
+        expected = str(state.get("wrapper_sha256", ""))
+        # A protected install is self-describing.  In particular, schema-1
+        # migration changes the ingress directory, so uninstall without an
+        # explicit bin_dir must follow the recorded schema-2 target rather than
+        # reconstructing the caller's current environment.
+        requested_target = (
+            Path(str(state.get("wrapper_path", ""))).expanduser().absolute()
+            if bin_dir is None
+            else wrapper_path(bin_dir.expanduser().absolute())
+        )
+        if target != requested_target:
+            raise CodexLauncherError("installed Codex launcher uses a different bin directory")
+        if target.exists() and not _wrapper_matches(target, expected):
+            raise CodexLauncherError(f"refusing to overwrite modified Codex launcher: {target}")
+        if dry_run:
+            return {"action": "managed-launcher", "status": "planned-restore", "target": str(target)}
+        previous = state.get("previous_wrapper")
+        if not isinstance(previous, dict):
+            raise CodexLauncherError("installed Codex launcher lacks restoration metadata")
+        profile_result = _unmanage_profile(state.get("profile", {}), target)
+        _restore_wrapper(target, previous)
+        previous_mode = state.get("previous_codex_home_mode")
+        if isinstance(previous_mode, int) and codex_home.is_dir() and not codex_home.is_symlink():
+            os.chmod(codex_home, previous_mode)
+        state_file.unlink(missing_ok=True)
+        return {"action": "managed-launcher", "status": "restored", "target": str(target), "protected": state.get("mode") == "protected-path-v1", "profile": profile_result}
 
 
 def status(*, codex_home: Path | None = None, bin_dir: Path | None = None) -> dict:

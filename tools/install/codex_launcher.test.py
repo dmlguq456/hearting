@@ -248,6 +248,123 @@ class CodexLauncherInstallTest(unittest.TestCase):
         self.assertEqual(again["status"], "unchanged")
         self.assertEqual(profile.read_bytes(), after)
 
+    def test_existing_deny_install_can_be_promoted_to_managed_profile(self) -> None:
+        protected = self.root / "protected-bin"
+        profile = self.home / ".bashrc"
+        with mock.patch.dict(os.environ, {"SHELL": "/bin/bash"}):
+            launcher.install(
+                codex_home=self.codex_home,
+                bin_dir=protected,
+                real_command=str(self.real),
+                profile_policy="deny",
+            )
+            self.assertFalse(profile.exists())
+            repaired = launcher.install(
+                codex_home=self.codex_home,
+                bin_dir=protected,
+                real_command=str(self.real),
+                profile_policy="manage",
+            )
+            unchanged = launcher.install(
+                codex_home=self.codex_home,
+                bin_dir=protected,
+                real_command=str(self.real),
+                profile_policy="manage",
+            )
+        self.assertEqual(repaired["status"], "repaired")
+        self.assertEqual(unchanged["status"], "unchanged")
+        state = json.loads(launcher.state_path(self.codex_home).read_text())
+        self.assertEqual(state["profile"]["policy"], "manage")
+        self.assertTrue(state["profile"]["restore"]["owned"])
+        self.assertNotIn("payload", state["profile"]["restore"])
+
+    def test_uninstall_removes_owned_profile_block_and_preserves_later_user_bytes(self) -> None:
+        protected = self.root / "protected-bin"
+        profile = self.home / ".bashrc"
+        original = b"# foreign\r\nexport KEEP=1\r\n"
+        suffix = b"# added after install\n"
+        profile.write_bytes(original)
+        profile.chmod(0o600)
+        with mock.patch.dict(os.environ, {"SHELL": "/bin/bash"}):
+            launcher.install(
+                codex_home=self.codex_home,
+                bin_dir=protected,
+                real_command=str(self.real),
+                profile_policy="manage",
+            )
+            profile.write_bytes(profile.read_bytes() + suffix)
+            result = launcher.uninstall(codex_home=self.codex_home, bin_dir=protected)
+        self.assertEqual(result["profile"]["status"], "removed")
+        self.assertEqual(profile.read_bytes(), original + suffix)
+        self.assertFalse((protected / "codex").exists())
+
+    def test_wrapper_refresh_preserves_managed_profile_restore_evidence(self) -> None:
+        protected = self.root / "protected-bin"
+        profile = self.home / ".bashrc"
+        profile.write_bytes(b"foreign\n")
+        profile.chmod(0o600)
+        with mock.patch.dict(os.environ, {"SHELL": "/bin/bash"}):
+            launcher.install(
+                codex_home=self.codex_home,
+                bin_dir=protected,
+                real_command=str(self.real),
+                profile_policy="manage",
+            )
+            before = json.loads(launcher.state_path(self.codex_home).read_text())["profile"]
+            with mock.patch.object(
+                launcher,
+                "wrapper_bytes",
+                return_value=launcher.wrapper_bytes() + b"# next runtime\n",
+            ):
+                launcher.install(
+                    codex_home=self.codex_home,
+                    bin_dir=protected,
+                    real_command=str(self.real),
+                    profile_policy="deny",
+                )
+            after = json.loads(launcher.state_path(self.codex_home).read_text())["profile"]
+            launcher.uninstall(codex_home=self.codex_home, bin_dir=protected)
+        self.assertEqual(after, before)
+        self.assertEqual(profile.read_bytes(), b"foreign\n")
+
+    def test_uninstall_leaves_a_preexisting_exact_profile_block(self) -> None:
+        protected = self.root / "protected-bin"
+        profile = self.home / ".bashrc"
+        block = launcher._profile_block(protected)
+        profile.write_bytes(block)
+        profile.chmod(0o600)
+        with mock.patch.dict(os.environ, {"SHELL": "/bin/bash"}):
+            launcher.install(
+                codex_home=self.codex_home,
+                bin_dir=protected,
+                real_command=str(self.real),
+                profile_policy="manage",
+            )
+            state = json.loads(launcher.state_path(self.codex_home).read_text())
+            result = launcher.uninstall(codex_home=self.codex_home, bin_dir=protected)
+        self.assertFalse(state["profile"]["restore"]["owned"])
+        self.assertEqual(result["profile"]["status"], "not-owned")
+        self.assertEqual(profile.read_bytes(), block)
+
+    def test_uninstall_fails_closed_on_ambiguous_managed_profile(self) -> None:
+        protected = self.root / "protected-bin"
+        profile = self.home / ".bashrc"
+        with mock.patch.dict(os.environ, {"SHELL": "/bin/bash"}):
+            launcher.install(
+                codex_home=self.codex_home,
+                bin_dir=protected,
+                real_command=str(self.real),
+                profile_policy="manage",
+            )
+            profile.write_bytes(profile.read_bytes() + launcher._profile_block(protected))
+            with self.assertRaisesRegex(
+                launcher.CodexLauncherError,
+                "managed shell profile block is ambiguous",
+            ):
+                launcher.uninstall(codex_home=self.codex_home, bin_dir=protected)
+        self.assertTrue((protected / "codex").is_file())
+        self.assertTrue(launcher.state_path(self.codex_home).is_file())
+
     @unittest.skipUnless(
         os.name == "posix" and Path("/var/tmp").is_dir() and os.access("/var/tmp", os.W_OK),
         "requires a writable POSIX sticky-temp hierarchy",
