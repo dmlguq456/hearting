@@ -200,6 +200,31 @@ harness install claude
   near-duplicate. Keep customizations in separate user-owned entries instead
   of editing managed ones.
 
+- **Owner-name-set reconciliation:** `harness install claude` and Claude
+  runtime activation are two legitimate owners of `$HOME/.claude` symlinks, and
+  each owns a distinct owner-name-set — the installer's `projector.py`
+  `_CLAUDE_SYMLINK_NAMES` table (`CLAUDE.md`, `README.md`, `core`, `commands`,
+  `skills`, `agents`, `agent-modes`, `hooks`, `utilities`, `tools`,
+  `scaffolds`, `loops`, `manifest.json`, `statusline.sh`) and activation's
+  native discovery names. When no activation record exists, the installer owns
+  its full name set alone. Once a
+  `linked` or `packaged` activation record exists, activation owns the
+  **union** of the installer name set and the activation name set, and in
+  `packaged` mode every name in that union is re-projected as a symlink into
+  the same immutable `active_root` bundle — a mixed layout where some
+  union-member names still point at the installer's versioned Claude
+  projection while others point at `active_root` is a repair target, not a
+  steady state. The repair set is computed as the symmetric difference between
+  the two owners' currently-observed name sets, not as a fixed list of
+  historically-drifted names, so a future change to either table is picked up
+  automatically. Regular user files (`settings.json`, `keybindings.json`, and
+  anything not in either owner's name set) and the runtime-generated state
+  listed below remain unowned by both and are never touched by reconciliation.
+  Deactivate/uninstall restores each union member to the exact target the
+  installer would have produced, but only when the current link is still the
+  activation-owned target recorded at the most recent activate — a link a user
+  repointed after activation is left alone.
+
 Keep these local to `$HOME/.claude`: `.credentials.json`, `.dispatch/`, `cache/`, `daemon/`, `history.jsonl`, `ide/`, `projects/`, `sessions/`, `session-env/`, `shell-snapshots/`, runtime logs, and other runtime-generated state.
 
 If present, existing `worklog-board/` and `worklog-board-wt/` directories under
