@@ -66,6 +66,10 @@ def main() -> int:
         if root in seen:
             continue
         seen.add(root)
+        if not Path(root).is_dir():
+            # A read-only fallback root (legacy <agent-home>/.dispatch) that
+            # does not exist holds nothing to sweep; touching it would create it.
+            continue
         try:
             records, _entries = sweep_deliver(root, RECIPIENT_KIND, session_id)
         except Exception:  # noqa: BLE001 -- fail-open (§13.33.1-(3))

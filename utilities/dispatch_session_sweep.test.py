@@ -302,6 +302,17 @@ class SweepTest(IsolatedRootMixin, unittest.TestCase):
 
     # -- self-instrumentation: observation only, never a gate. -------------
 
+    def test_sweep_never_materializes_a_missing_root(self):
+        # Regression: the legacy <agent-home>/.dispatch read-order root does
+        # not exist for a packaged release; sweeping it must not create
+        # `<release>/.dispatch/logs/` (that write made every superseded
+        # release refuse pruning with delta-digest-mismatch).
+        missing = Path(self._tmp.name) / "release" / ".dispatch"
+        records, entries = SWEEP.sweep_deliver(missing, "claude-parent-runtime", "sess-missing")
+        self.assertEqual((records, entries), ([], 0))
+        self.assertFalse(missing.exists())
+        self.assertFalse((Path(self._tmp.name) / "release").exists())
+
     def test_self_instrumentation_appends_one_line_per_sweep(self):
         self._seed("sess-owner")
         log_path = self.root / "logs" / SWEEP.LOG_FILENAME

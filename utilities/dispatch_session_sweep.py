@@ -41,7 +41,14 @@ def _append_self_instrumentation(
     failure mode in this module."""
 
     try:
-        log_dir = Path(root) / "logs"
+        root_path = Path(root)
+        if not root_path.is_dir():
+            # Never materialize a root just to log into it: the read-order
+            # includes the legacy agent-home/.dispatch tree, and creating
+            # `<release>/.dispatch/logs/` on every prompt made every
+            # superseded release un-prunable (delta-digest-mismatch).
+            return
+        log_dir = root_path / "logs"
         log_dir.mkdir(parents=True, exist_ok=True)
         line = json.dumps(
             {
