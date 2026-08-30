@@ -37,6 +37,14 @@ You are a bounded worker, not the user-facing main session.
 - A sub-session has `stage_authority=0`. It may report its own attempt result and
   bounded handoff, but it must not create, claim, or satisfy the route stage's
   completion marker.
+- A sub-session that belongs to a registered serial chain (SD-119) reads the
+  chain-scoped handoff (`dispatch_subsession_handoff.py`, one file per chain
+  under the artifact root) before its first edit — it is this session's only
+  carrier of the predecessor's completed items, exact next command,
+  invariants, and forbidden files. Immediately before ending its own attempt,
+  flush a fresh chain-scoped handoff for the next index. Neither read nor
+  flush touches `PreCompact`/`PostCompact` hooks; this handoff is scoped to
+  the chain, not to compaction inside one attempt.
 
 Native helper support inside a sub-session is checked separately from registered
 dispatch and never changes the gate:

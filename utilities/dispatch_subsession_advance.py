@@ -37,6 +37,7 @@ sys.path.insert(0, str(ROOT / "utilities"))
 
 import dispatch_contract as DC  # noqa: E402
 from dispatch_contract import DispatchContractError  # noqa: E402
+import dispatch_subsession_handoff as HANDOFF  # noqa: E402
 
 SUBSESSION_ADVANCE_RECORD_SCHEMA_VERSION = 1
 
@@ -80,6 +81,7 @@ class SubsessionAdvanceRequest:
     successor_subsession_index: int
     successor_session: dict
     parent_attempt_id: str
+    artifact_root: str = ""
     advance_generation: int = 0
 
 
@@ -111,6 +113,8 @@ class SubsessionAdvanceServices(Protocol):
     def sealed_manifest_sha256(self, request: SubsessionAdvanceRequest) -> str: ...
 
     def predecessor_terminal(self, request: SubsessionAdvanceRequest) -> bool: ...
+
+    def classify_handoff(self, request: SubsessionAdvanceRequest) -> str: ...
 
     def claim(
         self, request: SubsessionAdvanceRequest, *, subsession_advance_id: str, claim_key: tuple
@@ -228,7 +232,7 @@ def _registry_rows_for_chain(jobs: Path, chain_id: str) -> list[dict]:
         metadata = dict(part.split("=", 1) for part in fields[5].split(",") if "=" in part)
         if metadata.get("session_chain_id") != chain_id:
             continue
-        out.append({"status": fields[1], "metadata": metadata})
+        out.append({"status": fields[1], "metadata": metadata, "timestamp": fields[0]})
     return out
 
 
@@ -271,6 +275,23 @@ def load_chain_manifest(jobs: Path, chain_id: str) -> dict | None:
         return json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
+
+
+def _resolve_artifact_root() -> str:
+    """The one canonical writable artifact root (CLAUDE.md `Runtime Router`),
+    resolved the same way every other harness surface resolves it -- never a
+    supervisor-local guess."""
+
+    try:
+        result = subprocess.run(
+            [str(ROOT / "utilities" / "artifact-root.sh")],
+            cwd=ROOT, text=True, capture_output=True, timeout=10, check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    if result.returncode != 0:
+        return ""
+    return result.stdout.strip()
 
 
 def coordinate_chain_advance_from_joined_rows(
@@ -326,6 +347,7 @@ def coordinate_chain_advance_from_joined_rows(
         successor_subsession_index=successor_index,
         successor_session=successor_session,
         parent_attempt_id=parent_attempt_id,
+        artifact_root=_resolve_artifact_root(),
     )
     services = RealSubsessionAdvanceServices(manifest)
     result = coordinate_subsession_advance(request, services)
@@ -488,6 +510,19 @@ def coordinate_subsession_advance(
         )
         if "claimed" not in record["phases"]:
             cp("before-claim")
+            # SD-119 R3 (A-8): a missing or stale chain-scoped handoff hard
+            # stops here -- claim 0, register 0, start 0. Never proceeds on
+            # the assumption that index i+1 can reconstruct context another way.
+            handoff_classification = services.classify_handoff(request)
+            if handoff_classification != "ok":
+                record["outcome"] = "refused"
+                record["reason"] = handoff_classification
+                _atomic_json(record_path, record)
+                return _refused(
+                    handoff_classification,
+                    subsession_advance_id=subsession_advance_id,
+                    record_path=record_path,
+                )
             try:
                 claim = services.claim(
                     request, subsession_advance_id=subsession_advance_id, claim_key=claim_key
@@ -581,6 +616,32 @@ class RealSubsessionAdvanceServices:
                 continue
             status = row["status"]
         return status in TERMINAL_STATUSES
+
+    def _predecessor_terminal_at_ns(self, request: SubsessionAdvanceRequest) -> int:
+        from datetime import datetime, timezone
+
+        for row in _registry_rows_for_chain(request.jobs, request.chain_id):
+            if row["metadata"].get("attempt_id") != request.predecessor_terminal_attempt_id:
+                continue
+            try:
+                parsed = datetime.fromisoformat(row["timestamp"].replace("Z", "+00:00"))
+                if parsed.tzinfo is None:
+                    parsed = parsed.replace(tzinfo=timezone.utc)
+                return int(parsed.timestamp() * 1_000_000_000)
+            except (AttributeError, ValueError):
+                return 0
+        return 0
+
+    def classify_handoff(self, request: SubsessionAdvanceRequest) -> str:
+        if not request.artifact_root:
+            return "subsession-handoff-missing"
+        path = HANDOFF.handoff_path(request.artifact_root, request.route_id, request.chain_id)
+        return HANDOFF.classify_handoff(
+            path,
+            predecessor_attempt_id_expected=request.predecessor_terminal_attempt_id,
+            manifest_sha256_expected=request.manifest_sha256,
+            predecessor_terminal_at_ns=self._predecessor_terminal_at_ns(request),
+        )
 
     def claim(
         self, request: SubsessionAdvanceRequest, *, subsession_advance_id: str, claim_key: tuple

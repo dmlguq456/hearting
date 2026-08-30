@@ -20,6 +20,20 @@ def default_state_dir(artifact_root: Path, route_id: str) -> Path:
     return Path(artifact_root).joinpath(*STATE_BUCKET) / route_id
 
 
+# SD-119 R3: a chain-scoped sub-session's worker contract obligation is that
+# `dispatch_subsession_handoff.classify_handoff()` returning anything but
+# `"ok"` already keeps this index from ever starting (dispatch_subsession_
+# advance.py's chain-advance gate refuses claim/register/start beforehand) --
+# so by construction a bound successor session is never mid-edit without a
+# handoff that classified `ok` at start time. The worker contract obligation
+# layered on top of that server-side gate is procedural, not a second runtime
+# check: the successor MUST read that handoff before its first edit
+# (`roles/worker-bootstrap.md`), since it is this session's only carrier of
+# the predecessor's completed items, exact next command, invariants, and
+# forbidden files -- nothing else transfers context across the attempt
+# boundary. `metadata()` below is unchanged by R3.
+
+
 def add_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--subsession-id")
     parser.add_argument("--subsession-index", type=int)

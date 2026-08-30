@@ -96,9 +96,15 @@ class FakeServices:
         self.claim_calls = 0
         self.register_calls = 0
         self.start_calls = 0
+        self.handoff_classification = "ok"
+        self.handoff_calls = 0
 
     def sealed_manifest_sha256(self, request):
         return self.sealed_sha256
+
+    def classify_handoff(self, request):
+        self.handoff_calls += 1
+        return self.handoff_classification
 
     def predecessor_terminal(self, request):
         status = None
