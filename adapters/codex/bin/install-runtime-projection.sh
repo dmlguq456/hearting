@@ -19,10 +19,17 @@
 # skill metadata in Codex's initial context.
 set -eu
 
-SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-AGENT_HOME=${AGENT_HOME:-}
-if [ -z "$AGENT_HOME" ] || [ ! -f "$AGENT_HOME/core/CORE.md" ]; then
-  AGENT_HOME=$(CDPATH= cd -- "$SCRIPT_DIR/../../.." && pwd)
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
+agent_home_candidate=${AGENT_HOME:-}
+if [ -z "$agent_home_candidate" ] || [ ! -f "$agent_home_candidate/core/CORE.md" ]; then
+  agent_home_candidate=$SCRIPT_DIR/../../..
+fi
+# Resolve the source before refreshing $CODEX_HOME/hearting.  Managed sessions
+# commonly export AGENT_HOME through that projection; keeping the lexical path
+# would otherwise turn `hearting -> <source>` into `hearting -> hearting`.
+if ! AGENT_HOME=$(CDPATH= cd -- "$agent_home_candidate" && pwd -P); then
+  echo "install-runtime-projection: cannot resolve agent home: $agent_home_candidate" >&2
+  exit 69
 fi
 CODEX_HOME=${CODEX_HOME:-$HOME/.codex}
 
@@ -86,6 +93,15 @@ link() {
   if [ ! -e "$target" ]; then
     printf 'skip=%s reason=projection-target-missing\n' "$linkpath"
     return 0
+  fi
+  if ! link_parent=$(CDPATH= cd -- "$(dirname -- "$linkpath")" && pwd -P); then
+    printf 'install-runtime-projection: cannot resolve link parent: %s\n' "$linkpath" >&2
+    return 3
+  fi
+  link_identity=$link_parent/$(basename -- "$linkpath")
+  if [ "$target" = "$link_identity" ]; then
+    printf 'install-runtime-projection: refusing self-referential link: %s\n' "$linkpath" >&2
+    return 3
   fi
   if [ -e "$linkpath" ] && [ ! -L "$linkpath" ]; then
     if [ "$(basename "$linkpath")" = "hooks.json" ]; then

@@ -3397,6 +3397,20 @@ if AGENT_HOME="$ROOT" CODEX_HOME="$RPHOME" "$ROOT/adapters/codex/bin/install-run
 else
   bad "codex install-runtime-projection + checker should wire and validate the runtime home"
 fi
+RPSELF="$TMP/codex-runtime-home-self"
+rm -rf "$RPSELF"; mkdir -p "$RPSELF"
+ln -s "$ROOT" "$RPSELF/hearting"
+if AGENT_HOME="$RPSELF/hearting" CODEX_HOME="$RPSELF" "$ROOT/adapters/codex/bin/install-runtime-projection.sh" >"$TMP/codex_rp_self_install.out" 2>"$TMP/codex_rp_self_install.err" \
+  && grep -q '^status=ok' "$TMP/codex_rp_self_install.out" \
+  && [ "$(readlink "$RPSELF/hearting")" = "$ROOT" ] \
+  && [ "$(readlink -f "$RPSELF/hearting")" = "$ROOT" ] \
+  && AGENT_HOME="$RPSELF/hearting" CODEX_HOME="$RPSELF" "$ROOT/adapters/codex/bin/check-runtime-projection.sh" >"$TMP/codex_rp_self.out" 2>"$TMP/codex_rp_self.err" \
+  && grep -q '^check=hearting:ok' "$TMP/codex_rp_self.out" \
+  && grep -q '^status=ok' "$TMP/codex_rp_self.out"; then
+  ok "codex install-runtime-projection resolves a projected AGENT_HOME before relinking"
+else
+  bad "codex install-runtime-projection must not create a self-referential hearting link"
+fi
 RPPLUGIN="$TMP/codex-runtime-home-plugin"
 rm -rf "$RPPLUGIN"; mkdir -p "$RPPLUGIN"
 if AGENT_HOME="$ROOT" CODEX_HOME="$RPPLUGIN" "$ROOT/adapters/codex/bin/install-runtime-projection.sh" --install-plugin >"$TMP/codex_rp_plugin_install.out" 2>"$TMP/codex_rp_plugin_install.err" \
