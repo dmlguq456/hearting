@@ -153,5 +153,72 @@ class AdmissionGateTest(unittest.TestCase):
         self.assertEqual(verdict.refusal, "continuation-reserved-scope-violation")
 
 
+class RouteIdentityHashRegressionTest(unittest.TestCase):
+    """SD-116 WP1 anchor: a route carrying the SD-118 lineage fields
+    (`owner_attempt_id`, `route_family_key`) must resolve as `bound-route`,
+    not fall to the compatibility floor -- this is the exact defect that made
+    every post-SD-118 route lose its declared budget."""
+
+    def test_lineage_fields_resolve_as_bound_route(self):
+        with tempfile.TemporaryDirectory() as raw:
+            route = Path(raw) / "route.json"
+            value = {
+                "schema_version": 2,
+                "nodes": [{"id": f"node-{index}"} for index in range(8)],
+                "resume_retry_boundaries": [f"node-{index}" for index in range(7)],
+                "owner_attempt_id": "att-lineage-example",
+                "route_family_key": "sha256:" + "f" * 64,
+            }
+            import route_identity as RI
+            digest = RI.route_hash(value)
+            value["route_hash"] = digest
+            value["route_id"] = RI.route_id_from_hash(digest)
+            route.write_text(json.dumps(value), encoding="utf-8")
+            budget = MODULE.resolve_continuation_budget(
+                route_file=route,
+                route_id=value["route_id"],
+                route_hash=value["route_hash"],
+            )
+        self.assertEqual("bound-route", budget.source)
+        self.assertEqual(8, budget.declared_nodes)
+        self.assertEqual(7, budget.retry_slots)
+        self.assertEqual(15, budget.ordinary)
+        self.assertEqual(16, budget.limit)
+
+    def test_pre_wp1_two_key_hash_scheme_falls_to_floor(self):
+        """Control: a route whose stored `route_hash` was sealed with the old
+        (`route_hash`,`route_id`)-only exclusion scheme -- i.e. computed over
+        a payload that already includes the lineage fields -- no longer
+        matches `route_identity.route_hash()`'s 4-key exclusion. This is the
+        mirror image of the real SD-118 defect and confirms the resolver
+        genuinely depends on the shared exclusion set rather than coincidence."""
+        import hashlib
+        with tempfile.TemporaryDirectory() as raw:
+            route = Path(raw) / "route.json"
+            value = {
+                "schema_version": 2,
+                "nodes": [{"id": f"node-{index}"} for index in range(8)],
+                "resume_retry_boundaries": [f"node-{index}" for index in range(7)],
+                "owner_attempt_id": "att-lineage-example",
+                "route_family_key": "sha256:" + "e" * 64,
+            }
+            old_scheme_bare = {
+                key: val for key, val in value.items()
+                if key not in {"route_hash", "route_id"}
+            }
+            old_digest = "sha256:" + hashlib.sha256(
+                json.dumps(old_scheme_bare, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
+            ).hexdigest()
+            value["route_hash"] = old_digest
+            value["route_id"] = "rt-" + old_digest.split(":", 1)[1][:16]
+            route.write_text(json.dumps(value), encoding="utf-8")
+            budget = MODULE.resolve_continuation_budget(
+                route_file=route,
+                route_id=value["route_id"],
+                route_hash=value["route_hash"],
+            )
+        self.assertEqual("compatibility-floor", budget.source)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -4,9 +4,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-import hashlib
 import json
+import sys
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import route_identity as ROUTE_IDENTITY
 
 
 COMPATIBILITY_FLOOR = 12
@@ -80,13 +83,8 @@ def resolve_continuation_budget(
         return ContinuationBudget(COMPATIBILITY_FLOOR, "compatibility-floor")
     if route.get("route_id") != route_id or route.get("route_hash") != route_hash:
         return ContinuationBudget(COMPATIBILITY_FLOOR, "compatibility-floor")
-    bare = {key: value for key, value in route.items() if key not in {"route_hash", "route_id"}}
-    sealed_hash = "sha256:" + hashlib.sha256(
-        json.dumps(
-            bare, ensure_ascii=False, sort_keys=True, separators=(",", ":")
-        ).encode()
-    ).hexdigest()
-    if route_hash != sealed_hash or route_id != "rt-" + sealed_hash.split(":", 1)[1][:16]:
+    sealed_hash = ROUTE_IDENTITY.route_hash(route)
+    if route_hash != sealed_hash or route_id != ROUTE_IDENTITY.route_id_from_hash(sealed_hash):
         return ContinuationBudget(COMPATIBILITY_FLOOR, "compatibility-floor")
     if expected_cwd is not None:
         raw_cwd = route.get("cwd")
