@@ -323,6 +323,7 @@ def get_installed_layout_prefix() -> Path | None:
         if cached is not None:
             return cached
         tmp = Path(tempfile.mkdtemp(prefix="w1-installed-layout-", dir=str(choose_suite_temp_parent())))
+        register_fixture_root(tmp)
         env = build_isolated_env(tmp / "build-env")
         installer = ROOT / "tools" / "install" / "installer.py"
         if not installer.exists():
@@ -425,6 +426,78 @@ def extract_failing_test_ids(stdout: str, stderr: str) -> list[str]:
     return sorted(set(ids))
 
 
+LIVE_STATE_ROOT = Path(os.path.expanduser("~")) / ".local" / "state" / "hearting"
+_LIVE_SAMPLER_INTERVAL = 0.2
+_LIVE_SAMPLER_MAX_SAMPLES = 3000  # bounded: interval * cap is well past any --timeout in practice
+
+# Per-suite live-state paths a sampler positively attributed to that suite's
+# own process-group lineage, keyed by suite relpath. Populated only with
+# positive evidence -- a suite the sampler could not observe (no /proc, join
+# did not finish in time) contributes nothing here and its writes fall back
+# to the foreign/unknown classification in the leak sweep, never promoted to
+# an owned leak by absence of evidence.
+_OWNED_LIVE_PATHS_BY_SUITE: dict[str, set[str]] = {}
+_OWNED_LIVE_PATHS_LOCK = threading.Lock()
+
+# Fixture roots the runner itself constructs (per-profile env tmpdirs,
+# simulated install prefixes). OR'd into "owned" so a fixture root that
+# happens to land under LIVE_STATE_ROOT is never misclassified as a foreign
+# write from someone else's concurrent session.
+_FIXTURE_ROOTS: list[str] = []
+_FIXTURE_ROOTS_LOCK = threading.Lock()
+
+
+def register_fixture_root(path: Path) -> None:
+    with _FIXTURE_ROOTS_LOCK:
+        _FIXTURE_ROOTS.append(str(path))
+
+
+def _pids_in_process_group(pgid: int) -> list[int]:
+    pids = []
+    try:
+        proc_entries = os.listdir("/proc")
+    except OSError:
+        return pids
+    for entry in proc_entries:
+        if not entry.isdigit():
+            continue
+        pid = int(entry)
+        try:
+            if os.getpgid(pid) == pgid:
+                pids.append(pid)
+        except OSError:
+            continue
+    return pids
+
+
+def _sample_pgid_live_state_writes(
+    pgid: int, stop_event: threading.Event, collected: set[str], lock: threading.Lock
+) -> None:
+    """Bounded daemon sampler: poll /proc for open-fd targets under
+    LIVE_STATE_ROOT belonging to any process in ``pgid``. Runs until
+    ``stop_event`` fires or the sample cap is reached, whichever is first.
+    """
+    live_prefix = str(LIVE_STATE_ROOT) + os.sep
+    samples = 0
+    while not stop_event.is_set() and samples < _LIVE_SAMPLER_MAX_SAMPLES:
+        for pid in _pids_in_process_group(pgid):
+            fd_dir = f"/proc/{pid}/fd"
+            try:
+                fd_names = os.listdir(fd_dir)
+            except OSError:
+                continue
+            for fd_name in fd_names:
+                try:
+                    target = os.readlink(f"{fd_dir}/{fd_name}")
+                except OSError:
+                    continue
+                if target.startswith(live_prefix):
+                    with lock:
+                        collected.add(target)
+        samples += 1
+        stop_event.wait(_LIVE_SAMPLER_INTERVAL)
+
+
 def run_suite(suite: Path, root: Path, env: dict[str, str], profile: str, timeout: int) -> SuiteResult:
     relpath = suite_relpath(root, suite)
     if suite.name.endswith(".sh"):
@@ -442,18 +515,44 @@ def run_suite(suite: Path, root: Path, env: dict[str, str], profile: str, timeou
         cmd,
         cwd=str(root),
         env=env,
+        stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
         start_new_session=True,
     )
+    stop_event = threading.Event()
+    sample_lock = threading.Lock()
+    collected: set[str] = set()
+    sampler_thread: threading.Thread | None = None
     try:
-        out, err = proc.communicate(timeout=timeout)
-        rc = proc.returncode
-    except subprocess.TimeoutExpired:
-        timed_out = True
-        rc = 124
-        out, err = reap_process_group(proc)
+        pgid = os.getpgid(proc.pid)
+    except OSError:
+        pgid = None
+    if pgid is not None and os.path.isdir("/proc"):
+        sampler_thread = threading.Thread(
+            target=_sample_pgid_live_state_writes,
+            args=(pgid, stop_event, collected, sample_lock),
+            daemon=True,
+        )
+        sampler_thread.start()
+    try:
+        try:
+            out, err = proc.communicate(timeout=timeout)
+            rc = proc.returncode
+        except subprocess.TimeoutExpired:
+            timed_out = True
+            rc = 124
+            out, err = reap_process_group(proc)
+    finally:
+        stop_event.set()
+        if sampler_thread is not None:
+            sampler_thread.join(timeout=2.0)
+        with sample_lock:
+            snapshot = set(collected)
+        if snapshot:
+            with _OWNED_LIVE_PATHS_LOCK:
+                _OWNED_LIVE_PATHS_BY_SUITE.setdefault(relpath, set()).update(snapshot)
     duration = (datetime.datetime.now() - started).total_seconds()
     return SuiteResult(relpath, rc, timed_out, out, err, duration, profile)
 
@@ -536,6 +635,10 @@ def _read_tsv(path: Path, columns: list[str]) -> list[dict[str, str]]:
             cols = line.split("\t")
             if not header_seen:
                 header_seen = True
+                if cols != columns:
+                    raise BaselineError(
+                        f"{path}:{lineno}: expected header {columns}, got {cols}"
+                    )
                 continue
             if len(cols) != len(columns):
                 raise BaselineError(f"{path}:{lineno}: expected {len(columns)} columns, got {len(cols)}")
@@ -791,6 +894,15 @@ def write_report(path: Path, rows: list[dict[str, str]]) -> None:
 SEED_VERDICTS = {"FAIL", "TIMEOUT", "ERROR", "EXPIRED", "KIND-MISMATCH"}
 
 
+def _same_baseline_target(a: Path, b: Path) -> bool:
+    """True when ``a`` and ``b`` name the same file, including a hardlink
+    alias with a different name that resolve()-equality alone would miss."""
+    try:
+        return a.samefile(b)
+    except OSError:
+        return a.resolve() == b.resolve()
+
+
 def write_seed_baseline(path: Path, rows: list[dict[str, str]], fingerprint: str, today: str) -> int:
     """Write a *proposed* baseline stamped with the current fingerprint.
 
@@ -826,13 +938,17 @@ def read_report(path: Path) -> list[dict[str, str]]:
     rows: list[dict[str, str]] = []
     header_seen = False
     with path.open(encoding="utf-8") as fh:
-        for line in fh:
+        for lineno, line in enumerate(fh, start=1):
             line = line.rstrip("\n")
             if not line or line.startswith("#"):
                 continue
             cols = line.split("\t")
             if not header_seen:
                 header_seen = True
+                if cols != REPORT_COLUMNS:
+                    raise BaselineError(
+                        f"{path}:{lineno}: expected header {REPORT_COLUMNS}, got {cols}"
+                    )
                 continue
             if len(cols) != len(REPORT_COLUMNS):
                 continue
@@ -945,6 +1061,7 @@ def run_profile(
     def make_env(idx: int) -> dict[str, str]:
         tmp = Path(tempfile.mkdtemp(prefix=f"w1-{profile}-{idx}-", dir=str(choose_suite_temp_parent())))
         tmp_roots.append(tmp)
+        register_fixture_root(tmp)
         if profile == "isolated":
             return build_isolated_env(tmp)
         if profile == "installed-layout":
@@ -1119,15 +1236,19 @@ def main(argv: list[str]) -> int:
                     break
                 # Checking the budget only *before* an attempt does not bound
                 # it: with 1s left and --timeout 600 the attempt could still
-                # run 600s. Clamp this attempt's timeout to what is left.
-                attempt_timeout = max(1, min(args.timeout, int(remaining)))
+                # run 600s. Clamp this attempt's timeout to what is left,
+                # preserving the float remainder -- truncating a sub-second
+                # remainder to int(0) and then flooring it back up to a
+                # 1-second minimum would silently hand out more budget than
+                # was left. A positive clamp (remaining < args.timeout but
+                # still > 0) ran to completion within its budget and is not
+                # exhausted; only remaining <= 0 is.
+                attempt_timeout = min(float(args.timeout), remaining)
                 attempt_results = run_profile(
                     [suite], root, profile, 1, attempt_timeout, install_prefix
                 )
                 extra.extend(attempt_results)
                 retry_spent += sum(r.duration_s for r in attempt_results)
-                if attempt_timeout < args.timeout:
-                    retry_budget_exhausted.add(rel)
             results_by_suite[rel].extend(extra)
 
     # Undeclared/unneeded isolation opt-out detection: only for suites that
@@ -1151,6 +1272,7 @@ def main(argv: list[str]) -> int:
         if install_prefix is None:
             continue
         env_tmp = Path(tempfile.mkdtemp(prefix="w1-isosense-", dir=str(choose_suite_temp_parent())))
+        register_fixture_root(env_tmp)
         try:
             probe_env = build_installed_layout_env(env_tmp, install_prefix)
             probe = run_suite(root / r, root, probe_env, "installed-layout", args.timeout)
@@ -1242,7 +1364,16 @@ def main(argv: list[str]) -> int:
                 detail += f"; failing={','.join(failing_ids)}"
             if result.relpath in retry_budget_exhausted:
                 detail += "; retry-budget-exhausted"
-            verdict = "KIND-MISMATCH" if mismatch else ("XPASS" if all(x == "pass" for x in outcomes) else "KNOWN-FAIL" if all(x == "known-fail" for x in outcomes) else "FLAKY-KNOWN-FAIL")
+            # A flaky-timing suite's all-pass aggregate is not a genuine
+            # unexpected pass: one run (or one budget-limited run) proves
+            # nothing about a suite explicitly declared flaky, so it gets its
+            # own non-fatal verdict distinct from a non-flaky suite's XPASS.
+            verdict = (
+                "KIND-MISMATCH" if mismatch
+                else "FLAKY-PASS" if all(x == "pass" for x in outcomes)
+                else "KNOWN-FAIL" if all(x == "known-fail" for x in outcomes)
+                else "FLAKY-KNOWN-FAIL"
+            )
             verdicts = [Verdict(result.relpath, "-", verdict, detail=detail)]
         else:
             verdicts = classify_result(result, baseline, today, run_fingerprint)
@@ -1292,30 +1423,65 @@ def main(argv: list[str]) -> int:
     leak_new: set[str] = set()
     if not args.no_leak_sweep:
         after_leak = live_state_snapshot()
-        live_registry_paths = {sp for sp, row in isolation_tsv.items() if row["needs"] == "live-registry"}
+        live_registry_suites = {sp for sp, row in isolation_tsv.items() if row["needs"] == "live-registry"}
         new_entries = after_leak - before_leak
-        if new_entries and live_registry_paths:
-            # A live-registry opt-out is a declared, deliberate exception:
-            # entries are only excused when at least one such suite ran.
-            leak_new = new_entries
-        else:
-            leak_new = new_entries
+        with _OWNED_LIVE_PATHS_LOCK:
+            owned_by_suite_snapshot = {k: set(v) for k, v in _OWNED_LIVE_PATHS_BY_SUITE.items()}
+        with _FIXTURE_ROOTS_LOCK:
+            fixture_roots_snapshot = list(_FIXTURE_ROOTS)
+
+        def _owning_suite(path: str) -> str | None:
+            for suite_rel, owned_paths in owned_by_suite_snapshot.items():
+                if path in owned_paths:
+                    return suite_rel
+            return None
+
+        def _under_fixture_root(path: str) -> bool:
+            return any(path == fr or path.startswith(fr + os.sep) for fr in fixture_roots_snapshot)
+
+        owned_new: set[str] = set()
+        foreign_new: set[str] = set()
+        for entry in sorted(new_entries):
+            owner = _owning_suite(entry)
+            if owner is not None:
+                if owner in live_registry_suites:
+                    # A declared live-registry suite touching the live
+                    # registry is deliberate, not a leak to report at all.
+                    continue
+                owned_new.add(entry)
+            elif _under_fixture_root(entry):
+                owned_new.add(entry)
+            else:
+                # No positive PGID-lineage or fixture-root attribution:
+                # either genuinely a concurrent foreign session, or the
+                # sampler simply could not observe it (no /proc, bounded join
+                # did not finish). Either way, absence of evidence is never
+                # promoted to an owned leak.
+                foreign_new.add(entry)
+
+        if foreign_new:
+            for entry in sorted(foreign_new):
+                print(f"LIVE-STATE-OBSERVED-FOREIGN: {entry}", file=sys.stderr)
+
+        leak_new = owned_new
         if leak_new:
             for entry in sorted(leak_new):
                 print(f"LIVE-STATE-LEAK: {entry}", file=sys.stderr)
-            if not live_registry_paths:
-                hard_failures.append((
-                    "__live_state_leak__::-", "ERROR", "internal",
-                    f"{len(leak_new)} new live-state path(s) written during the run",
-                ))
+            hard_failures.append((
+                "__live_state_leak__::-", "ERROR", "internal",
+                f"{len(leak_new)} new live-state path(s) written during the run",
+            ))
 
     if args.report:
         write_report(args.report, report_rows)
     if args.seed_baseline:
         # The proposal must never become the contract by accident: writing it
         # over the configured baseline would replace the whole row set with the
-        # current run's hard failures.
-        if args.seed_baseline.resolve() == args.baseline.resolve():
+        # current run's hard failures. Plain resolve() equality misses a
+        # differently-named hardlink to the same inode, so prefer samefile()
+        # and only fall back to resolve() when one side does not exist yet
+        # (samefile() requires both paths to exist).
+        if _same_baseline_target(args.seed_baseline, args.baseline):
             print("--seed-baseline must not target the configured --baseline",
                   file=sys.stderr)
             return 64
@@ -1326,7 +1492,7 @@ def main(argv: list[str]) -> int:
     print(f"collected={total}")
     print(f"env: jobs={args.jobs} nproc={os.cpu_count()} timeout={args.timeout} profile={explicit_profile}")
     print(f"fingerprint={run_fingerprint}")
-    for key in ("PASS", "FAIL", "ERROR", "TIMEOUT", "KNOWN-FAIL", "FLAKY-KNOWN-FAIL", "XPASS", "STALE", "EXPIRED", "KIND-MISMATCH",
+    for key in ("PASS", "FAIL", "ERROR", "TIMEOUT", "KNOWN-FAIL", "FLAKY-KNOWN-FAIL", "FLAKY-PASS", "XPASS", "STALE", "EXPIRED", "KIND-MISMATCH",
                 "BASELINE-FOREIGN",
                 "UNDECLARED-ISOLATION-OPTOUT", "ISOLATION-OPTOUT-UNNEEDED"):
         if key in verdict_counts:

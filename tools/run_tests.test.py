@@ -286,6 +286,46 @@ class DuplicateRowFixture(RunTestsFixtureBase):
         self.assertIn("duplicate row", result.stderr)
 
 
+class MissingOrMalformedHeaderFixture(RunTestsFixtureBase):
+    """A TSV reader that unconditionally discards the first non-comment line
+    as "the header" cannot tell a real header apart from a headerless file
+    whose first data row it just silently ate."""
+
+    def test_baseline_missing_header_is_a_typed_parse_error_not_a_dropped_row(self):
+        write_suite(self.root, "b.test.py", "import sys\nsys.exit(1)\n")
+        baseline = self.root / "test-baseline.tsv"
+        # No header line at all -- the real first (and only) data row would
+        # otherwise be silently treated as "the header" and vanish.
+        baseline.write_text(
+            "b.test.py\t-\texit-nonzero\tisolated\ta\tMA-NOHDR\t" + TOMORROW + "\t\n",
+            encoding="utf-8",
+        )
+        isolation = write_isolation_tsv(self.root, None)
+        result = run_runner([
+            "--root", str(self.root), "--baseline", str(baseline),
+            "--isolation-tsv", str(isolation), "--isolation=isolated",
+            "--jobs", "1", "--timeout", "5", "--no-leak-sweep",
+        ])
+        self.assertEqual(result.returncode, 65, result.stdout + result.stderr)
+        self.assertIn("expected header", result.stderr)
+
+    def test_isolation_tsv_wrong_header_shape_is_a_typed_parse_error(self):
+        write_suite(self.root, "b.test.py", "import sys\nsys.exit(1)\n")
+        baseline = write_baseline(self.root, [])
+        isolation = self.root / "test-isolation.tsv"
+        # Right column count, wrong column names/order.
+        isolation.write_text(
+            "needs\tsuite_path\treason\tdefect_id\treview_by\n", encoding="utf-8"
+        )
+        result = run_runner([
+            "--root", str(self.root), "--baseline", str(baseline),
+            "--isolation-tsv", str(isolation), "--isolation=isolated",
+            "--jobs", "1", "--timeout", "5", "--no-leak-sweep",
+        ])
+        self.assertEqual(result.returncode, 65, result.stdout + result.stderr)
+        self.assertIn("expected header", result.stderr)
+
+
 class AmbiguousRowFixture(RunTestsFixtureBase):
     def test_ambiguous_row_fails_at_parse_stage(self):
         write_suite(self.root, "amb.test.py", "import sys\nsys.exit(1)\n")
@@ -451,11 +491,14 @@ class RetryFixture(RunTestsFixtureBase):
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertEqual([r["verdict"] for r in rows], ["FLAKY-KNOWN-FAIL"])
 
-    def test_all_pass_is_xpass_hard_failure(self):
+    def test_all_pass_is_flaky_pass_not_a_hard_failure(self):
+        # A flaky-timing suite's all-pass aggregate proves nothing about a
+        # suite explicitly declared flaky -- it gets a distinct non-fatal
+        # verdict instead of the non-flaky XPASS hard failure.
         self.write_retry_suite("all-pass")
         result, rows = self.run_fixture(self.baseline(), extra_args=["--retries", "1"])
-        self.assertNotEqual(result.returncode, 0)
-        self.assertEqual(rows[0]["verdict"], "XPASS")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(rows[0]["verdict"], "FLAKY-PASS")
 
     def test_all_fail_is_known_fail(self):
         self.write_retry_suite("all-fail")
@@ -566,21 +609,43 @@ class RetryBudgetFixture(RunTestsFixtureBase):
             sys.exit(1)
         """)
 
+    def write_never_ending_suite(self):
+        write_suite(self.root, "slow_flaky.test.py", """
+            from pathlib import Path
+            import time
+            p = Path('attempts.txt')
+            n = int(p.read_text()) + 1 if p.exists() else 1
+            p.write_text(str(n))
+            time.sleep(60)
+        """)
+
     def baseline(self):
         return [
             "slow_flaky.test.py\t-\texit-nonzero\tisolated\t"
             f"flaky-timing: intermittent\tMA-RETRY-BUDGET\t{TOMORROW}"
         ]
 
+    def baseline_timeout(self):
+        return [
+            "slow_flaky.test.py\t-\ttimeout\tisolated\t"
+            f"flaky-timing: intermittent\tMA-RETRY-BUDGET\t{TOMORROW}"
+        ]
+
     def test_exhausted_budget_is_recorded_and_skips_remaining_retries(self):
-        self.write_slow_flaky_suite(0.5)
+        # A suite that always times out keeps every attempt's kind identical
+        # (timeout), so the budget running out (remaining <= 0) is the only
+        # variable -- a mixed-kind fixture would make an ordinary attempt
+        # timeout race with the exhaustion check.
+        self.write_never_ending_suite()
         result, rows = self.run_fixture(
-            self.baseline(),
-            extra_args=["--retries", "3", "--retry-budget", "1", "--timeout", "1"],
+            self.baseline_timeout(),
+            extra_args=["--retries", "3", "--retry-budget", "2", "--timeout", "1"],
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("retry-budget-exhausted", rows[0]["detail"])
-        # budget stops the pass early: fewer attempts than requested ran
+        self.assertEqual(rows[0]["verdict"], "KNOWN-FAIL")
+        # budget (2s / 1s-clamped attempts) stops the pass after 2 retries,
+        # not all 3 requested; plus the one initial (non-retry) attempt.
         attempts = int((self.root / "attempts.txt").read_text())
         self.assertLess(attempts, 4)
 
@@ -592,6 +657,31 @@ class RetryBudgetFixture(RunTestsFixtureBase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertNotIn("retry-budget-exhausted", rows[0]["detail"])
         self.assertIn("attempts=2", rows[0]["detail"])
+
+    def test_all_pass_under_sub_second_clamps_is_flaky_pass_with_no_exhausted_label(self):
+        # Owner-observed regression input: utilities/dispatch_progress.test.py
+        # ran attempts=3, outcomes=pass,pass,pass under a tight retry budget,
+        # and the pre-fix runner wrongly tagged that all-pass aggregate with
+        # retry-budget-exhausted (a positive, non-exhausting clamp mislabeled
+        # as exhaustion) and would have reported it as XPASS. Neither defect
+        # may resurface: this is FLAKY-PASS with no exhausted label, even
+        # though every attempt after the first ran under a sub-second clamp.
+        write_suite(self.root, "slow_flaky.test.py", """
+            from pathlib import Path
+            import sys, time
+            p = Path('attempts.txt')
+            n = int(p.read_text()) + 1 if p.exists() else 1
+            p.write_text(str(n))
+            time.sleep(0.05)
+        """)
+        result, rows = self.run_fixture(
+            self.baseline(),
+            extra_args=["--retries", "3", "--retry-budget", "1", "--timeout", "5"],
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(rows[0]["verdict"], "FLAKY-PASS")
+        self.assertIn("attempts=4", rows[0]["detail"])
+        self.assertNotIn("retry-budget-exhausted", rows[0]["detail"])
 
     def test_flaky_aggregate_preserves_failing_test_ids(self):
         write_suite(self.root, "named_flaky.test.py", """
@@ -653,6 +743,26 @@ class SeedBaselineGuardFixture(RunTestsFixtureBase):
         self.assertEqual(result.returncode, 64, result.stdout + result.stderr)
         self.assertEqual(baseline.read_bytes(), before)
 
+    def test_seeding_onto_a_hardlink_alias_of_the_baseline_is_refused(self):
+        # A differently-named hardlink to the same inode is the same file:
+        # plain resolve()-equality misses this, samefile() does not.
+        write_suite(self.root, "fails.test.py", "import sys\nsys.exit(1)\n")
+        baseline = write_baseline(self.root, [
+            f"other.test.py\t-\tassertion\tisolated\tfixture\tMA-KEEP\t{TOMORROW}\t",
+        ])
+        isolation = write_isolation_tsv(self.root, None)
+        alias = self.root / "baseline-alias.tsv"
+        os.link(baseline, alias)
+        before = baseline.read_bytes()
+        result = run_runner([
+            "--root", str(self.root), "--baseline", str(baseline),
+            "--isolation-tsv", str(isolation), "--isolation=isolated",
+            "--jobs", "1", "--timeout", "5", "--no-leak-sweep",
+            "--seed-baseline", str(alias),
+        ])
+        self.assertEqual(result.returncode, 64, result.stdout + result.stderr)
+        self.assertEqual(baseline.read_bytes(), before)
+
 
 class RetryBudgetBoundFixture(RunTestsFixtureBase):
     """impl-review round 1 finding 3: checking the budget only before an attempt
@@ -675,7 +785,10 @@ class RetryBudgetBoundFixture(RunTestsFixtureBase):
         # The main pass costs the full 20s timeout; the retry must be clamped to
         # the ~3s of budget left rather than running another 20s.
         self.assertLess(elapsed, 35, f"{elapsed:.1f}s\n{result.stdout}")
-        self.assertIn("retry-budget-exhausted", report_rows[0]["detail"])
+        # Only one retry was requested and it ran (clamped to the ~3s left):
+        # the budget was never driven to <= 0, so this is an ordinary
+        # positive clamp, not exhaustion, and must not carry the label.
+        self.assertNotIn("retry-budget-exhausted", report_rows[0]["detail"])
 
 
 class TimeoutDescendantReclaimFixture(RunTestsFixtureBase):
@@ -989,13 +1102,21 @@ class LiveStateLeakFixture(RunTestsFixtureBase):
         # that writes under $HOME/.local/state/hearting must be caught.
         fake_home = Path(tempfile.mkdtemp(prefix="w1-fake-home-"))
         (fake_home / ".local" / "state" / "hearting").mkdir(parents=True)
+        # Hold the fd open across the sampler's poll interval so the bounded
+        # /proc-based sampler (which observes open fds, not instantaneous
+        # syscalls) has a real chance to attribute the write to this suite's
+        # own process-group lineage.
         write_suite(
             self.root,
             "leaky.test.py",
             f"""
             from pathlib import Path
+            import time
             p = Path({str(fake_home / '.local' / 'state' / 'hearting')!r}) / "leak-marker.json"
-            p.write_text("{{}}")
+            with open(p, "w") as f:
+                f.write("{{}}")
+                f.flush()
+                time.sleep(0.8)
             """,
         )
         baseline = write_baseline(self.root, [])
@@ -1020,6 +1141,99 @@ class LiveStateLeakFixture(RunTestsFixtureBase):
         )
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("LIVE-STATE-LEAK", result.stderr)
+
+    def test_foreign_concurrent_write_is_reported_but_not_fatal(self):
+        # A write under live-state that no suite's own process-group lineage
+        # produced (simulated here by writing it from the test process itself,
+        # standing in for a concurrent session) must surface as an advisory,
+        # never as the fatal __live_state_leak__ verdict.
+        fake_home = Path(tempfile.mkdtemp(prefix="w1-fake-home-foreign-"))
+        live_dir = fake_home / ".local" / "state" / "hearting"
+        live_dir.mkdir(parents=True)
+        # Sleeps briefly so the runner's own before/after live-state snapshot
+        # window is wide enough for the concurrently-started foreign writer
+        # below to land inside it.
+        write_suite(self.root, "harmless.test.py", "import time\ntime.sleep(0.6)\n")
+        baseline = write_baseline(self.root, [])
+        isolation = write_isolation_tsv(self.root)
+        report_path = self.root / "leak-report.tsv"
+        env = dict(os.environ)
+        env["HOME"] = str(fake_home)
+
+        def write_foreign_entry_mid_run():
+            time.sleep(0.3)
+            (live_dir / "foreign-marker.json").write_text("{}")
+
+        import threading as _threading
+        writer = _threading.Thread(target=write_foreign_entry_mid_run, daemon=True)
+        writer.start()
+        try:
+            result = subprocess.run(
+                [
+                    sys.executable, str(RUNNER),
+                    "--root", str(self.root),
+                    "--baseline", str(baseline),
+                    "--isolation-tsv", str(isolation),
+                    "--isolation=isolated",
+                    "--report", str(report_path),
+                ],
+                cwd=str(ROOT),
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+        finally:
+            writer.join(timeout=5)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("LIVE-STATE-OBSERVED-FOREIGN", result.stderr)
+        self.assertNotIn("LIVE-STATE-LEAK:", result.stderr)
+
+
+class LiveStateSamplerUnitFixture(unittest.TestCase):
+    """Unit-level coverage of the bounded PGID sampler itself: stop/join
+    behavior and lock-protected snapshotting, independent of a real suite
+    subprocess or the live-state root."""
+
+    def setUp(self):
+        self.mod = load_runner_module()
+
+    def test_sampler_stops_promptly_on_event_and_snapshot_is_consistent(self):
+        import threading
+
+        tmp = Path(tempfile.mkdtemp(prefix="w1-sampler-"))
+        try:
+            fake_live_root = tmp / "live"
+            fake_live_root.mkdir()
+            self.mod.LIVE_STATE_ROOT = fake_live_root
+            stop_event = threading.Event()
+            collected: set[str] = set()
+            lock = threading.Lock()
+            marker = fake_live_root / "marker.txt"
+            with open(marker, "w") as f:
+                f.write("x")
+                # Sample this test process's own process group -- its held-open
+                # fd under the (overridden) live-state root stands in for a
+                # suite child the sampler would otherwise track by real PGID.
+                thread = threading.Thread(
+                    target=self.mod._sample_pgid_live_state_writes,
+                    args=(os.getpgid(0), stop_event, collected, lock),
+                    daemon=True,
+                )
+                thread.start()
+                time.sleep(0.5)
+                stop_event.set()
+                started_join = time.time()
+                thread.join(timeout=2.0)
+                join_elapsed = time.time() - started_join
+            self.assertFalse(thread.is_alive())
+            self.assertLess(join_elapsed, 2.0)
+            with lock:
+                snapshot = set(collected)
+            self.assertIn(str(marker), snapshot)
+        finally:
+            import shutil
+            shutil.rmtree(tmp, ignore_errors=True)
 
 
 class SeedingGateFixture(unittest.TestCase):
