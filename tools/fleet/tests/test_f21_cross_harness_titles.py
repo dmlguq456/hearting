@@ -224,12 +224,20 @@ class CrossHarnessWorkerTest(_EnvMixin, unittest.TestCase):
                 "type": "agent_message", "text": "delta"}}) + "\n")
         captured = {}
         original = rt.subprocess.Popen
+        original_available = rt._executable_available
+        # maybe_spawn() returns early when the worker binary is absent from PATH,
+        # which is true on a CI runner. Executable availability is not what this
+        # test asserts -- it asserts the prompt path is forwarded and the anchor
+        # contents never reach argv or env -- and Popen is already intercepted,
+        # so nothing is executed either way.
+        rt._executable_available = lambda argv: True
         rt.subprocess.Popen = lambda argv, **kwargs: captured.update(argv=list(argv), kwargs=kwargs) or object()
         try:
             self.assertTrue(rt.maybe_spawn("codex", "prompt-path-sid", transcript,
                                            prompt_path=prompt_path))
         finally:
             rt.subprocess.Popen = original
+            rt._executable_available = original_available
         self.assertIn(prompt_path, captured["argv"])
         self.assertNotIn("DISTINCT ASSIGNMENT ANCHOR", captured["argv"])
         self.assertNotIn("DISTINCT ASSIGNMENT ANCHOR", " ".join(captured["kwargs"]["env"].values()))

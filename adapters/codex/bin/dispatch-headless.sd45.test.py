@@ -159,6 +159,19 @@ class CodexSandboxMountShape(unittest.TestCase):
             subprocess.run(["git", "init", "-q", str(worktree)], check=True)
             (worktree / ".codex").write_text("")
             jobs = base / "jobs.log"
+            # `codex_command=ok` describes the Codex CLI being callable, which is
+            # not what this test is about -- the assertion under test is that a
+            # bad mount target is a worktree-local failure. A CI runner has no
+            # Codex on PATH, so use the same stub-on-PATH pattern
+            # _preflight_check() already relies on and keep the verdict a
+            # property of the worktree.
+            bin_dir = base / "stub-bin"
+            bin_dir.mkdir()
+            stub = bin_dir / "codex"
+            stub.write_text("#!/bin/sh\nexit 0\n")
+            stub.chmod(0o755)
+            env = {**os.environ, "AGENT_HOME": str(ROOT)}
+            env["PATH"] = "%s:%s" % (bin_dir, env.get("PATH", ""))
             result = subprocess.run(
                 [
                     sys.executable, str(ROOT / "adapters/codex/bin/dispatch-headless.py"),
@@ -169,7 +182,7 @@ class CodexSandboxMountShape(unittest.TestCase):
                 ],
                 text=True,
                 capture_output=True,
-                env={**os.environ, "AGENT_HOME": str(ROOT)},
+                env=env,
             )
             self.assertEqual(result.returncode, 65, result.stdout + result.stderr)
             output = result.stdout + result.stderr
