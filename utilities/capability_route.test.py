@@ -2252,17 +2252,23 @@ class TestValidationBasis(unittest.TestCase):
   self.assertEqual(R.revalidate_launch_compatibility(route),(True,{}))
  def test_plain_verify_is_unchanged_and_launch_phase_rejects_tamper(self):
   import subprocess,sys
-  route=R.compile_route(**self.args())
-  tampered=json.loads(json.dumps(route))
-  tampered["launch_compatibility_tuple"]["runtime_root"]["release_id"]="release:tampered"
-  tampered=self._reseal(tampered)
   with tempfile.TemporaryDirectory() as tmp:
+   # Fixed grounding roots: compiling against the live checkout let a
+   # concurrent suite's working-tree mutation drift grounding_roots.cwd
+   # between compile and verify, so the launch-phase mismatch surfaced as
+   # grounding_roots.cwd instead of the tampered runtime_root.
+   fixed_cwd=Path(tmp)/"cwd"; fixed_root=Path(tmp)/"artifacts"
+   fixed_cwd.mkdir(); fixed_root.mkdir()
+   route=R.compile_route(**self.args(cwd=fixed_cwd,artifact_root=fixed_root))
+   tampered=json.loads(json.dumps(route))
+   tampered["launch_compatibility_tuple"]["runtime_root"]["release_id"]="release:tampered"
+   tampered=self._reseal(tampered)
    route_path=Path(tmp)/"route.json"
    route_path.write_text(json.dumps(tampered),encoding="utf-8")
    env=os.environ.copy(); env["AGENT_HOME"]=self._tmp_home.name
    env.pop("AGENT_DISPATCH_JOBS",None)
    plain=subprocess.run(
-    [sys.executable,str(P),"verify","--route",str(route_path),"--cwd",str(R.ROOT)],
+    [sys.executable,str(P),"verify","--route",str(route_path),"--cwd",str(fixed_cwd)],
     capture_output=True,text=True,cwd=str(R.ROOT),env=env,
    )
    self.assertEqual(plain.returncode,0,plain.stderr)
@@ -2272,7 +2278,7 @@ class TestValidationBasis(unittest.TestCase):
    )
    self.assertEqual(plain.stderr,"")
    launch=subprocess.run(
-    [sys.executable,str(P),"verify","--route",str(route_path),"--cwd",str(R.ROOT),
+    [sys.executable,str(P),"verify","--route",str(route_path),"--cwd",str(fixed_cwd),
      "--launch-phase","start"],
     capture_output=True,text=True,cwd=str(R.ROOT),env=env,
    )
