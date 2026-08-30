@@ -110,6 +110,7 @@ jobs:
         # fingerprint; adopting them is a human decision, never automatic.
         run: |
           python3 tools/run-tests.py --retries 1 \
+            --strict-leak-sweep \
             --report ${{ runner.temp }}/run-tests-report.tsv \
             --seed-baseline ${{ runner.temp }}/run-tests-seed-baseline.tsv
 

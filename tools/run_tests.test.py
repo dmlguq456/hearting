@@ -1197,38 +1197,29 @@ class LiveStateLeakFixture(RunTestsFixtureBase):
         self.assertNotIn("LIVE-STATE-LEAK:", result.stderr)
         self.assertNotIn("LIVE-STATE-UNATTRIBUTED", result.stderr)
 
-    def test_fast_own_open_write_close_is_never_a_silent_pass(self):
-        # A suite child that opens, writes, and closes a live-state file
-        # entirely within one sampler poll interval leaves no fd for the
-        # PGID-scoped sampler to observe. That must not be silently
-        # downgraded to the non-fatal foreign advisory -- with no positive
-        # own evidence and no positive foreign evidence either, the run must
-        # fail loudly (impl-review round 1, finding 2).
-        fake_home = Path(tempfile.mkdtemp(prefix="w1-fake-home-fastown-"))
-        (fake_home / ".local" / "state" / "hearting").mkdir(parents=True)
-        write_suite(
-            self.root,
-            "fastwriter.test.py",
-            f"""
-            from pathlib import Path
-            p = Path({str(fake_home / '.local' / 'state' / 'hearting')!r}) / "fast-marker.json"
-            with open(p, "w") as f:
-                f.write("{{}}")
-            """,
-        )
+    # ------------------------------------------------------------------
+    # Fast open/write/close: neither sampler can observe an fd that is gone
+    # before the next 0.2s poll, so such a write is UNATTRIBUTED whoever made
+    # it. The contract is that absence of evidence is advisory by default and
+    # fatal only in the single-tenant --strict-leak-sweep mode; these
+    # regressions must hold no matter when the write lands relative to the
+    # samplers, so they never assert on timing.
+    # ------------------------------------------------------------------
+
+    def _leak_sweep_run(self, fake_home: Path, *extra_args: str):
         baseline = write_baseline(self.root, [])
         isolation = write_isolation_tsv(self.root)
-        report_path = self.root / "leak-report.tsv"
         env = dict(os.environ)
         env["HOME"] = str(fake_home)
-        result = subprocess.run(
+        return subprocess.run(
             [
                 sys.executable, str(RUNNER),
                 "--root", str(self.root),
                 "--baseline", str(baseline),
                 "--isolation-tsv", str(isolation),
                 "--isolation=isolated",
-                "--report", str(report_path),
+                "--report", str(self.root / "leak-report.tsv"),
+                *extra_args,
             ],
             cwd=str(ROOT),
             env=env,
@@ -1236,9 +1227,101 @@ class LiveStateLeakFixture(RunTestsFixtureBase):
             text=True,
             timeout=60,
         )
-        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn("LIVE-STATE-UNATTRIBUTED", result.stderr)
-        self.assertNotIn("LIVE-STATE-OBSERVED-FOREIGN", result.stderr)
+
+    def _fast_own_writer_home(self, marker: str) -> Path:
+        fake_home = Path(tempfile.mkdtemp(prefix="w1-fake-home-fastown-"))
+        live_dir = fake_home / ".local" / "state" / "hearting"
+        live_dir.mkdir(parents=True)
+        write_suite(
+            self.root,
+            "fastwriter.test.py",
+            f"""
+            from pathlib import Path
+            p = Path({str(live_dir)!r}) / {marker!r}
+            with open(p, "w") as f:
+                f.write("{{}}")
+            """,
+        )
+        return fake_home
+
+    def _fast_foreign_writer_home(self, marker: str):
+        """A concurrent session's fast write: opened, written and closed from
+        outside any suite PGID. Gated on a ready file the suite itself
+        creates, so the write always lands inside the runner's before/after
+        live-state window without depending on runner start-up timing."""
+        fake_home = Path(tempfile.mkdtemp(prefix="w1-fake-home-fastforeign-"))
+        live_dir = fake_home / ".local" / "state" / "hearting"
+        live_dir.mkdir(parents=True)
+        ready = self.root / "suite-ready"
+        write_suite(
+            self.root,
+            "harmless.test.py",
+            f"""
+            from pathlib import Path
+            import time
+            Path({str(ready)!r}).write_text("1")
+            time.sleep(1.0)
+            """,
+        )
+
+        import threading as _threading
+
+        def _write_foreign():
+            deadline = time.time() + 30
+            while not ready.exists() and time.time() < deadline:
+                time.sleep(0.01)
+            with open(live_dir / marker, "w") as f:
+                f.write("{}")
+
+        writer = _threading.Thread(target=_write_foreign, daemon=True)
+        return fake_home, writer, ready
+
+    def test_fast_foreign_write_is_advisory_not_fatal(self):
+        # The defect this contract replaces: a concurrent session's fast
+        # write killed an otherwise-green local run.
+        fake_home, writer, _ready = self._fast_foreign_writer_home("fast-foreign.json")
+        writer.start()
+        try:
+            result = self._leak_sweep_run(fake_home)
+        finally:
+            writer.join(timeout=30)
+        output = result.stdout + result.stderr
+        self.assertEqual(result.returncode, 0, output)
+        self.assertIn("LIVE-STATE-UNATTRIBUTED: ", result.stderr)
+        self.assertIn("live-state-unattributed=1", result.stderr)
+        self.assertNotIn("LIVE-STATE-LEAK:", result.stderr)
+
+    def test_fast_foreign_write_is_fatal_under_strict_leak_sweep(self):
+        # Single-tenant mode (CI): with no concurrent writer possible, an
+        # unattributable write is this run's own and must fail it.
+        fake_home, writer, _ready = self._fast_foreign_writer_home("fast-foreign-strict.json")
+        writer.start()
+        try:
+            result = self._leak_sweep_run(fake_home, "--strict-leak-sweep")
+        finally:
+            writer.join(timeout=30)
+        output = result.stdout + result.stderr
+        self.assertNotEqual(result.returncode, 0, output)
+        self.assertIn("LIVE-STATE-UNATTRIBUTED: ", result.stderr)
+        self.assertIn("__live_state_unattributed__", output)
+
+    def test_fast_own_write_is_never_a_silent_pass(self):
+        # An own fast write is indistinguishable from a foreign one at the
+        # evidence level, so it is non-fatal by default -- but it must always
+        # be visible, never silently swallowed.
+        fake_home = self._fast_own_writer_home("fast-marker.json")
+        result = self._leak_sweep_run(fake_home)
+        output = result.stdout + result.stderr
+        self.assertEqual(result.returncode, 0, output)
+        self.assertIn("LIVE-STATE-UNATTRIBUTED: ", result.stderr)
+        self.assertIn("live-state-unattributed=1", result.stderr)
+
+    def test_fast_own_write_is_fatal_under_strict_leak_sweep(self):
+        fake_home = self._fast_own_writer_home("fast-marker-strict.json")
+        result = self._leak_sweep_run(fake_home, "--strict-leak-sweep")
+        output = result.stdout + result.stderr
+        self.assertNotEqual(result.returncode, 0, output)
+        self.assertIn("__live_state_unattributed__", output)
 
 
 class LiveStateSamplerUnitFixture(unittest.TestCase):

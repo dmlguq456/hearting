@@ -11,6 +11,19 @@ definition cannot drift. There is no code path that hands a suite subprocess
 the caller's real (ambient) environment — the runtime the caller invoked this
 script from is never propagated. See owner addendum A: an "ambient" execution
 profile does not exist here on purpose.
+
+The post-run live-state leak sweep classifies each newly appeared path under
+the live-state root by *positive* evidence only, never by absence of it:
+
+* ``LIVE-STATE-LEAK``  -- one of this run's own suite PGIDs was observed
+  holding the path open, or the path is under a fixture root this run
+  registered. Fatal in every mode.
+* ``LIVE-STATE-OBSERVED-FOREIGN`` -- a PGID this run never spawned was
+  observed holding it open (a concurrent session). Advisory, never fatal.
+* ``LIVE-STATE-UNATTRIBUTED`` -- neither. The samplers poll open fds, so any
+  fast open/write/close falls here whoever wrote it. Reported loudly (one
+  line per path plus ``live-state-unattributed=N``) but fatal only under
+  ``--strict-leak-sweep``, which declares a single-tenant environment (CI).
 """
 from __future__ import annotations
 
@@ -441,10 +454,13 @@ _OWNED_LIVE_PATHS_BY_SUITE: dict[str, set[str]] = {}
 _OWNED_LIVE_PATHS_LOCK = threading.Lock()
 
 # Every PGID this run has ever spawned for a suite attempt (main pass and
-# retries). The whole-run sampler below uses this to tell a genuinely
-# external process apart from one of this run's own suite children that the
-# per-suite sampler simply missed.
+# retries), mapped to the suite relpath it was spawned for. The whole-run
+# sampler below uses this to tell a genuinely external process apart from one
+# of this run's own suite children that the per-suite sampler simply missed,
+# and to keep a declared live-registry suite's own write exempt even when the
+# only evidence came from the whole-run sampler rather than the per-suite one.
 _ALL_RUN_PGIDS: set[int] = set()
+_RUN_PGID_SUITE: dict[int, str] = {}
 _ALL_RUN_PGIDS_LOCK = threading.Lock()
 
 # Whole-run positive-evidence map: live-state path -> set of PGIDs a
@@ -595,6 +611,7 @@ def run_suite(suite: Path, root: Path, env: dict[str, str], profile: str, timeou
     if pgid is not None:
         with _ALL_RUN_PGIDS_LOCK:
             _ALL_RUN_PGIDS.add(pgid)
+            _RUN_PGID_SUITE[pgid] = relpath
     if pgid is not None and os.path.isdir("/proc"):
         sampler_thread = threading.Thread(
             target=_sample_pgid_live_state_writes,
@@ -1093,6 +1110,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--baseline", type=Path, default=ROOT / "tools" / "test-baseline.tsv")
     p.add_argument("--isolation-tsv", type=Path, default=ROOT / "tools" / "test-isolation.tsv")
     p.add_argument("--no-leak-sweep", action="store_true", help="diagnostic only; never used in CI")
+    p.add_argument(
+        "--strict-leak-sweep", action="store_true",
+        help="single-tenant mode (CI): a new live-state path this run could not "
+             "attribute to any observed PGID (LIVE-STATE-UNATTRIBUTED) fails the "
+             "run. Without it such a path is reported as an advisory and only a "
+             "positively own-attributed write (LIVE-STATE-LEAK) is fatal, so a "
+             "concurrent session's fast write cannot fail a local run.",
+    )
     p.add_argument("--compare-baseline", action="store_true")
     p.add_argument("--fingerprint", action="store_true",
                    help="print the current environment fingerprint and exit")
@@ -1511,6 +1536,7 @@ def main(argv: list[str]) -> int:
             fixture_roots_snapshot = list(_FIXTURE_ROOTS)
         with _ALL_RUN_PGIDS_LOCK:
             all_run_pgids_snapshot = set(_ALL_RUN_PGIDS)
+            run_pgid_suite_snapshot = dict(_RUN_PGID_SUITE)
         with global_fd_lock:
             global_fd_snapshot = {k: set(v) for k, v in global_fd_observations.items()}
 
@@ -1530,6 +1556,12 @@ def main(argv: list[str]) -> int:
             # sampler simply missed) does not count as foreign evidence.
             return bool(global_fd_snapshot.get(path, set()) - all_run_pgids_snapshot)
 
+        def _own_pgid_evidence(path: str) -> set[int]:
+            # Positive evidence one of this run's own suite PGIDs held the
+            # path open, seen by the whole-run sampler even when the
+            # per-suite sampler missed it.
+            return global_fd_snapshot.get(path, set()) & all_run_pgids_snapshot
+
         owned_new: set[str] = set()
         foreign_new: set[str] = set()
         unattributed_new: set[str] = set()
@@ -1543,15 +1575,27 @@ def main(argv: list[str]) -> int:
                 owned_new.add(entry)
             elif _under_fixture_root(entry):
                 owned_new.add(entry)
+            elif _own_pgid_evidence(entry):
+                own_pgids = _own_pgid_evidence(entry)
+                if all(
+                    run_pgid_suite_snapshot.get(pgid) in live_registry_suites
+                    for pgid in own_pgids
+                ):
+                    # Same deliberate case as the per-suite branch above,
+                    # reached when only the whole-run sampler saw the fd.
+                    continue
+                owned_new.add(entry)
             elif _has_positive_foreign_evidence(entry):
                 foreign_new.add(entry)
             else:
-                # No positive own-PGID/fixture-root attribution and no
-                # positive foreign-PGID evidence either: a fast
-                # open/write/close inside a suite's own PGID between sampler
-                # polls must never look like a silent pass, so this is
-                # failed conservatively instead of downgraded to the
-                # non-fatal foreign advisory.
+                # Neither positive own evidence nor positive foreign
+                # evidence. Absence is never the basis for a fatal verdict:
+                # the samplers poll open fds every 0.2s, so any fast
+                # open/write/close -- this run's or a concurrent session's --
+                # lands here regardless of who wrote it. Reported loudly as
+                # an advisory, fatal only under --strict-leak-sweep, whose
+                # single-tenant environment makes "nobody else could have
+                # written it" a sound inference.
                 unattributed_new.add(entry)
 
         if foreign_new:
@@ -1570,10 +1614,12 @@ def main(argv: list[str]) -> int:
         if unattributed_new:
             for entry in sorted(unattributed_new):
                 print(f"LIVE-STATE-UNATTRIBUTED: {entry}", file=sys.stderr)
-            hard_failures.append((
-                "__live_state_unattributed__::-", "ERROR", "internal",
-                f"{len(unattributed_new)} new live-state path(s) with no positive own or foreign evidence",
-            ))
+            print(f"live-state-unattributed={len(unattributed_new)}", file=sys.stderr)
+            if args.strict_leak_sweep:
+                hard_failures.append((
+                    "__live_state_unattributed__::-", "ERROR", "internal",
+                    f"{len(unattributed_new)} new live-state path(s) with no positive own or foreign evidence",
+                ))
 
     if args.report:
         write_report(args.report, report_rows)
