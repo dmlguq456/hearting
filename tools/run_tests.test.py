@@ -12,6 +12,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import time
 import textwrap
 import unittest
 from unittest import mock
@@ -480,6 +481,101 @@ class CiLikeProfileFixture(unittest.TestCase):
             rows.append(dict(zip(header, cols)))
         profiles = {r["isolation_profile"] for r in rows if r["suite_path"] == "needs_installed.test.py"}
         self.assertEqual(profiles, {"ci-like"})
+
+
+class RetryBudgetFixture(RunTestsFixtureBase):
+    """P3: the serial retry pass is bounded in total, and the per-suite
+    timeout still applies to every individual attempt."""
+
+    def write_slow_flaky_suite(self, sleep_s: float):
+        write_suite(self.root, "slow_flaky.test.py", f"""
+            from pathlib import Path
+            import sys, time
+            p = Path('attempts.txt')
+            n = int(p.read_text()) + 1 if p.exists() else 1
+            p.write_text(str(n))
+            time.sleep({sleep_s})
+            sys.exit(1)
+        """)
+
+    def baseline(self):
+        return [
+            "slow_flaky.test.py\t-\texit-nonzero\tisolated\t"
+            f"flaky-timing: intermittent\tMA-RETRY-BUDGET\t{TOMORROW}"
+        ]
+
+    def test_exhausted_budget_is_recorded_and_skips_remaining_retries(self):
+        self.write_slow_flaky_suite(1.0)
+        result, rows = self.run_fixture(
+            self.baseline(), extra_args=["--retries", "3", "--retry-budget", "1"]
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("retry-budget-exhausted", rows[0]["detail"])
+        # budget stops the pass early: fewer attempts than requested ran
+        attempts = int((self.root / "attempts.txt").read_text())
+        self.assertLess(attempts, 4)
+
+    def test_budget_within_reach_is_not_recorded(self):
+        self.write_slow_flaky_suite(0.0)
+        result, rows = self.run_fixture(
+            self.baseline(), extra_args=["--retries", "1", "--retry-budget", "60"]
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("retry-budget-exhausted", rows[0]["detail"])
+        self.assertIn("attempts=2", rows[0]["detail"])
+
+    def test_flaky_aggregate_preserves_failing_test_ids(self):
+        write_suite(self.root, "named_flaky.test.py", """
+            import unittest
+            class T(unittest.TestCase):
+                def test_specific_thing(self):
+                    self.fail('boom')
+            unittest.main()
+        """)
+        result, rows = self.run_fixture(
+            [
+                "named_flaky.test.py\t-\tassertion\tisolated\t"
+                f"flaky-timing: intermittent\tMA-RETRY-IDS\t{TOMORROW}"
+            ],
+            extra_args=["--retries", "1"],
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        # the whole-file aggregate row still names which test failed
+        self.assertIn("failing=T.test_specific_thing", rows[0]["detail"])
+
+
+class TimeoutDescendantReclaimFixture(RunTestsFixtureBase):
+    """P3: a timed-out suite is killed together with the descendants it left
+    behind, so a supervisor or fake-server daemon cannot outlive the runner."""
+
+    def test_grandchild_is_reaped_when_the_suite_times_out(self):
+        pidfile = self.root / "grandchild.pid"
+        write_suite(self.root, "leaky.test.py", f"""
+            import subprocess, sys, time
+            # a grandchild that would outlive its parent
+            child = subprocess.Popen(
+                [sys.executable, "-c", "import time; time.sleep(120)"]
+            )
+            open({str(pidfile)!r}, "w").write(str(child.pid))
+            time.sleep(120)
+        """)
+        result, rows = self.run_fixture(
+            [], extra_args=["--timeout", "2"]
+        )
+        self.assertEqual(rows[0]["verdict"], "FAIL")
+        self.assertEqual(rows[0]["kind"], "timeout")
+        grandchild_pid = int(pidfile.read_text())
+        deadline = time.time() + 10
+        while time.time() < deadline:
+            try:
+                os.kill(grandchild_pid, 0)
+            except ProcessLookupError:
+                break
+            time.sleep(0.2)
+        else:
+            os.kill(grandchild_pid, 9)
+            self.fail(f"grandchild {grandchild_pid} survived the suite timeout")
+        _ = result
 
 
 class TempParentProbeFixture(unittest.TestCase):

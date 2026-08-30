@@ -21,6 +21,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -364,23 +365,63 @@ def run_suite(suite: Path, root: Path, env: dict[str, str], profile: str, timeou
         cmd = [sys.executable, str(suite)]
     started = datetime.datetime.now()
     timed_out = False
+    # start_new_session=True makes the child the leader of its own process
+    # group. That ordering matters: killpg() is only ever called after this
+    # guarantee, because killing the runner's own group would kill the runner.
+    # communicate(timeout=...) is kept as-is (hand-rolling capture invites a
+    # pipe deadlock on large output); only the timeout path adds the group kill.
+    proc = subprocess.Popen(
+        cmd,
+        cwd=str(root),
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    )
     try:
-        proc = subprocess.run(
-            cmd,
-            cwd=str(root),
-            env=env,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-        )
-        rc, out, err = proc.returncode, proc.stdout, proc.stderr
-    except subprocess.TimeoutExpired as exc:
+        out, err = proc.communicate(timeout=timeout)
+        rc = proc.returncode
+    except subprocess.TimeoutExpired:
         timed_out = True
         rc = 124
-        out = (exc.stdout or "") if isinstance(exc.stdout, str) else ""
-        err = (exc.stderr or "") if isinstance(exc.stderr, str) else ""
+        out, err = reap_process_group(proc)
     duration = (datetime.datetime.now() - started).total_seconds()
     return SuiteResult(relpath, rc, timed_out, out, err, duration, profile)
+
+
+def reap_process_group(proc: subprocess.Popen) -> tuple[str, str]:
+    """Terminate a timed-out suite together with every descendant it left
+    behind. A timed-out suite's supervisor or fake-server daemon otherwise
+    survives the runner and pollutes the host (P3).
+
+    Only safe because run_suite() started the child with
+    start_new_session=True, so getpgid(child) is the child's own group and
+    never the runner's.
+    """
+    try:
+        pgid = os.getpgid(proc.pid)
+    except OSError:
+        pgid = None
+    if pgid is not None and pgid != os.getpgid(0):
+        for sig, grace in ((signal.SIGTERM, 2.0), (signal.SIGKILL, 2.0)):
+            try:
+                os.killpg(pgid, sig)
+            except OSError:
+                break
+            try:
+                proc.wait(timeout=grace)
+                break
+            except subprocess.TimeoutExpired:
+                continue
+    else:  # pragma: no cover - defensive; the group guarantee should hold
+        proc.kill()
+    try:
+        out, err = proc.communicate(timeout=10)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        out, err = "", ""
+    return out or "", err or ""
 
 
 def last_nonempty_line(text: str) -> str:
@@ -680,6 +721,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT)
     p.add_argument("--retries", type=int, default=0, help="extra attempts for flaky-timing baseline suites")
     p.add_argument(
+        "--retry-budget", type=int, default=None,
+        help="total seconds the serial retry pass may spend (default: --timeout)",
+    )
+    p.add_argument(
         "--isolation",
         choices=ISOLATION_PROFILES,
         default="isolated",
@@ -848,16 +893,30 @@ def main(argv: list[str]) -> int:
     if args.retries < 0:
         print("--retries must be non-negative", file=sys.stderr)
         return 64
+    retry_budget_exhausted: set[str] = set()
     if args.retries:
+        # The retry pass re-runs flaky suites serially after the main run, and
+        # nothing bounded its total cost: N flaky suites could each consume the
+        # full per-suite timeout. The per-suite timeout still applies to every
+        # attempt; --retry-budget bounds the sum (P3).
+        retry_budget = args.retry_budget if args.retry_budget is not None else args.timeout
+        retry_spent = 0.0
         for suite in selected:
             rel = suite_relpath(root, suite)
             rows = [row for (sp, _), row in baseline.items() if sp == rel]
             if not any(row["reason"].startswith("flaky-timing:") for row in rows):
                 continue
             profile = profile_of[rel]
-            extra = run_profile([suite], root, profile, 1, args.timeout, install_prefix)
-            for attempt in range(args.retries - 1):
-                extra.extend(run_profile([suite], root, profile, 1, args.timeout, install_prefix))
+            extra: list[SuiteResult] = []
+            for _ in range(args.retries):
+                if retry_spent >= retry_budget:
+                    retry_budget_exhausted.add(rel)
+                    break
+                attempt_results = run_profile(
+                    [suite], root, profile, 1, args.timeout, install_prefix
+                )
+                extra.extend(attempt_results)
+                retry_spent += sum(r.duration_s for r in attempt_results)
             results_by_suite[rel].extend(extra)
 
     # Undeclared/unneeded isolation opt-out detection: only for suites that
@@ -953,7 +1012,20 @@ def main(argv: list[str]) -> int:
                         outcomes.append("kind-mismatch")
                     else:
                         outcomes.append("known-fail")
+            # Aggregating per-attempt rows into one whole-file row loses which
+            # test failed; keep the failing ids so a different failure inside a
+            # flaky suite cannot hide behind the aggregate (P3).
+            failing_ids = sorted({
+                test_id
+                for attempt in attempt_results
+                if not attempt.passed
+                for test_id in attempt.failing_test_ids
+            })
             detail = f"attempts={len(outcomes)}; outcomes={','.join(outcomes)}; policy=flaky-timing"
+            if failing_ids:
+                detail += f"; failing={','.join(failing_ids)}"
+            if result.relpath in retry_budget_exhausted:
+                detail += "; retry-budget-exhausted"
             verdict = "KIND-MISMATCH" if mismatch else ("XPASS" if all(x == "pass" for x in outcomes) else "KNOWN-FAIL" if all(x == "known-fail" for x in outcomes) else "FLAKY-KNOWN-FAIL")
             verdicts = [Verdict(result.relpath, "-", verdict, detail=detail)]
         else:
