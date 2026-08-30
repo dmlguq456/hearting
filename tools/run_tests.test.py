@@ -198,6 +198,56 @@ class StaleFixture(RunTestsFixtureBase):
         self.assertEqual(verdicts, {"STALE"})
 
 
+class FingerprintScopedSiblingRows(unittest.TestCase):
+    """One (suite, test) key may carry several rows only when each carries a
+    distinct, non-empty fingerprint; load picks the row for the current
+    fingerprint, then the unscoped row, then the first (foreign) row."""
+
+    # _read_tsv() skips the first non-comment line as the header row.
+    HEADER = ("# baseline fixture\n"
+              "suite_path\ttest_id\texpected_failure_kind\tisolation_profile"
+              "\treason\tdefect_id\treview_by\tfingerprint\n")
+
+    def setUp(self):
+        self.mod = load_runner_module()
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+
+    def _write(self, rows):
+        path = Path(self.tmp.name) / "baseline.tsv"
+        path.write_text(self.HEADER + "".join(r + "\n" for r in rows), encoding="utf-8")
+        return path
+
+    def _row(self, kind, fp):
+        return f"s.test.sh\t-\t{kind}\tisolated\tfixture\tMA-FP\t{TOMORROW}\t{fp}"
+
+    def test_current_fingerprint_row_wins_over_the_other_environment(self):
+        path = self._write([self._row("exit-nonzero", "host-a"), self._row("assertion", "ci-b")])
+        self.assertEqual(self.mod.load_baseline(path, "ci-b")[("s.test.sh", "-")]["expected_failure_kind"], "assertion")
+        self.assertEqual(self.mod.load_baseline(path, "host-a")[("s.test.sh", "-")]["expected_failure_kind"], "exit-nonzero")
+
+    def test_unknown_fingerprint_falls_back_to_the_first_row_as_foreign(self):
+        path = self._write([self._row("exit-nonzero", "host-a"), self._row("assertion", "ci-b")])
+        chosen = self.mod.load_baseline(path, "host-zzz")[("s.test.sh", "-")]
+        self.assertEqual(chosen["fingerprint"], "host-a")
+        self.assertFalse(self.mod.baseline_row_applicable(chosen, "host-zzz"))
+
+    def test_same_fingerprint_twice_is_still_a_duplicate(self):
+        path = self._write([self._row("exit-nonzero", "host-a"), self._row("assertion", "host-a")])
+        with self.assertRaises(self.mod.BaselineError):
+            self.mod.load_baseline(path, "host-a")
+
+    def test_scoped_rows_may_not_mix_with_an_unscoped_row(self):
+        path = self._write([self._row("exit-nonzero", ""), self._row("assertion", "ci-b")])
+        with self.assertRaises(self.mod.BaselineError):
+            self.mod.load_baseline(path, "ci-b")
+
+    def test_single_unscoped_row_keeps_the_legacy_contract(self):
+        path = self._write([self._row("exit-nonzero", "")])
+        chosen = self.mod.load_baseline(path, "anything")[("s.test.sh", "-")]
+        self.assertTrue(self.mod.baseline_row_applicable(chosen, "anything"))
+
+
 class ExpiredFixture(RunTestsFixtureBase):
     def test_expired_review_by_is_hard_failure(self):
         write_suite(self.root, "expired.test.py", "import sys\nsys.exit(1)\n")

@@ -538,9 +538,26 @@ def _read_tsv(path: Path, columns: list[str]) -> list[dict[str, str]]:
     return rows
 
 
-def load_baseline(path: Path) -> dict[tuple[str, str], dict[str, str]]:
+def select_baseline_row(rows: list[dict[str, str]], current_fingerprint: str) -> dict[str, str]:
+    """Pick the one row that applies under ``current_fingerprint`` when a
+    (suite, test) key carries several fingerprint-scoped rows: exact match,
+    then the unscoped (empty fingerprint) row, then the first row -- which the
+    downstream applicability check will treat as foreign."""
+
+    current = (current_fingerprint or "").strip()
+    for row in rows:
+        if (row.get("fingerprint") or "").strip() == current and current:
+            return row
+    for row in rows:
+        if not (row.get("fingerprint") or "").strip():
+            return row
+    return rows[0]
+
+
+def load_baseline(path: Path, current_fingerprint: str = "") -> dict[tuple[str, str], dict[str, str]]:
     rows = _read_tsv(path, BASELINE_COLUMNS)
     by_key: dict[tuple[str, str], dict[str, str]] = {}
+    rows_by_key: dict[tuple[str, str], list[dict[str, str]]] = {}
     by_suite_test_ids: dict[str, set[str]] = {}
     for row in rows:
         suite_path, test_id = row["suite_path"], row["test_id"]
@@ -555,14 +572,27 @@ def load_baseline(path: Path) -> dict[tuple[str, str], dict[str, str]]:
         if row["expected_failure_kind"] not in EXPECTED_FAILURE_KINDS:
             raise BaselineError(f"expected_failure_kind not in closed vocabulary: {row['expected_failure_kind']!r}")
         key = (suite_path, test_id)
-        if key in by_key:
+        # One row per (suite, test) *per environment*: several rows may share
+        # a key only when every one of them carries a distinct, non-empty
+        # fingerprint (the same test can fail with a different kind on the
+        # CI runner than on the maintainer host, 2026-08-30). A repeated
+        # fingerprint -- or a second unscoped row -- is still a duplicate.
+        siblings = rows_by_key.setdefault(key, [])
+        fp = (row.get("fingerprint") or "").strip()
+        if any(((r.get("fingerprint") or "").strip() == fp) for r in siblings):
             raise BaselineError(f"duplicate row: {suite_path} / {test_id}")
-        by_key[key] = row
+        if siblings and (not fp or any(not (r.get("fingerprint") or "").strip() for r in siblings)):
+            raise BaselineError(
+                f"duplicate row: {suite_path} / {test_id} (fingerprint-scoped rows may not mix with an unscoped row)"
+            )
+        siblings.append(row)
         by_suite_test_ids.setdefault(suite_path, set()).add(test_id)
 
     for suite_path, ids in by_suite_test_ids.items():
         if "-" in ids and len(ids) > 1:
             raise BaselineError(f"ambiguous rows: {suite_path} has both '-' and specific test_id rows")
+    for key, siblings in rows_by_key.items():
+        by_key[key] = select_baseline_row(siblings, current_fingerprint)
     return by_key
 
 
@@ -980,7 +1010,7 @@ def main(argv: list[str]) -> int:
         return cmd_census(selected, root)
 
     try:
-        baseline = load_baseline(args.baseline)
+        baseline = load_baseline(args.baseline, run_fingerprint)
         isolation_tsv = load_isolation_tsv(args.isolation_tsv)
     except BaselineError as exc:
         print(f"baseline parse error: {exc}", file=sys.stderr)
