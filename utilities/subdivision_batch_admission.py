@@ -28,6 +28,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "utilities"))
 
 from stage_session_contract import StageSessionError, load_manifest  # noqa: E402
+from dispatch_contract import DispatchContractError, close_attempt_row  # noqa: E402
 
 # Route-leg cardinality tier order, duplicated from `capability-route.py:41` --
 # importing that module is safe (no cycle back into this one) but the tier map
@@ -271,6 +272,22 @@ def dispatch_command(
     ] + [flag for file in session["fixed_files"] for flag in ("--fixed-file", file)]
 
 
+BATCH_REGISTRATION_INCOMPLETE = "subsession-batch-registration-incomplete"
+
+
+def _cancel_registered_row(jobs: Path, attempt_id: str) -> int:
+    """Mark one already-registered, never-started child row terminal so the
+    all-or-nothing receipt below is not contradicted by a live registry row.
+    A row that cannot be closed (already terminal, teardown-claimed, or a
+    registry the caller cannot write) reports 0 rather than raising -- the
+    batch refusal is the caller's answer either way."""
+
+    try:
+        return 1 if close_attempt_row(jobs, attempt_id, BATCH_REGISTRATION_INCOMPLETE) else 0
+    except (DispatchContractError, OSError):
+        return 0
+
+
 def start_admitted_batch(
     admission: AdmissionResult,
     *,
@@ -278,6 +295,7 @@ def start_admitted_batch(
     jobs: Path,
     governor_reservation_env: str,
     run: Callable[..., subprocess.CompletedProcess[str]] | None = None,
+    cancel_row: Callable[[Path, str], int] | None = None,
 ) -> list[dict[str, Any]]:
     """Register every admitted slice first; only start ANY slice once EVERY
     registration has succeeded (F-4, impl-review round 1). Registration and
@@ -288,7 +306,9 @@ def start_admitted_batch(
     partial-start recovery: a registration failure anywhere in the batch
     means zero slices start, including ones that themselves registered
     cleanly -- their reservation token is simply never consumed by a start
-    call. This function is presently unreachable from either live entry
+    call, and their row is cancel-marked so the returned receipt's
+    `registered: 0` is true of the registry too (F-4, round 2). This
+    function is presently unreachable from either live entry
     point (F-3's fail-closed gate), so no test exercises it against a real
     governor reservation lifecycle; a future R5 landing that reopens the
     live path should also decide whether an unconsumed token needs explicit
@@ -311,18 +331,31 @@ def start_admitted_batch(
         and all(register.returncode == 0 for _session, register in registrations)
     )
     if not all_registered:
+        # F-4 (impl-review round 2): the contract is all-or-nothing on BOTH
+        # counters, not just `started`. A slice that registered before the
+        # failure is cancel-marked here and then reported `registered: 0`, so
+        # the receipt and the registry agree that this batch admitted nothing.
+        # `cancelled` carries the fact that a row briefly existed -- the
+        # receipt states it explicitly instead of hiding it behind a 0.
+        canceller = cancel_row or _cancel_registered_row
         results: list[dict[str, Any]] = []
         for session, register in registrations:
+            cancelled = 0
+            if register.returncode == 0:
+                cancelled = canceller(jobs, session["attempt_id"])
             results.append({
                 "subsession_id": session["subsession_id"],
-                "registered": 0 if register.returncode else 1,
+                "registered": 0,
                 "started": 0,
+                "cancelled": cancelled,
+                "refusal_reason": BATCH_REGISTRATION_INCOMPLETE,
                 "stdout": register.stdout, "stderr": register.stderr, "exit_code": register.returncode,
             })
         for session in admission.sessions[len(registrations):]:
             results.append({
                 "subsession_id": session["subsession_id"],
-                "registered": 0, "started": 0,
+                "registered": 0, "started": 0, "cancelled": 0,
+                "refusal_reason": BATCH_REGISTRATION_INCOMPLETE,
                 "stdout": "", "stderr": "", "exit_code": None,
             })
         return results
@@ -336,6 +369,8 @@ def start_admitted_batch(
             "subsession_id": session["subsession_id"],
             "registered": 1,
             "started": 0 if start.returncode else 1,
+            "cancelled": 0,
+            "refusal_reason": "",
             "stdout": start.stdout, "stderr": start.stderr, "exit_code": start.returncode,
         })
     return results

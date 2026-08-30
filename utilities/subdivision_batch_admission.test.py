@@ -313,6 +313,7 @@ class StartAdmittedBatchPartialFailureTest(AdmissionFixture):
     def test_third_slice_register_failure_starts_no_slice_at_all(self):
         admission = self._admission(3)
         calls: list[list[str]] = []
+        cancelled: list[str] = []
 
         def fake_run(cmd, env):
             calls.append(cmd)
@@ -322,19 +323,69 @@ class StartAdmittedBatchPartialFailureTest(AdmissionFixture):
                 return subprocess.CompletedProcess(cmd, 65, "", "register-failed")
             return subprocess.CompletedProcess(cmd, 0, "ok", "")
 
+        def fake_cancel(jobs, attempt_id):
+            cancelled.append(attempt_id)
+            return 1
+
         results = SUBDIV.start_admitted_batch(
             admission, parent="owner", jobs=self.base / "jobs.log",
             governor_reservation_env="AGENT_DISPATCH_GOVERNOR_RESERVATION",
-            run=fake_run,
+            run=fake_run, cancel_row=fake_cancel,
         )
         self.assertEqual([row["started"] for row in results], [0, 0, 0])
-        # Slices 1/2 registered cleanly but must not have been started --
-        # the "start" action never appears in the call log at all.
-        self.assertEqual(results[0]["registered"], 1)
-        self.assertEqual(results[1]["registered"], 1)
-        self.assertEqual(results[2]["registered"], 0)
+        # F-4 (impl-review round 2): the contract is all-or-nothing on BOTH
+        # counters. Slices 1/2 registered cleanly, so they are cancel-marked
+        # and reported `registered: 0` -- the receipt and the registry agree
+        # that this batch admitted nothing.
+        self.assertEqual([row["registered"] for row in results], [0, 0, 0])
+        self.assertEqual([row["cancelled"] for row in results], [1, 1, 0])
+        self.assertEqual(
+            [row["refusal_reason"] for row in results],
+            [SUBDIV.BATCH_REGISTRATION_INCOMPLETE] * 3,
+        )
+        self.assertEqual(
+            cancelled,
+            [session["attempt_id"] for session in admission.sessions[:2]],
+        )
         self.assertTrue(all(cmd[cmd.index("--action") + 1] == "register" for cmd in calls))
         self.assertEqual(len(calls), 3)
+
+    def test_first_slice_register_failure_cancels_nothing(self):
+        admission = self._admission(3)
+        cancelled: list[str] = []
+
+        def fake_run(cmd, env):
+            return subprocess.CompletedProcess(cmd, 65, "", "register-failed")
+
+        results = SUBDIV.start_admitted_batch(
+            admission, parent="owner", jobs=self.base / "jobs.log",
+            governor_reservation_env="AGENT_DISPATCH_GOVERNOR_RESERVATION",
+            run=fake_run, cancel_row=lambda jobs, attempt: cancelled.append(attempt) or 1,
+        )
+        self.assertEqual([row["registered"] for row in results], [0, 0, 0])
+        self.assertEqual([row["started"] for row in results], [0, 0, 0])
+        self.assertEqual([row["cancelled"] for row in results], [0, 0, 0])
+        self.assertEqual(cancelled, [])
+
+    def test_cancel_failure_is_reported_not_raised(self):
+        admission = self._admission(2)
+
+        def fake_run(cmd, env):
+            slug = cmd[cmd.index("--slug") + 1]
+            if slug == "slice-2":
+                return subprocess.CompletedProcess(cmd, 65, "", "register-failed")
+            return subprocess.CompletedProcess(cmd, 0, "ok", "")
+
+        def cancel_fails(jobs, attempt_id):
+            return 0
+
+        results = SUBDIV.start_admitted_batch(
+            admission, parent="owner", jobs=self.base / "jobs.log",
+            governor_reservation_env="AGENT_DISPATCH_GOVERNOR_RESERVATION",
+            run=fake_run, cancel_row=cancel_fails,
+        )
+        self.assertEqual([row["registered"] for row in results], [0, 0])
+        self.assertEqual([row["cancelled"] for row in results], [0, 0])
 
     def test_all_registers_succeed_then_all_slices_start(self):
         admission = self._admission(2)

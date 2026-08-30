@@ -21,6 +21,7 @@ from dispatch_contract import (  # noqa: E402
     resolve_model_governor_root,
 )
 import subdivision_batch_admission as SUBDIVISION_ADMISSION  # noqa: E402
+import dispatch_subsession_resume_record as RESUME_RECORD  # noqa: E402
 
 _BATCH_SPEC = importlib.util.spec_from_file_location(
     "dispatch_batch_for_stage_session_chain", ROOT / "utilities" / "dispatch-batch.py"
@@ -31,12 +32,47 @@ DISPATCH_BATCH = importlib.util.module_from_spec(_BATCH_SPEC)
 _BATCH_SPEC.loader.exec_module(DISPATCH_BATCH)  # type: ignore[union-attr]
 
 
-def continuation_metrics(session_count: int) -> dict[str, int]:
-    """Return the projected (pre-execution) join comparison for `check`.
+def _resume_state_root(jobs: Path) -> Path:
+    """The census reader and `dispatch_subsession_advance.record_owner_resume_
+    if_chain()` (the writer) must derive the same state root from the same
+    registry path, or the reader silently reads an empty ledger. Both use the
+    canonical `<registry>/../` derivation with no extra normalization."""
 
-    Actual `runtime_joins` is derived post-execution from the owner-resume
-    census (see dispatch_subsession_resume_record.py) and is not a value this
-    dry-run projection can assert.
+    return Path(jobs).parent
+
+
+def chain_census(jobs: Path, chain_id: str, session_count: int | None = None) -> dict[str, object]:
+    """A-4 (F-2, impl-review round 2): the ONE production derivation of
+    `runtime_joins`. It counts unique `subsession_owner_resume_v1` delivery
+    ids and nothing else -- never a session count, never a hardcoded
+    constant, never a supervisor-local variable. `subsession_advances` is the
+    committed `ssadv-*` identity count for the same chain.
+
+    Pre-execution both are 0; that is a measurement, not a declaration.
+    """
+
+    # Imported lazily: `dispatch_subsession_advance` loads THIS module through
+    # importlib at advance time, so a module-level import here would make the
+    # import order depend on which of the two a process reached first.
+    import dispatch_subsession_advance as SUBSESSION_ADVANCE
+
+    runtime_joins = RESUME_RECORD.unique_delivery_ids(_resume_state_root(jobs), chain_id)
+    advances = SUBSESSION_ADVANCE.subsession_advances(Path(jobs), chain_id)
+    census: dict[str, object] = {
+        "runtime_joins": runtime_joins,
+        "runtime_joins_source": RESUME_RECORD.EVENT_TYPE,
+        "subsession_advances": advances,
+    }
+    if session_count is not None:
+        census["expected_subsession_advances"] = max(0, session_count - 1)
+    return census
+
+
+def continuation_metrics(session_count: int) -> dict[str, int]:
+    """`check`'s projected (pre-execution) join comparison. It reports the
+    un-chained baseline only and deliberately emits NO `runtime_joins`: that
+    value is a measurement, and the one surface that produces it is
+    `chain_census()` reading the owner-resume delivery ledger (F-2).
     """
     return {
         "baseline_runtime_joins": session_count,
@@ -105,6 +141,7 @@ def persist_chain_manifest(jobs: Path, manifest: dict) -> None:
 
 LAUNCH_PHASE_BY_ACTION = {
     "check": "dry-run",
+    "census": "dry-run",
     "register": "register",
     "start": "start",
 }
@@ -150,6 +187,18 @@ def _run_parallel_subdivision(
         admission, parent=args.parent, jobs=jobs,
         governor_reservation_env=GOVERNOR_RESERVATION_ENV,
     )
+    if any(row.get("refusal_reason") for row in results):
+        # F-4: an incomplete registration is a batch refusal, not a partial
+        # success with some counters at 0 -- it prints the same typed refusal
+        # envelope the admission-gate failure above prints.
+        print(json.dumps({
+            "schema_version": 1, "state": "subdivision-batch-refused",
+            "chain_id": admission.manifest["chain_id"],
+            "reason": SUBDIVISION_ADMISSION.BATCH_REGISTRATION_INCOMPLETE,
+            "admitted_rows": 0, "admitted_models": 0,
+            "cancelled_rows": sum(int(row.get("cancelled") or 0) for row in results),
+        }, sort_keys=True))
+        return 65
     print(f"chain_id={admission.manifest['chain_id']}")
     print(f"chain_manifest_sha256={admission.manifest_digest}")
     print(f"registered_sessions={len(admission.sessions)}")
@@ -162,7 +211,7 @@ def _run_parallel_subdivision(
 
 def main() -> int:
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("action", choices=("check", "register", "start"))
+    p.add_argument("action", choices=("check", "census", "register", "start"))
     p.add_argument("--manifest", required=True)
     p.add_argument("--parent", required=True)
     p.add_argument("--jobs")
@@ -182,8 +231,20 @@ def main() -> int:
         )
         if verify.returncode:
             return verify.returncode
-        if args.action == "check":
+        if args.action in {"check", "census"}:
             session_count = len(manifest["sessions"])
+            if args.action == "census":
+                jobs = resolve_global_registry(ROOT, args.jobs, 2, "check").path
+                # Read-only measurement surface: the census consumer that
+                # makes `runtime_joins` an observation of the owner-resume
+                # ledger rather than a receipt constant (A-4).
+                print(json.dumps({
+                    "census": "ok", "chain_id": manifest["chain_id"],
+                    "mode": manifest["mode"], "sessions": session_count,
+                    **chain_census(Path(jobs), manifest["chain_id"], session_count),
+                    "manifest_sha256": manifest["_manifest_sha256"],
+                }, sort_keys=True))
+                return 0
             print(json.dumps({
                 "check": "ok", "chain_id": manifest["chain_id"],
                 "mode": manifest["mode"], "sessions": session_count,

@@ -330,6 +330,26 @@ def coordinate_chain_advance_from_joined_rows(
     manifest = load_chain_manifest(jobs, chain_id)
     if manifest is None:
         return None
+    artifact_root = _resolve_artifact_root()
+    # F-1 (impl-review round 2): THE production connection between a
+    # predecessor's committed terminal registry row and its chain-scoped
+    # handoff. `flush_own_subsession_handoff()` below cannot serve this --
+    # it reads the CALLING process's `AGENT_DISPATCH_SUBSESSION_ID`, and a
+    # sub-session child is an ordinary dispatch-depth-2 worker with no
+    # supervisor process of its own (supervised completion is scoped to
+    # dispatch-depth-1 owners, `adapters/*/bin/dispatch-headless.py`
+    # `resolve_completion_delivery`), so nothing in the child's own runtime
+    # ever reaches that call site. The supervisor that observes the terminal
+    # row flushes it here instead, from the predecessor's own durable state
+    # ledger, strictly AFTER that row committed (the terminal check above)
+    # and strictly BEFORE the successor's handoff gate reads it.
+    #
+    # This does NOT make A-8's hard stop unreachable: the flush is a
+    # projection of the predecessor's ledger, so a predecessor that never
+    # maintained a readable ledger bound to its own attempt id produces no
+    # handoff at all and the advance still refuses `subsession-handoff-
+    # missing` (or `-stale`, when an earlier index's handoff is still there).
+    flush_chain_handoff_for_row(jobs, predecessor_row, manifest, artifact_root)
     try:
         predecessor_index = int(metadata.get("subsession_index", "0"))
     except ValueError:
@@ -356,7 +376,7 @@ def coordinate_chain_advance_from_joined_rows(
         successor_subsession_index=successor_index,
         successor_session=successor_session,
         parent_attempt_id=parent_attempt_id,
-        artifact_root=_resolve_artifact_root(),
+        artifact_root=artifact_root,
     )
     services = RealSubsessionAdvanceServices(manifest)
     result = coordinate_subsession_advance(request, services)
@@ -375,9 +395,11 @@ def _load_ledger_module():
 
 
 def flush_own_subsession_handoff(jobs: Path, route_id: str, attempt_id: str) -> None:
-    """SD-119 R3 impl-review fix (F-1): the real call site that wires
-    `dispatch_subsession_handoff.flush_handoff()` into execution. Called by a
-    subsession's own session supervisor immediately AFTER its own terminal
+    """SD-119 R3 impl-review fix (F-1): the flush path for a sub-session that
+    happens to run under a session supervisor of its OWN (only a supervised
+    attempt reaches this call site). The production path for an ordinary
+    unsupervised sub-session child is `flush_chain_handoff_for_row()`, driven
+    by the chain-advancing supervisor. Called immediately AFTER its own terminal
     registry row commits (i.e. right after `reconcile()` returns), never
     before -- so the handoff's mtime is always later in wall-clock time than
     the registry's recorded terminal timestamp, and index i+1's
@@ -399,23 +421,82 @@ def flush_own_subsession_handoff(jobs: Path, route_id: str, attempt_id: str) -> 
     manifest = load_chain_manifest(Path(jobs), chain_id)
     if manifest is None:
         return
-    artifact_root = _resolve_artifact_root()
+    _flush_handoff_from_ledger(
+        artifact_root=_resolve_artifact_root(),
+        route_id=route_id,
+        chain_id=chain_id,
+        attempt_id=attempt_id,
+        subsession_id=subsession_id,
+        manifest_sha256=manifest.get("_manifest_sha256", ""),
+        ledger_path=os.environ.get("AGENT_WORKER_STATE_LEDGER", ""),
+        require_ledger=False,
+    )
+
+
+def _flush_handoff_from_ledger(
+    *,
+    artifact_root: str,
+    route_id: str,
+    chain_id: str,
+    attempt_id: str,
+    subsession_id: str,
+    manifest_sha256: str,
+    ledger_path: str,
+    require_ledger: bool,
+) -> str:
+    """The one handoff writer both call sites share. Returns a typed outcome
+    so a caller (and a fixture) can tell "flushed" from each reason a flush
+    was declined, without either call site raising into a supervisor loop."""
+
     if not artifact_root:
-        return
+        return "artifact-root-unavailable"
     fields: dict = {}
-    ledger_path = os.environ.get("AGENT_WORKER_STATE_LEDGER", "")
     if ledger_path:
         fields = _load_ledger_module().read_fields(Path(ledger_path), attempt_id)
-    path = HANDOFF.handoff_path(artifact_root, route_id, chain_id)
+    if require_ledger and not fields:
+        # No ledger bound to this exact attempt id -- there is nothing durable
+        # to carry forward, so writing a handoff here would fabricate evidence
+        # of a completion the predecessor never recorded. Declining keeps
+        # A-8's `subsession-handoff-missing` hard stop reachable.
+        return "ledger-unavailable"
     HANDOFF.flush_handoff(
-        path,
+        HANDOFF.handoff_path(artifact_root, route_id, chain_id),
         predecessor_attempt_id=attempt_id,
         predecessor_subsession_id=subsession_id,
-        manifest_sha256=manifest.get("_manifest_sha256", ""),
+        manifest_sha256=manifest_sha256,
         completed_items=list(fields.get("completed_items") or []),
         next_command=str(fields.get("next_action") or ""),
         invariants=list(fields.get("invariants") or []),
         forbidden_files=list(fields.get("forbidden_files") or []),
+    )
+    return "flushed"
+
+
+def flush_chain_handoff_for_row(
+    jobs: Path, row, manifest: dict, artifact_root: str,
+) -> str:
+    """F-1: flush the chain-scoped handoff on behalf of a serial sub-session
+    child whose terminal row the caller has already observed, deriving every
+    field from that row's sealed registry metadata and the predecessor's own
+    state ledger -- never from the calling process's environment, which
+    belongs to the supervisor, not to the child.
+
+    Outcomes: `flushed` | `no-chain` | `artifact-root-unavailable` |
+    `ledger-unavailable`. Only `flushed` produces a file; every other outcome
+    leaves the handoff gate to decide `missing`/`stale` on its own evidence."""
+
+    metadata = getattr(row, "metadata", None) or {}
+    if not metadata.get("session_chain_id") or metadata.get("subsession_mode") != "serial":
+        return "no-chain"
+    return _flush_handoff_from_ledger(
+        artifact_root=artifact_root,
+        route_id=metadata.get("route_id", ""),
+        chain_id=metadata["session_chain_id"],
+        attempt_id=row.attempt_id,
+        subsession_id=metadata.get("subsession_id", ""),
+        manifest_sha256=manifest.get("_manifest_sha256", ""),
+        ledger_path=metadata.get("state_ledger", ""),
+        require_ledger=True,
     )
 
 

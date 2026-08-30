@@ -631,6 +631,160 @@ class RealHandoffServices(FakeServices):
         )
 
 
+class SupervisorSideFlushConnectionTest(unittest.TestCase):
+    """F-1 (impl-review round 2): the PRODUCTION connection -- an ordinary
+    unsupervised sub-session child never runs `flush_own_subsession_handoff`
+    (it has no supervisor process of its own), so the chain-advancing
+    supervisor flushes on its behalf from the predecessor's registry row and
+    state ledger. Every case below runs with the sub-session environment
+    variables cleared, which is exactly the owner supervisor's environment.
+    """
+
+    def _fixture(self, td: str, *, ledger_attempt_id: str | None):
+        sandbox = Sandbox()
+        manifest = make_manifest(session_count=2)
+        pointer = SA.chain_manifest_pointer_path(sandbox.jobs, CHAIN_ID)
+        pointer.parent.mkdir(parents=True, exist_ok=True)
+        pointer.write_text(json.dumps(manifest), encoding="utf-8")
+        ledger_path = Path(td) / "ledger.md"
+        if ledger_attempt_id is not None:
+            _write_ledger_fixture(
+                ledger_path, ledger_attempt_id,
+                completed_items=["slice 1 landed"], next_action="python3 slice2.py",
+                invariants=["one stage gate stays with the owner"],
+                forbidden_files=["out-of-list.py"],
+            )
+        terminal_at = datetime.now(timezone.utc) - timedelta(seconds=5)
+        timestamp = terminal_at.strftime("%Y-%m-%dT%H:%M:%SZ")
+        metadata = {
+            "parent_attempt_id": "att-owner-0001",
+            "attempt_id": "att-stage-session-1",
+            "session_chain_id": CHAIN_ID, "subsession_index": "1",
+            "subsession_mode": "serial", "route_id": ROUTE_ID,
+            "route_hash": ROUTE_HASH, "route_node": ROUTE_NODE,
+            "subsession_id": "ss-1", "state_ledger": str(ledger_path),
+        }
+        sandbox.add_registry_row(metadata, status="done")
+        lines = sandbox.jobs.read_text(encoding="utf-8").splitlines()
+        fields = lines[-1].split("\t")
+        fields[0] = timestamp
+        lines[-1] = "\t".join(fields)
+        sandbox.jobs.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        parsed = datetime.strptime(timestamp, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+        terminal_at_ns = int(parsed.timestamp() * 1_000_000_000)
+        joined = {
+            "att-stage-session-1": SimpleNamespace(
+                attempt_id="att-stage-session-1", status="done", metadata=metadata,
+            )
+        }
+        return sandbox, joined, terminal_at_ns
+
+    def _advance(self, sandbox, joined, artifact_root, terminal_at_ns):
+        fake = RealHandoffServices(sandbox, predecessor_terminal_at_ns=terminal_at_ns)
+        cleared = {
+            key: "" for key in (
+                "AGENT_DISPATCH_SUBSESSION_ID", "AGENT_DISPATCH_SESSION_CHAIN_ID",
+                "AGENT_DISPATCH_SUBSESSION_MODE", "AGENT_WORKER_STATE_LEDGER",
+            )
+        }
+        with mock.patch.object(SA, "RealSubsessionAdvanceServices", return_value=fake), \
+             mock.patch.object(SA, "_resolve_artifact_root", return_value=artifact_root), \
+             mock.patch.dict(os.environ, cleared, clear=False):
+            result = SA.coordinate_chain_advance_from_joined_rows(
+                sandbox.jobs, "att-owner-0001", joined,
+            )
+        return result, fake
+
+    def test_predecessor_terminal_row_produces_handoff_and_advances(self):
+        with tempfile.TemporaryDirectory() as td:
+            artifact_root = str(Path(td) / "artifact-root")
+            sandbox, joined, terminal_at_ns = self._fixture(
+                td, ledger_attempt_id="att-stage-session-1"
+            )
+            try:
+                path = HANDOFF.handoff_path(artifact_root, ROUTE_ID, CHAIN_ID)
+                self.assertFalse(path.exists())
+                result, fake = self._advance(sandbox, joined, artifact_root, terminal_at_ns)
+                self.assertEqual(result, "att-stage-session-2")
+                self.assertTrue(path.is_file())
+                text = path.read_text(encoding="utf-8")
+                self.assertIn("slice 1 landed", text)
+                self.assertIn("python3 slice2.py", text)
+                self.assertIn("out-of-list.py", text)
+                self.assertIn("predecessor_attempt_id: att-stage-session-1", text)
+                # A-8/A-13 combined: the handoff mtime is later than the
+                # predecessor's committed terminal moment, so the
+                # mtime-inversion stale check cannot fire on a legitimate flush.
+                self.assertGreater(path.stat().st_mtime_ns, terminal_at_ns)
+                self.assertEqual(fake.handoff_calls, 1)
+                self.assertEqual(fake.start_calls, 1)
+            finally:
+                sandbox.close()
+
+    def test_ledger_not_bound_to_predecessor_declines_flush_and_stops(self):
+        # The flush is a projection of the predecessor's own ledger. A ledger
+        # belonging to another attempt proves nothing about this one, so no
+        # handoff is fabricated and A-8's hard stop stays reachable.
+        with tempfile.TemporaryDirectory() as td:
+            artifact_root = str(Path(td) / "artifact-root")
+            sandbox, joined, terminal_at_ns = self._fixture(
+                td, ledger_attempt_id="att-some-other-attempt"
+            )
+            try:
+                result, fake = self._advance(sandbox, joined, artifact_root, terminal_at_ns)
+                self.assertIsNone(result)
+                self.assertFalse(
+                    HANDOFF.handoff_path(artifact_root, ROUTE_ID, CHAIN_ID).exists()
+                )
+                self.assertEqual(fake.claim_calls, 0)
+                self.assertEqual(fake.register_calls, 0)
+                self.assertEqual(fake.start_calls, 0)
+            finally:
+                sandbox.close()
+
+    def test_missing_ledger_leaves_prior_handoff_stale_and_stops(self):
+        with tempfile.TemporaryDirectory() as td:
+            artifact_root = str(Path(td) / "artifact-root")
+            sandbox, joined, terminal_at_ns = self._fixture(td, ledger_attempt_id=None)
+            try:
+                # An earlier index's handoff is still on disk; without a
+                # readable ledger nothing overwrites it, so the gate sees the
+                # attempt-id mismatch and refuses instead of advancing.
+                HANDOFF.flush_handoff(
+                    HANDOFF.handoff_path(artifact_root, ROUTE_ID, CHAIN_ID),
+                    predecessor_attempt_id="att-stage-session-0",
+                    predecessor_subsession_id="ss-0",
+                    manifest_sha256=MANIFEST_SHA,
+                    completed_items=[], next_command="", invariants=[], forbidden_files=[],
+                )
+                result, fake = self._advance(sandbox, joined, artifact_root, terminal_at_ns)
+                self.assertIsNone(result)
+                self.assertEqual(fake.start_calls, 0)
+                self.assertEqual(
+                    HANDOFF.classify_handoff(
+                        HANDOFF.handoff_path(artifact_root, ROUTE_ID, CHAIN_ID),
+                        predecessor_attempt_id_expected="att-stage-session-1",
+                        manifest_sha256_expected=MANIFEST_SHA,
+                        predecessor_terminal_at_ns=terminal_at_ns,
+                    ),
+                    "subsession-handoff-stale",
+                )
+            finally:
+                sandbox.close()
+
+    def test_non_chain_row_flushes_nothing(self):
+        with tempfile.TemporaryDirectory() as td:
+            artifact_root = str(Path(td) / "artifact-root")
+            row = SimpleNamespace(attempt_id="att-ordinary-1", status="done", metadata={})
+            self.assertEqual(
+                SA.flush_chain_handoff_for_row(
+                    Path(td) / "jobs.registry", row, {}, artifact_root
+                ),
+                "no-chain",
+            )
+            self.assertFalse(Path(artifact_root).exists())
+
+
 class WiredFlushIntegrationTest(unittest.TestCase):
     """F-1 supervisor-integration proof required by impl-review round 1: a
     normal 2-slice chain actually advances to index 2 once the real call
