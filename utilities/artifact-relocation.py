@@ -1015,6 +1015,26 @@ def _handoff_recheck(args: argparse.Namespace) -> int:
 # rehearse (isolated effect layer: dry-run / synthetic apply / rollback)
 # ---------------------------------------------------------------------------
 LIVE_HEARTING_ROOT = Path("/home/nas/user/Uihyeop/personal/hearting/.agent_reports").resolve()
+
+
+def live_roots() -> list[Path]:
+    """Every root the fixture rehearsal must refuse to touch.
+
+    The built-in constant is never removed or overridden: HEARTING_EXTRA_LIVE_ROOTS
+    (colon-separated) only *widens* the refusal set. There is deliberately no
+    environment variable that can narrow it, so a caller cannot use this to reach
+    a real artifact root the guard would otherwise reject.
+    """
+    roots = [LIVE_HEARTING_ROOT]
+    for entry in os.environ.get("HEARTING_EXTRA_LIVE_ROOTS", "").split(":"):
+        entry = entry.strip()
+        if entry:
+            roots.append(Path(entry).resolve())
+    return roots
+
+
+def is_live_root(candidate: Path) -> bool:
+    return any(candidate == root or root in candidate.parents for root in live_roots())
 SYNTHETIC_REHEARSAL_TEMPLATE = "synthetic-nonempty-v1"
 SYNTHETIC_REHEARSAL_PAYLOAD = b"synthetic-w7-payload\n"
 
@@ -1093,9 +1113,15 @@ def rehearse(args: argparse.Namespace) -> int:
 
     if not args.work_root:
         return fail(EXIT_INPUT, "work-root-required")
-    work = Path(args.work_root).resolve(strict=True)
-    if work == LIVE_HEARTING_ROOT or LIVE_HEARTING_ROOT in work.parents:
+    # strict=True raised an unhandled FileNotFoundError on a host where the path
+    # does not exist, which read as a crash rather than a refusal. Resolve
+    # non-strictly, decide liveness first (a live root is refused whether or not
+    # it exists here), then refuse a missing work root with a typed reason.
+    work = Path(args.work_root).resolve(strict=False)
+    if is_live_root(work):
         return fail(EXIT_INPUT, "live-root-rejected-by-fixture-rehearsal")
+    if not work.is_dir():
+        return fail(EXIT_INPUT, "work-root-missing")
 
     if args.mode == "apply":
         if not args.fixture_template:
@@ -1267,7 +1293,9 @@ def apply_cmd(args: argparse.Namespace) -> int:
     mutations = 0
 
     try:
-        root = Path(args.artifact_root).resolve(strict=True)
+        root = Path(args.artifact_root).resolve(strict=False)
+        if not root.is_dir():
+            raise ValueError("artifact-root-missing")
         before = scope_digest(root, args.dispatch_jobs, args.dispatch_lock)
     except (OSError, RuntimeError, ValueError) as exc:
         body = {"status": "blocked", "exit_class": EXIT_INPUT, "blocker": "apply_input_invalid", "error": str(exc), "mutations": 0,

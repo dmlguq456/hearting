@@ -11,11 +11,11 @@ import unittest
 from pathlib import Path
 
 TOOL = Path(__file__).with_name("artifact-relocation.py")
-SPEC = Path(os.environ.get(
-    "HEARTING_W7_SPEC",
-    "/home/nas/user/Uihyeop/personal/hearting/.agent_reports/spec/artifact-path-contract",
-))
-RUNTIME_ROOT = Path("/home/nas/user/Uihyeop/personal/hearting/.agent_reports")
+# The frozen W6 evidence lives on the maintainer host. Point HEARTING_W7_SPEC at
+# it to run the golden-replay tests; everywhere else REAL_EVIDENCE_AVAILABLE is
+# False and they skip. No test may assume a host-specific absolute path exists.
+SPEC = Path(os.environ.get("HEARTING_W7_SPEC", "/nonexistent/hearting-w7-spec"))
+RUNTIME_ROOT = SPEC.parent
 
 spec = importlib.util.spec_from_file_location("artifact_relocation_tested", TOOL)
 M = importlib.util.module_from_spec(spec)
@@ -463,12 +463,56 @@ class RehearsalEffectTest(unittest.TestCase):
             self.assertEqual(receipts[0], receipts[1])
 
     def test_live_hearting_root_rejected_by_fixture_rehearsal(self):
-        result = run("rehearse", "--mode", "apply", "--fixture-template", "synthetic-nonempty-v1",
-                     "--work-root", str(RUNTIME_ROOT), "--backup-root", "/tmp",
-                     "--output", "/tmp/w7-reject-out.json", "--journal", "/tmp/w7-reject-j.jsonl",
-                     "--inverse-journal", "/tmp/w7-reject-i.jsonl", "--backup-seal", "/tmp/w7-reject-s.json")
-        self.assertEqual(result.returncode, 64)
-        self.assertIn("live-root-rejected", result.stdout)
+        # Declares its own live root instead of naming the maintainer host's, so
+        # the refusal is provable on any machine. HEARTING_EXTRA_LIVE_ROOTS only
+        # widens the refusal set, so this cannot weaken the built-in guard.
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            live = base / "live-root"
+            live.mkdir()
+            env = dict(os.environ, HEARTING_EXTRA_LIVE_ROOTS=str(live))
+            result = subprocess.run(
+                ["python3", str(TOOL), "rehearse", "--mode", "apply",
+                 "--fixture-template", "synthetic-nonempty-v1",
+                 "--work-root", str(live), "--backup-root", str(base / "backup"),
+                 "--output", str(base / "out.json"), "--journal", str(base / "j.jsonl"),
+                 "--inverse-journal", str(base / "i.jsonl"), "--backup-seal", str(base / "s.json")],
+                text=True, capture_output=True, env=env,
+            )
+            self.assertEqual(result.returncode, 64, result.stdout + result.stderr)
+            self.assertIn("live-root-rejected", result.stdout)
+
+    def test_builtin_live_root_guard_is_not_overridable(self):
+        # The built-in constant stays in the refusal set even when the widening
+        # variable names something else entirely.
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            env = dict(os.environ, HEARTING_EXTRA_LIVE_ROOTS=str(base / "unrelated"))
+            result = subprocess.run(
+                ["python3", str(TOOL), "rehearse", "--mode", "apply",
+                 "--fixture-template", "synthetic-nonempty-v1",
+                 "--work-root", str(M.LIVE_HEARTING_ROOT),
+                 "--backup-root", str(base / "backup"),
+                 "--output", str(base / "out.json"), "--journal", str(base / "j.jsonl"),
+                 "--inverse-journal", str(base / "i.jsonl"), "--backup-seal", str(base / "s.json")],
+                text=True, capture_output=True, env=env,
+            )
+            self.assertEqual(result.returncode, 64, result.stdout + result.stderr)
+            self.assertIn("live-root-rejected", result.stdout)
+
+    def test_missing_work_root_is_a_typed_refusal_not_a_crash(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            result = run("rehearse", "--mode", "apply",
+                         "--fixture-template", "synthetic-nonempty-v1",
+                         "--work-root", str(base / "does-not-exist"),
+                         "--backup-root", str(base / "backup"),
+                         "--output", str(base / "out.json"), "--journal", str(base / "j.jsonl"),
+                         "--inverse-journal", str(base / "i.jsonl"),
+                         "--backup-seal", str(base / "s.json"))
+            self.assertEqual(result.returncode, 64, result.stdout + result.stderr)
+            self.assertIn("work-root-missing", result.stdout)
+            self.assertNotIn("Traceback", result.stderr)
 
     def test_fresh_rollback_rejects_tampered_seal_binding(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -546,11 +590,15 @@ class RehearsalEffectTest(unittest.TestCase):
 
 
 class LiveRootSafetyTest(unittest.TestCase):
+    """The contract under test is "an unapproved apply performs zero writes".
+    That holds for any artifact root, so these use a temp root rather than
+    the maintainer host's live one, which does not exist on CI."""
+
     def test_status_pass_without_authority_is_typed_refusal(self):
         with tempfile.TemporaryDirectory() as directory:
             base = Path(directory); package = base / "package.json"
             package.write_text(json.dumps({"status": "pass"}))
-            result = run("apply", "--artifact-root", str(RUNTIME_ROOT), "--package", str(package), "--receipt-stdout")
+            result = run("apply", "--artifact-root", str(base), "--package", str(package), "--receipt-stdout")
             self.assertEqual(result.returncode, 78)
             body = json.loads(result.stdout)
             self.assertEqual(body["blocker"], "apply_authority_invalid")
@@ -566,7 +614,7 @@ class LiveRootSafetyTest(unittest.TestCase):
             jobs.write_text("")
             lock = base / "jobs.log.lock"
             lock.write_text("")
-            result = run("apply", "--artifact-root", str(RUNTIME_ROOT), "--package", str(package),
+            result = run("apply", "--artifact-root", str(base), "--package", str(package),
                          "--dispatch-jobs", str(jobs), "--dispatch-lock", str(lock), "--receipt-stdout")
             self.assertIn(result.returncode, (78, 75))
             receipt = json.loads(result.stdout)
@@ -584,7 +632,7 @@ class LiveRootSafetyTest(unittest.TestCase):
     def test_apply_with_no_package_file_is_still_write_denied(self):
         with tempfile.TemporaryDirectory() as directory:
             base = Path(directory)
-            result = run("apply", "--artifact-root", str(RUNTIME_ROOT),
+            result = run("apply", "--artifact-root", str(base),
                          "--package", str(base / "does-not-exist.json"), "--receipt-stdout")
             self.assertIn(result.returncode, (78, 75))
             receipt = json.loads(result.stdout)
