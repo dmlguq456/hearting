@@ -838,7 +838,9 @@ def main(argv: list[str]) -> int:
 
     # Undeclared/unneeded isolation opt-out detection: only for suites that
     # actually failed under `isolated` and have no declared opt-out anywhere.
-    hard_failures: list[str] = []
+    # Each hard-fail record is (key, verdict, kind, signature) so the summary
+    # line can name what happened, not just which suite::test failed.
+    hard_failures: list[tuple[str, str, str, str]] = []
     xpass_nonfatal: list[str] = []
     report_rows: list[dict[str, str]] = []
     verdict_counts: dict[str, int] = {}
@@ -876,7 +878,10 @@ def main(argv: list[str]) -> int:
             }
         )
         verdict_counts["UNDECLARED-ISOLATION-OPTOUT"] = verdict_counts.get("UNDECLARED-ISOLATION-OPTOUT", 0) + 1
-        hard_failures.append(suite_path)
+        hard_failures.append((
+            f"{suite_path}::-", "UNDECLARED-ISOLATION-OPTOUT", "",
+            "isolated FAIL + installed-layout PASS, not declared",
+        ))
 
     for suite_path, row in isolation_tsv.items():
         matching = [r for r in all_results if r.relpath == suite_path and r.profile == "isolated"]
@@ -893,7 +898,10 @@ def main(argv: list[str]) -> int:
                 }
             )
             verdict_counts["ISOLATION-OPTOUT-UNNEEDED"] = verdict_counts.get("ISOLATION-OPTOUT-UNNEEDED", 0) + 1
-            hard_failures.append(suite_path)
+            hard_failures.append((
+                f"{suite_path}::-", "ISOLATION-OPTOUT-UNNEEDED", "",
+                "declared opt-out but passes under isolated",
+            ))
 
     processed_flaky: set[str] = set()
     for result in all_results:
@@ -928,15 +936,17 @@ def main(argv: list[str]) -> int:
             verdicts = classify_result(result, baseline, today)
         for v in verdicts:
             verdict_counts[v.verdict] = verdict_counts.get(v.verdict, 0) + 1
+            result_kind = classify_kind(result) if not result.passed else ""
+            signature = failure_signature(result) if not result.passed else ""
             report_rows.append(
                 {
                     "suite_path": v.suite_path,
                     "test_id": v.test_id,
                     "verdict": v.verdict,
-                    "kind": classify_kind(result) if not result.passed else "",
+                    "kind": result_kind,
                     "isolation_profile": result.profile,
                     "duration_s": f"{result.duration_s:.2f}",
-                    "detail": v.detail or (f"signature={failure_signature(result)}" if not result.passed else ""),
+                    "detail": v.detail or (f"signature={signature}" if not result.passed else ""),
                 }
             )
             if v.verdict in HARD_FAIL_VERDICTS:
@@ -947,13 +957,13 @@ def main(argv: list[str]) -> int:
                     # until the baseline carries an environment fingerprint.
                     xpass_nonfatal.append(f"{v.suite_path}::{v.test_id}")
                 else:
-                    hard_failures.append(f"{v.suite_path}::{v.test_id}")
+                    hard_failures.append((f"{v.suite_path}::{v.test_id}", v.verdict, result_kind, v.detail or signature))
         _ = skip_leak  # per-suite leak exemption is enforced globally below
 
     for row in stale_rows:
         verdict_counts[row["verdict"]] = verdict_counts.get(row["verdict"], 0) + 1
         report_rows.append(row)
-        hard_failures.append(f"{row['suite_path']}::{row['test_id']}")
+        hard_failures.append((f"{row['suite_path']}::{row['test_id']}", row["verdict"], "", row["detail"]))
 
     collected_total = len(selected)
     profile_subtotal = sum(len(v) for v in suites_by_profile.values())
@@ -962,7 +972,10 @@ def main(argv: list[str]) -> int:
             f"FATAL: profile subtotal ({profile_subtotal}) != collected ({collected_total})",
             file=sys.stderr,
         )
-        hard_failures.append("__profile_subtotal_mismatch__")
+        hard_failures.append((
+            "__profile_subtotal_mismatch__::-", "ERROR", "internal",
+            f"profile subtotal ({profile_subtotal}) != collected ({collected_total})",
+        ))
 
     leak_new: set[str] = set()
     if not args.no_leak_sweep:
@@ -979,13 +992,17 @@ def main(argv: list[str]) -> int:
             for entry in sorted(leak_new):
                 print(f"LIVE-STATE-LEAK: {entry}", file=sys.stderr)
             if not live_registry_paths:
-                hard_failures.append("__live_state_leak__")
+                hard_failures.append((
+                    "__live_state_leak__::-", "ERROR", "internal",
+                    f"{len(leak_new)} new live-state path(s) written during the run",
+                ))
 
     if args.report:
         write_report(args.report, report_rows)
 
     total = len(selected)
     print(f"collected={total}")
+    print(f"env: jobs={args.jobs} nproc={os.cpu_count()} timeout={args.timeout} profile={explicit_profile}")
     for key in ("PASS", "FAIL", "ERROR", "TIMEOUT", "KNOWN-FAIL", "FLAKY-KNOWN-FAIL", "XPASS", "STALE", "EXPIRED", "KIND-MISMATCH",
                 "UNDECLARED-ISOLATION-OPTOUT", "ISOLATION-OPTOUT-UNNEEDED"):
         if key in verdict_counts:
@@ -996,13 +1013,15 @@ def main(argv: list[str]) -> int:
 
     if xpass_nonfatal:
         print(f"XPASS-NONFATAL={len(xpass_nonfatal)}")
+        for item in xpass_nonfatal:
+            print(f"xpass: {item}")
     if hard_failures:
         # Name every hard failure in the summary: a CI log that only carries
         # the counts cannot be diagnosed without the report artifact
         # (2026-08-30, six CI-only failures with no suite names).
         print(f"HARD-FAIL={len(hard_failures)}")
-        for item in hard_failures[:100]:
-            print(f"hard-fail: {item}")
+        for key, verdict, kind, signature in hard_failures[:100]:
+            print(f"hard-fail: {key} verdict={verdict} kind={kind} signature={signature}")
     if args.report_only:
         return 0
     return 1 if hard_failures else 0

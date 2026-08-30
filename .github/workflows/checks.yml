@@ -108,4 +108,12 @@ jobs:
       - name: Run the full isolated test suite (C-3/C-4)
         # --xpass-nonfatal: the known-fail baseline is seeded on the maintainer host;
         # suites that pass on the CI runner are reported, not failed (MA-W1-011).
-        run: python3 tools/run-tests.py --retries 1 --xpass-nonfatal
+        run: python3 tools/run-tests.py --retries 1 --xpass-nonfatal --report ${{ runner.temp }}/run-tests-report.tsv
+
+      - name: Upload full-suite report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: run-tests-report
+          path: ${{ runner.temp }}/run-tests-report.tsv
+          if-no-files-found: ignore

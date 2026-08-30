@@ -153,6 +153,35 @@ class UnlistedFailFixture(RunTestsFixtureBase):
         self.assertEqual(verdicts, {"FAIL"})
 
 
+class HardFailSummaryLineFixture(RunTestsFixtureBase):
+    """P1: the CLI summary must carry enough to diagnose a hard-fail from
+    logs alone -- verdict, kind, and a compact signature per entry."""
+
+    def test_hard_fail_line_has_verdict_kind_and_signature(self):
+        write_suite(self.root, "surprise_fail.test.py", "import sys\nsys.exit(1)\n")
+        result, _rows = self.run_fixture([])
+        self.assertNotEqual(result.returncode, 0)
+        self.assertRegex(
+            result.stdout,
+            r"hard-fail: surprise_fail\.test\.py::- verdict=FAIL kind=exit-nonzero signature=",
+        )
+
+
+class XPassListingAndEnvLineFixture(RunTestsFixtureBase):
+    """P1: XPASS-NONFATAL must list which suites unexpectedly passed, and the
+    summary must carry a one-line execution environment fingerprint."""
+
+    def test_xpass_listing_and_env_summary_line(self):
+        write_suite(self.root, "now_passes.test.py", "import sys\nsys.exit(0)\n")
+        result, _rows = self.run_fixture(
+            [f"now_passes.test.py\t-\texit-nonzero\tisolated\tstale\tMA-TEST-015\t{TOMORROW}"],
+            extra_args=["--xpass-nonfatal"],
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("xpass: now_passes.test.py::-", result.stdout)
+        self.assertRegex(result.stdout, r"env: jobs=2 nproc=\d+ timeout=5 profile=isolated")
+
+
 class StaleFixture(RunTestsFixtureBase):
     def test_stale_baseline_row_is_hard_failure(self):
         write_suite(self.root, "present.test.py", "import sys\nsys.exit(0)\n")
