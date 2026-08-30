@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -15,8 +16,19 @@ sys.path.insert(0, str(ROOT / "utilities"))
 from stage_session_contract import StageSessionError, load_manifest  # noqa: E402
 from dispatch_contract import (  # noqa: E402
     DispatchContractError,
+    GOVERNOR_RESERVATION_ENV,
     resolve_global_registry,
+    resolve_model_governor_root,
 )
+import subdivision_batch_admission as SUBDIVISION_ADMISSION  # noqa: E402
+
+_BATCH_SPEC = importlib.util.spec_from_file_location(
+    "dispatch_batch_for_stage_session_chain", ROOT / "utilities" / "dispatch-batch.py"
+)
+if _BATCH_SPEC is None or _BATCH_SPEC.loader is None:
+    raise ImportError("dispatch-batch.py could not be loaded")
+DISPATCH_BATCH = importlib.util.module_from_spec(_BATCH_SPEC)
+_BATCH_SPEC.loader.exec_module(DISPATCH_BATCH)  # type: ignore[union-attr]
 
 
 def continuation_metrics(session_count: int) -> dict[str, int]:
@@ -98,6 +110,52 @@ LAUNCH_PHASE_BY_ACTION = {
 }
 
 
+def _run_parallel_subdivision(
+    route_record: dict, node: dict, args: argparse.Namespace, *, jobs: Path
+) -> int:
+    """SD-119 R4: `mode == "parallel"` routes to the dedicated sub-session batch
+    admission surface instead of raising `parallel-subsession-use-dispatch-batch`
+    -- that redirect described a mechanism (route-leg `dispatch-batch` groups)
+    this manifest was never eligible for (SD-119 (1)); the fix is to route to
+    the surface that is actually reachable, not to keep the dead-end typed."""
+
+    agent_home = ROOT
+    artifact_root = Path(
+        os.environ.get("AGENT_ARTIFACT_ROOT", str(agent_home / ".agent_reports"))
+    )
+    governor = ROOT / "utilities" / "model-worker-governor.py"
+    governor_root = resolve_model_governor_root(artifact_root)
+    try:
+        admission = SUBDIVISION_ADMISSION.admit_batch(
+            route=route_record, node=node, manifest_path=args.manifest,
+            governor=governor, governor_root=governor_root,
+            reserve=DISPATCH_BATCH.reserve_batch,
+        )
+    except SUBDIVISION_ADMISSION.SubdivisionAdmissionError as exc:
+        print(json.dumps({
+            "schema_version": 1, "state": "subdivision-batch-refused",
+            "chain_id": None, "reason": exc.reason,
+            "admitted_rows": 0, "admitted_models": 0,
+        }, sort_keys=True))
+        return 65
+    if args.action == "register":
+        print(f"chain_id={admission.manifest['chain_id']}")
+        print(f"registered_sessions={len(admission.sessions)}")
+        return 0
+    results = SUBDIVISION_ADMISSION.start_admitted_batch(
+        admission, parent=args.parent, jobs=jobs,
+        governor_reservation_env=GOVERNOR_RESERVATION_ENV,
+    )
+    print(f"chain_id={admission.manifest['chain_id']}")
+    print(f"chain_manifest_sha256={admission.manifest_digest}")
+    print(f"registered_sessions={len(admission.sessions)}")
+    print(f"registered={sum(1 for row in results if row.get('registered'))}")
+    print(f"started={sum(1 for row in results if row.get('started'))}")
+    print(f"child_spawned={sum(1 for row in results if row.get('started'))}")
+    print("runtime_wait=registered-children")
+    return 0 if all(row.get("started") for row in results) else 1
+
+
 def main() -> int:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("action", choices=("check", "register", "start"))
@@ -131,7 +189,7 @@ def main() -> int:
             return 0
         args.jobs = resolve_global_registry(ROOT, args.jobs, 2, args.action).path
         if manifest["mode"] != "serial":
-            raise StageSessionError("parallel-subsession-use-dispatch-batch")
+            return _run_parallel_subdivision(route_record, node, args, jobs=Path(args.jobs))
         for session in manifest["sessions"]:
             result = run_checked(
                 dispatch_command(manifest, session, "register", args.parent, args.jobs)

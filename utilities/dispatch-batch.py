@@ -53,6 +53,7 @@ from dispatch_allocation import (  # noqa: E402
     STRATEGY as ALLOCATION_STRATEGY,
     attempt_counts,
 )
+import subdivision_batch_admission as SUBDIVISION_ADMISSION  # noqa: E402
 
 CAPACITY_SPEC = importlib.util.spec_from_file_location(
     "harness_capacity", ROOT / "utilities" / "harness-capacity.py"
@@ -1717,6 +1718,72 @@ def _record_failed_legs(route, results, agent_home):
     return paths[-1] if paths else None
 
 
+def _run_subdivision_batch_admission(args: argparse.Namespace, route: dict[str, object]) -> int:
+    """SD-119 R4: dedicated admission surface for a node with no `parallel_group`
+    membership (`SUBDIVISION_ADMISSION.has_route_leg_group` is false). Deliberately
+    does not call `parallel_nodes` (A-1) -- the whole point is that the sole
+    subdivision-permitted node never has 2..4 realized legs to find there.
+    """
+
+    node = SUBDIVISION_ADMISSION.route_node(route, args.parallel_group)
+    agent_home = resolve_agent_home()
+    jobs = resolve_global_registry(
+        agent_home,
+        str(args.jobs) if args.jobs else os.environ.get("AGENT_DISPATCH_JOBS"),
+        2,
+        args.action,
+    ).path
+    self_slug = os.environ.get("AGENT_DISPATCH_SELF_SLUG", "")
+    parent_attempt = os.environ.get("AGENT_DISPATCH_ATTEMPT_ID", "")
+    if not self_slug or args.parent != self_slug or not parent_attempt:
+        raise BatchError("parent-identity-mismatch", f"parent={args.parent} self={self_slug or '-'}")
+    artifact_root = Path(
+        os.environ.get("AGENT_ARTIFACT_ROOT", str(agent_home / ".agent_reports"))
+    )
+    governor = ROOT / "utilities" / "model-worker-governor.py"
+    governor_root = resolve_model_governor_root(artifact_root)
+    try:
+        admission = SUBDIVISION_ADMISSION.admit_batch(
+            route=route, node=node, manifest_path=args.subdivision_manifest,
+            governor=governor, governor_root=governor_root, reserve=reserve_batch,
+        )
+    except SUBDIVISION_ADMISSION.SubdivisionAdmissionError as exc:
+        print(json.dumps({
+            "schema_version": 1,
+            "state": "subdivision-batch-refused",
+            "action": args.action,
+            "parallel_group": args.parallel_group,
+            "reason": exc.reason,
+            "admitted_rows": 0,
+            "admitted_models": 0,
+        }, separators=(",", ":"), sort_keys=True))
+        return 0
+    if args.action == "dry-run":
+        print(json.dumps({
+            "schema_version": 1,
+            "state": "subdivision-batch-admitted",
+            "action": args.action,
+            "parallel_group": args.parallel_group,
+            "reservation_identity": admission.reservation_identity,
+            "slice_count": len(admission.sessions),
+        }, separators=(",", ":"), sort_keys=True))
+        return 0
+    results = SUBDIVISION_ADMISSION.start_admitted_batch(
+        admission, parent=args.parent, jobs=jobs,
+        governor_reservation_env=GOVERNOR_RESERVATION_ENV,
+    )
+    print(json.dumps({
+        "schema_version": 1,
+        "state": "subdivision-batch-started",
+        "action": args.action,
+        "parallel_group": args.parallel_group,
+        "reservation_identity": admission.reservation_identity,
+        "slice_count": len(admission.sessions),
+        "sessions": results,
+    }, separators=(",", ":"), sort_keys=True))
+    return 0 if all(row.get("started") for row in results) else 1
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--route", type=Path, required=True)
@@ -1758,6 +1825,19 @@ def main(argv: list[str] | None = None) -> int:
     try:
         route_path = args.route.resolve()
         route = load_route(route_path, args.action)
+        if (
+            getattr(args, "subdivision_manifest", None)
+            and args.continuation is None
+            and not SUBDIVISION_ADMISSION.has_route_leg_group(route, args.parallel_group)
+        ):
+            # SD-119 R4: the sole subdivision-permitted node (`execute`) never
+            # has 2..4 realized `parallel_group` legs (A-1), so `parallel_nodes`
+            # is never reached for this call -- the dedicated admission surface
+            # is the only path in. A manifest bound to an existing SD-89 group
+            # (has_route_leg_group true) keeps using the legacy path below
+            # unchanged, so `test_g7_subdivision_manifest_session_count_must_
+            # match_group_width` and friends see no behavior change.
+            return _run_subdivision_batch_admission(args, route)
         nodes = parallel_nodes(route, args.parallel_group)
         if args.continuation is not None:
             continuation_record, partial = load_partial_continuation(
