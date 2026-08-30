@@ -17,6 +17,7 @@ from stage_session_contract import StageSessionError, load_manifest  # noqa: E40
 from dispatch_contract import (  # noqa: E402
     DispatchContractError,
     GOVERNOR_RESERVATION_ENV,
+    close_attempt_row,
     resolve_global_registry,
     resolve_model_governor_root,
 )
@@ -255,14 +256,40 @@ def main() -> int:
         args.jobs = resolve_global_registry(ROOT, args.jobs, 2, args.action).path
         if manifest["mode"] != "serial":
             return _run_parallel_subdivision(route_record, node, args, jobs=Path(args.jobs))
+        # SD-119 A-5 strengthening (plan WP5): the serial register loop must
+        # be all-or-nothing like the parallel path already is
+        # (`_run_parallel_subdivision` above) -- a mid-loop register failure
+        # used to leave the already-registered rows live in the registry with
+        # no rollback. Cancel every row registered so far and print the same
+        # typed refusal envelope the parallel path prints, reusing
+        # `BATCH_REGISTRATION_INCOMPLETE` rather than a new reason.
+        registered_attempt_ids: list[str] = []
         for session in manifest["sessions"]:
             result = run_checked(
                 dispatch_command(manifest, session, "register", args.parent, args.jobs)
             )
             if result.returncode:
-                print(result.stdout, end="")
+                cancelled = 0
+                for attempt_id in registered_attempt_ids:
+                    try:
+                        if close_attempt_row(
+                            Path(args.jobs), attempt_id,
+                            SUBDIVISION_ADMISSION.BATCH_REGISTRATION_INCOMPLETE,
+                        ):
+                            cancelled += 1
+                    except (DispatchContractError, OSError):
+                        pass
+                print(json.dumps({
+                    "schema_version": 1, "state": "subdivision-batch-refused",
+                    "chain_id": manifest["chain_id"],
+                    "reason": SUBDIVISION_ADMISSION.BATCH_REGISTRATION_INCOMPLETE,
+                    "admitted_rows": 0, "admitted_models": 0,
+                    "cancelled_rows": cancelled,
+                }, sort_keys=True))
+                print(result.stdout, end="", file=sys.stderr)
                 print(result.stderr, end="", file=sys.stderr)
-                return result.returncode
+                return 65
+            registered_attempt_ids.append(session["attempt_id"])
         persist_chain_manifest(Path(args.jobs), manifest)
         if args.action == "register":
             print(f"chain_id={manifest['chain_id']}")

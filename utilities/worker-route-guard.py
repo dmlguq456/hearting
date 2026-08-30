@@ -15,6 +15,8 @@ SPEC = importlib.util.spec_from_file_location("capability_route", ROOT / "utilit
 ROUTE = importlib.util.module_from_spec(SPEC); SPEC.loader.exec_module(ROUTE)
 FALLBACK_SPEC = importlib.util.spec_from_file_location("stage_dispatch_fallback", ROOT / "utilities" / "stage-dispatch-fallback.py")
 FALLBACK = importlib.util.module_from_spec(FALLBACK_SPEC); FALLBACK_SPEC.loader.exec_module(FALLBACK)
+sys.path.insert(0, str(ROOT / "utilities"))
+from dispatch_completion_join import SUCCESS_NOTES as COMPLETION_JOIN_SUCCESS_NOTES
 
 
 class WorkerRouteError(ValueError):
@@ -142,7 +144,7 @@ def _qualifying_subsession_lineage(
         and row.get("stage_authority") in {"0", "false"}
         and row.get("_status") == "done"
         and row.get("failure_class") == "pass"
-        and row.get("note") == "completed-supervisor"
+        and row.get("note") in COMPLETION_JOIN_SUCCESS_NOTES
         and row.get("subsession_count") == current.get("subsession_count")
         and str(row.get("subsession_index", "")).isdigit()
         and int(row["subsession_index"]) == current_index - 1
