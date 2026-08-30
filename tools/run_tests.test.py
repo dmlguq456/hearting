@@ -509,9 +509,10 @@ class RetryBudgetFixture(RunTestsFixtureBase):
         ]
 
     def test_exhausted_budget_is_recorded_and_skips_remaining_retries(self):
-        self.write_slow_flaky_suite(1.0)
+        self.write_slow_flaky_suite(0.5)
         result, rows = self.run_fixture(
-            self.baseline(), extra_args=["--retries", "3", "--retry-budget", "1"]
+            self.baseline(),
+            extra_args=["--retries", "3", "--retry-budget", "1", "--timeout", "1"],
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("retry-budget-exhausted", rows[0]["detail"])
@@ -546,6 +547,71 @@ class RetryBudgetFixture(RunTestsFixtureBase):
         self.assertEqual(result.returncode, 0, result.stderr)
         # the whole-file aggregate row still names which test failed
         self.assertIn("failing=T.test_specific_thing", rows[0]["detail"])
+
+
+class ForeignFlakyRetryFixture(RunTestsFixtureBase):
+    """impl-review round 1 finding 1: the retry aggregation branch computes its
+    verdict directly instead of going through classify_result(), so it must
+    apply the same fingerprint filter or it becomes a way around P8."""
+
+    def test_foreign_flaky_row_cannot_make_a_failing_suite_known_fail(self):
+        write_suite(self.root, "flaky.test.py", "import sys\nsys.exit(1)\n")
+        rows = [
+            "flaky.test.py\t-\texit-nonzero\tisolated\t"
+            f"flaky-timing: intermittent\tMA-FP-RETRY\t{TOMORROW}\tforeign-host"
+        ]
+        result, report_rows = self.run_fixture(rows, extra_args=["--retries", "1"])
+        verdicts = [r["verdict"] for r in report_rows]
+        self.assertNotIn("KNOWN-FAIL", verdicts, report_rows)
+        self.assertNotIn("FLAKY-KNOWN-FAIL", verdicts, report_rows)
+        self.assertNotIn("BASELINE-FOREIGN", verdicts, report_rows)
+        self.assertEqual(verdicts, ["FAIL"], report_rows)
+        self.assertNotEqual(result.returncode, 0)
+
+
+class SeedBaselineGuardFixture(RunTestsFixtureBase):
+    """impl-review round 1 finding 2: a proposal must not be able to become the
+    contract by being written over it."""
+
+    def test_seeding_onto_the_configured_baseline_is_refused(self):
+        write_suite(self.root, "fails.test.py", "import sys\nsys.exit(1)\n")
+        baseline = write_baseline(self.root, [
+            f"other.test.py\t-\tassertion\tisolated\tfixture\tMA-KEEP\t{TOMORROW}\t",
+        ])
+        isolation = write_isolation_tsv(self.root, None)
+        before = baseline.read_bytes()
+        result = run_runner([
+            "--root", str(self.root), "--baseline", str(baseline),
+            "--isolation-tsv", str(isolation), "--isolation=isolated",
+            "--jobs", "1", "--timeout", "5", "--no-leak-sweep",
+            "--seed-baseline", str(baseline),
+        ])
+        self.assertEqual(result.returncode, 64, result.stdout + result.stderr)
+        self.assertEqual(baseline.read_bytes(), before)
+
+
+class RetryBudgetBoundFixture(RunTestsFixtureBase):
+    """impl-review round 1 finding 3: checking the budget only before an attempt
+    does not bound that attempt."""
+
+    def test_a_retry_attempt_cannot_outrun_the_remaining_budget(self):
+        write_suite(self.root, "slow.test.py", """
+            import time
+            time.sleep(60)
+        """)
+        rows = [
+            "slow.test.py\t-\ttimeout\tisolated\t"
+            f"flaky-timing: intermittent\tMA-BUDGET\t{TOMORROW}\t"
+        ]
+        started = time.time()
+        result, report_rows = self.run_fixture(
+            rows, extra_args=["--retries", "1", "--timeout", "20", "--retry-budget", "3"],
+        )
+        elapsed = time.time() - started
+        # The main pass costs the full 20s timeout; the retry must be clamped to
+        # the ~3s of budget left rather than running another 20s.
+        self.assertLess(elapsed, 35, f"{elapsed:.1f}s\n{result.stdout}")
+        self.assertIn("retry-budget-exhausted", report_rows[0]["detail"])
 
 
 class TimeoutDescendantReclaimFixture(RunTestsFixtureBase):

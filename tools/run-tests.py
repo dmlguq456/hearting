@@ -206,7 +206,7 @@ def fingerprint_inputs(env: dict[str, str], profile: str) -> dict:
     sandbox = "none"
     if env.get("HEARTING_REQUIRE_PIDNS") == "1":
         sandbox = "pidns"
-    elif shutil.which("bwrap"):
+    elif shutil.which("bwrap", path=env.get("PATH", "")):
         sandbox = "bwrap"
     return {
         "probes": probes,
@@ -1064,19 +1064,35 @@ def main(argv: list[str]) -> int:
         for suite in selected:
             rel = suite_relpath(root, suite)
             rows = [row for (sp, _), row in baseline.items() if sp == rel]
-            if not any(row["reason"].startswith("flaky-timing:") for row in rows):
+            # A foreign row cannot select a suite for retry aggregation either.
+            # The aggregate branch below computes its verdict directly instead
+            # of going through classify_result(), so without this filter it
+            # would be a side entrance around the P8 contract: a failing suite
+            # whose only row is foreign could come out KNOWN-FAIL.
+            if not any(
+                row["reason"].startswith("flaky-timing:")
+                and baseline_row_applicable(row, run_fingerprint)
+                for row in rows
+            ):
                 continue
             profile = profile_of[rel]
             extra: list[SuiteResult] = []
             for _ in range(args.retries):
-                if retry_spent >= retry_budget:
+                remaining = retry_budget - retry_spent
+                if remaining <= 0:
                     retry_budget_exhausted.add(rel)
                     break
+                # Checking the budget only *before* an attempt does not bound
+                # it: with 1s left and --timeout 600 the attempt could still
+                # run 600s. Clamp this attempt's timeout to what is left.
+                attempt_timeout = max(1, min(args.timeout, int(remaining)))
                 attempt_results = run_profile(
-                    [suite], root, profile, 1, args.timeout, install_prefix
+                    [suite], root, profile, 1, attempt_timeout, install_prefix
                 )
                 extra.extend(attempt_results)
                 retry_spent += sum(r.duration_s for r in attempt_results)
+                if attempt_timeout < args.timeout:
+                    retry_budget_exhausted.add(rel)
             results_by_suite[rel].extend(extra)
 
     # Undeclared/unneeded isolation opt-out detection: only for suites that
@@ -1151,7 +1167,12 @@ def main(argv: list[str]) -> int:
         needs_row = isolation_tsv.get(result.relpath)
         skip_leak = needs_row is not None and needs_row.get("needs") == "live-registry"
         attempt_results = results_by_suite.get(result.relpath, [result])
-        flaky_rows = [row for (sp, _), row in baseline.items() if sp == result.relpath and row["reason"].startswith("flaky-timing:")]
+        flaky_rows = [
+            row for (sp, _), row in baseline.items()
+            if sp == result.relpath
+            and row["reason"].startswith("flaky-timing:")
+            and baseline_row_applicable(row, run_fingerprint)
+        ]
         if args.retries and flaky_rows:
             # all_results contains the first attempt for each suite; the
             # retry attempts are retained in results_by_suite. Emit one
@@ -1256,6 +1277,13 @@ def main(argv: list[str]) -> int:
     if args.report:
         write_report(args.report, report_rows)
     if args.seed_baseline:
+        # The proposal must never become the contract by accident: writing it
+        # over the configured baseline would replace the whole row set with the
+        # current run's hard failures.
+        if args.seed_baseline.resolve() == args.baseline.resolve():
+            print("--seed-baseline must not target the configured --baseline",
+                  file=sys.stderr)
+            return 64
         seeded = write_seed_baseline(args.seed_baseline, report_rows, run_fingerprint, today)
         print(f"seed-baseline={args.seed_baseline} rows={seeded}")
 
