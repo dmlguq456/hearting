@@ -46,6 +46,7 @@ BASELINE_COLUMNS = [
     "reason",
     "defect_id",
     "review_by",
+    "fingerprint",
 ]
 ISOLATION_COLUMNS = ["suite_path", "needs", "reason", "defect_id", "review_by"]
 
@@ -166,6 +167,68 @@ def build_ci_like_env(tmpdir: Path, repo_root: Path) -> dict[str, str]:
     env["GIT_CONFIG_GLOBAL"] = str(gitconfig)
     env["HEARTING_ENV_LAYOUT"] = "github-runner"
     return env
+
+
+# ---------------------------------------------------------------------------
+# Environment fingerprint (MA-W1-011)
+# ---------------------------------------------------------------------------
+
+# A closed, declared probe list rather than "every binary on PATH". The full
+# name set is ~2100 entries here, dominated by system packages, so one
+# `apt upgrade` would change the hash and mark every baseline row foreign.
+# These are the names the corpus actually shells out to, plus the shells.
+FINGERPRINT_PROBE_BINARIES = (
+    "bash", "bwrap", "claude", "codex", "ffmpeg", "gh", "git", "jq", "lsof",
+    "node", "npm", "npx", "opencode", "python3", "sh", "sudo",
+)
+
+
+def fingerprint_inputs(env: dict[str, str], profile: str) -> dict:
+    """The four declared fingerprint axes.
+
+    Deliberately excluded: absolute paths, nproc, git/python versions, host
+    name, timestamps. Any of those makes the fingerprint a host identity, every
+    row foreign, and the baseline contract dead. --jobs and nproc are recorded
+    in the report header instead, where they inform timing analysis without
+    invalidating verdicts.
+    """
+    path = env.get("PATH", "")
+    directories = [d for d in path.split(os.pathsep) if d]
+    probes = {}
+    for name in FINGERPRINT_PROBE_BINARIES:
+        probes[name] = any(os.access(os.path.join(d, name), os.X_OK) for d in directories)
+    if profile == "ci-like":
+        layout = "github-runner"
+    elif profile == "installed-layout":
+        layout = "installed-release"
+    else:
+        layout = "synthetic"
+    sandbox = "none"
+    if env.get("HEARTING_REQUIRE_PIDNS") == "1":
+        sandbox = "pidns"
+    elif shutil.which("bwrap"):
+        sandbox = "bwrap"
+    return {
+        "probes": probes,
+        "sandbox": sandbox,
+        "home_layout": layout,
+        "os_family": f"{os.uname().sysname.lower()}-{'glibc' if sys.platform == 'linux' else 'unknown'}",
+    }
+
+
+def environment_fingerprint(env: dict[str, str], profile: str) -> str:
+    payload = json.dumps(fingerprint_inputs(env, profile), sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
+
+
+def baseline_row_applicable(row: dict, current_fingerprint: str) -> bool:
+    """Whether a baseline row may be applied under the current fingerprint.
+
+    An empty fingerprint means "unknown" and keeps the pre-fingerprint contract,
+    so rows recorded before this column existed behave exactly as before.
+    """
+    recorded = (row.get("fingerprint") or "").strip()
+    return recorded == "" or recorded == current_fingerprint
 
 
 TEMP_PARENT_UNPROVEN_EXIT = 70
@@ -548,23 +611,50 @@ def classify_result(
     result: SuiteResult,
     baseline: dict[tuple[str, str], dict[str, str]],
     today: str,
+    fingerprint: str = "",
 ) -> list[Verdict]:
-    """Classify a single suite execution into one or more per-test verdicts."""
+    """Classify a single suite execution into one or more per-test verdicts.
+
+    Fingerprint handling (MA-W1-011) is a row *applicability filter*, never a
+    verdict that preempts the failure paths. A foreign row simply cannot be
+    applied, so a failing suite matched only by foreign rows is treated exactly
+    as if it had no baseline row at all: an unlisted FAIL. BASELINE-FOREIGN is
+    produced only where the suite passed, replacing XPASS with a held verdict.
+    That asymmetry is the whole point -- the fingerprint must never be able to
+    turn a real failure green.
+    """
     suite_path = result.relpath
     verdicts: list[Verdict] = []
 
-    whole_file_entry = baseline.get((suite_path, "-"))
-    specific_entries = {
+    all_whole_file = baseline.get((suite_path, "-"))
+    all_specific = {
         test_id: row for (sp, test_id), row in baseline.items() if sp == suite_path and test_id != "-"
+    }
+    applicable = (lambda row: row is not None and baseline_row_applicable(row, fingerprint))
+    whole_file_entry = all_whole_file if applicable(all_whole_file) else None
+    specific_entries = {
+        test_id: row for test_id, row in all_specific.items() if applicable(row)
+    }
+    foreign_whole_file = all_whole_file is not None and whole_file_entry is None
+    foreign_specific = {
+        test_id for test_id, row in all_specific.items() if test_id not in specific_entries
     }
 
     if result.passed:
         # Suite passed outright. Any baseline entry for this suite is now
         # stale/unneeded — the list only shrinks (owner addendum / plan R4-Q3).
+        # A row recorded under a different environment cannot support that
+        # judgement, so it is held rather than reported as an unexpected pass.
         if whole_file_entry is not None:
             verdicts.append(Verdict(suite_path, "-", "XPASS"))
+        elif foreign_whole_file:
+            verdicts.append(Verdict(suite_path, "-", "BASELINE-FOREIGN",
+                                    detail="baseline row recorded under another environment"))
         for test_id, row in specific_entries.items():
             verdicts.append(Verdict(suite_path, test_id, "XPASS"))
+        for test_id in sorted(foreign_specific):
+            verdicts.append(Verdict(suite_path, test_id, "BASELINE-FOREIGN",
+                                    detail="baseline row recorded under another environment"))
         if not verdicts:
             verdicts.append(Verdict(suite_path, "-", "PASS"))
         return verdicts
@@ -578,12 +668,18 @@ def classify_result(
         # reporter format run_suite() cannot parse).
         row = whole_file_entry
         if row is None:
-            if specific_entries:
+            # A foreign row is diagnostically different from no row at all --
+            # same FAIL verdict, but --seed-baseline reads this token to propose
+            # a row stamped with the current fingerprint.
+            suffix = " (baseline-foreign)" if foreign_whole_file else ""
+            if specific_entries or foreign_specific:
                 # baseline expects specific tests but we only observed a
                 # whole-file failure signature: unlisted at whole-file grain.
-                verdicts.append(Verdict(suite_path, "-", "FAIL", detail="unlisted whole-file failure"))
+                verdicts.append(Verdict(suite_path, "-", "FAIL",
+                                        detail="unlisted whole-file failure" + suffix))
             else:
-                verdicts.append(Verdict(suite_path, "-", "FAIL", detail="unlisted failure"))
+                verdicts.append(Verdict(suite_path, "-", "FAIL",
+                                        detail="unlisted failure" + suffix))
             return verdicts
         if is_expired(row["review_by"], today):
             verdicts.append(Verdict(suite_path, "-", "EXPIRED"))
@@ -600,7 +696,11 @@ def classify_result(
     for test_id in failing_ids:
         row = specific_entries.get(test_id) or whole_file_entry
         if row is None:
-            verdicts.append(Verdict(suite_path, test_id, "FAIL", detail="unlisted failure"))
+            was_foreign = test_id in foreign_specific or foreign_whole_file
+            verdicts.append(Verdict(
+                suite_path, test_id, "FAIL",
+                detail="unlisted failure" + (" (baseline-foreign)" if was_foreign else ""),
+            ))
             continue
         if is_expired(row["review_by"], today):
             verdicts.append(Verdict(suite_path, test_id, "EXPIRED"))
@@ -651,6 +751,40 @@ def write_report(path: Path, rows: list[dict[str, str]]) -> None:
         fh.write("\t".join(REPORT_COLUMNS) + "\n")
         for row in rows:
             fh.write("\t".join(str(row.get(c, "")) for c in REPORT_COLUMNS) + "\n")
+
+
+SEED_VERDICTS = {"FAIL", "TIMEOUT", "ERROR", "EXPIRED", "KIND-MISMATCH"}
+
+
+def write_seed_baseline(path: Path, rows: list[dict[str, str]], fingerprint: str, today: str) -> int:
+    """Write a *proposed* baseline stamped with the current fingerprint.
+
+    This is an artifact for a human to review, never an automatic replacement
+    for the repository baseline: seeding a failure into the baseline is exactly
+    the move that hides a real defect, so the decision stays with a person.
+    """
+    review_by = f"{int(today[:4]) + 1}{today[4:]}"
+    proposed = []
+    for row in rows:
+        if row.get("verdict") not in SEED_VERDICTS:
+            continue
+        proposed.append({
+            "suite_path": row["suite_path"],
+            "test_id": row.get("test_id") or "-",
+            "expected_failure_kind": row.get("kind") or "assertion",
+            "isolation_profile": row.get("isolation_profile") or "isolated",
+            "reason": f"seed: {row.get('detail', '')}".strip()[:400] or "seed: observed failure",
+            "defect_id": "SEED-REVIEW",
+            "review_by": review_by,
+            "fingerprint": fingerprint,
+        })
+    with path.open("w", encoding="utf-8") as fh:
+        fh.write(f"# proposed baseline rows observed under fingerprint={fingerprint}\n")
+        fh.write("# review before adopting: a seeded row silences a real failure\n")
+        fh.write("\t".join(BASELINE_COLUMNS) + "\n")
+        for row in proposed:
+            fh.write("\t".join(row[c] for c in BASELINE_COLUMNS) + "\n")
+    return len(proposed)
 
 
 def read_report(path: Path) -> list[dict[str, str]]:
@@ -743,6 +877,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--isolation-tsv", type=Path, default=ROOT / "tools" / "test-isolation.tsv")
     p.add_argument("--no-leak-sweep", action="store_true", help="diagnostic only; never used in CI")
     p.add_argument("--compare-baseline", action="store_true")
+    p.add_argument("--fingerprint", action="store_true",
+                   help="print the current environment fingerprint and exit")
+    p.add_argument("--fingerprint-explain", action="store_true",
+                   help="print the fingerprint inputs as JSON and exit")
+    p.add_argument("--seed-baseline", type=Path, default=None,
+                   help="write a proposed baseline TSV stamped with the current "
+                        "fingerprint; never rewrites the repository baseline")
     p.add_argument("--base-report", type=Path)
     p.add_argument("--head-report", type=Path)
     return p
@@ -804,6 +945,25 @@ def main(argv: list[str]) -> int:
             print("--compare-baseline requires --base-report and --head-report", file=sys.stderr)
             return 64
         return compare_baseline(args.base_report, args.head_report)
+
+    # The fingerprint describes the environment suites will actually run in, so
+    # it is computed from a representative profile env rather than the caller's.
+    with tempfile.TemporaryDirectory(prefix="fingerprint-") as fp_tmp:
+        fp_root = Path(fp_tmp)
+        if args.isolation == "ci-like":
+            fp_env = build_ci_like_env(fp_root, args.root.resolve())
+        else:
+            fp_env = build_isolated_env(fp_root)
+        run_fingerprint = environment_fingerprint(fp_env, args.isolation)
+        fp_inputs = fingerprint_inputs(fp_env, args.isolation)
+
+    if args.fingerprint_explain:
+        print(json.dumps({"fingerprint": run_fingerprint, "inputs": fp_inputs},
+                         sort_keys=True, indent=2))
+        return 0
+    if args.fingerprint:
+        print(run_fingerprint)
+        return 0
 
     root = args.root.resolve()
     suites = collect_suites(root)
@@ -1029,7 +1189,7 @@ def main(argv: list[str]) -> int:
             verdict = "KIND-MISMATCH" if mismatch else ("XPASS" if all(x == "pass" for x in outcomes) else "KNOWN-FAIL" if all(x == "known-fail" for x in outcomes) else "FLAKY-KNOWN-FAIL")
             verdicts = [Verdict(result.relpath, "-", verdict, detail=detail)]
         else:
-            verdicts = classify_result(result, baseline, today)
+            verdicts = classify_result(result, baseline, today, run_fingerprint)
         for v in verdicts:
             verdict_counts[v.verdict] = verdict_counts.get(v.verdict, 0) + 1
             result_kind = classify_kind(result) if not result.passed else ""
@@ -1095,11 +1255,16 @@ def main(argv: list[str]) -> int:
 
     if args.report:
         write_report(args.report, report_rows)
+    if args.seed_baseline:
+        seeded = write_seed_baseline(args.seed_baseline, report_rows, run_fingerprint, today)
+        print(f"seed-baseline={args.seed_baseline} rows={seeded}")
 
     total = len(selected)
     print(f"collected={total}")
     print(f"env: jobs={args.jobs} nproc={os.cpu_count()} timeout={args.timeout} profile={explicit_profile}")
+    print(f"fingerprint={run_fingerprint}")
     for key in ("PASS", "FAIL", "ERROR", "TIMEOUT", "KNOWN-FAIL", "FLAKY-KNOWN-FAIL", "XPASS", "STALE", "EXPIRED", "KIND-MISMATCH",
+                "BASELINE-FOREIGN",
                 "UNDECLARED-ISOLATION-OPTOUT", "ISOLATION-OPTOUT-UNNEEDED"):
         if key in verdict_counts:
             print(f"{key}={verdict_counts[key]}")

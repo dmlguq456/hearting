@@ -57,8 +57,12 @@ def write_suite(root: Path, relpath: str, body: str) -> Path:
 
 def write_baseline(root: Path, rows: list[str]) -> Path:
     p = root / "test-baseline.tsv"
-    header = "suite_path\ttest_id\texpected_failure_kind\tisolation_profile\treason\tdefect_id\treview_by"
-    p.write_text("\n".join(["# baseline", header] + rows) + "\n", encoding="utf-8")
+    header = ("suite_path\ttest_id\texpected_failure_kind\tisolation_profile\t"
+              "reason\tdefect_id\treview_by\tfingerprint")
+    # Fixture rows are written with the pre-fingerprint column count; pad them
+    # so each caller does not have to carry a trailing tab.
+    padded = [r if r.count("\t") >= 7 else r + "\t" for r in rows]
+    p.write_text("\n".join(["# baseline", header] + padded) + "\n", encoding="utf-8")
     return p
 
 
@@ -576,6 +580,168 @@ class TimeoutDescendantReclaimFixture(RunTestsFixtureBase):
             os.kill(grandchild_pid, 9)
             self.fail(f"grandchild {grandchild_pid} survived the suite timeout")
         _ = result
+
+
+class FingerprintFixture(unittest.TestCase):
+    """P8/MA-W1-011: the fingerprint decides whether a baseline row may be
+    applied. It is never a verdict that can preempt a failure."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.mod = load_runner_module()
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_fingerprint_is_deterministic_for_one_environment(self):
+        env = self.mod.build_isolated_env(self.root / "a")
+        first = self.mod.environment_fingerprint(env, "isolated")
+        second = self.mod.environment_fingerprint(env, "isolated")
+        self.assertEqual(first, second)
+        self.assertEqual(len(first), 16)
+
+    def test_profiles_with_different_environments_differ(self):
+        isolated = self.mod.environment_fingerprint(
+            self.mod.build_isolated_env(self.root / "iso"), "isolated"
+        )
+        ci_like = self.mod.environment_fingerprint(
+            self.mod.build_ci_like_env(self.root / "ci", self.root), "ci-like"
+        )
+        self.assertNotEqual(isolated, ci_like)
+
+    def test_empty_fingerprint_is_unknown_and_keeps_the_old_contract(self):
+        self.assertTrue(self.mod.baseline_row_applicable({"fingerprint": ""}, "abc123"))
+        self.assertTrue(self.mod.baseline_row_applicable({}, "abc123"))
+        self.assertTrue(self.mod.baseline_row_applicable({"fingerprint": "abc123"}, "abc123"))
+        self.assertFalse(self.mod.baseline_row_applicable({"fingerprint": "other"}, "abc123"))
+
+    # --- the six-row verdict table (plan P8) -------------------------------
+
+    def _baseline(self, *, kind="assertion", review_by=None, fingerprint="host-a", test_id="-"):
+        review_by = review_by or TOMORROW
+        return {
+            ("s.test.py", test_id): {
+                "suite_path": "s.test.py", "test_id": test_id,
+                "expected_failure_kind": kind, "isolation_profile": "isolated",
+                "reason": "fixture", "defect_id": "MA-FP", "review_by": review_by,
+                "fingerprint": fingerprint,
+            }
+        }
+
+    def _result(self, passed=True):
+        mod = self.mod
+        stderr = "" if passed else "AssertionError: boom\nFAILED (failures=1)\n"
+        return mod.SuiteResult("s.test.py", 0 if passed else 1, False, "", stderr, 0.1, "isolated")
+
+    def test_row1_foreign_pass_is_held_not_reported_as_xpass(self):
+        verdicts = self.mod.classify_result(
+            self._result(passed=True), self._baseline(), TODAY, "host-b"
+        )
+        self.assertEqual([v.verdict for v in verdicts], ["BASELINE-FOREIGN"])
+        self.assertNotIn("BASELINE-FOREIGN", self.mod.HARD_FAIL_VERDICTS)
+
+    def test_row2_unlisted_failure_is_unchanged_by_the_fingerprint(self):
+        verdicts = self.mod.classify_result(self._result(passed=False), {}, TODAY, "host-b")
+        self.assertEqual([v.verdict for v in verdicts], ["FAIL"])
+        self.assertNotIn("baseline-foreign", verdicts[0].detail)
+
+    def test_row3_foreign_expired_row_stays_a_hard_failure(self):
+        verdicts = self.mod.classify_result(
+            self._result(passed=False),
+            self._baseline(review_by=YESTERDAY), TODAY, "host-b",
+        )
+        self.assertEqual([v.verdict for v in verdicts], ["FAIL"])
+        self.assertIn("baseline-foreign", verdicts[0].detail)
+        self.assertIn(verdicts[0].verdict, self.mod.HARD_FAIL_VERDICTS)
+
+    def test_row4_foreign_kind_mismatch_row_stays_a_hard_failure(self):
+        verdicts = self.mod.classify_result(
+            self._result(passed=False), self._baseline(kind="timeout"), TODAY, "host-b",
+        )
+        self.assertEqual([v.verdict for v in verdicts], ["FAIL"])
+        self.assertIn("baseline-foreign", verdicts[0].detail)
+        self.assertIn(verdicts[0].verdict, self.mod.HARD_FAIL_VERDICTS)
+
+    def test_row5_stale_is_a_corpus_judgement_and_ignores_the_fingerprint(self):
+        # STALE says "this baseline row points at a suite that no longer
+        # exists", which is true regardless of where the row was recorded.
+        # Exempting it by fingerprint would keep dead rows alive forever.
+        write_suite(self.root, "live.test.py", "import sys\nsys.exit(0)\n")
+        baseline = write_baseline(self.root, [
+            f"gone.test.py\t-\tassertion\tisolated\tfixture\tMA-FP\t{TOMORROW}\thost-a",
+        ])
+        isolation = write_isolation_tsv(self.root, None)
+        report = self.root / "r.tsv"
+        result = run_runner([
+            "--root", str(self.root), "--baseline", str(baseline),
+            "--isolation-tsv", str(isolation), "--isolation=isolated",
+            "--jobs", "1", "--timeout", "5", "--no-leak-sweep",
+            "--report", str(report),
+        ])
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("STALE=1", result.stdout)
+
+    def test_row6_foreign_known_fail_becomes_a_hard_failure(self):
+        # The most important row: under the rejected preempt-first design this
+        # silently became a non-hard-fail, so a genuine CI assertion failure
+        # would have disappeared behind the fingerprint.
+        verdicts = self.mod.classify_result(
+            self._result(passed=False), self._baseline(), TODAY, "host-b",
+        )
+        self.assertEqual([v.verdict for v in verdicts], ["FAIL"])
+        self.assertIn(verdicts[0].verdict, self.mod.HARD_FAIL_VERDICTS)
+        # and with a matching fingerprint the row still applies normally
+        matching = self.mod.classify_result(
+            self._result(passed=False), self._baseline(), TODAY, "host-a",
+        )
+        self.assertEqual([v.verdict for v in matching], ["KNOWN-FAIL"])
+
+    def test_invariant_a_failing_run_never_yields_baseline_foreign(self):
+        # The mechanical definition of "the fingerprint cannot turn a failure
+        # green": no failing execution, under any baseline combination, may
+        # produce BASELINE-FOREIGN.
+        combos = [
+            {},
+            self._baseline(),
+            self._baseline(kind="timeout"),
+            self._baseline(review_by=YESTERDAY),
+            self._baseline(fingerprint=""),
+            self._baseline(test_id="T.test_a"),
+            {**self._baseline(), **self._baseline(test_id="T.test_a")},
+        ]
+        for fingerprint in ("host-a", "host-b", ""):
+            for baseline in combos:
+                verdicts = self.mod.classify_result(
+                    self._result(passed=False), baseline, TODAY, fingerprint
+                )
+                self.assertTrue(
+                    all(v.verdict != "BASELINE-FOREIGN" for v in verdicts),
+                    (fingerprint, baseline, [v.verdict for v in verdicts]),
+                )
+
+    def test_seed_baseline_writes_a_proposal_stamped_with_the_fingerprint(self):
+        write_suite(self.root, "fails.test.py", "import sys\nsys.exit(1)\n")
+        baseline = write_baseline(self.root, [])
+        isolation = write_isolation_tsv(self.root, None)
+        seed = self.root / "seed.tsv"
+        result = run_runner([
+            "--root", str(self.root), "--baseline", str(baseline),
+            "--isolation-tsv", str(isolation), "--isolation=isolated",
+            "--jobs", "1", "--timeout", "5", "--no-leak-sweep",
+            "--seed-baseline", str(seed),
+        ])
+        self.assertNotEqual(result.returncode, 0)
+        self.assertTrue(seed.is_file())
+        lines = [l for l in seed.read_text().splitlines() if l and not l.startswith("#")]
+        header, *rows = lines
+        self.assertEqual(header.split("\t"), self.mod.BASELINE_COLUMNS)
+        self.assertTrue(rows, seed.read_text())
+        stamped = dict(zip(self.mod.BASELINE_COLUMNS, rows[0].split("\t")))
+        self.assertEqual(stamped["suite_path"], "fails.test.py")
+        self.assertEqual(len(stamped["fingerprint"]), 16)
+        # the repository baseline is never rewritten by seeding
+        self.assertEqual(baseline.read_text().count("fails.test.py"), 0)
 
 
 class TempParentProbeFixture(unittest.TestCase):

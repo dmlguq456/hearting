@@ -211,7 +211,7 @@ class CodexNamespaceE2E(unittest.TestCase):
             # resolve_dispatch_state_root() picks its root from explicit jobs ->
             # AGENT_DISPATCH_JOBS -> a per-user fallback, so dropping the variable
             # here sent the two calls to structurally different roots: the markers
-            # landed, and --start still reported completion-marker-missing. Bind
+            # landed, and --start still reported every dependency as absent. Bind
             # both to the same fixture registry and state home.
             fixture_env["AGENT_DISPATCH_JOBS"] = str(jobs)
             fixture_env["XDG_STATE_HOME"] = str(base / "state")
