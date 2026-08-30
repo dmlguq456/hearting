@@ -93,15 +93,33 @@ def _validate_profile_path(path: Path) -> None:
     if path.is_symlink() or (path.exists() and not path.is_file()):
         raise CodexLauncherError(f"unsafe shell profile: {path}")
     current = path.parent
+    creation_anchor_checked = False
     while True:
         if current.is_symlink():
             raise CodexLauncherError(f"unsafe shell profile parent: {current}")
         if current.exists():
             info = current.stat()
             shared_temp = stat.S_ISDIR(info.st_mode) and bool(info.st_mode & stat.S_ISVTX) and os.access(current, os.W_OK)
-            writable_parent = current != path.parent or os.access(current, os.W_OK)
             system_root = current == current.parent
-            if not stat.S_ISDIR(info.st_mode) or ((info.st_uid != os.geteuid()) and not shared_temp and not system_root) or not writable_parent:
+            if not stat.S_ISDIR(info.st_mode):
+                raise CodexLauncherError(f"shell profile parent is not owner-writable: {current}")
+            if not creation_anchor_checked:
+                # The nearest existing ancestor is where mkdir/write starts.
+                # It must be writable by this user and either user-owned or a
+                # sticky shared-temp directory.  Higher immutable system
+                # ancestors such as /home and /var are trusted boundaries,
+                # not profile-owned directories.
+                if not os.access(current, os.W_OK) or (
+                    info.st_uid != os.geteuid() and not shared_temp
+                ):
+                    raise CodexLauncherError(f"shell profile parent is not owner-writable: {current}")
+                creation_anchor_checked = True
+            elif (
+                not system_root
+                and info.st_uid != os.geteuid()
+                and not shared_temp
+                and os.access(current, os.W_OK)
+            ):
                 raise CodexLauncherError(f"shell profile parent is not owner-writable: {current}")
         if current.parent == current:
             break

@@ -10,6 +10,7 @@ import sys
 import tempfile
 import threading
 import time
+from types import SimpleNamespace
 import unittest
 from unittest import mock
 
@@ -246,6 +247,41 @@ class CodexLauncherInstallTest(unittest.TestCase):
             )
         self.assertEqual(again["status"], "unchanged")
         self.assertEqual(profile.read_bytes(), after)
+
+    @unittest.skipUnless(
+        os.name == "posix" and Path("/var/tmp").is_dir() and os.access("/var/tmp", os.W_OK),
+        "requires a writable POSIX sticky-temp hierarchy",
+    )
+    def test_profile_validation_allows_immutable_system_ancestors(self) -> None:
+        # The full-suite runner deliberately places isolated homes below
+        # /var/tmp.  /var is root-owned and non-writable, which is a safe
+        # immutable ancestor rather than a reason to reject the user-owned
+        # profile subtree below the sticky shared-temp boundary.
+        with tempfile.TemporaryDirectory(dir="/var/tmp") as temporary:
+            profile = Path(temporary) / "home" / ".bashrc"
+            profile.parent.mkdir()
+            launcher._validate_profile_path(profile)
+
+    def test_profile_validation_rejects_foreign_writable_ancestor(self) -> None:
+        foreign = self.root / "foreign-writable"
+        owned = foreign / "owned"
+        owned.mkdir(parents=True)
+        foreign.chmod(0o777)
+        profile = owned / ".bashrc"
+        real_stat = Path.stat
+
+        def stat_with_foreign_owner(candidate: Path, *args, **kwargs):
+            info = real_stat(candidate, *args, **kwargs)
+            if candidate == foreign:
+                return SimpleNamespace(st_mode=info.st_mode, st_uid=os.geteuid() + 1)
+            return info
+
+        with mock.patch.object(Path, "stat", new=stat_with_foreign_owner):
+            with self.assertRaisesRegex(
+                launcher.CodexLauncherError,
+                "shell profile parent is not owner-writable",
+            ):
+                launcher._validate_profile_path(profile)
 
     def test_deny_profile_never_mutates_profile(self) -> None:
         profile = self.home / ".bashrc"
