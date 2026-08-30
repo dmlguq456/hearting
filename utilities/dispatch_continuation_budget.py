@@ -94,6 +94,38 @@ def resolve_continuation_budget(
             or Path(raw_cwd).resolve() != Path(expected_cwd).resolve()
         ):
             return ContinuationBudget(COMPATIBILITY_FLOOR, "compatibility-floor")
+    # SD-116 WP4 (D47-9): block first, current derivation second, floor last.
+    # The block was sealed into `route_hash` at compile time (WP1/WP4), so
+    # its integrity is already proven by the hash checks above -- no extra
+    # cross-check against `nodes`/`resume_retry_boundaries` is needed here.
+    sealed_block = route.get("continuation_budget")
+    if isinstance(sealed_block, dict) and sealed_block.get("contract_version") == 1:
+        block_ordinary = sealed_block.get("ordinary")
+        block_reserved = sealed_block.get("reserved")
+        block_limit = sealed_block.get("limit")
+        block_declared_nodes = sealed_block.get("declared_nodes")
+        if (
+            isinstance(block_ordinary, int) and not isinstance(block_ordinary, bool)
+            and isinstance(block_reserved, int) and not isinstance(block_reserved, bool)
+            and isinstance(block_limit, int) and not isinstance(block_limit, bool)
+            and isinstance(block_declared_nodes, int) and not isinstance(block_declared_nodes, bool)
+            and block_ordinary >= COMPATIBILITY_FLOOR
+            and block_reserved >= 1
+            and block_limit == block_ordinary + block_reserved
+            and block_declared_nodes >= 0
+        ):
+            return ContinuationBudget(
+                block_ordinary,
+                "sealed-block",
+                declared_nodes=block_declared_nodes,
+                retry_slots=(
+                    sealed_block.get("retry_slots")
+                    if isinstance(sealed_block.get("retry_slots"), int)
+                    and not isinstance(sealed_block.get("retry_slots"), bool)
+                    else 0
+                ),
+                reserved=block_reserved,
+            )
     nodes = route.get("nodes")
     boundaries = route.get("resume_retry_boundaries")
     if not isinstance(nodes, list) or not isinstance(boundaries, list):

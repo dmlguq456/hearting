@@ -12,6 +12,7 @@ from dispatch_contract import (
     resolve_global_registry,
 )
 from worker_bootstrap import assigned_contract, worker_type_for_kind
+import review_round_cap as REVIEW_ROUND_CAP
 
 _route_spec = importlib.util.spec_from_file_location(
     "capability_route", ROOT / "utilities" / "capability-route.py"
@@ -324,22 +325,7 @@ ROUND_CAPPED_NODE_IDS = frozenset({
     "test",
 })
 
-def max_review_rounds(effective_intensity):
-    """Tier-derived max round count for a capped anchor (CONVENTIONS §1.1 retry budget).
-
-    `direct`/`quick` run no automatic correction round (max 1: the first pass
-    only, matching the table's "One pass"/"None automatically"). `standard`/`strong`
-    get one correction (max 2). `thorough`/`adversarial` get two, including the
-    adversary pass that is not itself a correction (max 3). This is deliberately a
-    per-tier derivation, not a hardcoded `cap=2` -- a tier change moves the cap with it.
-    """
-    if effective_intensity in ("direct", "quick"):
-        return 1
-    if effective_intensity in ("standard", "strong"):
-        return 2
-    if effective_intensity in ("thorough", "adversarial"):
-        return 3
-    raise ValueError(f"unknown effective_intensity for review round cap: {effective_intensity}")
+max_review_rounds = REVIEW_ROUND_CAP.max_review_rounds
 
 def round_protocol_block(round_no, worker_type, node_id, prior):
  """Render the assignment block that scopes a correction round."""

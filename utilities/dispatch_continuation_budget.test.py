@@ -220,5 +220,117 @@ class RouteIdentityHashRegressionTest(unittest.TestCase):
         self.assertEqual("compatibility-floor", budget.source)
 
 
+class SealedBudgetBlockTest(unittest.TestCase):
+    """SD-116 WP4 (D47-9, SD-116 (a)): a compiled `continuation_budget`
+    block takes priority over the legacy nodes+retry-boundaries derivation."""
+
+    def _sealed_route(self, block):
+        value = {
+            "schema_version": 2,
+            "nodes": [{"id": "node-0"}],
+            "resume_retry_boundaries": [],
+            "continuation_budget": block,
+        }
+        import route_identity as RI
+        digest = RI.route_hash(value)
+        value["route_hash"] = digest
+        value["route_id"] = RI.route_id_from_hash(digest)
+        return value
+
+    def test_sealed_block_route_resolves_with_source_sealed_block_and_block_values(self):
+        block = {
+            "contract_version": 1, "declared_nodes": 20, "review_round_cap": 2,
+            "gap": 1, "retry": 1, "reserved": 1, "ordinary": 22, "limit": 23,
+        }
+        with tempfile.TemporaryDirectory() as raw:
+            route = Path(raw) / "route.json"
+            value = self._sealed_route(block)
+            route.write_text(json.dumps(value), encoding="utf-8")
+            budget = MODULE.resolve_continuation_budget(
+                route_file=route, route_id=value["route_id"], route_hash=value["route_hash"],
+            )
+        self.assertEqual("sealed-block", budget.source)
+        self.assertEqual(22, budget.ordinary)
+        self.assertEqual(23, budget.limit)
+        self.assertEqual(20, budget.declared_nodes)
+        self.assertEqual(1, budget.reserved)
+
+    def test_invariant_holds_across_all_three_sources(self):
+        # D47-9: limit == ordinary + reserved, and ordinary >= COMPATIBILITY_FLOOR,
+        # on the sealed-block path, the legacy bound-route path, and the floor.
+        sealed_block = {
+            "contract_version": 1, "declared_nodes": 5, "review_round_cap": 2,
+            "gap": 1, "retry": 1, "reserved": 1, "ordinary": 30, "limit": 31,
+        }
+        with tempfile.TemporaryDirectory() as raw:
+            route = Path(raw) / "route.json"
+            value = self._sealed_route(sealed_block)
+            route.write_text(json.dumps(value), encoding="utf-8")
+            sealed = MODULE.resolve_continuation_budget(
+                route_file=route, route_id=value["route_id"], route_hash=value["route_hash"],
+            )
+        self.assertEqual(sealed.limit, sealed.ordinary + sealed.reserved)
+        self.assertGreaterEqual(sealed.ordinary, MODULE.COMPATIBILITY_FLOOR)
+
+        with tempfile.TemporaryDirectory() as raw:
+            route = Path(raw) / "route.json"
+            bound_value = {
+                "schema_version": 2,
+                "nodes": [{"id": f"node-{index}"} for index in range(3)],
+                "resume_retry_boundaries": [],
+            }
+            import route_identity as RI
+            digest = RI.route_hash(bound_value)
+            bound_value["route_hash"] = digest
+            bound_value["route_id"] = RI.route_id_from_hash(digest)
+            route.write_text(json.dumps(bound_value), encoding="utf-8")
+            bound = MODULE.resolve_continuation_budget(
+                route_file=route, route_id=bound_value["route_id"], route_hash=bound_value["route_hash"],
+            )
+        self.assertEqual("bound-route", bound.source)
+        self.assertEqual(bound.limit, bound.ordinary + bound.reserved)
+        self.assertGreaterEqual(bound.ordinary, MODULE.COMPATIBILITY_FLOOR)
+
+        floor = MODULE.resolve_continuation_budget(route_file=None, route_id="", route_hash="")
+        self.assertEqual(floor.limit, floor.ordinary + floor.reserved)
+        self.assertGreaterEqual(floor.ordinary, MODULE.COMPATIBILITY_FLOOR)
+
+    def test_malformed_sealed_block_falls_through_to_legacy_derivation_not_floor(self):
+        # A malformed block (limit != ordinary+reserved) is ignored rather
+        # than trusted -- but the route itself is otherwise well-formed, so
+        # it still resolves via the legacy nodes+retry-boundaries path.
+        malformed = {
+            "contract_version": 1, "declared_nodes": 1, "review_round_cap": 2,
+            "gap": 1, "retry": 1, "reserved": 1, "ordinary": 5, "limit": 999,
+        }
+        with tempfile.TemporaryDirectory() as raw:
+            route = Path(raw) / "route.json"
+            value = self._sealed_route(malformed)
+            route.write_text(json.dumps(value), encoding="utf-8")
+            budget = MODULE.resolve_continuation_budget(
+                route_file=route, route_id=value["route_id"], route_hash=value["route_hash"],
+            )
+        self.assertEqual("bound-route", budget.source)
+
+    def test_d47_6_floor_path_still_keeps_reserved_remaining_at_least_one(self):
+        budget = MODULE.resolve_continuation_budget(route_file=None, route_id="", route_hash="")
+        self.assertEqual("compatibility-floor", budget.source)
+        ledger = MODULE.ContinuationLedger(budget)
+        self.assertGreaterEqual(ledger.reserved_remaining, 1)
+        terminal = ledger.admit(purpose="terminal-handoff", stalled=False, reservation_ok=True)
+        self.assertTrue(terminal.admitted)
+
+    def test_d47_7_unavailable_budget_state_admits_nothing_new(self):
+        budget = MODULE.ContinuationBudget(limit=3, source="test")
+        ledger = MODULE.ContinuationLedger(budget)
+        ledger._gross_remaining = -1
+        verdict = ledger.admit(purpose="ordinary", stalled=False, reservation_ok=True)
+        self.assertFalse(verdict.admitted)
+        self.assertEqual("continuation-budget-unavailable", verdict.refusal)
+        verdict2 = ledger.admit(purpose="ordinary", stalled=False, reservation_ok=False)
+        self.assertFalse(verdict2.admitted)
+        self.assertEqual("continuation-budget-unavailable", verdict2.refusal)
+
+
 if __name__ == "__main__":
     unittest.main()
