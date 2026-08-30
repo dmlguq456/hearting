@@ -52,6 +52,7 @@ from dispatch_continuation_budget import (
 )
 import dispatch_budget_record as budget_record
 import dispatch_stage_advance as stage_advance
+import dispatch_subsession_advance as subsession_advance
 from dispatch_supervisor_terminal import (
     SupervisorTerminal,
     classify_claude_result,
@@ -1394,6 +1395,28 @@ def main(argv: list[str] | None = None) -> int:
                     Path(args.jobs), args.parent_attempt_id, new_attempts
                 )
                 joined = {row.attempt_id: row for row in joined_rows}
+                # SD-119: an unfinished serial sub-session chain advances
+                # entirely in-process here -- zero model turns, zero
+                # continuation spend -- until it completes (falls through
+                # below using the LAST child's joined_rows/receipt) or this
+                # round's join carries no chain metadata (no-op, byte-identical).
+                while True:
+                    next_id = subsession_advance.coordinate_chain_advance_from_joined_rows(
+                        Path(args.jobs), args.parent_attempt_id, joined,
+                    )
+                    if next_id is None:
+                        break
+                    new_attempts = {next_id}
+                    receipt = run_join(args, new_attempts)
+                    while receipt["state"] == "timeout":
+                        reparks += 1
+                        if reparks > args.max_join_reparks:
+                            raise SupervisorError("join-timeout-repark-exceeded")
+                        receipt = run_join(args, new_attempts)
+                    joined_rows = current_children(
+                        Path(args.jobs), args.parent_attempt_id, new_attempts
+                    )
+                    joined = {row.attempt_id: row for row in joined_rows}
                 if runtime_reconcile(args, joined, set(new_attempts)):
                     receipt = run_join(args, new_attempts)
                     joined_rows = current_children(

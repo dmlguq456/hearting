@@ -75,6 +75,22 @@ def run_checked(command: list[str]) -> subprocess.CompletedProcess[str]:
     return subprocess.run(command, cwd=ROOT, text=True, capture_output=True, check=False)
 
 
+def chain_manifest_pointer_path(jobs: Path, chain_id: str) -> Path:
+    """Canonical, chain_id-keyed manifest pointer -- the only durable location
+    a later, unrelated process (a session supervisor advancing this chain,
+    SD-119 R2) can find the sealed manifest from, since the original
+    `--manifest` envelope path is caller-local and not otherwise discoverable
+    from a registry row alone."""
+
+    return jobs.parent / "session_chains" / f"{chain_id}.json"
+
+
+def persist_chain_manifest(jobs: Path, manifest: dict) -> None:
+    path = chain_manifest_pointer_path(jobs, manifest["chain_id"])
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(manifest, sort_keys=True, default=str) + "\n", encoding="utf-8")
+
+
 LAUNCH_PHASE_BY_ACTION = {
     "check": "dry-run",
     "register": "register",
@@ -124,6 +140,7 @@ def main() -> int:
                 print(result.stdout, end="")
                 print(result.stderr, end="", file=sys.stderr)
                 return result.returncode
+        persist_chain_manifest(Path(args.jobs), manifest)
         if args.action == "register":
             print(f"chain_id={manifest['chain_id']}")
             print(f"registered_sessions={len(manifest['sessions'])}")

@@ -903,6 +903,20 @@ class TypedReceiptStageAdvanceNegotiationTest(unittest.TestCase):
         self.assertEqual(receipt["schema_version"], 2)
         self.assertNotIn("stage_advance", receipt)
         self.assertEqual(json.dumps(negotiated_but_recordless, sort_keys=True), golden)
+        # SD-119: the chain-advance path exists (dispatch_subsession_advance.py)
+        # but Codex's own supervisor loop is not yet bound to it (R2b, parity
+        # unclaimed) -- a join with no chain metadata is a no-op regardless,
+        # and this receipt never carries a chain key.
+        sys.path.insert(0, str(ROOT / "utilities"))
+        import dispatch_subsession_advance as subsession_advance
+
+        no_chain = subsession_advance.coordinate_chain_advance_from_joined_rows(
+            Path("/nonexistent/jobs.registry"), PARENT, {"att-child": SimpleNamespace(
+                attempt_id="att-child", status="done", metadata={},
+            )},
+        )
+        self.assertIsNone(no_chain)
+        self.assertNotIn("chain_id", json.dumps(receipt, sort_keys=True))
 
     def test_negotiated_advanced_record_attaches_v3_block(self):
         value = self._join_value()
