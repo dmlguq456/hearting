@@ -56,6 +56,33 @@ class SubdivisionAdmissionError(RuntimeError):
         self.detail = detail
 
 
+# SD-119 impl-review round 1 (F-3): a TEMPORARY fail-closed gate for the two
+# LIVE parallel entry points -- `stage-session-chain.py`'s `mode == "parallel"`
+# branch and `dispatch-batch.py`'s subdivision-manifest-without-route-leg
+# branch. `admit_batch()` below proves permission, full-N reservation, and
+# exact-fixed-file scope (A-1/A-2), but not the R5 artifact-base fence: a
+# per-slice `{"base": "worktree"|"artifact", "path": ...}` declaration, the
+# producer-output ∩ write_scope intersection, a content-digest baseline/scan
+# root, and an ownership receipt (SD §13.35.1-(7)/(8)). None of that exists
+# yet (R5 is not landed), so a live call reaching `admit_batch()` today would
+# reserve full-N governor slots and start real children with only the
+# worktree fence proven -- not what SD §13.35.5's rollout note calls safe:
+# "R4의 fail-closed 게이트가 열리기 전에는 parallel spawn 0이므로 R1~R3만
+# 착지해도 회귀 위험 없이 serial 사장 원인이 닫힌다". `admit_batch()` itself
+# and its 8 existing unit tests are deliberately NOT gated here -- A-1/A-2
+# keep proving admission safety at unit level (impl-review round 1 explicit
+# instruction: do not delete or gate `admit_batch()`). Delete this function
+# and its two call sites, and only those, once R5 (artifact-base fence +
+# baseline/delta audit + ownership receipt) lands and the two live entry
+# points can prove it before calling `admit_batch()`.
+def raise_if_parallel_entry_fail_closed() -> None:
+    raise SubdivisionAdmissionError(
+        "scope-unproven",
+        "R5 artifact-base fence/baseline/ownership-receipt not yet landed; "
+        "parallel sub-session batch admission stays fail-closed (SD-119 R4)",
+    )
+
+
 def has_route_leg_group(route: dict[str, Any], group: str) -> bool:
     """True iff `group` names an existing SD-89 route-leg membership.
 
@@ -252,22 +279,56 @@ def start_admitted_batch(
     governor_reservation_env: str,
     run: Callable[..., subprocess.CompletedProcess[str]] | None = None,
 ) -> list[dict[str, Any]]:
-    """Register + start every admitted slice concurrently, each spending
-    exactly the reservation token admission already proved it has (no second
-    governor round-trip per child, unlike the ad hoc single-session path)."""
+    """Register every admitted slice first; only start ANY slice once EVERY
+    registration has succeeded (F-4, impl-review round 1). Registration and
+    start each run sequentially -- this fixes the all-or-nothing invariant a
+    prior register-then-immediately-start loop violated (a mid-batch
+    registration failure used to leave earlier slices already started while
+    later ones never registered), not the sequencing itself. Typed
+    partial-start recovery: a registration failure anywhere in the batch
+    means zero slices start, including ones that themselves registered
+    cleanly -- their reservation token is simply never consumed by a start
+    call. This function is presently unreachable from either live entry
+    point (F-3's fail-closed gate), so no test exercises it against a real
+    governor reservation lifecycle; a future R5 landing that reopens the
+    live path should also decide whether an unconsumed token needs explicit
+    `model-worker-governor.release` (not implemented here -- no existing
+    caller of this function threads a `governor_root` through to release
+    with)."""
 
     runner = run or (lambda cmd, env: subprocess.run(cmd, cwd=ROOT, text=True, capture_output=True, env=env, check=False))
-    results: list[dict[str, Any]] = []
-    for session, token in zip(admission.sessions, admission.tokens):
+    registrations: list[tuple[dict[str, Any], subprocess.CompletedProcess[str]]] = []
+    for session in admission.sessions:
         register = runner(
             dispatch_command(admission.manifest, session, "register", parent, jobs), os.environ.copy()
         )
+        registrations.append((session, register))
         if register.returncode:
+            break
+
+    all_registered = (
+        len(registrations) == len(admission.sessions)
+        and all(register.returncode == 0 for _session, register in registrations)
+    )
+    if not all_registered:
+        results: list[dict[str, Any]] = []
+        for session, register in registrations:
             results.append({
-                "subsession_id": session["subsession_id"], "registered": 0, "started": 0,
+                "subsession_id": session["subsession_id"],
+                "registered": 0 if register.returncode else 1,
+                "started": 0,
                 "stdout": register.stdout, "stderr": register.stderr, "exit_code": register.returncode,
             })
-            continue
+        for session in admission.sessions[len(registrations):]:
+            results.append({
+                "subsession_id": session["subsession_id"],
+                "registered": 0, "started": 0,
+                "stdout": "", "stderr": "", "exit_code": None,
+            })
+        return results
+
+    results = []
+    for session, token in zip(admission.sessions, admission.tokens):
         env = os.environ.copy()
         env[governor_reservation_env] = token
         start = runner(dispatch_command(admission.manifest, session, "start", parent, jobs), env)

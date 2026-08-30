@@ -82,6 +82,21 @@ def _body_fields(text: str) -> dict[str, object]:
     }
 
 
+def read_fields(path: Path, attempt_id: str) -> dict[str, object]:
+    """Public accessor for a sub-session's own ledger body fields, used by
+    SD-119 R3 chain-scoped handoff synthesis. Returns {} for a missing,
+    unreadable, or attempt-mismatched ledger -- callers treat that as
+    "nothing to carry forward", never as a hard failure."""
+
+    try:
+        meta, text = _read(Path(path))
+    except LedgerError:
+        return {}
+    if meta.get("attempt_id") != attempt_id:
+        return {}
+    return _body_fields(text)
+
+
 def _atomic(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, raw = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)

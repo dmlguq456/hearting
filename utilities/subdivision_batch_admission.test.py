@@ -9,6 +9,7 @@ import io
 import json
 import os
 from pathlib import Path
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -117,13 +118,12 @@ class AdmissionGateTest(AdmissionFixture):
 
     def test_dispatch_batch_parallel_group_path_unused(self):
         # A-1: the whole point is that `parallel_nodes` (2..4-member cardinality)
-        # is never reached for a node with zero route-leg membership.
+        # is never reached for a node with zero route-leg membership. F-3
+        # (impl-review round 1): the live entry point is fail-closed until R5
+        # lands, so `admit_batch` itself is also never reached -- both are
+        # asserted as `AssertionError`-raising side effects, not just unused
+        # return values, and the receipt is the typed refusal.
         manifest_path = self._manifest(2)
-        fake_admission = SUBDIV.AdmissionResult(
-            tokens=["a" * 32, "b" * 32], manifest={"chain_id": "ssc-fixture", "sessions": []},
-            manifest_digest="deadbeef", sessions=[], node_id="execute",
-            reservation_identity="deadbeef",
-        )
         output = io.StringIO()
         with contextlib.ExitStack() as stack:
             stack.enter_context(mock.patch.object(BATCH, "load_route", return_value=self.route))
@@ -132,7 +132,8 @@ class AdmissionGateTest(AdmissionFixture):
                 side_effect=AssertionError("parallel_nodes must not be called for subdivision admission"),
             ))
             stack.enter_context(mock.patch.object(
-                BATCH.SUBDIVISION_ADMISSION, "admit_batch", return_value=fake_admission
+                BATCH.SUBDIVISION_ADMISSION, "admit_batch",
+                side_effect=AssertionError("admit_batch must not be reached while F-3 fail-closed gate holds"),
             ))
             stack.enter_context(mock.patch.object(BATCH, "resolve_agent_home", return_value=self.base))
             stack.enter_context(mock.patch.object(
@@ -153,7 +154,10 @@ class AdmissionGateTest(AdmissionFixture):
                 rc = BATCH.main(argv)
         self.assertEqual(rc, 0, output.getvalue())
         receipt = json.loads(output.getvalue())
-        self.assertEqual(receipt["state"], "subdivision-batch-admitted")
+        self.assertEqual(receipt["state"], "subdivision-batch-refused")
+        self.assertEqual(receipt["reason"], "scope-unproven")
+        self.assertEqual(receipt["admitted_rows"], 0)
+        self.assertEqual(receipt["admitted_models"], 0)
 
     def test_legacy_group_call_still_raises_parallel_group_cardinality(self):
         # Non-subdivision calls against a group with the wrong width are
@@ -249,6 +253,101 @@ class PermissionAndFenceTest(AdmissionFixture):
                 reserve=lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not reserve")),
             )
         self.assertEqual(caught.exception.reason, "disjointness-unproven")
+
+
+CHAIN_PATH = Path(__file__).with_name("stage-session-chain.py")
+CHAIN_SPEC = importlib.util.spec_from_file_location("stage_session_chain_for_admission_test", CHAIN_PATH)
+CHAIN = importlib.util.module_from_spec(CHAIN_SPEC)
+assert CHAIN_SPEC.loader is not None
+sys.modules[CHAIN_SPEC.name] = CHAIN
+CHAIN_SPEC.loader.exec_module(CHAIN)
+
+
+class ParallelEntryFailClosedTest(unittest.TestCase):
+    """F-3 (impl-review round 1): both LIVE parallel entry points refuse
+    `scope-unproven` before `admit_batch()` is ever reached, and neither
+    writes a registry row or spawns a model process, until R5 lands."""
+
+    def test_stage_session_chain_parallel_branch_refuses_before_admit_batch(self):
+        with tempfile.TemporaryDirectory() as td:
+            jobs = Path(td) / "jobs.registry"
+            jobs.touch()
+            args = type("Args", (), {"action": "register", "manifest": "unused", "parent": "owner"})()
+            with mock.patch.object(
+                CHAIN.SUBDIVISION_ADMISSION, "admit_batch",
+                side_effect=AssertionError("admit_batch must not be reached while F-3 fail-closed gate holds"),
+            ):
+                output = io.StringIO()
+                with contextlib.redirect_stdout(output):
+                    rc = CHAIN._run_parallel_subdivision({}, {}, args, jobs=jobs)
+            self.assertEqual(rc, 65)
+            receipt = json.loads(output.getvalue())
+            self.assertEqual(receipt["state"], "subdivision-batch-refused")
+            self.assertEqual(receipt["reason"], "scope-unproven")
+            self.assertEqual(receipt["admitted_rows"], 0)
+            self.assertEqual(receipt["admitted_models"], 0)
+            # No child row: the fixture's jobs registry stays exactly empty.
+            self.assertEqual(jobs.read_text(encoding="utf-8"), "")
+
+    def test_raise_if_parallel_entry_fail_closed_reason_is_scope_unproven(self):
+        with self.assertRaises(SUBDIV.SubdivisionAdmissionError) as caught:
+            SUBDIV.raise_if_parallel_entry_fail_closed()
+        self.assertEqual(caught.exception.reason, "scope-unproven")
+
+
+class StartAdmittedBatchPartialFailureTest(AdmissionFixture):
+    """F-4 (impl-review round 1): a mid-batch registration failure starts
+    ZERO slices, including ones that themselves registered cleanly."""
+
+    def _admission(self, count: int) -> "SUBDIV.AdmissionResult":
+        manifest_path = self._manifest(count)
+        recorded: list = []
+        tokens = [chr(ord("a") + i) * 32 for i in range(count)]
+        return SUBDIV.admit_batch(
+            route=self.route, node=self.node, manifest_path=manifest_path,
+            governor=Path("g"), governor_root=Path("gr"),
+            reserve=lambda *a, **k: tokens,
+            record_baseline=lambda *a, **k: recorded.append(a),
+        )
+
+    def test_third_slice_register_failure_starts_no_slice_at_all(self):
+        admission = self._admission(3)
+        calls: list[list[str]] = []
+
+        def fake_run(cmd, env):
+            calls.append(cmd)
+            action = cmd[cmd.index("--action") + 1]
+            slug = cmd[cmd.index("--slug") + 1]
+            if action == "register" and slug == "slice-3":
+                return subprocess.CompletedProcess(cmd, 65, "", "register-failed")
+            return subprocess.CompletedProcess(cmd, 0, "ok", "")
+
+        results = SUBDIV.start_admitted_batch(
+            admission, parent="owner", jobs=self.base / "jobs.log",
+            governor_reservation_env="AGENT_DISPATCH_GOVERNOR_RESERVATION",
+            run=fake_run,
+        )
+        self.assertEqual([row["started"] for row in results], [0, 0, 0])
+        # Slices 1/2 registered cleanly but must not have been started --
+        # the "start" action never appears in the call log at all.
+        self.assertEqual(results[0]["registered"], 1)
+        self.assertEqual(results[1]["registered"], 1)
+        self.assertEqual(results[2]["registered"], 0)
+        self.assertTrue(all(cmd[cmd.index("--action") + 1] == "register" for cmd in calls))
+        self.assertEqual(len(calls), 3)
+
+    def test_all_registers_succeed_then_all_slices_start(self):
+        admission = self._admission(2)
+
+        def fake_run(cmd, env):
+            return subprocess.CompletedProcess(cmd, 0, "ok", "")
+
+        results = SUBDIV.start_admitted_batch(
+            admission, parent="owner", jobs=self.base / "jobs.log",
+            governor_reservation_env="AGENT_DISPATCH_GOVERNOR_RESERVATION",
+            run=fake_run,
+        )
+        self.assertEqual([row["started"] for row in results], [1, 1])
 
 
 if __name__ == "__main__":

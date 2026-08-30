@@ -1317,12 +1317,15 @@ def main(argv: list[str] | None = None) -> int:
                 # Claude-only realized behavior confirmed by measurement
                 # (SD-OPEN-15): this Codex binding mirrors that surface but
                 # claims no cross-harness parity.
+                joined_before_chain_advance = joined
+                last_advanced_attempt_id = None
                 while True:
                     next_id = subsession_advance.coordinate_chain_advance_from_joined_rows(
                         Path(args.jobs), args.parent_attempt_id, joined,
                     )
                     if next_id is None:
                         break
+                    last_advanced_attempt_id = next_id
                     new_attempts = {next_id}
                     receipt = run_join(args, new_attempts)
                     while receipt["state"] == "timeout":
@@ -1335,6 +1338,11 @@ def main(argv: list[str] | None = None) -> int:
                         Path(args.jobs), args.parent_attempt_id, new_attempts
                     )
                     joined = {row.attempt_id: row for row in joined_rows}
+                # A-4 (F-2): same single aggregate-delivery recording site as
+                # claude-session-supervisor.py's symmetric call.
+                subsession_advance.record_owner_resume_if_chain(
+                    Path(args.jobs), joined_before_chain_advance, last_advanced_attempt_id,
+                )
                 if runtime_reconcile(args, joined, set(new_attempts)):
                     receipt = run_join(args, new_attempts)
                     joined_rows = current_children(
@@ -1442,6 +1450,10 @@ def main(argv: list[str] | None = None) -> int:
             terminal = classify_codex_result(final_text)
             if not reconcile(args, terminal):
                 return 70
+            # F-1: flush strictly AFTER this attempt's own terminal row commits.
+            subsession_advance.flush_own_subsession_handoff(
+                Path(args.jobs), args.route_id, args.parent_attempt_id,
+            )
             if delivery_timing["join_completed_ns"] is not None:
                 delivery_timing = advance_delivery_timing(
                     delivery_timing, "owner_terminal_envelope_ns"

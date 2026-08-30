@@ -38,6 +38,7 @@ sys.path.insert(0, str(ROOT / "utilities"))
 import dispatch_contract as DC  # noqa: E402
 from dispatch_contract import DispatchContractError  # noqa: E402
 import dispatch_subsession_handoff as HANDOFF  # noqa: E402
+import dispatch_subsession_resume_record as RESUME_RECORD  # noqa: E402
 
 SUBSESSION_ADVANCE_RECORD_SCHEMA_VERSION = 1
 
@@ -205,6 +206,17 @@ def canonical_subsession_advance_id(
     (`coordinate_subsession_advance`), never a silent re-claim under the old id.
     """
 
+    # F-5 (impl-review round 1): a single completeness check over the 7
+    # required hash inputs -- `successor_subsession_index` is excluded (index
+    # 0 is never valid but is a legitimate falsy int elsewhere, so it is
+    # proven by the claim-key/index range checks, not here) -- replacing a
+    # prior two-dict-construction (`identity` then a filtered `required`
+    # copy) that built the same 7 values twice for one `any(...)` check.
+    if not all((
+        route_id, route_hash, route_node, chain_id, manifest_sha256,
+        predecessor_subsession_id, predecessor_terminal_attempt_id,
+    )):
+        raise SubsessionAdvanceError("subsession-advance-identity-incomplete")
     identity = {
         "route_id": route_id,
         "route_hash": route_hash,
@@ -215,9 +227,6 @@ def canonical_subsession_advance_id(
         "predecessor_terminal_attempt_id": predecessor_terminal_attempt_id,
         "successor_subsession_index": successor_subsession_index,
     }
-    required = {k: v for k, v in identity.items() if k != "successor_subsession_index"}
-    if any(not value for value in required.values()):
-        raise SubsessionAdvanceError("subsession-advance-identity-incomplete")
     return "ssadv-" + hashlib.sha256(_canonical_bytes(identity)).hexdigest()
 
 
@@ -354,6 +363,102 @@ def coordinate_chain_advance_from_joined_rows(
     if result.outcome == "advanced" and result.successor_attempt_id:
         return result.successor_attempt_id
     return None
+
+
+def _load_ledger_module():
+    spec = importlib.util.spec_from_file_location(
+        "dispatch_subsession_advance_ledger", ROOT / "utilities" / "worker-state-ledger.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def flush_own_subsession_handoff(jobs: Path, route_id: str, attempt_id: str) -> None:
+    """SD-119 R3 impl-review fix (F-1): the real call site that wires
+    `dispatch_subsession_handoff.flush_handoff()` into execution. Called by a
+    subsession's own session supervisor immediately AFTER its own terminal
+    registry row commits (i.e. right after `reconcile()` returns), never
+    before -- so the handoff's mtime is always later in wall-clock time than
+    the registry's recorded terminal timestamp, and index i+1's
+    `classify_handoff` mtime-inversion stale check (SD §13.35.1-(5)
+    condition 3) never fires for a legitimate flush. Content is synthesized
+    from this attempt's own state ledger (already required for every
+    sub-session), not from a second worker-authored artifact.
+
+    No-op (byte-identical) for a non-subsession attempt or a subsession
+    outside a serial chain -- the only two cases where
+    `AGENT_DISPATCH_SESSION_CHAIN_ID`/`AGENT_DISPATCH_SUBSESSION_MODE` are
+    unset or not `"serial"` at this call site."""
+
+    subsession_id = os.environ.get("AGENT_DISPATCH_SUBSESSION_ID", "")
+    chain_id = os.environ.get("AGENT_DISPATCH_SESSION_CHAIN_ID", "")
+    mode = os.environ.get("AGENT_DISPATCH_SUBSESSION_MODE", "")
+    if not subsession_id or not chain_id or mode != "serial":
+        return
+    manifest = load_chain_manifest(Path(jobs), chain_id)
+    if manifest is None:
+        return
+    artifact_root = _resolve_artifact_root()
+    if not artifact_root:
+        return
+    fields: dict = {}
+    ledger_path = os.environ.get("AGENT_WORKER_STATE_LEDGER", "")
+    if ledger_path:
+        fields = _load_ledger_module().read_fields(Path(ledger_path), attempt_id)
+    path = HANDOFF.handoff_path(artifact_root, route_id, chain_id)
+    HANDOFF.flush_handoff(
+        path,
+        predecessor_attempt_id=attempt_id,
+        predecessor_subsession_id=subsession_id,
+        manifest_sha256=manifest.get("_manifest_sha256", ""),
+        completed_items=list(fields.get("completed_items") or []),
+        next_command=str(fields.get("next_action") or ""),
+        invariants=list(fields.get("invariants") or []),
+        forbidden_files=list(fields.get("forbidden_files") or []),
+    )
+
+
+def record_owner_resume_if_chain(
+    jobs: Path, joined: dict, last_advanced_attempt_id: str | None,
+) -> None:
+    """SD-119 impl-review fix (F-2): the real call site for A-4's owner-resume
+    census. Called once per join round, immediately after the chain-advance
+    loop in `claude-session-supervisor.py`/`codex-app-server-supervisor.py`
+    finishes advancing as far as the sealed manifest allows -- i.e. exactly
+    at the point this round's join is about to be delivered to the owner
+    (either the no-further-model-turn terminal fast path or the
+    `resume = True` continuation path). Never called from inside
+    `coordinate_subsession_advance()` itself, so an internal advance commits
+    zero resume events (SD §13.35.1-(3)).
+
+    No-op (byte-identical) when `joined` (as captured BEFORE the
+    chain-advance loop ran) carries no serial chain metadata at all."""
+
+    chain_id = route_id = route_hash = route_node = ""
+    predecessor_attempt_id = None
+    for row in joined.values():
+        metadata = getattr(row, "metadata", None) or {}
+        if metadata.get("session_chain_id") and metadata.get("subsession_mode") == "serial":
+            chain_id = metadata["session_chain_id"]
+            route_id = metadata.get("route_id", "")
+            route_hash = metadata.get("route_hash", "")
+            route_node = metadata.get("route_node", "")
+            predecessor_attempt_id = row.attempt_id
+            break
+    if not chain_id:
+        return
+    manifest = load_chain_manifest(Path(jobs), chain_id)
+    manifest_sha256 = manifest.get("_manifest_sha256", "") if manifest else ""
+    final_attempt_id = last_advanced_attempt_id or predecessor_attempt_id or ""
+    delivery_id = hashlib.sha256(
+        f"{chain_id}:{final_attempt_id}".encode("utf-8")
+    ).hexdigest()
+    RESUME_RECORD.record_resume(
+        Path(jobs).parent,
+        route_id=route_id, route_hash=route_hash, route_node=route_node,
+        chain_id=chain_id, manifest_sha256=manifest_sha256, delivery_id=delivery_id,
+    )
 
 
 def subsession_advances(jobs: Path, chain_id: str) -> int:

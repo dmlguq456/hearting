@@ -126,6 +126,10 @@ def _run_parallel_subdivision(
     governor = ROOT / "utilities" / "model-worker-governor.py"
     governor_root = resolve_model_governor_root(artifact_root)
     try:
+        # F-3 (impl-review round 1): fail-closed until R5's artifact-base
+        # fence lands -- see the docstring on `raise_if_parallel_entry_
+        # fail_closed` in subdivision_batch_admission.py.
+        SUBDIVISION_ADMISSION.raise_if_parallel_entry_fail_closed()
         admission = SUBDIVISION_ADMISSION.admit_batch(
             route=route_record, node=node, manifest_path=args.manifest,
             governor=governor, governor_root=governor_root,
