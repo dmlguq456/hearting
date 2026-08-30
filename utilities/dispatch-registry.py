@@ -51,6 +51,11 @@ from dispatch_contract import (ARTIFACT_PROOF_RECEIPT,
                                signal_exact_process_group,
                                validate_attempt_metadata)  # noqa: E402
 from dispatch_continuation_budget import resolve_continuation_budget  # noqa: E402
+from owner_route_binding import (  # noqa: E402
+    OwnerRouteBinding,
+    OwnerRouteBindingError,
+    resolve_owner_route_lifecycle,
+)
 from dispatch_registry_inventory import (  # noqa: E402
     import_archive as inventory_import_archive,
     inventory_query,
@@ -439,7 +444,7 @@ def direct_child_rows(row, rows):
     return scoped
 
 
-def resolve_owner_route(row, rows=None):
+def resolve_owner_route(row, rows=None, jobs=None):
     """Resolve an owner's immutable route from itself or its registered children.
 
     Real dispatch-depth-1 owner rows predate route compilation and therefore normally
@@ -449,6 +454,26 @@ def resolve_owner_route(row, rows=None):
     Terminal child rows remain valid provenance for an unstarted successor.
     """
     meta = row["meta"]
+    sealed = (meta.get("owner_route_file"), meta.get("owner_route_id"), meta.get("owner_route_hash"))
+    # Some read-only callers provide an in-memory legacy row and the canonical
+    # jobs *location* before the registry file itself exists.  There can be no
+    # durable attachment/advance state in that case, so preserve the existing
+    # direct/child-derived route fallback.  Once the registry exists, lifecycle
+    # evidence is authoritative and malformed/conflicting state still fails
+    # closed below.
+    if jobs and Path(str(jobs)).is_file() and meta.get("attempt_id"):
+        try:
+            anchor = OwnerRouteBinding(*sealed) if all(sealed) else None
+            current, status = resolve_owner_route_lifecycle(
+                jobs, owner_attempt_id=str(meta.get("attempt_id", "")),
+                sealed_binding=anchor,
+            )
+            if status == "owner-route-advance-loop":
+                return None, None, "route-context-conflict"
+            if current is not None and status != "owner-route-advance-anchor-unresolvable":
+                return current.route_id, current.route_file, "ok"
+        except OwnerRouteBindingError:
+            return None, None, "route-context-conflict"
     direct_id, direct_file = meta.get("route_id"), meta.get("route_file")
     candidates = set()
     if rows is not None:
@@ -484,7 +509,7 @@ def route_incomplete(row, home, rows=None, jobs=None):
     Fails closed (returns an empty set) when the route record cannot be read
     safely, so an unreadable route never itself justifies an orphan claim.
     """
-    route_id, route_file, context_status = resolve_owner_route(row, rows)
+    route_id, route_file, context_status = resolve_owner_route(row, rows, jobs)
     if context_status != "ok" or not home: return set(), context_status
     try:
         record = json.loads(Path(route_file).read_text(encoding="utf-8")) if route_file else None
@@ -510,7 +535,7 @@ def has_orphaned_dependents(row, rows, incomplete_nodes, args):
     for other in children:
         if other["status"] not in OPEN: continue
         return True
-    route_id, route_file, context_status = resolve_owner_route(row, rows)
+    route_id, route_file, context_status = resolve_owner_route(row, rows, getattr(args, "jobs", None))
     if context_status != "ok": return False
     try:
         record = json.loads(Path(route_file).read_text(encoding="utf-8")) if route_file else None
@@ -839,7 +864,7 @@ def reconcile(rows, args):
             if not closed and fresh_decision:
                 reason = f"revalidation-veto:{fresh_decision.get('category')}:{fresh_decision.get('reason')}"
             if closed and note == "dead-parent-orphaned":
-                route_id, _, _ = resolve_owner_route(row, rows)
+                route_id, _, _ = resolve_owner_route(row, rows, args.jobs)
                 cascade = cascade_orphan_children(row, route_id, args)
         if (args.apply and not closed and row["status"] in OPEN
                 and row["attempt_contract_status"] == "current"
@@ -1953,7 +1978,7 @@ def emit_orphan_status(rows, args):
             print("check=ok\norphan=0\nreason=owner-not-depth-one")
             print("cascade_attempted=0\ncascade_closed=0\ncascade=[]")
             return 0
-        route_id, _, route_status = resolve_owner_route(row, rows)
+        route_id, _, route_status = resolve_owner_route(row, rows, args.jobs)
         if route_status == "route-context-conflict":
             print("check=ok\norphan=0\nclosed=0")
             print("cascade_attempted=0\ncascade_closed=0")
@@ -1971,7 +1996,7 @@ def emit_orphan_status(rows, args):
         if all(key[:2]): newest[key] = item["order"]
     category, reason, note = classify(row, args, newest, rows)
     if note == "dead-parent-orphaned":
-        route_id, route_file, _ = resolve_owner_route(row, rows)
+        route_id, route_file, _ = resolve_owner_route(row, rows, args.jobs)
         incomplete, _ = route_incomplete(row, args.agent_home, rows, args.jobs)
         boundary = resume_boundary(route_file, incomplete)
         closed = False
@@ -2036,7 +2061,7 @@ def emit_orphan_scan(rows, args):
             continue
         _, _, note = classify(row, args, newest, rows)
         if note == "dead-parent-orphaned":
-            route_id, route_file, _ = resolve_owner_route(row, rows)
+            route_id, route_file, _ = resolve_owner_route(row, rows, args.jobs)
             incomplete, _ = route_incomplete(row, args.agent_home, rows, args.jobs)
             boundary = resume_boundary(route_file, incomplete)
             orphans.append({"attempt_id": meta.get("attempt_id"), "route_id": route_id,

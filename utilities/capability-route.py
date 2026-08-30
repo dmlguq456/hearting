@@ -3667,11 +3667,38 @@ def main():
         else:
             output_path=expected_output
         write_once(output_path,route)
+        # A registered depth-1 owner can compile its first route only after it
+        # has started.  Attach those immutable bytes to the exact active owner
+        # attempt; non-owner and ordinary interactive compiles remain no-ops.
+        try:
+            from owner_route_binding import (
+                OwnerRouteBindingError,
+                publish_owner_route_attachment_from_environment,
+            )
+            route_for_binding = dict(route)
+            route_for_binding["route_file"] = str(output_path.resolve())
+            attachment = publish_owner_route_attachment_from_environment(
+                os.environ.get("AGENT_DISPATCH_JOBS", ""),
+                target_route=route_for_binding,
+                environ=os.environ,
+            ) if os.environ.get("AGENT_DISPATCH_ATTEMPT_ID") else None
+        except OwnerRouteBindingError as exc:
+            print(
+                f"route_file_written=1 owner_route_binding_written=0 reason={exc}",
+                file=sys.stderr,
+            )
+            raise ValueError(str(exc)) from exc
+        if attachment is not None:
+            print("owner_route_binding_written=1", file=sys.stderr)
         print(f"route_file={output_path.resolve()}",file=sys.stderr)
         print(json.dumps(route,sort_keys=True))
     elif a.command=="continuation":
         source_path=Path(a.source_route).resolve(strict=True)
         source=verify_route(json.loads(source_path.read_text(encoding="utf-8")))
+        # The launch-sealed owner tuple names the exact bytes supplied on this
+        # CLI invocation.  Keep that path attached to the verified source so a
+        # multi-hop continuation does not pair the R0 file with R1 metadata.
+        source["route_file"] = str(source_path)
         artifact=Path(a.artifact_root).resolve(strict=False)
         if artifact != Path(source["artifact_root"]).resolve(strict=False):
             print(
@@ -3735,6 +3762,30 @@ def main():
                     "started=0 child_spawned=0",file=sys.stderr,
                 )
             raise
+        # A continuation is an immutable route for ordinary callers.  For a
+        # registered depth-1 owner, publish the forward candidate only after
+        # that route has reached disk. The lifecycle adopts it only after an
+        # exact child start; a failed proof never rewrites either input.
+        try:
+            from owner_route_binding import (
+                OwnerRouteBindingError,
+                publish_owner_route_advance_from_environment,
+            )
+            route_for_binding = dict(route)
+            route_for_binding["route_file"] = str(output_path.resolve())
+            advance = publish_owner_route_advance_from_environment(
+                os.environ.get("AGENT_DISPATCH_JOBS", ""),
+                source_route=source, target_route=route_for_binding,
+                environ=os.environ,
+            ) if os.environ.get("AGENT_DISPATCH_ATTEMPT_ID") else None
+        except OwnerRouteBindingError as exc:
+            print(
+                f"route_file_written=1 owner_route_advance_written=0 reason={exc}",
+                file=sys.stderr,
+            )
+            raise ValueError(str(exc)) from exc
+        if advance is not None:
+            print("owner_route_advance_written=1", file=sys.stderr)
         print(f"route_file={output_path.resolve()}",file=sys.stderr)
         print(json.dumps(route,sort_keys=True))
     elif a.command=="status":

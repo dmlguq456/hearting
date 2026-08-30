@@ -35,6 +35,7 @@ from fleet import collectors as fleet_collectors  # noqa: E402
 from fleet.model import ATTEMPT_CLASSIFIER_SOURCE, DispatchJob, Session  # noqa: E402
 
 REAL = os.path.join(os.path.dirname(__file__), "fixtures", "route", "real_claude_staged.json")
+COMPOSED = os.path.join(os.path.dirname(__file__), "fixtures", "route", "synth_composed_survey.json")
 
 
 class RuntimeRootSeparationTest(unittest.TestCase):
@@ -77,6 +78,79 @@ class RuntimeRootSeparationTest(unittest.TestCase):
                 {"rt-sealed"}, agent_home=observer, jobs=[job]
             )
             self.assertEqual(rows["rt-sealed"][0]["event_id"], "dg-sealed")
+
+
+class InheritedCanonicalOwnerRouteTest(unittest.TestCase):
+    """The collector and projection must share the inherited registry path."""
+
+    def test_two_harness_homes_follow_one_inherited_owner_route_registry(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            jobs = root / "canonical" / "jobs.log"
+            source_path = root / "source.route.json"
+            target_path = root / "target.route.json"
+            source = route.load(REAL)
+            target = route.load(COMPOSED)
+            source_path.write_text(json.dumps(source), encoding="utf-8")
+            target_path.write_text(json.dumps(target), encoding="utf-8")
+            owner_attempt = "att-inherited-canonical-owner"
+            metadata = ",".join((
+                "capability=autopilot-code", "capability_mode=debug",
+                "attempt_schema_version=2", "dispatch_depth=1", "depth=1",
+                "transport=headless", "execution_surface=registered-headless",
+                "registered_worker=1", "fallback_hop=same-harness-headless",
+                "worker_type=owner", "unit=_kernel/owner", "owner=autopilot-code",
+                "attempt_id=" + owner_attempt,
+                "owner_route_file=" + str(source_path),
+                "owner_route_id=" + source["route_id"],
+                "owner_route_hash=" + source["route_hash"],
+            ))
+            jobs.parent.mkdir(parents=True)
+            jobs.write_text(
+                "2099-01-01T00:00:00Z\topen\trepo\t%s\towner\t%s\n"
+                % (root, metadata), encoding="utf-8"
+            )
+            homes = []
+            for name in ("codex", "claude"):
+                home = root / (name + "-home")
+                (home / "core").mkdir(parents=True)
+                (home / "core" / "CORE.md").write_text("fixture\n", encoding="utf-8")
+                homes.append(home)
+
+            observed = []
+            class Binding:
+                def __init__(self, route_file, route_id, route_hash):
+                    self.route_file, self.route_id, self.route_hash = route_file, route_id, route_hash
+            class OwnerRouteState:
+                OwnerRouteBinding = Binding
+                def resolve_owner_route_lifecycle(self, path, *, owner_attempt_id, sealed_binding=None):
+                    self.asserted_path = str(path)
+                    if Path(path).read_text(encoding="utf-8") == "":
+                        raise AssertionError("canonical registry was not read")
+                    return Binding(str(target_path), target["route_id"], target["route_hash"]), \
+                        "owner-route-advance-current"
+            state = OwnerRouteState()
+            for home in homes:
+                env = {
+                    "HOME": str(home), "AGENT_HOME": str(home),
+                    "AGENT_DISPATCH_JOBS": str(jobs),
+                }
+                with mock.patch.dict(os.environ, env, clear=True), \
+                     mock.patch.object(dispatch, "_scan_processes", return_value=[]), \
+                     mock.patch.object(dispatch, "_dispatch_liveness", return_value="working"):
+                    self.assertEqual(dispatch._candidate_jobs_paths(), [str(jobs)])
+                    collected = dispatch.collect()
+                    self.assertEqual(len(collected), 1)
+                    with mock.patch.object(projection, "_owner_route_binding_module", return_value=state):
+                        projection.attach_projections(
+                            [], collected,
+                            route_records={source["route_id"]: source, target["route_id"]: target},
+                            now=100.0,
+                        )
+                owner = collected[0]
+                observed.append((owner._registry_path, owner.work_projection.route_id))
+
+            self.assertEqual(observed, [(str(jobs), target["route_id"])] * 2)
 
 
 # --- B-3/B-14 (Slice 2): Fleet reader's _route_state_roots must observe the

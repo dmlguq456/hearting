@@ -1,4 +1,5 @@
 """Focused F-36 projection and sealed composed-DAG acceptance checks."""
+import hashlib
 import json
 import os
 import sys
@@ -19,6 +20,51 @@ REAL = os.path.join(FIXTURES, "real_claude_staged.json")
 
 
 class WorkProjectionTest(unittest.TestCase):
+    def _lineage_record(self, cwd, attempt, generation, *, source=None,
+                        first_node="execute", family="family-linear"):
+        nodes = [{"id": first_node, "depends_on": []}]
+        record = {
+            "schema_version": 1,
+            "nodes": nodes,
+            "cwd": cwd,
+            "capability": "autopilot-code",
+            "capability_mode": "debug",
+            "owner_attempt_id": attempt,
+            "route_family_key": family,
+            "advance_generation": generation,
+            "reused_nodes": [],
+        }
+        if source is not None:
+            reused = [{"node_id": "plan", "completion_marker": "plan.done"}]
+            continuation_id = "cont-" + hashlib.sha256(
+                (source["route_id"] + first_node).encode()
+            ).hexdigest()[:32]
+            edge = {
+                "edge_version": 1,
+                "operation": "continuation",
+                "from_route_id": source["route_id"],
+                "from_route_hash": source["route_hash"],
+                "to_continuation_id": continuation_id,
+                "source_verdict_preserved": True,
+            }
+            record.update({
+                "source_route_id": source["route_id"],
+                "source_route_hash": source["route_hash"],
+                "continuation_id": continuation_id,
+                "source_route_supersession": edge,
+                "supersession_edges": [*(source.get("supersession_edges") or []), edge],
+                "reused_nodes": reused,
+                "source_evidence_digest": "sha256:" + hashlib.sha256(
+                    json.dumps(
+                        reused, ensure_ascii=False, sort_keys=True,
+                        separators=(",", ":"),
+                    ).encode()
+                ).hexdigest(),
+            })
+        record["route_hash"] = route.route_hash(record)
+        record["route_id"] = "rt-" + record["route_hash"].split(":", 1)[1][:16]
+        return record
+
     def test_terminal_only_child_route_does_not_reattach_to_main_session(self):
         record = route.load(REAL)
         rid = record["route_id"]
@@ -193,6 +239,230 @@ class WorkProjectionTest(unittest.TestCase):
         owner = DispatchJob(key="analyze", slug="owner", depth=1, liveness="working")
         projection.attach_projections([], [first, second, owner], now=100.0)
         self.assertEqual(owner.work_projection.ambiguity, "multiple-owner-routes")
+
+    def test_post_launch_attachment_projects_route_then_first_child_stage(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            record = self._lineage_record(tmp, "att-owner", 0)
+            owner = DispatchJob(
+                key="autopilot-code", slug="owner", depth=1,
+                worker_type="owner", attempt_id="att-owner", cwd=tmp,
+                capability_mode="debug", liveness="working",
+            )
+            owner._registry_path = os.path.join(tmp, "jobs.log")
+            binding = mock.Mock(
+                route_file=os.path.join(tmp, "r0.json"),
+                route_id=record["route_id"], route_hash=record["route_hash"],
+            )
+            fake = self._fake_owner_route_binding_module(
+                binding, "owner-route-post-launch-attachment"
+            )
+            with mock.patch.object(
+                projection, "_owner_route_binding_module", return_value=fake,
+            ):
+                projection.attach_projections(
+                    [], [owner], route_records={record["route_id"]: record}, now=100.0,
+                )
+            self.assertEqual(owner.work_projection.source, "route-exact")
+            self.assertEqual(owner.work_projection.route_id, record["route_id"])
+            self.assertIsNone(owner.work_projection.stage_label)
+            child = DispatchJob(
+                key="code-execute", slug="execute", depth=2, parent_slug="owner",
+                route_id=record["route_id"], route_hash=record["route_hash"],
+                route_file=os.path.join(tmp, "r0.json"), route_node="execute",
+                liveness="working",
+            )
+            with mock.patch.object(
+                projection, "_owner_route_binding_module", return_value=fake,
+            ):
+                projection.attach_projections(
+                    [], [owner, child], route_records={record["route_id"]: record},
+                    now=100.0,
+                )
+            self.assertEqual(owner.work_projection.stage_label, "execute")
+
+    def test_unbound_linear_lineage_collapses_to_current_generation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            attempt = "att-linear"
+            r0 = self._lineage_record(tmp, attempt, 0, first_node="plan")
+            r1 = self._lineage_record(tmp, attempt, 1, source=r0, first_node="test")
+            r2 = self._lineage_record(tmp, attempt, 2, source=r1, first_node="execute")
+            owner = DispatchJob(
+                key="autopilot-code", slug="owner", depth=1,
+                worker_type="owner", attempt_id=attempt, cwd=tmp,
+                capability_mode="debug", liveness="working", harness="codex",
+                parent_sid="sid-main", is_child=True,
+            )
+            session = Session(
+                harness="codex", pid=900, proc_start="main-start", cwd=tmp,
+                slug="main", session_id="sid-main", liveness="working",
+            )
+            children = [
+                DispatchJob(
+                    key="code-plan", slug="source-open", depth=2,
+                    parent_slug="owner", route_id=r0["route_id"],
+                    route_hash=r0["route_hash"], route_file="r0.json",
+                    route_node="plan", liveness="working", cwd=tmp,
+                    harness="codex",
+                ),
+                DispatchJob(
+                    key="code-test", slug="middle-done", depth=2,
+                    parent_slug="owner", route_id=r1["route_id"],
+                    route_hash=r1["route_hash"], route_file="r1.json",
+                    route_node="test", liveness="idle", status="done", cwd=tmp,
+                    harness="codex",
+                ),
+                DispatchJob(
+                    key="code-execute", slug="current", depth=2,
+                    parent_slug="owner", route_id=r2["route_id"],
+                    route_hash=r2["route_hash"], route_file="r2.json",
+                    route_node="execute", liveness="working", cwd=tmp,
+                    harness="codex",
+                ),
+            ]
+            projection.attach_projections(
+                [session], [owner, *children],
+                route_records={row["route_id"]: row for row in (r0, r1, r2)},
+                now=100.0,
+            )
+            self.assertEqual(owner.work_projection.route_id, r2["route_id"])
+            self.assertEqual(owner.work_projection.stage_label, "execute")
+            self.assertIsNone(owner.work_projection.ambiguity)
+            payload = projection.route_summary_from_projections([owner, *children])
+            owner_json = next(item for item in payload if item["route_id"] == r2["route_id"])
+            self.assertEqual(owner_json["route_id"], r2["route_id"])
+            self.assertEqual(children[-1].work_projection.route_id, r2["route_id"])
+            render.set_process_view(False)
+            group_text = "\n".join(
+                "".join(token for token, _kind in line)
+                for line in render._build_lines(
+                    [session], [owner, *children], section="both", narrow=False,
+                    malformed=0, layout="wide", term_width=168,
+                ) if line
+            )
+            render.set_process_view(True)
+            process_text = "\n".join(
+                "".join(token for token, _kind in line)
+                for line in render._build_lines(
+                    [session], [owner, *children], section="both", narrow=False,
+                    malformed=0, layout="wide", term_width=168,
+                ) if line
+            )
+            render.set_process_view(False)
+            self.assertIn("execute", group_text)
+            self.assertIn("execute", process_text)
+
+    def test_childless_abandoned_compile_does_not_pollute_linear_lineage(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            attempt = "att-abandoned"
+            r0 = self._lineage_record(tmp, attempt, 0, first_node="plan")
+            r1 = self._lineage_record(tmp, attempt, 1, source=r0, first_node="execute")
+            abandoned = self._lineage_record(
+                tmp, attempt, 0, first_node="review", family="family-abandoned"
+            )
+            owner = DispatchJob(
+                key="autopilot-code", slug="owner", depth=1,
+                worker_type="owner", attempt_id=attempt, cwd=tmp,
+                capability_mode="debug", liveness="working",
+            )
+            source = DispatchJob(
+                key="code-plan", slug="source", depth=2, parent_slug="owner",
+                route_id=r0["route_id"], route_hash=r0["route_hash"],
+                route_file="r0.json", route_node="plan", liveness="idle", status="done",
+            )
+            current = DispatchJob(
+                key="code-execute", slug="current", depth=2, parent_slug="owner",
+                route_id=r1["route_id"], route_hash=r1["route_hash"],
+                route_file="r1.json", route_node="execute", liveness="working",
+            )
+            projection.attach_projections(
+                [], [owner, source, current],
+                route_records={
+                    r0["route_id"]: r0, r1["route_id"]: r1,
+                    abandoned["route_id"]: abandoned,
+                }, now=100.0,
+            )
+            self.assertEqual(owner.work_projection.route_id, r1["route_id"])
+            self.assertEqual(owner.work_projection.stage_label, "execute")
+
+    def test_competing_successors_and_unrelated_owner_stay_ambiguous(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            attempt = "att-competing"
+            r0 = self._lineage_record(tmp, attempt, 0, first_node="plan")
+            r1a = self._lineage_record(tmp, attempt, 1, source=r0, first_node="execute")
+            r1b = self._lineage_record(
+                tmp, attempt, 1, source=r0, first_node="test", family="family-linear"
+            )
+            owner = DispatchJob(
+                key="autopilot-code", slug="owner", depth=1,
+                worker_type="owner", attempt_id=attempt, cwd=tmp,
+                capability_mode="debug", liveness="working",
+            )
+            jobs = []
+            for index, record in enumerate((r0, r1a, r1b)):
+                jobs.append(DispatchJob(
+                    key="code", slug=f"child-{index}", depth=2, parent_slug="owner",
+                    route_id=record["route_id"], route_hash=record["route_hash"],
+                    route_file=f"r{index}.json", route_node=record["nodes"][0]["id"],
+                    liveness="working",
+                ))
+            projection.attach_projections(
+                [], [owner, *jobs],
+                route_records={row["route_id"]: row for row in (r0, r1a, r1b)},
+                now=100.0,
+            )
+            self.assertEqual(owner.work_projection.ambiguity, "multiple-owner-routes")
+
+            unrelated = dict(r1a)
+            unrelated["owner_attempt_id"] = "att-unrelated"
+            unrelated["route_hash"] = route.route_hash(unrelated)
+            unrelated["route_id"] = "rt-" + unrelated["route_hash"].split(":", 1)[1][:16]
+            owner2 = DispatchJob(
+                key="autopilot-code", slug="owner2", depth=1,
+                worker_type="owner", attempt_id=attempt, cwd=tmp,
+                capability_mode="debug", liveness="working",
+            )
+            bad_child = DispatchJob(
+                key="code", slug="bad", depth=2, parent_slug="owner2",
+                route_id=unrelated["route_id"], route_hash=unrelated["route_hash"],
+                route_file="bad.json", route_node="execute", liveness="working",
+            )
+            projection.attach_projections(
+                [], [owner2, bad_child],
+                route_records={unrelated["route_id"]: unrelated}, now=100.0,
+            )
+            self.assertEqual(owner2.work_projection.ambiguity, "multiple-owner-routes")
+
+    def test_resealed_but_tampered_lineage_history_stays_ambiguous(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            attempt = "att-tampered-lineage"
+            r0 = self._lineage_record(tmp, attempt, 0, first_node="plan")
+            r1 = self._lineage_record(tmp, attempt, 1, source=r0, first_node="test")
+            r2 = self._lineage_record(tmp, attempt, 2, source=r1, first_node="execute")
+            # A self-consistent route hash is not proof that the inherited
+            # lineage was preserved. Drop R0->R1 and reseal the object.
+            r2["supersession_edges"] = [r2["source_route_supersession"]]
+            r2["route_hash"] = route.route_hash(r2)
+            r2["route_id"] = "rt-" + r2["route_hash"].split(":", 1)[1][:16]
+            owner = DispatchJob(
+                key="autopilot-code", slug="owner", depth=1,
+                worker_type="owner", attempt_id=attempt, cwd=tmp,
+                capability_mode="debug", liveness="working",
+            )
+            children = [
+                DispatchJob(
+                    key="code", slug=f"child-{index}", depth=2,
+                    parent_slug="owner", route_id=record["route_id"],
+                    route_hash=record["route_hash"], route_file=f"r{index}.json",
+                    route_node=record["nodes"][0]["id"], liveness="working",
+                )
+                for index, record in enumerate((r0, r1, r2))
+            ]
+            projection.attach_projections(
+                [], [owner, *children],
+                route_records={record["route_id"]: record for record in (r0, r1, r2)},
+                now=100.0,
+            )
+            self.assertEqual(owner.work_projection.ambiguity, "multiple-owner-routes")
 
     def test_same_process_identity_with_two_leaf_routes_fails_closed(self):
         first = DispatchJob(key="code", slug="a", pid=55, proc_start="start",
@@ -439,6 +709,101 @@ class WorkProjectionTest(unittest.TestCase):
         )
         self.assertEqual(owner.work_projection.ambiguity, "owner-route-conflict")
         self.assertIsNone(owner.work_projection.route_id)
+
+    def _fake_owner_route_binding_module(self, current, status):
+        class _OwnerRouteBinding:
+            def __init__(self, route_file, route_id, route_hash):
+                self.route_file, self.route_id, self.route_hash = route_file, route_id, route_hash
+
+        class _OwnerRouteBindingError(ValueError):
+            pass
+
+        module = mock.Mock()
+        module.OwnerRouteBinding = _OwnerRouteBinding
+        module.OwnerRouteBindingError = _OwnerRouteBindingError
+        module.resolve_owner_route_lifecycle = mock.Mock(return_value=(current, status))
+        return module
+
+    def test_verified_advance_record_collapses_mixed_generation_children(self):
+        # R0->R1->R2 verified lineage: a live child stranded on R0 (mixed
+        # generations, which F-88 alone would flag as owner-route-conflict)
+        # no longer matters once a durable advance record proves the owner
+        # moved on -- the successor route projects outright.
+        r0 = route.load(REAL)
+        r2 = route.load(COMPOSED)
+        owner = DispatchJob(
+            key="code", slug="owner", depth=1, worker_type="owner",
+            attempt_id="att-owner-advance", liveness="working",
+            owner_route_file=REAL, owner_route_id=r0["route_id"],
+            owner_route_hash=r0["route_hash"],
+        )
+        owner._registry_path = "/state/dispatch/jobs.log"
+        stale_child = DispatchJob(
+            key="plan", slug="stale-child", depth=2, parent_slug="owner",
+            route_id=r0["route_id"], route_file=REAL, route_hash=r0["route_hash"],
+            route_node="plan", liveness="working",
+        )
+        current_binding = mock.Mock(
+            route_file=COMPOSED, route_id=r2["route_id"], route_hash=r2["route_hash"],
+        )
+        fake_binding_module = self._fake_owner_route_binding_module(
+            current_binding, "owner-route-advance-current",
+        )
+        with mock.patch.object(
+            projection, "_owner_route_binding_module", return_value=fake_binding_module,
+        ):
+            projection.attach_projections(
+                [], [owner, stale_child], route_records={
+                    r0["route_id"]: r0, r2["route_id"]: r2,
+                }, now=100.0,
+            )
+        self.assertEqual(owner.work_projection.source, "route-exact")
+        self.assertEqual(owner.work_projection.route_id, r2["route_id"])
+        self.assertIsNone(owner.work_projection.ambiguity)
+
+    def test_conflicting_advance_evidence_is_a_typed_ambiguity(self):
+        r0 = route.load(REAL)
+        owner = DispatchJob(
+            key="code", slug="owner", depth=1, worker_type="owner",
+            attempt_id="att-owner-tampered", liveness="working",
+            owner_route_file=REAL, owner_route_id=r0["route_id"],
+            owner_route_hash=r0["route_hash"],
+        )
+        owner._registry_path = "/state/dispatch/jobs.log"
+        fake_binding_module = self._fake_owner_route_binding_module(None, "unused")
+        fake_binding_module.resolve_owner_route_lifecycle = mock.Mock(
+            side_effect=fake_binding_module.OwnerRouteBindingError("owner-route-advance-target-invalid"),
+        )
+        with mock.patch.object(
+            projection, "_owner_route_binding_module", return_value=fake_binding_module,
+        ):
+            projection.attach_projections(
+                [], [owner], route_records={r0["route_id"]: r0}, now=100.0,
+            )
+        self.assertEqual(owner.work_projection.ambiguity, "owner-route-advance-conflict")
+
+    def test_two_child_adopted_durable_successors_use_multiple_owner_routes(self):
+        r0 = route.load(REAL)
+        owner = DispatchJob(
+            key="code", slug="owner", depth=1, worker_type="owner",
+            attempt_id="att-owner-competing", liveness="working",
+            owner_route_file=REAL, owner_route_id=r0["route_id"],
+            owner_route_hash=r0["route_hash"],
+        )
+        owner._registry_path = "/state/dispatch/jobs.log"
+        fake = self._fake_owner_route_binding_module(None, "unused")
+        fake.resolve_owner_route_lifecycle = mock.Mock(
+            side_effect=fake.OwnerRouteBindingError(
+                "owner-route-advance-competing-successor"
+            ),
+        )
+        with mock.patch.object(
+            projection, "_owner_route_binding_module", return_value=fake,
+        ):
+            projection.attach_projections(
+                [], [owner], route_records={r0["route_id"]: r0}, now=100.0,
+            )
+        self.assertEqual(owner.work_projection.ambiguity, "multiple-owner-routes")
 
     def test_owner_projection_collapses_parallel_active_nodes(self):
         record = {
