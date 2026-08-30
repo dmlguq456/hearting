@@ -101,6 +101,12 @@ def build_parser():
         help="Managed release tag, or latest to leave a pin",
     )
     p_update.add_argument("--auto", action="store_true", help=argparse.SUPPRESS)
+    p_update.add_argument(
+        "--force-prune-unproven",
+        action="store_true",
+        help="Delete superseded releases whose dispatch-state migration could not be "
+        "proven, after committing a non-recoverable gap record for each (SD-115)",
+    )
 
     sub.add_parser("status", parents=[common], help="Summarize installation channels, versions, and drift")
 
@@ -534,6 +540,7 @@ def cmd_update(args):
                 version=args.version,
                 runtimes=args.runtimes,
                 automatic=args.auto,
+                force_prune_unproven=getattr(args, "force_prune_unproven", False),
             )
         except distribution.DistributionError as exc:
             return {
