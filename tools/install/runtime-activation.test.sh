@@ -10,6 +10,13 @@ trap 'rm -rf "$TMP"' EXIT HUP INT TERM
 HOME="$TMP/home"
 XDG_CONFIG_HOME="$HOME/.config"
 XDG_DATA_HOME="$HOME/.local/share"
+# Sealed explicitly rather than left to default-from-HOME: an ambient
+# XDG_STATE_HOME/HARNESS_STATE_ROOT already exported by the calling shell
+# would otherwise survive this script's HOME override untouched and let
+# dispatch-state-root resolution (stable_state_root()) escape into the real
+# state root instead of this fixture's $TMP.
+XDG_STATE_HOME="$HOME/.local/state"
+HARNESS_STATE_ROOT="$XDG_STATE_HOME/hearting"
 CODEX_HOME="$HOME/.codex"
 CLAUDE_CONFIG_DIR="$HOME/.claude"
 SENTINEL_LOG="$TMP/external-calls.log"
@@ -18,8 +25,8 @@ SRC2="$TMP/source-worktree"
 SRC_BAD="$TMP/source-bad"
 SRC_LINK="$TMP/source-link"
 BIN="$TMP/bin"
-export HOME XDG_CONFIG_HOME XDG_DATA_HOME CODEX_HOME CLAUDE_CONFIG_DIR SENTINEL_LOG
-mkdir -p "$HOME" "$BIN"
+export HOME XDG_CONFIG_HOME XDG_DATA_HOME XDG_STATE_HOME HARNESS_STATE_ROOT CODEX_HOME CLAUDE_CONFIG_DIR SENTINEL_LOG
+mkdir -p "$HOME" "$BIN" "$HARNESS_STATE_ROOT"
 : > "$SENTINEL_LOG"
 
 fail() {
@@ -91,6 +98,13 @@ make_fixture() {
   chmod +x "$root/adapters/claude/utilities/fixture.sh"
   printf '%s\n' '#!/bin/sh' 'echo fixture-statusline' > "$root/adapters/claude/statusline.sh"
   chmod +x "$root/adapters/claude/statusline.sh"
+  # Owner-name-set union members installed by `harness install claude` but
+  # historically outside runtime_activation.py's own native discovery names
+  # (INSTALL_LAYOUT.md "owner-name-set reconciliation").
+  printf '%s\n' '# fixture root readme' > "$root/README.md"
+  printf '%s\n' '{"capabilities":[]}' > "$root/manifest.json"
+  mkdir -p "$root/adapters/claude/loops"
+  printf '%s\n' '# fixture loop' > "$root/adapters/claude/loops/demo.md"
   printf '%s\n' 'fixture' > "$root/adapters/claude/scaffolds/README.md"
   printf '%s\n' \
     '{"env":{"MEM_DISTILL_ENABLE":"1"},"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"sh $HOME/.claude/utilities/fixture.sh"}]}]},"statusLine":{"type":"command","command":"bash $HOME/.claude/statusline.sh","refreshInterval":60}}' \
@@ -172,6 +186,93 @@ with open(path, "w", encoding="utf-8") as handle:
     json.dump(settings, handle)
 PY
 ok "fresh Claude activation reports conflicts and uninstall preserves custom values"
+
+# INSTALL_LAYOUT.md "owner-name-set reconciliation": README.md/manifest.json
+# are installer-owned names outside activation's own historical discovery
+# set. A real `harness install claude` symlink resolves into the checkout
+# ($SRC), which is also `source_roots` for a fresh activation -- so it is
+# never a "foreign" collision, just a name activation has not managed yet.
+# In `packaged` mode `active_root` is a separate bundle copy, so adopting
+# the union here produces a *different* final target than the installer's,
+# exactly the real mixed-layout case INSTALL_LAYOUT.md describes. Simulate
+# the installer's prior projection by pre-creating that exact symlink shape.
+mkdir -p "$HOME/.claude"
+ln -sfn "$SRC/README.md" "$HOME/.claude/README.md"
+ln -sfn "$SRC/manifest.json" "$HOME/.claude/manifest.json"
+harness runtime activate --runtime claude --mode packaged --source "$SRC" --json \
+  > "$TMP/claude-union-activate.json" \
+  || { cat "$TMP/claude-union-activate.json" >&2; fail "union activation failed"; }
+readme_link=$(readlink "$HOME/.claude/README.md")
+case "$readme_link" in
+  "$SRC/README.md") fail "activation left README.md on the installer's checkout target instead of active_root" ;;
+  */README.md) : ;;
+  *) fail "activation did not project README.md as a symlink to active_root: $readme_link" ;;
+esac
+loops_link=$(readlink "$HOME/.claude/loops")
+case "$loops_link" in
+  */adapters/claude/loops) : ;;
+  *) fail "activation did not adopt the installer-owned loops name into the union: $loops_link" ;;
+esac
+python3 - "$HOME/.claude/.harness/activation.json" "$SRC" <<'PY'
+import json, os, sys
+state = json.load(open(sys.argv[1]))
+src = sys.argv[2]
+mapping = state["replaced_installer_symlink_targets"]
+home = os.environ["HOME"]
+assert mapping[f"{home}/.claude/README.md"] == f"{src}/README.md", mapping
+assert mapping[f"{home}/.claude/manifest.json"] == f"{src}/manifest.json", mapping
+PY
+# A refresh must carry the recorded original target forward byte-for-byte,
+# never re-derive it from whatever activation itself just linked there.
+harness runtime activate --runtime claude --mode packaged --source "$SRC" --json \
+  > "$TMP/claude-union-refresh.json" \
+  || { cat "$TMP/claude-union-refresh.json" >&2; fail "union refresh failed"; }
+python3 - "$HOME/.claude/.harness/activation.json" "$SRC" <<'PY'
+import json, os, sys
+state = json.load(open(sys.argv[1]))
+src = sys.argv[2]
+mapping = state["replaced_installer_symlink_targets"]
+home = os.environ["HOME"]
+assert mapping[f"{home}/.claude/README.md"] == f"{src}/README.md", mapping
+PY
+ok "activation adopts the owner-name-set union and records the installer target exactly once"
+
+# A user repoints one union member after activation; uninstall must leave
+# that repoint alone (never restore over it) while still restoring the
+# untouched one back to the installer's exact original target.
+ln -sfn "/nonexistent/user-repointed-manifest" "$HOME/.claude/manifest.json"
+harness uninstall claude > "$TMP/uninstall-union.log" 2>&1 \
+  || { cat "$TMP/uninstall-union.log" >&2; fail "union uninstall failed"; }
+test "$(readlink "$HOME/.claude/README.md")" = "$SRC/README.md" \
+  || fail "uninstall did not restore the untouched installer-owned README.md target"
+test ! -e "$HOME/.claude/manifest.json" && test ! -L "$HOME/.claude/manifest.json" \
+  || fail "uninstall restored over a manifest.json the user repointed after activation"
+ok "uninstall restores an untouched union member's installer target and leaves a user repoint alone"
+
+# A crash right after `_write_journal(..., "preparing", ...)` for a
+# union-only destination (README.md/manifest.json/loops) must stay
+# recoverable: `_journal_dest_allowed()` has to accept these names too, not
+# just the activation-native ones, or the next activate() permanently
+# refuses with "transaction destination is not harness-owned".
+harness runtime activate --runtime claude --mode packaged --source "$SRC" --json \
+  > "$TMP/claude-union-precrash.json" \
+  || { cat "$TMP/claude-union-precrash.json" >&2; fail "pre-crash union activation failed"; }
+test -L "$HOME/.claude/README.md" || fail "union README.md missing before crash simulation"
+mkdir -p "$HOME/.claude/.harness/transactions/readme-crash"
+printf '%s\n' \
+  "{\"schema\":1,\"runtime\":\"claude\",\"status\":\"preparing\",\"records\":[{\"dest\":\"$HOME/.claude/README.md\",\"state\":\"missing\",\"backup\":null,\"target\":null}]}" \
+  > "$HOME/.claude/.harness/transactions/readme-crash/journal.json"
+if ! harness runtime activate --runtime claude --mode packaged --source "$SRC" --json \
+  > "$TMP/claude-union-recover.json" 2>&1; then
+  cat "$TMP/claude-union-recover.json" >&2
+  fail "activation could not recover a preparing journal for a union-only destination"
+fi
+test ! -e "$HOME/.claude/.harness/transactions/readme-crash" \
+  || fail "recovered README.md transaction directory was not cleared"
+test -L "$HOME/.claude/README.md" || fail "recovery did not leave README.md reprojected"
+ok "journal recovery accepts a preparing README.md destination adopted by the owner-name-set union"
+
+rm -f "$HOME/.claude/README.md" "$HOME/.claude/loops"
 
 if ! harness runtime activate --runtime all --mode linked --source "$SRC" --json \
   > "$TMP/linked-activate.json"; then
@@ -951,6 +1052,39 @@ assert disallowed.isdisjoint(settings.keys()), settings
 assert disallowed.isdisjoint(settings.get("env", {}).keys()), settings
 PY
 ok "no Claude launcher, PATH block, binding state, or updater-disable setting was added"
+# named falsifier: ambient-lock-boundary (boundary sealing, not a confirmed
+# root-cause fix -- see runtime-activation.test.sh header). Runtime
+# activation reads (status/doctor) must never contend for the unrelated
+# distribution-update lock, so an external holder of that lock must not
+# block, hang, or otherwise get touched by this suite.
+DIST_LOCK="$HARNESS_STATE_ROOT/distribution.lock"
+mkdir -p "$HARNESS_STATE_ROOT"
+python3 -c "
+import fcntl, os, time, sys
+f = open(sys.argv[1], 'a+b')
+fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+time.sleep(8)
+" "$DIST_LOCK" &
+LOCK_PID=$!
+# give the holder a moment to actually acquire the lock before racing it
+sleep 0.5
+LOCK_MTIME_BEFORE=$(stat -c '%Y' "$DIST_LOCK" 2>/dev/null || echo none)
+START=$(date +%s)
+harness runtime status --runtime claude --json > "$TMP/status-under-ambient-lock.json"
+END=$(date +%s)
+kill "$LOCK_PID" 2>/dev/null || true
+wait "$LOCK_PID" 2>/dev/null || true
+ELAPSED=$((END - START))
+[ "$ELAPSED" -le 5 ] || fail "runtime status blocked on the unrelated distribution lock (${ELAPSED}s)"
+LOCK_MTIME_AFTER=$(stat -c '%Y' "$DIST_LOCK" 2>/dev/null || echo none)
+[ "$LOCK_MTIME_BEFORE" = "$LOCK_MTIME_AFTER" ] || fail "runtime status touched the ambient distribution lock sentinel"
+python3 - "$TMP/status-under-ambient-lock.json" <<'PY'
+import json, sys
+row = json.load(open(sys.argv[1]))
+assert row["mode"] is not None, row
+PY
+pgrep -f "$DIST_LOCK" >/dev/null 2>&1 && fail "a child process is still contending for the distribution lock"
+ok "ambient-lock-boundary: runtime status never contends for the unrelated distribution lock and leaves no child PGID behind"
 
 harness uninstall codex > "$TMP/uninstall-codex.log" 2>&1 \
   || { cat "$TMP/uninstall-codex.log" >&2; fail "codex uninstall failed"; }

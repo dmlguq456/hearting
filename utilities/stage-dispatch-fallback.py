@@ -1464,6 +1464,25 @@ def _dispatch(observation: "LAUNCH_TUPLE.ReportOnlyObservation") -> int:
         reason = exc.reason
         return fail(reason, 73, child_spawned="0")
 
+    # C-14: dispatch-node.py and dispatch-batch.py both cap review rounds, but
+    # ordinary standard+ depth-2 work goes through this wrapper, which had no
+    # such check -- so the cap was unreachable on the path most dispatches take.
+    # Reuse the already-loaded definitions rather than duplicating the cap.
+    if node["id"] in DISPATCH_NODE.ROUND_CAPPED_NODE_IDS:
+        prior_rounds = DISPATCH_NODE.prior_round_attempts(
+            args.jobs, route["route_id"], node["id"]
+        )
+        round_no = len(prior_rounds) + 1
+        max_round = DISPATCH_NODE.max_review_rounds(route["effective_intensity"])
+        if round_no > max_round:
+            return fail(
+                "review-round-budget-exhausted", 65,
+                route_id=route["route_id"], route_node=node["id"],
+                effective_intensity=route["effective_intensity"],
+                round=str(round_no), max_round=str(max_round),
+                child_spawned="0",
+            )
+
     prior_failures = registry_failures(args.jobs, route["route_id"], node["id"])
     failed_tuples = set(args.failed_tuple) | set(prior_failures)
     attempts: list[str] = []

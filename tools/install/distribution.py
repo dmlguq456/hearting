@@ -2176,24 +2176,34 @@ def _cleanup_releases(keep: set[Path], *, force_prune_unproven: bool = False) ->
                 file=sys.stderr,
             )
             continue
-        ok, blocked_reason = _migration_deletion_precondition(candidate, os.environ)
-        if not ok:
-            print(
-                f"harness release: {blocked_reason} for {candidate}; keeping it "
-                "instead of deleting it",
-                file=sys.stderr,
-            )
-            continue
+        # Both preconditions are "unproven-ness" checks -- a content mismatch
+        # (real corruption, e.g. B-7/B-8's out-of-band divergent copy) and a
+        # broken/missing dispatch-registry containment proof are the same
+        # kind of gap, and both route through the identical
+        # force_prune_unproven + gap-precommit gate (SD-115 §13.34.3-(2)).
+        # `_release_in_use`/`_succeed_dispatch_state` above are never
+        # force-overridable: those guard live/unmigrated state, not proof.
+        unproven_reasons = []
+        migration_ok, migration_reason = _migration_deletion_precondition(candidate, os.environ)
+        if not migration_ok:
+            unproven_reasons.append(migration_reason)
         containment_ok, containment_reason = _retention_containment_precondition(candidate, os.environ)
         if not containment_ok:
+            unproven_reasons.append(containment_reason)
+        if unproven_reasons:
             if not force_prune_unproven:
-                print(
-                    f"harness release: {containment_reason} for {candidate}; keeping it "
-                    "instead of deleting it",
-                    file=sys.stderr,
-                )
+                for reason in unproven_reasons:
+                    print(
+                        f"harness release: {reason} for {candidate}; keeping it "
+                        "instead of deleting it",
+                        file=sys.stderr,
+                    )
                 continue
-            if not _commit_forced_prune_gap_record(candidate, os.environ, containment_reason):
+            gap_committed = all(
+                _commit_forced_prune_gap_record(candidate, os.environ, reason)
+                for reason in unproven_reasons
+            )
+            if not gap_committed:
                 print(
                     f"harness release: registry-gap record commit failed for {candidate}; "
                     "keeping it instead of deleting it",

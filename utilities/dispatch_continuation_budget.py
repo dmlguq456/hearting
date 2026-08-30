@@ -4,9 +4,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-import hashlib
 import json
+import sys
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import route_identity as ROUTE_IDENTITY
 
 
 COMPATIBILITY_FLOOR = 12
@@ -80,13 +83,8 @@ def resolve_continuation_budget(
         return ContinuationBudget(COMPATIBILITY_FLOOR, "compatibility-floor")
     if route.get("route_id") != route_id or route.get("route_hash") != route_hash:
         return ContinuationBudget(COMPATIBILITY_FLOOR, "compatibility-floor")
-    bare = {key: value for key, value in route.items() if key not in {"route_hash", "route_id"}}
-    sealed_hash = "sha256:" + hashlib.sha256(
-        json.dumps(
-            bare, ensure_ascii=False, sort_keys=True, separators=(",", ":")
-        ).encode()
-    ).hexdigest()
-    if route_hash != sealed_hash or route_id != "rt-" + sealed_hash.split(":", 1)[1][:16]:
+    sealed_hash = ROUTE_IDENTITY.route_hash(route)
+    if route_hash != sealed_hash or route_id != ROUTE_IDENTITY.route_id_from_hash(sealed_hash):
         return ContinuationBudget(COMPATIBILITY_FLOOR, "compatibility-floor")
     if expected_cwd is not None:
         raw_cwd = route.get("cwd")
@@ -96,6 +94,53 @@ def resolve_continuation_budget(
             or Path(raw_cwd).resolve() != Path(expected_cwd).resolve()
         ):
             return ContinuationBudget(COMPATIBILITY_FLOOR, "compatibility-floor")
+    # SD-116 WP4 (D47-9): block first, current derivation second, floor last.
+    # The block was sealed into `route_hash` at compile time (WP1/WP4), so
+    # its integrity is already proven by the hash checks above -- no extra
+    # cross-check against `nodes`/`resume_retry_boundaries` is needed here.
+    sealed_block = route.get("continuation_budget")
+    if isinstance(sealed_block, dict) and sealed_block.get("contract_version") == 1:
+        block_ordinary = sealed_block.get("ordinary")
+        block_reserved = sealed_block.get("reserved")
+        block_limit = sealed_block.get("limit")
+        block_declared_nodes = sealed_block.get("declared_nodes")
+        block_review_round_cap = sealed_block.get("review_round_cap")
+        block_gap = sealed_block.get("gap")
+        block_retry = sealed_block.get("retry")
+        if (
+            isinstance(block_ordinary, int) and not isinstance(block_ordinary, bool)
+            and isinstance(block_reserved, int) and not isinstance(block_reserved, bool)
+            and isinstance(block_limit, int) and not isinstance(block_limit, bool)
+            and isinstance(block_declared_nodes, int) and not isinstance(block_declared_nodes, bool)
+            # impl-review round 1 finding 2: the compiler seals
+            # `review_round_cap`/`gap`/`retry` too (capability-route.py's
+            # `continuation_budget` literal); a malformed value here must
+            # degrade to the bound-route derivation exactly like a malformed
+            # `ordinary`/`reserved`/`limit`/`declared_nodes`, not be accepted
+            # as `sealed-block` unchecked.
+            and isinstance(block_review_round_cap, int) and not isinstance(block_review_round_cap, bool)
+            and isinstance(block_gap, int) and not isinstance(block_gap, bool)
+            and isinstance(block_retry, int) and not isinstance(block_retry, bool)
+            and block_ordinary >= COMPATIBILITY_FLOOR
+            and block_reserved >= 1
+            and block_limit == block_ordinary + block_reserved
+            and block_declared_nodes >= 0
+            and block_review_round_cap >= 1
+            and block_gap >= 0
+            and block_retry >= 0
+        ):
+            return ContinuationBudget(
+                block_ordinary,
+                "sealed-block",
+                declared_nodes=block_declared_nodes,
+                retry_slots=(
+                    sealed_block.get("retry_slots")
+                    if isinstance(sealed_block.get("retry_slots"), int)
+                    and not isinstance(sealed_block.get("retry_slots"), bool)
+                    else 0
+                ),
+                reserved=block_reserved,
+            )
     nodes = route.get("nodes")
     boundaries = route.get("resume_retry_boundaries")
     if not isinstance(nodes, list) or not isinstance(boundaries, list):

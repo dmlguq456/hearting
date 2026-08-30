@@ -535,6 +535,20 @@ class NormalizeReceiptStageAdvanceNegotiationTest(unittest.TestCase):
             ),
             golden,
         )
+        # SD-119: the chain-advance path exists but a join with no
+        # sub-session chain metadata is a no-op -- this receipt never carries
+        # a chain key, byte-identical to pre-SD-119.
+        sys.path.insert(0, str(ROOT / "utilities"))
+        import dispatch_subsession_advance as subsession_advance
+        from types import SimpleNamespace
+
+        no_chain = subsession_advance.coordinate_chain_advance_from_joined_rows(
+            self.jobs, PARENT, {"att-child": SimpleNamespace(
+                attempt_id="att-child", status="done", metadata={},
+            )},
+        )
+        self.assertIsNone(no_chain)
+        self.assertNotIn("chain_id", json.dumps(normalized, sort_keys=True))
 
     def test_negotiated_advanced_record_attaches_v3_block(self):
         record = {

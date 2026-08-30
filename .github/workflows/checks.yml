@@ -106,6 +106,20 @@ jobs:
           persist-credentials: false
 
       - name: Run the full isolated test suite (C-3/C-4)
-        # --xpass-nonfatal: the known-fail baseline is seeded on the maintainer host;
-        # suites that pass on the CI runner are reported, not failed (MA-W1-011).
-        run: python3 tools/run-tests.py --retries 1 --xpass-nonfatal
+        # --seed-baseline uploads the proposed rows stamped with this runner's
+        # fingerprint; adopting them is a human decision, never automatic.
+        run: |
+          python3 tools/run-tests.py --retries 1 \
+            --strict-leak-sweep \
+            --report ${{ runner.temp }}/run-tests-report.tsv \
+            --seed-baseline ${{ runner.temp }}/run-tests-seed-baseline.tsv
+
+      - name: Upload full-suite report and baseline seed
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: run-tests-report
+          path: |
+            ${{ runner.temp }}/run-tests-report.tsv
+            ${{ runner.temp }}/run-tests-seed-baseline.tsv
+          if-no-files-found: ignore

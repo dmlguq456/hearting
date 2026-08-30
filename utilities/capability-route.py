@@ -11,6 +11,9 @@ DEFAULTS_SPEC = importlib.util.spec_from_file_location("dispatch_defaults", ROOT
 DEFAULTS = importlib.util.module_from_spec(DEFAULTS_SPEC); DEFAULTS_SPEC.loader.exec_module(DEFAULTS)
 VALID_AFFINITY = DEFAULTS.AFFINITY_VALUES | {"unspecified"}
 sys.path.insert(0, str(ROOT/"utilities"))
+import route_identity as ROUTE_IDENTITY
+import review_round_cap as REVIEW_ROUND_CAP
+from dispatch_continuation_budget import COMPATIBILITY_FLOOR, TERMINAL_RESERVE_DEFAULT
 from dispatch_contract import (
     CANONICAL_PARENT_TRANSPORTS,
     DispatchContractError,
@@ -124,12 +127,8 @@ def _validate_registered_headless_evidence(evidence):
         raise ValueError("quick-headless-unavailable")
     return sorted(normalized, key=lambda row: row["harness"])
 
-def canonical(payload):
-    return json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",",":")).encode()
-
-def route_hash(payload):
-    bare={k:v for k,v in payload.items() if k not in ("route_hash","route_id","owner_attempt_id","route_family_key")}
-    return "sha256:"+hashlib.sha256(canonical(bare)).hexdigest()
+canonical = ROUTE_IDENTITY.canonical
+route_hash = ROUTE_IDENTITY.route_hash
 
 def route_family_key(capability,cwd,capability_mode,owner_attempt_id):
     payload=[capability,str(cwd),capability_mode,owner_attempt_id]
@@ -1520,6 +1519,25 @@ def _compile_from_recipe(registry, recipe, capability, capability_mode, requeste
         nodes, capability, owner_model_profile
     )
     spec_touch=any(_scope_touches_spec(scope) for node in nodes for scope in node["write_scope"])
+    # SD-116 WP4 (D47-9): the compiler now seals the continuation budget into
+    # the route itself, sealed into `route_hash` (it is added before the hash
+    # is computed, unlike `owner_attempt_id`/`route_family_key`). `ordinary`
+    # uses the identical `max(COMPATIBILITY_FLOOR, declared_nodes+retry_slots)`
+    # derivation `dispatch_continuation_budget.resolve_continuation_budget()`
+    # already used for the pre-WP4 "bound-route" path, so `ordinary` never
+    # shrinks below the pre-SD-116 `limit` for the same route shape (D47-9).
+    _continuation_declared_nodes=len(nodes)
+    _continuation_retry_slots=len(set(recipe["resume_retry_boundaries"]))
+    _continuation_ordinary=max(
+        COMPATIBILITY_FLOOR, _continuation_declared_nodes+_continuation_retry_slots)
+    continuation_budget={
+      "contract_version":1,
+      "declared_nodes":_continuation_declared_nodes,
+      "review_round_cap":REVIEW_ROUND_CAP.max_review_rounds(effective),
+      "gap":1,"retry":1,"reserved":TERMINAL_RESERVE_DEFAULT,
+      "ordinary":_continuation_ordinary,
+      "limit":_continuation_ordinary+TERMINAL_RESERVE_DEFAULT,
+    }
     payload={
       "schema_version":ROUTE_SCHEMA_VERSION,"capability":capability,"capability_mode":capability_mode,
       "requested_intensity":requested_intensity,"effective_intensity":effective,
@@ -1537,6 +1555,7 @@ def _compile_from_recipe(registry, recipe, capability, capability_mode, requeste
                    "selection_basis":selection_basis,
                    "escalation_basis":[{"signal":s,"source":"caller"} for s in signals],
                    "transport":transport,"transport_evidence":transport_evidence,"inline_reason":inline_reason},
+      "continuation_budget":continuation_budget,
       "nodes":nodes,"parallel_groups":_realized_parallel_groups(nodes),
       "conditional_extensions":_realize_conditional_extensions(recipe, effective),
       "completion_gates":gates,"human_gates":recipe["human_gates"],
@@ -1562,7 +1581,7 @@ def _compile_from_recipe(registry, recipe, capability, capability_mode, requeste
     if composed:
         payload["composed"]=True
         payload["composed_recipe"]=json.loads(json.dumps(recipe))
-    digest=route_hash(payload); payload["route_hash"]=digest; payload["route_id"]="rt-"+digest.split(":",1)[1][:16]
+    digest=route_hash(payload); payload["route_hash"]=digest; payload["route_id"]=ROUTE_IDENTITY.route_id_from_hash(digest)
     owner_attempt_id=_resolve_owner_attempt_id()
     payload["owner_attempt_id"]=owner_attempt_id
     payload["route_family_key"]=route_family_key(capability,cwd,capability_mode,owner_attempt_id)

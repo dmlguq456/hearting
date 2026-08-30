@@ -1292,7 +1292,19 @@ class ClaudeSessionSupervisorTest(unittest.TestCase):
             timeout=10,
         )
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("continuation-limit-exceeded", result.stdout + result.stderr)
+        # SD-116 (c): exhaustion no longer necessarily dies with
+        # "continuation-limit-exceeded" on the very next turn -- the reserved
+        # budget now buys exactly one extra cleanup turn first (see
+        # `_seal_terminal_handoff_or_raise`), which can shift a genuinely
+        # unresolved child onto whichever no-progress guard trips first (here,
+        # the pre-existing identical-redelivery bound). Either way it still
+        # raises -- this fixture's actual invariant.
+        combined = result.stdout + result.stderr
+        self.assertTrue(
+            "continuation-limit-exceeded" in combined
+            or "identical-redelivery-bound" in combined,
+            combined,
+        )
         registry = self.jobs.read_text(encoding="utf-8")
         self.assertIn("\topen\t", registry)
 
@@ -1327,6 +1339,17 @@ class TypedReceiptStageAdvanceNegotiationTest(unittest.TestCase):
         self.assertEqual(receipt["schema_version"], 2)
         self.assertNotIn("stage_advance", receipt)
         self.assertEqual(json.dumps(negotiated_but_recordless, sort_keys=True), golden)
+        # SD-119: the chain-advance path is wired into the supervisor, but a
+        # join with no sub-session chain metadata is a no-op -- this join's
+        # receipt bytes stay byte-identical to pre-SD-119, and no chain key
+        # ever appears in it.
+        no_chain = supervisor.subsession_advance.coordinate_chain_advance_from_joined_rows(
+            Path("/nonexistent/jobs.registry"), PARENT, {"att-child": SimpleNamespace(
+                attempt_id="att-child", status="done", metadata={},
+            )},
+        )
+        self.assertIsNone(no_chain)
+        self.assertNotIn("chain_id", json.dumps(receipt, sort_keys=True))
 
     def test_negotiated_advanced_record_attaches_v3_block(self):
         value = self._join_value()
@@ -1655,7 +1678,15 @@ class ContinuationTripartiteBudgetTest(unittest.TestCase):
         try:
             case.jobs.write_text(owner_row(case.lease) + child_row(), encoding="utf-8")
             result = subprocess.run(
-                case.command_with_join(case._non_closing_join()) + ["--max-continuations", "1"],
+                case.command_with_join(case._non_closing_join())
+                # SD-116 (c): exhaustion now buys one extra terminal-handoff
+                # cleanup turn before dying (`_seal_terminal_handoff_or_raise`),
+                # which costs one extra identical redelivery of the same
+                # receipt -- raise the redelivery bound so this fixture still
+                # exercises the genuine continuation-limit-exceeded path this
+                # test is about, instead of tripping the unrelated
+                # identical-redelivery guard first.
+                + ["--max-continuations", "1", "--max-identical-redeliveries", "50"],
                 input="initial assignment",
                 text=True,
                 capture_output=True,
@@ -1679,6 +1710,190 @@ class ContinuationTripartiteBudgetTest(unittest.TestCase):
         self.assertEqual(source.count('"terminal-handoff" if open_or_running'), 1)
         self.assertEqual(source.count("purpose=consumption_purpose"), 1)
         self.assertIn("SD-116 R2: terminal-handoff is sealed here and only here", source)
+
+
+class BudgetNoticeReceiptInvarianceTest(unittest.TestCase):
+    """SD-116 (b)/D47-8: the primary receipt-bytes-unchanged assertion."""
+
+    RECEIPT = {
+        "schema_version": 2,
+        "state": "ready",
+        "parent_attempt_id": PARENT,
+        "children": [],
+    }
+
+    def _compact(self, prompt: str) -> str:
+        marker = "Runtime completion receipt (typed supervisor data, not child output): "
+        start = prompt.index(marker) + len(marker)
+        end = prompt.index("\n", start)
+        return prompt[start:end]
+
+    def test_notice_present_or_absent_leaves_compact_receipt_bytes_identical(self):
+        without_notice = supervisor.completion_prompt(dict(self.RECEIPT))
+        with_notice = supervisor.completion_prompt(
+            dict(self.RECEIPT), notice="[continuation-budget-warning] remaining=2 (warning threshold=3)."
+        )
+        self.assertEqual(self._compact(without_notice), self._compact(with_notice))
+        self.assertNotEqual(without_notice, with_notice)
+        self.assertIn("[continuation-budget-warning]", with_notice)
+        self.assertNotIn("[continuation-budget-warning]", without_notice)
+
+
+class BudgetWarningDeliveryTest(unittest.TestCase):
+    """SD-116 (b) D47-5: the warning notice reaches the owner's next-turn
+    prompt exactly once, at the turn that crosses the threshold, and not
+    before."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.state_root = Path(self.temp.name)
+
+    def test_admit_returns_notice_only_on_the_crossing_turn(self):
+        # ordinary=5, reserved=1(default) -> gross_remaining after each
+        # ordinary admit is 4, 3, 2, 1. threshold=3 -> gross_remaining first
+        # reads <= 3 right after the *second* admit, and only there.
+        budget = supervisor_budget_module().ContinuationBudget(limit=5, source="test")
+        ledger = supervisor_budget_module().ContinuationLedger(budget)
+        notices = []
+        for ordinal in range(4):
+            verdict, notice = supervisor._admit_continuation(
+                ledger, self.state_root, parent_attempt_id="att-p",
+                route_id="rt-x", route_hash="sha256:" + "a" * 64,
+                ordinal=ordinal, purpose="ordinary", stalled=False,
+                warning_threshold=3,
+            )
+            self.assertTrue(verdict.admitted)
+            notices.append(notice)
+        self.assertEqual(["", notices[1], "", ""], notices)
+        self.assertTrue(notices[1])
+        self.assertIn("remaining=", notices[1])
+
+    def test_no_notice_before_threshold_is_crossed(self):
+        budget = supervisor_budget_module().ContinuationBudget(limit=10, source="test")
+        ledger = supervisor_budget_module().ContinuationLedger(budget)
+        verdict, notice = supervisor._admit_continuation(
+            ledger, self.state_root, parent_attempt_id="att-p",
+            route_id="rt-x", route_hash="sha256:" + "b" * 64,
+            ordinal=0, purpose="ordinary", stalled=False,
+            warning_threshold=3,
+        )
+        self.assertTrue(verdict.admitted)
+        self.assertEqual("", notice)
+
+
+class ReservationForcedFailureTest(unittest.TestCase):
+    """D47-3: a forced reservation-write failure refuses admission and spends
+    nothing -- the atomic-write outcome, not an in-process counter, is what
+    the ledger's `reservation_ok` decision rests on."""
+
+    def test_forced_reservation_write_failure_refuses_and_spends_nothing(self):
+        with tempfile.TemporaryDirectory() as home:
+            state_root = Path(home)
+            budget = supervisor_budget_module().ContinuationBudget(limit=5, source="test")
+            ledger = supervisor_budget_module().ContinuationLedger(budget)
+            with mock.patch.object(supervisor.budget_record, "_append", return_value=False):
+                verdict, notice = supervisor._admit_continuation(
+                    ledger, state_root, parent_attempt_id="att-p",
+                    route_id="rt-x", route_hash="sha256:" + "c" * 64,
+                    ordinal=0, purpose="ordinary", stalled=False,
+                )
+            self.assertFalse(verdict.admitted)
+            self.assertEqual(verdict.refusal, "continuation-budget-unavailable")
+            self.assertEqual(ledger.gross_remaining, budget.ordinary)
+            self.assertEqual("", notice)
+
+
+def _terminal_handoff_args(threshold=3):
+    return SimpleNamespace(
+        parent_attempt_id="att-p", route_id="rt-x",
+        route_hash="sha256:" + "d" * 64,
+        continuation_warning_threshold=threshold,
+    )
+
+
+class TerminalHandoffCleanupTurnBoundaryTest(unittest.TestCase):
+    """impl-review round 1 finding 1: `_seal_terminal_handoff_or_raise()`
+    reuses the just-refused ordinary admit's `ordinal`. Before the fix,
+    `dispatch_budget_record.reserve()`'s CAS key was `(parent_attempt_id,
+    ordinal)` alone, so the terminal-handoff reservation collided with the
+    already-appended `purpose="ordinary"` reservation at that same ordinal
+    and was refused as `reservation-lost` -- the SD-116 (c) 'one last
+    cleanup turn' was never actually issued and the owner died with
+    `continuation-limit-exceeded` on the very next admit instead of getting
+    the promised cleanup turn. This drives the real `_admit_continuation`/
+    `_seal_terminal_handoff_or_raise` functions against a real tmpdir
+    reservation ledger -- no mock stands in for the CAS check being
+    regression-tested."""
+
+    def test_exactly_one_cleanup_turn_then_second_cleanup_is_refused(self):
+        with tempfile.TemporaryDirectory() as home:
+            state_root = Path(home)
+            budget = supervisor_budget_module().ContinuationBudget(limit=3, source="test")
+            ledger = supervisor_budget_module().ContinuationLedger(budget)
+            terminal_handoff_issued = [False]
+            common = dict(
+                parent_attempt_id="att-p", route_id="rt-x",
+                route_hash="sha256:" + "d" * 64,
+            )
+            verdict, _ = supervisor._admit_continuation(
+                ledger, state_root, ordinal=0, purpose="ordinary", stalled=False, **common,
+            )
+            self.assertTrue(verdict.admitted)
+            verdict, _ = supervisor._admit_continuation(
+                ledger, state_root, ordinal=1, purpose="ordinary", stalled=False, **common,
+            )
+            self.assertTrue(verdict.admitted)
+            self.assertEqual(1, ledger.gross_remaining)
+            self.assertEqual(1, ledger.reserved_remaining)
+
+            # Refused at the gross==reserved boundary. This still appends a
+            # `purpose="ordinary"` reservation row at ordinal=2 even though
+            # the ledger refuses the admit -- that append is the collision
+            # source the fix must tolerate.
+            verdict, _ = supervisor._admit_continuation(
+                ledger, state_root, ordinal=2, purpose="ordinary", stalled=False, **common,
+            )
+            self.assertFalse(verdict.admitted)
+
+            # (a) exactly one budget-exhausted cleanup prompt is issued, at
+            # the SAME ordinal the just-refused ordinary admit used.
+            prompt = supervisor._seal_terminal_handoff_or_raise(
+                ledger, state_root, args=_terminal_handoff_args(), ordinal=2,
+                failure_reason="continuation-limit-exceeded",
+                terminal_handoff_issued=terminal_handoff_issued,
+            )
+            self.assertIn("final continuation turn", prompt)
+            self.assertTrue(terminal_handoff_issued[0])
+
+            # (b) reserved_remaining becomes 0.
+            self.assertEqual(0, ledger.reserved_remaining)
+
+            # (c) a second cleanup is refused and the supervisor terminates.
+            with self.assertRaises(supervisor.SupervisorError) as ctx:
+                supervisor._seal_terminal_handoff_or_raise(
+                    ledger, state_root, args=_terminal_handoff_args(), ordinal=3,
+                    failure_reason="continuation-limit-exceeded",
+                    terminal_handoff_issued=terminal_handoff_issued,
+                )
+            self.assertEqual("continuation-limit-exceeded", str(ctx.exception))
+
+            sys.path.insert(0, str(ROOT / "utilities"))
+            import dispatch_budget_record as BR
+            rows = BR.read_rows(state_root, "att-p")
+            reservations = [row for row in rows if row.get("record_kind") == "reservation"]
+            terminal_reservations = [row for row in reservations if row["purpose"] == "terminal-handoff"]
+            self.assertEqual(1, len(terminal_reservations))
+            ordinary_at_ordinal_2 = [
+                row for row in reservations if row["ordinal"] == 2 and row["purpose"] == "ordinary"
+            ]
+            self.assertEqual(1, len(ordinary_at_ordinal_2))
+
+
+def supervisor_budget_module():
+    sys.path.insert(0, str(ROOT / "utilities"))
+    import dispatch_continuation_budget as BUDGET
+    return BUDGET
 
 
 if __name__ == "__main__":

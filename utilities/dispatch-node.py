@@ -12,6 +12,7 @@ from dispatch_contract import (
     resolve_global_registry,
 )
 from worker_bootstrap import assigned_contract, worker_type_for_kind
+import review_round_cap as REVIEW_ROUND_CAP
 
 _route_spec = importlib.util.spec_from_file_location(
     "capability_route", ROOT / "utilities" / "capability-route.py"
@@ -294,7 +295,11 @@ def prior_round_attempts(jobs, route_id, node_id, *, exclude_slug=None, exclude_
   cols=line.rstrip("\n").split("\t")
   if len(cols)<6: continue
   meta=parse_registry_metadata(cols[5])
-  if meta.get("route")!=route_id or meta.get("route_node")!=node_id: continue
+   # The registry writer emits `route_id=`; `route=` never appears in a
+  # production row, so filtering on it matched nothing and every capped
+  # node counted round 1 forever. `route=` is kept as a read-only
+  # compatibility fallback, with `route_id` taking precedence.
+  if (meta.get("route_id") or meta.get("route"))!=route_id or meta.get("route_node")!=node_id: continue
   if meta.get("stage_authority")=="0": continue
   if exclude_slug and cols[4]==exclude_slug: continue
   if exclude_attempt and meta.get("attempt_id")==exclude_attempt: continue
@@ -305,24 +310,22 @@ def prior_round_attempts(jobs, route_id, node_id, *, exclude_slug=None, exclude_
 # budget under CONVENTIONS §1.1. `execute`/`report` are outside that budget (P2-27
 # review): execute's own retry mechanism is HEAD-lineage based, not round-counted,
 # so excluding it here cannot open an execute-side bypass of the cap.
-ROUND_CAPPED_NODE_IDS = frozenset({"plan-check", "impl-review", "test"})
+# The cap applies to every recipe node with kind == "review-worker" -- the PRD
+# fixes the kind, not a hand-kept id list -- enumerated exhaustively from
+# capabilities/topologies.json. dispatch_node.test.py asserts set equality
+# against that file, so a new review node in any recipe breaks the test rather
+# than silently escaping the cap.
+ROUND_CAPPED_NODE_IDS = frozenset({
+    "claim-verify", "critic-review", "fact-verify", "impl-review", "independent-verify",
+    "inspect", "plan-check", "post-deploy-verify", "qa", "quality-review", "release-review",
+    "review", "run-verify", "security-review", "smoke", "strategy-review", "verify",
+    "visual-verify",
+    # Declared exception: kind is pipeline-stage, but `test` is the QA anchor
+    # C-14 named. Every other exception must be explicit here too.
+    "test",
+})
 
-def max_review_rounds(effective_intensity):
-    """Tier-derived max round count for a capped anchor (CONVENTIONS §1.1 retry budget).
-
-    `direct`/`quick` run no automatic correction round (max 1: the first pass
-    only, matching the table's "One pass"/"None automatically"). `standard`/`strong`
-    get one correction (max 2). `thorough`/`adversarial` get two, including the
-    adversary pass that is not itself a correction (max 3). This is deliberately a
-    per-tier derivation, not a hardcoded `cap=2` -- a tier change moves the cap with it.
-    """
-    if effective_intensity in ("direct", "quick"):
-        return 1
-    if effective_intensity in ("standard", "strong"):
-        return 2
-    if effective_intensity in ("thorough", "adversarial"):
-        return 3
-    raise ValueError(f"unknown effective_intensity for review round cap: {effective_intensity}")
+max_review_rounds = REVIEW_ROUND_CAP.max_review_rounds
 
 def round_protocol_block(round_no, worker_type, node_id, prior):
  """Render the assignment block that scopes a correction round."""

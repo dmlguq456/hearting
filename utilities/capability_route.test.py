@@ -2252,17 +2252,23 @@ class TestValidationBasis(unittest.TestCase):
   self.assertEqual(R.revalidate_launch_compatibility(route),(True,{}))
  def test_plain_verify_is_unchanged_and_launch_phase_rejects_tamper(self):
   import subprocess,sys
-  route=R.compile_route(**self.args())
-  tampered=json.loads(json.dumps(route))
-  tampered["launch_compatibility_tuple"]["runtime_root"]["release_id"]="release:tampered"
-  tampered=self._reseal(tampered)
   with tempfile.TemporaryDirectory() as tmp:
+   # Fixed grounding roots: compiling against the live checkout let a
+   # concurrent suite's working-tree mutation drift grounding_roots.cwd
+   # between compile and verify, so the launch-phase mismatch surfaced as
+   # grounding_roots.cwd instead of the tampered runtime_root.
+   fixed_cwd=Path(tmp)/"cwd"; fixed_root=Path(tmp)/"artifacts"
+   fixed_cwd.mkdir(); fixed_root.mkdir()
+   route=R.compile_route(**self.args(cwd=fixed_cwd,artifact_root=fixed_root))
+   tampered=json.loads(json.dumps(route))
+   tampered["launch_compatibility_tuple"]["runtime_root"]["release_id"]="release:tampered"
+   tampered=self._reseal(tampered)
    route_path=Path(tmp)/"route.json"
    route_path.write_text(json.dumps(tampered),encoding="utf-8")
    env=os.environ.copy(); env["AGENT_HOME"]=self._tmp_home.name
    env.pop("AGENT_DISPATCH_JOBS",None)
    plain=subprocess.run(
-    [sys.executable,str(P),"verify","--route",str(route_path),"--cwd",str(R.ROOT)],
+    [sys.executable,str(P),"verify","--route",str(route_path),"--cwd",str(fixed_cwd)],
     capture_output=True,text=True,cwd=str(R.ROOT),env=env,
    )
    self.assertEqual(plain.returncode,0,plain.stderr)
@@ -2272,7 +2278,7 @@ class TestValidationBasis(unittest.TestCase):
    )
    self.assertEqual(plain.stderr,"")
    launch=subprocess.run(
-    [sys.executable,str(P),"verify","--route",str(route_path),"--cwd",str(R.ROOT),
+    [sys.executable,str(P),"verify","--route",str(route_path),"--cwd",str(fixed_cwd),
      "--launch-phase","start"],
     capture_output=True,text=True,cwd=str(R.ROOT),env=env,
    )
@@ -2739,6 +2745,50 @@ class MigrationAliasContinuationTest(unittest.TestCase):
   ))
   ok,mismatches=R.revalidate_launch_compatibility(route)
   self.assertTrue(ok,mismatches)
+
+
+class ContinuationBudgetSealedBlockTest(unittest.TestCase):
+ """SD-116 WP4: `compile_route()` seals a `continuation_budget` block into
+ the payload before `route_hash` is computed."""
+ setUp=TestRoute.setUp
+ _restore_agent_home=TestRoute._restore_agent_home
+ dispatch=TestRoute.dispatch
+ nested=TestRoute.nested
+ args=TestRoute.args
+
+ def test_compiled_route_carries_a_well_formed_continuation_budget_block(self):
+  route=R.compile_route(**self.args())
+  block=route["continuation_budget"]
+  self.assertEqual(1,block["contract_version"])
+  self.assertEqual(len(route["nodes"]),block["declared_nodes"])
+  self.assertEqual(1,block["gap"])
+  self.assertEqual(1,block["retry"])
+  self.assertGreaterEqual(block["reserved"],1)
+  self.assertEqual(block["limit"],block["ordinary"]+block["reserved"])
+  self.assertGreaterEqual(block["ordinary"],12)
+  self.assertIsInstance(block["review_round_cap"],int)
+  self.assertGreaterEqual(block["review_round_cap"],1)
+
+ def test_block_is_sealed_into_route_hash(self):
+  route=R.compile_route(**self.args())
+  tampered=json.loads(json.dumps(route))
+  tampered["continuation_budget"]["ordinary"]+=1000
+  self.assertNotEqual(R.route_hash(tampered),route["route_hash"])
+
+ def test_sealed_route_resolves_as_sealed_block_with_the_compiled_values(self):
+  import dispatch_continuation_budget as BUDGET
+  route=R.compile_route(**self.args(requested_intensity="strong",predicates=[],
+   signals=["shared-contract"],transport="headless",inline_reason=None,
+   dispatch_evidence=self.dispatch(self.nested())))
+  with tempfile.TemporaryDirectory() as raw:
+   route_file=Path(raw)/"route.json"
+   route_file.write_text(json.dumps(route),encoding="utf-8")
+   budget=BUDGET.resolve_continuation_budget(
+    route_file=route_file,route_id=route["route_id"],route_hash=route["route_hash"],
+   )
+  self.assertEqual("sealed-block",budget.source)
+  self.assertEqual(route["continuation_budget"]["ordinary"],budget.ordinary)
+  self.assertEqual(route["continuation_budget"]["limit"],budget.limit)
 
 
 if __name__=="__main__": unittest.main()

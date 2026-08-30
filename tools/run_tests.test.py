@@ -12,6 +12,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import time
 import textwrap
 import unittest
 from unittest import mock
@@ -56,8 +57,12 @@ def write_suite(root: Path, relpath: str, body: str) -> Path:
 
 def write_baseline(root: Path, rows: list[str]) -> Path:
     p = root / "test-baseline.tsv"
-    header = "suite_path\ttest_id\texpected_failure_kind\tisolation_profile\treason\tdefect_id\treview_by"
-    p.write_text("\n".join(["# baseline", header] + rows) + "\n", encoding="utf-8")
+    header = ("suite_path\ttest_id\texpected_failure_kind\tisolation_profile\t"
+              "reason\tdefect_id\treview_by\tfingerprint")
+    # Fixture rows are written with the pre-fingerprint column count; pad them
+    # so each caller does not have to carry a trailing tab.
+    padded = [r if r.count("\t") >= 7 else r + "\t" for r in rows]
+    p.write_text("\n".join(["# baseline", header] + padded) + "\n", encoding="utf-8")
     return p
 
 
@@ -153,6 +158,35 @@ class UnlistedFailFixture(RunTestsFixtureBase):
         self.assertEqual(verdicts, {"FAIL"})
 
 
+class HardFailSummaryLineFixture(RunTestsFixtureBase):
+    """P1: the CLI summary must carry enough to diagnose a hard-fail from
+    logs alone -- verdict, kind, and a compact signature per entry."""
+
+    def test_hard_fail_line_has_verdict_kind_and_signature(self):
+        write_suite(self.root, "surprise_fail.test.py", "import sys\nsys.exit(1)\n")
+        result, _rows = self.run_fixture([])
+        self.assertNotEqual(result.returncode, 0)
+        self.assertRegex(
+            result.stdout,
+            r"hard-fail: surprise_fail\.test\.py::- verdict=FAIL kind=exit-nonzero signature=",
+        )
+
+
+class XPassListingAndEnvLineFixture(RunTestsFixtureBase):
+    """P1: XPASS-NONFATAL must list which suites unexpectedly passed, and the
+    summary must carry a one-line execution environment fingerprint."""
+
+    def test_xpass_listing_and_env_summary_line(self):
+        write_suite(self.root, "now_passes.test.py", "import sys\nsys.exit(0)\n")
+        result, _rows = self.run_fixture(
+            [f"now_passes.test.py\t-\texit-nonzero\tisolated\tstale\tMA-TEST-015\t{TOMORROW}"],
+            extra_args=["--xpass-nonfatal"],
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("xpass: now_passes.test.py::-", result.stdout)
+        self.assertRegex(result.stdout, r"env: jobs=2 nproc=\d+ timeout=5 profile=isolated")
+
+
 class StaleFixture(RunTestsFixtureBase):
     def test_stale_baseline_row_is_hard_failure(self):
         write_suite(self.root, "present.test.py", "import sys\nsys.exit(0)\n")
@@ -162,6 +196,70 @@ class StaleFixture(RunTestsFixtureBase):
         self.assertNotEqual(result.returncode, 0)
         verdicts = {r["verdict"] for r in rows if r["suite_path"] == "absent.test.py"}
         self.assertEqual(verdicts, {"STALE"})
+
+
+class ArtifactRootsAreNotTestCorpus(unittest.TestCase):
+    def test_suites_under_an_artifact_root_are_not_collected(self):
+        mod = load_runner_module()
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / "utilities").mkdir()
+            (root / "utilities" / "real.test.py").write_text("import sys\nsys.exit(0)\n", encoding="utf-8")
+            for bucket in (".agent_reports/_scratch/copy/utilities", ".claude_reports/legacy"):
+                (root / bucket).mkdir(parents=True)
+                (root / bucket / "stale.test.py").write_text("import sys\nsys.exit(1)\n", encoding="utf-8")
+            found = [mod.suite_relpath(root, s) for s in mod.collect_suites(root)]
+        self.assertEqual(found, ["utilities/real.test.py"])
+
+
+class FingerprintScopedSiblingRows(unittest.TestCase):
+    """One (suite, test) key may carry several rows only when each carries a
+    distinct, non-empty fingerprint; load picks the row for the current
+    fingerprint, then the unscoped row, then the first (foreign) row."""
+
+    # _read_tsv() skips the first non-comment line as the header row.
+    HEADER = ("# baseline fixture\n"
+              "suite_path\ttest_id\texpected_failure_kind\tisolation_profile"
+              "\treason\tdefect_id\treview_by\tfingerprint\n")
+
+    def setUp(self):
+        self.mod = load_runner_module()
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+
+    def _write(self, rows):
+        path = Path(self.tmp.name) / "baseline.tsv"
+        path.write_text(self.HEADER + "".join(r + "\n" for r in rows), encoding="utf-8")
+        return path
+
+    def _row(self, kind, fp):
+        return f"s.test.sh\t-\t{kind}\tisolated\tfixture\tMA-FP\t{TOMORROW}\t{fp}"
+
+    def test_current_fingerprint_row_wins_over_the_other_environment(self):
+        path = self._write([self._row("exit-nonzero", "host-a"), self._row("assertion", "ci-b")])
+        self.assertEqual(self.mod.load_baseline(path, "ci-b")[("s.test.sh", "-")]["expected_failure_kind"], "assertion")
+        self.assertEqual(self.mod.load_baseline(path, "host-a")[("s.test.sh", "-")]["expected_failure_kind"], "exit-nonzero")
+
+    def test_unknown_fingerprint_falls_back_to_the_first_row_as_foreign(self):
+        path = self._write([self._row("exit-nonzero", "host-a"), self._row("assertion", "ci-b")])
+        chosen = self.mod.load_baseline(path, "host-zzz")[("s.test.sh", "-")]
+        self.assertEqual(chosen["fingerprint"], "host-a")
+        self.assertFalse(self.mod.baseline_row_applicable(chosen, "host-zzz"))
+
+    def test_same_fingerprint_twice_is_still_a_duplicate(self):
+        path = self._write([self._row("exit-nonzero", "host-a"), self._row("assertion", "host-a")])
+        with self.assertRaises(self.mod.BaselineError):
+            self.mod.load_baseline(path, "host-a")
+
+    def test_scoped_rows_may_not_mix_with_an_unscoped_row(self):
+        path = self._write([self._row("exit-nonzero", ""), self._row("assertion", "ci-b")])
+        with self.assertRaises(self.mod.BaselineError):
+            self.mod.load_baseline(path, "ci-b")
+
+    def test_single_unscoped_row_keeps_the_legacy_contract(self):
+        path = self._write([self._row("exit-nonzero", "")])
+        chosen = self.mod.load_baseline(path, "anything")[("s.test.sh", "-")]
+        self.assertTrue(self.mod.baseline_row_applicable(chosen, "anything"))
 
 
 class ExpiredFixture(RunTestsFixtureBase):
@@ -186,6 +284,46 @@ class DuplicateRowFixture(RunTestsFixtureBase):
         )
         self.assertEqual(result.returncode, 65)
         self.assertIn("duplicate row", result.stderr)
+
+
+class MissingOrMalformedHeaderFixture(RunTestsFixtureBase):
+    """A TSV reader that unconditionally discards the first non-comment line
+    as "the header" cannot tell a real header apart from a headerless file
+    whose first data row it just silently ate."""
+
+    def test_baseline_missing_header_is_a_typed_parse_error_not_a_dropped_row(self):
+        write_suite(self.root, "b.test.py", "import sys\nsys.exit(1)\n")
+        baseline = self.root / "test-baseline.tsv"
+        # No header line at all -- the real first (and only) data row would
+        # otherwise be silently treated as "the header" and vanish.
+        baseline.write_text(
+            "b.test.py\t-\texit-nonzero\tisolated\ta\tMA-NOHDR\t" + TOMORROW + "\t\n",
+            encoding="utf-8",
+        )
+        isolation = write_isolation_tsv(self.root, None)
+        result = run_runner([
+            "--root", str(self.root), "--baseline", str(baseline),
+            "--isolation-tsv", str(isolation), "--isolation=isolated",
+            "--jobs", "1", "--timeout", "5", "--no-leak-sweep",
+        ])
+        self.assertEqual(result.returncode, 65, result.stdout + result.stderr)
+        self.assertIn("expected header", result.stderr)
+
+    def test_isolation_tsv_wrong_header_shape_is_a_typed_parse_error(self):
+        write_suite(self.root, "b.test.py", "import sys\nsys.exit(1)\n")
+        baseline = write_baseline(self.root, [])
+        isolation = self.root / "test-isolation.tsv"
+        # Right column count, wrong column names/order.
+        isolation.write_text(
+            "needs\tsuite_path\treason\tdefect_id\treview_by\n", encoding="utf-8"
+        )
+        result = run_runner([
+            "--root", str(self.root), "--baseline", str(baseline),
+            "--isolation-tsv", str(isolation), "--isolation=isolated",
+            "--jobs", "1", "--timeout", "5", "--no-leak-sweep",
+        ])
+        self.assertEqual(result.returncode, 65, result.stdout + result.stderr)
+        self.assertIn("expected header", result.stderr)
 
 
 class AmbiguousRowFixture(RunTestsFixtureBase):
@@ -353,11 +491,14 @@ class RetryFixture(RunTestsFixtureBase):
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertEqual([r["verdict"] for r in rows], ["FLAKY-KNOWN-FAIL"])
 
-    def test_all_pass_is_xpass_hard_failure(self):
+    def test_all_pass_is_flaky_pass_not_a_hard_failure(self):
+        # A flaky-timing suite's all-pass aggregate proves nothing about a
+        # suite explicitly declared flaky -- it gets a distinct non-fatal
+        # verdict instead of the non-flaky XPASS hard failure.
         self.write_retry_suite("all-pass")
         result, rows = self.run_fixture(self.baseline(), extra_args=["--retries", "1"])
-        self.assertNotEqual(result.returncode, 0)
-        self.assertEqual(rows[0]["verdict"], "XPASS")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(rows[0]["verdict"], "FLAKY-PASS")
 
     def test_all_fail_is_known_fail(self):
         self.write_retry_suite("all-fail")
@@ -385,6 +526,465 @@ class RetryFixture(RunTestsFixtureBase):
         result, rows = self.run_fixture(self.baseline(), extra_args=["--retries", "1"])
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(rows[0]["detail"], "attempts=2; outcomes=known-fail,pass; policy=flaky-timing")
+
+
+class CiLikeProfileFixture(unittest.TestCase):
+    """P2: ci-like is a layer on top of build_isolated_env(), and the
+    equals-form --isolation flag must be honored as an explicit override."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.mod = load_runner_module()
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_ci_like_env_is_isolated_env_plus_a_layer(self):
+        isolated_env = self.mod.build_isolated_env(self.root / "base")
+        ci_like_env = self.mod.build_ci_like_env(self.root / "cilike", self.root)
+        # every key build_isolated_env sets is still present (layered, not replaced)
+        for key in isolated_env:
+            if key == "PATH":
+                continue  # ci-like pins its own PATH deliberately
+            self.assertIn(key, ci_like_env)
+        self.assertEqual(
+            ci_like_env["PATH"], "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+        )
+        self.assertEqual(ci_like_env["HEARTING_ENV_LAYOUT"], "github-runner")
+        self.assertTrue(Path(ci_like_env["RUNNER_TEMP"]).is_dir())
+        gitconfig = Path(ci_like_env["GIT_CONFIG_GLOBAL"])
+        self.assertTrue(gitconfig.is_file())
+        self.assertIn(str(self.root), gitconfig.read_text(encoding="utf-8"))
+
+    def test_equals_form_isolation_flag_overrides_declared_needs(self):
+        write_suite(self.root, "needs_installed.test.py", "import sys\nsys.exit(0)\n")
+        baseline = write_baseline(self.root, [])
+        isolation = write_isolation_tsv(
+            self.root,
+            [f"needs_installed.test.py\tinstalled-layout\tr\tMA-TEST-016\t{TOMORROW}"],
+        )
+        report_path = self.root / "report.tsv"
+        result = run_runner(
+            [
+                "--root", str(self.root),
+                "--baseline", str(baseline),
+                "--isolation-tsv", str(isolation),
+                "--isolation=ci-like",
+                "--jobs", "1",
+                "--timeout", "5",
+                "--no-leak-sweep",
+                "--report", str(report_path),
+                "--select", "needs_installed.test.py",
+            ]
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        rows = []
+        lines = report_path.read_text(encoding="utf-8").splitlines()
+        header = None
+        for line in lines:
+            if not line or line.startswith("#"):
+                continue
+            cols = line.split("\t")
+            if header is None:
+                header = cols
+                continue
+            rows.append(dict(zip(header, cols)))
+        profiles = {r["isolation_profile"] for r in rows if r["suite_path"] == "needs_installed.test.py"}
+        self.assertEqual(profiles, {"ci-like"})
+
+
+class RetryBudgetFixture(RunTestsFixtureBase):
+    """P3: the serial retry pass is bounded in total, and the per-suite
+    timeout still applies to every individual attempt."""
+
+    def write_slow_flaky_suite(self, sleep_s: float):
+        write_suite(self.root, "slow_flaky.test.py", f"""
+            from pathlib import Path
+            import sys, time
+            p = Path('attempts.txt')
+            n = int(p.read_text()) + 1 if p.exists() else 1
+            p.write_text(str(n))
+            time.sleep({sleep_s})
+            sys.exit(1)
+        """)
+
+    def write_never_ending_suite(self):
+        write_suite(self.root, "slow_flaky.test.py", """
+            from pathlib import Path
+            import time
+            p = Path('attempts.txt')
+            n = int(p.read_text()) + 1 if p.exists() else 1
+            p.write_text(str(n))
+            time.sleep(60)
+        """)
+
+    def baseline(self):
+        return [
+            "slow_flaky.test.py\t-\texit-nonzero\tisolated\t"
+            f"flaky-timing: intermittent\tMA-RETRY-BUDGET\t{TOMORROW}"
+        ]
+
+    def baseline_timeout(self):
+        return [
+            "slow_flaky.test.py\t-\ttimeout\tisolated\t"
+            f"flaky-timing: intermittent\tMA-RETRY-BUDGET\t{TOMORROW}"
+        ]
+
+    def test_exhausted_budget_is_recorded_and_skips_remaining_retries(self):
+        # A suite that always times out keeps every attempt's kind identical
+        # (timeout), so the budget running out (remaining <= 0) is the only
+        # variable -- a mixed-kind fixture would make an ordinary attempt
+        # timeout race with the exhaustion check.
+        self.write_never_ending_suite()
+        result, rows = self.run_fixture(
+            self.baseline_timeout(),
+            extra_args=["--retries", "3", "--retry-budget", "2", "--timeout", "1"],
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("retry-budget-exhausted", rows[0]["detail"])
+        self.assertEqual(rows[0]["verdict"], "KNOWN-FAIL")
+        # budget (2s / 1s-clamped attempts) stops the pass after 2 retries,
+        # not all 3 requested; plus the one initial (non-retry) attempt.
+        attempts = int((self.root / "attempts.txt").read_text())
+        self.assertLess(attempts, 4)
+
+    def test_budget_within_reach_is_not_recorded(self):
+        self.write_slow_flaky_suite(0.0)
+        result, rows = self.run_fixture(
+            self.baseline(), extra_args=["--retries", "1", "--retry-budget", "60"]
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("retry-budget-exhausted", rows[0]["detail"])
+        self.assertIn("attempts=2", rows[0]["detail"])
+
+    def test_all_pass_under_sub_second_clamps_is_flaky_pass_with_no_exhausted_label(self):
+        # Owner-observed regression input: utilities/dispatch_progress.test.py
+        # ran attempts=3, outcomes=pass,pass,pass under a tight retry budget,
+        # and the pre-fix runner wrongly tagged that all-pass aggregate with
+        # retry-budget-exhausted (a positive, non-exhausting clamp mislabeled
+        # as exhaustion) and would have reported it as XPASS. Neither defect
+        # may resurface: this is FLAKY-PASS with no exhausted label, even
+        # though every attempt after the first ran under a sub-second clamp.
+        write_suite(self.root, "slow_flaky.test.py", """
+            from pathlib import Path
+            import sys, time
+            p = Path('attempts.txt')
+            n = int(p.read_text()) + 1 if p.exists() else 1
+            p.write_text(str(n))
+            time.sleep(0.05)
+        """)
+        result, rows = self.run_fixture(
+            self.baseline(),
+            extra_args=["--retries", "3", "--retry-budget", "1", "--timeout", "5"],
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(rows[0]["verdict"], "FLAKY-PASS")
+        self.assertIn("attempts=4", rows[0]["detail"])
+        self.assertNotIn("retry-budget-exhausted", rows[0]["detail"])
+
+    def test_flaky_aggregate_preserves_failing_test_ids(self):
+        write_suite(self.root, "named_flaky.test.py", """
+            import unittest
+            class T(unittest.TestCase):
+                def test_specific_thing(self):
+                    self.fail('boom')
+            unittest.main()
+        """)
+        result, rows = self.run_fixture(
+            [
+                "named_flaky.test.py\t-\tassertion\tisolated\t"
+                f"flaky-timing: intermittent\tMA-RETRY-IDS\t{TOMORROW}"
+            ],
+            extra_args=["--retries", "1"],
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        # the whole-file aggregate row still names which test failed
+        self.assertIn("failing=T.test_specific_thing", rows[0]["detail"])
+
+
+class ForeignFlakyRetryFixture(RunTestsFixtureBase):
+    """impl-review round 1 finding 1: the retry aggregation branch computes its
+    verdict directly instead of going through classify_result(), so it must
+    apply the same fingerprint filter or it becomes a way around P8."""
+
+    def test_foreign_flaky_row_cannot_make_a_failing_suite_known_fail(self):
+        write_suite(self.root, "flaky.test.py", "import sys\nsys.exit(1)\n")
+        rows = [
+            "flaky.test.py\t-\texit-nonzero\tisolated\t"
+            f"flaky-timing: intermittent\tMA-FP-RETRY\t{TOMORROW}\tforeign-host"
+        ]
+        result, report_rows = self.run_fixture(rows, extra_args=["--retries", "1"])
+        verdicts = [r["verdict"] for r in report_rows]
+        self.assertNotIn("KNOWN-FAIL", verdicts, report_rows)
+        self.assertNotIn("FLAKY-KNOWN-FAIL", verdicts, report_rows)
+        self.assertNotIn("BASELINE-FOREIGN", verdicts, report_rows)
+        self.assertEqual(verdicts, ["FAIL"], report_rows)
+        self.assertNotEqual(result.returncode, 0)
+
+
+class SeedBaselineGuardFixture(RunTestsFixtureBase):
+    """impl-review round 1 finding 2: a proposal must not be able to become the
+    contract by being written over it."""
+
+    def test_seeding_onto_the_configured_baseline_is_refused(self):
+        write_suite(self.root, "fails.test.py", "import sys\nsys.exit(1)\n")
+        baseline = write_baseline(self.root, [
+            f"other.test.py\t-\tassertion\tisolated\tfixture\tMA-KEEP\t{TOMORROW}\t",
+        ])
+        isolation = write_isolation_tsv(self.root, None)
+        before = baseline.read_bytes()
+        result = run_runner([
+            "--root", str(self.root), "--baseline", str(baseline),
+            "--isolation-tsv", str(isolation), "--isolation=isolated",
+            "--jobs", "1", "--timeout", "5", "--no-leak-sweep",
+            "--seed-baseline", str(baseline),
+        ])
+        self.assertEqual(result.returncode, 64, result.stdout + result.stderr)
+        self.assertEqual(baseline.read_bytes(), before)
+
+    def test_seeding_onto_a_hardlink_alias_of_the_baseline_is_refused(self):
+        # A differently-named hardlink to the same inode is the same file:
+        # plain resolve()-equality misses this, samefile() does not.
+        write_suite(self.root, "fails.test.py", "import sys\nsys.exit(1)\n")
+        baseline = write_baseline(self.root, [
+            f"other.test.py\t-\tassertion\tisolated\tfixture\tMA-KEEP\t{TOMORROW}\t",
+        ])
+        isolation = write_isolation_tsv(self.root, None)
+        alias = self.root / "baseline-alias.tsv"
+        os.link(baseline, alias)
+        before = baseline.read_bytes()
+        result = run_runner([
+            "--root", str(self.root), "--baseline", str(baseline),
+            "--isolation-tsv", str(isolation), "--isolation=isolated",
+            "--jobs", "1", "--timeout", "5", "--no-leak-sweep",
+            "--seed-baseline", str(alias),
+        ])
+        self.assertEqual(result.returncode, 64, result.stdout + result.stderr)
+        self.assertEqual(baseline.read_bytes(), before)
+
+
+class RetryBudgetBoundFixture(RunTestsFixtureBase):
+    """impl-review round 1 finding 3: checking the budget only before an attempt
+    does not bound that attempt."""
+
+    def test_a_retry_attempt_cannot_outrun_the_remaining_budget(self):
+        write_suite(self.root, "slow.test.py", """
+            import time
+            time.sleep(60)
+        """)
+        rows = [
+            "slow.test.py\t-\ttimeout\tisolated\t"
+            f"flaky-timing: intermittent\tMA-BUDGET\t{TOMORROW}\t"
+        ]
+        started = time.time()
+        result, report_rows = self.run_fixture(
+            rows, extra_args=["--retries", "1", "--timeout", "20", "--retry-budget", "3"],
+        )
+        elapsed = time.time() - started
+        # The main pass costs the full 20s timeout; the retry must be clamped to
+        # the ~3s of budget left rather than running another 20s.
+        self.assertLess(elapsed, 35, f"{elapsed:.1f}s\n{result.stdout}")
+        # Only one retry was requested and it ran (clamped to the ~3s left):
+        # the budget was never driven to <= 0, so this is an ordinary
+        # positive clamp, not exhaustion, and must not carry the label.
+        self.assertNotIn("retry-budget-exhausted", report_rows[0]["detail"])
+
+
+class TimeoutDescendantReclaimFixture(RunTestsFixtureBase):
+    """P3: a timed-out suite is killed together with the descendants it left
+    behind, so a supervisor or fake-server daemon cannot outlive the runner."""
+
+    def test_grandchild_is_reaped_when_the_suite_times_out(self):
+        pidfile = self.root / "grandchild.pid"
+        write_suite(self.root, "leaky.test.py", f"""
+            import subprocess, sys, time
+            # a grandchild that would outlive its parent
+            child = subprocess.Popen(
+                [sys.executable, "-c", "import time; time.sleep(120)"]
+            )
+            open({str(pidfile)!r}, "w").write(str(child.pid))
+            time.sleep(120)
+        """)
+        result, rows = self.run_fixture(
+            [], extra_args=["--timeout", "2"]
+        )
+        self.assertEqual(rows[0]["verdict"], "FAIL")
+        self.assertEqual(rows[0]["kind"], "timeout")
+        grandchild_pid = int(pidfile.read_text())
+        deadline = time.time() + 10
+        while time.time() < deadline:
+            try:
+                os.kill(grandchild_pid, 0)
+            except ProcessLookupError:
+                break
+            time.sleep(0.2)
+        else:
+            os.kill(grandchild_pid, 9)
+            self.fail(f"grandchild {grandchild_pid} survived the suite timeout")
+        _ = result
+
+
+class FingerprintFixture(unittest.TestCase):
+    """P8/MA-W1-011: the fingerprint decides whether a baseline row may be
+    applied. It is never a verdict that can preempt a failure."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.mod = load_runner_module()
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_fingerprint_is_deterministic_for_one_environment(self):
+        env = self.mod.build_isolated_env(self.root / "a")
+        first = self.mod.environment_fingerprint(env, "isolated")
+        second = self.mod.environment_fingerprint(env, "isolated")
+        self.assertEqual(first, second)
+        self.assertEqual(len(first), 16)
+
+    def test_profiles_with_different_environments_differ(self):
+        isolated = self.mod.environment_fingerprint(
+            self.mod.build_isolated_env(self.root / "iso"), "isolated"
+        )
+        ci_like = self.mod.environment_fingerprint(
+            self.mod.build_ci_like_env(self.root / "ci", self.root), "ci-like"
+        )
+        self.assertNotEqual(isolated, ci_like)
+
+    def test_empty_fingerprint_is_unknown_and_keeps_the_old_contract(self):
+        self.assertTrue(self.mod.baseline_row_applicable({"fingerprint": ""}, "abc123"))
+        self.assertTrue(self.mod.baseline_row_applicable({}, "abc123"))
+        self.assertTrue(self.mod.baseline_row_applicable({"fingerprint": "abc123"}, "abc123"))
+        self.assertFalse(self.mod.baseline_row_applicable({"fingerprint": "other"}, "abc123"))
+
+    # --- the six-row verdict table (plan P8) -------------------------------
+
+    def _baseline(self, *, kind="assertion", review_by=None, fingerprint="host-a", test_id="-"):
+        review_by = review_by or TOMORROW
+        return {
+            ("s.test.py", test_id): {
+                "suite_path": "s.test.py", "test_id": test_id,
+                "expected_failure_kind": kind, "isolation_profile": "isolated",
+                "reason": "fixture", "defect_id": "MA-FP", "review_by": review_by,
+                "fingerprint": fingerprint,
+            }
+        }
+
+    def _result(self, passed=True):
+        mod = self.mod
+        stderr = "" if passed else "AssertionError: boom\nFAILED (failures=1)\n"
+        return mod.SuiteResult("s.test.py", 0 if passed else 1, False, "", stderr, 0.1, "isolated")
+
+    def test_row1_foreign_pass_is_held_not_reported_as_xpass(self):
+        verdicts = self.mod.classify_result(
+            self._result(passed=True), self._baseline(), TODAY, "host-b"
+        )
+        self.assertEqual([v.verdict for v in verdicts], ["BASELINE-FOREIGN"])
+        self.assertNotIn("BASELINE-FOREIGN", self.mod.HARD_FAIL_VERDICTS)
+
+    def test_row2_unlisted_failure_is_unchanged_by_the_fingerprint(self):
+        verdicts = self.mod.classify_result(self._result(passed=False), {}, TODAY, "host-b")
+        self.assertEqual([v.verdict for v in verdicts], ["FAIL"])
+        self.assertNotIn("baseline-foreign", verdicts[0].detail)
+
+    def test_row3_foreign_expired_row_stays_a_hard_failure(self):
+        verdicts = self.mod.classify_result(
+            self._result(passed=False),
+            self._baseline(review_by=YESTERDAY), TODAY, "host-b",
+        )
+        self.assertEqual([v.verdict for v in verdicts], ["FAIL"])
+        self.assertIn("baseline-foreign", verdicts[0].detail)
+        self.assertIn(verdicts[0].verdict, self.mod.HARD_FAIL_VERDICTS)
+
+    def test_row4_foreign_kind_mismatch_row_stays_a_hard_failure(self):
+        verdicts = self.mod.classify_result(
+            self._result(passed=False), self._baseline(kind="timeout"), TODAY, "host-b",
+        )
+        self.assertEqual([v.verdict for v in verdicts], ["FAIL"])
+        self.assertIn("baseline-foreign", verdicts[0].detail)
+        self.assertIn(verdicts[0].verdict, self.mod.HARD_FAIL_VERDICTS)
+
+    def test_row5_stale_is_a_corpus_judgement_and_ignores_the_fingerprint(self):
+        # STALE says "this baseline row points at a suite that no longer
+        # exists", which is true regardless of where the row was recorded.
+        # Exempting it by fingerprint would keep dead rows alive forever.
+        write_suite(self.root, "live.test.py", "import sys\nsys.exit(0)\n")
+        baseline = write_baseline(self.root, [
+            f"gone.test.py\t-\tassertion\tisolated\tfixture\tMA-FP\t{TOMORROW}\thost-a",
+        ])
+        isolation = write_isolation_tsv(self.root, None)
+        report = self.root / "r.tsv"
+        result = run_runner([
+            "--root", str(self.root), "--baseline", str(baseline),
+            "--isolation-tsv", str(isolation), "--isolation=isolated",
+            "--jobs", "1", "--timeout", "5", "--no-leak-sweep",
+            "--report", str(report),
+        ])
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("STALE=1", result.stdout)
+
+    def test_row6_foreign_known_fail_becomes_a_hard_failure(self):
+        # The most important row: under the rejected preempt-first design this
+        # silently became a non-hard-fail, so a genuine CI assertion failure
+        # would have disappeared behind the fingerprint.
+        verdicts = self.mod.classify_result(
+            self._result(passed=False), self._baseline(), TODAY, "host-b",
+        )
+        self.assertEqual([v.verdict for v in verdicts], ["FAIL"])
+        self.assertIn(verdicts[0].verdict, self.mod.HARD_FAIL_VERDICTS)
+        # and with a matching fingerprint the row still applies normally
+        matching = self.mod.classify_result(
+            self._result(passed=False), self._baseline(), TODAY, "host-a",
+        )
+        self.assertEqual([v.verdict for v in matching], ["KNOWN-FAIL"])
+
+    def test_invariant_a_failing_run_never_yields_baseline_foreign(self):
+        # The mechanical definition of "the fingerprint cannot turn a failure
+        # green": no failing execution, under any baseline combination, may
+        # produce BASELINE-FOREIGN.
+        combos = [
+            {},
+            self._baseline(),
+            self._baseline(kind="timeout"),
+            self._baseline(review_by=YESTERDAY),
+            self._baseline(fingerprint=""),
+            self._baseline(test_id="T.test_a"),
+            {**self._baseline(), **self._baseline(test_id="T.test_a")},
+        ]
+        for fingerprint in ("host-a", "host-b", ""):
+            for baseline in combos:
+                verdicts = self.mod.classify_result(
+                    self._result(passed=False), baseline, TODAY, fingerprint
+                )
+                self.assertTrue(
+                    all(v.verdict != "BASELINE-FOREIGN" for v in verdicts),
+                    (fingerprint, baseline, [v.verdict for v in verdicts]),
+                )
+
+    def test_seed_baseline_writes_a_proposal_stamped_with_the_fingerprint(self):
+        write_suite(self.root, "fails.test.py", "import sys\nsys.exit(1)\n")
+        baseline = write_baseline(self.root, [])
+        isolation = write_isolation_tsv(self.root, None)
+        seed = self.root / "seed.tsv"
+        result = run_runner([
+            "--root", str(self.root), "--baseline", str(baseline),
+            "--isolation-tsv", str(isolation), "--isolation=isolated",
+            "--jobs", "1", "--timeout", "5", "--no-leak-sweep",
+            "--seed-baseline", str(seed),
+        ])
+        self.assertNotEqual(result.returncode, 0)
+        self.assertTrue(seed.is_file())
+        lines = [l for l in seed.read_text().splitlines() if l and not l.startswith("#")]
+        header, *rows = lines
+        self.assertEqual(header.split("\t"), self.mod.BASELINE_COLUMNS)
+        self.assertTrue(rows, seed.read_text())
+        stamped = dict(zip(self.mod.BASELINE_COLUMNS, rows[0].split("\t")))
+        self.assertEqual(stamped["suite_path"], "fails.test.py")
+        self.assertEqual(len(stamped["fingerprint"]), 16)
+        # the repository baseline is never rewritten by seeding
+        self.assertEqual(baseline.read_text().count("fails.test.py"), 0)
 
 
 class TempParentProbeFixture(unittest.TestCase):
@@ -502,13 +1102,21 @@ class LiveStateLeakFixture(RunTestsFixtureBase):
         # that writes under $HOME/.local/state/hearting must be caught.
         fake_home = Path(tempfile.mkdtemp(prefix="w1-fake-home-"))
         (fake_home / ".local" / "state" / "hearting").mkdir(parents=True)
+        # Hold the fd open across the sampler's poll interval so the bounded
+        # /proc-based sampler (which observes open fds, not instantaneous
+        # syscalls) has a real chance to attribute the write to this suite's
+        # own process-group lineage.
         write_suite(
             self.root,
             "leaky.test.py",
             f"""
             from pathlib import Path
+            import time
             p = Path({str(fake_home / '.local' / 'state' / 'hearting')!r}) / "leak-marker.json"
-            p.write_text("{{}}")
+            with open(p, "w") as f:
+                f.write("{{}}")
+                f.flush()
+                time.sleep(0.8)
             """,
         )
         baseline = write_baseline(self.root, [])
@@ -533,6 +1141,233 @@ class LiveStateLeakFixture(RunTestsFixtureBase):
         )
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("LIVE-STATE-LEAK", result.stderr)
+
+    def test_foreign_concurrent_write_is_reported_but_not_fatal(self):
+        # A write under live-state that no suite's own process-group lineage
+        # produced (simulated here by writing it from the test process itself,
+        # standing in for a concurrent session) must surface as an advisory,
+        # never as the fatal __live_state_leak__ verdict. The whole-run
+        # foreign sampler can only positively attribute a write to a PGID
+        # this run never spawned while that PGID still holds the fd open, so
+        # the writer here holds it open across the sampler's poll interval --
+        # mirroring how LiveStateLeakFixture proves *own* attribution above.
+        fake_home = Path(tempfile.mkdtemp(prefix="w1-fake-home-foreign-"))
+        live_dir = fake_home / ".local" / "state" / "hearting"
+        live_dir.mkdir(parents=True)
+        # Sleeps briefly so the runner's own before/after live-state snapshot
+        # window is wide enough for the concurrently-started foreign writer
+        # below to land inside it.
+        write_suite(self.root, "harmless.test.py", "import time\ntime.sleep(1.0)\n")
+        baseline = write_baseline(self.root, [])
+        isolation = write_isolation_tsv(self.root)
+        report_path = self.root / "leak-report.tsv"
+        env = dict(os.environ)
+        env["HOME"] = str(fake_home)
+
+        def write_foreign_entry_mid_run():
+            time.sleep(0.3)
+            with open(live_dir / "foreign-marker.json", "w") as f:
+                f.write("{}")
+                f.flush()
+                time.sleep(0.5)
+
+        import threading as _threading
+        writer = _threading.Thread(target=write_foreign_entry_mid_run, daemon=True)
+        writer.start()
+        try:
+            result = subprocess.run(
+                [
+                    sys.executable, str(RUNNER),
+                    "--root", str(self.root),
+                    "--baseline", str(baseline),
+                    "--isolation-tsv", str(isolation),
+                    "--isolation=isolated",
+                    "--report", str(report_path),
+                ],
+                cwd=str(ROOT),
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+        finally:
+            writer.join(timeout=5)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("LIVE-STATE-OBSERVED-FOREIGN", result.stderr)
+        self.assertNotIn("LIVE-STATE-LEAK:", result.stderr)
+        self.assertNotIn("LIVE-STATE-UNATTRIBUTED", result.stderr)
+
+    # ------------------------------------------------------------------
+    # Fast open/write/close: neither sampler can observe an fd that is gone
+    # before the next 0.2s poll, so such a write is UNATTRIBUTED whoever made
+    # it. The contract is that absence of evidence is advisory by default and
+    # fatal only in the single-tenant --strict-leak-sweep mode; these
+    # regressions must hold no matter when the write lands relative to the
+    # samplers, so they never assert on timing.
+    # ------------------------------------------------------------------
+
+    def _leak_sweep_run(self, fake_home: Path, *extra_args: str):
+        baseline = write_baseline(self.root, [])
+        isolation = write_isolation_tsv(self.root)
+        env = dict(os.environ)
+        env["HOME"] = str(fake_home)
+        return subprocess.run(
+            [
+                sys.executable, str(RUNNER),
+                "--root", str(self.root),
+                "--baseline", str(baseline),
+                "--isolation-tsv", str(isolation),
+                "--isolation=isolated",
+                "--report", str(self.root / "leak-report.tsv"),
+                *extra_args,
+            ],
+            cwd=str(ROOT),
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+
+    def _fast_own_writer_home(self, marker: str) -> Path:
+        fake_home = Path(tempfile.mkdtemp(prefix="w1-fake-home-fastown-"))
+        live_dir = fake_home / ".local" / "state" / "hearting"
+        live_dir.mkdir(parents=True)
+        write_suite(
+            self.root,
+            "fastwriter.test.py",
+            f"""
+            from pathlib import Path
+            p = Path({str(live_dir)!r}) / {marker!r}
+            with open(p, "w") as f:
+                f.write("{{}}")
+            """,
+        )
+        return fake_home
+
+    def _fast_foreign_writer_home(self, marker: str):
+        """A concurrent session's fast write: opened, written and closed from
+        outside any suite PGID. Gated on a ready file the suite itself
+        creates, so the write always lands inside the runner's before/after
+        live-state window without depending on runner start-up timing."""
+        fake_home = Path(tempfile.mkdtemp(prefix="w1-fake-home-fastforeign-"))
+        live_dir = fake_home / ".local" / "state" / "hearting"
+        live_dir.mkdir(parents=True)
+        ready = self.root / "suite-ready"
+        write_suite(
+            self.root,
+            "harmless.test.py",
+            f"""
+            from pathlib import Path
+            import time
+            Path({str(ready)!r}).write_text("1")
+            time.sleep(1.0)
+            """,
+        )
+
+        import threading as _threading
+
+        def _write_foreign():
+            deadline = time.time() + 30
+            while not ready.exists() and time.time() < deadline:
+                time.sleep(0.01)
+            with open(live_dir / marker, "w") as f:
+                f.write("{}")
+
+        writer = _threading.Thread(target=_write_foreign, daemon=True)
+        return fake_home, writer, ready
+
+    def test_fast_foreign_write_is_advisory_not_fatal(self):
+        # The defect this contract replaces: a concurrent session's fast
+        # write killed an otherwise-green local run.
+        fake_home, writer, _ready = self._fast_foreign_writer_home("fast-foreign.json")
+        writer.start()
+        try:
+            result = self._leak_sweep_run(fake_home)
+        finally:
+            writer.join(timeout=30)
+        output = result.stdout + result.stderr
+        self.assertEqual(result.returncode, 0, output)
+        self.assertIn("LIVE-STATE-UNATTRIBUTED: ", result.stderr)
+        self.assertIn("live-state-unattributed=1", result.stderr)
+        self.assertNotIn("LIVE-STATE-LEAK:", result.stderr)
+
+    def test_fast_foreign_write_is_fatal_under_strict_leak_sweep(self):
+        # Single-tenant mode (CI): with no concurrent writer possible, an
+        # unattributable write is this run's own and must fail it.
+        fake_home, writer, _ready = self._fast_foreign_writer_home("fast-foreign-strict.json")
+        writer.start()
+        try:
+            result = self._leak_sweep_run(fake_home, "--strict-leak-sweep")
+        finally:
+            writer.join(timeout=30)
+        output = result.stdout + result.stderr
+        self.assertNotEqual(result.returncode, 0, output)
+        self.assertIn("LIVE-STATE-UNATTRIBUTED: ", result.stderr)
+        self.assertIn("__live_state_unattributed__", output)
+
+    def test_fast_own_write_is_never_a_silent_pass(self):
+        # An own fast write is indistinguishable from a foreign one at the
+        # evidence level, so it is non-fatal by default -- but it must always
+        # be visible, never silently swallowed.
+        fake_home = self._fast_own_writer_home("fast-marker.json")
+        result = self._leak_sweep_run(fake_home)
+        output = result.stdout + result.stderr
+        self.assertEqual(result.returncode, 0, output)
+        self.assertIn("LIVE-STATE-UNATTRIBUTED: ", result.stderr)
+        self.assertIn("live-state-unattributed=1", result.stderr)
+
+    def test_fast_own_write_is_fatal_under_strict_leak_sweep(self):
+        fake_home = self._fast_own_writer_home("fast-marker-strict.json")
+        result = self._leak_sweep_run(fake_home, "--strict-leak-sweep")
+        output = result.stdout + result.stderr
+        self.assertNotEqual(result.returncode, 0, output)
+        self.assertIn("__live_state_unattributed__", output)
+
+
+class LiveStateSamplerUnitFixture(unittest.TestCase):
+    """Unit-level coverage of the bounded PGID sampler itself: stop/join
+    behavior and lock-protected snapshotting, independent of a real suite
+    subprocess or the live-state root."""
+
+    def setUp(self):
+        self.mod = load_runner_module()
+
+    def test_sampler_stops_promptly_on_event_and_snapshot_is_consistent(self):
+        import threading
+
+        tmp = Path(tempfile.mkdtemp(prefix="w1-sampler-"))
+        try:
+            fake_live_root = tmp / "live"
+            fake_live_root.mkdir()
+            self.mod.LIVE_STATE_ROOT = fake_live_root
+            stop_event = threading.Event()
+            collected: set[str] = set()
+            lock = threading.Lock()
+            marker = fake_live_root / "marker.txt"
+            with open(marker, "w") as f:
+                f.write("x")
+                # Sample this test process's own process group -- its held-open
+                # fd under the (overridden) live-state root stands in for a
+                # suite child the sampler would otherwise track by real PGID.
+                thread = threading.Thread(
+                    target=self.mod._sample_pgid_live_state_writes,
+                    args=(os.getpgid(0), stop_event, collected, lock),
+                    daemon=True,
+                )
+                thread.start()
+                time.sleep(0.5)
+                stop_event.set()
+                started_join = time.time()
+                thread.join(timeout=2.0)
+                join_elapsed = time.time() - started_join
+            self.assertFalse(thread.is_alive())
+            self.assertLess(join_elapsed, 2.0)
+            with lock:
+                snapshot = set(collected)
+            self.assertIn(str(marker), snapshot)
+        finally:
+            import shutil
+            shutil.rmtree(tmp, ignore_errors=True)
 
 
 class SeedingGateFixture(unittest.TestCase):
@@ -575,7 +1410,7 @@ class NoAmbientExecutionPathFixture(unittest.TestCase):
         self.assertIsNotNone(m, result.stdout)
         choices = m.group(1).split(",")
         self.assertNotIn("ambient", choices)
-        self.assertEqual(set(choices), {"isolated", "installed-layout", "live-registry"})
+        self.assertEqual(set(choices), {"isolated", "installed-layout", "live-registry", "ci-like"})
 
     def test_source_never_launches_a_suite_subprocess_with_inherited_environ(self):
         source = RUNNER.read_text(encoding="utf-8")

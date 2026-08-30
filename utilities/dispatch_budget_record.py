@@ -9,10 +9,15 @@ Records live under `<dispatch_state_root>/supervisor-budget/<parent_attempt_id>.
 the delivery receipt's `state`/`required_action`/`reason` enums (D47-8):
 receipt bytes never change because of this module.
 
-`reserve()` is a CAS append keyed on `(parent_attempt_id, ordinal)`: this
-module deliberately never uses an in-process counter as the sole admission
-evidence, because an in-process counter is always true and could never
-exercise D47-3's false branch under a forced write failure.
+`reserve()` is a CAS append keyed on `(parent_attempt_id, ordinal, purpose)`:
+this module deliberately never uses an in-process counter as the sole
+admission evidence, because an in-process counter is always true and could
+never exercise D47-3's false branch under a forced write failure. `purpose`
+is part of the CAS key (impl-review round 1 finding 1) so that a
+`terminal-handoff` reservation at the same `ordinal` as the `ordinary`
+reservation it follows is never rejected as a duplicate of that unrelated
+purpose -- the two reservations are distinct admission decisions even when
+the caller reuses the turn's `ordinal` for both.
 """
 from __future__ import annotations
 
@@ -39,7 +44,15 @@ REFUSAL_REASONS = frozenset({
     "continuation-budget-unavailable",
     "continuation-admission-refused",
 })
+# SD-116 (b)/(c): `warning` record reasons. Distinct from `REFUSAL_REASONS`
+# above -- both are `record_kind`-scoped vocabularies, never the delivery
+# receipt's `state`/`required_action`/`reason` enums (D47-8).
+WARNING_REASONS = frozenset({
+    "continuation-budget-exhausted",
+    "continuation-budget-warning",
+})
 _LOCK_DEADLINE_SECONDS = 0.25
+_NOTICE_KINDS = frozenset({"budget-warning", "budget-exhausted"})
 
 
 def _now(now: float | None) -> float:
@@ -126,10 +139,14 @@ def reserve(
     state_root, *, parent_attempt_id, route_id, route_hash, ordinal, purpose,
     klass, remaining, now=None,
 ) -> tuple:
-    """CAS append. A duplicate `(parent_attempt_id, ordinal)` is
+    """CAS append. A duplicate `(parent_attempt_id, ordinal, purpose)` is
     `reservation-lost` -- the caller's admission is never granted twice for
-    the same ordinal, which is what makes `atomic_reservation_succeeds`
-    forceable to False for D47-3's negative branch."""
+    the same ordinal and purpose, which is what makes
+    `atomic_reservation_succeeds` forceable to False for D47-3's negative
+    branch. `purpose` is part of the key so a `terminal-handoff` reservation
+    sharing its `ordinal` with the `ordinary` reservation it follows is not
+    mistaken for a duplicate of that other purpose (impl-review round 1
+    finding 1)."""
 
     if purpose not in PURPOSES or klass not in CLASSES:
         return (False, f"reservation-invalid:purpose={purpose!r},class={klass!r}")
@@ -137,7 +154,11 @@ def reserve(
 
     def _do():
         for existing in read_rows(state_root, parent_attempt_id):
-            if existing.get("record_kind") == "reservation" and existing.get("ordinal") == ordinal:
+            if (
+                existing.get("record_kind") == "reservation"
+                and existing.get("ordinal") == ordinal
+                and existing.get("purpose") == purpose
+            ):
                 return (False, "reservation-lost")
         row = {
             "schema_version": SCHEMA_VERSION,
@@ -191,9 +212,47 @@ def _record_event(state_root, *, parent_attempt_id, record_kind, reason, remaini
 
 
 def record_warning(state_root, *, parent_attempt_id, reason, remaining, now=None) -> tuple:
+    if reason not in WARNING_REASONS:
+        return ("continuation-budget-warning-unrecorded", f"unknown-reason:{reason!r}")
     return _record_event(
         state_root, parent_attempt_id=parent_attempt_id, record_kind="warning",
         reason=reason, remaining=remaining, now=now,
+    )
+
+
+def warning_already_emitted(state_root, *, parent_attempt_id, reason) -> bool:
+    """SD-116 (b): "exactly once" is judged from the durable record itself,
+    never an in-process flag -- the same CAS-over-counter reasoning `reserve()`
+    above already documents (a process-local flag is always trustworthy and
+    could never exercise a genuine duplicate-suppression check)."""
+
+    for row in read_rows(state_root, parent_attempt_id):
+        if row.get("record_kind") == "warning" and row.get("reason") == reason:
+            return True
+    return False
+
+
+def render_notice(kind: str, *, remaining: int, threshold: int) -> str:
+    """Pure prose renderer shared by the Claude and Codex supervisors (SD-116
+    (b)/(c)). Never touches receipt bytes -- callers attach the returned
+    string outside any `compact` receipt JSON (D47-8)."""
+
+    if kind not in _NOTICE_KINDS:
+        raise ValueError(f"unknown notice kind: {kind!r}")
+    if kind == "budget-warning":
+        return (
+            "[continuation-budget-warning] remaining={remaining} "
+            "(warning threshold={threshold}). This owner's ordinary "
+            "continuation budget is running low. Recommendation: wrap up "
+            "outstanding work now, prefer a partial report over further "
+            "exploration, and be ready to end the attempt as BLOCKED if the "
+            "budget is exhausted before the work completes."
+        ).format(remaining=remaining, threshold=threshold)
+    return (
+        "[continuation-budget-exhausted] remaining=0. This is the final "
+        "reserved turn: no further continuation will be granted after this "
+        "one. Use this turn only to record a partial report or hand off "
+        "cleanly; do not start new work."
     )
 
 

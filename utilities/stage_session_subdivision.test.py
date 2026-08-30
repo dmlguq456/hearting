@@ -541,6 +541,35 @@ class SubdivisionContractTest(unittest.TestCase):
                 )
             self.assertEqual(status["status"], "stage-gate-aggregated")
 
+    def test_a13_three_slice_chain_writes_exactly_one_marker(self):
+        # SD-119 A-13: a 3-slice SERIAL chain completes to exactly one
+        # canonical marker + one history entry, `stage_authority=owner-chain`,
+        # and `subsession_manifest_sha256` equal to the manifest's own sealed
+        # digest.
+        with tempfile.TemporaryDirectory() as td:
+            worktree, route, node, manifest_path = self._fixture(
+                td, mode="serial", session_count=3
+            )
+            manifest = SSC.load_manifest(manifest_path, route=route, node=node)
+            jobs_path = Path(td) / "jobs.log"
+            self._write_jobs(jobs_path, route, manifest, mode="serial")
+            evidence = Path(td) / "evidence.md"
+            evidence.write_text("execute done\n", encoding="utf-8")
+            with mock.patch.dict(os.environ, {"AGENT_DISPATCH_JOBS": str(jobs_path)}):
+                marker, status = CR.complete_subsession_stage(
+                    route, node, "execute", evidence, manifest_path, jobs_path,
+                )
+                self.assertEqual(status["status"], "stage-gate-aggregated")
+                self.assertEqual(status["sessions"], 3)
+                self.assertEqual(marker["stage_authority"], "owner-chain")
+                self.assertEqual(
+                    marker["subsession_manifest_sha256"], manifest["_manifest_sha256"]
+                )
+                completion_dir = CR.completion_dir(route["route_id"])
+                self.assertTrue((completion_dir / "execute.json").is_file())
+                history_markers = list(completion_dir.glob("execute.*.json"))
+                self.assertEqual(len(history_markers), 1)
+
     def test_ac29_gap_retry_uses_only_failed_slice_files(self):
         # AC 29: the retry manifest is DERIVED by production code from the
         # failed slice, then validated by the real loader. The previous fixture

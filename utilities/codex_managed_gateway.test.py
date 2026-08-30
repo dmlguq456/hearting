@@ -1365,6 +1365,22 @@ class ValidateDeliveryStageAdvanceNegotiationTest(unittest.TestCase):
         )
         self.assertEqual(normalized["schema_version"], 2)
         self.assertNotIn("stage_advance", normalized)
+        # SD-119: the chain-advance path exists but a join with no
+        # sub-session chain metadata is a no-op -- this receipt never carries
+        # a chain key, byte-identical to pre-SD-119.
+        sys.path.insert(0, str(ROOT / "utilities"))
+        import dispatch_subsession_advance as subsession_advance
+        from types import SimpleNamespace
+
+        no_chain = subsession_advance.coordinate_chain_advance_from_joined_rows(
+            Path("/nonexistent/jobs.registry"), "att-parent", {
+                "att-child": SimpleNamespace(
+                    attempt_id="att-child", status="done", metadata={},
+                )
+            },
+        )
+        self.assertIsNone(no_chain)
+        self.assertNotIn("chain_id", json.dumps(normalized, sort_keys=True))
 
     def test_unnegotiated_gateway_rejects_stray_stage_advance_key(self):
         request = receipt_request()

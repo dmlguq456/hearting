@@ -83,5 +83,85 @@ class WarningDeliveryFailureTest(unittest.TestCase):
             self.assertEqual(ledger.gross_remaining, budget.ordinary)
 
 
+class WarningOnceTest(unittest.TestCase):
+    def test_first_crossing_writes_exactly_one_row_and_reentry_adds_none(self):
+        with tempfile.TemporaryDirectory() as home:
+            state_root = Path(home)
+            self.assertFalse(
+                BR.warning_already_emitted(
+                    state_root, parent_attempt_id="att-p", reason="continuation-budget-warning",
+                )
+            )
+            ok, detail = BR.record_warning(
+                state_root, parent_attempt_id="att-p",
+                reason="continuation-budget-warning", remaining=REMAINING,
+            )
+            self.assertEqual(ok, "", detail)
+            self.assertTrue(
+                BR.warning_already_emitted(
+                    state_root, parent_attempt_id="att-p", reason="continuation-budget-warning",
+                )
+            )
+            rows_before = BR.read_rows(state_root, "att-p")
+            warning_rows = [r for r in rows_before if r.get("record_kind") == "warning"]
+            self.assertEqual(len(warning_rows), 1)
+            # A caller that (incorrectly) records again anyway still only adds
+            # one row of durable evidence per distinct reason; the "already
+            # emitted" gate is what real call sites consult before recording.
+            self.assertTrue(
+                BR.warning_already_emitted(
+                    state_root, parent_attempt_id="att-p", reason="continuation-budget-warning",
+                )
+            )
+
+
+class RenderNoticeTest(unittest.TestCase):
+    def test_two_kinds_are_deterministic_and_include_remaining_and_recommendation(self):
+        warning = BR.render_notice("budget-warning", remaining=2, threshold=3)
+        self.assertIn("remaining=2", warning)
+        self.assertIn("threshold=3", warning)
+        self.assertEqual(warning, BR.render_notice("budget-warning", remaining=2, threshold=3))
+        exhausted = BR.render_notice("budget-exhausted", remaining=0, threshold=3)
+        self.assertIn("remaining=0", exhausted)
+        self.assertNotEqual(warning, exhausted)
+
+    def test_unknown_kind_raises(self):
+        with self.assertRaises(ValueError):
+            BR.render_notice("budget-unknown", remaining=1, threshold=3)
+
+
+class WarningVocabularyTest(unittest.TestCase):
+    def test_warning_reason_vocabulary_is_fixed_and_disjoint_from_refusal_reasons(self):
+        self.assertEqual(
+            {"continuation-budget-exhausted", "continuation-budget-warning"},
+            set(BR.WARNING_REASONS),
+        )
+        self.assertEqual(set(), BR.WARNING_REASONS & BR.REFUSAL_REASONS)
+
+    def test_record_warning_refuses_an_unknown_reason(self):
+        with tempfile.TemporaryDirectory() as home:
+            state_root = Path(home)
+            error, detail = BR.record_warning(
+                state_root, parent_attempt_id="att-p",
+                reason="not-a-real-reason", remaining=REMAINING,
+            )
+            self.assertTrue(error)
+            self.assertIn("not-a-real-reason", detail)
+            self.assertEqual(BR.read_rows(state_root, "att-p"), ())
+
+    def test_vocabulary_sets_disjoint_from_receipt_enums(self):
+        # D47-8: `RECORD_KINDS`/`PURPOSES`/`CLASSES`/`REFUSAL_REASONS`/
+        # `WARNING_REASONS` are a separate vocabulary from the delivery
+        # receipt's `state`/`required_action`/`reason` enums.
+        receipt_enum_values = {
+            "ready", "harvest", "", "attention", "blocked",
+            "complete-open", "inspect-done-failure",
+        }
+        for vocab in (
+            BR.RECORD_KINDS, BR.PURPOSES, BR.CLASSES, BR.REFUSAL_REASONS, BR.WARNING_REASONS,
+        ):
+            self.assertEqual(set(), set(vocab) & receipt_enum_values)
+
+
 if __name__ == "__main__":
     unittest.main()

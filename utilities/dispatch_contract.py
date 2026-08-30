@@ -5151,6 +5151,91 @@ def claim_stage_advance(
     )
 
 
+@dataclass(frozen=True)
+class SubsessionAdvanceRegistryClaim:
+    """SD-119 chain-advance claim result. `claim_key` is predecessor-free
+    (`route_hash`, `route_node`, `chain_id`, `successor_subsession_index`,
+    `advance_generation`) -- one generation, one chain, one index, one
+    claimant, regardless of which predecessor index closed first."""
+
+    subsession_advance_id: str
+    claim_key: tuple
+    successor_attempt_id: str
+    replayed: bool
+
+
+def claim_subsession_advance(
+    jobs: Path,
+    *,
+    subsession_advance_id: str,
+    route_hash: str,
+    route_node: str,
+    chain_id: str,
+    successor_subsession_index: int,
+    advance_generation: int,
+    successor_attempt_id: str,
+) -> SubsessionAdvanceRegistryClaim:
+    """CAS one stable sub-session chain-advance claim inside `<jobs>.lock`, or
+    replay the identical claim for a repeated `subsession_advance_id` (A-6/A-7).
+    A distinct `claim_key` already claimed by a DIFFERENT `subsession_advance_id`
+    is `subsession-advance-claim-conflict` (A-6), spawn 0."""
+
+    if (
+        not subsession_advance_id.startswith("ssadv-")
+        or not route_hash
+        or not route_node
+        or not chain_id
+        or not successor_attempt_id
+        or type(advance_generation) is not int
+        or type(successor_subsession_index) is not int
+    ):
+        raise DispatchContractError("subsession-advance-claim-identity-incomplete")
+    ensure_global_registry_writable(jobs)
+    claim_key = (route_hash, route_node, chain_id, successor_subsession_index, advance_generation)
+    claims_dir = jobs.parent / "subsession_advance" / "claims"
+    claim_path = claims_dir / f"{_stage_advance_claim_key_digest(claim_key)}.json"
+    with Path(f"{jobs}.lock").open("a", encoding="utf-8") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        if claim_path.is_file():
+            try:
+                existing = json.loads(claim_path.read_text(encoding="utf-8"))
+            except (OSError, ValueError) as exc:
+                raise DispatchContractError("subsession-advance-claim-record-invalid") from exc
+            if existing.get("subsession_advance_id") == subsession_advance_id:
+                return SubsessionAdvanceRegistryClaim(
+                    subsession_advance_id=subsession_advance_id,
+                    claim_key=claim_key,
+                    successor_attempt_id=existing["successor_attempt_id"],
+                    replayed=True,
+                )
+            raise DispatchContractError("subsession-advance-claim-conflict")
+        record = {
+            "subsession_advance_id": subsession_advance_id,
+            "claim_key": list(claim_key),
+            "successor_attempt_id": successor_attempt_id,
+            "claimed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        }
+        claims_dir.mkdir(parents=True, exist_ok=True)
+        fd, temp_name = tempfile.mkstemp(prefix=".claim.", dir=str(claims_dir))
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                json.dump(record, handle, sort_keys=True, separators=(",", ":"))
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temp_name, claim_path)
+        finally:
+            try:
+                os.unlink(temp_name)
+            except FileNotFoundError:
+                pass
+    return SubsessionAdvanceRegistryClaim(
+        subsession_advance_id=subsession_advance_id,
+        claim_key=claim_key,
+        successor_attempt_id=successor_attempt_id,
+        replayed=False,
+    )
+
+
 def seal_recovery_blocked(
     jobs: Path,
     *,
