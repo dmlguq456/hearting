@@ -2278,6 +2278,15 @@ def _install_or_update(
                 raise DistributionError(
                     f"same-release reconfiguration failed: {original_error}"
                 ) from original_error
+            if force_prune_unproven:
+                # An explicit force pass on an already-current release still
+                # walks the prune step: the flag is the operator's decision to
+                # retire unproven superseded releases, independent of whether
+                # this call changed the active version.
+                _cleanup_releases(
+                    {Path(previous_state["release_root"])},
+                    force_prune_unproven=True,
+                )
             return {
                 "status": "repaired" if repaired else "up-to-date",
                 "version": release["version"],
