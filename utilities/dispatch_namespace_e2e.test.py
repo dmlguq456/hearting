@@ -21,6 +21,7 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "utilities"))
 import dispatch_completion_join as JOIN  # noqa: E402
+import dispatch_contract  # noqa: E402
 from codex_dispatch_terminal import terminal_envelope_observed  # noqa: E402
 
 
@@ -33,6 +34,28 @@ def load(path: Path, name: str):
 
 
 ROUTE = load(ROOT / "utilities" / "capability-route.py", "pidns_route_fixture")
+
+# This fixture builds its own route and registry. Inheriting the caller's
+# dispatch identity makes the wrapper verify the *caller's* owner route against
+# the fixture's, which fails as owner-route-verification-failed when the suite
+# runs inside a real dispatch (CI has no such environment, so it only ever bites
+# locally). Every fixture environment is scrubbed of these.
+INHERITED_DISPATCH_KEYS = (
+    "AGENT_OWNER_ROUTE_FILE",
+    "AGENT_OWNER_ROUTE_ID",
+    "AGENT_OWNER_ROUTE_HASH",
+    "AGENT_ROUTE_FILE",
+    "AGENT_ROUTE_ID",
+    "AGENT_ROUTE_NODE",
+    "AGENT_DISPATCH_COMPLETION_STATE_FILE",
+    "AGENT_DISPATCH_SUPERVISOR_LEASE_FILE",
+    "AGENT_DISPATCH_PARENT_ATTEMPT_ID",
+)
+
+
+def base_environ() -> dict:
+    """os.environ minus any inherited dispatch/route identity."""
+    return {k: v for k, v in os.environ.items() if k not in INHERITED_DISPATCH_KEYS}
 WRAPPER = ROOT / "adapters" / "codex" / "bin" / "dispatch-headless.py"
 
 
@@ -46,39 +69,47 @@ class CodexNamespaceE2E(unittest.TestCase):
             if required:
                 self.fail("bubblewrap is required for the PID namespace regression")
             self.skipTest("bubblewrap is unavailable")
-        with tempfile.TemporaryDirectory() as dev_dir:
-            Path(dev_dir, "null").write_bytes(b"")
-            base = [
-                bwrap,
-                "--die-with-parent",
-                "--unshare-pid",
-                "--ro-bind", "/", "/",
-                "--proc", "/proc",
-                "--bind", dev_dir, "/dev",
-                "--bind", "/tmp", "/tmp",
-            ]
-            probe = subprocess.run([*base, "true"], text=True, capture_output=True)
-            if probe.returncode:
-                if required:
-                    self.fail("bubblewrap PID namespace unavailable: " + probe.stderr.strip())
-                self.skipTest("bubblewrap PID namespace unavailable: " + probe.stderr.strip())
-            env = {
-                **os.environ,
-                "HEARTING_PIDNS_CHILD": "1",
-                "HEARTING_HOST_PID_NS": os.readlink("/proc/self/ns/pid"),
-            }
-            result = subprocess.run(
-                [
-                    *base,
-                    sys.executable,
-                    str(Path(__file__).resolve()),
-                    "CodexNamespaceE2E.test_pass_receipt_marker_and_join_are_ordered",
-                ],
-                cwd=ROOT,
-                env=env,
-                text=True,
-                capture_output=True,
-            )
+        # A hand-built /dev containing only an empty `null` has no /dev/urandom,
+        # so git inside the namespace dies with "unable to get random bytes for
+        # temporary file" before the test under test even runs. bwrap's own
+        # --dev supplies a minimal, correct devtmpfs.
+        base = [
+            bwrap,
+            "--die-with-parent",
+            "--unshare-pid",
+            "--ro-bind", "/", "/",
+            "--proc", "/proc",
+            "--dev", "/dev",
+            "--bind", "/tmp", "/tmp",
+        ]
+        # `/` is bound read-only, so a TMPDIR outside /tmp (the test runner
+        # isolates one under /var/tmp) is unwritable inside the namespace and
+        # mktemp fails. Bind whatever TMPDIR actually is.
+        tmpdir = os.environ.get("TMPDIR", "").rstrip("/")
+        if tmpdir and not tmpdir.startswith("/tmp") and os.path.isdir(tmpdir):
+            base += ["--bind", tmpdir, tmpdir]
+        probe = subprocess.run([*base, "true"], text=True, capture_output=True)
+        if probe.returncode:
+            if required:
+                self.fail("bubblewrap PID namespace unavailable: " + probe.stderr.strip())
+            self.skipTest("bubblewrap PID namespace unavailable: " + probe.stderr.strip())
+        env = {
+            **os.environ,
+            "HEARTING_PIDNS_CHILD": "1",
+            "HEARTING_HOST_PID_NS": os.readlink("/proc/self/ns/pid"),
+        }
+        result = subprocess.run(
+            [
+                *base,
+                sys.executable,
+                str(Path(__file__).resolve()),
+                "CodexNamespaceE2E.test_pass_receipt_marker_and_join_are_ordered",
+            ],
+            cwd=ROOT,
+            env=env,
+            text=True,
+            capture_output=True,
+        )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         return True
 
@@ -170,13 +201,20 @@ class CodexNamespaceE2E(unittest.TestCase):
             route_path.write_text(json.dumps(route), encoding="utf-8")
             node = next(item for item in route["nodes"] if item["id"] == "plan")
             fixture_env = {
-                **os.environ,
+                **base_environ(),
                 "AGENT_HOME": str(agent_home),
                 "AGENT_ARTIFACT_ROOT": str(artifact_root),
                 "AGENT_MODEL_GOVERNOR_ROOT": str(model_governor_root),
                 "HOME": str(home),
             }
-            fixture_env.pop("AGENT_DISPATCH_JOBS", None)
+            # `complete` writes the predecessor markers and `--start` reads them.
+            # resolve_dispatch_state_root() picks its root from explicit jobs ->
+            # AGENT_DISPATCH_JOBS -> a per-user fallback, so dropping the variable
+            # here sent the two calls to structurally different roots: the markers
+            # landed, and --start still reported completion-marker-missing. Bind
+            # both to the same fixture registry and state home.
+            fixture_env["AGENT_DISPATCH_JOBS"] = str(jobs)
+            fixture_env["XDG_STATE_HOME"] = str(base / "state")
             for predecessor in node.get("depends_on", []):
                 predecessor_evidence = artifact_root / f"{predecessor}.md"
                 predecessor_evidence.write_text("fixture predecessor\n", encoding="utf-8")
@@ -265,8 +303,16 @@ class CodexNamespaceE2E(unittest.TestCase):
                 "--foreground-timeout", "10",
                 "--prompt-text", "fixture",
             ]
+            marker_root = dispatch_contract.dispatch_state_root(jobs) / "completion" / route["route_id"]
+            for predecessor in node.get("depends_on", []):
+                self.assertTrue(
+                    (marker_root / f"{predecessor}.json").is_file(),
+                    f"predecessor marker missing before --start: {predecessor} "
+                    f"(looked in {marker_root}); `complete` returning 0 is not "
+                    f"evidence that --start can find the marker",
+                )
             env = {
-                **os.environ,
+                **base_environ(),
                 "PATH": str(fakebin) + os.pathsep + os.environ.get("PATH", ""),
                 "HOME": str(home),
                 "AGENT_HOME": str(agent_home),
@@ -344,7 +390,11 @@ class CodexNamespaceE2E(unittest.TestCase):
             parent.wait(timeout=5)
             self.assertEqual(finished.status, "done")
             self.assertEqual(finished.metadata.get("note"), "completed-marker")
-            self.assertEqual(finished.metadata.get("failure_class"), None)
+            # `note=completed-marker` and `failure_class=pass` are written
+            # together by the marker-bound-delivery-v1 classifier (6c994ba8), and
+            # worker-route-guard requires the positive `pass` value to accept a
+            # slice's lineage. Asserting None here predates that commit.
+            self.assertEqual(finished.metadata.get("failure_class"), "pass")
             self.assertEqual(finished.metadata.get("pid_scope"), "namespace-local")
             self.assertEqual(finished.metadata.get("pid_ns"), inner_namespace)
             self.assertEqual(finished.metadata.get("pid_observer_ns"), inner_namespace)
