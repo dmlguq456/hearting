@@ -186,7 +186,9 @@ NO_PARENT_ATTEMPT = "-"
 PENDING_DELIVERY_LOG = "dispatch-pending-delivery.log"
 
 
-def pending_record_identity(metadata: dict[str, str]) -> tuple[str, str, str]:
+def pending_record_identity(
+    metadata: dict[str, str], jobs: Path | None = None
+) -> tuple[str, str, str]:
     """Resolve the (route_id, route_node, parent_attempt_id) identity triple a
     pending-delivery record requires from one terminal row's metadata.
 
@@ -199,6 +201,14 @@ def pending_record_identity(metadata: dict[str, str]) -> tuple[str, str, str]:
     ``identity-incomplete`` and no production record ever existed. Owner rows
     now resolve to ``owner_route_id`` + the ``_owner`` node sentinel + the
     ``-`` no-parent sentinel; stage rows are unchanged.
+
+    A registered depth-1 owner may since have advanced past its launch-sealed
+    route generation. When a jobs path is available, the verified current
+    binding (owner_route_binding's advance lifecycle) outranks the sealed
+    ``owner_route_id`` so the delivery receipt reflects the owner's current
+    generation rather than the one it launched under. Invalid or conflicting
+    advance evidence is a refusal here (``JoinContractError``), never a
+    silent fall back to the stale sealed value.
     """
 
     route_id = metadata.get("route_id") or ""
@@ -209,7 +219,39 @@ def pending_record_identity(metadata: dict[str, str]) -> tuple[str, str, str]:
         or metadata.get("dispatch_depth") == "1"
     )
     if is_owner_row:
-        route_id = route_id or metadata.get("owner_route_id") or ""
+        sealed = (
+            metadata.get("owner_route_file"),
+            metadata.get("owner_route_id"),
+            metadata.get("owner_route_hash"),
+        )
+        current_route_id = metadata.get("owner_route_id") or ""
+        # Legacy terminal rows may carry only owner_route_id, which is already
+        # sufficient for the delivery identity sentinel. Consult the durable
+        # lifecycle for either a complete launch tuple or a completely
+        # route-less owner that can have a post-launch attachment; do not turn
+        # the historical id-only form into a new refusal.
+        sealed_present = any(sealed)
+        lifecycle_eligible = all(sealed) or not sealed_present
+        if (not route_id and jobs is not None and metadata.get("attempt_id")
+                and lifecycle_eligible):
+            from owner_route_binding import (
+                OwnerRouteBinding,
+                OwnerRouteBindingError,
+                resolve_owner_route_lifecycle,
+            )
+            try:
+                anchor = OwnerRouteBinding(*sealed) if all(sealed) else None
+                current, status = resolve_owner_route_lifecycle(
+                    jobs, owner_attempt_id=str(metadata.get("attempt_id", "")),
+                    sealed_binding=anchor,
+                )
+                if status == "owner-route-advance-loop":
+                    raise JoinContractError("owner-route-advance-conflict")
+                if current is not None and status != "owner-route-advance-anchor-unresolvable":
+                    current_route_id = current.route_id
+            except OwnerRouteBindingError as exc:
+                raise JoinContractError("owner-route-advance-conflict") from exc
+        route_id = route_id or current_route_id
         route_node = route_node or OWNER_ROUTE_NODE
         parent_attempt_id = parent_attempt_id or NO_PARENT_ATTEMPT
     return route_id, route_node, parent_attempt_id
@@ -274,7 +316,7 @@ def materialize_pending_delivery(jobs: Path, row_fields: list[str]) -> Path | No
         )
     receipt = unseal_delivery_receipt(metadata["delivery_receipt_b64"])
     root = jobs.resolve(strict=False).parent
-    route_id, route_node, parent_attempt_id = pending_record_identity(metadata)
+    route_id, route_node, parent_attempt_id = pending_record_identity(metadata, jobs)
     record = pending_delivery.create(
         root,
         recipient_kind=metadata["delivery_recipient_kind"],

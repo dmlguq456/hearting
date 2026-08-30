@@ -2001,6 +2001,178 @@ class TestContinuation(unittest.TestCase):
    self.assertEqual(partial["realized_peer_set"][0]["terminal_attempt_id"],"att-peer")
    self.assertTrue(partial["reused_peer_set_proof_digest"].startswith("sha256:"))
    self.assertTrue(partial["replacement_attempt_id"].startswith("att-"))
+
+ def test_compile_cli_attaches_generation_zero_to_route_less_owner(self):
+  import subprocess,sys
+  with tempfile.TemporaryDirectory() as tmp:
+   artifact=Path(tmp)/"artifacts"; jobs=Path(tmp)/"state"/"jobs.log"
+   jobs.parent.mkdir(parents=True)
+   attempt="att-cli-post-launch"
+   jobs.write_text(
+    "2099-01-01T00:00:00Z\topen\t%s\t%s\towner\t"
+    "attempt_schema_version=2,worker_type=owner,unit=_kernel/owner,"
+    "dispatch_depth=1,registered_worker=1,execution_surface=registered-headless,"
+    "capability=autopilot-code,capability_mode=dev,intensity=strong,"
+    "artifact_root=%s,parent_sid=parent-session,owner_harness=codex,attempt_id=%s\n"
+    % (R.ROOT,R.ROOT,artifact,attempt), encoding="utf-8",
+   )
+   dispatch_path=Path(tmp)/"dispatch.json"
+   dispatch_path.write_text(json.dumps(self._dispatch()),encoding="utf-8")
+   env=os.environ.copy()
+   for key in ("AGENT_OWNER_ROUTE_FILE","AGENT_OWNER_ROUTE_ID","AGENT_OWNER_ROUTE_HASH"):
+    env.pop(key,None)
+   env.update({
+    "AGENT_HOME":str(R.ROOT), "AGENT_DISPATCH_JOBS":str(jobs),
+    "AGENT_DISPATCH_ATTEMPT_ID":attempt, "AGENT_DISPATCH_WORKER_TYPE":"owner",
+    "AGENT_DISPATCH_DEPTH":"1", "AGENT_DISPATCH_ATTEMPT_SCHEMA_VERSION":"2",
+    "AGENT_DISPATCH_EXECUTION_SURFACE":"registered-headless",
+    "AGENT_DISPATCH_REGISTERED_WORKER":"1",
+    "AGENT_DISPATCH_PARENT_SESSION_ID":"parent-session",
+    "AGENT_DISPATCH_OWNER_HARNESS":"codex",
+   })
+   result=subprocess.run([
+    sys.executable,str(P),"compile","--capability","autopilot-code",
+    "--capability-mode","dev","--intensity","strong","--cwd",str(R.ROOT),
+    "--artifact-root",str(artifact),"--signal","shared-contract",
+    "--transport","headless","--tracking","tracked",
+    "--dispatch-evidence",str(dispatch_path),"--spec-read","true",
+    "--drift-verdict","within-spec","--workflow-mode","tracked",
+    "--artifact-guard","fixture",
+   ],capture_output=True,text=True,cwd=str(R.ROOT),env=env)
+   self.assertEqual(result.returncode,0,result.stderr)
+   route=json.loads(result.stdout)
+   self.assertEqual(route["owner_attempt_id"],attempt)
+   self.assertIn("owner_route_binding_written=1",result.stderr)
+   records=list((jobs.parent/"owner-route-bindings").glob("*.json"))
+   self.assertEqual(len(records),1)
+   attachment=json.loads(records[0].read_text(encoding="utf-8"))
+   self.assertEqual(attachment["route_id"],route["route_id"])
+   self.assertEqual(attachment["route_hash"],route["route_hash"])
+
+ def test_compile_cli_stage_attempt_does_not_publish_owner_binding(self):
+  import subprocess,sys
+  with tempfile.TemporaryDirectory() as tmp:
+   artifact=Path(tmp)/"artifacts"; jobs=Path(tmp)/"state"/"jobs.log"
+   jobs.parent.mkdir(parents=True)
+   jobs.write_text(
+    "2099-01-01T00:00:00Z\topen\t%s\t%s\tstage\t"
+    "attempt_schema_version=2,worker_type=stage,unit=dev/backend,"
+    "dispatch_depth=2,registered_worker=1,execution_surface=registered-headless,"
+    "attempt_id=att-cli-stage-compile\n" % (R.ROOT,R.ROOT), encoding="utf-8",
+   )
+   dispatch_path=Path(tmp)/"dispatch.json"
+   dispatch_path.write_text(json.dumps(self._dispatch()),encoding="utf-8")
+   env=os.environ.copy()
+   env.update({
+    "AGENT_HOME":str(R.ROOT), "AGENT_DISPATCH_JOBS":str(jobs),
+    "AGENT_DISPATCH_ATTEMPT_ID":"att-cli-stage-compile",
+    "AGENT_DISPATCH_WORKER_TYPE":"stage", "AGENT_DISPATCH_DEPTH":"2",
+    "AGENT_DISPATCH_ATTEMPT_SCHEMA_VERSION":"2",
+    "AGENT_DISPATCH_EXECUTION_SURFACE":"registered-headless",
+    "AGENT_DISPATCH_REGISTERED_WORKER":"1",
+   })
+   result=subprocess.run([
+    sys.executable,str(P),"compile","--capability","autopilot-code",
+    "--capability-mode","dev","--intensity","strong","--cwd",str(R.ROOT),
+    "--artifact-root",str(artifact),"--signal","shared-contract",
+    "--transport","headless","--tracking","tracked",
+    "--dispatch-evidence",str(dispatch_path),"--spec-read","true",
+    "--drift-verdict","within-spec","--workflow-mode","tracked",
+    "--artifact-guard","fixture",
+   ],capture_output=True,text=True,cwd=str(R.ROOT),env=env)
+   self.assertEqual(result.returncode,0,result.stderr)
+   self.assertFalse((jobs.parent/"owner-route-bindings").exists())
+
+ def test_real_postlaunch_binding_and_two_child_adopted_continuations(self):
+  import owner_route_binding as O
+  from unittest import mock
+  with tempfile.TemporaryDirectory() as tmp:
+   root=Path(tmp); artifact=root/"artifacts"; jobs=root/"state"/"jobs.log"
+   jobs.parent.mkdir(parents=True)
+   attempt="att-real-owner-lifecycle"
+   owner_meta=",".join((
+    "attempt_schema_version=2","worker_type=owner","unit=_kernel/owner",
+    "dispatch_depth=1","registered_worker=1",
+    "execution_surface=registered-headless","capability=autopilot-code",
+    "capability_mode=dev","intensity=strong",f"artifact_root={artifact}",
+    "parent_sid=launch-parent","owner_harness=codex",f"attempt_id={attempt}",
+   ))
+   owner_row="\t".join((
+    "2099-01-01T00:00:00Z","open",str(R.ROOT),str(R.ROOT),"owner",owner_meta,
+   ))
+   jobs.write_text(owner_row+"\n",encoding="utf-8")
+   lifecycle_env={
+    "AGENT_DISPATCH_JOBS":str(jobs),"AGENT_DISPATCH_ATTEMPT_ID":attempt,
+    "AGENT_DISPATCH_WORKER_TYPE":"owner","AGENT_DISPATCH_DEPTH":"1",
+    "AGENT_DISPATCH_ATTEMPT_SCHEMA_VERSION":"2",
+    "AGENT_DISPATCH_EXECUTION_SURFACE":"registered-headless",
+    "AGENT_DISPATCH_REGISTERED_WORKER":"1",
+    "AGENT_DISPATCH_PARENT_SESSION_ID":"launch-parent",
+    "AGENT_DISPATCH_OWNER_HARNESS":"codex",
+   }
+
+   def child_row(route,path,suffix):
+    meta=",".join((
+     f"attempt_id=att-real-child-{suffix}",f"parent_attempt_id={attempt}",
+     "attempt_schema_version=2","dispatch_depth=2","registered_worker=1",
+     "execution_surface=registered-headless","worker_type=stage","unit=dev/backend",
+     "route_node=execute",f"route_file={path}",f"route_id={route['route_id']}",
+     f"route_hash={route['route_hash']}","capability=autopilot-code",
+     "capability_mode=dev",f"artifact_root={artifact}","launch_started=1",
+    ))
+    return "\t".join(("2099-01-01T00:00:00Z","open",str(R.ROOT),str(R.ROOT),
+                       f"child-{suffix}",meta))+"\n"
+
+   with mock.patch.dict(os.environ,lifecycle_env,clear=False):
+    source=self._source(artifact)
+    source_path=R.canonical_route_path(artifact,source["route_id"])
+    R.write_once(source_path,source)
+    attached=O.publish_owner_route_attachment_from_environment(
+     jobs,target_route={**source,"route_file":str(source_path)},environ=os.environ,
+    )
+    self.assertEqual(attached.route_id,source["route_id"])
+    self._complete_prefix(source,"test",root/"evidence-r0")
+    r1=self._build(source)
+    r1_path=R.canonical_route_path(artifact,r1["route_id"])
+    R.publish_continuation_route(r1,source,r1_path)
+    O.publish_owner_route_advance_from_environment(
+     jobs,source_route={**source,"route_file":str(source_path)},
+     target_route={**r1,"route_file":str(r1_path)},environ=os.environ,
+    )
+    pending,pending_status=O.resolve_owner_route_lifecycle(
+     jobs,owner_attempt_id=attempt,
+    )
+    self.assertEqual((pending.route_id,pending_status),
+                     (source["route_id"],"owner-route-advance-pending"))
+    with jobs.open("a",encoding="utf-8") as stream:
+     stream.write(child_row(r1,r1_path,"r1"))
+    current,current_status=O.resolve_owner_route_lifecycle(
+     jobs,owner_attempt_id=attempt,
+    )
+    self.assertEqual((current.route_id,current_status),
+                     (r1["route_id"],"owner-route-advance-current"))
+
+    self._complete_prefix(r1,"report",root/"evidence-r1")
+    r2=R.build_continuation_route(
+     r1,resume_from_node="report",requested_boundary="report",
+     reason="second-generation",artifact_root=artifact,
+    )
+    r2_path=R.canonical_route_path(artifact,r2["route_id"])
+    R.publish_continuation_route(r2,r1,r2_path)
+    O.publish_owner_route_advance_from_environment(
+     jobs,source_route={**r1,"route_file":str(r1_path)},
+     target_route={**r2,"route_file":str(r2_path)},environ=os.environ,
+    )
+    with jobs.open("a",encoding="utf-8") as stream:
+     stream.write(child_row(r2,r2_path,"r2"))
+    final,final_status=O.resolve_owner_route_lifecycle(
+     jobs,owner_attempt_id=attempt,
+    )
+    self.assertEqual((final.route_id,final_status),
+                     (r2["route_id"],"owner-route-advance-current"))
+    self.assertTrue(r1["reused_nodes"])
+    self.assertTrue(r2["reused_nodes"])
+
  def test_continuation_cli_publishes_and_reports_zero_write_blocker(self):
   import subprocess,sys
   with tempfile.TemporaryDirectory() as tmp:
@@ -2039,6 +2211,110 @@ class TestContinuation(unittest.TestCase):
      "route_file_written=0 predecessor_attempts=0 registered=0 "
      "started=0 child_spawned=0",blocked.stderr,
     )
+   finally:
+    if previous_home is None: os.environ.pop("AGENT_HOME",None)
+    else: os.environ["AGENT_HOME"]=previous_home
+    if previous_jobs is None: os.environ.pop("AGENT_DISPATCH_JOBS",None)
+    else: os.environ["AGENT_DISPATCH_JOBS"]=previous_jobs
+
+ def test_continuation_cli_requires_exact_registered_depth1_owner(self):
+  import subprocess,sys
+  with tempfile.TemporaryDirectory() as tmp:
+   artifact=Path(tmp)/"artifacts"; jobs=Path(tmp)/"state"/"jobs.log"
+   previous_home=os.environ.get("AGENT_HOME"); previous_jobs=os.environ.get("AGENT_DISPATCH_JOBS")
+   os.environ["AGENT_HOME"]=str(R.ROOT); os.environ["AGENT_DISPATCH_JOBS"]=str(jobs)
+   try:
+    source=self._source(artifact); self._complete_prefix(source,"test",Path(tmp)/"evidence")
+    source_path=Path(tmp)/"source-route.json"; source_path.write_text(json.dumps(source),encoding="utf-8")
+    jobs.parent.mkdir(parents=True, exist_ok=True); jobs.write_text(
+     "2099-01-01T00:00:00Z\topen\t%s\t%s\towner\t"
+     "attempt_schema_version=2,worker_type=owner,unit=_kernel/owner,"
+     "dispatch_depth=1,registered_worker=1,execution_surface=registered-headless,"
+     "capability=autopilot-code,capability_mode=dev,intensity=strong,artifact_root=%s,"
+     "owner_harness=codex,"
+     "parent_sid=thread-source,"
+     "attempt_id=att-cli-owner,owner_route_file=%s,owner_route_id=%s,owner_route_hash=%s\n"
+     % (R.ROOT, R.ROOT, source["artifact_root"], source_path, source["route_id"], source["route_hash"]), encoding="utf-8")
+    env=os.environ.copy()
+    for key in ("AGENT_DISPATCH_OWNER_HARNESS","AGENT_DISPATCH_CURRENT_HARNESS",
+                "CODEX_THREAD_ID","CLAUDE_CODE_SESSION_ID","AGENT_DISPATCH_PARENT_SESSION_ID"):
+     env.pop(key,None)
+    env["AGENT_DISPATCH_ATTEMPT_ID"]="att-cli-owner"; env["AGENT_OWNER_ROUTE_FILE"]=str(source_path)
+    env["AGENT_OWNER_ROUTE_ID"]=source["route_id"]
+    env["AGENT_OWNER_ROUTE_HASH"]=source["route_hash"]
+    command=[sys.executable,str(P),"continuation","--source-route",str(source_path),"--resume-from-node","test",
+             "--requested-boundary","test","--reason","cli-owner","--artifact-root",str(artifact)]
+    result=subprocess.run(command,capture_output=True,text=True,cwd=str(R.ROOT),env=env)
+    self.assertEqual(result.returncode,0,result.stderr)
+    self.assertIn("owner_route_advance_written=1",result.stderr)
+   finally:
+    if previous_home is None: os.environ.pop("AGENT_HOME",None)
+    else: os.environ["AGENT_HOME"]=previous_home
+    if previous_jobs is None: os.environ.pop("AGENT_DISPATCH_JOBS",None)
+    else: os.environ["AGENT_DISPATCH_JOBS"]=previous_jobs
+
+ def test_continuation_cli_reports_route_written_without_owner_advance(self):
+  import subprocess,sys
+  with tempfile.TemporaryDirectory() as tmp:
+   artifact=Path(tmp)/"artifacts"; jobs=Path(tmp)/"state"/"jobs.log"
+   previous_home=os.environ.get("AGENT_HOME"); previous_jobs=os.environ.get("AGENT_DISPATCH_JOBS")
+   os.environ["AGENT_HOME"]=str(R.ROOT); os.environ["AGENT_DISPATCH_JOBS"]=str(jobs)
+   try:
+    source=self._source(artifact); self._complete_prefix(source,"test",Path(tmp)/"evidence")
+    source_path=Path(tmp)/"source-route.json"; source_path.write_text(json.dumps(source),encoding="utf-8")
+    jobs.parent.mkdir(parents=True, exist_ok=True); jobs.write_text(
+     "2099-01-01T00:00:00Z\topen\trepo\t%s\tstage\t"
+     "attempt_schema_version=2,worker_type=stage,unit=dev/backend,attempt_id=att-cli-stage\n" % R.ROOT,
+     encoding="utf-8")
+    env=os.environ.copy(); env["AGENT_DISPATCH_ATTEMPT_ID"]="att-cli-stage"
+    for key in ("AGENT_OWNER_ROUTE_FILE", "AGENT_OWNER_ROUTE_ID", "AGENT_OWNER_ROUTE_HASH"):
+     env.pop(key, None)
+    command=[sys.executable,str(P),"continuation","--source-route",str(source_path),"--resume-from-node","test",
+             "--requested-boundary","test","--reason","cli-stage","--artifact-root",str(artifact)]
+    result=subprocess.run(command,capture_output=True,text=True,cwd=str(R.ROOT),env=env)
+    self.assertEqual(result.returncode,0,result.stderr)
+    self.assertIn("route_file=",result.stderr)
+    self.assertTrue(any((artifact/".runtime"/"routes").glob("*.json")))
+   finally:
+    if previous_home is None: os.environ.pop("AGENT_HOME",None)
+    else: os.environ["AGENT_HOME"]=previous_home
+    if previous_jobs is None: os.environ.pop("AGENT_DISPATCH_JOBS",None)
+    else: os.environ["AGENT_DISPATCH_JOBS"]=previous_jobs
+
+ def test_continuation_cli_owner_advance_is_atomic_on_exact_replay(self):
+  import subprocess,sys
+  with tempfile.TemporaryDirectory() as tmp:
+   artifact=Path(tmp)/"artifacts"; jobs=Path(tmp)/"state"/"jobs.log"
+   previous_home=os.environ.get("AGENT_HOME"); previous_jobs=os.environ.get("AGENT_DISPATCH_JOBS")
+   os.environ["AGENT_HOME"]=str(R.ROOT); os.environ["AGENT_DISPATCH_JOBS"]=str(jobs)
+   try:
+    source=self._source(artifact); self._complete_prefix(source,"test",Path(tmp)/"evidence")
+    source_path=Path(tmp)/"source-route.json"; source_path.write_text(json.dumps(source),encoding="utf-8")
+    jobs.parent.mkdir(parents=True, exist_ok=True); jobs.write_text(
+     "2099-01-01T00:00:00Z\topen\t%s\t%s\towner\t"
+     "attempt_schema_version=2,worker_type=owner,unit=_kernel/owner,"
+     "dispatch_depth=1,registered_worker=1,execution_surface=registered-headless,"
+     "capability=autopilot-code,capability_mode=dev,intensity=strong,artifact_root=%s,"
+     "owner_harness=codex,"
+     "parent_sid=thread-source,"
+     "attempt_id=att-cli-replay,"
+     "owner_route_file=%s,owner_route_id=%s,owner_route_hash=%s\n"
+     % (R.ROOT, R.ROOT, source["artifact_root"], source_path, source["route_id"], source["route_hash"]), encoding="utf-8")
+    env=os.environ.copy()
+    for key in ("AGENT_DISPATCH_OWNER_HARNESS","AGENT_DISPATCH_CURRENT_HARNESS",
+                "CODEX_THREAD_ID","CLAUDE_CODE_SESSION_ID","AGENT_DISPATCH_PARENT_SESSION_ID"):
+     env.pop(key,None)
+    env["AGENT_DISPATCH_ATTEMPT_ID"]="att-cli-replay"; env["AGENT_OWNER_ROUTE_FILE"]=str(source_path)
+    env["AGENT_OWNER_ROUTE_ID"]=source["route_id"]
+    env["AGENT_OWNER_ROUTE_HASH"]=source["route_hash"]
+    command=[sys.executable,str(P),"continuation","--source-route",str(source_path),"--resume-from-node","test",
+             "--requested-boundary","test","--reason","cli-replay","--artifact-root",str(artifact)]
+    first=subprocess.run(command,capture_output=True,text=True,cwd=str(R.ROOT),env=env)
+    second=subprocess.run(command,capture_output=True,text=True,cwd=str(R.ROOT),env=env)
+    self.assertEqual(first.returncode,0,first.stderr); self.assertEqual(second.returncode,0,second.stderr)
+    records=list((jobs.parent/"owner-route-advances").rglob("*.json"))
+    self.assertEqual(len(records),1)
+    self.assertIn("owner_route_advance_written=1",second.stderr)
    finally:
     if previous_home is None: os.environ.pop("AGENT_HOME",None)
     else: os.environ["AGENT_HOME"]=previous_home

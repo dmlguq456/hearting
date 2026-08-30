@@ -2022,4 +2022,55 @@ class OrphanReconcileTest(unittest.TestCase):
   self.assertNotEqual(applied["decisions"][0]["category"],"orphan")
 
 
+class ResolveOwnerRouteAdvanceTest(unittest.TestCase):
+ def setUp(self):
+  spec=importlib.util.spec_from_file_location("dispatch_registry_advance",SCRIPT)
+  self.module=importlib.util.module_from_spec(spec);spec.loader.exec_module(self.module)
+  self.tmp=tempfile.TemporaryDirectory();self.base=Path(self.tmp.name)
+  self.jobs=self.base/"jobs.log";self.jobs.write_text("")
+ def tearDown(self):
+  self.tmp.cleanup()
+ def _row(self,**meta):
+  return {"meta":{"owner_route_file":"/r0.json","owner_route_id":"rt-r0",
+                  "owner_route_hash":"sha256:rt-r0","attempt_id":"att-1",**meta}}
+ def test_no_jobs_path_falls_back_to_legacy_child_inference(self):
+  row=self._row(route_id="rt-direct",route_file="/r0.json")
+  route_id,route_file,status=self.module.resolve_owner_route(row,None,None)
+  self.assertEqual((route_id,route_file,status),("rt-direct","/r0.json","ok"))
+ def test_advance_success_outranks_legacy_fields(self):
+  row=self._row(route_id="rt-stale",route_file="/stale.json")
+  binding=self.module.OwnerRouteBinding("/r1.json","rt-r1","sha256:rt-r1")
+  with mock.patch.object(self.module,"resolve_owner_route_lifecycle",
+                        return_value=(binding,"owner-route-advance-current")):
+   route_id,route_file,status=self.module.resolve_owner_route(row,None,str(self.jobs))
+  self.assertEqual((route_id,route_file,status),("rt-r1","/r1.json","ok"))
+ def test_post_launch_attachment_resolves_route_less_owner(self):
+  row={"meta":{"attempt_id":"att-1"}}
+  binding=self.module.OwnerRouteBinding("/r0.json","rt-r0","sha256:rt-r0")
+  with mock.patch.object(self.module,"resolve_owner_route_lifecycle",
+                        return_value=(binding,"owner-route-post-launch-attachment")):
+   route_id,route_file,status=self.module.resolve_owner_route(row,None,str(self.jobs))
+  self.assertEqual((route_id,route_file,status),("rt-r0","/r0.json","ok"))
+ def test_advance_loop_reports_route_context_conflict(self):
+  row=self._row()
+  binding=self.module.OwnerRouteBinding("/r0.json","rt-r0","sha256:rt-r0")
+  with mock.patch.object(self.module,"resolve_owner_route_lifecycle",
+                        return_value=(binding,"owner-route-advance-loop")):
+   route_id,route_file,status=self.module.resolve_owner_route(row,None,str(self.jobs))
+  self.assertEqual((route_id,route_file,status),(None,None,"route-context-conflict"))
+ def test_advance_tamper_reports_route_context_conflict_without_leaking_reason(self):
+  row=self._row()
+  with mock.patch.object(self.module,"resolve_owner_route_lifecycle",
+                        side_effect=self.module.OwnerRouteBindingError("owner-route-advance-target-invalid")):
+   route_id,route_file,status=self.module.resolve_owner_route(row,None,str(self.jobs))
+  self.assertEqual((route_id,route_file,status),(None,None,"route-context-conflict"))
+ def test_absent_advance_record_preserves_legacy_behavior(self):
+  row=self._row(route_id="rt-legacy",route_file="/legacy.json")
+  binding=self.module.OwnerRouteBinding("/r0.json","rt-r0","sha256:rt-r0")
+  with mock.patch.object(self.module,"resolve_owner_route_lifecycle",
+                        return_value=(binding,"owner-route-advance-anchor-unresolvable")):
+   route_id,route_file,status=self.module.resolve_owner_route(row,None,str(self.jobs))
+  self.assertEqual((route_id,route_file,status),("rt-legacy","/legacy.json","ok"))
+
+
 if __name__=="__main__":unittest.main()

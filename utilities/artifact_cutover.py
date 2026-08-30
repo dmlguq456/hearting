@@ -57,6 +57,11 @@ import artifact_identity  # noqa: E402
 import artifact_producer as P  # noqa: E402
 import codex_dispatch_terminal as TERMINAL  # noqa: E402
 import dispatch_contract as DISPATCH  # noqa: E402
+from owner_route_binding import (  # noqa: E402
+    OwnerRouteBinding,
+    OwnerRouteBindingError,
+    resolve_owner_route_lifecycle,
+)
 
 JOURNAL_SCHEMA = "artifact-relocation-live-journal-row/v1"
 MAP_SCHEMA = "artifact-relocation-compatibility-map-row/v1"
@@ -187,6 +192,30 @@ def _registry_attempts(paths: Sequence[Path]) -> Dict[str, Dict[str, Any]]:
     return latest
 
 
+def _current_owner_route_id(attempt_id: str, metadata: Dict[str, Any], jobs: str) -> Tuple[Optional[str], bool]:
+    """Resolve a registered owner's verified current route id, if any.
+
+    Returns ``(route_id_or_None, conflict)``. The launch-sealed
+    ``owner_route_id`` remains in the caller's identity set regardless, so an
+    open owner's anchor route is never lost; this only adds the verified
+    successor -- or, on conflicting/tampered advance evidence, reports the
+    conflict so the caller can degrade to ``unverifiable`` instead of ``dead``.
+    """
+    sealed = (metadata.get("owner_route_file"), metadata.get("owner_route_id"), metadata.get("owner_route_hash"))
+    try:
+        anchor = OwnerRouteBinding(*sealed) if all(sealed) else None
+        current, status = resolve_owner_route_lifecycle(
+            jobs, owner_attempt_id=attempt_id, sealed_binding=anchor
+        )
+    except OwnerRouteBindingError:
+        return None, True
+    if status == "owner-route-advance-loop":
+        return None, True
+    if current is None or status == "owner-route-advance-anchor-unresolvable":
+        return None, False
+    return current.route_id, False
+
+
 def _route_liveness(route_id: str, attempts: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
     observations = []
     for attempt_id, row in attempts.items():
@@ -196,7 +225,20 @@ def _route_liveness(route_id: str, attempts: Dict[str, Dict[str, Any]]) -> Dict[
             metadata.get("owner_route_id", ""),
             metadata.get("batch_route_id", ""),
         }
+        current_owner_route_id, advance_conflict = _current_owner_route_id(
+            attempt_id, metadata, row["jobs"],
+        )
+        if current_owner_route_id:
+            identities.add(current_owner_route_id)
         if route_id not in identities:
+            continue
+        if advance_conflict:
+            observations.append({
+                "attempt_id": attempt_id,
+                "status": row["status"],
+                "state": "unverifiable",
+                "reason": "owner-route-advance-conflict",
+            })
             continue
         try:
             terminal = TERMINAL.terminal_envelope_observed(metadata.get("log_file"))

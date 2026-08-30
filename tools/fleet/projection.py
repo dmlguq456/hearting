@@ -8,6 +8,8 @@ result.  It never starts a provider and never writes harness state.
 from __future__ import annotations
 
 import glob
+import hashlib
+import json
 import os
 import re
 import sys
@@ -285,6 +287,162 @@ def _evidence_owner_candidates(entity, node_evidence, route_records):
             if record is not None:
                 candidates.append((rid, record, nodes or {}))
     return candidates
+
+
+def _owner_lineage_projection(entity, jobs, route_records, node_evidence, now, degradations):
+    """Collapse owner-linked exact routes through a verified local lineage.
+
+    This is deliberately fed only by the owner's children and exact terminal
+    evidence.  It never discovers route files globally, and therefore cannot
+    attach an abandoned compiled route merely because it is present on disk.
+    """
+    # Only depth-1 owners and interactive sessions own this attribution.  A
+    # route-bearing stage child can itself have descendants, but must retain
+    # the ordinary stage/leaf resolver rather than becoming a second owner.
+    if _field(entity, "depth") not in (None, 1):
+        return None, False
+    candidates = {}
+    for child in _owner_children(entity, jobs):
+        rid = _field(child, "route_id")
+        if not rid:
+            continue
+        record, failure = _route_record_values(
+            rid, _field(child, "route_file"), _field(child, "route_hash"),
+            route_records=route_records,
+        )
+        if record is None:
+            return None, True
+        candidates[rid] = record
+    for rid, record, _evidence in _evidence_owner_candidates(
+            entity, node_evidence, route_records or {}):
+        if record is None:
+            return None, True
+        owner_ids = {_field(entity, "session_id"), _field(entity, "slug")}
+        owner_ids.discard(None)
+        exact_evidence = [
+            ev for ev in (_evidence or {}).values()
+            if _field(ev, "parent") in owner_ids
+        ]
+        if not exact_evidence or any(
+            _field(ev, "route_hash")
+            and _field(ev, "route_hash") != record.get("route_hash")
+            for ev in exact_evidence
+        ):
+            return None, True
+        candidates[rid] = record
+    if not candidates:
+        return None, False
+    if not any(record.get("source_route_supersession") for record in candidates.values()):
+        # Ordinary single-route projection and F-88 remain owned by the
+        # established path below. Identity checks here apply only when Fleet
+        # is being asked to prove a successor collapse.
+        return None, False
+    if any(
+        _field(child, "route_id") and not _field(child, "route_hash")
+        for child in _owner_children(entity, jobs)
+    ):
+        return None, True
+
+    owner_attempt = _field(entity, "attempt_id")
+    owner_worktree = _field(entity, "worktree") or _field(entity, "cwd")
+    owner_capability = (
+        _field(entity, "capability") or _field(entity, "capability_owner")
+        or (_field(entity, "key") if str(_field(entity, "key") or "").startswith("autopilot-") else None)
+    )
+    owner_mode = _field(entity, "capability_mode")
+    owner_artifact_root = _field(entity, "artifact_root")
+    if not all((owner_attempt, owner_worktree, owner_capability, owner_mode)):
+        return None, True
+    for record in candidates.values():
+        if record.get("owner_attempt_id") != owner_attempt:
+            return None, True
+        if owner_worktree and os.path.realpath(record.get("cwd") or "") != os.path.realpath(owner_worktree):
+            return None, True
+        if owner_capability and record.get("capability") != owner_capability:
+            return None, True
+        if owner_mode and record.get("capability_mode") != owner_mode:
+            return None, True
+        if (owner_artifact_root
+                and os.path.realpath(record.get("artifact_root") or "")
+                != os.path.realpath(owner_artifact_root)):
+            return None, True
+
+    outgoing = {}
+    incoming = {}
+    for rid, record in candidates.items():
+        edge = record.get("source_route_supersession")
+        if not edge:
+            continue
+        source_id, source_hash = edge.get("from_route_id"), edge.get("from_route_hash")
+        target_id = record.get("route_id")
+        source = candidates.get(source_id)
+        if source is None or source.get("route_hash") != source_hash:
+            return None, True
+        if (record.get("source_route_id"), record.get("source_route_hash")) != (
+                source_id, source_hash):
+            return None, True
+        if (
+                edge.get("edge_version") != 1
+                or edge.get("operation") != "continuation"
+                or edge.get("source_verdict_preserved") is not True
+                or edge.get("to_continuation_id") != record.get("continuation_id")):
+            return None, True
+        edges = record.get("supersession_edges") or []
+        source_edges = source.get("supersession_edges") or []
+        if edges != [*source_edges, edge]:
+            return None, True
+        if (
+                not source.get("route_family_key")
+                or source.get("route_family_key") != record.get("route_family_key")):
+            return None, True
+        reused = record.get("reused_nodes")
+        if not isinstance(reused, list):
+            return None, True
+        evidence_digest = "sha256:" + hashlib.sha256(json.dumps(
+            reused, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+        ).encode()).hexdigest()
+        if record.get("source_evidence_digest") != evidence_digest:
+            return None, True
+        try:
+            monotonic = int(record.get("advance_generation")) == int(
+                source.get("advance_generation")) + 1
+        except (TypeError, ValueError):
+            monotonic = False
+        if not monotonic:
+            return None, True
+        if source_id in outgoing and outgoing[source_id] != target_id:
+            return None, True
+        outgoing[source_id] = target_id
+        incoming.setdefault(target_id, set()).add(source_id)
+
+    if not outgoing:
+        # Preserve the ordinary single-route/F-88 path when no lineage fact is
+        # present; this helper owns only explicit supersession collapse.
+        return None, False
+
+    # Every candidate with a valid edge must be part of one chain.  A loop is
+    # a typed ambiguity, as are competing terminal successors.
+    terminals = [rid for rid in candidates if rid not in outgoing]
+    if len(terminals) != 1:
+        return None, True
+    terminal = terminals[0]
+    seen = set()
+    current = terminal
+    while current in incoming:
+        predecessors = incoming[current]
+        if len(predecessors) != 1 or current in seen:
+            return None, True
+        seen.add(current)
+        current = next(iter(predecessors))
+    if len(seen) != len(candidates) - 1:
+        return None, True
+    record = candidates[terminal]
+    same_jobs = [j for j in jobs if _field(j, "route_id") == terminal]
+    return _projection_from_record(
+        entity, record, terminal, same_jobs,
+        node_evidence=(node_evidence or {}).get(terminal, {}),
+        now=now, owner=True, degradations=degradations,
+    ), False
 
 
 def _latest_exact_owner_evidence_route(entity, node_evidence, route_records):
@@ -896,6 +1054,77 @@ def _explicit(entity):
                for name in ("route_file", "route_id", "route_hash", "route_node"))
 
 
+_OWNER_ROUTE_BINDING_MOD = None
+
+
+def _owner_route_binding_module():
+    """Lazily load utilities/owner_route_binding.py in-process.
+
+    Read-only: the module only resolves an existing predecessor-keyed advance
+    record under the jobs root, it never writes. Cached across ticks the same
+    way the orphan-registry module is (`tools/fleet/collectors/dispatch.py`).
+    """
+    global _OWNER_ROUTE_BINDING_MOD
+    if _OWNER_ROUTE_BINDING_MOD is None:
+        import importlib.util
+        path = os.path.join(
+            os.path.dirname(__file__), "..", "..", "utilities", "owner_route_binding.py"
+        )
+        try:
+            spec = importlib.util.spec_from_file_location("_fleet_owner_route_binding", path)
+            mod = importlib.util.module_from_spec(spec)
+            sys.modules[spec.name] = mod
+            spec.loader.exec_module(mod)
+        except Exception:
+            mod = False
+        _OWNER_ROUTE_BINDING_MOD = mod
+    return _OWNER_ROUTE_BINDING_MOD or None
+
+
+def _owner_route_advance_binding(entity, owner_binding=None):
+    """Resolve the owner's verified current route, if a durable advance exists.
+
+    Returns ``(binding_dict_or_None, status)``. ``status`` is one of
+    ``"absent-legacy"`` (no jobs path, no attempt id, or no durable record --
+    F-88 heuristics remain authoritative), ``"current"`` (an advance chain was
+    followed to a verified successor, possibly zero-length), or
+    ``"conflict"`` (a present record failed verification -- tampered,
+    downgraded, looping, or unrelated). A conflict must never be silently
+    repaired by the legacy heuristics below it.
+    """
+    orb = _owner_route_binding_module()
+    jobs_path = _field(entity, "_registry_path")
+    attempt_id = _field(entity, "attempt_id")
+    if orb is None or not jobs_path or not attempt_id:
+        return None, "absent-legacy"
+    try:
+        anchor = (orb.OwnerRouteBinding(
+            owner_binding["route_file"], owner_binding["route_id"], owner_binding["route_hash"],
+        ) if owner_binding else None)
+        current, resolved_status = orb.resolve_owner_route_lifecycle(
+            jobs_path, owner_attempt_id=attempt_id, sealed_binding=anchor,
+        )
+    except orb.OwnerRouteBindingError as exc:
+        if str(exc) in {"owner-route-jobs-unreadable", "owner-route-owner-row-not-unique"}:
+            return None, "absent-legacy"
+        if str(exc) == "owner-route-advance-competing-successor":
+            return None, "multiple"
+        return None, "conflict"
+    if resolved_status == "owner-route-advance-loop":
+        return None, "conflict"
+    if resolved_status in (
+        "owner-route-binding-absent", "owner-route-launch-binding",
+        "owner-route-advance-absent", "owner-route-advance-anchor-unresolvable",
+    ):
+        return None, "absent-legacy"
+    if current is None:
+        return None, "absent-legacy"
+    return {
+        "route_file": current.route_file, "route_id": current.route_id,
+        "route_hash": current.route_hash,
+    }, "current"
+
+
 def _owner_route_binding(entity):
     """Return a complete wrapper-validated owner binding or its fail-closed error."""
     values = {
@@ -967,6 +1196,40 @@ def resolve_work_projection(entity, jobs=(), route_records=None, node_evidence=N
             route_hash=_field(entity, "owner_route_hash"),
             attempt_id=_field(entity, "attempt_id"), node_state="unknown",
             ambiguity=owner_binding_error,
+        )
+    advance_binding, advance_status = _owner_route_advance_binding(entity, owner_binding)
+    if advance_status == "multiple":
+        return WorkProjection(
+            source="none", attempt_id=_field(entity, "attempt_id"),
+            node_state="unknown", ambiguity=MULTIPLE_OWNER_ROUTES,
+        )
+    if advance_status == "conflict":
+        return WorkProjection(
+            source="registry-exact",
+            route_id=(owner_binding or {}).get("route_id"),
+            route_hash=(owner_binding or {}).get("route_hash"),
+            attempt_id=_field(entity, "attempt_id"), node_state="unknown",
+            ambiguity="owner-route-advance-conflict",
+        )
+    if advance_status == "current" and advance_binding is not None:
+        # A durable, verified post-launch attachment or successor advance is
+        # authoritative even before the first child row exists.
+        record, failure = _route_record_values(
+            advance_binding["route_id"], advance_binding["route_file"],
+            advance_binding["route_hash"], route_records=route_records,
+        )
+        if record is None:
+            return WorkProjection(
+                source="registry-exact", route_id=advance_binding["route_id"],
+                route_hash=advance_binding["route_hash"],
+                attempt_id=_field(entity, "attempt_id"), node_state="unknown",
+                ambiguity=failure or ROUTE_RECORD_MISMATCH,
+            )
+        same_jobs = [j for j in jobs if _field(j, "route_id") == advance_binding["route_id"]]
+        return _projection_from_record(
+            entity, record, advance_binding["route_id"], same_jobs,
+            node_evidence=(node_evidence or {}).get(advance_binding["route_id"], {}),
+            now=now, owner=True, degradations=degradations,
         )
     if owner_binding:
         record, failure = _route_record_values(
@@ -1049,6 +1312,20 @@ def resolve_work_projection(entity, jobs=(), route_records=None, node_evidence=N
             node_evidence=(node_evidence or {}).get(owner_binding["route_id"], {}),
             now=now, owner=True, degradations=degradations,
         )
+
+    # A registered owner is itself a process/cwd match for all of its children.
+    # Collapse its exact successor lineage before the generic leaf/cwd adoption
+    # heuristics, which are intended for otherwise-unattributed sessions and
+    # would reduce a legitimate R0->R1->R2 owner to a cardinality error.
+    lineage_projection, lineage_conflict = _owner_lineage_projection(
+        entity, jobs, route_records, node_evidence, now, degradations,
+    )
+    if lineage_conflict:
+        return WorkProjection(source="none", node_state="unknown",
+                              ambiguity=MULTIPLE_OWNER_ROUTES)
+    if lineage_projection is not None:
+        return lineage_projection
+
     pid, proc_start = _field(entity, "pid"), _field(entity, "proc_start")
     identity_evidence_present = pid is not None and proc_start is not None
     if identity_evidence_present:

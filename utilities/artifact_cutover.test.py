@@ -762,5 +762,64 @@ class CloseoutTest(unittest.TestCase):
         self.assertTrue(Path(result["destination_cycle"]["cycle_dir"]).joinpath("manifest.json").is_file())
 
 
+class RouteLivenessOwnerAdvanceTest(unittest.TestCase):
+    """The verified successor of an open owner counts as live, and a
+    conflicting/tampered advance record degrades the anchor's own liveness
+    call to `unverifiable` rather than a false `dead`."""
+
+    def _row(self, jobs, **meta):
+        return {"status": "open", "jobs": jobs,
+                "metadata": {"attempt_id": "att-owner", **meta}}
+
+    def test_verified_successor_is_alive(self):
+        attempts = {"att-owner": self._row(
+            "/jobs.log", owner_route_file="/r0.json",
+            owner_route_id="rt-r0", owner_route_hash="sha256:r0",
+        )}
+        current = C.OwnerRouteBinding("/r1.json", "rt-r1", "sha256:r1")
+        with mock.patch.object(C, "resolve_owner_route_lifecycle",
+                               return_value=(current, "owner-route-advance-current")), \
+             mock.patch.object(C.DISPATCH, "observed_attempt_liveness") as observed:
+            observed.return_value = mock.Mock(state="alive", reason="ok")
+            result = C._route_liveness("rt-r1", attempts)
+        self.assertEqual(result["state"], "alive")
+
+    def test_post_launch_attachment_is_alive_without_launch_tuple(self):
+        attempts = {"att-owner": self._row("/jobs.log")}
+        current = C.OwnerRouteBinding("/r0.json", "rt-r0", "sha256:r0")
+        with mock.patch.object(
+            C, "resolve_owner_route_lifecycle",
+            return_value=(current, "owner-route-post-launch-attachment"),
+        ), mock.patch.object(C.DISPATCH, "observed_attempt_liveness") as observed:
+            observed.return_value = mock.Mock(state="alive", reason="ok")
+            result = C._route_liveness("rt-r0", attempts)
+        self.assertEqual(result["state"], "alive")
+
+    def test_conflicting_advance_marks_anchor_unverifiable_not_dead(self):
+        attempts = {"att-owner": self._row(
+            "/jobs.log", owner_route_file="/r0.json",
+            owner_route_id="rt-r0", owner_route_hash="sha256:r0",
+        )}
+        with mock.patch.object(
+            C, "resolve_owner_route_lifecycle",
+            side_effect=C.OwnerRouteBindingError("owner-route-advance-target-invalid"),
+        ):
+            result = C._route_liveness("rt-r0", attempts)
+        self.assertEqual(result["state"], "unverifiable")
+
+    def test_absent_advance_record_is_unaffected(self):
+        attempts = {"att-owner": self._row(
+            "/jobs.log", owner_route_file="/r0.json",
+            owner_route_id="rt-r0", owner_route_hash="sha256:r0",
+        )}
+        anchor = C.OwnerRouteBinding("/r0.json", "rt-r0", "sha256:r0")
+        with mock.patch.object(C, "resolve_owner_route_lifecycle",
+                               return_value=(anchor, "owner-route-launch-binding")), \
+             mock.patch.object(C.DISPATCH, "observed_attempt_liveness") as observed:
+            observed.return_value = mock.Mock(state="alive", reason="ok")
+            result = C._route_liveness("rt-r0", attempts)
+        self.assertEqual(result["state"], "alive")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -2504,6 +2504,106 @@ class MaterializePendingDeliveryTest(unittest.TestCase):
             self.assertEqual(len(refusals), 1)
             self.assertIn("identity-incomplete", refusals[0]["reason"])
 
+    def test_owner_row_identity_resolves_verified_advance_over_sealed_route_id(self):
+        # An owner may have advanced past its launch-sealed owner_route_id;
+        # when a jobs path is supplied the verified current binding must win.
+        import importlib.util as _ilu
+        spec = _ilu.spec_from_file_location(
+            "owner_route_binding_ocj", HERE / "owner_route_binding.py"
+        )
+        orb = _ilu.module_from_spec(spec)
+        sys.modules[spec.name] = orb
+        spec.loader.exec_module(orb)
+        with tempfile.TemporaryDirectory() as td:
+            jobs = Path(td) / "jobs.log"
+            metadata = {
+                "worker_type": "owner", "dispatch_depth": "1",
+                "attempt_id": "att-advance-owner",
+                "owner_route_file": str(Path(td) / "r0.json"),
+                "owner_route_id": "rt-sealed-r0",
+                "owner_route_hash": "sha256:r0",
+            }
+            current = orb.OwnerRouteBinding(str(Path(td) / "r1.json"), "rt-current-r1", "sha256:r1")
+            with mock.patch.object(orb, "resolve_owner_route_lifecycle",
+                                   return_value=(current, "owner-route-advance-current")), \
+                 mock.patch.dict(sys.modules, {"owner_route_binding": orb}):
+                result = JOIN.pending_record_identity(metadata, jobs)
+            self.assertEqual(result, ("rt-current-r1", JOIN.OWNER_ROUTE_NODE, JOIN.NO_PARENT_ATTEMPT))
+
+    def test_owner_row_identity_preserves_sealed_route_id_when_advance_absent(self):
+        import importlib.util as _ilu
+        spec = _ilu.spec_from_file_location(
+            "owner_route_binding_ocj2", HERE / "owner_route_binding.py"
+        )
+        orb = _ilu.module_from_spec(spec)
+        sys.modules[spec.name] = orb
+        spec.loader.exec_module(orb)
+        with tempfile.TemporaryDirectory() as td:
+            jobs = Path(td) / "jobs.log"
+            metadata = {
+                "worker_type": "owner", "dispatch_depth": "1",
+                "attempt_id": "att-legacy-owner",
+                "owner_route_file": str(Path(td) / "r0.json"),
+                "owner_route_id": "rt-sealed-r0",
+                "owner_route_hash": "sha256:r0",
+            }
+            anchor = orb.OwnerRouteBinding(str(Path(td) / "r0.json"), "rt-sealed-r0", "sha256:r0")
+            with mock.patch.object(orb, "resolve_owner_route_lifecycle",
+                                   return_value=(anchor, "owner-route-launch-binding")), \
+                 mock.patch.dict(sys.modules, {"owner_route_binding": orb}):
+                result = JOIN.pending_record_identity(metadata, jobs)
+            self.assertEqual(result, ("rt-sealed-r0", JOIN.OWNER_ROUTE_NODE, JOIN.NO_PARENT_ATTEMPT))
+
+    def test_owner_row_identity_resolves_post_launch_attachment_without_sealed_tuple(self):
+        import importlib.util as _ilu
+        spec = _ilu.spec_from_file_location(
+            "owner_route_binding_ocj_attach", HERE / "owner_route_binding.py"
+        )
+        orb = _ilu.module_from_spec(spec)
+        sys.modules[spec.name] = orb
+        spec.loader.exec_module(orb)
+        with tempfile.TemporaryDirectory() as td:
+            jobs = Path(td) / "jobs.log"
+            metadata = {
+                "worker_type": "owner", "dispatch_depth": "1",
+                "attempt_id": "att-attached-owner",
+            }
+            current = orb.OwnerRouteBinding(
+                str(Path(td) / "r0.json"), "rt-attached-r0", "sha256:r0"
+            )
+            with mock.patch.object(
+                orb, "resolve_owner_route_lifecycle",
+                return_value=(current, "owner-route-post-launch-attachment"),
+            ), mock.patch.dict(sys.modules, {"owner_route_binding": orb}):
+                result = JOIN.pending_record_identity(metadata, jobs)
+            self.assertEqual(
+                result, ("rt-attached-r0", JOIN.OWNER_ROUTE_NODE, JOIN.NO_PARENT_ATTEMPT)
+            )
+
+    def test_owner_row_identity_refuses_on_invalid_advance_evidence(self):
+        import importlib.util as _ilu
+        spec = _ilu.spec_from_file_location(
+            "owner_route_binding_ocj3", HERE / "owner_route_binding.py"
+        )
+        orb = _ilu.module_from_spec(spec)
+        sys.modules[spec.name] = orb
+        spec.loader.exec_module(orb)
+        with tempfile.TemporaryDirectory() as td:
+            jobs = Path(td) / "jobs.log"
+            metadata = {
+                "worker_type": "owner", "dispatch_depth": "1",
+                "attempt_id": "att-tampered-owner",
+                "owner_route_file": str(Path(td) / "r0.json"),
+                "owner_route_id": "rt-sealed-r0",
+                "owner_route_hash": "sha256:r0",
+            }
+            with mock.patch.object(
+                orb, "resolve_owner_route_lifecycle",
+                side_effect=orb.OwnerRouteBindingError("owner-route-advance-target-invalid"),
+            ), mock.patch.dict(sys.modules, {"owner_route_binding": orb}):
+                with self.assertRaisesRegex(JOIN.JoinContractError, "owner-route-advance-conflict"):
+                    JOIN.pending_record_identity(metadata, jobs)
+
     def test_a47_9_persistence_refusal_observed_row_close_unchanged(self):
         # Predicate: forcing N materialize failures produces exactly N
         # observed `delivery-persistence-refused` log entries, and none of

@@ -3005,7 +3005,7 @@ def _retain_dead_terminal_owners(jobs, now, jobs_path=None):
             drop.add(id(j)); continue
         j.liveness = "dead"
         try:
-            _, route_file, _ = registry.resolve_owner_route(row, rows)
+            _, route_file, _ = registry.resolve_owner_route(row, rows, args.jobs)
             j.resume_boundary = registry.resume_boundary(route_file, incomplete) or "-"
         except Exception:
             j.resume_boundary = "-"
@@ -3057,7 +3057,7 @@ def _annotate_orphan_conductors(jobs, now, jobs_path=None):
             continue
         if note == "dead-parent-orphaned":
             try:
-                _, route_file, _ = registry.resolve_owner_route(row, rows)
+                _, route_file, _ = registry.resolve_owner_route(row, rows, args.jobs)
                 incomplete, _ = registry.route_incomplete(
                     row, args.agent_home, rows, args.jobs
                 )
