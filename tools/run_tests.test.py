@@ -416,6 +416,72 @@ class RetryFixture(RunTestsFixtureBase):
         self.assertEqual(rows[0]["detail"], "attempts=2; outcomes=known-fail,pass; policy=flaky-timing")
 
 
+class CiLikeProfileFixture(unittest.TestCase):
+    """P2: ci-like is a layer on top of build_isolated_env(), and the
+    equals-form --isolation flag must be honored as an explicit override."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.mod = load_runner_module()
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_ci_like_env_is_isolated_env_plus_a_layer(self):
+        isolated_env = self.mod.build_isolated_env(self.root / "base")
+        ci_like_env = self.mod.build_ci_like_env(self.root / "cilike", self.root)
+        # every key build_isolated_env sets is still present (layered, not replaced)
+        for key in isolated_env:
+            if key == "PATH":
+                continue  # ci-like pins its own PATH deliberately
+            self.assertIn(key, ci_like_env)
+        self.assertEqual(
+            ci_like_env["PATH"], "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+        )
+        self.assertEqual(ci_like_env["HEARTING_ENV_LAYOUT"], "github-runner")
+        self.assertTrue(Path(ci_like_env["RUNNER_TEMP"]).is_dir())
+        gitconfig = Path(ci_like_env["GIT_CONFIG_GLOBAL"])
+        self.assertTrue(gitconfig.is_file())
+        self.assertIn(str(self.root), gitconfig.read_text(encoding="utf-8"))
+
+    def test_equals_form_isolation_flag_overrides_declared_needs(self):
+        write_suite(self.root, "needs_installed.test.py", "import sys\nsys.exit(0)\n")
+        baseline = write_baseline(self.root, [])
+        isolation = write_isolation_tsv(
+            self.root,
+            [f"needs_installed.test.py\tinstalled-layout\tr\tMA-TEST-016\t{TOMORROW}"],
+        )
+        report_path = self.root / "report.tsv"
+        result = run_runner(
+            [
+                "--root", str(self.root),
+                "--baseline", str(baseline),
+                "--isolation-tsv", str(isolation),
+                "--isolation=ci-like",
+                "--jobs", "1",
+                "--timeout", "5",
+                "--no-leak-sweep",
+                "--report", str(report_path),
+                "--select", "needs_installed.test.py",
+            ]
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        rows = []
+        lines = report_path.read_text(encoding="utf-8").splitlines()
+        header = None
+        for line in lines:
+            if not line or line.startswith("#"):
+                continue
+            cols = line.split("\t")
+            if header is None:
+                header = cols
+                continue
+            rows.append(dict(zip(header, cols)))
+        profiles = {r["isolation_profile"] for r in rows if r["suite_path"] == "needs_installed.test.py"}
+        self.assertEqual(profiles, {"ci-like"})
+
+
 class TempParentProbeFixture(unittest.TestCase):
     """C-5: the Git containment probe must distinguish a real "not a
     repository" answer from any other probe failure."""
@@ -604,7 +670,7 @@ class NoAmbientExecutionPathFixture(unittest.TestCase):
         self.assertIsNotNone(m, result.stdout)
         choices = m.group(1).split(",")
         self.assertNotIn("ambient", choices)
-        self.assertEqual(set(choices), {"isolated", "installed-layout", "live-registry"})
+        self.assertEqual(set(choices), {"isolated", "installed-layout", "live-registry", "ci-like"})
 
     def test_source_never_launches_a_suite_subprocess_with_inherited_environ(self):
         source = RUNNER.read_text(encoding="utf-8")

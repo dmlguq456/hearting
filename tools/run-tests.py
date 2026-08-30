@@ -35,7 +35,7 @@ DEFAULT_JOBS = 4
 PRUNE_DIRS = {".git", "__pycache__", "node_modules"}
 
 EXPECTED_FAILURE_KINDS = {"exit-nonzero", "timeout", "error", "missing-binary", "assertion"}
-ISOLATION_PROFILES = ("isolated", "installed-layout", "live-registry")
+ISOLATION_PROFILES = ("isolated", "installed-layout", "live-registry", "ci-like")
 
 BASELINE_COLUMNS = [
     "suite_path",
@@ -143,6 +143,27 @@ def build_installed_layout_env(tmpdir: Path, install_prefix: Path) -> dict[str, 
     env["AGENT_HOME"] = agent_home
     env["XDG_DATA_HOME"] = str(install_prefix / "home" / ".local" / "share")
     env["XDG_STATE_HOME"] = str(install_prefix / "home" / ".local" / "state")
+    return env
+
+
+def build_ci_like_env(tmpdir: Path, repo_root: Path) -> dict[str, str]:
+    """Layer a GitHub-runner-shaped environment on top of the isolated env
+    (diagnostic/reproduction profile only, not used as the CI default). Same
+    single-owner pattern as build_installed_layout_env: everything starts
+    from build_isolated_env() and this function only adds to it.
+    """
+    env = build_isolated_env(tmpdir)
+    env["PATH"] = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+    home = Path(env["HOME"])
+    for d in (home / ".local" / "bin", home / ".local" / "share", home / ".local" / "state"):
+        d.mkdir(parents=True, exist_ok=True)
+    runner_temp = home / "work" / "_temp"
+    runner_temp.mkdir(parents=True, exist_ok=True)
+    env["RUNNER_TEMP"] = str(runner_temp)
+    gitconfig = tmpdir / "gitconfig"
+    gitconfig.write_text(f"[safe]\n\tdirectory = {repo_root}\n", encoding="utf-8")
+    env["GIT_CONFIG_GLOBAL"] = str(gitconfig)
+    env["HEARTING_ENV_LAYOUT"] = "github-runner"
     return env
 
 
@@ -712,6 +733,8 @@ def run_profile(
             env = build_isolated_env(tmp)
             env["HOME"] = os.environ.get("HOME", env["HOME"])
             return env
+        if profile == "ci-like":
+            return build_ci_like_env(tmp, root)
         raise ValueError(profile)
 
     try:
@@ -788,10 +811,11 @@ def main(argv: list[str]) -> int:
 
     # Decide per-suite profile.
     explicit_profile = args.isolation
+    isolation_flag_given = any(a == "--isolation" or a.startswith("--isolation=") for a in argv)
     profile_of: dict[str, str] = {}
     for r in (suite_relpath(root, s) for s in selected):
         needs_row = isolation_tsv.get(r)
-        if needs_row is not None and "--isolation" not in argv:
+        if needs_row is not None and not isolation_flag_given:
             profile_of[r] = needs_row["needs"]
         else:
             profile_of[r] = explicit_profile
