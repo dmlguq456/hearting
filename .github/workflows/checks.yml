@@ -106,14 +106,10 @@ jobs:
           persist-credentials: false
 
       - name: Run the full isolated test suite (C-3/C-4)
-        # --xpass-nonfatal: the known-fail baseline is seeded on the maintainer host;
-        # suites that pass on the CI runner are reported, not failed (MA-W1-011).
-        # It stays until the baseline rows carry this runner's fingerprint: only
-        # then does a passing suite land as BASELINE-FOREIGN instead of XPASS.
-        # --seed-baseline uploads the proposed rows stamped with that fingerprint;
-        # adopting them is a human decision, never automatic.
+        # --seed-baseline uploads the proposed rows stamped with this runner's
+        # fingerprint; adopting them is a human decision, never automatic.
         run: |
-          python3 tools/run-tests.py --retries 1 --xpass-nonfatal \
+          python3 tools/run-tests.py --retries 1 \
             --report ${{ runner.temp }}/run-tests-report.tsv \
             --seed-baseline ${{ runner.temp }}/run-tests-seed-baseline.tsv
 
