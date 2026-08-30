@@ -903,10 +903,11 @@ class TypedReceiptStageAdvanceNegotiationTest(unittest.TestCase):
         self.assertEqual(receipt["schema_version"], 2)
         self.assertNotIn("stage_advance", receipt)
         self.assertEqual(json.dumps(negotiated_but_recordless, sort_keys=True), golden)
-        # SD-119: the chain-advance path exists (dispatch_subsession_advance.py)
-        # but Codex's own supervisor loop is not yet bound to it (R2b, parity
-        # unclaimed) -- a join with no chain metadata is a no-op regardless,
-        # and this receipt never carries a chain key.
+        # SD-119: Codex's own supervisor loop is bound to the chain-advance
+        # path (R2b), but a join with no chain metadata is a no-op -- this
+        # receipt never carries a chain key, byte-identical to pre-SD-119.
+        # Claude-only realized behavior confirmed by measurement (SD-OPEN-15):
+        # this call proves the shared no-op contract, not cross-harness parity.
         sys.path.insert(0, str(ROOT / "utilities"))
         import dispatch_subsession_advance as subsession_advance
 
