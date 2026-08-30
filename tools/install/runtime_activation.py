@@ -1534,11 +1534,20 @@ def _journal_dest_allowed(runtime: str, dest: Path, scope: str) -> bool:
             "hearting", "AGENTS.md", "agent-core", "agent-capabilities",
             "agent-roles", "agent-bin", "agent-hooks", "hooks.json", "agent-modes",
         },
-        "claude": {
-            "hearting", "CLAUDE.md", "core", "capabilities", "roles",
-            "agent-modes", "bin", "tools", "utilities", "scaffolds",
-            "statusline.sh",
-        },
+        # Claude's activation-native names unioned with
+        # `projector.claude_installer_owned_names()` (the same canonical
+        # owner-name-set `_linked_entries()` unions in). A journal recording a
+        # union-only name such as README.md/manifest.json/loops must stay
+        # recoverable after a crash, or a partial reprojection can never be
+        # repaired (INSTALL_LAYOUT.md "owner-name-set reconciliation").
+        "claude": (
+            {
+                "hearting", "CLAUDE.md", "core", "capabilities", "roles",
+                "agent-modes", "bin", "tools", "utilities", "scaffolds",
+                "statusline.sh",
+            }
+            | projector.claude_installer_owned_names()
+        ),
         "opencode": {
             "hearting", "AGENTS.md", "agent-core", "agent-capabilities",
             "agent-roles",

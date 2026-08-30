@@ -6,6 +6,12 @@
 #   held as BASELINE-FOREIGN, and a failing one is an unlisted FAIL. A foreign
 #   row can never turn a failure green.
 # wildcards forbidden. test_id is "-" (whole file) or "Class.test_method". duplicate/ambiguous rows are a hard parse failure.
+# --isolation=ci-like is NOT a supported local pre-CI gate: the 6 rows this
+# revision fingerprint-scoped to isolated (fingerprint=7b9040f1656f0fe8) do
+# not apply under ci-like's own fingerprint (5ea1047a4dfe427c), so their 4
+# genuinely-failing suites/tests surface as unlisted FAIL locally under
+# ci-like. CI itself always runs the real `isolated` fingerprint, so this
+# does not affect CI. See dev_logs/wp4.md (impl-review round 1 closure).
 suite_path	test_id	expected_failure_kind	isolation_profile	reason	defect_id	review_by	fingerprint
 adapters/codex/bin/dispatch-headless.sd15.test.sh	-	exit-nonzero	isolated	real-bug: exit-nonzero:— codex dispatch-headless SD-15 conformance: FAIL (2); evidence=w3-known-fail-initial.tsv	MA-W1-101	2026-11-30	
 adapters/codex/bin/preflight_dispatch_owner.test.py	PreflightDispatchOwnerTest.test_dispatch_owner_arm_selects_configured_adapter_end_to_end	assertion	isolated	env: assertion:AssertionError: 65 != 0 : status=unavailable; evidence=w3-known-fail-initial.tsv	MA-W1-102	2026-11-30	

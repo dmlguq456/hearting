@@ -248,6 +248,29 @@ test ! -e "$HOME/.claude/manifest.json" && test ! -L "$HOME/.claude/manifest.jso
   || fail "uninstall restored over a manifest.json the user repointed after activation"
 ok "uninstall restores an untouched union member's installer target and leaves a user repoint alone"
 
+# A crash right after `_write_journal(..., "preparing", ...)` for a
+# union-only destination (README.md/manifest.json/loops) must stay
+# recoverable: `_journal_dest_allowed()` has to accept these names too, not
+# just the activation-native ones, or the next activate() permanently
+# refuses with "transaction destination is not harness-owned".
+harness runtime activate --runtime claude --mode packaged --source "$SRC" --json \
+  > "$TMP/claude-union-precrash.json" \
+  || { cat "$TMP/claude-union-precrash.json" >&2; fail "pre-crash union activation failed"; }
+test -L "$HOME/.claude/README.md" || fail "union README.md missing before crash simulation"
+mkdir -p "$HOME/.claude/.harness/transactions/readme-crash"
+printf '%s\n' \
+  "{\"schema\":1,\"runtime\":\"claude\",\"status\":\"preparing\",\"records\":[{\"dest\":\"$HOME/.claude/README.md\",\"state\":\"missing\",\"backup\":null,\"target\":null}]}" \
+  > "$HOME/.claude/.harness/transactions/readme-crash/journal.json"
+if ! harness runtime activate --runtime claude --mode packaged --source "$SRC" --json \
+  > "$TMP/claude-union-recover.json" 2>&1; then
+  cat "$TMP/claude-union-recover.json" >&2
+  fail "activation could not recover a preparing journal for a union-only destination"
+fi
+test ! -e "$HOME/.claude/.harness/transactions/readme-crash" \
+  || fail "recovered README.md transaction directory was not cleared"
+test -L "$HOME/.claude/README.md" || fail "recovery did not leave README.md reprojected"
+ok "journal recovery accepts a preparing README.md destination adopted by the owner-name-set union"
+
 rm -f "$HOME/.claude/README.md" "$HOME/.claude/loops"
 
 if ! harness runtime activate --runtime all --mode linked --source "$SRC" --json \

@@ -1146,14 +1146,18 @@ class LiveStateLeakFixture(RunTestsFixtureBase):
         # A write under live-state that no suite's own process-group lineage
         # produced (simulated here by writing it from the test process itself,
         # standing in for a concurrent session) must surface as an advisory,
-        # never as the fatal __live_state_leak__ verdict.
+        # never as the fatal __live_state_leak__ verdict. The whole-run
+        # foreign sampler can only positively attribute a write to a PGID
+        # this run never spawned while that PGID still holds the fd open, so
+        # the writer here holds it open across the sampler's poll interval --
+        # mirroring how LiveStateLeakFixture proves *own* attribution above.
         fake_home = Path(tempfile.mkdtemp(prefix="w1-fake-home-foreign-"))
         live_dir = fake_home / ".local" / "state" / "hearting"
         live_dir.mkdir(parents=True)
         # Sleeps briefly so the runner's own before/after live-state snapshot
         # window is wide enough for the concurrently-started foreign writer
         # below to land inside it.
-        write_suite(self.root, "harmless.test.py", "import time\ntime.sleep(0.6)\n")
+        write_suite(self.root, "harmless.test.py", "import time\ntime.sleep(1.0)\n")
         baseline = write_baseline(self.root, [])
         isolation = write_isolation_tsv(self.root)
         report_path = self.root / "leak-report.tsv"
@@ -1162,7 +1166,10 @@ class LiveStateLeakFixture(RunTestsFixtureBase):
 
         def write_foreign_entry_mid_run():
             time.sleep(0.3)
-            (live_dir / "foreign-marker.json").write_text("{}")
+            with open(live_dir / "foreign-marker.json", "w") as f:
+                f.write("{}")
+                f.flush()
+                time.sleep(0.5)
 
         import threading as _threading
         writer = _threading.Thread(target=write_foreign_entry_mid_run, daemon=True)
@@ -1188,6 +1195,50 @@ class LiveStateLeakFixture(RunTestsFixtureBase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("LIVE-STATE-OBSERVED-FOREIGN", result.stderr)
         self.assertNotIn("LIVE-STATE-LEAK:", result.stderr)
+        self.assertNotIn("LIVE-STATE-UNATTRIBUTED", result.stderr)
+
+    def test_fast_own_open_write_close_is_never_a_silent_pass(self):
+        # A suite child that opens, writes, and closes a live-state file
+        # entirely within one sampler poll interval leaves no fd for the
+        # PGID-scoped sampler to observe. That must not be silently
+        # downgraded to the non-fatal foreign advisory -- with no positive
+        # own evidence and no positive foreign evidence either, the run must
+        # fail loudly (impl-review round 1, finding 2).
+        fake_home = Path(tempfile.mkdtemp(prefix="w1-fake-home-fastown-"))
+        (fake_home / ".local" / "state" / "hearting").mkdir(parents=True)
+        write_suite(
+            self.root,
+            "fastwriter.test.py",
+            f"""
+            from pathlib import Path
+            p = Path({str(fake_home / '.local' / 'state' / 'hearting')!r}) / "fast-marker.json"
+            with open(p, "w") as f:
+                f.write("{{}}")
+            """,
+        )
+        baseline = write_baseline(self.root, [])
+        isolation = write_isolation_tsv(self.root)
+        report_path = self.root / "leak-report.tsv"
+        env = dict(os.environ)
+        env["HOME"] = str(fake_home)
+        result = subprocess.run(
+            [
+                sys.executable, str(RUNNER),
+                "--root", str(self.root),
+                "--baseline", str(baseline),
+                "--isolation-tsv", str(isolation),
+                "--isolation=isolated",
+                "--report", str(report_path),
+            ],
+            cwd=str(ROOT),
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("LIVE-STATE-UNATTRIBUTED", result.stderr)
+        self.assertNotIn("LIVE-STATE-OBSERVED-FOREIGN", result.stderr)
 
 
 class LiveStateSamplerUnitFixture(unittest.TestCase):

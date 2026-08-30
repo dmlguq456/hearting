@@ -434,10 +434,73 @@ _LIVE_SAMPLER_MAX_SAMPLES = 3000  # bounded: interval * cap is well past any --t
 # own process-group lineage, keyed by suite relpath. Populated only with
 # positive evidence -- a suite the sampler could not observe (no /proc, join
 # did not finish in time) contributes nothing here and its writes fall back
-# to the foreign/unknown classification in the leak sweep, never promoted to
-# an owned leak by absence of evidence.
+# to the unattributed/foreign classification in the leak sweep (see
+# `_GLOBAL_FD_OBSERVATIONS` below), never promoted to an owned leak by
+# absence of evidence.
 _OWNED_LIVE_PATHS_BY_SUITE: dict[str, set[str]] = {}
 _OWNED_LIVE_PATHS_LOCK = threading.Lock()
+
+# Every PGID this run has ever spawned for a suite attempt (main pass and
+# retries). The whole-run sampler below uses this to tell a genuinely
+# external process apart from one of this run's own suite children that the
+# per-suite sampler simply missed.
+_ALL_RUN_PGIDS: set[int] = set()
+_ALL_RUN_PGIDS_LOCK = threading.Lock()
+
+# Whole-run positive-evidence map: live-state path -> set of PGIDs a
+# sampler has actually observed holding it open at some point during the
+# entire run (not just one suite's lifetime). A path with no entry here was
+# never observed open by anyone and gets the conservative
+# LIVE-STATE-UNATTRIBUTED verdict rather than the non-fatal foreign advisory
+# -- LIVE-STATE-OBSERVED-FOREIGN is reserved for a path this map shows was
+# held open by a PGID this run never spawned.
+_GLOBAL_FD_OBSERVATIONS: dict[str, set[int]] = {}
+_GLOBAL_FD_OBSERVATIONS_LOCK = threading.Lock()
+
+
+def _sample_all_live_state_fd_holders(
+    stop_event: threading.Event, observations: dict[str, set[int]], lock: threading.Lock
+) -> None:
+    """Whole-run daemon sampler: unlike `_sample_pgid_live_state_writes`
+    (scoped to one suite's own PGID), this walks every PID in /proc for the
+    entire run and records which PGID(s) it saw holding each live-state path
+    open. This is the only basis for treating a write as positively foreign
+    instead of merely unattributed.
+    """
+    live_prefix = str(LIVE_STATE_ROOT) + os.sep
+    samples = 0
+    max_samples = _LIVE_SAMPLER_MAX_SAMPLES * 20  # whole-run scope, not one suite's
+    while not stop_event.is_set() and samples < max_samples:
+        try:
+            proc_entries = os.listdir("/proc")
+        except OSError:
+            proc_entries = []
+        for entry in proc_entries:
+            if not entry.isdigit():
+                continue
+            pid = int(entry)
+            fd_dir = f"/proc/{pid}/fd"
+            try:
+                fd_names = os.listdir(fd_dir)
+            except OSError:
+                continue
+            pgid: int | None = None
+            for fd_name in fd_names:
+                try:
+                    target = os.readlink(f"{fd_dir}/{fd_name}")
+                except OSError:
+                    continue
+                if not target.startswith(live_prefix):
+                    continue
+                if pgid is None:
+                    try:
+                        pgid = os.getpgid(pid)
+                    except OSError:
+                        break
+                with lock:
+                    observations.setdefault(target, set()).add(pgid)
+        samples += 1
+        stop_event.wait(_LIVE_SAMPLER_INTERVAL)
 
 # Fixture roots the runner itself constructs (per-profile env tmpdirs,
 # simulated install prefixes). OR'd into "owned" so a fixture root that
@@ -529,6 +592,9 @@ def run_suite(suite: Path, root: Path, env: dict[str, str], profile: str, timeou
         pgid = os.getpgid(proc.pid)
     except OSError:
         pgid = None
+    if pgid is not None:
+        with _ALL_RUN_PGIDS_LOCK:
+            _ALL_RUN_PGIDS.add(pgid)
     if pgid is not None and os.path.isdir("/proc"):
         sampler_thread = threading.Thread(
             target=_sample_pgid_live_state_writes,
@@ -1141,6 +1207,17 @@ def main(argv: list[str]) -> int:
     today = datetime.date.today().isoformat()
 
     before_leak = set() if args.no_leak_sweep else live_state_snapshot()
+    global_fd_stop_event = threading.Event()
+    global_fd_observations: dict[str, set[int]] = {}
+    global_fd_lock = threading.Lock()
+    global_fd_thread: threading.Thread | None = None
+    if not args.no_leak_sweep and os.path.isdir("/proc"):
+        global_fd_thread = threading.Thread(
+            target=_sample_all_live_state_fd_holders,
+            args=(global_fd_stop_event, global_fd_observations, global_fd_lock),
+            daemon=True,
+        )
+        global_fd_thread.start()
 
     # STALE must be judged against the full repo corpus (a suite file that no
     # longer exists), not the --exclude-narrowed run set — excluding one known
@@ -1421,6 +1498,9 @@ def main(argv: list[str]) -> int:
         ))
 
     leak_new: set[str] = set()
+    if global_fd_thread is not None:
+        global_fd_stop_event.set()
+        global_fd_thread.join(timeout=2.0)
     if not args.no_leak_sweep:
         after_leak = live_state_snapshot()
         live_registry_suites = {sp for sp, row in isolation_tsv.items() if row["needs"] == "live-registry"}
@@ -1429,6 +1509,10 @@ def main(argv: list[str]) -> int:
             owned_by_suite_snapshot = {k: set(v) for k, v in _OWNED_LIVE_PATHS_BY_SUITE.items()}
         with _FIXTURE_ROOTS_LOCK:
             fixture_roots_snapshot = list(_FIXTURE_ROOTS)
+        with _ALL_RUN_PGIDS_LOCK:
+            all_run_pgids_snapshot = set(_ALL_RUN_PGIDS)
+        with global_fd_lock:
+            global_fd_snapshot = {k: set(v) for k, v in global_fd_observations.items()}
 
         def _owning_suite(path: str) -> str | None:
             for suite_rel, owned_paths in owned_by_suite_snapshot.items():
@@ -1439,8 +1523,16 @@ def main(argv: list[str]) -> int:
         def _under_fixture_root(path: str) -> bool:
             return any(path == fr or path.startswith(fr + os.sep) for fr in fixture_roots_snapshot)
 
+        def _has_positive_foreign_evidence(path: str) -> bool:
+            # Positive evidence a PGID this run never spawned held the path
+            # open at some point -- the only basis for the non-fatal foreign
+            # advisory. A PGID this run *did* spawn (own suite the per-suite
+            # sampler simply missed) does not count as foreign evidence.
+            return bool(global_fd_snapshot.get(path, set()) - all_run_pgids_snapshot)
+
         owned_new: set[str] = set()
         foreign_new: set[str] = set()
+        unattributed_new: set[str] = set()
         for entry in sorted(new_entries):
             owner = _owning_suite(entry)
             if owner is not None:
@@ -1451,13 +1543,16 @@ def main(argv: list[str]) -> int:
                 owned_new.add(entry)
             elif _under_fixture_root(entry):
                 owned_new.add(entry)
-            else:
-                # No positive PGID-lineage or fixture-root attribution:
-                # either genuinely a concurrent foreign session, or the
-                # sampler simply could not observe it (no /proc, bounded join
-                # did not finish). Either way, absence of evidence is never
-                # promoted to an owned leak.
+            elif _has_positive_foreign_evidence(entry):
                 foreign_new.add(entry)
+            else:
+                # No positive own-PGID/fixture-root attribution and no
+                # positive foreign-PGID evidence either: a fast
+                # open/write/close inside a suite's own PGID between sampler
+                # polls must never look like a silent pass, so this is
+                # failed conservatively instead of downgraded to the
+                # non-fatal foreign advisory.
+                unattributed_new.add(entry)
 
         if foreign_new:
             for entry in sorted(foreign_new):
@@ -1470,6 +1565,14 @@ def main(argv: list[str]) -> int:
             hard_failures.append((
                 "__live_state_leak__::-", "ERROR", "internal",
                 f"{len(leak_new)} new live-state path(s) written during the run",
+            ))
+
+        if unattributed_new:
+            for entry in sorted(unattributed_new):
+                print(f"LIVE-STATE-UNATTRIBUTED: {entry}", file=sys.stderr)
+            hard_failures.append((
+                "__live_state_unattributed__::-", "ERROR", "internal",
+                f"{len(unattributed_new)} new live-state path(s) with no positive own or foreign evidence",
             ))
 
     if args.report:
