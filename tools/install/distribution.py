@@ -846,6 +846,33 @@ def _activate_release(root: Path, runtimes: Iterable[str]) -> dict:
     }
 
 
+def _reconcile_codex_launcher() -> dict:
+    """Reconcile the protected Codex ingress for same-release repairs.
+
+    This deliberately imports the launcher implementation from the active
+    release instead of duplicating its transaction here.  Callers hold the
+    distribution lock, so the launcher lock is acquired second.
+    """
+    try:
+        import codex_launcher
+    except (ImportError, OSError) as exc:
+        return {
+            "action": "managed-launcher",
+            "status": "skipped-unavailable",
+            "detail": f"launcher module unavailable: {exc}",
+        }
+    try:
+        return codex_launcher.install(profile_policy="deny")
+    except codex_launcher.CodexUnavailableError as exc:
+        return {
+            "action": "managed-launcher",
+            "status": "skipped-unavailable",
+            "detail": str(exc),
+        }
+    except codex_launcher.CodexLauncherError as exc:
+        raise DistributionError(f"Codex launcher reconciliation failed: {exc}") from exc
+
+
 def _write_distribution_state(value: dict) -> None:
     if os.environ.get("HARNESS_TEST_FAIL_STATE_COMMIT") == "1":
         raise DistributionError("injected distribution state commit failure")
@@ -2220,6 +2247,7 @@ def _install_or_update(
             previous_state_bytes = state_path().read_bytes()
             try:
                 repaired = _repair_managed_pointers(previous_state)
+                launcher_result = _reconcile_codex_launcher()
                 previous_state["channel"] = channel
                 previous_state["pinned_version"] = pinned_version
                 previous_state["last_checked_at"] = _utc_now()
@@ -2248,6 +2276,7 @@ def _install_or_update(
                 "runtimes": [],
                 "skipped": {},
                 "session_action": {},
+                "launcher": launcher_result,
             }
 
         if bootstrap:
@@ -2395,6 +2424,11 @@ def _install_or_update(
             "runtimes": activation["runtimes"],
             "skipped": skipped,
             "session_action": activation["session_action"],
+            "launcher": (
+                activation.get("report", {}).get("managed_launcher")
+                if isinstance(activation.get("report"), dict)
+                else None
+            ),
         }
 
 

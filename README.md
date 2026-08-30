@@ -69,12 +69,15 @@ registers a daily user-level update check where the OS supports it. It does not
 touch runtime credentials, sessions, logs, or databases.
 
 When Codex is installed, the same transaction also installs a reversible
-`~/.local/bin/codex` launcher. Plain interactive `codex`, `codex resume`, and
+`$CODEX_HOME/.harness/bin/codex` protected ingress. Plain interactive `codex`, `codex resume`, and
 `codex fork` enter the harness-managed App Server automatically; `codex exec`,
 plugin administration, login, and other non-interactive commands pass through to
 the recorded real CLI. Updates repair the launcher, and `hearting uninstall codex`
-restores the exact previous command binding. If Codex is not installed yet, this
-step is reported as skipped and can be applied by a later runtime refresh.
+restores the exact previous command binding. Profile PATH edits require explicit
+`--profile-policy manage` authority; otherwise use the printed manual source
+instruction (the current terminal is not changed). `legacy-inplace-v1` is an
+explicit degraded mode only. If Codex is not installed yet, this step is
+reported as skipped and can be applied by a later runtime refresh.
 
 Once `~/.local/bin` is on your `PATH`, manage it with:
 

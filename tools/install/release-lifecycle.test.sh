@@ -677,6 +677,17 @@ export HOME XDG_CONFIG_HOME XDG_DATA_HOME XDG_STATE_HOME HARNESS_BIN_DIR
 export HARNESS_RELEASE_INDEX_URL CODEX_HOME CLAUDE_CONFIG_DIR
 mkdir -p "$HOME"
 
+# A fake standalone vendor Codex binary on PATH (never inside HARNESS_BIN_DIR)
+# proves the managed-release flow reconciles the protected launcher through
+# the real codex_launcher.py transaction from the built archive, not a
+# duplicated launcher implementation inside distribution.py.
+VENDOR_BIN="$INTEGRATION/vendor-bin"
+mkdir -p "$VENDOR_BIN"
+printf '%s\n' '#!/bin/sh' 'exit 0' > "$VENDOR_BIN/codex"
+chmod +x "$VENDOR_BIN/codex"
+PATH="$VENDOR_BIN:$PATH"
+export PATH
+
 set +e
 "$INTEGRATION/assets/install.sh" --version v-other > "$INTEGRATION/version-override.out" 2>&1
 OVERRIDE_EXIT=$?
@@ -693,11 +704,13 @@ HARNESS_REPOSITORY=other/harness HARNESS_VERSION=v-other "$INTEGRATION/assets/in
 "$HARNESS_BIN_DIR/harness" runtime doctor --runtime all --strict --json > "$INTEGRATION/doctor.json"
 "$HARNESS_BIN_DIR/harness" update --json > "$INTEGRATION/update.json"
 
-python3 - "$INTEGRATION/install.json" "$INTEGRATION/doctor.json" "$INTEGRATION/update.json" <<'PY'
+python3 - "$INTEGRATION/install.json" "$INTEGRATION/doctor.json" "$INTEGRATION/update.json" "$HOME" "$VENDOR_BIN/codex" <<'PY'
 import json, os, sys
 installed = json.load(open(sys.argv[1]))
 doctor = json.load(open(sys.argv[2]))
 updated = json.load(open(sys.argv[3]))
+home = sys.argv[4]
+vendor_codex = sys.argv[5]
 state = json.load(
     open(os.path.join(os.environ["XDG_STATE_HOME"], "hearting/distribution.json"))
 )
@@ -707,7 +720,28 @@ assert state["repository"] == "example/harness"
 assert set(installed["runtimes"]) == {"claude", "codex", "opencode"}
 assert doctor["exit"] == 0
 assert updated["release"]["status"] == "up-to-date"
+
+codex_report = next(r for r in doctor["runtimes"] if r["runtime"] == "codex")
+launcher = codex_report["managed_launcher"]
+assert launcher["installed"], launcher
+assert launcher["healthy"], launcher
+# This fixture sets HARNESS_BIN_DIR globally for the top-level `harness`
+# launcher's own install location; codex_launcher.py treats that same
+# explicit-bin-dir signal as opt-in compatibility mode by design (an
+# operator naming HARNESS_BIN_DIR is exactly the documented escape hatch for
+# private/test fixtures), so it correctly reports `legacy-inplace-v1` /
+# `protected=false` here rather than the default protected-path mode.
+assert launcher["mode"] == "legacy-inplace-v1", launcher
+assert launcher["protected"] is False, launcher
+assert launcher["real_command"] == os.path.abspath(vendor_codex), launcher
+assert os.path.realpath(vendor_codex) == os.path.abspath(vendor_codex), (
+    "same-version repair must never overwrite the vendor Codex command"
+)
+same_version_launcher = updated["release"]["launcher"]
+assert same_version_launcher is not None
+assert same_version_launcher["status"] in {"unchanged", "created"}, same_version_launcher
 PY
+echo "ok - managed release installs and same-version-repairs the protected Codex launcher without touching the vendor command"
 
 HARNESS_INSTALL_URL="file://$INTEGRATION/assets/install.sh" "$ROOT/install.sh" --no-auto-update --json > "$INTEGRATION/legacy-redirect.json"
 python3 - "$INTEGRATION/legacy-redirect.json" <<'PY'
@@ -717,6 +751,198 @@ assert result["status"] in {"up-to-date", "repaired"}
 assert result["version"] == "v0.0.0-integration"
 PY
 echo "ok - release-bound installer and legacy redirect activate and verify all runtimes"
+
+fail() {
+  echo "FAIL: $*" >&2
+  exit 1
+}
+
+# Phase 3 residual (checklist rows 66/67): a genuine version update, a
+# launcher-specific fault rollback, and pruning must all preserve the real
+# vendor Codex binding and never move the protected ingress into a release
+# directory. `install.sh` is deliberately version-locked at build time (see
+# the "--version"/"--repository" rejection above), so moving versions here
+# means rewriting the same `HARNESS_RELEASE_INDEX_URL` release.json/archive
+# this fixture's managed install already resolves through and calling
+# `harness update --version <tag>`, exactly like a real operator would.
+publish_integration_release() {
+  python3 - "$ROOT" "$INTEGRATION" "$1" <<'PY'
+import hashlib
+import io
+import json
+import subprocess
+import sys
+import tarfile
+from pathlib import Path
+
+root = Path(sys.argv[1])
+target = Path(sys.argv[2])
+version = sys.argv[3]
+archive = target / "assets/hearting.tar.gz"
+listed = subprocess.run(
+    [
+        "git", "-C", str(root), "ls-files", "--cached", "--others",
+        "--exclude-standard", "-z",
+    ],
+    check=True,
+    capture_output=True,
+).stdout.decode().split("\0")
+paths = sorted(
+    {
+        item
+        for item in listed
+        if item
+        and not item.startswith((".agent_reports/", ".claude_reports/"))
+        and "__pycache__" not in Path(item).parts
+    }
+)
+with tarfile.open(archive, "w:gz") as bundle:
+    for relative in paths:
+        source = root / relative
+        if source.exists() or source.is_symlink():
+            bundle.add(source, arcname="hearting/" + relative, recursive=False)
+    marker = (version + "\n").encode()
+    info = tarfile.TarInfo("hearting/RELEASE_VERSION")
+    info.mode = 0o644
+    info.size = len(marker)
+    bundle.addfile(info, io.BytesIO(marker))
+digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+checksum = target / "assets/hearting.tar.gz.sha256"
+checksum.write_text(digest + "  hearting.tar.gz\n")
+(target / "release.json").write_text(
+    json.dumps(
+        {
+            "tag_name": version,
+            "assets": [
+                {"name": "hearting.tar.gz", "browser_download_url": archive.as_uri()},
+                {"name": "hearting.tar.gz.sha256", "browser_download_url": checksum.as_uri()},
+            ],
+        }
+    )
+)
+PY
+}
+
+CODEX_WRAPPER="$HARNESS_BIN_DIR/codex"
+CODEX_LAUNCHER_STATE="$CODEX_HOME/.harness/codex-launcher.json"
+RELEASES_ROOT="$XDG_DATA_HOME/hearting/releases"
+
+# `publish_integration_release` shells out to `git -C "$ROOT"`, which needs
+# this fixture's own (now-current) $HOME's gitconfig to trust $ROOT, same as
+# the original build above did under the previous $HOME.
+git config --file "$HOME/.gitconfig" --add safe.directory "$ROOT"
+
+publish_integration_release "v0.0.0-integration-2"
+"$HARNESS_BIN_DIR/harness" update --version v0.0.0-integration-2 --json > "$INTEGRATION/update-v2.json"
+python3 - "$INTEGRATION/update-v2.json" <<'PY'
+import json, sys
+result = json.load(open(sys.argv[1]))
+assert result["exit"] == 0, result
+assert result["release"]["version"] == "v0.0.0-integration-2", result
+PY
+"$HARNESS_BIN_DIR/harness" runtime doctor --runtime codex --strict --json > "$INTEGRATION/doctor-v2.json"
+python3 - "$INTEGRATION/doctor-v2.json" "$VENDOR_BIN/codex" <<'PY'
+import json, os, sys
+row = json.load(open(sys.argv[1]))
+vendor_codex = sys.argv[2]
+codex = row if row.get("runtime") == "codex" else next(r for r in row["runtimes"] if r["runtime"] == "codex")
+launcher = codex["managed_launcher"]
+assert launcher["installed"] and launcher["healthy"], launcher
+assert launcher["real_command"] == os.path.abspath(vendor_codex), (
+    "genuine version update must preserve the vendor Codex binding", launcher
+)
+PY
+echo "ok - genuine Codex-managed version update preserves the protected launcher and vendor binding"
+
+WRAPPER_BEFORE=$(sha256sum "$CODEX_WRAPPER" | cut -d ' ' -f 1)
+STATE_BEFORE=$(sha256sum "$CODEX_LAUNCHER_STATE" | cut -d ' ' -f 1)
+VENDOR_BEFORE=$(sha256sum "$VENDOR_BIN/codex" | cut -d ' ' -f 1)
+CURRENT_BEFORE=$(readlink "$XDG_DATA_HOME/hearting/current")
+
+publish_integration_release "v0.0.0-integration-3"
+export HARNESS_INSTALLER_FAIL_AFTER_LAUNCHER=1
+set +e
+"$HARNESS_BIN_DIR/harness" update --version v0.0.0-integration-3 --json \
+  > "$INTEGRATION/update-v3-fail.json" 2> "$INTEGRATION/update-v3-fail.err"
+FAIL_EXIT=$?
+set -e
+unset HARNESS_INSTALLER_FAIL_AFTER_LAUNCHER
+[ "$FAIL_EXIT" -ne 0 ] || fail "injected launcher-boundary failure during version update unexpectedly succeeded"
+
+python3 - "$INTEGRATION/update-v3-fail.json" "$XDG_STATE_HOME/hearting/distribution.json" <<'PY'
+import json, sys
+result = json.load(open(sys.argv[1]))
+assert result["exit"] != 0, result
+state = json.load(open(sys.argv[2]))
+assert state["version"] == "v0.0.0-integration-2", (
+    "failed version update must leave the prior version current", state
+)
+PY
+WRAPPER_AFTER=$(sha256sum "$CODEX_WRAPPER" | cut -d ' ' -f 1)
+STATE_AFTER=$(sha256sum "$CODEX_LAUNCHER_STATE" | cut -d ' ' -f 1)
+VENDOR_AFTER=$(sha256sum "$VENDOR_BIN/codex" | cut -d ' ' -f 1)
+CURRENT_AFTER=$(readlink "$XDG_DATA_HOME/hearting/current")
+test "$WRAPPER_BEFORE" = "$WRAPPER_AFTER" || fail "launcher wrapper changed after a rolled-back version update"
+test "$STATE_BEFORE" = "$STATE_AFTER" || fail "launcher state changed after a rolled-back version update"
+test "$VENDOR_BEFORE" = "$VENDOR_AFTER" || fail "vendor Codex command changed after a rolled-back version update"
+test "$CURRENT_BEFORE" = "$CURRENT_AFTER" || fail "current-pointer rollback left it pointing at the failed release"
+test ! -d "$RELEASES_ROOT/v0.0.0-integration-3" || fail "failed release directory was not cleaned up"
+echo "ok - injected launcher-boundary failure during a genuine version update restores the exact prior launcher, vendor binding, and current pointer"
+
+# Real (non-injected) rotation past the failed attempt, twice more, to push
+# retention past its floor and force a real prune while the launcher keeps
+# working across it.
+publish_integration_release "v0.0.0-integration-3"
+"$HARNESS_BIN_DIR/harness" update --version v0.0.0-integration-3 --json > "$INTEGRATION/update-v3.json"
+publish_integration_release "v0.0.0-integration-4"
+"$HARNESS_BIN_DIR/harness" update --version v0.0.0-integration-4 --json > "$INTEGRATION/update-v4.json"
+
+python3 - "$INTEGRATION/update-v3.json" "$INTEGRATION/update-v4.json" "$RELEASES_ROOT" \
+  "$XDG_DATA_HOME/hearting/current" "$CODEX_WRAPPER" "$CODEX_LAUNCHER_STATE" "$VENDOR_BIN/codex" <<'PY'
+import json, os, sys
+v3 = json.load(open(sys.argv[1]))
+v4 = json.load(open(sys.argv[2]))
+releases_root = os.path.realpath(sys.argv[3])
+current = os.path.realpath(sys.argv[4])
+wrapper = os.path.realpath(sys.argv[5])
+state = os.path.realpath(sys.argv[6])
+vendor_codex = os.path.abspath(sys.argv[7])
+
+assert v3["exit"] == 0 and v3["release"]["version"] == "v0.0.0-integration-3", v3
+assert v4["exit"] == 0 and v4["release"]["version"] == "v0.0.0-integration-4", v4
+assert current == os.path.join(releases_root, "v0.0.0-integration-4")
+
+# Retention keeps only the 2 most recent releases; the original install and
+# the second version are now pruned.
+assert not os.path.isdir(os.path.join(releases_root, "v0.0.0-integration")), (
+    "the original release should have been pruned by now"
+)
+assert not os.path.isdir(os.path.join(releases_root, "v0.0.0-integration-2")), (
+    "the superseded release should have been pruned by now"
+)
+
+# The managed launcher's own ingress and state are never inside the
+# release tree at all (they live under $CODEX_HOME, entirely outside
+# data_root()/releases), so pruning a release structurally cannot ever
+# repoint or remove them -- assert that invariant directly rather than
+# only inferring it from the launcher still working below.
+assert not wrapper.startswith(releases_root + os.sep), wrapper
+assert not state.startswith(releases_root + os.sep), state
+
+state_data = json.load(open(state))
+assert state_data["real_command"] == vendor_codex, state_data
+PY
+"$HARNESS_BIN_DIR/harness" runtime doctor --runtime codex --strict --json > "$INTEGRATION/doctor-v4.json"
+python3 - "$INTEGRATION/doctor-v4.json" "$VENDOR_BIN/codex" <<'PY'
+import json, os, sys
+row = json.load(open(sys.argv[1]))
+vendor_codex = sys.argv[2]
+codex = row if row.get("runtime") == "codex" else next(r for r in row["runtimes"] if r["runtime"] == "codex")
+launcher = codex["managed_launcher"]
+assert launcher["installed"] and launcher["healthy"], launcher
+assert launcher["real_command"] == os.path.abspath(vendor_codex), launcher
+PY
+echo "ok - pruning older managed releases never repoints or removes the protected Codex ingress, which stays vendor-bound"
 
 # I-2 regression (plan-check round-1 frame §6.4 / assignment 검증요구 (a)):
 # _cleanup_releases keeps only the 2 most recent packaged releases and

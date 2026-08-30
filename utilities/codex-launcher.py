@@ -10,6 +10,11 @@ import stat
 import sys
 import tempfile
 
+try:
+    import fcntl
+except ImportError:  # pragma: no cover
+    fcntl = None
+
 
 PASSTHROUGH_COMMANDS = {
     "app",
@@ -68,6 +73,22 @@ class LauncherError(RuntimeError):
     """Installed launcher state is unsafe or incomplete."""
 
 
+def _launcher_lock(home: Path):
+    path = home / ".harness" / "codex-launcher.lock"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    handle = path.open("a+b")
+    os.chmod(path, 0o600)
+    if fcntl is not None:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+    return handle
+
+
+def _unlock(handle) -> None:
+    if fcntl is not None:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    handle.close()
+
+
 def _codex_home() -> Path:
     raw = os.environ.get("CODEX_HOME")
     home = Path(raw).expanduser() if raw else Path.home() / ".codex"
@@ -103,9 +124,9 @@ def _state(home: Path) -> dict:
         value = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         raise LauncherError(f"managed launcher state is invalid: {path}") from exc
-    if not isinstance(value, dict) or value.get("schema") != 1 or value.get("phase") != "installed":
+    if not isinstance(value, dict) or value.get("schema") not in {1, 2} or value.get("phase") != "installed":
         raise LauncherError(f"managed launcher state is incomplete: {path}")
-    real = Path(str(value.get("real_command", "")))
+    real = Path(str(value.get("real_command") or value.get("vendor_binding", {}).get("command_path", "")))
     if not real.is_absolute() or not real.exists() or not os.access(real, os.X_OK):
         raise LauncherError(f"real Codex command is unavailable: {real}")
     if _is_harness_wrapper(real):
@@ -113,6 +134,14 @@ def _state(home: Path) -> dict:
             f"real Codex command resolves to an hearting launcher wrapper: {real}"
         )
     value["real_command"] = str(real)
+    ingress = Path(str(value.get("ingress_path") or value.get("wrapper_path", "")))
+    if not ingress.is_absolute() or ingress.name != "codex":
+        raise LauncherError("managed launcher ingress path is invalid")
+    try:
+        if ingress.resolve(strict=False).parent == home.resolve(strict=False) / ".harness" / "bin":
+            pass
+    except OSError as exc:
+        raise LauncherError("managed launcher ingress path is invalid") from exc
     return value
 
 
@@ -321,7 +350,11 @@ def main() -> int:
             )
         os.environ["AGENT_CODEX_LAUNCHER_GUARD_PID"] = str(os.getpid())
         state_home = launcher_state_home(runtime_home)
-        value = _state(state_home)
+        lock = _launcher_lock(state_home)
+        try:
+            value = _state(state_home)
+        finally:
+            _unlock(lock)
         real = Path(value["real_command"])
         # A global launcher may be used with a one-off CODEX_HOME for tests,
         # repair, or an administrative command. Its global binding remains

@@ -13,6 +13,7 @@ import time
 from typing import Callable, Mapping
 
 from dispatch_contract import (
+    GROUP_REAP_PROOF,
     process_group_observation,
     process_identity_is_live,
     process_start_ticks,
@@ -273,6 +274,43 @@ def _bounded_group_stop(
     except subprocess.TimeoutExpired:
         exit_code = proc.poll()
     return (exit_code if exit_code is not None else -signal.SIGKILL), empty
+
+
+@dataclass(frozen=True)
+class PostExitOutcome:
+    launch_outcome: str
+    group_reap_proof: str = ""
+    group_reap_pgid: str = ""
+
+
+def deterministic_post_exit_outcome(
+    proc: subprocess.Popen,
+    *,
+    fence_released: bool,
+    grace: float = 1.0,
+    poll_interval: float = 0.05,
+) -> PostExitOutcome:
+    """Classify a killed, fenced process's post-exit state deterministically.
+
+    The caller has already terminated and waited on the exact process group
+    (mirroring `_bounded_group_stop`'s own termination) before calling this.
+    Returns the proved foreground receipt when the exact group is proved
+    empty, or `never-launched` when the launch fence was never released so no
+    payload can have executed. Only the case neither of those two can prove
+    (fence released, group emptiness unprovable within the grace window)
+    falls back to an empty outcome so the caller preserves its prior
+    unverified behavior instead of fabricating a claim it cannot prove.
+    """
+
+    if not fence_released:
+        return PostExitOutcome(launch_outcome="never-launched")
+    if _wait_group_empty(proc.pid, time.monotonic() + grace, poll_interval):
+        return PostExitOutcome(
+            launch_outcome="governed-process-reaped",
+            group_reap_proof=GROUP_REAP_PROOF,
+            group_reap_pgid=str(proc.pid),
+        )
+    return PostExitOutcome(launch_outcome="")
 
 
 def wait_foreground(

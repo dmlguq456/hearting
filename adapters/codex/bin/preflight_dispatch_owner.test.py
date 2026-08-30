@@ -25,15 +25,37 @@ class PreflightDispatchOwnerTest(unittest.TestCase):
         self.jobs.touch()
         self.config = self.home / "dispatch-defaults.yaml"
         self.config.write_text(
-            "schema_version: 1\ndepth1_owner: [claude]\nopencode:\n  relief_only: true\ncapabilities:\n",
+            "schema_version: 1\ndepth1_owner: [codex]\nopencode:\n  relief_only: true\ncapabilities:\n",
             encoding="utf-8",
         )
+        self.git_config = self.home / "gitconfig"
+        self.git_config.write_text(
+            "[safe]\n\tdirectory = %s\n" % ROOT,
+            encoding="utf-8",
+        )
+        # Strip every ambient dispatch/runtime identity variable by prefix
+        # rather than an enumerated list: this test process itself may be a
+        # real registered nested worker (AGENT_DISPATCH_CHILD=1, a live
+        # managed gateway socket, real CODEX_THREAD_ID/CLAUDE_CODE_SESSION_ID,
+        # a real parent attempt id, ...), and any one of those leaking into a
+        # subprocess meant to simulate an *unmanaged* interactive parent would
+        # silently borrow this session's real managed/parent identity instead
+        # of exercising the fixture's simulated one.
         self.env = {
-            **os.environ,
+            k: v
+            for k, v in os.environ.items()
+            if not k.startswith(("AGENT_", "CODEX_", "CLAUDE_"))
+            and k not in ("GIT_DIR", "GIT_WORK_TREE")
+        }
+        self.env.update({
             "AGENT_HOME": str(self.home),
             "HOME": str(self.home),
             "DISPATCH_DEFAULTS_CONFIG": str(self.config),
-        }
+            "GIT_CONFIG_GLOBAL": str(self.git_config),
+            # Deterministic capacity so adapter selection never depends on
+            # this process's own real ambient Codex/Claude session history.
+            "HARNESS_CAPACITY_SCORES": "claude:80,codex:80,opencode:80",
+        })
 
     def test_dispatch_owner_arm_delegates_to_selector(self):
         result = subprocess.run(
@@ -56,7 +78,7 @@ class PreflightDispatchOwnerTest(unittest.TestCase):
         ]
         result = subprocess.run(args, text=True, capture_output=True, env=self.env, timeout=20)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn("adapter=claude", result.stdout)
+        self.assertIn("adapter=codex", result.stdout)
         self.assertIn("selection_source=configured-normal", result.stdout)
 
     def test_unmanaged_codex_parent_fails_before_either_owner_registration(self):
@@ -77,6 +99,10 @@ class PreflightDispatchOwnerTest(unittest.TestCase):
                 env = {
                     **self.env,
                     "CODEX_THREAD_ID": "thread-unmanaged-test",
+                    "AGENT_DISPATCH_CALLER_HARNESS": "codex",
+                    "AGENT_DISPATCH_CURRENT_HARNESS": "codex",
+                    "AGENT_DISPATCH_CURRENT_TRANSPORT": "headless",
+                    "AGENT_DISPATCH_CURRENT_SANDBOX": "workspace-write",
                 }
                 result = subprocess.run(
                     args, text=True, capture_output=True, env=env, timeout=20

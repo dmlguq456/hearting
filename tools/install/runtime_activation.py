@@ -2178,7 +2178,26 @@ def status(runtime: str, scope: str = "global") -> dict:
             else "mutable-linked-debug"
         ),
         "next_action": next_action,
+        "executable_ingress": _executable_ingress_report(runtime),
     }
+
+
+def _executable_ingress_report(runtime: str) -> dict:
+    """Report only which surface owns the runtime's executable, never mutate it.
+
+    Claude Code's native updater replaces its own binary in the background, so
+    the deliberate absence of a Hearting `claude` wrapper must be reported as a
+    distinct healthy contract (`hearting_ingress=none`) rather than an omission
+    that looks like a missed integration. Codex's protected launcher status is
+    owned and reported by `codex_launcher.status()`; this merely names that the
+    installer should look there, so this runtime-neutral engine never inspects
+    or writes shell profiles or executable bindings itself.
+    """
+    if runtime == "claude":
+        return {"owner": "vendor", "hearting_ingress": "none"}
+    if runtime == "codex":
+        return {"owner": "hearting", "hearting_ingress": "see-managed-launcher"}
+    return {"owner": "vendor", "hearting_ingress": "none"}
 
 
 def refresh(runtime: str, scope: str = "global") -> dict:

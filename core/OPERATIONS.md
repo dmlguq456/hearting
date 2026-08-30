@@ -425,6 +425,19 @@ decision, never two independently toggled ones.
   receipt cannot become `matched=0` by selecting another state root. The receipt
   remains bounded to 2,048 UTF-8 bytes; the complete typed context has its own
   finite bound.
+- An SD-92 managed-gateway readiness refusal carries exactly one typed
+  `reason_class` from a closed five-member set —
+  `expected-thread-not-witnessed`, `lineage-mismatch`, `tui-disconnected`,
+  `approval-owner-mismatch`, `upstream-client-count-invalid` — chosen by
+  evaluating the conditions in a fixed documented order so exactly one class
+  applies. This is diagnosis only: the portable aggregate outcome token
+  `managed-gateway-not-ready` and the advanced-thread acceptance rule at
+  `core/OPERATIONS.md:383-385` are unchanged, and the existing pre-status
+  typed reasons (`managed-entry-not-enabled`, `managed-parent-runtime-mismatch`,
+  `managed-parent-harness-mismatch`, `managed-parent-thread-mismatch`,
+  `managed-control-missing`, the `managed-control-*`/
+  `managed-state-directory-unsafe` socket reasons, and the `managed-status-*`
+  framing reasons) are disjoint from this set and stay unchanged.
 
 ### §5.11. Commit and Push Policy for `<agent-home>`
 

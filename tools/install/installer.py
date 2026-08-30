@@ -724,112 +724,149 @@ def cmd_uninstall(args):
     checks = []
 
     for rt in runtimes:
-        if rt == "codex":
+        launcher_snapshot = None
+        if rt == "codex" and not args.dry_run:
+            launcher_snapshot = codex_launcher.capture_snapshot()
+        try:
+            if rt == "codex":
+                try:
+                    launcher_result = codex_launcher.uninstall(dry_run=args.dry_run)
+                    lines.append(
+                        "uninstall: codex — managed launcher "
+                        + launcher_result["status"]
+                    )
+                    checks.append(
+                        {
+                            "id": "codex.managed-launcher",
+                            "ok": True,
+                            "detail": launcher_result["status"],
+                        }
+                    )
+                except codex_launcher.CodexLauncherError as exc:
+                    lines.append(f"uninstall: codex — managed launcher blocked: {exc}")
+                    checks.append(
+                        {"id": "codex.managed-launcher", "ok": False, "detail": str(exc)}
+                    )
+                    return {
+                        "runtime": runtimes,
+                        "channel": "dev",
+                        "checks": checks,
+                        "drift": [],
+                        "exit": EXIT_BLOCKED,
+                        "lines": lines,
+                    }
+                if (
+                    not args.dry_run
+                    and os.environ.get("HARNESS_INSTALLER_FAIL_AFTER_UNINSTALL_LAUNCHER") == "1"
+                ):
+                    # Private-fixture fault injection only: proves a failure
+                    # immediately after the managed launcher's uninstall commit
+                    # boundary — before any remaining uninstall step for this
+                    # runtime runs — restores the launcher to its exact
+                    # pre-uninstall bytes/state instead of leaving a partial
+                    # uninstall with the protected ingress already removed.
+                    raise RuntimeError(
+                        "injected failure after uninstall launcher commit boundary"
+                    )
             try:
-                launcher_result = codex_launcher.uninstall(dry_run=args.dry_run)
+                deactivated = runtime_activation.deactivate(
+                    rt, scope=args.scope, dry_run=args.dry_run
+                )
+            except runtime_activation.ActivationError as exc:
+                deactivated = None
+                lines.append(f"uninstall: {rt} — projection deactivation blocked: {exc}")
+                checks.append({"id": f"{rt}.deactivate", "ok": False, "detail": str(exc)})
+            if deactivated is not None and deactivated["status"] != "not-active":
+                verb = "would remove" if args.dry_run else "removed"
                 lines.append(
-                    "uninstall: codex — managed launcher "
-                    + launcher_result["status"]
+                    f"uninstall: {rt} — projection {deactivated['status']}; "
+                    f"{verb} {len(deactivated['removed'])} owned path(s)"
                 )
                 checks.append(
                     {
-                        "id": "codex.managed-launcher",
+                        "id": f"{rt}.deactivate",
                         "ok": True,
-                        "detail": launcher_result["status"],
+                        "detail": f"{deactivated['status']}: {len(deactivated['removed'])} path(s)",
                     }
                 )
-            except codex_launcher.CodexLauncherError as exc:
-                lines.append(f"uninstall: codex — managed launcher blocked: {exc}")
+
+            manifest_path = manifest._manifest_path(rt, args.scope)
+            manifest_data = manifest._load_manifest(manifest_path)
+
+            if manifest_data is None:
+                lines.append(f"uninstall: {rt} — no manifest; nothing to remove")
+                checks.append({"id": f"{rt}.uninstall", "ok": True, "detail": "no manifest, nothing to uninstall"})
+                if launcher_snapshot is not None:
+                    codex_launcher.discard_snapshot(launcher_snapshot)
+                continue
+
+            runtime_home = paths.runtime_home(rt, args.scope)
+
+            copy_once_dests = [runtime_home / relpath for relpath in manifest_data.get("files", {})]
+
+            entries = projector.plan([rt], scope=args.scope)[rt]
+            symlink_dests = [Path(e["dest"]) for e in entries if e["action"] == "symlink"]
+
+            if args.dry_run:
+                for d in copy_once_dests:
+                    lines.append(f"uninstall(dry-run): {rt} — remove copy-once file {d}")
+                for d in symlink_dests:
+                    lines.append(f"uninstall(dry-run): {rt} — remove symlink {d}")
+                lines.append(f"uninstall(dry-run): {rt} — remove manifest {manifest_path}")
                 checks.append(
-                    {"id": "codex.managed-launcher", "ok": False, "detail": str(exc)}
+                    {
+                        "id": f"{rt}.uninstall",
+                        "ok": True,
+                        "detail": f"dry-run: would remove {len(copy_once_dests)} copy-once file(s) and {len(symlink_dests)} symlink(s)",
+                    }
                 )
-                return {
-                    "runtime": runtimes,
-                    "channel": "dev",
-                    "checks": checks,
-                    "drift": [],
-                    "exit": EXIT_BLOCKED,
-                    "lines": lines,
-                }
-        try:
-            deactivated = runtime_activation.deactivate(
-                rt, scope=args.scope, dry_run=args.dry_run
-            )
-        except runtime_activation.ActivationError as exc:
-            deactivated = None
-            lines.append(f"uninstall: {rt} — projection deactivation blocked: {exc}")
-            checks.append({"id": f"{rt}.deactivate", "ok": False, "detail": str(exc)})
-        if deactivated is not None and deactivated["status"] != "not-active":
-            verb = "would remove" if args.dry_run else "removed"
-            lines.append(
-                f"uninstall: {rt} — projection {deactivated['status']}; "
-                f"{verb} {len(deactivated['removed'])} owned path(s)"
-            )
-            checks.append(
-                {
-                    "id": f"{rt}.deactivate",
-                    "ok": True,
-                    "detail": f"{deactivated['status']}: {len(deactivated['removed'])} path(s)",
-                }
-            )
+                continue
 
-        manifest_path = manifest._manifest_path(rt, args.scope)
-        manifest_data = manifest._load_manifest(manifest_path)
-
-        if manifest_data is None:
-            lines.append(f"uninstall: {rt} — no manifest; nothing to remove")
-            checks.append({"id": f"{rt}.uninstall", "ok": True, "detail": "no manifest, nothing to uninstall"})
-            continue
-
-        runtime_home = paths.runtime_home(rt, args.scope)
-
-        copy_once_dests = [runtime_home / relpath for relpath in manifest_data.get("files", {})]
-
-        entries = projector.plan([rt], scope=args.scope)[rt]
-        symlink_dests = [Path(e["dest"]) for e in entries if e["action"] == "symlink"]
-
-        if args.dry_run:
-            for d in copy_once_dests:
-                lines.append(f"uninstall(dry-run): {rt} — remove copy-once file {d}")
+            # 1) Remove symlinks idempotently.
             for d in symlink_dests:
-                lines.append(f"uninstall(dry-run): {rt} — remove symlink {d}")
-            lines.append(f"uninstall(dry-run): {rt} — remove manifest {manifest_path}")
+                if d.is_symlink():
+                    d.unlink()
+                    lines.append(f"uninstall: {rt} — removed symlink {d}")
+
+            # 2) Back up and remove copy-once files.
+            for relpath, d in zip(manifest_data.get("files", {}), copy_once_dests):
+                if d.exists():
+                    backup_path = paths.harness_state_dir(rt, args.scope) / "local-patches" / relpath
+                    backup_path.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copyfile(d, backup_path)
+                    d.unlink()
+                    lines.append(f"uninstall: {rt} — removed copy-once file {d} (backed up to {backup_path})")
+
+            # 3) Remove manifest.json last.
+            if manifest_path.exists():
+                manifest_path.unlink()
+                lines.append(f"uninstall: {rt} — removed manifest {manifest_path}")
+
             checks.append(
                 {
                     "id": f"{rt}.uninstall",
                     "ok": True,
-                    "detail": f"dry-run: would remove {len(copy_once_dests)} copy-once file(s) and {len(symlink_dests)} symlink(s)",
+                    "detail": f"removed {len(copy_once_dests)} copy-once file(s) and {len(symlink_dests)} symlink(s)",
                 }
             )
-            continue
-
-        # 1) Remove symlinks idempotently.
-        for d in symlink_dests:
-            if d.is_symlink():
-                d.unlink()
-                lines.append(f"uninstall: {rt} — removed symlink {d}")
-
-        # 2) Back up and remove copy-once files.
-        for relpath, d in zip(manifest_data.get("files", {}), copy_once_dests):
-            if d.exists():
-                backup_path = paths.harness_state_dir(rt, args.scope) / "local-patches" / relpath
-                backup_path.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copyfile(d, backup_path)
-                d.unlink()
-                lines.append(f"uninstall: {rt} — removed copy-once file {d} (backed up to {backup_path})")
-
-        # 3) Remove manifest.json last.
-        if manifest_path.exists():
-            manifest_path.unlink()
-            lines.append(f"uninstall: {rt} — removed manifest {manifest_path}")
-
-        checks.append(
-            {
-                "id": f"{rt}.uninstall",
-                "ok": True,
-                "detail": f"removed {len(copy_once_dests)} copy-once file(s) and {len(symlink_dests)} symlink(s)",
+        except Exception as exc:
+            if launcher_snapshot is not None:
+                codex_launcher.restore_snapshot(launcher_snapshot)
+            lines.append(
+                f"uninstall: {rt} — blocked after managed-launcher commit; "
+                f"launcher restored to its exact pre-uninstall state: {exc}"
+            )
+            checks.append({"id": f"{rt}.uninstall", "ok": False, "detail": str(exc)})
+            return {
+                "runtime": runtimes,
+                "channel": "dev",
+                "checks": checks,
+                "drift": [],
+                "exit": EXIT_BLOCKED,
+                "lines": lines,
             }
-        )
+        if launcher_snapshot is not None:
+            codex_launcher.discard_snapshot(launcher_snapshot)
 
     full = (
         args.scope == "global"
@@ -887,10 +924,13 @@ def cmd_runtime(args):
     lines = []
     exit_code = EXIT_OK
     snapshots = []
+    launcher_snapshot = None
 
     try:
         if args.runtime_command in {"activate", "refresh"}:
             source = args.source if args.runtime_command == "activate" else None
+            if "codex" in targets:
+                launcher_snapshot = codex_launcher.capture_snapshot()
             for runtime in targets:
                 snapshots.append(
                     runtime_activation.capture_runtime_state(runtime, source, args.scope)
@@ -919,6 +959,14 @@ def cmd_runtime(args):
                 raise runtime_activation.ActivationError(
                     f"unknown runtime command: {args.runtime_command}"
                 )
+            if runtime == "codex" and args.runtime_command in {"status", "doctor"}:
+                launcher_report = codex_launcher.status()
+                report["managed_launcher"] = launcher_report
+                if args.runtime_command == "doctor" and args.strict and launcher_report.get("installed"):
+                    if launcher_report.get("protected") and launcher_report.get("path_precedence") != "first":
+                        report["ok"] = False
+                        exit_code = EXIT_VERIFY_FAIL
+                        report["next_action"] = "put the protected Codex ingress first on PATH"
             reports.append(report)
             freshness = report.get("freshness")
             if freshness is None and isinstance(report.get("status"), dict):
@@ -984,6 +1032,14 @@ def cmd_runtime(args):
                 raise runtime_activation.ActivationError(
                     f"Codex managed launcher installation failed: {exc}"
                 ) from exc
+            if os.environ.get("HARNESS_INSTALLER_FAIL_AFTER_LAUNCHER") == "1":
+                # Private-fixture fault injection only: proves rollback restores
+                # both the just-committed launcher transaction and every runtime
+                # snapshot when a failure lands immediately after the launcher
+                # commit boundary, the narrowest possible post-commit window.
+                raise runtime_activation.ActivationError(
+                    "injected failure after launcher commit boundary"
+                )
             lines.append(
                 "codex: managed-launcher "
                 f"status={launcher_result['status']} target={launcher_result['target']}"
@@ -1016,6 +1072,11 @@ def cmd_runtime(args):
                 runtime_activation.restore_runtime_state(snapshot)
             except Exception as rollback_exc:
                 rollback_errors.append(str(rollback_exc))
+        if launcher_snapshot is not None:
+            try:
+                codex_launcher.restore_snapshot(launcher_snapshot)
+            except Exception as rollback_exc:
+                rollback_errors.append(f"launcher: {rollback_exc}")
         for report in reports:
             report["rolled_back"] = True
         if snapshots:
@@ -1034,12 +1095,16 @@ def cmd_runtime(args):
     except Exception:
         for snapshot in reversed(snapshots):
             runtime_activation.restore_runtime_state(snapshot)
+        if launcher_snapshot is not None:
+            codex_launcher.restore_snapshot(launcher_snapshot)
         for snapshot in snapshots:
             runtime_activation.discard_runtime_state(snapshot)
         raise
 
     for snapshot in snapshots:
         runtime_activation.discard_runtime_state(snapshot)
+    if launcher_snapshot is not None:
+        codex_launcher.discard_snapshot(launcher_snapshot)
 
     return _runtime_emit_shape(args.runtime_command, reports, exit_code, lines)
 

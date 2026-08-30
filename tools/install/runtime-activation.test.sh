@@ -130,6 +130,7 @@ done
 PATH="$BIN:$PATH"
 AGENT_HOME="$SRC"
 export PATH AGENT_HOME
+ORIGINAL_PATH="$PATH"
 
 harness() {
   sh "$ROOT/tools/install/harness.sh" "$@"
@@ -177,6 +178,8 @@ if ! harness runtime activate --runtime all --mode linked --source "$SRC" --json
   cat "$TMP/linked-activate.json" >&2
   fail "initial linked activation failed"
 fi
+PATH="$HOME/.codex/.harness/bin:$PATH"
+export PATH
 harness runtime status --runtime all --json > "$TMP/linked-status.json"
 harness runtime doctor --runtime all --strict --json > "$TMP/linked-doctor.json"
 
@@ -198,14 +201,44 @@ for row in data["runtimes"]:
     assert row["duplicate_sources"] == [] and row["external_dependencies"] == []
     assert row["session_action"] == expected[row["runtime"]]
 PY
-test -x "$HOME/.local/bin/codex" || fail "Codex managed launcher was not installed"
-test ! -L "$HOME/.local/bin/codex" || fail "Codex managed launcher remained a passthrough symlink"
+test -x "$HOME/.codex/.harness/bin/codex" || fail "Codex protected launcher was not installed"
+test -x "$BIN/codex" || fail "vendor Codex command was lost"
+test ! -L "$HOME/.codex/.harness/bin/codex" || fail "Codex protected launcher is a symlink"
+# Model the current shell having sourced the authorized profile block.  The
+# installer remains non-interactive and does not mutate the profile; this
+# process-local PATH change is the healthy precedence state for strict doctor.
+if ! harness runtime doctor --runtime codex --strict --json > "$TMP/codex-doctor-sourced.json"; then
+  fail "strict Codex doctor rejected a shell with sourced protected PATH"
+fi
+python3 - "$TMP/codex-doctor-sourced.json" <<'PY'
+import json, sys
+row = json.load(open(sys.argv[1]))
+assert row["exit"] == 0, row
+codex = row if row.get("runtime") == "codex" else next(item for item in row["runtimes"] if item["runtime"] == "codex")
+assert codex["managed_launcher"]["path_precedence"] == "first", codex
+PY
+PATH="$BIN:$ORIGINAL_PATH"
+export PATH
+if harness runtime doctor --runtime codex --strict --json > "$TMP/codex-doctor-missing-precedence.json"; then
+  fail "strict Codex doctor accepted missing protected PATH precedence"
+fi
+python3 - "$TMP/codex-doctor-missing-precedence.json" <<'PY'
+import json, sys
+row = json.load(open(sys.argv[1]))
+assert row["exit"] == 2, row
+codex = row if row.get("runtime") == "codex" else next(item for item in row["runtimes"] if item["runtime"] == "codex")
+assert codex["ok"] is False, codex
+assert codex["managed_launcher"]["path_precedence"] == "missing", codex
+PY
+PATH="$HOME/.codex/.harness/bin:$ORIGINAL_PATH"
+export PATH
 python3 - "$HOME/.codex/.harness/codex-launcher.json" "$BIN/codex" <<'PY'
 import json, os, stat, sys
 state=json.load(open(sys.argv[1]))
 assert state["phase"] == "installed", state
 assert state["real_command"] == os.path.abspath(sys.argv[2]), state
 assert state["previous_wrapper"] == {"kind": "missing"}, state
+assert os.path.realpath(state["ingress_path"]) == os.path.abspath(os.path.join(os.path.dirname(sys.argv[1]), "bin", "codex")), state
 assert stat.S_IMODE(os.stat(os.path.dirname(os.path.dirname(sys.argv[1]))).st_mode) == 0o700
 PY
 test -L "$HOME/.config/opencode/skills/demo" || fail "OpenCode plural skills projection missing"
@@ -742,6 +775,183 @@ chmod +x "$SRC/adapters/claude/statusline.sh"
 harness runtime doctor --runtime claude --strict --json >/dev/null
 ok "claude doctor rejects a broken managed statusline command"
 
+# --- Phase 5: Claude parity — vendor-owned executable channels ---
+# Claude's own updater replaces its executable outside any Hearting-owned
+# path. Model the documented native layout, advance it the way the vendor
+# updater does, and prove Hearting's projection/settings behavior never
+# reacts to it and never claims ownership of it.
+CLAUDE_NATIVE_VERSIONS="$HOME/.local/share/claude/versions"
+CLAUDE_NATIVE_BIN="$HOME/.local/bin/claude"
+mkdir -p "$CLAUDE_NATIVE_VERSIONS/1.0.0" "$(dirname "$CLAUDE_NATIVE_BIN")"
+printf '%s\n' '#!/bin/sh' 'echo native-claude-1.0.0' > "$CLAUDE_NATIVE_VERSIONS/1.0.0/claude"
+chmod +x "$CLAUDE_NATIVE_VERSIONS/1.0.0/claude"
+ln -s "$CLAUDE_NATIVE_VERSIONS/1.0.0/claude" "$CLAUDE_NATIVE_BIN"
+
+harness runtime status --runtime claude --json > "$TMP/claude-native-before.json"
+harness runtime doctor --runtime claude --strict --json > "$TMP/claude-native-doctor-before.json"
+
+# Simulate the vendor background updater: build the new version tree, then
+# repoint the link, exactly as `~/.local/bin/claude -> versions/<version>`
+# advances on next start. No Hearting path is touched by this step.
+mkdir -p "$CLAUDE_NATIVE_VERSIONS/1.0.1"
+printf '%s\n' '#!/bin/sh' 'echo native-claude-1.0.1' > "$CLAUDE_NATIVE_VERSIONS/1.0.1/claude"
+chmod +x "$CLAUDE_NATIVE_VERSIONS/1.0.1/claude"
+rm -f "$CLAUDE_NATIVE_BIN"
+ln -s "$CLAUDE_NATIVE_VERSIONS/1.0.1/claude" "$CLAUDE_NATIVE_BIN"
+test "$(readlink "$CLAUDE_NATIVE_BIN")" = "$CLAUDE_NATIVE_VERSIONS/1.0.1/claude" \
+  || fail "simulated native Claude updater did not advance the version link"
+
+harness runtime status --runtime claude --json > "$TMP/claude-native-after.json"
+harness runtime doctor --runtime claude --strict --json > "$TMP/claude-native-doctor-after.json"
+python3 - "$TMP/claude-native-before.json" "$TMP/claude-native-after.json" \
+  "$TMP/claude-native-doctor-before.json" "$TMP/claude-native-doctor-after.json" <<'PY'
+import json, sys
+before, after, doctor_before, doctor_after = (json.load(open(p)) for p in sys.argv[1:5])
+for row in (before, after):
+    assert row["exit"] == 0, row
+    assert row["freshness"] == "fresh", row
+    assert row["executable_ingress"] == {"owner": "vendor", "hearting_ingress": "none"}, row
+for row in (doctor_before, doctor_after):
+    assert row["exit"] == 0 and row["ok"] is True, row
+    assert row["status"]["executable_ingress"] == {"owner": "vendor", "hearting_ingress": "none"}, row
+    assert "managed_launcher" not in row, row
+assert before["projection_digest"] == after["projection_digest"], (before, after)
+PY
+ok "simulated native Claude version-link advance preserves Hearting projection/doctor"
+
+# Model a Homebrew/package-manager-owned replacement: a plain regular
+# executable outside any Hearting-owned path, never a link Hearting adopts.
+CLAUDE_BREW_BIN="$TMP/homebrew/bin/claude"
+mkdir -p "$(dirname "$CLAUDE_BREW_BIN")"
+printf '%s\n' '#!/bin/sh' 'echo homebrew-claude' > "$CLAUDE_BREW_BIN"
+chmod +x "$CLAUDE_BREW_BIN"
+brew_digest_before=$(cksum "$CLAUDE_BREW_BIN")
+harness runtime status --runtime claude --json > "$TMP/claude-brew.json"
+python3 - "$TMP/claude-brew.json" <<'PY'
+import json, sys
+row = json.load(open(sys.argv[1]))
+assert row["exit"] == 0 and row["freshness"] == "fresh", row
+assert row["executable_ingress"] == {"owner": "vendor", "hearting_ingress": "none"}, row
+PY
+ok "simulated Homebrew Claude replacement remains vendor-owned"
+
+# --- Claude channel matrix: native/Homebrew/WinGet/apt/dnf/apk ---
+# A channel that cannot be faithfully represented on this host (WinGet's
+# Windows-only app-execution-alias mechanism, on a non-Windows host) must
+# report typed unsupported-channel evidence rather than borrowing another
+# channel's modeled result.
+CHANNEL_ROOT="$TMP/claude-channels"
+mkdir -p "$CHANNEL_ROOT/native/versions/2.0.0" "$CHANNEL_ROOT/native/bin" \
+  "$CHANNEL_ROOT/homebrew/bin" "$CHANNEL_ROOT/apt/bin" \
+  "$CHANNEL_ROOT/dnf/bin" "$CHANNEL_ROOT/apk/bin"
+printf '%s\n' '#!/bin/sh' 'echo native' > "$CHANNEL_ROOT/native/versions/2.0.0/claude"
+chmod +x "$CHANNEL_ROOT/native/versions/2.0.0/claude"
+ln -s "$CHANNEL_ROOT/native/versions/2.0.0/claude" "$CHANNEL_ROOT/native/bin/claude"
+for pm in homebrew apt dnf apk; do
+  printf '%s\n' '#!/bin/sh' "echo $pm" > "$CHANNEL_ROOT/$pm/bin/claude"
+  chmod +x "$CHANNEL_ROOT/$pm/bin/claude"
+done
+
+python3 - "$CHANNEL_ROOT" > "$TMP/claude-channel-matrix.json" <<'PY'
+import json, os, platform, sys
+
+root = sys.argv[1]
+host_platform = "windows" if platform.system() == "Windows" else "posix"
+
+
+def modeled_channel(name, path, layout):
+    return {
+        "channel": name,
+        "modeled": True,
+        "layout": layout,
+        "path": os.path.realpath(path) if os.path.islink(path) else os.path.abspath(path),
+        "owner": "vendor",
+        "hearting_ingress": "none",
+    }
+
+
+def unsupported_channel(name, reason):
+    return {
+        "channel": name,
+        "modeled": False,
+        "reason": "unsupported-channel",
+        "detail": reason,
+    }
+
+
+matrix = [
+    modeled_channel("native", os.path.join(root, "native", "bin", "claude"), "version-link"),
+    modeled_channel("homebrew", os.path.join(root, "homebrew", "bin", "claude"), "package-manager-regular-file"),
+    modeled_channel("apt", os.path.join(root, "apt", "bin", "claude"), "package-manager-regular-file"),
+    modeled_channel("dnf", os.path.join(root, "dnf", "bin", "claude"), "package-manager-regular-file"),
+    modeled_channel("apk", os.path.join(root, "apk", "bin", "claude"), "package-manager-regular-file"),
+    (
+        modeled_channel("winget", os.path.join(root, "winget", "bin", "claude"), "app-execution-alias")
+        if host_platform == "windows"
+        else unsupported_channel(
+            "winget", f"host_platform={host_platform} requires windows app-execution-alias mechanism"
+        )
+    ),
+]
+print(json.dumps(matrix))
+PY
+
+python3 - "$TMP/claude-channel-matrix.json" <<'PY'
+import json, sys
+matrix = json.load(open(sys.argv[1]))
+by_channel = {row["channel"]: row for row in matrix}
+assert set(by_channel) == {"native", "homebrew", "winget", "apt", "dnf", "apk"}, by_channel
+paths = set()
+for name in ("native", "homebrew", "apt", "dnf", "apk"):
+    row = by_channel[name]
+    assert row["modeled"] is True, row
+    assert row["owner"] == "vendor" and row["hearting_ingress"] == "none", row
+    assert row["path"] not in paths, (name, "channel result was inherited from another channel")
+    paths.add(row["path"])
+winget = by_channel["winget"]
+assert winget["modeled"] is False, winget
+assert winget["reason"] == "unsupported-channel", winget
+assert "windows" in winget["detail"], winget
+PY
+ok "Claude channel matrix names native/Homebrew/WinGet/apt/dnf/apk and marks unsupported channels typed"
+
+# --- Cross-runtime doctor distinguishes Codex protected ingress from Claude vendor ownership ---
+harness runtime doctor --runtime all --strict --json > "$TMP/cross-runtime-doctor.json"
+python3 - "$TMP/cross-runtime-doctor.json" <<'PY'
+import json, sys
+data = json.load(open(sys.argv[1]))
+assert data["exit"] == 0, data
+rows = {row["runtime"]: row for row in data["runtimes"]}
+codex, claude = rows["codex"], rows["claude"]
+assert codex["ok"] is True and claude["ok"] is True, (codex, claude)
+launcher = codex["managed_launcher"]
+assert launcher["installed"] is True and launcher["protected"] is True, launcher
+assert launcher["path_precedence"] == "first", launcher
+assert launcher["binding_state"], launcher
+assert codex["status"]["executable_ingress"] == {"owner": "hearting", "hearting_ingress": "see-managed-launcher"}, codex
+assert "managed_launcher" not in claude, claude
+assert claude["status"]["executable_ingress"] == {"owner": "vendor", "hearting_ingress": "none"}, claude
+PY
+ok "cross-runtime doctor distinguishes Codex protected ingress from Claude vendor ownership"
+
+# --- No Claude launcher/PATH block/binding state/updater-disable setting was added ---
+test ! -e "$ROOT/tools/install/drivers/claude_launcher.py" \
+  || fail "a Claude launcher driver was added without falsifying evidence"
+test ! -e "$HOME/.claude/.harness/bin/claude" \
+  || fail "a Hearting-owned Claude executable ingress was created"
+test ! -e "$HOME/.claude/.harness/claude-launcher.json" \
+  || fail "Claude binding state was created"
+! grep -rq "hearting-claude protected ingress" "$HOME" 2>/dev/null \
+  || fail "a Claude PATH profile block was written"
+python3 - "$HOME/.claude/settings.json" <<'PY'
+import json, sys
+settings = json.load(open(sys.argv[1]))
+disallowed = {"autoUpdaterDisabled", "disableAutoupdate", "updaterDisabled", "DISABLE_AUTOUPDATER"}
+assert disallowed.isdisjoint(settings.keys()), settings
+assert disallowed.isdisjoint(settings.get("env", {}).keys()), settings
+PY
+ok "no Claude launcher, PATH block, binding state, or updater-disable setting was added"
+
 harness uninstall codex > "$TMP/uninstall-codex.log" 2>&1 \
   || { cat "$TMP/uninstall-codex.log" >&2; fail "codex uninstall failed"; }
 test ! -e "$HOME/.codex/hearting" && test ! -L "$HOME/.codex/hearting" \
@@ -778,6 +988,21 @@ assert settings["env"] == {"USER_FLAG": "keep"}, settings
 assert settings["enabledPlugins"]["foreign@fixture"] is True
 PY
 ok "claude uninstall unmerges managed hooks, statusline, and env while keeping user settings"
+
+# Uninstall must never mutate vendor executable/version bytes on any modeled
+# Claude channel; Hearting never had ingress into any of these paths.
+brew_digest_after=$(cksum "$CLAUDE_BREW_BIN")
+test "$brew_digest_before" = "$brew_digest_after" \
+  || fail "claude uninstall mutated the simulated Homebrew-owned executable"
+test "$(readlink "$CLAUDE_NATIVE_BIN")" = "$CLAUDE_NATIVE_VERSIONS/1.0.1/claude" \
+  || fail "claude uninstall mutated the simulated native version-link target"
+test -x "$CLAUDE_NATIVE_VERSIONS/1.0.0/claude" && test -x "$CLAUDE_NATIVE_VERSIONS/1.0.1/claude" \
+  || fail "claude uninstall removed a simulated native version tree"
+for pm in native homebrew apt dnf apk; do
+  test -x "$CHANNEL_ROOT/$pm/bin/claude" \
+    || fail "claude uninstall touched the simulated $pm channel executable"
+done
+ok "claude uninstall never mutates vendor executable/version bytes on any modeled channel"
 
 test ! -s "$SENTINEL_LOG" || fail "external command invoked: $(tr '\n' ' ' < "$SENTINEL_LOG")"
 ok "activation path used no runtime, marketplace, network, npm, or bun command"

@@ -32,9 +32,18 @@ $HOME/.claude/              # Claude Code runtime home
 $HOME/.codex/               # Codex runtime home
 $HOME/.config/opencode/     # OpenCode global config home
 $HOME/.local/share/opencode/  # OpenCode data home (DB, logs, snapshots)
+$CODEX_HOME/.harness/bin/codex # Hearting-owned protected Codex ingress
+$HOME/.local/bin/codex         # vendor-owned Codex command binding
 ```
 
 Do not make `$HOME/.claude`, `$HOME/.codex`, or `$HOME/.config/opencode` the canonical repo. Those directories contain runtime-owned state such as credentials, sessions, logs, SQLite databases, caches, and shell snapshots.
+
+Codex ingress is kept under `$CODEX_HOME/.harness/bin` so a vendor updater may
+replace `$HOME/.local/bin/codex` without overwriting Hearting code. Shell profile
+management is opt-in and byte-preserving; `manual`/`deny` leave the profile
+untouched and report the exact PATH source needed for the current terminal.
+`legacy-inplace-v1` is a separately authorized degraded mode. Claude remains
+vendor-owned and has no Hearting executable ingress.
 
 ## Report Bundle Store
 

@@ -83,6 +83,12 @@ if [ ! -d "$AGENT_HOME/codex_setting" ]; then
   exit 69
 fi
 
+# Resolve the vendor executable before projection links or the protected
+# ingress can affect PATH lookup.  The launcher still validates this path and
+# rejects another Hearting wrapper, but discovery here keeps the installer from
+# accidentally binding to its own newly projected command.
+vendor_codex_command=$(command -v codex 2>/dev/null || true)
+
 mkdir -p "$CODEX_HOME"
 
 # link <target> <linkpath>: refresh a harness-owned symlink. Refuses to clobber a
@@ -203,9 +209,9 @@ if [ -z "${HARNESS_BIN_DIR:-}" ] && [ "$(real "$CODEX_HOME")" != "$(real "$defau
   # A temporary/private CODEX_HOME must not silently replace the user's global
   # CLI ingress. Operators can opt in with an explicit HARNESS_BIN_DIR.
   printf 'managed_launcher=skipped reason=non-default-codex-home-without-harness-bin-dir\n'
-elif command -v codex >/dev/null 2>&1; then
+elif [ -n "$vendor_codex_command" ]; then
   launcher_result=$(python3 "$AGENT_HOME/tools/install/codex_launcher.py" install \
-    --codex-home "$CODEX_HOME" --json) || {
+    --codex-home "$CODEX_HOME" --real-command "$vendor_codex_command" --json) || {
       printf '%s\n' "$launcher_result" >&2
       echo "install-runtime-projection: managed Codex launcher installation failed" >&2
       exit 3

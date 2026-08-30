@@ -4,8 +4,10 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
 from pathlib import Path
+import subprocess
 import tempfile
 import unittest
 from unittest import mock
@@ -19,6 +21,80 @@ SPEC.loader.exec_module(launcher)
 
 
 class CodexLauncherRuntimeTest(unittest.TestCase):
+    def _state_fixture(self, root: Path, real: Path) -> Path:
+        home = root / ".codex"
+        harness = home / ".harness"
+        harness.mkdir(parents=True)
+        home.chmod(0o700)
+        ingress = harness / "bin" / "codex"
+        ingress.parent.mkdir()
+        ingress.write_bytes(b"#!/bin/sh\n# protected ingress\n")
+        ingress.chmod(0o755)
+        (harness / "codex-launcher.json").write_text(json.dumps({
+            "schema": 2, "phase": "installed", "real_command": str(real),
+            "ingress_path": str(ingress), "wrapper_path": str(ingress),
+        }), encoding="utf-8")
+        (harness / "codex-launcher.json").chmod(0o600)
+        return home
+
+    def test_all_passthrough_commands_preserve_argv_after_vendor_replacement(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            real = root / "vendor" / "codex"
+            real.parent.mkdir()
+            real.write_text("#!/bin/sh\n", encoding="utf-8")
+            home = self._state_fixture(root, real)
+            replacement = root / "vendor" / "codex-v2"
+            replacement.write_text("#!/bin/sh\n", encoding="utf-8")
+            replacement.chmod(0o755)
+            real.unlink()
+            real.symlink_to(replacement)
+            forms = [[name, "--fixture", "value"] for name in sorted(launcher.PASSTHROUGH_COMMANDS)]
+            forms += [["login", "--device-auth"], ["logout"], ["update"], ["doctor"],
+                      ["--help"], ["--version"], ["--remote", "unix:///private.sock"],
+                      ["-h"], ["-V"]]
+            for args in forms:
+                with self.subTest(args=args), mock.patch.dict(
+                    os.environ, {"CODEX_HOME": str(home), "HOME": str(root)}, clear=False
+                ), mock.patch.object(launcher.os, "execv") as execv:
+                    launcher.sys.argv = ["codex-launcher.py", *args]
+                    self.assertIsNone(launcher.main())
+                    execv.assert_called_once_with(str(real), [str(real), *args])
+                    execv.reset_mock()
+            self.assertFalse((home / ".harness" / "managed-sessions").exists())
+
+    def test_interactive_forms_keep_pinned_environment_after_vendor_replacement(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            home = self._state_fixture(root, root / "vendor" / "codex")
+            real = root / "vendor" / "codex"
+            real.parent.mkdir(exist_ok=True)
+            real.write_text("#!/bin/sh\n", encoding="utf-8")
+            real.chmod(0o755)
+            active = root / "bundle"
+            (active / "core").mkdir(parents=True)
+            (active / "core" / "CORE.md").write_text("core\n", encoding="utf-8")
+            (active / "utilities").mkdir()
+            (active / "utilities" / "codex-managed-entry.py").write_text("# entry\n", encoding="utf-8")
+            (home / "hearting").symlink_to(active, target_is_directory=True)
+            (home / ".harness" / "activation.json").write_text(json.dumps({
+                "schema": 2, "runtime": "codex", "mode": "linked",
+                "active_root": str(active), "active_revision": "rev-test",
+            }), encoding="utf-8")
+            (home / ".harness" / "activation.json").chmod(0o600)
+            (home / "auth.json").write_text("{}\n", encoding="utf-8")
+            (home / "auth.json").chmod(0o600)
+            for args in ([], ["resume", "--last"], ["fork"]):
+                with self.subTest(args=args), mock.patch.dict(
+                    os.environ, {"CODEX_HOME": str(home), "HOME": str(root)}, clear=False
+                ), mock.patch.object(launcher.os, "execv") as execv:
+                    launcher.sys.argv = ["codex-launcher.py", *args]
+                    launcher.main()
+                    command = execv.call_args.args[1]
+                    self.assertEqual(command[command.index("--codex") + 1], str(real))
+                    self.assertEqual(os.environ["AGENT_HOME"], str(active))
+                    self.assertEqual(os.environ["AGENT_RUNTIME_IDENTITY"], "linked:rev-test:-")
+                    execv.reset_mock()
     def test_only_interactive_surfaces_are_managed(self) -> None:
         managed = (
             [],

@@ -72,11 +72,13 @@ user-level 일일 update 확인도 등록합니다. Runtime credential, session,
 database는 건드리지 않습니다.
 
 Codex가 설치되어 있으면 같은 transaction이 복구 가능한
-`~/.local/bin/codex` launcher도 설치합니다. 평범하게 `codex`, `codex resume`,
+`$CODEX_HOME/.harness/bin/codex` 보호 ingress도 설치합니다. 평범하게 `codex`, `codex resume`,
 `codex fork`를 실행하면 자동으로 harness-managed App Server로 들어가고,
 `codex exec`, plugin 관리, login 등 비대화형 명령은 기록해 둔 실제 CLI로
 그대로 전달됩니다. Update는 launcher를 복구하며 `hearting uninstall codex`는
-설치 전 command binding을 정확히 복원합니다. Codex가 아직 없으면 이 단계만
+설치 전 command binding을 정확히 복원합니다. 프로필 PATH 변경은 명시적인
+`--profile-policy manage` 권한이 필요하며 현재 터미널은 바꾸지 않습니다.
+`legacy-inplace-v1`은 명시적인 제한 모드에서만 가능합니다. Codex가 아직 없으면 이 단계만
 skip으로 보고하고 나중에 runtime refresh로 적용할 수 있습니다.
 
 `~/.local/bin`을 `PATH`에 넣은 뒤에는 다음처럼 관리합니다.

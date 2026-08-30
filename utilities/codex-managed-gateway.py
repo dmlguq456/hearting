@@ -571,6 +571,12 @@ class ManagedGateway:
         self._upstream: WebSocket | None = None
         self._epoch = 0
         self._current_thread_id = ""
+        # Parent ingress binding: the identity dispatch readiness and
+        # completion delivery compare against. Distinct from
+        # _current_thread_id (last-witnessed thread, kept for bookkeeping).
+        self._binding_thread_id = ""
+        self._binding_source = ""
+        self._sibling_thread_ids: list[str] = []
         self._thread_predecessors: dict[str, str] = {}
         self._threads: dict[str, ThreadState] = {}
         self._tui_requests: dict[tuple[str, Any], tuple[str, dict[str, Any]]] = {}
@@ -653,6 +659,9 @@ class ManagedGateway:
                 self._tui = tui
                 self._upstream = upstream
                 self._current_thread_id = ""
+                self._binding_thread_id = ""
+                self._binding_source = ""
+                self._sibling_thread_ids.clear()
                 self._thread_predecessors.clear()
                 self._threads.clear()
                 self._tui_requests.clear()
@@ -729,6 +738,9 @@ class ManagedGateway:
                 self._appserver_requests.clear()
                 self._threads.clear()
                 self._current_thread_id = ""
+                self._binding_thread_id = ""
+                self._binding_source = ""
+                self._sibling_thread_ids.clear()
                 self._thread_predecessors.clear()
                 current_tui = self._tui
                 current_upstream = self._upstream
@@ -790,7 +802,9 @@ class ManagedGateway:
                 request_id, -32602, "turn/start identity invalid"
             )
             return
-        self._current_thread_id = thread_id
+        # An unwitnessed manual turn/start request is not gateway-witnessed
+        # lineage evidence: it must not establish, advance, or move the
+        # parent ingress binding. Per-thread bookkeeping is unaffected.
         state = self._threads.setdefault(thread_id, ThreadState())
         if state.active_turn_id and state.steer_ready:
             self._send_manual_steer_locked(request_id, params, state)
@@ -909,9 +923,10 @@ class ManagedGateway:
                 # App Server notifications cover every thread sharing the
                 # upstream connection, including native subagents.  They are
                 # useful per-thread state, but are not ingress-lineage proof.
-                # Only a witnessed thread start/resume/fork response may move
-                # an established parent binding; the first notification stays
-                # a bootstrap fallback for older servers.
+                # Only a witnessed thread start/resume/fork response may
+                # establish or move the parent binding (see
+                # _track_tui_response_locked); an unwitnessed notification
+                # must never do so, even when no binding exists yet.
                 if not self._current_thread_id:
                     self._current_thread_id = thread_id
                 self.trace(
@@ -1026,16 +1041,42 @@ class ManagedGateway:
                 or str(params.get("threadId", ""))
             )
             if thread_id:
+                self._current_thread_id = thread_id
+                self._threads.setdefault(thread_id, ThreadState())
                 predecessor = params.get("threadId")
-                if (
+                is_witnessed_fork_of_binding = (
                     method == "thread/fork"
                     and isinstance(predecessor, str)
                     and ID_PATTERN.fullmatch(predecessor)
                     and predecessor != thread_id
-                ):
+                    and predecessor == self._binding_thread_id
+                )
+                if not self._binding_thread_id:
+                    # Establish: first witnessed thread identity this epoch.
+                    self._binding_thread_id = thread_id
+                    self._binding_source = "initial"
+                    if is_witnessed_fork_of_binding:
+                        self._thread_predecessors[thread_id] = predecessor
+                elif is_witnessed_fork_of_binding:
+                    # Advance by fork: witnessed fork of the current binding.
                     self._thread_predecessors[thread_id] = predecessor
-                self._current_thread_id = thread_id
-                self._threads.setdefault(thread_id, ThreadState())
+                    self._binding_thread_id = thread_id
+                    self._binding_source = "fork"
+                elif (
+                    method == "thread/resume"
+                    and thread_id == self._binding_thread_id
+                ):
+                    # Advance by resume: exact same-thread resume.
+                    self._binding_source = "resume"
+                elif thread_id == self._binding_thread_id:
+                    pass
+                else:
+                    # Reject: unrelated thread/start, a fork of a non-binding
+                    # thread, or a resume of a different id. The binding stays
+                    # unchanged; the witnessed thread is recorded as a sibling.
+                    if thread_id not in self._sibling_thread_ids:
+                        self._sibling_thread_ids.append(thread_id)
+                        del self._sibling_thread_ids[:-MAX_THREAD_LINEAGE]
         if method != "turn/start":
             return
         thread_id = str(params.get("threadId", ""))
@@ -1267,10 +1308,10 @@ class ManagedGateway:
 
     def status(self) -> dict[str, Any]:
         with self._lock:
-            state = self._threads.get(self._current_thread_id)
+            state = self._threads.get(self._binding_thread_id)
             ancestors: list[str] = []
-            observed = {self._current_thread_id}
-            current = self._current_thread_id
+            observed = {self._binding_thread_id}
+            current = self._binding_thread_id
             while len(ancestors) < MAX_THREAD_LINEAGE:
                 predecessor = self._thread_predecessors.get(current, "")
                 if not predecessor or predecessor in observed:
@@ -1285,11 +1326,15 @@ class ManagedGateway:
                     else "disconnected"
                 ),
                 "epoch": self._epoch,
-                "thread_id": self._current_thread_id,
+                "thread_id": self._binding_thread_id,
                 "thread_ancestors": ancestors,
                 "active_turn_id": state.active_turn_id if state else "",
                 "approval_owner": "tui",
                 "upstream_clients": 1 if self._upstream else 0,
+                "witnessed_thread_id": self._current_thread_id,
+                "sibling_thread_ids": list(self._sibling_thread_ids),
+                "binding_source": self._binding_source,
+                "tui_connected": bool(self._tui),
             }
 
     @staticmethod
@@ -1304,7 +1349,7 @@ class ManagedGateway:
         thread_id = request.get("thread_id")
         if thread_id in {None, ""}:
             with self._lock:
-                thread_id = self._current_thread_id
+                thread_id = self._binding_thread_id
         thread_id = self._validate_identifier(
             thread_id, "thread-id-invalid"
         )
@@ -1592,7 +1637,7 @@ class ManagedGateway:
                         "delivery_id": delivery_id,
                         "reason": "tui-not-connected",
                     }
-                if self._current_thread_id != thread_id:
+                if self._binding_thread_id != thread_id:
                     return {
                         "schema_version": 1,
                         "status": "rejected",

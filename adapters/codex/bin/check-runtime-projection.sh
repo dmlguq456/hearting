@@ -354,18 +354,25 @@ except (IndexError, json.JSONDecodeError):
 print("installed=" + ("1" if value.get("installed") else "0"))
 print("healthy=" + ("1" if value.get("healthy") else "0"))
 print("detail=" + str(value.get("detail", "unknown")))
+print("protected=" + ("1" if value.get("protected") else "0"))
+print("precedence=" + str(value.get("path_precedence", "unknown")))
+print("profile=" + str(value.get("profile", {}).get("health", "unknown")))
 PY
 )
 launcher_installed=$(printf '%s\n' "$launcher_fields" | sed -n 's/^installed=//p')
 launcher_healthy=$(printf '%s\n' "$launcher_fields" | sed -n 's/^healthy=//p')
 launcher_detail=$(printf '%s\n' "$launcher_fields" | sed -n 's/^detail=//p')
+launcher_protected=$(printf '%s\n' "$launcher_fields" | sed -n 's/^protected=//p')
+launcher_precedence=$(printf '%s\n' "$launcher_fields" | sed -n 's/^precedence=//p')
+launcher_profile=$(printf '%s\n' "$launcher_fields" | sed -n 's/^profile=//p')
 default_codex_home=$HOME/.codex
 if [ "${CODEX_RUNTIME_PROJECTION_SKIP_CLI_DISCOVERY:-0}" = "1" ]; then
   printf 'check=managed-launcher:skipped reason=codex-cli-discovery-skipped\n'
 elif [ -z "${HARNESS_BIN_DIR:-}" ] && [ "$(real "$CODEX_HOME")" != "$(real "$default_codex_home")" ]; then
   printf 'check=managed-launcher:skipped reason=non-default-codex-home-without-harness-bin-dir\n'
-elif [ "$launcher_healthy" = "1" ]; then
-  printf 'check=managed-launcher:ok\n'
+elif [ "$launcher_healthy" = "1" ] && [ "$launcher_protected" = "1" ] && [ "$launcher_precedence" = "first" ]; then
+  printf 'check=managed-launcher:ok protected=%s precedence=%s profile=%s\n' \
+    "$launcher_protected" "$launcher_precedence" "$launcher_profile"
 elif [ "$launcher_installed" = "1" ]; then
   printf 'check=managed-launcher:failed installed=%s reason=%s\n' \
     "${launcher_installed:-0}" "${launcher_detail:-status-unavailable}"

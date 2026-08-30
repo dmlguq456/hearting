@@ -303,12 +303,34 @@ class OpenCodeLaunchFenceFailure(unittest.TestCase):
         os.close(write_fd)
         self.assertEqual(
             WH.read_launch_fence_failure(read_fd),
-            {
-                "schema_version": 1,
-                "reason": "launch-runtime-root-mismatch",
-                "detail": "sealed root drifted",
-            },
+            (
+                {
+                    "schema_version": 1,
+                    "reason": "launch-runtime-root-mismatch",
+                    "detail": "sealed root drifted",
+                },
+                True,
+            ),
         )
+
+    def test_open_write_end_reports_fence_not_released(self):
+        # The write end is still open and nothing has been written yet --
+        # the non-blocking read must hit BlockingIOError, proving the fence
+        # was genuinely never released (no payload can have executed).
+        read_fd, write_fd = os.pipe()
+        try:
+            self.assertEqual(
+                WH.read_launch_fence_failure(read_fd), (None, False)
+            )
+        finally:
+            os.close(write_fd)
+
+    def test_closed_write_end_with_no_payload_reports_fence_released(self):
+        # An EOF read (write end already closed, nothing written) proves the
+        # fence was released with no failure payload.
+        read_fd, write_fd = os.pipe()
+        os.close(write_fd)
+        self.assertEqual(WH.read_launch_fence_failure(read_fd), (None, True))
 
 
 if __name__=="__main__": unittest.main()

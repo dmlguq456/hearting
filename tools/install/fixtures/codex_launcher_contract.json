@@ -1,0 +1,21 @@
+{
+  "schema_versions": [1, 2],
+  "current_schema": 2,
+  "modes": ["protected-path-v1", "legacy-inplace-v1"],
+  "phases": ["prepared", "installed"],
+  "profile_policies": ["manage", "manual", "deny"],
+  "reasons": [
+    "invalid-profile-policy",
+    "profile-authorization-required",
+    "ambiguous-or-unsupported-profile",
+    "real-command-unavailable",
+    "self-link",
+    "foreign-path",
+    "protected-byte-drift",
+    "unsupported-schema"
+  ],
+  "result_fields": [
+    "action", "status", "target", "real_command", "protected", "mode",
+    "path_precedence", "binding_state", "migration", "next_action", "reason"
+  ]
+}

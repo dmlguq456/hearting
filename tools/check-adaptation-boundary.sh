@@ -15,6 +15,15 @@ else
 fi
 cd "$ROOT"
 
+for doc in README.md README.ko.md; do
+  grep -q '\$CODEX_HOME/.harness/bin/codex' "$ROOT/$doc" || { echo "$doc missing protected Codex ingress" >&2; exit 1; }
+  grep -q 'legacy-inplace-v1' "$ROOT/$doc" || { echo "$doc missing explicit degraded mode" >&2; exit 1; }
+done
+if grep -q '~/.local/bin/codex` launcher' "$ROOT/README.md" "$ROOT/README.ko.md"; then
+  echo 'README claims Hearting owns the vendor Codex path' >&2
+  exit 1
+fi
+
 fail=0
 # Shared pre-owner evidence generator is invoked through adapter preflight
 # wrappers and remains at the portable root; no adapter-local utility symlink.

@@ -32,10 +32,22 @@ class StatusServer:
         *,
         thread_id: str = "thread-1",
         thread_ancestors: list[str] | None = None,
+        sibling_thread_ids: list[str] | None = None,
+        witnessed_thread_id: str = "",
+        binding_source: str = "initial",
+        status_value: str = "ready",
+        approval_owner: str = "tui",
+        upstream_clients: int = 1,
     ) -> None:
         self.path = path
         self.thread_id = thread_id
         self.thread_ancestors = thread_ancestors or []
+        self.sibling_thread_ids = sibling_thread_ids or []
+        self.witnessed_thread_id = witnessed_thread_id
+        self.binding_source = binding_source
+        self.status_value = status_value
+        self.approval_owner = approval_owner
+        self.upstream_clients = upstream_clients
         self.request: dict[str, object] | None = None
         self.listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         self.listener.bind(str(path))
@@ -55,13 +67,17 @@ class StatusServer:
         self.request = json.loads(bytes(data).split(b"\n", 1)[0])
         response = {
             "schema_version": 1,
-            "status": "ready",
+            "status": self.status_value,
             "epoch": 7,
             "thread_id": self.thread_id,
             "thread_ancestors": self.thread_ancestors,
             "active_turn_id": "",
-            "approval_owner": "tui",
-            "upstream_clients": 1,
+            "approval_owner": self.approval_owner,
+            "upstream_clients": self.upstream_clients,
+            "witnessed_thread_id": self.witnessed_thread_id,
+            "sibling_thread_ids": self.sibling_thread_ids,
+            "binding_source": self.binding_source,
+            "tui_connected": self.status_value == "ready",
         }
         connection.sendall(
             (json.dumps(response, separators=(",", ":")) + "\n").encode()
@@ -157,6 +173,103 @@ class ManagedDispatchTest(unittest.TestCase):
                 environ=self.env(self.control),
             )
         self.assertEqual(str(raised.exception), "managed-gateway-not-ready")
+
+    def test_reason_class_expected_thread_not_witnessed(self) -> None:
+        server = StatusServer(
+            self.control, thread_id="thread-2", thread_ancestors=[]
+        )
+        self.addCleanup(server.close)
+        with self.assertRaises(MANAGED.ManagedDispatchError) as raised:
+            MANAGED.probe_managed_codex_parent(
+                parent_harness="codex",
+                parent_session_id="thread-1",
+                environ=self.env(self.control),
+            )
+        self.assertEqual(
+            raised.exception.reason_class, "expected-thread-not-witnessed"
+        )
+
+    def test_reason_class_lineage_mismatch(self) -> None:
+        server = StatusServer(
+            self.control,
+            thread_id="thread-2",
+            thread_ancestors=["thread-unrelated"],
+            sibling_thread_ids=["thread-1"],
+        )
+        self.addCleanup(server.close)
+        with self.assertRaises(MANAGED.ManagedDispatchError) as raised:
+            MANAGED.probe_managed_codex_parent(
+                parent_harness="codex",
+                parent_session_id="thread-1",
+                environ=self.env(self.control),
+            )
+        self.assertEqual(raised.exception.reason_class, "lineage-mismatch")
+
+    def test_reason_class_tui_disconnected(self) -> None:
+        server = StatusServer(self.control, status_value="disconnected")
+        self.addCleanup(server.close)
+        with self.assertRaises(MANAGED.ManagedDispatchError) as raised:
+            MANAGED.probe_managed_codex_parent(
+                parent_harness="codex",
+                parent_session_id="thread-1",
+                environ=self.env(self.control),
+            )
+        self.assertEqual(raised.exception.reason_class, "tui-disconnected")
+
+    def test_reason_class_approval_owner_mismatch(self) -> None:
+        server = StatusServer(self.control, approval_owner="user")
+        self.addCleanup(server.close)
+        with self.assertRaises(MANAGED.ManagedDispatchError) as raised:
+            MANAGED.probe_managed_codex_parent(
+                parent_harness="codex",
+                parent_session_id="thread-1",
+                environ=self.env(self.control),
+            )
+        self.assertEqual(
+            raised.exception.reason_class, "approval-owner-mismatch"
+        )
+
+    def test_reason_class_upstream_client_count_invalid(self) -> None:
+        server = StatusServer(self.control, upstream_clients=2)
+        self.addCleanup(server.close)
+        with self.assertRaises(MANAGED.ManagedDispatchError) as raised:
+            MANAGED.probe_managed_codex_parent(
+                parent_harness="codex",
+                parent_session_id="thread-1",
+                environ=self.env(self.control),
+            )
+        self.assertEqual(
+            raised.exception.reason_class, "upstream-client-count-invalid"
+        )
+
+    def test_sibling_cannot_obtain_a_bindings_probe(self) -> None:
+        # B is witnessed (present in sibling_thread_ids) but never becomes the
+        # binding, so B's own probe against A's status fails lineage-mismatch
+        # rather than silently succeeding with A's identity. Two independent
+        # control sockets stand in for two probes issued against the one
+        # live gateway's unchanged status at different moments.
+        sibling_control = self.base / "control-sibling.sock"
+        server_for_b = StatusServer(
+            sibling_control,
+            thread_id="thread-A",
+            sibling_thread_ids=["thread-B"],
+        )
+        self.addCleanup(server_for_b.close)
+        with self.assertRaises(MANAGED.ManagedDispatchError) as raised:
+            MANAGED.probe_managed_codex_parent(
+                parent_harness="codex",
+                parent_session_id="thread-B",
+                environ=self.env(sibling_control, thread_id="thread-B"),
+            )
+        self.assertEqual(raised.exception.reason_class, "lineage-mismatch")
+        server_for_a = StatusServer(self.control, thread_id="thread-A")
+        self.addCleanup(server_for_a.close)
+        binding = MANAGED.probe_managed_codex_parent(
+            parent_harness="codex",
+            parent_session_id="thread-A",
+            environ=self.env(self.control, thread_id="thread-A"),
+        )
+        self.assertEqual(binding.thread_id, "thread-A")
 
     def test_sealed_batch_is_order_independent_and_registry_delivery_exact(self) -> None:
         first = MANAGED.sealed_batch_id("thread-1", {"att-a", "att-b"})

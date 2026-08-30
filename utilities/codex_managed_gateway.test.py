@@ -154,7 +154,12 @@ class FakeAppServer:
         self.reject_steer = False
         self.start_received = threading.Event()
         self.release_start = threading.Event()
+        self.hold_thread_start = False
+        self.thread_start_received = threading.Event()
+        self.release_thread_start = threading.Event()
         self.current: Any = None
+        self.next_start_id = "thread-1"
+        self.next_fork_id = "thread-2"
         self.thread = threading.Thread(target=self._accept_loop, daemon=True)
         self.thread.start()
 
@@ -195,12 +200,25 @@ class FakeAppServer:
                 )
             elif method == "initialized":
                 continue
-            elif method in {"thread/start", "thread/resume"}:
+            elif method == "thread/start":
+                self.thread_start_received.set()
+                if self.hold_thread_start:
+                    self.release_thread_start.wait(5)
                 websocket.write_json(
                     {
                         "jsonrpc": "2.0",
                         "id": message["id"],
-                        "result": {"thread": {"id": "thread-1"}},
+                        "result": {"thread": {"id": self.next_start_id}},
+                    }
+                )
+            elif method == "thread/resume":
+                params = message.get("params") or {}
+                resumed = params.get("threadId") or self.next_start_id
+                websocket.write_json(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": message["id"],
+                        "result": {"thread": {"id": resumed}},
                     }
                 )
             elif method == "thread/fork":
@@ -208,7 +226,7 @@ class FakeAppServer:
                     {
                         "jsonrpc": "2.0",
                         "id": message["id"],
-                        "result": {"thread": {"id": "thread-2"}},
+                        "result": {"thread": {"id": self.next_fork_id}},
                     }
                 )
             elif method == "turn/start":
@@ -402,11 +420,13 @@ def control(path: Path, value: dict[str, Any]) -> dict[str, Any]:
     return json.loads(bytes(data).split(b"\n", 1)[0])
 
 
-def receipt_request(batch: str = "batch-1") -> dict[str, Any]:
+def receipt_request(
+    batch: str = "batch-1", thread_id: str = "thread-1"
+) -> dict[str, Any]:
     return {
         "schema_version": 1,
         "op": "deliver",
-        "thread_id": "thread-1",
+        "thread_id": thread_id,
         "parent_attempt_id": "att-parent",
         "sealed_batch_id": batch,
         "receipt": {
@@ -519,6 +539,164 @@ class ManagedGatewayTest(unittest.TestCase):
         )
         self.assertEqual(status["thread_id"], "thread-2")
         self.assertEqual(status["thread_ancestors"], ["thread-1"])
+        self.assertEqual(status["binding_source"], "fork")
+
+    def test_sibling_thread_start_does_not_move_binding(self) -> None:
+        self.server.next_start_id = "thread-sibling"
+        self.client.request("thread/start", {})
+        status = control(
+            self.control, {"schema_version": 1, "op": "status"}
+        )
+        self.assertEqual(status["thread_id"], "thread-1")
+        self.assertEqual(status["binding_source"], "initial")
+        self.assertEqual(status["sibling_thread_ids"], ["thread-sibling"])
+        self.assertEqual(status["witnessed_thread_id"], "thread-sibling")
+
+    def test_exact_same_thread_resume_is_accepted(self) -> None:
+        self.client.request("thread/resume", {"threadId": "thread-1"})
+        status = control(
+            self.control, {"schema_version": 1, "op": "status"}
+        )
+        self.assertEqual(status["thread_id"], "thread-1")
+        self.assertEqual(status["binding_source"], "resume")
+
+    def test_resume_of_different_id_is_rejected_as_sibling(self) -> None:
+        self.client.request("thread/resume", {"threadId": "thread-other"})
+        status = control(
+            self.control, {"schema_version": 1, "op": "status"}
+        )
+        self.assertEqual(status["thread_id"], "thread-1")
+        self.assertEqual(status["binding_source"], "initial")
+        self.assertIn("thread-other", status["sibling_thread_ids"])
+
+    def test_fork_of_non_binding_thread_is_rejected(self) -> None:
+        self.server.next_start_id = "thread-sibling"
+        self.client.request("thread/start", {})
+        self.server.next_fork_id = "thread-sibling-fork"
+        self.client.request("thread/fork", {"threadId": "thread-sibling"})
+        status = control(
+            self.control, {"schema_version": 1, "op": "status"}
+        )
+        self.assertEqual(status["thread_id"], "thread-1")
+        self.assertEqual(status["binding_source"], "initial")
+        self.assertIn("thread-sibling-fork", status["sibling_thread_ids"])
+
+    def test_concurrent_probes_and_deliveries_converge_on_one_binding(
+        self,
+    ) -> None:
+        self.server.next_start_id = "thread-sibling"
+        self.server.next_fork_id = "thread-2"
+        ready = threading.Barrier(5)
+        results: dict[str, Any] = {}
+        results_lock = threading.Lock()
+        snapshots: list[dict[str, Any]] = []
+
+        def sibling_start() -> None:
+            ready.wait()
+            results["sibling"] = self.client.request("thread/start", {})
+
+        def fork() -> None:
+            ready.wait()
+            results["fork"] = self.client.request(
+                "thread/fork", {"threadId": "thread-1"}
+            )
+
+        def probe_status() -> None:
+            ready.wait()
+            for _ in range(25):
+                snapshot = control(
+                    self.control, {"schema_version": 1, "op": "status"}
+                )
+                with results_lock:
+                    snapshots.append(snapshot)
+
+        def deliver_sibling() -> None:
+            ready.wait()
+            results["deliver_sibling"] = control(
+                self.control,
+                receipt_request("batch-sibling", "thread-sibling"),
+            )
+
+        def deliver_binding() -> None:
+            ready.wait()
+            results["deliver_binding"] = control(
+                self.control, receipt_request("batch-binding", "thread-1")
+            )
+
+        threads = [
+            threading.Thread(target=sibling_start),
+            threading.Thread(target=fork),
+            threading.Thread(target=probe_status),
+            threading.Thread(target=deliver_sibling),
+            threading.Thread(target=deliver_binding),
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=5)
+            self.assertFalse(thread.is_alive())
+
+        final = control(
+            self.control, {"schema_version": 1, "op": "status"}
+        )
+        self.assertEqual(final["thread_id"], "thread-2")
+        self.assertEqual(final["binding_source"], "fork")
+        self.assertIn("thread-sibling", final["sibling_thread_ids"])
+
+        # No probe ever observed a binding outside the two legitimate
+        # values (pre-fork "thread-1", post-fork "thread-2") — the lock
+        # around binding mutation rules out any interleaved/torn value.
+        for snapshot in snapshots:
+            self.assertIn(snapshot["thread_id"], {"thread-1", "thread-2"})
+
+        # The sibling thread never owns the binding at any point in the
+        # race, so its delivery is unconditionally rejected.
+        self.assertEqual(results["deliver_sibling"]["status"], "rejected")
+        self.assertEqual(
+            results["deliver_sibling"]["reason"],
+            "thread-not-owned-by-current-tui",
+        )
+
+        # A delivery explicitly addressed to "thread-1" either lands
+        # before the fork advances the binding (accepted) or after
+        # (rejected as no longer the binding) — never anything else, and
+        # never accepted once the binding has moved off "thread-1".
+        binding_outcome = results["deliver_binding"]
+        self.assertIn(binding_outcome["status"], {"accepted", "rejected"})
+        if binding_outcome["status"] == "rejected":
+            self.assertEqual(
+                binding_outcome["reason"], "thread-not-owned-by-current-tui"
+            )
+
+    def test_manual_unwitnessed_turn_start_does_not_move_binding(self) -> None:
+        self.client.request(
+            "turn/start", {"threadId": "thread-manual-unwitnessed"}
+        )
+        status = control(
+            self.control, {"schema_version": 1, "op": "status"}
+        )
+        self.assertEqual(status["thread_id"], "thread-1")
+        self.assertEqual(status["binding_source"], "initial")
+
+    def test_reconnect_clears_binding_and_lineage(self) -> None:
+        self.client.request("thread/fork", {"threadId": "thread-1"})
+        self.client.close()
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            status = control(
+                self.control, {"schema_version": 1, "op": "status"}
+            )
+            if status["status"] == "disconnected":
+                break
+            time.sleep(0.01)
+        self.client = self._connect_client()
+        status = control(
+            self.control, {"schema_version": 1, "op": "status"}
+        )
+        self.assertEqual(status["thread_id"], "thread-1")
+        self.assertEqual(status["thread_ancestors"], [])
+        self.assertEqual(status["sibling_thread_ids"], [])
+        self.assertEqual(status["binding_source"], "initial")
 
     def test_foreign_turn_started_does_not_replace_witnessed_ingress(self) -> None:
         assert self.server.current is not None
@@ -1015,6 +1193,126 @@ class ManagedGatewayTest(unittest.TestCase):
         result = control(self.control, receipt_request("batch-reconnected"))
         self.assertEqual(result["status"], "accepted")
         self.assertEqual(self.server.connections, 2)
+
+
+class EstablishFromEmptyBindingRaceTest(unittest.TestCase):
+    """A fresh gateway has no binding yet. An unwitnessed App-Server
+    `turn/started` notification (e.g. from a native subagent or any other
+    sibling thread) must never establish the parent ingress binding, even
+    from empty -- only a gateway-witnessed thread/start (or resume/fork)
+    response may do that."""
+
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.upstream = self.root / "upstream.sock"
+        self.front = self.root / "front.sock"
+        self.control = self.root / "control.sock"
+        self.ledger = self.root / "ledger.json"
+        self.trace = self.root / "trace.jsonl"
+        self.interactions = self.root / "interactions"
+        self.interaction_env = mock.patch.dict(
+            os.environ,
+            {"FLEET_INTERACTION_STATE_DIR": str(self.interactions)},
+            clear=False,
+        )
+        self.interaction_env.start()
+        self.addCleanup(self.interaction_env.stop)
+        self.server = FakeAppServer(self.upstream)
+        self.addCleanup(self.server.close)
+        self.gateway = GATEWAY.ManagedGateway(
+            listen_path=self.front,
+            upstream_path=self.upstream,
+            control_path=self.control,
+            ledger_path=self.ledger,
+            trace_path=self.trace,
+        )
+        self.gateway_thread = threading.Thread(
+            target=self.gateway.serve_forever, daemon=True
+        )
+        self.gateway_thread.start()
+        self.addCleanup(self.gateway.close)
+        self.addCleanup(lambda: self.gateway_thread.join(timeout=2))
+        wait_path(self.front)
+        wait_path(self.control)
+        self.client = RpcClient(self.front)
+        self.addCleanup(self.client.close)
+        self.client.request(
+            "initialize",
+            {
+                "clientInfo": {
+                    "name": "managed-gateway-test",
+                    "version": "1",
+                },
+                "capabilities": {"experimentalApi": True},
+            },
+        )
+        self.client.notify("initialized", {})
+
+    def test_unwitnessed_sibling_turn_started_cannot_establish_binding_from_empty(
+        self,
+    ) -> None:
+        status = control(self.control, {"schema_version": 1, "op": "status"})
+        self.assertEqual(status["thread_id"], "")
+        self.assertEqual(status["binding_source"], "")
+
+        self.server.hold_thread_start = True
+        start_thread = threading.Thread(
+            target=lambda: self.client.request("thread/start", {})
+        )
+        start_thread.start()
+        self.addCleanup(lambda: start_thread.join(timeout=5))
+        self.assertTrue(self.server.thread_start_received.wait(5))
+
+        deadline = time.monotonic() + 5
+        while self.server.current is None and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert self.server.current is not None
+        notification = {
+            "jsonrpc": "2.0",
+            "method": "turn/started",
+            "params": {
+                "threadId": "thread-native-subagent",
+                "turn": {
+                    "id": "turn-native-subagent",
+                    "items": [],
+                    "status": "inProgress",
+                },
+            },
+        }
+        self.server.current.write_json(notification)
+        self.assertEqual(
+            self.client.wait_for(lambda value: value == notification),
+            notification,
+        )
+
+        # The sibling notification was witnessed for per-thread bookkeeping
+        # only -- it must not have established the binding while empty.
+        status = control(self.control, {"schema_version": 1, "op": "status"})
+        self.assertEqual(status["thread_id"], "")
+        self.assertEqual(status["binding_source"], "")
+        self.assertEqual(status["witnessed_thread_id"], "thread-native-subagent")
+        self.assertEqual(
+            self.gateway._threads["thread-native-subagent"].active_turn_id,
+            "turn-native-subagent",
+        )
+
+        # Now release the parent's own witnessed thread/start response and
+        # prove it -- and only it -- establishes the binding.
+        self.server.release_thread_start.set()
+        start_thread.join(timeout=5)
+        self.assertFalse(start_thread.is_alive())
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            status = control(
+                self.control, {"schema_version": 1, "op": "status"}
+            )
+            if status.get("thread_id") == "thread-1":
+                break
+            time.sleep(0.01)
+        self.assertEqual(status["thread_id"], "thread-1")
+        self.assertEqual(status["binding_source"], "initial")
 
 
 class ValidateDeliveryStageAdvanceNegotiationTest(unittest.TestCase):

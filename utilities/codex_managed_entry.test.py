@@ -97,6 +97,7 @@ class ManagedEntryTest(unittest.TestCase):
                     'jobs': os.environ.get('AGENT_DISPATCH_JOBS'),
                 }
                 pathlib.Path(result).write_text(json.dumps(value), encoding='utf-8')
+                raise SystemExit(int(os.environ.get('FAKE_CLIENT_EXIT', '0')))
                 """
             ),
             encoding="utf-8",
@@ -158,6 +159,22 @@ class ManagedEntryTest(unittest.TestCase):
             "managed-control.sock",
         ):
             self.assertFalse((self.state / name).exists())
+
+    def test_client_failure_and_gateway_fault_clean_only_exact_session_sockets(self) -> None:
+        sentinel = self.state / "unrelated.sock"
+        sentinel.write_bytes(b"preserve\n")
+        for fault in ("none", "before-send", "after-send"):
+            with self.subTest(fault=fault), mock.patch.dict(
+                os.environ, {"FAKE_CLIENT_EXIT": "7"}, clear=False
+            ):
+                command = self.command()
+                command.insert(command.index("--client-command"), "--gateway-fault")
+                command.insert(command.index("--client-command"), fault)
+                result = subprocess.run(command, text=True, capture_output=True, timeout=15)
+                self.assertEqual(result.returncode, 7, result.stderr)
+                for name in ("app-server.sock", "managed-tui.sock", "managed-control.sock"):
+                    self.assertFalse((self.state / name).exists())
+                self.assertEqual(sentinel.read_bytes(), b"preserve\n")
 
     def test_nonprivate_state_dir_fails_before_process_start(self) -> None:
         os.chmod(self.state, 0o755)

@@ -70,6 +70,7 @@ from dispatch_lifecycle import (  # noqa: E402
     DETACHED,
     FOREGROUND_SCOPED,
     LIFECYCLES,
+    deterministic_post_exit_outcome,
     reconcile_launch_lifecycle,
     wait_foreground,
 )
@@ -314,33 +315,40 @@ def fail(reason: str, code: int, **fields: str) -> int:
     return code
 
 
-def read_launch_fence_failure(fd: int) -> dict[str, object] | None:
-    """Read and close the fence's private, close-on-exec failure channel."""
+def read_launch_fence_failure(fd: int) -> tuple[dict[str, object] | None, bool]:
+    """Read and close the fence's private, close-on-exec failure channel.
+
+    Returns the parsed failure record (or None) alongside whether the fence
+    was actually released: `BlockingIOError` means the write end is still
+    open (the child has not reached the fence yet, so nothing was released),
+    while an EOF read means the write end already closed (the fence was
+    released with no failure payload).
+    """
     try:
         os.set_blocking(fd, False)
         try:
             raw = os.read(fd, 16384)
         except BlockingIOError:
-            return None
+            return None, False
     finally:
         try:
             os.close(fd)
         except OSError:
             pass
     if not raw:
-        return None
+        return None, True
     try:
         record = json.loads(raw.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError):
-        return None
+        return None, True
     if (
         not isinstance(record, dict)
         or record.get("schema_version") != 1
         or not isinstance(record.get("reason"), str)
         or not isinstance(record.get("detail"), str)
     ):
-        return None
-    return record
+        return None, True
+    return record, True
 
 
 class ModelSelectionError(ValueError):
@@ -717,7 +725,6 @@ def resolve_parent_completion_delivery(args: argparse.Namespace) -> str:
     direct_registered = (
         getattr(args, "action", "") in {"register", "start"}
         and args.dispatch_depth == 1
-        and args.launch_lifecycle == DETACHED
         and args.execution_surface == "registered-headless"
         and bool(args.registered_worker)
         and bool(args.parent_session_id)
@@ -739,6 +746,11 @@ def resolve_parent_completion_delivery(args: argparse.Namespace) -> str:
                 if os.environ.get("AGENT_CODEX_MANAGED_GATEWAY") == "1"
                 else "interactive-auto-wake-unsupported"
             )
+            args.parent_completion_reason_class = (
+                (getattr(exc, "reason_class", "") or "-")
+                if os.environ.get("AGENT_CODEX_MANAGED_GATEWAY") == "1"
+                else "-"
+            )
             return "poll-fallback"
         args.parent_completion_reason = "managed-single-ingress-live"
         return MANAGED_PARENT_DELIVERY
@@ -759,7 +771,6 @@ def validate_interactive_parent_launch(args: argparse.Namespace) -> None:
     direct_registered = (
         getattr(args, "action", "") in {"register", "start"}
         and args.dispatch_depth == 1
-        and args.launch_lifecycle == DETACHED
         and args.execution_surface == "registered-headless"
         and bool(args.registered_worker)
         and bool(args.parent_session_id)
@@ -2154,7 +2165,9 @@ def main(argv: list[str]) -> int:
                 expected_reservation=args.replica_batch_expectation,
             )
         except DispatchContractError as exc:
-            fence_failure = read_launch_fence_failure(fence_failure_read_fd)
+            fence_failure, fence_released = read_launch_fence_failure(
+                fence_failure_read_fd
+            )
             try:
                 os.killpg(proc.pid, signal.SIGTERM)
                 proc.wait(timeout=0.5)
@@ -2177,6 +2190,23 @@ def main(argv: list[str]) -> int:
                     reason, 73, detail=str(fence_failure["detail"]),
                     attempt_id=args.attempt_id, registered="0", started="0",
                     child_spawned="0",
+                )
+            post_exit = deterministic_post_exit_outcome(
+                proc, fence_released=fence_released,
+            )
+            if post_exit.launch_outcome:
+                annotate_attempt_row(
+                    jobs,
+                    args.attempt_id,
+                    {
+                        key: value
+                        for key, value in {
+                            "launch_outcome": post_exit.launch_outcome,
+                            "group_reap_proof": post_exit.group_reap_proof,
+                            "group_reap_pgid": post_exit.group_reap_pgid,
+                        }.items()
+                        if value
+                    },
                 )
             close_job_row(
                 jobs, args.slug, args.worktree,
@@ -2319,6 +2349,7 @@ def main(argv: list[str]) -> int:
     print(f"completion_delivery={args.resolved_completion_delivery}")
     print(f"parent_completion_delivery={args.parent_completion_delivery}")
     print(f"parent_completion_reason={args.parent_completion_reason}")
+    print(f"parent_completion_reason_class={getattr(args, 'parent_completion_reason_class', '-')}")
     print(f"managed_sidecar_state={getattr(args, 'managed_sidecar_state', 'not-started')}")
     print(f"managed_sidecar_reason={getattr(args, 'managed_sidecar_reason', '-')}")
     print(f"managed_sidecar_pid={getattr(args, 'managed_sidecar_pid', '-')}")

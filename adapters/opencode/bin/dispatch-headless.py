@@ -67,6 +67,7 @@ from dispatch_lifecycle import (  # noqa: E402
     DETACHED,
     FOREGROUND_SCOPED,
     LIFECYCLES,
+    deterministic_post_exit_outcome,
     reconcile_launch_lifecycle,
     wait_foreground,
 )
@@ -297,33 +298,40 @@ def fail(reason: str, code: int, **fields: str) -> int:
     return code
 
 
-def read_launch_fence_failure(fd: int) -> dict[str, object] | None:
-    """Read and close the fence's private, close-on-exec failure channel."""
+def read_launch_fence_failure(fd: int) -> tuple[dict[str, object] | None, bool]:
+    """Read and close the fence's private, close-on-exec failure channel.
+
+    Returns the parsed failure record (or None) alongside whether the fence
+    was actually released: `BlockingIOError` means the write end is still
+    open (the child has not reached the fence yet, so nothing was released),
+    while an EOF read means the write end already closed (the fence was
+    released with no failure payload).
+    """
     try:
         os.set_blocking(fd, False)
         try:
             raw = os.read(fd, 16384)
         except BlockingIOError:
-            return None
+            return None, False
     finally:
         try:
             os.close(fd)
         except OSError:
             pass
     if not raw:
-        return None
+        return None, True
     try:
         record = json.loads(raw.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError):
-        return None
+        return None, True
     if (
         not isinstance(record, dict)
         or record.get("schema_version") != 1
         or not isinstance(record.get("reason"), str)
         or not isinstance(record.get("detail"), str)
     ):
-        return None
-    return record
+        return None, True
+    return record, True
 
 
 class ModelSelectionError(ValueError):
@@ -1743,7 +1751,9 @@ def main(argv: list[str]) -> int:
                 expected_reservation=args.replica_batch_expectation,
             )
         except DispatchContractError as exc:
-            fence_failure = read_launch_fence_failure(fence_failure_read_fd)
+            fence_failure, fence_released = read_launch_fence_failure(
+                fence_failure_read_fd
+            )
             try:
                 os.killpg(proc.pid, signal.SIGTERM)
                 proc.wait(timeout=0.5)
@@ -1766,6 +1776,23 @@ def main(argv: list[str]) -> int:
                     reason, 73, detail=str(fence_failure["detail"]),
                     attempt_id=args.attempt_id, registered="0", started="0",
                     child_spawned="0",
+                )
+            post_exit = deterministic_post_exit_outcome(
+                proc, fence_released=fence_released,
+            )
+            if post_exit.launch_outcome:
+                annotate_attempt_row(
+                    jobs,
+                    args.attempt_id,
+                    {
+                        key: value
+                        for key, value in {
+                            "launch_outcome": post_exit.launch_outcome,
+                            "group_reap_proof": post_exit.group_reap_proof,
+                            "group_reap_pgid": post_exit.group_reap_pgid,
+                        }.items()
+                        if value
+                    },
                 )
             close_job_row(
                 jobs, args.slug, args.worktree,

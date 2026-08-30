@@ -5,6 +5,8 @@ from pathlib import Path
 from unittest import mock
 
 ROOT=Path(__file__).resolve().parents[1]
+sys.path.insert(0,str(ROOT/"utilities"))
+import dispatch_contract as DC
 
 ADAPTERS={
  "codex":([sys.executable,str(ROOT/"adapters/codex/bin/dispatch-headless.py")],["--model","gpt-test","--reasoning","low"]),
@@ -532,5 +534,136 @@ class AdapterV11Test(unittest.TestCase):
     output=stream.getvalue()
     self.assertEqual(code,0,output)
     self.assertIn("launch_lifecycle_override=absent",output)
+
+ def test_governor_reservation_transfer_records_deterministic_launch_outcome(self):
+  # Phase 8: a governor-reservation-transfer terminal row must always carry a
+  # deterministic post-exit launch_outcome (never left unverified), so the
+  # checked post-exit-receipt fallback is not poisoned by an incomplete row.
+  for harness in ("codex","claude","opencode"):
+   with self.subTest(harness=harness), tempfile.TemporaryDirectory() as td:
+    root=Path(td); repo,art=self.fixture(root); jobs=root/"jobs.log"; logs=root/"logs"
+    fakebin=root/"bin"; fakebin.mkdir()
+    fake=fakebin/harness
+    fake.write_text("#!/bin/sh\nexec sleep 60\n",encoding="utf-8"); fake.chmod(0o755)
+    wrapper=self.load_wrapper(harness)
+    if harness=="opencode":
+     attempt_id="att-opencode-governor-transfer"
+     argv=["dispatch-headless.py","--start","--worktree",str(repo),"--slug","opencode-owner",
+           "--capability","autopilot-code","--capability-mode","dev","--intensity","standard",
+           "--dispatch-depth","1","--worker-type","owner","--unit","_kernel/owner",
+           "--assigned-contract","autopilot-code","--owner-harness","opencode",
+           "--model","provider/test","--variant","low","--jobs",str(jobs),
+           "--log-dir",str(logs),"--attempt-id",attempt_id,
+           "--foreground-timeout","5","--prompt-text","ok"]
+     env_extra={"OPENCODE_CONFIG_CONTENT":"{}"}
+    else:
+     attempt_id=f"att-{harness}-fixture-0001"
+     self.seed_parent(jobs,repo,harness=harness)
+     command=self.command(harness,"start",repo,jobs,logs)+["--foreground-timeout","5"]
+     argv=["dispatch-headless.py",*command[2:]]
+     env_extra={"AGENT_DISPATCH_CHILD":"1","AGENT_DISPATCH_ATTEMPT_ID":"att-parent-fixture"}
+    resolution=wrapper.reconcile_launch_lifecycle(
+     wrapper.DETACHED,{},evidence={
+      "lifecycle_selector_source":"pid1-class",
+      "lifecycle_nspid_width":"1",
+      "lifecycle_pid1_class":"non-system-init",
+     })
+    env={**os.environ,"PATH":str(fakebin)+os.pathsep+os.environ.get("PATH",""),
+         "AGENT_HOME":str(ROOT),"AGENT_ARTIFACT_ROOT":str(art),
+         "AGENT_DISPATCH_JOBS":str(jobs),"XDG_STATE_HOME":str(root/"state"),
+         **env_extra}
+    env.pop("AGENT_MODEL_GOVERNOR_ROOT",None)
+    stream=io.StringIO()
+    patches=[mock.patch.dict(os.environ,env,clear=True),
+             mock.patch.object(wrapper,"reconcile_launch_lifecycle",return_value=resolution),
+             mock.patch.object(
+              wrapper,"wait_governor_reservation_claim",
+              side_effect=wrapper.DispatchContractError("reservation-owner-mismatch")),
+             mock.patch.object(wrapper,"read_launch_fence_failure",return_value=(None,True))]
+    if hasattr(wrapper,"check_runtime_projection"): patches.append(mock.patch.object(wrapper,"check_runtime_projection",return_value=0))
+    if hasattr(wrapper,"ensure_runtime_home_projection"): patches.append(mock.patch.object(wrapper,"ensure_runtime_home_projection",return_value=None))
+    for patch in patches: patch.start()
+    try:
+     with redirect_stdout(stream): code=wrapper.main(argv)
+    finally:
+     for patch in reversed(patches): patch.stop()
+    output=stream.getvalue()
+    self.assertEqual(code,75,output)
+    self.assertIn("reason=reservation-owner-mismatch",output)
+    row=jobs.read_text(encoding="utf-8")
+    self.assertIn("note=dead-governor-reservation-transfer",row)
+    self.assertIn("launch_outcome=governed-process-reaped",row)
+    self.assertIn("group_reap_proof="+DC.GROUP_REAP_PROOF,row)
+    fields=[line.split("\t") for line in row.splitlines() if line.strip()]
+    metadata=next(
+     DC.parse_registry_metadata(f[5])
+     for f in fields
+     if len(f)==6 and DC.row_has_attempt(f[5],attempt_id)
+    )
+    self.assertNotEqual(DC.post_exit_receipt_reason(metadata),"")
+    quiescence=DC.attempt_process_quiescence(metadata,terminal_receipt=True)
+    self.assertNotEqual(quiescence.reason,"post-exit-receipt-incomplete")
+
+ def test_governor_reservation_transfer_records_never_launched_when_fence_not_released(self):
+  # Phase 8 gap fix: a BlockingIOError on the non-blocking fence read means
+  # the write end is still open (the child never reached/released the
+  # fence), so the row must record the stronger, honest
+  # launch_outcome=never-launched -- never the reaped-and-proved-empty
+  # claim -- even though the process group is provably empty after kill.
+  for harness in ("codex","claude","opencode"):
+   with self.subTest(harness=harness), tempfile.TemporaryDirectory() as td:
+    root=Path(td); repo,art=self.fixture(root); jobs=root/"jobs.log"; logs=root/"logs"
+    fakebin=root/"bin"; fakebin.mkdir()
+    fake=fakebin/harness
+    fake.write_text("#!/bin/sh\nexec sleep 60\n",encoding="utf-8"); fake.chmod(0o755)
+    wrapper=self.load_wrapper(harness)
+    if harness=="opencode":
+     attempt_id="att-opencode-governor-transfer-never-launched"
+     argv=["dispatch-headless.py","--start","--worktree",str(repo),"--slug","opencode-owner",
+           "--capability","autopilot-code","--capability-mode","dev","--intensity","standard",
+           "--dispatch-depth","1","--worker-type","owner","--unit","_kernel/owner",
+           "--assigned-contract","autopilot-code","--owner-harness","opencode",
+           "--model","provider/test","--variant","low","--jobs",str(jobs),
+           "--log-dir",str(logs),"--attempt-id",attempt_id,
+           "--foreground-timeout","5","--prompt-text","ok"]
+     env_extra={"OPENCODE_CONFIG_CONTENT":"{}"}
+    else:
+     attempt_id=f"att-{harness}-fixture-never-launched-0001"
+     self.seed_parent(jobs,repo,harness=harness)
+     command=self.command(harness,"start",repo,jobs,logs)+["--foreground-timeout","5"]
+     argv=["dispatch-headless.py",*command[2:]]
+     env_extra={"AGENT_DISPATCH_CHILD":"1","AGENT_DISPATCH_ATTEMPT_ID":"att-parent-fixture"}
+    resolution=wrapper.reconcile_launch_lifecycle(
+     wrapper.DETACHED,{},evidence={
+      "lifecycle_selector_source":"pid1-class",
+      "lifecycle_nspid_width":"1",
+      "lifecycle_pid1_class":"non-system-init",
+     })
+    env={**os.environ,"PATH":str(fakebin)+os.pathsep+os.environ.get("PATH",""),
+         "AGENT_HOME":str(ROOT),"AGENT_ARTIFACT_ROOT":str(art),
+         "AGENT_DISPATCH_JOBS":str(jobs),"XDG_STATE_HOME":str(root/"state"),
+         **env_extra}
+    env.pop("AGENT_MODEL_GOVERNOR_ROOT",None)
+    stream=io.StringIO()
+    patches=[mock.patch.dict(os.environ,env,clear=True),
+             mock.patch.object(wrapper,"reconcile_launch_lifecycle",return_value=resolution),
+             mock.patch.object(
+              wrapper,"wait_governor_reservation_claim",
+              side_effect=wrapper.DispatchContractError("reservation-owner-mismatch")),
+             mock.patch.object(wrapper,"read_launch_fence_failure",return_value=(None,False))]
+    if hasattr(wrapper,"check_runtime_projection"): patches.append(mock.patch.object(wrapper,"check_runtime_projection",return_value=0))
+    if hasattr(wrapper,"ensure_runtime_home_projection"): patches.append(mock.patch.object(wrapper,"ensure_runtime_home_projection",return_value=None))
+    for patch in patches: patch.start()
+    try:
+     with redirect_stdout(stream): code=wrapper.main(argv)
+    finally:
+     for patch in reversed(patches): patch.stop()
+    output=stream.getvalue()
+    self.assertEqual(code,75,output)
+    self.assertIn("reason=reservation-owner-mismatch",output)
+    row=jobs.read_text(encoding="utf-8")
+    self.assertIn("note=dead-governor-reservation-transfer",row)
+    self.assertIn("launch_outcome=never-launched",row)
+    self.assertNotIn("launch_outcome=governed-process-reaped",row)
 
 if __name__=="__main__": unittest.main()

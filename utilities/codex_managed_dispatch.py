@@ -28,8 +28,21 @@ MAX_CONTROL_RESPONSE_BYTES = 16 * 1024
 MAX_BATCH_ATTEMPTS = 4
 
 
+READINESS_REASON_CLASSES = (
+    "expected-thread-not-witnessed",
+    "lineage-mismatch",
+    "tui-disconnected",
+    "approval-owner-mismatch",
+    "upstream-client-count-invalid",
+)
+
+
 class ManagedDispatchError(RuntimeError):
     """The managed parent boundary could not be proved or launched."""
+
+    def __init__(self, message: str, *, reason_class: str = "") -> None:
+        super().__init__(message)
+        self.reason_class = reason_class
 
 
 @dataclass(frozen=True)
@@ -38,6 +51,7 @@ class ManagedGatewayBinding:
     thread_id: str
     epoch: int
     inherited_thread_id: str = ""
+    binding_source: str = ""
 
     @property
     def thread_advanced(self) -> bool:
@@ -146,29 +160,69 @@ def probe_managed_codex_parent(
     epoch = response.get("epoch")
     gateway_thread = response.get("thread_id")
     ancestors = response.get("thread_ancestors", [])
+    siblings = response.get("sibling_thread_ids", [])
+    witnessed_thread = response.get("witnessed_thread_id", "")
+    binding_source = response.get("binding_source", "")
     lineage_valid = (
         isinstance(ancestors, list)
         and len(ancestors) <= 16
         and all(isinstance(value, str) for value in ancestors)
     )
-    inherited_is_current_or_ancestor = (
-        gateway_thread == current_thread
-        or (lineage_valid and current_thread in ancestors)
+    siblings_valid = (
+        isinstance(siblings, list)
+        and len(siblings) <= 16
+        and all(isinstance(value, str) for value in siblings)
     )
     if (
         response.get("schema_version") != 1
-        or response.get("status") != "ready"
         or not isinstance(gateway_thread, str)
-        or not inherited_is_current_or_ancestor
-        or response.get("approval_owner") != "tui"
-        or response.get("upstream_clients") != 1
         or not isinstance(epoch, int)
         or isinstance(epoch, bool)
         or epoch < 1
     ):
         raise ManagedDispatchError("managed-gateway-not-ready")
+    inherited_is_current_or_ancestor = (
+        gateway_thread == current_thread
+        or (lineage_valid and current_thread in ancestors)
+    )
+    known_threads: set[str] = {gateway_thread}
+    if lineage_valid:
+        known_threads.update(ancestors)
+    if siblings_valid:
+        known_threads.update(siblings)
+    if isinstance(witnessed_thread, str) and witnessed_thread:
+        known_threads.add(witnessed_thread)
+    # Evaluate the five typed readiness reason classes in a fixed,
+    # documented order so exactly one class is ever reported.
+    if current_thread not in known_threads:
+        raise ManagedDispatchError(
+            "managed-gateway-not-ready",
+            reason_class="expected-thread-not-witnessed",
+        )
+    if not inherited_is_current_or_ancestor:
+        raise ManagedDispatchError(
+            "managed-gateway-not-ready", reason_class="lineage-mismatch"
+        )
+    if response.get("status") != "ready":
+        raise ManagedDispatchError(
+            "managed-gateway-not-ready", reason_class="tui-disconnected"
+        )
+    if response.get("approval_owner") != "tui":
+        raise ManagedDispatchError(
+            "managed-gateway-not-ready",
+            reason_class="approval-owner-mismatch",
+        )
+    if response.get("upstream_clients") != 1:
+        raise ManagedDispatchError(
+            "managed-gateway-not-ready",
+            reason_class="upstream-client-count-invalid",
+        )
     return ManagedGatewayBinding(
-        control, gateway_thread, epoch, inherited_thread_id=current_thread
+        control,
+        gateway_thread,
+        epoch,
+        inherited_thread_id=current_thread,
+        binding_source=binding_source if isinstance(binding_source, str) else "",
     )
 
 
