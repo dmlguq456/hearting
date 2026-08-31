@@ -23,6 +23,16 @@ AGENT_HOME="$ROOT"
 export HOME XDG_CONFIG_HOME XDG_DATA_HOME XDG_STATE_HOME CODEX_HOME CLAUDE_CONFIG_DIR AGENT_HOME
 mkdir -p "$HOME"
 
+# A hosted CI runner has no vendor Codex command. Seed one outside the
+# harness-owned ingress so activation exercises the real binding/protection
+# path without borrowing a developer machine's installation.
+VENDOR_BIN="$TMP/vendor/bin"
+mkdir -p "$VENDOR_BIN"
+printf '%s\n' '#!/usr/bin/env sh' 'printf "%s\n" "codex-cli 0.151.0"' > "$VENDOR_BIN/codex"
+chmod 755 "$VENDOR_BIN/codex"
+PATH="$VENDOR_BIN${PATH:+:$PATH}"
+export PATH
+
 harness() {
   sh "$ROOT/tools/install/harness.sh" "$@"
 }
