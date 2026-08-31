@@ -22,6 +22,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import signal
 import shutil
 import subprocess
 import sys
@@ -718,6 +719,34 @@ class NamespaceE2E(unittest.TestCase):
             for entry in live_result["sys_path"]:
                 self.assertFalse(entry.startswith(str(ROOT.resolve())), entry)
 
+            # Hold the detached reap watcher at the exact pre-receipt edge.
+            # Without this barrier a fast CI runner can close the row between
+            # observing the terminal envelope and the intended timeout probe,
+            # turning a transition assertion into a scheduler race.
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                open_row = JOIN.exact_attempt_row(jobs, attempt)
+                if open_row.metadata.get("reap_watch_pid"):
+                    break
+                if packaged.poll() is not None:
+                    self.fail(f"{harness} wrapper exited before publishing reap watcher identity")
+                time.sleep(0.005)
+            else:
+                self.fail(f"{harness} wrapper did not publish reap watcher identity")
+            reap_watch_pid = int(open_row.metadata["reap_watch_pid"])
+            os.kill(reap_watch_pid, signal.SIGSTOP)
+            watcher = {"stopped": True}
+
+            def resume_watcher() -> None:
+                if not watcher["stopped"]:
+                    return
+                try:
+                    os.kill(reap_watch_pid, signal.SIGCONT)
+                except ProcessLookupError:
+                    pass
+                watcher["stopped"] = False
+
+            self.addCleanup(resume_watcher)
             sentinel.unlink()
             stdout, stderr = packaged.communicate(timeout=10)
             self.assertEqual(packaged.returncode, 0, stdout + stderr)
@@ -770,6 +799,7 @@ class NamespaceE2E(unittest.TestCase):
                 blocked_receipt["children"][0]["reason"],
                 "process-unverifiable",
             )
+            resume_watcher()
             deadline = time.monotonic() + 5
             while time.monotonic() < deadline:
                 finished = JOIN.exact_attempt_row(jobs, attempt)
