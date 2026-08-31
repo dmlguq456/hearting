@@ -34,14 +34,9 @@ typed_root_refusal() { printf 'check=failed\nreason=harness-source-root-unresolv
 if script_parent=$(dirname "$0") && SCRIPT_DIR=$(CDPATH= cd -P "$script_parent" 2>/dev/null && pwd -P); then :; else typed_root_refusal; fi
 if SELF_REAL=$(canonical_existing_path "$0" 2>/dev/null); then :; else typed_root_refusal; fi
 resolve_source_root() {
-  git_candidate=""
-  if command -v git >/dev/null 2>&1 && git_root=$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel 2>/dev/null) && git_root=$(canonical_existing_path "$git_root" 2>/dev/null); then git_candidate=$git_root; fi
-  relative_candidate=""
-  if relative_candidate=$(CDPATH= cd -P "$SCRIPT_DIR/../../.." 2>/dev/null && pwd -P) && relative_candidate=$(canonical_existing_path "$relative_candidate" 2>/dev/null); then :; else relative_candidate=""; fi
-  for candidate in "$git_candidate" "$relative_candidate" "${AGENT_HOME:-}"; do
-    [ -n "$candidate" ] || continue
-    if accepted=$(is_harness_source_root "$candidate" 2>/dev/null); then printf '%s\n' "$accepted"; return 0; fi
-  done
+  if [ -n "${AGENT_HOME:-}" ]; then
+    if accepted=$(is_harness_source_root "$AGENT_HOME" 2>/dev/null); then printf '%s\n' "$accepted"; return 0; fi
+  fi
   record=${CODEX_HOME:-${HOME:-}/.codex}/.harness/activation.json
   if [ -f "$record" ] && command -v python3 >/dev/null 2>&1; then
     if activation_candidate=$(python3 - "$record" codex 2>/dev/null <<'PY'
@@ -62,6 +57,14 @@ PY
     if [ -n "$resolver_value" ] && accepted=$(is_harness_source_root "$resolver_value" 2>/dev/null); then printf '%s\n' "$accepted"; return 0; fi
   fi
   for candidate in "${CODEX_HOME:-${HOME:-}/.codex}/hearting" "${HOME:-}/hearting" "${HOME:-}/agent_setting"; do
+    if accepted=$(is_harness_source_root "$candidate" 2>/dev/null); then printf '%s\n' "$accepted"; return 0; fi
+  done
+  git_candidate=""
+  if command -v git >/dev/null 2>&1 && git_root=$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel 2>/dev/null) && git_root=$(canonical_existing_path "$git_root" 2>/dev/null); then git_candidate=$git_root; fi
+  relative_candidate=""
+  if relative_candidate=$(CDPATH= cd -P "$SCRIPT_DIR/../../.." 2>/dev/null && pwd -P) && relative_candidate=$(canonical_existing_path "$relative_candidate" 2>/dev/null); then :; else relative_candidate=""; fi
+  for candidate in "$git_candidate" "$relative_candidate"; do
+    [ -n "$candidate" ] || continue
     if accepted=$(is_harness_source_root "$candidate" 2>/dev/null); then printf '%s\n' "$accepted"; return 0; fi
   done
   return 1

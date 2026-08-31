@@ -156,6 +156,27 @@ class ComputeHostsTest(unittest.TestCase):
             (self.run_root / run_id / "exit_code").read_text(encoding="utf-8").strip(),
             "7")
 
+    def test_workdir_run_keeps_state_under_the_run_root(self):
+        workdir = self.root / "workdir"
+        workdir.mkdir()
+        result = self.run_tool(
+            "run", "here", "--cwd", str(workdir), "--",
+            "bash", "-c", "pwd; exit 7",
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        run_id = result.stdout.split()[1]
+        exit_path = self.run_root / run_id / "exit_code"
+        for _ in range(50):
+            if exit_path.is_file():
+                break
+            time.sleep(0.1)
+        self.assertEqual(exit_path.read_text(encoding="utf-8").strip(), "7")
+        self.assertEqual(
+            (self.run_root / run_id / "log").read_text(encoding="utf-8").strip(),
+            str(workdir),
+        )
+        self.assertFalse((workdir / "exit_code").exists())
+
     def test_two_launches_in_one_second_get_separate_directories(self):
         module = load_module()
         import datetime

@@ -256,11 +256,19 @@ def _unmanage_profile(profile: dict, target: Path) -> dict:
 
 def _path_precedence(target: Path) -> str:
     entries = [Path(item).expanduser().absolute() for item in os.environ.get("PATH", "").split(os.pathsep) if item]
+    target = target.absolute()
     try:
-        index = next(i for i, entry in enumerate(entries) if entry / "codex" == target.absolute())
+        index = next(i for i, entry in enumerate(entries) if entry / "codex" == target)
     except StopIteration:
         return "missing"
-    return "first" if index == 0 else "shadowed"
+    for entry in entries[:index]:
+        candidate = entry / "codex"
+        try:
+            if candidate.is_file() and os.access(candidate, os.X_OK):
+                return "shadowed"
+        except OSError:
+            continue
+    return "first"
 
 
 class _LauncherLock:

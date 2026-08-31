@@ -906,9 +906,13 @@ def cmd_run(args):
 
     # The log and exit code live under the shared run root, so any host that
     # mounts it can follow the run without touching the machine running it.
+    log_path = run_dir / "log"
+    exit_path = run_dir / "exit_code"
     inner = (f"mkdir -p {shlex.quote(str(run_dir))} && "
              f"cd {shlex.quote(str(run_dir))} && "
-             f"{{ {body} ; }} > log 2>&1; echo $? > exit_code")
+             f"( {body} ) > {shlex.quote(str(log_path))} 2>&1; "
+             f"run_status=$?; printf '%s\\n' \"$run_status\" "
+             f"> {shlex.quote(str(exit_path))}")
     launch = (
         f"mkdir -p {shlex.quote(str(run_dir))} && "
         f"if command -v tmux >/dev/null 2>&1; then "

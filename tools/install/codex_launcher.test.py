@@ -201,6 +201,32 @@ class CodexLauncherInstallTest(unittest.TestCase):
             with self.assertRaises(launcher.CodexUnavailableError):
                 launcher.install(codex_home=self.codex_home, bin_dir=self.bin_dir)
 
+    def test_path_precedence_skips_entries_without_an_executable_codex(self) -> None:
+        empty_bin = self.root / "empty-bin"
+        empty_bin.mkdir()
+        nonexec_bin = self.root / "nonexec-bin"
+        nonexec_bin.mkdir()
+        nonexec = nonexec_bin / "codex"
+        nonexec.write_text("not executable\n", encoding="utf-8")
+        nonexec.chmod(0o644)
+        with mock.patch.dict(
+            os.environ,
+            {"PATH": os.pathsep.join([str(empty_bin), str(nonexec_bin), str(self.bin_dir)])},
+        ):
+            self.assertEqual(launcher._path_precedence(self.target), "first")
+
+    def test_path_precedence_reports_an_earlier_executable_codex(self) -> None:
+        foreign_bin = self.root / "foreign-bin"
+        foreign_bin.mkdir()
+        foreign = foreign_bin / "codex"
+        foreign.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        foreign.chmod(0o755)
+        with mock.patch.dict(
+            os.environ,
+            {"PATH": os.pathsep.join([str(foreign_bin), str(self.bin_dir)])},
+        ):
+            self.assertEqual(launcher._path_precedence(self.target), "shadowed")
+
     def _write_foreign_wrapper(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(launcher.wrapper_bytes())

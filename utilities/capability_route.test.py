@@ -2823,10 +2823,15 @@ class ContinuationSealedJobsFallbackTest(unittest.TestCase):
    home=Path(tmp)/"home"; home.mkdir()
    prior={
     key:os.environ.get(key)
-    for key in ("HOME","XDG_STATE_HOME","HARNESS_STATE_ROOT","AGENT_DISPATCH_JOBS")
+    for key in (
+     "HOME","XDG_STATE_HOME","HARNESS_STATE_ROOT","AGENT_HOME",
+     "AGENT_DISPATCH_JOBS",
+    )
    }
    try:
-    for key in ("XDG_STATE_HOME","HARNESS_STATE_ROOT","AGENT_DISPATCH_JOBS"):
+    for key in (
+     "XDG_STATE_HOME","HARNESS_STATE_ROOT","AGENT_HOME","AGENT_DISPATCH_JOBS",
+    ):
      os.environ.pop(key,None)
     os.environ["HOME"]=str(home)
     route={"launch_compatibility_tuple":{"jobs_path":{"path":"/nonexistent-release/.dispatch/jobs.log"}}}
