@@ -272,6 +272,19 @@ symlinks are preserved. Full uninstall removes that shared launcher, while a
 partial runtime uninstall retains it. No startup file is edited, no scheduler
 selects a host, and no remote agent dispatch is involved.
 
+Destructive filesystem mutation is authority-scoped. Before any unlink,
+directory removal, overwriting rename, or rollback, the operation must prove a
+canonical target inside an exact allowed root or closed allowlist, an explicit
+ownership record, and the current expected state (kind, device/inode, plus
+content digest or link target where applicable). Validation of the complete
+request happens before snapshots, lock creation, temporary files, or state
+writes. A rollback may restore its preimage only while the current path is its
+sealed postimage; a different successor is preserved and reported as a typed
+conflict. Backups, ambient environment paths, string-prefix containment, and a
+path's mere existence never grant deletion authority. External user paths use
+stable canonical target locks and atomic replacement without an
+unlink-then-write window.
+
 ## 5. Adapter Responsibilities
 
 Each adapter should provide:

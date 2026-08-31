@@ -14,6 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import bootstrap  # noqa: E402
 import distribution  # noqa: E402
 import installer  # noqa: E402
+import fixture_env  # noqa: E402
 
 
 class ComputeHostsLauncherTest(unittest.TestCase):
@@ -50,14 +51,20 @@ class ComputeHostsLauncherTest(unittest.TestCase):
         )
         return root
 
+    # destructive-ok: reason=replace one compute-hosts fixture link before invocation; boundary=one target below self.home in this TemporaryDirectory
     def _invoke(self, root, *args):
         target = self.home / ".local/bin/compute-hosts"
         target.parent.mkdir(parents=True, exist_ok=True)
         if target.exists() or target.is_symlink():
             target.unlink()
         target.symlink_to(self.wrapper)
-        env = {**os.environ, "HOME": str(self.home), "AGENT_HOME": str(root),
-               "COMPUTE_HOSTS_CONFIG": str(self.config)}
+        env = fixture_env.build_environment(
+            self.root,
+            root,
+            base={"PATH": os.environ.get("PATH", "")},
+        )
+        env["COMPUTE_HOSTS_CONFIG"] = str(self.config)
+        fixture_env.prepare_environment(env)
         return subprocess.run([str(target), *args], env=env, capture_output=True, text=True)
 
     def test_forwards_exact_arguments_for_runtime_style_pinned_roots(self):
@@ -97,6 +104,7 @@ class ComputeHostsLauncherTest(unittest.TestCase):
         self.assertEqual(target.read_text(encoding="utf-8"), "foreign\n")
         self.assertEqual(self.config.read_text(encoding="utf-8"), "user-owned\n")
 
+    # destructive-ok: reason=simulate current-pointer replacement in a fixture; boundary=two links below this test TemporaryDirectory
     def test_managed_health_requires_lexical_current_target(self):
         current = self.root / "data/hearting/current"
         release = self.root / "data/hearting/releases/old"
@@ -122,6 +130,7 @@ class ComputeHostsLauncherTest(unittest.TestCase):
             target.symlink_to(self.root / "foreign")
             self.assertEqual(bootstrap.compute_hosts_status(self.home)["status"], "foreign-collision")
 
+    # destructive-ok: reason=simulate removal of one fixture launcher; boundary=harness_target below self.home in this TemporaryDirectory
     def test_launcher_expectation_distinguishes_activation_only_from_install(self):
         self.assertFalse(bootstrap.compute_hosts_expected(self.home))
 

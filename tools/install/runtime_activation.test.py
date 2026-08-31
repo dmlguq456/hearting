@@ -59,6 +59,9 @@ class RuntimeSnapshotTest(unittest.TestCase):
                     (Path(record["backup"]) / "managed-sessions").exists())
                 current.write_text("after\n", encoding="utf-8")
                 (state / "new-projection").write_text("remove me\n", encoding="utf-8")
+                record["postimage"] = activation.safe_fs.capture_state(
+                    state, exclude_names=("managed-sessions",)
+                ).public()
                 activation._restore([record])
                 self.assertEqual(current.read_text(encoding="utf-8"), "before\n")
                 self.assertFalse((state / "new-projection").exists())

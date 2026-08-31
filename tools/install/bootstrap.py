@@ -9,10 +9,10 @@ The helpers remain usable independently of installer command wiring.
 import json
 import os
 import subprocess
-import uuid
 from pathlib import Path
 
 import paths
+import safe_fs
 
 
 def restore_memory(mem_store=None):
@@ -202,13 +202,17 @@ def _is_prior_linked_launcher(target, home, rel_source):
 
 def _replace_symlink(target, source):
     """Atomically replace one already-validated installer-owned symlink."""
-    temporary = target.with_name(f".{target.name}.hearting-{uuid.uuid4().hex}")
     try:
-        temporary.symlink_to(source)
-        os.replace(temporary, target)
-    finally:
-        if temporary.is_symlink():
-            temporary.unlink()
+        current = safe_fs.capture_state(target)
+        auth = safe_fs.authority(
+            target,
+            owner="bootstrap:planned-launcher",
+            allowed_paths=(target,),
+            expected=current,
+        )
+        safe_fs.atomic_write_symlink(auth, str(source), create_parents=True)
+    except safe_fs.SafetyError as exc:
+        raise RuntimeError(str(exc)) from exc
 
 
 def install_launchers(home=None, dry_run=False):
@@ -363,7 +367,18 @@ def uninstall_compute_hosts(home=None, dry_run=False):
     elif report["status"] in {"healthy", "owned-drift"}:
         report["status"] = "planned-remove" if dry_run else "removed"
         if not dry_run:
-            target.unlink()
+            try:
+                current = safe_fs.capture_state(target)
+                auth = safe_fs.authority(
+                    target,
+                    owner="bootstrap:owned-compute-hosts-launcher",
+                    allowed_paths=(target,),
+                    expected=current,
+                )
+                safe_fs.remove_exact(auth)
+            except safe_fs.SafetyError as exc:
+                report["status"] = "preserved-foreign"
+                report["detail"] = str(exc)
     else:
         report["status"] = "preserved-foreign"
     return report

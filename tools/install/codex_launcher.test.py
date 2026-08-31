@@ -17,6 +17,7 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import codex_launcher as launcher
+import fixture_env
 
 
 class CodexLauncherInstallTest(unittest.TestCase):
@@ -36,19 +37,25 @@ class CodexLauncherInstallTest(unittest.TestCase):
         self.bin_dir.mkdir(parents=True)
         self.target = self.bin_dir / "codex"
         self.target.symlink_to(self.real)
-        self.environment = mock.patch.dict(
-            os.environ,
+        hermetic = fixture_env.build_environment(
+            self.root,
+            Path(__file__).resolve().parents[2],
+            base={"PATH": os.environ.get("PATH", "")},
+        )
+        hermetic.update(
             {
-                "HOME": str(self.home),
                 "CODEX_HOME": str(self.codex_home),
                 "HARNESS_BIN_DIR": str(self.bin_dir),
                 "PATH": str(self.bin_dir),
-            },
-            clear=False,
+                "SHELL": "/bin/codex-launcher-test-unsupported-shell",
+            }
         )
+        fixture_env.prepare_environment(hermetic)
+        self.environment = mock.patch.dict(os.environ, hermetic, clear=True)
         self.environment.start()
         self.addCleanup(self.environment.stop)
 
+    # destructive-ok: reason=simulate vendor replacement of one fixture ingress; boundary=self.target inside this test TemporaryDirectory
     def test_install_repair_and_uninstall_restore_exact_binding(self) -> None:
         created = launcher.install(codex_home=self.codex_home, bin_dir=self.bin_dir)
         self.assertEqual(created["status"], "created")
@@ -75,8 +82,9 @@ class CodexLauncherInstallTest(unittest.TestCase):
         self.assertTrue(self.target.is_symlink())
         self.assertEqual(os.readlink(self.target), str(self.real))
         self.assertEqual(self.codex_home.stat().st_mode & 0o777, 0o775)
-        self.assertFalse(launcher.lock_path(self.codex_home).exists())
+        self.assertTrue(launcher.lock_path(self.codex_home).is_file())
 
+    # destructive-ok: reason=inject a replaced lock pathname; boundary=one fixture lock below self.codex_home
     def test_launcher_lock_never_unlinks_a_successor_inode(self) -> None:
         path = launcher.lock_path(self.codex_home)
         lock = launcher._LauncherLock(path)
@@ -103,6 +111,7 @@ class CodexLauncherInstallTest(unittest.TestCase):
 
         self.assertEqual(foreign.read_bytes(), b"foreign")
 
+    # destructive-ok: reason=construct an orphaned fixture wrapper; boundary=self.target inside this test TemporaryDirectory
     def test_adopts_byte_exact_orphaned_wrapper(self) -> None:
         self.target.unlink()
         self.target.write_bytes(launcher.wrapper_bytes())
@@ -138,6 +147,7 @@ class CodexLauncherInstallTest(unittest.TestCase):
         self.assertEqual(repaired["status"], "repaired")
         self.assertEqual(self.target.read_bytes(), upgraded)
 
+    # destructive-ok: reason=simulate a moved fixture vendor command; boundary=self.real inside this test TemporaryDirectory
     def test_update_recovers_when_recorded_real_command_moves(self) -> None:
         launcher.install(codex_home=self.codex_home, bin_dir=self.bin_dir)
         replacement = self.root / "codex-new"
@@ -169,6 +179,7 @@ class CodexLauncherInstallTest(unittest.TestCase):
         self.assertFalse(other_home.exists())
         self.assertFalse(other_bin.exists())
 
+    # destructive-ok: reason=construct a foreign fixture ingress; boundary=self.target inside this test TemporaryDirectory
     def test_foreign_file_is_never_overwritten(self) -> None:
         self.target.unlink()
         self.target.write_text("user-owned\n", encoding="utf-8")
@@ -182,6 +193,7 @@ class CodexLauncherInstallTest(unittest.TestCase):
         self.assertEqual(self.target.read_bytes(), before)
         self.assertFalse(launcher.state_path(self.codex_home).exists())
 
+    # destructive-ok: reason=construct a foreign fixture symlink; boundary=self.target inside this test TemporaryDirectory
     def test_foreign_symlink_is_never_adopted(self) -> None:
         foreign = self.root / "foreign-vendor"
         foreign.write_bytes(b"vendor\n")
@@ -195,6 +207,7 @@ class CodexLauncherInstallTest(unittest.TestCase):
         self.assertEqual(self.target.readlink(), foreign)
         self.assertFalse(launcher.state_path(self.codex_home).exists())
 
+    # destructive-ok: reason=simulate a missing fixture vendor command; boundary=self.target inside this test TemporaryDirectory
     def test_missing_real_cli_has_a_typed_result(self) -> None:
         self.target.unlink()
         with mock.patch.object(launcher.shutil, "which", return_value=None):
@@ -232,6 +245,7 @@ class CodexLauncherInstallTest(unittest.TestCase):
         path.write_bytes(launcher.wrapper_bytes())
         path.chmod(0o755)
 
+    # destructive-ok: reason=construct a foreign fixture wrapper; boundary=self.target inside this test TemporaryDirectory
     def test_binding_skips_a_foreign_install_wrapper_on_path(self) -> None:
         # A second HOME's wrapper earlier on PATH must never become real_command:
         # binding to it makes the launcher exec itself forever.
@@ -254,6 +268,7 @@ class CodexLauncherInstallTest(unittest.TestCase):
         state = json.loads(launcher.state_path(self.codex_home).read_text())
         self.assertEqual(state["real_command"], str(real_cli))
 
+    # destructive-ok: reason=construct an isolated wrapper-only PATH fixture; boundary=self.target inside this test TemporaryDirectory
     def test_binding_fails_closed_when_only_wrappers_are_on_path(self) -> None:
         foreign_bin = self.root / "other-home" / ".local" / "bin"
         self._write_foreign_wrapper(foreign_bin / "codex")
@@ -265,6 +280,7 @@ class CodexLauncherInstallTest(unittest.TestCase):
                 with self.assertRaises(launcher.CodexUnavailableError):
                     launcher.install(codex_home=self.codex_home, bin_dir=self.bin_dir)
 
+    # destructive-ok: reason=construct an explicit self-reference fixture; boundary=self.target inside this test TemporaryDirectory
     def test_explicit_wrapper_real_command_is_rejected(self) -> None:
         foreign = self.root / "elsewhere" / "codex"
         self._write_foreign_wrapper(foreign)
@@ -589,6 +605,7 @@ class CodexLauncherInstallTest(unittest.TestCase):
         self.assertEqual(created["mode"], "protected-path-v1")
         self.assertFalse((self.bin_dir / "codex").exists() and not self.target.is_symlink())
 
+    # destructive-ok: reason=construct a legacy in-place fixture binding; boundary=self.target inside this test TemporaryDirectory
     def test_allow_legacy_inplace_opts_into_vendor_bin_dir_implicitly(self) -> None:
         self.target.unlink()
         with mock.patch.dict(os.environ, {}, clear=False):
@@ -601,27 +618,52 @@ class CodexLauncherInstallTest(unittest.TestCase):
         self.assertEqual(created["mode"], "legacy-inplace-v1")
         self.assertTrue(self.target.exists())
 
-    def test_snapshot_restores_profile_but_preserves_updater_successor(self) -> None:
+    def test_activation_snapshot_excludes_profile_and_vendor_paths(self) -> None:
         profile = self.home / ".bashrc"
         profile.write_bytes(b"# user bytes\r\n")
         profile.chmod(0o600)
         with mock.patch.dict(os.environ, {"SHELL": "/bin/bash"}):
             snapshot = launcher.capture_snapshot(
-                codex_home=self.codex_home, bin_dir=self.root / "protected-bin"
+                codex_home=self.codex_home,
+                bin_dir=self.root / "protected-bin",
+                operation="activation",
             )
+            self.assertNotIn("profile", snapshot["paths"])
+            self.assertNotIn("vendor_binding", snapshot["paths"])
             profile.write_bytes(b"# transaction block\n")
             successor = self.root / "successor"
             successor.write_bytes(b"updater successor\n")
             successor.chmod(0o755)
-            snapshot["paths"]["vendor_binding"] = {
-                "path": str(successor),
-                "entry": {"kind": "file", "payload": b"old vendor\n", "mode": 0o755},
-            }
+            launcher.seal_snapshot(snapshot)
             launcher.restore_snapshot(snapshot, codex_home=self.codex_home,
                                       bin_dir=self.root / "protected-bin")
-        self.assertEqual(profile.read_bytes(), b"# user bytes\r\n")
+        self.assertEqual(profile.read_bytes(), b"# transaction block\n")
         self.assertEqual(successor.read_bytes(), b"updater successor\n")
 
+    def test_absent_or_unsealed_snapshot_fails_closed(self) -> None:
+        with self.assertRaisesRegex(
+            launcher.CodexLauncherError, "ownership-unproved"
+        ):
+            launcher.restore_snapshot(
+                {
+                    "codex_home": str(self.codex_home),
+                    "ingress": str(self.target),
+                }
+            )
+        snapshot = launcher.capture_snapshot(
+            codex_home=self.codex_home,
+            bin_dir=self.bin_dir,
+            operation="activation",
+        )
+        try:
+            with self.assertRaisesRegex(
+                launcher.CodexLauncherError, "postimage is not sealed"
+            ):
+                launcher.restore_snapshot(snapshot)
+        finally:
+            launcher.discard_snapshot(snapshot)
+
+    # destructive-ok: reason=construct one schema-1 launcher fixture; boundary=self.target inside this test TemporaryDirectory
     def _write_schema1_state(self) -> None:
         self.target.unlink(missing_ok=True)
         self.target.write_bytes(launcher.wrapper_bytes())
@@ -654,6 +696,7 @@ class CodexLauncherInstallTest(unittest.TestCase):
         self.assertTrue(self.target.is_symlink())
         self.assertEqual(os.readlink(self.target), str(self.real))
 
+    # destructive-ok: reason=simulate updater replacement of a fixture ingress; boundary=self.target inside this test TemporaryDirectory
     def test_schema1_after_updater_preserves_successor_on_migration_and_uninstall(self) -> None:
         self._write_schema1_state()
         successor = self.root / "vendor" / "current" / "bin" / "codex"
@@ -676,6 +719,7 @@ class CodexLauncherInstallTest(unittest.TestCase):
         self.assertEqual(self.target.readlink(), before)
         self.assertEqual(successor.read_bytes(), b"updater successor\n")
 
+    # destructive-ok: reason=construct a future-schema fixture ingress; boundary=self.target inside this test TemporaryDirectory
     def test_future_schema_state_is_rejected_without_mutation(self) -> None:
         self.target.unlink(missing_ok=True)
         self.target.write_bytes(launcher.wrapper_bytes())
@@ -688,6 +732,7 @@ class CodexLauncherInstallTest(unittest.TestCase):
             launcher.install(codex_home=self.codex_home, bin_dir=self.bin_dir)
         self.assertEqual(state_file.read_text(), before)
 
+    # destructive-ok: reason=construct a crash-repair fixture preimage; boundary=self.target inside this test TemporaryDirectory
     def test_injected_crash_during_repair_restores_exact_preimage(self) -> None:
         launcher.install(codex_home=self.codex_home, bin_dir=self.bin_dir)
         original_state = launcher.state_path(self.codex_home).read_text()
@@ -696,10 +741,10 @@ class CodexLauncherInstallTest(unittest.TestCase):
 
         real_atomic_bytes = launcher._atomic_bytes
 
-        def crash(path: Path, payload: bytes, mode: int) -> None:
+        def crash(path: Path, payload: bytes, mode: int, **kwargs) -> None:
             if Path(path) == self.target:
                 raise OSError("simulated crash")
-            return real_atomic_bytes(path, payload, mode)
+            return real_atomic_bytes(path, payload, mode, **kwargs)
 
         with mock.patch.object(launcher, "_atomic_bytes", side_effect=crash):
             with self.assertRaises(OSError):
@@ -709,6 +754,59 @@ class CodexLauncherInstallTest(unittest.TestCase):
         self.assertEqual(os.readlink(self.target), str(self.real))
         self.assertEqual(launcher.state_path(self.codex_home).read_text(), original_state)
 
+    def test_profile_install_failure_restores_profile_before_state_exists(self) -> None:
+        profile = self.home / ".bashrc"
+        profile.write_bytes(b"user prefix\n")
+        profile.chmod(0o640)
+        before = profile.read_bytes()
+        protected = self.root / "protected-profile-failure"
+        with (
+            mock.patch.dict(os.environ, {"SHELL": "/bin/bash"}),
+            mock.patch.object(
+                launcher, "_atomic_json", side_effect=OSError("state commit failed")
+            ),
+        ):
+            with self.assertRaisesRegex(OSError, "state commit failed"):
+                launcher.install(
+                    codex_home=self.codex_home,
+                    bin_dir=protected,
+                    real_command=str(self.real),
+                    profile_policy="manage",
+                )
+        self.assertEqual(profile.read_bytes(), before)
+        self.assertFalse((protected / "codex").exists())
+        self.assertFalse(launcher.state_path(self.codex_home).exists())
+
+    def test_direct_uninstall_failure_rolls_back_profile_wrapper_and_state(self) -> None:
+        profile = self.home / ".bashrc"
+        profile.write_bytes(b"user prefix\n")
+        profile.chmod(0o640)
+        protected = self.root / "protected-uninstall-failure"
+        with mock.patch.dict(os.environ, {"SHELL": "/bin/bash"}):
+            launcher.install(
+                codex_home=self.codex_home,
+                bin_dir=protected,
+                real_command=str(self.real),
+                profile_policy="manage",
+            )
+            profile_before = profile.read_bytes()
+            wrapper_before = (protected / "codex").read_bytes()
+            state_before = launcher.state_path(self.codex_home).read_bytes()
+            with mock.patch.object(
+                launcher,
+                "_restore_wrapper",
+                side_effect=OSError("wrapper restore failed"),
+            ):
+                with self.assertRaisesRegex(OSError, "wrapper restore failed"):
+                    launcher.uninstall(
+                        codex_home=self.codex_home, bin_dir=protected
+                    )
+        self.assertEqual(profile.read_bytes(), profile_before)
+        self.assertEqual((protected / "codex").read_bytes(), wrapper_before)
+        self.assertEqual(
+            launcher.state_path(self.codex_home).read_bytes(), state_before
+        )
+
     def test_schema1_migration_crash_recovery_restores_exact_start_state(self) -> None:
         self._write_schema1_state()
         original_state = json.loads(launcher.state_path(self.codex_home).read_text())
@@ -717,10 +815,10 @@ class CodexLauncherInstallTest(unittest.TestCase):
 
         real_atomic_bytes = launcher._atomic_bytes
 
-        def crash(path: Path, payload: bytes, mode: int) -> None:
+        def crash(path: Path, payload: bytes, mode: int, **kwargs) -> None:
             if Path(path) == protected_target:
                 raise OSError("simulated crash")
-            return real_atomic_bytes(path, payload, mode)
+            return real_atomic_bytes(path, payload, mode, **kwargs)
 
         with mock.patch.dict(os.environ, {}, clear=False):
             os.environ.pop("HARNESS_BIN_DIR", None)
@@ -760,7 +858,7 @@ class CodexLauncherInstallTest(unittest.TestCase):
         self.assertEqual(state["phase"], "installed")
         self.assertTrue(self.target.is_file())
         self.assertFalse(self.target.is_symlink())
-        self.assertFalse(launcher.lock_path(self.codex_home).exists())
+        self.assertTrue(launcher.lock_path(self.codex_home).is_file())
 
     def test_hundred_invocation_reconciliation_smoke(self) -> None:
         created = launcher.install(codex_home=self.codex_home, bin_dir=self.bin_dir)

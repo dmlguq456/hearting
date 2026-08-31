@@ -77,6 +77,13 @@ jobs:
           ./tools/release/plan.test.sh
           python3 tools/install/codex_launcher.test.py
           python3 utilities/codex_launcher.test.py
+          python3 tools/install/check_destructive_calls.py tools/install
+          python3 tools/install/test_destructive_guard.py
+          python3 tools/install/test_fixture_env.py
+          python3 tools/install/test_safe_fs.py
+          python3 tools/install/test_distribution_safe.py
+          python3 tools/install/deletion_safety.test.py
+          python3 tools/install/installer_runtime.test.py
           ./tools/install/release-lifecycle.test.sh
           ./tools/install/projection-completeness.test.sh
           ./tools/install/runtime-activation.test.sh

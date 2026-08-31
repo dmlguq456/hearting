@@ -26,6 +26,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
+from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Iterable, Optional
 
@@ -70,6 +71,19 @@ _SHA256_RE = re.compile(
 
 class DistributionError(RuntimeError):
     """Safe user-facing distribution failure."""
+
+
+@dataclass(frozen=True)
+class _LeafState:
+    """Exact public identity for a standalone-installer mutation target."""
+
+    kind: str
+    device: int | None = None
+    inode: int | None = None
+    mode: int | None = None
+    size: int | None = None
+    digest: str | None = None
+    target: str | None = None
 
 
 def _env_path(name: str, default: Path) -> Path:
@@ -134,28 +148,201 @@ def _utc_now() -> str:
     return dt.datetime.now(dt.timezone.utc).isoformat()
 
 
-def _atomic_bytes(path: Path, payload: bytes, mode: int = 0o600) -> None:
-    if path.is_symlink():
-        raise DistributionError(f"refusing to replace symlink state file: {path}")
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_name = tempfile.mkstemp(prefix=path.name + ".", dir=str(path.parent))
+def _canonical_leaf(path: Path) -> Path:
+    if not path.is_absolute():
+        raise DistributionError(f"mutation target must be absolute: {path}")
+    leaf = Path(os.path.abspath(os.fspath(path)))
+    current = Path(leaf.anchor)
+    for index, part in enumerate(leaf.parts[1:], start=1):
+        current /= part
+        try:
+            info = os.lstat(current)
+        except FileNotFoundError:
+            continue
+        if stat.S_ISLNK(info.st_mode) and index != len(leaf.parts) - 1:
+            raise DistributionError(f"mutation target parent is a symlink: {current}")
+        if index != len(leaf.parts) - 1 and not stat.S_ISDIR(info.st_mode):
+            raise DistributionError(f"mutation target parent is not a directory: {current}")
+    protected = {Path(leaf.anchor), _home(), *Path(leaf.anchor).parents, *_home().parents}
+    if leaf in protected:
+        raise DistributionError(f"refusing protected mutation target: {leaf}")
+    fixture_raw = os.environ.get("HEARTING_FIXTURE_ROOT")
+    if fixture_raw:
+        fixture = Path(os.path.abspath(os.fspath(Path(fixture_raw).expanduser())))
+        try:
+            leaf.relative_to(fixture)
+        except ValueError as exc:
+            raise DistributionError(
+                f"target-outside-fixture: {leaf}: fixture_root={fixture}"
+            ) from exc
+    return leaf
+
+
+def _capture_leaf(path: Path) -> _LeafState:
+    leaf = _canonical_leaf(path)
     try:
-        os.fchmod(fd, mode)
-        with os.fdopen(fd, "wb") as handle:
-            handle.write(payload)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(tmp_name, path)
+        before = os.lstat(leaf)
+    except FileNotFoundError:
+        return _LeafState("missing")
+    common = {
+        "device": before.st_dev,
+        "inode": before.st_ino,
+        "mode": stat.S_IMODE(before.st_mode),
+        "size": before.st_size,
+    }
+    if stat.S_ISLNK(before.st_mode):
+        target = os.readlink(leaf)
+        after = os.lstat(leaf)
+        if (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino):
+            raise DistributionError(f"expected-state-mismatch: {leaf}")
+        return _LeafState("symlink", target=target, **common)
+    if stat.S_ISREG(before.st_mode):
+        payload = leaf.read_bytes()
+        after = os.lstat(leaf)
+        if (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns) != (
+            after.st_dev,
+            after.st_ino,
+            after.st_size,
+            after.st_mtime_ns,
+        ):
+            raise DistributionError(f"expected-state-mismatch: {leaf}")
+        return _LeafState(
+            "file", digest=hashlib.sha256(payload).hexdigest(), **common
+        )
+    if stat.S_ISDIR(before.st_mode):
+        return _LeafState("directory", **common)
+    return _LeafState("other", **common)
+
+
+def _standalone_lock_root() -> Path:
+    uid = os.geteuid() if hasattr(os, "geteuid") else 0
+    base = (
+        Path("/tmp") if os.name == "posix" else Path(tempfile.gettempdir())
+    ) / f"hearting-path-locks-{uid}"
+    if not base.exists():
+        try:
+            os.mkdir(base, 0o700)
+        except FileExistsError:
+            pass
+    info = os.lstat(base)
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+        raise DistributionError(f"unsafe target-lock root: {base}")
+    if hasattr(os, "geteuid") and (
+        info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) != 0o700
+    ):
+        raise DistributionError(f"target-lock root is not owner-only: {base}")
+    return base
+
+
+@contextlib.contextmanager
+def _target_lock(path: Path):
+    leaf = _canonical_leaf(path)
+    key = hashlib.sha256(os.fsencode(os.fspath(leaf))).hexdigest()
+    lock = _standalone_lock_root() / f"{key}.lock"
+    flags = os.O_RDWR | os.O_CREAT
+    if hasattr(os, "O_CLOEXEC"):
+        flags |= os.O_CLOEXEC
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    descriptor = os.open(lock, flags, 0o600)
+    handle = os.fdopen(descriptor, "r+b", buffering=0)
+    try:
+        try:
+            import fcntl
+
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        except ImportError:
+            import msvcrt
+
+            msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+        opened = os.fstat(handle.fileno())
+        current = os.lstat(lock)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or not stat.S_ISREG(current.st_mode)
+            or (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino)
+            or (
+                hasattr(os, "geteuid")
+                and (opened.st_uid != os.geteuid() or current.st_uid != os.geteuid())
+            )
+        ):
+            raise DistributionError(f"unsafe target-lock identity: {lock}")
+        os.fchmod(handle.fileno(), 0o600)
+        yield
     finally:
-        if os.path.exists(tmp_name):
-            os.unlink(tmp_name)
+        try:
+            if "fcntl" in sys.modules:
+                sys.modules["fcntl"].flock(handle.fileno(), sys.modules["fcntl"].LOCK_UN)
+        finally:
+            handle.close()
 
 
-def _atomic_json(path: Path, value: dict) -> None:
+def _assert_leaf(path: Path, expected: _LeafState) -> None:
+    current = _capture_leaf(path)
+    if current != expected:
+        raise DistributionError(
+            f"expected-state-mismatch: {path}: expected={expected} current={current}"
+        )
+
+
+def _fsync_parent(path: Path) -> None:
+    try:
+        descriptor = os.open(path.parent, os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(descriptor)
+    except OSError:
+        pass
+    finally:
+        os.close(descriptor)
+
+
+# destructive-ok: reason=commit CAS-validated bytes and discard the helper-created sibling temp; boundary=one exact caller target and one mkstemp sibling
+def _atomic_bytes(
+    path: Path,
+    payload: bytes,
+    mode: int = 0o600,
+    *,
+    expected: _LeafState | None = None,
+) -> _LeafState:
+    leaf = _canonical_leaf(path)
+    with _target_lock(leaf):
+        wanted = _capture_leaf(leaf) if expected is None else expected
+        _assert_leaf(leaf, wanted)
+        if wanted.kind not in {"missing", "file"}:
+            raise DistributionError(f"refusing non-file state target: {leaf}")
+        leaf.parent.mkdir(parents=True, exist_ok=True)
+        _canonical_leaf(leaf)
+        fd, tmp_name = tempfile.mkstemp(prefix=f".{leaf.name}.hearting-", dir=leaf.parent)
+        try:
+            os.fchmod(fd, mode)
+            with os.fdopen(fd, "wb") as handle:
+                fd = -1
+                handle.write(payload)
+                handle.flush()
+                os.fsync(handle.fileno())
+            _assert_leaf(leaf, wanted)
+            os.replace(tmp_name, leaf)
+            _fsync_parent(leaf)
+            return _capture_leaf(leaf)
+        finally:
+            if fd >= 0:
+                os.close(fd)
+            # STANDALONE_SAFE_FS_INTERNAL: exact mkstemp sibling owned by this call.
+            try:
+                Path(tmp_name).unlink(missing_ok=True)
+            except OSError:
+                pass
+
+
+def _atomic_json(
+    path: Path, value: dict, *, expected: _LeafState | None = None
+) -> _LeafState:
     payload = json.dumps(
         value, ensure_ascii=False, sort_keys=True, indent=2
     ).encode("utf-8") + b"\n"
-    _atomic_bytes(path, payload)
+    return _atomic_bytes(path, payload, expected=expected)
 
 
 def _load_state() -> Optional[dict]:
@@ -389,6 +576,7 @@ def _expected_checksum(url: str) -> str:
     return matches[0]
 
 
+# destructive-ok: reason=discard failed or mismatched release download; boundary=one mkstemp download owned by this call
 def _download_archive(url: str, destination: Path, expected: str) -> None:
     _allow_url(url)
     request = urllib.request.Request(
@@ -509,6 +697,7 @@ def _release_metadata_path(root: Path) -> Path:
     return root / ".hearting-release.json"
 
 
+# destructive-ok: reason=publish verified staging by atomic rename; boundary=one versioned staging directory and absent release destination
 def _publish_release(
     extracted_root: Path, version: str, checksum: str
 ) -> tuple[Path, bool]:
@@ -556,23 +745,100 @@ def _read_link(path: Path) -> Optional[str]:
     return None
 
 
-def _atomic_symlink(path: Path, target: Path) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
-    try:
-        temporary.symlink_to(target)
-        os.replace(temporary, path)
-    finally:
-        temporary.unlink(missing_ok=True)
+# destructive-ok: reason=commit a CAS-validated symlink and discard the helper-created sibling temp; boundary=one exact managed pointer and one mkstemp sibling
+def _atomic_symlink(
+    path: Path,
+    target: Path | str,
+    *,
+    expected: _LeafState | None = None,
+) -> _LeafState:
+    leaf = _canonical_leaf(path)
+    with _target_lock(leaf):
+        wanted = _capture_leaf(leaf) if expected is None else expected
+        _assert_leaf(leaf, wanted)
+        if wanted.kind not in {"missing", "symlink"}:
+            raise DistributionError(f"refusing non-pointer target: {leaf}")
+        leaf.parent.mkdir(parents=True, exist_ok=True)
+        _canonical_leaf(leaf)
+        descriptor, raw_temp = tempfile.mkstemp(
+            prefix=f".{leaf.name}.hearting-", dir=leaf.parent
+        )
+        os.close(descriptor)
+        temporary = Path(raw_temp)
+        # STANDALONE_SAFE_FS_INTERNAL: convert this call's empty sibling temp.
+        temporary.unlink()
+        try:
+            temporary.symlink_to(target)
+            _assert_leaf(leaf, wanted)
+            os.replace(temporary, leaf)
+            _fsync_parent(leaf)
+            return _capture_leaf(leaf)
+        finally:
+            # STANDALONE_SAFE_FS_INTERNAL: exact sibling temp owned by this call.
+            temporary.unlink(missing_ok=True)
 
 
-def _restore_link(path: Path, previous: Optional[str]) -> None:
-    if path.is_symlink():
-        path.unlink()
-    elif path.exists():
-        raise DistributionError(f"cannot restore pointer over regular path: {path}")
-    if previous is not None:
-        path.symlink_to(previous)
+# destructive-ok: reason=remove one CAS-validated standalone-installer leaf; boundary=one exact caller target under its canonical target lock
+def _remove_exact(path: Path, expected: _LeafState) -> _LeafState:
+    leaf = _canonical_leaf(path)
+    with _target_lock(leaf):
+        _assert_leaf(leaf, expected)
+        if expected.kind == "missing":
+            return expected
+        if expected.kind not in {"file", "symlink"}:
+            raise DistributionError(f"refusing unsupported removal target: {leaf}")
+        leaf.unlink()
+        _fsync_parent(leaf)
+        return _capture_leaf(leaf)
+
+
+def _restore_link(path: Path, previous: _LeafState, postimage: _LeafState) -> None:
+    current = _capture_leaf(path)
+    if current == previous:
+        return
+    if current != postimage:
+        raise DistributionError(
+            f"concurrent-successor: {path}: postimage={postimage} current={current}"
+        )
+    if previous.kind == "missing":
+        _remove_exact(path, current)
+    elif previous.kind == "symlink" and previous.target is not None:
+        _atomic_symlink(path, previous.target, expected=current)
+    else:
+        raise DistributionError(f"cannot restore unsupported pointer preimage: {path}")
+
+
+def _restore_bytes(
+    path: Path, previous: _LeafState, postimage: _LeafState, payload: bytes | None
+) -> None:
+    current = _capture_leaf(path)
+    if current == previous:
+        return
+    if current != postimage:
+        raise DistributionError(
+            f"concurrent-successor: {path}: postimage={postimage} current={current}"
+        )
+    if previous.kind == "missing":
+        _remove_exact(path, current)
+    elif previous.kind == "file" and payload is not None:
+        _atomic_bytes(
+            path,
+            payload,
+            int(previous.mode or 0o600),
+            expected=current,
+        )
+    else:
+        raise DistributionError(f"cannot restore unsupported file preimage: {path}")
+
+
+def _assert_rollback_candidate(
+    path: Path, previous: _LeafState, postimage: _LeafState
+) -> None:
+    current = _capture_leaf(path)
+    if current not in {previous, postimage}:
+        raise DistributionError(
+            f"concurrent-successor: {path}: postimage={postimage} current={current}"
+        )
 
 
 def _launcher_is_harness_link(path: Path) -> bool:
@@ -660,7 +926,7 @@ def _tool_launcher_is_owned(
     }
 
 
-def _snapshot_tool_launchers(state: Optional[dict]) -> dict[str, Optional[str]]:
+def _snapshot_tool_launchers(state: Optional[dict]) -> dict[str, _LeafState]:
     snapshot = {}
     for name, relative_source in TOOL_LAUNCHERS:
         path = bin_dir() / name
@@ -672,11 +938,15 @@ def _snapshot_tool_launchers(state: Optional[dict]) -> dict[str, Optional[str]]:
             path, relative_source, state
         ):
             raise DistributionError(f"Hearting launcher is a foreign symlink: {path}")
-        snapshot[name] = os.readlink(path) if path.is_symlink() else None
+        snapshot[name] = _capture_leaf(path)
     return snapshot
 
 
-def _install_tool_launchers(root: Path) -> bool:
+def _install_tool_launchers(
+    root: Path,
+    expected_states: dict[str, _LeafState] | None = None,
+    postimages: dict[str, _LeafState] | None = None,
+) -> bool:
     changed = False
     for name, relative_source in TOOL_LAUNCHERS:
         source = root / relative_source
@@ -686,15 +956,28 @@ def _install_tool_launchers(root: Path) -> bool:
             )
         path = bin_dir() / name
         desired = current_path() / relative_source
-        if not path.is_symlink() or Path(os.readlink(path)) != desired:
-            _atomic_symlink(path, desired)
+        before = (
+            expected_states[name]
+            if expected_states is not None
+            else _capture_leaf(path)
+        )
+        if before.kind not in {"missing", "symlink"}:
+            raise DistributionError(f"Hearting launcher is not a pointer: {path}")
+        if before.kind != "symlink" or Path(before.target or "") != desired:
+            after = _atomic_symlink(path, desired, expected=before)
             changed = True
+        else:
+            after = before
+        if postimages is not None:
+            postimages[name] = after
     return changed
 
 
-def _restore_tool_launchers(snapshot: dict[str, Optional[str]]) -> None:
+def _restore_tool_launchers(
+    snapshot: dict[str, _LeafState], postimages: dict[str, _LeafState]
+) -> None:
     for name, _relative_source in TOOL_LAUNCHERS:
-        _restore_link(bin_dir() / name, snapshot[name])
+        _restore_link(bin_dir() / name, snapshot[name], postimages[name])
 
 
 def _repair_managed_pointers(state: dict) -> bool:
@@ -724,7 +1007,7 @@ def _repair_managed_pointers(state: dict) -> bool:
                 f"managed release file escapes root: {relative}"
             ) from exc
 
-    _snapshot_tool_launchers(state)
+    tool_preimages = _snapshot_tool_launchers(state)
 
     changed = False
     current = current_path()
@@ -734,7 +1017,7 @@ def _repair_managed_pointers(state: dict) -> bool:
         raw = Path(current_raw)
         current_target = raw if raw.is_absolute() else current.parent / raw
     if current_target is None or current_target.resolve(strict=False) != resolved_target:
-        _atomic_symlink(current, target)
+        _atomic_symlink(current, target, expected=_capture_leaf(current))
         changed = True
 
     launcher = launcher_path()
@@ -744,7 +1027,7 @@ def _repair_managed_pointers(state: dict) -> bool:
         raise DistributionError(f"harness launcher is a foreign symlink: {launcher}")
     desired = current / "tools/install/harness.sh"
     if not launcher.is_symlink() or Path(os.readlink(launcher)) != desired:
-        _atomic_symlink(launcher, desired)
+        _atomic_symlink(launcher, desired, expected=_capture_leaf(launcher))
         changed = True
 
     legacy = legacy_launcher_path()
@@ -753,9 +1036,9 @@ def _repair_managed_pointers(state: dict) -> bool:
     if legacy.is_symlink() and not _launcher_is_harness_link(legacy):
         raise DistributionError(f"harness launcher is a foreign symlink: {legacy}")
     if not legacy.is_symlink() or Path(os.readlink(legacy)) != desired:
-        _atomic_symlink(legacy, desired)
+        _atomic_symlink(legacy, desired, expected=_capture_leaf(legacy))
         changed = True
-    if _install_tool_launchers(target):
+    if _install_tool_launchers(target, tool_preimages):
         changed = True
     return changed
 
@@ -800,6 +1083,23 @@ def _selected_update_runtimes(state: dict, requested: Iterable[str]) -> tuple[li
         else:
             selected.append(runtime)
     return selected, skipped
+
+
+def _release_projection_referenced(target: Path) -> bool:
+    resolved = target.resolve(strict=False)
+    current = current_path()
+    if current.is_symlink():
+        try:
+            if current.resolve(strict=False) == resolved:
+                return True
+        except OSError:
+            return True
+    for runtime in RUNTIMES:
+        activation = _activation_state(runtime)
+        source = activation.get("source_root") if activation else None
+        if source and Path(source).resolve(strict=False) == resolved:
+            return True
+    return False
 
 
 def _activate_release(root: Path, runtimes: Iterable[str]) -> dict:
@@ -873,12 +1173,14 @@ def _reconcile_codex_launcher() -> dict:
         raise DistributionError(f"Codex launcher reconciliation failed: {exc}") from exc
 
 
-def _write_distribution_state(value: dict) -> None:
+def _write_distribution_state(
+    value: dict, *, expected: _LeafState | None = None
+) -> _LeafState:
     if os.environ.get("HARNESS_TEST_FAIL_STATE_COMMIT") == "1":
         raise DistributionError("injected distribution state commit failure")
     value = dict(value)
     value.pop("profile", None)
-    _atomic_json(state_path(), value)
+    return _atomic_json(state_path(), value, expected=expected)
 
 
 def _relative_to_release(value_path: Path, candidate: Path) -> Optional[Path]:
@@ -1143,6 +1445,7 @@ def _registry_lock(jobs: Path):
             handle.close()
 
 
+# destructive-ok: reason=atomically replace one dispatch registry; boundary=one validated jobs registry and its mkstemp sibling
 def _atomic_registry_write(jobs: Path, lines: list[str]) -> None:
     """stdlib mirror of `dispatch_contract._atomic_registry_replace`."""
     fd, tmp_name = tempfile.mkstemp(prefix=f".{jobs.name}.carry-", dir=str(jobs.parent))
@@ -1468,6 +1771,7 @@ def _dispatch_migration_promoted(environ: dict[str, str]) -> bool:
     return False
 
 
+# destructive-ok: reason=remove a successful migration probe; boundary=one probe created inside the selected stable state root
 def _migration_m0_preflight(source_dispatch: Path, stable_root: Path) -> dict:
     """M0 preflight (SD-112 §13.33.2-(4)): create/verify the stable root is
     writable, measure cross-device-ness and legacy inventory (open row
@@ -1496,6 +1800,7 @@ def _migration_m0_preflight(source_dispatch: Path, stable_root: Path) -> dict:
     }
 
 
+# destructive-ok: reason=commit a verified migration copy; boundary=one destination and its mkstemp sibling under stable state
 def _atomic_migrate_copy(source: Path, destination: Path) -> bool:
     """M2 per-file atomic copy for the new migration path only (decision 8):
     copy to a same-directory `.tmp`, verify the digest, fsync the file,
@@ -2143,6 +2448,7 @@ def _commit_forced_prune_gap_record(candidate: Path, environ: dict[str, str], re
                 pass
 
 
+# destructive-ok: reason=prune only retention-proved version directories; boundary=canonical children of the managed releases root
 def _cleanup_releases(keep: set[Path], *, force_prune_unproven: bool = False) -> None:
     releases = data_root() / "releases"
     if not releases.is_dir() or releases.is_symlink():
@@ -2213,6 +2519,7 @@ def _cleanup_releases(keep: set[Path], *, force_prune_unproven: bool = False) ->
         shutil.rmtree(candidate, ignore_errors=True)
 
 
+# destructive-ok: reason=rollback or discard one managed release staging transaction; boundary=version target staging root and state leaf selected by this invocation
 def _install_or_update(
     *,
     repository: str,
@@ -2254,18 +2561,27 @@ def _install_or_update(
             and previous_state.get("version") == release["version"]
             and previous_state.get("archive_sha256") == checksum
         ):
+            previous_state_leaf = _capture_leaf(state_path())
             previous_state_bytes = state_path().read_bytes()
+            state_postimage = previous_state_leaf
             try:
                 repaired = _repair_managed_pointers(previous_state)
                 launcher_result = _reconcile_codex_launcher()
                 previous_state["channel"] = channel
                 previous_state["pinned_version"] = pinned_version
                 previous_state["last_checked_at"] = _utc_now()
-                _write_distribution_state(previous_state)
+                state_postimage = _write_distribution_state(
+                    previous_state, expected=previous_state_leaf
+                )
             except Exception as original_error:
                 rollback_error = None
                 try:
-                    _atomic_bytes(state_path(), previous_state_bytes)
+                    _restore_bytes(
+                        state_path(),
+                        previous_state_leaf,
+                        state_postimage,
+                        previous_state_bytes,
+                    )
                 except Exception as exc:
                     rollback_error = str(exc)
                 if rollback_error:
@@ -2306,12 +2622,26 @@ def _install_or_update(
 
         current = current_path()
         launcher = launcher_path()
-        previous_current = _read_link(current)
+        previous_current_raw = _read_link(current)
+        previous_current = _capture_leaf(current)
+        if (
+            (previous_current_raw is None and previous_current.kind != "missing")
+            or (
+                previous_current_raw is not None
+                and (
+                    previous_current.kind != "symlink"
+                    or previous_current.target != previous_current_raw
+                )
+            )
+        ):
+            raise DistributionError(f"current pointer changed during preflight: {current}")
         if launcher.exists() and not launcher.is_symlink():
             raise DistributionError(f"harness launcher already exists and is not owned: {launcher}")
         if launcher.is_symlink() and not _launcher_is_harness_link(launcher):
             raise DistributionError(f"harness launcher is a foreign symlink: {launcher}")
-        previous_launcher = os.readlink(launcher) if launcher.is_symlink() else None
+        previous_launcher = _capture_leaf(launcher)
+        if previous_launcher.kind not in {"missing", "symlink"}:
+            raise DistributionError(f"harness launcher changed during preflight: {launcher}")
         legacy_launcher = legacy_launcher_path()
         if legacy_launcher.exists() and not legacy_launcher.is_symlink():
             raise DistributionError(
@@ -2323,10 +2653,14 @@ def _install_or_update(
             raise DistributionError(
                 f"harness launcher is a foreign symlink: {legacy_launcher}"
             )
-        previous_legacy_launcher = (
-            os.readlink(legacy_launcher) if legacy_launcher.is_symlink() else None
-        )
+        previous_legacy_launcher = _capture_leaf(legacy_launcher)
+        if previous_legacy_launcher.kind not in {"missing", "symlink"}:
+            raise DistributionError(
+                f"harness launcher changed during preflight: {legacy_launcher}"
+            )
         previous_tool_launchers = _snapshot_tool_launchers(previous_state)
+        post_tool_launchers = dict(previous_tool_launchers)
+        previous_state_leaf = _capture_leaf(state_path())
         previous_state_bytes = state_path().read_bytes() if state_path().is_file() else None
         old_root = (
             Path(previous_state["release_root"])
@@ -2338,15 +2672,31 @@ def _install_or_update(
         published = False
         target = None
         activation = {"runtimes": [], "session_action": {}}
+        post_current = previous_current
+        post_launcher = previous_launcher
+        post_legacy_launcher = previous_legacy_launcher
+        state_postimage = previous_state_leaf
         try:
             _download_archive(release["assets"][ARCHIVE_NAME], archive, checksum)
             extracted = _safe_extract(archive, staging / "extract", release["version"])
             target, published = _publish_release(extracted, release["version"], checksum)
             activation = _activate_release(target, selected)
-            _atomic_symlink(current, target)
-            _atomic_symlink(launcher, current / "tools/install/harness.sh")
-            _atomic_symlink(legacy_launcher, current / "tools/install/harness.sh")
-            _install_tool_launchers(target)
+            post_current = _atomic_symlink(
+                current, target, expected=previous_current
+            )
+            post_launcher = _atomic_symlink(
+                launcher,
+                current / "tools/install/harness.sh",
+                expected=previous_launcher,
+            )
+            post_legacy_launcher = _atomic_symlink(
+                legacy_launcher,
+                current / "tools/install/harness.sh",
+                expected=previous_legacy_launcher,
+            )
+            _install_tool_launchers(
+                target, previous_tool_launchers, post_tool_launchers
+            )
             next_state = {
                 "schema": STATE_SCHEMA,
                 "repository": repository,
@@ -2369,26 +2719,69 @@ def _install_or_update(
                 "channel": channel,
                 "pinned_version": pinned_version,
             }
-            _write_distribution_state(next_state)
+            state_postimage = _write_distribution_state(
+                next_state, expected=previous_state_leaf
+            )
         except Exception as original_error:
             rollback_error = None
-            if old_root and selected:
+            rollback_conflict = False
+            rollback_paths = [
+                (current, previous_current, post_current),
+                (launcher, previous_launcher, post_launcher),
+                (
+                    legacy_launcher,
+                    previous_legacy_launcher,
+                    post_legacy_launcher,
+                ),
+                (state_path(), previous_state_leaf, state_postimage),
+            ]
+            rollback_paths.extend(
+                (
+                    bin_dir() / name,
+                    previous_tool_launchers[name],
+                    post_tool_launchers[name],
+                )
+                for name, _relative_source in TOOL_LAUNCHERS
+            )
+            try:
+                for rollback_path, preimage, postimage in rollback_paths:
+                    _assert_rollback_candidate(rollback_path, preimage, postimage)
+            except Exception as exc:
+                rollback_error = str(exc)
+                rollback_conflict = True
+            if not rollback_conflict and old_root and selected:
                 try:
                     _activate_release(old_root, selected)
                 except Exception as exc:
                     rollback_error = str(exc)
             try:
-                _restore_link(current, previous_current)
-                _restore_link(launcher, previous_launcher)
-                _restore_link(legacy_launcher, previous_legacy_launcher)
-                _restore_tool_launchers(previous_tool_launchers)
-                if previous_state_bytes is None:
-                    state_path().unlink(missing_ok=True)
-                else:
-                    _atomic_bytes(state_path(), previous_state_bytes)
+                if not rollback_conflict:
+                    _restore_link(current, previous_current, post_current)
+                    _restore_link(launcher, previous_launcher, post_launcher)
+                    _restore_link(
+                        legacy_launcher,
+                        previous_legacy_launcher,
+                        post_legacy_launcher,
+                    )
+                    _restore_tool_launchers(
+                        previous_tool_launchers, post_tool_launchers
+                    )
+                    _restore_bytes(
+                        state_path(),
+                        previous_state_leaf,
+                        state_postimage,
+                        previous_state_bytes,
+                    )
             except Exception as exc:
                 rollback_error = rollback_error or str(exc)
-            if published and target and target.exists():
+                rollback_conflict = True
+            if (
+                not rollback_conflict
+                and published
+                and target
+                and target.exists()
+                and not _release_projection_referenced(target)
+            ):
                 shutil.rmtree(target, ignore_errors=True)
             if rollback_error:
                 raise DistributionError(
@@ -2584,8 +2977,53 @@ def _systemd_environment_line(name: str, value: str) -> str:
     return f'Environment="{escaped}"'
 
 
+def _owned_scheduler_state(path: Path, kind: str) -> _LeafState:
+    state = _capture_leaf(path)
+    if state.kind == "missing":
+        return state
+    if state.kind != "file":
+        raise DistributionError(f"scheduler unit is not an owned file: {path}")
+    try:
+        payload = path.read_bytes()
+    except OSError as exc:
+        raise DistributionError(f"scheduler unit cannot be read: {path}") from exc
+    if _capture_leaf(path) != state:
+        raise DistributionError(f"scheduler unit changed while reading: {path}")
+    owned = False
+    if kind == "systemd-service":
+        owned = (
+            b"Description=Update Hearting managed release\n" in payload
+            and b"\nExecStart=" in payload
+            and payload.endswith(b" update --auto\n")
+        )
+    elif kind == "systemd-timer":
+        owned = (
+            b"Description=Check for Hearting updates daily\n" in payload
+            and b"\nOnUnitActiveSec=24h\n" in payload
+            and payload.endswith(b"WantedBy=timers.target\n")
+        )
+    elif kind == "launch-agent":
+        try:
+            value = plistlib.loads(payload)
+        except Exception:
+            value = None
+        arguments = value.get("ProgramArguments") if isinstance(value, dict) else None
+        owned = (
+            isinstance(value, dict)
+            and value.get("Label") == "com.hearting.update"
+            and isinstance(arguments, list)
+            and len(arguments) >= 3
+            and arguments[-2:] == ["update", "--auto"]
+        )
+    if not owned:
+        raise DistributionError(f"ownership-unproved: foreign scheduler unit: {path}")
+    return state
+
+
 def _write_systemd_units() -> tuple[Path, Path]:
     service, timer = _systemd_paths()
+    service_before = _owned_scheduler_state(service, "systemd-service")
+    timer_before = _owned_scheduler_state(timer, "systemd-timer")
     environment = "\n".join(
         _systemd_environment_line(name, value)
         for name, value in _scheduler_environment().items()
@@ -2609,8 +3047,10 @@ def _write_systemd_units() -> tuple[Path, Path]:
         "[Install]\n"
         "WantedBy=timers.target\n"
     )
-    _atomic_bytes(service, service_body.encode("utf-8"), 0o644)
-    _atomic_bytes(timer, timer_body.encode("utf-8"), 0o644)
+    _atomic_bytes(
+        service, service_body.encode("utf-8"), 0o644, expected=service_before
+    )
+    _atomic_bytes(timer, timer_body.encode("utf-8"), 0o644, expected=timer_before)
     return service, timer
 
 
@@ -2620,6 +3060,7 @@ def _launch_agent_path() -> Path:
 
 def _write_launch_agent() -> Path:
     path = _launch_agent_path()
+    before = _owned_scheduler_state(path, "launch-agent")
     payload = plistlib.dumps(
         {
             "Label": "com.hearting.update",
@@ -2632,7 +3073,7 @@ def _write_launch_agent() -> Path:
         fmt=plistlib.FMT_XML,
         sort_keys=True,
     )
-    _atomic_bytes(path, payload, 0o644)
+    _atomic_bytes(path, payload, 0o644, expected=before)
     return path
 
 
@@ -2867,17 +3308,22 @@ def disable_auto_update() -> dict:
     if kind == "systemd-user":
         service, timer = _systemd_paths()
         _run_scheduler(["systemctl", "--user", "disable", "--now", timer.name])
-        for path in (service, timer):
-            if path.exists() or path.is_symlink():
-                path.unlink()
+        for path, unit_kind in (
+            (service, "systemd-service"),
+            (timer, "systemd-timer"),
+        ):
+            before = _owned_scheduler_state(path, unit_kind)
+            if before.kind != "missing":
+                _remove_exact(path, before)
                 removed.append(str(path))
         _run_scheduler(["systemctl", "--user", "daemon-reload"])
     elif kind == "launch-agent":
         path = _launch_agent_path()
         domain = f"gui/{os.getuid()}"
         _run_scheduler(["launchctl", "bootout", domain, str(path)])
-        if path.exists() or path.is_symlink():
-            path.unlink()
+        before = _owned_scheduler_state(path, "launch-agent")
+        if before.kind != "missing":
+            _remove_exact(path, before)
             removed.append(str(path))
     else:
         detail = "automatic updates are unsupported on this platform"

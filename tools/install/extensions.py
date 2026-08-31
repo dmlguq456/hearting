@@ -16,7 +16,6 @@ import hashlib
 import json
 import os
 import re
-import secrets
 import stat
 import subprocess
 import sys
@@ -27,6 +26,7 @@ from pathlib import Path
 from typing import Any, Iterator, Optional
 
 import paths
+import safe_fs
 
 TOOLS_ROOT = Path(__file__).resolve().parents[1]
 if str(TOOLS_ROOT) not in sys.path:
@@ -914,6 +914,7 @@ def _snapshot_path(entry: dict) -> Path:
     return current / entry["snapshot_key"]
 
 
+# destructive-ok: reason=discard failed prepared extension snapshots; boundary=one digest-named staging directory under the extension snapshot root
 def _prepare_snapshot(report: dict) -> tuple[Path, str, str, bool, Optional[Path]]:
     if report["status"] != "ready":
         raise ExtensionError("inspection-blocked", "extension has blocking inspection findings")
@@ -1000,6 +1001,7 @@ def _prepare_snapshot(report: dict) -> tuple[Path, str, str, bool, Optional[Path
         raise
 
 
+# destructive-ok: reason=publish a prepared immutable extension snapshot; boundary=one verified staging directory and digest-named snapshot destination
 def _commit_prepared_snapshot(
     temporary: Optional[Path], final: Path, projection_checksum: str
 ) -> None:
@@ -1027,6 +1029,7 @@ def _commit_prepared_snapshot(
         raise ExtensionError("snapshot-mismatch", "committed snapshot failed digest verification")
 
 
+# destructive-ok: reason=remove a no-follow extension-owned tree; boundary=one caller-validated snapshot staging or projection tree via dirfd walk
 def _writable_rmtree(path: Path) -> None:
     root, parts = _data_relative(path)
     if not parts:
@@ -1087,8 +1090,8 @@ def _journal_path() -> Path:
     return paths.extension_state_dir() / "transaction.json"
 
 
-def _atomic_json(path: Path, data: dict) -> None:
-    _atomic_bytes(path, _json_bytes(data))
+def _atomic_json(path: Path, data: dict) -> safe_fs.PathState:
+    return _atomic_bytes(path, _json_bytes(data))
 
 
 def _json_bytes(data: dict) -> bytes:
@@ -1097,20 +1100,20 @@ def _json_bytes(data: dict) -> bytes:
     ).encode("utf-8")
 
 
-def _atomic_bytes(path: Path, data: bytes) -> None:
-    if path.is_symlink():
-        raise ExtensionError("unsafe-state-path", f"state file must not be a symlink: {path}")
-    fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=str(path.parent))
+def _atomic_bytes(path: Path, data: bytes) -> safe_fs.PathState:
     try:
-        with os.fdopen(fd, "wb") as handle:
-            handle.write(data)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.chmod(temporary, 0o600)
-        os.replace(temporary, path)
-    finally:
-        if os.path.exists(temporary):
-            os.unlink(temporary)
+        with safe_fs.TargetLock(path):
+            current = safe_fs.capture_state(path)
+            auth = safe_fs.authority(
+                path,
+                owner="extensions:registry-or-journal",
+                allowed_paths=(path,),
+                allow_leaf_symlink=False,
+                expected=current,
+            )
+            return safe_fs.atomic_write_bytes(auth, data, 0o600, create_parents=True)
+    except safe_fs.SafetyError as exc:
+        raise ExtensionError("unsafe-state-path", str(exc)) from exc
 
 
 def _default_registry() -> dict:
@@ -1301,43 +1304,77 @@ def _preflight_destination(
     require_missing: bool = False,
 ) -> dict:
     destination = _runtime_destination(runtime, physical, create=False)
+    try:
+        preimage = safe_fs.capture_state(destination)
+    except safe_fs.SafetyError as exc:
+        raise ExtensionError("ownership-drift", str(exc)) from exc
     if require_missing:
-        if destination.exists() or destination.is_symlink():
+        if preimage.kind != "missing":
             raise ExtensionError(
                 "destination-collision", f"refusing to replace existing runtime path: {destination}"
             )
-        return {"runtime": runtime, "dest": str(destination), "before": "missing", "target": None}
-    if not destination.is_symlink():
+        return {
+            "runtime": runtime,
+            "dest": str(destination),
+            "before": "missing",
+            "target": None,
+            "preimage": preimage.public(),
+            "postimage": preimage.public(),
+        }
+    if preimage.kind != "symlink":
         raise ExtensionError(
             "ownership-drift", f"owned runtime link is missing or replaced: {destination}"
         )
-    raw = os.readlink(destination)
+    raw = preimage.link_target
     if expected is None or raw != str(expected):
         raise ExtensionError(
             "ownership-drift", f"runtime link target differs from registry ownership: {destination}"
         )
-    return {"runtime": runtime, "dest": str(destination), "before": "symlink", "target": raw}
+    return {
+        "runtime": runtime,
+        "dest": str(destination),
+        "before": "symlink",
+        "target": raw,
+        "preimage": preimage.public(),
+        "postimage": preimage.public(),
+    }
 
 
-def _atomic_symlink(target: Path, destination: Path) -> None:
-    temporary = None
-    for _ in range(10):
-        candidate = destination.parent / (
-            f".{destination.name}.extension-{secrets.token_hex(16)}"
-        )
-        try:
-            os.symlink(str(target), candidate)
-        except FileExistsError:
-            continue
-        temporary = candidate
-        break
-    if temporary is None:
-        raise ExtensionError("temp-collision", "could not allocate a unique symlink temp path")
+def _atomic_symlink(
+    target: Path, destination: Path, expected: safe_fs.PathState
+) -> safe_fs.PathState:
     try:
-        os.replace(temporary, destination)
-    finally:
-        if temporary.is_symlink():
-            temporary.unlink()
+        with safe_fs.TargetLock(destination):
+            auth = safe_fs.authority(
+                destination,
+                owner="extensions:sealed-runtime-projection",
+                allowed_paths=(destination,),
+                expected=expected,
+            )
+            return safe_fs.atomic_write_symlink(
+                auth,
+                str(target),
+                create_parents=True,
+                target_is_directory=True,
+            )
+    except safe_fs.SafetyError as exc:
+        raise ExtensionError("expected-state-mismatch", str(exc)) from exc
+
+
+def _remove_exact_leaf(
+    path: Path, expected: safe_fs.PathState, *, owner: str
+) -> safe_fs.PathState:
+    try:
+        with safe_fs.TargetLock(path):
+            auth = safe_fs.authority(
+                path,
+                owner=owner,
+                allowed_paths=(path,),
+                expected=expected,
+            )
+            return safe_fs.remove_exact(auth)
+    except safe_fs.SafetyError as exc:
+        raise ExtensionError("expected-state-mismatch", str(exc)) from exc
 
 
 def _create_record_parent(record: dict, physical: str) -> Path:
@@ -1474,6 +1511,8 @@ def _journal_records_valid(journal: dict) -> dict:
             "before",
             "target",
             "expected_after",
+            "preimage",
+            "postimage",
         }:
             raise ExtensionError("journal-invalid", "transaction record fields are invalid")
         runtime = record["runtime"]
@@ -1492,6 +1531,38 @@ def _journal_records_valid(journal: dict) -> dict:
         expected_after = str(new_snapshot) if new_snapshot else None
         if not valid_state or record["expected_after"] != expected_after:
             raise ExtensionError("journal-invalid", "transaction link ownership is invalid")
+        try:
+            preimage = safe_fs.PathState.from_public(record["preimage"])
+            postimage = safe_fs.PathState.from_public(record["postimage"])
+        except safe_fs.SafetyError as exc:
+            raise ExtensionError(
+                "journal-invalid", "transaction exact state is invalid"
+            ) from exc
+        if (
+            (record["before"] == "missing" and preimage.kind != "missing")
+            or (
+                record["before"] == "symlink"
+                and (
+                    preimage.kind != "symlink"
+                    or preimage.link_target != record["target"]
+                )
+            )
+        ):
+            raise ExtensionError(
+                "journal-invalid", "transaction preimage disagrees with prior state"
+            )
+        intended_post = (
+            (expected_after is None and postimage.kind == "missing")
+            or (
+                expected_after is not None
+                and postimage.kind == "symlink"
+                and postimage.link_target == expected_after
+            )
+        )
+        if postimage != preimage and not intended_post:
+            raise ExtensionError(
+                "journal-invalid", "transaction postimage is not prior or intended state"
+            )
         checked.append(record)
     if sorted(record["runtime"] for record in checked) != runtimes:
         raise ExtensionError("journal-invalid", "transaction runtime records do not match")
@@ -1508,31 +1579,37 @@ def _journal_records_valid(journal: dict) -> dict:
 
 def _restore_record(record: dict) -> None:
     destination = Path(record["dest"])
-    current_target = _link_target(destination)
-    expected_after = record["expected_after"]
-    before_target = record["target"]
-    if destination.exists() and not destination.is_symlink():
+    try:
+        preimage = safe_fs.PathState.from_public(record["preimage"])
+        postimage = safe_fs.PathState.from_public(record["postimage"])
+        current = safe_fs.capture_state(destination)
+        if current == preimage:
+            return
+        if current != postimage:
+            raise safe_fs.SafetyError(
+                "concurrent-successor",
+                destination,
+                f"postimage={postimage.public()} current={current.public()}",
+            )
+        if preimage.kind == "missing":
+            _remove_exact_leaf(
+                destination,
+                current,
+                owner="extensions:rollback-created-runtime-projection",
+            )
+        elif preimage.kind == "symlink" and preimage.link_target is not None:
+            _atomic_symlink(Path(preimage.link_target), destination, current)
+        else:
+            raise safe_fs.SafetyError(
+                "ownership-unproved",
+                destination,
+                f"unsupported extension preimage kind: {preimage.kind}",
+            )
+        return
+    except (safe_fs.SafetyError, ExtensionError) as exc:
         raise ExtensionError(
-            "recovery-conflict", f"foreign path blocks transaction recovery: {destination}"
-        )
-    if record["before"] == "missing":
-        if destination.is_symlink():
-            if current_target != expected_after:
-                raise ExtensionError(
-                    "recovery-conflict", f"foreign link blocks transaction recovery: {destination}"
-                )
-            destination.unlink()
-        return
-    if destination.is_symlink() and current_target == before_target:
-        return
-    if destination.is_symlink() and expected_after is not None and current_target != expected_after:
-        raise ExtensionError(
-            "recovery-conflict", f"foreign link blocks transaction recovery: {destination}"
-        )
-    if not destination.exists() or destination.is_symlink():
-        _atomic_symlink(Path(before_target), destination)
-        return
-    raise ExtensionError("recovery-conflict", f"cannot restore transaction path: {destination}")
+            "recovery-conflict", f"cannot restore transaction path: {destination}: {exc}"
+        ) from exc
 
 
 def _recover_journal_locked() -> bool:
@@ -1542,11 +1619,19 @@ def _recover_journal_locked() -> bool:
     if not path.exists():
         return False
     try:
+        journal_state = safe_fs.capture_state(path)
+    except safe_fs.SafetyError as exc:
+        raise ExtensionError("journal-invalid", "transaction journal cannot be sealed") from exc
+    if journal_state.kind != "file":
+        raise ExtensionError("journal-invalid", "transaction journal must be a regular file")
+    try:
         journal = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise ExtensionError("journal-invalid", "transaction journal cannot be read") from exc
     if not isinstance(journal, dict) or journal.get("schema_version") != 1:
         raise ExtensionError("journal-invalid", "transaction journal does not match schema v1")
+    if safe_fs.capture_state(path) != journal_state:
+        raise ExtensionError("journal-invalid", "transaction journal changed while reading")
     validated = _journal_records_valid(journal)
     records = validated["records"]
     registry_path = _registry_path()
@@ -1564,7 +1649,11 @@ def _recover_journal_locked() -> bool:
             raise ExtensionError(
                 "recovery-conflict", "committed journal does not match current registry"
             )
-        path.unlink()
+        _remove_exact_leaf(
+            path,
+            journal_state,
+            owner="extensions:discard-committed-journal",
+        )
         return True
     if journal.get("status") != "applying":
         raise ExtensionError("journal-invalid", "transaction journal status is invalid")
@@ -1577,7 +1666,12 @@ def _recover_journal_locked() -> bool:
     before = validated["before"]
     before_raw = validated["before_raw"]
     if before_raw is None:
-        registry_path.unlink(missing_ok=True)
+        current_registry = safe_fs.capture_state(registry_path)
+        _remove_exact_leaf(
+            registry_path,
+            current_registry,
+            owner="extensions:restore-missing-registry",
+        )
     else:
         _atomic_bytes(registry_path, before_raw)
     created = journal.get("created_snapshot")
@@ -1590,8 +1684,13 @@ def _recover_journal_locked() -> bool:
             _snapshot_path(entry) == expected for entry in before["extensions"].values()
         )
         if not used and expected.exists():
+            # destructive-ok: reason=discard one transaction-created immutable snapshot; boundary=journal-sealed digest snapshot below extension data
             _writable_rmtree(expected)
-    path.unlink()
+    _remove_exact_leaf(
+        path,
+        journal_state,
+        owner="extensions:discard-recovered-journal",
+    )
     return True
 
 
@@ -1722,10 +1821,15 @@ def _write_journal(
 
 def _finish_transaction(journal: dict) -> None:
     journal["status"] = "committed"
-    _atomic_json(_journal_path(), journal)
-    _journal_path().unlink()
+    committed = _atomic_json(_journal_path(), journal)
+    _remove_exact_leaf(
+        _journal_path(),
+        committed,
+        owner="extensions:discard-committed-journal",
+    )
 
 
+# destructive-ok: reason=garbage-collect an unreferenced immutable snapshot; boundary=one validated digest snapshot below the snapshot root
 def _cleanup_snapshot(entry: dict, registry: dict) -> None:
     candidate = _snapshot_path(entry)
     if any(_snapshot_path(item) == candidate for item in registry["extensions"].values()):
@@ -1748,6 +1852,7 @@ def _selected_runtimes(values: list[str] | tuple[str, ...] | None) -> list[str]:
     return sorted(set(raw))
 
 
+# destructive-ok: reason=discard uncommitted extension staging on failure; boundary=one transaction-created prepared snapshot directory
 def add(source: str, runtimes: list[str] | None = None) -> dict:
     report = _inspect(source)
     selected = _selected_runtimes(runtimes)
@@ -1792,10 +1897,13 @@ def add(source: str, runtimes: list[str] | None = None) -> dict:
         try:
             _commit_prepared_snapshot(temporary, snapshot, projection)
             for count, record in enumerate(records, 1):
-                _atomic_symlink(
+                postimage = _atomic_symlink(
                     snapshot,
                     _create_record_parent(record, report["physical_id"]),
+                    safe_fs.PathState.from_public(record["preimage"]),
                 )
+                record["postimage"] = postimage.public()
+                _atomic_json(_journal_path(), journal)
                 _after_link_change(count)
             _atomic_json(_registry_path(), registry_after)
             _finish_transaction(journal)
@@ -1819,6 +1927,7 @@ def add(source: str, runtimes: list[str] | None = None) -> dict:
         return result
 
 
+# destructive-ok: reason=discard uncommitted extension staging on failure; boundary=one transaction-created prepared snapshot directory
 def update(canonical_id: str, source: Optional[str] = None) -> dict:
     publisher, name = parse_canonical_id(canonical_id)
     with _mutation_lock():
@@ -1889,10 +1998,13 @@ def update(canonical_id: str, source: Optional[str] = None) -> dict:
         try:
             _commit_prepared_snapshot(temporary, snapshot, projection)
             for count, record in enumerate(records, 1):
-                _atomic_symlink(
+                postimage = _atomic_symlink(
                     snapshot,
                     _create_record_parent(record, old["physical_id"]),
+                    safe_fs.PathState.from_public(record["preimage"]),
                 )
+                record["postimage"] = postimage.public()
+                _atomic_json(_journal_path(), journal)
                 _after_link_change(count)
             _atomic_json(_registry_path(), registry_after)
             _finish_transaction(journal)
@@ -1918,6 +2030,7 @@ def update(canonical_id: str, source: Optional[str] = None) -> dict:
         return result
 
 
+# destructive-ok: reason=remove exact extension projections sealed in registry and journal; boundary=closed destination set for one canonical extension id
 def remove(canonical_id: str) -> dict:
     parse_canonical_id(canonical_id)
     with _mutation_lock():
@@ -1958,7 +2071,14 @@ def remove(canonical_id: str) -> dict:
         )
         try:
             for count, record in enumerate(records, 1):
-                Path(record["dest"]).unlink()
+                destination = Path(record["dest"])
+                postimage = _remove_exact_leaf(
+                    destination,
+                    safe_fs.PathState.from_public(record["preimage"]),
+                    owner="extensions:remove-owned-runtime-projection",
+                )
+                record["postimage"] = postimage.public()
+                _atomic_json(_journal_path(), journal)
                 _after_link_change(count)
             _atomic_json(_registry_path(), registry_after)
             _finish_transaction(journal)

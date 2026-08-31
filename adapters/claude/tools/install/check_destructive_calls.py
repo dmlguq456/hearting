@@ -1,0 +1,1 @@
+../../../../tools/install/check_destructive_calls.py

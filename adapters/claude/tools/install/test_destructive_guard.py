@@ -1,0 +1,1 @@
+../../../../tools/install/test_destructive_guard.py

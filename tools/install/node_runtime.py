@@ -28,6 +28,8 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+import safe_fs
+
 MIN_NODE = (20, 9, 0)
 DIST_INDEX_URL = "https://nodejs.org/dist/index.json"
 DIST_BASE_URL = "https://nodejs.org/dist"
@@ -148,8 +150,9 @@ def _owned_link(path: Path, root: Path) -> bool:
     if not target.is_absolute():
         target = path.parent / target
     try:
-        return str(target.resolve()).startswith(str(root.resolve()) + os.sep)
-    except OSError:
+        target.resolve().relative_to(root.resolve())
+        return True
+    except (OSError, ValueError):
         return False
 
 
@@ -159,10 +162,18 @@ def _expose(install_dir: Path, root: Path) -> list:
     bin_dir.mkdir(parents=True, exist_ok=True)
     skipped = []
     current = root / "current"
-    tmp_link = root / ".current.tmp"
-    tmp_link.unlink(missing_ok=True)
-    tmp_link.symlink_to(install_dir)
-    tmp_link.replace(current)
+    current_state = safe_fs.capture_state(current)
+    if current_state.kind != "missing" and not _owned_link(current, root):
+        raise OSError(f"managed Node current pointer is foreign: {current}")
+    current_auth = safe_fs.authority(
+        current,
+        owner="node-runtime:current-pointer",
+        allowed_roots=(root,),
+        expected=current_state,
+    )
+    safe_fs.atomic_write_symlink(
+        current_auth, str(install_dir), create_parents=True, target_is_directory=True
+    )
     for name in EXPOSED:
         source = current / "bin" / name
         if not source.exists():
@@ -172,8 +183,14 @@ def _expose(install_dir: Path, root: Path) -> list:
             if not _owned_link(link, root):
                 skipped.append(name)
                 continue
-            link.unlink()
-        link.symlink_to(source)
+        link_state = safe_fs.capture_state(link)
+        link_auth = safe_fs.authority(
+            link,
+            owner=f"node-runtime:exposed-{name}",
+            allowed_paths=(link,),
+            expected=link_state,
+        )
+        safe_fs.atomic_write_symlink(link_auth, str(source), create_parents=True)
     return skipped
 
 
@@ -211,7 +228,14 @@ def ensure_node() -> dict:
                 )
                 extracted = _extract(archive, staging_path, top_level)
                 if install_dir.exists():
-                    shutil.rmtree(install_dir)
+                    install_state = safe_fs.capture_state(install_dir)
+                    install_auth = safe_fs.authority(
+                        install_dir,
+                        owner="node-runtime:incomplete-version",
+                        allowed_roots=(root,),
+                        expected=install_state,
+                    )
+                    safe_fs.remove_exact(install_auth, recursive=True)
                 extracted.rename(install_dir)
         smoke = subprocess.run(
             [str(install_dir / "bin" / "node"), "--version"],

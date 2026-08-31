@@ -9,6 +9,8 @@ import stat
 import tempfile
 from pathlib import Path
 
+import safe_fs
+
 
 class UserModelConfigError(RuntimeError):
     """The user model-config path cannot be created without guessing ownership."""
@@ -30,6 +32,7 @@ def _legacy_codex_projection(config_dir: Path, shipped: Path) -> bool:
         return False
 
 
+# destructive-ok: reason=discard the exclusive-create payload temp; boundary=mkstemp sibling created inside the validated config directory
 def seed_model_config(
     adapter: str,
     source: str | Path,
@@ -86,7 +89,17 @@ def seed_model_config(
         }
 
     if migrated:
-        config_dir.unlink()
+        try:
+            current = safe_fs.capture_state(config_dir)
+            auth = safe_fs.authority(
+                config_dir,
+                owner="model-config:legacy-codex-projection",
+                allowed_paths=(config_dir,),
+                expected=current,
+            )
+            safe_fs.remove_exact(auth)
+        except safe_fs.SafetyError as exc:
+            raise UserModelConfigError(str(exc)) from exc
     config_dir.mkdir(parents=True, exist_ok=True)
 
     fd, temporary = tempfile.mkstemp(prefix=".models.conf.", dir=str(config_dir))

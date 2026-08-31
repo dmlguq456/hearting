@@ -5,14 +5,10 @@ ROOT=$(CDPATH= cd -- "$(dirname "$0")/../.." && pwd)
 HARNESS="$ROOT/tools/install/harness.sh"
 FIXTURES="$ROOT/tools/install/fixtures/extensions"
 TMP=$(mktemp -d)
+# destructive-ok: reason=clean one mktemp extension fixture; boundary=TMP returned by the immediately preceding mktemp call
 trap 'chmod -R u+w "$TMP" 2>/dev/null || true; rm -rf "$TMP"' EXIT HUP INT TERM
 
-export HOME="$TMP/home"
-export CODEX_HOME="$TMP/codex-home"
-export XDG_STATE_HOME="$TMP/state"
-export XDG_DATA_HOME="$TMP/data"
-export XDG_CONFIG_HOME="$TMP/config"
-export AGENT_HOME="$ROOT"
+eval "$(python3 "$ROOT/tools/install/fixture_env.py" shell "$TMP" "$ROOT")"
 
 mkdir -p "$TMP/sources"
 cp -R "$FIXTURES/instruction-only" "$TMP/sources/instruction-only"
@@ -205,6 +201,7 @@ test ! -e "$XDG_STATE_HOME/hearting/extensions/transaction.json"
 
 # Replacing a snapshot parent with a symlink must not read or delete the target.
 SNAPSHOT_PARENT="$XDG_DATA_HOME/hearting/extensions/fixture-labs/portable-review"
+# destructive-ok: reason=simulate missing extension snapshot storage; boundary=fixture snapshot directory and sibling saved name below TMP
 mv "$SNAPSHOT_PARENT" "$SNAPSHOT_PARENT.saved"
 mkdir "$TMP/external-snapshot-parent"
 printf 'keep\n' >"$TMP/external-snapshot-parent/marker"
@@ -212,7 +209,9 @@ ln -s "$TMP/external-snapshot-parent" "$SNAPSHOT_PARENT"
 expect_exit 3 "$HARNESS" extension update "$CANONICAL" --json >"$TMP/parent-symlink.json"
 test "$(json_value "$TMP/parent-symlink.json" 'data["reason"]')" = unsafe-snapshot-path
 test -f "$TMP/external-snapshot-parent/marker"
+# destructive-ok: reason=remove one synthetic snapshot-parent symlink; boundary=exact fixture symlink below TMP
 rm "$SNAPSHOT_PARENT"
+# destructive-ok: reason=restore synthetic snapshot storage name; boundary=fixture saved directory and exact snapshot path below TMP
 mv "$SNAPSHOT_PARENT.saved" "$SNAPSHOT_PARENT"
 
 # Snapshot reuse is allowed only after a full digest recheck.
@@ -296,35 +295,36 @@ expect_exit 2 "$HARNESS" extension inspect "$TMP/sources/escape" --json >"$TMP/e
 grep -q '"id": "symlink-escape"' "$TMP/escape.json"
 
 cp -R "$FIXTURES/instruction-only" "$TMP/sources/internal-link"
+# destructive-ok: reason=construct an internal-link extension fixture; boundary=two exact source leaves below TMP
 mv "$TMP/sources/internal-link/skill/reference.md" "$TMP/sources/internal-link/skill/target.md"
 ln -s target.md "$TMP/sources/internal-link/skill/reference.md"
 "$HARNESS" extension inspect "$TMP/sources/internal-link" --json >"$TMP/internal-link.json"
 test "$(json_value "$TMP/internal-link.json" 'data["extension"]["status"]')" = ready
 
 cp -R "$FIXTURES/instruction-only" "$TMP/sources/manifest-link"
+# destructive-ok: reason=construct a manifest-symlink extension fixture; boundary=two exact manifest leaves below TMP
 mv "$TMP/sources/manifest-link/extension.json" "$TMP/sources/manifest-link/real.json"
 ln -s real.json "$TMP/sources/manifest-link/extension.json"
 expect_exit 2 "$HARNESS" extension inspect "$TMP/sources/manifest-link" --json >"$TMP/manifest-link.json"
 test "$(json_value "$TMP/manifest-link.json" 'data["reason"]')" = manifest-type
 
-# A predictable temp collision remains foreign and is never unlinked.
+# A foreign sibling matching the atomic-temp prefix remains untouched.
 PYTHONPATH="$ROOT/tools/install:$ROOT/tools" python3 - "$TMP" <<'PY'
 import pathlib
 import sys
 import extensions
+import safe_fs
 
 root = pathlib.Path(sys.argv[1]) / "atomic-link"
 root.mkdir()
 destination = root / "owned"
-collision = root / ".owned.extension-fixed"
+collision = root / ".owned.hearting-foreign"
 collision.write_text("foreign", encoding="utf-8")
-extensions.secrets.token_hex = lambda size: "fixed"
-try:
-    extensions._atomic_symlink(root / "target", destination)
-except extensions.ExtensionError as exc:
-    assert exc.reason == "temp-collision"
-else:
-    raise AssertionError("expected temp collision")
+postimage = extensions._atomic_symlink(
+    root / "target", destination, safe_fs.capture_state(destination)
+)
+assert postimage.kind == "symlink"
+assert destination.readlink() == root / "target"
 assert collision.read_text(encoding="utf-8") == "foreign"
 PY
 
@@ -336,6 +336,7 @@ GENERATION_BEFORE=$(json_value "$REGISTRY" 'data["generation"]')
 expect_exit 3 "$HARNESS" extension add "$RUNTIME_SOURCE" --runtime codex --json >"$TMP/collision.json"
 test "$(json_value "$TMP/collision.json" 'data["reason"]')" = destination-collision
 test "$(json_value "$REGISTRY" 'data["generation"]')" = "$GENERATION_BEFORE"
+# destructive-ok: reason=construct one missing extension projection; boundary=exact runtime skill link below fixture CODEX_HOME
 rm "$CODEX_HOME/skills/$RUNTIME_PHYSICAL"
 
 "$HARNESS" extension remove "$CANONICAL" --json >"$TMP/remove.json"

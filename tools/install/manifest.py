@@ -37,6 +37,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import paths
+import safe_fs
 
 
 _CHUNK_SIZE = 65536
@@ -99,22 +100,83 @@ def _load_manifest(path):
         return json.load(f)
 
 
+def load_ownership_manifest(path, runtime, scope):
+    """Load and seal the exact manifest object used as uninstall authority.
+
+    A parsed dictionary by itself is not ownership evidence: the pathname can
+    be replaced between parsing and deletion.  Return the exact file state so
+    uninstall can compare it again after acquiring all target locks.
+    """
+
+    path = Path(path)
+    try:
+        state = safe_fs.capture_state(path, include_payload=True)
+    except safe_fs.SafetyError as exc:
+        raise ValueError(f"ownership-unproved: unsafe manifest: {exc}") from exc
+    if state.kind == "missing":
+        return None, state
+    if state.kind != "file" or state.payload is None:
+        raise ValueError(f"ownership-unproved: manifest is not a regular file: {path}")
+    try:
+        data = json.loads(state.payload.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"ownership-unproved: corrupt manifest: {path}") from exc
+    if not isinstance(data, dict):
+        raise ValueError(f"ownership-unproved: manifest is not an object: {path}")
+    if (
+        data.get("schema") != 1
+        or data.get("runtime") != runtime
+        or data.get("scope") != scope
+    ):
+        raise ValueError(
+            f"ownership-unproved: manifest identity does not match {runtime}/{scope}: {path}"
+        )
+    files = data.get("files")
+    if not isinstance(files, dict):
+        raise ValueError(f"ownership-unproved: manifest files map is invalid: {path}")
+    for relpath, digest in files.items():
+        if not isinstance(relpath, str):
+            raise ValueError(f"ownership-unproved: manifest path is not text: {path}")
+        _safe_relpath(relpath)
+        if (
+            not isinstance(digest, str)
+            or len(digest) != 64
+            or any(character not in "0123456789abcdef" for character in digest)
+        ):
+            raise ValueError(
+                f"ownership-unproved: manifest digest is invalid for {relpath}: {path}"
+            )
+    return data, state
+
+
 def _write_manifest(path, data):
     path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = path.with_suffix(path.suffix + ".tmp")
-    with open(tmp_path, "w", encoding="utf-8") as f:
-        json.dump(data, f, sort_keys=True, ensure_ascii=False, indent=2)
-    os.replace(tmp_path, path)
+    payload = json.dumps(
+        data, sort_keys=True, ensure_ascii=False, indent=2
+    ).encode("utf-8")
+    current = safe_fs.capture_state(path)
+    auth = safe_fs.authority(
+        path,
+        owner="manifest:ownership-registry",
+        allowed_paths=(path,),
+        allow_leaf_symlink=False,
+        expected=current,
+    )
+    safe_fs.atomic_write_bytes(auth, payload, 0o600, create_parents=True)
 
 
 def _atomic_write_bytes(path, data):
     """Write bytes through a temporary file and atomic rename."""
     path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = path.with_name(path.name + ".tmp")
-    tmp_path.write_bytes(data)
-    os.replace(tmp_path, path)
+    current = safe_fs.capture_state(path)
+    auth = safe_fs.authority(
+        path,
+        owner="manifest:pristine-or-local-patch",
+        allowed_paths=(path,),
+        allow_leaf_symlink=False,
+        expected=current,
+    )
+    safe_fs.atomic_write_bytes(auth, data, 0o600, create_parents=True)
 
 
 def _git_head_or_unknown():

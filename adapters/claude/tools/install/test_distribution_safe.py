@@ -1,0 +1,1 @@
+../../../../tools/install/test_distribution_safe.py

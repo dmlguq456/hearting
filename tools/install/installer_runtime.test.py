@@ -27,6 +27,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import installer  # noqa: E402
 import codex_launcher  # noqa: E402
 import runtime_activation  # noqa: E402
+import fixture_env  # noqa: E402
 
 
 def _write_executable(path: Path) -> None:
@@ -39,13 +40,18 @@ def _stubbed_runtime_projection():
     fake_report = {"runtime": "codex", "freshness": "fresh", "next_action": "none"}
     with mock.patch.multiple(
         runtime_activation,
+        validate_request=mock.DEFAULT,
         capture_runtime_state=mock.DEFAULT,
+        seal_runtime_state=mock.DEFAULT,
         restore_runtime_state=mock.DEFAULT,
         discard_runtime_state=mock.DEFAULT,
         activate=mock.DEFAULT,
         refresh=mock.DEFAULT,
     ) as mocks:
-        mocks["capture_runtime_state"].return_value = {"fake": "snapshot"}
+        mocks["capture_runtime_state"].return_value = {
+            "fake": "snapshot",
+            "_sealed": True,
+        }
         mocks["activate"].return_value = dict(fake_report)
         mocks["refresh"].return_value = dict(fake_report)
         yield mocks
@@ -76,10 +82,14 @@ class LauncherCommitBoundaryTest(unittest.TestCase):
         }
         for path, content in self.protected_files.items():
             path.write_text(content, encoding="utf-8")
-        env = {
-            "HOME": str(self.home),
+        env = fixture_env.build_environment(
+            root,
+            Path(__file__).resolve().parents[2],
+            base={"PATH": os.environ.get("PATH", "")},
+        )
+        env.update({
             "CODEX_HOME": str(self.codex_home),
-            "PATH": str(self.vendor_bin) + os.pathsep + os.environ.get("PATH", ""),
+            "PATH": str(self.vendor_bin) + os.pathsep + env.get("PATH", ""),
             # An unsupported shell name makes `_profile_path()` return None
             # unconditionally, so no launcher/uninstall transaction in this
             # module ever resolves a profile path from the ambient
@@ -89,9 +99,10 @@ class LauncherCommitBoundaryTest(unittest.TestCase):
             # profile-mapping behavior is exhaustively covered by
             # `codex_launcher.test.py`, not this module.
             "SHELL": "/bin/installer-runtime-test-unsupported-shell",
-        }
+        })
         env.pop("HARNESS_BIN_DIR", None)
-        self._env_patch = mock.patch.dict(os.environ, env, clear=False)
+        fixture_env.prepare_environment(env)
+        self._env_patch = mock.patch.dict(os.environ, env, clear=True)
         self._env_patch.start()
         self.addCleanup(self._env_patch.stop)
         os.environ.pop("HARNESS_INSTALLER_FAIL_AFTER_LAUNCHER", None)
@@ -147,7 +158,9 @@ class LauncherCommitBoundaryTest(unittest.TestCase):
 
         self.assertEqual(second["exit"], installer.EXIT_BLOCKED)
         self.assertIn("injected failure after launcher commit boundary", second["lines"][-1])
-        restore_runtime_state.assert_called_once_with({"fake": "snapshot"})
+        restore_runtime_state.assert_called_once_with(
+            {"fake": "snapshot", "_sealed": True}
+        )
 
         # The launcher install() call inside the injected attempt ran and
         # committed (it is a real, unmocked transaction); the installer's
@@ -167,7 +180,9 @@ class LauncherCommitBoundaryTest(unittest.TestCase):
                 discard_runtime_state = mocks["discard_runtime_state"]
                 restore_runtime_state = mocks["restore_runtime_state"]
             self.assertEqual(result["exit"], installer.EXIT_OK)
-            discard_runtime_state.assert_called_once_with({"fake": "snapshot"})
+            discard_runtime_state.assert_called_once_with(
+                {"fake": "snapshot", "_sealed": True}
+            )
             restore_runtime_state.assert_not_called()
         status = codex_launcher.status(codex_home=self.codex_home)
         self.assertTrue(status["installed"])

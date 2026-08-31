@@ -5,23 +5,17 @@ export PYTHONDONTWRITEBYTECODE=1
 
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
 TMP=$(mktemp -d)
+# destructive-ok: reason=clean one mktemp release fixture; boundary=TMP returned by the immediately preceding mktemp call
 trap 'rm -rf "$TMP"' EXIT HUP INT TERM
 
-HOME="$TMP/home"
-XDG_CONFIG_HOME="$HOME/.config"
-XDG_DATA_HOME="$HOME/.local/share"
-XDG_STATE_HOME="$HOME/.local/state"
+eval "$(python3 "$ROOT/tools/install/fixture_env.py" shell "$TMP" "$ROOT")"
 HARNESS_BIN_DIR="$HOME/.local/bin"
-CODEX_HOME="$HOME/.codex"
-CLAUDE_CONFIG_DIR="$HOME/.claude"
 HARNESS_ALLOW_FILE_RELEASES=1
 HARNESS_SCHEDULER_NO_ACTIVATE=1
 HARNESS_TEST_PLATFORM=linux
-AGENT_HOME="$ROOT"
-export HOME XDG_CONFIG_HOME XDG_DATA_HOME XDG_STATE_HOME HARNESS_BIN_DIR CODEX_HOME CLAUDE_CONFIG_DIR
+export HARNESS_BIN_DIR
 export HARNESS_ALLOW_FILE_RELEASES HARNESS_SCHEDULER_NO_ACTIVATE
-export HARNESS_TEST_PLATFORM AGENT_HOME ROOT TMP
-mkdir -p "$HOME"
+export HARNESS_TEST_PLATFORM ROOT TMP
 
 python3 - "$ROOT" "$TMP" <<'PY'
 import argparse
@@ -665,17 +659,15 @@ build_release.build_installer(
 )
 PY
 
-HOME="$INTEGRATION/home"
-XDG_CONFIG_HOME="$HOME/.config"
-XDG_DATA_HOME="$HOME/.local/share"
-XDG_STATE_HOME="$HOME/.local/state"
+OUTER_TMP=$TMP
+eval "$(python3 "$ROOT/tools/install/fixture_env.py" shell "$INTEGRATION" "$ROOT")"
+# The lifecycle's outer mktemp root owns the EXIT trap; keep its shell variable
+# stable while TEMP/TMPDIR and every runtime selector remain in INTEGRATION.
+TMP=$OUTER_TMP
+export TMP
 HARNESS_BIN_DIR="$HOME/.local/bin"
 HARNESS_RELEASE_INDEX_URL="file://$INTEGRATION/release.json"
-CODEX_HOME="$HOME/.codex"
-CLAUDE_CONFIG_DIR="$HOME/.claude"
-export HOME XDG_CONFIG_HOME XDG_DATA_HOME XDG_STATE_HOME HARNESS_BIN_DIR
-export HARNESS_RELEASE_INDEX_URL CODEX_HOME CLAUDE_CONFIG_DIR
-mkdir -p "$HOME"
+export HARNESS_BIN_DIR HARNESS_RELEASE_INDEX_URL
 
 # A fake standalone vendor Codex binary on PATH (never inside HARNESS_BIN_DIR)
 # proves the managed-release flow reconciles the protected launcher through

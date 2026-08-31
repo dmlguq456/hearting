@@ -17,6 +17,7 @@ import manifest
 import verifier
 import codex_launcher
 import user_model_config
+import safe_fs
 
 RUNTIME = "codex"
 
@@ -152,10 +153,31 @@ def install(scope="global", plugin=False, dry_run=False):
                 )
                 continue
 
-            if dest.is_symlink():
-                dest.unlink()
-
-            dest.symlink_to(source, target_is_directory=source.is_dir())
+            try:
+                current = safe_fs.capture_state(dest)
+                auth = safe_fs.authority(
+                    dest,
+                    owner="codex-driver:projector-plan",
+                    allowed_paths=(dest,),
+                    expected=current,
+                )
+                safe_fs.atomic_write_symlink(
+                    auth,
+                    str(source),
+                    create_parents=True,
+                    target_is_directory=source.is_dir(),
+                )
+            except safe_fs.SafetyError as exc:
+                actions.append(
+                    {
+                        "action": "symlink",
+                        "source": str(source),
+                        "dest": str(dest),
+                        "status": "blocked",
+                        "detail": str(exc),
+                    }
+                )
+                continue
             actions.append(
                 {
                     "action": "symlink",
@@ -222,6 +244,7 @@ def install(scope="global", plugin=False, dry_run=False):
     }
 
 
+# destructive-ok: reason=discard one isolated bootstrap smoke fixture; boundary=TemporaryDirectory created inside the check
 def checks(scope="global"):
     """Return core-projection, preflight, and bootstrap checks."""
     entries = projector.plan(["codex"], scope=scope)["codex"]

@@ -35,6 +35,7 @@ if str(UTILITIES_ROOT) not in sys.path:
 import harness_manifest
 import model_config
 import projector
+import safe_fs
 import user_model_config
 
 
@@ -107,28 +108,36 @@ def _utc_now() -> str:
 
 
 def _atomic_json(path: Path, data: dict) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_name = tempfile.mkstemp(prefix=path.name + ".", dir=str(path.parent))
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            json.dump(data, handle, sort_keys=True, ensure_ascii=False, indent=2)
-            handle.write("\n")
-        os.replace(tmp_name, path)
-    finally:
-        if os.path.exists(tmp_name):
-            os.unlink(tmp_name)
+        payload = json.dumps(
+            data, sort_keys=True, ensure_ascii=False, indent=2
+        ).encode("utf-8") + b"\n"
+        current = safe_fs.capture_state(path)
+        auth = safe_fs.authority(
+            path,
+            owner="runtime-activation:state-json",
+            allowed_paths=(path,),
+            allow_leaf_symlink=False,
+            expected=current,
+        )
+        safe_fs.atomic_write_bytes(auth, payload, 0o600, create_parents=True)
+    except safe_fs.SafetyError as exc:
+        raise ActivationError(str(exc)) from exc
 
 
 def _atomic_bytes(path: Path, data: bytes) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_name = tempfile.mkstemp(prefix=path.name + ".", dir=str(path.parent))
     try:
-        with os.fdopen(fd, "wb") as handle:
-            handle.write(data)
-        os.replace(tmp_name, path)
-    finally:
-        if os.path.exists(tmp_name):
-            os.unlink(tmp_name)
+        current = safe_fs.capture_state(path)
+        auth = safe_fs.authority(
+            path,
+            owner="runtime-activation:config-bytes",
+            allowed_paths=(path,),
+            allow_leaf_symlink=False,
+            expected=current,
+        )
+        safe_fs.atomic_write_bytes(auth, data, 0o600, create_parents=True)
+    except safe_fs.SafetyError as exc:
+        raise ActivationError(str(exc)) from exc
 
 
 def _load_json(path: Path) -> Optional[dict]:
@@ -190,6 +199,73 @@ def _real_source(source: Optional[str]) -> Path:
     if not root.is_dir():
         raise ActivationError(f"source is not a directory: {root}")
     return root
+
+
+def validate_request(
+    runtime: str,
+    command: str,
+    *,
+    mode: Optional[str] = None,
+    source: Optional[str] = None,
+    scope: str = "global",
+) -> dict:
+    """Validate a complete public request without creating any state.
+
+    Installer orchestration calls this for every selected runtime before the
+    first snapshot or lock.  It intentionally performs reads only.
+    """
+
+    if runtime not in RUNTIMES:
+        raise ActivationError(f"invalid-before-mutation: unsupported runtime: {runtime}")
+    try:
+        _validate_scope(runtime, scope)
+    except ActivationError as exc:
+        raise ActivationError(f"invalid-before-mutation: {exc}") from exc
+    if command not in {"activate", "refresh", "status", "doctor"}:
+        raise ActivationError(
+            f"invalid-before-mutation: unknown runtime command: {command}"
+        )
+    if command == "activate":
+        if mode not in MODES:
+            raise ActivationError(
+                f"invalid-before-mutation: unsupported activation mode: {mode}"
+            )
+        try:
+            root = _real_source(source)
+            _validate_source_symlinks(root)
+        except ActivationError as exc:
+            raise ActivationError(f"invalid-before-mutation: {exc}") from exc
+        return {"runtime": runtime, "command": command, "source": str(root)}
+    if command == "refresh":
+        try:
+            state = _load_json(_state_path(runtime, scope))
+        except ActivationError as exc:
+            raise ActivationError(f"invalid-before-mutation: {exc}") from exc
+        if state is None:
+            raise ActivationError(
+                f"invalid-before-mutation: {runtime} has no activation state"
+            )
+        stored_mode = state.get("mode")
+        stored_source = state.get("source_root")
+        if stored_mode not in MODES or not isinstance(stored_source, str):
+            raise ActivationError(
+                f"invalid-before-mutation: {runtime} activation state is incomplete"
+            )
+        try:
+            root = _real_source(stored_source)
+            _validate_source_symlinks(root)
+        except ActivationError as exc:
+            raise ActivationError(f"invalid-before-mutation: {exc}") from exc
+        return {"runtime": runtime, "command": command, "source": str(root)}
+    if mode is not None and mode not in MODES:
+        raise ActivationError(
+            f"invalid-before-mutation: unsupported activation mode: {mode}"
+        )
+    if source is not None:
+        raise ActivationError(
+            f"invalid-before-mutation: {command} does not accept a source"
+        )
+    return {"runtime": runtime, "command": command}
 
 
 def _sha_path(
@@ -557,6 +633,7 @@ def _validate_source_symlinks(source_root: Path) -> None:
                 ) from exc
 
 
+# destructive-ok: reason=publish or discard one immutable runtime bundle staging tree; boundary=one revision bundle and sibling staging directory below runtime state
 def _build_bundle(runtime: str, source_root: Path, revision: str, scope: str) -> Path:
     if "+dirty:" in revision:
         raise ActivationError("packaged activation refuses a dirty git source")
@@ -1396,10 +1473,19 @@ def duplicate_sources(runtime: str, scope: str = "global") -> List[str]:
 
 
 def _remove_path(path: Path) -> None:
-    if path.is_symlink() or path.is_file():
-        path.unlink(missing_ok=True)
-    elif path.is_dir():
-        shutil.rmtree(path)
+    current = safe_fs.capture_state(path)
+    if current.kind == "missing":
+        return
+    try:
+        auth = safe_fs.authority(
+            path.expanduser().absolute(),
+            owner="runtime-activation:validated-owned-destination",
+            allowed_paths=(path.expanduser().absolute(),),
+            expected=current,
+        )
+        safe_fs.remove_exact(auth, recursive=current.kind == "directory")
+    except safe_fs.SafetyError as exc:
+        raise ActivationError(str(exc)) from exc
 
 
 def _safe_existing_dest(
@@ -1426,7 +1512,13 @@ def _safe_existing_dest(
 
 
 def _snapshot_record(dest: Path, backup_root: Path, index: int) -> dict:
-    record = {"dest": str(dest), "state": "missing", "backup": None, "target": None}
+    record = {
+        "dest": str(dest),
+        "state": "missing",
+        "backup": None,
+        "target": None,
+        "preimage": safe_fs.capture_state(dest).public(),
+    }
     if dest.is_symlink():
         record.update(state="symlink", target=os.readlink(dest))
     elif dest.exists():
@@ -1442,13 +1534,20 @@ def _copy_snapshot(
     preserve_names: Sequence[str] = (),
 ) -> dict:
     if not dest.exists() and not dest.is_symlink():
-        return {"dest": str(dest), "state": "missing-copy", "backup": None, "target": None}
+        return {
+            "dest": str(dest),
+            "state": "missing-copy",
+            "backup": None,
+            "target": None,
+            "preimage": safe_fs.capture_state(dest).public(),
+        }
     if dest.is_symlink():
         return {
             "dest": str(dest),
             "state": "symlink-copy",
             "backup": None,
             "target": os.readlink(dest),
+            "preimage": safe_fs.capture_state(dest).public(),
         }
     backup = backup_root / f"protected-{index}"
     backup.parent.mkdir(parents=True, exist_ok=True)
@@ -1475,6 +1574,9 @@ def _copy_snapshot(
         "backup": str(backup),
         "target": None,
         "preserve_names": sorted(preserved) if dest.is_dir() else [],
+        "preimage": safe_fs.capture_state(
+            dest, exclude_names=preserve_names
+        ).public(),
     }
 
 
@@ -1482,17 +1584,43 @@ def _restore(records: List[dict]) -> None:
     for record in reversed(records):
         dest = Path(record["dest"])
         state = record["state"]
+        if "preimage" not in record or "postimage" not in record:
+            raise ActivationError(
+                f"ownership-unproved: rollback record lacks exact state: {dest}"
+            )
+        preserve_names = set(record.get("preserve_names") or ())
+        try:
+            preimage = safe_fs.PathState.from_public(record["preimage"])
+            postimage = safe_fs.PathState.from_public(record["postimage"])
+            current = safe_fs.capture_state(dest, exclude_names=preserve_names)
+        except safe_fs.SafetyError as exc:
+            raise ActivationError(str(exc)) from exc
+        if current == preimage:
+            continue
+        if current != postimage:
+            raise ActivationError(
+                f"concurrent-successor: rollback preserves changed target: {dest}"
+            )
         if state == "moved" and not Path(record["backup"]).exists():
             # Journal was flushed before the move and the process died between
             # those two operations.  The original destination is still intact.
             continue
-        preserve_names = set(record.get("preserve_names") or ())
         preserve_in_place = state == "copied" and preserve_names and dest.is_dir()
-        if not preserve_in_place:
+        if not preserve_in_place and state not in {"symlink", "symlink-copy"}:
             _remove_path(dest)
         if state in {"symlink", "symlink-copy"}:
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            dest.symlink_to(record["target"])
+            try:
+                auth = safe_fs.authority(
+                    dest,
+                    owner="runtime-activation:journal-symlink-restore",
+                    allowed_paths=(dest,),
+                    expected=current,
+                )
+                safe_fs.atomic_write_symlink(
+                    auth, record["target"], create_parents=True
+                )
+            except safe_fs.SafetyError as exc:
+                raise ActivationError(str(exc)) from exc
         elif state == "moved":
             dest.parent.mkdir(parents=True, exist_ok=True)
             shutil.move(record["backup"], str(dest))
@@ -1591,6 +1719,7 @@ def _journal_dest_allowed(runtime: str, dest: Path, scope: str) -> bool:
     return False
 
 
+# destructive-ok: reason=remove only validated completed or recovered transaction roots; boundary=canonical transaction children below one runtime harness state directory
 def _recover_transactions(runtime: str, scope: str = "global") -> None:
     tx_parent = paths.harness_state_dir(runtime, scope) / "transactions"
     if not tx_parent.is_dir():
@@ -1617,8 +1746,14 @@ def _recover_transactions(runtime: str, scope: str = "global") -> None:
             if not _journal_dest_allowed(runtime, dest, scope):
                 raise ActivationError(f"transaction destination is not harness-owned: {dest}")
             state_value = record.get("state")
-            if state_value not in {"missing", "symlink", "moved", "missing-copy", "copied"}:
+            if state_value not in {
+                "missing", "symlink", "moved", "missing-copy", "symlink-copy", "copied"
+            }:
                 raise ActivationError(f"invalid transaction record state: {state_value}")
+            if "preimage" not in record or "postimage" not in record:
+                raise ActivationError(
+                    f"ownership-unproved: transaction lacks exact state: {dest}"
+                )
             backup = record.get("backup")
             if backup:
                 try:
@@ -1701,6 +1836,7 @@ def _trusted_owned(
     return trusted
 
 
+# destructive-ok: reason=discard the active runtime transaction after commit or exact rollback; boundary=one UUID transaction root created below runtime harness state
 def _apply_transaction(
     runtime: str,
     desired: List[dict],
@@ -1741,6 +1877,7 @@ def _apply_transaction(
         for dest in protected_paths:
             _ensure_owned_destination(runtime, dest, scope)
             record = _copy_snapshot(dest, backup_root, len(snapshots))
+            record["postimage"] = record["preimage"]
             snapshots.append(record)
             _write_journal(journal_path, runtime, "preparing", snapshots)
 
@@ -1754,6 +1891,11 @@ def _apply_transaction(
             quarantine_owned = owned | {str(path) for path in quarantine}
             _safe_existing_dest(dest, kind, quarantine_owned, allowed_link_roots)
             record = _snapshot_record(dest, backup_root, len(snapshots))
+            record["postimage"] = (
+                safe_fs.PathState("missing").public()
+                if record["state"] == "moved"
+                else record["preimage"]
+            )
             snapshots.append(record)
             _write_journal(journal_path, runtime, "preparing", snapshots)
             if record["state"] == "moved":
@@ -1763,7 +1905,17 @@ def _apply_transaction(
         _write_journal(journal_path, runtime, "applying", snapshots)
 
         for dest in removal + quarantine:
+            for record in snapshots:
+                if record["dest"] == str(dest):
+                    record["postimage"] = safe_fs.PathState("missing").public()
+                    break
+            _write_journal(journal_path, runtime, "applying", snapshots)
             _remove_path(dest)
+            for record in snapshots:
+                if record["dest"] == str(dest):
+                    record["postimage"] = safe_fs.capture_state(dest).public()
+                    break
+            _write_journal(journal_path, runtime, "applying", snapshots)
             operation_count += 1
             if fail_after and operation_count >= fail_after:
                 raise ActivationError(f"injected failure after operation {operation_count}")
@@ -1771,12 +1923,34 @@ def _apply_transaction(
         for item in desired:
             source = Path(item["source"])
             dest = Path(item["dest"])
-            _remove_path(dest)
+            for record in snapshots:
+                if record["dest"] == str(dest):
+                    record["postimage"] = safe_fs.PathState("missing").public()
+                    break
+            _write_journal(journal_path, runtime, "applying", snapshots)
             dest.parent.mkdir(parents=True, exist_ok=True)
             if item["kind"] == "copytree":
+                _remove_path(dest)
                 shutil.copytree(source, dest, symlinks=False)
             else:
-                dest.symlink_to(source, target_is_directory=source.is_dir())
+                current = safe_fs.capture_state(dest)
+                try:
+                    auth = safe_fs.authority(
+                        dest,
+                        owner=f"runtime-activation:{runtime}:{item['surface']}",
+                        allowed_paths=(dest,),
+                        expected=current,
+                    )
+                    safe_fs.atomic_write_symlink(
+                        auth, str(source), create_parents=True
+                    )
+                except safe_fs.SafetyError as exc:
+                    raise ActivationError(str(exc)) from exc
+            for record in snapshots:
+                if record["dest"] == str(dest):
+                    record["postimage"] = safe_fs.capture_state(dest).public()
+                    break
+            _write_journal(journal_path, runtime, "applying", snapshots)
             changed.append(dict(item))
             operation_count += 1
             if fail_after and operation_count >= fail_after:
@@ -1811,9 +1985,25 @@ def _apply_transaction(
 
         owned_entries = [item for item in changed if item.get("kind") != "quarantine"]
         if commit_callback is not None:
-            commit_callback(owned_entries)
+            try:
+                commit_callback(owned_entries)
+            finally:
+                protected = {str(path) for path in protected_paths}
+                for record in snapshots:
+                    if record["dest"] in protected:
+                        record["postimage"] = safe_fs.capture_state(
+                            Path(record["dest"]),
+                            exclude_names=record.get("preserve_names") or (),
+                        ).public()
+                _write_journal(journal_path, runtime, "applying", snapshots)
         _write_journal(journal_path, runtime, "committed", snapshots)
     except Exception:
+        for record in snapshots:
+            if "postimage" not in record:
+                record["postimage"] = safe_fs.capture_state(
+                    Path(record["dest"]),
+                    exclude_names=record.get("preserve_names") or (),
+                ).public()
         _restore(snapshots)
         shutil.rmtree(tx_root, ignore_errors=True)
         raise
@@ -1826,6 +2016,7 @@ def _projection_digest(entries: List[dict]) -> str:
     return _digest_paths(Path(item["source"]) for item in entries)
 
 
+# destructive-ok: reason=discard a failed invocation snapshot; boundary=one mkdtemp rollback root created by this capture
 def capture_runtime_state(
     runtime: str, source: Optional[str] = None, scope: str = "global"
 ) -> dict:
@@ -1855,14 +2046,21 @@ def capture_runtime_state(
         except ActivationError:
             continue
 
-    snapshot_root = Path(tempfile.mkdtemp(prefix=f"harness-{runtime}-rollback-"))
-    backup_root = snapshot_root / "backup"
-    records: List[dict] = []
     full_copy_paths = [
         paths.harness_state_dir(runtime, scope),
         *_runtime_config_paths(runtime, scope),
         *_plugin_roots(runtime, scope),
     ]
+    candidate_paths = list(full_copy_paths)
+    candidate_paths.extend(sorted(discovery, key=lambda item: str(item)))
+    locks = safe_fs.TargetLocks(candidate_paths)
+    try:
+        locks.__enter__()
+    except safe_fs.SafetyError as exc:
+        raise ActivationError(str(exc)) from exc
+    snapshot_root = Path(tempfile.mkdtemp(prefix=f"harness-{runtime}-rollback-"))
+    backup_root = snapshot_root / "backup"
+    records: List[dict] = []
     seen = set()
     try:
         for dest in full_copy_paths:
@@ -1876,8 +2074,12 @@ def capture_runtime_state(
                 if dest == paths.harness_state_dir(runtime, scope)
                 else ()
             )
-            records.append(_copy_snapshot(
-                dest, backup_root, len(records), preserve_names=preserve_names))
+            record = _copy_snapshot(
+                dest, backup_root, len(records), preserve_names=preserve_names)
+            record["_preimage"] = safe_fs.capture_state(
+                dest, exclude_names=preserve_names
+            )
+            records.append(record)
         for dest in sorted(discovery, key=lambda item: str(item)):
             key = str(dest)
             if key in seen:
@@ -1888,22 +2090,83 @@ def capture_runtime_state(
                 # A regular foreign destination makes activation block before
                 # mutation, so it does not need a potentially unbounded copy.
                 continue
-            records.append(_copy_snapshot(dest, backup_root, len(records)))
+            record = _copy_snapshot(dest, backup_root, len(records))
+            record["_preimage"] = safe_fs.capture_state(dest)
+            records.append(record)
     except Exception:
         shutil.rmtree(snapshot_root, ignore_errors=True)
+        locks.__exit__(None, None, None)
         raise
-    return {"runtime": runtime, "scope": scope, "root": str(snapshot_root), "records": records}
+    return {
+        "runtime": runtime,
+        "scope": scope,
+        "root": str(snapshot_root),
+        "records": records,
+        "_locks": locks,
+        "_sealed": False,
+    }
+
+
+def seal_runtime_state(snapshot: dict) -> None:
+    """Seal exact postimages while the invocation locks remain held."""
+
+    if snapshot.get("_sealed"):
+        return
+    for record in snapshot["records"]:
+        postimage = safe_fs.capture_state(
+            Path(record["dest"]),
+            exclude_names=record.get("preserve_names") or (),
+        )
+        record["_postimage"] = postimage
+        # `_restore()` is also used for crash-journal recovery and therefore
+        # consumes the redacted/public form.  Seal both representations from
+        # the same observation while the canonical target locks are held.
+        record["postimage"] = postimage.public()
+    snapshot["_sealed"] = True
 
 
 def restore_runtime_state(snapshot: dict) -> None:
     runtime = snapshot["runtime"]
     scope = snapshot["scope"]
+    if not snapshot.get("_sealed"):
+        raise ActivationError("ownership-unproved: runtime snapshot postimage is not sealed")
+    restore_records = []
     for record in snapshot["records"]:
-        _ensure_owned_destination(runtime, Path(record["dest"]), scope)
-    _restore(snapshot["records"])
+        dest = Path(record["dest"])
+        _ensure_owned_destination(runtime, dest, scope)
+        current = safe_fs.capture_state(
+            dest, exclude_names=record.get("preserve_names") or ()
+        )
+        preimage = record.get("_preimage")
+        postimage = record.get("_postimage")
+        if not isinstance(preimage, safe_fs.PathState) or not isinstance(
+            postimage, safe_fs.PathState
+        ):
+            raise ActivationError(
+                f"ownership-unproved: runtime snapshot state is incomplete: {dest}"
+            )
+        if current == preimage:
+            continue
+        if current != postimage:
+            raise ActivationError(
+                f"concurrent-successor: runtime rollback preserves changed target: {dest}"
+            )
+        restore_records.append(record)
+    try:
+        _restore(restore_records)
+    finally:
+        locks = snapshot.get("_locks")
+        if isinstance(locks, safe_fs.TargetLocks):
+            locks.__exit__(None, None, None)
+            snapshot["_locks"] = None
 
 
+# destructive-ok: reason=discard a consumed invocation snapshot; boundary=exact mkdtemp rollback root carried by the snapshot object
 def discard_runtime_state(snapshot: dict) -> None:
+    locks = snapshot.get("_locks")
+    if isinstance(locks, safe_fs.TargetLocks):
+        locks.__exit__(None, None, None)
+        snapshot["_locks"] = None
     shutil.rmtree(snapshot["root"], ignore_errors=True)
 
 
@@ -2395,8 +2658,8 @@ def deactivate(runtime: str, scope: str = "global", dry_run: bool = False) -> di
     if not dry_run:
         bundles = paths.harness_state_dir(runtime, scope) / "bundles"
         if bundles.is_dir() and not bundles.is_symlink():
-            shutil.rmtree(bundles)
-        state_file.unlink(missing_ok=True)
+            _remove_path(bundles)
+        _remove_path(state_file)
     return {
         "runtime": runtime,
         "status": "planned" if dry_run else "deactivated",

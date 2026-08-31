@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Optional, Union
 
 import paths
+import safe_fs
 
 
 SCHEMA_VERSION = 1
@@ -93,15 +94,22 @@ def write(*, remote_url: str, ref: Optional[str] = None,
     if dry_run:
         return {"status": "would-write", "path": str(path), **payload}
 
-    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     serialized = json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n"
-    temporary = path.with_name(path.name + ".tmp")
-    fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w", encoding="utf-8") as handle:
-        handle.write(serialized)
-        handle.flush()
-        os.fsync(handle.fileno())
-    os.replace(temporary, path)
+    try:
+        current = safe_fs.capture_state(path)
+        auth = safe_fs.authority(
+            path,
+            owner="memory-sync:validated-config",
+            allowed_paths=(path,),
+            allow_leaf_symlink=False,
+            expected=current,
+        )
+        path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        safe_fs.atomic_write_bytes(
+            auth, serialized.encode("utf-8"), 0o600
+        )
+    except safe_fs.SafetyError as exc:
+        raise ValueError(str(exc)) from exc
     return {"status": "written", "path": str(path), **payload}
 
 

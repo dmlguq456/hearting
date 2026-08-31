@@ -1,0 +1,1 @@
+../../../../tools/install/deletion_safety.test.py

@@ -5,28 +5,18 @@ set -eu
 
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
 TMP=$(mktemp -d)
+# destructive-ok: reason=clean one mktemp activation fixture; boundary=TMP returned by the immediately preceding mktemp call
 trap 'rm -rf "$TMP"' EXIT HUP INT TERM
 
-HOME="$TMP/home"
-XDG_CONFIG_HOME="$HOME/.config"
-XDG_DATA_HOME="$HOME/.local/share"
-# Sealed explicitly rather than left to default-from-HOME: an ambient
-# XDG_STATE_HOME/HARNESS_STATE_ROOT already exported by the calling shell
-# would otherwise survive this script's HOME override untouched and let
-# dispatch-state-root resolution (stable_state_root()) escape into the real
-# state root instead of this fixture's $TMP.
-XDG_STATE_HOME="$HOME/.local/state"
-HARNESS_STATE_ROOT="$XDG_STATE_HOME/hearting"
-CODEX_HOME="$HOME/.codex"
-CLAUDE_CONFIG_DIR="$HOME/.claude"
+eval "$(python3 "$ROOT/tools/install/fixture_env.py" shell "$TMP" "$ROOT")"
 SENTINEL_LOG="$TMP/external-calls.log"
 SRC="$TMP/source-main"
 SRC2="$TMP/source-worktree"
 SRC_BAD="$TMP/source-bad"
 SRC_LINK="$TMP/source-link"
 BIN="$TMP/bin"
-export HOME XDG_CONFIG_HOME XDG_DATA_HOME XDG_STATE_HOME HARNESS_STATE_ROOT CODEX_HOME CLAUDE_CONFIG_DIR SENTINEL_LOG
-mkdir -p "$HOME" "$BIN" "$HARNESS_STATE_ROOT"
+export SENTINEL_LOG
+mkdir -p "$BIN"
 : > "$SENTINEL_LOG"
 
 fail() {
@@ -249,29 +239,36 @@ test ! -e "$HOME/.claude/manifest.json" && test ! -L "$HOME/.claude/manifest.jso
   || fail "uninstall restored over a manifest.json the user repointed after activation"
 ok "uninstall restores an untouched union member's installer target and leaves a user repoint alone"
 
-# A crash right after `_write_journal(..., "preparing", ...)` for a
-# union-only destination (README.md/manifest.json/loops) must stay
-# recoverable: `_journal_dest_allowed()` has to accept these names too, not
-# just the activation-native ones, or the next activate() permanently
-# refuses with "transaction destination is not harness-owned".
+# A legacy/incomplete journal has no exact preimage/postimage proof. Recovery
+# must fail closed without touching the union-only destination; an operator can
+# then remove that fixture-owned corrupt journal and retry normally.
 harness runtime activate --runtime claude --mode packaged --source "$SRC" --json \
   > "$TMP/claude-union-precrash.json" \
   || { cat "$TMP/claude-union-precrash.json" >&2; fail "pre-crash union activation failed"; }
 test -L "$HOME/.claude/README.md" || fail "union README.md missing before crash simulation"
+readme_before=$(readlink "$HOME/.claude/README.md")
 mkdir -p "$HOME/.claude/.harness/transactions/readme-crash"
 printf '%s\n' \
   "{\"schema\":1,\"runtime\":\"claude\",\"status\":\"preparing\",\"records\":[{\"dest\":\"$HOME/.claude/README.md\",\"state\":\"missing\",\"backup\":null,\"target\":null}]}" \
   > "$HOME/.claude/.harness/transactions/readme-crash/journal.json"
-if ! harness runtime activate --runtime claude --mode packaged --source "$SRC" --json \
+if harness runtime activate --runtime claude --mode packaged --source "$SRC" --json \
   > "$TMP/claude-union-recover.json" 2>&1; then
-  cat "$TMP/claude-union-recover.json" >&2
-  fail "activation could not recover a preparing journal for a union-only destination"
+  fail "activation accepted a journal without exact state evidence"
 fi
-test ! -e "$HOME/.claude/.harness/transactions/readme-crash" \
-  || fail "recovered README.md transaction directory was not cleared"
-test -L "$HOME/.claude/README.md" || fail "recovery did not leave README.md reprojected"
-ok "journal recovery accepts a preparing README.md destination adopted by the owner-name-set union"
+grep -q 'ownership-unproved: transaction lacks exact state' \
+  "$TMP/claude-union-recover.json" \
+  || fail "incomplete journal refusal lacked the typed ownership diagnostic"
+test -L "$HOME/.claude/README.md" \
+  && test "$(readlink "$HOME/.claude/README.md")" = "$readme_before" \
+  || fail "incomplete journal refusal changed README.md"
+# destructive-ok: reason=operator-clean one deliberately corrupt fixture journal; boundary=exact readme-crash directory below fixture HOME
+rm -rf "$HOME/.claude/.harness/transactions/readme-crash"
+harness runtime activate --runtime claude --mode packaged --source "$SRC" --json \
+  > "$TMP/claude-union-retry.json" \
+  || { cat "$TMP/claude-union-retry.json" >&2; fail "retry after corrupt journal cleanup failed"; }
+ok "incomplete legacy journal fails closed and preserves its union-only destination"
 
+# destructive-ok: reason=construct missing projection fixtures; boundary=two exact Claude leaves below fixture HOME
 rm -f "$HOME/.claude/README.md" "$HOME/.claude/loops"
 
 if ! harness runtime activate --runtime all --mode linked --source "$SRC" --json \
@@ -625,6 +622,7 @@ fi
 opencode_state_after=$(sha256sum "$HOME/.config/opencode/.harness/activation.json" | cut -d ' ' -f 1)
 test "$opencode_state_before" = "$opencode_state_after" \
   || fail "blocked OpenCode JSONC activation changed state"
+# destructive-ok: reason=advance one OpenCode config fixture state; boundary=exact opencode.jsonc leaf below fixture HOME
 rm "$HOME/.config/opencode/opencode.jsonc"
 ok "OpenCode plugin parsing handles tuples, comments, and unsafe JSONC rewrites"
 
@@ -699,6 +697,7 @@ if harness runtime activate --runtime codex --mode linked --source "$SRC" --json
 fi
 test "$(cat "$HOME/.codex/auth.json")" = credential-still-owned \
   || fail "forged journal changed runtime credentials"
+# destructive-ok: reason=clean one forged fixture journal; boundary=exact forged directory below fixture HOME
 rm -rf "$HOME/.codex/.harness/transactions/forged"
 ok "journal recovery rejects non-harness destinations"
 
@@ -707,9 +706,33 @@ ok "journal recovery rejects non-harness destinations"
 mode_link="$HOME/.codex/agent-modes/dev/refactor.md"
 mode_target=$(readlink "$mode_link")
 mkdir -p "$HOME/.codex/.harness/transactions/mode-recovery"
-printf '%s\n' \
-  "{\"schema\":2,\"runtime\":\"codex\",\"status\":\"applying\",\"records\":[{\"dest\":\"$mode_link\",\"state\":\"symlink\",\"backup\":null,\"target\":\"$mode_target\"}]}" \
-  > "$HOME/.codex/.harness/transactions/mode-recovery/journal.json"
+PYTHONPATH="$ROOT/tools/install" python3 - \
+  "$HOME/.codex/.harness/transactions/mode-recovery/journal.json" \
+  "$mode_link" "$mode_target" <<'PY'
+import json
+import sys
+import safe_fs
+
+journal, destination, target = sys.argv[1:]
+state = safe_fs.capture_state(destination).public()
+with open(journal, "w", encoding="utf-8") as handle:
+    json.dump(
+        {
+            "schema": 2,
+            "runtime": "codex",
+            "status": "applying",
+            "records": [{
+                "dest": destination,
+                "state": "symlink",
+                "backup": None,
+                "target": target,
+                "preimage": state,
+                "postimage": state,
+            }],
+        },
+        handle,
+    )
+PY
 harness runtime activate --runtime codex --mode linked --source "$SRC" --json \
   >/dev/null || fail "nested mode transaction could not recover"
 test -L "$mode_link" || fail "nested mode recovery lost the projected link"
@@ -719,13 +742,15 @@ ok "journal recovery accepts profile-owned nested mode destinations"
 
 printf '%s\n' backup-victim > "$TMP/backup-victim"
 mkdir -p "$HOME/.codex/.harness/transactions/backup-escape"
-python3 - \
+PYTHONPATH="$ROOT/tools/install" python3 - \
   "$HOME/.codex/.harness/transactions/backup-escape/journal.json" \
   "$HOME/.codex/AGENTS.md" "$TMP/backup-victim" <<'PY'
 import json
 import sys
+import safe_fs
 
 journal, destination, backup = sys.argv[1:]
+state = safe_fs.capture_state(destination).public()
 with open(journal, "w", encoding="utf-8") as handle:
     json.dump(
         {
@@ -738,6 +763,8 @@ with open(journal, "w", encoding="utf-8") as handle:
                     "state": "copied",
                     "backup": backup,
                     "target": None,
+                    "preimage": state,
+                    "postimage": state,
                 }
             ],
         },
@@ -750,9 +777,11 @@ if harness runtime activate --runtime codex --mode linked --source "$SRC" --json
 fi
 test "$(cat "$TMP/backup-victim")" = backup-victim \
   || fail "backup escape journal changed its external target"
+# destructive-ok: reason=clean one backup-escape fixture journal; boundary=exact backup-escape directory below fixture HOME
 rm -rf "$HOME/.codex/.harness/transactions/backup-escape"
 ok "journal recovery rejects backup paths outside the transaction root"
 
+# destructive-ok: reason=replace fixture transaction storage with a symlink; boundary=empty transactions directory below fixture HOME
 rmdir "$HOME/.codex/.harness/transactions"
 mkdir -p "$TMP/outside-transactions"
 printf '%s\n' state-victim > "$TMP/outside-transactions/sentinel"
@@ -763,6 +792,7 @@ if harness runtime activate --runtime codex --mode linked --source "$SRC" --json
 fi
 test "$(cat "$TMP/outside-transactions/sentinel")" = state-victim \
   || fail "symlinked transaction directory changed external state"
+# destructive-ok: reason=remove the fixture transaction-storage symlink; boundary=exact transactions symlink below fixture HOME
 rm "$HOME/.codex/.harness/transactions"
 mkdir "$HOME/.codex/.harness/transactions"
 ok "activation rejects symlinked harness transaction storage"
@@ -777,6 +807,7 @@ ok "activation recovers an empty pre-journal crash directory"
 git clone -q "$SRC" "$SRC_LINK"
 mkdir -p "$TMP/outside-skill"
 printf '%s\n' '# outside' > "$TMP/outside-skill/SKILL.md"
+# destructive-ok: reason=construct a source-root escape fixture; boundary=exact demo skill below fixture clone SRC_LINK
 rm -rf "$SRC_LINK/adapters/codex/skills/demo"
 ln -s "$TMP/outside-skill" "$SRC_LINK/adapters/codex/skills/demo"
 if harness runtime activate --runtime codex --mode linked --source "$SRC_LINK" --json \
@@ -786,6 +817,7 @@ fi
 ok "linked activation rejects external source symlinks"
 
 git clone -q "$SRC" "$SRC_BAD"
+# destructive-ok: reason=construct an incomplete Codex source fixture; boundary=two exact adapter directories below fixture clone SRC_BAD
 rm -rf "$SRC_BAD/adapters/codex/bin" "$SRC_BAD/adapters/codex/hooks"
 claude_state_before=$(sha256sum "$HOME/.claude/.harness/activation.json" | cut -d ' ' -f 1)
 claude_settings_before=$(sha256sum "$HOME/.claude/settings.json" | cut -d ' ' -f 1)
@@ -797,8 +829,10 @@ fi
 claude_state_after=$(sha256sum "$HOME/.claude/.harness/activation.json" | cut -d ' ' -f 1)
 claude_settings_after=$(sha256sum "$HOME/.claude/settings.json" | cut -d ' ' -f 1)
 claude_link_after=$(readlink "$HOME/.claude/skills/demo")
-test "$claude_state_before" = "$claude_state_after" \
-  || fail "multi-runtime rollback did not restore Claude activation state"
+if test "$claude_state_before" != "$claude_state_after"; then
+  cat "$TMP/global-rollback.json" >&2
+  fail "multi-runtime rollback did not restore Claude activation state"
+fi
 test "$claude_settings_before" = "$claude_settings_after" \
   || fail "multi-runtime rollback did not restore Claude settings"
 test "$claude_link_before" = "$claude_link_after" \
@@ -823,6 +857,7 @@ assert row["freshness"] == "fresh"
 PY
 ok "absolute source path distinguishes the explicitly activated worktree"
 
+# destructive-ok: reason=construct deleted-discovery fixture state; boundary=exact demo skill below fixture clone SRC2
 rm -rf "$SRC2/adapters/codex/skills/demo"
 harness runtime status --runtime codex --json > "$TMP/removed-skill.json" || true
 python3 - "$TMP/removed-skill.json" <<'PY'
@@ -845,6 +880,7 @@ harness runtime activate --runtime codex --mode linked --source "$SRC" --json \
   || { cat "$TMP/marker-dir-activate.json" >&2; fail "runtime marker symlink blocked activation"; }
 ok "activation ignores absolute symlinks under runtime marker directories"
 
+# destructive-ok: reason=construct a missing managed hook command fixture; boundary=exact fixture.sh below fixture source SRC
 rm "$SRC/adapters/claude/utilities/fixture.sh"
 harness runtime status --runtime claude --json > "$TMP/hook-file-missing.json" || true
 python3 - "$TMP/hook-file-missing.json" <<'PY'
@@ -897,6 +933,7 @@ harness runtime doctor --runtime claude --strict --json > "$TMP/claude-native-do
 mkdir -p "$CLAUDE_NATIVE_VERSIONS/1.0.1"
 printf '%s\n' '#!/bin/sh' 'echo native-claude-1.0.1' > "$CLAUDE_NATIVE_VERSIONS/1.0.1/claude"
 chmod +x "$CLAUDE_NATIVE_VERSIONS/1.0.1/claude"
+# destructive-ok: reason=simulate native Claude version-link advance; boundary=exact synthetic Claude binary inside fixture HOME
 rm -f "$CLAUDE_NATIVE_BIN"
 ln -s "$CLAUDE_NATIVE_VERSIONS/1.0.1/claude" "$CLAUDE_NATIVE_BIN"
 test "$(readlink "$CLAUDE_NATIVE_BIN")" = "$CLAUDE_NATIVE_VERSIONS/1.0.1/claude" \

@@ -181,6 +181,7 @@ class ManagedReleaseMigrationTest(unittest.TestCase):
         rows = {r["name"]: r["status"] for r in bootstrap.install_launchers(home=self.home)}
         self.assertEqual(set(rows.values()), {"migrated-legacy"})
 
+    # destructive-ok: reason=simulate removal of one prior fixture launcher link; boundary=target below this test TemporaryDirectory
     def test_prior_runtime_bundle_links_migrate_after_activation_advances(self):
         """The old bundle is no longer named by activation.json after a refresh."""
         rel = dict(bootstrap.LAUNCHERS)["fleet"]

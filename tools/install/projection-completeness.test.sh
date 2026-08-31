@@ -11,17 +11,10 @@ set -eu
 
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
 TMP=$(mktemp -d)
+# destructive-ok: reason=clean one mktemp projection fixture; boundary=TMP returned by the immediately preceding mktemp call
 trap 'rm -rf "$TMP"' EXIT HUP INT TERM
 
-HOME="$TMP/home"
-XDG_CONFIG_HOME="$HOME/.config"
-XDG_DATA_HOME="$HOME/.local/share"
-XDG_STATE_HOME="$HOME/.local/state"
-CODEX_HOME="$HOME/.codex"
-CLAUDE_CONFIG_DIR="$HOME/.claude"
-AGENT_HOME="$ROOT"
-export HOME XDG_CONFIG_HOME XDG_DATA_HOME XDG_STATE_HOME CODEX_HOME CLAUDE_CONFIG_DIR AGENT_HOME
-mkdir -p "$HOME"
+eval "$(python3 "$ROOT/tools/install/fixture_env.py" shell "$TMP" "$ROOT")"
 
 # A hosted CI runner has no vendor Codex command. Seed one outside the
 # harness-owned ingress so activation exercises the real binding/protection

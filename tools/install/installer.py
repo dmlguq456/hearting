@@ -38,6 +38,7 @@ import compute_hosts_config
 import user_config
 import host_probes
 import node_runtime
+import safe_fs
 from drivers import get_driver, RUNTIMES
 
 # Exit codes map one-to-one to the PRD CLI table.
@@ -730,14 +731,32 @@ def cmd_uninstall(args):
     lines = []
     checks = []
 
+    try:
+        for runtime in runtimes:
+            runtime_activation.validate_scope(runtime, args.scope)
+    except runtime_activation.ActivationError as exc:
+        return {
+            "runtime": runtimes,
+            "channel": "dev",
+            "checks": [{"id": "uninstall.preflight", "ok": False, "detail": f"invalid-before-mutation: {exc}"}],
+            "drift": [],
+            "exit": EXIT_BLOCKED,
+            "lines": [f"uninstall: blocked before mutation: {exc}"],
+        }
+
     for rt in runtimes:
         launcher_snapshot = None
         if rt == "codex" and not args.dry_run:
-            launcher_snapshot = codex_launcher.capture_snapshot()
+            launcher_snapshot = codex_launcher.capture_snapshot(
+                operation="uninstall"
+            )
         try:
             if rt == "codex":
                 try:
-                    launcher_result = codex_launcher.uninstall(dry_run=args.dry_run)
+                    launcher_result = codex_launcher.uninstall(
+                        dry_run=args.dry_run,
+                        transaction_snapshot=launcher_snapshot,
+                    )
                     lines.append(
                         "uninstall: codex — managed launcher "
                         + launcher_result["status"]
@@ -754,6 +773,10 @@ def cmd_uninstall(args):
                     checks.append(
                         {"id": "codex.managed-launcher", "ok": False, "detail": str(exc)}
                     )
+                    if launcher_snapshot is not None:
+                        if "postimages" not in launcher_snapshot:
+                            codex_launcher.seal_snapshot(launcher_snapshot)
+                        codex_launcher.restore_snapshot(launcher_snapshot)
                     return {
                         "runtime": runtimes,
                         "channel": "dev",
@@ -798,7 +821,9 @@ def cmd_uninstall(args):
                 )
 
             manifest_path = manifest._manifest_path(rt, args.scope)
-            manifest_data = manifest._load_manifest(manifest_path)
+            manifest_data, loaded_manifest_state = manifest.load_ownership_manifest(
+                manifest_path, rt, args.scope
+            )
 
             if manifest_data is None:
                 lines.append(f"uninstall: {rt} — no manifest; nothing to remove")
@@ -812,7 +837,8 @@ def cmd_uninstall(args):
             copy_once_dests = [runtime_home / relpath for relpath in manifest_data.get("files", {})]
 
             entries = projector.plan([rt], scope=args.scope)[rt]
-            symlink_dests = [Path(e["dest"]) for e in entries if e["action"] == "symlink"]
+            symlink_entries = [e for e in entries if e["action"] == "symlink"]
+            symlink_dests = [Path(e["dest"]) for e in symlink_entries]
 
             if args.dry_run:
                 for d in copy_once_dests:
@@ -829,25 +855,95 @@ def cmd_uninstall(args):
                 )
                 continue
 
-            # 1) Remove symlinks idempotently.
-            for d in symlink_dests:
-                if d.is_symlink():
-                    d.unlink()
+            deletion_targets = [*symlink_dests, *copy_once_dests, manifest_path]
+            with safe_fs.TargetLocks(deletion_targets):
+                symlink_states = []
+                for entry in symlink_entries:
+                    d = Path(entry["dest"])
+                    current = safe_fs.capture_state(d)
+                    if current.kind == "missing":
+                        continue
+                    if current.kind != "symlink":
+                        raise RuntimeError(
+                            f"ownership-unproved: projection is no longer a symlink: {d}"
+                        )
+                    raw_target = Path(os.readlink(d))
+                    resolved = (
+                        raw_target if raw_target.is_absolute() else d.parent / raw_target
+                    ).resolve(strict=False)
+                    expected_target = Path(entry["source"]).resolve(strict=False)
+                    if resolved != expected_target:
+                        raise RuntimeError(
+                            f"expected-state-mismatch: repointed projection preserved: {d}"
+                        )
+                    symlink_states.append((d, current))
+
+                copy_states = []
+                for relpath, d in zip(
+                    manifest_data.get("files", {}), copy_once_dests
+                ):
+                    manifest._safe_relpath(relpath)
+                    current = safe_fs.capture_state(d)
+                    if current.kind == "missing":
+                        continue
+                    expected_hash = manifest_data["files"][relpath]
+                    if current.kind != "file" or current.digest != expected_hash:
+                        raise RuntimeError(
+                            f"expected-state-mismatch: modified copy-once file preserved: {d}"
+                        )
+                    copy_states.append((relpath, d, current))
+
+                manifest_state = safe_fs.capture_state(manifest_path)
+                if manifest_state != loaded_manifest_state:
+                    raise RuntimeError(
+                        f"expected-state-mismatch: manifest changed while preparing uninstall: {manifest_path}"
+                    )
+                if manifest_state.kind not in {"file", "missing"}:
+                    raise RuntimeError(
+                        f"ownership-unproved: manifest path has unsafe kind: {manifest_path}"
+                    )
+
+                # 1) Remove only exact, still-owned symlink projections.
+                for d, current in symlink_states:
+                    auth = safe_fs.authority(
+                        d,
+                        owner=f"installer-manifest:{rt}:symlink",
+                        allowed_paths=(d,),
+                        expected=current,
+                    )
+                    safe_fs.remove_exact(auth)
                     lines.append(f"uninstall: {rt} — removed symlink {d}")
 
-            # 2) Back up and remove copy-once files.
-            for relpath, d in zip(manifest_data.get("files", {}), copy_once_dests):
-                if d.exists():
-                    backup_path = paths.harness_state_dir(rt, args.scope) / "local-patches" / relpath
-                    backup_path.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.copyfile(d, backup_path)
-                    d.unlink()
-                    lines.append(f"uninstall: {rt} — removed copy-once file {d} (backed up to {backup_path})")
+                # 2) Back up and remove byte-exact copy-once files.
+                for relpath, d, current in copy_states:
+                    backup_path = (
+                        paths.harness_state_dir(rt, args.scope)
+                        / "local-patches"
+                        / relpath
+                    )
+                    manifest._atomic_write_bytes(backup_path, d.read_bytes())
+                    auth = safe_fs.authority(
+                        d,
+                        owner=f"installer-manifest:{rt}:copy-once:{relpath}",
+                        allowed_paths=(d,),
+                        expected=current,
+                    )
+                    safe_fs.remove_exact(auth)
+                    lines.append(
+                        f"uninstall: {rt} — removed copy-once file {d} "
+                        f"(backed up to {backup_path})"
+                    )
 
-            # 3) Remove manifest.json last.
-            if manifest_path.exists():
-                manifest_path.unlink()
-                lines.append(f"uninstall: {rt} — removed manifest {manifest_path}")
+                # 3) Remove the exact manifest object last.
+                if manifest_state.kind == "file":
+                    auth = safe_fs.authority(
+                        manifest_path,
+                        owner=f"installer-manifest:{rt}:registry",
+                        allowed_paths=(manifest_path,),
+                        expected=manifest_state,
+                    )
+                    safe_fs.remove_exact(auth)
+                    lines.append(f"uninstall: {rt} — removed manifest {manifest_path}")
 
             checks.append(
                 {
@@ -858,6 +954,8 @@ def cmd_uninstall(args):
             )
         except Exception as exc:
             if launcher_snapshot is not None:
+                if "postimages" not in launcher_snapshot:
+                    codex_launcher.seal_snapshot(launcher_snapshot)
                 codex_launcher.restore_snapshot(launcher_snapshot)
             lines.append(
                 f"uninstall: {rt} — blocked after managed-launcher commit; "
@@ -931,17 +1029,32 @@ def cmd_runtime(args):
     lines = []
     exit_code = EXIT_OK
     snapshots = []
+    snapshots_by_runtime = {}
     launcher_snapshot = None
 
     try:
+        # Validate the complete multi-runtime request before any snapshot,
+        # lock-file creation, directory creation, or state write.
+        for runtime in targets:
+            runtime_activation.validate_request(
+                runtime,
+                args.runtime_command,
+                mode=args.mode if args.runtime_command == "activate" else None,
+                source=args.source if args.runtime_command == "activate" else None,
+                scope=args.scope,
+            )
         if args.runtime_command in {"activate", "refresh"}:
             source = args.source if args.runtime_command == "activate" else None
             if "codex" in targets:
-                launcher_snapshot = codex_launcher.capture_snapshot()
-            for runtime in targets:
-                snapshots.append(
-                    runtime_activation.capture_runtime_state(runtime, source, args.scope)
+                launcher_snapshot = codex_launcher.capture_snapshot(
+                    operation="activation"
                 )
+            for runtime in targets:
+                snapshot = runtime_activation.capture_runtime_state(
+                    runtime, source, args.scope
+                )
+                snapshots.append(snapshot)
+                snapshots_by_runtime[runtime] = snapshot
         for runtime in targets:
             if args.runtime_command == "status":
                 report = runtime_activation.status(runtime, args.scope)
@@ -965,6 +1078,10 @@ def cmd_runtime(args):
             else:
                 raise runtime_activation.ActivationError(
                     f"unknown runtime command: {args.runtime_command}"
+                )
+            if args.runtime_command in {"activate", "refresh"}:
+                runtime_activation.seal_runtime_state(
+                    snapshots_by_runtime[runtime]
                 )
             if runtime == "codex" and args.runtime_command in {"status", "doctor"}:
                 launcher_report = codex_launcher.status()
@@ -1027,7 +1144,9 @@ def cmd_runtime(args):
                 report["surface_skew"] = skew
         if args.runtime_command in {"activate", "refresh"} and "codex" in targets:
             try:
-                launcher_result = codex_launcher.install()
+                launcher_result = codex_launcher.install(
+                    transaction_snapshot=launcher_snapshot
+                )
             except codex_launcher.CodexUnavailableError as exc:
                 launcher_result = {
                     "action": "managed-launcher",
@@ -1035,6 +1154,8 @@ def cmd_runtime(args):
                     "target": str(codex_launcher.wrapper_path(codex_launcher.default_bin_dir())),
                     "detail": str(exc),
                 }
+                if launcher_snapshot is not None:
+                    codex_launcher.seal_snapshot(launcher_snapshot)
             except codex_launcher.CodexLauncherError as exc:
                 raise runtime_activation.ActivationError(
                     f"Codex managed launcher installation failed: {exc}"
@@ -1076,11 +1197,15 @@ def cmd_runtime(args):
         rollback_errors = []
         for snapshot in reversed(snapshots):
             try:
+                if not snapshot.get("_sealed"):
+                    runtime_activation.seal_runtime_state(snapshot)
                 runtime_activation.restore_runtime_state(snapshot)
             except Exception as rollback_exc:
                 rollback_errors.append(str(rollback_exc))
         if launcher_snapshot is not None:
             try:
+                if "postimages" not in launcher_snapshot:
+                    codex_launcher.seal_snapshot(launcher_snapshot)
                 codex_launcher.restore_snapshot(launcher_snapshot)
             except Exception as rollback_exc:
                 rollback_errors.append(f"launcher: {rollback_exc}")
@@ -1101,8 +1226,12 @@ def cmd_runtime(args):
         )
     except Exception:
         for snapshot in reversed(snapshots):
+            if not snapshot.get("_sealed"):
+                runtime_activation.seal_runtime_state(snapshot)
             runtime_activation.restore_runtime_state(snapshot)
         if launcher_snapshot is not None:
+            if "postimages" not in launcher_snapshot:
+                codex_launcher.seal_snapshot(launcher_snapshot)
             codex_launcher.restore_snapshot(launcher_snapshot)
         for snapshot in snapshots:
             runtime_activation.discard_runtime_state(snapshot)
