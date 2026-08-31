@@ -12,6 +12,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import textwrap
 import unittest
@@ -205,11 +206,65 @@ class ArtifactRootsAreNotTestCorpus(unittest.TestCase):
             root = Path(td)
             (root / "utilities").mkdir()
             (root / "utilities" / "real.test.py").write_text("import sys\nsys.exit(0)\n", encoding="utf-8")
-            for bucket in (".agent_reports/_scratch/copy/utilities", ".claude_reports/legacy"):
+            for bucket in (
+                ".agent_reports/_scratch/copy/utilities",
+                ".claude_reports/legacy",
+                ".dispatch/nested-home/plugins/vendor/tests",
+            ):
                 (root / bucket).mkdir(parents=True)
                 (root / bucket / "stale.test.py").write_text("import sys\nsys.exit(1)\n", encoding="utf-8")
             found = [mod.suite_relpath(root, s) for s in mod.collect_suites(root)]
         self.assertEqual(found, ["utilities/real.test.py"])
+
+
+class ExclusiveSuiteSchedulingFixture(unittest.TestCase):
+    def test_projection_completeness_runs_after_parallel_batch_and_keeps_report_order(self):
+        mod = load_runner_module()
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            serial = root / "tools/install/projection-completeness.test.sh"
+            regular_a = root / "a.test.py"
+            regular_b = root / "b.test.py"
+            for suite in (serial, regular_a, regular_b):
+                suite.parent.mkdir(parents=True, exist_ok=True)
+                suite.touch()
+
+            barrier = threading.Barrier(2)
+            lock = threading.Lock()
+            active_regular = 0
+            regular_overlap = False
+            serial_observed_parallel = None
+
+            def fake_run_suite(suite, _root, _env, _profile, _timeout):
+                nonlocal active_regular, regular_overlap, serial_observed_parallel
+                rel = suite.relative_to(root).as_posix()
+                if rel in mod.SERIAL_SUITES:
+                    with lock:
+                        serial_observed_parallel = active_regular
+                    return rel
+                with lock:
+                    active_regular += 1
+                    regular_overlap = regular_overlap or active_regular > 1
+                barrier.wait(timeout=2)
+                with lock:
+                    active_regular -= 1
+                return rel
+
+            with mock.patch.object(mod, "run_suite", side_effect=fake_run_suite):
+                results = mod.run_profile(
+                    [serial, regular_a, regular_b], root, "isolated", 2, 5, None
+                )
+
+        self.assertTrue(regular_overlap)
+        self.assertEqual(serial_observed_parallel, 0)
+        self.assertEqual(
+            results,
+            [
+                "tools/install/projection-completeness.test.sh",
+                "a.test.py",
+                "b.test.py",
+            ],
+        )
 
 
 class FingerprintScopedSiblingRows(unittest.TestCase):

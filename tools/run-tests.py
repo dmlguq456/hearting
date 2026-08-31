@@ -46,10 +46,20 @@ ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_TIMEOUT = 600
 DEFAULT_JOBS = 4
 
-PRUNE_DIRS = {".git", "__pycache__", "node_modules",
+# This suite repeatedly activates all three runtime projections in both linked
+# and packaged modes. Running it beside other install/projection suites makes
+# its strict-doctor assertions depend on host load (the same GitHub runner
+# fingerprint has produced both ``exit-nonzero`` and ``assertion`` failures).
+# Keep it in the full corpus and report, but run it only after the profile's
+# parallel batch has drained.
+SERIAL_SUITES = frozenset({"tools/install/projection-completeness.test.sh"})
+
+PRUNE_DIRS = {".git", ".dispatch", "__pycache__", "node_modules",
     # Artifact roots are never test corpus: a stale repo copy under
     # .agent_reports/_scratch/ once inflated the census 295 -> 1240 suites and
-    # made the full run hang past every timeout (2026-08-30).
+    # made the full run hang past every timeout (2026-08-30). Repo-local
+    # dispatch state is likewise runtime data and may contain nested runtime
+    # plugin caches with unrelated vendor tests.
     ".agent_reports", ".claude_reports",
 }
 
@@ -1146,7 +1156,7 @@ def run_profile(
     timeout: int,
     install_prefix: Path | None,
 ) -> list[SuiteResult]:
-    results: list[SuiteResult] = []
+    results_by_index: dict[int, SuiteResult] = {}
     tmp_roots: list[Path] = []
 
     def make_env(idx: int) -> dict[str, str]:
@@ -1167,17 +1177,37 @@ def run_profile(
         raise ValueError(profile)
 
     try:
+        indexed = list(enumerate(suites))
+        parallel = [
+            (idx, suite)
+            for idx, suite in indexed
+            if suite_relpath(root, suite) not in SERIAL_SUITES
+        ]
+        serial = [
+            (idx, suite)
+            for idx, suite in indexed
+            if suite_relpath(root, suite) in SERIAL_SUITES
+        ]
         with ThreadPoolExecutor(max_workers=max(1, jobs)) as pool:
             futures = []
-            for idx, suite in enumerate(suites):
+            for idx, suite in parallel:
                 env = make_env(idx)
-                futures.append(pool.submit(run_suite, suite, root, env, profile, timeout))
-            for fut in futures:
-                results.append(fut.result())
+                futures.append(
+                    (idx, pool.submit(run_suite, suite, root, env, profile, timeout))
+                )
+            for idx, fut in futures:
+                results_by_index[idx] = fut.result()
+
+        # The pool context has joined every parallel suite before an exclusive
+        # suite starts. Preserve the original corpus order in the returned
+        # report even though execution order is deliberately different.
+        for idx, suite in serial:
+            env = make_env(idx)
+            results_by_index[idx] = run_suite(suite, root, env, profile, timeout)
     finally:
         for tmp in tmp_roots:
             shutil.rmtree(tmp, ignore_errors=True)
-    return results
+    return [results_by_index[idx] for idx in range(len(suites))]
 
 
 def main(argv: list[str]) -> int:
