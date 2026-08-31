@@ -110,7 +110,11 @@ run_real() {
         "$@" >"$out" 2>"$err"
   set -- "$trace"*
   test -e "$1"
-  if rg -q 'utilities/cairn-artifact-read\.sh|connect\(' "$trace"*; then
+  # AF_UNIX lookups such as glibc's optional nscd probe are local runtime
+  # plumbing, not an artifact transport. Keep the boundary exact: the Cairn
+  # executable or any IP socket attempt is forbidden here.
+  if rg -q 'utilities/cairn-artifact-read\.sh|connect\(.*sa_family=AF_INET' "$trace"*; then
+    rg -n 'utilities/cairn-artifact-read\.sh|connect\(.*sa_family=AF_INET' "$trace"* >&2 || :
     echo "startup transport observed for $mode" >&2
     exit 1
   fi

@@ -1541,13 +1541,16 @@ class ArtifactProofReceiptSealTest(unittest.TestCase):
    self.assertEqual(
     observed_attempt_liveness("done",sealed,terminal_receipt_gate=True).state,
     "terminal")
-   # Without the seal the same live tag still vetoes quiescence.
+   # Without the seal the same live tag still vetoes quiescence -- and now
+   # reports the descendant as live process evidence instead of merely
+   # withholding terminal progression, matching every other populated-scan
+   # case in the precedence ladder.
    unsealed={key:value for key,value in sealed.items()
              if not key.startswith("artifact_proof_")
              and key!="post_exit_receipt_substitute"}
    self.assertEqual(
     attempt_process_quiescence(unsealed,terminal_receipt=True).state,
-    "unverifiable")
+    "live")
   finally:
    child.terminate();child.wait(timeout=5)
 

@@ -89,6 +89,16 @@ for row in data["runtimes"]:
     assert row["freshness"] == "fresh", row
 PY
 
+  # Strict doctor now verifies the protected Codex ingress is the command a
+  # fresh shell would resolve. Keep this private-HOME fixture hermetic instead
+  # of inheriting a host vendor command that happens to appear earlier on PATH.
+  case ":$PATH:" in
+    *":$CODEX_HOME/.harness/bin:"*) ;;
+    *) PATH="$CODEX_HOME/.harness/bin:$PATH"; export PATH ;;
+  esac
+  test "$(command -v codex)" = "$CODEX_HOME/.harness/bin/codex" \
+    || fail "$mode protected Codex ingress is not first on PATH"
+
   test "$(count_dirs "$HOME/.codex/skills")" = "$EXPECTED_CAPABILITIES" || fail "$mode Codex skill count"
   test "$(count_dirs "$HOME/.claude/skills")" = "$EXPECTED_CAPABILITIES" || fail "$mode Claude skill count"
   test "$(count_dirs "$HOME/.config/opencode/skills")" = "$EXPECTED_CAPABILITIES" || fail "$mode OpenCode skill count"

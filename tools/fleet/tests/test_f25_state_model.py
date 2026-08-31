@@ -457,11 +457,34 @@ class NamespaceLocalDescendantEvidenceTest(unittest.TestCase):
         self.assertEqual(verdict["source"], "namespace")
         self.assertIn("attempt-tagged", verdict["rule"])
 
-    def test_live_tagged_process_keeps_the_fresh_heartbeat_working(self):
+    def test_live_tagged_process_works_without_a_fresh_heartbeat(self):
         verdict = model.classify_attempt_evidence(
-            self.evidence(attempt_descendants="populated"), now=1060.0)
+            self.evidence(attempt_descendants="populated",
+                          heartbeat=None), now=99000.0)
+        self.assertEqual((verdict["state"], verdict["source"]),
+                         ("working", "namespace"))
+
+    def test_populated_descendant_overrides_terminal_summary(self):
+        verdict = model.classify_attempt_evidence(
+            self.evidence(attempt_descendants="populated",
+                          terminal_observation={
+                              "attempt_id": "att-ghost", "route_id": "rt-ghost",
+                              "route_node": "execute", "terminal_action": "completed-marker",
+                          }), now=99000.0)
         self.assertEqual(verdict["state"], "working")
         self.assertEqual(verdict["source"], "namespace")
+
+    def test_shared_observer_terminal_exception_outranks_raw_descendant(self):
+        verdict = model.classify_attempt_evidence(
+            self.evidence(
+                attempt_descendants="populated",
+                observed_liveness={
+                    "state": "terminal",
+                    "reason": "sealed-artifact-proof",
+                },
+            ), now=99000.0)
+        self.assertEqual((verdict["state"], verdict["source"]),
+                         ("done", "shared-observer"))
 
     def test_unscannable_and_absent_probes_both_stay_fail_closed(self):
         # An impossible scan, and an older caller that supplies no probe at all.

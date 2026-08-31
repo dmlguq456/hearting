@@ -1061,11 +1061,14 @@ class DispatchContractTest(unittest.TestCase):
    identity=D.process_launch_identity(proc.pid)
    self.assertEqual(identity["pid"],str(proc.pid))
    self.assertEqual(identity["pid_start"],D.process_start_ticks(proc.pid))
-   self.assertEqual(identity.get("pid_host"),str(proc.pid))
-   self.assertEqual(identity.get("pid_host_start"),identity["pid_start"])
-   expected_host_ns=D.process_namespace_identity(1) or identity.get("pid_observer_ns")
-   self.assertEqual(identity.get("pid_host_ns"),expected_host_ns)
-   self.assertEqual(identity.get("pid_host_proof"),D.PID_HOST_NAMESPACE_PROOF)
+   nspid=D.process_namespace_pids(proc.pid)
+   if len(nspid) > 1 and D.process_namespace_identity(1):
+    self.assertEqual(identity.get("pid_host"),str(nspid[0]))
+    self.assertEqual(identity.get("pid_host_start"),identity["pid_start"])
+    self.assertEqual(identity.get("pid_host_ns"),D.process_namespace_identity(1))
+    self.assertEqual(identity.get("pid_host_proof"),D.PID_HOST_NAMESPACE_PROOF)
+   else:
+    self.assertNotIn("pid_host",identity)
    self.assertEqual(identity.get("pgid"),str(proc.pid))
   finally:
    proc.kill();proc.wait()
@@ -1119,15 +1122,27 @@ class DispatchContractTest(unittest.TestCase):
        mock.patch.object(D,"process_namespace_pids",return_value=(7,)), \
        mock.patch.object(D.os,"getpgid",return_value=7):
    identity=D.process_launch_identity(7)
-  self.assertEqual(identity["pid_host"],"7")
-  self.assertEqual(identity["pid_host_ns"],inner_namespace)
-  self.assertEqual(identity["pid_host_proof"],D.PID_HOST_NAMESPACE_PROOF)
+  self.assertNotIn("pid_host",identity)
+  self.assertNotIn("pid_host_start",identity)
+  self.assertNotIn("pid_host_ns",identity)
+  self.assertNotIn("pid_host_proof",identity)
   with mock.patch.object(D,"process_namespace_identity",return_value="pid:[outer]"), \
        mock.patch.object(D,"_proc_observation") as observation:
    result=D.attempt_process_quiescence({**identity,"pid_scope":"namespace-local"})
   self.assertEqual((result.state,result.reason),
                    ("unverifiable","process-namespace-unverifiable"))
   observation.assert_not_called()
+
+ def test_unverifiable_leader_with_exact_descendant_is_live(self):
+  metadata={"attempt_id":"att-unverifiable-descendant",
+            "pid_scope":"namespace-local"}
+  probe=mock.Mock(state="populated",members=((901,"42","S"),),reason="")
+  with mock.patch.object(D,"_attempt_process_quiescence_impl",
+                         return_value=D.ProcessQuiescence("unverifiable","process-namespace-unverifiable")), \
+       mock.patch.object(D,"attempt_tagged_descendants",return_value=probe):
+   result=D.attempt_process_quiescence(metadata)
+  self.assertEqual((result.state,result.reason,result.pid),
+                   ("live","attempt-descendant-live",901))
 
  def test_exact_process_quiescence_is_live_then_ready_only_after_reap(self):
   proc=subprocess.Popen(

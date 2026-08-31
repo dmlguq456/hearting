@@ -178,8 +178,9 @@ class AdapterV11Test(unittest.TestCase):
    self.assertIn("preview=1",result.stdout)
    self.assertIn("attempt_id=-",result.stdout)
    self.assertIn("--network-access",result.stdout)
-   self.assertIn(f"--writable-root {ROOT / '.dispatch'}",result.stdout)
-   self.assertIn(f"--writable-root {jobs.parent.resolve()}",result.stdout)
+   canonical_state_root=DC.dispatch_state_root(jobs)
+   self.assertIn(f"--writable-root {canonical_state_root}",result.stdout)
+   self.assertNotIn(f"--writable-root {ROOT / '.dispatch'}",result.stdout)
    if (ROOT/".core-grounding").is_dir():
     self.assertIn(f"--writable-root {ROOT / '.core-grounding'}",result.stdout)
    self.assertIn(f"--writable-root {claude_config / 'session-env'}",result.stdout)
@@ -215,9 +216,11 @@ class AdapterV11Test(unittest.TestCase):
   args=type("Args",(),{
    "worktree":"/work/repo","artifact_root":"/artifacts","nested_headless_network":False,
    "agent_home":ROOT,"dispatch_depth":2,"route_id":"rt-1","attempt_id":"att-stage-1",
+   "command_attempt_id":"att-stage-1","jobs_path":Path("/state/jobs.log"),
    "sandbox":"workspace-write","resolved_model_settings":{"source":"inherit"},"approval":"inherit"})()
   command=wrapper.shell_command(args,Path("/prompt"),Path("/log"))
-  self.assertIn(f"--add-dir {ROOT / '.dispatch'}",command)
+  self.assertIn(f"--add-dir {DC.dispatch_state_root(args.jobs_path)}",command)
+  self.assertNotIn(f"--add-dir {ROOT / '.dispatch'}",command)
   self.assertNotIn("network_access=true",command)
  def test_foreground_codex_child_reuses_checked_outer_sandbox(self):
   wrapper=self.load_wrapper("codex")
@@ -319,7 +322,10 @@ class AdapterV11Test(unittest.TestCase):
      self.assertIn("launch_lifecycle_override=absent",row)
      self.assertNotIn("dead-nested-sandbox-lifetime",row)
      self.assertIn("parent_attempt_id=att-parent-fixture",row)
-     self.assertIn("pid_host=",row);self.assertIn("pid_host_start=",row)
+     # A one-element NSpid vector (this test's own procfs view) proves only
+     # local identity, never an outer host mapping; neither wrapper may
+     # publish a pid_host* claim from it.
+     self.assertNotIn("pid_host=",row);self.assertNotIn("pid_host_start=",row)
      self.assertIn("pgid=",row)
      if harness=="claude":
       self.assertIn("--output-format stream-json",output)
@@ -392,18 +398,19 @@ class AdapterV11Test(unittest.TestCase):
   bwrap=shutil.which("bwrap")
   if not bwrap:
    self.skipTest("bubblewrap is unavailable")
-  with tempfile.TemporaryDirectory() as dev_dir:
-   Path(dev_dir,"null").write_bytes(b"")
-   base=[bwrap,"--die-with-parent","--unshare-pid","--ro-bind","/","/",
-         "--proc","/proc","--bind",dev_dir,"/dev","--bind","/tmp","/tmp"]
-   probe=subprocess.run([*base,"true"],text=True,capture_output=True)
-   if probe.returncode:
-    self.skipTest("bubblewrap PID namespaces are unavailable: "+probe.stderr.strip())
-   env={**os.environ,"HEARTING_BWRAP_PID_NS":"1"}
-   result=subprocess.run(
-    [*base,sys.executable,str(Path(__file__).resolve()),
-     "AdapterV11Test.test_opencode_parent_callback_runs_in_real_bubblewrap_pid_namespace"],
-    cwd=ROOT,text=True,capture_output=True,env=env)
+  base=[bwrap,"--die-with-parent","--unshare-pid","--ro-bind","/","/",
+        "--proc","/proc","--dev","/dev","--tmpfs","/tmp"]
+  tmpdir=os.environ.get("TMPDIR","").rstrip("/")
+  if tmpdir and not tmpdir.startswith("/tmp") and os.path.isdir(tmpdir):
+   base += ["--bind",tmpdir,tmpdir]
+  probe=subprocess.run([*base,"true"],text=True,capture_output=True)
+  if probe.returncode:
+   self.skipTest("bubblewrap PID namespaces are unavailable: "+probe.stderr.strip())
+  env={**os.environ,"HEARTING_BWRAP_PID_NS":"1"}
+  result=subprocess.run(
+   [*base,sys.executable,str(Path(__file__).resolve()),
+    "AdapterV11Test.test_opencode_parent_callback_runs_in_real_bubblewrap_pid_namespace"],
+   cwd=ROOT,text=True,capture_output=True,env=env)
   self.assertEqual(result.returncode,0,result.stdout+result.stderr)
  def test_exact_attempt_row_closure_is_isolated_for_both_wrappers(self):
   for harness in ("codex","claude"):
