@@ -26,9 +26,8 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
-from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import Iterable, Optional
+from typing import Iterable, NamedTuple, Optional
 
 
 DEFAULT_REPOSITORY = "dmlguq456/hearting"
@@ -73,8 +72,7 @@ class DistributionError(RuntimeError):
     """Safe user-facing distribution failure."""
 
 
-@dataclass(frozen=True)
-class _LeafState:
+class _LeafState(NamedTuple):
     """Exact public identity for a standalone-installer mutation target."""
 
     kind: str
