@@ -75,6 +75,33 @@ class CodexLauncherInstallTest(unittest.TestCase):
         self.assertTrue(self.target.is_symlink())
         self.assertEqual(os.readlink(self.target), str(self.real))
         self.assertEqual(self.codex_home.stat().st_mode & 0o777, 0o775)
+        self.assertFalse(launcher.lock_path(self.codex_home).exists())
+
+    def test_launcher_lock_never_unlinks_a_successor_inode(self) -> None:
+        path = launcher.lock_path(self.codex_home)
+        lock = launcher._LauncherLock(path)
+        lock.__enter__()
+        path.unlink()
+        path.write_bytes(b"successor")
+        successor = path.stat()
+
+        lock.__exit__(None, None, None)
+
+        self.assertTrue(path.is_file())
+        current = path.stat()
+        self.assertEqual((current.st_dev, current.st_ino), (successor.st_dev, successor.st_ino))
+
+    def test_symlinked_launcher_lock_is_rejected_without_mutating_target(self) -> None:
+        path = launcher.lock_path(self.codex_home)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        foreign = self.root / "foreign-lock"
+        foreign.write_bytes(b"foreign")
+        path.symlink_to(foreign)
+
+        with self.assertRaisesRegex(launcher.CodexLauncherError, "unsafe Codex launcher lock"):
+            launcher.install(codex_home=self.codex_home, bin_dir=self.bin_dir)
+
+        self.assertEqual(foreign.read_bytes(), b"foreign")
 
     def test_adopts_byte_exact_orphaned_wrapper(self) -> None:
         self.target.unlink()
@@ -707,6 +734,7 @@ class CodexLauncherInstallTest(unittest.TestCase):
         self.assertEqual(state["phase"], "installed")
         self.assertTrue(self.target.is_file())
         self.assertFalse(self.target.is_symlink())
+        self.assertFalse(launcher.lock_path(self.codex_home).exists())
 
     def test_hundred_invocation_reconciliation_smoke(self) -> None:
         created = launcher.install(codex_home=self.codex_home, bin_dir=self.bin_dir)

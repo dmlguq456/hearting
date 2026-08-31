@@ -270,17 +270,71 @@ class _LauncherLock:
 
     def __enter__(self):
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.handle = self.path.open("a+b")
-        os.chmod(self.path, 0o600)
-        if fcntl is not None:
-            fcntl.flock(self.handle.fileno(), fcntl.LOCK_EX)
-        return self
+        while True:
+            flags = os.O_RDWR | os.O_CREAT
+            if hasattr(os, "O_CLOEXEC"):
+                flags |= os.O_CLOEXEC
+            if hasattr(os, "O_NOFOLLOW"):
+                flags |= os.O_NOFOLLOW
+            try:
+                fd = os.open(self.path, flags, 0o600)
+            except OSError as exc:
+                raise CodexLauncherError(f"unsafe Codex launcher lock: {self.path}") from exc
+            self.handle = os.fdopen(fd, "r+b", buffering=0)
+            acquired = False
+            valid = False
+            try:
+                if fcntl is not None:
+                    fcntl.flock(self.handle.fileno(), fcntl.LOCK_EX)
+                acquired = True
+                opened = os.fstat(self.handle.fileno())
+                try:
+                    current = os.stat(self.path, follow_symlinks=False)
+                except FileNotFoundError:
+                    current = None
+                if current is not None and (
+                    stat.S_ISREG(opened.st_mode)
+                    and stat.S_ISREG(current.st_mode)
+                    and opened.st_uid == os.geteuid()
+                    and current.st_uid == os.geteuid()
+                    and (opened.st_dev, opened.st_ino) == (current.st_dev, current.st_ino)
+                ):
+                    os.fchmod(self.handle.fileno(), 0o600)
+                    valid = True
+                    return self
+                if current is not None and (
+                    not stat.S_ISREG(opened.st_mode)
+                    or not stat.S_ISREG(current.st_mode)
+                    or opened.st_uid != os.geteuid()
+                    or current.st_uid != os.geteuid()
+                ):
+                    raise CodexLauncherError(f"unsafe Codex launcher lock: {self.path}")
+            finally:
+                if self.handle is not None and not valid:
+                    if fcntl is not None and acquired:
+                        fcntl.flock(self.handle.fileno(), fcntl.LOCK_UN)
+                    self.handle.close()
+                    self.handle = None
 
     def __exit__(self, *_):
         if self.handle is not None:
-            if fcntl is not None:
-                fcntl.flock(self.handle.fileno(), fcntl.LOCK_UN)
-            self.handle.close()
+            # Unlink only the inode held by this process and do so before
+            # unlocking. A waiter that acquired an already-unlinked inode
+            # fails the enter-side identity check and retries against the new
+            # pathname, so cleanup never creates two valid lock domains.
+            try:
+                opened = os.fstat(self.handle.fileno())
+                current = os.stat(self.path, follow_symlinks=False)
+                if (opened.st_dev, opened.st_ino) == (current.st_dev, current.st_ino):
+                    os.unlink(self.path)
+            except OSError:
+                pass
+            try:
+                if fcntl is not None:
+                    fcntl.flock(self.handle.fileno(), fcntl.LOCK_UN)
+            finally:
+                self.handle.close()
+                self.handle = None
 
 
 def wrapper_bytes() -> bytes:
