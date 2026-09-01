@@ -194,12 +194,21 @@ class ClaudeSessionSupervisorTest(unittest.TestCase):
                             with open(route_file, encoding='utf-8') as route_handle:
                                 route = json.load(route_handle)
                             marker = os.environ['FAKE_TERMINAL_MARKER']
+                            artifact = os.environ['FAKE_TERMINAL_ARTIFACT']
+                            with open(artifact, 'w', encoding='utf-8') as artifact_handle:
+                                artifact_handle.write('material terminal report\\n')
+                            with open(artifact, 'rb') as artifact_handle:
+                                artifact_digest = __import__('hashlib').sha256(
+                                    artifact_handle.read()
+                                ).hexdigest()
                             with open(marker, 'w', encoding='utf-8') as marker_handle:
                                 json.dump({'schema_version': 2,
                                            'route_id': route['route_id'],
                                            'route_hash': route['route_hash'],
                                            'node_id': 'report',
-                                           'attempt_id': attempt}, marker_handle)
+                                           'attempt_id': attempt,
+                                           'evidence': {'path': artifact,
+                                                        'sha256': artifact_digest}}, marker_handle)
                             terminal = (f",note=completed-marker,"
                                         f"route_id={route['route_id']},"
                                         f"route_hash={route['route_hash']},"
@@ -397,12 +406,14 @@ class ClaudeSessionSupervisorTest(unittest.TestCase):
         route_value = seal_route({
             "schema_version": 2,
             "cwd": str(self.base),
+            "artifact_root": str(self.base),
             "nodes": [{"id": "report", "terminal": True}],
             "workflow_contract": {"terminal_nodes": ["report"]},
             "resume_retry_boundaries": [],
         })
         route.write_text(json.dumps(route_value), encoding="utf-8")
         marker = self.base / "report.json"
+        artifact = self.base / "final_report.md"
         self.jobs.write_text(owner_row(self.lease) + child_row(), encoding="utf-8")
         result = subprocess.run(
             self.command(self.stream_claude)
@@ -419,6 +430,7 @@ class ClaudeSessionSupervisorTest(unittest.TestCase):
                 FAKE_TRACE=str(self.trace),
                 FAKE_TERMINAL_ROUTE=str(route),
                 FAKE_TERMINAL_MARKER=str(marker),
+                FAKE_TERMINAL_ARTIFACT=str(artifact),
             ),
             timeout=10,
         )
@@ -439,7 +451,7 @@ class ClaudeSessionSupervisorTest(unittest.TestCase):
         )
         self.assertEqual(rows[-1]["type"], "result")
         self.assertEqual(
-            rows[-1]["result"], "artifact: -\nverdict: PASS\nblocker: none"
+            rows[-1]["result"], f"artifact: {artifact}\nverdict: PASS\nblocker: none"
         )
         registry = self.jobs.read_text(encoding="utf-8")
         self.assertIn("failure_class=pass", registry)
@@ -1730,7 +1742,9 @@ class ContinuationTripartiteBudgetTest(unittest.TestCase):
     def test_terminal_handoff_purpose_is_sealed_at_the_single_completion_receipt_site(self):
         source = SUPERVISOR.read_text(encoding="utf-8")
         self.assertEqual(source.count('"terminal-handoff" if open_or_running'), 1)
-        self.assertEqual(source.count("purpose=consumption_purpose"), 1)
+        self.assertEqual(source.count('purpose="terminal-handoff"'), 3)
+        self.assertIn("charge=charge_reserved", source)
+        self.assertNotIn("charge=lambda: True", source)
         self.assertIn("SD-116 R2: terminal-handoff is sealed here and only here", source)
 
 

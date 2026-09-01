@@ -1298,7 +1298,9 @@ class ContinuationTripartiteBudgetTest(unittest.TestCase):
     def test_terminal_handoff_purpose_is_sealed_at_the_single_completion_receipt_site(self):
         source = SUPERVISOR.read_text(encoding="utf-8")
         self.assertEqual(source.count('"terminal-handoff" if open_or_running'), 1)
-        self.assertEqual(source.count("purpose=consumption_purpose"), 1)
+        self.assertEqual(source.count('purpose="terminal-handoff"'), 3)
+        self.assertIn("charge=charge_reserved", source)
+        self.assertNotIn("charge=lambda: True", source)
         self.assertIn("SD-116 R2: terminal-handoff is sealed here and only here", source)
 
 

@@ -27,6 +27,7 @@ _JOIN_SPEC = importlib.util.spec_from_file_location(
 JOIN = importlib.util.module_from_spec(_JOIN_SPEC)
 sys.modules[_JOIN_SPEC.name] = JOIN
 _JOIN_SPEC.loader.exec_module(JOIN)
+import dispatch_terminal_commit as terminal_commit  # noqa: E402
 
 
 class RegisteredParentParkTest(unittest.TestCase):
@@ -116,6 +117,7 @@ class RegisteredParentParkTest(unittest.TestCase):
         command: str | None = None,
         *,
         mode: str = "supervised",
+        tool_input: dict[str, object] | None = None,
     ) -> dict[str, object] | None:
         payload: dict[str, object] = {
             "hook_event_name": "PreToolUse",
@@ -125,6 +127,8 @@ class RegisteredParentParkTest(unittest.TestCase):
         }
         if command is not None:
             payload["tool_input"] = {"command": command}
+        if tool_input is not None:
+            payload["tool_input"] = tool_input
         result = subprocess.run(
             ["python3", str(HOOK)],
             input=json.dumps(payload),
@@ -250,6 +254,56 @@ class RegisteredParentParkTest(unittest.TestCase):
             "--adapter claude --action start --slug child-b --parent owner",
         )
         self.assertIsNone(self.invoke("Read", mode="poll"))
+
+    def test_terminal_cleanup_claim_is_a_bounded_capability(self) -> None:
+        report_root = self.base / "campaigns" / "camp" / "cycles" / "cyc" / "artifacts"
+        report_root.mkdir(parents=True)
+        report = report_root / "final_report.md"
+        claim = terminal_commit.claim_terminal_handoff(
+            self.base,
+            parent_attempt_id=PARENT,
+            child_attempt_ids=[CHILD],
+            continuation_ordinal=9,
+            route_hash="sha256:" + "a" * 64,
+        )
+        terminal_commit.convert_terminal_handoff_claim(
+            self.base,
+            claim_id=claim["claim_id"],
+            prompt="exact cleanup prompt",
+            charge=lambda: True,
+            artifact_root=str(self.base),
+            allowed_write_roots=[str(report_root)],
+            allowed_read_roots=[str(self.base)],
+            allowed_commands=["recover exact"],
+        )
+        self.write_state([])
+        self.assertIsNone(
+            self.invoke(
+                "Write", tool_input={"file_path": str(report), "content": "ok"}
+            )
+        )
+        self.assertIsNone(
+            self.invoke("Read", tool_input={"file_path": str(self.route)})
+        )
+        self.assertIsNone(self.invoke("Bash", "recover exact"))
+        denied_write = self.invoke(
+            "Write",
+            tool_input={
+                "file_path": str(self.base / "source.py"),
+                "content": "bad",
+            },
+        )
+        self.assertEqual(
+            denied_write["hookSpecificOutput"]["permissionDecision"], "deny"
+        )
+        self.assertIn(
+            "runtime-terminal-cleanup",
+            denied_write["hookSpecificOutput"]["permissionDecisionReason"],
+        )
+        denied_dispatch = self.invoke("Bash", "preflight.sh dispatch --start")
+        self.assertEqual(
+            denied_dispatch["hookSpecificOutput"]["permissionDecision"], "deny"
+        )
 
     def test_replica_batch_requires_one_exact_leg_and_rejects_repeat(self) -> None:
         replica_metadata = (

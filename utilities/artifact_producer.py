@@ -49,6 +49,7 @@ import artifact_identity  # noqa: E402
 import artifact_index  # noqa: E402
 import artifact_lifecycle  # noqa: E402
 import artifact_manifest  # noqa: E402
+import dispatch_terminal_commit as terminal_commit  # noqa: E402
 from dispatch_contract import process_start_ticks  # noqa: E402
 
 PRODUCER_REL = ".runtime/artifact-producer/v1"
@@ -500,6 +501,31 @@ def _env_for(root: Path, record: Mapping[str, Any]) -> Dict[str, str]:
     }
 
 
+def _binding_after_begin(
+    root: Path,
+    *,
+    route: Mapping[str, Any],
+    route_file: Path,
+    record: Mapping[str, Any],
+) -> Optional[Dict[str, Any]]:
+    """SD-120: publish the exact producer binding after durable begin.
+
+    Direct/library callers have no matching registered-owner environment and
+    remain unchanged.  A matching owner route is an exact contract: a binding
+    conflict is surfaced instead of returning an apparently usable open cycle.
+    """
+
+    try:
+        return terminal_commit.maybe_publish_producer_binding(
+            root,
+            route=route,
+            route_file=route_file,
+            cycle_record=record,
+        )
+    except terminal_commit.TerminalCommitError as exc:
+        raise ProducerError(exc.reason, exc.detail) from exc
+
+
 def begin(
     root: Path,
     *,
@@ -551,12 +577,18 @@ def begin(
             if record.get("route_id") == route["route_id"] and record.get("state") == "open":
                 if record.get("route_hash") != route["route_hash"]:
                     raise ProducerError("route-hash-drift", record["cycle_id"])
-                return {
+                result = {
                     "status": "resumed", "layout": "cycle", "campaign_id": record["campaign_id"],
                     "cycle_id": record["cycle_id"], "producer_id": record["producer_id"],
                     "cycle_dir": str(cycle_dir(root, record["campaign_id"], record["cycle_id"])),
                     "env": _env_for(root, record),
                 }
+                binding = _binding_after_begin(
+                    root, route=route, route_file=Path(route_file), record=record
+                )
+                if binding is not None:
+                    result["producer_binding"] = binding
+                return result
         index = artifact_admission.load_index(root)
         campaign: Optional[Dict[str, Any]] = None
         if campaign_id:
@@ -629,11 +661,17 @@ def begin(
         _ensure_dir(target / "artifacts")
         campaign["cycles"] = list(campaign.get("cycles", [])) + [new_cycle_id]
         _write_campaign(root, campaign, exclusive=campaign_created)
-        return {
+        result = {
             "status": "begun", "layout": "cycle", "campaign_id": campaign["campaign_id"],
             "cycle_id": new_cycle_id, "producer_id": producer_id, "cycle_dir": str(target),
             "campaign_created": campaign_created, "env": _env_for(root, record),
         }
+        binding = _binding_after_begin(
+            root, route=route, route_file=Path(route_file), record=record
+        )
+        if binding is not None:
+            result["producer_binding"] = binding
+        return result
     finally:
         artifact_admission._release_lock(root, lock_fd)
 

@@ -24,6 +24,7 @@ from dispatch_completion_join import (  # noqa: E402
     supervisor_outbox_row_state,
 )
 from dispatch_contract import dispatch_state_roots  # noqa: E402
+import dispatch_terminal_commit as terminal_commit  # noqa: E402
 
 
 def deny(reason: str) -> int:
@@ -97,10 +98,24 @@ def main() -> int:
     # computed this set differently would report a command satisfiable that this
     # guard then denies (plan SS3.4 D2a, fixture D-6c).
     guarded_attempts = supervisor_guarded_attempt_ids(rows, state.outbox if state else None)
-    if not guarded_attempts:
-        return 0
     tool_name = payload.get("tool_name")
     tool_args = mapping(payload.get("tool_input"))
+    cleanup_claim = terminal_commit.active_cleanup_claim(
+        registry.parent, parent_attempt_id=parent_attempt
+    )
+    if cleanup_claim is not None and isinstance(tool_name, str):
+        if terminal_commit.cleanup_tool_allowed(
+            cleanup_claim, tool_name=tool_name, tool_input=tool_args
+        ):
+            return 0
+    if not guarded_attempts:
+        if cleanup_claim is None:
+            return 0
+        return deny(
+            "runtime-terminal-cleanup: active terminal_handoff_claim_v1 "
+            "admits only bound producer report/evidence writes, exact forward "
+            "recovery commands, and narrow verification"
+        )
     command = tool_args.get("command")
     action = None
     if tool_name == "Bash" and isinstance(command, str):
@@ -172,6 +187,13 @@ def main() -> int:
         allowed = bool(action and action.kind in {"dispatch", "dispatch-batch"})
     if allowed:
         return 0
+
+    if cleanup_claim is not None:
+        return deny(
+            "runtime-terminal-cleanup: active terminal_handoff_claim_v1 "
+            "admits only bound producer report/evidence writes, exact forward "
+            "recovery commands, narrow verification, or the exact required harvest"
+        )
 
     # D4: name the ACTUAL registry status per attempt, not "open" for every
     # one -- a done row with a typed dead-worker note was previously

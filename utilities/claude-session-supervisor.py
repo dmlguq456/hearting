@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import os
 from pathlib import Path
@@ -13,7 +12,7 @@ import shlex
 import subprocess
 import sys
 import time
-from typing import Any
+from typing import Any, Iterable
 import uuid
 
 from dispatch_completion_join import (
@@ -54,6 +53,8 @@ from dispatch_continuation_budget import (
 import dispatch_budget_record as budget_record
 import dispatch_stage_advance as stage_advance
 import dispatch_subsession_advance as subsession_advance
+import dispatch_terminal_commit as terminal_commit
+import route_identity as ROUTE_IDENTITY
 from dispatch_supervisor_terminal import (
     SupervisorTerminal,
     classify_claude_result,
@@ -113,20 +114,12 @@ def terminal_route_completion(
         return ()
     if not isinstance(route, dict) or route.get("schema_version") != 2:
         return ()
-    bare = {
-        key: value for key, value in route.items()
-        if key not in {"route_hash", "route_id"}
-    }
-    sealed_hash = "sha256:" + hashlib.sha256(
-        json.dumps(
-            bare, ensure_ascii=False, sort_keys=True, separators=(",", ":")
-        ).encode()
-    ).hexdigest()
+    sealed_hash = ROUTE_IDENTITY.route_hash(route)
     if (
         route.get("route_id") != args.route_id
         or route.get("route_hash") != args.route_hash
         or sealed_hash != args.route_hash
-        or args.route_id != "rt-" + sealed_hash.split(":", 1)[1][:16]
+        or args.route_id != ROUTE_IDENTITY.route_id_from_hash(sealed_hash)
     ):
         return ()
     contract = route.get("workflow_contract")
@@ -313,36 +306,6 @@ def attempt_stage_advance(
             except (OSError, ValueError):
                 advanced_record = None
     return advanced_record
-
-
-def terminal_handoff_result(
-    result: dict[str, Any], rows: list[object], terminal_nodes: tuple[str, ...]
-) -> dict[str, Any]:
-    """Build the standard PASS envelope without another model turn."""
-
-    artifacts: list[str] = []
-    for row in rows:
-        metadata = getattr(row, "metadata", {})
-        if metadata.get("route_node") not in terminal_nodes:
-            continue
-        marker_path = Path(metadata.get("completion_marker", ""))
-        try:
-            marker = json.loads(marker_path.read_text(encoding="utf-8"))
-        except (FileNotFoundError, OSError, TypeError, ValueError):
-            continue
-        evidence = marker.get("evidence") if isinstance(marker, dict) else None
-        artifact = evidence.get("path") if isinstance(evidence, dict) else None
-        if (
-            isinstance(artifact, str)
-            and Path(artifact).is_absolute()
-            and not Path(artifact).is_symlink()
-            and Path(artifact).is_file()
-        ):
-            artifacts.append(artifact)
-    artifact = sorted(set(artifacts))[0] if artifacts else "-"
-    terminal_result = dict(result)
-    terminal_result["result"] = f"artifact: {artifact}\nverdict: PASS\nblocker: none"
-    return terminal_result
 
 
 def emit(value: dict[str, Any]) -> None:
@@ -799,6 +762,7 @@ def _admit_continuation(
 def _seal_terminal_handoff_or_raise(
     ledger: ContinuationLedger, state_root, *, args: argparse.Namespace,
     ordinal: int, failure_reason: str, terminal_handoff_issued: list[bool],
+    child_attempt_ids: Iterable[str] = (),
 ) -> str:
     """SD-116 (c): an ordinary/redelivery admit refusal no longer kills the
     owner immediately. It gets exactly one `purpose="terminal-handoff"` admit
@@ -813,16 +777,13 @@ def _seal_terminal_handoff_or_raise(
 
     if terminal_handoff_issued[0] or ledger.reserved_remaining <= 0:
         raise SupervisorError(failure_reason)
-    verdict, _notice = _admit_continuation(
-        ledger, state_root,
+    claim = terminal_commit.claim_terminal_handoff(
+        state_root,
         parent_attempt_id=args.parent_attempt_id,
-        route_id=args.route_id, route_hash=args.route_hash,
-        ordinal=ordinal, purpose="terminal-handoff", stalled=False,
-        warning_threshold=args.continuation_warning_threshold,
+        child_attempt_ids=child_attempt_ids,
+        continuation_ordinal=ordinal,
+        route_hash=args.route_hash,
     )
-    if not verdict.admitted:
-        raise SupervisorError(failure_reason)
-    terminal_handoff_issued[0] = True
     try:
         exhausted_notice = budget_record.render_notice(
             "budget-exhausted", remaining=0,
@@ -830,11 +791,42 @@ def _seal_terminal_handoff_or_raise(
         )
     except Exception:
         exhausted_notice = "[continuation-budget-exhausted] remaining=0."
-    return _apply_notice(
+    prompt = _apply_notice(
         "This is the final continuation turn granted from the reserved "
         "budget. No further continuation will be granted after this one.",
         exhausted_notice,
     )
+    cleanup = terminal_commit.supervisor_cleanup_capability(args)
+    admission: dict[str, Any] = {}
+
+    def charge_reserved() -> bool:
+        verdict, _notice = _admit_continuation(
+            ledger, state_root,
+            parent_attempt_id=args.parent_attempt_id,
+            route_id=args.route_id, route_hash=args.route_hash,
+            ordinal=ordinal, purpose="terminal-handoff", stalled=False,
+            warning_threshold=args.continuation_warning_threshold,
+        )
+        admission["verdict"] = verdict
+        return verdict.admitted
+
+    converted = terminal_commit.convert_terminal_handoff_claim(
+        state_root,
+        claim_id=claim["claim_id"],
+        prompt=prompt,
+        charge=charge_reserved,
+        artifact_root=cleanup["artifact_root"],
+        allowed_write_roots=cleanup["allowed_write_roots"],
+        allowed_read_roots=cleanup["allowed_read_roots"],
+        allowed_commands=cleanup["allowed_commands"],
+    )
+    verdict = admission.get("verdict")
+    if converted.get("state") != "converted" or (
+        verdict is not None and not verdict.admitted
+    ):
+        raise SupervisorError(failure_reason)
+    terminal_handoff_issued[0] = True
+    return prompt
 
 
 def claude_command(
@@ -1146,6 +1138,7 @@ def main(argv: list[str] | None = None) -> int:
     # can flip it for the whole loop -- the reserve is spendable exactly once
     # per owner lifetime (D47-4's "gross_remaining == reserved boundary" case).
     terminal_handoff_issued = [False]
+    pending_terminal_handoff_claim: dict[str, Any] | None = None
     next_prompt = initial_prompt
     pending_notice = ""
     continuations = 0
@@ -1400,6 +1393,7 @@ def main(argv: list[str] | None = None) -> int:
                             ordinal=continuations,
                             failure_reason="continuation-limit-exceeded",
                             terminal_handoff_issued=terminal_handoff_issued,
+                            child_attempt_ids=active_outbox.attempt_ids,
                         )
                         continuations += 1
                         resume = True
@@ -1464,21 +1458,17 @@ def main(argv: list[str] | None = None) -> int:
                 resume = True
                 continue
             if new_attempts:
-                # Cheap, non-mutating fail-fast: this round's real admission
-                # (and its single budget spend) is committed once, at the R2
-                # sealed site below, once the post-join purpose is knowable.
-                # This guard only skips the expensive park+join dance early
-                # when an ordinary admit could not possibly succeed anyway.
+                # SD-121: registration/waiting is not an owner continuation.
+                # At the reserve boundary publish only a zero-delta claim and
+                # continue into the exact join.  Conversion is post-join at R2.
                 if not (ledger.gross_remaining > ledger.reserved_remaining):
-                    next_prompt = _seal_terminal_handoff_or_raise(
-                        ledger, budget_state_root, args=args,
-                        ordinal=continuations,
-                        failure_reason="continuation-limit-exceeded",
-                        terminal_handoff_issued=terminal_handoff_issued,
+                    pending_terminal_handoff_claim = terminal_commit.claim_terminal_handoff(
+                        budget_state_root,
+                        parent_attempt_id=args.parent_attempt_id,
+                        child_attempt_ids=new_attempts,
+                        continuation_ordinal=continuations,
+                        route_hash=args.route_hash,
                     )
-                    continuations += 1
-                    resume = True
-                    continue
                 emit(
                     {
                         "type": "dispatch.supervisor.parked",
@@ -1576,12 +1566,35 @@ def main(argv: list[str] | None = None) -> int:
                 )
                 terminal_nodes = terminal_route_completion(args, current_rows)
                 if terminal_nodes:
+                    settlement = terminal_commit.settle_supervisor_terminal(
+                        args, current_rows
+                    )
+                    if not settlement.success:
+                        emit(
+                            {
+                                "type": "dispatch.supervisor.terminal-commit",
+                                "parent_attempt_id": args.parent_attempt_id,
+                                "state": settlement.state,
+                                "reason": settlement.reason,
+                                "terminal_commit_id": settlement.commit_id,
+                            }
+                        )
+                        terminal_nodes = ()
+                if terminal_nodes:
+                    if pending_terminal_handoff_claim is not None:
+                        terminal_commit.complete_terminal_handoff_claim(
+                            budget_state_root,
+                            claim_id=pending_terminal_handoff_claim["claim_id"],
+                            terminal_commit_id_value=settlement.commit_id,
+                        )
+                        pending_terminal_handoff_claim = None
                     emit(
                         {
                             "type": "dispatch.supervisor.terminal-fast-path",
                             "parent_attempt_id": args.parent_attempt_id,
                             "terminal_nodes": list(terminal_nodes),
                             "continuation_saved": True,
+                            "terminal_commit_id": settlement.commit_id,
                         }
                     )
                     if stream_session is not None:
@@ -1602,9 +1615,8 @@ def main(argv: list[str] | None = None) -> int:
                                 ),
                             }
                         )
-                    final_result = terminal_handoff_result(
-                        result, current_rows, terminal_nodes
-                    )
+                    final_result = dict(result)
+                    final_result["result"] = settlement.envelope
                     delivery_timing = advance_delivery_timing(
                         delivery_timing, "final_report_marker_ns"
                     )
@@ -1651,35 +1663,89 @@ def main(argv: list[str] | None = None) -> int:
                 consumption_purpose = (
                     "terminal-handoff" if open_or_running == 0 and gross_exhausted else "ordinary"
                 )
-                verdict, notice = _admit_continuation(
-                    ledger, budget_state_root,
-                    parent_attempt_id=args.parent_attempt_id,
-                    route_id=args.route_id, route_hash=args.route_hash,
-                    ordinal=continuations, purpose=consumption_purpose, stalled=False,
-                    warning_threshold=args.continuation_warning_threshold,
-                )
-                if not verdict.admitted:
-                    # This is the sealed terminal-handoff site (R2 comment
-                    # above): a refusal here already tried purpose=
-                    # "terminal-handoff" whenever the reserve boundary was
-                    # reached, so there is no further cleanup turn to grant.
-                    raise SupervisorError("continuation-limit-exceeded")
-                prepared = prepare_supervisor_outbox(
-                    state_path,
-                    args.parent_attempt_id,
-                    delivered,
-                    receipt_with_current_actions(
-                        receipt, joined_rows, jobs=Path(args.jobs)
-                    ),
-                    joined_rows,
-                )
-                delivered = set(prepared.delivered_attempt_ids)
-                active_outbox = prepared.outbox
-                pending_notice = notice
-                next_prompt = completion_prompt(
-                    active_outbox.receipt or {}, active_outbox, jobs=args.jobs,
-                    notice=notice,
-                )
+                if consumption_purpose == "terminal-handoff":
+                    if pending_terminal_handoff_claim is None:
+                        pending_terminal_handoff_claim = terminal_commit.claim_terminal_handoff(
+                            budget_state_root,
+                            parent_attempt_id=args.parent_attempt_id,
+                            child_attempt_ids=new_attempts,
+                            continuation_ordinal=continuations,
+                            route_hash=args.route_hash,
+                        )
+                    prepared = prepare_supervisor_outbox(
+                        state_path,
+                        args.parent_attempt_id,
+                        delivered,
+                        receipt_with_current_actions(
+                            receipt, joined_rows, jobs=Path(args.jobs)
+                        ),
+                        joined_rows,
+                    )
+                    delivered = set(prepared.delivered_attempt_ids)
+                    active_outbox = prepared.outbox
+                    cleanup = terminal_commit.supervisor_cleanup_capability(args)
+                    admission: dict[str, Any] = {}
+
+                    def charge_reserved() -> tuple[bool, str]:
+                        verdict, notice = _admit_continuation(
+                            ledger, budget_state_root,
+                            parent_attempt_id=args.parent_attempt_id,
+                            route_id=args.route_id, route_hash=args.route_hash,
+                            ordinal=continuations, purpose="terminal-handoff", stalled=False,
+                            warning_threshold=args.continuation_warning_threshold,
+                        )
+                        admission.update({"verdict": verdict, "notice": notice})
+                        prompt = completion_prompt(
+                            active_outbox.receipt or {}, active_outbox, jobs=args.jobs,
+                            notice=notice,
+                        )
+                        return verdict.admitted, prompt
+
+                    converted = terminal_commit.convert_terminal_handoff_claim(
+                        budget_state_root,
+                        claim_id=pending_terminal_handoff_claim["claim_id"],
+                        prompt="",
+                        charge=charge_reserved,
+                        artifact_root=cleanup["artifact_root"],
+                        allowed_write_roots=cleanup["allowed_write_roots"],
+                        allowed_read_roots=cleanup["allowed_read_roots"],
+                        allowed_commands=cleanup["allowed_commands"],
+                    )
+                    verdict = admission.get("verdict")
+                    if converted.get("state") != "converted" or (
+                        verdict is not None and not verdict.admitted
+                    ):
+                        raise SupervisorError("continuation-limit-exceeded")
+                    pending_notice = str(admission.get("notice", ""))
+                    next_prompt = str(converted.get("prompt_intent", ""))
+                    terminal_handoff_issued[0] = True
+                    pending_terminal_handoff_claim = None
+                else:
+                    verdict, notice = _admit_continuation(
+                        ledger, budget_state_root,
+                        parent_attempt_id=args.parent_attempt_id,
+                        route_id=args.route_id, route_hash=args.route_hash,
+                        ordinal=continuations, purpose="ordinary", stalled=False,
+                        warning_threshold=args.continuation_warning_threshold,
+                    )
+                    if not verdict.admitted:
+                        raise SupervisorError("continuation-limit-exceeded")
+                    prepared = prepare_supervisor_outbox(
+                        state_path,
+                        args.parent_attempt_id,
+                        delivered,
+                        receipt_with_current_actions(
+                            receipt, joined_rows, jobs=Path(args.jobs)
+                        ),
+                        joined_rows,
+                    )
+                    delivered = set(prepared.delivered_attempt_ids)
+                    active_outbox = prepared.outbox
+                    pending_notice = notice
+                    next_prompt = completion_prompt(
+                        active_outbox.receipt or {}, active_outbox, jobs=args.jobs,
+                        notice=notice,
+                    )
                 continuations += 1
                 resume = True
                 continue

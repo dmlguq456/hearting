@@ -87,9 +87,14 @@ class ProducerTestBase(unittest.TestCase):
         (home / "core").mkdir(parents=True, exist_ok=True)
         (home / "core" / "CORE.md").write_text("fixture\n", encoding="utf-8")
         self._env = {k: os.environ.get(k) for k in (
-            "AGENT_HOME", "AGENT_DISPATCH_JOBS", "AGENT_ARTIFACT_CYCLE_DIR", "AGENT_ARTIFACT_ROOT")}
+            "AGENT_HOME", "AGENT_DISPATCH_JOBS", "AGENT_DISPATCH_ATTEMPT_ID",
+            "AGENT_ROUTE_ID", "AGENT_ROUTE_FILE", "AGENT_ARTIFACT_CYCLE_DIR",
+            "AGENT_ARTIFACT_ROOT")}
         os.environ["AGENT_HOME"] = str(home)
-        for key in ("AGENT_DISPATCH_JOBS", "AGENT_ARTIFACT_CYCLE_DIR", "AGENT_ARTIFACT_ROOT"):
+        for key in (
+            "AGENT_DISPATCH_JOBS", "AGENT_DISPATCH_ATTEMPT_ID", "AGENT_ROUTE_ID",
+            "AGENT_ROUTE_FILE", "AGENT_ARTIFACT_CYCLE_DIR", "AGENT_ARTIFACT_ROOT",
+        ):
             os.environ.pop(key, None)
         self.addCleanup(self._restore)
 
@@ -192,6 +197,40 @@ class ActivateAndBeginTest(ProducerTestBase):
         second = P.begin(self.root, route_file=route_file, capability="autopilot-code", intensity="direct")
         self.assertEqual(second["status"], "resumed")
         self.assertEqual(second["cycle_id"], first["cycle_id"])
+
+    def test_begin_publishes_and_replays_exact_registered_owner_binding(self):
+        self.activate()
+        route, route_file = self.route()
+        jobs = Path(self._tmp.name) / "jobs.log"
+        owner = "att-" + "d" * 32
+        jobs.write_text(
+            "2026-09-01T00:00:00Z\topen\t/repo\t/wt\towner\t"
+            "attempt_schema_version=2,dispatch_depth=1,worker_type=owner,"
+            f"attempt_id={owner},owner_route_id={route['route_id']},"
+            f"owner_route_hash={route['route_hash']},owner_route_file={route_file}\n",
+            encoding="utf-8",
+        )
+        os.environ.update(
+            AGENT_DISPATCH_JOBS=str(jobs),
+            AGENT_DISPATCH_ATTEMPT_ID=owner,
+            AGENT_ROUTE_ID=route["route_id"],
+            AGENT_ROUTE_FILE=str(route_file),
+        )
+        first = P.begin(
+            self.root,
+            route_file=route_file,
+            capability="autopilot-code",
+            intensity="direct",
+        )
+        self.assertEqual(first["producer_binding"]["cycle_id"], first["cycle_id"])
+        second = P.begin(
+            self.root,
+            route_file=route_file,
+            capability="autopilot-code",
+            intensity="direct",
+        )
+        self.assertEqual(second["status"], "resumed")
+        self.assertEqual(second["producer_binding"], first["producer_binding"])
 
     def test_begin_rejects_capability_and_intensity_mismatch(self):
         self.activate()
