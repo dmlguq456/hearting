@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import importlib.util, io, os, shutil, subprocess, sys, tempfile, threading, unittest
+import importlib.util, io, os, shutil, subprocess, sys, tempfile, threading, time, unittest
 from contextlib import redirect_stdout
 from pathlib import Path
 from unittest import mock
@@ -281,6 +281,57 @@ class AdapterV11Test(unittest.TestCase):
    self.assertTrue((home/"hearting").is_symlink())
    self.assertEqual((home/"hearting").resolve(),wrapper.resolve_agent_home().resolve())
    self.assertEqual(home.parent,worktree/".dispatch")
+ def test_parallel_nested_codex_home_projection_is_serialized(self):
+  with tempfile.TemporaryDirectory() as td:
+   root=Path(td); source=root/"source"; source.mkdir(); worktree=root/"worktree"; worktree.mkdir()
+   (source/"auth.json").write_text("{}\n",encoding="utf-8")
+   (source/"config.toml").write_text("model = \"fixture\"\n",encoding="utf-8")
+   spec=importlib.util.spec_from_file_location("codex_dispatch_home_parallel",ROOT/"adapters/codex/bin/dispatch-headless.py")
+   wrapper=importlib.util.module_from_spec(spec); spec.loader.exec_module(wrapper)
+   state={"inflight":0,"maximum":0}; state_lock=threading.Lock()
+   def install(command,**_kwargs):
+    with state_lock:
+     state["inflight"]+=1; state["maximum"]=max(state["maximum"],state["inflight"])
+    time.sleep(0.01)
+    with state_lock: state["inflight"]-=1
+    return subprocess.CompletedProcess(command,0,"","")
+   homes=[]; errors=[]
+   def project():
+    try: homes.append(wrapper.prepare_nested_codex_home(worktree,source))
+    except Exception as exc: errors.append(exc)
+   with mock.patch.object(wrapper.subprocess,"run",side_effect=install):
+    threads=[threading.Thread(target=project) for _ in range(6)]
+    for thread in threads: thread.start()
+    for thread in threads: thread.join()
+   self.assertEqual(errors,[])
+   self.assertEqual(state["maximum"],1)
+   self.assertEqual(set(homes),{worktree/".dispatch/nested-codex-home"})
+   self.assertEqual((homes[0]/"auth.json").resolve(),(source/"auth.json").resolve())
+   self.assertEqual((homes[0]/"config.toml").resolve(),(source/"config.toml").resolve())
+ def test_nested_owner_reuses_projected_home_without_self_links(self):
+  with tempfile.TemporaryDirectory() as td:
+   root=Path(td); source=root/"source"; source.mkdir(); worktree=root/"worktree"; worktree.mkdir()
+   (source/"auth.json").write_text("{}\n",encoding="utf-8")
+   (source/"config.toml").write_text("model = \"fixture\"\n",encoding="utf-8")
+   spec=importlib.util.spec_from_file_location("codex_dispatch_home_recursive",ROOT/"adapters/codex/bin/dispatch-headless.py")
+   wrapper=importlib.util.module_from_spec(spec); spec.loader.exec_module(wrapper)
+   home=wrapper.prepare_nested_codex_home(worktree,source)
+   with mock.patch.dict(os.environ,{"CODEX_HOME":str(home)},clear=False):
+    projected=wrapper.prepare_nested_codex_home(worktree)
+   self.assertEqual(projected,home)
+   self.assertEqual((home/"auth.json").resolve(strict=True),(source/"auth.json").resolve())
+   self.assertEqual((home/"config.toml").resolve(strict=True),(source/"config.toml").resolve())
+ def test_nested_codex_home_oserror_is_typed(self):
+  with tempfile.TemporaryDirectory() as td:
+   root=Path(td); source=root/"source"; source.mkdir(); worktree=root/"worktree"; worktree.mkdir()
+   (source/"auth.json").write_text("{}\n",encoding="utf-8")
+   spec=importlib.util.spec_from_file_location("codex_dispatch_home_error",ROOT/"adapters/codex/bin/dispatch-headless.py")
+   wrapper=importlib.util.module_from_spec(spec); spec.loader.exec_module(wrapper)
+   with mock.patch.object(wrapper.subprocess,"run",side_effect=OSError("fixture-io")):
+    with self.assertRaises(wrapper.DispatchContractError) as caught:
+     wrapper.prepare_nested_codex_home(worktree,source)
+   self.assertEqual(caught.exception.reason,"nested-codex-home-projection-failed")
+   self.assertEqual(caught.exception.detail,"fixture-io")
  def test_detached_selection_is_promoted_before_launch_without_failure_exposure(self):
   for harness in ("codex","claude"):
    for repetition in range(4):

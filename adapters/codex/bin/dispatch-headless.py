@@ -1635,47 +1635,80 @@ def prepare_nested_codex_home(worktree: Path, source_home: Path | None = None) -
 
     source = (source_home or Path(os.environ.get("CODEX_HOME", "~/.codex"))).expanduser().resolve()
     destination = worktree / ".dispatch" / "nested-codex-home"
-    destination.mkdir(parents=True, exist_ok=True)
-    destination.chmod(0o700)
+    lock_path = destination.parent / ".nested-codex-home.lock"
 
-    # Runtime projection identity follows the installed/canonical AGENT_HOME,
-    # not the source-only task worktree containing this wrapper. Otherwise a
-    # nested eligibility check compares a worktree-linked local CODEX_HOME with
-    # the inherited canonical AGENT_HOME and rejects a valid recursive launch.
-    projection_root = resolve_agent_home().resolve()
-    installer = projection_root / "adapters" / "codex" / "bin" / "install-runtime-projection.sh"
-    env = {**os.environ, "AGENT_HOME": str(projection_root), "CODEX_HOME": str(destination)}
-    result = subprocess.run(
-        [str(installer), "--skills-mode", "native"],
-        cwd=ROOT,
-        env=env,
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        check=False,
-    )
-    if result.returncode != 0:
+    def source_file(name: str) -> Path | None:
+        # A depth-1 owner already runs with CODEX_HOME=destination.  Resolve its
+        # credential/config links before replacing them so a child launch never
+        # rewrites `auth.json` or `config.toml` into a self-referential link.
+        candidates = (source / name, Path.home() / ".codex" / name)
+        for candidate in candidates:
+            try:
+                resolved = candidate.resolve(strict=True)
+            except (OSError, RuntimeError):
+                continue
+            if resolved.is_file():
+                return resolved
+        return None
+
+    try:
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        lock_flags = os.O_CREAT | os.O_RDWR | getattr(os, "O_CLOEXEC", 0)
+        lock_flags |= getattr(os, "O_NOFOLLOW", 0)
+        lock_fd = os.open(lock_path, lock_flags, 0o600)
+        with os.fdopen(lock_fd, "a", encoding="utf-8") as lock:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+            if destination.is_symlink():
+                raise DispatchContractError(
+                    "nested-codex-home-collision", str(destination)
+                )
+            destination.mkdir(parents=True, exist_ok=True)
+            destination.chmod(0o700)
+
+            # A parallel group starts every Codex wrapper concurrently.  They
+            # share this one worktree-local home, so projection plus credential
+            # relinking is one critical section; otherwise unlink/symlink races
+            # escape before the wrapper can emit a typed launch receipt.
+            projection_root = resolve_agent_home().resolve()
+            installer = projection_root / "adapters" / "codex" / "bin" / "install-runtime-projection.sh"
+            env = {**os.environ, "AGENT_HOME": str(projection_root), "CODEX_HOME": str(destination)}
+            result = subprocess.run(
+                [str(installer), "--skills-mode", "native"],
+                cwd=ROOT,
+                env=env,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+            if result.returncode != 0:
+                raise DispatchContractError(
+                    "nested-codex-home-projection-failed",
+                    (result.stderr or result.stdout).strip() or f"exit-{result.returncode}",
+                )
+
+            auth = source_file("auth.json")
+            if auth is None:
+                raise DispatchContractError(
+                    "nested-codex-auth-missing", str(source / "auth.json")
+                )
+            config = source_file("config.toml")
+
+            for name, target in (("auth.json", auth), ("config.toml", config)):
+                if target is None:
+                    continue
+                link = destination / name
+                if link.is_symlink():
+                    link.unlink()
+                elif link.exists():
+                    raise DispatchContractError("nested-codex-home-collision", str(link))
+                link.symlink_to(target)
+    except DispatchContractError:
+        raise
+    except OSError as exc:
         raise DispatchContractError(
-            "nested-codex-home-projection-failed",
-            (result.stderr or result.stdout).strip() or f"exit-{result.returncode}",
-        )
-
-    auth = source / "auth.json"
-    if not auth.is_file():
-        fallback = Path.home() / ".codex" / "auth.json"
-        auth = fallback if fallback.is_file() else auth
-    if not auth.is_file():
-        raise DispatchContractError("nested-codex-auth-missing", str(auth))
-
-    for name, target in (("auth.json", auth), ("config.toml", source / "config.toml")):
-        if not target.is_file():
-            continue
-        link = destination / name
-        if link.is_symlink():
-            link.unlink()
-        elif link.exists():
-            raise DispatchContractError("nested-codex-home-collision", str(link))
-        link.symlink_to(target)
+            "nested-codex-home-projection-failed", str(exc)
+        ) from exc
     return destination
 
 
