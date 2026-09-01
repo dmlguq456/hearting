@@ -29,6 +29,7 @@ import concurrent.futures
 import datetime
 import fcntl
 import importlib.util
+import ipaddress
 import json
 import os
 import shlex
@@ -45,6 +46,17 @@ LOCAL = "local"
 OWNER_CLAIMS = ".process-owners.json"
 OWNER_CLAIMS_LOCK = ".process-owners.lock"
 OWNER_CLAIMS_SCHEMA = 1
+SSH_BRIDGE_MAX_PROCESSES = 8192
+SSH_BRIDGE_MAX_SOCKET_ROWS = 32768
+SSH_BRIDGE_MAX_FDS = 256
+SSH_BRIDGE_MAX_CONNECTIONS = 256
+SSH_BRIDGE_ENV_BYTES = 1024 * 1024
+SESSION_ENV_KEYS = (
+    ("CLAUDE_CODE_SESSION_ID", "claude"),
+    ("CODEX_THREAD_ID", "codex"),
+    ("CODEX_SESSION_ID", "codex"),
+    ("OPENCODE_SESSION_ID", "opencode"),
+)
 
 
 def _parser_module():
@@ -190,10 +202,288 @@ def remote(host, script, *, timeout=PROBE_TIMEOUT):
         return subprocess.CompletedProcess(argv, 255, "", "timed out")
 
 
+def _normalize_ip(value):
+    """Return one comparison form for IPv4, IPv6, and IPv4-mapped IPv6."""
+    try:
+        parsed = ipaddress.ip_address(str(value).split("%", 1)[0])
+    except ValueError:
+        return None
+    if isinstance(parsed, ipaddress.IPv6Address) and parsed.ipv4_mapped:
+        parsed = parsed.ipv4_mapped
+    return parsed.compressed
+
+
+def _decode_proc_net_endpoint(value, family):
+    """Decode one Linux /proc/net/tcp{,6} address without invoking `ss`."""
+    try:
+        address_hex, port_hex = value.split(":", 1)
+        raw = bytes.fromhex(address_hex)
+        port = int(port_hex, 16)
+        if family == socket.AF_INET and len(raw) == 4:
+            raw = raw[::-1]
+        elif family == socket.AF_INET6 and len(raw) == 16:
+            # procfs prints each native-endian 32-bit word independently.
+            raw = b"".join(raw[index:index + 4][::-1]
+                           for index in range(0, len(raw), 4))
+        else:
+            return None
+        address = _normalize_ip(socket.inet_ntop(family, raw))
+    except (OSError, ValueError):
+        return None
+    if address is None or not 0 < port <= 65535:
+        return None
+    return address, port
+
+
+def _established_tcp_sockets(proc_root=Path("/proc")):
+    """Map bounded established socket inodes to normalized endpoint tuples."""
+    sockets = {}
+    examined = 0
+    for name, family in (("tcp", socket.AF_INET), ("tcp6", socket.AF_INET6)):
+        try:
+            lines = (Path(proc_root) / "net" / name).read_text(
+                encoding="ascii", errors="replace").splitlines()[1:]
+        except OSError:
+            continue
+        for line in lines:
+            examined += 1
+            if examined > SSH_BRIDGE_MAX_SOCKET_ROWS:
+                return sockets
+            fields = line.split()
+            if len(fields) < 10 or fields[3] != "01":  # TCP_ESTABLISHED
+                continue
+            local = _decode_proc_net_endpoint(fields[1], family)
+            remote_endpoint = _decode_proc_net_endpoint(fields[2], family)
+            try:
+                inode = int(fields[9])
+            except ValueError:
+                continue
+            if inode > 0 and local is not None and remote_endpoint is not None:
+                sockets.setdefault(inode, (local[0], local[1],
+                                           remote_endpoint[0], remote_endpoint[1]))
+    return sockets
+
+
+def _unix_listener_inodes(proc_root=Path("/proc")):
+    """Return Unix stream listeners, including OpenSSH ControlMaster sockets."""
+    try:
+        lines = (Path(proc_root) / "net" / "unix").read_text(
+            encoding="ascii", errors="replace").splitlines()[1:]
+    except OSError:
+        return None
+    if len(lines) > SSH_BRIDGE_MAX_SOCKET_ROWS:
+        return None
+    listeners = set()
+    for line in lines:
+        fields = line.split()
+        if len(fields) < 7:
+            continue
+        try:
+            flags = int(fields[3], 16)
+            socket_type = int(fields[4], 16)
+            inode = int(fields[6])
+        except ValueError:
+            continue
+        # SO_ACCEPTCON plus SOCK_STREAM is the durable shape used by an SSH
+        # multiplexing master. Excluding any such ssh-owned socket is safer
+        # than assigning all multiplexed channels to the master's session.
+        if flags & 0x00010000 and socket_type == 1 and inode > 0:
+            listeners.add(inode)
+    return listeners
+
+
+def _local_proc_identity(pid, proc_root=Path("/proc")):
+    """Read the stable process start time only for this effective user."""
+    root = Path(proc_root) / str(pid)
+    try:
+        text = (root / "stat").read_text(encoding="utf-8", errors="replace")
+        rest = text[text.rfind(")") + 2:].split()
+        start = int(rest[19])
+        status = (root / "status").read_text(encoding="utf-8", errors="replace")
+        effective = None
+        for line in status.splitlines():
+            if line.startswith("Uid:"):
+                fields = line.split()
+                effective = int(fields[2]) if len(fields) >= 3 else None
+                break
+    except (OSError, ValueError, IndexError):
+        return None
+    return start if effective == os.geteuid() else None
+
+
+def _is_ssh_process(pid, proc_root=Path("/proc")):
+    root = Path(proc_root) / str(pid)
+    try:
+        if (root / "comm").read_text(encoding="utf-8", errors="replace").strip() == "ssh":
+            return True
+    except OSError:
+        pass
+    try:
+        argv0 = (root / "cmdline").read_bytes()[:4096].split(b"\0", 1)[0]
+    except OSError:
+        return False
+    return os.path.basename(argv0.decode("utf-8", errors="ignore")) == "ssh"
+
+
+def _local_identity_env(pid, proc_root=Path("/proc")):
+    values = {}
+    allowlist = {key for key, _harness in SESSION_ENV_KEYS}
+    try:
+        with (Path(proc_root) / str(pid) / "environ").open("rb") as handle:
+            raw = handle.read(SSH_BRIDGE_ENV_BYTES + 1)
+    except OSError:
+        return values
+    if len(raw) > SSH_BRIDGE_ENV_BYTES:
+        return values
+    for item in raw.split(b"\0"):
+        key, separator, value = item.partition(b"=")
+        if not separator:
+            continue
+        decoded_key = key.decode("utf-8", errors="ignore")
+        if decoded_key in allowlist:
+            values[decoded_key] = value.decode("utf-8", errors="replace")
+    return values
+
+
+def _unique_session_owner(values):
+    candidates = set()
+    for key, harness in SESSION_ENV_KEYS:
+        session_id = values.get(key)
+        if not isinstance(session_id, str):
+            continue
+        if (not session_id or len(session_id) > 256 or session_id != session_id.strip()
+                or any(ord(char) < 32 or ord(char) == 127 for char in session_id)):
+            return None
+        candidates.add((harness, session_id))
+    if len(candidates) != 1:
+        return None
+    harness, session_id = next(iter(candidates))
+    return {"kind": "session", "harness": harness, "id": session_id}
+
+
+def _socket_inodes(pid, proc_root=Path("/proc")):
+    inodes = set()
+    try:
+        entries = sorted((Path(proc_root) / str(pid) / "fd").iterdir(),
+                         key=lambda entry: int(entry.name) if entry.name.isdigit() else 1 << 30)
+    except OSError:
+        return None
+    if len(entries) > SSH_BRIDGE_MAX_FDS:
+        return None
+    for entry in entries:
+        try:
+            target = os.readlink(entry)
+        except OSError:
+            continue
+        if target.startswith("socket:[") and target.endswith("]"):
+            try:
+                inodes.add(int(target[8:-1]))
+            except ValueError:
+                continue
+    return inodes
+
+
+def _ssh_session_bridges_for_pid(pid, sockets, unix_listener_inodes,
+                                 proc_root=Path("/proc")):
+    before = _local_proc_identity(pid, proc_root)
+    if before is None or not _is_ssh_process(pid, proc_root):
+        return []
+    owner = _unique_session_owner(_local_identity_env(pid, proc_root))
+    if owner is None:
+        return []
+    inodes = _socket_inodes(pid, proc_root)
+    if inodes is None or inodes & unix_listener_inodes:
+        return []
+    after = _local_proc_identity(pid, proc_root)
+    if before != after or not _is_ssh_process(pid, proc_root):
+        return []
+    rows = []
+    for inode in sorted(inodes):
+        connection = sockets.get(inode)
+        if connection is None:
+            continue
+        rows.append({
+            "_pid": pid,
+            "_proc_start": before,
+            "_socket_inode": inode,
+            "client_address": connection[0], "client_port": connection[1],
+            "server_address": connection[2], "server_port": connection[3],
+            "owner": dict(owner),
+        })
+    return rows
+
+
+def _deduplicate_ssh_session_bridges(rows):
+    """Keep one owner per tuple; a conflicting tuple is omitted, never truncated."""
+    grouped = {}
+    for row in rows:
+        if not isinstance(row, dict) or not isinstance(row.get("owner"), dict):
+            continue
+        key = (row.get("client_address"), row.get("client_port"),
+               row.get("server_address"), row.get("server_port"))
+        owner_key = (row["owner"].get("harness"), row["owner"].get("id"))
+        grouped.setdefault(key, {})[owner_key] = row
+    result = []
+    for key in sorted(grouped, key=lambda item: tuple(map(str, item))):
+        owners = grouped[key]
+        if len(owners) != 1:
+            continue
+        row = next(iter(owners.values()))
+        result.append({
+            "client_address": row["client_address"],
+            "client_port": row["client_port"],
+            "server_address": row["server_address"],
+            "server_port": row["server_port"],
+            "owner": dict(row["owner"]),
+        })
+        if len(result) >= SSH_BRIDGE_MAX_CONNECTIONS:
+            break
+    return result
+
+
+def collect_ssh_session_bridges(proc_root=Path("/proc")):
+    """Collect transient exact session evidence for live direct SSH transports."""
+    sockets_before = _established_tcp_sockets(proc_root)
+    unix_listeners_before = _unix_listener_inodes(proc_root)
+    if not sockets_before or unix_listeners_before is None:
+        return []
+    try:
+        pids = sorted(int(entry.name) for entry in Path(proc_root).iterdir()
+                      if entry.name.isdigit())[:SSH_BRIDGE_MAX_PROCESSES]
+    except OSError:
+        return []
+    rows = []
+    for pid in pids:
+        rows.extend(_ssh_session_bridges_for_pid(
+            pid, sockets_before, unix_listeners_before, proc_root))
+    sockets_after = _established_tcp_sockets(proc_root)
+    unix_listeners_after = _unix_listener_inodes(proc_root)
+    if unix_listeners_after is None:
+        return []
+    stable = []
+    for row in rows:
+        pid = row.get("_pid")
+        inode = row.get("_socket_inode")
+        connection = (row.get("client_address"), row.get("client_port"),
+                      row.get("server_address"), row.get("server_port"))
+        if sockets_after.get(inode) != connection:
+            continue
+        if (_local_proc_identity(pid, proc_root) != row.get("_proc_start")
+                or not _is_ssh_process(pid, proc_root)):
+            continue
+        current_inodes = _socket_inodes(pid, proc_root)
+        if (current_inodes is None or inode not in current_inodes
+                or current_inodes & unix_listeners_after):
+            continue
+        stable.append(row)
+    return _deduplicate_ssh_session_bridges(stable)
+
+
 PROBE_SCRIPT = r"""
 python3 - <<'PY'
 import csv
 import hashlib
+import ipaddress
 import io
 import json
 import os
@@ -209,6 +499,14 @@ except (TypeError, ValueError):
     OWNER_CLAIMS = []
 if not isinstance(OWNER_CLAIMS, list):
     OWNER_CLAIMS = []
+try:
+    SSH_SESSION_BRIDGE_ROWS = json.loads(
+        os.environ.get("HEARTING_SSH_SESSION_BRIDGES_JSON", "[]"))
+except (TypeError, ValueError):
+    SSH_SESSION_BRIDGE_ROWS = []
+if (not isinstance(SSH_SESSION_BRIDGE_ROWS, list)
+        or len(SSH_SESSION_BRIDGE_ROWS) > 256):
+    SSH_SESSION_BRIDGE_ROWS = []
 
 
 def smi(query):
@@ -232,6 +530,82 @@ def integer(value):
         return int(float(value.split()[0]))
     except (ValueError, IndexError):
         return None
+
+
+def normalized_ip(value):
+    try:
+        parsed = ipaddress.ip_address(str(value).split("%", 1)[0])
+    except ValueError:
+        return None
+    if isinstance(parsed, ipaddress.IPv6Address) and parsed.ipv4_mapped:
+        parsed = parsed.ipv4_mapped
+    return parsed.compressed
+
+
+def normalized_ssh_connection(values):
+    if isinstance(values, str):
+        values = values.split()
+    if not isinstance(values, (list, tuple)) or len(values) != 4:
+        return None
+    client_address = normalized_ip(values[0])
+    server_address = normalized_ip(values[2])
+
+    def port(value):
+        if isinstance(value, bool):
+            return None
+        if isinstance(value, int):
+            return value
+        if isinstance(value, str) and value.isdigit():
+            try:
+                return int(value)
+            except ValueError:
+                return None
+        return None
+
+    client_port = port(values[1])
+    server_port = port(values[3])
+    if (client_address is None or server_address is None
+            or client_port is None or server_port is None
+            or not 0 < client_port <= 65535 or not 0 < server_port <= 65535):
+        return None
+    return client_address, client_port, server_address, server_port
+
+
+def load_ssh_session_bridges(rows):
+    bridges = {}
+    if not isinstance(rows, list) or len(rows) > 256:
+        return bridges
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        key = normalized_ssh_connection((
+            row.get("client_address"), row.get("client_port"),
+            row.get("server_address"), row.get("server_port"),
+        ))
+        owner = row.get("owner")
+        if key is None or not isinstance(owner, dict) or owner.get("kind") != "session":
+            continue
+        harness = owner.get("harness")
+        session_id = owner.get("id")
+        if (harness not in {"claude", "codex", "opencode"}
+                or not isinstance(session_id, str) or not session_id
+                or len(session_id) > 256 or session_id != session_id.strip()
+                or any(ord(char) < 32 or ord(char) == 127 for char in session_id)):
+            continue
+        bridges.setdefault(key, {})[(harness, session_id)] = {
+            "kind": "session", "harness": harness, "id": session_id,
+        }
+    return bridges
+
+
+SSH_SESSION_BRIDGES = load_ssh_session_bridges(SSH_SESSION_BRIDGE_ROWS)
+
+
+def ssh_connection_owners(value):
+    key = normalized_ssh_connection(value)
+    if key is None:
+        return []
+    return list(SSH_SESSION_BRIDGES.get(key, {}).values())
 
 
 def proc_stat(pid):
@@ -408,7 +782,7 @@ ENV_KEYS = {
     "AGENT_DISPATCH_ATTEMPT_ID", "AGENT_DISPATCH_SELF_SLUG",
     "HEARTING_COMPUTE_RUN_ID", "HEARTING_COMPUTE_HOST",
     "CLAUDE_CODE_SESSION_ID", "CODEX_THREAD_ID", "CODEX_SESSION_ID",
-    "OPENCODE_SESSION_ID",
+    "OPENCODE_SESSION_ID", "SSH_CONNECTION",
 }
 
 
@@ -494,6 +868,16 @@ def process_owner(pid, expected_start):
                 "harness": harness, "evidence_pid": current,
                 "evidence_start": stat["start"], "ancestry_depth": depth,
                 "source": "environment+ancestry",
+            })
+        for bridge_owner in ssh_connection_owners(env.get("SSH_CONNECTION")):
+            harness = bridge_owner["harness"]
+            sid = bridge_owner["id"]
+            candidates["session"].append({
+                "kind": "session", "id": sid,
+                "label": "%s:%s" % (harness, safe_label(sid[:8], "session")),
+                "harness": harness, "evidence_pid": current,
+                "evidence_start": stat["start"], "ancestry_depth": depth,
+                "source": "ssh-connection+ancestry",
             })
         for claim in OWNER_CLAIMS:
             if not isinstance(claim, dict):
@@ -650,12 +1034,17 @@ PY
 """
 
 
-def probe_host(name, host, owner_claims=None):
+def probe_host(name, host, owner_claims=None, ssh_session_bridges=None):
     observed_at = datetime.datetime.now().timestamp()
     claims_json = json.dumps(list(owner_claims or ()), ensure_ascii=False,
                              separators=(",", ":"))
-    script = "export HEARTING_OWNER_CLAIMS_JSON=%s\n%s" % (
-        shlex.quote(claims_json), PROBE_SCRIPT)
+    if ssh_session_bridges is None:
+        ssh_session_bridges = collect_ssh_session_bridges()
+    bridges_json = json.dumps(list(ssh_session_bridges)[:SSH_BRIDGE_MAX_CONNECTIONS],
+                              ensure_ascii=False, separators=(",", ":"))
+    script = ("export HEARTING_OWNER_CLAIMS_JSON=%s\n"
+              "export HEARTING_SSH_SESSION_BRIDGES_JSON=%s\n%s") % (
+                  shlex.quote(claims_json), shlex.quote(bridges_json), PROBE_SCRIPT)
     result = remote(host, script, timeout=GPU_PROBE_TIMEOUT)
     if result.returncode != 0:
         detail = (result.stderr or result.stdout).strip().splitlines()
@@ -709,10 +1098,12 @@ def _probe_selected(selected, run_root=None):
     for claim in claims:
         if isinstance(claim.get("host"), str):
             claims_by_host.setdefault(claim["host"], []).append(claim)
+    ssh_session_bridges = collect_ssh_session_bridges()
     workers = min(8, len(selected))
     with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
         return list(pool.map(
-            lambda item: probe_host(item[0], item[1], claims_by_host.get(item[0], ())),
+            lambda item: probe_host(item[0], item[1], claims_by_host.get(item[0], ()),
+                                    ssh_session_bridges),
             selected))
 
 

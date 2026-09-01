@@ -99,6 +99,164 @@ class ComputeHostsTest(unittest.TestCase):
         self.assertEqual(argv[-1], "someone@h")
         self.assertEqual(module.ssh_prefix({"ssh_host": "local"}), [])
 
+    def test_proc_tcp_endpoints_decode_ipv4_ipv6_and_mapped_addresses(self):
+        module = load_module()
+        import socket
+        self.assertEqual(
+            module._decode_proc_net_endpoint("63DDEFA3:840C", socket.AF_INET),
+            ("163.239.221.99", 33804),
+        )
+        self.assertEqual(
+            module._decode_proc_net_endpoint(
+                "00000000000000000000000001000000:0016", socket.AF_INET6),
+            ("::1", 22),
+        )
+        self.assertEqual(
+            module._decode_proc_net_endpoint(
+                "B80D0120000000000000000001000000:0016", socket.AF_INET6),
+            ("2001:db8::1", 22),
+        )
+        self.assertEqual(
+            module._decode_proc_net_endpoint(
+                "0000000000000000FFFF0000370DEFA3:0016", socket.AF_INET6),
+            ("163.239.13.55", 22),
+        )
+        self.assertEqual(module._normalize_ip("::ffff:163.239.13.55"),
+                         "163.239.13.55")
+        self.assertIsNone(module._decode_proc_net_endpoint("bad", socket.AF_INET))
+
+        proc_root = self.root / "proc-net"
+        (proc_root / "net").mkdir(parents=True)
+        (proc_root / "net" / "unix").write_text(
+            "Num RefCount Protocol Flags Type St Inode Path\n"
+            "0: 2 0 00010000 0001 01 9002 /tmp/control\n"
+            "0: 3 0 00000000 0001 03 9003\n",
+            encoding="ascii",
+        )
+        self.assertEqual(module._unix_listener_inodes(proc_root), {9002})
+
+    def test_local_ssh_bridge_requires_one_unique_session_and_stable_pid(self):
+        module = load_module()
+        self.assertEqual(module._unique_session_owner({
+            "CODEX_THREAD_ID": "sid-one", "CODEX_SESSION_ID": "sid-one",
+        }), {"kind": "session", "harness": "codex", "id": "sid-one"})
+        self.assertIsNone(module._unique_session_owner({
+            "CODEX_THREAD_ID": "sid-one", "CODEX_SESSION_ID": "sid-two",
+        }))
+        self.assertIsNone(module._unique_session_owner({
+            "CODEX_THREAD_ID": "sid-one", "CLAUDE_CODE_SESSION_ID": "sid-one",
+        }))
+
+        connection = ("192.0.2.10", 41000, "198.51.100.20", 22)
+        with mock.patch.object(module, "_local_proc_identity",
+                               side_effect=[77, 77]), \
+                mock.patch.object(module, "_is_ssh_process", return_value=True), \
+                mock.patch.object(module, "_local_identity_env", return_value={
+                    "CODEX_THREAD_ID": "sid-one", "CODEX_SESSION_ID": "sid-one",
+                }), \
+                mock.patch.object(module, "_socket_inodes", return_value={9001}):
+            rows = module._ssh_session_bridges_for_pid(
+                12, {9001: connection}, set())
+        self.assertEqual(rows, [{
+            "_pid": 12,
+            "_proc_start": 77,
+            "_socket_inode": 9001,
+            "client_address": "192.0.2.10", "client_port": 41000,
+            "server_address": "198.51.100.20", "server_port": 22,
+            "owner": {"kind": "session", "harness": "codex", "id": "sid-one"},
+        }])
+
+        with mock.patch.object(module, "_local_proc_identity",
+                               side_effect=[77, 78]), \
+                mock.patch.object(module, "_is_ssh_process", return_value=True), \
+                mock.patch.object(module, "_local_identity_env", return_value={
+                    "CODEX_THREAD_ID": "sid-one",
+                }), \
+                mock.patch.object(module, "_socket_inodes", return_value={9001}):
+            self.assertEqual(
+                module._ssh_session_bridges_for_pid(
+                    12, {9001: connection}, set()), [])
+
+        with mock.patch.object(module, "_local_proc_identity",
+                               side_effect=[77, 77]), \
+                mock.patch.object(module, "_is_ssh_process", return_value=True), \
+                mock.patch.object(module, "_local_identity_env", return_value={
+                    "CODEX_THREAD_ID": "sid-one",
+                }), \
+                mock.patch.object(module, "_socket_inodes",
+                                  return_value={9001, 9002}):
+            self.assertEqual(
+                module._ssh_session_bridges_for_pid(
+                    12, {9001: connection}, {9002}), [])
+
+        with mock.patch.object(module, "_local_proc_identity", return_value=77), \
+                mock.patch.object(module, "_is_ssh_process", return_value=True), \
+                mock.patch.object(module, "_local_identity_env", return_value={
+                    "CODEX_THREAD_ID": "sid-one",
+                }), \
+                mock.patch.object(module, "_socket_inodes", return_value=None):
+            self.assertEqual(
+                module._ssh_session_bridges_for_pid(
+                    12, {9001: connection}, set()), [])
+
+        proc_root = self.root / "proc"
+        (proc_root / "12").mkdir(parents=True)
+        candidate = {
+            "_pid": 12,
+            "_proc_start": 77,
+            "_socket_inode": 9001,
+            "client_address": "192.0.2.10", "client_port": 41000,
+            "server_address": "198.51.100.20", "server_port": 22,
+            "owner": {"kind": "session", "harness": "codex", "id": "sid-one"},
+        }
+        with mock.patch.object(module, "_established_tcp_sockets", side_effect=[
+                    {9001: connection},
+                    {9001: ("192.0.2.10", 41001, "198.51.100.20", 22)},
+                ]), \
+                mock.patch.object(module, "_unix_listener_inodes",
+                                  side_effect=[set(), set()]), \
+                mock.patch.object(module, "_ssh_session_bridges_for_pid",
+                                  return_value=[candidate]):
+            self.assertEqual(module.collect_ssh_session_bridges(proc_root), [])
+
+    def test_conflicting_local_owners_for_one_connection_fail_closed(self):
+        module = load_module()
+        base = {
+            "client_address": "192.0.2.10", "client_port": 41000,
+            "server_address": "198.51.100.20", "server_port": 22,
+        }
+        rows = module._deduplicate_ssh_session_bridges([
+            {**base, "owner": {"kind": "session", "harness": "codex",
+                                "id": "sid-one"}},
+            {**base, "owner": {"kind": "session", "harness": "claude",
+                                "id": "sid-two"}},
+        ])
+        self.assertEqual(rows, [])
+
+    def test_probe_serializes_transient_ssh_bridge_separately_from_claims(self):
+        module = load_module()
+        bridge = {
+            "client_address": "192.0.2.10", "client_port": 41000,
+            "server_address": "198.51.100.20", "server_port": 22,
+            "owner": {"kind": "session", "harness": "codex", "id": "sid-one"},
+        }
+        captured = {}
+
+        def fake_remote(_host, script, *, timeout):
+            captured["script"] = script
+            captured["timeout"] = timeout
+            payload = {"hostname": "remote", "gpus": [], "observed_at": 1.0}
+            return subprocess.CompletedProcess([], 0, json.dumps(payload), "")
+
+        with mock.patch.object(module, "remote", side_effect=fake_remote):
+            row = module.probe_host("remote", {"ssh_host": "example.invalid"},
+                                    owner_claims=[], ssh_session_bridges=[bridge])
+        self.assertTrue(row["reachable"])
+        self.assertIn("HEARTING_OWNER_CLAIMS_JSON", captured["script"])
+        self.assertIn("HEARTING_SSH_SESSION_BRIDGES_JSON", captured["script"])
+        self.assertIn("sid-one", captured["script"])
+        self.assertEqual(captured["timeout"], module.GPU_PROBE_TIMEOUT)
+
     def test_options_before_the_separator_are_not_swallowed(self):
         # argparse.REMAINDER would capture --name/--dry-run as part of the
         # command; the separator has to be split off before parsing.
@@ -204,12 +362,13 @@ class ComputeHostsTest(unittest.TestCase):
         module = load_module()
         barrier = threading.Barrier(3, timeout=1.0)
 
-        def fake_probe(name, _host, _claims):
+        def fake_probe(name, _host, _claims, _bridges):
             barrier.wait()
             return {"host": name, "reachable": True, "gpus": []}
 
         selected = [(name, {"ssh_host": "local"}) for name in ("a", "b", "c")]
-        with mock.patch.object(module, "probe_host", side_effect=fake_probe):
+        with mock.patch.object(module, "probe_host", side_effect=fake_probe), \
+                mock.patch.object(module, "collect_ssh_session_bridges", return_value=[]):
             rows = module._probe_selected(selected)
         self.assertEqual([row["host"] for row in rows], ["a", "b", "c"])
 

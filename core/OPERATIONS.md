@@ -602,6 +602,22 @@ the match is against a declared field. Live state is never recorded: `list` and
 `probe` measure reachability, CPU utilization, and GPU utilization/free memory
 at the moment they are asked.
 
+A live direct SSH launch may cross the process boundary without forwarding its
+Claude Code, Codex, or OpenCode session variable. In that case the probe may
+form a transient exact bridge only by joining a stable same-EUID local `ssh`
+process's allowlisted unique session identity and established socket four-tuple
+to the remote GPU ancestry's exact OpenSSH `SSH_CONNECTION` four-tuple. Both
+sides are bounded and PID/start-stable. Distinct owners for one tuple,
+unreadable procfs, an SSH process that owns a Unix listener (including a
+detected ControlMaster), proxy/NAT rewriting, or a disconnected transport
+fails closed. Connection addresses are correlation evidence only and never
+enter Fleet's public process
+model. This bridge exists only while the direct SSH connection is live; it does
+not replace the detached-process claim below. This rule was added after the
+2026-09-01 BC_ResNet incident in which the local Codex-owned SSH process and
+remote GPU ancestry were both exact but the session variable had not crossed
+the SSH boundary.
+
 `claim <host> <pid> --harness <runtime> --session <id>` is the narrow bridge for
 an already detached `nohup`/`setsid` process whose runtime ancestor and session
 environment no longer survive. It writes only to the shared run root's

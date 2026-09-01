@@ -112,6 +112,60 @@ class ProbeCommandAndSessionEvidenceTest(unittest.TestCase):
         self.assertIsNone(reason)
         self.assertEqual(session_owner["id"], "sid-claim")
 
+    def test_live_ssh_connection_supplies_only_exact_unique_session_evidence(self):
+        ns = _probe_namespace()
+        ns["proc_stat"] = mock.Mock(return_value={"ppid": 0, "start": 99})
+        ns["same_euid"] = mock.Mock(return_value=True)
+        ns["harness_process"] = mock.Mock(return_value=None)
+        ns["OWNER_CLAIMS"] = []
+        base = {
+            "client_address": "192.0.2.10", "client_port": 41000,
+            "server_address": "198.51.100.20", "server_port": 22,
+        }
+        exact = [{
+            **base,
+            "owner": {"kind": "session", "harness": "codex", "id": "sid-exact"},
+        }]
+        ns["SSH_SESSION_BRIDGES"] = ns["load_ssh_session_bridges"](exact)
+        ns["identity_env"] = mock.Mock(return_value={
+            "SSH_CONNECTION": "192.0.2.10 41000 198.51.100.20 22",
+        })
+        owner, reason, session_owner = ns["process_owner"](7, 99)
+        self.assertEqual(owner["id"], "sid-exact")
+        self.assertEqual(owner["source"], "ssh-connection+ancestry")
+        self.assertIsNone(reason)
+        self.assertEqual(session_owner["id"], "sid-exact")
+
+        ns["identity_env"] = mock.Mock(return_value={
+            "SSH_CONNECTION": "192.0.2.10 41001 198.51.100.20 22",
+        })
+        owner, reason, session_owner = ns["process_owner"](7, 99)
+        self.assertIsNone(owner)
+        self.assertEqual(reason, "no-exact-owner")
+        self.assertIsNone(session_owner)
+
+        ambiguous = exact + [{
+            **base,
+            "owner": {"kind": "session", "harness": "claude", "id": "sid-other"},
+        }]
+        ns["SSH_SESSION_BRIDGES"] = ns["load_ssh_session_bridges"](ambiguous)
+        ns["identity_env"] = mock.Mock(return_value={
+            "SSH_CONNECTION": "192.0.2.10 41000 198.51.100.20 22",
+        })
+        owner, reason, session_owner = ns["process_owner"](7, 99)
+        self.assertIsNone(owner)
+        self.assertEqual(reason, "ambiguous-session")
+        self.assertIsNone(session_owner)
+
+        self.assertIsNone(ns["normalized_ssh_connection"]("malformed"))
+        self.assertIsNone(ns["normalized_ssh_connection"](
+            "192.0.2.10 0 198.51.100.20 22"))
+        self.assertIsNone(ns["normalized_ssh_connection"](
+            ("192.0.2.10", True, "198.51.100.20", 22)))
+        self.assertEqual(ns["normalized_ssh_connection"](
+            "2001:0db8::1 41000 ::ffff:198.51.100.20 22"),
+            ("2001:db8::1", 41000, "198.51.100.20", 22))
+
 
 class GpuProcessAndResourceRenderTest(unittest.TestCase):
     def setUp(self):
