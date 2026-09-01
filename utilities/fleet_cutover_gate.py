@@ -224,6 +224,12 @@ def match_waiver(entry: Mapping[str, Any], rows: Sequence[Mapping[str, Any]]) ->
     construction. Matching by `repo_path` lets `validate_time_bounded_grant`
     independently confirm the entry's declared `canonical_root` (if any)
     against the matched row's resolved root.
+
+    Consequence: a waiver entry that carries only `canonical_root` (no
+    `repo_path`) can never trigger `waiver-foreign-root` -- its match key
+    and the value the foreign-root check compares against are the same
+    field compared to the same value. This is accepted, intended
+    non-coverage, not a gap to close by reordering the match keys.
     """
     repo_path = entry.get("repo_path")
     canonical_root = entry.get("canonical_root")

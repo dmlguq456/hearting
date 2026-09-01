@@ -241,6 +241,29 @@ class CompleteTest(GateTestBase):
         self.assertEqual(payload["waivers"]["unmatched"][0]["reason"], "waiver-unmatched-root")
         self.assertEqual(payload["verdict"], "incomplete")
 
+    def test_canonical_root_only_waiver_is_unmatched_by_construction(self):
+        # A waiver carrying only `canonical_root` (no `repo_path`) matches rows
+        # by comparing canonical_root against row["resolved_root"] -- the same
+        # field pair validate_time_bounded_grant later re-checks for foreign-root.
+        # A canonical_root that does not equal any row's resolved_root cannot be
+        # matched at all, so it lands in `unmatched` and can never flip a
+        # blocking root. This documents intended non-coverage of
+        # `waiver-foreign-root` for canonical_root-only entries (see
+        # match_waiver docstring), not a bug to fix by reordering match keys.
+        roster = self.all_four_roster()
+        waivers = self.write_waivers([
+            {"canonical_root": str(self.base / "elsewhere"), "reason": "known gap", "issuer": "ops",
+             "created_at": "2026-09-01T00:00:00Z", "expires_at": "2099-01-01T00:00:00Z"},
+        ])
+        _, payload = self.run_cli(["complete", "--roster", str(roster), "--waivers", str(waivers)])
+        self.assertEqual(len(payload["waivers"]["unmatched"]), 1)
+        self.assertEqual(payload["waivers"]["unmatched"][0]["reason"], "waiver-unmatched-root")
+        blocking_paths = {row["repo_path"] for row in payload["blocking"]}
+        self.assertIn(str(self.malformed_repo), blocking_paths)
+        self.assertIn(str(self.legacy_repo), blocking_paths)
+        self.assertIn(str(self.empty_repo), blocking_paths)
+        self.assertEqual(payload["verdict"], "incomplete")
+
     def test_complete_requires_negative_probe_pass_on_active_roots(self):
         roster = self.active_only_roster()
         with mock.patch.object(P, "check_write",
