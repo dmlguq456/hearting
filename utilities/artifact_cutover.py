@@ -1351,10 +1351,12 @@ def _has_hidden_component(rel: str) -> bool:
 
 
 def _prune_hidden_copies(root: Path, run_dir: Path, report: Dict[str, Any]) -> List[str]:
-    """Remove copied targets whose locator has a hidden component (an earlier
-    migrate-delta copied them before the D-6 rule was applied) and rewrite the
-    journal, inverse and map without them."""
+    """Remove copied targets whose locator cannot be a D-6 locator (an earlier
+    migrate-delta copied them before the rule was applied: hidden components,
+    and non-locator components such as non-ASCII filenames) and rewrite the
+    journal, inverse and map without them. Sources are never touched."""
     pruned: List[str] = []
+    pruned_invalid: List[str] = []
     for name in ("journal.jsonl", "inverse.jsonl", "compatibility-map.jsonl"):
         path = run_dir / name
         if not path.is_file():
@@ -1362,17 +1364,25 @@ def _prune_hidden_copies(root: Path, run_dir: Path, report: Dict[str, Any]) -> L
         kept = []
         for row in _read_jsonl(path):
             target = row.get("target_locator", "")
-            if row.get("kind", "file") == "file" and _has_hidden_component(target):
+            reason = P._unmanifestable_reason(target) if row.get("kind", "file") == "file" else None
+            if reason is not None:
                 if name == "journal.jsonl":
                     victim = root / target
                     if victim.is_file() and not os.path.islink(str(victim)):
                         victim.unlink()
-                    pruned.append(row.get("source_locator", target))
+                    source = row.get("source_locator", target)
+                    pruned.append(source)
+                    if reason != "hidden-component":
+                        pruned_invalid.append(source)
                 continue
             kept.append(row)
         report["digests"][name.split(".")[0].replace("compatibility-map", "compatibility_map")] = _write_jsonl(path, kept)
     if pruned:
-        report["skipped_hidden_components"] = sorted(set(report.get("skipped_hidden_components", [])) | set(pruned))
+        hidden = set(pruned) - set(pruned_invalid)
+        report["skipped_hidden_components"] = sorted(set(report.get("skipped_hidden_components", [])) | hidden)
+        if pruned_invalid:
+            report["skipped_invalid_components"] = sorted(
+                set(report.get("skipped_invalid_components", [])) | set(pruned_invalid))
         report["journal_rows"] = len(_read_jsonl(run_dir / "journal.jsonl"))
     return pruned
 
@@ -1468,11 +1478,25 @@ def migrate_delta(root: Path, *, census_rows: Path, route_file: Path, capability
     cycle_refs = _identity_refs(identity, begun["campaign_id"], begun["cycle_id"])
     per_bucket: Dict[str, int] = {}
     skipped_hidden: List[str] = []
+    skipped_invalid: List[str] = []
+
+    def unmanifestable(rel: str) -> bool:
+        # D-6 locators cannot name dot-files or non-locator components (for
+        # example non-ASCII filenames); both stay legacy instead of wedging the
+        # seal, which validates every copied locator.
+        reason = P._unmanifestable_reason(rel)
+        if reason == "hidden-component":
+            skipped_hidden.append(rel)
+            return True
+        if reason is not None:
+            skipped_invalid.append(rel)
+            return True
+        return False
+
     for row in candidates:
         rel = row["path"]
         bucket = rel.split("/", 1)[0]
-        if _has_hidden_component(rel):
-            skipped_hidden.append(rel)  # D-6 locators cannot name dot-files; stays legacy
+        if unmanifestable(rel):
             continue
         if bucket in SHARED_SNAPSHOT:
             continue  # shared kinds are snapshotted whole below
@@ -1495,8 +1519,7 @@ def migrate_delta(root: Path, *, census_rows: Path, route_file: Path, capability
             rel = entry.relative_to(root).as_posix()
             if _excluded(rel, excludes):
                 continue
-            if _has_hidden_component(rel):
-                skipped_hidden.append(rel)
+            if unmanifestable(rel):
                 continue
             target_rel = os.path.relpath(str(cycle_dir / "artifacts" / staged / entry.relative_to(base).as_posix()), str(root))
             copy_one(rel, target_rel, cycle_refs)
@@ -1516,6 +1539,7 @@ def migrate_delta(root: Path, *, census_rows: Path, route_file: Path, capability
         "candidates_total": len(candidates), "copied_by_bucket": per_bucket, "shared_snapshots": snapshot_counts,
         "journal_rows": len(journal), "excluded_prefixes": list(excludes), "excluded_files": len(skipped_excluded),
         "skipped_hidden_components": skipped_hidden,
+        "skipped_invalid_components": skipped_invalid,
         "digests": digests, "sources_touched": False,
     }
     P._write_atomic(run_dir / "report.json", P._json_bytes(report))

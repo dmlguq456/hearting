@@ -228,6 +228,47 @@ class CutoverTest(unittest.TestCase):
         self.assertFalse(stray.exists())
         self.assertFalse(any(".gitignore" in r["target_locator"] for r in C._read_jsonl(run_dir / "compatibility-map.jsonl")))
 
+    def test_migrate_delta_skips_invalid_locator_components(self):
+        # Non-ASCII filenames cannot be D-6 locators; they must stay legacy at
+        # copy time instead of wedging the later seal (SR_CorrNet_DSC 2026-09-02).
+        self.w("plans/2026-01-03_c/핵심요약보고서.html", "korean-named\n")
+        self.w("analysis_project/doc/검증결과.md", "korean snapshot\n")
+        rows = self.rows.read_text() + json.dumps(
+            {"path": "plans/2026-01-03_c/핵심요약보고서.html", "kind": "file",
+             "disposition": "post-w7-arrival", "detail": "cycle-candidate:plans"}) + "\n"
+        self.rows.write_text(rows)
+        report, sealed = self.migrate()
+        self.assertEqual(sorted(report["skipped_invalid_components"]),
+                         ["analysis_project/doc/검증결과.md", "plans/2026-01-03_c/핵심요약보고서.html"])
+        cycle_dir = Path(report["cycle_dir"])
+        self.assertFalse((cycle_dir / "artifacts/plans/2026-01-03_c").exists())
+        self.assertFalse((cycle_dir / "artifacts/shared-input/analysis/doc/검증결과.md").exists())
+        self.assertTrue((self.root / "plans/2026-01-03_c/핵심요약보고서.html").is_file(), "source preserved")
+        self.assertEqual(sealed["state"], "sealed")
+
+    def test_seal_prunes_invalid_locator_copies_left_by_an_earlier_run(self):
+        route, route_file = self.route()
+        report = C.migrate_delta(self.root, census_rows=self.rows, route_file=route_file, capability="autopilot-code",
+                                 intensity="direct", excludes=["plans/keep"], approval_receipt_sha256=None, campaign_id=None)
+        run_dir = Path(report["run_dir"])
+        self.w("research/topic/검증결과.md", "korean source\n")
+        stray = Path(report["cycle_dir"]) / "artifacts/research/topic/검증결과.md"
+        stray.write_text("korean source\n")
+        rel = os.path.relpath(stray, self.root)
+        with open(run_dir / "journal.jsonl", "a") as fh:
+            fh.write(json.dumps({"schema_version": C.JOURNAL_SCHEMA, "row_ordinal": 999, "action": "create_destination", "kind": "file",
+                                 "source_locator": "research/topic/검증결과.md", "target_locator": rel, "sha256": "x", "size": 14}) + "\n")
+        with open(run_dir / "compatibility-map.jsonl", "a") as fh:
+            fh.write(json.dumps({"schema_version": C.MAP_SCHEMA, "kind": "file", "source_locator": "research/topic/검증결과.md", "target_locator": rel}) + "\n")
+        self.close(route, route_file)
+        sealed = C.migrate_seal(self.root, run_dir=run_dir, spec_reference=W7_REF)
+        self.assertEqual(sealed["state"], "sealed")
+        self.assertIn("research/topic/검증결과.md", sealed["pruned_hidden_copies"])
+        self.assertIn("research/topic/검증결과.md", sealed.get("skipped_invalid_components", []))
+        self.assertFalse(stray.exists())
+        self.assertTrue((self.root / "research/topic/검증결과.md").is_file(), "source preserved")
+        self.assertFalse(any("검증결과" in r["target_locator"] for r in C._read_jsonl(run_dir / "compatibility-map.jsonl")))
+
     def test_adopt_campaign_lists_existing_cycles_and_allows_join(self):
         camp = "camp_" + "e" * 32
         cyc = "cyc_" + "e" * 32
