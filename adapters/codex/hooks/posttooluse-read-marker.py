@@ -114,11 +114,20 @@ def shell_read_target(payload: dict[str, Any], args: dict[str, Any]) -> str:
     for token in tokens:
         if token.startswith("-") or token in {"|", "&&", "||", ";"}:
             continue
-        normalized = token.replace("\\", "/")
-        if "spec/prd.md" in normalized or ("/core/" in normalized and normalized.endswith(".md")) or (
-            normalized.startswith("core/") and normalized.endswith(".md")
-        ):
-            return normalize(base, token)
+        target = normalize(base, token)
+        normalized = target.replace("\\", "/")
+        spec_prd = normalized.endswith("/prd.md") and any(
+            marker in normalized
+            for marker in (
+                "/.agent_reports/spec/",
+                "/.claude_reports/spec/",
+                "/artifacts/spec/",
+                "/shared/spec/",
+            )
+        )
+        core_doc = "/core/" in normalized and normalized.endswith(".md")
+        if spec_prd or core_doc:
+            return target
     return ""
 
 

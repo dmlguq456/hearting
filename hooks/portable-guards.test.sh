@@ -2891,6 +2891,17 @@ if printf '{"tool_name":"Bash","tool_input":{"command":"cat .agent_reports/spec/
 else
   bad "codex native read hook should mark obvious shell spec reads"
 fi
+shared_repo="$TMP/sharedrepo"
+shared_prd="$shared_repo/.agent_reports/shared/spec/ref_fixture/revisions/rrev_fixture/stage-dispatch/prd.md"
+mkdir -p "$(dirname "$shared_prd")"
+printf 'shared prd\n' > "$shared_prd"
+if printf '{"tool_name":"functions.exec_command","tool_input":{"cmd":"sed -n 1,120p %s"},"session_id":"shellsharedreadsid","cwd":"%s"}\n' "$shared_prd" "$shared_repo" \
+  | AGENT_HOME="$TMP/codex_marker_home" HOME="$TMP/codex_hook_home" python3 "$TMP/codex_hook_home/.codex/hearting/adapters/codex/hooks/posttooluse-read-marker.py" >/tmp/codex_shared_read_hook.out 2>/tmp/codex_shared_read_hook.err \
+  && find "$TMP/codex_marker_home/.spec-grounding" -type f -name 'shellsharedreadsid__*' -print -quit | grep -q .; then
+  ok "codex native read hook marks shell reads of canonical shared spec revisions"
+else
+  bad "codex native read hook should mark canonical shared spec revision reads"
+fi
 mkdir -p "$TMP/repo/core"
 printf 'core\n' > "$TMP/repo/core/MEMORY.md"
 if printf '{"tool_name":"Read","tool_input":{"file_path":"%s"},"session_id":"corereadsid","cwd":"%s"}\n' "$TMP/repo/core/MEMORY.md" "$TMP/repo" \
