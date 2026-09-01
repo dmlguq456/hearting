@@ -3589,4 +3589,33 @@ class RuntimeAncestryBindingTest(unittest.TestCase):
             self.assertIsNone(D.runtime_ancestry_binding(42))
 
 
+class ReservationClaimTimeoutTest(unittest.TestCase):
+    def test_default_absorbs_pre_claim_route_verification(self):
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop(D.RESERVATION_CLAIM_TIMEOUT_ENV, None)
+            self.assertEqual(D.reservation_claim_timeout(), D.RESERVATION_CLAIM_TIMEOUT_DEFAULT)
+        self.assertGreaterEqual(D.RESERVATION_CLAIM_TIMEOUT_DEFAULT, 30.0)
+
+    def test_env_override_is_clamped(self):
+        cases = {"120": 120.0, "0.2": 1.0, "9000": 600.0, "nonsense": D.RESERVATION_CLAIM_TIMEOUT_DEFAULT,
+                 "": D.RESERVATION_CLAIM_TIMEOUT_DEFAULT, "  ": D.RESERVATION_CLAIM_TIMEOUT_DEFAULT}
+        for raw, expected in cases.items():
+            with mock.patch.dict(os.environ, {D.RESERVATION_CLAIM_TIMEOUT_ENV: raw}):
+                self.assertEqual(D.reservation_claim_timeout(), expected, raw)
+
+    def test_wait_uses_env_budget_and_dead_child_still_fails_fast(self):
+        class DeadProc:
+            pid = 4242
+            returncode = 1
+            def poll(self):
+                return 1
+        with mock.patch.dict(os.environ, {D.RESERVATION_CLAIM_TIMEOUT_ENV: "600"}), \
+             mock.patch.object(D, "_governor_json", return_value={"state": "unclaimed"}):
+            start = time.monotonic()
+            with self.assertRaises(D.DispatchContractError) as ctx:
+                D.wait_governor_reservation_claim(Path("/g"), Path("/r"), "tok", DeadProc())
+            self.assertLess(time.monotonic() - start, 5.0)
+            self.assertEqual(ctx.exception.reason, "model-worker-reservation-claim-timeout")
+
+
 if __name__=="__main__": unittest.main()

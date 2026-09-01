@@ -2716,17 +2716,44 @@ def cancel_governor_reservation(governor: Path, root: Path, token: str) -> None:
     )
 
 
+RESERVATION_CLAIM_TIMEOUT_DEFAULT = 60.0
+RESERVATION_CLAIM_TIMEOUT_ENV = "AGENT_DISPATCH_RESERVATION_CLAIM_TIMEOUT"
+
+
+def reservation_claim_timeout() -> float:
+    """Claim-wait budget: env override clamped to [1, 600], else the default.
+
+    A route-bound launch runs launch-fence route verification before the
+    governed runner claims its reservation, and that verification is
+    storage-latency-bound (an 18s wall-clock verify was measured on an
+    NFS-backed artifact root). The budget must absorb that pre-claim work; a
+    dead child still fails immediately regardless of this value because the
+    wait loop exits as soon as the spawned process is gone.
+    """
+
+    raw = os.environ.get(RESERVATION_CLAIM_TIMEOUT_ENV, "").strip()
+    if not raw:
+        return RESERVATION_CLAIM_TIMEOUT_DEFAULT
+    try:
+        value = float(raw)
+    except ValueError:
+        return RESERVATION_CLAIM_TIMEOUT_DEFAULT
+    return min(max(value, 1.0), 600.0)
+
+
 def wait_governor_reservation_claim(
     governor: Path,
     root: Path,
     token: str,
     proc: subprocess.Popen,
     *,
-    timeout: float = 5.0,
+    timeout: float | None = None,
     expected_reservation: dict[str, object] | None = None,
 ) -> dict[str, object]:
     """Observe reserve→runner transfer before the reserving process may exit."""
 
+    if timeout is None:
+        timeout = reservation_claim_timeout()
     deadline = time.monotonic() + max(0.1, timeout)
     while True:
         payload = _governor_json(
