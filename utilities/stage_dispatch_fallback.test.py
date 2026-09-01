@@ -297,6 +297,18 @@ class FallbackTest(unittest.TestCase):
   self.assertEqual(result.returncode,73,result.stdout+result.stderr)
   self.assertIn("reason=parent-identity-mismatch",result.stdout)
   self.assertFalse(self.jobs.exists())
+ def test_attempt_id_as_parent_reports_slug_identity_mismatch(self):
+  path=self.route(same_status="supported")
+  attempt="att-fallback-parent"
+  cmd=[sys.executable,str(ROOT/"utilities/stage-dispatch-fallback.py"),"--route",str(path),"--node","plan","--slug","fallback-plan","--parent",attempt,"--capability-mode","dev","--worker-mode","plan/plan-author","--jobs",str(self.jobs),"--register"]
+  env={**os.environ,"AGENT_HOME":str(ROOT),"AGENT_ARTIFACT_ROOT":str(self.art),"AGENT_DISPATCH_JOBS":str(self.jobs),"AGENT_DISPATCH_SELF_SLUG":"real-owner"}
+  result=subprocess.run(cmd,text=True,capture_output=True,env=env)
+  self.assertEqual(result.returncode,73,result.stdout+result.stderr)
+  self.assertIn("reason=parent-identity-mismatch",result.stdout)
+  self.assertIn("explicit="+attempt,result.stdout)
+  self.assertIn("current=real-owner",result.stdout)
+  self.assertIn("child_spawned=0",result.stdout)
+  self.assertFalse(self.jobs.exists())
  def test_failed_same_and_cross_degrade_in_order(self):
   path=self.route(native="supported"); same="codex/headless/workspace-write/codex/conductor"; cross="codex/headless/workspace-write/claude/conductor"
   result=self.run_chain(path,"--failed-tuple",same,"--failed-tuple",cross); self.assertEqual(result.returncode,79,result.stdout+result.stderr); self.assertIn("skipped-child-proof-missing",result.stdout); self.assertIn("selected_hop=inline",result.stdout)

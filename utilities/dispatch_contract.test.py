@@ -871,6 +871,33 @@ class DispatchContractTest(unittest.TestCase):
     self.assertEqual(binding.liveness_source,"supervisor-lease")
     self.assertIsNone(binding.observed_pid)
     self.assertTrue(D.parent_attempt_binding_is_live(jobs,binding))
+
+    # Live Codex depth-1 owners execute their tool turn as an attempt-tagged
+    # descendant.  That broader attempt verdict must stay live for cleanup,
+    # while parent admission still consumes the exact governed-process verdict
+    # so namespace-unverifiable evidence can use the held SD-90 lease.
+    tagged=mock.Mock(state="populated",members=((1,"42","S"),),reason="")
+    metadata=D.parse_registry_metadata(jobs.read_text().split("\t",5)[5])
+    with mock.patch.object(D,"process_namespace_identity",return_value="pid:[inner]"), \
+         mock.patch.object(D,"attempt_tagged_descendants",return_value=tagged) as scan:
+     folded=D.attempt_process_quiescence(metadata)
+     self.assertEqual((folded.state,folded.reason,folded.pid),
+                      ("live","attempt-descendant-live",1))
+     scans_before=scan.call_count
+     descendant_binding=D.resolve_live_parent_attempt(
+      jobs,parent_slug="owner",repo="/repo",worktree="/wt",
+      expected_attempt_id=attempt)
+     self.assertEqual(descendant_binding.liveness_source,"supervisor-lease")
+     self.assertEqual(scan.call_count,scans_before)
+
+    with mock.patch.object(
+        D,"_attempt_process_quiescence_impl",
+        return_value=D.ProcessQuiescence("quiescent","host-pid-gone")):
+     with self.assertRaises(D.DispatchContractError) as quiescent:
+      D.resolve_live_parent_attempt(
+       jobs,parent_slug="owner",repo="/repo",worktree="/wt",
+       expected_attempt_id=attempt)
+    self.assertEqual(quiescent.exception.reason,"parent-attempt-not-live")
     sealed_row=jobs.read_text()
     jobs.write_text(sealed_row.replace(
      f"supervisor_lease_nonce={nonce}",f"supervisor_lease_nonce={'e'*64}"))

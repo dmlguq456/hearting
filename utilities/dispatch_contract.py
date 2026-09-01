@@ -2858,7 +2858,17 @@ def _abort_fenced_launch(
 def _parent_liveness_evidence(
     jobs: Path, metadata: dict[str, str]
 ) -> tuple[bool, str, AuthoritativeProcessIdentity | None]:
-    process = attempt_process_quiescence(metadata)
+    # Parent admission needs the governed owner's exact process verdict.  The
+    # broader attempt verdict folds tagged descendants into ``live`` so cleanup
+    # and successor gates do not ignore work still running for an attempt.  A
+    # supervised Codex owner observed from a different PID namespace can have
+    # exactly that shape: governed=namespace-unverifiable while the current
+    # tool process is a visible tagged descendant.  Folding first erases the
+    # one SD-90 verdict for which the exact held supervisor lease is allowed to
+    # provide liveness, yet supplies no authoritative parent process identity.
+    # Keep positive governed death/quiescence authoritative and consult the
+    # lease only for the verified namespace-unverifiable verdict below.
+    process = attempt_governed_process_quiescence(metadata)
     if process.state == "live" and process.identity is not None:
         return True, "process", process.identity
     if (
