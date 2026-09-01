@@ -199,10 +199,13 @@ def _record_nodes(record, route_id, jobs, node_evidence=None, now=None, degradat
 
 
 def _active_stage_label(active_nodes):
-    """Describe every active node in the sealed record order.
+    """Describe every current owner node in the sealed record order.
 
     Leaf projections may use their validated assigned contract, but an owner row
-    represents the whole active route level.  Keeping this derivation here makes
+    represents the whole current route level.  A depth-2 inline fallback has no
+    child process row, but its exact degradation record still names the node that
+    the owner is executing; callers therefore include both ``active`` and
+    ``degraded`` nodes.  Keeping this derivation here makes
     the owner projection independent of collector/job iteration order.
 
     Parallel legs (shared ``parallel_group``; legacy ``replica_group`` alias)
@@ -234,14 +237,15 @@ def _active_stage_label(active_nodes):
 
 
 def _owner_active_selection(active_nodes):
-    """Derive the owner's scalar (route_node, node_state) from sealed active nodes.
+    """Derive the owner's scalar (route_node, node_state) from sealed current nodes.
 
-    A single active node projects its own id/state.  Active legs that share one
+    A single current node projects its own id/state.  Current legs that share one
     ``parallel_group`` collapse into the same ``<group>(N-way)`` id used by
-    ``_active_stage_label``, with state ``active`` — the group is one selection,
-    not several.  No active node, or more than one independent active node/group,
-    cannot be named by a single node id, so this returns ``(None, "unknown")``
-    rather than picking one arbitrarily.
+    ``_active_stage_label``.  If any leg is an exact inline degradation, the
+    group is degraded rather than falsely reported as fully active.  With no
+    current node, or with more than one independent current node/group, a single
+    node id cannot be selected, so this returns ``(None, "unknown")`` rather than
+    picking one arbitrarily.
     """
     named = [node for node in active_nodes if node.id]
     if not named:
@@ -255,7 +259,9 @@ def _owner_active_selection(active_nodes):
         if len(named) == 1:
             return named[0].id, named[0].state
         return None, "unknown"
-    return ("%s(%d-way)" % (group, len(named)) if len(named) > 1 else named[0].id), "active"
+    states = {node.state for node in named}
+    group_state = "degraded" if "degraded" in states else "active"
+    return ("%s(%d-way)" % (group, len(named)) if len(named) > 1 else named[0].id), group_state
 
 
 def _load_evidence_records(node_evidence, route_records):
@@ -524,6 +530,14 @@ def _projection_from_record(entity, record, route_id, jobs, node_evidence=None, 
     active_nodes = tuple(node for node in projections if node.state == "active")
     owner_state = None
     if owner:
+        # Inline work has no registered child row.  The exact degradation
+        # tuple is nevertheless the current route frontier and must feed the
+        # owner's stage column; otherwise Fleet looks frozen until completion.
+        # Completion/failed evidence already wins in route._node_state(), so an
+        # old degradation cannot keep a terminal node current here.
+        active_nodes = tuple(
+            node for node in projections if node.state in {"active", "degraded"}
+        )
         label = _active_stage_label(active_nodes)
         route_node, owner_state = _owner_active_selection(active_nodes)
         selected = next((node for node in projections if node.id == route_node), None)

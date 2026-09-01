@@ -62,6 +62,56 @@ class DegradedStateTest(unittest.TestCase):
         self.assertEqual(public_node["degradation"]["fleet_visibility"], "none")
         self.assertNotIn("pid", public_node)
 
+    def test_exact_inline_degradation_is_the_owner_current_stage(self):
+        now = 10_000
+        route_id = "rt-owner-inline"
+        route_hash = "sha256:owner-inline"
+        record = {
+            "route_id": route_id,
+            "route_hash": route_hash,
+            "capability": "autopilot-code",
+            "nodes": [{"id": "execute"}],
+            "levels": [["execute"]],
+        }
+        degradation = {
+            "kind": "degradation",
+            "dispatch_depth": 2,
+            "route_id": route_id,
+            "route_node": "execute",
+            "route_hash": route_hash,
+            "fallback_hop": "inline",
+            "fleet_visibility": "none",
+            "registered_worker": 0,
+            "ts": now - 30,
+        }
+        owner = model.DispatchJob(
+            key="autopilot-code", slug="owner", depth=1,
+            worker_type="owner", attempt_id="att-owner", liveness="working",
+        )
+
+        current = projection._projection_from_record(
+            owner, record, route_id, [], now=now, owner=True,
+            degradations={route_id: [degradation]},
+        )
+
+        self.assertEqual(current.stage_label, "execute")
+        self.assertEqual(current.route_node, "execute")
+        self.assertEqual(current.node_state, "degraded")
+        self.assertEqual([(node.id, node.state) for node in current.active_nodes],
+                         [("execute", "degraded")])
+
+    def test_mixed_parallel_inline_frontier_keeps_degraded_owner_state(self):
+        nodes = (
+            model.ActiveNodeProjection(
+                id="review", state="active", parallel_group="review"),
+            model.ActiveNodeProjection(
+                id="review-alt", state="degraded", parallel_group="review"),
+        )
+
+        self.assertEqual(projection._active_stage_label(nodes), "review(2-way)")
+        self.assertEqual(projection._owner_active_selection(nodes),
+                         ("review(2-way)", "degraded"))
+
     def test_render_builds_route_views_from_attached_projection(self):
         route_id, job = self._incident()
         captured = {}
