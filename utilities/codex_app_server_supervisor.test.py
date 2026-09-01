@@ -358,6 +358,28 @@ class CodexAppServerSupervisorTest(unittest.TestCase):
         self.assertEqual(inspected.returncode, 0, inspected.stderr + inspected.stdout)
         self.assertIn("\tvalid\texact-turn-completed\tPASS\tnone\tnone", inspected.stdout)
 
+    def test_budget_warning_reaches_the_prompt_handed_to_owner(self):
+        self.jobs.write_text(owner_row(self.lease) + child_row(), encoding="utf-8")
+        result = subprocess.run(
+            self.command() + ["--continuation-warning-threshold", "999"],
+            input="initial assignment",
+            text=True,
+            capture_output=True,
+            env={**os.environ, "FAKE_TRACE": str(self.trace)},
+            timeout=10,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        turns = [
+            json.loads(line)
+            for line in self.trace.read_text(encoding="utf-8").splitlines()
+            if json.loads(line).get("event") == "turn-start"
+        ]
+        self.assertEqual(len(turns), 2, turns)
+        self.assertNotIn("[continuation-budget-warning]", turns[0]["prompt"])
+        self.assertEqual(
+            turns[1]["prompt"].count("[continuation-budget-warning]"), 1
+        )
+
     def test_no_child_finishes_in_one_turn(self):
         self.jobs.write_text(owner_row(self.lease), encoding="utf-8")
         result = self.run_supervisor(FAKE_NO_CHILD="1")

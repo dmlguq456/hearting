@@ -1147,6 +1147,7 @@ def main(argv: list[str] | None = None) -> int:
     # per owner lifetime (D47-4's "gross_remaining == reserved boundary" case).
     terminal_handoff_issued = [False]
     next_prompt = initial_prompt
+    pending_notice = ""
     continuations = 0
     resume = False
     turn_ordinal = 0
@@ -1215,7 +1216,8 @@ def main(argv: list[str] | None = None) -> int:
                 resumed_receipt = dict(active_outbox.receipt)
                 resumed_receipt["delivery_timing"] = delivery_timing
                 next_prompt = completion_prompt(
-                    resumed_receipt, active_outbox, jobs=args.jobs
+                    resumed_receipt, active_outbox, jobs=args.jobs,
+                    notice=pending_notice,
                 )
             if active_outbox is None:
                 write_supervisor_state(
@@ -1251,6 +1253,7 @@ def main(argv: list[str] | None = None) -> int:
                 resume=resume,
                 stream_session=stream_session,
             )
+            pending_notice = ""
             turn_completed_ns = time.monotonic_ns()
             emit(
                 {
@@ -1401,6 +1404,7 @@ def main(argv: list[str] | None = None) -> int:
                         continuations += 1
                         resume = True
                         continue
+                    pending_notice = notice
                     next_prompt = completion_prompt(
                         active_outbox.receipt or {}, active_outbox, jobs=args.jobs,
                         notice=notice,
@@ -1671,6 +1675,7 @@ def main(argv: list[str] | None = None) -> int:
                 )
                 delivered = set(prepared.delivered_attempt_ids)
                 active_outbox = prepared.outbox
+                pending_notice = notice
                 next_prompt = completion_prompt(
                     active_outbox.receipt or {}, active_outbox, jobs=args.jobs,
                     notice=notice,

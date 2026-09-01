@@ -1163,6 +1163,7 @@ def main(argv: list[str] | None = None) -> int:
         remediated: set[tuple[str, ...]] = set()
         launch_remediated: set[tuple[str, ...]] = set()
         next_prompt = prompt
+        pending_notice = ""
         continuations = 0
         last_delivery_identity: tuple[str, tuple[tuple[str, str], ...]] = ("", ())
         identical_redeliveries = 0
@@ -1179,7 +1180,8 @@ def main(argv: list[str] | None = None) -> int:
                 resumed_receipt = dict(active_outbox.receipt)
                 resumed_receipt["delivery_timing"] = delivery_timing
                 next_prompt = completion_prompt(
-                    resumed_receipt, active_outbox, jobs=args.jobs
+                    resumed_receipt, active_outbox, jobs=args.jobs,
+                    notice=pending_notice,
                 )
             if active_outbox is None:
                 write_supervisor_state(
@@ -1196,6 +1198,7 @@ def main(argv: list[str] | None = None) -> int:
             final_text, _final_item = run_turn(
                 server, thread_id=thread_id, prompt=next_prompt, args=args
             )
+            pending_notice = ""
             rows = current_children(Path(args.jobs), args.parent_attempt_id)
             current = {row.attempt_id: row for row in rows}
             completed_delivery = False
@@ -1299,6 +1302,7 @@ def main(argv: list[str] | None = None) -> int:
                         )
                         continuations += 1
                         continue
+                    pending_notice = notice
                     next_prompt = completion_prompt(
                         active_outbox.receipt or {}, active_outbox, jobs=args.jobs,
                         notice=notice,
@@ -1517,6 +1521,7 @@ def main(argv: list[str] | None = None) -> int:
                 )
                 delivered = set(prepared.delivered_attempt_ids)
                 active_outbox = prepared.outbox
+                pending_notice = notice
                 next_prompt = completion_prompt(
                     active_outbox.receipt or {}, active_outbox, jobs=args.jobs,
                     notice=notice,
