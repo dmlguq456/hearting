@@ -412,7 +412,7 @@ case "$cmd" in
   route)
     if [ "${2:-}" = "--capability" ]; then
       shift
-      exec python3 "$ROOT/utilities/capability-route.py" compile "$@"
+      AGENT_HOME="$AGENT_ROOT" exec python3 "$ROOT/utilities/capability-route.py" compile "$@"
     fi
     [ "$#" -ge 2 ] || { echo "codex preflight: route requires a capability name" >&2; exit 64; }
     name=$2

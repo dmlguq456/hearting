@@ -917,7 +917,7 @@ EOF
       prev=$a
     done
     set +e
-    python3 "$ROOT/utilities/capability-route.py" compile "$@"
+    AGENT_HOME="$AGENT_ROOT" python3 "$ROOT/utilities/capability-route.py" compile "$@"
     compile_rc=$?
     set -e
     bind_rc=0

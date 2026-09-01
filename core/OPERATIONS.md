@@ -94,6 +94,21 @@ managed-entry, and registered children. A running session never follows a
 later pointer change. Runtime-owned credentials, sessions, logs, caches,
 databases, and Codex `config.toml` remain outside this activation boundary.
 
+Route validation distinguishes immutable code identity from path-bound state
+identity. A resolved-path alias of one code root is always the same root. Two
+different physical roots may compare equal only at an explicitly code-root-only
+site and only when both are complete managed-release copies with regular-file
+release metadata, matching `RELEASE_VERSION`, the same version and archive
+SHA-256, and identical sealed release revision plus code-anchor digest. A
+missing or malformed marker, a changed anchor or release revision, or a
+different release fails closed. This exception never applies to cwd, artifact
+root, jobs registry, completion/log/heartbeat state, runtime home, or any other
+mutable or path-owned surface; the general agent-home/path equivalence helper
+remains resolved-path-only. Launch-tuple start validation keeps its exact
+sealed path and identity checks, and route close keeps its existing integrity
+and currentness policy. This compile-time exception changes neither lifecycle
+fence and cannot hide session-root drift.
+
 ### §5.10. Work Isolation and Parallel Dispatch
 
 Adapter and projection changes follow the same core-first order as other portable work: establish and read the governing `core/` contract before adapter edits. Read and write markers enforce that gate but do not replace review. A generated projection's determinism covers its file mode, not only its bytes: a generator that writes plugin JSON (`hooks.json`, `plugin.json`, marketplace manifests) fixes the mode to `0644` on every write regardless of process umask, and its `--check` counterpart fails a foreign mode as a stale projection alongside a content mismatch (S-5d, owner-supervisor-liveness — a reproducible regenerate cycle flips `hooks.json` away from `0644`; the first mutating syscall was not isolated, so the fix enforces the invariant rather than only diagnosing it).

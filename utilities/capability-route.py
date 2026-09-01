@@ -181,6 +181,104 @@ def _launch_content_digest(path):
         _LAUNCH_CONTENT_DIGEST_CACHE[key]="sha256:"+hashlib.sha256(canonical(rows)).hexdigest()
     return _LAUNCH_CONTENT_DIGEST_CACHE[key]
 
+def _contained_regular_release_file(root, relative):
+    """Return one release-owned regular file, rejecting every symlink component."""
+    candidate=root
+    for part in Path(relative).parts:
+        if part in ("", ".", ".."):
+            return None
+        candidate=candidate/part
+        try:
+            if candidate.is_symlink():
+                return None
+        except OSError:
+            return None
+    try:
+        resolved=candidate.resolve(strict=True)
+        resolved.relative_to(root)
+        if not candidate.is_file():
+            return None
+    except (OSError, RuntimeError, ValueError):
+        return None
+    return candidate
+
+def _verified_immutable_release_identity(path):
+    """Return the bounded identity of one complete managed-release code root.
+
+    A marker is necessary but never sufficient: the installed release version,
+    whole immutable release revision, and closed launch-anchor digest must all
+    agree.  `published_at` proves marker completeness but is intentionally not
+    a comparison axis; the revision digest still covers its exact bytes.
+    """
+    try:
+        root=Path(path).expanduser().resolve(strict=True)
+    except (OSError, RuntimeError):
+        return None
+    if not root.is_dir():
+        return None
+    marker_path=_contained_regular_release_file(root,".hearting-release.json")
+    version_path=_contained_regular_release_file(root,"RELEASE_VERSION")
+    if marker_path is None or version_path is None:
+        return None
+    try:
+        if marker_path.stat().st_size > 16_384 or version_path.stat().st_size > 128:
+            return None
+        marker=json.loads(marker_path.read_text(encoding="utf-8"))
+        release_version=version_path.read_text(encoding="utf-8").strip()
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return None
+    if not isinstance(marker,dict) or type(marker.get("schema")) is not int:
+        return None
+    version=marker.get("version")
+    archive_sha256=marker.get("archive_sha256")
+    published_at=marker.get("published_at")
+    if (
+        marker["schema"] != 1
+        or not isinstance(version,str)
+        or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}",version) is None
+        or release_version != version
+        or not isinstance(archive_sha256,str)
+        or re.fullmatch(r"[0-9a-f]{64}",archive_sha256) is None
+        or not isinstance(published_at,str)
+        or not published_at
+        or len(published_at) > 256
+    ):
+        return None
+    if any(_contained_regular_release_file(root,relative) is None
+           for relative in _LAUNCH_CODE_ANCHORS):
+        return None
+    try:
+        release_id=_launch_source_revision(root)
+        content_digest=_launch_content_digest(root)
+    except (OSError, RuntimeError):
+        return None
+    prefix=f"release:{version}:"
+    if (
+        not release_id.startswith(prefix)
+        or re.fullmatch(r"[0-9a-f]{12}",release_id[len(prefix):]) is None
+        or re.fullmatch(r"sha256:[0-9a-f]{64}",content_digest) is None
+    ):
+        return None
+    return {
+        "schema":marker["schema"],"version":version,
+        "archive_sha256":archive_sha256,"release_id":release_id,
+        "content_digest":content_digest,
+    }
+
+def immutable_code_root_equivalent(a,b):
+    """Compare route code roots without weakening general path equivalence.
+
+    Symlink aliases retain the existing resolved-path behavior.  Distinct
+    physical paths compare by content only when both are complete, verified
+    immutable managed-release copies.  Mutable/state callers must continue to
+    use `agent_home_equivalent()` directly.
+    """
+    if agent_home_equivalent(a,b):
+        return True
+    left=_verified_immutable_release_identity(a)
+    right=_verified_immutable_release_identity(b)
+    return left is not None and left == right
+
 def _launch_root_identity(kind, path, *, resolver_identity=None):
     """Return one memoized code-root identity or runtime-bound mutable path identity."""
     resolved=Path(path).expanduser().resolve(strict=False)
@@ -1385,7 +1483,7 @@ def _validation_basis():
         "unit_catalog_root": str(unit_catalog_root),
         "runtime_root": str(runtime_root),
         "runtime_root_validated": (runtime_root/"core"/"CORE.md").is_file(),
-        "runtime_root_match": agent_home_equivalent(registry_root, runtime_root),
+        "runtime_root_match": immutable_code_root_equivalent(registry_root, runtime_root),
     }
 
 def unit_catalog_digest(units_root=None):
@@ -3760,7 +3858,7 @@ def main():
             )
             raise ValueError("continuation-boundary-blocked")
         launch_tuple=route.get("launch_compatibility_tuple") or {}
-        if not agent_home_equivalent(
+        if not immutable_code_root_equivalent(
             (launch_tuple.get("registry_root") or {}).get("path",""),
             (launch_tuple.get("runtime_root") or {}).get("path",""),
         ):

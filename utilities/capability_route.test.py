@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-import contextlib, hashlib, importlib.util, io, json, os, re, shutil, sys, tempfile, unittest
+import contextlib, hashlib, importlib.util, io, json, os, re, shutil, subprocess, sys, tempfile, unittest
 from pathlib import Path
+from unittest import mock
 
 P=Path(__file__).with_name("capability-route.py")
 S=importlib.util.spec_from_file_location("route",P); R=importlib.util.module_from_spec(S); S.loader.exec_module(R)
@@ -2494,6 +2495,160 @@ class TestValidationBasis(unittest.TestCase):
   route=json.loads(json.dumps(route))
   route["route_hash"]=R.route_hash(route); route["route_id"]="rt-"+route["route_hash"].split(":",1)[1][:16]
   return route
+ def _release(self,root,version="v9.8.7",archive="a"*64,marker_updates=None):
+  root=Path(root); root.mkdir(parents=True,exist_ok=True)
+  for relative in R._LAUNCH_CODE_ANCHORS:
+   path=root/relative; path.parent.mkdir(parents=True,exist_ok=True)
+   path.write_text(relative+"\n",encoding="utf-8")
+  extra=root/"adapters"/"codex"/"bin"/"preflight.sh"
+  extra.parent.mkdir(parents=True,exist_ok=True)
+  extra.write_text("#!/bin/sh\nexit 0\n",encoding="utf-8")
+  (root/"RELEASE_VERSION").write_text(version+"\n",encoding="utf-8")
+  marker={
+   "schema":1,"version":version,"archive_sha256":archive,
+   "published_at":"2026-09-01T00:00:00+00:00",
+  }
+  if marker_updates: marker.update(marker_updates)
+  (root/".hearting-release.json").write_text(
+   json.dumps(marker,sort_keys=True,separators=(",",":"))+"\n",encoding="utf-8")
+  return root
+ def test_immutable_code_root_symlink_alias_passes(self):
+  with tempfile.TemporaryDirectory() as tmp:
+   release=self._release(Path(tmp)/"release")
+   alias=Path(tmp)/"alias"; alias.symlink_to(release,target_is_directory=True)
+   self.assertTrue(R.immutable_code_root_equivalent(release,alias))
+ def test_distinct_verified_immutable_release_copy_passes(self):
+  with tempfile.TemporaryDirectory() as tmp:
+   left=self._release(Path(tmp)/"bundle")
+   right=self._release(Path(tmp)/"managed-release")
+   self.assertNotEqual(left.resolve(),right.resolve())
+   self.assertTrue(R.immutable_code_root_equivalent(left,right))
+   with mock.patch.object(R.TOPO,"ROOT",left), \
+        mock.patch.object(R,"resolve_agent_home",return_value=right):
+    basis=R._validation_basis()
+   self.assertTrue(basis["runtime_root_validated"])
+   self.assertTrue(basis["runtime_root_match"])
+ def test_same_release_marker_with_modified_anchor_fails(self):
+  with tempfile.TemporaryDirectory() as tmp:
+   left=self._release(Path(tmp)/"left")
+   right=self._release(Path(tmp)/"right")
+   (right/"core"/"CORE.md").write_text("tampered\n",encoding="utf-8")
+   self.assertFalse(R.immutable_code_root_equivalent(left,right))
+ def test_different_release_or_non_anchor_content_fails(self):
+  with tempfile.TemporaryDirectory() as tmp:
+   left=self._release(Path(tmp)/"left")
+   other_release=self._release(Path(tmp)/"other-release",version="v9.8.8")
+   self.assertFalse(R.immutable_code_root_equivalent(left,other_release))
+   same_marker=self._release(Path(tmp)/"other-content")
+   (same_marker/"adapters"/"codex"/"bin"/"preflight.sh").write_text(
+    "#!/bin/sh\nexit 7\n",encoding="utf-8")
+   self.assertFalse(R.immutable_code_root_equivalent(left,same_marker))
+ def test_incomplete_or_symlinked_release_marker_fails(self):
+  with tempfile.TemporaryDirectory() as tmp:
+   left=self._release(Path(tmp)/"left")
+   incomplete=self._release(Path(tmp)/"incomplete",marker_updates={"archive_sha256":None})
+   self.assertFalse(R.immutable_code_root_equivalent(left,incomplete))
+   linked=self._release(Path(tmp)/"linked")
+   marker=linked/".hearting-release.json"
+   marker_bytes=marker.read_bytes(); marker.unlink()
+   external=Path(tmp)/"external-marker.json"; external.write_bytes(marker_bytes)
+   marker.symlink_to(external)
+   self.assertFalse(R.immutable_code_root_equivalent(left,linked))
+ def test_mutable_state_roots_remain_path_bound(self):
+  with tempfile.TemporaryDirectory() as tmp:
+   left=self._release(Path(tmp)/"release-a")
+   right=self._release(Path(tmp)/"release-b")
+   left_jobs=left/"state"/"jobs.log"; right_jobs=right/"state"/"jobs.log"
+   left_jobs.parent.mkdir(); right_jobs.parent.mkdir()
+   left_jobs.write_text("same\n",encoding="utf-8")
+   right_jobs.write_text("same\n",encoding="utf-8")
+   self.assertTrue(R.immutable_code_root_equivalent(left,right))
+   self.assertFalse(D.agent_home_equivalent(left,right))
+   self.assertFalse(D.agent_home_equivalent(left_jobs,right_jobs))
+ def test_launch_revalidation_keeps_identical_replica_paths_exact(self):
+  with tempfile.TemporaryDirectory() as tmp:
+   root=Path(tmp)
+   runtime_a=self._release(root/"runtime-a")
+   runtime_b=self._release(root/"runtime-b")
+   artifact_root=root/"artifacts"; cwd=root/"cwd"
+   artifact_root.mkdir(); cwd.mkdir()
+   jobs=root/"state"/"jobs.log"
+   env={"AGENT_DISPATCH_JOBS":str(jobs)}
+   with mock.patch.dict(os.environ,env,clear=False), \
+        mock.patch.object(R,"resolve_agent_home",return_value=runtime_a):
+    sealed={
+     "contract_version":R.LAUNCH_COMPATIBILITY_TUPLE_VERSION,
+     **R.launch_compatibility_tuple(artifact_root=artifact_root,cwd=cwd),
+    }
+   route={
+    "launch_compatibility_tuple":sealed,
+    "artifact_root":str(artifact_root),"cwd":str(cwd),
+   }
+   with mock.patch.dict(os.environ,env,clear=False), \
+        mock.patch.object(R,"resolve_agent_home",return_value=runtime_b):
+    compatible,mismatches=R.revalidate_launch_compatibility(route)
+   self.assertFalse(compatible)
+   self.assertIn("runtime_root",mismatches)
+   self.assertEqual(mismatches["runtime_root"]["fields"],["binding_digest","path"])
+ def test_runtime_preflights_pin_bundle_with_release_copy_present(self):
+  with tempfile.TemporaryDirectory() as tmp:
+   base=Path(tmp); home=base/"home"; codex_home=home/".codex"
+   bundle=codex_home/".harness"/"bundles"/"fixture"/"source"
+   ignored=shutil.ignore_patterns(
+    ".git",".agent_reports",".claude_reports","__pycache__","*.pyc")
+   shutil.copytree(R.ROOT,bundle,symlinks=True,ignore=ignored)
+   marker={
+    "schema":1,"version":"v9.8.7","archive_sha256":"b"*64,
+    "published_at":"2026-09-01T00:00:00+00:00",
+   }
+   marker_bytes=json.dumps(marker,sort_keys=True,separators=(",",":"))+"\n"
+   (bundle/"RELEASE_VERSION").write_text("v9.8.7\n",encoding="utf-8")
+   (bundle/".hearting-release.json").write_text(marker_bytes,encoding="utf-8")
+   release=base/"xdg"/"hearting"/"releases"/"v9.8.7"
+   shutil.copytree(bundle,release,symlinks=True)
+   codex_home.mkdir(parents=True,exist_ok=True)
+   (codex_home/"hearting").symlink_to(bundle,target_is_directory=True)
+   opencode_home=base/"config"/"opencode"
+   opencode_home.mkdir(parents=True)
+   (opencode_home/"hearting").symlink_to(bundle,target_is_directory=True)
+   current=base/"xdg"/"hearting"/"current"
+   current.symlink_to(release,target_is_directory=True)
+   workspace=base/"workspace"; workspace.mkdir()
+   env=os.environ.copy()
+   for key in (
+    "AGENT_HOME","CLAUDE_HOME","AGENT_DISPATCH_ATTEMPT_ID",
+    "AGENT_ROUTE_FILE","AGENT_ROUTE_ID","AGENT_ROUTE_NODE",
+    "OPENCODE_SESSION_ID",
+   ): env.pop(key,None)
+   env.update({
+    "HOME":str(home),"CODEX_HOME":str(codex_home),
+    "XDG_CONFIG_HOME":str(base/"config"),"XDG_DATA_HOME":str(base/"xdg"),
+    "AGENT_DISPATCH_JOBS":str(base/"state"/"jobs.log"),
+    "DISPATCH_DEFAULTS_CONFIG":str(bundle/"profiles"/"dispatch-defaults.yaml"),
+   })
+   common=["route",
+    "--capability","autopilot-code","--capability-mode","debug",
+    "--intensity","direct","--cwd",str(workspace),
+    "--tracking","tracked","--spec-read","true",
+    "--drift-verdict","within-spec","--workflow-mode","tracked",
+    "--artifact-guard","true","--inline-reason","atomic-direct",
+   ]
+   for predicate in ALL: common.extend(["--predicate",predicate])
+   for adapter in ("codex","opencode"):
+    preflight=bundle/"adapters"/adapter/"bin"/"preflight.sh"
+    for label,agent_home in (("default",None),("explicit",str(bundle))):
+     artifact_root=base/f"artifacts-{adapter}-{label}"
+     run_env=env.copy()
+     if agent_home is not None: run_env["AGENT_HOME"]=agent_home
+     result=subprocess.run(
+      [str(preflight),*common,"--artifact-root",str(artifact_root)],
+      capture_output=True,text=True,cwd=str(workspace),env=run_env,
+     )
+     self.assertEqual(result.returncode,0,result.stderr)
+     route=json.loads(result.stdout)
+     self.assertTrue((R.canonical_routes_dir(artifact_root)/f"{route['route_id']}.json").is_file())
+     self.assertEqual(route["validation_basis"]["runtime_root"],str(bundle.resolve()))
+     self.assertTrue(route["validation_basis"]["runtime_root_match"])
  def test_fresh_compile_seals_validation_basis(self):
   route=R.compile_route(**self.args())
   vb=route["validation_basis"]
@@ -2660,6 +2815,26 @@ class TestValidationBasis(unittest.TestCase):
   skewed=self._reseal(skewed)
   with self.assertRaisesRegex(ValueError,r"^unit-catalog-digest-skew\(compiled="):
    R.verify_route(skewed,R.ROOT)
+ def test_validation_classifier_does_not_read_immutable_release_content(self):
+  route={
+   "registry_digest":"sha256:"+"1"*64,
+   "unit_catalog_digest":"sha256:"+"2"*64,
+   "validation_basis":{
+    "registry_root":"/tmp/compiled-registry",
+    "unit_catalog_root":"/tmp/current-units",
+   },
+  }
+  with mock.patch.object(
+   R,"immutable_code_root_equivalent",
+   side_effect=AssertionError("pure classifier touched release content"),
+  ):
+   result=R.classify_validation_basis(
+    route,registry_digest_now="sha256:"+"3"*64,
+    units_digest_now=route["unit_catalog_digest"],
+    registry_root_now="/tmp/current-registry",
+    unit_catalog_root_now="/tmp/current-units",
+   )
+  self.assertEqual(result["verdict"],"skew")
  def test_cross_root_equal_digest_passes(self):
   route=R.compile_route(**self.args())
   moved=json.loads(json.dumps(route))
