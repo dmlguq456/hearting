@@ -56,6 +56,9 @@ _TURN_CONTEXT_CACHE_MAX = 512
 _TURN_CONTEXT_CACHE = OrderedDict()
 _TURN_CONTEXT_CACHE_EVICTIONS = 0
 _SUMMARY_BOUNDARY_SCAN = 1 << 20
+_SYNTHETIC_NATIVE_TITLE_RE = re.compile(
+    r"^(?:agents\.md\s*[-—:]\s*)?codex adapter bootstrap$", re.IGNORECASE
+)
 
 
 @dataclass
@@ -140,6 +143,14 @@ def _thread_titles(home):
                 connection.close()
     _TITLE_INDEX.update(stamp=stamp, map=mapped)
     return mapped
+
+
+def _displayable_title(value):
+    """Drop the known title Codex derives from the synthetic AGENTS envelope."""
+    if not isinstance(value, str):
+        return None
+    title = " ".join(value.split())
+    return None if _SYNTHETIC_NATIVE_TITLE_RE.fullmatch(title) else title or None
 
 
 def _agent_type(agent_role, agent_path=None):
@@ -1300,8 +1311,10 @@ def enrich(sess, tick=None):
                             "cursor_kind": "byte-offset-v1"}
     if sess.session_id:
         from fleet import titles
-        native_title = _thread_titles(home).get(sess.session_id)
-        sidecar_title = titles.fresh_title(sess.session_id, harness="codex")
+        native_title = _displayable_title(_thread_titles(home).get(sess.session_id))
+        sidecar_title = _displayable_title(
+            titles.fresh_title(sess.session_id, harness="codex")
+        )
         sess.title = sidecar_title or native_title or sess.title
         sess.summary, sess.summary_ts = titles.fresh_summary_with_ts(
             sess.session_id, harness="codex",

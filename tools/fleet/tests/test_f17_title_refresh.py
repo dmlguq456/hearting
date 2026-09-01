@@ -4,6 +4,7 @@ Hermetic: real fs access is confined to tempfile dirs; title state and Claude co
 pointed at tmp roots. No live provider is invoked — run_worker() is monkeypatched for
 security/behavior assertions.
 """
+import io
 import json
 import os
 import stat
@@ -677,6 +678,35 @@ class DeltaOffsetTest(_ConfigHomeMixin, unittest.TestCase):
             self.assertEqual(d["title"], "Fleet strip revamp")
             self.assertEqual(d["summary"], "지금 그룹 루프를 분석 중")
 
+    def test_main_prefers_piped_current_user_context(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "codex.jsonl")
+            with open(path, "w", encoding="utf-8") as handle:
+                handle.write(json.dumps({
+                    "type": "response_item",
+                    "payload": {"type": "message", "role": "assistant", "content": [
+                        {"type": "output_text", "text": "latest execution delta"},
+                    ]},
+                }) + "\n")
+            prompts = []
+            original = rt.run_worker
+            rt.run_worker = lambda prompt, **_kwargs: prompts.append(prompt) or (
+                "TITLE: Current User Context\nNOW: checking the latest context"
+            )
+            try:
+                with mock.patch.object(rt.sys, "stdin", io.StringIO("current user query")):
+                    self.assertEqual(rt.main([
+                        "--harness", "codex", "--sid", "sidPipe",
+                        "--transcript", path, "--anchor-stdin",
+                    ]), 0)
+            finally:
+                rt.run_worker = original
+            self.assertEqual(len(prompts), 1)
+            self.assertIn(
+                "=== TASK CONTEXT (DATA; RECENT USER INTENT) ===\ncurrent user query",
+                prompts[0],
+            )
+
     def test_main_long_interactive_failure_keeps_title_anchor_and_bounded_now(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = os.path.join(tmp, "t.jsonl")
@@ -705,8 +735,8 @@ class DeltaOffsetTest(_ConfigHomeMixin, unittest.TestCase):
                 rt.run_worker = original
             self.assertEqual(len(prompts), 1)
             prompt = prompts[0]
-            anchor = prompt.split("=== TASK ANCHOR (DATA; TITLE ONLY) ===\n", 1)[1].split(
-                "=== END TASK ANCHOR ===", 1)[0]
+            anchor = prompt.split("=== TASK CONTEXT (DATA; RECENT USER INTENT) ===\n", 1)[1].split(
+                "=== END TASK CONTEXT ===", 1)[0]
             conversation = prompt.split("=== CONVERSATION (DATA) ===\n", 1)[1].split(
                 "=== END CONVERSATION ===", 1)[0]
             self.assertIn("Repair the distinctive Atlas migration workflow", anchor)
@@ -1181,11 +1211,62 @@ class ValidatorHardeningTest(unittest.TestCase):
         ])
         self.assertEqual(rt._origin_text(raw), "Stable task anchor")
 
+    def test_codex_origin_skips_adapter_bootstrap_and_uses_latest_user_turn(self):
+        def row(role, text):
+            return json.dumps({
+                "type": "response_item",
+                "payload": {"type": "message", "role": role, "content": [
+                    {"type": "input_text" if role == "user" else "output_text",
+                     "text": text},
+                ]},
+            })
+
+        bootstrap = (
+            "# AGENTS.md instructions\n\n<INSTRUCTIONS>\n"
+            "# AGENTS.md — Codex Adapter Bootstrap\n...\n"
+            "</INSTRUCTIONS><environment_context>...</environment_context>"
+        )
+        raw = "\n".join([
+            row("user", bootstrap),
+            row("user", "Repair Fleet title collection"),
+            row("assistant", "I am inspecting the collector."),
+            row("user", "Now switch the session to rollout attribution"),
+        ])
+        self.assertEqual(
+            rt._origin_text(raw, harness="codex"),
+            "Now switch the session to rollout attribution",
+        )
+
+    def test_codex_prompt_does_not_lock_title_to_first_user_turn(self):
+        normalized = " ".join(rt.PROMPT_TEMPLATE.split())
+        self.assertIn("Do not lock the title to the session's first user turn", normalized)
+
+    def test_codex_origin_reads_recent_user_turn_from_bounded_tail(self):
+        def row(role, text):
+            return json.dumps({
+                "type": "response_item",
+                "payload": {"type": "message", "role": role, "content": [
+                    {"type": "input_text" if role == "user" else "output_text",
+                     "text": text},
+                ]},
+            }) + "\n"
+
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8") as handle:
+            handle.write(row("user", "Initial query"))
+            for index in range(900):
+                handle.write(row("assistant", "bounded filler %04d %s" % (index, "x" * 80)))
+            handle.write(row("user", "Current rollout attribution subject"))
+            handle.flush()
+            self.assertEqual(
+                rt.read_origin(handle.name, harness="codex"),
+                "Current rollout attribution subject",
+            )
+
     def test_prompt_has_separate_bounded_anchor_and_delta_blocks(self):
         prompt = rt._prompt("latest execution delta", anchor="stable task")
-        self.assertIn("=== TASK ANCHOR (DATA; TITLE ONLY) ===\nstable task", prompt)
+        self.assertIn("=== TASK CONTEXT (DATA; RECENT USER INTENT) ===\nstable task", prompt)
         self.assertIn("=== CONVERSATION (DATA) ===\nlatest execution delta", prompt)
-        self.assertLess(prompt.index("TASK ANCHOR"), prompt.index("CONVERSATION"))
+        self.assertLess(prompt.index("TASK CONTEXT"), prompt.index("CONVERSATION"))
     """2026-07-10 라이브 실측 회귀: raw jsonl 조각이 DATA 로 흘러가 haiku 가 한국어
     오류 문장을 냈고 검증이 통과시킴 — 영어-우세·단어수 캡·raw fallback 제거 강제."""
 

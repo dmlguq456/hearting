@@ -353,8 +353,11 @@ def main() -> int:
         except Exception:
             pass
     sid = session_id(payload)
+    current_prompt = nested_string(payload, "prompt")
     if interaction_sid:
-        launch_trigger("codex", interaction_sid, "initial")
+        launch_trigger(
+            "codex", interaction_sid, "initial", anchor_text=current_prompt
+        )
     sd111_first_prompt_sweep(sid)
 
     parts = []

@@ -18,6 +18,11 @@ if str(TOOLS) not in sys.path:
 
 HARNESSES = {"claude", "codex", "opencode"}
 PHASES = {"initial", "periodic", "final"}
+ANCHOR_TEXT_CAP = 2000
+
+
+def _bounded_anchor(value: str | None) -> str:
+    return value[:ANCHOR_TEXT_CAP] if isinstance(value, str) else ""
 
 
 def _codex_transcript(sid: str) -> Path | None:
@@ -43,7 +48,8 @@ def _opencode_db() -> Path:
 
 
 def trigger(harness: str, sid: str, phase: str, transcript: str | None = None,
-            wait_seconds: float = 0.0, after_mtime_ns: int | None = None) -> bool:
+            wait_seconds: float = 0.0, after_mtime_ns: int | None = None,
+            anchor_text: str | None = None) -> bool:
     if harness not in HARNESSES or phase not in PHASES or not sid:
         return False
     deadline = time.monotonic() + max(0.0, wait_seconds)
@@ -63,6 +69,7 @@ def trigger(harness: str, sid: str, phase: str, transcript: str | None = None,
                     priority=phase in {"initial", "final"},
                     quota_class=phase if phase in {"initial", "final"} else None,
                     refresh_source={"kind": "opencode-db", "db_path": str(database)},
+                    anchor_text=_bounded_anchor(anchor_text),
                 ))
         elif source is not None and source.is_file():
             if after_mtime_ns is not None:
@@ -84,13 +91,15 @@ def trigger(harness: str, sid: str, phase: str, transcript: str | None = None,
                 debounce=0 if phase in {"initial", "final"} else 90,
                 priority=phase in {"initial", "final"},
                 quota_class=phase if phase in {"initial", "final"} else None,
+                anchor_text=_bounded_anchor(anchor_text),
             ))
         if time.monotonic() >= deadline:
             return False
         time.sleep(0.1)
 
 
-def launch_trigger(harness: str, sid: str, phase: str, transcript: str | None = None) -> bool:
+def launch_trigger(harness: str, sid: str, phase: str, transcript: str | None = None,
+                   anchor_text: str | None = None) -> bool:
     """Launch the bounded trigger without adding latency to a runtime hook."""
     if harness not in HARNESSES or phase not in PHASES or not sid:
         return False
@@ -107,16 +116,28 @@ def launch_trigger(harness: str, sid: str, phase: str, transcript: str | None = 
         argv.extend(["--after-mtime-ns", str(after_mtime_ns)])
     if transcript:
         argv.extend(["--transcript", transcript])
+    bounded_anchor = _bounded_anchor(anchor_text)
+    if bounded_anchor:
+        argv.append("--anchor-stdin")
     env = dict(os.environ)
     env["AGENT_SESSION_ROLE"] = "worker"
     try:
-        subprocess.Popen(
-            argv, cwd=str(ROOT), env=env, stdin=subprocess.DEVNULL,
+        process = subprocess.Popen(
+            argv, cwd=str(ROOT), env=env,
+            stdin=subprocess.PIPE if bounded_anchor else subprocess.DEVNULL,
+            text=bool(bounded_anchor),
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             start_new_session=True,
         )
     except OSError:
         return False
+    if bounded_anchor:
+        try:
+            process.stdin.write(bounded_anchor)
+            process.stdin.close()
+        except (AttributeError, BrokenPipeError, OSError):
+            # The detached trigger still has the transcript fallback.
+            pass
     return True
 
 
@@ -128,10 +149,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--transcript")
     parser.add_argument("--wait", type=float, default=0.0)
     parser.add_argument("--after-mtime-ns", type=int)
+    parser.add_argument("--anchor-stdin", action="store_true")
     args = parser.parse_args(argv)
+    anchor_text = sys.stdin.read(ANCHOR_TEXT_CAP) if args.anchor_stdin else None
     trigger(
-        args.harness, args.sid, args.phase, args.transcript, args.wait,
-        args.after_mtime_ns,
+        args.harness, args.sid, args.phase, args.transcript,
+        wait_seconds=args.wait, after_mtime_ns=args.after_mtime_ns,
+        anchor_text=anchor_text,
     )
     return 0
 

@@ -132,6 +132,17 @@ class CodexCollectorTitleTest(_EnvMixin, unittest.TestCase):
         titles.write(self.SID, "Stale", harness="codex", now=time.time() - 25 * 3600)
         self.assertEqual(self._enrich(rollout).title, "Native Codex Title")
 
+    def test_synthetic_adapter_bootstrap_native_title_is_hidden(self):
+        rollout = self._fixture(native_title="Codex Adapter Bootstrap")
+        self.assertIsNone(self._enrich(rollout).title)
+
+    def test_synthetic_adapter_bootstrap_sidecar_is_hidden(self):
+        rollout = self._fixture(native_title="Codex Adapter Bootstrap")
+        titles.write(
+            self.SID, "Codex Adapter Bootstrap", harness="codex", now=time.time()
+        )
+        self.assertIsNone(self._enrich(rollout).title)
+
 
 class CrossHarnessWorkerTest(_EnvMixin, unittest.TestCase):
 
@@ -241,6 +252,45 @@ class CrossHarnessWorkerTest(_EnvMixin, unittest.TestCase):
         self.assertIn(prompt_path, captured["argv"])
         self.assertNotIn("DISTINCT ASSIGNMENT ANCHOR", captured["argv"])
         self.assertNotIn("DISTINCT ASSIGNMENT ANCHOR", " ".join(captured["kwargs"]["env"].values()))
+
+    def test_current_user_context_is_piped_without_process_metadata(self):
+        transcript = os.path.join(self.tmp.name, "context-pipe.jsonl")
+        with open(transcript, "w", encoding="utf-8") as handle:
+            handle.write(json.dumps({"type": "session_meta"}) + "\n")
+
+        class Sink:
+            def __init__(self):
+                self.value = ""
+
+            def write(self, value):
+                self.value += value
+
+            def close(self):
+                pass
+
+        process = type("Process", (), {"stdin": Sink()})()
+        captured = {}
+        original = rt.subprocess.Popen
+        original_available = rt._executable_available
+        rt._executable_available = lambda _argv: True
+        rt.subprocess.Popen = lambda argv, **kwargs: (
+            captured.update(argv=list(argv), kwargs=kwargs) or process
+        )
+        try:
+            self.assertTrue(rt.maybe_spawn(
+                "codex", "context-pipe-sid", transcript,
+                anchor_text="private current query",
+            ))
+        finally:
+            rt.subprocess.Popen = original
+            rt._executable_available = original_available
+        self.assertIn("--anchor-stdin", captured["argv"])
+        self.assertNotIn("private current query", " ".join(captured["argv"]))
+        self.assertNotIn(
+            "private current query", " ".join(captured["kwargs"]["env"].values())
+        )
+        self.assertEqual(process.stdin.value, "private current query")
+
     def test_codex_delta_extracts_only_user_and_assistant_messages(self):
         rows = [
             {"type": "response_item", "payload": {"type": "message", "role": "user",
