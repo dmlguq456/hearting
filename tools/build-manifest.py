@@ -37,6 +37,7 @@ import json
 import glob
 import shlex
 import hashlib
+import argparse
 
 try:
     import yaml
@@ -635,20 +636,23 @@ def render(manifest):
 
 
 def main(argv):
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--check", action="store_true", help="verify without writing")
+    parser.add_argument("--sync-baselines", action="store_true")
+    parser.add_argument("--adaptation-surface")
+    args = parser.parse_args(argv)
     # HLS-7: filesystem-derived surface sets consumed by check-adaptation-boundary.sh.
-    if "--adaptation-surface" in argv:
-        i = argv.index("--adaptation-surface")
-        kind = argv[i + 1] if i + 1 < len(argv) else ""
-        for line in adaptation_surface(kind):
+    if args.adaptation_surface is not None:
+        for line in adaptation_surface(args.adaptation_surface):
             print(line)
         return 0
     # HLS-3: regenerate delta baselines (canonical raw-byte sha256) into the exemption ledger.
-    if "--sync-baselines" in argv:
+    if args.sync_baselines:
         n = sync_baselines()
         print("synced %d delta baseline(s) in %s" % (n, os.path.relpath(EXEMPTIONS_PATH, REPO_ROOT)))
         return 0
 
-    check = "--check" in argv
+    check = args.check
     canonical = harness_manifest.load()
     text = render(build_manifest(canonical))
     document_outputs = generated_document_outputs(canonical)

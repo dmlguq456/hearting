@@ -224,7 +224,9 @@ def check_file(path: Path, expected: str, stale: list[str]) -> None:
     if not path.exists() or path.read_text(encoding="utf-8") != expected:
         stale.append(str(path.relative_to(ROOT)))
         return
-    if stat.S_IMODE(path.stat().st_mode) != JSON_MODE:
+    # Git tracks only executable bits for regular files; group-write is a
+    # checkout umask/mount detail that a commit cannot normalize.
+    if stat.S_IMODE(path.stat().st_mode) & 0o111:
         stale.append(str(path.relative_to(ROOT)) + " (mode)")
 
 

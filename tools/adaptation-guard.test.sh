@@ -20,6 +20,14 @@ fails=0
 ok()  { printf 'ok   - %s\n' "$1"; }
 bad() { printf 'FAIL - %s\n' "$1"; fails=$((fails + 1)); }
 
+before_manifest=$(sha256sum manifest.json | awk '{print $1}')
+if python3 "$BM" --help >/dev/null \
+  && [ "$before_manifest" = "$(sha256sum manifest.json | awk '{print $1}')" ]; then
+  ok "build-manifest --help is read-only"
+else
+  bad "build-manifest --help must not write manifest.json"
+fi
+
 TMP=$(mktemp -d)
 CREATED=""      # 정리할 임시 생성 파일들
 # 변형 전 baseline: 미커밋 Phase 2 편집·untracked 파일은 정상이므로 기준선에 포함해 비교한다.
