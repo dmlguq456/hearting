@@ -675,6 +675,8 @@ class RegistryConfirmArmTest(unittest.TestCase):
         status: str = "open",
         parent_sid: str = "session-1",
         age_seconds: float = 0.0,
+        slug: str = "slug",
+        worktree: str = "/repo",
         **overrides: str,
     ) -> str:
         metadata = {
@@ -689,7 +691,7 @@ class RegistryConfirmArmTest(unittest.TestCase):
         }
         metadata.update(overrides)
         pipe = ",".join(f"{key}={value}" for key, value in metadata.items())
-        columns = [self.stamp(age_seconds), status, "/repo", "/repo", "slug", pipe]
+        columns = [self.stamp(age_seconds), status, "/repo", worktree, slug, pipe]
         return "\t".join(columns) + "\n"
 
     def payload(self, *, stdout: str = "check=ok", **replacements):
@@ -713,6 +715,89 @@ class RegistryConfirmArmTest(unittest.TestCase):
         self.assertEqual(launch.jobs, self.jobs)
         self.assertEqual(launch.session_id, "session-1")
         self.assertEqual(launch.armed, "registry")
+
+    def test_wave_of_starts_narrows_by_the_exact_command_slug(self) -> None:
+        # Five concurrent fleet owners (2026-09-01) made every same-session
+        # candidate window ambiguous; the observed command's own literal
+        # `--slug` names which row this exact start created.
+        self.jobs.write_text(
+            self.row(attempt_id="att-owner-a", slug="cleanup-a")
+            + self.row(attempt_id="att-owner-b", slug="cleanup-b"),
+            encoding="utf-8",
+        )
+        payload = self.payload()
+        payload["tool_input"] = {
+            "command": (
+                "python3 utilities/dispatch-owner.py --start --slug cleanup-b | grep -E 'x'"
+            )
+        }
+        launch = rewake.registry_launch(payload)
+        self.assertIsNotNone(launch)
+        assert launch is not None
+        self.assertEqual(launch.attempt_id, "att-owner-b")
+        self.assertEqual(launch.armed, "registry")
+
+    def test_wave_narrowing_never_matches_an_unexpanded_variable_or_same_slug(self) -> None:
+        rows = self.row(attempt_id="att-owner-a", slug="cleanup-a") + self.row(
+            attempt_id="att-owner-b", slug="cleanup-a"
+        )
+        self.jobs.write_text(rows, encoding="utf-8")
+        # Same slug on both rows: still ambiguous after narrowing.
+        payload = self.payload()
+        payload["tool_input"] = {
+            "command": "python3 utilities/dispatch-owner.py --start --slug cleanup-a"
+        }
+        self.assertIsNone(rewake.registry_launch(payload))
+        # An unexpanded shell variable is not a literal and narrows nothing.
+        payload["tool_input"] = {
+            "command": 'python3 utilities/dispatch-owner.py --start --slug "$SLUG"'
+        }
+        self.assertIsNone(rewake.registry_launch(payload))
+
+    def test_a_lone_candidate_still_arms_regardless_of_the_command_slug(self) -> None:
+        # Narrowing is an ambiguity tie-break only: a single exact candidate
+        # keeps arming even when the recorded command's slug spells the
+        # display slug differently (the pre-2026-09-01 contract, unchanged).
+        launch = rewake.registry_launch(self.payload())
+        self.assertIsNotNone(launch)
+        assert launch is not None
+        self.assertEqual(launch.attempt_id, "att-owner-1")
+
+    def test_started_receipt_that_arms_nothing_emits_one_typed_notice(self) -> None:
+        # Partial grep-filtered stdout: started=1 survives the filter but the
+        # dispatch_depth/worker_type fields the stdout fast path needs do
+        # not, and two same-session rows keep the registry fallback
+        # ambiguous.  Silence here lost four fleet wakes on 2026-09-01.
+        self.jobs.write_text(
+            self.row(attempt_id="att-owner-a", slug="cleanup-a")
+            + self.row(attempt_id="att-owner-b", slug="cleanup-b"),
+            encoding="utf-8",
+        )
+        stdout = "check=ok\nstatus=start\nregistered=1\nstarted=1\nattempt_id=att-owner-b"
+        payload = self.payload(stdout=stdout)
+        payload["tool_input"] = {
+            "command": "python3 utilities/dispatch-owner.py --start | grep -E 'status='"
+        }
+        with mock.patch.object(rewake.sys, "stdin", io.StringIO(json.dumps(payload))), \
+             mock.patch.object(rewake.sys, "stdout", io.StringIO()) as out, \
+             mock.patch.object(rewake.sys, "stderr", io.StringIO()) as err:
+            self.assertEqual(rewake.main(), 2)
+        self.assertIn("state=not-armed", err.getvalue())
+        self.assertIn("attempt_id=att-owner-b", err.getvalue())
+        self.assertIn("state=not-armed", json.loads(out.getvalue())["systemMessage"])
+
+    def test_a_failed_start_stays_silent_without_a_notice(self) -> None:
+        # No registered row exists (the start failed before registration) and
+        # stdout says so itself -- the notice must not shout over it.
+        self.jobs.write_text("", encoding="utf-8")
+        stdout = "check=failed\nreason=invalid-dispatch-capability-mode"
+        payload = self.payload(stdout=stdout)
+        with mock.patch.object(rewake.sys, "stdin", io.StringIO(json.dumps(payload))), \
+             mock.patch.object(rewake.sys, "stdout", io.StringIO()) as out, \
+             mock.patch.object(rewake.sys, "stderr", io.StringIO()) as err:
+            self.assertEqual(rewake.main(), 0)
+        self.assertEqual(out.getvalue(), "")
+        self.assertEqual(err.getvalue(), "")
 
     def test_registry_armed_run_reaches_the_unchanged_wait_path(self) -> None:
         with mock.patch.object(rewake.sys, "stdin", io.StringIO(json.dumps(self.payload()))), (
@@ -1092,10 +1177,15 @@ class A12ArmingFailureFixture(unittest.TestCase):
         self.assertEqual(stderr, "")
         self._terminal_edge_and_recover()
 
-    def test_condition_2_no_jobs_source_zero_carrier_one_terminal_edge_one_record(self):
+    def test_condition_2_no_jobs_source_one_typed_notice_one_terminal_edge_one_record(self):
         # stdout is present but the one field registry_launch would need
         # (job_registry) is missing -- and no other jobs source (env,
-        # --jobs, canonical) resolves either.
+        # --jobs, canonical) resolves either.  A-12's sealed outcome (writer
+        # invocation 1, pending record 1, loss 0) is unchanged; since
+        # 2026-09-01 the *arming* loss itself is additionally loud: a start
+        # that reported started=1 but armed neither path emits one typed
+        # not-armed notice instead of silence (five fleet owners launched
+        # with grep-filtered stdout lost their wakes silently).
         output = "\n".join((
             "check=ok", "status=start", "dispatch_depth=1", "worker_type=owner",
             "parent_completion_delivery=claude-parent-runtime",
@@ -1112,9 +1202,10 @@ class A12ArmingFailureFixture(unittest.TestCase):
             "tool_response": {"stdout": output, "stderr": ""},
         }
         code, stdout, stderr = self._run_main_with(payload)
-        self.assertEqual(code, 0)
-        self.assertEqual(stdout, "")
-        self.assertEqual(stderr, "")
+        self.assertEqual(code, 2)
+        self.assertIn("state=not-armed", stderr)
+        self.assertIn(f"attempt_id={self.ATTEMPT}", stderr)
+        self.assertIn("state=not-armed", json.loads(stdout)["systemMessage"])
         self._terminal_edge_and_recover()
 
     def test_condition_3_unrecognized_launcher_zero_carrier_one_terminal_edge_one_record(self):

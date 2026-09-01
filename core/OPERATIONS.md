@@ -433,8 +433,18 @@ decision, never two independently toggled ones.
   `dispatch-node --action start` surface. Neither command is wake authority by
   itself: arming still requires exactly one recent, same-session,
   claimed-and-started depth-1 `worker_type=owner` row stamped
-  `parent_completion_delivery=claude-parent-runtime`; zero, multiple, stale,
-  foreign, or non-owner candidates arm nothing.
+  `parent_completion_delivery=claude-parent-runtime`. When several such rows
+  share the window — a same-session wave of owner starts — the registry
+  fallback first narrows them by the exact `--slug`/`--worktree` literals of
+  the observed start command (unexpanded shell variables never match), and
+  only an exact single survivor arms; zero, still-ambiguous, stale, foreign,
+  or non-owner candidates arm nothing. A start whose receipt proves
+  `started=1` (or whose fully-hidden stdout leaves at least one same-session
+  registry candidate) but that armed neither path emits one typed
+  `not-armed` notice naming the explicit poll-fallback instead of staying
+  silent — grep-filtered start stdout is the recurring cause (2026-09-01,
+  five fleet owners; the notice never overrides fail-closed arming, it only
+  makes the loss loud).
 - Managed receipt schema v2 binds the one canonical absolute `job_registry`
   supplied by its completion sidecar. The gateway includes it in the delivery
   digest and names it with `--jobs` in every actionable harvest command, so

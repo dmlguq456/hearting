@@ -189,6 +189,32 @@ def parse_launch(payload: object) -> Launch | None:
     return Launch(attempt_id=attempt_id, jobs=jobs, session_id=payload_session, armed="stdout")
 
 
+def _command_literal_option(command: str, name: str) -> str | None:
+    """Read one `--name value` / `--name=value` literal from the launch command.
+
+    Only a plain literal counts: a value carrying `$` is an unexpanded shell
+    variable in the recorded command text and must not be matched against
+    registry rows (the same trap that leaves `--jobs "$J"` unusable)."""
+
+    try:
+        parts = shlex.split(command)
+    except ValueError:
+        return None
+    flag = f"--{name}"
+    for index, part in enumerate(parts):
+        value: str | None = None
+        if part == flag and index + 1 < len(parts):
+            value = parts[index + 1]
+        elif part.startswith(flag + "="):
+            value = part[len(flag) + 1 :]
+        if value is None:
+            continue
+        if "$" in value or not value:
+            return None
+        return value
+    return None
+
+
 def _command_jobs(command: str) -> str | None:
     """Read the inherited registry path the launch command itself declared."""
 
@@ -252,9 +278,49 @@ def registry_launch(payload: object) -> Launch | None:
     so the receipt fast path silently fails to arm.  The lock-written registry
     row carries the same exactness — one open depth-1 owner attempt bound to
     this Claude session, started inside the immediately preceding tool window —
-    and is harder to forge than tool output.  Zero or several candidates stay a
-    silent no-op: absence beats misattribution.
+    and is harder to forge than tool output.  When several same-session rows
+    share the window (a wave of owner starts, 2026-09-01: five fleet cleanup
+    owners), the observed launch command's own `--slug`/`--worktree` literals
+    narrow them before the exactly-one gate; only an exact single survivor
+    arms.  Zero or still-ambiguous candidates stay an unarmed result: absence
+    beats misattribution.  (The caller turns that unarmed result into one typed
+    `not-armed` notice — see `no_arm_notice` — instead of a silent loss.)
     """
+
+    resolved = _registry_start_candidates(payload)
+    if resolved is None:
+        return None
+    command, session, jobs, candidates = resolved
+    if len(candidates) > 1:
+        # A wave of same-session owner starts is legitimate; the command this
+        # exact hook invocation observed names which one it launched.  Narrow
+        # by its literal `--slug`, then `--worktree`.  A literal that matches
+        # nothing narrows nothing (it may name a not-yet-visible row), and a
+        # set still ambiguous after narrowing arms nothing, exactly as before.
+        for option, position in (("slug", 2), ("worktree", 1)):
+            literal = _command_literal_option(command, option)
+            if literal is None:
+                continue
+            narrowed = [row for row in candidates if row[position] == literal]
+            if narrowed:
+                candidates = narrowed
+            if len(candidates) == 1:
+                break
+    if len(candidates) != 1:
+        return None
+    return Launch(
+        attempt_id=candidates[0][0], jobs=jobs, session_id=session, armed="registry"
+    )
+
+
+def _registry_start_candidates(
+    payload: object,
+) -> tuple[str, str, Path, list[tuple[str, str, str]]] | None:
+    """Same-session, recent, claimed-and-started owner rows for one observed
+    start command: ``(command, session, jobs, [(attempt_id, worktree, slug)])``.
+
+    ``None`` means the payload is not an owner-start Bash call or no registry
+    resolves; candidate absence is an empty list, never ``None``."""
 
     gate = _owner_start_command(payload)
     if gate is None:
@@ -276,7 +342,7 @@ def registry_launch(payload: object) -> Launch | None:
         lines = jobs.read_text(encoding="utf-8", errors="replace").splitlines()
     except OSError:
         return None
-    latest: dict[str, tuple[str, str, dict[str, str]]] = {}
+    latest: dict[str, tuple[str, str, str, str, dict[str, str]]] = {}
     for line in lines:
         columns = line.split("\t")
         if len(columns) != 6:
@@ -285,13 +351,13 @@ def registry_launch(payload: object) -> Launch | None:
         attempt_id = metadata.get("attempt_id", "")
         if ATTEMPT.fullmatch(attempt_id) is None:
             continue
-        latest[attempt_id] = (columns[0], columns[1], metadata)
+        latest[attempt_id] = (columns[0], columns[1], columns[3], columns[4], metadata)
     window = _bounded_number(
         "AGENT_CLAUDE_REWAKE_ARM_WINDOW_SECONDS", DEFAULT_ARM_WINDOW_SECONDS, 30, 86_400
     )
     now = time.time()
-    candidates = []
-    for attempt_id, (stamp, status, metadata) in latest.items():
+    candidates: list[tuple[str, str, str]] = []
+    for attempt_id, (stamp, status, worktree, slug, metadata) in latest.items():
         if status != "open" or metadata.get("parent_sid") != session:
             continue
         if any(metadata.get(key) != value for key, value in REGISTRY_OWNER_START.items()):
@@ -299,10 +365,8 @@ def registry_launch(payload: object) -> Launch | None:
         age = _row_age(stamp, now)
         if age is None or age > window or age < -MAXIMUM_CLOCK_SKEW_SECONDS:
             continue
-        candidates.append(attempt_id)
-    if len(candidates) != 1:
-        return None
-    return Launch(attempt_id=candidates[0], jobs=jobs, session_id=session, armed="registry")
+        candidates.append((attempt_id, worktree, slug))
+    return command, session, jobs, candidates
 
 
 def agent_home() -> Path:
@@ -624,6 +688,48 @@ def _carrier_one_claim(launch: Launch, metadata: dict[str, str]) -> ClaimWin | N
     return ClaimWin(claim_owner, recipient_key, delivery_id, root)
 
 
+def no_arm_notice(payload: object) -> int:
+    """One typed notice when a successful start armed neither bridge path.
+
+    A grep-filtered `dispatch-owner --start` stdout plus an ambiguous
+    registry window loses the wake silently: the owner completes, nothing
+    wakes the parent, and the durable SD-111 record may also be refused for a
+    route-less owner (2026-09-01: five fleet cleanup owners, four unwatched
+    terminals).  Arming stays fail-closed — absence beats misattribution —
+    but the *loss* must be loud (fix candidate ③ of the 2026-08-24 quick-gap
+    record): tell the launching session immediately that completion will not
+    wake it, so it relaunches with unfiltered stdout or uses the explicit
+    poll-fallback.  A start whose own stdout already reports failure keeps
+    telling that story itself; this notice never fires for it."""
+
+    gate = _owner_start_command(payload)
+    if gate is None:
+        return 0
+    inner, _command = gate
+    raw_stdout = _stdout(inner.get("tool_response"))
+    fields = _fields(raw_stdout)
+    started = "start" in fields.get("status", []) and "1" in fields.get("started", [])
+    if raw_stdout.strip() and not started:
+        return 0
+    if not raw_stdout.strip():
+        resolved = _registry_start_candidates(payload)
+        if resolved is None or not resolved[3]:
+            return 0
+    attempt_id = _single(fields, "attempt_id") or "unknown"
+    message = (
+        f"[dispatch-owner-rewake] schema=2 state=not-armed attempt_id={attempt_id} "
+        "— this owner start reported started=1 but the asyncRewake bridge did NOT arm "
+        "(filtered stdout or an ambiguous recent-candidate window), so its completion "
+        "will not wake this session and no bridge is watching it. Relaunch future "
+        "starts with unfiltered stdout, or watch this exact attempt via the explicit "
+        "poll-fallback (dispatch-wait --attempt-id <id>); do not wait for a wake that "
+        "cannot arrive."
+    )
+    print(json.dumps({"systemMessage": message}, ensure_ascii=False, separators=(",", ":")))
+    print(message, file=sys.stderr)
+    return 2
+
+
 def main() -> int:
     try:
         payload: Any = json.load(sys.stdin)
@@ -631,7 +737,7 @@ def main() -> int:
         return 0
     launch = parse_launch(payload) or registry_launch(payload)
     if launch is None:
-        return 0
+        return no_arm_notice(payload)
     root = agent_home()
     readiness = root / "utilities" / "dispatch-attempt-ready.py"
     if not readiness.is_file():
