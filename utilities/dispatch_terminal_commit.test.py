@@ -564,7 +564,7 @@ class TerminalCommitTest(unittest.TestCase):
         converted = terminal.convert_terminal_handoff_claim(
             state_root,
             claim_id=claim["claim_id"],
-            prompt="",
+            prompt="exact delivered cleanup prompt",
             charge=lambda: (True, "exact delivered cleanup prompt"),
             artifact_root=str(self.root),
             allowed_write_roots=[str(self.evidence.parent)],
@@ -572,6 +572,66 @@ class TerminalCommitTest(unittest.TestCase):
         )
         self.assertEqual(converted["state"], "converted")
         self.assertEqual(converted["prompt_intent"], "exact delivered cleanup prompt")
+        self.assertEqual(converted["reservation_count"], 1)
+
+    def test_terminal_charge_crash_replays_exact_reservation_and_prompt(self):
+        import dispatch_budget_record as budget_record
+
+        state_root = Path(self.temp.name) / "dispatch"
+        claim = terminal.claim_terminal_handoff(
+            state_root,
+            parent_attempt_id="att-owner",
+            child_attempt_ids=["att-child"],
+            continuation_ordinal=10,
+            route_hash=self.route["route_hash"],
+        )
+        prompt = "one exact terminal cleanup prompt"
+        prompt_digest = terminal.digest_bytes(prompt.encode("utf-8"))
+
+        def charge():
+            admitted, _detail = budget_record.reserve(
+                state_root,
+                parent_attempt_id="att-owner",
+                route_id=self.route["route_id"],
+                route_hash=self.route["route_hash"],
+                ordinal=10,
+                purpose="terminal-handoff",
+                klass="reserved",
+                terminal_claim_id=claim["claim_id"],
+                prompt_intent_digest=prompt_digest,
+                remaining={
+                    "gross_remaining": 1,
+                    "stall_remaining": 1,
+                    "reserved_remaining": 1,
+                },
+            )
+            return admitted
+
+        kwargs = {
+            "claim_id": claim["claim_id"],
+            "prompt": prompt,
+            "charge": charge,
+            "artifact_root": str(self.root),
+            "allowed_write_roots": [str(self.evidence.parent)],
+            "allowed_read_roots": [str(self.root)],
+        }
+        with self.assertRaises(terminal.TerminalCommitCrash):
+            terminal.convert_terminal_handoff_claim(
+                state_root, crash_after_charge=True, **kwargs
+            )
+        prepared = terminal._read_json(
+            terminal.terminal_handoff_claim_path(state_root, claim["claim_id"])
+        )
+        self.assertEqual(prepared["state"], "converting")
+        self.assertEqual(prepared["prompt_intent_digest"], prompt_digest)
+        converted = terminal.convert_terminal_handoff_claim(state_root, **kwargs)
+        reservations = [
+            row
+            for row in budget_record.read_rows(state_root, "att-owner")
+            if row.get("record_kind") == "reservation"
+        ]
+        self.assertEqual(len(reservations), 1)
+        self.assertEqual(converted["state"], "converted")
         self.assertEqual(converted["reservation_count"], 1)
 
 

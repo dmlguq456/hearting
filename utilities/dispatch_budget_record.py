@@ -137,11 +137,12 @@ def _append(path: Path, row: dict) -> bool:
 
 def reserve(
     state_root, *, parent_attempt_id, route_id, route_hash, ordinal, purpose,
-    klass, remaining, now=None,
+    klass, remaining, terminal_claim_id="", prompt_intent_digest="", now=None,
 ) -> tuple:
-    """CAS append. A duplicate `(parent_attempt_id, ordinal, purpose)` is
-    `reservation-lost` -- the caller's admission is never granted twice for
-    the same ordinal and purpose, which is what makes
+    """CAS append. An ordinary duplicate `(parent_attempt_id, ordinal,
+    purpose)` is `reservation-lost`; the sole exception is an exact terminal
+    claim/prompt replay after a process crash.  This means the caller's
+    ordinary admission is never granted twice, which is what makes
     `atomic_reservation_succeeds` forceable to False for D47-3's negative
     branch. `purpose` is part of the key so a `terminal-handoff` reservation
     sharing its `ordinal` with the `ordinary` reservation it follows is not
@@ -159,6 +160,21 @@ def reserve(
                 and existing.get("ordinal") == ordinal
                 and existing.get("purpose") == purpose
             ):
+                # A terminal-handoff process may die after this durable CAS
+                # and before its claim record advances.  The exact claim and
+                # prompt digest make that one reservation replayable without
+                # relaxing ordinary-continuation duplicate rejection.
+                if (
+                    purpose == "terminal-handoff"
+                    and terminal_claim_id
+                    and prompt_intent_digest
+                    and existing.get("route_id") == route_id
+                    and existing.get("route_hash") == route_hash
+                    and existing.get("class") == klass
+                    and existing.get("terminal_claim_id") == terminal_claim_id
+                    and existing.get("prompt_intent_digest") == prompt_intent_digest
+                ):
+                    return (True, "reservation-replayed")
                 return (False, "reservation-lost")
         row = {
             "schema_version": SCHEMA_VERSION,
@@ -174,6 +190,11 @@ def reserve(
             "reserved_remaining": remaining.get("reserved_remaining", 0),
             "recorded_at": _rfc3339(_now(now)),
         }
+        if purpose == "terminal-handoff":
+            if not terminal_claim_id or not prompt_intent_digest:
+                return (False, "reservation-invalid:terminal-intent-required")
+            row["terminal_claim_id"] = terminal_claim_id
+            row["prompt_intent_digest"] = prompt_intent_digest
         row["event_id"] = _event_id(row)
         if not _append(path, row):
             return (False, "reservation-unrecorded:write-failed")

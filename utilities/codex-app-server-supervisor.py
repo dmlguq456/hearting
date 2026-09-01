@@ -893,6 +893,7 @@ def _apply_notice(prompt: str, notice: str) -> str:
 def _admit_continuation(
     ledger: ContinuationLedger, state_root, *, parent_attempt_id: str,
     route_id: str, route_hash: str, ordinal: int, purpose: str, stalled: bool,
+    terminal_claim_id: str = "", prompt_intent_digest: str = "",
     warning_threshold: int = 3,
 ) -> tuple[AdmitVerdict, str]:
     """SD-116 §13.34.4-(2), mirrored from claude-session-supervisor.py's
@@ -910,6 +911,8 @@ def _admit_continuation(
     reservation_ok, _detail = budget_record.reserve(
         state_root, parent_attempt_id=parent_attempt_id, route_id=route_id,
         route_hash=route_hash, ordinal=ordinal, purpose=purpose, klass=klass,
+        terminal_claim_id=terminal_claim_id,
+        prompt_intent_digest=prompt_intent_digest,
         remaining={
             "gross_remaining": ledger.gross_remaining,
             "stall_remaining": ledger.stall_remaining,
@@ -1013,6 +1016,8 @@ def _seal_terminal_handoff_or_raise(
             parent_attempt_id=args.parent_attempt_id,
             route_id=args.route_id, route_hash=args.route_hash,
             ordinal=ordinal, purpose="terminal-handoff", stalled=False,
+            terminal_claim_id=claim["claim_id"],
+            prompt_intent_digest=terminal_commit.digest_bytes(prompt.encode("utf-8")),
             warning_threshold=args.continuation_warning_threshold,
         )
         admission["verdict"] = verdict

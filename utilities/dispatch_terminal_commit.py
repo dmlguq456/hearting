@@ -1059,11 +1059,14 @@ def convert_terminal_handoff_claim(
     allowed_write_roots: Sequence[str],
     allowed_read_roots: Sequence[str],
     allowed_commands: Sequence[str] = (),
+    crash_after_charge: bool = False,
 ) -> dict[str, Any]:
     """Convert once at the real prompt-intent boundary.
 
-    The callback is invoked while the claim lock is held.  A failed callback
-    leaves the claim and every recorded delta unchanged.
+    The prompt intent is prepared durably before the callback.  The callback's
+    terminal-budget CAS binds that claim and prompt digest, so a crash after
+    the charge replays the same reservation instead of charging again.  A
+    failed callback restores the zero-delta claimed state.
     """
 
     path = terminal_handoff_claim_path(state_root, claim_id)
@@ -1073,35 +1076,67 @@ def convert_terminal_handoff_claim(
             raise TerminalCommitError("recovery-unavailable", claim_id)
         if record.get("state") == "converted":
             return record
-        if record.get("state") != "claimed":
+        if record.get("state") not in {"claimed", "converting"}:
             raise TerminalCommitError("transaction-conflict", claim_id)
+        if not prompt:
+            raise TerminalCommitError("transaction-conflict", "empty prompt intent")
+        prompt_digest = digest_bytes(prompt.encode("utf-8"))
+        capability = {
+            "artifact_root": str(Path(artifact_root).resolve()),
+            "allowed_write_roots": [
+                str(Path(value).resolve()) for value in allowed_write_roots
+            ],
+            "allowed_read_roots": [
+                str(Path(value).resolve()) for value in allowed_read_roots
+            ],
+            "allowed_commands": sorted(set(allowed_commands)),
+        }
+        if record.get("state") == "converting":
+            if (
+                record.get("prompt_intent_digest") != prompt_digest
+                or record.get("cleanup_capability") != capability
+            ):
+                raise TerminalCommitError("transaction-conflict", claim_id)
+        else:
+            record.update(
+                {
+                    "state": "converting",
+                    "prompt_intent": prompt,
+                    "prompt_intent_digest": prompt_digest,
+                    "cleanup_capability": capability,
+                    "updated_at": _now(),
+                }
+            )
+            _atomic_write(path, canonical_bytes(record) + b"\n")
         charge_result = charge()
         if isinstance(charge_result, tuple):
             charged, resolved_prompt = charge_result
         else:
             charged, resolved_prompt = charge_result, prompt
         if not charged:
+            for key in (
+                "prompt_intent",
+                "prompt_intent_digest",
+                "cleanup_capability",
+            ):
+                record.pop(key, None)
+            record["state"] = "claimed"
+            record["updated_at"] = _now()
+            _atomic_write(path, canonical_bytes(record) + b"\n")
             return record
         if not resolved_prompt:
             raise TerminalCommitError("transaction-conflict", "empty prompt intent")
+        if crash_after_charge:
+            raise TerminalCommitCrash("terminal-handoff-charged")
+        resolved_digest = digest_bytes(resolved_prompt.encode("utf-8"))
+        if resolved_digest != prompt_digest:
+            raise TerminalCommitError("transaction-conflict", "prompt intent changed")
         record.update(
             {
                 "state": "converted",
                 "budget_delta": {"gross": 0, "stall": 0, "reserved": -1},
                 "reservation_count": 1,
                 "prompt_count": 1,
-                "prompt_intent": resolved_prompt,
-                "prompt_intent_digest": digest_bytes(resolved_prompt.encode("utf-8")),
-                "cleanup_capability": {
-                    "artifact_root": str(Path(artifact_root).resolve()),
-                    "allowed_write_roots": [
-                        str(Path(value).resolve()) for value in allowed_write_roots
-                    ],
-                    "allowed_read_roots": [
-                        str(Path(value).resolve()) for value in allowed_read_roots
-                    ],
-                    "allowed_commands": sorted(set(allowed_commands)),
-                },
                 "updated_at": _now(),
             }
         )
