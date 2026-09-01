@@ -306,6 +306,44 @@ class CodexLauncherRuntimeTest(unittest.TestCase):
             with mock.patch.object(launcher.Path, "home", return_value=root):
                 self.assertEqual(launcher.launcher_state_home(private_home), private_home)
 
+    def test_private_runtime_home_reads_global_binding_without_lock_write(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            real = root / "vendor" / "codex"
+            real.parent.mkdir()
+            real.write_text("#!/bin/sh\n", encoding="utf-8")
+            real.chmod(0o755)
+            default_home = self._state_fixture(root, real)
+            lock = default_home / ".harness" / "codex-launcher.lock"
+            lock.write_bytes(b"")
+            lock.chmod(0o600)
+            private_home = root / "private-codex"
+            private_home.mkdir()
+
+            real_open = Path.open
+
+            def deny_global_lock_write(path: Path, mode: str = "r", *args, **kwargs):
+                if path == lock and any(flag in mode for flag in ("a", "w", "+")):
+                    raise OSError(30, "Read-only file system", str(path))
+                return real_open(path, mode, *args, **kwargs)
+
+            with (
+                mock.patch.dict(
+                    os.environ,
+                    {"CODEX_HOME": str(private_home), "HOME": str(root)},
+                    clear=False,
+                ),
+                mock.patch.object(launcher.Path, "home", return_value=root),
+                mock.patch.object(launcher.Path, "open", deny_global_lock_write),
+                mock.patch.object(launcher.os, "execv") as execv,
+            ):
+                launcher.sys.argv = ["codex-launcher.py", "debug", "prompt-input", "fixture"]
+                self.assertIsNone(launcher.main())
+                execv.assert_called_once_with(
+                    str(real),
+                    [str(real), "debug", "prompt-input", "fixture"],
+                )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -73,8 +73,18 @@ class LauncherError(RuntimeError):
     """Installed launcher state is unsafe or incomplete."""
 
 
-def _launcher_lock(home: Path):
+def _launcher_lock(home: Path, *, shared_read: bool = False):
     path = home / ".harness" / "codex-launcher.lock"
+    if shared_read:
+        if path.is_symlink() or not path.is_file():
+            raise LauncherError(f"managed launcher lock is unavailable: {path}")
+        info = path.stat()
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or info.st_mode & 0o077:
+            raise LauncherError(f"managed launcher lock is unsafe: {path}")
+        handle = path.open("rb")
+        if fcntl is not None:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_SH)
+        return handle
     path.parent.mkdir(parents=True, exist_ok=True)
     handle = path.open("a+b")
     os.chmod(path, 0o600)
@@ -350,7 +360,15 @@ def main() -> int:
             )
         os.environ["AGENT_CODEX_LAUNCHER_GUARD_PID"] = str(os.getpid())
         state_home = launcher_state_home(runtime_home)
-        lock = _launcher_lock(state_home)
+        # A private CODEX_HOME may reuse the installed global vendor binding
+        # for non-interactive commands.  Such a process can have read-only
+        # access to the global runtime home (the normal nested-worker sandbox),
+        # so it takes a shared read lock instead of trying to mutate/chmod the
+        # global lock file.  The installer keeps its exclusive lock and state
+        # replacement remains serialized against this read.
+        lock = _launcher_lock(
+            state_home, shared_read=state_home != runtime_home
+        )
         try:
             value = _state(state_home)
         finally:
