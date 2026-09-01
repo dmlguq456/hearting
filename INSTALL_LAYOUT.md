@@ -152,6 +152,11 @@ activation record carrying a retired `profile*` field is read but ignored.
 - A manually activated `packaged` source changes only after `runtime refresh`;
   a managed release changes through `harness update`. Both use the same native
   discovery paths.
+- Managed updates prune only releases with complete ownership and live-reference
+  evidence. `harness update --force-prune-unproven` is an explicit recovery
+  operation: it records a durable gap for each unproven candidate before the
+  checked prune and never overrides an active-attempt reference. It is not a
+  normal install/update default.
 - Both modes disable prior harness plugin registry entries and quarantine only
   harness-owned plugin caches so plugin state cannot shadow the selected source.
 - There is no `both` mode. Codex/Claude native+plugin and OpenCode local+npm

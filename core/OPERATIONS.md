@@ -241,6 +241,15 @@ with `versioned-source-registry-fallback`. Completion, logs, watchdog,
 heartbeat, and supervisor state continue to derive only from the accepted
 registry's parent.
 
+Release pruning is evidence-bound. `harness update` retains any release whose
+ownership or live-reference proof is incomplete. An operator may explicitly
+run `harness update --force-prune-unproven` only after reviewing the proposed
+release set: the updater first appends a durable gap row for every unproven
+candidate, then prunes only candidates that still pass the live-row and
+`launch_home` checks. The flag does not bypass active-attempt protection, does
+not infer recoverability, and is never selected automatically. Re-running an
+up-to-date release with the flag still executes this checked prune phase.
+
 Before delivery, the supervisor atomically commits the bounded receipt payload,
 deterministic receipt id and digest, exact attempt set, and row revisions. A
 restart reuses that committed payload and identity. The guard and prompt treat
