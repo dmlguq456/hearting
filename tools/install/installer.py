@@ -251,6 +251,14 @@ def resolve_runtimes(args):
     return [target]
 
 
+UPDATE_SKIP_HINTS = {
+    "missing": "not activated — run: harness runtime activate --runtime {runtime} --mode packaged",
+    "linked": "linked to a dev checkout — run: harness runtime refresh --runtime {runtime}",
+    "foreign": "points at another source root — run: harness runtime activate "
+               "--runtime {runtime} --mode packaged --source {release_root}",
+}
+
+
 def emit(result, as_json):
     if as_json:
         print(json.dumps(result, ensure_ascii=False))
@@ -558,23 +566,32 @@ def cmd_update(args):
         for runtime in result.get("runtimes", []):
             action = result.get("session_action", {}).get(runtime)
             lines.append(f"updated: {runtime} session_action={action}")
+        checks = [{"id": "update.release", "ok": True,
+                   "detail": f"{result['status']} {result['version']}"}]
+        skipped_hints = {}
+        release_root = result.get("release_root", "<release-root>")
         for runtime, reason in result.get("skipped", {}).items():
-            lines.append(f"skipped: {runtime} ({reason})")
-        return {
+            template = UPDATE_SKIP_HINTS.get(reason)
+            if template is None:
+                lines.append(f"skipped: {runtime} ({reason})")
+                continue
+            hint = template.format(runtime=runtime, release_root=release_root)
+            lines.append(f"skipped: {runtime} ({reason}) — {hint}")
+            skipped_hints[runtime] = hint
+            checks.append({"id": f"update.skipped.{runtime}", "ok": False,
+                           "detail": f"{reason}: {hint}"})
+        payload = {
             "runtime": result.get("runtimes", []),
             "channel": "managed-release",
             "release": result,
-            "checks": [
-                {
-                    "id": "update.release",
-                    "ok": True,
-                    "detail": f"{result['status']} {result['version']}",
-                }
-            ],
+            "checks": checks,
             "drift": [],
             "exit": EXIT_OK,
             "lines": lines,
         }
+        if skipped_hints:
+            payload["skipped_hints"] = skipped_hints
+        return payload
 
     runtimes = resolve_runtimes(args)
     drift = manifest.check_drift(runtimes, scope=args.scope)
@@ -675,6 +692,7 @@ def cmd_status(args):
                 "exit": EXIT_FAIL,
                 "lines": [f"managed release: invalid state: {exc}"],
             }
+    observed = []
     for rt in runtimes:
         try:
             activation = runtime_activation.status(rt, scope=args.scope)
@@ -712,6 +730,18 @@ def cmd_status(args):
         healthy = freshness in ("fresh", "not-activated")
         checks.append({"id": f"{rt}.status", "ok": healthy, "detail": detail})
         lines.append(f"{rt}: {detail}")
+        observed.append({"runtime": rt, "version": version,
+                         "source_root": (activation or {}).get("source_root")})
+    versions = sorted({row["version"] for row in observed if row["version"]})
+    skew = None
+    if len(versions) > 1:
+        detail = "; ".join(f"{row['runtime']}={row['version']} "
+                           f"({row['source_root'] or 'unknown'})" for row in observed)
+        lines.append(f"version-skew: runtimes disagree — {detail}")
+        lines.append("next: harness update --version latest, "
+                     "then harness runtime refresh --runtime all")
+        checks.append({"id": "runtime.version-skew", "ok": False, "detail": detail})
+        skew = {"versions": versions, "runtimes": observed}
     channel = managed["channel"] if managed else ("plugin" if args.plugin else "dev")
     result = {
         "runtime": runtimes,
@@ -721,6 +751,8 @@ def cmd_status(args):
         "exit": EXIT_OK,
         "lines": lines,
     }
+    if skew:
+        result["version_skew"] = skew
     if managed:
         result["release"] = managed
     return result

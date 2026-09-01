@@ -56,6 +56,15 @@ CONTRACT = "artifact-producer/v1"
 ALGORITHM_VERSION = "w7c-producer/v1"
 OK, BLOCKED, USAGE = 0, 65, 64
 
+COMPAT_OVERRIDE_NAME = "compat-override.json"
+INACTIVE_FALLBACK_ENV = "AGENT_ARTIFACT_INACTIVE_FALLBACK"
+ROOT_CLASSES = ("active", "inactive-with-legacy", "inactive-empty", "malformed")
+ACTIVATION_KINDS = ("approval", "bootstrap-empty-root")
+RUNTIME_OWNED_EXACT = ("_scratch",)          # `.`-prefix is a separate predicate
+COMPAT_OVERRIDE_FIELDS = ("schema_version", "contract", "canonical_root",
+                          "reason", "issuer", "created_at", "expires_at")
+WAIVER_FIELDS = ("reason", "issuer", "created_at", "expires_at")
+
 # SD-117 §13.34.5-(2): a cycle's abandonment sealing decision must always
 # name why -- a closed enum, disjoint from review verdict vocabulary
 # (PASS/FAIL/BLOCKED, allow/deny) so the two can never be confused (E47-7).
@@ -261,6 +270,10 @@ def cutover_path(root: Path) -> Path:
     return producer_dir(root) / "cutover.json"
 
 
+def compat_override_path(root: Path) -> Path:
+    return producer_dir(root) / COMPAT_OVERRIDE_NAME
+
+
 def cycle_record_path(root: Path, cycle_id: str) -> Path:
     return producer_dir(root) / "cycles" / f"{cycle_id}.json"
 
@@ -290,6 +303,181 @@ def read_cutover(root: Path) -> Dict[str, Any]:
 
 def is_active(root: Path) -> bool:
     return read_cutover(root).get("state") == "active"
+
+
+def _is_runtime_owned_top_level(name: str) -> bool:
+    return name.startswith(".") or name in RUNTIME_OWNED_EXACT
+
+
+def _legacy_content_names(root: Path, *, exhaustive: bool = False) -> List[str]:
+    """Top-level names holding non-runtime content.
+
+    Mirrors `_walk_files`'s symlink policy: never follow a symlink, but count
+    it as content. Stops at the first hit unless `exhaustive` is set, so the
+    hot-path predicate never walks a large legacy tree.
+    """
+    root = Path(root)
+    if not root.is_dir():
+        return []
+    found: List[str] = []
+    for entry in sorted(root.iterdir(), key=lambda p: p.name):
+        name = entry.name
+        if _is_runtime_owned_top_level(name):
+            continue
+        has_content = False
+        if entry.is_symlink():
+            has_content = True
+        elif entry.is_file():
+            has_content = True
+        elif entry.is_dir():
+            for current, dirs, files in os.walk(str(entry), followlinks=False):
+                if files:
+                    has_content = True
+                    break
+                linked = [d for d in dirs if os.path.islink(os.path.join(current, d))]
+                if linked:
+                    has_content = True
+                    break
+        if has_content:
+            found.append(name)
+            if not exhaustive:
+                return found
+    return found
+
+
+def classify_root(root: Path, *, collect_legacy_top_level: bool = False) -> Dict[str, Any]:
+    """D-72 root classification. Never creates or modifies anything.
+
+    Returns {"state": active|inactive-with-legacy|inactive-empty|malformed,
+             "root": str, "cutover_state": str|None, "activation_kind": str|None,
+             "identity": {"repository_id":…, "artifact_root_id":…}|None,
+             "reason": str|None,
+             "legacy_top_level": List[str], "legacy_top_level_complete": bool}
+    """
+    root = Path(root)
+    result: Dict[str, Any] = {
+        "state": None, "root": str(root), "cutover_state": None, "activation_kind": None,
+        "identity": None, "reason": None,
+        "legacy_top_level": [], "legacy_top_level_complete": collect_legacy_top_level,
+    }
+    path = cutover_path(root)
+    cutover: Optional[Dict[str, Any]] = None
+    if path.exists():
+        cutover = _read_json(path)
+        if cutover is None:
+            result["state"] = "malformed"
+            result["reason"] = "cutover-record-unreadable"
+            return result
+    if cutover is not None and cutover.get("state") not in ("active", "inactive"):
+        result["state"] = "malformed"
+        result["reason"] = "cutover-schema-unknown"
+        return result
+    try:
+        identity = artifact_lifecycle.read_root_identity(root)
+    except artifact_lifecycle.LifecycleError:
+        result["state"] = "malformed"
+        result["reason"] = "root-identity-invalid"
+        return result
+    if cutover is not None and cutover.get("state") == "active":
+        cutover_root_id = (cutover.get("identity") or {}).get("artifact_root_id")
+        if identity is None or cutover_root_id != identity.artifact_root_id:
+            result["state"] = "malformed"
+            result["reason"] = "identity-conflict"
+            return result
+        result["state"] = "active"
+        result["cutover_state"] = "active"
+        result["activation_kind"] = cutover.get("activation_kind", "approval")
+        result["identity"] = {"repository_id": identity.repository_id,
+                              "artifact_root_id": identity.artifact_root_id}
+        return result
+    if not root.exists():
+        result["state"] = "inactive-empty"
+        return result
+    try:
+        names = _legacy_content_names(root, exhaustive=collect_legacy_top_level)
+    except OSError:
+        result["state"] = "malformed"
+        result["reason"] = "root-unreadable"
+        return result
+    result["legacy_top_level"] = names
+    result["state"] = "inactive-with-legacy" if names else "inactive-empty"
+    return result
+
+
+def validate_time_bounded_grant(payload: Any, *, canonical_root: Path,
+                                required_fields: Sequence[str],
+                                now: Optional[float] = None) -> Dict[str, Any]:
+    """Shared fail-closed rule for D-74 compat overrides and D-75 waivers.
+
+    Returns {"status": "accepted"|"rejected",
+             "reason": None|"malformed"|"expired"|"foreign-root",
+             "expires_at": str|None}
+    """
+    if not isinstance(payload, dict):
+        return {"status": "rejected", "reason": "malformed", "expires_at": None}
+    for field in required_fields:
+        value = payload.get(field)
+        if value is None or value == "":
+            return {"status": "rejected", "reason": "malformed", "expires_at": None}
+    if "schema_version" in required_fields and payload.get("schema_version") != 1:
+        return {"status": "rejected", "reason": "malformed", "expires_at": None}
+    if "contract" in required_fields and payload.get("contract") != CONTRACT:
+        return {"status": "rejected", "reason": "malformed", "expires_at": None}
+    expires_at = payload.get("expires_at")
+    try:
+        expires_ts = _rfc3339_to_epoch(str(expires_at))
+    except (ValueError, OverflowError):
+        return {"status": "rejected", "reason": "malformed", "expires_at": None}
+    if "canonical_root" in payload:
+        if os.path.realpath(str(payload["canonical_root"])) != os.path.realpath(str(canonical_root)):
+            return {"status": "rejected", "reason": "foreign-root", "expires_at": expires_at}
+    when = time.time() if now is None else now
+    if expires_ts <= when:
+        return {"status": "rejected", "reason": "expired", "expires_at": expires_at}
+    return {"status": "accepted", "reason": None, "expires_at": expires_at}
+
+
+def read_compat_override(root: Path, *, now: Optional[float] = None) -> Dict[str, Any]:
+    """{"status": "absent"|"accepted"|"rejected",
+        "reason": None|"override-malformed"|"override-expired"|"override-foreign-root",
+        "path": str, "expires_at": str|None}"""
+    path = compat_override_path(root)
+    if not path.exists():
+        return {"status": "absent", "reason": None, "path": str(path), "expires_at": None}
+    payload = _read_json(path)
+    verdict = validate_time_bounded_grant(
+        payload, canonical_root=root, required_fields=COMPAT_OVERRIDE_FIELDS, now=now)
+    reason = f"override-{verdict['reason']}" if verdict["reason"] else None
+    return {"status": verdict["status"], "reason": reason, "path": str(path),
+            "expires_at": verdict["expires_at"]}
+
+
+def inactive_fallback_level() -> str:
+    """`warn` unless AGENT_ARTIFACT_INACTIVE_FALLBACK is exactly `deny`;
+    any other non-empty value is fail-closed to `deny`."""
+    value = os.environ.get(INACTIVE_FALLBACK_ENV, "")
+    if value in ("", "warn"):
+        return "warn"
+    return "deny"
+
+
+def legacy_fallback_state(root: Path, *, now: Optional[float] = None,
+                          classification: Optional[Mapping[str, Any]] = None
+                          ) -> Optional[Dict[str, Any]]:
+    """D-74 typed block; None unless the root is `inactive-with-legacy`."""
+    klass = classification if classification is not None else classify_root(root)
+    if klass["state"] != "inactive-with-legacy":
+        return None
+    return {
+        "level": inactive_fallback_level(),
+        "reason": "cutover-inactive-legacy-root",
+        "override": read_compat_override(root, now=now),
+    }
+
+
+def _fallback_blocks(fallback: Optional[Mapping[str, Any]]) -> bool:
+    return bool(fallback) and fallback["level"] == "deny" \
+        and fallback["override"]["status"] != "accepted"
 
 
 def read_cycle_record(root: Path, cycle_id: str) -> Optional[Dict[str, Any]]:
@@ -415,6 +603,8 @@ def activate(
     artifact_root_id: str,
     w7: Optional[Mapping[str, Any]] = None,
     approval_receipt_sha256: Optional[str] = None,
+    activation_kind: str = "approval",
+    adopt_existing_identity: bool = False,
     now: Optional[float] = None,
 ) -> Dict[str, Any]:
     root = Path(root).resolve()
@@ -422,6 +612,9 @@ def activate(
         raise ProducerError("identity-malformed", "repository_id")
     if not artifact_identity.is_well_formed(artifact_root_id, "artifact_root"):
         raise ProducerError("identity-malformed", "artifact_root_id")
+    if activation_kind not in ACTIVATION_KINDS:
+        raise ProducerError("activation-kind-unknown", activation_kind)
+    requested_ids = (repository_id, artifact_root_id)
     lock_fd = artifact_admission._acquire_lock(root, artifact_admission.LOCK_TIMEOUT_DEFAULT, now=now)
     try:
         existing = artifact_lifecycle.read_root_identity(root)
@@ -439,10 +632,14 @@ def activate(
             identity = artifact_identity.RootIdentity.parse(payload)
             identity_state = "created"
         else:
-            if (existing.repository_id, existing.artifact_root_id) != (repository_id, artifact_root_id):
+            if adopt_existing_identity:
+                repository_id = existing.repository_id
+                artifact_root_id = existing.artifact_root_id
+            elif (existing.repository_id, existing.artifact_root_id) != requested_ids:
                 raise ProducerError("identity-conflict", "root identity already frozen with other ids")
             identity = existing
-            identity_state = "matched"
+            identity_state = "adopted" if (adopt_existing_identity and
+                (existing.repository_id, existing.artifact_root_id) != requested_ids) else "matched"
         current = read_cutover(root)
         if current.get("state") == "active":
             if current.get("identity", {}).get("artifact_root_id") != artifact_root_id:
@@ -456,6 +653,7 @@ def activate(
             "identity": {"repository_id": identity.repository_id, "artifact_root_id": identity.artifact_root_id},
             "w7": dict(w7 or {}),
             "approval_receipt_sha256": approval_receipt_sha256,
+            "activation_kind": activation_kind,
         }
         _ensure_dir(producer_dir(root))
         _write_exclusive(cutover_path(root), _json_bytes(body), 0o600)
@@ -473,6 +671,8 @@ def status(root: Path) -> Dict[str, Any]:
         counts[row.get("state", "?")] = counts.get(row.get("state", "?"), 0) + 1
     journal_dir = producer_dir(root) / "journal"
     pending = sorted(p.stem for p in journal_dir.glob("*.json")) if journal_dir.is_dir() else []
+    klass = classify_root(root)
+    fallback = legacy_fallback_state(root, classification=klass)
     return {
         "artifact_root": str(root),
         "cutover": read_cutover(root),
@@ -480,6 +680,9 @@ def status(root: Path) -> Dict[str, Any]:
         "cycle_counts": counts,
         "open_cycles": [r["cycle_id"] for r in records if r.get("state") == "open"],
         "pending_journals": pending,
+        "root_classification": klass["state"],
+        "activation_kind": read_cutover(root).get("activation_kind", "approval") if klass["state"] == "active" else None,
+        "legacy_fallback": fallback,
     }
 
 
@@ -530,7 +733,24 @@ def begin(
     node = _route_node(route, node_id)
     if route_is_closed(root, route):
         raise ProducerError("route-already-closed", route["route_id"])
-    if not is_active(root):
+    alloc = allocator or artifact_identity.IdAllocator()
+    klass = classify_root(root)
+    if klass["state"] == "malformed":
+        raise ProducerError("cutover-record-malformed", klass["reason"])
+    if klass["state"] == "inactive-empty":
+        # D-73: bootstrap-first identity. MUST stay above the admission lock at
+        # :547 -- activate() acquires the same lock and would self-deadlock.
+        activate(root,
+                 repository_id=alloc.allocate("repository"),
+                 artifact_root_id=alloc.allocate("artifact_root"),
+                 activation_kind="bootstrap-empty-root",
+                 adopt_existing_identity=True,
+                 now=now)
+    elif klass["state"] == "inactive-with-legacy":
+        fallback = legacy_fallback_state(root, now=now, classification=klass)
+        if _fallback_blocks(fallback):
+            raise ProducerError("cutover-inactive-fallback-denied",
+                                fallback["override"]["reason"] or "override-absent")
         if require_cycle:
             raise ProducerError("cutover-inactive", "activation required before cycle issuance")
         return {
@@ -539,11 +759,12 @@ def begin(
             "route_id": route["route_id"],
             "reason": "cutover-inactive",
             "env": {"AGENT_ARTIFACT_ROOT": str(root)},
+            "legacy_fallback": fallback,
         }
+    # active, or just bootstrapped: fall through to the existing cycle path.
     identity = artifact_lifecycle.read_root_identity(root)
     if identity is None:
         raise ProducerError("root-identity-missing")
-    alloc = allocator or artifact_identity.IdAllocator()
     lock_fd = artifact_admission._acquire_lock(root, artifact_admission.LOCK_TIMEOUT_DEFAULT, now=now)
     try:
         # Idempotent per route: one open cycle per route.
@@ -1475,7 +1696,21 @@ def check_write(root: Path, target: Path) -> Dict[str, Any]:
     if active:
         return {**base, "verdict": "deny", "reason": "legacy-top-level-write-denied", "layout": "legacy",
                 "bucket": top}
-    return {**base, "verdict": "allow", "reason": "legacy-compat-window", "layout": "legacy", "bucket": top}
+    klass = classify_root(root)
+    if klass["state"] == "malformed":
+        # Same reason string as begin(). A damaged cutover record does not
+        # slip out through an unmarked legacy allow (D-74: no unmarked allow
+        # on any of the three surfaces).
+        return {**base, "verdict": "deny", "reason": "cutover-record-malformed",
+                "layout": "legacy", "bucket": top, "detail": klass["reason"]}
+    fallback = legacy_fallback_state(root, classification=klass)
+    if _fallback_blocks(fallback):
+        return {**base, "verdict": "deny", "reason": "cutover-inactive-fallback-denied",
+                "layout": "legacy", "bucket": top, "legacy_fallback": fallback}
+    result = {**base, "verdict": "allow", "reason": "legacy-compat-window", "layout": "legacy", "bucket": top}
+    if fallback is not None:
+        result["legacy_fallback"] = fallback
+    return result
 
 
 def cycle_bucket(root: Path, target: Path) -> Optional[Tuple[str, str]]:
@@ -1502,6 +1737,12 @@ def resolve_output_dir(root: Path, bucket: str, *, cycle_dir_hint: Optional[str]
     if is_active(root):
         raise ProducerError("legacy-top-level-write-denied",
                             f"{bucket}: begin a cycle first (AGENT_ARTIFACT_CYCLE_DIR unset)")
+    klass = classify_root(root)
+    if klass["state"] == "malformed":
+        raise ProducerError("cutover-record-malformed", klass["reason"] or bucket)
+    fallback = legacy_fallback_state(root, classification=klass)
+    if _fallback_blocks(fallback):
+        raise ProducerError("cutover-inactive-fallback-denied", bucket)
     return root / bucket, "legacy"
 
 
@@ -1651,6 +1892,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         elif args.command == "resolve-output":
             directory, layout = resolve_output_dir(root, args.bucket, cycle_dir_hint=args.cycle_dir)
             result = {"status": "ok", "output_dir": str(directory), "layout": layout}
+            if layout == "legacy":
+                fallback = legacy_fallback_state(root)
+                if fallback is not None:
+                    result["legacy_fallback"] = fallback
         else:  # pragma: no cover
             parser.error("unknown command")
             return USAGE

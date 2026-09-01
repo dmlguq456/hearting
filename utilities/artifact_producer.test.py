@@ -141,16 +141,27 @@ class ProducerTestBase(unittest.TestCase):
         target.write_bytes(data)
         return target
 
+    def seed_legacy(self, rel="plans/legacy.md", data="legacy body\n"):
+        target = self.root / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(data, encoding="utf-8")
+        return target
+
 
 class ActivateAndBeginTest(ProducerTestBase):
     def test_begin_before_activation_is_legacy_compat(self):
+        self.seed_legacy()
         route, route_file, result = self.begin()
         self.assertEqual(result["status"], "legacy-compat")
         self.assertEqual(result["layout"], "legacy")
         self.assertFalse((self.root / "campaigns").exists())
+        self.assertEqual(result["legacy_fallback"]["level"], "warn")
+        self.assertEqual(result["legacy_fallback"]["reason"], "cutover-inactive-legacy-root")
+        self.assertEqual(result["legacy_fallback"]["override"]["status"], "absent")
 
     def test_begin_require_cycle_fails_closed_when_inactive(self):
         route, route_file = self.route()
+        self.seed_legacy()
         with self.assertRaises(P.ProducerError) as ctx:
             P.begin(self.root, route_file=route_file, capability="autopilot-code", intensity="direct",
                     require_cycle=True)
@@ -243,6 +254,310 @@ class ActivateAndBeginTest(ProducerTestBase):
             P.begin(self.root, route_file=self.route("direct", mode="debug")[1], capability="autopilot-code",
                     intensity="direct", parent_cycle_id=second["cycle_id"])
         self.assertEqual(ctx.exception.code, "parent-cycle-not-sealed")
+
+
+class BootstrapTest(ProducerTestBase):
+    def test_begin_against_empty_root_bootstraps(self):
+        route, route_file, result = self.begin()
+        self.assertEqual(result["status"], "begun")
+        self.assertEqual(result["layout"], "cycle")
+        cutover = P.read_cutover(self.root)
+        self.assertEqual(cutover["activation_kind"], "bootstrap-empty-root")
+        self.assertIsNone(cutover["approval_receipt_sha256"])
+        self.assertEqual(cutover["state"], "active")
+        self.assertIsNotNone(L.read_root_identity(self.root))
+        self.assertTrue(idm.is_well_formed(result["campaign_id"], "campaign"))
+        self.assertTrue(idm.is_well_formed(result["cycle_id"], "cycle"))
+        self.assertTrue(idm.is_well_formed(result["producer_id"], "producer"))
+
+    def test_bootstrap_creates_no_legacy_bucket_directory(self):
+        self.begin()
+        names = sorted(p.name for p in self.root.iterdir())
+        self.assertEqual(names, [".runtime", "campaigns"])
+
+    def test_bootstrapped_root_denies_legacy_top_level_write(self):
+        self.begin()
+        verdict = P.check_write(self.root, self.root / "plans" / "x.md")
+        self.assertEqual((verdict["verdict"], verdict["reason"]),
+                         ("deny", "legacy-top-level-write-denied"))
+
+    def test_begin_require_cycle_bootstraps_empty_root(self):
+        route, route_file, result = self.begin(require_cycle=True)
+        self.assertEqual(result["status"], "begun")
+
+    def test_bootstrap_adopts_existing_frozen_identity(self):
+        identity_path = adm._root_identity_path(self.root)
+        identity_path.parent.mkdir(parents=True, exist_ok=True)
+        payload = idm.RootIdentity(
+            schema_version=1, artifact_root_id=ROOT_ID, repository_id=REPO_ID,
+            issued_at="2026-09-02T00:00:00Z", producer_contract_version=m.CONTRACT_VERSION,
+        ).to_payload()
+        identity_path.write_text(json.dumps(payload), encoding="utf-8")
+        route, route_file, result = self.begin()
+        self.assertEqual(result["status"], "begun")
+        self.assertEqual(P.read_cutover(self.root)["identity"]["artifact_root_id"], ROOT_ID)
+
+    def test_explicit_activate_after_bootstrap_is_already_active_without_kind_promotion(self):
+        self.begin()
+        identity = L.read_root_identity(self.root)
+        result = P.activate(self.root, repository_id=identity.repository_id,
+                            artifact_root_id=identity.artifact_root_id)
+        self.assertEqual(result["status"], "already-active")
+        self.assertEqual(P.read_cutover(self.root)["activation_kind"], "bootstrap-empty-root")
+
+    def test_malformed_cutover_record_blocks_begin(self):
+        route, route_file = self.route()
+        P.producer_dir(self.root).mkdir(parents=True, exist_ok=True)
+        P.cutover_path(self.root).write_text("{", encoding="utf-8")
+        with self.assertRaises(P.ProducerError) as ctx:
+            P.begin(self.root, route_file=route_file, capability="autopilot-code", intensity="direct")
+        self.assertEqual(ctx.exception.code, "cutover-record-malformed")
+
+    def test_read_only_oracles_never_bootstrap(self):
+        P.check_write(self.root, self.root / "plans" / "x.md")
+        P.status(self.root)
+        P.resolve_output_dir(self.root, "spec")
+        self.assertFalse(P.cutover_path(self.root).exists())
+
+
+class ClassifyRootTest(ProducerTestBase):
+    def test_empty_root_is_inactive_empty(self):
+        self.assertEqual(P.classify_root(self.root)["state"], "inactive-empty")
+
+    def test_root_with_only_empty_directories_is_inactive_empty(self):
+        (self.root / "plans").mkdir()
+        (self.root / "spec").mkdir()
+        self.assertEqual(P.classify_root(self.root)["state"], "inactive-empty")
+
+    def test_nested_regular_file_is_inactive_with_legacy(self):
+        target = self.root / "plans" / "a" / "b" / "c.md"
+        target.parent.mkdir(parents=True)
+        target.write_text("x", encoding="utf-8")
+        klass = P.classify_root(self.root)
+        self.assertEqual(klass["state"], "inactive-with-legacy")
+        self.assertEqual(klass["legacy_top_level"], ["plans"])
+
+    def test_campaigns_only_root_without_cutover_is_inactive_with_legacy(self):
+        target = self.root / "campaigns" / "x" / "y.md"
+        target.parent.mkdir(parents=True)
+        target.write_text("x", encoding="utf-8")
+        self.assertEqual(P.classify_root(self.root)["state"], "inactive-with-legacy")
+
+    def test_symlink_counts_as_content_and_is_not_followed(self):
+        outside = Path(self._tmp.name) / "outside-target"
+        outside.mkdir()
+        for i in range(100):
+            (outside / f"f{i}.md").write_text("x", encoding="utf-8")
+        (self.root / "plans").mkdir()
+        os.symlink(outside, self.root / "plans" / "link")
+        klass = P.classify_root(self.root, collect_legacy_top_level=True)
+        self.assertEqual(klass["state"], "inactive-with-legacy")
+        self.assertEqual(klass["legacy_top_level"], ["plans"])
+
+    def test_missing_root_directory_is_inactive_empty(self):
+        missing = self.root / "does-not-exist"
+        self.assertEqual(P.classify_root(missing)["state"], "inactive-empty")
+
+    def test_unreadable_cutover_is_malformed(self):
+        P.producer_dir(self.root).mkdir(parents=True, exist_ok=True)
+        P.cutover_path(self.root).write_text("{", encoding="utf-8")
+        klass = P.classify_root(self.root)
+        self.assertEqual((klass["state"], klass["reason"]), ("malformed", "cutover-record-unreadable"))
+
+    def test_unknown_cutover_state_is_malformed(self):
+        P.producer_dir(self.root).mkdir(parents=True, exist_ok=True)
+        P.cutover_path(self.root).write_text(json.dumps({"state": "paused"}), encoding="utf-8")
+        klass = P.classify_root(self.root)
+        self.assertEqual((klass["state"], klass["reason"]), ("malformed", "cutover-schema-unknown"))
+
+    def test_identity_conflict_is_malformed(self):
+        self.activate()
+        identity_path = adm._root_identity_path(self.root)
+        payload = json.loads(identity_path.read_text(encoding="utf-8"))
+        payload["artifact_root_id"] = "root_" + "f" * 32
+        identity_path.write_text(json.dumps(payload), encoding="utf-8")
+        klass = P.classify_root(self.root)
+        self.assertEqual((klass["state"], klass["reason"]), ("malformed", "identity-conflict"))
+
+    def test_active_classification_does_not_walk_content(self):
+        self.activate()
+        self.seed_legacy()
+        klass = P.classify_root(self.root)
+        self.assertEqual(klass["state"], "active")
+        self.assertEqual(klass["legacy_top_level"], [])
+
+
+class LegacyFallbackTest(ProducerTestBase):
+    def _override_payload(self, **overrides):
+        payload = {
+            "schema_version": 1, "contract": P.CONTRACT, "canonical_root": str(self.root),
+            "reason": "test override", "issuer": "test", "created_at": "2026-09-01T00:00:00Z",
+            "expires_at": "2099-01-01T00:00:00Z",
+        }
+        payload.update(overrides)
+        return payload
+
+    def _write_override(self, payload):
+        path = P.compat_override_path(self.root)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(payload), encoding="utf-8")
+
+    def test_warn_is_the_default_on_all_three_surfaces(self):
+        self.seed_legacy()
+        route, route_file, result = self.begin()
+        self.assertEqual(result["legacy_fallback"]["level"], "warn")
+        write_verdict = P.check_write(self.root, self.root / "plans" / "x.md")
+        self.assertEqual(write_verdict["verdict"], "allow")
+        self.assertEqual(write_verdict["legacy_fallback"]["level"], "warn")
+        directory, layout = P.resolve_output_dir(self.root, "spec")
+        self.assertEqual(layout, "legacy")
+
+    def test_deny_without_override_blocks_all_three_surfaces(self):
+        self.seed_legacy()
+        os.environ[P.INACTIVE_FALLBACK_ENV] = "deny"
+        try:
+            write_verdict = P.check_write(self.root, self.root / "plans" / "x.md")
+            self.assertEqual((write_verdict["verdict"], write_verdict["reason"]),
+                             ("deny", "cutover-inactive-fallback-denied"))
+            route, route_file = self.route()
+            with self.assertRaises(P.ProducerError) as ctx:
+                P.begin(self.root, route_file=route_file, capability="autopilot-code", intensity="direct")
+            self.assertEqual(ctx.exception.code, "cutover-inactive-fallback-denied")
+            with self.assertRaises(P.ProducerError) as ctx:
+                P.resolve_output_dir(self.root, "spec")
+            self.assertEqual(ctx.exception.code, "cutover-inactive-fallback-denied")
+        finally:
+            os.environ.pop(P.INACTIVE_FALLBACK_ENV, None)
+
+    def test_unknown_fallback_value_fails_closed_to_deny(self):
+        self.seed_legacy()
+        for value in ("WARN", "maybe"):
+            os.environ[P.INACTIVE_FALLBACK_ENV] = value
+            try:
+                write_verdict = P.check_write(self.root, self.root / "plans" / "x.md")
+                self.assertEqual(write_verdict["verdict"], "deny")
+            finally:
+                os.environ.pop(P.INACTIVE_FALLBACK_ENV, None)
+
+    def test_valid_override_allows_and_records(self):
+        self.seed_legacy()
+        self._write_override(self._override_payload())
+        os.environ[P.INACTIVE_FALLBACK_ENV] = "deny"
+        try:
+            verdict = P.check_write(self.root, self.root / "plans" / "x.md")
+            self.assertEqual(verdict["verdict"], "allow")
+            self.assertEqual(verdict["legacy_fallback"]["override"]["status"], "accepted")
+            self.assertEqual(verdict["legacy_fallback"]["override"]["expires_at"], "2099-01-01T00:00:00Z")
+        finally:
+            os.environ.pop(P.INACTIVE_FALLBACK_ENV, None)
+
+    def test_expired_override_is_rejected(self):
+        self.seed_legacy()
+        self._write_override(self._override_payload(expires_at="2000-01-01T00:00:00Z"))
+        os.environ[P.INACTIVE_FALLBACK_ENV] = "deny"
+        try:
+            verdict = P.check_write(self.root, self.root / "plans" / "x.md")
+            self.assertEqual(verdict["verdict"], "deny")
+            self.assertEqual(verdict["legacy_fallback"]["override"]["reason"], "override-expired")
+        finally:
+            os.environ.pop(P.INACTIVE_FALLBACK_ENV, None)
+
+    def test_malformed_override_is_rejected(self):
+        self.seed_legacy()
+        os.environ[P.INACTIVE_FALLBACK_ENV] = "deny"
+        try:
+            self._write_override(self._override_payload(issuer=None))
+            self.assertEqual(P.check_write(self.root, self.root / "plans" / "x.md")["legacy_fallback"]
+                             ["override"]["reason"], "override-malformed")
+            self._write_override(self._override_payload(schema_version=2))
+            self.assertEqual(P.check_write(self.root, self.root / "plans" / "x.md")["legacy_fallback"]
+                             ["override"]["reason"], "override-malformed")
+            P.compat_override_path(self.root).write_text("{", encoding="utf-8")
+            self.assertEqual(P.check_write(self.root, self.root / "plans" / "x.md")["legacy_fallback"]
+                             ["override"]["reason"], "override-malformed")
+        finally:
+            os.environ.pop(P.INACTIVE_FALLBACK_ENV, None)
+
+    def test_foreign_root_override_is_rejected(self):
+        self.seed_legacy()
+        self._write_override(self._override_payload(canonical_root=str(Path(self._tmp.name) / "elsewhere")))
+        os.environ[P.INACTIVE_FALLBACK_ENV] = "deny"
+        try:
+            verdict = P.check_write(self.root, self.root / "plans" / "x.md")
+            self.assertEqual(verdict["legacy_fallback"]["override"]["reason"], "override-foreign-root")
+            self.assertEqual(verdict["verdict"], "deny")
+        finally:
+            os.environ.pop(P.INACTIVE_FALLBACK_ENV, None)
+
+    def test_warn_keeps_level_warn_for_rejected_override(self):
+        self.seed_legacy()
+        self._write_override(self._override_payload(expires_at="2000-01-01T00:00:00Z"))
+        verdict = P.check_write(self.root, self.root / "plans" / "x.md")
+        self.assertEqual(verdict["legacy_fallback"]["level"], "warn")
+        self.assertEqual(verdict["legacy_fallback"]["override"]["status"], "rejected")
+        self.assertEqual(verdict["verdict"], "allow")
+
+    def test_resolve_output_dir_signature_stays_a_two_tuple(self):
+        self.seed_legacy()
+        result = P.resolve_output_dir(self.root, "spec")
+        self.assertEqual(len(result), 2)
+        self.assertEqual(result, (self.root / "spec", "legacy"))
+
+    def test_status_reports_classification_and_fallback(self):
+        self.seed_legacy()
+        result = P.status(self.root)
+        self.assertEqual(result["root_classification"], "inactive-with-legacy")
+        self.assertIsNone(result["activation_kind"])
+        self.assertEqual(result["legacy_fallback"]["level"], "warn")
+        for key in ("artifact_root", "cutover", "identity", "cycle_counts", "open_cycles", "pending_journals"):
+            self.assertIn(key, result)
+
+    def test_unrelated_verdicts_are_byte_identical_to_pre_change(self):
+        self.seed_legacy()
+        targets = {
+            "runtime": self.root / ".runtime" / "x.json",
+            "scratch": self.root / "_scratch" / "x",
+            "outside": Path(self._tmp.name) / "elsewhere.md",
+            "shared": self.root / "shared" / "spec" / ("ref_" + "1" * 32) / "revisions" / ("rrev_" + "2" * 32) / "prd.md",
+            "campaigns": self.root / "campaigns" / ("camp_" + "9" * 32) / "campaign.json",
+        }
+        for name, target in targets.items():
+            verdict = P.check_write(self.root, target)
+            self.assertNotIn("legacy_fallback", verdict, name)
+
+    def test_inactive_empty_root_check_write_is_unchanged(self):
+        verdict = P.check_write(self.root, self.root / "plans" / "x.md")
+        self.assertEqual((verdict["verdict"], verdict["reason"]), ("allow", "legacy-compat-window"))
+        self.assertNotIn("legacy_fallback", verdict)
+
+    def test_malformed_cutover_with_legacy_denies_check_write(self):
+        self.seed_legacy()
+        P.producer_dir(self.root).mkdir(parents=True, exist_ok=True)
+        P.cutover_path(self.root).write_text("{", encoding="utf-8")
+        verdict = P.check_write(self.root, self.root / "plans" / "x.md")
+        self.assertEqual((verdict["verdict"], verdict["reason"]), ("deny", "cutover-record-malformed"))
+        self.assertNotIn("legacy_fallback", verdict)
+
+    def test_malformed_cutover_with_legacy_blocks_resolve_output_dir(self):
+        self.seed_legacy()
+        P.producer_dir(self.root).mkdir(parents=True, exist_ok=True)
+        P.cutover_path(self.root).write_text("{", encoding="utf-8")
+        with self.assertRaises(P.ProducerError) as ctx:
+            P.resolve_output_dir(self.root, "spec")
+        self.assertEqual(ctx.exception.code, "cutover-record-malformed")
+
+    def test_malformed_cutover_with_legacy_cli_check_write_exits_65(self):
+        self.seed_legacy()
+        P.producer_dir(self.root).mkdir(parents=True, exist_ok=True)
+        P.cutover_path(self.root).write_text("{", encoding="utf-8")
+        import io
+        import contextlib
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            exit_code = P.main(["check-write", "--artifact-root", str(self.root),
+                                "--file", str(self.root / "plans" / "x.md")])
+        self.assertEqual(exit_code, P.BLOCKED)
+        self.assertEqual(json.loads(buf.getvalue())["reason"], "cutover-record-malformed")
 
 
 class CheckWriteTest(ProducerTestBase):

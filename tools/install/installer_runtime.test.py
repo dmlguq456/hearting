@@ -257,5 +257,108 @@ class LauncherCommitBoundaryTest(unittest.TestCase):
         self._assert_protected_surfaces_untouched()
 
 
+class StatusVersionSkewTest(unittest.TestCase):
+    def _status_args(self, runtimes):
+        return Namespace(runtimes=runtimes, target=None, scope="user", plugin=False)
+
+    def _fake_activation(self, source_root):
+        return {"freshness": "fresh", "mode": "packaged", "source_root": source_root}
+
+    def _fake_driver(self, version):
+        driver = mock.Mock()
+        driver.status.return_value = {"channel": "dev", "version": version, "drift_count": 0}
+        return driver
+
+    def test_status_reports_skew_when_runtimes_disagree(self):
+        args = self._status_args(["claude", "codex"])
+        drivers = {"claude": self._fake_driver("1.0.0"), "codex": self._fake_driver("2.0.0")}
+        with mock.patch.object(runtime_activation, "status",
+                               side_effect=lambda rt, scope: self._fake_activation(f"/src/{rt}")), \
+             mock.patch.object(installer, "get_driver", side_effect=lambda rt: drivers[rt]):
+            result = installer.cmd_status(args)
+        self.assertTrue(any(line.startswith("version-skew:") for line in result["lines"]))
+        self.assertTrue(any(line.startswith("next:") for line in result["lines"]))
+        skew_checks = [c for c in result["checks"] if c["id"] == "runtime.version-skew"]
+        self.assertEqual(len(skew_checks), 1)
+        self.assertFalse(skew_checks[0]["ok"])
+        self.assertEqual(result["version_skew"]["versions"], ["1.0.0", "2.0.0"])
+
+    def test_status_exit_code_is_unchanged_under_skew(self):
+        args = self._status_args(["claude", "codex"])
+        drivers = {"claude": self._fake_driver("1.0.0"), "codex": self._fake_driver("2.0.0")}
+        with mock.patch.object(runtime_activation, "status",
+                               side_effect=lambda rt, scope: self._fake_activation(f"/src/{rt}")), \
+             mock.patch.object(installer, "get_driver", side_effect=lambda rt: drivers[rt]):
+            result = installer.cmd_status(args)
+        self.assertEqual(result["exit"], installer.EXIT_OK)
+
+    def test_status_is_silent_when_versions_agree(self):
+        args = self._status_args(["claude", "codex"])
+        drivers = {"claude": self._fake_driver("1.0.0"), "codex": self._fake_driver("1.0.0")}
+        with mock.patch.object(runtime_activation, "status",
+                               side_effect=lambda rt, scope: self._fake_activation(f"/src/{rt}")), \
+             mock.patch.object(installer, "get_driver", side_effect=lambda rt: drivers[rt]):
+            result = installer.cmd_status(args)
+        self.assertFalse(any(line.startswith("version-skew:") for line in result["lines"]))
+        self.assertNotIn("version_skew", result)
+
+    def test_status_does_not_call_surface_skew(self):
+        args = self._status_args(["claude", "codex"])
+        drivers = {"claude": self._fake_driver("1.0.0"), "codex": self._fake_driver("1.0.0")}
+        with mock.patch.object(runtime_activation, "status",
+                               side_effect=lambda rt, scope: self._fake_activation(f"/src/{rt}")), \
+             mock.patch.object(installer, "get_driver", side_effect=lambda rt: drivers[rt]), \
+             mock.patch.object(runtime_activation, "surface_skew") as fake_skew:
+            installer.cmd_status(args)
+            fake_skew.assert_not_called()
+
+
+class UpdateSkipHintTest(unittest.TestCase):
+    def _update_args(self):
+        return Namespace(dry_run=False, scope="global", plugin=False, reapply=False,
+                         version="latest", runtimes=["claude", "codex", "opencode"],
+                         auto=False, force_prune_unproven=False)
+
+    def _managed_result(self, skipped):
+        return {
+            "status": "updated", "version": "9.9.9", "runtimes": [],
+            "session_action": {}, "skipped": skipped, "release_root": "/releases/9.9.9",
+        }
+
+    def test_each_closed_reason_gets_its_own_hint(self):
+        skipped = {"claude": "missing", "codex": "linked", "opencode": "foreign"}
+        with mock.patch.object(installer.distribution, "is_managed", return_value=True), \
+             mock.patch.object(installer.distribution, "update", return_value=self._managed_result(skipped)):
+            result = installer.cmd_update(self._update_args())
+        hints = result["skipped_hints"]
+        self.assertEqual(set(hints), {"claude", "codex", "opencode"})
+        self.assertEqual(len(set(hints.values())), 3)
+        for rt in ("claude", "codex", "opencode"):
+            self.assertIn({"id": f"update.skipped.{rt}", "ok": False,
+                           "detail": f"{skipped[rt]}: {hints[rt]}"}, result["checks"])
+
+    def test_release_skipped_map_is_untouched(self):
+        skipped = {"claude": "missing"}
+        with mock.patch.object(installer.distribution, "is_managed", return_value=True), \
+             mock.patch.object(installer.distribution, "update", return_value=self._managed_result(skipped)):
+            result = installer.cmd_update(self._update_args())
+        self.assertEqual(result["release"]["skipped"], skipped)
+
+    def test_update_exit_code_is_unchanged(self):
+        skipped = {"claude": "missing"}
+        with mock.patch.object(installer.distribution, "is_managed", return_value=True), \
+             mock.patch.object(installer.distribution, "update", return_value=self._managed_result(skipped)):
+            result = installer.cmd_update(self._update_args())
+        self.assertEqual(result["exit"], installer.EXIT_OK)
+
+    def test_unknown_reason_keeps_legacy_line_format(self):
+        skipped = {"claude": "some-new-reason"}
+        with mock.patch.object(installer.distribution, "is_managed", return_value=True), \
+             mock.patch.object(installer.distribution, "update", return_value=self._managed_result(skipped)):
+            result = installer.cmd_update(self._update_args())
+        self.assertIn("skipped: claude (some-new-reason)", result["lines"])
+        self.assertNotIn("skipped_hints", result)
+
+
 if __name__ == "__main__":
     unittest.main()

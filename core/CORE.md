@@ -154,6 +154,17 @@ removing, or widening an entry requires a product-spec revision.
 
 **Write cutover.** The legacy `C-DUR` buckets above (`analysis_project/`, `research/`, `spec/`, `plans/`, `documents/`, `experiments/`, `designs/`) are writable only while the producer cutover is inactive (`.runtime/artifact-producer/v1/cutover.json` absent). Once activated by the approval package, every new write must land under an open cycle's `campaigns/<camp>/cycles/<cyc>/artifacts/`, IDs are issued by `begin` before the first write, and `artifact_producer.py check-write` is the single allow/deny oracle for hooks and writers. The approval-gated follow-ups run through `utilities/artifact_cutover.py`: `migrate-delta`/`migrate-seal` copy the census-classified legacy delta into one sealed cycle and new shared revisions (sources preserved, journaled), `compat-close` records the map set legacy readers resolve through (`resolve-legacy`; the spec gate falls back to the latest `shared/spec/` revision), and `retire` deletes only digest-verified, backed-up sources. Existing legacy content stays readable; nothing is moved or deleted by activation. Readers resolve a bucket through `utilities/artifact_reader.py` (cycle dirs → latest shared revision → the legacy bucket as a read-only fallback, missing legacy paths via `resolve-legacy`); a reader that still opens `<root>/<bucket>/` directly sees only the retirement exclusions.
 
+**Cutover 이전 상태.** 아직 cutover되지 않은 root는 두 상태로 갈린다. runtime-owned 이름
+(`.`-prefix, `_scratch/`) 밖에 내용이 하나도 없는 root의 첫 `begin`은 legacy로 떨어지지 않고
+`activation_kind: "bootstrap-empty-root"`(승인 receipt 없음)로 activation·campaign·cycle을 먼저
+발급한다. legacy 내용이 있는 root의 activation은 여전히 승인 package 경로만 쓰며, 그 root의
+`begin`/`check-write`/`resolve-output`은 typed `legacy_fallback` block(기본 `warn`,
+`AGENT_ARTIFACT_INACTIVE_FALLBACK=deny`로 거부 전환)을 싣는다. `deny`를 뒤집는 유일한 수단은
+root-specific·만료 필수 compatibility override
+`.runtime/artifact-producer/v1/compat-override.json` 하나뿐이다. 복수 root의 완료 판정은
+read-only 도구 `utilities/fleet_cutover_gate.py`가 소유한다. 상태·필드·검증 규칙의 정본은
+`spec/artifact-path-contract/prd.md` §27이며 여기서 되풀이하지 않는다.
+
 **Population.** `_scratch/` is the sole exact census exclusion; no other name is
 excluded by name. Census never follows symlinks: a symlink is recorded as its own
 row and produces no descendant rows, and a symlink whose target resolves outside
