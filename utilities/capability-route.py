@@ -853,6 +853,7 @@ def build_continuation_route(
         "tracked_gate_evidence","spec_touch","cwd","source_commit",
         "registry_digest","dispatch_defaults_digest","dispatch_allocation",
         "owner_harness_policy","selection","human_gates","human_gate_bindings",
+        "confirmation_mode",
         "resume_retry_boundaries","dispatch_evidence","dispatch_contract_version",
         "dispatch_evidence_scope_version","registered_headless_candidates",
         "registered_headless_policy","unit_catalog_digest","validation_basis",
@@ -1471,6 +1472,26 @@ def _seal_dispatch_defaults(nodes, capability, owner_profile=None):
         DEFAULTS.query_profile_policy(cfg, owner_profile) if owner_profile else None,
     )
 
+def _seal_confirmation_mode():
+    """SD-123: resolve the declared `confirmation.mode` to seal into the
+    route, independent of `_seal_dispatch_defaults`'s return tuple.
+
+    T-3: `_seal_dispatch_defaults` returns `(None, None, None)` early when
+    the user config file is absent, and threading `confirmation_mode`
+    through that tuple would seal `None` for exactly that user instead of
+    the `hybrid` default -- the "configured but not applied" drift class.
+    This helper is deliberately separate and always returns a real mode.
+    """
+    config_path = DEFAULTS.default_config_path()
+    if not os.path.exists(config_path):
+        return DEFAULTS.DEFAULT_CONFIRMATION_MODE
+    try:
+        cfg = DEFAULTS.load_and_validate(config_path, DEFAULTS.default_topology_path())
+    except (DEFAULTS.DefaultsConfigError, OSError, json.JSONDecodeError):
+        return DEFAULTS.DEFAULT_CONFIRMATION_MODE
+    return DEFAULTS.query_confirmation_mode(cfg)
+
+
 def _validation_basis():
     """Seal which install root produced `registry_digest`/`unit_catalog_digest`.
 
@@ -1655,6 +1676,7 @@ def _compile_from_recipe(registry, recipe, capability, capability_mode, requeste
       "dispatch_defaults_digest":dispatch_defaults_digest,
       "dispatch_allocation":dispatch_allocation,
       "owner_harness_policy":owner_harness_policy,
+      "confirmation_mode":_seal_confirmation_mode(),
       "selection":{"direct_predicates":predicates,"promotion_signals":[{"signal":s,"source":"caller"} for s in signals],
                    "selection_basis":selection_basis,
                    "escalation_basis":[{"signal":s,"source":"caller"} for s in signals],

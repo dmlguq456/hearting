@@ -130,6 +130,11 @@ class TestRoute(unittest.TestCase):
   return legacy
  def test_direct_all_and_stable(self):
   a=R.compile_route(**self.args()); b=R.compile_route(**self.args()); self.assertEqual(a,b); self.assertEqual(a["effective_intensity"],"direct"); self.assertEqual(a["owner_dispatch_depth"],0); self.assertEqual(a["max_dispatch_depth"],0); self.assertEqual(a["nodes"][0]["dispatch_depth"],0); self.assertEqual(a["nodes"][0]["execution_surface"],"inline"); self.assertFalse(a["nodes"][0]["registered_worker"]); self.assertEqual(a["conditional_extensions"][0]["after"],["inline"]); R.verify_route(a,R.ROOT)
+  # A6/SD-123: capability-route.py already gates human_gate_bindings to
+  # standard+ (compile payload sets [] for direct/quick regardless of the
+  # recipe's declared bindings) -- assert that explicitly now that
+  # autopilot-code's recipe declares a non-empty frame-review binding.
+  self.assertEqual(a["human_gate_bindings"],[])
  def test_ambiguous_quick(self):
   a=R.compile_route(**self.args(predicates=[],transport=None,inline_reason=None,registered_headless_evidence=self.registered_headless()))
   self.assertEqual(a["effective_intensity"],"quick")
@@ -137,6 +142,7 @@ class TestRoute(unittest.TestCase):
   self.assertEqual(a["nodes"][0]["execution_surface"],"registered-headless")
   self.assertTrue(a["nodes"][0]["registered_worker"])
   self.assertEqual(a["conditional_extensions"][0]["after"],["one-shot"])
+  self.assertEqual(a["human_gate_bindings"],[])
  def test_quick_missing_eligibility_fails_closed(self):
   with self.assertRaisesRegex(ValueError,"quick-headless-unavailable"):
    R.compile_route(**self.args(predicates=[],transport=None,inline_reason=None))
@@ -1221,6 +1227,32 @@ class TestRoute(unittest.TestCase):
   self.assertIsNone(route["dispatch_defaults_digest"])
   self.assertIsNone(route["dispatch_allocation"])
   for node in route["nodes"]: self.assertEqual(node["harness_affinity"],"unspecified")
+  # T-3: confirmation_mode must NOT ride _seal_dispatch_defaults's
+  # (None, None, None) early return for an absent config file -- that would
+  # seal confirmation_mode=None instead of the "hybrid" default for exactly
+  # the user this config is absent for.
+  self.assertEqual(route["confirmation_mode"],"hybrid")
+ def test_seal_confirmation_mode_reads_v4_config(self):
+  v4_config=(
+   "schema_version: 4\n"
+   "harnesses:\n  enabled: [claude, codex]\n"
+   "profiles:\n"
+   + "".join(
+     f"  {profile}:\n    primary: [claude, codex]\n    relief: []\n"
+     "    last_resort: []\n    promote_relief_below: 0\n"
+     for profile in ("deep","balanced-deep","light","mini")
+   )
+   + "allocation:\n  strategy: capacity-aware\n  window: 30\n"
+   "confirmation:\n  mode: post-frame-only\n"
+   "capabilities:\n"
+  )
+  with dispatch_defaults_config(v4_config):
+   route=self._standard()
+  self.assertEqual(route["confirmation_mode"],"post-frame-only")
+ def test_seal_confirmation_mode_defaults_for_v1_config_without_block(self):
+  with dispatch_defaults_config(DD_CONFIG_A):
+   route=self._standard()
+  self.assertEqual(route["confirmation_mode"],"hybrid")
  def test_seal_corrupt_config_fails_loud(self):
   with dispatch_defaults_config(DD_CONFIG_CORRUPT):
    with self.assertRaisesRegex(ValueError,"corrupt dispatch-defaults config"):
@@ -1872,6 +1904,17 @@ class TestContinuation(unittest.TestCase):
    R.publish_continuation_route(continuation,source,output)
    self.assertTrue(output.is_file())
    self.assertFalse(R.completion_dir(continuation["route_id"]).exists())
+ def test_confirmation_mode_survives_continuation(self):
+  # T-5: confirmation_mode must ride inherited_keys, or a continuation route
+  # silently drops it and the A5 drift check sees None after the first advance.
+  with tempfile.TemporaryDirectory() as tmp:
+   artifact=Path(tmp)/"artifacts"
+   source=self._source(artifact)
+   self.assertEqual(source["confirmation_mode"],"hybrid")
+   self._complete_prefix(source,"test",Path(tmp)/"evidence")
+   continuation=self._build(source)
+   self.assertEqual(continuation["confirmation_mode"],"hybrid")
+
  def test_at2_boundary_and_first_runnable_blockers_are_disjoint(self):
   with tempfile.TemporaryDirectory() as tmp:
    source=self._source(Path(tmp)/"artifacts-request")
@@ -3245,6 +3288,56 @@ class ContinuationBudgetSealedBlockTest(unittest.TestCase):
   self.assertEqual("sealed-block",budget.source)
   self.assertEqual(route["continuation_budget"]["ordinary"],budget.ordinary)
   self.assertEqual(route["continuation_budget"]["limit"],budget.limit)
+
+
+class FrameSummaryContractTest(unittest.TestCase):
+ """A50-9 / N3 / R2-3: shards/frame/frame-summary.json contract, documented in
+ skills/autopilot-code/references/owner-execution.md and
+ capabilities/autopilot-code.md. `utilities/dispatch_completion_join.py`
+ (the module owning the actual v2/v3 receipt body -- StageAdvanceReceiptNegotiationTest,
+ dispatch_completion_join.test.py:1908-2032) is outside this slice's fixed-file
+ fence, so this pins the two independently-checkable halves of the contract:
+ the summary's own shape, and a static guard that the receipt module's source
+ never gains a literal frame-summary field name (a real regression signal
+ for a future edit, without requiring this test to drive that module's
+ stateful multi-argument API)."""
+
+ FRAME_SUMMARY_FIELDS = ("방향", "대안", "위험", "범위 변경", "비용")
+
+ def _summary(self, **overrides):
+  summary = {
+   "방향": "표준 실행 경로를 그대로 진행합니다.",
+   "대안": "대안 A, 대안 B",
+   "위험": "낮음 - 기존 계약 변경 없음",
+   "범위 변경": "없음",
+   "비용": "추가 비용 없음",
+  }
+  summary.update(overrides)
+  return summary
+
+ def test_frame_summary_has_exactly_the_five_declared_fields(self):
+  summary = self._summary()
+  self.assertEqual(set(summary), set(self.FRAME_SUMMARY_FIELDS))
+  extra = self._summary(**{"required_action": "human-gate:frame-review"})
+  self.assertNotEqual(set(extra), set(self.FRAME_SUMMARY_FIELDS))
+
+ def test_frame_summary_serializes_at_or_under_one_kilobyte(self):
+  encoded = json.dumps(self._summary(), ensure_ascii=False).encode("utf-8")
+  self.assertLessEqual(len(encoded), 1024)
+
+ def test_receipt_module_source_never_gains_a_literal_frame_summary_field(self):
+  # Seam 3: a schema_version 2/3 receipt body is returned/extended by
+  # identity; frame-summary.json is referenced by PATH from outside it.
+  # This is a source-text guard, not a call into the module's stateful API
+  # (out of this slice's fixed-file fence) -- it fails loudly if a future
+  # edit to that module starts building any of these literal keys into a
+  # receipt dict.
+  join_module = Path(__file__).with_name("dispatch_completion_join.py")
+  source = join_module.read_text(encoding="utf-8")
+  for field in self.FRAME_SUMMARY_FIELDS:
+   self.assertNotIn(field, source)
+  self.assertNotIn("frame_summary", source)
+  self.assertNotIn("frame-summary", source)
 
 
 if __name__=="__main__": unittest.main()
