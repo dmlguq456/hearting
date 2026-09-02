@@ -877,10 +877,16 @@ class RotationRegistryCarryFidelityTest(unittest.TestCase):
         self.base = Path(self.temp.name)
         self.prior_env = {
             key: os.environ.get(key)
-            for key in ("AGENT_HOME", "AGENT_DISPATCH_JOBS", "HARNESS_DATA_ROOT")
+            for key in (
+                "AGENT_HOME", "AGENT_DISPATCH_JOBS", "HARNESS_DATA_ROOT",
+                "HOME", "XDG_STATE_HOME", "HARNESS_STATE_ROOT",
+            )
         }
         os.environ.pop("AGENT_DISPATCH_JOBS", None)
+        os.environ.pop("XDG_STATE_HOME", None)
+        os.environ.pop("HARNESS_STATE_ROOT", None)
         os.environ["HARNESS_DATA_ROOT"] = str(self.base / "data")
+        os.environ["HOME"] = str(self.base / "stable-home")
         self.addCleanup(self._restore_env)
 
         self.old_release = DISTRIBUTION.data_root() / "releases" / "old"
@@ -992,8 +998,15 @@ class RegistryRepairStaleRowTest(unittest.TestCase):
         self.jobs = self.home / ".dispatch" / "jobs.log"
         self.jobs.parent.mkdir(parents=True, exist_ok=True)
         self.prior_env = {
-            key: os.environ.get(key) for key in ("AGENT_HOME", "AGENT_DISPATCH_JOBS")
+            key: os.environ.get(key)
+            for key in (
+                "AGENT_HOME", "AGENT_DISPATCH_JOBS",
+                "HOME", "XDG_STATE_HOME", "HARNESS_STATE_ROOT",
+            )
         }
+        os.environ.pop("XDG_STATE_HOME", None)
+        os.environ.pop("HARNESS_STATE_ROOT", None)
+        os.environ["HOME"] = str(self.base / "stable-home")
         os.environ["AGENT_HOME"] = str(self.home)
         # SD-112 chain-3 supersession: the env-less fallback no longer
         # resolves under `self.home` at all, so pin the registry explicitly
