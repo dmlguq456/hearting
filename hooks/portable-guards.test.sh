@@ -5368,6 +5368,20 @@ else
   else
     bad "§5.14 is missing realization step(s):$s_missing"
   fi
+  # S1-S6 must be the SD-122 §13.37.2-(2) steward invariants, not just labels —
+  # each of these phrases anchors to its invariant's substance.
+  inv_missing=""
+  printf '%s' "$sec5_14" | grep -q "permission laundering" || inv_missing="$inv_missing S1:permission-laundering"
+  printf '%s' "$sec5_14" | grep -q "not an instruction" || inv_missing="$inv_missing S2:not-an-instruction"
+  printf '%s' "$sec5_14" | grep -q "sleep loop" || inv_missing="$inv_missing S3:sleep-loop"
+  printf '%s' "$sec5_14" | grep -q "log mtime" || inv_missing="$inv_missing S4:log-mtime"
+  printf '%s' "$sec5_14" | grep -q "release record" || inv_missing="$inv_missing S5:release-record"
+  printf '%s' "$sec5_14" | grep -q "body digest" || inv_missing="$inv_missing S6:body-digest"
+  if [ -z "$inv_missing" ]; then
+    ok "§5.14 S1-S6 carry the SD-122 steward invariants (not the old data-flow steps)"
+  else
+    bad "§5.14 S1-S6 are missing invariant substance:$inv_missing"
+  fi
   for kind in watch steer handoff gate-relay notice; do
     printf '%s' "$sec5_14" | grep -q "$kind" || s_missing="$s_missing $kind"
   done
