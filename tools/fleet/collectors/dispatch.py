@@ -2554,9 +2554,12 @@ def _iso_elapsed_min(ts):
 
 
 def _scan_jobs_log(path, seen_slugs, seen_keys=None, registry_priority=0,
-                   live_attempt_ids=None, canonical_attempts=None):
+                   live_attempt_ids=None, canonical_attempts=None,
+                   proc_attempts_by_slug=None, proc_pid_identities=None,
+                   seen_attempts=None):
     jobs = []
     malformed = 0
+    seen_attempts = set() if seen_attempts is None else seen_attempts
     try:
         with open(path, encoding="utf-8", errors="replace") as f:
             rows = f.read().splitlines()
@@ -2578,12 +2581,22 @@ def _scan_jobs_log(path, seen_slugs, seen_keys=None, registry_priority=0,
             malformed += 1
             continue
         slug = fields[4]
-        if slug not in latest:
-            order.append(slug)
-        latest[slug] = (registry_order, fields)  # last occurrence = newest status for this slug
-    for slug in order:
-        registry_order, fields = latest[slug]
-        ts, status, repo, worktree, _slug, pipe = fields
+        row_meta = _parse_pipe_meta(fields[5] or "")
+        # F-97e (2026-09-02): identity is the ATTEMPT, not the slug. An owner and its
+        # dispatch-depth-2 children share one jobs.log slug, so slug-keyed latest-wins
+        # DESTROYED the open depth-1 owner row before any liveness or render logic ran
+        # (measured: rows 331/335/338/339/341 of jobs.log, owner att-c981df61 vanished).
+        # The 290h phantom fix above needs last-occurrence-wins WITHIN one job, which
+        # attempt_id satisfies exactly: it is stable across a job's running→done rows and
+        # distinct between jobs. Rows predating attempt_id fall back to the slug, so their
+        # behaviour is byte-identical.
+        key = row_meta.get("attempt_id") or slug
+        if key not in latest:
+            order.append(key)
+        latest[key] = (registry_order, fields, row_meta)
+    for key in order:
+        registry_order, fields, meta = latest[key]
+        ts, status, repo, worktree, slug, pipe = fields
         row_age_min = _iso_elapsed_min(ts)
         afterglow = False
         dead_terminal_owner = False
@@ -2595,7 +2608,7 @@ def _scan_jobs_log(path, seen_slugs, seen_keys=None, registry_priority=0,
             # closed a multi-turn codex attempt at its first turn.completed; the worker ran
             # on for hours while the session row hid as a dispatch child and the job row
             # dropped as done — the whole dispatch vanished from the screen).
-            if _terminal_row_process_alive(_parse_pipe_meta(pipe or ""),
+            if _terminal_row_process_alive(meta,
                                            live_attempt_ids=live_attempt_ids):
                 row_terminal_mismatch = True
             # F-46: `done` within the afterglow window survives as a display-only row
@@ -2610,30 +2623,50 @@ def _scan_jobs_log(path, seen_slugs, seen_keys=None, registry_priority=0,
                 # back to the legacy multi-line stage surface (user 2026-08-26 "stage 형식이
                 # old 스타일로 박스없이 남아있잖아"). `_retain_dead_terminal_owners` drops
                 # it again once the route closes or a newer owner binds the same route.
-                if not _dead_terminal_owner_row(status, _parse_pipe_meta(pipe or "")):
+                if not _dead_terminal_owner_row(status, meta):
                     continue                  # newest state is terminal → not live
                 dead_terminal_owner = True
             else:
                 afterglow = True
         cwd = worktree if worktree not in ("-", "(main-tree)") else ""
-        row_attempt = _parse_pipe_meta(pipe or "").get("attempt_id")
+        row_attempt = meta.get("attempt_id")
         # F-71: when a proc row and this registry row describe the SAME attempt, the
         # registry row is the canonical identity (it carries the launch's own harness,
         # unit and route), so it must survive slug dedup — collect() then drops the
         # proc twin. Without this the proc row's guessed identity won the display.
         attempt_owned = bool(row_attempt and canonical_attempts is not None
                              and row_attempt in canonical_attempts)
-        if slug in seen_slugs and not attempt_owned:
+        _registry_pid_tuple = _authoritative_registry_pid(meta)
+        registry_pid_identity = _registry_pid_tuple[:2]
+        # F-97e: a registry row is the twin of a proc row only when they are the SAME job.
+        # Evidence, strongest first: same attempt id (attempt_owned), same authoritative
+        # pid identity, or — for rows predating attempt_id — the legacy slug heuristic.
+        # A row carrying an attempt id that the proc side demonstrably does not hold is a
+        # DISTINCT job and must never be vetoed by a shared slug (owner vs. its children).
+        proc_claims = (proc_attempts_by_slug or {}).get(slug) or set()
+        if attempt_owned:
+            twin_of_proc = False                    # registry row is canonical; F-71 drops the proc twin
+        elif row_attempt and proc_claims and row_attempt not in proc_claims:
+            twin_of_proc = False                    # proc side names other attempts → distinct job
+        elif registry_pid_identity[0] and proc_pid_identities and registry_pid_identity in proc_pid_identities:
+            twin_of_proc = True
+        elif row_attempt and proc_claims:
+            twin_of_proc = True
+        else:
+            twin_of_proc = not row_attempt          # legacy row with no attempt id → slug heuristic
+        if twin_of_proc and slug in seen_slugs:
             continue                          # already shown as a live process job
         # F-15c: (normalized cwd, slug-stem) dedup — a stage-worker registry row
         # (fleet-ui-v2-execute) reconciles against its already-shown proc job
         # (fleet-ui-v2) ONLY when both cwd and stem match; a different worktree (conductor
         # vs its own dispatch-depth-2 child, OPERATIONS §5.10) never collapses, so both stay visible.
-        if (cwd and seen_keys and not attempt_owned
+        if (twin_of_proc and cwd and seen_keys
                 and (_norm_cwd(cwd), _slug_stem(slug)) in seen_keys):
             continue
-        seen_slugs.add(slug)
-        meta = _parse_pipe_meta(pipe or "")
+        if key in seen_attempts:
+            continue                          # this attempt already emitted from another registry root
+        seen_attempts.add(key)
+        seen_slugs.add(slug)                  # kept: legacy rows without attempt_id still need it
         attempt_contract = _attempt_contract(meta)
         pname = meta.get("_name") or repo or "job"
         # _parse_pipe_meta already strips any `autopilot-` prefix on a successful parse; this
@@ -2657,7 +2690,7 @@ def _scan_jobs_log(path, seen_slugs, seen_keys=None, registry_priority=0,
         pid_s = meta.get("pid", "")
         pid_local = int(pid_s) if pid_s.isdigit() else None
         pid_local_start = meta.get("pid_start") or meta.get("proc_start")
-        registry_pid, registry_start, identity_source = _authoritative_registry_pid(meta)
+        registry_pid, registry_start, identity_source = _registry_pid_tuple
         pid_host_s = meta.get("pid_host", "")
         pgid_s = meta.get("pgid", "")
         job = DispatchJob(
@@ -3179,10 +3212,20 @@ def collect(jobs_path=None, harness_filter=None):
     live_attempts = _live_attempt_ids()
     proc_attempts = {getattr(j, "attempt_id", None) for j in proc_jobs}
     proc_attempts.discard(None)
+    proc_attempts_by_slug = {}
+    for j in proc_jobs:
+        if j.slug and getattr(j, "attempt_id", None):
+            proc_attempts_by_slug.setdefault(j.slug, set()).add(j.attempt_id)
+    proc_pid_identities = {(j.pid, getattr(j, "proc_start", None))
+                           for j in proc_jobs if j.pid}
+    seen_attempts = set()
     for registry_priority, path in enumerate(paths):
         path_jobs, path_malformed = _scan_jobs_log(
             path, seen, seen_keys, registry_priority=registry_priority,
             live_attempt_ids=live_attempts, canonical_attempts=proc_attempts,
+            proc_attempts_by_slug=proc_attempts_by_slug,
+            proc_pid_identities=proc_pid_identities,
+            seen_attempts=seen_attempts,
         )
         if path in split_registries:
             for job in path_jobs:

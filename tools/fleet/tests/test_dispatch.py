@@ -1408,6 +1408,12 @@ class CwdFallbackEnrichmentTest(unittest.TestCase):
             self.assertEqual(jobs[0].artifact_root, artifact)
 
     def test_collect_backfills_owner_route_by_exact_attempt_across_same_slug_retry(self):
+        # F-97e (2026-09-02): identity is attempt-scoped, not slug-scoped, so two rows
+        # sharing a slug under different attempt ids are now two distinct jobs — this is
+        # the exact fix that lets a dispatch-depth-1 owner survive a same-slug depth-2
+        # child instead of being clobbered by "latest row per slug" reconciliation. The
+        # live proc's own attempt (attempt_a) must still resolve its EXACT route/artifact
+        # metadata via attempt-indexed backfill, unaffected by the other row's presence.
         with tempfile.TemporaryDirectory() as tmp:
             worktree = os.path.join(tmp, "worktree")
             artifact_a = os.path.join(tmp, "artifacts-a")
@@ -1446,14 +1452,15 @@ class CwdFallbackEnrichmentTest(unittest.TestCase):
                  mock.patch.object(dispatch, "_dispatch_liveness", return_value="working"):
                 jobs = dispatch.collect(jobs_path=jobs_log)
 
-            self.assertEqual(len(jobs), 1)
-            job = jobs[0]
-            self.assertEqual(job.attempt_id, attempt_a)
+            self.assertEqual(len(jobs), 2)
+            by_attempt = {j.attempt_id: j for j in jobs}
+            job = by_attempt[attempt_a]
             self.assertEqual(job.owner_route_file, route_a)
             self.assertEqual(job.owner_route_id, "rt-a")
             self.assertEqual(job.owner_route_hash, "hash-a")
             self.assertEqual(job.artifact_root, artifact_a)
             self.assertEqual(job._log_file, os.path.join(artifact_a, "attempt.jsonl"))
+            self.assertIn(attempt_b, by_attempt)
 
     def test_argv_matched_pid_excluded_from_cwd_scan(self):
         """Case 2 — an already argv-matched (proc-scanned) pid is passed into

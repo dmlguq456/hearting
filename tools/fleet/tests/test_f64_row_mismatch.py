@@ -37,6 +37,12 @@ _PIPE = ("capability=autopilot-code,harness=codex,depth=1,"
          "pid=4242,pid_start=777,attempt_id=att-f64")
 
 
+def _pipe_for(attempt_id):
+    # F-97e: identity is attempt-scoped, so three logically distinct jobs need
+    # three distinct attempt ids even when they otherwise share a pipe shape.
+    return _PIPE.replace("attempt_id=att-f64", "attempt_id=" + attempt_id)
+
+
 def _scan(rows, live_attempt_ids=None):
     with tempfile.TemporaryDirectory() as tmp:
         path = os.path.join(tmp, "jobs.log")
@@ -83,9 +89,10 @@ class TerminalRowMismatchCollectorTest(unittest.TestCase):
     def test_dead_terminal_row_keeps_existing_drop_and_afterglow(self):
         with _proc_start(None):
             jobs, _malformed = _scan([
-                _row("done", "honest-done-old", dispatch.DONE_AFTERGLOW_MIN + 1, _PIPE),
-                _row("done", "honest-done-fresh", 5, _PIPE),
-                _row("killed", "honest-killed", 1, _PIPE),
+                _row("done", "honest-done-old", dispatch.DONE_AFTERGLOW_MIN + 1,
+                     _pipe_for("att-f64-old")),
+                _row("done", "honest-done-fresh", 5, _pipe_for("att-f64-fresh")),
+                _row("killed", "honest-killed", 1, _pipe_for("att-f64-killed")),
             ])
         by_slug = {j.slug: j for j in jobs}
         self.assertNotIn("honest-done-old", by_slug)
