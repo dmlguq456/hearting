@@ -9,6 +9,7 @@ field layout, same dispatch_depth/attempt_id/parent linkage, same slug —
 not a verbatim byte capture (that capture was not available to this test).
 """
 import os
+import re
 import sys
 import tempfile
 import unittest
@@ -21,7 +22,7 @@ if _TOOLS_DIR not in sys.path:
 
 from fleet import gitinfo, model, render  # noqa: E402
 from fleet.collectors import dispatch  # noqa: E402
-from fleet.model import DispatchJob  # noqa: E402
+from fleet.model import DispatchJob, Session  # noqa: E402
 
 _FIXTURE = os.path.join(os.path.dirname(__file__), "fixtures", "f97e_jobs.log")
 
@@ -189,6 +190,7 @@ class F97bSuffixWidthTest(unittest.TestCase):
         self.assertFalse(any(k == "loc_repo" for _t, k in segs))
 
     def test_foreign_suffix_widths_overflow_zero(self):
+        # +1 is the documented `_NAME_GAP` reserve, identical at baseline da552ad4.
         for width in (168, 120, 100, 60):
             segs = render._branch_suffix_segs(
                 None, "peer-steward-fleet-location", dim=True,
@@ -203,6 +205,83 @@ class F97bSuffixWidthTest(unittest.TestCase):
         text = "".join(t for t, _k in segs)
         self.assertNotIn("d1", text)
         self.assertNotIn("d2", text)
+
+
+class F97dRowWidthRegressionTest(unittest.TestCase):
+    """End-to-end row-width check through `_build_lines` (the surface F-97d's "168/120/100/60
+    columns, zero overflow" requirement is actually about). The suffix-only check above measures
+    `_branch_suffix_segs` in isolation and never renders a row, so it could not catch a location
+    token that widens the printed line."""
+
+    def _lines(self, job, width, layout):
+        session = Session(harness="claude", pid=910, proc_start="root", cwd="/tmp/f97",
+                          session_id="sid-f97", slug="f97-parent", liveness="working")
+        job.parent_sid = "sid-f97"
+        job.is_child = True
+        lines = render._build_lines([session], [job], "both", False, 0,
+                                    layout=layout, term_width=width)
+        return [re.sub(r"\x00[^\x00]*\x00", "", "".join(t for t, _k in l)) for l in lines if l]
+
+    def _job(self, location_kind=None, location_repo=None, location_wt=None):
+        return DispatchJob(key="code", slug="f97d-job", cwd="/tmp/f97", harness="claude",
+                           depth=2, liveness="working", branch="feature-long-name",
+                           location_kind=location_kind, location_repo=location_repo,
+                           location_wt=location_wt)
+
+    def test_location_token_never_widens_the_row(self):
+        # `wide` layout is excluded: baseline da552ad4 already emits a 199-cell row whenever
+        # term_width < 168 in that layout (the layout choice, not the location token, is what
+        # widens it — layout selection is the caller's job) — a synthetic condition, not a
+        # regression surface for this suffix code.
+        for layout in ("narrow", "stack"):
+            for width in (168, 120, 100, 60):
+                primary = self._lines(self._job(location_kind="primary"), width, layout)[:-1]
+                isolated = self._lines(
+                    self._job(location_kind="isolated-wt", location_wt="isolated-wt"),
+                    width, layout)[:-1]
+                foreign = self._lines(
+                    self._job(location_kind="foreign-repo", location_repo="hearting"),
+                    width, layout)[:-1]
+                primary_w = max(render._dw(t) for t in primary)
+                isolated_w = max(render._dw(t) for t in isolated)
+                foreign_w = max(render._dw(t) for t in foreign)
+                self.assertEqual(isolated_w, primary_w,
+                                 "isolated-wt widened the row at %s/%d" % (layout, width))
+                self.assertEqual(foreign_w, primary_w,
+                                 "foreign-repo widened the row at %s/%d" % (layout, width))
+
+
+class F97dLegendWidthTest(unittest.TestCase):
+    """The legend row (last line of `_build_lines`) at 60 columns: baseline (no location glyphs
+    seen) measures 52 cells; F-97's conditional location legend entries (loc_foreign/loc_wt) add
+    15 (isolated-wt, "⌂wt worktree") and 17 (foreign-repo, "→ foreign repo") more cells on top of
+    that. These are this session's own measurements, not the owner's da552ad4 baseline figures —
+    see dev_logs/execute-gap.md."""
+
+    def _legend_width(self, location_kind, location_repo=None, location_wt=None):
+        session = Session(harness="claude", pid=910, proc_start="root", cwd="/tmp/f97",
+                          session_id="sid-f97", slug="f97-parent", liveness="working")
+        job = DispatchJob(key="code", slug="f97d-job", cwd="/tmp/f97", harness="claude",
+                          depth=2, liveness="working", branch="feature-long-name",
+                          location_kind=location_kind, location_repo=location_repo,
+                          location_wt=location_wt, parent_sid="sid-f97", is_child=True)
+        for layout in ("narrow", "stack"):
+            lines = render._build_lines([session], [job], "both", False, 0,
+                                        layout=layout, term_width=60)
+            texts = [re.sub(r"\x00[^\x00]*\x00", "", "".join(t for t, _k in l))
+                     for l in lines if l]
+            yield layout, render._dw(texts[-1])
+
+    def test_legend_overflow_at_60_columns_is_the_measured_baseline(self):
+        for kind, repo, wt, expect in (
+            ("primary", None, None, 52),
+            ("isolated-wt", None, "isolated-wt", 67),
+            ("foreign-repo", "hearting", None, 69),
+        ):
+            for layout, width in self._legend_width(kind, location_repo=repo, location_wt=wt):
+                self.assertEqual(width, expect,
+                                 "legend width for %s/%s: got %d, expected %d"
+                                 % (kind, layout, width, expect))
 
 
 class F97cCampaignLabelTest(unittest.TestCase):
