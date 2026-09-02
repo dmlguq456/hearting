@@ -8,19 +8,46 @@ pre-SD-122 board.
 import glob
 import json
 import os
+import sys
 import time
+from pathlib import Path
 
 _TAIL_BYTES = 64 * 1024
 _WINDOW_SECONDS = 24 * 3600
 _MAX_RECORDS = 200
 
 
-def _state_roots():
+def _agent_home():
     from . import dispatch
+    return dispatch._registry_home()
+
+
+def _state_roots():
+    """F-98d — read through the SAME resolver chain the writer (`peer-message.py`) uses,
+    not `dispatch._row_state_roots()`'s no-row default (which pins to the release tree's
+    `.dispatch` and ignores an inherited `AGENT_DISPATCH_JOBS`). Modelled on
+    `tools/fleet/route.py`'s `_dispatch_state_roots` — lazy import, tolerant of every
+    failure (never raises out of a read-only collector)."""
     try:
-        return dispatch._row_state_roots()
+        home = _agent_home()
     except Exception:
         return ()
+    here = Path(__file__).resolve()
+    for candidate in here.parents:
+        utilities_dir = candidate / "utilities"
+        if (utilities_dir / "dispatch_contract.py").is_file():
+            if str(utilities_dir) not in sys.path:
+                sys.path.insert(0, str(utilities_dir))
+            try:
+                from dispatch_contract import dispatch_state_roots
+
+                return tuple(
+                    str(root) for root in dispatch_state_roots(
+                        Path(home), jobs=os.environ.get("AGENT_DISPATCH_JOBS"))
+                )
+            except Exception:
+                return ()
+    return ()
 
 
 def _tail_lines(path):
@@ -97,10 +124,16 @@ def collect(state_roots=None):
             if age_min <= 60:
                 row["recv_1h"] += 1
             if row["last_recv"] is None:
-                # The notice record (self-authored on receipt) is the common carrier
-                # since Claude's SendMessage addresses peers by name — its own
-                # `to.name` is the ONLY name-shaped hint of who sent it (F-98b §10-5).
-                from_name = frm.get("name") or to.get("name") or from_sid or ""
+                # `to.name` is the recipient's own name on an ordinary sent record —
+                # using it as the sender would let the recipient's subtitle claim
+                # the message came from itself. The one exception is a `notice`
+                # record: it is self-authored by the receiving session on receipt,
+                # and there `to.name` is repurposed to carry the extracted sender
+                # name (F-98b §10-5), the only name-shaped hint available for it.
+                if rec.get("kind") == "notice":
+                    from_name = frm.get("name") or to.get("name") or from_sid or ""
+                else:
+                    from_name = frm.get("name") or from_sid or ""
                 row["last_recv"] = {
                     "from_name": from_name,
                     "from_session_id": from_sid,

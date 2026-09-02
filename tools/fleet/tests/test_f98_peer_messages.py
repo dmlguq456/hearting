@@ -117,6 +117,16 @@ class CollectorTest(unittest.TestCase):
         self.assertNotIn("body", raw.lower().replace("body_sha256", ""))
         self.assertLessEqual(len(result["records"][0]["summary"]), 200)
 
+    def test_sent_record_never_labels_recipient_as_sender(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _write_ledger(tmp, "sid-a", [
+                _rec("sid-a", to_sid="sid-b", to_name="sid-b-display", kind="steer", minutes_ago=1)
+            ])
+            result = peer_messages.collect(state_roots=[tmp])
+        last_recv = result["by_session"]["sid-b"]["last_recv"]
+        self.assertNotEqual(last_recv["from_name"], "sid-b-display")
+        self.assertEqual(last_recv["from_name"], "sid-a")
+
     def test_join_is_exact_session_id_not_name(self):
         with tempfile.TemporaryDirectory() as tmp:
             _write_ledger(tmp, "sid-a", [
@@ -125,6 +135,49 @@ class CollectorTest(unittest.TestCase):
             result = peer_messages.collect(state_roots=[tmp])
         self.assertNotIn("hearting-21 [f3e821]", result["by_session"])
         self.assertEqual(result["by_session"]["sid-a"]["sent_1h"], 1)
+
+
+class StableRootResolverTest(unittest.TestCase):
+    """F-98d — `_state_roots()` must read through the SAME resolver chain the
+    writer (`utilities/peer-message.py`) uses (`resolve_dispatch_state_root` +
+    `dispatch_state_roots`), not `dispatch._row_state_roots()`'s no-row default
+    (which silently pins to the release-tree `.dispatch` and ignores an inherited
+    `AGENT_DISPATCH_JOBS`). Every fixture above passes `state_roots=[tmp]`
+    explicitly — this is the one that does not, which is exactly why the bug
+    shipped undetected (measured 2026-09-02 against v2.101.0)."""
+
+    def setUp(self):
+        self._old_environ = dict(os.environ)
+
+    def tearDown(self):
+        os.environ.clear()
+        os.environ.update(self._old_environ)
+
+    def test_collect_with_no_state_roots_finds_records_in_the_stable_root_only(self):
+        with tempfile.TemporaryDirectory() as home:
+            os.environ["HOME"] = home
+            os.environ["AGENT_HOME"] = home
+            for key in ("CLAUDE_HOME", "AGENT_DISPATCH_JOBS", "XDG_STATE_HOME", "HARNESS_STATE_ROOT"):
+                os.environ.pop(key, None)
+            stable_root = os.path.join(home, ".local", "state", "hearting", "dispatch")
+            _write_ledger(stable_root, "sid-a", [_rec("sid-a", to_sid="sid-b", minutes_ago=1)])
+            result = peer_messages.collect()
+        self.assertEqual(result["by_session"]["sid-b"]["recv_1h"], 1)
+
+    def test_collect_with_no_state_roots_honors_agent_dispatch_jobs(self):
+        with tempfile.TemporaryDirectory() as base:
+            home = os.path.join(base, "home")
+            os.makedirs(home)
+            registry_dir = os.path.join(base, "custom-jobs-dir")
+            os.makedirs(registry_dir)
+            os.environ["HOME"] = home
+            os.environ["AGENT_HOME"] = home
+            os.environ["AGENT_DISPATCH_JOBS"] = os.path.join(registry_dir, "jobs.log")
+            for key in ("CLAUDE_HOME", "XDG_STATE_HOME", "HARNESS_STATE_ROOT"):
+                os.environ.pop(key, None)
+            _write_ledger(registry_dir, "sid-a", [_rec("sid-a", to_sid="sid-b", minutes_ago=1)])
+            result = peer_messages.collect()
+        self.assertEqual(result["by_session"]["sid-b"]["recv_1h"], 1)
 
 
 class RenderByteIdenticalTest(unittest.TestCase):
