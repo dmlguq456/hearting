@@ -125,6 +125,9 @@ def _snapshot_json(sessions, jobs, resource_jobs=None, usage=None, disabled=None
     mem = _collect_memory()
     if mem is not None:
         out["memory"] = mem
+    peer = getattr(collect_all, "last_peer_messages", None)
+    if isinstance(peer, dict) and peer.get("records"):
+        out["peer_messages"] = peer      # summary(<=200) only; body never present
     out["route"] = _collect_route(list(sessions) + list(jobs))
     gov = _collect_governor()
     if gov is not None:

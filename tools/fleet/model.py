@@ -309,6 +309,9 @@ class Session:
     branch_ahead: Optional[int] = None  # additive background git telemetry
     branch_behind: Optional[int] = None
     worktree_count: int = 0             # snapshot-owned; render never scans .git/worktrees
+    peer_sent_1h: int = 0                 # F-98a snapshot-owned; render never reads the ledger
+    peer_recv_1h: int = 0
+    peer_last_recv: Optional[dict] = None # {from_name, from_session_id, kind, age_min} — NO summary, NO body
     mem_worker: bool = False   # Memory worker or title refresher; summarized and hidden by default.
     # F-29 (v9, prd.md:290-295) — enrichment ONLY, never a session-existence signal (prd.md:291).
     # None = source absent/unconfirmed (honest gap, prd.md:292's "no guessing"); [] = source

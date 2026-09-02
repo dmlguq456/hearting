@@ -1860,6 +1860,13 @@ def _session_row(s, narrow, is_parent=False, child_count=0, name_width=None,
     if used < session_width:
         segs.append((" " * (session_width - used), None))
 
+    # F-98: peer-message badge. Zero segments when neither count is nonzero — this IS the
+    # byte-identical guard for a board with no ledger activity (G2).
+    _peer_sent = getattr(s, "peer_sent_1h", 0)
+    _peer_recv = getattr(s, "peer_recv_1h", 0)
+    if _peer_sent or _peer_recv:
+        segs.append((" ✉ %d/%d" % (_peer_sent, _peer_recv), "dim"))
+
     segs.append((" " * _WIDE_STAGE_GAP, None))
     if show_projection_stage:
         # Responsive stage zone (2026-07-24): the old flat label was hard-clipped at 24 cells and
@@ -5448,6 +5455,9 @@ def _build_lines(sessions, jobs, section, narrow, malformed, layout="wide", memo
     # before account usage begins instead of letting the two metadata zones touch.
     lines = _top_rows(term_width)
     _seen_glyphs = set()
+    # F-98b: the peer-message subtitle only makes sense between two sessions BOTH on
+    # screen this tick — an off-screen peer still counts toward recv, but gets no line.
+    rendered_session_ids = {s.session_id for s in sessions if s.session_id}
     # F-12(c) legend glyph-appearance tracking — LOCAL to this call (never module/global state,
     # _OFFSET invariant R3): which of the conditional legend glyphs actually got emitted this
     # build. working/idle/dispatch/`~` stay unconditional (always relevant vocabulary); the
@@ -5997,6 +6007,17 @@ def _build_lines(sessions, jobs, section, narrow, malformed, layout="wide", memo
             detail = _context_detail_row(s, term_width=term_width, now_key="now_main")
             if detail:
                 lines.extend(detail)
+            # F-98b/G3: subtitle only when BOTH endpoints are on screen this tick; an
+            # off-screen peer's message still counted toward recv above, but earns no line.
+            # G4: summary/body text never appears here — from_name/kind/age only.
+            _peer_last = getattr(s, "peer_last_recv", None)
+            if _peer_last and _peer_last.get("from_session_id") in rendered_session_ids:
+                lines.extend(_summary_row(
+                    "← %s · %s · %s" % (
+                        _peer_last.get("from_name") or "peer",
+                        _peer_last.get("kind") or "",
+                        fmt_min(_peer_last.get("age_min") or 0)),
+                    depth=0, term_width=term_width, start_col=_NAME_COL))
             stage_rows = ([] if suppress_session_stage else
                           _projection_stage_detail_rows(s, term_width=term_width))
             if stage_rows:

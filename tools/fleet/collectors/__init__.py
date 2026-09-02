@@ -383,6 +383,25 @@ def collect_all(harness_filter=None, jobs_path=None, usage="cache-only"):
     collect_all.last_resource_malformed = getattr(
         resource_runs.collect, "last_malformed", 0) if "resource_runs" in locals() else 0
 
+    # F-98: read-only peer-message ledger projection. Additive and fail-soft — a missing
+    # or unreadable ledger must leave every Session field at its default so the rendered
+    # snapshot is byte-identical to a pre-SD-122 board.
+    peer = None
+    try:
+        from . import peer_messages
+        peer = peer_messages.collect()
+        by_sid = (peer or {}).get("by_session") or {}
+        for s in sessions:
+            row = by_sid.get(s.session_id) if s.session_id else None
+            if not row:
+                continue
+            s.peer_sent_1h = row.get("sent_1h", 0)
+            s.peer_recv_1h = row.get("recv_1h", 0)
+            s.peer_last_recv = row.get("last_recv")
+    except Exception:
+        peer = None
+    collect_all.last_peer_messages = peer
+
     # F-25: drop cross-tick hysteresis entries for rows that no longer exist. Runs after
     # BOTH sessions and jobs are classified — sweeping earlier would evict live job keys.
     try:
@@ -399,3 +418,4 @@ collect_all.last_resource_jobs = []
 collect_all.last_resource_malformed = 0
 collect_all.last_usage = {}
 collect_all.last_usage_snapshots = {}
+collect_all.last_peer_messages = None
