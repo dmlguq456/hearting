@@ -18,6 +18,7 @@ from typing import Any
 ROOT = Path(__file__).resolve().parents[3]
 PREFLIGHT = ROOT / "adapters" / "codex" / "bin" / "preflight.sh"
 RECALL_HOOK = ROOT / "hooks" / "mem-recall-inject.sh"
+LOCAL_EVIDENCE_HOOK = ROOT / "hooks" / "local-evidence-inject.sh"
 TOOLS = ROOT / "tools"
 if str(TOOLS) not in sys.path:
     sys.path.insert(0, str(TOOLS))
@@ -114,6 +115,22 @@ def candidate_context(payload: dict[str, Any], current_cwd: str, sid: str) -> st
             command, cwd=str(ROOT), env=env, text=True,
             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
             timeout=2, check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    return result.stdout if result.returncode == 0 else ""
+
+
+def local_evidence_context(current_cwd: str) -> str:
+    """Run the bounded local-evidence presence probe; every failure is zero context."""
+    command = [str(LOCAL_EVIDENCE_HOOK), "--cwd", current_cwd, "--format", "text"]
+    env = os.environ.copy()
+    env["AGENT_HOME"] = str(ROOT)
+    try:
+        result = subprocess.run(
+            command, cwd=str(ROOT), env=env, text=True,
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            timeout=3, check=False,
         )
     except (OSError, subprocess.SubprocessError):
         return ""
@@ -362,6 +379,7 @@ def main() -> int:
 
     parts = []
     parts.append(candidate_context(payload, current_cwd, sid))
+    parts.append(local_evidence_context(current_cwd))
     parts.append(run_preflight("briefing", current_cwd))
     # Phase 1 token self-regulation is transition-only. Normal, unknown,
     # native-owned, and repeated bands return an empty string (zero injection).

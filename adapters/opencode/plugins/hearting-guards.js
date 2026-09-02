@@ -344,6 +344,7 @@ export const AgentHarnessGuards = async (ctx) => {
     if (prompt && (!cached || cached.turn !== turnKey)) {
       const blocks = [
         collectCandidates([prompt, cwd, sid, turn]),
+        collectPreflight("local-evidence", [cwd]),
         collectPreflight("prompt-signal", [cwd, sid]),
         collectPreflight("briefing", [cwd]),
       ].filter(Boolean)

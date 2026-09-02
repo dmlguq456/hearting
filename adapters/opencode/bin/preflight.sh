@@ -132,6 +132,7 @@ usage: preflight.sh write <file> [session-id] [turn-id]
        preflight.sh skill <name> [cwd] [session-id]
        preflight.sh memory [cwd]
        preflight.sh candidates <prompt> <cwd> <session-id> [turn-id]
+       preflight.sh local-evidence [cwd]
        preflight.sh recall <query> [cwd] [session-id]
        preflight.sh recall-gate <cwd> (--decision recall|skip --reason <reason> [--query <query>] | --outcome applied|miss --gate-id <id>) [options]
        preflight.sh briefing [cwd]
@@ -385,6 +386,10 @@ EOF
     set -- --prompt "$prompt" --cwd "$cwd" --session-id "$sid" --runtime opencode --format text
     [ -z "$turn" ] || set -- "$@" --turn-id "$turn"
     AGENT_HOME="$AGENT_ROOT" bash "$ROOT/hooks/mem-recall-inject.sh" "$@"
+    ;;
+  local-evidence)
+    cwd=${2:-$PWD}
+    AGENT_HOME="$AGENT_ROOT" bash "$ROOT/hooks/local-evidence-inject.sh" --cwd "$cwd" --format text
     ;;
   recall)
     [ "$#" -ge 2 ] || { echo "opencode preflight: recall requires a query" >&2; exit 64; }

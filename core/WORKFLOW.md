@@ -235,7 +235,10 @@ conditions holds:
 4. a spec-backed project will create or update a capability-owned artifact.
 
 Read-only orientation, status reporting, explanations, and simple factual
-answers are exempt. `direct` is an explicit route shown in the card with its
+answers are exempt. Card exemption is not evidence exemption: an explanatory
+or factual answer still follows `roles/response-policy.md` "Local evidence
+before recall" when the repository holds covering research or document
+artifacts. `direct` is an explicit route shown in the card with its
 reason, not a silent no-route decision. A current or immediately preceding user
 instruction that already approves the same route and scope satisfies the gate;
 do not repeat the card. After approval, capability-owned stages, validation,

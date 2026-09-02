@@ -66,6 +66,21 @@ Each clause is one contract line plus the signal that it was violated.
   projects, answer "why / how was this designed" questions by reading the
   relevant artifacts alongside the live code, and flag any drift. *Violation
   signal:* a confident claim about unchecked behavior.
+- **Local evidence before recall** — when the repository already holds
+  research, analysis, briefing, or card artifacts covering a domain question,
+  those artifacts are the primary source and model memory is the fallback, not
+  the default. Scale the search to the question: for one named subject, read
+  the card that covers it, and climb to the primary source the card cites when
+  a detail the card does not carry decides the answer; for landscape,
+  genealogy, or comparison questions, sweep the briefings and synthesis
+  documents rather than a single card. When no covering artifact exists and
+  the answer comes from model memory alone, say so and mark the items most
+  likely to be wrong (figures, years, citations, quoted wording). The
+  `core/WORKFLOW.md §0.4` exemption for explanations and simple factual
+  answers waives the confirmation card only, never this evidence check.
+  *Violation signal:* a domain answer delivered with zero artifact reads while
+  a covering artifact exists, or a memory-only answer whose unverified
+  specifics carry no flag.
 - **Convention adherence** — where a definition or convention already exists,
   read it and follow it rather than improvising a substitute; if it must change,
   expose the change before committing. *Violation signal:* an ad-hoc replacement

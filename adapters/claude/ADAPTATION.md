@@ -91,6 +91,13 @@ explicit `recall-gate` path recovers a missing or failed hook. Registered
 workers stay silent. Candidate relevance and full-record adoption remain model
 judgments.
 
+`UserPromptSubmit` also runs the portable `local-evidence-inject.sh` presence
+probe for the prompt cwd: research/documents/analysis bucket counts plus at
+most six newest entry paths from the canonical artifact root (2,400-UTF-8-byte
+bound, no body reads, no prompt classifier, silent when the root holds no such
+artifacts, worker-exempt, fail-open). It realizes `roles/response-policy.md`
+"Local evidence before recall" deterministically.
+
 Claude Code realizes the portable memory distillation hooks through
 `adapters/claude/settings.json` hook registration and concrete hook scripts under
 `adapters/claude/hooks/`.

@@ -426,6 +426,15 @@
         "hooks": [
           {
             "type": "command",
+            "command": "bash \"$HOME/.claude/hooks/local-evidence-inject.sh\"",
+            "timeout": 5
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
             "command": "python3 \"$HOME/.claude/hooks/dispatch-session-sweep.py\"",
             "timeout": 10
           }
