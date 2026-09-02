@@ -1,0 +1,5 @@
+capture: COLUMNS=100 python3 tools/fleet/fleet.py --once
+quoted: "● hearting/ 🚧 7"; "codex   test Peer-steward… (⌂wt peer-st…)"; "● BC_ResNet/"
+names: rendered session/job labels; peer badge: absent; working-parent owner subtree: visible under hearting card.
+tokens: CL/ 0, CX/ 0, OC/ 0, d1 0, d2 0.
+legend measured widths: primary [52], isolated-wt [49,14], foreign-repo [49,16]; overflow 0.

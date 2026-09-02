@@ -1,0 +1,5 @@
+capture: python3 tools/fleet/fleet.py --once --json
+quoted: "runtime_name": null; jobs depth-1 rows include att-e616fe03e3ae46b583cdf2bcb83668a4
+peer resolver observation: current session has peer_sent_1h=0 and peer_recv_1h=0; no ✉ badge can be rendered.
+owner subtree: JSON contains depth-1 owner rows; child parent linkage is parent_slug (not parent_attempt_id).
+tokens: CL/ 0, CX/ 0, OC/ 0, d1 0, d2 0.

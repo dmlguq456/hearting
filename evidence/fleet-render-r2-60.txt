@@ -1,0 +1,42 @@
+  hearting v2.101.0-14-g7a82f771 · unmanaged
+
+  usage claude code   5h [━━━━━━──────  46%] ↻ 58m   7d [━━━━────────  35%] ↻ 5d 18h   fable [━━━━━───────  40%]
+        codex         7d [━━━━━━━━━━──  83%] ↻ 4d 13h
+  fleet ⠇ 0 working   ● 0 idle   ↳ 4 jobs (1 working)
+  🧠 mem  +44 added(20w·24d) · 13 expired · 26 pruned · last distill 13h 24m · durable 3 over
+─────
+  COMPUTE RESOURCES  1/3
+  ⌂ moving4  CPU ━───────────  4/64 thr  M 32/125G  S 2.6/8G
+             gpu unavailable
+  ◇ cnn      down · ssh: connect to host 163.239.13.43 port 
+  ◇ xavier   down · ssh: connect to host 163.239.13.55 port 
+─────
+
+  SESSIONS   stack · press w to cycle  
+● hearting/ 🚧 7
+▍ ⌄ orphaned dispatch rows ─────────────────────────────────
+▍       ··· claude  plan-check instal…  (orphan)
+▍   12d 5h          Sonnet 5 (medium)          plan-check(std) / qa/plan-review : 
+▍                   autopilot-code
+▍           unknown ────────────────   —
+▍ ··  · claude code stage-dispatch & …  (orphan) (⌂wt peer-st…)
+▍   3h 53m          Opus 5 (xhigh)             code(dev·std·owner) : -
+▍                   
+▍       unknown ━━━━━━────────── 38%        ⚙ Bash  Confir…
+▍         ⠇ codex   test Fleet suite … (⌂wt peer-st…)
+▍   8m              gpt-5.6-luna (medium)      code-test(std) / qa/test : 
+▍                   running
+▍           working ━─── 16%                Confirmed the t…
+▍────────────────────────────────────────────────
+▍ 🧠 19:57 + durable/project sync "**What shipped (branch `review-verdict-contract`, commit fc…"
+▍ 🧠 19:57 + durable/feedback sync "2026-09-02 user hypothesis confirmed from transcript eviden…"
+
+○ BC_ResNet/
+▍ ⌄ orphaned dispatch rows ─────────────────────────────────
+▍ ··  · claude code c1v3-wwd-mix-port  (orphan)
+▍   12d 6h          Opus 5 (xhigh)             code(dev·std·owner) : 
+▍                   impl-review ✓ › test ✓ › report ✓
+▍       unknown ────────────────   —
+
+  ⠹ working   ● idle   ↳ dispatch   🚧 N worktrees
+  🧠 0 mem   ⌂wt worktree
