@@ -5343,5 +5343,90 @@ for surface in utilities/harness-status.sh utilities/dispatch-liveness.sh utilit
   fi
 done
 
+# --- A50-1: core/OPERATIONS.md §5.14 realizes the six SD-122 steps, the kind
+# vocabulary, the ledger schema, the realization table, and the probe-first rule.
+sec5_14=$(python3 -c "
+t = open('$ROOT/core/OPERATIONS.md', encoding='utf-8').read()
+i = t.find('### §5.14')
+print(t[i:i+4000] if i >= 0 else '')
+")
+if [ -z "$sec5_14" ]; then
+  bad "core/OPERATIONS.md is missing ### §5.14 (SD-122 peer-session steering)"
+else
+  first_sentence=$(printf '%s' "$sec5_14" | python3 -c "import sys;t=sys.stdin.read();print(t.split(chr(10)+chr(10))[1].split('.')[0])" 2>/dev/null)
+  if printf '%s' "$first_sentence" | grep -qF "informally depth −1; not a dispatch depth"; then
+    ok "§5.14 first sentence carries the depth −1 non-dispatch phrase"
+  else
+    bad "§5.14 first sentence is missing 'informally depth −1; not a dispatch depth'"
+  fi
+  s_missing=""
+  for tok in S1 S2 S3 S4 S5 S6; do
+    printf '%s' "$sec5_14" | grep -q "\*\*${tok}\*\*" || s_missing="$s_missing $tok"
+  done
+  if [ -z "$s_missing" ]; then
+    ok "§5.14 names all six realization steps S1-S6"
+  else
+    bad "§5.14 is missing realization step(s):$s_missing"
+  fi
+  for kind in watch steer handoff gate-relay notice; do
+    printf '%s' "$sec5_14" | grep -q "$kind" || s_missing="$s_missing $kind"
+  done
+  if printf '%s' "$sec5_14" | grep -q '| Runtime | Realization |'; then
+    ok "§5.14 carries the per-adapter realization table"
+  else
+    bad "§5.14 is missing the per-adapter realization table"
+  fi
+  if printf '%s' "$sec5_14" | grep -q 'peer-session-probe/P-<n>.md'; then
+    ok "§5.14 names the probe-first receipt path"
+  else
+    bad "§5.14 is missing the probe receipt path"
+  fi
+  p_missing=""
+  for tok in "P-1" "P-2" "P-3" "P-4" "P-5"; do
+    printf '%s' "$sec5_14" | grep -qF "$tok" || p_missing="$p_missing $tok"
+  done
+  if [ -z "$p_missing" ]; then
+    ok "§5.14 names probes P-1 through P-5"
+  else
+    bad "§5.14 is missing probe reference(s):$p_missing"
+  fi
+  if printf '%s' "$sec5_14" | grep -q 'Codex | .unknown.' \
+       && printf '%s' "$sec5_14" | grep -q 'OpenCode | .unknown.'; then
+    ok "§5.14 Codex/OpenCode rows are unknown"
+  else
+    bad "§5.14 Codex/OpenCode rows should read unknown pending probe"
+  fi
+  if printf '%s' "$sec5_14" | grep -A2 'Codex |' | grep -qi 'supported'; then
+    bad "§5.14 Codex row asserts a capability ('supported') ahead of its probe (A50-6)"
+  else
+    ok "§5.14 Codex row makes no premature capability claim"
+  fi
+fi
+for f in core/WORKFLOW.md core/CONVENTIONS.md core/ADAPTATION.md; do
+  if grep -qi 'steward' "$ROOT/$f"; then
+    ok "$f carries its §5.14 cross-reference line"
+  else
+    bad "$f is missing its §5.14 cross-reference line"
+  fi
+done
+
+# --- A50-5: no literal dispatch_depth=-1 anywhere in shipped surfaces.
+# (This scan's own source line is excluded — it names the forbidden token to test for it.)
+depth_neg1=$(cd "$ROOT" && grep -rn 'dispatch_depth=-1\|"dispatch_depth": *-1\|dispatch_depth: *-1' \
+  core utilities tools adapters hooks 2>/dev/null | grep -v '^hooks/portable-guards\.test\.sh:')
+if [ -z "$depth_neg1" ]; then
+  ok "no literal dispatch_depth=-1 in core/utilities/tools/adapters/hooks"
+else
+  bad "found literal dispatch_depth=-1 [$depth_neg1]"
+fi
+
+# --- d1/d2 depth text tokens must never re-enter the render surface.
+d1d2=$(cd "$ROOT" && grep -n "'d1'\|\"d1\"\|'d2'\|\"d2\"" tools/fleet/render.py 2>/dev/null)
+if [ -z "$d1d2" ]; then
+  ok "no d1/d2 depth text tokens in tools/fleet/render.py"
+else
+  bad "found d1/d2 depth text tokens in tools/fleet/render.py [$d1d2]"
+fi
+
 printf 'PASS=%s FAIL=%s\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

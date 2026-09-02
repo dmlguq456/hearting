@@ -712,6 +712,6 @@ carries the message body.
 | OpenCode | `unknown` — probe P-1 through P-5 pending; no capability claimed until a receipt exists |
 
 Probe receipts, once run, land at
-`spec/stage-dispatch/_internal/research/peer-session-probe/P-<n>.md` — P-1 through P-5
-are not yet executed as of this section's authoring, and no adapter claims a working
-Codex or OpenCode realization until its probe receipt exists.
+`spec/stage-dispatch/_internal/research/peer-session-probe/P-<n>.md` — P-1, P-2, P-3, P-4,
+and P-5 are not yet executed as of this section's authoring, and no adapter claims a
+working Codex or OpenCode realization until its probe receipt exists.
