@@ -431,6 +431,90 @@ class TestSupervisorAdvance(WorkflowFixture):
 
 
 # ---------------------------------------------------------------------------
+# B2. A50-8 `release` closes the gap `gate --release` alone leaves open
+# ---------------------------------------------------------------------------
+class TestGateRelease(WorkflowFixture):
+    def _blocked(self):
+        route, path = self.two_stage_route(
+            continuation={"kind": "human-gate", "gate": "frame-review"},
+            human_gate="frame-review")
+        SUP.main(["gate", "--route", str(path), "--gate", "frame-review", "--block"])
+        return route, path
+
+    def test_proceed_claims_and_reports_the_successor_exactly_once(self):
+        route, path = self._blocked()
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            code = SUP.main(["release", "--route", str(path), "--gate", "frame-review",
+                             "--decision", "proceed", "--actor", "fixture-user"])
+        self.assertEqual(code, 0)
+        payload = json.loads(buf.getvalue())
+        self.assertEqual(payload["decision"], "proceed")
+        self.assertEqual(payload["node"], "run")
+        self.assertEqual(len(payload["successors"]), 1)
+        self.assertEqual(payload["successors"][0]["successor"], "verify")
+        self.assertTrue(payload["successors"][0]["created"])
+        ledger = SUP.ledger_for(route)
+        self.assertEqual(ledger.state()["workflow_state"], "RUNNING")
+        self.assertEqual(len(ledger.claims()), 1)
+        # A second release attempt is refused outright by the same state
+        # guard cmd_gate's --release already uses -- the gate is no longer
+        # BLOCKED_HUMAN_GATE, so "exactly once" never depends on re-deriving
+        # the claim key twice.
+        with self.assertRaisesRegex(SUP.SupervisorError, "not blocked"):
+            SUP.main(["release", "--route", str(path), "--gate", "frame-review",
+                     "--decision", "proceed"])
+        self.assertEqual(len(ledger.claims()), 1)
+
+    def test_proceed_requires_a_blocked_workflow(self):
+        route, path = self.two_stage_route(
+            continuation={"kind": "human-gate", "gate": "frame-review"},
+            human_gate="frame-review")
+        with self.assertRaisesRegex(SUP.SupervisorError, "not blocked"):
+            SUP.main(["release", "--route", str(path), "--gate", "frame-review",
+                     "--decision", "proceed"])
+
+    def test_release_rejects_an_undeclared_gate(self):
+        route, path = self._blocked()
+        with self.assertRaisesRegex(SUP.SupervisorError, "no human gate"):
+            SUP.main(["release", "--route", str(path), "--gate", "no-such-gate",
+                     "--decision", "proceed"])
+
+    def test_revise_reaches_failed_retryable_via_the_declared_two_hop_path(self):
+        # BLOCKED_HUMAN_GATE has no direct transition to FAILED_RETRYABLE in the
+        # topology registry -- only via RUNNING, both hops declared. Confirms
+        # `release --decision revise` does not need a vocabulary widening.
+        self.assertFalse(WS.can_transition("BLOCKED_HUMAN_GATE", "FAILED_RETRYABLE"))
+        route, path = self._blocked()
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            code = SUP.main(["release", "--route", str(path), "--gate", "frame-review",
+                             "--decision", "revise", "--actor", "fixture-user"])
+        self.assertEqual(code, 0)
+        payload = json.loads(buf.getvalue())
+        self.assertEqual(payload["decision"], "revise")
+        self.assertEqual(payload["retry_boundary"], "frame")
+        ledger = SUP.ledger_for(route)
+        self.assertEqual(ledger.state()["workflow_state"], "FAILED_RETRYABLE")
+        self.assertEqual(ledger.claims(), {})
+
+    def test_stop_sets_cancelled_with_operator_decision_evidence(self):
+        route, path = self._blocked()
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            code = SUP.main(["release", "--route", str(path), "--gate", "frame-review",
+                             "--decision", "stop", "--actor", "fixture-user"])
+        self.assertEqual(code, 0)
+        payload = json.loads(buf.getvalue())
+        self.assertEqual(payload["decision"], "stop")
+        ledger = SUP.ledger_for(route)
+        self.assertEqual(ledger.state()["workflow_state"], "CANCELLED")
+        journal = ledger.journal()
+        last = journal[-1]
+        self.assertEqual(last["evidence"]["abandon_reason"], "operator-decision")
+
+
+# ---------------------------------------------------------------------------
 # C. completion is terminal-node bound
 # ---------------------------------------------------------------------------
 class TestCompletion(WorkflowFixture):

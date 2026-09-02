@@ -111,6 +111,21 @@ Stage-local gates must not become full independent QA loops after every sub-stag
 
 **Corrections are batched, never atomic.** A failed review gate (`plan-check`, `impl-review`, `test`) is followed by exactly one correction pass that closes every 🔴 finding of that round together, plus the follow-on gaps the review named; the owner never redispatches the full `plan` or `execute` node to fix a single finding. The plan correction runs through the `code-refine` boundary and the code correction re-enters the `execute` boundary as a bounded fix under the same node. The re-review that follows is a **closure check** under the review unit's Round Protocol — the owner's assignment names the round number and the prior review artifact and asks whether the prior 🔴 items are closed and the delta is clean; it never asks for a fresh independent re-audit of the whole artifact. Each correction consumes one unit of the `core/CONVENTIONS.md §1.1` retry budget; when the budget is spent, remaining concerns go to the plan's risk/unresolved section and the owner reports them instead of opening another round. A review round that records blocking findings ends `completed-review-blocking`, not as a dead worker; when the budget is spent on such rounds, the owner writes `round_{N}.owner-closure.md` beside the review artifacts (frontmatter `verdict: closed-by-owner`, `node`, `gate`; body naming every blocking attempt and its disposition) and completes the review node with that record as evidence — `core/OPERATIONS.md §5.10` owns the gate's evidence checks.
 
+**Post-frame direction gate (SD-123).** A `standard+` route compiled after this
+cycle seals `human_gates: ["frame-review"]` and the `frame` node's continuation
+as a human gate; a route sealed before this cycle keeps `inline-next` and is
+never retro-fitted. After `frame` completes and before `plan` starts, the owner
+builds `shards/frame/frame-summary.json` (five fields — 방향/대안/위험/범위
+변경/비용, ≤1KB) from `shards/frame/direction-brief.md`, raises the existing
+typed attention path with `required_action=human-gate:frame-review` referencing
+that file **by path** (never embedded in a stage-advance receipt body), and
+waits for `workflow-supervisor.py release --gate frame-review --decision
+proceed|revise|stop`. `proceed` claims and starts `plan` exactly once; `revise`
+returns to `frame` under the `code-refine` retry boundary; `stop` cancels the
+route. The declared `confirmation.mode` (default `hybrid`) governs whether this
+is the sole confirmation point, layers onto the pre-plan notify, or both apply;
+`core/WORKFLOW.md` §0.4 owns the user-facing card.
+
 A declared `plan-check` parallel group is a 2-way read-only review: two plan-check verdicts merge under the existing review-anchor merge contract (stricter-wins plus the union of blocking findings). When the two legs nominate different plan legs as winner, `plan.md` materialization is blocked unless the owner writes a bounded merge-arbitration memo, which is the only path into the existing bounded `code-refine` flow. `plan-check` itself never mutates the plan.
 
 At `thorough+` the group realizes a third `simplicity-check` leg with `leg_class: auxiliary`. Its arbiter is the **owner**, not the group's anchor — the anchor runs concurrently with it. After the group joins, the owner puts `auxiliary_findings_considered` in the merge memo's frontmatter with exactly one entry per realized auxiliary leg (adopted or rejected, with the reason) and registers it with `capability-route.py arbitrate --group plan-check`. Until that record exists, `code-execute` is refused at the start-gate with `auxiliary-arbitration-missing` and the route's terminal-gate observation carries a failed `parallel_group:plan-check` row. `core/OPERATIONS.md §5.10` owns the transaction and its typed refusals.

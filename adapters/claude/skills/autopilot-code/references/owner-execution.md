@@ -61,6 +61,37 @@ Before merge/commit: (1) run `python3 tools/generate.py`, (2) record new `utilit
 
 > Treat the [Reference Index](#reference-index) as the single source for reference files, load points, and contents.
 
+## Post-Frame Direction Gate (SD-123)
+
+`standard+` routes compiled after this cycle seal `human_gates: ["frame-review"]`
+and the `frame` node's continuation as `{"kind": "human-gate", "gate":
+"frame-review"}` — a route sealed before this cycle keeps `inline-next` and is
+never retro-fitted; do not attempt to apply this gate to an already-open route.
+
+1. After `frame` (and, at `standard`, `frame-alternative`) completes, before
+   dispatching `plan`: build `shards/frame/frame-summary.json` from
+   `shards/frame/direction-brief.md` — exactly the five fields 방향 (direction),
+   대안 (alternatives), 위험 (risk), 범위 변경 (scope change), 비용 (cost), total
+   size ≤1KB. Reference it by **path** when raising attention; never embed the
+   summary, a `required_action`, or a gate field inside a stage-advance receipt
+   body (seam 3 — `utilities/dispatch_completion_join.py`'s v2/v3 receipt
+   negotiation returns its body by identity when no advanced record exists).
+2. Raise the existing typed attention path (SD-78/108) with
+   `required_action=human-gate:frame-review`, naming `shards/frame/frame-summary.json`
+   as the reviewable artifact.
+3. Wait for the release rather than polling or sleeping:
+   `workflow-supervisor.py release --route <route file> --gate frame-review
+   --decision proceed|revise|stop --actor <actor>`. `proceed` claims and reports
+   the `plan` successor atomically (never spawn `plan` a second time on retry);
+   `revise` returns to `frame` under the `code-refine` retry boundary; `stop`
+   cancels the route with `abandon_reason=operator-decision`.
+4. `confirmation.mode` (`profiles/dispatch-defaults.yaml` /
+   `utilities/dispatch-defaults.py`, default `hybrid`) governs whether this
+   post-frame gate is the sole confirmation point (`post-frame-only`), layers
+   onto the existing pre-plan notify (`hybrid`), or both are always explicit
+   (`both`) — read it via `query_confirmation_mode`, never hardcode `hybrid`.
+   `core/WORKFLOW.md` §0.4 owns the user-facing card text.
+
 ## Artifact Producer Lifecycle (W7C)
 
 Owner-executed, same at every intensity (`direct` inline; `quick`/`standard+`

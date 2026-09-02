@@ -337,7 +337,8 @@
             "unit": "plan/frame",
             "model_profile": "balanced-deep",
             "continuation": {
-              "kind": "inline-next"
+              "kind": "human-gate",
+              "gate": "frame-review"
             },
             "advance_class": "runtime-eligible",
             "commit_expected": false
@@ -754,8 +755,16 @@
         "code-test",
         "code-report"
       ],
-      "human_gates": [],
-      "human_gate_bindings": [],
+      "human_gates": [
+        "frame-review"
+      ],
+      "human_gate_bindings": [
+        {
+          "gate": "frame-review",
+          "node": "plan",
+          "position": "entry"
+        }
+      ],
       "resume_retry_boundaries": [
         "frame",
         "plan",

@@ -265,6 +265,35 @@ sessions read the detail they need after approval. If a runtime automatically
 injects a selected Skill body into main, do not duplicate that read; record the
 runtime limitation rather than claiming total-token savings.
 
+**Standard+ two-stage confirmation (SD-123).** For `autopilot-code` at
+`standard+`, the §0.4 gate above is a non-blocking `[실행 통지]` rather than a
+blocking card — the same five fields, in order, plus one closing line "frame
+뒤 방향 확인 예정" — and route compile/bind/producer-begin proceed immediately
+after it (frame never touches source, so the route-participation invariant
+above still holds). A second, blocking `[방향 확인]` card follows the frame
+group join, before `plan` starts:
+
+```text
+[방향 확인]
+
+방향: <채택한 방향 한 줄>
+대안: <기각한 대안과 이유>
+위험: <frame이 찾은 최대 위험·가정>
+범위 변경: <시작 통지 대비 증감, 없으면 "없음">
+비용: <frame 실소비와 남은 단계·강도>
+
+→ 진행(권장) / 수정: <틀린 부분> / 중단
+```
+
+Deliver this card through a native structured-question surface when one is
+available, the plain-text form otherwise — the same fallback rule as the §0.4
+card. `direct`/`quick` have no `frame` node and keep the ordinary blocking §0.4
+card unchanged. `confirmation.mode` (`profiles/dispatch-defaults.yaml`, default
+`hybrid`) governs the pair: `hybrid` is the shape above, `both` restores a
+blocking start card, `post-frame-only` drops the start notify entirely. A route
+compiled before this cycle keeps `frame.continuation=inline-next` and is never
+retro-fitted onto this gate.
+
 Entry routers therefore have two deterministic load phases: manifest-owned
 metadata before approval, then the selected portable owner contract after
 approval. A router may expose one direct owner-reference index, but no
@@ -363,7 +392,7 @@ contract exists to prevent, so the declaration is mechanical, not editorial:
 |---|---|
 | `inline-next` | the same checked payload runs the next stage before it returns |
 | `supervised` | a registered continuation supervisor observes child termination and starts the next stage exactly once |
-| `human-gate` | an explicit human gate named in the recipe's `human_gates` blocks the successor |
+| `human-gate` | an explicit human gate named in the recipe's `human_gates` blocks the successor — e.g. `autopilot-code`'s `frame` node continues into gate `frame-review`, releasing with `workflow-supervisor.py release --gate frame-review --decision proceed\|revise\|stop` (§0.4, SD-123) |
 | `monitor` | a checked monitor waits on an external state change and reports a typed condition match |
 
 A detached resource process can never continue itself, so a `resource-runner`

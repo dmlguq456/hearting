@@ -380,6 +380,28 @@ def _start_successor(armed, successor, key):
             "log": log_path}
 
 
+def _claim_successors(route, ledger, armed, node_id, successors, evidence=None):
+    """Exactly-once successor claim + start, factored out of `_evaluate` (A50-8)
+    so ordinary poll advancement and an explicit `release --decision proceed`
+    share the one claim primitive (`ledger.claim`) instead of each growing its
+    own copy of this loop."""
+    started = []
+    for successor in successors:
+        key = WS.successor_key(route.get("route_hash", ""), node_id,
+                               str((evidence or {}).get("identity")), successor)
+        created, claim = ledger.claim(key, {
+            "route_id": route["route_id"], "predecessor": node_id, "successor": successor,
+            "predecessor_identity": (evidence or {}).get("identity"),
+        })
+        if not created:
+            started.append({"successor": successor, "claim": key, "created": False,
+                            "note": "already claimed", "claim_record": claim})
+            continue
+        outcome = _start_successor(armed, successor, key)
+        started.append({"successor": successor, "claim": key, "created": True, **outcome})
+    return started
+
+
 def _evaluate(route, ledger, armed, results):
     node_id = armed["node"]
     kind = armed["continuation_kind"]
@@ -425,20 +447,7 @@ def _evaluate(route, ledger, armed, results):
         evidence["monitor"] = "matched"
 
     ledger.record(node_id, "STAGE_SUCCEEDED", evidence=evidence, actor="poll")
-    started = []
-    for successor in armed["successors"]:
-        key = WS.successor_key(route.get("route_hash", ""), node_id,
-                               str(evidence.get("identity")), successor)
-        created, claim = ledger.claim(key, {
-            "route_id": route["route_id"], "predecessor": node_id, "successor": successor,
-            "predecessor_identity": evidence.get("identity"),
-        })
-        if not created:
-            started.append({"successor": successor, "claim": key, "created": False,
-                            "note": "already claimed", "claim_record": claim})
-            continue
-        outcome = _start_successor(armed, successor, key)
-        started.append({"successor": successor, "claim": key, "created": True, **outcome})
+    started = _claim_successors(route, ledger, armed, node_id, armed["successors"], evidence)
     row["action"] = "advanced"
     row["successors"] = started
     if any(entry.get("created") for entry in started):
@@ -531,6 +540,101 @@ def cmd_gate(args):
             action = "blocked"
     print(json.dumps({"gate": args.gate, "action": action,
                       "workflow_state": ledger.state()["workflow_state"]}, sort_keys=True))
+    return 0
+
+
+def _gate_predecessor_node(route, gate_name):
+    """The node whose declared continuation names this gate -- the node the
+    workflow was blocked leaving, as opposed to `human_gate_bindings`' own
+    `node`/`position`, which name where the gate blocks *entry*."""
+    for node in route.get("nodes", []) or []:
+        continuation = node.get("continuation") or {}
+        if continuation.get("kind") == "human-gate" and continuation.get("gate") == gate_name:
+            return node
+    return None
+
+
+def cmd_release(args):
+    """A50-8: `release --decision proceed|revise|stop`, semantically
+    consistent with `gate --release|--block` but closing the gap `gate
+    --release` alone leaves open -- `poll_once` reports `action=human-gate`
+    for a human-gate continuation and stops there (:465-471); nothing else
+    ever calls `_evaluate` for that node, so a bare `gate --release` leaves
+    the workflow RUNNING with no successor claimed or started. `proceed`
+    performs both, atomically, inside one `ledger.lock()`.
+    """
+    route = load_route(args.route)
+    ledger = ledger_for(route)
+    gates = {row["gate"]: row for row in (route.get("human_gate_bindings") or [])}
+    if args.gate not in gates:
+        raise SupervisorError(f"route declares no human gate {args.gate!r}")
+    predecessor = _gate_predecessor_node(route, args.gate)
+    if predecessor is None:
+        raise SupervisorError(
+            f"route declares no node continuing into human gate {args.gate!r}"
+        )
+    node_id = str(predecessor["id"])
+    actor = args.actor or "user"
+    with ledger.lock():
+        state = ledger.state()["workflow_state"]
+        if state != "BLOCKED_HUMAN_GATE":
+            raise SupervisorError(f"workflow is {state}, not blocked on a human gate")
+        if args.decision == "proceed":
+            ledger.set_workflow_state(
+                "RUNNING",
+                evidence={"released_gate": args.gate, "released_by": actor, "decision": "proceed"},
+                actor="release",
+            )
+            successors = WS.route_successors(route, node_id)
+            # No armed record exists for a human-gate node (cmd_arm governs only
+            # supervised/monitor continuations), so the successor start is always
+            # the declared-external-surface shape of `_start_successor`: the
+            # owner conductor itself dispatches the next stage after this call
+            # returns. Only the exactly-once claim is this function's job.
+            armed_like = {"route_id": route["route_id"], "successor_command": None}
+            started = _claim_successors(route, ledger, armed_like, node_id, successors)
+            if any(entry.get("created") for entry in started):
+                current = ledger.state()["workflow_state"]
+                if WS.can_transition(current, "NEXT_REGISTERED"):
+                    ledger.set_workflow_state(
+                        "NEXT_REGISTERED",
+                        evidence={"node": node_id, "successors": successors},
+                        actor="release",
+                    )
+            payload = {"gate": args.gate, "decision": "proceed", "node": node_id,
+                      "successors": started,
+                      "workflow_state": ledger.state()["workflow_state"]}
+        elif args.decision == "revise":
+            # BLOCKED_HUMAN_GATE has no direct transition to FAILED_RETRYABLE in
+            # the topology registry's workflow_transitions -- both hops
+            # (-> RUNNING -> FAILED_RETRYABLE) are declared, so revise takes
+            # them in the same lock rather than widening the vocabulary.
+            ledger.set_workflow_state(
+                "RUNNING",
+                evidence={"released_gate": args.gate, "released_by": actor, "decision": "revise"},
+                actor="release",
+            )
+            ledger.set_workflow_state(
+                "FAILED_RETRYABLE",
+                evidence={"gate": args.gate, "released_by": actor,
+                          "retry_boundary": "frame", "next_stage": "code-refine"},
+                actor="release",
+            )
+            payload = {"gate": args.gate, "decision": "revise", "node": node_id,
+                      "retry_boundary": "frame",
+                      "workflow_state": ledger.state()["workflow_state"]}
+        elif args.decision == "stop":
+            ledger.set_workflow_state(
+                "CANCELLED",
+                evidence={"gate": args.gate, "released_by": actor,
+                          "abandon_reason": "operator-decision"},
+                actor="release",
+            )
+            payload = {"gate": args.gate, "decision": "stop", "node": node_id,
+                      "workflow_state": ledger.state()["workflow_state"]}
+        else:
+            raise SupervisorError(f"unknown --decision: {args.decision!r}")
+    print(json.dumps(payload, sort_keys=True))
     return 0
 
 
@@ -1018,6 +1122,12 @@ def build_parser():
     group.add_argument("--release", action="store_true")
     group.add_argument("--block", action="store_true")
 
+    release = sub.add_parser("release", help="resolve a declared human gate: proceed, revise, or stop")
+    release.add_argument("--route", required=True)
+    release.add_argument("--gate", required=True)
+    release.add_argument("--decision", required=True, choices=("proceed", "revise", "stop"))
+    release.add_argument("--actor")
+
     status = sub.add_parser("status", help="portable workflow/stage/resource projection")
     status.add_argument("--route", required=True)
     status.add_argument("--json", action="store_true")
@@ -1036,6 +1146,7 @@ def main(argv=None):
     args = build_parser().parse_args(argv)
     handler = {
         "arm": cmd_arm, "poll": cmd_poll, "watch": cmd_watch, "gate": cmd_gate,
+        "release": cmd_release,
         "status": cmd_status, "complete": cmd_complete, "survey": cmd_survey,
     }[args.command]
     return handler(args)
