@@ -146,6 +146,9 @@ _HUE_OF = {
     # dial, stage prefixes) — it is not a name key and is absent from `NAME_KEYS`.
     "name_dim": ("w", _A_D), "nm_dead": ("w", _A_D),
     "grp": ("w", _A_B), "branch_s": ("d", 0), "cost_hi": ("w", _A_B),
+    # F-97b: one step brighter than the dim branch/parens so a foreign-repo or
+    # isolated-worktree token reads as a distinct identity signal, not decoration.
+    "loc_repo": ("w", 0),
     "qa_quick": ("d", _A_D), "qa_light": ("d", _A_D), "qa_standard": ("d", 0),
     "qa_thorough": ("d", _A_B), "qa_adversarial": ("d", _A_B),
     "g_work": ("g", _A_B), "g_work_off": ("g", _A_D),
@@ -920,8 +923,28 @@ def _wide_name_width(term_width):
     return _NW_S + min(_NAME_WIDE_MAX - _NW_S, surplus)
 
 
+_LOC_CONTENT_W = _BRANCH_SUFFIX_W - 2      # 12 — content budget inside "( )"
+
+
+def _location_prefix_segs(kind, repo, budget):
+    """(segs, cells). Never exceeds `budget`; identity(repo) outranks branch (F-97b)."""
+    if kind == "foreign-repo" and repo:
+        # repo is allocated FIRST and clipped only against the hard floor that keeps
+        # 1 cell for the arrow, 1 for the gap and >=1 for the branch.
+        repo_max = max(1, budget - 3)
+        shown_repo = _clip_w(str(repo), repo_max)
+        return ([("→", "loc_repo"), (shown_repo, "loc_repo"), (" ", None)],
+                1 + _dw(shown_repo) + 1)
+    if kind == "isolated-wt":
+        if budget < 5:            # "⌂wt" + gap + >=1 branch cell does not fit
+            return [], 0          # narrow layouts keep branch identity, drop the token
+        return [("⌂wt", "loc_repo"), (" ", None)], 4
+    return [], 0                  # primary / unknown / missing repo -> no token at all
+
+
 def _branch_suffix_segs(cwd, branch, dim=True, optional=False,
-                        ahead=_IO_UNSET, behind=_IO_UNSET):
+                        ahead=_IO_UNSET, behind=_IO_UNSET,
+                        location_kind=None, location_repo=None):
     """Integrated `` (branch)`` suffix for the session column.
 
     Wide rows reserve a fixed amount for this suffix; narrow/stack rows use only
@@ -931,11 +954,13 @@ def _branch_suffix_segs(cwd, branch, dim=True, optional=False,
     snapshot_owned = ahead is not _IO_UNSET or behind is not _IO_UNSET
     br = branch or (None if snapshot_owned else _git_branch(cwd))
     if not br and optional:
-        return []
+        return []                                  # UNCHANGED — must stay BEFORE location work,
+                                                   # so a location token never appears alone
+    loc_segs, loc_w = _location_prefix_segs(location_kind, location_repo, _LOC_CONTENT_W)
     # The title side reserves `_NAME_GAP`, so the visible suffix may use one cell
     # beyond its nominal reserve without moving the next column.
-    shown = _clip_w(str(br or "—"), max(1, _BRANCH_SUFFIX_W - 2))
-    base = [(" (", "dim"), (shown, "dim" if dim else "branch_s")]
+    shown = _clip_w(str(br or "—"), max(1, _LOC_CONTENT_W - loc_w))
+    base = [(" (", "dim")] + loc_segs + [(shown, "dim" if dim else "branch_s")]
     close = [(")", "dim")]
     if snapshot_owned:
         counts = ((ahead or 0), (behind or 0)) if (ahead or behind) else None
@@ -2634,7 +2659,9 @@ def _dispatch_row(j, orphan=False, parent_model=None, parent_harness=None, is_la
     branch_segs = _branch_suffix_segs(
         "" if key in _LOOPS_KEYS else j.cwd, j.branch, optional=key in _LOOPS_KEYS,
         ahead=getattr(j, "branch_ahead", None),
-        behind=getattr(j, "branch_behind", None))
+        behind=getattr(j, "branch_behind", None),
+        location_kind=None if key in _LOOPS_KEYS else getattr(j, "location_kind", None),
+        location_repo=getattr(j, "location_repo", None))
     segs += branch_segs
     used += sum(_dw(text) for text, _key in branch_segs)
     session_width = avail + _BRANCH_SUFFIX_W
@@ -2905,7 +2932,9 @@ def _dispatch_row_2line(j, orphan=False, parent_model=None, parent_effort=None, 
     br_segs = _branch_suffix_segs(
         "" if key in _LOOPS_KEYS else j.cwd, j.branch, optional=True,
         ahead=getattr(j, "branch_ahead", None),
-        behind=getattr(j, "branch_behind", None))
+        behind=getattr(j, "branch_behind", None),
+        location_kind=None if key in _LOOPS_KEYS else getattr(j, "location_kind", None),
+        location_repo=getattr(j, "location_repo", None))
     if not _split:
         l1.extend(br_segs)
 
@@ -5759,6 +5788,7 @@ def _build_lines(sessions, jobs, section, narrow, malformed, layout="wide", memo
             # F-27: a job row is a target only with an exact pid to verify (prd.md:253).
             if job.pid:
                 _SELECTABLE.append(_select_entry_job(job, len(lines)))
+            _dispatch_lines_before = len(lines)
             if _jrow:
                 lines.extend(_jrow(job, orphan=orphan, parent_model=row_parent_model,
                                    parent_effort=row_parent_effort, stage_override=stage_override,
@@ -5775,6 +5805,15 @@ def _build_lines(sessions, jobs, section, narrow, malformed, layout="wide", memo
                                            # F-83: unframed rows need the same right-edge
                                            # ledger to clamp their open-row breadcrumb zone.
                                            card_interior=_dispatch_box_width(term_width, layout) - 1))
+            # F-97b legend gate: _seen_glyphs is local to this call (R3), and
+            # _branch_suffix_segs runs inside a helper with no closure over it, so the
+            # loc_repo/loc_wt glyph is inferred here from the row it just emitted.
+            for _line in lines[_dispatch_lines_before:]:
+                if any(_k == "loc_repo" for _t, _k in _line):
+                    _seen_glyphs.add(
+                        "loc_foreign" if any(_t.startswith("→") for _t, _k in _line)
+                        else "loc_wt"
+                    )
             # 2026-07-24: a dispatch card's second line is its live log summary ONLY —
             # the same "identity row + fresh NOW" shape as a main-session card. The
             # pipeline rides the row's own breadcrumb; dedicated stage rows are a
@@ -5852,11 +5891,20 @@ def _build_lines(sessions, jobs, section, narrow, malformed, layout="wide", memo
                 # so the rail stays bare rather than printing `one-shot` twice on one card
                 # (the F-37 single-render contract). Computed BEFORE the insertion check
                 # below so a childless-but-labeled card still gets its divider.
+                campaign_label = getattr(job, "campaign_label", None)
+                campaign_segs = [(" · " + campaign_label, "dim")] if campaign_label else []
+                campaign_w = sum(_dw(t) for t, _k in campaign_segs)
                 route_label = None
                 if route_seq and len(route_seq) > 1:
+                    # F-97c: the campaign label rides the SAME divider budget as the route
+                    # breadcrumb, deducted first, so the divider's total width never grows —
+                    # breadcrumb legibility always wins when the budget cannot carry both.
+                    label_budget = bottom_label_budget(box_width) - campaign_w
+                    if label_budget < bottom_label_budget(box_width) // 2:
+                        campaign_segs = []  # no room to spare — drop the label, keep the route
                     route_label = _route_stage_segs(
                         route_seq, unit_working or job.liveness == "working",
-                        bottom_label_budget(box_width))
+                        max(1, label_budget))
                 # D4/F-81: a divider only makes sense when this card actually HAS raw
                 # children — it separates the owner's own rows from its descendants'.
                 # `has_children` is the raw job_children lookup, not whether any of them
@@ -5872,9 +5920,10 @@ def _build_lines(sessions, jobs, section, narrow, malformed, layout="wide", memo
                 # passed through `_frame_dispatch_line` (frame members, not content rows).
                 has_children = bool(job_children.get(job.slug))
                 if has_children:
+                    divider_label = (route_label or []) + campaign_segs if campaign_segs else route_label
                     lines.insert(header_end,
                                  _dispatch_box_divider(box_width, rail_key, run_key=run_key,
-                                                       label_segs=route_label))
+                                                       label_segs=divider_label))
                     lines.append(_dispatch_box_bottom(box_width, rail_key, run_key=run_key,
                                                       label_segs=None))
                 else:
@@ -6074,6 +6123,10 @@ def _build_lines(sessions, jobs, section, narrow, malformed, layout="wide", memo
     if n_mem_total or "mem" in _seen_glyphs:
         # Always expose the board-wide memory total in the legend, even when memory-only groups fold.
         legend += [("🧠 %d" % n_mem_total, "dim"), (" mem   ", "dim")]
+    if "loc_foreign" in _seen_glyphs:
+        legend += [("→", "loc_repo"), (" foreign repo   ", "dim")]
+    if "loc_wt" in _seen_glyphs:
+        legend += [("⌂wt", "loc_repo"), (" worktree   ", "dim")]
     # F-9(d) `~ derived/inherited value` retired with the marker itself (user 2026-07-16:
     # inherited effort now shows plain — the tilde read as noise).
     lines.append(legend)

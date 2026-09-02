@@ -435,6 +435,10 @@ class DispatchJob:
     branch_ahead: Optional[int] = None  # live snapshot Git telemetry
     branch_behind: Optional[int] = None
     worktree_count: int = 0             # snapshot-owned; render never scans .git/worktrees
+    location_kind: Optional[str] = None   # F-97a: primary | isolated-wt | foreign-repo | unknown
+    location_repo: Optional[str] = None   # foreign-repo only — project_of(job.cwd)
+    location_wt: Optional[str] = None     # isolated-wt only — basename(job.cwd)
+    campaign_label: Optional[str] = None  # F-97c: producer cycle title, bounded 24
     depth: int = 1                      # display compatibility alias; derived from dispatch_depth on current rows
     dispatch_depth: Optional[int] = None  # portable route topology: 0 main, 1 owner, 2 bounded node
     transport: Optional[str] = None

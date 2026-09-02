@@ -50,8 +50,9 @@ try:  # W7D read-side layout resolver; absent on a pre-cutover checkout.
 except Exception:  # a monitor must never fail to import over a read helper
     artifact_reader = None
 
+from .. import gitinfo
 from .. import model
-from ..model import ContextEvidence, DispatchJob, etime_to_min
+from ..model import ContextEvidence, DispatchJob, etime_to_min, project_of
 from ..token_budget import parse_codex_token_count, telemetry_from_explicit
 from . import procscan
 
@@ -3191,6 +3192,89 @@ def _pending_delivery_counts(paths):
     return {"pending": pending + unmaterialized, "expired": expired}
 
 
+def _fill_locations(jobs):
+    """F-97a: classify each job's cwd against its parent's checkout — snapshot-owned,
+    tick-local, never raises. Never touches the network or blocks on git subprocess."""
+    memo = {}
+
+    def _resolve(cwd):
+        if cwd not in memo:
+            try:
+                memo[cwd] = gitinfo.resolve_gitdir(cwd)
+            except Exception:
+                memo[cwd] = (None, None)
+        return memo[cwd]
+
+    for job in jobs:
+        try:
+            cwd = getattr(job, "cwd", None)
+            parent_cwd = getattr(job, "parent_cwd", None)
+            if not cwd or not parent_cwd:
+                job.location_kind = "unknown"
+                continue
+            linked_j, main_j = _resolve(cwd)
+            linked_p, main_p = _resolve(parent_cwd)
+            if not main_j or not main_p:
+                job.location_kind = "unknown"
+                continue
+            if main_j == main_p and linked_j == main_j:
+                job.location_kind = "primary"
+            elif main_j == main_p:
+                job.location_kind = "isolated-wt"
+                job.location_wt = os.path.basename(cwd.rstrip("/"))
+            else:
+                job.location_kind = "foreign-repo"
+                job.location_repo = project_of(cwd)
+        except Exception:
+            job.location_kind = "unknown"
+
+
+def _campaign_labels(jobs):
+    """F-97c: bind an owner job's route to its producer cycle title, read-only and
+    bounded. No IO at all when no job carries a route_id."""
+    route_ids = {getattr(j, "route_id", None) for j in jobs}
+    route_ids.discard(None)
+    route_ids.discard("")
+    if not route_ids:
+        return
+    try:
+        artifact_roots = {getattr(j, "artifact_root", None) for j in jobs}
+        artifact_roots.discard(None)
+        titles = {}
+        remaining = set(route_ids)
+        for root in artifact_roots:
+            if not remaining:
+                break
+            cycles_dir = os.path.join(root, ".runtime", "artifact-producer", "v1", "cycles")
+            try:
+                entries = sorted(
+                    os.scandir(cycles_dir), key=lambda e: e.stat().st_mtime, reverse=True
+                )
+            except OSError:
+                continue
+            for entry, _ in zip(entries, range(200)):
+                if not remaining:
+                    break
+                if not entry.name.endswith(".json"):
+                    continue
+                try:
+                    with open(entry.path, encoding="utf-8") as fh:
+                        rec = json.load(fh)
+                except Exception:
+                    continue
+                rid = rec.get("route_id")
+                if rid in remaining:
+                    titles[rid] = (rec.get("title") or "")[:24]
+                    remaining.discard(rid)
+        if titles:
+            for job in jobs:
+                rid = getattr(job, "route_id", None)
+                if rid in titles:
+                    job.campaign_label = titles[rid]
+    except Exception:
+        pass
+
+
 def collect(jobs_path=None, harness_filter=None):
     """Return merged [DispatchJob]. harness_filter does not restrict dispatch — the section
     is cross-harness by design (jobs, not sessions)."""
@@ -3250,6 +3334,8 @@ def collect(jobs_path=None, harness_filter=None):
                 twin._proc_liveness = getattr(job, "liveness", None)
         proc_jobs = kept_proc
     jobs = proc_jobs + log_jobs
+    _fill_locations(jobs)          # F-97a; own try/except inside, never raises
+    _campaign_labels(jobs)         # F-97c; own try/except inside, never raises
     # Typed-mode+profile backfill for proc jobs whose argv/env omitted metadata.
     # Legacy mode backfill is read-only; profile=None backfill IS spec §7-mandated —
     # a proc-scanned profile job has no argv signal for --profile at all).
