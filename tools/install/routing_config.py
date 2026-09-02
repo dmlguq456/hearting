@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 import shutil
@@ -9,6 +10,78 @@ import subprocess
 import sys
 
 import paths
+
+_OWNER_ROUTE_BINDING_SCAN_LIMIT = 50
+
+
+def _dispatch_contract_module():
+    """Best-effort dynamic import of utilities/dispatch_contract.py, the same
+    resolver chain the peer ledger and stable-registry writer use. Import
+    failure is a caller concern (fail-soft `unknown`), never raised here."""
+    utilities_dir = Path(__file__).resolve().parents[2] / "utilities"
+    if str(utilities_dir) not in sys.path:
+        sys.path.insert(0, str(utilities_dir))
+    import dispatch_contract
+    return dispatch_contract
+
+
+def _newest_owner_route_binding(limit=_OWNER_ROUTE_BINDING_SCAN_LIMIT):
+    """A5 evidence source: `<dispatch state root>/owner-route-bindings/*.json`,
+    newest by the record's own `published_at` field (an explicit ordering key,
+    not mtime). Returns None for every failure mode -- absent bindings dir,
+    empty dir, or a scan that cannot resolve the state root -- so the caller
+    always reports `unknown` rather than raising or guessing `drift`."""
+    try:
+        DC = _dispatch_contract_module()
+        agent_home = Path(DC.resolve_agent_home())
+        state_root = DC.resolve_dispatch_state_root(agent_home, environ=os.environ)
+        bindings_dir = state_root / "owner-route-bindings"
+        if not bindings_dir.is_dir():
+            return None
+        entries = []
+        for path in sorted(bindings_dir.glob("*.json"))[:limit]:
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            if isinstance(payload.get("published_at"), (int, float)):
+                entries.append(payload)
+        if not entries:
+            return None
+        entries.sort(key=lambda row: row["published_at"])
+        return entries[-1]
+    except Exception:
+        return None
+
+
+def confirmation_mode_drift_warning(declared_mode):
+    """A5: declared-vs-sealed `confirmation_mode` drift, non-fatal.
+
+    Compares the declared `confirmation.mode` against the most recently
+    published owner route's sealed `confirmation_mode`. Every failure mode --
+    no bindings published yet (a direct/quick-only user, or a fresh install),
+    a pruned or unreadable `route_file`, or a legacy route sealed before this
+    cycle with no `confirmation_mode` key -- reports nothing (`unknown`,
+    never `drift`). Only an actually-differing, readable, newest binding
+    returns a warning string.
+    """
+    binding = _newest_owner_route_binding()
+    if binding is None:
+        return None
+    route_file = binding.get("route_file")
+    if not route_file:
+        return None
+    try:
+        route = json.loads(Path(route_file).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    sealed_mode = route.get("confirmation_mode")
+    if sealed_mode is None or sealed_mode == declared_mode:
+        return None
+    return (
+        f"confirmation.mode={declared_mode!r} differs from the most recently "
+        f"sealed route's confirmation_mode={sealed_mode!r} ({route_file})"
+    )
 
 
 RUNTIMES = ("claude", "codex", "opencode")
@@ -118,6 +191,21 @@ def validate() -> dict:
         for line in result.stdout.splitlines()
         if line.startswith("warning=")
     ]
+    # A5: declared-vs-sealed confirmation_mode drift, layered onto the same
+    # `warning=`-style non-fatal extension `allocation_warnings` already
+    # established -- the surface stays "dispatch-defaults", no new row.
+    mode_result = subprocess.run(
+        [sys.executable, str(Path(__file__).resolve().parents[2] / "utilities" / "dispatch-defaults.py"),
+         "confirmation-mode", "--config", str(path)],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if mode_result.returncode == 0:
+        declared_mode = mode_result.stdout.strip()
+        drift = confirmation_mode_drift_warning(declared_mode)
+        if drift:
+            warnings.append(drift)
     if warnings:
         return {
             "status": "drift",

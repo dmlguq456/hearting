@@ -1,0 +1,1 @@
+../../../../tools/install/test_user_config.py

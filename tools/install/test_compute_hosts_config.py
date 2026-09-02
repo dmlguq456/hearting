@@ -65,7 +65,8 @@ class ComputeHostsConfigTests(unittest.TestCase):
             self.assertEqual(
                 set(rows),
                 {"compute-hosts", "dispatch-defaults", "report-bundle", "memory-sync",
-                 "models-conf.claude", "models-conf.codex", "models-conf.opencode"})
+                 "models-conf.claude", "models-conf.codex", "models-conf.opencode",
+                 "claude-settings.defaultMode"})
             self.assertEqual(rows["compute-hosts"]["status"], "missing")
             self.assertTrue(rows["compute-hosts"]["ok"])
             self.assertEqual(rows["memory-sync"]["status"], "absent")

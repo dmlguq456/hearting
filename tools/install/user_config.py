@@ -9,6 +9,7 @@ and who creates it. Nothing here writes: seeding stays with each module's
 
 from __future__ import annotations
 
+import claude_settings_config
 import compute_hosts_config
 import memory_sync_config
 import paths
@@ -71,6 +72,13 @@ SURFACES = (
         "seeded_by": "harness memory join --remote-url <git>",
         "when_absent": "memory stays local to this host",
         "validate": memory_sync_config.validate,
+    },
+    {
+        "id": "claude-settings.defaultMode",
+        "title": "Claude settings.json permissions.defaultMode",
+        "seeded_by": "harness install (Claude activation, once)",
+        "when_absent": "template adapters/claude/settings.json applies until seeded",
+        "validate": claude_settings_config.validate,
     },
 ) + tuple(
     {

@@ -1,5 +1,6 @@
 import importlib
 import importlib.util
+import json
 import os
 from pathlib import Path
 import sys
@@ -147,6 +148,107 @@ class RoutingConfigInstallTests(unittest.TestCase):
             result = routing_config.validate()
         self.assertFalse(result["ok"])
         self.assertEqual(result["status"], "invalid")
+
+
+class ConfirmationModeDriftWarningTests(unittest.TestCase):
+    """A5: declared-vs-sealed confirmation_mode drift, sourced from the
+    newest `owner-route-bindings/*.json` record by its own `published_at`."""
+
+    def test_no_binding_is_unknown_not_drift(self):
+        with mock.patch.object(routing_config, "_newest_owner_route_binding", return_value=None):
+            self.assertIsNone(routing_config.confirmation_mode_drift_warning("hybrid"))
+
+    def test_binding_missing_route_file_key_is_unknown(self):
+        with mock.patch.object(routing_config, "_newest_owner_route_binding", return_value={}):
+            self.assertIsNone(routing_config.confirmation_mode_drift_warning("hybrid"))
+
+    def test_unreadable_route_file_is_unknown(self):
+        with mock.patch.object(
+            routing_config, "_newest_owner_route_binding",
+            return_value={"route_file": "/does/not/exist.json"},
+        ):
+            self.assertIsNone(routing_config.confirmation_mode_drift_warning("hybrid"))
+
+    def test_legacy_route_without_confirmation_mode_key_is_unknown(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            route_file = Path(tmp) / "rt-legacy.json"
+            route_file.write_text(json.dumps({"route_id": "rt-legacy"}), encoding="utf-8")
+            with mock.patch.object(
+                routing_config, "_newest_owner_route_binding",
+                return_value={"route_file": str(route_file)},
+            ):
+                self.assertIsNone(routing_config.confirmation_mode_drift_warning("hybrid"))
+
+    def test_matching_sealed_mode_is_not_drift(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            route_file = Path(tmp) / "rt-a.json"
+            route_file.write_text(json.dumps({"confirmation_mode": "hybrid"}), encoding="utf-8")
+            with mock.patch.object(
+                routing_config, "_newest_owner_route_binding",
+                return_value={"route_file": str(route_file)},
+            ):
+                self.assertIsNone(routing_config.confirmation_mode_drift_warning("hybrid"))
+
+    def test_differing_sealed_mode_is_drift(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            route_file = Path(tmp) / "rt-b.json"
+            route_file.write_text(json.dumps({"confirmation_mode": "both"}), encoding="utf-8")
+            with mock.patch.object(
+                routing_config, "_newest_owner_route_binding",
+                return_value={"route_file": str(route_file)},
+            ):
+                warning = routing_config.confirmation_mode_drift_warning("hybrid")
+            self.assertIsNotNone(warning)
+            self.assertIn("hybrid", warning)
+            self.assertIn("both", warning)
+
+    def test_newest_binding_selected_by_published_at_not_filename_order(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            bindings_dir = Path(tmp) / "owner-route-bindings"
+            bindings_dir.mkdir()
+            old_route = Path(tmp) / "rt-old.json"
+            old_route.write_text(json.dumps({"confirmation_mode": "hybrid"}), encoding="utf-8")
+            new_route = Path(tmp) / "rt-new.json"
+            new_route.write_text(json.dumps({"confirmation_mode": "both"}), encoding="utf-8")
+            (bindings_dir / "a-first-alphabetically.json").write_text(
+                json.dumps({"route_file": str(new_route), "published_at": 200.0}),
+                encoding="utf-8",
+            )
+            (bindings_dir / "z-last-alphabetically.json").write_text(
+                json.dumps({"route_file": str(old_route), "published_at": 100.0}),
+                encoding="utf-8",
+            )
+            fake_dc = mock.Mock()
+            fake_dc.resolve_agent_home.return_value = tmp
+            fake_dc.resolve_dispatch_state_root.return_value = Path(tmp)
+            with mock.patch.object(routing_config, "_dispatch_contract_module", return_value=fake_dc):
+                binding = routing_config._newest_owner_route_binding()
+            self.assertEqual(binding["route_file"], str(new_route))
+
+    def test_empty_or_missing_bindings_dir_returns_none(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fake_dc = mock.Mock()
+            fake_dc.resolve_agent_home.return_value = tmp
+            fake_dc.resolve_dispatch_state_root.return_value = Path(tmp)
+            with mock.patch.object(routing_config, "_dispatch_contract_module", return_value=fake_dc):
+                self.assertIsNone(routing_config._newest_owner_route_binding())
+
+    def test_validate_surfaces_confirmation_mode_drift_as_warning(self):
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {"XDG_CONFIG_HOME": tmp}, clear=False
+        ), mock.patch.object(routing_config.shutil, "which", return_value="/bin/runtime"):
+            os.environ.pop("DISPATCH_DEFAULTS_CONFIG", None)
+            routing_config.ensure(["claude", "codex"])
+            route_file = Path(tmp) / "rt-drift.json"
+            route_file.write_text(json.dumps({"confirmation_mode": "both"}), encoding="utf-8")
+            with mock.patch.object(
+                routing_config, "_newest_owner_route_binding",
+                return_value={"route_file": str(route_file)},
+            ):
+                result = routing_config.validate()
+            self.assertTrue(result["ok"])
+            self.assertEqual(result["status"], "drift")
+            self.assertTrue(any("confirmation.mode" in w for w in result["warnings"]))
 
 
 if __name__ == "__main__":

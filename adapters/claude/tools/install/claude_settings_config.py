@@ -1,0 +1,1 @@
+../../../../tools/install/claude_settings_config.py
