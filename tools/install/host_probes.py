@@ -76,5 +76,35 @@ def probe_bwrap_userns() -> dict:
     return {"id": "host.bwrap-userns", "status": "warning", "detail": detail}
 
 
+def probe_herdr() -> dict:
+    path = shutil.which("herdr")
+    if path is None:
+        return {
+            "id": "host.herdr",
+            "status": "warning",
+            "detail": (
+                "herdr CLI not found; steward wait falls back to Claude "
+                "native notify_when_idle / explicit poll-fallback"
+            ),
+        }
+    try:
+        result = subprocess.run(
+            ["herdr", "--version"], capture_output=True, text=True, timeout=10,
+        )
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        return {
+            "id": "host.herdr",
+            "status": "warning",
+            "detail": f"probe could not complete: {exc}",
+        }
+    if result.returncode == 0:
+        return {"id": "host.herdr", "status": "ok", "detail": (result.stdout or path).strip()}
+    return {
+        "id": "host.herdr",
+        "status": "warning",
+        "detail": f"herdr --version exited {result.returncode}",
+    }
+
+
 def run() -> list:
-    return [probe_node(), probe_bwrap_userns()]
+    return [probe_node(), probe_bwrap_userns(), probe_herdr()]

@@ -71,6 +71,79 @@ class HostProbesTest(unittest.TestCase):
         self.assertIn("probe could not complete", probe["detail"])
 
 
+class HerdrProbeTest(unittest.TestCase):
+    def test_herdr_missing_is_warning_no_invented_install_url(self):
+        with mock.patch.object(host_probes.shutil, "which", return_value=None):
+            probe = host_probes.probe_herdr()
+        self.assertEqual(probe["status"], "warning")
+        self.assertIn("herdr CLI not found", probe["detail"])
+        self.assertNotIn("http", probe["detail"])
+
+    def test_herdr_present_and_version_ok(self):
+        with ExitStack() as stack:
+            stack.enter_context(mock.patch.object(
+                host_probes.shutil, "which", return_value="/usr/bin/herdr",
+            ))
+            stack.enter_context(mock.patch.object(
+                host_probes.subprocess, "run",
+                return_value=subprocess.CompletedProcess([], 0, stdout="herdr 0.8.0\n", stderr=""),
+            ))
+            probe = host_probes.probe_herdr()
+        self.assertEqual(probe["status"], "ok")
+
+    def test_herdr_version_nonzero_exit_is_warning(self):
+        with ExitStack() as stack:
+            stack.enter_context(mock.patch.object(
+                host_probes.shutil, "which", return_value="/usr/bin/herdr",
+            ))
+            stack.enter_context(mock.patch.object(
+                host_probes.subprocess, "run",
+                return_value=subprocess.CompletedProcess([], 1, stdout="", stderr="boom"),
+            ))
+            probe = host_probes.probe_herdr()
+        self.assertEqual(probe["status"], "warning")
+
+    def test_herdr_registered_in_run(self):
+        with mock.patch.object(host_probes.shutil, "which", return_value=None), \
+             mock.patch.object(host_probes.subprocess, "run",
+                                return_value=subprocess.CompletedProcess([], 0, stdout="", stderr="")):
+            results = {p["id"]: p for p in host_probes.run()}
+        self.assertIn("host.herdr", results)
+
+    def test_herdr_probe_never_changes_installer_exit_code(self):
+        args = SimpleNamespace(
+            runtimes=["claude"], target=None, scope="global",
+            plugin=False, dry_run=False, report_bundle_root=None,
+        )
+        driver = mock.Mock()
+        driver.install.return_value = {"actions": [], "blocked": False}
+        with ExitStack() as stack:
+            stack.enter_context(mock.patch.object(installer, "get_driver", return_value=driver))
+            stack.enter_context(mock.patch.object(
+                installer.routing_config, "ensure", return_value={
+                    "status": "preserved", "path": "/tmp/config", "enabled": ["claude"],
+                }))
+            stack.enter_context(mock.patch.object(
+                installer.report_bundle_config, "ensure", return_value={
+                    "status": "preserved", "path": "/tmp/report-bundle.json", "root": "/tmp/reports",
+                }))
+            stack.enter_context(mock.patch.object(
+                installer.bootstrap, "restore_memory", return_value={"action": "skipped", "detail": "present"}))
+            stack.enter_context(mock.patch.object(installer.bootstrap, "install_launchers", return_value=[]))
+            stack.enter_context(mock.patch.object(
+                installer.host_probes, "run", return_value=[
+                    {"id": "host.node", "status": "warning", "detail": "node not found"},
+                    {"id": "host.bwrap-userns", "status": "warning", "detail": "userns unavailable"},
+                    {"id": "host.herdr", "status": "warning", "detail": "herdr not found"},
+                ]))
+            stack.enter_context(mock.patch.object(
+                installer.node_runtime, "ensure_node", return_value={
+                    "id": "host.node-runtime", "status": "warning", "detail": "node install failed: offline",
+                }))
+            result = installer.cmd_install(args)
+        self.assertEqual(result["exit"], installer.EXIT_OK)
+
+
 class HostProbesWarnOnlyContractTest(unittest.TestCase):
     def test_cmd_install_stays_ok_when_both_probes_warn(self):
         args = SimpleNamespace(
