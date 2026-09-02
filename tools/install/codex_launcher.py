@@ -355,6 +355,29 @@ class _LauncherLock:
                 self.handle.close()
                 self.handle = None
 
+    # destructive-ok: reason=an uninstall endpoint must leave no harness-owned lock file; boundary=only the lock inode this process holds, proved by the fstat/stat identity match below
+    def discard_pathname(self) -> None:
+        """Unlink the held lock inode at an uninstall endpoint, before unlock.
+
+        Ordinary lock release keeps the pathname stable (see __exit__), but an
+        uninstall endpoint must leave nothing harness-owned behind. Unlinking
+        while still holding the flock is safe with the enter-side identity
+        check: a waiter that acquires the unlinked inode fails that check and
+        retries against the (now absent) pathname.
+        """
+        if self.handle is None:
+            return
+        try:
+            opened = os.fstat(self.handle.fileno())
+            current = os.stat(self.path, follow_symlinks=False)
+        except OSError:
+            return
+        if (opened.st_dev, opened.st_ino) == (current.st_dev, current.st_ino):
+            try:
+                os.unlink(self.path)
+            except OSError:
+                pass
+
 
 def wrapper_bytes() -> bytes:
     return b"""#!/bin/sh
@@ -1098,9 +1121,10 @@ def _uninstall_impl(
             seal_snapshot(transaction_snapshot)
         return result
 
-    with _LauncherLock(lock_path(codex_home)):
+    with _LauncherLock(lock_path(codex_home)) as launcher_lock:
         state = _load_state(state_file)
         if state is None:
+            launcher_lock.discard_pathname()
             return finish({"action": "managed-launcher", "status": "not-installed"})
         target = Path(str(state.get("wrapper_path", "")))
         expected = str(state.get("wrapper_sha256", ""))
@@ -1157,6 +1181,7 @@ def _uninstall_impl(
                 safe_fs.remove_exact(auth)
             except safe_fs.SafetyError as exc:
                 raise CodexLauncherError(str(exc)) from exc
+        launcher_lock.discard_pathname()
         return finish({"action": "managed-launcher", "status": "restored", "target": str(target), "protected": state.get("mode") == "protected-path-v1", "profile": profile_result})
 
 

@@ -82,7 +82,14 @@ class CodexLauncherInstallTest(unittest.TestCase):
         self.assertTrue(self.target.is_symlink())
         self.assertEqual(os.readlink(self.target), str(self.real))
         self.assertEqual(self.codex_home.stat().st_mode & 0o777, 0o775)
-        self.assertTrue(launcher.lock_path(self.codex_home).is_file())
+        # Uninstall is an endpoint: no harness-owned file may remain, the lock
+        # pathname included (the post-publish release smoke asserts this).
+        self.assertFalse(launcher.lock_path(self.codex_home).exists())
+
+    def test_uninstall_on_not_installed_home_leaves_no_lock(self) -> None:
+        result = launcher.uninstall(codex_home=self.codex_home, bin_dir=self.bin_dir)
+        self.assertEqual(result["status"], "not-installed")
+        self.assertFalse(launcher.lock_path(self.codex_home).exists())
 
     # destructive-ok: reason=inject a replaced lock pathname; boundary=one fixture lock below self.codex_home
     def test_launcher_lock_never_unlinks_a_successor_inode(self) -> None:
