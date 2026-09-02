@@ -1698,6 +1698,7 @@ def _dispatch(observation: "LAUNCH_TUPLE.ReportOnlyObservation") -> int:
                     continue
                 if (result.returncode == 0 and early == "-"
                         and fields.get("check") != "failed" and worker_failure == "-"):
+                    watch_fields = {}
                     if args.action == "start":
                         watch_state, watch_fields = watch_launched_attempt(
                             args, route, node, attempt_id, fields)
@@ -1725,6 +1726,12 @@ def _dispatch(observation: "LAUNCH_TUPLE.ReportOnlyObservation") -> int:
                         print("launch_authority=conductor")
                         print("broker_lifecycle=retired")
                         print(f"attempt_id={attempt_id}")
+                        if watch_fields.get("review_verdict"):
+                            # OPERATIONS §5.10: a reviewer that finished with
+                            # blocking findings inside the launch-confirm window
+                            # is reported as such, not swallowed as a plain start.
+                            print(f"terminal_note={watch_fields.get('note', REVIEW_BLOCKING_NOTE)}")
+                            print(f"review_verdict={watch_fields['review_verdict']}")
                         print(f"job_registry={args.jobs}")
                         print("attempt_trace=" + "|".join(attempts))
                         print("prior_attempt_ids=" + ",".join(x for values in prior_failures.values() for x in values))

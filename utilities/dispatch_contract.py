@@ -214,6 +214,11 @@ ATTEMPT_TERMINAL_EVIDENCE_KEYS = {
     # FAIL handoff (urlsafe base64, padding stripped), sealed at close time so
     # the owner-closure gate in capability-route.py can re-verify it.
     "review_artifact_b64",
+    # Owner-closure seal (capability-route.py, OPERATIONS §5.10): written only
+    # through `_updated_attempt_metadata(..., terminal=True)` so the operator-
+    # chosen evidence path is sanitized like every other terminal value.
+    "gate_closure",
+    "owner_closure",
 }
 _MODULE_ROOT = Path(__file__).resolve().parents[1]
 _CAPACITY_TERMINAL_RE = re.compile(

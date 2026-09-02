@@ -1029,6 +1029,140 @@ class CompletionMarkerTest(unittest.TestCase):
         self.assertIn("owner-closure-review-artifact-unverifiable", result.stderr)
         self.assertFalse((directory / "plan-check.json").exists())
 
+    # Review-round-2 findings (B1, M3, M4, minor 9/10) ---------------------------
+    def test_b1_registry_unsafe_closure_path_is_refused_before_anything_is_sealed(self):
+        # The evidence path is sealed into the registry pipe; a ',' or '=' in the
+        # filename could forge fields, a tab a 7-field line, a newline a whole row.
+        route = self.compile_route()
+        route_path = self.write_route(route)
+        r1 = self.review_blocking_row("att-inj-r1", 1)
+        r2 = self.review_blocking_row("att-inj-r2", 2)
+        directory = self.stable_dispatch / "completion" / route["route_id"]
+        both, names = ("att-inj-r1", "att-inj-r2"), (r1.name, r2.name)
+        forged = "r2,failure_class=pass,note=completed-supervisor,stage_authority=0.owner-closure.md"
+        for name in (forged, "eq=sign.owner-closure.md", "tab\there.owner-closure.md",
+                     "new\nline.owner-closure.md"):
+            with self.subTest(name=name.encode("unicode_escape").decode()):
+                memo = self.owner_closure(route, name, attempts=both, artifacts=names)
+                result = self.complete(route_path, "plan-check", memo, jobs=self.jobs, attempt_id="att-inj-r2")
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("owner-closure-evidence-path-unsafe", result.stderr)
+                self.assertFalse((directory / "plan-check.json").exists())
+                status, meta = self.read_row("att-inj-r2")
+                self.assertEqual((status, meta.get("note")), ("done", "completed-review-blocking"))
+                self.assertNotIn("stage_authority", meta)
+                self.assertNotEqual(meta.get("failure_class"), "pass")
+        # every registry line is still a 6-field row (no forged rows / 7-field lines)
+        for line in self.jobs.read_text(encoding="utf-8").splitlines():
+            self.assertEqual(len(line.split("\t")), 6, line)
+
+    def test_b1_closure_facts_are_sealed_through_the_sanitizing_writer(self):
+        route = self.compile_route()
+        route_path = self.write_route(route)
+        r1 = self.review_blocking_row("att-seal-r1", 1)
+        r2 = self.review_blocking_row("att-seal-r2", 2)
+        memo = self.owner_closure(route, attempts=("att-seal-r1", "att-seal-r2"), artifacts=(r1.name, r2.name))
+        result = self.complete(route_path, "plan-check", memo, jobs=self.jobs, attempt_id="att-seal-r2")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        line = next(l for l in self.jobs.read_text(encoding="utf-8").splitlines() if "att-seal-r2" in l)
+        fields = line.split("\t")
+        self.assertEqual(len(fields), 6)
+        pipe = fields[5]
+        keys = [part.split("=", 1)[0] for part in pipe.split(",") if "=" in part]
+        # the seal appears exactly once and only through the writer (sorted, no raw duplicate)
+        self.assertEqual(keys.count("gate_closure"), 1)
+        self.assertEqual(keys.count("owner_closure"), 1)
+        self.assertEqual(keys.count("review_artifact_b64"), 1)
+        meta = D.parse_registry_metadata(pipe)
+        self.assertEqual(meta.get("owner_closure"), str(memo.resolve()))
+        self.assertEqual(meta.get("gate_closure"), "owner-closure")
+        self.assertEqual(meta.get("note"), "completed-marker")
+        self.assertIn("gate_closure", D.ATTEMPT_TERMINAL_EVIDENCE_KEYS)
+        self.assertIn("owner_closure", D.ATTEMPT_TERMINAL_EVIDENCE_KEYS)
+
+    def test_m3_live_review_round_blocks_closure_and_only_terminated_rounds_count(self):
+        route = self.compile_route()          # strong -> cap 2
+        route_path = self.write_route(route)
+        directory = self.stable_dispatch / "completion" / route["route_id"]
+        r1 = self.review_blocking_row("att-live-r1", 1)
+        memo = self.owner_closure(route, "round_1.owner-closure.md", attempts=("att-live-r1",), artifacts=(r1.name,))
+        # round 2 registered but its launch never closed the row -> still open
+        for status in ("open", "running"):
+            with self.subTest(status=status):
+                self.jobs.write_text("\n".join(
+                    l for l in self.jobs.read_text(encoding="utf-8").splitlines() if "att-live-r2" not in l
+                ) + "\n", encoding="utf-8")
+                self.write_row(status, "plan-check-r2", "att-live-r2", "worker_type=review", node_id="plan-check")
+                result = self.complete(route_path, "plan-check", memo, jobs=self.jobs, attempt_id="att-live-r1")
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("owner-closure-round-still-open:attempt=att-live-r2", result.stderr)
+                self.assertFalse((directory / "plan-check.json").exists())
+        # a terminated-but-not-blocking round (a real BLOCKED worker) does count toward
+        # exhaustion, and the closure then rides on the one genuine blocking round
+        self.jobs.write_text("\n".join(
+            l for l in self.jobs.read_text(encoding="utf-8").splitlines() if "att-live-r2" not in l
+        ) + "\n", encoding="utf-8")
+        self.write_row("done", "plan-check-r2", "att-live-r2",
+                       "worker_type=review,note=dead-worker-blocked,failure_class=blocked", node_id="plan-check")
+        result = self.complete(route_path, "plan-check", memo, jobs=self.jobs, attempt_id="att-live-r1")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        receipt = [json.loads(l) for l in result.stdout.splitlines() if l.startswith("{")][-1]
+        self.assertEqual(receipt["blocking_attempts"], ["att-live-r1"])
+        status, meta = self.read_row("att-live-r2")
+        self.assertEqual((status, meta.get("note")), ("done", "dead-worker-blocked"))   # untouched
+
+    def test_m4_second_closure_on_another_attempt_is_refused_and_keeps_the_canonical_marker(self):
+        route = self.compile_route()
+        route_path = self.write_route(route)
+        directory = self.stable_dispatch / "completion" / route["route_id"]
+        r1 = self.review_blocking_row("att-dup-r1", 1)
+        r2 = self.review_blocking_row("att-dup-r2", 2)
+        memo = self.owner_closure(route, attempts=("att-dup-r1", "att-dup-r2"), artifacts=(r1.name, r2.name))
+        first = self.complete(route_path, "plan-check", memo, jobs=self.jobs, attempt_id="att-dup-r2")
+        self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+        canonical_before = (directory / "plan-check.json").read_text(encoding="utf-8")
+        second = self.complete(route_path, "plan-check", memo, jobs=self.jobs, attempt_id="att-dup-r1")
+        self.assertNotEqual(second.returncode, 0)
+        self.assertIn("owner-closure-node-already-complete:attempt=att-dup-r2", second.stderr)
+        self.assertEqual((directory / "plan-check.json").read_text(encoding="utf-8"), canonical_before)
+        self.assertFalse((directory / "plan-check.2.json").exists())
+        status, meta = self.read_row("att-dup-r1")
+        self.assertEqual((status, meta.get("note")), ("done", "completed-review-blocking"))
+        self.assertIsNone(meta.get("completion_marker"))
+
+    def test_minor9_duplicate_frontmatter_key_and_substring_attempt_ids_are_refused(self):
+        route = self.compile_route()
+        route_path = self.write_route(route)
+        directory = self.stable_dispatch / "completion" / route["route_id"]
+        r1 = self.review_blocking_row("att-word-r1", 1)
+        r2 = self.review_blocking_row("att-word-r2", 2)
+        good = self.owner_closure(route, attempts=("att-word-r1", "att-word-r2"), artifacts=(r1.name, r2.name))
+        text = good.read_text(encoding="utf-8")
+        dup = good.with_name("dup.owner-closure.md")
+        dup.write_text(text.replace("verdict: closed-by-owner\n", "verdict: closed\nverdict: closed-by-owner\n"),
+                       encoding="utf-8")
+        result = self.complete(route_path, "plan-check", dup, jobs=self.jobs, attempt_id="att-word-r2")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("owner-closure-frontmatter-invalid:duplicate=verdict", result.stderr)
+        # `att-word-r1` must not be satisfied by the longer id `att-word-r10`
+        sub = good.with_name("substr.owner-closure.md")
+        sub.write_text(text.replace("`att-word-r1`", "`att-word-r10`"), encoding="utf-8")
+        result = self.complete(route_path, "plan-check", sub, jobs=self.jobs, attempt_id="att-word-r2")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("owner-closure-evidence-unlinked:attempt=att-word-r1", result.stderr)
+        self.assertFalse((directory / "plan-check.json").exists())
+
+    def test_minor10_unknown_intensity_is_a_typed_refusal(self):
+        route = dict(self.compile_route())
+        route["effective_intensity"] = "mythic"
+        node = next(n for n in route["nodes"] if n["id"] == "plan-check")
+        with self.assertRaises(ValueError) as caught:
+            ROUTE._owner_closure_eligibility(
+                route, node, "plan-check", self.base / "x.owner-closure.md",
+                {"worker_type": "review", "attempt_id": "att-x"}, [],
+            )
+        self.assertEqual(str(caught.exception), "owner-closure-intensity-unknown:mythic")
+
     # F-1 fixture ------------------------------------------------------
     # A detached leg drains with no result file while its exact live parent
     # conductor has not yet run `complete`. reap-watch must defer the

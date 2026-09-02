@@ -155,13 +155,17 @@ main/orchestrator chooses per job and the wrapper only reflects that choice:
   permission mode from `headless.claude_permission_mode` in
   `dispatch-defaults.yaml` (`--permission-mode` / `CLAUDE_DISPATCH_PERMISSION_MODE`
   per launch): `bypass` (shipped default) appends `--permission-mode
-  bypassPermissions`; `allowlist` keeps the runtime's starting mode and appends
-  `--allowedTools` naming only the harness utilities under the sealed
-  `AGENT_HOME`. Root/sudo and `permissions.disableBypassPermissionsMode:
-  "disable"` (user or managed settings) demote `bypass` to `allowlist`
-  automatically. The wrapper prints and records `permission_mode=` and
-  `permission_mode_reason=` so the applied posture is ledger evidence, and the
-  proven-fatal `--disallowedTools` deny still applies in both postures
+  bypassPermissions`; `allowlist` appends `--permission-mode acceptEdits`.
+  Both postures append `--allowedTools` naming the harness utilities under the
+  sealed `AGENT_HOME`, read-only git (plus `git add`/`git commit` for an
+  owner), the harness test runners, and `Edit(//<worktree>/**)` /
+  `Edit(//<artifact-root>/**)`. Root/sudo and
+  `permissions.disableBypassPermissionsMode: "disable"` in any settings scope
+  (managed, project-local, project, user) demote `bypass` to `allowlist`
+  automatically. The wrapper prints and records `permission_mode=`,
+  `permission_mode_reason=`, and `permission_inherited_mode=` (the settings
+  `defaultMode` the turn would otherwise inherit) so the applied posture is
+  ledger evidence, and the proven-fatal `--disallowedTools` deny still applies in both postures
   (`core/OPERATIONS.md §5.10` "Registered headless permission posture").
 - Direct registered child completion is selected by the parent runtime, not by
   the child wrapper. An interactive Claude parent receives the successful exact

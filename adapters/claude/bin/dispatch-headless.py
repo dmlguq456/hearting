@@ -107,7 +107,7 @@ from model_profile import (  # noqa: E402
     validate_registered_profile,
 )
 from model_config import ModelConfigError, resolve_config  # noqa: E402
-from codex_dispatch_terminal import inspect_terminal_attempt  # noqa: E402
+from codex_dispatch_terminal import REVIEW_BLOCKING_NOTE, inspect_terminal_attempt  # noqa: E402
 from codex_managed_dispatch import (  # noqa: E402
     MANAGED_PARENT_DELIVERY,
     ManagedDispatchError,
@@ -864,10 +864,16 @@ def launch_parent_completion_sidecar(
 # therefore pins the start mode itself and records the applied posture on the
 # attempt row as evidence.
 PERMISSION_POSTURES = ("bypass", "allowlist")
-PERMISSION_MODE_FLAG_VALUES = {"bypass": "bypassPermissions"}
-# Only the harness utilities are pre-approved in `allowlist` posture: the
-# commands a registered owner/worker must be able to run to record its own
-# gate, never a general Bash grant.
+# `allowlist` pins acceptEdits: file edits inside the working directory and
+# the added artifact root are auto-approved without the auto-mode classifier,
+# and everything else is decided by the explicit allow rules below -- so a
+# denied command is a plain tool refusal the model can route around, never a
+# classifier cascade.
+PERMISSION_MODE_FLAG_VALUES = {"bypass": "bypassPermissions", "allowlist": "acceptEdits"}
+# The allow rules a registered owner/worker contractually needs: its own
+# gate-recording utilities, read-only git, the harness test runners, and
+# Edit (which also governs Write) scoped to the worktree and the artifact
+# root. Never a bare `Bash` grant.
 HARNESS_ALLOWLIST_UTILITIES = (
     "capability-route.py",
     "dispatch-node.py",
@@ -878,29 +884,93 @@ HARNESS_ALLOWLIST_UTILITIES = (
     "artifact_producer.py",
     "spec-transaction.py",
 )
+_READ_ONLY_GIT_RULES = (
+    "Bash(git status *)", "Bash(git status)", "Bash(git diff *)", "Bash(git diff)",
+    "Bash(git log *)", "Bash(git show *)", "Bash(git rev-parse *)", "Bash(git branch *)",
+    "Bash(git worktree list *)", "Bash(git worktree list)",
+)
+_OWNER_COMMIT_GIT_RULES = ("Bash(git add *)", "Bash(git commit *)")
+_TEST_RUNNER_RULES = (
+    "Bash(python3 -m unittest *)", "Bash(python3 -m pytest *)", "Bash(pytest *)",
+    "Bash(python3 tools/run-tests.py *)",
+)
 _MANAGED_SETTINGS_PATHS = (
     Path("/etc/claude-code/managed-settings.json"),
     Path("/Library/Application Support/ClaudeCode/managed-settings.json"),
 )
 
 
-def _settings_disable_bypass(paths) -> bool:
-    """True when any readable settings file sets permissions.disableBypassPermissionsMode=disable."""
+def _settings_permissions(paths):
+    """Yield the `permissions` object of every readable settings file, in the given order."""
     for path in paths:
         try:
             payload = json.loads(Path(path).read_text(encoding="utf-8"))
         except (OSError, ValueError, TypeError):
             continue
         permissions = payload.get("permissions") if isinstance(payload, dict) else None
-        if isinstance(permissions, dict) and permissions.get("disableBypassPermissionsMode") == "disable":
-            return True
-    return False
+        if isinstance(permissions, dict):
+            yield permissions
 
 
-def _claude_settings_paths() -> tuple[Path, ...]:
+def _settings_disable_bypass(paths) -> bool:
+    """True when ANY settings scope sets permissions.disableBypassPermissionsMode=disable.
+
+    The settings reference lists the key as honoured from any file (managed,
+    user, project, project-local), so every scope is read; precedence does
+    not matter for a key whose only effect is to forbid.
+    """
+    return any(p.get("disableBypassPermissionsMode") == "disable" for p in _settings_permissions(paths))
+
+
+def _settings_default_mode(paths) -> str:
+    """The `permissions.defaultMode` the runtime would inherit (highest precedence first), or ""."""
+    for permissions in _settings_permissions(paths):
+        value = permissions.get("defaultMode")
+        if isinstance(value, str) and value:
+            return value
+    return ""
+
+
+def _claude_settings_paths(worktree: str | Path | None = None) -> tuple[Path, ...]:
+    """Settings files in precedence order: managed, project-local, project, user.
+
+    Project scope is the worktree the registered session runs in (a linked
+    worktree is its own repository root for Claude Code); user scope honours
+    CLAUDE_CONFIG_DIR.
+    """
     config_dir = os.environ.get("CLAUDE_CONFIG_DIR")
     user_home = Path(config_dir) if config_dir else Path.home() / ".claude"
-    return (user_home / "settings.json", *_MANAGED_SETTINGS_PATHS)
+    project: tuple[Path, ...] = ()
+    if worktree:
+        project_dir = Path(str(worktree)) / ".claude"
+        project = (project_dir / "settings.local.json", project_dir / "settings.json")
+    return (*_MANAGED_SETTINGS_PATHS, *project, user_home / "settings.json")
+
+
+def _allowlist_rules(agent_home: Path, worktree: str | Path | None, artifact_root: str | Path | None,
+                     worker_type: str | None) -> tuple[str, ...]:
+    """The explicit allow rules a registered worker/owner contractually needs (never bare Bash)."""
+    rules: list[str] = []
+    for name in HARNESS_ALLOWLIST_UTILITIES:
+        utility = agent_home / "utilities" / name
+        rules += [
+            f"Bash(python3 {utility} *)",
+            f"Bash(python3 {utility})",
+            f"Bash({utility} *)",
+            f"Bash({utility})",
+        ]
+    rules += list(_READ_ONLY_GIT_RULES)
+    if worker_type == "owner":
+        # SD-69: only owners are commit-expected; depth-2 stages are no-commit workers.
+        rules += list(_OWNER_COMMIT_GIT_RULES)
+    rules += list(_TEST_RUNNER_RULES)
+    # Edit rules also govern Write (Write path rules are never consulted);
+    # `//` anchors an absolute path. Reads inside the working directory and
+    # the `--add-dir` artifact root need no rule.
+    for scope in (worktree, artifact_root):
+        if scope:
+            rules.append(f"Edit(//{str(Path(str(scope))).lstrip('/')}/**)")
+    return tuple(rules)
 
 
 def _configured_permission_posture() -> tuple[str, str]:
@@ -925,34 +995,61 @@ def _configured_permission_posture() -> tuple[str, str]:
 
 
 def resolve_permission_posture(args: argparse.Namespace) -> dict[str, object]:
-    """Resolve the applied permission posture: {mode, reason, allowed_tools}."""
+    """Resolve the applied permission posture.
+
+    Returns {mode, reason, mode_flag, allowed_tools, inherited_default_mode}.
+    `allowed_tools` is emitted in BOTH postures: under bypass the rules have no
+    effect, but if the runtime demotes the session (a disable set in a scope
+    this resolver could not read) the worker still holds what it needs.
+    `inherited_default_mode` is the settings `defaultMode` the session would
+    have started in without the pin -- recorded so the ledger names the real
+    inherited mode, not a guess about the plan default.
+    """
     requested = getattr(args, "permission_mode", None) or "config"
     if requested == "config":
         mode, reason = _configured_permission_posture()
     else:
         mode, reason = requested, "launch-explicit"
+    worktree = getattr(args, "worktree", None)
+    settings_paths = _claude_settings_paths(worktree)
     if mode == "bypass":
-        # Where bypass cannot apply the runtime would refuse to start (root) or
-        # silently start in Manual (disableBypassPermissionsMode); demote to
-        # the allowlist posture with a typed reason instead of dying opaque.
+        # Where bypass cannot apply the runtime refuses to start (root/sudo)
+        # or does not enter bypass (disableBypassPermissionsMode in any
+        # settings scope); demote to the allowlist posture with a typed reason
+        # instead of dying opaque or attesting a posture that never applied.
         if hasattr(os, "geteuid") and os.geteuid() == 0:
             mode, reason = "allowlist", "root-refuses-bypass"
-        elif _settings_disable_bypass(_claude_settings_paths()):
+        elif _settings_disable_bypass(settings_paths):
             mode, reason = "allowlist", "settings-disable-bypass"
-    allowed: tuple[str, ...] = ()
-    if mode == "allowlist":
-        agent_home = Path(str(getattr(args, "agent_home", "") or ROOT))
-        rules = []
-        for name in HARNESS_ALLOWLIST_UTILITIES:
-            utility = agent_home / "utilities" / name
-            rules += [
-                f"Bash(python3 {utility} *)",
-                f"Bash(python3 {utility})",
-                f"Bash({utility} *)",
-                f"Bash({utility})",
-            ]
-        allowed = tuple(rules)
-    return {"mode": mode, "reason": reason, "allowed_tools": allowed}
+    agent_home = Path(str(getattr(args, "agent_home", "") or ROOT))
+    allowed = _allowlist_rules(
+        agent_home, worktree, getattr(args, "artifact_root", None), getattr(args, "worker_type", None)
+    )
+    return {
+        "mode": mode,
+        "reason": reason,
+        "mode_flag": PERMISSION_MODE_FLAG_VALUES[mode],
+        "allowed_tools": allowed,
+        "inherited_default_mode": _settings_default_mode(settings_paths) or "-",
+    }
+
+
+def _foreground_terminal_evidence(terminal: dict, terminal_note: str, log_path) -> dict[str, str]:
+    """Evidence sealed on the row by the foreground tail close.
+
+    A finished review (`completed-review-blocking`) also seals the in-root
+    artifact it named, exactly like the supervisor join does, so the
+    owner-closure gate can re-verify it from the row.
+    """
+    evidence = {
+        "detected_by": "foreground-terminal-handoff",
+        "failure_class": terminal["failure_class"],
+        "terminal_event": terminal["terminal_event"],
+        "log_file": str(log_path),
+    }
+    if terminal_note == REVIEW_BLOCKING_NOTE and terminal.get("artifact_path_b64"):
+        evidence["review_artifact_b64"] = str(terminal["artifact_path_b64"])
+    return evidence
 
 
 def _permission_posture(args: argparse.Namespace) -> dict[str, object]:
@@ -1070,8 +1167,7 @@ def shell_command(args: argparse.Namespace, prompt_path: Path, log_path: Path) -
         for tool in _async_deny_tools(args):
             command += ["--disallowed-tool", tool]
         posture = _permission_posture(args)
-        if posture["mode"] in PERMISSION_MODE_FLAG_VALUES:
-            command += ["--permission-mode", PERMISSION_MODE_FLAG_VALUES[posture["mode"]]]
+        command += ["--permission-mode", str(posture["mode_flag"])]
         for tool in posture["allowed_tools"]:
             command += ["--allowed-tool", tool]
         return (
@@ -1099,8 +1195,7 @@ def shell_command(args: argparse.Namespace, prompt_path: Path, log_path: Path) -
     if deny:
         cmd += ["--disallowedTools", ",".join(deny)]
     posture = _permission_posture(args)
-    if posture["mode"] in PERMISSION_MODE_FLAG_VALUES:
-        cmd += ["--permission-mode", PERMISSION_MODE_FLAG_VALUES[posture["mode"]]]
+    cmd += ["--permission-mode", str(posture["mode_flag"])]
     if posture["allowed_tools"]:
         cmd += ["--allowedTools", ",".join(posture["allowed_tools"])]
     inner = " ".join(shlex.quote(x) for x in cmd)
@@ -1248,7 +1343,10 @@ def append_job(jobs: Path, args: argparse.Namespace) -> bool:
     )
     pipe += f",async_wait_policy={_async_wait_policy(args)}"
     posture = _permission_posture(args)
-    pipe += f",permission_mode={posture['mode']},permission_mode_reason={posture['reason']}"
+    pipe += (
+        f",permission_mode={posture['mode']},permission_mode_reason={posture['reason']}"
+        f",permission_inherited_mode={posture['inherited_default_mode']}"
+    )
     pipe += f",completion_delivery={args.resolved_completion_delivery}"
     if args.resolved_completion_delivery == "session-resume-supervised":
         pipe += (
@@ -2451,12 +2549,7 @@ def main(argv: list[str]) -> int:
                     jobs,
                     args.attempt_id,
                     terminal_note,
-                    evidence={
-                        "detected_by": "foreground-terminal-handoff",
-                        "failure_class": terminal["failure_class"],
-                        "terminal_event": terminal["terminal_event"],
-                        "log_file": str(log_path),
-                    },
+                    evidence=_foreground_terminal_evidence(terminal, terminal_note, log_path),
                 )
                 if terminal_closed:
                     materialize_after_terminal_close(jobs, args.attempt_id)
@@ -2521,6 +2614,7 @@ def main(argv: list[str]) -> int:
     posture = _permission_posture(args)
     print(f"permission_mode={posture['mode']}")
     print(f"permission_mode_reason={posture['reason']}")
+    print(f"permission_inherited_mode={posture['inherited_default_mode']}")
     leg_class, auxiliary_check = _route_node_leg_fields(args)
     print(f"leg_class={leg_class}")
     print(f"auxiliary_check={auxiliary_check}")

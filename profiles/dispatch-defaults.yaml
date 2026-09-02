@@ -88,11 +88,14 @@ allocation:
 # Registered headless permission posture (core/OPERATIONS.md §5.10). Hearting-
 # launched Claude workers and owners are unattended `claude -p` turns; without a
 # pinned start mode they inherit the runtime default (`auto` plus the permission
-# classifier on Pro/Max/Team) and a run of classifier denials kills the owner
-# with no typed cause. `bypass` pins `--permission-mode bypassPermissions`;
-# `allowlist` keeps the runtime's start mode and pre-approves only the harness
-# utilities through `--allowedTools`. The wrapper falls back to `allowlist` on
-# its own where bypass cannot apply (root/sudo, permissions.disableBypassPermissionsMode)
+# classifier when the settings template's `permissions.defaultMode: auto` is
+# inherited) and a run of classifier denials kills the owner with no typed
+# cause. `bypass` pins `--permission-mode bypassPermissions`; `allowlist` pins
+# `--permission-mode acceptEdits` and pre-approves only what a worker needs
+# (harness utilities, read-only git, test runners, Edit inside the worktree and
+# artifact root) through `--allowedTools`. The wrapper falls back to `allowlist`
+# on its own where bypass cannot apply (root/sudo, permissions.disableBypassPermissionsMode
+# in any settings scope)
 # and records the applied posture in the attempt row (`permission_mode=`,
 # `permission_mode_reason=`). Omitting the section selects `bypass`.
 headless:

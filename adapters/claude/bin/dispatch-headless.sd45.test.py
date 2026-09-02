@@ -476,44 +476,61 @@ class ClaudeLaunchFenceFailure(unittest.TestCase):
 class ClaudeHeadlessPermissionPosture(unittest.TestCase):
     """core/OPERATIONS.md §5.10 registered headless permission posture."""
 
-    def _posture(self, mode, reason="launch-explicit", tools=()):
-        return {"mode": mode, "reason": reason, "allowed_tools": tuple(tools)}
+    HARNESS = {"/tmp/fixture-agent-home/utilities/" + n for n in WH.HARNESS_ALLOWLIST_UTILITIES}
 
-    def _resolve(self, mode, **env):
+    def _ns(self, mode, **overrides):
+        base = dict(permission_mode=mode, agent_home=Path("/tmp/fixture-agent-home"),
+                    worktree="/tmp/fixture-worktree", artifact_root="/tmp/fixture-artifacts",
+                    worker_type="stage")
+        base.update(overrides)
+        return argparse.Namespace(**base)
+
+    def _resolve(self, mode, env=None, **overrides):
         with tempfile.TemporaryDirectory() as td, \
-             mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": td, **env}), \
+             mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": td, **(env or {})}), \
              mock.patch.object(WH, "_MANAGED_SETTINGS_PATHS", ()):
-            return WH.resolve_permission_posture(
-                argparse.Namespace(permission_mode=mode, agent_home=Path("/tmp/fixture-agent-home"))
-            )
+            return WH.resolve_permission_posture(self._ns(mode, **overrides))
 
-    def test_bypass_posture_pins_the_start_mode_on_the_one_shot_turn(self):
-        args = _shell_command_args(resolved_permission_posture=self._posture("bypass"))
-        command = WH.shell_command(args, Path("/tmp/p.txt"), Path("/tmp/l.log"))
-        self.assertIn("--permission-mode bypassPermissions", command)
-        self.assertNotIn("--allowedTools", command)
-        self.assertIn("--disallowedTools", command)   # SD-71/78 deny applies in every posture
+    def _harness_rules(self, rules):
+        return {r.split("/utilities/")[1].split(" ")[0].rstrip(")") for r in rules if "/utilities/" in r}
 
-    def test_allowlist_posture_keeps_runtime_mode_and_preapproves_only_harness_utilities(self):
-        posture = self._resolve("allowlist")
-        self.assertEqual((posture["mode"], posture["reason"]), ("allowlist", "launch-explicit"))
-        self.assertTrue(posture["allowed_tools"])
-        for rule in posture["allowed_tools"]:
-            self.assertTrue(rule.startswith("Bash("), rule)
-            self.assertIn("/tmp/fixture-agent-home/utilities/", rule)
-        self.assertNotIn("Bash", posture["allowed_tools"])
-        names = {rule.split("/utilities/")[1].split(" ")[0].rstrip(")") for rule in posture["allowed_tools"]}
-        self.assertEqual(names, set(WH.HARNESS_ALLOWLIST_UTILITIES))
+    def test_bypass_posture_pins_the_start_mode_and_still_carries_the_allow_rules(self):
+        posture = self._resolve("bypass")
+        self.assertEqual((posture["mode"], posture["mode_flag"]), ("bypass", "bypassPermissions"))
+        self.assertTrue(posture["allowed_tools"])           # M5: rules ride along under bypass
         args = _shell_command_args(resolved_permission_posture=posture)
         command = WH.shell_command(args, Path("/tmp/p.txt"), Path("/tmp/l.log"))
-        self.assertNotIn("--permission-mode", command)
+        self.assertIn("--permission-mode bypassPermissions", command)
+        self.assertIn("--allowedTools", command)
+        self.assertIn("--disallowedTools", command)        # SD-71/78 deny applies in every posture
+
+    def test_allowlist_posture_pins_accept_edits_and_grants_what_a_worker_needs(self):
+        posture = self._resolve("allowlist")
+        self.assertEqual((posture["mode"], posture["reason"], posture["mode_flag"]),
+                         ("allowlist", "launch-explicit", "acceptEdits"))
+        rules = posture["allowed_tools"]
+        self.assertEqual(self._harness_rules(rules), set(WH.HARNESS_ALLOWLIST_UTILITIES))
+        self.assertIn("Edit(//tmp/fixture-worktree/**)", rules)        # Edit also governs Write
+        self.assertIn("Edit(//tmp/fixture-artifacts/**)", rules)
+        self.assertIn("Bash(git status *)", rules)
+        self.assertIn("Bash(python3 -m unittest *)", rules)
+        self.assertNotIn("Bash", rules)                                 # never a bare Bash grant
+        self.assertNotIn("Bash(git commit *)", rules)                   # stage workers are no-commit
+        self.assertFalse([r for r in rules if r.startswith("Bash(git push")])
+        owner = self._resolve("allowlist", worker_type="owner")
+        self.assertIn("Bash(git commit *)", owner["allowed_tools"])     # SD-69 commit-expected owner
+        args = _shell_command_args(resolved_permission_posture=posture)
+        command = WH.shell_command(args, Path("/tmp/p.txt"), Path("/tmp/l.log"))
+        self.assertIn("--permission-mode acceptEdits", command)
+        self.assertNotIn("bypassPermissions", command)
         self.assertIn("--allowedTools", command)
         self.assertIn("capability-route.py", command)
 
     def test_supervised_turn_carries_the_posture_to_the_session_bridge(self):
-        for posture, flag in ((self._posture("bypass"), "--permission-mode bypassPermissions"),
-                              (self._resolve("allowlist"), "--allowed-tool")):
-            with self.subTest(mode=posture["mode"]):
+        for mode, flag in (("bypass", "--permission-mode bypassPermissions"),
+                           ("allowlist", "--permission-mode acceptEdits")):
+            with self.subTest(mode=mode):
+                posture = self._resolve(mode)
                 args = _shell_command_args(
                     resolved_completion_delivery="session-resume-supervised",
                     attempt_id="att-fixture", resolved_permission_posture=posture,
@@ -521,14 +538,15 @@ class ClaudeHeadlessPermissionPosture(unittest.TestCase):
                 command = WH.shell_command(args, Path("/tmp/p.txt"), Path("/tmp/l.log"))
                 self.assertIn("claude-session-supervisor.py", command)
                 self.assertIn(flag, command)
+                self.assertIn("--allowed-tool", command)
 
     def test_config_default_is_bypass_from_the_shipped_profile(self):
         if hasattr(os, "geteuid") and os.geteuid() == 0:
             self.skipTest("root demotes bypass by contract; covered separately")
         shipped = str(WH.ROOT / "profiles" / "dispatch-defaults.yaml")
-        posture = self._resolve("config", DISPATCH_DEFAULTS_CONFIG=shipped)
+        posture = self._resolve("config", env={"DISPATCH_DEFAULTS_CONFIG": shipped})
         self.assertEqual((posture["mode"], posture["reason"]), ("bypass", "config"))
-        self.assertEqual(posture["allowed_tools"], ())
+        self.assertEqual(posture["inherited_default_mode"], "-")
 
     def test_config_opt_out_selects_allowlist(self):
         with tempfile.TemporaryDirectory() as td:
@@ -536,7 +554,7 @@ class ClaudeHeadlessPermissionPosture(unittest.TestCase):
             user = Path(td) / "dispatch-defaults.yaml"
             user.write_text(shipped.replace("claude_permission_mode: bypass", "claude_permission_mode: allowlist"),
                             encoding="utf-8")
-            posture = self._resolve("config", DISPATCH_DEFAULTS_CONFIG=str(user))
+            posture = self._resolve("config", env={"DISPATCH_DEFAULTS_CONFIG": str(user)})
         self.assertEqual((posture["mode"], posture["reason"]), ("allowlist", "config"))
 
     def test_invalid_config_falls_back_to_the_shipped_default_with_a_typed_reason(self):
@@ -545,24 +563,57 @@ class ClaudeHeadlessPermissionPosture(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             broken = Path(td) / "dispatch-defaults.yaml"
             broken.write_text("schema_version: 3\nheadless: nonsense\n", encoding="utf-8")
-            posture = self._resolve("config", DISPATCH_DEFAULTS_CONFIG=str(broken))
+            posture = self._resolve("config", env={"DISPATCH_DEFAULTS_CONFIG": str(broken)})
         self.assertEqual((posture["mode"], posture["reason"]), ("bypass", "config-invalid-shipped-default"))
 
-    def test_disable_bypass_setting_demotes_to_allowlist_with_a_typed_reason(self):
-        with tempfile.TemporaryDirectory() as td, \
+    def test_m5_disable_bypass_is_honoured_from_every_settings_scope(self):
+        disable = json.dumps({"permissions": {"disableBypassPermissionsMode": "disable"}})
+        for scope in ("user", "project", "project-local"):
+            with self.subTest(scope=scope), tempfile.TemporaryDirectory() as cfg, \
+                 tempfile.TemporaryDirectory() as wt, \
+                 mock.patch.object(WH, "_MANAGED_SETTINGS_PATHS", ()):
+                target = {
+                    "user": Path(cfg) / "settings.json",
+                    "project": Path(wt) / ".claude" / "settings.json",
+                    "project-local": Path(wt) / ".claude" / "settings.local.json",
+                }[scope]
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(disable, encoding="utf-8")
+                with mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": cfg}):
+                    posture = WH.resolve_permission_posture(self._ns("bypass", worktree=wt))
+                self.assertEqual((posture["mode"], posture["reason"], posture["mode_flag"]),
+                                 ("allowlist", "settings-disable-bypass", "acceptEdits"))
+                self.assertTrue(posture["allowed_tools"])
+
+    def test_m5_managed_scope_is_read_too(self):
+        with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as cfg:
+            managed = Path(td) / "managed-settings.json"
+            managed.write_text(json.dumps({"permissions": {"disableBypassPermissionsMode": "disable"}}))
+            with mock.patch.object(WH, "_MANAGED_SETTINGS_PATHS", (managed,)), \
+                 mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": cfg}):
+                posture = WH.resolve_permission_posture(self._ns("bypass", worktree=cfg))
+        self.assertEqual(posture["reason"], "settings-disable-bypass")
+
+    def test_inherited_default_mode_is_recorded_from_the_highest_precedence_scope(self):
+        with tempfile.TemporaryDirectory() as cfg, tempfile.TemporaryDirectory() as wt, \
              mock.patch.object(WH, "_MANAGED_SETTINGS_PATHS", ()):
-            (Path(td) / "settings.json").write_text(
-                json.dumps({"permissions": {"disableBypassPermissionsMode": "disable"}}), encoding="utf-8")
-            with mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": td}):
-                posture = WH.resolve_permission_posture(
-                    argparse.Namespace(permission_mode="bypass", agent_home=Path(td)))
-        self.assertEqual((posture["mode"], posture["reason"]), ("allowlist", "settings-disable-bypass"))
-        self.assertTrue(posture["allowed_tools"])
+            (Path(cfg) / "settings.json").write_text(json.dumps({"permissions": {"defaultMode": "auto"}}))
+            with mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": cfg}):
+                posture = WH.resolve_permission_posture(self._ns("bypass", worktree=wt))
+                self.assertEqual(posture["inherited_default_mode"], "auto")   # the harness template value
+                self.assertEqual(posture["mode"], "bypass")                    # the pin still wins
+                project = Path(wt) / ".claude"; project.mkdir()
+                (project / "settings.local.json").write_text(json.dumps({"permissions": {"defaultMode": "plan"}}))
+                posture = WH.resolve_permission_posture(self._ns("bypass", worktree=wt))
+                self.assertEqual(posture["inherited_default_mode"], "plan")   # project-local outranks user
+        args = _shell_command_args(resolved_permission_posture=posture, capability="autopilot-code")
+        self.assertEqual(posture["mode_flag"], "bypassPermissions")
 
     def test_root_demotes_bypass_to_allowlist(self):
         with mock.patch.object(WH.os, "geteuid", return_value=0, create=True):
             posture = self._resolve("bypass")
-        self.assertEqual((posture["mode"], posture["reason"]), ("allowlist", "root-refuses-bypass"))
+        self.assertEqual((posture["mode"], posture["reason"], posture["mode_flag"]),
+                         ("allowlist", "root-refuses-bypass", "acceptEdits"))
 
     def test_wrapper_parser_accepts_the_posture_flag(self):
         parser = WH.parser()
@@ -573,6 +624,14 @@ class ClaudeHeadlessPermissionPosture(unittest.TestCase):
             os.environ.pop("CLAUDE_DISPATCH_PERMISSION_MODE", None)
             args = WH.parser().parse_args(["--dry-run", "--worktree", "/tmp/x", "--slug", "s", "--capability", "autopilot-code"])
         self.assertEqual(args.permission_mode, "config")
+
+    def test_minor7_foreground_close_seals_the_review_artifact_for_a_finished_review(self):
+        terminal = {"failure_class": "fail", "terminal_event": "result", "artifact_path_b64": "abc"}
+        sealed = WH._foreground_terminal_evidence(terminal, WH.REVIEW_BLOCKING_NOTE, "/tmp/l.jsonl")
+        self.assertEqual(sealed["review_artifact_b64"], "abc")
+        self.assertEqual(sealed["failure_class"], "fail")          # verdict axis untouched
+        dead = WH._foreground_terminal_evidence(terminal, "dead-worker-fail", "/tmp/l.jsonl")
+        self.assertNotIn("review_artifact_b64", dead)
 
 
 if __name__=="__main__": unittest.main()

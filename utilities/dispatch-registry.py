@@ -61,8 +61,10 @@ from dispatch_registry_inventory import (  # noqa: E402
     inventory_query,
 )
 from codex_dispatch_terminal import (  # noqa: E402
+    REVIEW_BLOCKING_NOTE,
     inspect_terminal_attempt,
     inspect_terminal_log,
+    review_blocking_handoff,
 )
 from dispatch_completion_join import (  # noqa: E402
     materialize_after_terminal_close,
@@ -566,6 +568,17 @@ def resume_boundary(route_file, incomplete_nodes):
     return None
 
 
+def review_terminal_view(row):
+    """Root-bound terminal view of one row's exact log for the review conjunction."""
+    meta = row["meta"]
+    return inspect_terminal_attempt(
+        meta.get("log_file"),
+        worktree=row.get("worktree"),
+        artifact_root_metadata=meta.get("artifact_root"),
+        worker_type=meta.get("worker_type"),
+    )
+
+
 def classify(row, args, newest_orders, rows=None):
     if row["status"] not in OPEN: return "terminal", "already-terminal", None
     meta = row["meta"]
@@ -582,7 +595,16 @@ def classify(row, args, newest_orders, rows=None):
     ):
         reason = f"{terminal['terminal_event']}:{terminal['verdict']}"
         if terminal.get("failure_note"):
-            return "terminal-handoff", reason, terminal["failure_note"]
+            note = terminal["failure_note"]
+            if note == "dead-worker-fail" and meta.get("worker_type") == "review":
+                # OPERATIONS §5.10: the reconcile carrier applies the same
+                # conjunction as the wrapper tail and the supervisor join -- a
+                # reviewer whose FAIL names a readable in-root artifact finished
+                # its contract, even when its wrapper died before closing the row.
+                view = review_terminal_view(row)
+                if review_blocking_handoff(view, "review"):
+                    note = REVIEW_BLOCKING_NOTE
+            return "terminal-handoff", reason, note
         # SD-70: a route-bound PASS completes only through its completion
         # marker. The envelope alone never proves completion, so a marker-less
         # PASS row is either a still-draining worker or a typed worker death —
@@ -850,6 +872,12 @@ def reconcile(rows, args):
 
             reconcile_evidence = {"classifier_source": ATTEMPT_CLASSIFIER_SOURCE,
                                   "reconcile_reason": reason}
+            if note == REVIEW_BLOCKING_NOTE:
+                # Seal the artifact the reviewer named, as the join does, so the
+                # owner-closure gate can re-verify it from the row.
+                encoded = str(review_terminal_view(row).get("artifact_path_b64") or "")
+                if encoded:
+                    reconcile_evidence["review_artifact_b64"] = encoded
             if note == "dead-invalid-envelope":
                 # B47-3: this is the `classify()`-selected invalid-envelope
                 # note, the second of the two producers §4 ②-A names.

@@ -144,6 +144,50 @@ class RegistryTest(unittest.TestCase):
      self.assertEqual(metadata.get("failure_class"),"invalid-envelope")
     else:
      self.assertNotIn("failure_class",metadata)
+ def test_m2_reconcile_books_a_finished_review_as_completed_review_blocking(self):
+  # OPERATIONS §5.10: the reconcile carrier applies the same conjunction as the
+  # wrapper tail and the supervisor join. A plan-check reviewer whose wrapper
+  # died after the handoff must not be booked `dead-worker-fail` forever.
+  artifact_root=self.base/".agent_reports";artifact_root.mkdir(exist_ok=True)
+  review=artifact_root/"round_1.md";review.write_text("## Plan Review Results\n1 blocking finding\n")
+  log=self.base/"review-fail.jsonl"
+  events=[
+   {"type":"item.completed","item":{"type":"agent_message",
+    "text":f"artifact: {review}\nverdict: FAIL\nblocker: 1 blocking finding"}},
+   {"type":"turn.completed"},
+  ]
+  log.write_text("\n".join(json.dumps(event) for event in events)+"\n")
+  for attempt,worker_type,expected in (("att-review-fail","review","completed-review-blocking"),
+                                        ("att-stage-fail","stage","dead-worker-fail")):
+   with self.subTest(worker_type=worker_type):
+    self.jobs.write_text(f"2026-07-16T00:00:05Z\topen\t/r\t{self.base}\t{attempt}\t"
+              f"route_id=rt-review-fail,route_node=plan-check,attempt_id={attempt},pid=99999993,pid_start=1,"
+              f"harness=codex,worker_type={worker_type},artifact_root={artifact_root},log_file={log}\n")
+    currentize_registry(self.jobs)
+    applied=self.invoke("reconcile","--attempt",attempt,"--apply")
+    record=json.loads(applied.stdout)
+    self.assertEqual(record["closed"],1,record)
+    self.assertEqual(record["decisions"][0]["category"],"terminal-handoff")
+    self.assertEqual(record["decisions"][0]["proposed_note"],expected)
+    fields=self.jobs.read_text().strip().split("\t",5)
+    self.assertEqual(fields[1],"done")
+    metadata=D.parse_registry_metadata(fields[5])
+    self.assertEqual(metadata.get("note"),expected)
+    if expected=="completed-review-blocking":
+     self.assertTrue(metadata.get("review_artifact_b64"))
+    else:
+     self.assertNotIn("review_artifact_b64",metadata)
+    self.assertNotIn("failure_class",metadata)
+  # a review FAIL with no readable artifact stays a dead worker even through reconcile
+  log.write_text("\n".join(json.dumps(e) for e in [
+   {"type":"item.completed","item":{"type":"agent_message","text":"artifact: -\nverdict: FAIL\nblocker: x"}},
+   {"type":"turn.completed"}])+"\n")
+  self.jobs.write_text(f"2026-07-16T00:00:06Z\topen\t/r\t{self.base}\tatt-review-noart\t"
+            f"route_id=rt-review-fail,route_node=plan-check,attempt_id=att-review-noart,pid=99999993,pid_start=1,"
+            f"harness=codex,worker_type=review,artifact_root={artifact_root},log_file={log}\n")
+  currentize_registry(self.jobs)
+  applied=self.invoke("reconcile","--attempt","att-review-noart","--apply")
+  self.assertEqual(json.loads(applied.stdout)["decisions"][0]["proposed_note"],"dead-worker-fail")
  def test_reconcile_natural_dead_worker_blocked_note_excludes_failure_class(self):
   # gap1 correction 1: same axis as above, but through a real (non-mocked)
   # classify() -> inspect_terminal_log() run against an actual BLOCKED

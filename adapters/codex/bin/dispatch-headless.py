@@ -106,7 +106,7 @@ from model_profile import (  # noqa: E402
     resolve_runtime_profile,
     validate_registered_profile,
 )
-from codex_dispatch_terminal import inspect_terminal_attempt  # noqa: E402
+from codex_dispatch_terminal import REVIEW_BLOCKING_NOTE, inspect_terminal_attempt  # noqa: E402
 from dispatch_completion_join import (  # noqa: E402
     JoinContractError,
     close_wrapper_pass,
@@ -2895,16 +2895,20 @@ def main(argv: list[str]) -> int:
                 terminal_note = "completed-terminal-handoff"
             terminal_closed = False
             if terminal_note:
+                terminal_evidence = {
+                    "detected_by": "foreground-terminal-handoff",
+                    "failure_class": terminal["failure_class"],
+                    "terminal_event": terminal["terminal_event"],
+                    "log_file": str(log_path),
+                }
+                if terminal_note == REVIEW_BLOCKING_NOTE and terminal.get("artifact_path_b64"):
+                    # OPERATIONS §5.10: seal the named review artifact like the join does.
+                    terminal_evidence["review_artifact_b64"] = str(terminal["artifact_path_b64"])
                 terminal_closed = close_attempt_row(
                     jobs,
                     args.attempt_id,
                     terminal_note,
-                    evidence={
-                        "detected_by": "foreground-terminal-handoff",
-                        "failure_class": terminal["failure_class"],
-                        "terminal_event": terminal["terminal_event"],
-                        "log_file": str(log_path),
-                    },
+                    evidence=terminal_evidence,
                 )
                 if terminal_closed:
                     materialize_after_terminal_close(jobs, args.attempt_id)

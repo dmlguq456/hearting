@@ -24,6 +24,7 @@ from dispatch_contract import (
     WRAPPER_TRANSPORTS,
     _atomic_registry_replace,
     _delivery_intent_values,
+    _updated_attempt_metadata,
     agent_home_equivalent,
     attempt_process_quiescence,
     completion_marker_is_current,
@@ -3133,26 +3134,44 @@ def complete_node(
 # the SD-94 fail-closed refusal. Every refusal is typed `owner-closure-*`.
 _OWNER_CLOSURE_SUFFIX=".owner-closure.md"
 _OWNER_CLOSURE_VERDICT="closed-by-owner"
+_REGISTRY_UNSAFE_CHARS=(",","=","\t","\n","\r")
+_LIVE_ROW_STATUSES={"open","running"}
+
+def _registry_unsafe(value):
+    """True when a value cannot be sealed into the comma/=/tab/newline registry pipe."""
+    text=str(value)
+    return any(ch in text for ch in _REGISTRY_UNSAFE_CHARS) or any(ord(ch)<32 or ord(ch)==127 for ch in text)
 
 def _owner_closure_frontmatter(text):
-    """Parse the flat `key: value` frontmatter of an owner-closure record."""
+    """Parse the flat `key: value` frontmatter of an owner-closure record.
+
+    Returns (fields, duplicate_keys); a duplicated key is a refusal upstream
+    because last-value-wins would let a second `verdict:` line override the first."""
     match=re.match(r"\A---\n(.*?\n)---\n",text,re.DOTALL)
     if not match:
-        return None
+        return None, []
     fields={}
+    duplicates=[]
     for line in match.group(1).splitlines():
         if ":" not in line or line.startswith((" ","\t","#")):
             continue
         key,_,value=line.partition(":")
-        fields[key.strip()]=value.strip().strip("'\"")
-    return fields
+        key=key.strip()
+        if key in fields:
+            duplicates.append(key)
+        fields[key]=value.strip().strip("'\"")
+    return fields, sorted(set(duplicates))
+
+def _mentions(text, token):
+    """Whole-token mention: `att-r1` must not be satisfied by `att-r10`."""
+    return re.search(r"(?<![A-Za-z0-9_./-])"+re.escape(token)+r"(?![A-Za-z0-9_-])",text) is not None
 
 def _review_round_rows(lines, route_id, node_id):
     """Registry rows of one route node that count as review rounds.
 
-    Mirrors `dispatch-node.py prior_round_attempts`: same route/node, any
-    status, sub-sessions (`stage_authority=0`) excluded, legacy `route=` key
-    honoured read-only."""
+    Mirrors `dispatch-node.py prior_round_attempts`: same route/node,
+    sub-sessions (`stage_authority=0`) excluded, legacy `route=` key honoured
+    read-only. Returns every status; the caller separates live from terminated."""
     rows=[]
     for line in lines:
         fields=line.split("\t")
@@ -3172,12 +3191,14 @@ def _owner_closure_eligibility(route, node, node_id, evidence, row_metadata, lin
     """Admit `complete` on a `completed-review-blocking` row, or raise a typed refusal.
 
     Returns the closure facts the caller seals on the row. Checks, in order:
-    the node is a review node and the row a review worker; the node's round
-    budget is exhausted; the exact attempt log still proves a FAIL handoff
-    with a readable in-root review artifact; the evidence is an in-root
-    `*.owner-closure.md` distinct from that artifact with the closure
-    frontmatter; and its body names every blocking attempt of the node and the
-    review artifact it rules on.
+    the node is a review node and the row a review worker; no review round of
+    the node is still open/running and the terminated rounds exhaust the
+    budget; the node has no canonical marker from another attempt; the exact
+    attempt log still proves a FAIL handoff with a readable in-root review
+    artifact; the evidence is a registry-safe, in-root `*.owner-closure.md`
+    distinct from that artifact with the closure frontmatter; and its body
+    names every blocking attempt of the node and the review artifact it rules
+    on, as whole tokens.
     """
     def refuse(reason, detail=""):
         raise ValueError(f"owner-closure-{reason}"+(f":{detail}" if detail else ""))
@@ -3186,9 +3207,29 @@ def _owner_closure_eligibility(route, node, node_id, evidence, row_metadata, lin
         refuse("node-not-review",
                f"kind={node.get('kind') or '-'};worker_type={row_metadata.get('worker_type') or '-'}")
     rounds=_review_round_rows(lines,route["route_id"],node_id)
-    max_round=REVIEW_ROUND_CAP.max_review_rounds(route["effective_intensity"])
-    if len(rounds)<max_round:
-        refuse("round-budget-not-exhausted",f"rounds={len(rounds)};max_round={max_round}")
+    live=[metadata.get("attempt_id") or "-" for status,metadata in rounds if status in _LIVE_ROW_STATUSES]
+    if live:
+        # A live review worker may still write a second blocking artifact
+        # nobody has read; the gate never closes over its head.
+        refuse("round-still-open","attempt="+"|".join(live))
+    terminated=[(status,metadata) for status,metadata in rounds if status not in _LIVE_ROW_STATUSES]
+    try:
+        max_round=REVIEW_ROUND_CAP.max_review_rounds(route["effective_intensity"])
+    except ValueError:
+        refuse("intensity-unknown",str(route.get("effective_intensity")))
+    if len(terminated)<max_round:
+        refuse("round-budget-not-exhausted",f"rounds={len(terminated)};max_round={max_round}")
+    own=row_metadata.get("attempt_id")
+    canonical=completion_dir(route["route_id"])/f"{node_id}.json"
+    if canonical.is_file():
+        try:
+            existing=json.loads(canonical.read_text(encoding="utf-8"))
+        except (OSError,ValueError):
+            refuse("node-already-complete","canonical-marker-unreadable")
+        if existing.get("attempt_id")!=own:
+            # SD-70: one node, one exact attempt. A second closure would
+            # overwrite the canonical marker and leave two rows claiming it.
+            refuse("node-already-complete",f"attempt={existing.get('attempt_id') or '-'}")
     terminal=inspect_terminal_attempt(
         row_metadata.get("log_file"),
         worktree=route["cwd"],
@@ -3211,6 +3252,10 @@ def _owner_closure_eligibility(route, node, node_id, evidence, row_metadata, lin
     except (ValueError,UnicodeDecodeError):
         refuse("review-artifact-unverifiable","artifact-undecodable")
     evidence_path=Path(evidence).resolve()
+    if _registry_unsafe(evidence_path):
+        # The path is sealed into the registry pipe; a ',' '=' tab or newline
+        # in it would forge fields or whole rows.
+        refuse("evidence-path-unsafe",evidence_path.name.encode("unicode_escape").decode("ascii")[:80])
     if not evidence_path.name.endswith(_OWNER_CLOSURE_SUFFIX):
         refuse("evidence-name-invalid",evidence_path.name)
     artifact_root=Path(route["artifact_root"]).resolve()
@@ -3224,9 +3269,11 @@ def _owner_closure_eligibility(route, node, node_id, evidence, row_metadata, lin
         text=evidence_path.read_text(encoding="utf-8")
     except (OSError,UnicodeDecodeError):
         refuse("evidence-unreadable",str(evidence_path))
-    frontmatter=_owner_closure_frontmatter(text)
+    frontmatter,duplicates=_owner_closure_frontmatter(text)
     if frontmatter is None:
         refuse("frontmatter-invalid","missing")
+    if duplicates:
+        refuse("frontmatter-invalid","duplicate="+"|".join(duplicates))
     if frontmatter.get("verdict")!=_OWNER_CLOSURE_VERDICT:
         refuse("frontmatter-invalid",f"verdict={frontmatter.get('verdict') or '-'}")
     if frontmatter.get("node")!=node_id:
@@ -3234,22 +3281,21 @@ def _owner_closure_eligibility(route, node, node_id, evidence, row_metadata, lin
     if "gate" in frontmatter and frontmatter["gate"]!=node.get("completion_gate"):
         refuse("frontmatter-invalid",f"gate={frontmatter['gate']}")
     blocking=[
-        metadata.get("attempt_id") for status,metadata in rounds
+        metadata.get("attempt_id") for status,metadata in terminated
         if status=="done" and metadata.get("note")==REVIEW_BLOCKING_NOTE and metadata.get("attempt_id")
     ]
-    own=row_metadata.get("attempt_id")
     if own and own not in blocking:
         blocking.append(own)
-    missing=[attempt for attempt in blocking if attempt not in text]
+    missing=[attempt for attempt in blocking if not _mentions(text,attempt)]
     if missing:
         refuse("evidence-unlinked","attempt="+"|".join(missing))
-    if review_artifact.name not in text:
+    if not _mentions(text,review_artifact.name):
         refuse("evidence-unlinked",f"artifact={review_artifact.name}")
     return {
         "evidence":str(evidence_path),
         "review_artifact_b64":encoded,
         "blocking_attempts":blocking,
-        "rounds":len(rounds),
+        "rounds":len(terminated),
         "max_round":max_round,
     }
 
@@ -3355,10 +3401,28 @@ def _complete_node_locked(
             # `completed-review-blocking` is marker-eligible only through the
             # evidence-bound owner-closure gate; it raises its own typed refusal.
             owner_closure=None
+            sealed_pipe=None
             if already_closed and row_note==REVIEW_BLOCKING_NOTE:
                 owner_closure=_owner_closure_eligibility(
                     route,node,node_id,evidence,row_metadata,lines,
                 )
+                # Seal the closure facts through the one sanitizing writer
+                # every other terminal value uses (keys allowlisted in
+                # ATTEMPT_TERMINAL_EVIDENCE_KEYS, ',' -> ';', immutability
+                # checks) -- and compute it BEFORE the marker is published so a
+                # refused seal publishes nothing.
+                try:
+                    sealed_pipe=_updated_attempt_metadata(
+                        row_fields[5],
+                        {
+                            "gate_closure":"owner-closure",
+                            "owner_closure":owner_closure["evidence"],
+                            "review_artifact_b64":owner_closure["review_artifact_b64"],
+                        },
+                        terminal=True,
+                    )
+                except DispatchContractError as exc:
+                    raise ValueError(f"owner-closure-seal-refused:{exc.reason}") from exc
                 marker_eligible=True
             if already_closed and row_note!="completed-marker" and not marker_eligible:
                 raise ValueError(
@@ -3385,21 +3449,18 @@ def _complete_node_locked(
             # `complete` then reads note=completed-marker (last value wins) and returns the
             # idempotent already-closed path instead of appending twice.
             row_fields[1]="done"
+            if sealed_pipe is not None:
+                # The gate closed on the owner's ruling, not on a passing review:
+                # the closure facts were sealed above and the verdict axis stays
+                # untouched (never `failure_class=pass` for a FAIL review).
+                row_fields[5]=sealed_pipe
             row_fields[5] += (
                 f",note=completed-marker,completion_marker={canonical_marker_path}"
                 f",completion_marker_history={history_marker_path}"
             )
-            if owner_closure is not None:
-                # The gate closed on the owner's ruling, not on a passing review:
-                # seal the closure facts and leave the verdict axis untouched
-                # (never `failure_class=pass` for a FAIL review).
-                row_fields[5] += (
-                    f",gate_closure=owner-closure,owner_closure={owner_closure['evidence']}"
-                    f",review_artifact_b64={owner_closure['review_artifact_b64']}"
-                )
             # DR-1: seal the pass verdict alongside the marker so partial-continuation
             # peer checks see immutable terminal success without re-deriving it.
-            elif row_metadata.get("failure_class") in (None,"","-"):
+            if owner_closure is None and row_metadata.get("failure_class") in (None,"","-"):
                 row_fields[5] += ",failure_class=pass"
             if not already_closed:
                 # SD-111 (§4.3.1): this is the row's one open|running -> done
