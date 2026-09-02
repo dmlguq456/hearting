@@ -750,8 +750,14 @@ projects the ledger into per-session sent/recv counts and a bounded last-receive
 summary, never scanning the ledger from a write path; the projection renders as an
 additive session badge/subtitle, never widening or reflowing an existing row.
 
-승인 대기·만료 = 송신 세션 permission mode; 실행 중 승격 불가 → 기동 시점 플래그.
-감시 세션은 등록 dispatch 직접 분사가 기본, 인터랙티브 자식은 사람 응답·복구 필요 장기 작업만.
+Peer-message holds and expiries are permission-mode effects on **both** ends (measured 2026-09-02):
+`SendMessage` is a tool call gated by the sender's permission mode, so an unattended prompting-mode
+sender expires; and a receiving session that is not in bypass mode holds an inbound peer message for
+its own user's approval before its Claude sees it. A running session cannot be raised to bypass (the
+shift+tab cycle has no bypass step), so the launch-time flag is the only deterministic point —
+`peer-steward.py start` applies it. A stewarding session dispatches registered work from its own
+session by default; an interactive child session is reserved for long-running work that needs human
+answers or recovery.
 
 Probe P-1 through P-5 (Codex `queue` reachability, managed-gateway reachability, gateway
 `steer` single-ingress, idle republish, OpenCode message queue) are closed-by-decision as
