@@ -8,6 +8,7 @@ frame direction-brief (§2.1) for jobs.log rows 331/335/338/339/341 — same
 field layout, same dispatch_depth/attempt_id/parent linkage, same slug —
 not a verbatim byte capture (that capture was not available to this test).
 """
+import json
 import os
 import re
 import sys
@@ -20,7 +21,7 @@ _TOOLS_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__f
 if _TOOLS_DIR not in sys.path:
     sys.path.insert(0, _TOOLS_DIR)
 
-from fleet import gitinfo, model, render  # noqa: E402
+from fleet import fleet as fleet_entry, gitinfo, model, render  # noqa: E402
 from fleet.collectors import dispatch  # noqa: E402
 from fleet.model import DispatchJob, Session  # noqa: E402
 
@@ -63,6 +64,35 @@ class F97eOwnerSurvivalTest(unittest.TestCase):
             jobs, _malformed = dispatch._scan_jobs_log(path, set())
         attempts = {j.attempt_id for j in jobs}
         self.assertGreater(len(attempts), 1)
+
+    def test_json_jobs_contains_owner_row_and_child_parent_attempt_id(self):
+        """F-97e / R2-2 (owner adjudication round 2) — the `--json` integration path,
+        not a static object assertion: the registry-open depth-1 owner must be in
+        `jobs[]` and at least one depth-2 child must resolve its parent linkage back
+        to it, going through `dispatch.collect()` -> `fleet._snapshot_json()` exactly
+        as the real `fleet --once --json` entry point does.
+
+        Measured note (report): `DispatchJob` has no `parent_attempt_id` field —
+        `_scan_jobs_log` never extracts the jobs.log row's own `parent_attempt_id=`
+        key (only `_scan_registry_evidence`'s separate `route`-json path does, at
+        `collectors/dispatch.py:2251`). The child's actual --json parent linkage to
+        the owner is `parent_slug` (== the owner's shared `slug`); this asserts that
+        field, and the discrepancy from the plan's literal wording is reported."""
+        owner_attempt_id = "att-c981df617dc145298b6a3c1e9a6971ac"
+        with tempfile.TemporaryDirectory() as tmp:
+            path = _rebased_fixture(tmp)
+            with mock.patch.object(dispatch.procscan, "_ps_lines", return_value=[]), \
+                 mock.patch.dict(os.environ, {"AGENT_HOME": tmp}):
+                jobs = dispatch.collect(jobs_path=path)
+            payload = json.loads(fleet_entry._snapshot_json([], jobs))
+        job_rows = payload["jobs"]
+        owner_rows = [row for row in job_rows if row.get("attempt_id") == owner_attempt_id]
+        self.assertEqual(len(owner_rows), 1)
+        self.assertEqual(owner_rows[0]["depth"], 1)
+        owner_slug = owner_rows[0]["slug"]
+        child_rows = [row for row in job_rows
+                      if row.get("depth") == 2 and row.get("parent_slug") == owner_slug]
+        self.assertGreater(len(child_rows), 0)
 
     def test_two_row_falsifier(self):
         """Minimal reproduction: an open dispatch-depth-1 owner and an open
@@ -252,13 +282,15 @@ class F97dRowWidthRegressionTest(unittest.TestCase):
 
 
 class F97dLegendWidthTest(unittest.TestCase):
-    """The legend row (last line of `_build_lines`) at 60 columns: baseline (no location glyphs
-    seen) measures 52 cells; F-97's conditional location legend entries (loc_foreign/loc_wt) add
-    15 (isolated-wt, "⌂wt worktree") and 17 (foreign-repo, "→ foreign repo") more cells on top of
-    that. These are this session's own measurements, not the owner's da552ad4 baseline figures —
-    see dev_logs/execute-gap.md."""
+    """Follow-up (c) / C11 — the legend now WRAPS instead of overflowing past
+    `term_width`. Baseline (no location glyphs seen) measures 52 cells and never
+    wraps at 60; F-97's conditional location legend entries (loc_foreign/loc_wt)
+    push the flat width to 67/69, which now wrap into two lines. This is a planned
+    assertion change, not a baseline regression — see plan.md §3 C11 and
+    dev_logs/slice-C.md for the measured numbers."""
 
-    def _legend_width(self, location_kind, location_repo=None, location_wt=None):
+    def _legend_lines(self, location_kind, location_repo=None, location_wt=None,
+                      term_width=60):
         session = Session(harness="claude", pid=910, proc_start="root", cwd="/tmp/f97",
                           session_id="sid-f97", slug="f97-parent", liveness="working")
         job = DispatchJob(key="code", slug="f97d-job", cwd="/tmp/f97", harness="claude",
@@ -267,21 +299,50 @@ class F97dLegendWidthTest(unittest.TestCase):
                           location_wt=location_wt, parent_sid="sid-f97", is_child=True)
         for layout in ("narrow", "stack"):
             lines = render._build_lines([session], [job], "both", False, 0,
-                                        layout=layout, term_width=60)
+                                        layout=layout, term_width=term_width)
             texts = [re.sub(r"\x00[^\x00]*\x00", "", "".join(t for t, _k in l))
                      for l in lines if l]
-            yield layout, render._dw(texts[-1])
+            # Every trailing line from the first legend glyph ("working") onward is
+            # a legend line — collect all of them, not `texts[-1]` alone (a wrapped
+            # legend is now more than one physical line).
+            start = max(i for i, t in enumerate(texts) if "working" in t)
+            yield layout, texts[start:]
 
-    def test_legend_overflow_at_60_columns_is_the_measured_baseline(self):
+    def test_legend_wraps_with_zero_overflow_at_every_width(self):
+        for term_width in (60, 100, 120, 168):
+            for kind, repo, wt in (
+                ("primary", None, None),
+                ("isolated-wt", None, "isolated-wt"),
+                ("foreign-repo", "hearting", None),
+            ):
+                for layout, legend_texts in self._legend_lines(
+                        kind, location_repo=repo, location_wt=wt, term_width=term_width):
+                    for line_text in legend_texts:
+                        self.assertLessEqual(
+                            render._dw(line_text), term_width,
+                            "legend line overflow at %d cols (%s/%s/%s): %r"
+                            % (term_width, kind, layout, term_width, line_text))
+
+    def test_measured_per_line_widths_at_60_columns(self):
         for kind, repo, wt, expect in (
-            ("primary", None, None, 52),
-            ("isolated-wt", None, "isolated-wt", 67),
-            ("foreign-repo", "hearting", None, 69),
+            ("primary", None, None, [52]),
+            ("isolated-wt", None, "isolated-wt", [49, 14]),
+            ("foreign-repo", "hearting", None, [49, 16]),
         ):
-            for layout, width in self._legend_width(kind, location_repo=repo, location_wt=wt):
-                self.assertEqual(width, expect,
-                                 "legend width for %s/%s: got %d, expected %d"
-                                 % (kind, layout, width, expect))
+            for layout, legend_texts in self._legend_lines(kind, location_repo=repo,
+                                                            location_wt=wt, term_width=60):
+                widths = [render._dw(t) for t in legend_texts]
+                self.assertEqual(widths, expect,
+                                 "legend widths for %s/%s: got %r, expected %r"
+                                 % (kind, layout, widths, expect))
+
+    def test_wide_columns_never_wrap(self):
+        for term_width in (100, 120, 168):
+            for layout, legend_texts in self._legend_lines(
+                    "foreign-repo", location_repo="hearting", term_width=term_width):
+                self.assertEqual(len(legend_texts), 1,
+                                 "unexpected wrap at %d cols/%s" % (term_width, layout))
+                self.assertEqual(render._dw(legend_texts[0]), 69)
 
 
 class F97cCampaignLabelTest(unittest.TestCase):
