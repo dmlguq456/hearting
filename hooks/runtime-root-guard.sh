@@ -91,5 +91,8 @@ if [ "$hook_mode" -eq 0 ]; then
   printf '⛔ %s\n' "$reason" >&2
   exit 2
 fi
-printf '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"%s"}}\n' "$reason"
+# JSON-string-escape reason: backslash first, then double-quote, so an
+# existing backslash is never re-escaped by the quote substitution.
+reason_json=$(printf '%s' "$reason" | sed 's/\\/\\\\/g; s/"/\\"/g')
+printf '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"%s"}}\n' "$reason_json"
 exit 0
