@@ -22,6 +22,7 @@ find_prd() {
   dir=$1
   candidates=""
   root=""
+  unresolvable=""
   while [ ! -d "$dir" ]; do
     parent=$(dirname "$dir")
     [ "$parent" = "$dir" ] && return 0
@@ -30,6 +31,29 @@ find_prd() {
   dir=$(CDPATH= cd -- "$dir" && pwd -P)
   artifact_root=$("$ARTIFACT_ROOT_RESOLVER" "$dir" 2>/dev/null) || return 0
 
+  # One resolver owns the candidate order (PRD v11 D-71: open cycle -> latest
+  # shared revision -> legacy read-only fallback, first tree with a prd.md
+  # wins). Ranking the legacy bucket here as well used to hand a copy-only
+  # cutover root its stale `spec/prd.md` even after the canonical spec moved
+  # into `shared/spec/`. When python3 is available the resolver is the only
+  # source, including its "no candidates" answer.
+  if command -v python3 >/dev/null 2>&1; then
+    candidates=$(python3 "$SCRIPT_DIR/../utilities/artifact_cutover.py" resolve-legacy \
+      --artifact-root "$artifact_root" --prd-candidates 2>/dev/null)
+    [ -n "$candidates" ] && root=$(dirname "$artifact_root")
+    return 0
+  fi
+
+  # No python3: the shared/cycle layouts cannot be ranked here without
+  # reimplementing the resolver, so a root that has one is closed rather than
+  # answered from the legacy bucket alone.
+  if [ -d "$artifact_root/shared/spec" ]; then
+    unresolvable="$artifact_root"
+    root=$(dirname "$artifact_root")
+    return 0
+  fi
+
+  # Legacy-only project: enumerate exactly what the resolver would.
   if [ -f "$artifact_root/spec/prd.md" ]; then
     candidates="$artifact_root/spec/prd.md"
   fi
@@ -47,13 +71,6 @@ find_prd() {
 $d/prd.md"
     fi
   done
-
-  # W7C (gate G4): once the legacy `spec/` bucket is retired, the canonical
-  # prd.md candidates live in the latest immutable `shared/spec/` revision.
-  if [ -z "$candidates" ] && [ -d "$artifact_root/shared/spec" ] && command -v python3 >/dev/null 2>&1; then
-    candidates=$(python3 "$SCRIPT_DIR/../utilities/artifact_cutover.py" resolve-legacy \
-      --artifact-root "$artifact_root" --prd-candidates 2>/dev/null)
-  fi
 
   [ -n "$candidates" ] && root=$(dirname "$artifact_root")
 }
@@ -86,6 +103,10 @@ check_gate() {
   esac
 
   find_prd "$cwd"
+  if [ -n "$unresolvable" ]; then
+    reason="This project publishes its spec under $unresolvable/shared/spec, but python3 is unavailable, so the governing prd.md cannot be resolved. Install python3 or run the capability from a runtime that has it."
+    return 2
+  fi
   [ -z "$candidates" ] && return 0   # Not a spec-backed project.
 
   key=$(printf '%s' "$root" | sed 's#[/ ]#_#g')

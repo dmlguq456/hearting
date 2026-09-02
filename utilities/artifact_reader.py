@@ -100,25 +100,46 @@ def glob_bucket(root: Path, bucket: str, pattern: str, **kw) -> List[Path]:
     return [child for child, _ in iter_bucket_children(root, bucket, **kw) if fnmatch.fnmatch(child.name, pattern)]
 
 
+def carries_prd(tree: Optional[Path]) -> bool:
+    """True when a tree holds a governing `prd.md`.
+
+    Deliberately the spec gate's own enumeration
+    (`artifact_cutover.tree_prd_candidates`, root plus one component level), so
+    this resolver and the gate can never rank a different governing tree.
+    """
+    return tree is not None and _is_real_dir(tree) and bool(C.tree_prd_candidates(tree))
+
+
 def spec_dir(root: Path, *, open_cycle_dir: Optional[str] = None) -> Optional[Tuple[Path, str]]:
     """The spec tree a reader should consult.
 
     Order: the open producer cycle handed in (a writer's own in-progress tree),
-    the latest shared/spec revision (canonical), then the legacy `spec/` only
-    when it still carries `prd.md` or `pipeline_state.yaml`.
+    the latest shared/spec revision (canonical), then the legacy `spec/`.
+
+    Selection is by content, not by directory: the producer creates an open
+    cycle's `artifacts/spec` before anything is written into it, so a
+    directory-only test would hand a reader an empty cycle while the spec gate
+    was still ranking the revision that governs.  The governing `prd.md` decides
+    first and by the gate's own enumeration, which makes the two resolvers agree
+    on every root that has a prd.md at all.  Only when no layout carries one
+    does a `pipeline_state.yaml`-bearing tree answer -- the W7D rule that keeps
+    a pipeline-state-only legacy bucket readable -- and there the gate has
+    nothing to gate on either, so the two still cannot disagree about a
+    governing prd.
     """
     root = Path(root)
     hint = open_cycle_dir or os.environ.get("AGENT_ARTIFACT_CYCLE_DIR")
+    order: List[Tuple[Optional[Path], str]] = []
     if hint:
-        candidate = Path(hint) / "artifacts" / "spec"
-        if _is_real_dir(candidate):
-            return candidate, LAYOUT_CYCLE
-    shared = latest_shared_dir(root, "spec")
-    if shared is not None:
-        return shared, LAYOUT_SHARED
-    legacy = root / "spec"
-    if _is_real_dir(legacy) and ((legacy / "prd.md").is_file() or (legacy / "pipeline_state.yaml").is_file()):
-        return legacy, LAYOUT_LEGACY
+        order.append((Path(hint) / "artifacts" / "spec", LAYOUT_CYCLE))
+    order.append((latest_shared_dir(root, "spec"), LAYOUT_SHARED))
+    order.append((root / "spec", LAYOUT_LEGACY))
+    for tree, layout in order:
+        if carries_prd(tree):
+            return tree, layout
+    for tree, layout in order:
+        if tree is not None and _is_real_dir(tree) and (tree / "pipeline_state.yaml").is_file():
+            return tree, layout
     return None
 
 

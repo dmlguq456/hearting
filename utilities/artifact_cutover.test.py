@@ -168,13 +168,59 @@ class CutoverTest(unittest.TestCase):
         self.assertEqual(C.resolve_legacy(self.root, "plans/none.md")["resolution"], "unresolved")
 
     def test_prd_candidates_fall_back_to_latest_shared_revision(self):
-        self.assertEqual(C.prd_candidates(self.root), [str(self.root / "spec/prd.md"), str(self.root / "spec/comp/prd.md")])
         report, sealed = self.migrate()
         import shutil
         shutil.rmtree(self.root / "spec")
         cands = C.prd_candidates(self.root)
         rev = Path(sealed["shared_admissions"]["spec"]["revision_dir"])
         self.assertEqual(cands, [str(rev / "prd.md"), str(rev / "comp/prd.md")])
+
+    def test_prd_candidates_prefer_the_shared_revision_while_the_cutover_is_active(self):
+        """D-71: a copy-only cutover leaves a stale legacy `spec/prd.md` behind.
+
+        The reader order is open cycle -> latest shared revision -> legacy
+        read-only fallback, so the surviving legacy copy must not outrank the
+        shared revision that superseded it.
+        """
+        self.assertTrue((self.root / "spec/prd.md").is_file(), "fixture keeps the legacy copy")
+        self.assertEqual(C.prd_candidates(self.root),
+                         [str(self.root / f"shared/spec/{W7_REF}/revisions/{W7_RREV}/prd.md")])
+
+    def test_prd_candidates_keep_legacy_first_while_the_cutover_is_inactive(self):
+        P.cutover_path(self.root).unlink()
+        self.assertEqual(C.prd_candidates(self.root),
+                         [str(self.root / "spec/prd.md"), str(self.root / "spec/comp/prd.md")])
+
+    def test_prd_candidates_fall_back_to_legacy_when_no_canonical_tree_carries_a_prd(self):
+        """An active root that has not published a shared spec still gates."""
+        import shutil
+        shutil.rmtree(self.root / "shared/spec")
+        self.assertEqual(C.prd_candidates(self.root),
+                         [str(self.root / "spec/prd.md"), str(self.root / "spec/comp/prd.md")])
+
+    def test_the_open_cycle_alone_governs_once_it_carries_a_prd(self):
+        """Precedence, not union: a lower tree cannot satisfy the gate for a
+        spec the open cycle is currently rewriting."""
+        cycle_spec = self.root / "campaigns/camp_x/cycles/cyc_x/artifacts/spec"
+        self.w("campaigns/camp_x/cycles/cyc_x/artifacts/spec/prd.md", "# in-flight prd\n")
+        self.w("campaigns/camp_x/cycles/cyc_x/artifacts/spec/comp/prd.md", "# in-flight comp\n")
+        os.environ["AGENT_ARTIFACT_CYCLE_DIR"] = str(cycle_spec.parent.parent)
+        self.assertEqual(C.prd_candidates(self.root),
+                         [str(cycle_spec / "prd.md"), str(cycle_spec / "comp/prd.md")])
+
+    def test_an_empty_open_cycle_bucket_falls_through_to_the_shared_revision(self):
+        """The cycle dir exists from the first producer write; ranking by
+        directory rather than by candidate would silence the gate here."""
+        cycle_spec = self.root / "campaigns/camp_x/cycles/cyc_x/artifacts/spec"
+        cycle_spec.mkdir(parents=True, exist_ok=True)
+        os.environ["AGENT_ARTIFACT_CYCLE_DIR"] = str(cycle_spec.parent.parent)
+        self.assertEqual(C.prd_candidates(self.root),
+                         [str(self.root / f"shared/spec/{W7_REF}/revisions/{W7_RREV}/prd.md")])
+
+    def test_prd_candidates_ignore_an_open_cycle_hint_from_another_root(self):
+        os.environ["AGENT_ARTIFACT_CYCLE_DIR"] = str(Path(self._tmp.name) / "other-root/campaigns/c/cycles/y")
+        self.assertEqual(C.prd_candidates(self.root),
+                         [str(self.root / f"shared/spec/{W7_REF}/revisions/{W7_RREV}/prd.md")])
 
     def test_retire_verifies_backs_up_and_deletes(self):
         report, sealed = self.migrate()

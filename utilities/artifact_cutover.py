@@ -1825,28 +1825,61 @@ def latest_shared_revision(root: Path, kind: str) -> Optional[Path]:
     return best[1] if best else None
 
 
-def prd_candidates(root: Path) -> List[str]:
-    """Canonical prd.md candidates: legacy `spec/` first, else the latest shared/spec revision."""
-    root = Path(root).resolve()
+def tree_prd_candidates(tree: Optional[Path]) -> List[str]:
+    """`prd.md` plus one level of `<slug>/prd.md` inside a single spec tree."""
+    if tree is None or not tree.is_dir() or os.path.islink(str(tree)):
+        return []
     out: List[str] = []
-    legacy = root / "spec"
-    if legacy.is_dir():
-        if (legacy / "prd.md").is_file():
-            out.append(str(legacy / "prd.md"))
-        for d in sorted(legacy.iterdir()):
-            if d.is_dir() and d.name != "_internal" and (d / "prd.md").is_file():
-                out.append(str(d / "prd.md"))
-    if out:
-        return out
-    revision = latest_shared_revision(root, "spec")
-    if revision is None:
-        return out
-    if (revision / "prd.md").is_file():
-        out.append(str(revision / "prd.md"))
-    for d in sorted(revision.iterdir()):
+    if (tree / "prd.md").is_file():
+        out.append(str(tree / "prd.md"))
+    for d in sorted(tree.iterdir()):
         if d.is_dir() and d.name != "_internal" and (d / "prd.md").is_file():
             out.append(str(d / "prd.md"))
     return out
+
+
+def open_cycle_spec_dir(root: Path) -> Optional[Path]:
+    """The writer's own open-cycle spec tree, when the producer exported one."""
+    hint = os.environ.get("AGENT_ARTIFACT_CYCLE_DIR")
+    if not hint:
+        return None
+    candidate = Path(hint) / "artifacts" / "spec"
+    try:
+        candidate.resolve().relative_to(Path(root).resolve())
+    except ValueError:
+        return None
+    # No-follow, matching `artifact_reader._is_real_dir`: a symlinked cycle
+    # bucket must not let the two resolvers pick different trees.
+    if not candidate.is_dir() or os.path.islink(str(candidate)):
+        return None
+    return candidate
+
+
+def prd_candidates(root: Path) -> List[str]:
+    """Canonical prd.md candidates, ranked in the reader's order.
+
+    D-71 makes the legacy top-level `spec/` bucket a read-only fallback once the
+    write cutover is active, and readers resolve open cycle -> latest shared
+    revision -> legacy.  A copy-only cutover leaves a stale `spec/prd.md`
+    behind, so ranking legacy first there hands every caller a superseded PRD.
+    The first tree that actually carries a prd.md is the governing one and the
+    lower trees are not candidates at all, so a lower-priority copy can never
+    satisfy the gate for a spec that a higher tree has already superseded.
+    Ranking by candidates rather than by directory also keeps the gate alive
+    while an open cycle's spec bucket exists but is still empty.  With the
+    cutover inactive the legacy bucket is still the live spec tree and keeps its
+    place at the front.
+    """
+    root = Path(root).resolve()
+    if P.is_active(root):
+        order = (open_cycle_spec_dir(root), latest_shared_revision(root, "spec"), root / "spec")
+    else:
+        order = (root / "spec", latest_shared_revision(root, "spec"))
+    for tree in order:
+        found = tree_prd_candidates(tree)
+        if found:
+            return found
+    return []
 
 
 # ---------------------------------------------------------------------------

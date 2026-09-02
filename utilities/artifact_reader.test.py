@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 import tempfile
 import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import artifact_cutover as cutover  # noqa: E402
+import artifact_producer as producer  # noqa: E402
 import artifact_reader as reader  # noqa: E402
 
 CAMP = "camp_" + "a" * 32
@@ -55,13 +58,68 @@ class ReaderTests(unittest.TestCase):
         self.assertEqual(names, ["2026-08-26_cycle-plan", "2026-01-01_legacy-plan"])
         self.assertEqual(reader.glob_bucket(self.root, "plans", ".hidden"), [])
 
-    def test_spec_dir_prefers_open_cycle_then_latest_shared(self):
+    def test_spec_dir_prefers_an_open_cycle_only_once_it_carries_a_spec(self):
         cycle_dir = self.root / "campaigns" / CAMP / "cycles" / CYC
+        cycle_spec = cycle_dir / "artifacts" / "spec"
+        # The producer creates `artifacts/spec` before anything is written into
+        # it; an empty bucket must not hide the revision that still governs.
         path, layout = reader.spec_dir(self.root, open_cycle_dir=str(cycle_dir))
-        self.assertEqual((path, layout), (cycle_dir / "artifacts" / "spec", "cycle"))
+        self.assertEqual(layout, "shared")
+        self.assertEqual(path.name, RREV_NEW)
+        (cycle_spec / "prd.md").write_text("in flight", encoding="utf-8")
+        self.assertEqual(reader.spec_dir(self.root, open_cycle_dir=str(cycle_dir)),
+                         (cycle_spec, "cycle"))
+        # a component-only cycle tree is a spec tree too
+        (cycle_spec / "prd.md").unlink()
+        (cycle_spec / "component" / "prd.md").write_text("in flight", encoding="utf-8")
+        self.assertEqual(reader.spec_dir(self.root, open_cycle_dir=str(cycle_dir)),
+                         (cycle_spec, "cycle"))
         path, layout = reader.spec_dir(self.root)
         self.assertEqual(layout, "shared")
         self.assertEqual(path.name, RREV_NEW)
+
+    def test_spec_dir_and_the_spec_gate_rank_the_same_governing_tree(self):
+        """The reader and `artifact_cutover.prd_candidates` must never disagree
+        about which tree governs; the gate would otherwise force a read of one
+        tree while every reader consulted another."""
+        producer.activate(self.root, repository_id="repo_" + "1" * 32,
+                          artifact_root_id="root_" + "2" * 32)
+        cycle_dir = self.root / "campaigns" / CAMP / "cycles" / CYC
+        cycle_spec = cycle_dir / "artifacts" / "spec"
+        (self.root / "spec" / "prd.md").write_text("stale legacy", encoding="utf-8")
+        previous = os.environ.get("AGENT_ARTIFACT_CYCLE_DIR")
+        self.addCleanup(lambda: os.environ.__setitem__("AGENT_ARTIFACT_CYCLE_DIR", previous)
+                        if previous is not None else os.environ.pop("AGENT_ARTIFACT_CYCLE_DIR", None))
+        os.environ["AGENT_ARTIFACT_CYCLE_DIR"] = str(cycle_dir)
+        cases = [
+            # (label, populate, expect_cycle)
+            ("empty cycle", lambda: None, False),
+            # a tree that carries only pipeline_state.yaml has no governing prd,
+            # so it must not outrank the revision that does
+            ("pipeline-state only", lambda: (cycle_spec / "pipeline_state.yaml").write_text("x", encoding="utf-8"), False),
+            ("cycle prd", lambda: (cycle_spec / "prd.md").write_text("in flight", encoding="utf-8"), True),
+        ]
+        for label, populate, expect_cycle in cases:
+            with self.subTest(case=label):
+                populate()
+                tree = reader.spec_dir(self.root)[0]
+                self.assertEqual(cutover.prd_candidates(self.root),
+                                 cutover.tree_prd_candidates(tree))
+                self.assertEqual(tree == cycle_spec, expect_cycle)
+
+    def test_a_pipeline_state_only_tree_answers_only_when_no_prd_exists(self):
+        """The W7D pipeline-state fallback stays, but it can never contradict the
+        spec gate: it only answers when no layout carries a prd.md at all."""
+        import shutil
+        cycle_dir = self.root / "campaigns" / CAMP / "cycles" / CYC
+        cycle_spec = cycle_dir / "artifacts" / "spec"
+        (cycle_spec / "pipeline_state.yaml").write_text("x", encoding="utf-8")
+        # shared still has a prd.md -> shared governs for both resolvers
+        self.assertEqual(reader.spec_dir(self.root, open_cycle_dir=str(cycle_dir))[1], "shared")
+        shutil.rmtree(self.root / "shared")
+        self.assertEqual(reader.spec_dir(self.root, open_cycle_dir=str(cycle_dir)),
+                         (cycle_spec, "cycle"))
+        self.assertEqual(cutover.prd_candidates(self.root), [])
 
     def test_legacy_spec_without_prd_is_not_the_spec_dir(self):
         import shutil
