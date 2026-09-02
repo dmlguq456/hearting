@@ -204,6 +204,9 @@ For standard+ code stage dispatch, role and profile are explicit: ordinary frame
     continuation supervisor is one shared implementation
     (`OPERATIONS §5.12`); exactly-once advance is claim-based and restart-safe,
     and no model sleep loop or arbitrary detached shell substitutes for it.
+16. A steward session never holds launch, gate, write, or approval authority over
+    another root; peer messages are advisory and the ledger is the only record
+    (`OPERATIONS §5.14`).
 
 Token-budget accounting is observation, not attribution. Hook invocations,
 zero/emission outcomes, exact inserted-directive UTF-8 bytes, and monotonic

@@ -672,3 +672,46 @@ attempt binding, because the work usually outlives the session that started it.
 Use the resource-job lifecycle when a registered attempt must own the run;
 use `compute-hosts` when the run belongs on another machine. A run that needs
 both is a resource job whose payload is a `compute-hosts run` invocation.
+
+### §5.14. Peer-Session Steering (steward role)
+
+A steward's peer message is informally depth −1; not a dispatch depth. It carries no
+launch, gate, write, or approval authority over the session it addresses — it is
+advisory context delivered between two already-running sessions, and the append-only
+ledger below is the only record of it (SD-122 §13.37.2-(1)).
+
+The realization has six steps: **S1** the sending session's native peer-messaging
+surface (Claude `SendMessage`) fires; **S2** a `PostToolUse(SendMessage)` hook writes one
+`peer_message_v1` record before the send completes; **S3** the record lands in the
+append-only ledger under the resolved dispatch state root, one JSONL file per sending
+session per month; **S4** the receiving session's own `UserPromptSubmit` hook, on seeing
+an injected cross-session message, writes its own `notice` record addressed to itself by
+its own verifiable session id; **S5** a read-only Fleet collector projects the ledger into
+per-session sent/recv counts and a bounded last-received summary, never scanning the
+ledger from any write path; **S6** the projection renders as an additive session badge
+and subtitle, never a role badge, and never widens or reflows an existing row.
+
+Every record uses `kind ∈ {watch, steer, handoff, gate-relay, notice}`: `watch` marks an
+idle-notify subscription, `steer`/`handoff`/`gate-relay` are inferred from an explicit
+`[steer]`/`[handoff]`/`[gate]` prefix on the message's first line (absent prefix defaults
+to `steer`), and `notice` is the receiving session's own self-authored receipt record.
+
+The ledger path is `<dispatch-state-root>/peer-messages/<YYYY-MM>/<from_session_id>.jsonl`,
+one JSON object per line, schema `peer_message_v1`: `schema_version=1`, a 16-hex
+`message_id` (sha256 of `from_sid|to|ts|summary`), `ts` (UTC ISO-8601 `Z`),
+`from{harness,session_id,project}`, `to{harness,session_id|name}`, `kind`, `summary`
+(hard-truncated to 200 characters, never the full message), `body_sha256` (sha256 of the
+complete body, which is never itself stored), `delivery{surface,status,receipt}`, and
+`refs[]`. No field anywhere in the schema, the Fleet projection, or the rendered board
+carries the message body.
+
+| Runtime | Realization |
+|---|---|
+| Claude | measured — S1-S6 above run against `hooks/peer-message-record.py` (`PostToolUse(SendMessage)`, `UserPromptSubmit`) and `utilities/peer-message.py` in this codebase |
+| Codex | `unknown` — probe P-1 through P-5 pending; no capability claimed until a receipt exists |
+| OpenCode | `unknown` — probe P-1 through P-5 pending; no capability claimed until a receipt exists |
+
+Probe receipts, once run, land at
+`spec/stage-dispatch/_internal/research/peer-session-probe/P-<n>.md` — P-1 through P-5
+are not yet executed as of this section's authoring, and no adapter claims a working
+Codex or OpenCode realization until its probe receipt exists.
