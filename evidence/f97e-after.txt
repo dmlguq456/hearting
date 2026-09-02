@@ -1,0 +1,18 @@
+--- F-97e: owner rows in jobs[] (fleet --once --json), AFTER ---
+{"attempt_id": "att-4aa65f69571645faa8f1fa2ef43b9a4c", "parent_sid": "f14098f0-346f-4c49-8134-bab47cce0dbb", "parent_attempt_id": null, "dispatch_depth": 1, "status": "open", "stage": null, "harness": "claude", "is_child": true}
+{"attempt_id": "att-9191c949f69b49f7ae7b830988775898", "parent_sid": "97e9876a-9116-4bb4-92ce-8823527b64dd", "parent_attempt_id": null, "dispatch_depth": 2, "status": "open", "stage": "autopilot-code", "harness": "claude", "is_child": true}
+{"attempt_id": "att-Y", "parent_sid": null, "parent_attempt_id": null, "dispatch_depth": 2, "status": "open", "stage": null, "harness": "claude", "is_child": false}
+{"attempt_id": "att-X", "parent_sid": null, "parent_attempt_id": null, "dispatch_depth": null, "status": "open", "stage": null, "harness": "claude", "is_child": false}
+{"attempt_id": "att-e616fe03e3ae46b583cdf2bcb83668a4", "parent_sid": "62b32e44-1c3a-45df-9531-11c11e49b700", "parent_attempt_id": null, "dispatch_depth": 1, "status": "open", "stage": null, "harness": "claude", "is_child": true}
+
+--- F-98d: peer counts per session (from the stable dispatch state root) ---
+session=e707261a-12e3-4b9f-9fa0-8c9f7d631b4f harness=claude is_child=True peer_sent_1h=8 peer_recv_1h=0
+
+--- F-99: runtime_name / registry_name / display on session rows ---
+session=32f8c282 runtime_name=None registry_name='hearting-21' title='Review verdict contract + headless postu'
+session=dbf6bcf0 runtime_name=None registry_name='hearting-25' title='Route session-bind autofix for .sh guard'
+session=62b32e44 runtime_name=None registry_name='hearting-fb' title='Fleet visibility & session identity cycl'
+session=e707261a runtime_name=None registry_name='peer-steward-cycle2-68' title='stage-dispatch & fleet-dashboard PRD imp'
+session=0432af5b runtime_name=None registry_name='cairn-c9' title='Cairn W13 multi-root fleet projection'
+session=01a05f45 runtime_name='간단한 연결 테스트다. 다음 두 가지만 답하라: (1) 네 현재' registry_name=None title='Repo connection sanity check'
+session=9b325958 runtime_name=None registry_name='claude-cf' title='FLASH/GAU vs MossFormer architecture com'

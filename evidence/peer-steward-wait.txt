@@ -1,0 +1,16 @@
+$ python3 utilities/peer-steward.py wait w1:pD --until idle --timeout 3000
+(ran the worktree copy: the installed `current` symlink points at v2.101.1 and the
+ sealed release tree v2.101.0 predates peer-steward.py, so the worktree is the only
+ path that has the utility)
+
+state=idle agent=claude session_id=71b1286a-89a5-40bf-9a94-be4afcfa1762 name=- pane=w1:pD
+exit=0
+
+$ python3 utilities/peer-steward.py wait fleet-cycle2 --until working --timeout 1500   # A51-1 timeout class
+state=timeout agent=- session_id=- name=fleet-cycle2 pane=-
+exit=3
+
+--- ledger records written by these waits (kind=watch, surface=herdr, written at wait start) ---
+{"schema_version": 1, "message_id": "2715d872ea5b956e", "ts": "2026-09-02T12:04:46Z", "from": {"harness": "claude", "session_id": "e707261a-12e3-4b9f-9fa0-8c9f7d631b4f", "project": "peer-steward-cycle2"}, "to": {"harness": "unknown", "name": "w1:pD"}, "kind": "watch", "summary": "", "body_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "delivery": {"surface": "herdr", "status": "sent", "receipt": null}, "refs": []}
+{"schema_version": 1, "message_id": "2715d872ea5b956e", "ts": "2026-09-02T12:04:46Z", "from": {"harness": "claude", "session_id": "e707261a-12e3-4b9f-9fa0-8c9f7d631b4f", "project": "peer-steward-cycle2"}, "to": {"harness": "unknown", "name": "w1:pD"}, "kind": "watch", "summary": "", "body_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "delivery": {"surface": "herdr", "status": "sent", "receipt": null}, "refs": []}
+{"schema_version": 1, "message_id": "3d67d5a38dd5b122", "ts": "2026-09-02T12:04:46Z", "from": {"harness": "claude", "session_id": "e707261a-12e3-4b9f-9fa0-8c9f7d631b4f", "project": "peer-steward-cycle2"}, "to": {"harness": "unknown", "name": "fleet-cycle2"}, "kind": "watch", "summary": "", "body_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "delivery": {"surface": "herdr", "status": "sent", "receipt": null}, "refs": []}

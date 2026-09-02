@@ -1,0 +1,19 @@
+=== F-99e three-entry-point comparison ===
+derived-session fixture (Amendment 2 / R2-5): session_name=AI title, registry name=hearting-fb, nameSource=derived: statusline='AI generated title' fleet='AI generated title' match=True
+user-renamed session (nameSource=user): statusline='my-custom-name' fleet='my-custom-name' match=True
+
+=== Codex Herdr formatter vs Fleet, same display_name() call shape ===
+herdr='A Codex title' fleet='A Codex title' match=True
+
+=== Owner re-verification (2026-09-02, after the A51-1 hotfix) ===
+The live `adapters/claude/statusline.sh` could NOT be exercised headlessly: fed a synthetic stdin
+payload it produces no output in this environment (it depends on a real Claude runtime tap and its
+own `2>/dev/null || true` boundary swallows the difference). Both the e8ba7ddf baseline copy and the
+changed copy emit nothing here, so this is not evidence either way — it is the known gap that
+plan.md §7 and slice C's artifact both flag ("statusline and the Herdr hook have no native tests").
+What IS proven: the function-level three-surface equality above, and the source change itself
+(statusline now resolves its own pid + `sessions/<pid>.json` `nameSource` and calls
+`display_name()`/`resolve_display_inputs()` instead of `session_display_name(...)`, which was the
+only remaining producer of a literal `CL/<sid8>` prompt segment).
+Owner verdict: F-99e is proven at the function level and by code inspection; a live statusline
+capture requires an interactive session and is the one F-99e sub-claim left to depth-0.

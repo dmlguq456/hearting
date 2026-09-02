@@ -1,0 +1,63 @@
+  hearting v2.101.0 · unmanaged
+
+  usage claude code   5h [━───────────   3%] ↻ 4h 51m   7d [━━━─────────  28%] ↻ 5d 22h   fable [━━━━────────  32%]
+        codex         7d [━━━━━━━━━━──  83%] ↻ 4d 17h
+  fleet ⠹ 2 working   ● 5 idle   ↳ 3 jobs (1 working)
+  🧠 mem  +40 added(20w·20d) · 13 expired · 26 pruned · last distill 9h 32m · durable 3 over
+─────
+  COMPUTE RESOURCES  3/3
+  ⌂ moving4  CPU ━━━─────────────  11/64 thr  · MEM 31/125GB  · SWP 2.6/8GB
+             ● 0: idle     RTX 6000 Ada Gen.   UTIL   0%  VRAM ━───────────   0.0/48GB
+             ● 1: idle     RTX 6000 Ada Gen.   UTIL   0%  VRAM ━───────────   0.0/48GB
+  ◇ cnn      CPU ━──────  4/28 thr  · MEM 4.7/62GB  · SWP 0/8GB
+             ● 0: idle     GeForce RTX 5090    UTIL   0%  VRAM ━───────       0.0/32GB
+             ● 1: idle     GeForce RTX 5090    UTIL   0%  VRAM ━───────       0.0/32GB
+  ◇ xavier   CPU ━━━─────────────────  11/80 thr  · MEM 14/188GB  · SWP 0.0/2GB
+             ● 0: idle     GeForce RTX 4090    UTIL   0%  VRAM ━─────         0.0/24GB
+             ● 1: idle     GeForce RTX 4090    UTIL   0%  VRAM ━─────         0.0/24GB
+─────
+
+  SESSIONS   narrow · press w to cycle  
+● hearting/ 🚧 7
+▍ ⠹ claude code     Fleet visibility & session identity cycl ▾1 (main)
+▍   37m             Fable 5.1 (xhigh)        -
+▍   working ━━━━━━━───────── 43%            Reading core contract docs and prior-session memory to resume cycle 2. (26m)
+▍  ╭─  ⠹ claude     stage-dispatch & … (⌂wt peer-st…) ────────────────────────────────────────────────────────────────╮
+▍   0m              Opus 5 (xhigh)             code(dev·std·owner)                                                    │
+▍  │     working ━───────────────  5%       ⚙ Bash  Orienting in worktree and reading canonical spec files.          │
+▍  ╰───────────────────────────────────── frame(2-way) › plan › plan-check › execute › impl-review › test › report ───╯
+▍ ⠹ claude code     Review-worker verdict contract fix (review-verd…)
+▍   20m             Fable 5.1 (xhigh)        -
+▍   working ━━━━━─────────── 32%            Beginning: checking worktree state, defect memory, and core docs before edi…
+▍ ● claude code     Fleet visibility & review-gate diagnosis (main)
+▍   1d 0h           Fable (xhigh)            -
+▍   idle    ━━────────────── 13%            ⚙ herdr 30m  bypass-permission 하네스 설정을 fleet-cycle2·review-verdict …
+▍ ● claude code     Route session-bind autofix for .sh guard (main)
+▍   17h 19m         Fable 5 (xhigh)          -
+▍   idle    ━━━━━─────────── 33%            v2.100.1 release smoke passed green after uninstall-lock hotfix; g… (6h 12m)
+▍────────────────────────────────────────────────────────────────────────────────────────────────────────────
+▍ 🧠 17:29 + durable/project sync "**Observed (2026-09-02, route rt-23728d301917bcc0, owner at…"
+▍ 🧠 17:16 + working/decision manual "cross-session/steward 통신 메커니즘 확정(2026-09-02 사용자 …"
+
+● cairn/ 🚧 20  ✓ 4m
+▍ ● claude code     Cairn W13 multi-root fleet projection (main)
+▍   9h 50m          Fable 5 (xhigh)          -
+▍   idle    ━━━━━━────────── 40%            Waiting for user to apply Bash allow-rules for .claude/settings.local.json …
+▍ ● codex           Repo connection sanity check (main)
+▍   9h 48m          gpt-5.6-sol (xhigh)      -
+▍   idle    ━───  4%                        Answering pwd and repo name for a one-line connection test. (9h 48m)
+▍────────────────────────────────────────────────────────────────────────────────────────────────────────────
+▍ 🧠 14:09 + working/handoff manual "Cairn W13 multi-root fleet projection 코드 사이클 완료 보고…"
+▍ 🧠 13:36 − working/handoff manual 
+
+○ 삼성세미나_음성처리/
+▍ ● claude code     FLASH/GAU vs MossFormer architecture com
+▍   7h 58m          Opus 5 (high)            -
+▍   idle    ━━━━━─────────── 34%            Explaining why input-side projection P⊥ acts as normalization, not… (3h 35m)
+
+○ BC_ResNet/
+▍ ⌄ orphaned dispatch rows ─────────────────────────────────────────────────────────────────────────────────────────────
+▍ ··  · claude code c1v3-wwd-mix-port  (orphan)
+▍   12d 2h          Opus 5 (xhigh)             code(dev·std·owner) : impl-review ✓ › test ✓ › report ✓
+
+  ⠹ working   ● idle   · stale   ▾N child jobs   ⚡ sub-agent   ↳ dispatch   🚧 N worktrees   🧠 0 mem   ⌂wt worktree   

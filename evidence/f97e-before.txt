@@ -1,0 +1,60 @@
+  hearting v2.101.0 · unmanaged
+
+  usage claude code   5h [━───────────   3%] ↻ 4h 51m   7d [━━━─────────  28%] ↻ 5d 22h   fable [━━━━────────  32%]
+        codex         7d [━━━━━━━━━━──  83%] ↻ 4d 17h
+  fleet ⠧ 2 working   ● 5 idle   ↳ 3 jobs (1 working)
+  🧠 mem  +40 added(20w·20d) · 13 expired · 26 pruned · last distill 9h 32m · durable 3 over
+─────
+  COMPUTE RESOURCES  3/3
+  ⌂ moving4  CPU ━━━━────────────  14/64 thr  · MEM 31/125GB  · SWP 2.6/8GB
+             ● 0: idle     RTX 6000 Ada Gen.   UTIL   0%  VRAM ━───────────   0.0/48GB
+             ● 1: idle     RTX 6000 Ada Gen.   UTIL   0%  VRAM ━───────────   0.0/48GB
+  ◇ cnn      CPU ───────  0/28 thr  · MEM 4.7/62GB  · SWP 0/8GB
+             ● 0: idle     GeForce RTX 5090    UTIL   0%  VRAM ━───────       0.0/32GB
+             ● 1: idle     GeForce RTX 5090    UTIL   0%  VRAM ━───────       0.0/32GB
+  ◇ xavier   CPU ━───────────────────  5/80 thr  · MEM 14/188GB  · SWP 0.0/2GB
+             ● 0: idle     GeForce RTX 4090    UTIL   0%  VRAM ━─────         0.0/24GB
+             ● 1: idle     GeForce RTX 4090    UTIL   0%  VRAM ━─────         0.0/24GB
+─────
+
+● hearting/ 🚧 7
+▍ ⠧ claude code (Fable 5.1·xhigh)           Fleet visibility & session identity… ▾1 (main)             -  37m
+▍   working ━━━━━━━───────── 43%            Reading core contract docs and prior-session memory to resume cycle 2. (26m)
+▍  ╭─  ⠧ claude code (Opus 5·xhigh) ─────── stage-dispatch & fleet-dashboard PRD… (⌂wt peer-st…) ─── code(dev·std·owner)  0m   ───────────────────────────────────────╮
+▍  │     working ━───────────────  5%       ⚙ Bash  Orienting in worktree and reading canonical spec files.                                                          │
+▍  ╰───────────────────────────────────────────────────────────────────────────────────── frame(2-way) › plan › plan-check › execute › impl-review › test › report ───╯
+▍ ⠧ claude code (Fable 5.1·xhigh)           Review-worker verdict contract fix (review-verd…)          -  20m
+▍   working ━━━━━─────────── 32%            Beginning: checking worktree state, defect memory, and core docs before editing.
+▍ ● claude code (Fable·xhigh)               Fleet visibility & review-gate diagnos… (main)             -  1d 0h
+▍   idle    ━━────────────── 13%            ⚙ herdr 30m  bypass-permission 하네스 설정을 fleet-cycle2·review-verdict 세션에 지시 전달 후 herdr wait로 대기 중.
+▍ ● claude code (Fable 5·xhigh)             Route session-bind autofix for .sh gua… (main)             -  17h 19m
+▍   idle    ━━━━━─────────── 33%            v2.100.1 release smoke passed green after uninstall-lock hotfix; guard/test suite confirmed clean. (6h 12m)
+▍────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+▍ 🧠 17:29 + durable/project sync "**Observed (2026-09-02, route rt-23728d301917bcc0, owner at…"
+▍ 🧠 17:16 + working/decision manual "cross-session/steward 통신 메커니즘 확정(2026-09-02 사용자 …"
+
+● cairn/ 🚧 20  ✓ 4m
+▍ ● claude code (Fable 5·xhigh)             Cairn W13 multi-root fleet projection (main)               -  9h 50m
+▍   idle    ━━━━━━────────── 40%            Waiting for user to apply Bash allow-rules for .claude/settings.local.json before resuming.
+▍ ● codex (gpt-5.6-sol·xhigh)               Repo connection sanity check (main)                        -  9h 48m
+▍   idle    ━───  4%                        Answering pwd and repo name for a one-line connection test. (9h 47m)
+▍────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+▍ 🧠 14:09 + working/handoff manual "Cairn W13 multi-root fleet projection 코드 사이클 완료 보고…"
+▍ 🧠 13:36 − working/handoff manual 
+
+○ 삼성세미나_음성처리/
+▍ ● claude code (Opus 5·high)               FLASH/GAU vs MossFormer architecture c… (—)                -  7h 58m
+▍   idle    ━━━━━─────────── 34%            Explaining why input-side projection P⊥ acts as normalization, not a correctness constraint. (3h 35m)
+
+○ BC_ResNet/
+▍ ⌄ orphaned dispatch rows ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+▍ ··  · claude code (Opus 5·xhigh)          c1v3-wwd-mix-port  (orphan) (→BC_ResNet —)                 code(dev·std·owner) : done ✓  12d 2h
+
+  ⠹ working   ● idle   · stale   ▾N child jobs   ⚡ sub-agent   ↳ dispatch   🚧 N worktrees   🧠 0 mem   → foreign repo   ⌂wt worktree   
+
+--- jobs[] (fleet --once --json), captured before any change ---
+{"attempt_id": "att-4aa65f69571645faa8f1fa2ef43b9a4c", "parent_sid": "f14098f0-346f-4c49-8134-bab47cce0dbb", "dispatch_depth": 1, "status": "open", "stage": null, "harness": "claude", "is_child": true}
+{"attempt_id": "att-9191c949f69b49f7ae7b830988775898", "parent_sid": "97e9876a-9116-4bb4-92ce-8823527b64dd", "dispatch_depth": 2, "status": "open", "stage": "autopilot-code", "harness": "claude", "is_child": true}
+{"attempt_id": "att-Y", "parent_sid": null, "dispatch_depth": 2, "status": "open", "stage": null, "harness": "claude", "is_child": false}
+{"attempt_id": "att-X", "parent_sid": null, "dispatch_depth": null, "status": "open", "stage": null, "harness": "claude", "is_child": false}
+{"attempt_id": "att-e616fe03e3ae46b583cdf2bcb83668a4", "parent_sid": "62b32e44-1c3a-45df-9531-11c11e49b700", "dispatch_depth": 1, "status": "open", "stage": null, "harness": "claude", "is_child": true}

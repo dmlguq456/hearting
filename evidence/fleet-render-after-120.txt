@@ -1,0 +1,60 @@
+  hearting v2.101.0-dirty · unmanaged
+
+  usage claude code   5h [━━━━━───────  43%] ↻ 1h 47m   7d [━━━━────────  35%] ↻ 5d 19h   fable [━━━━━───────  40%]
+        codex         7d [━━━━━━━━━━──  83%] ↻ 4d 14h
+  fleet ⠇ 0 working   ● 6 idle   ↳ 3 jobs (1 working)
+  🧠 mem  +44 added(20w·24d) · 13 expired · 26 pruned · last distill 12h 36m · durable 3 over
+─────
+  COMPUTE RESOURCES  3/3
+  ⌂ moving4  CPU ━━──────────────  8/64 thr  · MEM 32/125GB  · SWP 2.6/8GB
+             ● 0: idle     RTX 6000 Ada Gen.   UTIL   0%  VRAM ━───────────   0.0/48GB
+             ● 1: idle     RTX 6000 Ada Gen.   UTIL   0%  VRAM ━───────────   0.0/48GB
+  ◇ cnn      CPU ───────  0/28 thr  · MEM 4.7/62GB  · SWP 0/8GB
+             ● 0: idle     GeForce RTX 5090    UTIL   0%  VRAM ━───────       0.0/32GB
+             ● 1: idle     GeForce RTX 5090    UTIL   0%  VRAM ━───────       0.0/32GB
+  ◇ xavier   CPU ━━──────────────────  8/80 thr  · MEM 14/188GB  · SWP 0.0/2GB
+             ● 0: idle     GeForce RTX 4090    UTIL   0%  VRAM ━─────         0.0/24GB
+             ● 1: idle     GeForce RTX 4090    UTIL   0%  VRAM ━─────         0.0/24GB
+─────
+
+  SESSIONS   narrow · press w to cycle  
+● hearting/ 🚧 7
+▍ ● claude code     Review verdict contract + headless postu (main)
+▍   1d 3h           Fable (xhigh)            -
+▍   idle    ━━━━──────────── 25%            fleet-cycle2 감시 wait가 외부에서 중지돼 재감시 여부를 사용자에게 … (1h 10m)
+▍ ● claude code     Route session-bind autofix for .sh guard (main)
+▍   20h 23m         Fable 5 (xhigh)          -
+▍   idle    ━━━━━─────────── 33%            v2.100.1 release smoke passed green after uninstall-lock hotfix; g… (9h 16m)
+▍ ● claude code     Fleet visibility & session identity cycl ▾1 (main)
+▍   3h 41m          Fable 5.1 (xhigh)        -
+▍   idle    ━━━━━━━───────── 44%            ⚙ python3 3h 04m  Waiting for owner att-e616fe03 rewake before fi… (1h 11m)
+▍  ╭─  ⠇ claude     stage-dispatch & … (⌂wt peer-st…) ────────────────────────────────────────────────────────────────╮
+▍   3h 04m          Opus 5 (xhigh)             code(dev·std·owner) : -                                                │
+▍  │     working ━━━━━─────────── 33%       ⚙ timeout  Verified 3 fleet failures at baseline with 24 net-new tests an│
+▍  ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+▍────────────────────────────────────────────────────────────────────────────────────────────────────────────
+▍ 🧠 19:57 + durable/project sync "**What shipped (branch `review-verdict-contract`, commit fc…"
+▍ 🧠 19:57 + durable/feedback sync "2026-09-02 user hypothesis confirmed from transcript eviden…"
+
+● cairn/ 🚧 20  ✓ 54m
+▍ ● claude code     Cairn W13 multi-root fleet projection (main)
+▍   12h 54m         Fable 5 (xhigh)          -
+▍   idle    ━━━━━━────────── 40%            Waiting for user to apply Bash allow-rules for .claude/settings.lo… (3h 06m)
+▍ ● codex           간단한 연결 테스트다. 다음 두 가지만 답하라: (1) 네 현재 (main)
+▍   12h 52m         gpt-5.6-sol (xhigh)      -
+▍   idle    ━───  4%                        Answering pwd and repo name for a one-line connection test. (12h 52m)
+▍────────────────────────────────────────────────────────────────────────────────────────────────────────────
+▍ 🧠 14:09 + working/handoff manual "Cairn W13 multi-root fleet projection 코드 사이클 완료 보고…"
+▍ 🧠 13:36 − working/handoff manual 
+
+○ 삼성세미나_음성처리/
+▍ ● claude code     FLASH/GAU vs MossFormer architecture com
+▍   11h 02m         Opus 5 (high)            -
+▍   idle    ━━━━━─────────── 34%            Explaining why input-side projection P⊥ acts as normalization, not… (6h 39m)
+
+○ BC_ResNet/
+▍ ⌄ orphaned dispatch rows ─────────────────────────────────────────────────────────────────────────────────────────────
+▍ ··  · claude code c1v3-wwd-mix-port  (orphan)
+▍   12d 5h          Opus 5 (xhigh)             code(dev·std·owner) : impl-review ✓ › test ✓ › report ✓
+
+  ⠹ working   ● idle   · stale   ▾N child jobs   ⚡ sub-agent   ↳ dispatch   🚧 N worktrees   🧠 0 mem   ⌂wt worktree   

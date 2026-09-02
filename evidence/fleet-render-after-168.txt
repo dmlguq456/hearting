@@ -1,0 +1,51 @@
+  hearting v2.101.0-dirty · unmanaged
+
+  usage claude code   5h [━━━━━───────  43%] ↻ 1h 47m   7d [━━━━────────  35%] ↻ 5d 19h   fable [━━━━━───────  40%]
+        codex         7d [━━━━━━━━━━──  83%] ↻ 4d 14h
+  fleet ⠹ 0 working   ● 6 idle   ↳ 3 jobs (1 working)
+  🧠 mem  +44 added(20w·24d) · 13 expired · 26 pruned · last distill 12h 36m · durable 3 over
+─────
+  COMPUTE RESOURCES  3/3
+  ⌂ moving4  CPU ━───────────────  4/64 thr  · MEM 31/125GB  · SWP 2.6/8GB
+             ● 0: idle     RTX 6000 Ada Gen.   UTIL   0%  VRAM ━───────────   0.0/48GB
+             ● 1: idle     RTX 6000 Ada Gen.   UTIL   0%  VRAM ━───────────   0.0/48GB
+  ◇ cnn      CPU ───────  0/28 thr  · MEM 4.7/62GB  · SWP 0/8GB
+             ● 0: idle     GeForce RTX 5090    UTIL   0%  VRAM ━───────       0.0/32GB
+             ● 1: idle     GeForce RTX 5090    UTIL   0%  VRAM ━───────       0.0/32GB
+  ◇ xavier   CPU ━━──────────────────  8/80 thr  · MEM 14/188GB  · SWP 0.0/2GB
+             ● 0: idle     GeForce RTX 4090    UTIL   0%  VRAM ━─────         0.0/24GB
+             ● 1: idle     GeForce RTX 4090    UTIL   0%  VRAM ━─────         0.0/24GB
+─────
+
+● hearting/ 🚧 7
+▍ ● claude code (Fable·xhigh)               Review verdict contract + headless pos… (main)             -  1d 3h
+▍   idle    ━━━━──────────── 25%            fleet-cycle2 감시 wait가 외부에서 중지돼 재감시 여부를 사용자에게 확인 중. (1h 10m)
+▍ ● claude code (Fable 5·xhigh)             Route session-bind autofix for .sh gua… (main)             -  20h 23m
+▍   idle    ━━━━━─────────── 33%            v2.100.1 release smoke passed green after uninstall-lock hotfix; guard/test suite confirmed clean. (9h 16m)
+▍ ● claude code (Fable 5.1·xhigh)           Fleet visibility & session identity… ▾1 (main)             -  3h 41m
+▍   idle    ━━━━━━━───────── 44%            ⚙ python3 3h 04m  Waiting for owner att-e616fe03 rewake before finalizing merge on new main. (1h 11m)
+▍  ╭─  ⠹ claude code (Opus 5·xhigh) ─────── stage-dispatch & fleet-dashboard PRD… (⌂wt peer-st…) ─── code(dev·std·owner) : —  3h 04m   ───────────────────────────────╮
+▍  │     working ━━━━━─────────── 33%       ⚙ timeout  Verified 3 fleet failures at baseline with 24 net-new tests and no regressions; running remaining gates.      │
+▍  ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+▍────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+▍ 🧠 19:57 + durable/project sync "**What shipped (branch `review-verdict-contract`, commit fc…"
+▍ 🧠 19:57 + durable/feedback sync "2026-09-02 user hypothesis confirmed from transcript eviden…"
+
+● cairn/ 🚧 20  ✓ 54m
+▍ ● claude code (Fable 5·xhigh)             Cairn W13 multi-root fleet projection (main)               -  12h 54m
+▍   idle    ━━━━━━────────── 40%            Waiting for user to apply Bash allow-rules for .claude/settings.local.json before resuming. (3h 06m)
+▍ ● codex (gpt-5.6-sol·xhigh)               간단한 연결 테스트다. 다음 두 가지만 … (main)              -  12h 52m
+▍   idle    ━───  4%                        Answering pwd and repo name for a one-line connection test. (12h 51m)
+▍────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+▍ 🧠 14:09 + working/handoff manual "Cairn W13 multi-root fleet projection 코드 사이클 완료 보고…"
+▍ 🧠 13:36 − working/handoff manual 
+
+○ 삼성세미나_음성처리/
+▍ ● claude code (Opus 5·high)               FLASH/GAU vs MossFormer architecture c… (—)                -  11h 02m
+▍   idle    ━━━━━─────────── 34%            Explaining why input-side projection P⊥ acts as normalization, not a correctness constraint. (6h 39m)
+
+○ BC_ResNet/
+▍ ⌄ orphaned dispatch rows ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+▍ ··  · claude code (Opus 5·xhigh)          c1v3-wwd-mix-port  (orphan) (→BC_ResNet —)                 code(dev·std·owner) : done ✓  12d 5h
+
+  ⠹ working   ● idle   · stale   ▾N child jobs   ⚡ sub-agent   ↳ dispatch   🚧 N worktrees   🧠 0 mem   → foreign repo   ⌂wt worktree   
