@@ -188,11 +188,14 @@ Portable hook semantics are named by invariant:
 | peer-session steering ledger | Write one append-only, body-free `peer_message_v1` record per outbound and inbound cross-session message (`OPERATIONS §5.14`) |
 
 Adapters decide whether each invariant is enforced by native hook, wrapper,
-manual preflight, or unsupported fallback. Realized (steward role, `OPERATIONS §5.14`):
-Claude — `PostToolUse(SendMessage)` + `UserPromptSubmit` (measured,
-`hooks/peer-message-record.py`). Codex — the managed gateway's `steer` op is a
-spec-only seam pending probe P-1 through P-5; no realization claimed yet.
-OpenCode — `unknown`, no probe run.
+manual preflight, or unsupported fallback. Realized (steward role, `OPERATIONS §5.14`,
+v51 herdr-unified): Claude — `PostToolUse(SendMessage)` + `UserPromptSubmit` (measured,
+`hooks/peer-message-record.py`) for the ledger, and `utilities/peer-steward.py wait` →
+`herdr agent wait` (measured) for no-poll watching. Codex — `herdr agent wait` watching is
+measured; steward-side `--timeout` foreground wait + next-turn reload is unmeasured
+(P-7). The managed gateway's `steer`/`watch-idle` ops are **not implemented**
+(closed-by-decision, P-1 through P-5 retired, not pending). OpenCode — `unknown`, pending
+probe P-6.
 
 ## 6. Projection Invariant
 
