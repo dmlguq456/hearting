@@ -15,6 +15,8 @@ from types import SimpleNamespace
 ROOT = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location("progress", ROOT / "utilities/dispatch-progress.py")
 P = importlib.util.module_from_spec(spec); spec.loader.exec_module(P)
+sys.path.insert(0, str(ROOT / "utilities"))
+import dispatch_contract as D  # noqa: E402
 from tools.fleet import model
 
 
@@ -367,6 +369,59 @@ class ProgressTest(unittest.TestCase):
         row = self.jobs.read_text()
         self.assertNotIn("\topen\t", row)
         self.assertIn("note=dead-sandbox-init", row)
+
+    def _review_fail_log(self, artifact):
+        log = self.base / "stage.attempt.codex.jsonl"
+        target = "-" if artifact is None else str(artifact)
+        rows = [
+            {"type": "turn.started"},
+            {"type": "item.completed", "item": {"type": "agent_message",
+                                                 "text": f"artifact: {target}\nverdict: FAIL\nblocker: 1 blocking finding"}},
+            {"type": "turn.completed"},
+        ]
+        log.write_text("\n".join(json.dumps(row) for row in rows) + "\n")
+        return log
+
+    def _dead_path_note(self, *, worker_type, artifact):
+        # OPERATIONS §5.10: the watchdog dead path is a post-hoc carrier and must
+        # classify a finished review exactly like reconcile and the join do.
+        root = self.base / ".agent_reports"; root.mkdir(exist_ok=True)
+        review = None
+        if artifact:
+            review = root / "round_1.md"; review.write_text("## Plan Review Results\n1 blocking finding\n")
+        log = self._review_fail_log(review)
+        self.jobs.write_text(self.jobs.read_text().replace(
+            f"write_scope={self.scope}",
+            f"write_scope={self.scope},log_file={log},worker_type={worker_type},artifact_root={root}",
+        ))
+        with mock.patch.dict(os.environ, {"AGENT_ARTIFACT_ROOT": str(root)}):
+            P.heartbeat(self.args(), 0)
+            self.proc.terminate()
+            self.proc.wait(timeout=3)
+            state = P.watchdog(self.args(apply=True), 10)
+        row = self.jobs.read_text()
+        self.assertNotIn("\topen\t", row)
+        return state, D.parse_registry_metadata(row.strip().split("\t", 5)[5])
+
+    def test_m2_watchdog_dead_path_books_a_finished_review_as_completed_review_blocking(self):
+        state, meta = self._dead_path_note(worker_type="review", artifact=True)
+        self.assertEqual(state["terminal_action"], "completed-review-blocking")
+        self.assertEqual(meta.get("note"), "completed-review-blocking")
+        self.assertTrue(meta.get("review_artifact_b64"))
+        self.assertEqual(meta.get("failure_class"), "fail")          # verdict axis untouched
+        self.assertEqual(meta.get("detected_by"), "progress-terminal-handoff")
+
+    def test_m2_watchdog_dead_path_keeps_dead_worker_fail_for_stage_or_artifactless_review(self):
+        for worker_type, artifact in (("stage", True), ("review", False)):
+            with self.subTest(worker_type=worker_type, artifact=artifact):
+                self.setUp()
+                try:
+                    state, meta = self._dead_path_note(worker_type=worker_type, artifact=artifact)
+                    self.assertEqual(state["terminal_action"], "dead-worker-fail")
+                    self.assertEqual(meta.get("note"), "dead-worker-fail")
+                    self.assertNotIn("review_artifact_b64", meta)
+                finally:
+                    self.tearDown()
 
     def test_codex_preflight_projects_stage_heartbeat(self):
         command=[str(ROOT/"adapters/codex/bin/preflight.sh"),"stage-heartbeat",

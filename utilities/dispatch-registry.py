@@ -62,9 +62,8 @@ from dispatch_registry_inventory import (  # noqa: E402
 )
 from codex_dispatch_terminal import (  # noqa: E402
     REVIEW_BLOCKING_NOTE,
+    carrier_terminal_note,
     inspect_terminal_attempt,
-    inspect_terminal_log,
-    review_blocking_handoff,
 )
 from dispatch_completion_join import (  # noqa: E402
     materialize_after_terminal_close,
@@ -568,10 +567,10 @@ def resume_boundary(route_file, incomplete_nodes):
     return None
 
 
-def review_terminal_view(row):
-    """Root-bound terminal view of one row's exact log for the review conjunction."""
+def carrier_terminal(row):
+    """Shared carrier classification of one row's exact log (OPERATIONS §5.10)."""
     meta = row["meta"]
-    return inspect_terminal_attempt(
+    return carrier_terminal_note(
         meta.get("log_file"),
         worktree=row.get("worktree"),
         artifact_root_metadata=meta.get("artifact_root"),
@@ -586,7 +585,11 @@ def classify(row, args, newest_orders, rows=None):
         return "legacy-read-only", "legacy-attempt-row", None
     if row.get("attempt_contract_status") != "current":
         return "contract-invalid", row.get("attempt_contract_status", "invalid"), None
-    terminal = inspect_terminal_log(meta.get("log_file"))
+    # OPERATIONS §5.10: every post-hoc carrier classifies the exact log through
+    # the shared helper, so a reviewer whose FAIL names a readable in-root
+    # artifact is booked `completed-review-blocking` here exactly as the
+    # wrapper tail, the supervisor join, and the progress watchdog book it.
+    terminal, _ = carrier_terminal(row)
     if (
         meta.get("attempt_id")
         and meta.get("route_id")
@@ -595,16 +598,7 @@ def classify(row, args, newest_orders, rows=None):
     ):
         reason = f"{terminal['terminal_event']}:{terminal['verdict']}"
         if terminal.get("failure_note"):
-            note = terminal["failure_note"]
-            if note == "dead-worker-fail" and meta.get("worker_type") == "review":
-                # OPERATIONS §5.10: the reconcile carrier applies the same
-                # conjunction as the wrapper tail and the supervisor join -- a
-                # reviewer whose FAIL names a readable in-root artifact finished
-                # its contract, even when its wrapper died before closing the row.
-                view = review_terminal_view(row)
-                if review_blocking_handoff(view, "review"):
-                    note = REVIEW_BLOCKING_NOTE
-            return "terminal-handoff", reason, note
+            return "terminal-handoff", reason, terminal["failure_note"]
         # SD-70: a route-bound PASS completes only through its completion
         # marker. The envelope alone never proves completion, so a marker-less
         # PASS row is either a still-draining worker or a typed worker death —
@@ -875,9 +869,7 @@ def reconcile(rows, args):
             if note == REVIEW_BLOCKING_NOTE:
                 # Seal the artifact the reviewer named, as the join does, so the
                 # owner-closure gate can re-verify it from the row.
-                encoded = str(review_terminal_view(row).get("artifact_path_b64") or "")
-                if encoded:
-                    reconcile_evidence["review_artifact_b64"] = encoded
+                reconcile_evidence.update(carrier_terminal(row)[1])
             if note == "dead-invalid-envelope":
                 # B47-3: this is the `classify()`-selected invalid-envelope
                 # note, the second of the two producers §4 ②-A names.

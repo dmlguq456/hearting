@@ -35,7 +35,7 @@ from dispatch_contract import (  # noqa: E402
     resolve_agent_home,
     validate_attempt_metadata,
 )
-from codex_dispatch_terminal import inspect_terminal_log  # noqa: E402
+from codex_dispatch_terminal import carrier_terminal_note  # noqa: E402
 from dispatch_completion_join import materialize_after_terminal_close  # noqa: E402
 
 KINDS = {"registry", "tool", "file", "artifact", "test", "terminal"}
@@ -532,7 +532,16 @@ def watchdog(args, now):
             write_json(wd_path, state)
             return state
         if verdict["state"] == "dead":
-            terminal = inspect_terminal_log(metadata.get("log_file"))
+            # OPERATIONS §5.10: the watchdog is a post-hoc carrier like
+            # reconcile -- same shared classification, so a finished review
+            # (FAIL + readable in-root artifact, worker_type=review) closes
+            # `completed-review-blocking` here too instead of `dead-worker-fail`.
+            terminal, terminal_extra = carrier_terminal_note(
+                metadata.get("log_file"),
+                worktree=fields[3],
+                artifact_root_metadata=metadata.get("artifact_root"),
+                worker_type=metadata.get("worker_type"),
+            )
             terminal_note = terminal.get("failure_note") if terminal else ""
             if terminal_note and args.apply:
                 def still_exact(fields):
@@ -554,6 +563,7 @@ def watchdog(args, now):
                         "failure_class": terminal["failure_class"],
                         "terminal_event": terminal["terminal_event"],
                         "log_file": terminal["log_file"],
+                        **terminal_extra,
                     },
                 )
                 if closed:

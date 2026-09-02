@@ -536,6 +536,44 @@ def review_blocking_handoff(
     )
 
 
+def carrier_terminal_note(
+    path: str | Path | None,
+    *,
+    worktree: str | Path | None,
+    artifact_root_metadata: str | Path | None,
+    worker_type: str | None,
+) -> tuple[dict[str, str] | None, dict[str, str]]:
+    """The one terminal classification every post-hoc carrier shares.
+
+    Reconcile (`dispatch-registry.py`), the progress watchdog
+    (`dispatch-progress.py`), and any future carrier that closes an open row
+    from its exact log call this instead of `inspect_terminal_log` directly,
+    so the review conjunction (OPERATIONS §5.10) cannot drift between them:
+    the compatibility view is upgraded to ``completed-review-blocking`` only
+    when the row is a review worker AND the root-bound re-inspection proves a
+    valid FAIL handoff naming a readable in-root artifact. Returns
+    ``(terminal_view, extra_evidence)``; ``extra_evidence`` carries
+    ``review_artifact_b64`` for a finished review and is empty otherwise.
+    """
+    compat = inspect_terminal_log(path)
+    if not compat:
+        return None, {}
+    extra: dict[str, str] = {}
+    if compat.get("failure_note") == "dead-worker-fail" and worker_type == REVIEW_WORKER_TYPE:
+        view = inspect_terminal_attempt(
+            path,
+            worktree=worktree,
+            artifact_root_metadata=artifact_root_metadata,
+            worker_type=REVIEW_WORKER_TYPE,
+        )
+        if review_blocking_handoff(view, REVIEW_WORKER_TYPE):
+            compat = {**compat, "failure_note": REVIEW_BLOCKING_NOTE}
+            encoded = str(view.get("artifact_path_b64") or "")
+            if encoded:
+                extra["review_artifact_b64"] = encoded
+    return compat, extra
+
+
 def inspect_terminal_log(path: str | Path | None) -> dict[str, str] | None:
     """Historical compatibility view used by registry failure reconciliation."""
 
