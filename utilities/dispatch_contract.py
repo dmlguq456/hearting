@@ -209,6 +209,11 @@ ATTEMPT_TERMINAL_EVIDENCE_KEYS = {
     "delivery_intent_at_ns",
     "delivery_receipt_b64",
     "delivery_persistence_refused",
+    # OPERATIONS §5.10 "Review verdict is a result, not a worker death": the
+    # in-root review artifact a `completed-review-blocking` row named in its
+    # FAIL handoff (urlsafe base64, padding stripped), sealed at close time so
+    # the owner-closure gate in capability-route.py can re-verify it.
+    "review_artifact_b64",
 }
 _MODULE_ROOT = Path(__file__).resolve().parents[1]
 _CAPACITY_TERMINAL_RE = re.compile(

@@ -862,6 +862,173 @@ class CompletionMarkerTest(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0, attempt)
             self.assertIn("attempt-row-terminal-without-completion", result.stderr, attempt)
 
+    # OPERATIONS §5.10 owner-closure fixtures ----------------------------------
+    # A review round that records blocking findings ends
+    # `completed-review-blocking`. It is marker-eligible only through the
+    # evidence-bound owner-closure gate; a true dead worker, a missing record,
+    # an unlinked record, or an unexhausted budget keep the SD-94 refusal.
+    _REVIEW_ROW = (
+        "note=completed-review-blocking,worker_type=review,unit=qa/plan-review,"
+        "classifier_source=completion-join-terminal-verdict-v1,"
+        "reconcile_reason=typed-review-blocking,"
+        "launch_outcome=governed-process-group-drained"
+    )
+
+    def review_blocking_row(self, attempt_id, round_no, *, note=None, artifact=True):
+        """One finished plan-check review round: exact log + readable in-root artifact."""
+        review = self.artifact / "_internal" / "plan_reviews" / f"round_{round_no}.md"
+        review.parent.mkdir(parents=True, exist_ok=True)
+        if artifact:
+            review.write_text(f"## Plan Review Results\nround {round_no}: 1 blocking finding\n",
+                              encoding="utf-8")
+        log = self.logs / f"{attempt_id}.claude.jsonl"
+        log.parent.mkdir(parents=True, exist_ok=True)
+        log.write_text(
+            json.dumps({"type": "system", "subtype": "init"}) + "\n"
+            + json.dumps({
+                "type": "result", "subtype": "success", "is_error": False,
+                "result": f"artifact: {review}\nverdict: FAIL\nblocker: blocking findings",
+            }) + "\n",
+            encoding="utf-8",
+        )
+        extra = self._REVIEW_ROW
+        if note is not None:
+            extra = extra.replace("note=completed-review-blocking", f"note={note}")
+        extra += f",log_file={log},artifact_root={self.artifact}"
+        self.write_row("done", f"plan-check-r{round_no}", attempt_id, extra, node_id="plan-check")
+        return review
+
+    def owner_closure(self, route, name="round_2.owner-closure.md", *, attempts=(), artifacts=(),
+                      verdict="closed-by-owner", node="plan-check", directory=None):
+        gate = next(n["completion_gate"] for n in route["nodes"] if n["id"] == node)
+        memo = (directory or (self.artifact / "_internal" / "plan_reviews")) / name
+        memo.parent.mkdir(parents=True, exist_ok=True)
+        rows = "\n".join(
+            f"| {i + 1} | `{attempt}` | `{artifact}` | blocking-findings |"
+            for i, (attempt, artifact) in enumerate(zip(attempts, artifacts))
+        )
+        memo.write_text(
+            f"---\nauthor: autopilot-code owner\nnode: {node}\ngate: {gate}\nverdict: {verdict}\n---\n\n"
+            "# gate closure (owner judgement)\n\n"
+            "| Round | Attempt | Artifact | Reviewer verdict |\n|---|---|---|---|\n"
+            f"{rows}\n\nEvery prior blocker closed by one batched correction; the residual is "
+            "resolved by owner ruling R-1 and carried to the pipeline summary.\n",
+            encoding="utf-8",
+        )
+        return memo
+
+    def test_two_blocking_rounds_with_owner_closure_publish_the_marker(self):
+        route = self.compile_route()          # strong -> review round cap 2
+        route_path = self.write_route(route)
+        r1 = self.review_blocking_row("att-review-r1", 1)
+        r2 = self.review_blocking_row("att-review-r2", 2)
+        memo = self.owner_closure(route, attempts=("att-review-r1", "att-review-r2"),
+                                  artifacts=(r1.name, r2.name))
+        result = self.complete(route_path, "plan-check", memo, jobs=self.jobs,
+                               attempt_id="att-review-r2")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        directory = self.stable_dispatch / "completion" / route["route_id"]
+        canonical = directory / "plan-check.json"
+        self.assertTrue(canonical.is_file())
+        marker = json.loads(canonical.read_text(encoding="utf-8"))
+        self.assertEqual(marker["attempt_id"], "att-review-r2")
+        self.assertEqual(marker["evidence"]["path"], str(memo.resolve()))
+        status, meta = self.read_row("att-review-r2")
+        self.assertEqual(status, "done")                        # never re-closed
+        self.assertEqual(meta.get("note"), "completed-marker")
+        self.assertEqual(meta.get("gate_closure"), "owner-closure")
+        self.assertEqual(meta.get("owner_closure"), str(memo.resolve()))
+        self.assertTrue(meta.get("review_artifact_b64"))
+        self.assertNotEqual(meta.get("failure_class"), "pass")  # a FAIL review never becomes pass
+        # round 1 is left exactly as the reviewer ended it
+        r1_status, r1_meta = self.read_row("att-review-r1")
+        self.assertEqual((r1_status, r1_meta.get("note")), ("done", "completed-review-blocking"))
+        self.assertIsNone(r1_meta.get("completion_marker"))
+        receipt = [json.loads(line) for line in result.stdout.splitlines() if line.startswith("{")][-1]
+        self.assertEqual(receipt["status"], "marker-appended")
+        self.assertEqual(receipt["gate_closure"], "owner-closure")
+        self.assertEqual(receipt["blocking_attempts"], ["att-review-r1", "att-review-r2"])
+        # idempotent replay: note=completed-marker now wins -> already-closed path, one marker
+        again = self.complete(route_path, "plan-check", memo, jobs=self.jobs, attempt_id="att-review-r2")
+        self.assertEqual(again.returncode, 0, again.stdout + again.stderr)
+        self.assertFalse((directory / "plan-check.2.json").exists())
+
+    def test_true_dead_worker_is_refused_even_with_a_closure_record(self):
+        # The core safety property: a worker that did not finish (dead-*) is
+        # never completable by an owner memo, however well-formed.
+        route = self.compile_route()
+        route_path = self.write_route(route)
+        r1 = self.review_blocking_row("att-dead-r1", 1, note="dead-worker-fail")
+        r2 = self.review_blocking_row("att-dead-r2", 2, note="dead-worker-fail")
+        memo = self.owner_closure(route, attempts=("att-dead-r1", "att-dead-r2"),
+                                  artifacts=(r1.name, r2.name))
+        directory = self.stable_dispatch / "completion" / route["route_id"]
+        for attempt in ("att-dead-r2", "att-dead-r1"):
+            result = self.complete(route_path, "plan-check", memo, jobs=self.jobs, attempt_id=attempt)
+            self.assertNotEqual(result.returncode, 0, attempt)
+            self.assertIn("attempt-row-terminal-without-completion:dead-worker-fail", result.stderr)
+            self.assertFalse((directory / "plan-check.json").exists())
+        for attempt in ("att-dead-r1", "att-dead-r2"):
+            status, meta = self.read_row(attempt)
+            self.assertEqual((status, meta.get("note")), ("done", "dead-worker-fail"))
+
+    def test_owner_closure_refusals_are_typed_and_publish_nothing(self):
+        route = self.compile_route()
+        route_path = self.write_route(route)
+        directory = self.stable_dispatch / "completion" / route["route_id"]
+        # (1) budget not exhausted: one blocking round at strong (cap 2) -- a
+        # correction round is the answer while budget remains, not a ruling.
+        r1 = self.review_blocking_row("att-early-r1", 1)
+        early = self.owner_closure(route, "round_1.owner-closure.md",
+                                   attempts=("att-early-r1",), artifacts=(r1.name,))
+        result = self.complete(route_path, "plan-check", early, jobs=self.jobs, attempt_id="att-early-r1")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("owner-closure-round-budget-not-exhausted", result.stderr)
+        self.assertFalse((directory / "plan-check.json").exists())
+        r2 = self.review_blocking_row("att-early-r2", 2)
+        both = ("att-early-r1", "att-early-r2")
+        names = (r1.name, r2.name)
+        cases = []
+        plain = self.artifact / "_internal" / "plan_reviews" / "closure-notes.md"
+        plain.write_text(self.owner_closure(route, attempts=both, artifacts=names).read_text(encoding="utf-8"),
+                         encoding="utf-8")
+        cases.append((plain, "owner-closure-evidence-name-invalid"))
+        cases.append((self.owner_closure(route, "unlinked.owner-closure.md"),
+                      "owner-closure-evidence-unlinked"))
+        cases.append((self.owner_closure(route, "flag.owner-closure.md", attempts=both,
+                                         artifacts=names, verdict="closed"),
+                      "owner-closure-frontmatter-invalid"))
+        cases.append((self.owner_closure(route, "wrong-node.owner-closure.md", attempts=both,
+                                         artifacts=names, node="impl-review"),
+                      "owner-closure-frontmatter-invalid"))
+        cases.append((self.owner_closure(route, "outside.owner-closure.md", attempts=both,
+                                         artifacts=names, directory=self.base / "elsewhere"),
+                      "owner-closure-evidence-outside-root"))
+        for evidence, reason in cases:
+            with self.subTest(reason=reason):
+                result = self.complete(route_path, "plan-check", evidence, jobs=self.jobs,
+                                       attempt_id="att-early-r2")
+                self.assertNotEqual(result.returncode, 0, evidence.name)
+                self.assertIn(reason, result.stderr)
+                self.assertFalse((directory / "plan-check.json").exists())
+                status, meta = self.read_row("att-early-r2")
+                self.assertEqual((status, meta.get("note")), ("done", "completed-review-blocking"))
+        # (2) a non-review node cannot borrow the path even with the note
+        self.write_row("done", "plan-x", "att-plan-blocking",
+                       "note=completed-review-blocking,worker_type=stage")
+        plan_memo = self.owner_closure(route, "plan.owner-closure.md", attempts=("att-plan-blocking",),
+                                       artifacts=("plan.md",), node="plan")
+        result = self.complete(route_path, "plan", plan_memo, jobs=self.jobs, attempt_id="att-plan-blocking")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("owner-closure-node-not-review", result.stderr)
+        # (3) the review artifact the exact log names has vanished -> unverifiable
+        r2.unlink()
+        good = self.owner_closure(route, "late.owner-closure.md", attempts=both, artifacts=names)
+        result = self.complete(route_path, "plan-check", good, jobs=self.jobs, attempt_id="att-early-r2")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("owner-closure-review-artifact-unverifiable", result.stderr)
+        self.assertFalse((directory / "plan-check.json").exists())
+
     # F-1 fixture ------------------------------------------------------
     # A detached leg drains with no result file while its exact live parent
     # conductor has not yet run `complete`. reap-watch must defer the

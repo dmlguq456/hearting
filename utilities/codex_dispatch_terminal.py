@@ -19,6 +19,15 @@ import sys
 
 from dispatch_supervisor_terminal import opencode_terminal_boundary
 
+# OPERATIONS §5.10 "Review verdict is a result, not a worker death": a review
+# worker whose FAIL handoff names a readable in-root review artifact finished
+# its contract -- it recorded blocking findings. Its row closes with this typed
+# completion note instead of `dead-worker-fail`; the verdict axis
+# (`failure_class=fail`) is unchanged. Only a `worker_type=review` row with a
+# readable artifact earns it; every other FAIL keeps the dead-worker note.
+REVIEW_BLOCKING_NOTE = "completed-review-blocking"
+REVIEW_WORKER_TYPE = "review"
+
 
 ROOT = Path(__file__).resolve().parents[1]
 # The handoff is the trailing three lines of the final message. Anchoring at the
@@ -421,8 +430,16 @@ def inspect_terminal_attempt(
     worktree: str | Path | None,
     artifact_root_metadata: str | Path | None,
     include_failure_detail: bool = False,
+    worker_type: str | None = None,
 ) -> dict[str, object]:
-    """Return the normalized, root-bound result for one exact attempt log."""
+    """Return the normalized, root-bound result for one exact attempt log.
+
+    ``worker_type`` is the registry row's `worker_type`; passing `review` lets a
+    FAIL handoff with a readable in-root artifact carry ``failure_note``
+    ``completed-review-blocking`` (a finished review) instead of
+    ``dead-worker-fail`` (a dead worker). Callers that do not know the worker
+    type keep the compatibility note.
+    """
 
     parsed = _read_terminal(path)
     if parsed["state"] != "valid":
@@ -481,6 +498,9 @@ def inspect_terminal_attempt(
         parsed["artifact_state"] = "readable"
         parsed["artifact_path_b64"] = _encode_path(artifact_path)
 
+    if review_blocking_handoff(parsed, worker_type):
+        parsed["failure_note"] = REVIEW_BLOCKING_NOTE
+
     if include_failure_detail and parsed["verdict"] in {"FAIL", "BLOCKED"}:
         blocker = str(parsed.get("blocker", ""))
         if blocker != "none":
@@ -497,6 +517,23 @@ def inspect_terminal_attempt(
     for key in ("artifact", "blocker", "diagnostic"):
         parsed.pop(key, None)
     return parsed
+
+
+def review_blocking_handoff(
+    terminal: dict[str, object], worker_type: str | None
+) -> bool:
+    """True when a valid FAIL handoff is a finished review with a readable artifact.
+
+    The three conditions are deliberately conjunctive: a non-review worker's
+    FAIL, a review FAIL that names no artifact (or one outside the root), and
+    any invalid envelope all stay on the dead-worker path.
+    """
+    return (
+        worker_type == REVIEW_WORKER_TYPE
+        and terminal.get("state") == "valid"
+        and str(terminal.get("verdict")) == "FAIL"
+        and terminal.get("artifact_state") == "readable"
+    )
 
 
 def inspect_terminal_log(path: str | Path | None) -> dict[str, str] | None:

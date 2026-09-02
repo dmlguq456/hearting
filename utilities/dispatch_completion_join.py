@@ -41,6 +41,8 @@ from dispatch_contract import (  # noqa: E402
 )
 import dispatch_pending_delivery as pending_delivery  # noqa: E402
 from codex_dispatch_terminal import (  # noqa: E402
+    REVIEW_BLOCKING_NOTE,
+    review_blocking_handoff,
     inspect_terminal_attempt,
     terminal_envelope_observed,
 )
@@ -3121,12 +3123,26 @@ def close_finished_child(row: ChildRow, *, jobs: str | Path) -> str:
         # is reachable only for a PASS verdict, never for BLOCKED/FAIL.
         note = "dead-worker-blocked" if verdict == "BLOCKED" else "dead-worker-fail"
         reason = "typed-%s" % verdict.lower()
+        extra_evidence = None
+        if review_blocking_handoff(terminal, metadata.get("worker_type")):
+            # OPERATIONS §5.10: a reviewer that recorded blocking findings in a
+            # readable in-root artifact finished its contract. The row closes
+            # typed-complete (never marker-eligible on its own -- only the
+            # owner-closure path in capability-route.py can complete it), the
+            # verdict axis stays FAIL, and the artifact it named is sealed on
+            # the row so the closure gate can re-verify it later.
+            note = REVIEW_BLOCKING_NOTE
+            reason = "typed-review-blocking"
+            extra_evidence = {
+                "review_artifact_b64": str(terminal.get("artifact_path_b64") or ""),
+            }
         if _close_invalid_envelope_child(
             row,
             jobs=jobs,
             reason=reason,
             note=note,
             classifier_source="completion-join-terminal-verdict-v1",
+            extra_evidence=extra_evidence,
         ):
             return ""
         return reason
@@ -3211,6 +3227,7 @@ def _close_invalid_envelope_child(
     note: str = "dead-invalid-envelope",
     classifier_source: str = INVALID_ENVELOPE_CLASSIFIER_SOURCE,
     terminal_envelope: bool = True,
+    extra_evidence: dict[str, str] | None = None,
 ) -> bool:
     """Close a quiescent child whose terminal envelope can never legally complete.
 
@@ -3238,6 +3255,9 @@ def _close_invalid_envelope_child(
     }
     if classifier_source == INVALID_ENVELOPE_CLASSIFIER_SOURCE:
         evidence["failure_class"] = "invalid-envelope"
+    for key, value in (extra_evidence or {}).items():
+        if value:
+            evidence[key] = value
     try:
         closed = close_attempt_row(
             Path(jobs),

@@ -128,6 +128,29 @@ class DispatchDefaultsV3Tests(unittest.TestCase):
                 os.environ.pop("DISPATCH_DEFAULTS_CONFIG", None)
                 self.assertEqual(Path(D.default_config_path()), path)
 
+    def test_headless_permission_posture_defaults_to_bypass_and_validates(self):
+        # core/OPERATIONS.md §5.10 registered headless permission posture.
+        capmap = D.load_topology_capabilities(D.default_topology_path())
+        config = self.config()
+        self.assertEqual(D.validate(config, capmap), [])
+        self.assertEqual(D.query_headless_policy(config),
+                         {"claude_permission_mode": "bypass", "source": "shipped-default"})
+        config["headless"] = {"claude_permission_mode": "allowlist"}
+        self.assertEqual(D.validate(config, capmap), [])
+        self.assertEqual(D.query_headless_policy(config),
+                         {"claude_permission_mode": "allowlist", "source": "config"})
+        config["headless"] = {"claude_permission_mode": "yolo"}
+        self.assertTrue(any("headless.claude_permission_mode" in e for e in D.validate(config, capmap)))
+        config["headless"] = {"permission": "bypass"}
+        self.assertTrue(any("unknown headless key" in e for e in D.validate(config, capmap)))
+        config["headless"] = "bypass"
+        self.assertTrue(any("headless must be a mapping" in e for e in D.validate(config, capmap)))
+
+    def test_shipped_config_declares_the_bypass_posture_explicitly(self):
+        shipped = D.parse_yaml_subset(Path(D.SHIPPED_CONFIG_PATH).read_text(encoding="utf-8"))
+        self.assertEqual(D.query_headless_policy(shipped),
+                         {"claude_permission_mode": "bypass", "source": "config"})
+
     def test_ac9_opencode_rejected_in_deep_quality_bands(self):
         # AC 9 band placement gate: opencode in deep/balanced-deep primary is a
         # validation error; opencode in light.primary stays legal.

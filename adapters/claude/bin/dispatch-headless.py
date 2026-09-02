@@ -7,6 +7,7 @@ import argparse
 from contextlib import contextmanager
 import fcntl
 import hashlib
+import importlib.util
 import json
 import os
 import re
@@ -268,6 +269,15 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--model-profile", default=os.environ.get("CLAUDE_DISPATCH_MODEL_PROFILE"))
     p.add_argument("--model", default=os.environ.get("CLAUDE_DISPATCH_MODEL"))
     p.add_argument("--effort", default=os.environ.get("CLAUDE_DISPATCH_EFFORT"))
+    p.add_argument(
+        "--permission-mode",
+        choices=("config", *PERMISSION_POSTURES),
+        default=os.environ.get("CLAUDE_DISPATCH_PERMISSION_MODE", "config"),
+        help="registered headless permission posture (core/OPERATIONS.md §5.10): "
+        "`config` reads headless.claude_permission_mode from dispatch-defaults.yaml "
+        "(shipped default bypass); `bypass` pins --permission-mode bypassPermissions; "
+        "`allowlist` keeps the runtime start mode and pre-approves only harness utilities",
+    )
     p.add_argument(
         "--completion-delivery",
         choices=("auto", "supervised", "poll"),
@@ -845,6 +855,114 @@ def launch_parent_completion_sidecar(
         args.managed_sidecar_reason = "sidecar-metadata-unrecorded"
 
 
+# core/OPERATIONS.md §5.10 "Registered headless permission posture". A
+# registered `claude -p` turn without a start flag inherits the runtime's
+# starting permission mode (user `permissions.defaultMode`, else the plan's
+# built-in `auto` with the classifier). A non-interactive run has no prompt to
+# fall back to when the classifier blocks repeatedly, so a headless owner dies
+# as a cascade of denials (observed 2026-09-02 att-e836ebd2...). The wrapper
+# therefore pins the start mode itself and records the applied posture on the
+# attempt row as evidence.
+PERMISSION_POSTURES = ("bypass", "allowlist")
+PERMISSION_MODE_FLAG_VALUES = {"bypass": "bypassPermissions"}
+# Only the harness utilities are pre-approved in `allowlist` posture: the
+# commands a registered owner/worker must be able to run to record its own
+# gate, never a general Bash grant.
+HARNESS_ALLOWLIST_UTILITIES = (
+    "capability-route.py",
+    "dispatch-node.py",
+    "dispatch-batch.py",
+    "dispatch-owner.py",
+    "dispatch-harvest.py",
+    "stage-dispatch-fallback.py",
+    "artifact_producer.py",
+    "spec-transaction.py",
+)
+_MANAGED_SETTINGS_PATHS = (
+    Path("/etc/claude-code/managed-settings.json"),
+    Path("/Library/Application Support/ClaudeCode/managed-settings.json"),
+)
+
+
+def _settings_disable_bypass(paths) -> bool:
+    """True when any readable settings file sets permissions.disableBypassPermissionsMode=disable."""
+    for path in paths:
+        try:
+            payload = json.loads(Path(path).read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError):
+            continue
+        permissions = payload.get("permissions") if isinstance(payload, dict) else None
+        if isinstance(permissions, dict) and permissions.get("disableBypassPermissionsMode") == "disable":
+            return True
+    return False
+
+
+def _claude_settings_paths() -> tuple[Path, ...]:
+    config_dir = os.environ.get("CLAUDE_CONFIG_DIR")
+    user_home = Path(config_dir) if config_dir else Path.home() / ".claude"
+    return (user_home / "settings.json", *_MANAGED_SETTINGS_PATHS)
+
+
+def _configured_permission_posture() -> tuple[str, str]:
+    """Read headless.claude_permission_mode from dispatch-defaults.yaml.
+
+    An unreadable or invalid config falls back to the shipped default rather
+    than refusing the launch: the posture is a runtime guard for the worker,
+    not a config gate, and the reason word says the file was not honoured.
+    """
+    try:
+        spec = importlib.util.spec_from_file_location(
+            "dispatch_defaults", ROOT / "utilities" / "dispatch-defaults.py"
+        )
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        config_path = module.default_config_path()
+        config = module.load_and_validate(config_path, module.default_topology_path())
+        policy = module.query_headless_policy(config)
+    except Exception:  # noqa: BLE001 -- posture never blocks a launch on config trouble
+        return "bypass", "config-invalid-shipped-default"
+    return str(policy["claude_permission_mode"]), str(policy["source"])
+
+
+def resolve_permission_posture(args: argparse.Namespace) -> dict[str, object]:
+    """Resolve the applied permission posture: {mode, reason, allowed_tools}."""
+    requested = getattr(args, "permission_mode", None) or "config"
+    if requested == "config":
+        mode, reason = _configured_permission_posture()
+    else:
+        mode, reason = requested, "launch-explicit"
+    if mode == "bypass":
+        # Where bypass cannot apply the runtime would refuse to start (root) or
+        # silently start in Manual (disableBypassPermissionsMode); demote to
+        # the allowlist posture with a typed reason instead of dying opaque.
+        if hasattr(os, "geteuid") and os.geteuid() == 0:
+            mode, reason = "allowlist", "root-refuses-bypass"
+        elif _settings_disable_bypass(_claude_settings_paths()):
+            mode, reason = "allowlist", "settings-disable-bypass"
+    allowed: tuple[str, ...] = ()
+    if mode == "allowlist":
+        agent_home = Path(str(getattr(args, "agent_home", "") or ROOT))
+        rules = []
+        for name in HARNESS_ALLOWLIST_UTILITIES:
+            utility = agent_home / "utilities" / name
+            rules += [
+                f"Bash(python3 {utility} *)",
+                f"Bash(python3 {utility})",
+                f"Bash({utility} *)",
+                f"Bash({utility})",
+            ]
+        allowed = tuple(rules)
+    return {"mode": mode, "reason": reason, "allowed_tools": allowed}
+
+
+def _permission_posture(args: argparse.Namespace) -> dict[str, object]:
+    posture = getattr(args, "resolved_permission_posture", None)
+    if posture is None:
+        posture = resolve_permission_posture(args)
+        args.resolved_permission_posture = posture
+    return posture
+
+
 def _async_deny_tools(args: argparse.Namespace) -> tuple[str, ...]:
     """SD-71/78: deny proven-fatal async tools for every Claude print turn."""
     return PROVEN_ASYNC_DENY
@@ -951,6 +1069,11 @@ def shell_command(args: argparse.Namespace, prompt_path: Path, log_path: Path) -
             ]
         for tool in _async_deny_tools(args):
             command += ["--disallowed-tool", tool]
+        posture = _permission_posture(args)
+        if posture["mode"] in PERMISSION_MODE_FLAG_VALUES:
+            command += ["--permission-mode", PERMISSION_MODE_FLAG_VALUES[posture["mode"]]]
+        for tool in posture["allowed_tools"]:
+            command += ["--allowed-tool", tool]
         return (
             " ".join(shlex.quote(x) for x in command)
             + f" < {shlex.quote(str(prompt_path))} >> {shlex.quote(str(log_path))} 2>&1"
@@ -975,6 +1098,11 @@ def shell_command(args: argparse.Namespace, prompt_path: Path, log_path: Path) -
     deny = _async_deny_tools(args)
     if deny:
         cmd += ["--disallowedTools", ",".join(deny)]
+    posture = _permission_posture(args)
+    if posture["mode"] in PERMISSION_MODE_FLAG_VALUES:
+        cmd += ["--permission-mode", PERMISSION_MODE_FLAG_VALUES[posture["mode"]]]
+    if posture["allowed_tools"]:
+        cmd += ["--allowedTools", ",".join(posture["allowed_tools"])]
     inner = " ".join(shlex.quote(x) for x in cmd)
     return (
         f"cd {shlex.quote(args.worktree)} && "
@@ -1119,6 +1247,8 @@ def append_job(jobs: Path, args: argparse.Namespace) -> bool:
         f",model={settings['model']},effort={settings['effort']}"
     )
     pipe += f",async_wait_policy={_async_wait_policy(args)}"
+    posture = _permission_posture(args)
+    pipe += f",permission_mode={posture['mode']},permission_mode_reason={posture['reason']}"
     pipe += f",completion_delivery={args.resolved_completion_delivery}"
     if args.resolved_completion_delivery == "session-resume-supervised":
         pipe += (
@@ -1718,6 +1848,7 @@ def main(argv: list[str]) -> int:
         if args.model_role:
             fields["model_role"] = args.model_role
         return fail(e.reason, 64, **fields)
+    args.resolved_permission_posture = resolve_permission_posture(args)
     try:
         validate_interactive_parent_launch(args)
     except DispatchContractError as exc:
@@ -2301,6 +2432,7 @@ def main(argv: list[str]) -> int:
                 log_path,
                 worktree=args.worktree,
                 artifact_root_metadata=args.artifact_root,
+                worker_type=args.worker_type,
             )
             args.terminal_inspection = terminal
             args.terminal_verdict = (
@@ -2386,6 +2518,9 @@ def main(argv: list[str]) -> int:
     print(f"profile_granularity={settings['granularity']}")
     print(f"model={settings['model']}")
     print(f"effort={settings['effort']}")
+    posture = _permission_posture(args)
+    print(f"permission_mode={posture['mode']}")
+    print(f"permission_mode_reason={posture['reason']}")
     leg_class, auxiliary_check = _route_node_leg_fields(args)
     print(f"leg_class={leg_class}")
     print(f"auxiliary_check={auxiliary_check}")

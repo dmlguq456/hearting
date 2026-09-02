@@ -21,8 +21,17 @@ ALLOCATION_STRATEGIES = {"least-recent-attempts", "capacity-aware", "balanced"}
 DEFAULT_USAGE_GATE_USED_PERCENT = 90
 TOP_LEVEL_KEYS = {
     "schema_version", "depth1_owner", "opencode", "allocation", "capabilities",
-    "harnesses", "profiles",
+    "harnesses", "profiles", "headless",
 }
+# core/OPERATIONS.md §5.10 "Registered headless permission posture": the
+# Claude wrapper pins the starting permission mode of every registered
+# `claude -p` turn. `bypass` appends `--permission-mode bypassPermissions`;
+# `allowlist` keeps the runtime's starting mode and pre-approves only the
+# harness utilities. The shipped default is `bypass`; omitting the section
+# selects it.
+HEADLESS_KEYS = {"claude_permission_mode"}
+HEADLESS_PERMISSION_MODES = ("bypass", "allowlist")
+DEFAULT_HEADLESS_PERMISSION_MODE = "bypass"
 
 
 class DefaultsConfigError(Exception):
@@ -394,6 +403,20 @@ def validate(config, capmap):
     elif allocation is not None:
         errors.append("allocation requires schema_version 2 or 3")
 
+    headless = config.get("headless")
+    if headless is not None:
+        if not isinstance(headless, dict):
+            errors.append("headless must be a mapping")
+        else:
+            for key in sorted(set(headless) - HEADLESS_KEYS):
+                errors.append(f"unknown headless key: {key!r}")
+            mode = headless.get("claude_permission_mode", DEFAULT_HEADLESS_PERMISSION_MODE)
+            if mode not in HEADLESS_PERMISSION_MODES:
+                errors.append(
+                    "headless.claude_permission_mode must be one of "
+                    f"{list(HEADLESS_PERMISSION_MODES)}, got {mode!r}"
+                )
+
     caps = config.get("capabilities", {})
     if not isinstance(caps, dict):
         errors.append("capabilities must be a mapping")
@@ -518,6 +541,25 @@ def query_allocation(config):
     }
     result.update(neutral)
     return result
+
+
+def query_headless_policy(config):
+    """Return the registered-headless permission posture the config selects.
+
+    `source` says whether the value came from the file (`config`) or from the
+    shipped default because the section/key is absent (`shipped-default`), so a
+    wrapper receipt can name where the applied posture came from.
+    """
+    headless = config.get("headless")
+    if isinstance(headless, dict) and "claude_permission_mode" in headless:
+        return {
+            "claude_permission_mode": headless["claude_permission_mode"],
+            "source": "config",
+        }
+    return {
+        "claude_permission_mode": DEFAULT_HEADLESS_PERMISSION_MODE,
+        "source": "shipped-default",
+    }
 
 
 def query_opencode_policy(config):

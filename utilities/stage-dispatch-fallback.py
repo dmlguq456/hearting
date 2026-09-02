@@ -71,6 +71,7 @@ from dispatch_mode_contract import (  # noqa: E402
     validate_route_mode_axes,
 )
 from worker_bootstrap import assigned_contract, worker_type_for_kind  # noqa: E402
+from codex_dispatch_terminal import REVIEW_BLOCKING_NOTE  # noqa: E402
 from dispatch_degradation import record_degradation  # noqa: E402
 from dispatch_allocation_receipt import record_allocation_receipt  # noqa: E402
 from dispatch_allocation import inert_allocation_keys  # noqa: E402
@@ -699,6 +700,12 @@ def terminal_attempt_state(
         return "fail-closed", fields
     if note == "completed-marker":
         return "terminal", fields
+    if note == REVIEW_BLOCKING_NOTE:
+        # OPERATIONS §5.10: a reviewer that recorded blocking findings finished.
+        # That is a stage result for the owner to read, never a launch failure
+        # to fall back from -- descending to the next hop here would spend the
+        # round budget on a second review the owner did not ask for.
+        return "terminal", {**fields, "review_verdict": "FAIL"}
     if note == "dead-capacity":
         return "capacity", {**fields, "failure_class": "capacity"}
     if note.startswith("dead-"):

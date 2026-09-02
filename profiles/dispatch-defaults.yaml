@@ -29,6 +29,8 @@
 #   capabilities:
 #     <capability-name>:
 #       <canonical-topology-node-id>: <claude|codex|opencode|diverse>
+#   headless:
+#     claude_permission_mode: bypass   # bypass | allowlist
 #
 # Value vocabulary for a capability/stage cell: claude | codex | opencode |
 # diverse (rank the checked pool by the sealed allocation policy) |
@@ -82,6 +84,19 @@ allocation:
     worker: codex
   depth_affinity_weight: 0.65
   usage_headroom_exponent: 2
+
+# Registered headless permission posture (core/OPERATIONS.md §5.10). Hearting-
+# launched Claude workers and owners are unattended `claude -p` turns; without a
+# pinned start mode they inherit the runtime default (`auto` plus the permission
+# classifier on Pro/Max/Team) and a run of classifier denials kills the owner
+# with no typed cause. `bypass` pins `--permission-mode bypassPermissions`;
+# `allowlist` keeps the runtime's start mode and pre-approves only the harness
+# utilities through `--allowedTools`. The wrapper falls back to `allowlist` on
+# its own where bypass cannot apply (root/sudo, permissions.disableBypassPermissionsMode)
+# and records the applied posture in the attempt row (`permission_mode=`,
+# `permission_mode_reason=`). Omitting the section selects `bypass`.
+headless:
+  claude_permission_mode: bypass
 
 capabilities:
   # autopilot-code: canonical topology node ids are frame, plan, plan-check,

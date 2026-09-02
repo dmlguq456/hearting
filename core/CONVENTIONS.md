@@ -69,7 +69,7 @@ Rigor is an assurance budget inside the graph selected by intensity. It does not
 | `thorough` | `thorough` | Deeper or multi-axis review | Keep declared groups and realize their thorough width, commonly adding an implementation-risk, failure-mode, or contrarian third leg | Broader evidence and adequacy review | Up to two corrections |
 | `adversarial` | `adversarial` | Hostile owner-plan critique | Realize the adversarial route width and any selected security, contradiction, or failure-mode perspective | Verification plus adversarial evidence | Two corrections plus one selected adversary pass |
 
-A correction in the retry budget is one **batched** pass that closes every blocking finding of the failing round together; the review that follows is a closure check of that list plus the delta (unit Round Protocol), never a fresh full audit. The budget therefore counts rounds, not findings.
+A correction in the retry budget is one **batched** pass that closes every blocking finding of the failing round together; the review that follows is a closure check of that list plus the delta (unit Round Protocol), never a fresh full audit. The budget therefore counts rounds, not findings. A review round that ends with blocking findings is a completed round, not a failed worker (`completed-review-blocking`); when the budget is spent and the last round still reports blocking findings, the owner closes the gate itself with an owner-closure record (`round_{N}.owner-closure.md`) that names every blocking round and its disposition, and `OPERATIONS §5.10` owns the evidence contract that lets that record complete the node.
 
 Two properties cut across every rigor tier and do not scale away at low intensity:
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Compile, verify, and complete immutable capability routes."""
 from __future__ import annotations
-import argparse, contextlib, fcntl, hashlib, importlib.util, json, os, re, shutil, subprocess, sys, uuid
+import argparse, base64, contextlib, fcntl, hashlib, importlib.util, json, os, re, shutil, subprocess, sys, uuid
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -40,6 +40,7 @@ from dispatch_contract import (
 from stage_session_contract import load_manifest
 from dispatch_degradation import record_degradation  # noqa: E402
 from dispatch_completion_join import materialize_after_terminal_close  # noqa: E402
+from codex_dispatch_terminal import REVIEW_BLOCKING_NOTE, inspect_terminal_attempt  # noqa: E402
 from replica_batch_contract import verify_manifest as verify_batch_manifest  # noqa: E402
 ORDER = {"direct":0,"quick":1,"standard":2,"strong":3,"thorough":4,"adversarial":5}
 TRACKING = {"tracked", "untracked"}
@@ -3125,6 +3126,133 @@ def complete_node(
     return marker, row
 
 
+# OPERATIONS §5.10 "Review verdict is a result, not a worker death" -- the
+# owner-closure completion path for a review row that ended
+# `completed-review-blocking`. Evidence-bound on purpose: a bare flag, a memo
+# that names no attempt, a `dead-*` row, or an unexhausted round budget all keep
+# the SD-94 fail-closed refusal. Every refusal is typed `owner-closure-*`.
+_OWNER_CLOSURE_SUFFIX=".owner-closure.md"
+_OWNER_CLOSURE_VERDICT="closed-by-owner"
+
+def _owner_closure_frontmatter(text):
+    """Parse the flat `key: value` frontmatter of an owner-closure record."""
+    match=re.match(r"\A---\n(.*?\n)---\n",text,re.DOTALL)
+    if not match:
+        return None
+    fields={}
+    for line in match.group(1).splitlines():
+        if ":" not in line or line.startswith((" ","\t","#")):
+            continue
+        key,_,value=line.partition(":")
+        fields[key.strip()]=value.strip().strip("'\"")
+    return fields
+
+def _review_round_rows(lines, route_id, node_id):
+    """Registry rows of one route node that count as review rounds.
+
+    Mirrors `dispatch-node.py prior_round_attempts`: same route/node, any
+    status, sub-sessions (`stage_authority=0`) excluded, legacy `route=` key
+    honoured read-only."""
+    rows=[]
+    for line in lines:
+        fields=line.split("\t")
+        if len(fields)!=6:
+            continue
+        metadata=parse_registry_metadata(fields[5])
+        if (metadata.get("route_id") or metadata.get("route"))!=route_id:
+            continue
+        if metadata.get("route_node")!=node_id:
+            continue
+        if str(metadata.get("stage_authority","1"))=="0":
+            continue
+        rows.append((fields[1],metadata))
+    return rows
+
+def _owner_closure_eligibility(route, node, node_id, evidence, row_metadata, lines):
+    """Admit `complete` on a `completed-review-blocking` row, or raise a typed refusal.
+
+    Returns the closure facts the caller seals on the row. Checks, in order:
+    the node is a review node and the row a review worker; the node's round
+    budget is exhausted; the exact attempt log still proves a FAIL handoff
+    with a readable in-root review artifact; the evidence is an in-root
+    `*.owner-closure.md` distinct from that artifact with the closure
+    frontmatter; and its body names every blocking attempt of the node and the
+    review artifact it rules on.
+    """
+    def refuse(reason, detail=""):
+        raise ValueError(f"owner-closure-{reason}"+(f":{detail}" if detail else ""))
+
+    if node.get("kind")!="review-worker" or row_metadata.get("worker_type")!="review":
+        refuse("node-not-review",
+               f"kind={node.get('kind') or '-'};worker_type={row_metadata.get('worker_type') or '-'}")
+    rounds=_review_round_rows(lines,route["route_id"],node_id)
+    max_round=REVIEW_ROUND_CAP.max_review_rounds(route["effective_intensity"])
+    if len(rounds)<max_round:
+        refuse("round-budget-not-exhausted",f"rounds={len(rounds)};max_round={max_round}")
+    terminal=inspect_terminal_attempt(
+        row_metadata.get("log_file"),
+        worktree=route["cwd"],
+        artifact_root_metadata=row_metadata.get("artifact_root") or route.get("artifact_root"),
+        worker_type="review",
+    )
+    if (
+        terminal.get("state")!="valid"
+        or str(terminal.get("verdict"))!="FAIL"
+        or terminal.get("artifact_state")!="readable"
+    ):
+        refuse("review-artifact-unverifiable",
+               f"state={terminal.get('state')};verdict={terminal.get('verdict')};"
+               f"artifact_state={terminal.get('artifact_state')};reason={terminal.get('reason')}")
+    encoded=str(terminal.get("artifact_path_b64") or "")
+    try:
+        review_artifact=Path(
+            base64.urlsafe_b64decode(encoded+"="*(-len(encoded)%4)).decode("utf-8")
+        ).resolve()
+    except (ValueError,UnicodeDecodeError):
+        refuse("review-artifact-unverifiable","artifact-undecodable")
+    evidence_path=Path(evidence).resolve()
+    if not evidence_path.name.endswith(_OWNER_CLOSURE_SUFFIX):
+        refuse("evidence-name-invalid",evidence_path.name)
+    artifact_root=Path(route["artifact_root"]).resolve()
+    try:
+        evidence_path.relative_to(artifact_root)
+    except ValueError:
+        refuse("evidence-outside-root",str(evidence_path))
+    if evidence_path==review_artifact:
+        refuse("evidence-is-review-artifact",evidence_path.name)
+    try:
+        text=evidence_path.read_text(encoding="utf-8")
+    except (OSError,UnicodeDecodeError):
+        refuse("evidence-unreadable",str(evidence_path))
+    frontmatter=_owner_closure_frontmatter(text)
+    if frontmatter is None:
+        refuse("frontmatter-invalid","missing")
+    if frontmatter.get("verdict")!=_OWNER_CLOSURE_VERDICT:
+        refuse("frontmatter-invalid",f"verdict={frontmatter.get('verdict') or '-'}")
+    if frontmatter.get("node")!=node_id:
+        refuse("frontmatter-invalid",f"node={frontmatter.get('node') or '-'}")
+    if "gate" in frontmatter and frontmatter["gate"]!=node.get("completion_gate"):
+        refuse("frontmatter-invalid",f"gate={frontmatter['gate']}")
+    blocking=[
+        metadata.get("attempt_id") for status,metadata in rounds
+        if status=="done" and metadata.get("note")==REVIEW_BLOCKING_NOTE and metadata.get("attempt_id")
+    ]
+    own=row_metadata.get("attempt_id")
+    if own and own not in blocking:
+        blocking.append(own)
+    missing=[attempt for attempt in blocking if attempt not in text]
+    if missing:
+        refuse("evidence-unlinked","attempt="+"|".join(missing))
+    if review_artifact.name not in text:
+        refuse("evidence-unlinked",f"artifact={review_artifact.name}")
+    return {
+        "evidence":str(evidence_path),
+        "review_artifact_b64":encoded,
+        "blocking_attempts":blocking,
+        "rounds":len(rounds),
+        "max_round":max_round,
+    }
+
 def _complete_node_locked(
     route,
     node,
@@ -3223,6 +3351,15 @@ def _complete_node_locked(
                 and row_note=="completed-supervisor"
                 and row_metadata.get("failure_class")=="pass"
             )
+            # OPERATIONS §5.10 owner-closure extension: a review row that ended
+            # `completed-review-blocking` is marker-eligible only through the
+            # evidence-bound owner-closure gate; it raises its own typed refusal.
+            owner_closure=None
+            if already_closed and row_note==REVIEW_BLOCKING_NOTE:
+                owner_closure=_owner_closure_eligibility(
+                    route,node,node_id,evidence,row_metadata,lines,
+                )
+                marker_eligible=True
             if already_closed and row_note!="completed-marker" and not marker_eligible:
                 raise ValueError(
                     f"attempt-row-terminal-without-completion:{row_note or 'unknown'}"
@@ -3252,9 +3389,17 @@ def _complete_node_locked(
                 f",note=completed-marker,completion_marker={canonical_marker_path}"
                 f",completion_marker_history={history_marker_path}"
             )
+            if owner_closure is not None:
+                # The gate closed on the owner's ruling, not on a passing review:
+                # seal the closure facts and leave the verdict axis untouched
+                # (never `failure_class=pass` for a FAIL review).
+                row_fields[5] += (
+                    f",gate_closure=owner-closure,owner_closure={owner_closure['evidence']}"
+                    f",review_artifact_b64={owner_closure['review_artifact_b64']}"
+                )
             # DR-1: seal the pass verdict alongside the marker so partial-continuation
             # peer checks see immutable terminal success without re-deriving it.
-            if row_metadata.get("failure_class") in (None,"","-"):
+            elif row_metadata.get("failure_class") in (None,"","-"):
                 row_fields[5] += ",failure_class=pass"
             if not already_closed:
                 # SD-111 (§4.3.1): this is the row's one open|running -> done
@@ -3269,6 +3414,9 @@ def _complete_node_locked(
             return marker, {
                 "attempt_id":attempt_id,
                 "status":"marker-appended" if marker_eligible else "closed",
+                **({"gate_closure":"owner-closure",
+                    "blocking_attempts":owner_closure["blocking_attempts"]}
+                   if owner_closure is not None else {}),
             }
 
 def _git_changed_files(worktree):

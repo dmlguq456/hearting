@@ -372,6 +372,24 @@ class FallbackTest(unittest.TestCase):
   finally:
    if proc.poll() is None:proc.kill()
    proc.wait()
+ def test_finished_blocking_review_row_is_terminal_not_fallback(self):
+  # OPERATIONS §5.10: a reviewer's blocking-findings completion is a stage
+  # result for the owner, never a launch failure -- the wrapper must neither
+  # descend to the next hop (a second review the owner never asked for, spent
+  # from the round budget) nor fail closed on the terminal race.
+  self.jobs.write_text(
+   "2026-07-24T00:00:00Z\tdone\t/repo\t/wt\tplan-check\t"
+   "route_id=rt-q,route_node=plan-check,attempt_id=att-rb,worker_type=review,"
+   "launch_outcome=reaped-before-publish,note=completed-review-blocking\n")
+  state,fields=F.terminal_attempt_state(self.jobs,"rt-q","plan-check","att-rb")
+  self.assertEqual(state,"terminal")
+  self.assertEqual(fields["note"],"completed-review-blocking")
+  self.assertEqual(fields["review_verdict"],"FAIL")
+  self.assertEqual(fields["process_state"],"quiescent")
+  self.jobs.write_text(self.jobs.read_text().replace("completed-review-blocking","dead-worker-fail"))
+  state,fields=F.terminal_attempt_state(self.jobs,"rt-q","plan-check","att-rb")
+  self.assertEqual(state,"fallback")
+  self.assertNotIn("review_verdict",fields)
  def test_attempt_identity_is_stable_across_actions(self):
   path=self.route(); first=self.run_chain(path); second=self.run_chain(path)
   def attempt(out): return next(line.split("=",1)[1] for line in out.splitlines() if line.startswith("attempt_id="))

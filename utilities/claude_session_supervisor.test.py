@@ -1918,5 +1918,36 @@ def supervisor_budget_module():
     return BUDGET
 
 
+class PermissionPosturePassthrough(unittest.TestCase):
+    """core/OPERATIONS.md §5.10: the supervisor carries the wrapper-resolved
+    permission posture onto the first and every resumed print turn."""
+
+    def _args(self, **overrides):
+        base = SimpleNamespace(claude_command=None, add_dir=[], model=None, effort=None,
+                               disallowed_tool=[], permission_mode=None, allowed_tool=[])
+        base.__dict__.update(overrides)
+        return base
+
+    def test_bypass_posture_is_pinned_on_first_and_resumed_turns(self):
+        args = self._args(permission_mode="bypassPermissions")
+        for resume in (False, True):
+            command = supervisor.claude_command(args, "sid-1", resume)
+            self.assertIn("--permission-mode", command)
+            self.assertEqual(command[command.index("--permission-mode") + 1], "bypassPermissions")
+            self.assertNotIn("--allowedTools", command)
+            self.assertIn("--resume" if resume else "--session-id", command)
+
+    def test_allowlist_posture_passes_only_the_given_rules(self):
+        rule = "Bash(python3 /h/utilities/capability-route.py *)"
+        command = supervisor.claude_command(self._args(allowed_tool=[rule]), "sid-1", False)
+        self.assertNotIn("--permission-mode", command)
+        self.assertEqual(command[command.index("--allowedTools") + 1], rule)
+
+    def test_absent_posture_leaves_the_command_unchanged(self):
+        command = supervisor.claude_command(self._args(), "sid-1", False)
+        self.assertNotIn("--permission-mode", command)
+        self.assertNotIn("--allowedTools", command)
+
+
 if __name__ == "__main__":
     unittest.main()

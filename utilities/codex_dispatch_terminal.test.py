@@ -101,6 +101,60 @@ class CodexDispatchTerminalTest(unittest.TestCase):
         self.assertEqual(failed["failure_note"], "dead-worker-fail")
         self.assertEqual(passed["failure_note"], "")
 
+    # OPERATIONS §5.10 "Review verdict is a result, not a worker death" ---------
+    def test_review_worker_fail_with_readable_artifact_is_a_completed_review(self):
+        review = self.root / "round_1.md"
+        review.write_text("## Plan Review Results\n1 blocking finding\n", encoding="utf-8")
+        path = self.write_log(verdict="FAIL", blocker="1 blocking finding",
+                              artifact=str(review), sandbox=False)
+        result = inspect_terminal_attempt(
+            path, worktree=self.worktree, artifact_root_metadata=self.root,
+            worker_type="review",
+        )
+        self.assertEqual(result["state"], "valid")
+        self.assertEqual(result["artifact_state"], "readable")
+        self.assertEqual(result["failure_note"], terminal.REVIEW_BLOCKING_NOTE)
+        # only the completion note changes: the verdict axis is untouched
+        self.assertEqual(result["verdict"], "FAIL")
+        self.assertEqual(result["failure_class"], "fail")
+        self.assertTrue(terminal.review_blocking_handoff(result, "review"))
+
+    def test_review_note_needs_a_review_worker_and_a_readable_artifact(self):
+        review = self.root / "round_1.md"
+        review.write_text("findings\n", encoding="utf-8")
+        readable = self.write_log(verdict="FAIL", blocker="x", artifact=str(review), sandbox=False)
+        for worker_type in (None, "stage", "owner", "support"):
+            with self.subTest(worker_type=worker_type):
+                result = inspect_terminal_attempt(
+                    readable, worktree=self.worktree, artifact_root_metadata=self.root,
+                    worker_type=worker_type,
+                )
+                self.assertEqual(result["failure_note"], "dead-worker-fail")
+                self.assertFalse(terminal.review_blocking_handoff(result, worker_type))
+        none = self.write_log(verdict="FAIL", blocker="x", artifact="-", sandbox=False)
+        result = inspect_terminal_attempt(
+            none, worktree=self.worktree, artifact_root_metadata=self.root, worker_type="review",
+        )
+        self.assertEqual(result["artifact_state"], "none")
+        self.assertEqual(result["failure_note"], "dead-worker-fail")
+        missing = self.write_log(verdict="FAIL", blocker="x",
+                                 artifact=str(self.root / "absent.md"), sandbox=False)
+        result = inspect_terminal_attempt(
+            missing, worktree=self.worktree, artifact_root_metadata=self.root, worker_type="review",
+        )
+        self.assertEqual(result["state"], "invalid")
+        self.assertNotEqual(result.get("failure_note"), terminal.REVIEW_BLOCKING_NOTE)
+        blocked = self.write_log(verdict="BLOCKED", blocker="x", artifact=str(review), sandbox=False)
+        result = inspect_terminal_attempt(
+            blocked, worktree=self.worktree, artifact_root_metadata=self.root, worker_type="review",
+        )
+        self.assertEqual(result["failure_note"], "dead-worker-blocked")
+        passed = self.write_log(verdict="PASS", blocker="none", artifact=str(review), sandbox=False)
+        result = inspect_terminal_attempt(
+            passed, worktree=self.worktree, artifact_root_metadata=self.root, worker_type="review",
+        )
+        self.assertEqual(result["failure_note"], "")
+
     def test_supervisor_turn_boundary_prevents_cross_turn_diagnostic_bleed(self):
         old_failure = {
             "type": "item.completed",

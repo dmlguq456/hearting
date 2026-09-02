@@ -2880,6 +2880,7 @@ def main(argv: list[str]) -> int:
                 log_path,
                 worktree=args.worktree,
                 artifact_root_metadata=args.artifact_root,
+                worker_type=args.worker_type,
             )
             args.terminal_inspection = terminal
             args.terminal_verdict = (

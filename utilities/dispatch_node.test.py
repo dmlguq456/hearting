@@ -671,7 +671,7 @@ class ReviewRoundCapTest(unittest.TestCase):
             for i in range(1, n + 1)
         )
 
-    def _run(self, node_id, prior_count, *, effective_intensity="standard", slug="slug-next"):
+    def _run(self, node_id, prior_count, *, effective_intensity="standard", slug="slug-next", rows=None):
         node = dict(make_node(depth=1, dispatch_fallback=[]), id=node_id,
                     kind="review-worker", unit="qa/code-review", completion_gate="code-" + node_id)
         route = make_route(node, tuples=[])
@@ -687,7 +687,7 @@ class ReviewRoundCapTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             jobs = Path(td) / ".dispatch" / "jobs.log"
             jobs.parent.mkdir()
-            jobs.write_text(self._rows(node_id, prior_count))
+            jobs.write_text(rows if rows is not None else self._rows(node_id, prior_count))
             route_path = Path(td) / "route.json"
             route_path.write_text(json.dumps(route))
             argv = ["dispatch-node.py", "--route", str(route_path), "--node", node_id,
@@ -750,6 +750,30 @@ class ReviewRoundCapTest(unittest.TestCase):
         for intensity in ("thorough", "adversarial"):
             code, printed = self._run("test", 2, effective_intensity=intensity)
             self.assertEqual(code, 0)
+
+    def test_finished_blocking_review_rounds_still_spend_the_budget(self):
+        # OPERATIONS §5.10: a review that recorded blocking findings ends
+        # `completed-review-blocking`, not `dead-worker-fail` -- but it is a
+        # spent round all the same. The cap counts it exactly as before, so the
+        # owner-closure completion (capability-route complete) is the only way
+        # forward once the budget is gone, never a third dispatch.
+        rows = self._rows("plan-check", 2).replace("note=dead-worker-fail", "note=completed-review-blocking")
+        self.assertEqual(rows.count("completed-review-blocking"), 2)
+        code, printed = self._run("plan-check", 2, rows=rows)
+        self.assertEqual(code, 65)
+        self.assertIn("reason=review-round-budget-exhausted", printed)
+        self.assertIn("round=3", printed)
+        one = self._rows("plan-check", 1).replace("note=dead-worker-fail", "note=completed-review-blocking")
+        code, printed = self._run("plan-check", 1, rows=one)
+        self.assertEqual(code, 0)
+        self.assertIn("correction_round=2", printed)
+
+    def test_round_protocol_history_names_the_finished_review_note(self):
+        prior = [("slug-r1", "completed-review-blocking")]
+        block = N.round_protocol_block(2, "review", "plan-check", prior)
+        self.assertIn("Round protocol (round 2", block)
+        self.assertIn("slug-r1 (completed-review-blocking)", block)
+        self.assertNotIn("dead-worker", block)
 
     # The cap set is derived from a kind, not curated by hand. This is the gate:
     # if a recipe gains a review node and the constant is not updated, this test

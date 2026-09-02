@@ -880,6 +880,14 @@ def claude_command(
         command += ["--effort", args.effort]
     if args.disallowed_tool:
         command += ["--disallowedTools", ",".join(args.disallowed_tool)]
+    # OPERATIONS §5.10 registered headless permission posture: the wrapper
+    # resolved the posture once; the supervisor only carries it onto every
+    # first and resumed print turn so a resume never drops back to the
+    # runtime's classifier-bearing start mode.
+    if getattr(args, "permission_mode", None):
+        command += ["--permission-mode", args.permission_mode]
+    if getattr(args, "allowed_tool", None):
+        command += ["--allowedTools", ",".join(args.allowed_tool)]
     return command
 
 
@@ -1047,6 +1055,12 @@ def parser() -> argparse.ArgumentParser:
     value.add_argument("--model")
     value.add_argument("--effort")
     value.add_argument("--disallowed-tool", action="append", default=[])
+    value.add_argument(
+        "--permission-mode",
+        default=None,
+        help="Claude --permission-mode value pinned by the wrapper (OPERATIONS §5.10 headless posture)",
+    )
+    value.add_argument("--allowed-tool", action="append", default=[])
     value.add_argument("--join-interval", type=float, default=2.0)
     value.add_argument("--join-timeout", type=float, default=3600.0)
     value.add_argument("--max-join-reparks", type=int, default=6)

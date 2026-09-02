@@ -1740,6 +1740,41 @@ class FinishedChildClosure(unittest.TestCase):
         self.assertIn("dead-worker-fail", lines[0])
         self.assertIn("completion-join-terminal-verdict-v1", lines[0])
 
+    def test_review_worker_fail_with_artifact_closes_completed_review_blocking(self):
+        # OPERATIONS §5.10 owner-closure extension: the join books a reviewer's
+        # blocking-findings FAIL as a finished review, seals the artifact it
+        # named on the row, and still never runs route completion for it.
+        row = self.child(verdict="FAIL", artifact="round_1.md", quiescent=True)
+        row.metadata["worker_type"] = "review"
+        self.jobs.write_text(row.raw + "\n", encoding="utf-8")
+        calls = []
+        real = JOIN.run_route_completion
+        JOIN.run_route_completion = lambda command: calls.append(command) or ""
+        try:
+            reason = JOIN.close_finished_child(row, jobs=self.jobs)
+        finally:
+            JOIN.run_route_completion = real
+        self.assertEqual(reason, "")
+        self.assertEqual(calls, [], "route completion must never run for a FAIL verdict")
+        line = self.jobs.read_text(encoding="utf-8").strip().splitlines()[0]
+        self.assertIn("note=completed-review-blocking", line)
+        self.assertNotIn("dead-worker-fail", line)
+        self.assertIn("reconcile_reason=typed-review-blocking", line)
+        self.assertIn("classifier_source=completion-join-terminal-verdict-v1", line)
+        self.assertIn("review_artifact_b64=", line)
+        # B47-3: this classifier source stays unlabeled on the verdict axis
+        self.assertNotIn("failure_class=", line)
+
+    def test_review_worker_fail_without_artifact_stays_a_dead_worker(self):
+        row = self.child(verdict="FAIL", artifact=None, quiescent=True)
+        row.metadata["worker_type"] = "review"
+        self.jobs.write_text(row.raw + "\n", encoding="utf-8")
+        reason = JOIN.close_finished_child(row, jobs=self.jobs)
+        self.assertEqual(reason, "")
+        line = self.jobs.read_text(encoding="utf-8").strip().splitlines()[0]
+        self.assertIn("dead-worker-fail", line)
+        self.assertNotIn("completed-review-blocking", line)
+
     def test_blocked_row_without_readable_artifact_also_closes_typed(self):
         # The pre-existing branch (no readable artifact) must keep closing
         # BLOCKED/FAIL typed too, not just the new readable-artifact branch.
