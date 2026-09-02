@@ -3229,10 +3229,15 @@ def _fill_locations(jobs):
             job.location_kind = "unknown"
 
 
+def _label_route_id(job):
+    """Return the route used for campaign labels, preferring the job route."""
+    return getattr(job, "route_id", None) or getattr(job, "owner_route_id", None)
+
+
 def _campaign_labels(jobs):
     """F-97c: bind an owner job's route to its producer cycle title, read-only and
-    bounded. No IO at all when no job carries a route_id."""
-    route_ids = {getattr(j, "route_id", None) for j in jobs}
+    bounded. No IO at all when no job carries a route id."""
+    route_ids = {_label_route_id(j) for j in jobs}
     route_ids.discard(None)
     route_ids.discard("")
     if not route_ids:
@@ -3268,7 +3273,7 @@ def _campaign_labels(jobs):
                     remaining.discard(rid)
         if titles:
             for job in jobs:
-                rid = getattr(job, "route_id", None)
+                rid = _label_route_id(job)
                 if rid in titles:
                     job.campaign_label = titles[rid]
     except Exception:

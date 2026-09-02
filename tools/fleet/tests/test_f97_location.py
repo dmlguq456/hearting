@@ -296,6 +296,30 @@ class F97cCampaignLabelTest(unittest.TestCase):
         self.assertIsNotNone(job.campaign_label)
         self.assertLessEqual(len(job.campaign_label), 24)
 
+    def test_campaign_label_owner_route_id_fallback(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cycles_dir = os.path.join(tmp, ".runtime", "artifact-producer", "v1", "cycles")
+            os.makedirs(cycles_dir)
+            with open(os.path.join(cycles_dir, "cyc_1.json"), "w", encoding="utf-8") as fh:
+                fh.write('{"route_id": "rt-owner", "title": "peer-steward + fleet location"}')
+            job = DispatchJob(key="owner", route_id=None, owner_route_id="rt-owner", artifact_root=tmp)
+            dispatch._campaign_labels([job])
+        self.assertEqual(job.campaign_label, "peer-steward + fleet location"[:24])
+
+    def test_campaign_label_route_id_takes_precedence_over_owner_route_id(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cycles_dir = os.path.join(tmp, ".runtime", "artifact-producer", "v1", "cycles")
+            os.makedirs(cycles_dir)
+            with open(os.path.join(cycles_dir, "cyc_1.json"), "w", encoding="utf-8") as fh:
+                fh.write('{"route_id": "rt-route", "title": "route title"}')
+            with open(os.path.join(cycles_dir, "cyc_2.json"), "w", encoding="utf-8") as fh:
+                fh.write('{"route_id": "rt-owner", "title": "owner title"}')
+            job = DispatchJob(
+                key="owner", route_id="rt-route", owner_route_id="rt-owner", artifact_root=tmp
+            )
+            dispatch._campaign_labels([job])
+        self.assertEqual(job.campaign_label, "route title")
+
     def test_campaign_label_miss_renders_nothing(self):
         with tempfile.TemporaryDirectory() as tmp:
             cycles_dir = os.path.join(tmp, ".runtime", "artifact-producer", "v1", "cycles")
@@ -307,7 +331,7 @@ class F97cCampaignLabelTest(unittest.TestCase):
         self.assertIsNone(job.campaign_label)
 
     def test_no_route_id_means_zero_file_io(self):
-        job = DispatchJob(key="code", route_id=None, artifact_root="/nonexistent")
+        job = DispatchJob(key="code", route_id=None, owner_route_id=None, artifact_root="/nonexistent")
         with mock.patch("os.scandir") as m:
             dispatch._campaign_labels([job])
         m.assert_not_called()
