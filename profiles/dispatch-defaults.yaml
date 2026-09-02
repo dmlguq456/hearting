@@ -10,7 +10,7 @@
 # utilities/dispatch-defaults.py — no PyYAML/yq dependency.
 #
 # Schema (narrow subset, parsed by utilities/dispatch-defaults.py):
-#   schema_version: 3
+#   schema_version: 4
 #   harnesses:
 #     enabled: [<harness>, ...]
 #   profiles:
@@ -26,6 +26,10 @@
 #     depth_affinity: {owner: claude, worker: codex}
 #     depth_affinity_weight: 0.65
 #     usage_headroom_exponent: 2
+#   confirmation:                      # SD-123: post-frame direction gate
+#     mode: hybrid                     # hybrid | both | post-frame-only
+#   steward:                           # SD-122 (9): peer-session steward
+#     child_permission_mode: bypass    # bypass | inherit
 #   capabilities:
 #     <capability-name>:
 #       <canonical-topology-node-id>: <claude|codex|opencode|diverse>
@@ -38,7 +42,7 @@
 # never a concrete model id or reasoning/effort value; that stays owned by
 # the adapter model-map contract (SD-22 family/role split).
 
-schema_version: 3
+schema_version: 4
 
 harnesses:
   enabled: [claude, codex, opencode]
@@ -100,6 +104,19 @@ allocation:
 # `permission_mode_reason=`). Omitting the section selects `bypass`.
 headless:
   claude_permission_mode: bypass
+
+# SD-123: standard+ two-stage confirmation for the post-frame direction gate.
+# hybrid keeps the existing pre-plan notify plus the new post-frame gate;
+# both requires an explicit release at each stage; post-frame-only drops the
+# pre-plan notify and gates only after the frame.
+confirmation:
+  mode: hybrid
+
+# SD-122 (9): default permission mode `peer-steward.py start` applies to a
+# newly started child session. `bypass` prepends the per-runtime bypass flag
+# verbatim; `inherit` is the opt-out (prepends nothing).
+steward:
+  child_permission_mode: bypass
 
 capabilities:
   # autopilot-code: canonical topology node ids are frame, plan, plan-check,

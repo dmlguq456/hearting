@@ -5,7 +5,8 @@ Parses a deliberately narrow YAML subset (scalars, inline lists, nested
 mappings, comments) — no PyYAML/yq dependency. Validates against the
 canonical topology node ids in capabilities/topologies.json and exposes
 affinity/owner/allocation/quality-band queries.  Schemas v1/v2 remain readable;
-schema v3 adds user-local enabled harnesses and per-profile quality bands.
+schema v3 adds user-local enabled harnesses and per-profile quality bands;
+schema v4 adds `confirmation.mode` and `steward.child_permission_mode`.
 """
 import json
 import os
@@ -21,7 +22,7 @@ ALLOCATION_STRATEGIES = {"least-recent-attempts", "capacity-aware", "balanced"}
 DEFAULT_USAGE_GATE_USED_PERCENT = 90
 TOP_LEVEL_KEYS = {
     "schema_version", "depth1_owner", "opencode", "allocation", "capabilities",
-    "harnesses", "profiles", "headless",
+    "harnesses", "profiles", "headless", "confirmation", "steward",
 }
 # core/OPERATIONS.md §5.10 "Registered headless permission posture": the
 # Claude wrapper pins the starting permission mode of every registered
@@ -32,6 +33,10 @@ TOP_LEVEL_KEYS = {
 HEADLESS_KEYS = {"claude_permission_mode"}
 HEADLESS_PERMISSION_MODES = ("bypass", "allowlist")
 DEFAULT_HEADLESS_PERMISSION_MODE = "bypass"
+CONFIRMATION_MODES = ("hybrid", "both", "post-frame-only")
+DEFAULT_CONFIRMATION_MODE = "hybrid"
+STEWARD_CHILD_PERMISSION_MODES = ("bypass", "inherit")
+DEFAULT_STEWARD_CHILD_PERMISSION_MODE = "bypass"
 
 
 class DefaultsConfigError(Exception):
@@ -229,7 +234,7 @@ def validate(config, capmap):
         errors.append("missing required key: schema_version")
     elif not isinstance(version, int):
         errors.append(f"schema_version must be an integer, got {version!r}")
-    elif version not in {1, 2, 3}:
+    elif version not in {1, 2, 3, 4}:
         errors.append(f"unsupported schema_version: {version!r}")
 
     enabled = []
@@ -264,10 +269,10 @@ def validate(config, capmap):
                     f"{str(expected_relief).lower()} for schema v{version}"
                 )
         if "harnesses" in config or "profiles" in config:
-            errors.append("harnesses/profiles require schema_version 3")
-    elif version == 3:
+            errors.append("harnesses/profiles require schema_version 3 or 4")
+    elif version in {3, 4}:
         if "depth1_owner" in config or "opencode" in config:
-            errors.append("schema v3 replaces depth1_owner/opencode with harnesses/profiles")
+            errors.append("schema v3+ replaces depth1_owner/opencode with harnesses/profiles")
         harnesses = config.get("harnesses")
         if not isinstance(harnesses, dict):
             errors.append("harnesses must be a mapping for schema v3")
@@ -368,7 +373,7 @@ def validate(config, capmap):
                 )
 
     allocation = config.get("allocation")
-    if version in {2, 3}:
+    if version in {2, 3, 4}:
         if not isinstance(allocation, dict):
             errors.append(f"allocation must be a mapping for schema v{version}")
         else:
@@ -401,7 +406,39 @@ def validate(config, capmap):
             if isinstance(exponent, bool) or not isinstance(exponent, int) or not 1 <= exponent <= 4:
                 errors.append("allocation.usage_headroom_exponent must be an integer from 1 to 4")
     elif allocation is not None:
-        errors.append("allocation requires schema_version 2 or 3")
+        errors.append("allocation requires schema_version 2, 3, or 4")
+
+    confirmation = config.get("confirmation")
+    steward = config.get("steward")
+    if version == 4:
+        if confirmation is not None:
+            if not isinstance(confirmation, dict):
+                errors.append("confirmation must be a mapping")
+            else:
+                for key in sorted(set(confirmation) - {"mode"}):
+                    errors.append(f"unknown confirmation key: {key!r}")
+                mode = confirmation.get("mode", DEFAULT_CONFIRMATION_MODE)
+                if mode not in CONFIRMATION_MODES:
+                    errors.append(
+                        f"confirmation.mode must be one of {sorted(CONFIRMATION_MODES)}"
+                    )
+        if steward is not None:
+            if not isinstance(steward, dict):
+                errors.append("steward must be a mapping")
+            else:
+                for key in sorted(set(steward) - {"child_permission_mode"}):
+                    errors.append(f"unknown steward key: {key!r}")
+                mode = steward.get("child_permission_mode", DEFAULT_STEWARD_CHILD_PERMISSION_MODE)
+                if mode not in STEWARD_CHILD_PERMISSION_MODES:
+                    errors.append(
+                        "steward.child_permission_mode must be one of "
+                        f"{sorted(STEWARD_CHILD_PERMISSION_MODES)}"
+                    )
+    else:
+        if confirmation is not None:
+            errors.append("confirmation requires schema_version 4")
+        if steward is not None:
+            errors.append("steward requires schema_version 4")
 
     headless = config.get("headless")
     if headless is not None:
@@ -440,7 +477,7 @@ def validate(config, capmap):
                         f"invalid affinity value for {cap_name}.{stage_name}: {value!r} "
                         f"(allowed: {sorted(AFFINITY_VALUES)}; model/effort values are never allowed here)"
                     )
-                elif version == 3 and value != "diverse" and value not in enabled:
+                elif version in {3, 4} and value != "diverse" and value not in enabled:
                     errors.append(
                         f"affinity {cap_name}.{stage_name} targets disabled harness: {value!r}"
                     )
@@ -493,7 +530,7 @@ def query_stage_affinity(config, capability, stage):
 
 
 def query_owners(config):
-    if config.get("schema_version") == 3:
+    if config.get("schema_version") in {3, 4}:
         return list((config.get("harnesses") or {}).get("enabled", []))
     return config.get("depth1_owner", [])
 
@@ -506,7 +543,7 @@ def query_profile_policy(config, profile):
     """
     if profile not in MODEL_PROFILES:
         raise DefaultsConfigError(f"unknown model profile: {profile!r}")
-    if config.get("schema_version") != 3:
+    if config.get("schema_version") not in {3, 4}:
         return {
             "primary": list(query_owners(config)),
             "relief": [],
@@ -524,7 +561,7 @@ def query_profile_policy(config, profile):
 def query_allocation(config):
     neutral = {"depth_affinity": {}, "depth_affinity_weight": 0.5, "usage_headroom_exponent": 1}
     allocation = config.get("allocation")
-    if config.get("schema_version") in {2, 3} and isinstance(allocation, dict):
+    if config.get("schema_version") in {2, 3, 4} and isinstance(allocation, dict):
         result = {
             "strategy": allocation["strategy"],
             "window": allocation["window"],
@@ -563,7 +600,7 @@ def query_headless_policy(config):
 
 
 def query_opencode_policy(config):
-    if config.get("schema_version") == 3:
+    if config.get("schema_version") in {3, 4}:
         policies = [query_profile_policy(config, profile) for profile in MODEL_PROFILES]
         if all("opencode" not in policy["primary"] for policy in policies):
             return "quality-banded"
@@ -574,6 +611,35 @@ def query_opencode_policy(config):
     if isinstance(opencode, dict) and opencode.get("relief_only") is False:
         return "normal"
     return "unknown"
+
+
+def query_confirmation_mode(config):
+    """SD-123: post-frame direction-gate confirmation mode.
+
+    Returns the default (`hybrid`) whenever the `confirmation` block or its
+    `mode` key is absent — including for a schema_version < 4 document,
+    where the block is not legal at all — so every caller gets a value
+    without special-casing older configs.
+    """
+    confirmation = config.get("confirmation")
+    if isinstance(confirmation, dict):
+        mode = confirmation.get("mode")
+        if mode in CONFIRMATION_MODES:
+            return mode
+    return DEFAULT_CONFIRMATION_MODE
+
+
+def query_steward_child_permission_mode(config):
+    """SD-122 (9): default child-session permission mode for `peer-steward.py
+    start`. Returns `bypass` whenever the `steward` block or its
+    `child_permission_mode` key is absent, including for schema_version < 4.
+    """
+    steward = config.get("steward")
+    if isinstance(steward, dict):
+        mode = steward.get("child_permission_mode")
+        if mode in STEWARD_CHILD_PERMISSION_MODES:
+            return mode
+    return DEFAULT_STEWARD_CHILD_PERMISSION_MODE
 
 
 def shipped_allocation_strategy():
@@ -629,7 +695,7 @@ def _arg(args, flag, default=None):
 
 def main(argv):
     if not argv:
-        print("usage: dispatch-defaults.py <validate|affinity|owners|policy|allocation|opencode-policy> [options]", file=sys.stderr)
+        print("usage: dispatch-defaults.py <validate|affinity|owners|policy|allocation|opencode-policy|confirmation-mode> [options]", file=sys.stderr)
         return 64
 
     op = argv[0]
@@ -675,6 +741,9 @@ def main(argv):
         return 0
     if op == "opencode-policy":
         print(query_opencode_policy(config))
+        return 0
+    if op == "confirmation-mode":
+        print(query_confirmation_mode(config))
         return 0
 
     print(f"dispatch-defaults: unknown operation {op!r}", file=sys.stderr)

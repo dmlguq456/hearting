@@ -280,6 +280,119 @@ class DispatchDefaultsV3Tests(unittest.TestCase):
         self.assertIsNone(QP.quality_peer_families(None))
 
 
+class DispatchDefaultsV4Tests(unittest.TestCase):
+    """SD-123/SD-122: schema v4 adds `confirmation.mode` and
+    `steward.child_permission_mode`, additive over v3 -- a v3 config (or one
+    missing these blocks entirely) must keep validating and the accessors
+    must keep returning their defaults."""
+
+    def v3_config(self):
+        return D.parse_yaml_subset(
+            "schema_version: 3\n"
+            "harnesses:\n  enabled: [claude, codex, opencode]\n"
+            "profiles:\n"
+            "  deep:\n    primary: [claude, codex]\n    relief: []\n"
+            "    last_resort: [opencode]\n    promote_relief_below: 0\n"
+            "  balanced-deep:\n    primary: [claude, codex]\n    relief: []\n"
+            "    last_resort: [opencode]\n    promote_relief_below: 0\n"
+            "  light:\n    primary: [claude, codex]\n    relief: [opencode]\n"
+            "    last_resort: []\n    promote_relief_below: 35\n"
+            "  mini:\n    primary: [claude, codex]\n    relief: [opencode]\n"
+            "    last_resort: []\n    promote_relief_below: 35\n"
+            "allocation:\n  strategy: capacity-aware\n  window: 30\n"
+            "capabilities:\n"
+        )
+
+    def v4_config(self):
+        config = self.v3_config()
+        config["schema_version"] = 4
+        return config
+
+    @property
+    def capmap(self):
+        return D.load_topology_capabilities(D.default_topology_path())
+
+    def test_v3_config_without_new_blocks_validates_and_defaults(self):
+        config = self.v3_config()
+        self.assertEqual(D.validate(config, self.capmap), [])
+        self.assertEqual(D.query_confirmation_mode(config), "hybrid")
+        self.assertEqual(D.query_steward_child_permission_mode(config), "bypass")
+
+    def test_v3_config_with_new_blocks_is_rejected(self):
+        config = self.v3_config()
+        config["confirmation"] = {"mode": "both"}
+        errors = D.validate(config, self.capmap)
+        self.assertTrue(any("confirmation requires schema_version 4" in e for e in errors), errors)
+        config = self.v3_config()
+        config["steward"] = {"child_permission_mode": "inherit"}
+        errors = D.validate(config, self.capmap)
+        self.assertTrue(any("steward requires schema_version 4" in e for e in errors), errors)
+
+    def test_v4_config_validates_and_still_answers_v3_shaped_queries(self):
+        config = self.v4_config()
+        self.assertEqual(D.validate(config, self.capmap), [])
+        self.assertEqual(D.query_owners(config), ["claude", "codex", "opencode"])
+        self.assertEqual(D.query_profile_policy(config, "deep")["primary"], ["claude", "codex"])
+        allocation = D.query_allocation(config)
+        self.assertEqual(allocation["strategy"], "capacity-aware")
+
+    def test_v4_config_without_new_blocks_defaults(self):
+        config = self.v4_config()
+        self.assertNotIn("confirmation", config)
+        self.assertNotIn("steward", config)
+        self.assertEqual(D.query_confirmation_mode(config), "hybrid")
+        self.assertEqual(D.query_steward_child_permission_mode(config), "bypass")
+
+    def test_absent_config_defaults(self):
+        self.assertEqual(D.query_confirmation_mode({}), "hybrid")
+        self.assertEqual(D.query_steward_child_permission_mode({}), "bypass")
+
+    def test_every_valid_confirmation_mode_and_steward_mode_validates(self):
+        for mode in ("hybrid", "both", "post-frame-only"):
+            config = self.v4_config()
+            config["confirmation"] = {"mode": mode}
+            self.assertEqual(D.validate(config, self.capmap), [])
+            self.assertEqual(D.query_confirmation_mode(config), mode)
+        for mode in ("bypass", "inherit"):
+            config = self.v4_config()
+            config["steward"] = {"child_permission_mode": mode}
+            self.assertEqual(D.validate(config, self.capmap), [])
+            self.assertEqual(D.query_steward_child_permission_mode(config), mode)
+
+    def test_every_invalid_enum_value_is_rejected(self):
+        config = self.v4_config()
+        config["confirmation"] = {"mode": "always"}
+        errors = D.validate(config, self.capmap)
+        self.assertTrue(any("confirmation.mode must be one of" in e for e in errors), errors)
+        # an invalid value never falls back to the default silently
+        self.assertEqual(D.query_confirmation_mode(config), "hybrid")
+
+        config = self.v4_config()
+        config["steward"] = {"child_permission_mode": "root"}
+        errors = D.validate(config, self.capmap)
+        self.assertTrue(any("steward.child_permission_mode must be one of" in e for e in errors), errors)
+        self.assertEqual(D.query_steward_child_permission_mode(config), "bypass")
+
+    def test_unknown_keys_inside_new_blocks_are_rejected(self):
+        config = self.v4_config()
+        config["confirmation"] = {"mode": "hybrid", "extra": 1}
+        errors = D.validate(config, self.capmap)
+        self.assertTrue(any("unknown confirmation key" in e for e in errors), errors)
+        config = self.v4_config()
+        config["steward"] = {"child_permission_mode": "bypass", "extra": 1}
+        errors = D.validate(config, self.capmap)
+        self.assertTrue(any("unknown steward key" in e for e in errors), errors)
+
+    def test_shipped_baseline_is_schema_v4_and_validates(self):
+        capmap = self.capmap
+        with open(D.SHIPPED_CONFIG_PATH, encoding="utf-8") as f:
+            parsed = D.parse_yaml_subset(f.read())
+        self.assertEqual(parsed.get("schema_version"), 4)
+        self.assertEqual(D.validate(parsed, capmap), [])
+        self.assertEqual(D.query_confirmation_mode(parsed), "hybrid")
+        self.assertEqual(D.query_steward_child_permission_mode(parsed), "bypass")
+
+
 class ShippedBaselineMergeTests(unittest.TestCase):
     def sparse_v3_text(self):
         return (
