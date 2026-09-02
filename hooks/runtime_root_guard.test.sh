@@ -93,6 +93,46 @@ else
   bad "allows an invocation against the active AGENT_HOME's own utilities"
 fi
 
+# --- deny: checkout-relative call, payload cwd == checkout, different AGENT_HOME ---
+json_input=$(printf '{"cwd":"%s","tool_name":"Bash","tool_input":{"command":"python3 utilities/capability-route.py compile"}}' "$CHECKOUT")
+out=$(printf '%s' "$json_input" | AGENT_HOME="$OTHER_HOME" "$GUARD")
+rc=$?
+if [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -q '"permissionDecision":"deny"'; then
+  ok "denies relative utilities/capability-route.py with payload cwd=checkout under a different AGENT_HOME"
+else
+  bad "denies relative utilities/capability-route.py with payload cwd=checkout under a different AGENT_HOME (rc=$rc out=$out)"
+fi
+
+# --- deny: "./utilities/<name>.py" relative form ---
+json_input=$(printf '{"cwd":"%s","tool_name":"Bash","tool_input":{"command":"./utilities/dispatch-batch.py foo"}}' "$CHECKOUT")
+out=$(printf '%s' "$json_input" | AGENT_HOME="$OTHER_HOME" "$GUARD")
+rc=$?
+if [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -q '"permissionDecision":"deny"'; then
+  ok "denies ./utilities/dispatch-batch.py with payload cwd=checkout under a different AGENT_HOME"
+else
+  bad "denies ./utilities/dispatch-batch.py with payload cwd=checkout under a different AGENT_HOME (rc=$rc out=$out)"
+fi
+
+# --- allow: relative call, payload cwd == AGENT_HOME (dev activation) ---
+json_input=$(printf '{"cwd":"%s","tool_name":"Bash","tool_input":{"command":"python3 utilities/capability-route.py compile"}}' "$CHECKOUT")
+out=$(printf '%s' "$json_input" | AGENT_HOME="$CHECKOUT" "$GUARD")
+rc=$?
+if [ "$rc" -eq 0 ] && ! printf '%s' "$out" | grep -q '"permissionDecision":"deny"'; then
+  ok "allows relative utilities/capability-route.py when payload cwd equals AGENT_HOME (dev)"
+else
+  bad "allows relative utilities/capability-route.py when payload cwd equals AGENT_HOME (dev) (rc=$rc out=$out)"
+fi
+
+# --- allow: relative call, payload has no cwd field at all (fail-open) ---
+json_input='{"tool_name":"Bash","tool_input":{"command":"python3 utilities/capability-route.py compile"}}'
+out=$(printf '%s' "$json_input" | AGENT_HOME="$OTHER_HOME" "$GUARD")
+rc=$?
+if [ "$rc" -eq 0 ] && ! printf '%s' "$out" | grep -q '"permissionDecision":"deny"'; then
+  ok "allows relative utilities/capability-route.py when payload has no cwd (fail-open)"
+else
+  bad "allows relative utilities/capability-route.py when payload has no cwd (fail-open) (rc=$rc out=$out)"
+fi
+
 # --- hook-mode (stdin JSON) smoke: deny surfaces as JSON deny, exit 0 ---
 json_input=$(printf '{"tool_name":"Bash","tool_input":{"command":"python3 %s/utilities/capability-route.py compile"}}' "$CHECKOUT")
 out=$(printf '%s' "$json_input" | AGENT_HOME="$OTHER_HOME" "$GUARD")
