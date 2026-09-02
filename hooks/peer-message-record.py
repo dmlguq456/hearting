@@ -74,6 +74,7 @@ def handle_post_tool(payload):
         "--kind", kind,
         "--surface", "claude-native",
         "--status", "sent",
+        "--body-stdin",
     ]
     if isinstance(to, dict):
         if to.get("session_id"):
@@ -115,6 +116,7 @@ def handle_prompt(payload):
         "--kind", "notice",
         "--surface", "claude-native",
         "--status", "received",
+        "--body-stdin",
     ]
     if from_name:
         args_list += ["--to-name", from_name]

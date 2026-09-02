@@ -20,6 +20,11 @@ if _UTILITIES_DIR not in sys.path:
 from dispatch_contract import resolve_dispatch_state_root  # noqa: E402
 
 _KINDS = ("watch", "steer", "handoff", "gate-relay", "notice")
+_SURFACES = (
+    "claude-native", "herdr", "codex-queue", "codex-gateway-steer",
+    "opencode-unknown", "manual-paste",
+)
+_STATUSES = ("sent", "delivered", "received", "failed", "unknown")
 _SUMMARY_MAX = 200
 
 
@@ -40,22 +45,34 @@ def _ledger_path(from_session_id, when=None):
 
 
 def _message_id(from_sid, to, ts, summary):
+    # `ts` is second-resolution (its documented output shape is fixed), so two
+    # records for the same sender/target/summary in the same second would
+    # otherwise collide. `time.time_ns()` gives each call its own
+    # sub-second/entropy component in the digest input without touching the
+    # `ts` field itself.
     to_key = to.get("session_id") or to.get("name") or ""
-    raw = f"{from_sid}|{to_key}|{ts}|{summary}".encode("utf-8", "replace")
+    raw = f"{from_sid}|{to_key}|{ts}|{summary}|{time.time_ns()}".encode("utf-8", "replace")
     return hashlib.sha256(raw).hexdigest()[:16]
 
 
 def _read_body(args):
     if args.body_file:
         return Path(args.body_file).read_text(encoding="utf-8", errors="replace")
-    if not sys.stdin.isatty():
-        data = sys.stdin.read()
-        if data:
-            return data
+    if args.body_stdin:
+        return sys.stdin.read()
     return ""
 
 
 def cmd_record(args):
+    if args.kind not in _KINDS:
+        print("peer-message: invalid-kind", file=sys.stderr)
+        return 1
+    if args.surface not in _SURFACES:
+        print("peer-message: invalid-surface", file=sys.stderr)
+        return 1
+    if args.status not in _STATUSES:
+        print("peer-message: invalid-status", file=sys.stderr)
+        return 1
     try:
         body = _read_body(args)
         first_line = body.splitlines()[0] if body else ""
@@ -72,7 +89,7 @@ def cmd_record(args):
             "session_id": args.from_session_id,
             "project": args.from_project,
         }
-        kind = args.kind if args.kind in _KINDS else "steer"
+        kind = args.kind
         rec = {
             "schema_version": 1,
             "message_id": _message_id(args.from_session_id, to, ts, summary),
@@ -174,11 +191,12 @@ def main(argv=None):
     p_record.add_argument("--to-session-id", default=None)
     p_record.add_argument("--to-name", default=None)
     p_record.add_argument("--kind", default="steer")
-    p_record.add_argument("--surface", default="unknown")
+    p_record.add_argument("--surface", required=True)
     p_record.add_argument("--status", default="sent")
     p_record.add_argument("--receipt", default=None)
     p_record.add_argument("--ref", action="append", default=[])
     p_record.add_argument("--body-file", default=None)
+    p_record.add_argument("--body-stdin", action="store_true")
     p_record.set_defaults(func=cmd_record)
 
     p_list = sub.add_parser("list")

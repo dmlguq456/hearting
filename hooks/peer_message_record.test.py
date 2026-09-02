@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Unit tests for hooks/peer-message-record.py (SD-122)."""
+import hashlib
 import json
 import os
 import subprocess
@@ -116,6 +117,23 @@ class PostToolTest(_BaseTest):
         self.assertNotIn(b"permissionDecision", proc.stdout)
         self.assertNotIn(b"deny", proc.stdout)
 
+    def test_body_stdin_flag_carries_the_real_body_through_the_hook(self):
+        """T-1 regression: body must reach peer-message.py via --body-stdin.
+
+        Without --body-stdin on both args_list constructions, _read_body
+        never sees the piped body and every record silently gets an empty
+        summary and body_sha256 == sha256(""), even though the hook piped a
+        real message via input=....encode().
+        """
+        message = "first line of the real message\nsecond line"
+        proc = self._run("post-tool", self._sendmessage_payload(message=message))
+        self.assertEqual(proc.returncode, 0)
+        recs = self._all_records()
+        self.assertEqual(len(recs), 1)
+        self.assertEqual(recs[0]["summary"], "first line of the real message")
+        self.assertNotEqual(recs[0]["body_sha256"], hashlib.sha256(b"").hexdigest())
+        self.assertEqual(recs[0]["body_sha256"], hashlib.sha256(message.encode()).hexdigest())
+
     def test_hook_never_raises_on_malformed_stdin(self):
         proc = subprocess.run(
             [sys.executable, str(_HOOK), "post-tool"],
@@ -183,6 +201,20 @@ class PromptTest(_BaseTest):
         self._run("prompt", payload)
         recs = self._all_records()
         self.assertEqual(recs[0]["to"]["session_id"], "sid-receiver-exact")
+
+    def test_notice_body_stdin_flag_carries_receipt_body_through_the_hook(self):
+        payload = {
+            "session_id": "sid-receiver-exact",
+            "cwd": "/tmp/proj",
+            "prompt": 'x <cross-session-message from="named-peer">hi</cross-session-message>',
+        }
+        self._run("prompt", payload)
+        recs = self._all_records()
+        self.assertEqual(len(recs), 1)
+        expected_body = "cross-session message received"
+        self.assertEqual(recs[0]["summary"], expected_body)
+        self.assertNotEqual(recs[0]["body_sha256"], hashlib.sha256(b"").hexdigest())
+        self.assertEqual(recs[0]["body_sha256"], hashlib.sha256(expected_body.encode()).hexdigest())
 
     def test_no_record_when_session_id_missing(self):
         payload = {
