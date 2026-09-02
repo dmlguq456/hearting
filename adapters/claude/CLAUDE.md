@@ -29,6 +29,7 @@ another adapter.
 - Before adapter edits, read the governing core contract and run the applicable write guard. Before spec changes, read the current PRD and use the spec capability gate.
 - Run deterministic guards directly when hook execution is unavailable or untrusted.
 - Task-specific detail is progressively disclosed through the selected Skill and adapter README/ADAPTATION docs; do not preload unrelated procedures.
+- Call the six runtime-root-sensitive utilities (`capability-route`, `artifact_producer`, `spec-transaction`, `dispatch-owner`, `dispatch-batch`, `dispatch-node`) through the installed `$AGENT_HOME`; a checkout-relative call to one of them is allowed only under dev activation (`AGENT_HOME` is that checkout itself), enforced by `hooks/runtime-root-guard.sh`.
 
 ## Routing and Execution
 

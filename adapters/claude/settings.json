@@ -173,6 +173,16 @@
         ]
       },
       {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh \"$HOME/.claude/hooks/runtime-root-guard.sh\"",
+            "timeout": 10
+          }
+        ]
+      },
+      {
         "matcher": "Agent|Task",
         "hooks": [
           {
@@ -261,6 +271,16 @@
             "type": "command",
             "command": "python3 \"$HOME/.claude/hooks/material-route-guard.py\"",
             "timeout": 15
+          }
+        ]
+      },
+      {
+        "matcher": "SendMessage",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$HOME/.claude/hooks/peer-message-record.py\" post-tool",
+            "timeout": 10
           }
         ]
       },
@@ -454,6 +474,15 @@
           {
             "type": "command",
             "command": "bash \"$HOME/.claude/hooks/mem-briefing-inject.sh\"",
+            "timeout": 10
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$HOME/.claude/hooks/peer-message-record.py\" prompt",
             "timeout": 10
           }
         ]
