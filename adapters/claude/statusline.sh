@@ -71,17 +71,51 @@ print("S_CTX=" + shlex.quote(str(cpct)))
 ' 2>/dev/null)"
 : "${S_CWD:=$PWD}" "${S_MODEL:=?}" "${S_EFFORT:=}" "${S_SID:=}" "${S_SESSION_NAME:=}" "${S_5H:=}" "${S_7D:=}" "${S_5H_RST:=}" "${S_7D_RST:=}" "${S_CTX:=-1}" "${S_MS:=}" "${S_TRANSCRIPT:=}"
 
-# F-87 shared session handle projection; unavailable helpers are deliberately silent.
+# F-87/F-99 shared session handle projection; unavailable helpers are deliberately silent.
+# Own pid + /proc starttime (F-26 tier-2 identity — see the tap write below, whose own
+# comment has the full walk-up rationale) is resolved here FIRST because F-99's
+# `resolve_display_inputs()` needs the same pid to read `sessions/<pid>.json`'s
+# `nameSource` (Amendment 2 — statusline must apply the same derived-vs-user-set rule
+# Fleet applies, not print its own stdin `session_name` unconditionally).
+tap_pid=""; tap_start=""
+p=$PPID
+for _ in 1 2 3 4 5; do
+  [ -n "$p" ] && [ "$p" != 1 ] && [ -r "/proc/$p/comm" ] || break
+  if [ "$(cat "/proc/$p/comm" 2>/dev/null)" = "claude" ]; then
+    st=$(cat "/proc/$p/stat" 2>/dev/null) || break
+    st=${st##*) }                       # comm 뒤 (state 부터); ppid=2번째, starttime=20번째
+    # shellcheck disable=SC2086
+    set -- $st
+    if [ "$#" -ge 20 ]; then tap_pid=$p; tap_start=${20}; fi
+    break
+  fi
+  st=$(cat "/proc/$p/stat" 2>/dev/null) || break
+  st=${st##*) }
+  # shellcheck disable=SC2086
+  set -- $st
+  [ "$#" -ge 2 ] || break
+  p=$2
+done
 S_SESSION_DISPLAY=""
 session_helper="$AGENT_HOME/tools/fleet/session_handle.py"
 [ -f "$session_helper" ] || session_helper="$(dirname "$AGENT_HOME")/tools/fleet/session_handle.py"
 if [ -n "$S_SID" ] && [ -f "$session_helper" ]; then
-  S_SESSION_DISPLAY=$(python3 - "$session_helper" "$S_SID" "$S_SESSION_NAME" <<'PY' 2>/dev/null || true
+  S_SESSION_DISPLAY=$(python3 - "$session_helper" "$S_SID" "$tap_pid" "$S_CWD" "$S_SESSION_NAME" <<'PY' 2>/dev/null || true
 import importlib.util, sys
 try:
     spec = importlib.util.spec_from_file_location("fleet_session_handle", sys.argv[1])
     mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)
-    print(mod.session_display_name("claude", sys.argv[2], sys.argv[3], budget=48))
+    sid, pid_raw, cwd, session_name = sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5]
+    pid = int(pid_raw) if pid_raw.isdigit() else None
+    inputs = mod.resolve_display_inputs("claude", sid, pid=pid)
+    # `title` carries the stdin session_name (AI-generated title or a not-yet-classified
+    # user name) — it only wins when nameSource left `runtime_name` empty (Amendment 2:
+    # this must NOT be treated as ① unconditionally, or a derived-nameSource session
+    # would show a different string here than Fleet's own title-chain fixture).
+    name = mod.display_name("claude", sid, runtime_name=inputs.get("runtime_name"),
+                             registry_name=inputs.get("registry_name"),
+                             title=session_name or None, slug=None, cwd=cwd)
+    print(mod.clip_cells(name, 48))
 except Exception:
     pass
 PY
@@ -98,27 +132,8 @@ if [ -n "$S_SID" ]; then
   # 소유 claude pid + /proc starttime 을 tap 에 additive 주입 (F-25 tier-2 식별 증거) —
   # sessions/<pid>.json registry 가 살아있는 세션에서 소실되면(2026-07-20 실측) fleet 이
   # pid→sid 를 복구할 유일한 소스가 이 tap 이다. proc_start 는 PID 재사용 오귀속 방지 짝
-  # (F-26). 조상에서 claude 를 못 찾으면 필드 생략(F-3 정직 결손). /proc/<p>/stat 은 comm
-  # 괄호 필드 뒤로 잘라 파싱한다(comm 에 공백 포함 가능 — field 위치 어긋남 함정).
-  tap_pid=""; tap_start=""
-  p=$PPID
-  for _ in 1 2 3 4 5; do
-    [ -n "$p" ] && [ "$p" != 1 ] && [ -r "/proc/$p/comm" ] || break
-    if [ "$(cat "/proc/$p/comm" 2>/dev/null)" = "claude" ]; then
-      st=$(cat "/proc/$p/stat" 2>/dev/null) || break
-      st=${st##*) }                       # comm 뒤 (state 부터); ppid=2번째, starttime=20번째
-      # shellcheck disable=SC2086
-      set -- $st
-      if [ "$#" -ge 20 ]; then tap_pid=$p; tap_start=${20}; fi
-      break
-    fi
-    st=$(cat "/proc/$p/stat" 2>/dev/null) || break
-    st=${st##*) }
-    # shellcheck disable=SC2086
-    set -- $st
-    [ "$#" -ge 2 ] || break
-    p=$2
-  done
+  # (F-26). $tap_pid/$tap_start 는 위 F-99 세션 이름 블록에서 이미 walk-up 해 계산했다
+  # (동일 pid 필요 — 중복 계산 대신 재사용).
   tap_json=$input
   case "$tap_pid$tap_start" in
     ''|*[!0-9]*) ;;                       # 미확보·비정상 값 → 원문 그대로 (주입 생략)

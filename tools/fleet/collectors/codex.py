@@ -47,7 +47,8 @@ _START_MATCH_AFTER_SEC = 30.0
 _FALLBACK_CLAIMS = {"ts": 0.0, "sids": set()}  # session ids assigned without a proc fd
 _PROC_PATHS = {}                                  # pid -> rollout reserved at collect tick start
 _CFG = {"ts": 0.0, "model": None, "effort": None}
-_TITLE_INDEX = {"stamp": None, "map": {}}      # native state stamps -> sid: title
+_TITLE_INDEX = {"stamp": None, "map": {}, "runtime_map": {}}   # native state stamps -> sid: title
+                                                                # (runtime_map = JSONL thread_name only, F-99a ①)
 _SUBAGENT_INDEX = {}                  # runtime home -> (read time, stamp, map, available)
 _LIFECYCLE_CACHE_MAX = 512
 _LIFECYCLE_CACHE = OrderedDict()
@@ -114,6 +115,7 @@ def _thread_titles(home):
     if _TITLE_INDEX["stamp"] == stamp:
         return _TITLE_INDEX["map"]
     mapped = {}
+    runtime_mapped = {}
     try:
         with open(index_path, encoding="utf-8", errors="replace") as f:
             for line in f:
@@ -125,6 +127,9 @@ def _thread_titles(home):
                 name = row.get("thread_name") if isinstance(row, dict) else None
                 if isinstance(sid, str) and isinstance(name, str) and name.strip():
                     mapped[sid] = name.strip()
+                    # F-99a ① — the JSONL thread_name, kept separate from the DB `title`
+                    # overwrite below so a runtime-set name is never collapsed into it.
+                    runtime_mapped[sid] = name.strip()
     except OSError:
         pass
     if db_path:
@@ -141,8 +146,15 @@ def _thread_titles(home):
         finally:
             if connection is not None:
                 connection.close()
-    _TITLE_INDEX.update(stamp=stamp, map=mapped)
+    _TITLE_INDEX.update(stamp=stamp, map=mapped, runtime_map=runtime_mapped)
     return mapped
+
+
+def _thread_runtime_names(home):
+    """F-99a ① — the JSONL ``thread_name`` map, kept distinct from ``_thread_titles``'s
+    DB-title-wins merge. Piggybacks on ``_thread_titles``'s own stamp/cache."""
+    _thread_titles(home)
+    return _TITLE_INDEX["runtime_map"]
 
 
 def _displayable_title(value):
@@ -1316,6 +1328,20 @@ def enrich(sess, tick=None):
             titles.fresh_title(sess.session_id, harness="codex")
         )
         sess.title = sidecar_title or native_title or sess.title
+        # F-99a ① Codex runtime_name = latest thread_name (Q-2: automatic titles land
+        # in the same field, so a user-set name is honestly indistinguishable — always
+        # treated as ①). Falls to the ② hearting session-name registry only when Codex
+        # has never named the thread.
+        runtime_name = _thread_runtime_names(home).get(sess.session_id)
+        if isinstance(runtime_name, str) and runtime_name.strip():
+            sess.runtime_name = runtime_name.strip()
+        else:
+            try:
+                from fleet.session_handle import resolve_display_inputs
+                sess.runtime_name = resolve_display_inputs(
+                    "codex", sess.session_id).get("runtime_name")
+            except Exception:
+                pass
         sess.summary, sess.summary_ts = titles.fresh_summary_with_ts(
             sess.session_id, harness="codex",
             after_offset=_latest_user_message_offset(path),

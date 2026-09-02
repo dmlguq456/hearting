@@ -302,6 +302,7 @@ class Session:
     started_at: Optional[float] = None     # registry startedAt (epoch sec)
     updated_at: Optional[float] = None     # registry updatedAt (epoch sec)
     registry_name: Optional[str] = None    # registry `name` — explicit name chain link (slug also carries it)
+    runtime_name: Optional[str] = None     # F-99a ①②-tier canonical name (session_handle.resolve_display_inputs)
     kind: Optional[str] = None             # registry `kind` (interactive/...)
     provenance: Optional[str] = None       # best-effort launcher lineage: herdr|terminal|vscode|worker
     state_evidence: Optional[dict] = None  # F-25 classifier verdict + inputs (additive; --json via asdict)

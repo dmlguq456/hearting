@@ -40,7 +40,7 @@ from .model import (fmt_min, dash, project_of, exec_child_is_wait,
                     LIVENESS_STATES, PLUGIN_QUEUE_STATES, session_parent_visible)
 from . import gitinfo
 from .refresh import LiveSnapshot, RefreshPump
-from .session_handle import sanitize_title
+from .session_handle import display_name as _display_name, sanitize_title
 
 # curses attribute constants — real values when curses is present, harmless 0 fallbacks
 # otherwise, so this module imports (and the plain --once path runs) with no curses at all.
@@ -1422,13 +1422,31 @@ def _stage_zone_segs(bc):
 
 
 def _session_name(s):
-    """The session name chain, made explicit (F-26): AI/sidecar title → registry name → slug
-    → cwd basename. `registry_name` is a real link in this chain, not decoration: a session
-    that has never been prompted has no title, and without the registry name it would render
-    as an anonymous cwd basename — which is exactly how the ghost session hid."""
+    """F-99a/b — the one canonical display name, shared with statusline.sh and the Herdr
+    formatter via ``session_handle.display_name()``: ① a runtime-exposed/hearting-registry
+    user-set name (``runtime_name``, snapshot-owned by each collector) → ② the existing F-26
+    chain (title → registry name → slug → cwd basename). `registry_name` is a real link in
+    that chain, not decoration: a session that has never been prompted has no title, and
+    without the registry name it would render as an anonymous cwd basename — which is
+    exactly how the ghost session hid."""
     slug = s.slug or (s.cwd.rsplit("/", 1)[-1] if s.cwd else "?")
-    fallback = s.title or getattr(s, "registry_name", None) or slug
-    return sanitize_title(fallback)
+    return _display_name(
+        s.harness, s.session_id, runtime_name=getattr(s, "runtime_name", None),
+        registry_name=getattr(s, "registry_name", None), title=s.title,
+        slug=slug, cwd=s.cwd)
+
+
+def _session_name_companion(s, name_txt):
+    """F-99c — dim ``· <registry_name>`` cross-identification, shown only when the display
+    name differs from the derived registry label (a user-renamed or hearting-registered
+    session already reads as itself and needs no companion)."""
+    registry_name = getattr(s, "registry_name", None)
+    if not registry_name:
+        return None
+    clean = sanitize_title(registry_name)
+    if not clean or clean == name_txt:
+        return None
+    return " · %s" % clean
 
 
 def _projection_stage_text(entity, max_width=24):
@@ -1837,6 +1855,12 @@ def _session_row(s, narrow, is_parent=False, child_count=0, name_width=None,
         if avail - suffix_w - _dw(ptag) - _NAME_GAP >= _dw(name_txt):
             suffix.append((ptag, "dim"))
             suffix_w += _dw(ptag)
+    # F-99c: dim cross-identification companion, best-effort like `prov` above — dropped
+    # first under pressure since the canonical name itself is what identifies the row.
+    companion = _session_name_companion(s, name_txt)
+    if companion and avail - suffix_w - _dw(companion) - _NAME_GAP >= _dw(name_txt):
+        suffix.append((companion, "dim"))
+        suffix_w += _dw(companion)
     if unused_at is not None and avail - suffix_w - _NAME_GAP < _dw(name_txt):
         short = (_unused_badge(s, compact=True), "g_unused_b")
         suffix_w -= _dw(suffix[unused_at][0]) - _dw(short[0])
@@ -6150,9 +6174,49 @@ def _build_lines(sessions, jobs, section, narrow, malformed, layout="wide", memo
         legend += [("⌂wt", "loc_repo"), (" worktree   ", "dim")]
     # F-9(d) `~ derived/inherited value` retired with the marker itself (user 2026-07-16:
     # inherited effort now shows plain — the tilde read as noise).
-    lines.append(legend)
+    lines.extend(_wrap_legend(legend, term_width))
 
     return lines
+
+
+def _wrap_legend(legend, term_width):
+    """F-97d follow-up (c) — wrap the legend across multiple lines at `term_width`
+    instead of appending it as one flat, silently-overflowing line. Breaks only
+    between whole glyph+label pairs (never mid-pair), indents continuation lines
+    with the same leading `'  '` the first line opens with, and rstrips the
+    trailing separator spaces at each line's end. `term_width=None` (hermetic/
+    legacy callers with no terminal) keeps the single-line legacy shape."""
+    if not term_width or not legend:
+        return [legend] if legend else []
+    lead = legend[0]
+    pairs = [legend[i:i + 2] for i in range(1, len(legend), 2)]
+    wrapped = []
+    current = [lead]
+    current_w = _dw(lead[0])
+    for pair in pairs:
+        pair_w = sum(_dw(t) for t, _k in pair)
+        if len(current) > 1 and current_w + pair_w > int(term_width):
+            wrapped.append(current)
+            current = [("  ", None)]
+            current_w = 2
+        current.extend(pair)
+        current_w += pair_w
+    wrapped.append(current)
+    if len(wrapped) == 1:
+        # No wrap actually happened — byte-identical to the pre-wrap single line
+        # (the common case at 100/120/168 cols and at 60 cols for the primary
+        # legend, which measures 52 ≤ 60 and never needed to break at all).
+        return wrapped
+    out = []
+    for line in wrapped:
+        last_text, last_key = line[-1]
+        stripped = last_text.rstrip()
+        if stripped:
+            line = line[:-1] + [(stripped, last_key)]
+        else:
+            line = line[:-1]
+        out.append(line)
+    return out
 
 
 # ---------- plain (--once) ----------

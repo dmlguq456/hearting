@@ -449,6 +449,11 @@ def _apply_registry(sess, sj):
     if name:
         sess.slug = name                          # friendly name disambiguates same-cwd sessions
         sess.registry_name = name                 # explicit link in the name chain (F-26)
+        # F-99a ① — the registry `name` is a runtime-exposed user-set name only when
+        # `nameSource` says the user actually set it (not the default derived label).
+        # This is the same rule statusline.sh applies via `resolve_display_inputs()`.
+        if sj.get("nameSource") != "derived":
+            sess.runtime_name = name
     kind = sj.get("kind")
     if isinstance(kind, str):
         sess.kind = kind
@@ -527,6 +532,14 @@ def enrich(sess):
 
     # 2) per-session statusline tap (§5) — telemetry; absent → '—'
     sid = sess.session_id
+    # F-99a ② — the hearting-owned session-name registry outranks the F-95 fallback
+    # chain even when ① (nameSource) had nothing to offer.
+    if sid and not sess.runtime_name:
+        try:
+            from fleet.session_handle import resolve_display_inputs
+            sess.runtime_name = resolve_display_inputs("claude", sid).get("runtime_name")
+        except Exception:
+            pass
     if sid:
         try:
             with open(os.path.join(home, ".statusline", sid + ".json")) as f:

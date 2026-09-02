@@ -8,7 +8,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from tools.fleet.session_handle import session_display_name
+from tools.fleet.session_handle import display_name
 
 ROOT = next(parent for parent in Path(__file__).resolve().parents
             if (parent / "adapters/codex").is_dir())
@@ -58,15 +58,18 @@ class RuntimeProjectionTest(unittest.TestCase):
         return result, rows
 
     def test_claude_positive_missing_control_and_long_titles(self):
+        """F-99 — statusline shows the canonical name with zero sid8 (`CL/<sid8>`)."""
         with tempfile.TemporaryDirectory() as td:
             root, sid = Path(td), "abcdefgh-claude"
-            self.assertIn("CL/abcdefgh · My Task", self.statusline(root, sid, "My Task").stdout)
+            self.assertIn("My Task", self.statusline(root, sid, "My Task").stdout)
             missing = self.statusline(root, sid, "My Task", helper=False)
             self.assertEqual(missing.returncode, 0)
+            self.assertNotIn("My Task", missing.stdout)
             self.assertNotIn("CL/abcdefgh", missing.stdout)
-            self.assertIn("CL/abcdefgh · A B", self.statusline(root, sid, "A\nB\x00").stdout)
+            self.assertIn("A B", self.statusline(root, sid, "A\nB\x00").stdout)
             long = self.statusline(root, sid, "가" * 100).stdout
-            display = next(x for x in long.split(" │ ") if "CL/abcdefgh" in x)
+            self.assertNotIn("CL/abcdefgh", long)
+            display = next(x for x in long.split(" │ ") if "가" in x)
             self.assertLess(display.count("가"), 100)
             self.assertIn("…", display)
 
@@ -75,7 +78,7 @@ class RuntimeProjectionTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             _, rows = self.project(root, sid, title="A title")
-            self.assertEqual(rows, [["pane","report-agent-session","pane-7","--source","herdr:codex","--agent","codex","--agent-session-id",sid], ["pane","report-metadata","pane-7","--source","herdr:codex","--display-agent","CX/abcdefgh","--title","A title"]])
+            self.assertEqual(rows, [["pane","report-agent-session","pane-7","--source","herdr:codex","--agent","codex","--agent-session-id",sid], ["pane","report-metadata","pane-7","--source","herdr:codex","--display-agent","A title","--title","A title"]])
             _, rows = self.project(root, sid, title="{")
             self.assertNotIn("--title", rows[1])
             _, rows = self.project(root, sid, title="가" * 60)
@@ -111,12 +114,12 @@ class RuntimeProjectionTest(unittest.TestCase):
             formatter.write_text("#!/usr/bin/env python3\nprint('{')\n")
             formatter.chmod(formatter.stat().st_mode | stat.S_IXUSR)
             _, rows = self.project(root, sid, title="Fallback", formatter=formatter)
-            self.assertEqual(rows[1][6:], ["CX/abcdefgh", "--title", "Fallback"])
+            self.assertEqual(rows[1][6:], ["Fallback", "--title", "Fallback"])
 
             formatter.write_text("#!/usr/bin/env python3\nimport time;time.sleep(.5)\n")
             formatter.chmod(formatter.stat().st_mode | stat.S_IXUSR)
             _, rows = self.project(root, sid, title="Timeout", formatter=formatter)
-            self.assertEqual(rows[1][6:], ["CX/abcdefgh", "--title", "Timeout"])
+            self.assertEqual(rows[1][6:], ["Timeout", "--title", "Timeout"])
 
     def test_codex_absent_command_is_fail_soft(self):
         with tempfile.TemporaryDirectory() as td:
@@ -130,10 +133,14 @@ class RuntimeProjectionTest(unittest.TestCase):
             self.assertFalse(log.exists())
 
     def test_shared_input_vectors_match_fleet_claude_and_codex(self):
+        """F-99e — statusline and the Herdr formatter both resolve to the same
+        `display_name()` output for one title, with zero sid8 handles anywhere."""
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             for harness, sid, title in (("claude","abcdefgh-claude","Task"),("codex","abcdefgh-codex","Task")):
-                expected = session_display_name(harness, sid, None)
+                expected = display_name(harness, sid, runtime_name=None, registry_name=None,
+                                        title=title, slug=None, cwd=None)
+                self.assertEqual(expected, title)
                 if harness == "claude":
                     self.assertIn(expected, self.statusline(root, sid, title).stdout)
                 else:

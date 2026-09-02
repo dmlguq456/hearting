@@ -18,6 +18,7 @@ import json
 import argparse
 import shutil
 import subprocess
+import time
 from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
@@ -148,6 +149,23 @@ def build_parser():
     p_config_status.add_argument("--verbose", action="store_true",
                                  help="Show seeding and absence notes for every surface")
     p_config_status.add_argument("--json", action="store_true")
+
+    # F-99c — the hearting-owned session-name registry. Zero-injection: this never
+    # writes a runtime record (`~/.claude/sessions/*.json` etc.), only the hearting
+    # side-registry `<dispatch state root>/session-names/<harness>/<session_id>.json`.
+    p_session = sub.add_parser(
+        "session", help="Set the hearting-owned display name for the current session")
+    session_sub = p_session.add_subparsers(
+        dest="session_command", required=True, parser_class=_UsageExitParser)
+    p_session_name = session_sub.add_parser(
+        "name", help="Register a display name for a session (F-99c)")
+    p_session_name.add_argument("name", help="The display name to register")
+    p_session_name.add_argument(
+        "--session-id", help="Explicit session id (default: CLAUDE_CODE_SESSION_ID/CODEX_THREAD_ID)")
+    p_session_name.add_argument(
+        "--harness", choices=("claude", "codex", "opencode"),
+        help="Required together with --session-id; inferred otherwise")
+    p_session_name.add_argument("--json", action="store_true")
 
     # Source → active runtime truth.  These parsers intentionally do not inherit
     # the legacy install channel's --plugin option: linked/packaged are mutually
@@ -1475,10 +1493,75 @@ def cmd_memory(args):
             "exit": EXIT_OK if ok else EXIT_FAIL, "lines": lines}
 
 
+def _dispatch_contract_module():
+    """Best-effort dynamic import of utilities/dispatch_contract.py — the same
+    resolver chain `routing_config._dispatch_contract_module` and the peer ledger
+    use. Import failure is a caller concern (typed error), never raised here."""
+    utilities_dir = Path(__file__).resolve().parents[2] / "utilities"
+    if str(utilities_dir) not in sys.path:
+        sys.path.insert(0, str(utilities_dir))
+    import dispatch_contract
+    return dispatch_contract
+
+
+def _resolve_session_identity(args):
+    """Session id from `CLAUDE_CODE_SESSION_ID` / `CODEX_THREAD_ID` / explicit
+    `--session-id`; none resolvable → a typed error, nothing written."""
+    if args.session_id:
+        if not args.harness:
+            return None, None, "--session-id requires --harness"
+        return args.harness, args.session_id, None
+    sid = os.environ.get("CLAUDE_CODE_SESSION_ID")
+    if sid:
+        return "claude", sid, None
+    sid = os.environ.get("CODEX_THREAD_ID")
+    if sid:
+        return "codex", sid, None
+    return None, None, ("no session id resolvable "
+                         "(set CLAUDE_CODE_SESSION_ID/CODEX_THREAD_ID, or pass --session-id --harness)")
+
+
+def cmd_session(args):
+    """F-99c — `harness session name <name>`. Writes only `{name, set_at}` to the
+    hearting-owned `<dispatch state root>/session-names/<harness>/<session_id>.json`;
+    never a runtime record (`~/.claude/sessions/*.json` etc. stay untouched)."""
+    operation = f"session {args.session_command}"
+    harness, session_id, err = _resolve_session_identity(args)
+    if err:
+        return {"operation": operation, "checks": [], "drift": [],
+                "exit": EXIT_FAIL, "lines": [f"session name: {err}"]}
+    try:
+        dispatch_contract = _dispatch_contract_module()
+        agent_home = Path(dispatch_contract.resolve_agent_home())
+        state_root = dispatch_contract.resolve_dispatch_state_root(agent_home, environ=os.environ)
+    except Exception as exc:
+        return {"operation": operation, "checks": [], "drift": [],
+                "exit": EXIT_FAIL, "lines": [f"session name: state root unresolved: {exc}"]}
+    path = Path(state_root) / "session-names" / harness / f"{session_id}.json"
+    payload = {"name": args.name, "set_at": time.time()}
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(path.name + ".tmp")
+        tmp.write_text(json.dumps(payload), encoding="utf-8")
+        tmp.replace(path)
+    except OSError as exc:
+        return {"operation": operation, "checks": [], "drift": [],
+                "exit": EXIT_FAIL, "lines": [f"session name: write failed: {exc}"]}
+    return {
+        "operation": operation,
+        "session_name": {"harness": harness, "session_id": session_id, "path": str(path), **payload},
+        "checks": [{"id": "session-name", "ok": True, "detail": f"{harness}/{session_id}"}],
+        "drift": [],
+        "exit": EXIT_OK,
+        "lines": [f"session name: {harness}/{session_id} = {args.name!r}"],
+    }
+
+
 COMMANDS = {
     "install": cmd_install,
     "memory": cmd_memory,
     "config": cmd_config,
+    "session": cmd_session,
     "verify": cmd_verify,
     "update": cmd_update,
     "status": cmd_status,
