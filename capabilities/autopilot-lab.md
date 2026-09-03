@@ -189,7 +189,7 @@ Before a full run, seal the resolved path, normalized `config_ref`, a required
 source-scoped git state (`source_git_state`; `source_dirty` is
 `source_git_state != "clean"`). `seal` derives its output directory from a
 required `--artifact-root` as
-`<artifact-root>/experiments/<slug>/_internal/configs/` — there is no `--out`.
+`$AGENT_ARTIFACT_OUTPUT_DIR/experiments/<slug>/_internal/configs/` — there is no `--out`.
 The manifest fields are named by `capabilities/lab-config-manifest.schema.json`
 (`schema_version` 2; v1 manifests are rejected without migration) and enforced
 by `tools/lab-config-provenance.py`. Same-input retries are idempotent; a
@@ -224,7 +224,7 @@ and that the slug recovered from that chain, together with `config_ref` and
 directory must therefore move together *and* keep their `experiments/<slug>`
 parents intact. If `experiments` itself is a symlink to a real sibling
 directory, the manifest must be addressed via the documented derived path
-(`<artifact-root>/experiments/<slug>/_internal/configs/<run_id>.manifest.json`)
+(`$AGENT_ARTIFACT_OUTPUT_DIR/experiments/<slug>/_internal/configs/<run_id>.manifest.json`)
 — addressing it via the fully-resolved path is rejected, since resolution
 collapses the `experiments` segment `seal` itself recorded.
 

@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
-"""W7D: artifact_reader resolves cycle, shared, and legacy layouts in that order."""
+"""W7D/W7G: artifact_reader resolves cycle, shared, and legacy layouts in that
+order, and (D-77-a) surfaces a nonterminal resplit journal hold."""
 from __future__ import annotations
 
+import inspect
 import json
 import sys
 import tempfile
@@ -9,6 +11,7 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import artifact_cutover as C  # noqa: E402
 import artifact_reader as reader  # noqa: E402
 
 CAMP = "camp_" + "a" * 32
@@ -84,6 +87,87 @@ class ReaderTests(unittest.TestCase):
             code = reader.main(["spec-dir", "--artifact-root", str(self.root)])
         self.assertEqual(code, 0)
         self.assertEqual(json.loads(out.getvalue())["layout"], "shared")
+
+
+class HoldTests(unittest.TestCase):
+    """A-16.7 reader hold: `resplit_hold` is a thin re-export over the same
+    on-disk journal `artifact_resplit.resplit_hold` reads (D-77-a: never
+    process liveness)."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name) / ".agent_reports"
+        self.root.mkdir()
+        build(self.root)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _write_journal(self, *, phase: str, lump_cycle_id: str = "cyc_" + "9" * 32):
+        run_dir = C.migrations_dir(self.root) / f"20260903T000000Z-resplit-{lump_cycle_id}"
+        run_dir.mkdir(parents=True)
+        journal = {"schema_version": 1, "kind": "w7g-resplit-journal", "gate": "r2",
+                  "phase": phase, "lump_cycle_id": lump_cycle_id, "started_at": "2026-09-03T00:00:00Z"}
+        (run_dir / "journal-r2.json").write_text(json.dumps(journal), encoding="utf-8")
+        return run_dir
+
+    def test_a16_7_reader_hold_from_disk_journal(self):
+        self.assertIsNone(reader.resplit_hold(self.root))
+        self._write_journal(phase="renamed")
+        hold = reader.resplit_hold(self.root)
+        self.assertIsNotNone(hold)
+        self.assertEqual(hold["code"], "resplit-in-progress")
+        self.assertEqual(hold["gate"], "r2")
+        self.assertEqual(hold["phase"], "renamed")
+
+    def test_a16_7_reader_hold_is_none_once_terminal(self):
+        self._write_journal(phase="complete")
+        self.assertIsNone(reader.resplit_hold(self.root))
+
+    def test_a16_7_reader_hold_cli_exit_code(self):
+        import io
+        import contextlib
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = reader.main(["hold", "--artifact-root", str(self.root)])
+        self.assertEqual(code, 0)
+        self.assertIsNone(json.loads(out.getvalue())["hold"])
+        self._write_journal(phase="renamed")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = reader.main(["hold", "--artifact-root", str(self.root)])
+        self.assertEqual(code, reader.HOLD_EXIT)
+        self.assertEqual(json.loads(out.getvalue())["hold"]["code"], "resplit-in-progress")
+
+    def test_a16_7_reader_public_shapes_unchanged(self):
+        expected = {
+            "bucket_dirs": (
+                [("root", "POSITIONAL_OR_KEYWORD", "Path"), ("bucket", "POSITIONAL_OR_KEYWORD", "str"),
+                 ("include_shared", "KEYWORD_ONLY", "bool"), ("include_legacy", "KEYWORD_ONLY", "bool")],
+                "List[Tuple[Path, Dict[str, str]]]"),
+            "cycle_bucket_dirs": (
+                [("root", "POSITIONAL_OR_KEYWORD", "Path"), ("bucket", "POSITIONAL_OR_KEYWORD", "str")],
+                "List[Tuple[Path, Dict[str, str]]]"),
+            "iter_bucket_children": (
+                [("root", "POSITIONAL_OR_KEYWORD", "Path"), ("bucket", "POSITIONAL_OR_KEYWORD", "str"),
+                 ("kw", "VAR_KEYWORD", "<class 'inspect._empty'>")],
+                "Iterator[Tuple[Path, Dict[str, str]]]"),
+            "glob_bucket": (
+                [("root", "POSITIONAL_OR_KEYWORD", "Path"), ("bucket", "POSITIONAL_OR_KEYWORD", "str"),
+                 ("pattern", "POSITIONAL_OR_KEYWORD", "str"), ("kw", "VAR_KEYWORD", "<class 'inspect._empty'>")],
+                "List[Path]"),
+            "spec_dir": (
+                [("root", "POSITIONAL_OR_KEYWORD", "Path"), ("open_cycle_dir", "KEYWORD_ONLY", "Optional[str]")],
+                "Optional[Tuple[Path, str]]"),
+            "resolve_path": (
+                [("root", "POSITIONAL_OR_KEYWORD", "Path"), ("rel", "POSITIONAL_OR_KEYWORD", "str")],
+                "Dict[str, object]"),
+        }
+        for name, (params, ret) in expected.items():
+            sig = inspect.signature(getattr(reader, name))
+            actual = [(p.name, p.kind.name, str(p.annotation)) for p in sig.parameters.values()]
+            self.assertEqual(actual, params, name)
+            self.assertEqual(str(sig.return_annotation), ret, name)
 
 
 if __name__ == "__main__":

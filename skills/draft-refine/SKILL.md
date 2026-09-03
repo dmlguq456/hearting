@@ -25,7 +25,7 @@ Resolve `$ARGUMENTS` to a canonical strategy or draft and any existing required 
 - A path containing `/strategy/` selects strategy mode and canonical `strategy.md`.
 - A directory defaults to `strategy/strategy.md`.
 - A Markdown file is used as supplied; recognize a sibling `draft_ko.md` or `strategy_ko.md` only when it exists or the workflow explicitly requires that legacy companion.
-- Otherwise fuzzy-search with `ls -d <artifact-root>/documents/*$ARGUMENTS* 2>/dev/null`.
+- Otherwise fuzzy-search with `ls -d $AGENT_ARTIFACT_OUTPUT_DIR/documents/*$ARGUMENTS* 2>/dev/null`.
   - one match → resolve its canonical strategy and existing companions
   - multiple matches → ask the user to choose
   - no match → report the resolution error
@@ -107,7 +107,7 @@ Document type and path: [type/path]
 Changed sections: [list]
 
 For every material model, venue, year, metric, lineage, or classification claim, open and compare the ground-truth source:
-- <artifact-root>/analysis_project/paper/*.md is the primary source produced by `analyze-project --mode paper`
+- $AGENT_ARTIFACT_OUTPUT_DIR/analysis_project/paper/*.md is the primary source produced by `analyze-project --mode paper`
 - open original PDFs only when the paper analysis lacks the fact
 - use {artifact_root}/strategy/ or analysis/ for strategy-specific evidence
 

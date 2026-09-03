@@ -16,7 +16,9 @@ from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import artifact_cutover as C  # noqa: E402
 import artifact_producer as P  # noqa: E402
+import artifact_resplit as RS  # noqa: E402
 
 SCHEMA_VERSION = 1
 KIND = "fleet-cutover-gate/v1"
@@ -157,6 +159,102 @@ def negative_probe(root: Path) -> Dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# D-85 gate extension: resplit/retire predicates (read-only, mutation 0)
+# ---------------------------------------------------------------------------
+
+
+def _empty_resplit_fields() -> Dict[str, Any]:
+    return {
+        "lumped_cycles_remaining": None, "lump_index_state": None,
+        "legacy_top_level_retired": False, "resplit_hold": None, "supersession_divergent": [],
+    }
+
+
+def _retirement_run_dirs(root: Path) -> List[Path]:
+    mdir = C.migrations_dir(root)
+    if not mdir.is_dir():
+        return []
+    try:
+        return sorted(p for p in mdir.iterdir() if p.is_dir() and p.name.endswith("-retirement"))
+    except OSError:
+        return []
+
+
+def _sha256_key(value: Optional[str]) -> Optional[str]:
+    """`artifact_cutover.retire`'s journal rows carry a bare hex digest while the
+    resplit retire-inventory's rows carry a `sha256:`-prefixed one -- normalize
+    both to the bare form before comparing."""
+    if not isinstance(value, str):
+        return value
+    return value[len("sha256:"):] if value.startswith("sha256:") else value
+
+
+def _r4_retired_rows(root: Path) -> Tuple[bool, set]:
+    """(True, rows) once an R4 run *completed* (report.json written past approval
+    validation -- `artifact_cutover.retire` raises before writing it otherwise).
+    `rows` is every `(source_locator, sha256)` that run's journal committed."""
+    approved = False
+    retired: set = set()
+    for run_dir in _retirement_run_dirs(root):
+        report = P._read_json(run_dir / "report.json")
+        if not isinstance(report, dict) or report.get("kind") != "w7c-source-retirement" or report.get("dry_run"):
+            continue
+        journal_path = run_dir / "journal.jsonl"
+        if not journal_path.is_file():
+            continue
+        approved = True
+        for jrow in C._read_jsonl(journal_path):
+            if jrow.get("action") == "retire_source" and jrow.get("commit_state") == "committed":
+                retired.add((jrow.get("source_locator"), _sha256_key(jrow.get("sha256"))))
+    return approved, retired
+
+
+def legacy_top_level_retired(root: Path) -> bool:
+    """D-85: reads only the R1-sealed retire ordered inventory (D-84). Absent
+    inventory is fail-closed `False`; an empty inventory is `True`; otherwise
+    `True` only when a completed R4 run's evidence covers every entry and none
+    of those source paths remain as a regular file."""
+    inventory = RS.sealed_retire_inventory(root)
+    if inventory is None:
+        return False
+    entries = inventory.get("entries") or []
+    if not entries:
+        return True
+    wanted = {(e.get("source_locator"), _sha256_key(e.get("sha256"))) for e in entries}
+    approved, retired = _r4_retired_rows(root)
+    if not approved or not wanted <= retired:
+        return False
+    for entry in entries:
+        path = root / entry["source_locator"]
+        if path.is_file() and not path.is_symlink():
+            return False
+    return True
+
+
+def _resplit_fields(root: Path) -> Dict[str, Any]:
+    hold = RS.resplit_hold(root)
+    retired = legacy_top_level_retired(root)
+    if hold is not None:
+        return {
+            "lumped_cycles_remaining": None, "lump_index_state": "resplit-in-progress",
+            "legacy_top_level_retired": retired, "resplit_hold": hold, "supersession_divergent": [],
+        }
+    scan = RS.scan_lumps(root)
+    if scan.get("invalid"):
+        return {
+            "lumped_cycles_remaining": None, "lump_index_state": "lump-report-invalid",
+            "legacy_top_level_retired": retired, "resplit_hold": None, "supersession_divergent": [],
+        }
+    display = RS.lump_display_state(root)
+    return {
+        "lumped_cycles_remaining": display["lumped_cycles_remaining"],
+        "lump_index_state": display["lump_index_state"],
+        "legacy_top_level_retired": retired, "resplit_hold": None,
+        "supersession_divergent": display["divergent"],
+    }
+
+
+# ---------------------------------------------------------------------------
 # row assembly
 # ---------------------------------------------------------------------------
 
@@ -175,6 +273,7 @@ def audit_row(repo: Mapping[str, Any], *, timeout: float) -> Dict[str, Any]:
             "route_bookkeeping": {"open_routes": 0, "non_canonical_route_records": 0},
             "probe": {"legacy_top_level": None, "shared_revision": None, "passed": None},
         })
+        row.update(_empty_resplit_fields())
         return row
     klass = P.classify_root(root, collect_legacy_top_level=True)
     row.update({
@@ -190,8 +289,10 @@ def audit_row(repo: Mapping[str, Any], *, timeout: float) -> Dict[str, Any]:
     })
     if klass["state"] == "active":
         row["probe"] = negative_probe(root)
+        row.update(_resplit_fields(root))
     else:
         row["probe"] = {"legacy_top_level": None, "shared_revision": None, "passed": None}
+        row.update(_empty_resplit_fields())
     return row
 
 
@@ -292,19 +393,26 @@ def _apply_waivers(rows: Sequence[Dict[str, Any]], waivers_payload: Optional[Map
 # ---------------------------------------------------------------------------
 
 
-def evaluate(rows: Sequence[Mapping[str, Any]], *, waived: bool) -> Tuple[str, List[Dict[str, str]]]:
+def evaluate(rows: Sequence[Mapping[str, Any]], *, waived: bool,
+            require_resplit: bool = False) -> Tuple[str, List[Dict[str, str]]]:
     blocking: List[Dict[str, str]] = []
     for row in rows:
-        passed = row.get("state") == "active" and row.get("probe", {}).get("passed") is True
-        if passed:
+        base_passed = row.get("state") == "active" and row.get("probe", {}).get("passed") is True
+        resplit_passed = True
+        if require_resplit:
+            resplit_passed = (row.get("lumped_cycles_remaining") == 0
+                              and row.get("legacy_top_level_retired") is True)
+        if base_passed and resplit_passed:
             continue
         waiver = row.get("waiver") or {}
         if waived and waiver.get("status") == "accepted":
             continue
-        if row.get("state") == "active":
+        if row.get("state") != "active":
+            reason = row.get("reason") or row.get("state")
+        elif not base_passed:
             reason = "negative-probe-failed"
         else:
-            reason = row.get("reason") or row.get("state")
+            reason = "resplit-incomplete"
         blocking.append({"repo_path": row["repo_path"], "state": row.get("state"), "reason": reason})
     return ("incomplete" if blocking else "complete"), blocking
 
@@ -391,6 +499,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     p.add_argument("--waivers")
     p.add_argument("--output")
     p.add_argument("--timeout", type=float, default=RESOLVE_TIMEOUT_DEFAULT)
+    p.add_argument("--require-resplit", action="store_true")
 
     args = parser.parse_args(argv)
     try:
@@ -413,7 +522,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         if args.waivers:
             waivers_payload, waivers_digest = load_waivers(Path(args.waivers))
         waivers_result = _apply_waivers(rows, waivers_payload, now=None)
-        verdict, blocking = evaluate(rows, waived=waivers_payload is not None)
+        verdict, blocking = evaluate(rows, waived=waivers_payload is not None,
+                                     require_resplit=args.require_resplit)
         payload = _build_payload(
             command="complete", roster=roster, roster_digest=roster_digest,
             roster_path=str(args.roster), rows=rows,

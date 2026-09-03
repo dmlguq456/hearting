@@ -26,6 +26,7 @@ from typing import Dict, Iterator, List, Optional, Sequence, Tuple
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import artifact_cutover as C  # noqa: E402
+import artifact_resplit as RS  # noqa: E402
 
 LEGACY_BUCKETS = ("plans", "spec", "research", "documents", "analysis_project", "experiments", "designs")
 SHARED_KIND_FOR_BUCKET = {"spec": "spec", "analysis_project": "analysis", "research": "research"}
@@ -127,6 +128,14 @@ def resolve_path(root: Path, rel: str) -> Dict[str, object]:
     return C.resolve_legacy(Path(root), rel)
 
 
+HOLD_EXIT = 65
+
+
+def resplit_hold(root: Path) -> Optional[Dict[str, object]]:
+    """D-77-a: thin re-export of `artifact_resplit.resplit_hold` for readers."""
+    return RS.resplit_hold(Path(root))
+
+
 def _emit(payload) -> None:
     print(json.dumps(payload, sort_keys=True, ensure_ascii=False))
 
@@ -148,6 +157,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     p = sub.add_parser("resolve", help="resolve a legacy root-relative path")
     p.add_argument("--artifact-root", required=True)
     p.add_argument("--path", required=True)
+    p = sub.add_parser("hold", help="nonterminal resplit journal hold, if any (D-77-a)")
+    p.add_argument("--artifact-root", required=True)
     args = parser.parse_args(argv)
     root = Path(args.artifact_root).resolve()
     if args.command == "bucket-dirs":
@@ -160,6 +171,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             _emit({"path": None, "layout": None})
             return 1
         _emit({"path": str(found[0]), "layout": found[1]})
+    elif args.command == "hold":
+        hold = resplit_hold(root)
+        if hold is None:
+            _emit({"hold": None})
+            return 0
+        _emit({"hold": hold})
+        return HOLD_EXIT
     else:
         _emit(resolve_path(root, args.path))
     return 0

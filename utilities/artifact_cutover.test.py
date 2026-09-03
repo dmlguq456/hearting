@@ -104,6 +104,18 @@ class CutoverTest(unittest.TestCase):
                 R.write_completion_marker(route, node, node["id"], ev)
         R.close_route(route, route_file, commit="a" * 40, summary="fixture")
 
+    def approve_retire(self, dry_run_report, *, root_id=None):
+        self._retire_approval_ordinal = getattr(self, "_retire_approval_ordinal", 0) + 1
+        approval_path = Path(self._tmp.name) / f"retire-approval-{self._retire_approval_ordinal}.json"
+        approval_path.write_text(json.dumps({
+            "authorized": True,
+            "body": {
+                "root_id": root_id or P.artifact_lifecycle.read_root_identity(self.root).artifact_root_id,
+                "retire_inventory_sha256": dry_run_report["inventory_sha256"],
+            },
+        }))
+        return approval_path
+
     def migrate(self):
         route, route_file = self.route()
         report = C.migrate_delta(self.root, census_rows=self.rows, route_file=route_file, capability="autopilot-code",
@@ -186,8 +198,9 @@ class CutoverTest(unittest.TestCase):
                        approval_receipt_sha256=None, dry_run=True)
         self.assertTrue(dry["dry_run"])
         self.assertTrue((self.root / "spec/prd.md").is_file())
+        approval_path = self.approve_retire(dry)
         out = C.retire(self.root, maps=[self.w7_map, w7c_map], backup_root=backup, excludes=["plans/keep"],
-                       approval_receipt_sha256="y" * 64)
+                       approval_receipt_sha256="y" * 64, approval_path=approval_path)
         self.assertEqual(out["kept_files"], 1)
         self.assertEqual(out["kept"][0]["source"], "plans/2026-01-02_b/final_report.md")
         self.assertFalse((self.root / "spec/prd.md").exists())
@@ -352,6 +365,203 @@ class CutoverTest(unittest.TestCase):
         with self.assertRaises(C.CutoverError) as ctx:
             C.retire(self.root, maps=[self.w7_map], backup_root=self.root / "_scratch", excludes=[], approval_receipt_sha256=None)
         self.assertEqual(ctx.exception.code, "backup-root-inside-artifact-root")
+
+    # -- A-16.4: compat map chain (append-only) -----------------------------
+
+    def test_a16_4_compat_append_preserves_old_rows_and_grows_maps_by_one(self):
+        report, sealed = self.migrate()
+        w7c_map = Path(report["run_dir"]) / "compatibility-map.jsonl"
+        closed = C.compat_close(self.root, maps=[self.w7_map], approval_receipt_sha256=None)
+        self.assertEqual(len(closed["maps"]), 1)
+        appended = C.compat_append(self.root, maps=[w7c_map], approval_receipt_sha256=None)
+        self.assertEqual(len(appended["maps"]), 2)
+        self.assertEqual(appended["maps"][0]["path"], closed["maps"][0]["path"])
+        self.assertEqual(appended["maps"][0]["sha256"], closed["maps"][0]["sha256"])
+        self.assertEqual(appended["maps"][0]["rows"], closed["maps"][0]["rows"])
+        self.assertEqual(appended["maps"][1]["path"], str(w7c_map.resolve()))
+
+    def test_a16_4_old_map_file_sha_unchanged(self):
+        report, sealed = self.migrate()
+        w7c_map = Path(report["run_dir"]) / "compatibility-map.jsonl"
+        C.compat_close(self.root, maps=[self.w7_map], approval_receipt_sha256=None)
+        real_sha = C._sha
+        seen = []
+
+        def spy(p):
+            seen.append(Path(p).resolve())
+            return real_sha(p)
+
+        with mock.patch.object(C, "_sha", side_effect=spy):
+            appended = C.compat_append(self.root, maps=[w7c_map], approval_receipt_sha256=None)
+        self.assertNotIn(self.w7_map.resolve(), seen, "old map file must never be opened for its digest")
+        self.assertIn(w7c_map.resolve(), seen)
+        self.assertEqual(appended["maps"][0]["sha256"], real_sha(self.w7_map))
+
+    def test_a16_4_superseded_by_and_at_recorded_on_old_entry(self):
+        report, sealed = self.migrate()
+        w7c_map = Path(report["run_dir"]) / "compatibility-map.jsonl"
+        C.compat_close(self.root, maps=[self.w7_map], approval_receipt_sha256=None)
+        appended = C.compat_append(self.root, maps=[w7c_map], supersedes=[str(self.w7_map.resolve())],
+                                   approval_receipt_sha256=None)
+        old, new = appended["maps"]
+        self.assertEqual(old["superseded_by"], new["sha256"])
+        self.assertTrue(old["superseded_at"])
+        self.assertNotIn("superseded_by", new)
+
+    def test_a16_4_resolve_legacy_prefers_new_map(self):
+        C.compat_close(self.root, maps=[self.w7_map], approval_receipt_sha256=None)
+        new_target_dir = self.root / "campaigns/camp_y/cycles/cyc_y/artifacts/plans/2026-01-01_a"
+        new_target_dir.mkdir(parents=True)
+        (new_target_dir / "old.md").write_text("old\n")
+        new_map = Path(self._tmp.name) / "w7g-map.jsonl"
+        new_map.write_text(json.dumps({
+            "schema_version": C.MAP_SCHEMA, "kind": "file", "source_locator": "plans/2026-01-01_a/old.md",
+            "target_locator": "campaigns/camp_y/cycles/cyc_y/artifacts/plans/2026-01-01_a/old.md"}) + "\n")
+        C.compat_append(self.root, maps=[new_map], supersedes=[str(self.w7_map.resolve())],
+                        approval_receipt_sha256=None)
+        (self.root / "plans/2026-01-01_a/old.md").unlink()
+        resolved = C.resolve_legacy(self.root, "plans/2026-01-01_a/old.md")
+        self.assertEqual(resolved["resolution"], "mapped")
+        self.assertEqual(resolved["target"], "campaigns/camp_y/cycles/cyc_y/artifacts/plans/2026-01-01_a/old.md")
+
+    def test_a16_4_retire_uses_latest_map_target(self):
+        new_target_dir = self.root / "campaigns/camp_y/cycles/cyc_y/artifacts/plans/2026-01-01_a"
+        new_target_dir.mkdir(parents=True)
+        (new_target_dir / "old.md").write_text("old\n")
+        new_map = Path(self._tmp.name) / "w7g-map.jsonl"
+        new_map.write_text(json.dumps({
+            "schema_version": C.MAP_SCHEMA, "kind": "file", "source_locator": "plans/2026-01-01_a/old.md",
+            "target_locator": "campaigns/camp_y/cycles/cyc_y/artifacts/plans/2026-01-01_a/old.md"}) + "\n")
+        dry = C.retire(self.root, maps=[self.w7_map, new_map], backup_root=Path(self._tmp.name) / "backup-a16-4",
+                       excludes=[], approval_receipt_sha256=None, dry_run=True)
+        row = next(r for r in dry["verified_sample"] if r["source"] == "plans/2026-01-01_a/old.md")
+        self.assertEqual(row["target"], "campaigns/camp_y/cycles/cyc_y/artifacts/plans/2026-01-01_a/old.md")
+
+    def test_a16_4_map_paths_are_in_retire_excludes(self):
+        C.compat_close(self.root, maps=[self.w7_map], approval_receipt_sha256=None)
+        dry = C.retire(self.root, maps=[self.w7_map], backup_root=Path(self._tmp.name) / "backup-a16-4b",
+                       excludes=[], approval_receipt_sha256=None, dry_run=True)
+        rel = self.w7_map.resolve().relative_to(self.root).as_posix()
+        self.assertIn(rel, dry["excluded_prefixes"])
+
+    def test_a16_4_append_allowed_in_closed_window(self):
+        report, sealed = self.migrate()
+        w7c_map = Path(report["run_dir"]) / "compatibility-map.jsonl"
+        closed = C.compat_close(self.root, maps=[self.w7_map], approval_receipt_sha256=None)
+        self.assertEqual(closed["compatibility_window"], "closed")
+        appended = C.compat_append(self.root, maps=[w7c_map], approval_receipt_sha256=None)
+        self.assertEqual(appended["compatibility_window"], "closed")
+        self.assertEqual(len(appended["maps"]), 2)
+
+    def test_a16_4_missing_recorded_map_is_typed_hold_on_write_surfaces(self):
+        C.compat_close(self.root, maps=[self.w7_map], approval_receipt_sha256=None)
+        self.w7_map.unlink()
+        self.assertEqual(C.resolve_legacy(self.root, "plans/none.md")["resolution"], "unresolved")
+        new_map = Path(self._tmp.name) / "w7g-map2.jsonl"
+        new_map.write_text("")
+        with self.assertRaises(C.CutoverError) as ctx:
+            C.compat_append(self.root, maps=[new_map], approval_receipt_sha256=None)
+        self.assertEqual(ctx.exception.code, "compat-map-missing")
+
+    # -- A-16.6: retire (R4) --------------------------------------------------
+
+    def test_a16_6_retire_refused_without_approval(self):
+        report, sealed = self.migrate()
+        w7c_map = Path(report["run_dir"]) / "compatibility-map.jsonl"
+        with self.assertRaises(C.CutoverError) as ctx:
+            C.retire(self.root, maps=[self.w7_map, w7c_map], backup_root=Path(self._tmp.name) / "backup-a16-6a",
+                     excludes=["plans/keep"], approval_receipt_sha256=None)
+        self.assertEqual(ctx.exception.code, "retire-approval-required")
+
+    def test_a16_6_digest_mismatch_is_kept(self):
+        report, sealed = self.migrate()
+        w7c_map = Path(report["run_dir"]) / "compatibility-map.jsonl"
+        (self.root / "plans/2026-01-02_b/final_report.md").write_text("changed later\n")
+        dry = C.retire(self.root, maps=[self.w7_map, w7c_map], backup_root=Path(self._tmp.name) / "backup-a16-6b",
+                       excludes=["plans/keep"], approval_receipt_sha256=None, dry_run=True)
+        self.assertEqual(dry["kept"][0]["source"], "plans/2026-01-02_b/final_report.md")
+        self.assertEqual(dry["kept"][0]["reason"], "no-target-with-identical-digest")
+
+    def test_a16_6_no_unlink_before_backup_seal_and_reread(self):
+        report, sealed = self.migrate()
+        w7c_map = Path(report["run_dir"]) / "compatibility-map.jsonl"
+        backup = Path(self._tmp.name) / "backup-a16-6c"
+        dry = C.retire(self.root, maps=[self.w7_map, w7c_map], backup_root=backup, excludes=["plans/keep"],
+                       approval_receipt_sha256=None, dry_run=True)
+        approval_path = self.approve_retire(dry)
+        with self.assertRaises(C.CutoverError) as ctx:
+            C.retire(self.root, maps=[self.w7_map, w7c_map], backup_root=backup, excludes=["plans/keep"],
+                     approval_receipt_sha256="z" * 64, approval_path=approval_path, crash_after_phase="backup-sealed")
+        self.assertEqual(ctx.exception.code, "crash-fixture")
+        self.assertTrue((self.root / "spec/prd.md").is_file(), "no source unlinked before seal+reread")
+        self.assertTrue((self.root / "research/topic/report.md").is_file())
+
+    def test_a16_6_archive_tamper_after_seal_is_typed_failure_zero_unlinks(self):
+        # 🔴1 (R4 half): the re-read must recompute the archive digest and
+        # compare against the sealed one, not just check tar member names.
+        # Simulates the archive changing between the seal write and the
+        # re-read (the exact window `backup-seal.json` -> re-read covers) by
+        # making the second `_sha(archive)` call (the re-read) disagree with
+        # the first (the one recorded in the seal).
+        report, sealed = self.migrate()
+        w7c_map = Path(report["run_dir"]) / "compatibility-map.jsonl"
+        backup = Path(self._tmp.name) / "backup-a16-6g"
+        dry = C.retire(self.root, maps=[self.w7_map, w7c_map], backup_root=backup, excludes=["plans/keep"],
+                       approval_receipt_sha256=None, dry_run=True)
+        approval_path = self.approve_retire(dry)
+        before_present = (self.root / "spec/prd.md").is_file() and (self.root / "research/topic/report.md").is_file()
+        self.assertTrue(before_present)
+        real_sha = C._sha
+        archive_calls = {"n": 0, "archive": None}
+
+        def tamper_reread(path):
+            p = Path(path)
+            if p.suffix == ".gz" and p.name == "retired-sources.tar.gz":
+                archive_calls["n"] += 1
+                if archive_calls["n"] == 2:  # the re-read call
+                    return "0" * 64
+            return real_sha(p)
+
+        with mock.patch.object(C, "_sha", side_effect=tamper_reread):
+            with self.assertRaises(C.CutoverError) as ctx:
+                C.retire(self.root, maps=[self.w7_map, w7c_map], backup_root=backup, excludes=["plans/keep"],
+                         approval_receipt_sha256="v" * 64, approval_path=approval_path)
+        self.assertEqual(ctx.exception.code, "backup-incomplete")
+        self.assertEqual(archive_calls["n"], 2)
+        self.assertTrue((self.root / "spec/prd.md").is_file(), "zero unlinks after a tampered re-read")
+        self.assertTrue((self.root / "research/topic/report.md").is_file())
+
+    def test_a16_6_exclusion_list_preserved(self):
+        C.compat_close(self.root, maps=[self.w7_map], approval_receipt_sha256=None)
+        dry = C.retire(self.root, maps=[self.w7_map], backup_root=Path(self._tmp.name) / "backup-a16-6d",
+                       excludes=["plans/keep"], approval_receipt_sha256=None, dry_run=True)
+        for prefix in C.RETIRE_DEFAULT_EXCLUDES:
+            self.assertIn(prefix, dry["excluded_prefixes"])
+        self.assertIn("plans/keep", dry["excluded_prefixes"])
+
+    def test_a16_6_dry_run_twice_byte_identical(self):
+        report, sealed = self.migrate()
+        w7c_map = Path(report["run_dir"]) / "compatibility-map.jsonl"
+        kwargs = dict(maps=[self.w7_map, w7c_map], backup_root=Path(self._tmp.name) / "backup-a16-6e",
+                     excludes=["plans/keep"], approval_receipt_sha256=None, dry_run=True)
+        first = C.retire(self.root, **kwargs)
+        second = C.retire(self.root, **kwargs)
+        volatile = {"created_at", "run_dir", "backup_dir"}
+        self.assertEqual({k: v for k, v in first.items() if k not in volatile},
+                         {k: v for k, v in second.items() if k not in volatile})
+
+    def test_a16_6_approval_stale_on_inventory_drift(self):
+        report, sealed = self.migrate()
+        w7c_map = Path(report["run_dir"]) / "compatibility-map.jsonl"
+        backup = Path(self._tmp.name) / "backup-a16-6f"
+        dry = C.retire(self.root, maps=[self.w7_map, w7c_map], backup_root=backup, excludes=["plans/keep"],
+                       approval_receipt_sha256=None, dry_run=True)
+        approval_path = self.approve_retire(dry)
+        (self.root / "plans/2026-01-02_b/final_report.md").write_text("drifted after approval\n")
+        with self.assertRaises(C.CutoverError) as ctx:
+            C.retire(self.root, maps=[self.w7_map, w7c_map], backup_root=backup, excludes=["plans/keep"],
+                     approval_receipt_sha256="w" * 64, approval_path=approval_path)
+        self.assertEqual(ctx.exception.code, "approval-stale")
 
 
 class CloseoutTest(unittest.TestCase):

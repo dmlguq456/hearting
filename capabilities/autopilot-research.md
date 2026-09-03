@@ -33,7 +33,7 @@ Adapters may expose this capability through native commands, skill files, prompt
 
 Use the shared artifact root rule: prefer `.agent_reports/`; use legacy `.claude_reports/` only when it already exists and `.agent_reports/` does not.
 
-Research work writes to `<artifact-root>/research/<topic>/`.
+Research work writes to `$AGENT_ARTIFACT_OUTPUT_DIR/research/<topic>/`.
 
 Required public artifacts:
 
@@ -117,7 +117,7 @@ Additional research-entry gates:
 ## Portable Procedure
 
 1. Parse query, mode, depth, intensity, QA override, optional `--from`, and skip flags.
-2. Compile and bind the selected route, then resolve or create `<artifact-root>/research/<topic>/`; if resuming, read `pipeline_state.yaml`.
+2. Compile and bind the selected route, then resolve or create `$AGENT_ARTIFACT_OUTPUT_DIR/research/<topic>/`; if resuming, read `pipeline_state.yaml`.
 3. Infer mode when omitted and ask scope clarification when required.
 4. Build search queries, including 2-3 synonym or alternate-phrase expansions.
 5. Search mode-appropriate sources and write raw metadata under `_internal/`.

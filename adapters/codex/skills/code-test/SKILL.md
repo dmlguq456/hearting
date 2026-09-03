@@ -44,7 +44,7 @@ contract. It is adapter-owned output, not a legacy compatibility Skill copy.
 Use the shared artifact root rule: prefer `.agent_reports/`; use legacy `.claude_reports/` only when it already exists and `.agent_reports/` does not.
 
 When invoked from a `standard+` `autopilot-code` stage cycle, write verification
-evidence only under `<artifact-root>/plans/<date>_<slug>/test_logs/` and
+evidence only under `$AGENT_ARTIFACT_OUTPUT_DIR/plans/<date>_<slug>/test_logs/` and
 `_internal/test_reviews/`. Return the final verdict to `code-report`, which owns
 `pipeline_summary.md`; the `code-test` stage must not write that report-owned
 artifact. Standalone invocations should create or reuse an appropriate

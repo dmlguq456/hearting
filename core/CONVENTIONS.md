@@ -466,11 +466,11 @@ reuses one `v{N}` directory for every changed file in the same artifact.
 
 #### §5.4.1. Research
 
-`<artifact-root>/research/<topic>/` contains T1 `pipeline_summary.md`, `pipeline_state.yaml`, `00_briefing.md`, and numerically ordered report chapters; T2 `analysis_summary.md`, `cards/`, `code_resources/`, and `figures/`; and T3 search results, batches, access classification, chaining, code search, prefetch, reviews, and versions under `_internal/`. Keep chapters at root because numeric prefixes already group them.
+`$AGENT_ARTIFACT_OUTPUT_DIR/research/<topic>/` contains T1 `pipeline_summary.md`, `pipeline_state.yaml`, `00_briefing.md`, and numerically ordered report chapters; T2 `analysis_summary.md`, `cards/`, `code_resources/`, and `figures/`; and T3 search results, batches, access classification, chaining, code search, prefetch, reviews, and versions under `_internal/`. Keep chapters at root because numeric prefixes already group them.
 
 #### §5.4.2. Documents
 
-`<artifact-root>/documents/<date>_<name>/` contains T1 pipeline state and the latest `draft/`; T2 latest `strategy/`, `analysis/`, and `assets/`; and T3 metadata, strategy/draft reviews, audits, discarded variants, and major-refine snapshots under `_internal/versions/v{N}/`. Direct minor edits remain snapshot-free and are recorded in `pipeline_summary.md`. Retire sibling `_v{N}.md` files for new output but preserve them in legacy artifacts.
+`$AGENT_ARTIFACT_OUTPUT_DIR/documents/<date>_<name>/` contains T1 pipeline state and the latest `draft/`; T2 latest `strategy/`, `analysis/`, and `assets/`; and T3 metadata, strategy/draft reviews, audits, discarded variants, and major-refine snapshots under `_internal/versions/v{N}/`. Direct minor edits remain snapshot-free and are recorded in `pipeline_summary.md`. Retire sibling `_v{N}.md` files for new output but preserve them in legacy artifacts.
 
 #### §5.4.3. Code Track — Flat `spec/` Plus Repeated `plans/`
 

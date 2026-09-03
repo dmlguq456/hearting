@@ -23,7 +23,7 @@ Use the deepest eligible planning profile selected by the active adapter when cr
 
 ## Pre-Check
 
-Search `<artifact-root>/plans/` for a similar plan and branch on its frontmatter status:
+Search `$AGENT_ARTIFACT_OUTPUT_DIR/plans/` for a similar plan and branch on its frontmatter status:
 
 - `active`: Ask whether to continue the active plan or create a new one. Do not proceed until that genuine choice is resolved.
 - `done` or `failed`: Note it as a reference and create a new plan without pausing.
@@ -39,8 +39,8 @@ Run the `plan/plan-author` unit with this task, adapted only for the selected ar
 Plan mode. Create a new implementation plan.
 
 Task: {$ARGUMENTS}
-Save canonical plan to: <artifact-root>/plans/{YYYY-MM-DD}_{short-task-name}/plan.md
-Save execution checklist to: <artifact-root>/plans/{YYYY-MM-DD}_{short-task-name}/checklist.md
+Save canonical plan to: $AGENT_ARTIFACT_OUTPUT_DIR/plans/{YYYY-MM-DD}_{short-task-name}/plan.md
+Save execution checklist to: $AGENT_ARTIFACT_OUTPUT_DIR/plans/{YYYY-MM-DD}_{short-task-name}/checklist.md
 Artifact language: {selected audience or conversation language}
 Date: {YYYY-MM-DD}
 {If a done/failed/partial plan exists: "Reference previous plan: [path], status: [status]"}
@@ -53,7 +53,7 @@ Plan procedure, plan structure, and the single-line return contract are owned by
 
 Derive verification rigor from the caller's `--intensity` and plan risk under [CONVENTIONS §1.1](../../core/CONVENTIONS.md#11-verification-rigor-tiers). Rigor does not select this stage: `code-plan` runs only after the caller chooses a durable `standard+` graph. `direct` skips it; `quick` uses a one-shot worker with an inline micro-plan and plan-check-lite.
 
-Set `{log_dir}` to the directory containing root `plan.md`; for example, `<artifact-root>/plans/2026-03-18_task/plan.md` resolves to `<artifact-root>/plans/2026-03-18_task/`. Run `mkdir -p {log_dir}/_internal/plan_reviews` before independent review.
+Set `{log_dir}` to the directory containing root `plan.md`; for example, `$AGENT_ARTIFACT_OUTPUT_DIR/plans/2026-03-18_task/plan.md` resolves to `$AGENT_ARTIFACT_OUTPUT_DIR/plans/2026-03-18_task/`. Run `mkdir -p {log_dir}/_internal/plan_reviews` before independent review.
 
 | Rigor | Plan-check action | Correction budget |
 |---|---|---|

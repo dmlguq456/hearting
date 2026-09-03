@@ -32,13 +32,13 @@ Adapters may expose this capability through native commands, skill files, prompt
 
 Use the shared artifact root rule: prefer `.agent_reports/`; use legacy `.claude_reports/` only when it already exists and `.agent_reports/` does not.
 
-Code work normally writes to `<artifact-root>/plans/<date>_<slug>/`, even when a `spec/` directory exists. `spec/` is the blueprint bucket; `plans/` is the work-cycle bucket.
+Code work normally writes to `$AGENT_ARTIFACT_OUTPUT_DIR/plans/<date>_<slug>/`, even when a `spec/` directory exists. `spec/` is the blueprint bucket; `plans/` is the work-cycle bucket.
 
 Artifact intensity policy:
 
 - `direct`: no new plan root, no `plan.md`, and no durable pipeline artifact unless the adapter or current repo policy explicitly requires one;
 - `quick`: no durable `plan.md` by default; record a short summary/evidence only when a work-cycle artifact is already required;
-- `standard+`: create or resume `<artifact-root>/plans/<date>_<slug>/`.
+- `standard+`: create or resume `$AGENT_ARTIFACT_OUTPUT_DIR/plans/<date>_<slug>/`.
 
 Required public artifacts for `standard+` work cycles:
 

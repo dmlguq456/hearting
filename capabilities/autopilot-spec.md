@@ -36,7 +36,7 @@ Adapters may expose this capability through native commands, skill files, prompt
 
 Use the shared artifact root rule: prefer `.agent_reports/`; use legacy `.claude_reports/` only when it already exists and `.agent_reports/` does not.
 
-Spec work writes to `<artifact-root>/spec/`. The canonical current blueprint is always `<artifact-root>/spec/prd.md`.
+Spec work writes to `$AGENT_ARTIFACT_OUTPUT_DIR/spec/`. The canonical current blueprint is always `$AGENT_ARTIFACT_OUTPUT_DIR/spec/prd.md`.
 
 `prd.md` opens with a bounded blueprint-summary block — exact `<!-- BLUEPRINT-SUMMARY:BEGIN -->` / `<!-- BLUEPRINT-SUMMARY:END -->` markers right after the H1 title, at most 40 lines between markers — refreshed in the same transaction as every body update. The block is the concise user-facing blueprint (vision, current shape, active decisions, in-flight cycles); downstream consumers such as note-app spec mirrors extract it by exact marker matching, so the markers are a stable contract. A legacy PRD without the block gains it on its next update.
 

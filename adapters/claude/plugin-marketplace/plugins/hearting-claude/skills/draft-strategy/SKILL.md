@@ -25,7 +25,7 @@ Parse `$ARGUMENTS` as follows:
 
 - first word, `mode`: `rebuttal | paper | review | report | proposal | presentation`
 - `--inputs <comma-separated-paths>`: pre-discovered artifact directories, usually `analysis_project/{paper,doc}/...` or `research/{topic}/`
-- `--output <dir>`: `<artifact-root>/documents/{date}_{name}/`
+- `--output <dir>`: `$AGENT_ARTIFACT_OUTPUT_DIR/documents/{date}_{name}/`
 - `--intensity`: derive the `quick | light | standard | thorough | adversarial` verification tier through [CONVENTIONS §1.1](../../core/CONVENTIONS.md#11-verification-rigor-tiers)
 - remaining text: task description and context
 

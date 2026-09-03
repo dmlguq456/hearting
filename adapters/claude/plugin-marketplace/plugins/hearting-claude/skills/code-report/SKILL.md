@@ -58,7 +58,7 @@ Procedure:
 2. Read the checklist for successful, failed, and skipped steps.
 3. Read all development logs and extract each old → new change, Decision rationale, modified file, and result.
 4. Read implementation and test reviews; record findings, resolutions, and unresolved items.
-5. Update <artifact-root>/analysis_project/code/ for successful steps only when that directory already exists. Map each source file to the best existing topic document. Common mappings include:
+5. Update $AGENT_ARTIFACT_OUTPUT_DIR/analysis_project/code/ for successful steps only when that directory already exists. Map each source file to the best existing topic document. Common mappings include:
    - model/module → model_modules.md or the matching topic
    - network/backbone → network_modules.md
    - loss/objective → loss_functions.md
@@ -70,7 +70,7 @@ Procedure:
    - project structure, document table, or file rename → the existing project bootstrap document, including CLAUDE.md only when it is the project's intended target
    Update Interface Reference signatures, callers, and line numbers. Verify every class/function line number against post-edit source. If analysis_project/code/ is absent, skip and recommend `analyze-project --mode code` once.
 6. Confirm documentation writes with:
-   git diff --stat -- <artifact-root>/analysis_project/code/ CLAUDE.md
+   git diff --stat -- $AGENT_ARTIFACT_OUTPUT_DIR/analysis_project/code/ CLAUDE.md
    Report a documentation update only when the relevant diff proves it happened. If the expected diff is empty, re-read and correct the update.
 7. Read pipeline_summary.md. Summarize its Decision Points in section 4.5. If no events exist, write the natural equivalent of "No autonomous decision events (clean run)" in the selected artifact language.
 8. Synthesize causes, effects, and durable lessons; do not merely enumerate steps.

@@ -17,7 +17,7 @@ This is the portable capability contract for `analyze-project`. It defines runti
 ## Invocation Semantics
 
 Pre-work analysis capability — analyzes the project's primary materials and
-writes structured artifacts to `<artifact-root>/analysis_project/`. Invoke it
+writes structured artifacts to `$AGENT_ARTIFACT_OUTPUT_DIR/analysis_project/`. Invoke it
 when the user explicitly asks to analyze existing code, a paper, or document
 materials and no usable persistent analysis exists, when existing analysis is
 demonstrably stale for the requested downstream work, or when the user asks to
