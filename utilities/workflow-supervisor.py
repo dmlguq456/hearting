@@ -543,7 +543,7 @@ def cmd_gate(args):
                                                            "released_by": released_by,
                                                            "actor_kind": actor_kind},
                                       actor="gate")
-            record_gate_release(route, gate=args.gate, decision="proceed",
+            record_gate_release(route, args.route, gate=args.gate, decision="proceed",
                                 released_by=released_by, actor_kind=actor_kind)
             payload.update({"released_by": released_by, "actor_kind": actor_kind})
             action = "released"
@@ -608,14 +608,24 @@ def default_jobs_path():
 def _owner_row(rows, route_id):
     """The depth-1 owner row for this route, latest wins.
 
-    `AGENT_DISPATCH_ATTEMPT_ID` is the direct answer when the caller *is* the
-    owner; the route scan is the fallback for a supervisor invoked beside it.
+    `AGENT_DISPATCH_ATTEMPT_ID` is a shortcut for the common case where the
+    caller *is* this route's owner, but it describes the CALLER, not the subject.
+    So the shortcut counts only when that row also belongs to `route_id`;
+    otherwise it is ignored and the route scan decides. Without the check, an
+    owner of route A that blocks a gate on route B derives the recipient from
+    A's row and the gate is delivered to the wrong depth-0 session — the person
+    who owns route B is never told, and someone else is handed a gate that is
+    not theirs.
     """
     attempt_id = os.environ.get("AGENT_DISPATCH_ATTEMPT_ID", "")
     if attempt_id:
         for row in reversed(rows):
-            if row["meta"].get("attempt_id") == attempt_id:
+            meta = row["meta"]
+            if meta.get("attempt_id") != attempt_id:
+                continue
+            if route_id in (meta.get("owner_route_id"), meta.get("route_id")):
                 return row
+            break
     for row in reversed(rows):
         meta = row["meta"]
         if meta.get("dispatch_depth") != "1":
@@ -750,19 +760,42 @@ def release_actor_kind():
     return "user"
 
 
-def gate_release_sidecar_path(route):
-    route_file = os.environ.get("AGENT_OWNER_ROUTE_FILE") or route.get("route_file")
-    if not route_file:
+def gate_release_sidecar_path(route_path):
+    """The sidecar beside the route being released — the path the caller named.
+
+    This used to read `AGENT_OWNER_ROUTE_FILE` first and fall back to
+    `route["route_file"]`. Both halves were wrong. A live route record
+    (`rt-*.json`) carries no `route_file` at all — only its `.outcome.json` does,
+    written from `args.route` at close — so the fallback never fired and the
+    function was effectively env-only. And the env names the route the CALLING
+    owner runs under, not the route being released.
+
+    Measured 2026-09-03: an owner running its own suite put eight fixture
+    releases (`route_hash: "sha256:fixture"`) into the real
+    `rt-6579b69141dc0c00.gate-release.json`, and `close_route` folds that
+    sidecar into the route outcome, so those eight would have entered a real
+    route's history. The same precedence misfiles a genuine release whenever an
+    owner releases a gate on a nested or continuation route.
+
+    So the subject is passed in, the way `close_route` already builds
+    `route_file` from `args.route`. No env, no guessing: without a path there is
+    no sidecar, and the ledger remains the authoritative record of the release.
+    """
+    if not route_path:
         return None
-    path = Path(route_file)
+    path = Path(route_path)
     return path.with_name(path.stem + ".gate-release.json")
 
 
-def record_gate_release(route, *, gate, decision, released_by, actor_kind):
+def record_gate_release(route, route_path, *, gate, decision, released_by, actor_kind):
     """Append one gate release to the route's sidecar; `close_route` folds it into
     the outcome. Fail-soft: a release must never be lost because a sidecar could
-    not be written, and the ledger already holds the authoritative transition."""
-    path = gate_release_sidecar_path(route)
+    not be written, and the ledger already holds the authoritative transition.
+
+    `route_path` is the file the caller named, kept separate from `route` because
+    a loaded route record does not know its own path (see
+    `gate_release_sidecar_path`)."""
+    path = gate_release_sidecar_path(route_path)
     if path is None:
         return None
     row = {
@@ -889,7 +922,7 @@ def cmd_release(args):
             raise SupervisorError(f"unknown --decision: {args.decision!r}")
         payload["released_by"] = actor
         payload["actor_kind"] = actor_kind
-        record_gate_release(route, gate=args.gate, decision=args.decision,
+        record_gate_release(route, args.route, gate=args.gate, decision=args.decision,
                             released_by=actor, actor_kind=actor_kind)
     print(json.dumps(payload, sort_keys=True))
     return 0

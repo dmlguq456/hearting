@@ -2353,8 +2353,27 @@ def close_route(route, route_file, commit=None, summary=None, publication=None, 
              "route_location":classify_route_location(route_file,route["artifact_root"]),
              "terminal_gate_proven":terminal_gate_proven(gates),"terminal_gates":gates}
     if publication is not None: outcome["publication"]=publication
+    releases=_gate_releases(route_file)
+    if releases: outcome["gate_releases"]=releases
     atomic_write(target,outcome)
     return outcome, True
+
+def _gate_releases(route_file):
+    """SD-123 (8)(d): fold the gate-release sidecar into the closed outcome.
+
+    `workflow-supervisor.py` appends one row per release beside the route file.
+    Without this fold nothing ever read that sidecar, so a headless owner's
+    self-release was recorded in a file no consumer opened -- which is the same
+    silence (d) exists to end. Additive and fail-soft: a missing or malformed
+    sidecar leaves the key absent, exactly as before, and the workflow ledger
+    stays the authoritative record of the transition itself.
+    """
+    path=Path(route_file); path=path.with_name(path.stem+".gate-release.json")
+    try: data=json.loads(path.read_text(encoding="utf-8"))
+    except (OSError,ValueError): return []
+    rows=data.get("gate_releases") if isinstance(data,dict) else None
+    if not isinstance(rows,list): return []
+    return [row for row in rows if isinstance(row,dict) and row.get("gate")]
 
 def route_status(artifact_root, *, diagnostics=None):
     """Report every compiled route under one artifact root and whether it is closed.

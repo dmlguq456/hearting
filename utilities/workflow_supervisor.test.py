@@ -20,6 +20,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
@@ -1328,6 +1329,123 @@ class TestSurvey(WorkflowFixture):
             self.assertTrue(l_row["read_only"])
             self.assertIn("duplicate_locations", c_row)
             self.assertIn("duplicate_locations", l_row)
+
+
+class TestGateSubjectNotCaller(WorkflowFixture):
+    """Defect I and its sibling — the caller's identity must never override the
+    route the call names.
+
+    Measured 2026-09-03: the implementation owner ran its own suite, and eight
+    fixture releases landed in the REAL `rt-6579b69141dc0c00.gate-release.json`
+    under `.agent_reports/.runtime/routes/` because `AGENT_OWNER_ROUTE_FILE` was
+    preferred over the route passed in. `close_route` folds that sidecar into the
+    route outcome, so those eight would have become part of a real route's
+    history. Evidence kept out of tree at
+    `<scratchpad>/leaked-gate-release.json`; it is deliberately NOT restored
+    beside the route.
+    """
+
+    def test_sidecar_is_written_beside_the_route_argument_not_the_callers_route(self):
+        route, path = self.two_stage_route(human_gate="frame-review")
+        foreign = self.base / "rt-callers-own-route.json"
+        foreign.write_text("{}", encoding="utf-8")
+        with mock.patch.dict(os.environ, {"AGENT_OWNER_ROUTE_FILE": str(foreign)}):
+            sidecar = SUP.gate_release_sidecar_path(path)
+        self.assertEqual(sidecar, path.with_name(path.stem + ".gate-release.json"))
+        self.assertFalse(foreign.with_name(foreign.stem + ".gate-release.json").exists())
+
+    def test_a_release_leaves_nothing_beside_the_callers_route(self):
+        route, path = self.two_stage_route(human_gate="frame-review")
+        jobs, _code = self.block_gate(path, "frame-review")
+        foreign = self.base / "rt-callers-own-route.json"
+        foreign.write_text("{}", encoding="utf-8")
+        env = {"AGENT_OWNER_ROUTE_FILE": str(foreign),
+               "AGENT_DISPATCH_REGISTERED_WORKER": "1"}
+        with mock.patch.dict(os.environ, env), contextlib.redirect_stdout(io.StringIO()):
+            code = SUP.main(["gate", "--route", str(path), "--gate", "frame-review",
+                             "--release", "--by", "headless-owner"])
+        self.assertEqual(code, 0)
+        self.assertFalse(foreign.with_name(foreign.stem + ".gate-release.json").exists())
+        rows = json.loads(
+            path.with_name(path.stem + ".gate-release.json").read_text(encoding="utf-8")
+        )["gate_releases"]
+        self.assertEqual([r["gate"] for r in rows], ["frame-review"])
+        self.assertEqual(rows[0]["route_hash"], route["route_hash"])
+
+    def test_no_path_means_no_sidecar_rather_than_a_guess(self):
+        """A live `rt-*.json` carries no `route_file`, so the old record fallback
+        never fired and the env decided everything. With no path there is simply
+        no sidecar; the ledger still holds the release."""
+        self.assertIsNone(SUP.gate_release_sidecar_path(None))
+        self.assertIsNone(SUP.gate_release_sidecar_path(""))
+        _route, path = self.two_stage_route(human_gate="frame-review")
+        record = json.loads(path.read_text(encoding="utf-8"))
+        self.assertNotIn("route_file", record)
+
+    def test_a_foreign_attempt_id_does_not_choose_the_recipient(self):
+        """`AGENT_DISPATCH_ATTEMPT_ID` describes the caller. An owner of route A
+        blocking a gate on route B must resolve B's owner row, or the gate is
+        delivered to a session that does not own it."""
+        _route, path = self.two_stage_route(human_gate="frame-review",
+                                            route_id="rt-fixture0000000")
+        jobs, _session, _attempt = self.owner_registry(route_id="rt-fixture0000000")
+        foreign_meta = ",".join([
+            "attempt_id=att-foreign-owner0001", "parent_sid=sess-foreign-depth0",
+            "parent_completion_delivery=claude-parent-runtime", "dispatch_depth=1",
+            "worker_type=owner", "owner_route_id=rt-someone-elses0", "harness=claude",
+            "registered_worker=1", "execution_surface=registered-headless",
+        ])
+        with jobs.open("a", encoding="utf-8") as fh:
+            fh.write("\t".join(["2026-09-03T00:00:01Z", "open", str(self.base),
+                                str(self.base), "foreign-owner", foreign_meta]) + "\n")
+        rows = SUP._registry_rows(jobs)
+        with mock.patch.dict(os.environ,
+                             {"AGENT_DISPATCH_ATTEMPT_ID": "att-foreign-owner0001"}):
+            row = SUP._owner_row(rows, "rt-fixture0000000")
+        self.assertIsNotNone(row)
+        self.assertEqual(row["meta"]["attempt_id"], "att-fixtureowner0001")
+        self.assertEqual(row["meta"]["parent_sid"], "sess-fixture-depth0")
+
+    def test_the_attempt_id_shortcut_still_wins_for_its_own_route(self):
+        _route, path = self.two_stage_route(human_gate="frame-review")
+        jobs, _session, _attempt = self.owner_registry(route_id="rt-fixture0000000")
+        rows = SUP._registry_rows(jobs)
+        with mock.patch.dict(os.environ,
+                             {"AGENT_DISPATCH_ATTEMPT_ID": "att-fixtureowner0001"}):
+            row = SUP._owner_row(rows, "rt-fixture0000000")
+        self.assertEqual(row["meta"]["attempt_id"], "att-fixtureowner0001")
+
+    def test_close_route_folds_the_sidecar_into_the_outcome(self):
+        """The commit claimed `close_route` folded the sidecar; nothing read it.
+        A release recorded in a file no consumer opens is the same silence
+        contract (d) exists to end."""
+        route, path = self.two_stage_route(human_gate="frame-review")
+        self.block_gate(path, "frame-review")
+        env = {"AGENT_DISPATCH_REGISTERED_WORKER": "1"}
+        with mock.patch.dict(os.environ, env), contextlib.redirect_stdout(io.StringIO()):
+            SUP.main(["gate", "--route", str(path), "--gate", "frame-review",
+                      "--release", "--by", "headless-owner"])
+        releases = ROUTE._gate_releases(str(path))
+        self.assertEqual([r["gate"] for r in releases], ["frame-review"])
+        self.assertEqual(releases[0]["actor_kind"], "headless-owner")
+
+    def test_a_missing_or_malformed_sidecar_folds_to_nothing(self):
+        _route, path = self.two_stage_route(human_gate="frame-review")
+        self.assertEqual(ROUTE._gate_releases(str(path)), [])
+        path.with_name(path.stem + ".gate-release.json").write_text("{not json",
+                                                                    encoding="utf-8")
+        self.assertEqual(ROUTE._gate_releases(str(path)), [])
+        path.with_name(path.stem + ".gate-release.json").write_text(
+            json.dumps({"gate_releases": [{"no_gate": 1}, "junk"]}), encoding="utf-8")
+        self.assertEqual(ROUTE._gate_releases(str(path)), [])
+
+    def test_no_test_in_this_class_writes_outside_its_temporary_root(self):
+        """The leak was a test writing into real runtime state. Pin the invariant."""
+        canonical = Path.home() / ".agent_reports"
+        route, path = self.two_stage_route(human_gate="frame-review")
+        sidecar = SUP.gate_release_sidecar_path(path)
+        self.assertTrue(str(sidecar).startswith(str(self.base)))
+        self.assertFalse(str(sidecar).startswith(str(canonical)))
 
 
 if __name__ == "__main__":
