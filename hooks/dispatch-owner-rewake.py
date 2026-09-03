@@ -745,7 +745,17 @@ def _gate_notices(launch: Launch) -> list[str]:
         claim_owner = f"claude-async-rewake-gate:{os.getpid()}:{time.monotonic_ns()}"
         try:
             if record.get("state") in {"claimed", "sent-ambiguous"}:
-                pending_delivery.reclaim(root, recipient_key, delivery_id)
+                # `now_ns` is keyword-only and required. Omitting it raised
+                # TypeError, which the `except PendingDeliveryError` below does
+                # NOT catch — so the whole rewake hook died and the parent lost
+                # its completion receipt entirely, not just the gate. Reachable
+                # whenever a sweep claimed the record first, an ack failed, two
+                # parallel-group rewakes raced, or after `mark_sent_ambiguous`.
+                # The sibling call in `dispatch_session_sweep.sweep_deliver`
+                # always passed it; this one never did, and no test covered it.
+                pending_delivery.reclaim(
+                    root, recipient_key, delivery_id, now_ns=time.time_ns()
+                )
             pending_delivery.claim(
                 root, recipient_key, delivery_id, claim_owner=claim_owner,
                 lease_seconds=CLAIM_LEASE_SECONDS, require_generation_proof=False,

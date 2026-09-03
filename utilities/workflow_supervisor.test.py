@@ -22,6 +22,9 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import dispatch_pending_delivery as PENDING  # noqa: E402
+
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
 sys.path.insert(0, str(HERE))
@@ -1363,7 +1366,7 @@ class TestGateSubjectNotCaller(WorkflowFixture):
                "AGENT_DISPATCH_REGISTERED_WORKER": "1"}
         with mock.patch.dict(os.environ, env), contextlib.redirect_stdout(io.StringIO()):
             code = SUP.main(["gate", "--route", str(path), "--gate", "frame-review",
-                             "--release", "--by", "headless-owner"])
+                             "--release"])
         self.assertEqual(code, 0)
         self.assertFalse(foreign.with_name(foreign.stem + ".gate-release.json").exists())
         rows = json.loads(
@@ -1424,7 +1427,7 @@ class TestGateSubjectNotCaller(WorkflowFixture):
         env = {"AGENT_DISPATCH_REGISTERED_WORKER": "1"}
         with mock.patch.dict(os.environ, env), contextlib.redirect_stdout(io.StringIO()):
             SUP.main(["gate", "--route", str(path), "--gate", "frame-review",
-                      "--release", "--by", "headless-owner"])
+                      "--release"])
         releases = ROUTE._gate_releases(str(path))
         self.assertEqual([r["gate"] for r in releases], ["frame-review"])
         self.assertEqual(releases[0]["actor_kind"], "headless-owner")
@@ -1438,6 +1441,126 @@ class TestGateSubjectNotCaller(WorkflowFixture):
         path.with_name(path.stem + ".gate-release.json").write_text(
             json.dumps({"gate_releases": [{"no_gate": 1}, "junk"]}), encoding="utf-8")
         self.assertEqual(ROUTE._gate_releases(str(path)), [])
+
+    def test_a_new_attempt_can_re_raise_the_same_gate(self):
+        """Blocking finding #2(a). `IMMUTABLE_FIELDS` includes `attempt_ids`, so a
+        delivery id keyed only on (recipient, route, gate) made a second attempt's
+        raise a `pending-delivery-identity-conflict` — and `create_gate_delivery`
+        turns that into a refusal, so the owner could not raise its gate at all.
+        `release --decision revise` -> retry lands exactly here."""
+        _route, path = self.two_stage_route(human_gate="frame-review")
+        jobs, _session, _attempt = self.owner_registry(route_id="rt-fixture0000000")
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(0, SUP.main([
+                "gate", "--route", str(path), "--gate", "frame-review", "--block",
+                "--jobs", str(jobs), "--artifact", "shards/frame/frame-summary.json"]))
+            SUP.main(["gate", "--route", str(path), "--gate", "frame-review",
+                      "--release"])
+            # A different attempt now owns the route and raises the same gate.
+            second = ",".join([
+                "attempt_id=att-fixtureowner0002", "parent_sid=sess-fixture-depth0",
+                "parent_completion_delivery=claude-parent-runtime", "dispatch_depth=1",
+                "worker_type=owner", "owner_route_id=rt-fixture0000000",
+                "harness=claude", "registered_worker=1",
+                "execution_surface=registered-headless",
+            ])
+            with jobs.open("a", encoding="utf-8") as fh:
+                fh.write("\t".join(["2026-09-04T00:00:00Z", "open", str(self.base),
+                                     str(self.base), "owner-2", second]) + "\n")
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                code = SUP.main([
+                    "gate", "--route", str(path), "--gate", "frame-review", "--block",
+                    "--jobs", str(jobs), "--artifact",
+                    "shards/frame/frame-summary.json"])
+        self.assertEqual(code, 0)
+        payload = json.loads(buf.getvalue())
+        self.assertTrue(payload["delivery_created"])
+        self.assertTrue(Path(payload["delivery"]).is_file())
+
+    def test_re_raising_after_an_ack_reaches_someone_again(self):
+        """Blocking finding #2(b). The same attempt re-raising after the first
+        record was acked used to get `created=False` and the gate reached nobody
+        — the exact silence SD-123 (8) exists to end."""
+        _route, path = self.two_stage_route(human_gate="frame-review")
+        jobs, session, _attempt = self.owner_registry(route_id="rt-fixture0000000")
+        root = Path(jobs).resolve(strict=False).parent
+        first = io.StringIO()
+        with contextlib.redirect_stdout(first):
+            SUP.main(["gate", "--route", str(path), "--gate", "frame-review", "--block",
+                      "--jobs", str(jobs), "--artifact", "a.json"])
+        first_path = Path(json.loads(first.getvalue())["delivery"])
+        delivery_id = json.loads(first_path.read_text(encoding="utf-8"))["delivery_id"]
+        PENDING.claim(root, session, delivery_id, claim_owner="carrier",
+                      lease_seconds=30.0)
+        PENDING.ack(root, session, delivery_id, acked_by="carrier")
+        second = io.StringIO()
+        with contextlib.redirect_stdout(io.StringIO()):
+            SUP.main(["gate", "--route", str(path), "--gate", "frame-review",
+                      "--release"])
+        with contextlib.redirect_stdout(second):
+            code = SUP.main(["gate", "--route", str(path), "--gate", "frame-review",
+                             "--block", "--jobs", str(jobs), "--artifact", "a.json"])
+        self.assertEqual(code, 0)
+        payload = json.loads(second.getvalue())
+        self.assertTrue(payload["delivery_created"], "the re-raise reached nobody")
+        self.assertNotEqual(Path(payload["delivery"]), first_path)
+
+    def test_release_retires_the_pending_record(self):
+        """Finding #3: a released gate that stays `pending` keeps being announced
+        by the next UserPromptSubmit sweep."""
+        _route, path = self.two_stage_route(human_gate="frame-review")
+        jobs, session, _attempt = self.owner_registry(route_id="rt-fixture0000000")
+        root = Path(jobs).resolve(strict=False).parent
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            SUP.main(["gate", "--route", str(path), "--gate", "frame-review", "--block",
+                      "--jobs", str(jobs), "--artifact", "a.json"])
+        record = json.loads(Path(json.loads(out.getvalue())["delivery"]).read_text("utf-8"))
+        self.assertEqual(record["state"], "pending")
+        with contextlib.redirect_stdout(io.StringIO()):
+            SUP.main(["gate", "--route", str(path), "--gate", "frame-review",
+                      "--release", "--jobs", str(jobs)])
+        after = PENDING.read(root, session, record["delivery_id"])
+        self.assertEqual(after["state"], "acked")
+
+    def test_a_registered_worker_may_not_name_the_releaser(self):
+        """Finding #4: enforcement compared against the literal "user" only, so
+        `--by shinuh` from a headless owner recorded that name."""
+        _route, path = self.two_stage_route(human_gate="frame-review")
+        self.block_gate(path, "frame-review")
+        env = {"AGENT_DISPATCH_REGISTERED_WORKER": "1"}
+        for label in ("user", "shinuh", "headless-owner"):
+            with self.subTest(label=label), mock.patch.dict(os.environ, env):
+                with self.assertRaises(SUP.SupervisorError) as caught:
+                    SUP.resolved_released_by("headless-owner", label)
+                self.assertIn("gate-release-actor-refused", str(caught.exception))
+        self.assertEqual(SUP.resolved_released_by("user", "shinuh"), "shinuh")
+        self.assertEqual(SUP.resolved_released_by("headless-owner", None),
+                         "headless-owner")
+
+    def test_only_a_taught_carrier_may_receive_a_gate(self):
+        """Finding #5: `gate_recipient` admitted all four recipient kinds, but the
+        Codex gateway rejects this receipt on three counts — the record would be
+        written, never deliverable, and would poison that session's delivery
+        pass. Codex/OpenCode parity is SD-OPEN-33."""
+        route, path = self.two_stage_route(human_gate="frame-review")
+        jobs, _session, _attempt = self.owner_registry(
+            route_id="rt-fixture0000000", recipient_kind="codex-stop-hook")
+        with self.assertRaises(SUP.SupervisorError) as caught:
+            SUP.gate_recipient(route, jobs)
+        self.assertIn("gate-carrier-unsupported", str(caught.exception))
+        self.assertIn("SD-OPEN-33", str(caught.exception))
+
+    def test_a_gate_must_name_the_artifact_a_person_reviews(self):
+        """Nit #8: `--artifact` defaulted to `-`, so a gate could arrive telling
+        the reader nothing to look at."""
+        _route, path = self.two_stage_route(human_gate="frame-review")
+        jobs, _session, _attempt = self.owner_registry(route_id="rt-fixture0000000")
+        with self.assertRaises(SUP.SupervisorError) as caught:
+            SUP.main(["gate", "--route", str(path), "--gate", "frame-review",
+                      "--block", "--jobs", str(jobs)])
+        self.assertIn("gate-artifact-required", str(caught.exception))
 
     def test_no_test_in_this_class_writes_outside_its_temporary_root(self):
         """The leak was a test writing into real runtime state. Pin the invariant."""

@@ -533,19 +533,16 @@ def cmd_gate(args):
             if state != "BLOCKED_HUMAN_GATE":
                 raise SupervisorError(f"workflow is {state}, not blocked on a human gate")
             actor_kind = release_actor_kind()
-            released_by = args.by or actor_kind
-            if actor_kind == "headless-owner" and args.by == "user":
-                raise SupervisorError(
-                    "gate-release-actor-refused: a registered headless owner records "
-                    "released_by=headless-owner, never user"
-                )
+            released_by = resolved_released_by(actor_kind, args.by)
             ledger.set_workflow_state("RUNNING", evidence={"released_gate": args.gate,
                                                            "released_by": released_by,
                                                            "actor_kind": actor_kind},
                                       actor="gate")
             record_gate_release(route, args.route, gate=args.gate, decision="proceed",
                                 released_by=released_by, actor_kind=actor_kind)
-            payload.update({"released_by": released_by, "actor_kind": actor_kind})
+            retired = retire_gate_delivery(route, args.gate, args.jobs)
+            payload.update({"released_by": released_by, "actor_kind": actor_kind,
+                            "delivery_retired": retired})
             action = "released"
         else:
             # SD-123 (8)(a): the record and the transition are one transaction.
@@ -554,9 +551,18 @@ def cmd_gate(args):
             # blocked gate nobody can be told about, and there is no compensating
             # action for that. `delivery_id` is deterministic, so the unlink
             # below can only remove the record this call just created.
+            if not args.artifact or args.artifact == "-":
+                # Contract (a) names the reviewable artifact as part of the
+                # record. A gate that arrives saying `artifact=-` tells the
+                # person nothing to look at, which defeats the delivery.
+                raise SupervisorError(
+                    "gate-artifact-required: --artifact must name the artifact a "
+                    "person reviews at this gate"
+                )
             jobs_path = Path(args.jobs) if args.jobs else default_jobs_path()
             record_path, created = create_gate_delivery(
-                route, args.gate, args.artifact, jobs_path
+                route, args.gate, args.artifact, jobs_path,
+                gate_raise_epoch(ledger, args.gate),
             )
             try:
                 ledger.set_workflow_state("BLOCKED_HUMAN_GATE",
@@ -592,6 +598,9 @@ def cmd_gate(args):
 # The fix is deliberately small: the one transition into BLOCKED_HUMAN_GATE also
 # writes one SD-111 record, in the same storage, with the same lock discipline.
 # No new polling surface, no new command, no schema change.
+
+# The recipient kinds whose carriers were actually taught `human-gate:` (v59).
+GATE_CARRIER_KINDS = frozenset({"claude-parent-runtime"})
 
 GATE_SESSION_GENERATION = "unsupported"
 GATE_SESSION_GENERATION_SUPPORTED = "0"
@@ -655,14 +664,62 @@ def gate_recipient(route, jobs_path):
         raise SupervisorError("gate-recipient-unresolved: owner row names no parent session")
     if recipient_kind not in PENDING.RECIPIENT_KINDS:
         raise SupervisorError(f"gate-recipient-unresolved: recipient kind {recipient_kind!r}")
+    if recipient_kind not in GATE_CARRIER_KINDS:
+        # Only the two Claude carriers learned the `human-gate:` vocabulary in
+        # v59. `utilities/codex-managed-gateway.py` rejects this receipt on three
+        # counts (readiness, required_action, reason), so writing the record for a
+        # Codex or OpenCode parent produces something that can never be delivered
+        # AND poisons that session's delivery pass. Refuse loudly instead, and
+        # keep the refusal typed so the caller can act on it. Extending the other
+        # two vocabularies is SD-OPEN-33; until then this is the honest boundary.
+        raise SupervisorError(
+            "gate-carrier-unsupported: no human-gate carrier for recipient kind "
+            f"{recipient_kind!r} (SD-OPEN-33); supported: "
+            + ", ".join(sorted(GATE_CARRIER_KINDS))
+        )
     return recipient_key, recipient_kind, attempt_id, meta.get("harness", "-")
 
 
-def gate_delivery_id(recipient_key, route_id, gate):
-    """Deterministic in `(recipient, route, gate)` so repeated blocks of the same
-    gate converge on one record through `create`'s O_EXCL identity check."""
+def gate_raise_epoch(ledger, gate):
+    """How many times this gate has already been raised on this route.
+
+    Read from the append-only ledger journal before the new transition is
+    appended, so it is stable for the raise being made and increments for the
+    next one.
+    """
+    epoch = 0
+    for entry in ledger.journal():
+        if entry.get("workflow_state") != "BLOCKED_HUMAN_GATE":
+            continue
+        if ((entry.get("evidence") or {}).get("gate")) == gate:
+            epoch += 1
+    return epoch
+
+
+def gate_delivery_id(recipient_key, route_id, gate, attempt_id, epoch):
+    """Identity for one RAISE of a gate, not for the gate.
+
+    Keying only on `(recipient, route, gate)` looked idempotent and was in fact
+    two bugs, because `dispatch_pending_delivery.IMMUTABLE_FIELDS` includes
+    `attempt_ids` and `receipt_digest`, which are per-attempt:
+
+      · a NEW owner attempt re-raising the same gate hit
+        `pending-delivery-identity-conflict: attempt_ids`, `create_gate_delivery`
+        turned that into a refusal, and the transition was refused with it — the
+        owner could not raise its gate at all. This branch's own
+        `release --decision revise` -> retry path lands exactly here.
+      · the SAME attempt re-raising after the first record was acked got the
+        acked record back with `created=False`, the transition proceeded, and the
+        gate reached nobody — the precise failure SD-123 (8) exists to end.
+
+    So the discriminator is the raise: attempt id plus the ledger's raise epoch.
+    Repeated work inside one raise still converges (the epoch is read before the
+    transition is appended), and the ledger refuses a second BLOCKED transition
+    while one is open, so no legitimate caller creates two records for one raise.
+    """
     payload = json.dumps(
-        {"gate": gate, "recipient": recipient_key, "route_id": route_id},
+        {"attempt_id": attempt_id, "epoch": epoch, "gate": gate,
+         "recipient": recipient_key, "route_id": route_id},
         separators=(",", ":"), sort_keys=True,
     ).encode("utf-8")
     return "delivery-" + hashlib.sha256(payload).hexdigest()[:32]
@@ -696,7 +753,7 @@ def gate_receipt(*, attempt_id, jobs_path, gate, artifact, harness):
     }
 
 
-def create_gate_delivery(route, gate, artifact, jobs_path):
+def create_gate_delivery(route, gate, artifact, jobs_path, epoch):
     """Write the one durable record a gate transition owes its depth-0 session.
 
     Returns `(record_path, created)`. Raises `SupervisorError` on any refusal --
@@ -708,11 +765,18 @@ def create_gate_delivery(route, gate, artifact, jobs_path):
         attempt_id=attempt_id, jobs_path=jobs_path, gate=gate,
         artifact=artifact, harness=harness,
     )
-    delivery_id = gate_delivery_id(recipient_key, route["route_id"], gate)
+    delivery_id = gate_delivery_id(
+        recipient_key, route["route_id"], gate, attempt_id, epoch
+    )
     root = Path(jobs_path).resolve(strict=False).parent
     path = PENDING.record_path(root, recipient_key, delivery_id)
-    existed = path.is_file()
     try:
+        with PENDING._record_lock(path):
+            # Read existence under the same lock `create` takes, so the caller's
+            # rollback can only ever unlink the record this call created. Reading
+            # it outside let a concurrent raise of the same gate turn our
+            # compensating `unlink` into the deletion of someone else's record.
+            existed = PENDING._read_unlocked(path) is not None
         PENDING.create(
             root,
             recipient_kind=recipient_kind,
@@ -742,6 +806,61 @@ def _gate_route_node(route, gate_name):
         None,
     )
     return str((binding or {}).get("node") or "_gate")
+
+
+def resolved_released_by(actor_kind, requested):
+    """`released_by` for this release, refusing a registered worker's own label.
+
+    The first cut only compared the requested value against the literal
+    `"user"`, so `--by shinuh` from a headless owner recorded
+    `released_by=shinuh` and only `actor_kind` still betrayed it — the exact
+    indistinguishability contract (d) exists to prevent. A registered worker now
+    may not name the releaser at all; its label is derived.
+    """
+    if actor_kind == "headless-owner" and requested:
+        raise SupervisorError(
+            "gate-release-actor-refused: a registered headless owner may not name "
+            "the releaser; released_by is derived as headless-owner"
+        )
+    return requested or actor_kind
+
+
+def retire_gate_delivery(route, gate, jobs):
+    """Retire the pending gate record once the gate is released.
+
+    Without this the record stays `pending` after a release, and the next
+    `UserPromptSubmit` sweep keeps announcing a gate that is already closed.
+    Fail-soft on purpose: the ledger transition is the authoritative release, so
+    a record that cannot be retired must never fail the release. Returns the
+    state it reached, or None when there was nothing to retire.
+    """
+    try:
+        jobs_path = Path(jobs) if jobs else default_jobs_path()
+        recipient_key, _kind, attempt_id, _harness = gate_recipient(route, jobs_path)
+        root = Path(jobs_path).resolve(strict=False).parent
+    except (SupervisorError, OSError):
+        return None
+    ledger = ledger_for(route)
+    # Every raise of this gate, newest first: a release closes whichever raise is
+    # still outstanding, and older ones may legitimately be acked already.
+    for epoch in range(gate_raise_epoch(ledger, gate), -1, -1):
+        delivery_id = gate_delivery_id(recipient_key, route["route_id"], gate,
+                                       attempt_id, epoch)
+        try:
+            record = PENDING.read(root, recipient_key, delivery_id)
+            if record is None or record.get("state") in {"acked", "expired"}:
+                continue
+            if record.get("state") in {"claimed", "sent-ambiguous"}:
+                PENDING.reclaim(root, recipient_key, delivery_id, now_ns=time.time_ns())
+            PENDING.claim(root, recipient_key, delivery_id,
+                          claim_owner=f"gate-release:{os.getpid()}",
+                          lease_seconds=60.0, require_generation_proof=False)
+            PENDING.ack(root, recipient_key, delivery_id,
+                        acked_by=f"gate-released:{gate}")
+            return "acked"
+        except (PENDING.PendingDeliveryError, OSError, TypeError):
+            continue
+    return None
 
 
 def release_actor_kind():
@@ -855,12 +974,7 @@ def cmd_release(args):
     # headless owner may release its own gate -- forbidding it leaves only the
     # 53-minute BLOCKED death -- but it may not sign that release as a person.
     actor_kind = release_actor_kind()
-    if actor_kind == "headless-owner" and args.actor == "user":
-        raise SupervisorError(
-            "gate-release-actor-refused: a registered headless owner records "
-            "released_by=headless-owner, never --actor user"
-        )
-    actor = args.actor or actor_kind
+    actor = resolved_released_by(actor_kind, args.actor)
     with ledger.lock():
         state = ledger.state()["workflow_state"]
         if state != "BLOCKED_HUMAN_GATE":
@@ -924,6 +1038,7 @@ def cmd_release(args):
         payload["actor_kind"] = actor_kind
         record_gate_release(route, args.route, gate=args.gate, decision=args.decision,
                             released_by=actor, actor_kind=actor_kind)
+        retire_gate_delivery(route, args.gate, getattr(args, "jobs", None))
     print(json.dumps(payload, sort_keys=True))
     return 0
 
