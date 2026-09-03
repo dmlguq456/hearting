@@ -107,9 +107,9 @@ class ModelProfileTest(unittest.TestCase):
             # because that collapse must stay visible if someone re-splits the tiers.
             "opencode": {
                 "deep": ("opencode-go/qwen3.8-max", "runtime-default"),
-                "balanced-deep": ("opencode-go/glm-5.2", "runtime-default"),
-                "light": ("opencode-go/deepseek-v4-flash", "runtime-default"),
-                "mini": ("opencode-go/deepseek-v4-flash", "runtime-default"),
+                "balanced-deep": ("opencode-go/glm-5.3", "runtime-default"),
+                "light": ("opencode-go/glm-5.3-flash", "runtime-default"),
+                "mini": ("opencode-go/glm-5.3-flash", "runtime-default"),
             },
         }
         for adapter, profiles in expected.items():
@@ -183,13 +183,14 @@ class ModelProfileTest(unittest.TestCase):
             self.assertEqual(resolved["model"], concrete["model"])
 
     def test_opencode_live_conf_resolves_deep_and_balanced_deep_distinctly(self):
-        # 66e38467 (2026-08-07 사용자 결정): deep=qwen3.8-max, balanced-deep=glm-5.2.
-        # The earlier vacant-deep demotion premise is superseded; only `mini`
-        # still collapses (into light), named by CFG_MODEL_PROFILE_GRANULARITY.
+        # 66e38467 (2026-08-07 사용자 결정): deep=qwen3.8-max. 2026-09-03 tier
+        # refresh moved balanced-deep to glm-5.3 and light/mini to glm-5.3-flash
+        # (same-or-cheaper registry rows); only `mini` still collapses (into
+        # light), named by CFG_MODEL_PROFILE_GRANULARITY.
         conf = ROOT / "adapters" / "opencode" / "config" / "models.conf"
         balanced = PROFILE.resolve_profile("opencode", conf, "balanced-deep")
         self.assertEqual(balanced["tier"], "balanced-deep")
-        self.assertEqual(balanced["model"], "opencode-go/glm-5.2")
+        self.assertEqual(balanced["model"], "opencode-go/glm-5.3")
 
         deep = PROFILE.resolve_profile("opencode", conf, "deep")
         self.assertEqual(deep["tier"], "deep")
