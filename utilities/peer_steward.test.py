@@ -83,9 +83,11 @@ class WaitTest(_TmpRootMixin, unittest.TestCase):
              mock.patch.object(peer_steward.subprocess, "run", return_value=_herdr_json(payload)) as run_mock:
             rc = self._wait()
         self.assertEqual(rc, 0)
-        run_mock.assert_called_once()
-        cmd = run_mock.call_args[0][0]
-        self.assertEqual(cmd[:3], ["herdr", "agent", "wait"])
+        # F-100c: one `agent get` resolves the target's session id for the ledger record;
+        # the WAIT itself is still exactly one herdr call — no poll loop.
+        waits = [c[0][0] for c in run_mock.call_args_list if c[0][0][:3] == ["herdr", "agent", "wait"]]
+        self.assertEqual(len(waits), 1)
+        self.assertEqual(run_mock.call_args[0][0][:3], ["herdr", "agent", "wait"])
 
     def test_unrecognized_agent_status_is_normalized_to_unknown(self):
         payload = {
@@ -143,7 +145,8 @@ class WaitTest(_TmpRootMixin, unittest.TestCase):
         with mock.patch.object(peer_steward.shutil, "which", return_value="/usr/bin/herdr"), \
              mock.patch.object(peer_steward.subprocess, "run", return_value=_herdr_json(payload)) as run_mock:
             self._wait()
-        self.assertEqual(run_mock.call_count, 1)
+        waits = [c[0][0] for c in run_mock.call_args_list if c[0][0][:3] == ["herdr", "agent", "wait"]]
+        self.assertEqual(len(waits), 1)                      # F-100c: + one `agent get`, never a loop
 
     def test_one_watch_record_written_at_wait_start_body_empty(self):
         payload = {"error": {"code": "timeout"}}
@@ -286,6 +289,117 @@ class StartTest(_TmpRootMixin, unittest.TestCase):
         cmd = run_mock.call_args[0][0]
         self.assertIn("--extra-flag", cmd)
         self.assertLess(cmd.index("bypassPermissions"), cmd.index("--extra-flag"))
+
+
+
+def _agent_json(harness, sid, name, status="idle"):
+    return {"id": "cli:agent:get", "result": {"agent": {
+        "agent": harness, "agent_status": status, "name": name, "pane_id": "w1:pX",
+        "agent_session": ({"agent": harness, "kind": "id", "value": sid} if sid else None)}}}
+
+
+class F100cPromptAndResolutionTest(_TmpRootMixin, unittest.TestCase):
+    """F-100c — the steward send is `prompt`: herdr resolves the target's exact session
+    id, the sender's registry name rides the record, and the body gets the trailer."""
+
+    def _fake_run(self, get_payload, prompt_rc=0, calls=None):
+        def run(argv, **kw):
+            if calls is not None:
+                calls.append(argv)
+            if argv[:3] == ["herdr", "agent", "get"]:
+                return _herdr_json(get_payload)
+            if argv[:3] == ["herdr", "agent", "prompt"]:
+                return subprocess.CompletedProcess(argv, prompt_rc, stdout="{}", stderr="")
+            if argv[:3] == ["herdr", "agent", "start"]:
+                return _herdr_json({"id": "cli:agent:start", "result": {"agent": get_payload["result"]["agent"]}})
+            return subprocess.CompletedProcess(argv, 0, stdout="{}", stderr="")
+        return run
+
+    def test_prompt_resolves_target_appends_trailer_and_records_exact_ids(self):
+        os.environ["CLAUDE_CODE_SESSION_ID"] = "sid-steward"
+        calls = []
+        with mock.patch.object(peer_steward.shutil, "which", return_value="/usr/bin/herdr"), \
+             mock.patch.object(peer_steward.subprocess, "run",
+                               side_effect=self._fake_run(_agent_json("codex", "thread-9", "child"), calls=calls)), \
+             mock.patch.object(peer_steward.peer_message, "claude_session_name", return_value="hearting-46"), \
+             mock.patch("builtins.print") as print_mock:
+            rc = peer_steward.main(["prompt", "child", "[handoff] do the thing\nline two"])
+        self.assertEqual(rc, 0)
+        prompt_call = next(c for c in calls if c[:3] == ["herdr", "agent", "prompt"])
+        self.assertEqual(prompt_call[3], "child")
+        self.assertTrue(prompt_call[4].endswith("(peer-from: claude sid-steward hearting-46)"))
+        self.assertTrue(prompt_call[4].startswith("[handoff] do the thing\nline two"))
+        rec = self._all_records()[-1]
+        self.assertEqual(rec["kind"], "handoff")
+        self.assertEqual(rec["to"], {"harness": "codex", "session_id": "thread-9", "name": "child"})
+        self.assertEqual(rec["from"]["name"], "hearting-46")
+        self.assertEqual(rec["summary"], "[handoff] do the thing")
+        line = print_mock.call_args[0][0]
+        self.assertIn("prompted=true", line)
+        self.assertIn("to_session_id=thread-9", line)
+        # the sender is now flagged as steward of the target
+        self.assertIn(("claude", "sid-steward"), peer_steward.peer_message.read_steward_markers())
+
+    def test_prompt_without_trailer_flag_and_unresolvable_target(self):
+        os.environ["CLAUDE_CODE_SESSION_ID"] = "sid-steward"
+        calls = []
+        with mock.patch.object(peer_steward.shutil, "which", return_value="/usr/bin/herdr"), \
+             mock.patch.object(peer_steward.subprocess, "run",
+                               side_effect=self._fake_run({"error": {"code": "agent_not_found"}}, calls=calls)), \
+             mock.patch("builtins.print"):
+            rc = peer_steward.main(["prompt", "ghost", "hello", "--no-trailer"])
+        self.assertEqual(rc, 0)
+        prompt_call = next(c for c in calls if c[:3] == ["herdr", "agent", "prompt"])
+        self.assertEqual(prompt_call[4], "hello")
+        rec = self._all_records()[-1]
+        self.assertEqual(rec["to"], {"harness": "unknown", "name": "ghost"})
+        self.assertEqual(rec["kind"], "steer")
+
+    def test_prompt_empty_body_sends_nothing(self):
+        with mock.patch.object(peer_steward.shutil, "which", return_value="/usr/bin/herdr"), \
+             mock.patch.object(peer_steward.subprocess, "run") as run_mock, \
+             mock.patch("builtins.print"):
+            rc = peer_steward.main(["prompt", "child", "   "])
+        self.assertEqual(rc, 1)
+        run_mock.assert_not_called()
+        self.assertEqual(self._all_records(), [])
+
+    def test_wait_and_start_records_carry_the_resolved_session_id(self):
+        os.environ["CLAUDE_CODE_SESSION_ID"] = "sid-steward"
+        with mock.patch.object(peer_steward.shutil, "which", return_value="/usr/bin/herdr"), \
+             mock.patch.object(peer_steward.subprocess, "run",
+                               side_effect=self._fake_run(_agent_json("claude", "sid-child", "peer-c", status="idle"))), \
+             mock.patch("builtins.print"):
+            peer_steward.main(["wait", "peer-c"])
+            peer_steward.main(["start", "peer-c", "--kind", "claude", "--pane", "w1:pM"])
+        recs = self._all_records()
+        self.assertEqual([r["kind"] for r in recs], ["watch", "steer"])
+        self.assertEqual(recs[0]["to"]["session_id"], "sid-child")
+        self.assertEqual(recs[0]["to"]["harness"], "claude")
+        self.assertEqual(recs[1]["to"]["session_id"], "sid-child")
+
+    def test_opencode_env_identifies_an_opencode_steward(self):
+        os.environ["OPENCODE_SESSION_ID"] = "ses_1"
+        self.assertEqual(peer_steward._current_session_identity(), ("ses_1", "opencode"))
+
+
+
+class F100cStewardModeTest(_TmpRootMixin, unittest.TestCase):
+    def test_steward_on_off_raises_and_clears_the_flag(self):
+        os.environ["CLAUDE_CODE_SESSION_ID"] = "sid-steward"
+        with mock.patch("builtins.print") as print_mock:
+            self.assertEqual(peer_steward.main(["steward", "on"]), 0)
+        self.assertIn("steward=on", print_mock.call_args[0][0])
+        self.assertIn(("claude", "sid-steward"), peer_steward.peer_message.read_steward_markers())
+        with mock.patch("builtins.print") as print_mock:
+            self.assertEqual(peer_steward.main(["steward", "off"]), 0)
+        self.assertIn("steward=off", print_mock.call_args[0][0])
+        self.assertEqual(peer_steward.peer_message.read_steward_markers(), {})
+
+    def test_steward_on_without_identity_is_a_typed_failure(self):
+        with mock.patch("builtins.print") as print_mock:
+            self.assertEqual(peer_steward.main(["steward", "on"]), 1)
+        self.assertIn("reason=no-session-identity", print_mock.call_args[0][0])
 
 
 if __name__ == "__main__":

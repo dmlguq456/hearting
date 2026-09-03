@@ -731,9 +731,20 @@ agent start|prompt|read|wait`), because `ListAgents` never surfaces a Codex sess
 
 | Runtime | Watched side (wait target) | Steward side (wait & restart) | Send (secondary) | Receive | Ledger | Status |
 |---|---|---|---|---|---|---|
-| Claude | `herdr agent wait <target>` — measured 2026-09-02 | a background-Bash wait restarts the session on process exit — measured (hearting-21; no approval/expiry). A different surface from the registered owner attempt's `asyncRewake` rule ("no Background Bash/Monitor") — that rule applies only to the exact owner attempt armed by `dispatch-owner --start` | native `SendMessage` — reaches inline mid-turn (measured), lost to approval wait/expiry when idle (measured) → not the primary completion-report path | `<cross-session-message>` injection | `PostToolUse(SendMessage)` hook + `peer-steward.py` record | measured |
-| Codex | `herdr agent wait <target>` — measured 2026-09-02 (cairn-codex-test, idle matches immediately) | `--timeout`-bounded foreground wait + next-turn reload — unknown (no capability claim before measurement, P-7) | none — native path retired (`codex queue` / gateway `steer` op not implemented) | none | `peer-steward.py` record | watched measured / steward unknown |
-| OpenCode | unknown — pending P-6 | unknown | none | none | `peer-steward.py` record `status=unknown` | unknown |
+| Claude | `herdr agent wait <target>` — measured 2026-09-02 | a background-Bash wait restarts the session on process exit — measured (hearting-21; no approval/expiry). A different surface from the registered owner attempt's `asyncRewake` rule ("no Background Bash/Monitor") — that rule applies only to the exact owner attempt armed by `dispatch-owner --start` | `peer-steward.py prompt` (herdr, F-100c primary) · native `SendMessage` — reaches inline mid-turn (measured), lost to approval wait/expiry when idle (measured) → secondary | `<cross-session-message>` injection · herdr prompt with the `(peer-from: …)` trailer | `PostToolUse(SendMessage)` hook + `UserPromptSubmit` hook (`notice` for both envelopes) + `peer-steward.py` record | measured |
+| Codex | `herdr agent wait <target>` — measured 2026-09-02 (cairn-codex-test, idle matches immediately); `--until working/idle --timeout` timed out after completion in the 2026-09-03 F-100 test — read the pane instead | `--timeout`-bounded foreground wait + next-turn reload — unknown (no capability claim before measurement, P-7) | `peer-steward.py prompt` (herdr, F-100c) — native path retired (`codex queue` / gateway `steer` op not implemented) | herdr prompt with the `(peer-from: …)` trailer → `userprompt-lifecycle.py` writes the `notice` | `peer-steward.py` record + Codex hook `notice` | send/receive measured 2026-09-03 / steward wait unknown |
+| OpenCode | `herdr agent wait <target>` — unknown (pending P-6) | unknown | `peer-steward.py prompt` (herdr, F-100c) | herdr prompt with the `(peer-from: …)` trailer → `hearting-guards.js` `chat.message` writes the `notice` | `peer-steward.py` record + plugin `notice` | send measured 2026-09-03 / receive pending live measurement |
+
+Identity on the ledger (F-100c): every steward record carries `to.session_id` resolved
+through `herdr agent get` (Claude UUID, Codex thread id; herdr reports NO id for
+OpenCode — measured 2026-09-03) and `from.name` (the sender's registry name, Claude
+only today). Fleet joins sent/recv counts and the `← <name> · kind · age` subtitle on the
+exact session id, so a child row shows its steward on every harness; the pane pid probe
+(`herdr pane process-info`) is what places an OpenCode session in its herdr pane. A
+session that has SENT a steer/handoff/gate-relay/watch record — or ran
+`peer-steward.py steward on` — carries the steward marker under
+`<dispatch-state-root>/peer-steward/`, which Fleet renders as the bold-yellow tag badge;
+`peer-steward.py steward off` (or `peer-message release`) clears it.
 
 Same-behavior guarantees are still not claimed: the watched-side herdr realization is
 measured for both Claude and Codex; steward-side restart is measured for Claude only. The

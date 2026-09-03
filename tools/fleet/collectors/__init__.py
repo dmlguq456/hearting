@@ -249,6 +249,12 @@ def collect_all(harness_filter=None, jobs_path=None, usage="cache-only"):
         _herdr.enrich(sessions)
     except Exception:
         pass
+    # F-100c: steward flag — exact (harness, session_id) join on the ledger's markers.
+    try:
+        from . import steward as _steward
+        _steward.enrich(sessions)
+    except Exception:
+        pass
 
     # F-51d: JSON telemetry projection — cache-only lookup (never schedules a background
     # `git rev-list`; the live render path's own ahead_behind() calls are what populate the

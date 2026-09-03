@@ -277,5 +277,82 @@ class PeerMessageBodyFlagTest(_TmpRootMixin, unittest.TestCase):
         self.assertEqual(rec["summary"], "piped body")
 
 
+
+class F100cSenderAndStewardTest(unittest.TestCase):
+    """F-100c — from.name, the herdr sender trailer, and the steward marker."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.root = Path(self._tmp.name)
+        self._old = dict(os.environ)
+        os.environ["AGENT_DISPATCH_JOBS"] = str(self.root / "jobs.log")
+        (self.root / "jobs.log").touch()
+        os.environ.pop("AGENT_HOME", None)
+        self.addCleanup(self._restore)
+
+    def _restore(self):
+        os.environ.clear()
+        os.environ.update(self._old)
+
+    def _ns(self, **over):
+        base = dict(from_harness="claude", from_session_id="sid-a", from_project="p",
+                    from_name=None, to_harness="codex", to_session_id="sid-c", to_name="child",
+                    kind="steer", surface="herdr", status="sent", receipt=None, ref=[],
+                    body_file=None, body_stdin=False)
+        base.update(over)
+        return peer_message.argparse.Namespace(**base)
+
+    def _records(self):
+        out = []
+        for f in (peer_message._ledger_root() / "peer-messages").rglob("*.jsonl"):
+            out += [json.loads(l) for l in f.read_text().splitlines() if l.strip()]
+        return out
+
+    def test_from_name_is_additive(self):
+        self.assertEqual(peer_message.cmd_record(self._ns()), 0)
+        self.assertEqual(peer_message.cmd_record(self._ns(from_name="hearting-46")), 0)
+        recs = self._records()
+        self.assertNotIn("name", recs[0]["from"])
+        self.assertEqual(recs[1]["from"]["name"], "hearting-46")
+
+    def test_trailer_round_trip_and_last_wins(self):
+        t = peer_message.peer_trailer("claude", "sid-a", "hearting-46")
+        self.assertEqual(t, "(peer-from: claude sid-a hearting-46)")
+        self.assertEqual(peer_message.parse_peer_trailer("body\n\n" + t),
+                         {"harness": "claude", "session_id": "sid-a", "name": "hearting-46"})
+        self.assertEqual(peer_message.parse_peer_trailer("(peer-from: codex 01a0)")["name"], None)
+        two = "(peer-from: codex one)\nx\n(peer-from: claude two n)"
+        self.assertEqual(peer_message.parse_peer_trailer(two)["session_id"], "two")
+        self.assertIsNone(peer_message.parse_peer_trailer("no trailer here"))
+        self.assertIsNone(peer_message.parse_peer_trailer(None))
+        # a name with a ')' cannot break the envelope
+        self.assertEqual(peer_message.parse_peer_trailer(
+            peer_message.peer_trailer("claude", "s", "a) b"))["name"], "a  b".replace("  ", " "))
+
+    def test_sent_steer_marks_the_sender_as_steward_notice_does_not(self):
+        self.assertEqual(peer_message.cmd_record(self._ns()), 0)
+        markers = peer_message.read_steward_markers()
+        self.assertEqual(set(markers), {("claude", "sid-a")})
+        self.assertEqual(markers[("claude", "sid-a")]["targets"]["sid-c"]["harness"], "codex")
+        self.assertEqual(peer_message.cmd_record(self._ns(
+            from_harness="codex", from_session_id="sid-c", to_harness="claude",
+            to_session_id="sid-a", kind="notice", status="received")), 0)
+        self.assertEqual(set(peer_message.read_steward_markers()), {("claude", "sid-a")})
+        self.assertEqual(peer_message.cmd_release(peer_message.argparse.Namespace(
+            harness="claude", session_id="sid-a")), 0)
+        self.assertEqual(peer_message.read_steward_markers(), {})
+
+    def test_claude_session_name_reads_the_registry_by_session_id(self):
+        cfg = self.root / "cfg"
+        (cfg / "sessions").mkdir(parents=True)
+        (cfg / "sessions" / "123.json").write_text(json.dumps(
+            {"sessionId": "sid-a", "name": "hearting-46", "nameSource": "derived"}))
+        (cfg / "sessions" / "bad.json").write_text("{not json")
+        self.assertEqual(peer_message.claude_session_name("sid-a", config_dir=str(cfg)), "hearting-46")
+        self.assertIsNone(peer_message.claude_session_name("sid-zz", config_dir=str(cfg)))
+        self.assertIsNone(peer_message.claude_session_name("", config_dir=str(cfg)))
+
+
 if __name__ == "__main__":
     unittest.main()

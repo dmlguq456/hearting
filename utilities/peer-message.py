@@ -9,6 +9,7 @@ import fcntl
 import hashlib
 import json
 import os
+import re
 import sys
 import time
 from pathlib import Path
@@ -26,6 +27,67 @@ _SURFACES = (
 )
 _STATUSES = ("sent", "delivered", "received", "failed", "unknown")
 _SUMMARY_MAX = 200
+# F-100c — kinds whose SENT record marks the sender as a steward (depth −1) of the target.
+_STEWARD_KINDS = ("steer", "handoff", "gate-relay", "watch")
+_STEWARD_TARGETS_MAX = 32
+
+# F-100c — the harness-neutral sender trailer a steward appends to a herdr prompt so the
+# RECEIVER (Claude UserPromptSubmit hook, Codex userprompt hook, OpenCode plugin) can write
+# its own `notice` record with an exact sender: `(peer-from: <harness> <session_id> <name>)`.
+# Native Claude SendMessage already wraps its delivery in <cross-session-message from=…>;
+# a herdr prompt has no envelope, so the trailer is the envelope.
+_PEER_TRAILER_RE = re.compile(
+    r"\(peer-from:\s*(?P<harness>[A-Za-z0-9_-]+)\s+(?P<sid>[^\s)]+)(?:\s+(?P<name>[^)]*?))?\s*\)")
+
+
+def peer_trailer(harness, session_id, name=None):
+    """The trailer line a steward appends to a herdr prompt body."""
+    parts = [str(harness or "unknown"), str(session_id or "-")]
+    clean = " ".join(str(name or "").replace(")", " ").split())
+    if clean:
+        parts.append(clean)
+    return "(peer-from: %s)" % " ".join(parts)
+
+
+def parse_peer_trailer(text):
+    """→ {harness, session_id, name} for the LAST trailer in ``text``, else ``None``."""
+    if not isinstance(text, str) or "peer-from:" not in text:
+        return None
+    match = None
+    for match in _PEER_TRAILER_RE.finditer(text):
+        pass
+    if match is None:
+        return None
+    return {
+        "harness": match.group("harness").lower(),
+        "session_id": match.group("sid"),
+        "name": (match.group("name") or "").strip() or None,
+    }
+
+
+def claude_session_name(session_id, config_dir=None):
+    """The Claude Code registry ``name`` (``hearting-46``) for ``session_id`` from
+    ``<CLAUDE_CONFIG_DIR|~/.claude>/sessions/*.json``; ``None`` when unknown. Stable
+    across title changes, which is why the ledger carries it and not the AI title."""
+    if not session_id:
+        return None
+    home = config_dir or os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude")
+    try:
+        entries = os.listdir(os.path.join(home, "sessions"))
+    except OSError:
+        return None
+    for entry in entries:
+        if not entry.endswith(".json"):
+            continue
+        try:
+            with open(os.path.join(home, "sessions", entry), encoding="utf-8") as fh:
+                rec = json.load(fh)
+        except Exception:
+            continue
+        if isinstance(rec, dict) and rec.get("sessionId") == session_id:
+            name = rec.get("name")
+            return name if isinstance(name, str) and name else None
+    return None
 
 
 def _agent_home():
@@ -42,6 +104,72 @@ def _ledger_path(from_session_id, when=None):
     month = time.strftime("%Y-%m", when)
     root = _ledger_root() / "peer-messages" / month
     return root / f"{from_session_id}.jsonl"
+
+
+def steward_marker_path(harness, session_id):
+    """F-100c steward flag: ``<dispatch-state-root>/peer-steward/<harness>/<sid>.json``.
+    Written by every SENT steer/handoff/gate-relay/watch record (so the wrapper, the
+    Claude SendMessage hook and a manual `record` all raise the same flag), read by the
+    Fleet steward collector, cleared by `peer-message release`."""
+    safe = "".join(ch if (ch.isalnum() or ch in "._-") else "_" for ch in str(session_id or ""))
+    return _ledger_root() / "peer-steward" / str(harness or "unknown") / f"{safe or 'unknown'}.json"
+
+
+def mark_steward(harness, session_id, to, kind, ts):
+    if not session_id:
+        return False
+    path = steward_marker_path(harness, session_id)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            with open(path, encoding="utf-8") as fh:
+                data = json.load(fh)
+        except Exception:
+            data = None
+        if not isinstance(data, dict):
+            data = {"schema_version": 1, "harness": harness, "session_id": session_id,
+                    "since": ts, "targets": {}}
+        targets = data.get("targets")
+        if not isinstance(targets, dict):
+            targets = {}
+        key = to.get("session_id") or to.get("name") or "-"
+        targets[key] = {"harness": to.get("harness"), "session_id": to.get("session_id"),
+                        "name": to.get("name"), "kind": kind, "ts": ts}
+        if len(targets) > _STEWARD_TARGETS_MAX:
+            oldest = sorted(targets, key=lambda k: targets[k].get("ts") or "")
+            for k in oldest[: len(targets) - _STEWARD_TARGETS_MAX]:
+                targets.pop(k, None)
+        data["targets"] = targets
+        data["updated"] = ts
+        tmp = path.with_name(path.name + ".tmp")
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(data, fh, ensure_ascii=False)
+        os.replace(tmp, path)
+        return True
+    except Exception:
+        return False
+
+
+def read_steward_markers():
+    """``{(harness, session_id): marker_dict}`` over every marker under the ledger root."""
+    out = {}
+    root = _ledger_root() / "peer-steward"
+    try:
+        harness_dirs = list(root.iterdir())
+    except OSError:
+        return out
+    for hdir in harness_dirs:
+        if not hdir.is_dir():
+            continue
+        for f in hdir.glob("*.json"):
+            try:
+                with open(f, encoding="utf-8") as fh:
+                    data = json.load(fh)
+            except Exception:
+                continue
+            if isinstance(data, dict) and data.get("session_id"):
+                out[(hdir.name, str(data["session_id"]))] = data
+    return out
 
 
 def _message_id(from_sid, to, ts, summary):
@@ -89,6 +217,9 @@ def cmd_record(args):
             "session_id": args.from_session_id,
             "project": args.from_project,
         }
+        from_name = getattr(args, "from_name", None)
+        if from_name:
+            from_block["name"] = str(from_name)
         kind = args.kind
         rec = {
             "schema_version": 1,
@@ -117,10 +248,26 @@ def cmd_record(args):
                 os.fsync(fh.fileno())
             finally:
                 fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+        if args.status == "sent" and kind in _STEWARD_KINDS:
+            mark_steward(args.from_harness, args.from_session_id, to, kind, ts)
         return 0
     except Exception as exc:
         print(f"peer-message record failed: {exc}", file=sys.stderr)
         return 1
+
+
+def cmd_release(args):
+    """Clear the steward flag for one session (the ledger itself is append-only)."""
+    path = steward_marker_path(args.harness, args.session_id)
+    try:
+        path.unlink()
+        print("released")
+    except FileNotFoundError:
+        print("not-marked")
+    except Exception as exc:
+        print(f"peer-message release failed: {exc}", file=sys.stderr)
+        return 1
+    return 0
 
 
 def _iter_records(since_hours=None):
@@ -187,6 +334,7 @@ def main(argv=None):
     p_record.add_argument("--from-harness", required=True)
     p_record.add_argument("--from-session-id", required=True)
     p_record.add_argument("--from-project", default="")
+    p_record.add_argument("--from-name", default=None)
     p_record.add_argument("--to-harness", required=True)
     p_record.add_argument("--to-session-id", default=None)
     p_record.add_argument("--to-name", default=None)
@@ -207,6 +355,11 @@ def main(argv=None):
     p_status = sub.add_parser("status")
     p_status.add_argument("--since-hours", type=float, default=1.0)
     p_status.set_defaults(func=cmd_status)
+
+    p_release = sub.add_parser("release")
+    p_release.add_argument("--harness", required=True)
+    p_release.add_argument("--session-id", required=True)
+    p_release.set_defaults(func=cmd_release)
 
     args = parser.parse_args(argv)
     return args.func(args)

@@ -258,6 +258,41 @@ function appendContext(output, text) {
   output.system.push(text)
 }
 
+// F-100c -- receive side of a herdr steer, harness-neutral: a steward appends
+// `(peer-from: <harness> <sid> <name>)` to the prompt body; the receiver writes its
+// own `notice` peer_message_v1 under its exact session id (same record the Claude
+// hook and the Codex hook write). Detached, fail-soft, never blocks the turn.
+const peerTrailerRe = /\(peer-from:\s*([A-Za-z0-9_-]+)\s+([^\s)]+)(?:\s+([^)]*?))?\s*\)/g
+
+function spawnPeerNotice(sid, prompt, cwd) {
+  if (!sid || !prompt || !prompt.includes("peer-from:")) return
+  let match = null
+  for (const m of prompt.matchAll(peerTrailerRe)) match = m
+  if (!match) return
+  const [, fromHarness, fromSid, fromName] = match
+  const tool = path.join(root, "utilities", "peer-message.py")
+  const args = [tool, "record",
+    "--from-harness", String(fromHarness).toLowerCase(),
+    "--from-session-id", fromSid,
+    "--from-project", path.basename(cwd || ""),
+    "--to-harness", "opencode",
+    "--to-session-id", sid,
+    "--kind", "notice", "--surface", "herdr", "--status", "received",
+    "--body-stdin"]
+  if (fromName && fromName.trim()) args.push("--from-name", fromName.trim())
+  try {
+    const child = spawn("python3", args, {
+      cwd: root,
+      env: { ...process.env, AGENT_HOME: root },
+      stdio: ["pipe", "ignore", "ignore"],
+      detached: true,
+    })
+    child.on("error", () => {})
+    child.stdin.end("herdr steer received")
+    child.unref()
+  } catch {}
+}
+
 function promptText(output) {
   if (typeof output?.message?.content === "string") return output.message.content
   if (!Array.isArray(output?.parts)) return ""
@@ -314,6 +349,7 @@ export const AgentHarnessGuards = async (ctx) => {
     const prompt = promptText(output)
     const turn = input.messageID || output?.message?.id || ""
     if (prompt) promptBySession.set(sid, prompt)
+    if (prompt && eventSid) spawnPeerNotice(eventSid, prompt, baseDir(ctx))
     if (turn) turnBySession.set(sid, turn)
   },
   "experimental.chat.system.transform": async (input, output) => {
