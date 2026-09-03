@@ -22,7 +22,7 @@ Follow an explicit artifact or audience language when provided. Otherwise, write
 ## Resolve the Design
 
 1. Use explicit `--design <path>`.
-2. Otherwise select the latest applicable `design_state.yaml` under `<artifact-root>/designs/` or `<artifact-root>/spec/*/design/`.
+2. Otherwise select the latest applicable `design_state.yaml` under `$AGENT_ARTIFACT_OUTPUT_DIR/designs/` or `$AGENT_ARTIFACT_OUTPUT_DIR/spec/*/design/`.
 3. If no state exists, report that `design-init` must run first.
 
 ## Procedure

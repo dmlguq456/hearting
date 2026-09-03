@@ -1052,5 +1052,175 @@ class AbandonReasonTest(ProducerTestBase):
         self.assertEqual(abandoned_events[0]["payload"]["abandon_reason"], "operator-override-live-review")
 
 
+class SharedReferencePinAndRelatedTest(ProducerTestBase):
+    def _admitted_spec_pin(self):
+        self.activate()
+        route, route_file, source = self.begin("direct", "autopilot-spec", "update")
+        self.write_output(source, "spec/prd.md", b"# PRD\n")
+        self.close(route, route_file)
+        P.finalize(self.root, cycle_id=source["cycle_id"])
+        admitted = P.admit_shared(self.root, cycle_id=source["cycle_id"], kind="spec", source="spec", key="prd")
+        return admitted
+
+    def test_manifest_shape_unchanged_without_pins(self):
+        self.activate()
+        route, route_file, result = self.begin()
+        self.write_output(result)
+        self.close(route, route_file)
+        sealed = P.finalize(self.root, cycle_id=result["cycle_id"])
+        self.assertEqual(sealed["status"], "sealed")
+        document = json.loads((Path(result["cycle_dir"]) / "manifest.json").read_text(encoding="utf-8"))
+        self.assertEqual(document["shared_references"], [])
+        self.assertEqual(document["shared_reference_revisions"], [])
+        self.assertTrue(m.validate(document).ok)
+        self.assertIsNone(P.read_cycle_record(self.root, result["cycle_id"]).get("shared_reference_pins"))
+
+    def test_shared_reference_pins_emit_valid_manifest_rows(self):
+        admitted = self._admitted_spec_pin()
+        pin = {
+            "kind": "spec", "shared_reference_id": admitted["shared_reference_id"],
+            "shared_reference_revision_id": admitted["shared_reference_revision_id"],
+        }
+        route, route_file, result = self.begin("direct", "autopilot-code", shared_reference_pins=[pin])
+        self.assertEqual(P.read_cycle_record(self.root, result["cycle_id"])["shared_reference_pins"], [pin])
+        self.write_output(result)
+        self.close(route, route_file)
+        sealed = P.finalize(self.root, cycle_id=result["cycle_id"])
+        self.assertEqual(sealed["status"], "sealed")
+        document = json.loads((Path(result["cycle_dir"]) / "manifest.json").read_text(encoding="utf-8"))
+        self.assertTrue(m.validate(document).ok, m.validate(document).violations)
+        self.assertEqual(document["shared_references"], [{
+            "shared_reference_id": admitted["shared_reference_id"], "kind": "shared-spec",
+            "title": "artifacts/spec",
+        }])
+        self.assertEqual(len(document["shared_reference_revisions"]), 1)
+        rev_row = document["shared_reference_revisions"][0]
+        self.assertEqual(rev_row["shared_reference_revision_id"], admitted["shared_reference_revision_id"])
+        self.assertEqual(rev_row["shared_reference_id"], admitted["shared_reference_id"])
+        self.assertEqual(rev_row["content_digest"], admitted["content_digest"])
+        self.assertEqual(rev_row["provenance"]["source_manifest_id"], document["manifest_id"])
+
+    def test_shared_reference_pin_missing_revision_is_typed_hold(self):
+        admitted = self._admitted_spec_pin()
+        pin = {
+            "kind": "spec", "shared_reference_id": admitted["shared_reference_id"],
+            "shared_reference_revision_id": "rrev_" + "9" * 32,
+        }
+        route, route_file, result = self.begin("direct", "autopilot-code", shared_reference_pins=[pin])
+        self.write_output(result)
+        self.close(route, route_file)
+        with self.assertRaises(P.ProducerError) as ctx:
+            P.finalize(self.root, cycle_id=result["cycle_id"])
+        self.assertEqual(ctx.exception.code, "shared-reference-pin-unresolved")
+        self.assertFalse((Path(result["cycle_dir"]) / "manifest.json").exists())
+
+    def test_shared_reference_pin_digest_mismatch_is_typed_hold(self):
+        admitted = self._admitted_spec_pin()
+        pin = {
+            "kind": "spec", "shared_reference_id": admitted["shared_reference_id"],
+            "shared_reference_revision_id": admitted["shared_reference_revision_id"],
+            "content_digest": "sha256:" + "0" * 64,
+        }
+        route, route_file, result = self.begin("direct", "autopilot-code", shared_reference_pins=[pin])
+        self.write_output(result)
+        self.close(route, route_file)
+        with self.assertRaises(P.ProducerError) as ctx:
+            P.finalize(self.root, cycle_id=result["cycle_id"])
+        self.assertEqual(ctx.exception.code, "shared-reference-pin-digest-mismatch")
+        self.assertFalse((Path(result["cycle_dir"]) / "manifest.json").exists())
+
+    def test_begin_shared_reference_cli_flag(self):
+        admitted = self._admitted_spec_pin()
+        route, route_file = self.route("direct", "autopilot-code")
+        pin_value = f"spec:{admitted['shared_reference_id']}:{admitted['shared_reference_revision_id']}:{admitted['content_digest']}"
+        import io
+        import contextlib
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            code = P.main([
+                "begin", "--artifact-root", str(self.root), "--route", str(route_file),
+                "--capability", "autopilot-code", "--intensity", "direct",
+                "--shared-reference", pin_value,
+            ])
+        self.assertEqual(code, P.OK)
+        payload = json.loads(buffer.getvalue().strip().splitlines()[-1])
+        self.assertEqual(payload["status"], "begun")
+        record = P.read_cycle_record(self.root, payload["cycle_id"])
+        self.assertEqual(record["shared_reference_pins"], [{
+            "kind": "spec", "shared_reference_id": admitted["shared_reference_id"],
+            "shared_reference_revision_id": admitted["shared_reference_revision_id"],
+            "content_digest": admitted["content_digest"],
+        }])
+
+    def test_related_field_validation(self):
+        self.activate()
+        route, route_file, first = self.begin(campaign_key="camp-a")
+        self.write_output(first)
+        self.close(route, route_file)
+        P.finalize(self.root, cycle_id=first["cycle_id"])
+        route2, route_file2, second = self.begin(intensity="quick", campaign_key="camp-b")
+
+        with self.assertRaises(P.ProducerError) as ctx:
+            P.set_campaign_related(self.root, first["campaign_id"], related=[{"kind": "bogus-kind",
+                                    "campaign_id": second["campaign_id"]}])
+        self.assertEqual(ctx.exception.code, "campaign-related-invalid")
+
+        with self.assertRaises(P.ProducerError) as ctx:
+            P.set_campaign_related(self.root, first["campaign_id"], related=[{"kind": "related"}])
+        self.assertEqual(ctx.exception.code, "campaign-related-invalid")
+
+        with self.assertRaises(P.ProducerError) as ctx:
+            P.set_campaign_related(self.root, first["campaign_id"],
+                                   related=[{"kind": "related", "campaign_id": "camp_" + "z" * 32}])
+        self.assertEqual(ctx.exception.code, "campaign-related-unresolved")
+
+        related = [{"kind": "precedes", "campaign_id": second["campaign_id"]}]
+        result = P.set_campaign_related(self.root, first["campaign_id"], related=related)
+        self.assertEqual(result["status"], "updated")
+        self.assertEqual(P.read_campaign(self.root, first["campaign_id"])["related"], related)
+        # Not bidirectional: the related campaign's own record is untouched.
+        self.assertIsNone(P.read_campaign(self.root, second["campaign_id"]).get("related"))
+        self.assertEqual(
+            P.check_write(self.root, self.root / "campaigns" / first["campaign_id"] / "campaign.json")["reason"],
+            "campaign-record-machine-managed")
+
+    def test_mark_campaign_superseded_refuses_live_cycles(self):
+        self.activate()
+        route, route_file, first = self.begin(campaign_key="camp-live")
+        self.write_output(first)
+        self.close(route, route_file)
+        P.finalize(self.root, cycle_id=first["cycle_id"])
+        route2, route_file2, second = self.begin(intensity="quick", campaign_key="camp-live")
+        self.write_output(second)
+        self.close(route2, route_file2)
+        P.finalize(self.root, cycle_id=second["cycle_id"])
+
+        with self.assertRaises(P.ProducerError) as ctx:
+            P.mark_campaign_superseded(self.root, first["campaign_id"])
+        self.assertEqual(ctx.exception.code, "campaign-has-live-cycles")
+
+        superseded_first = P.mark_cycle_superseded(
+            self.root, first["cycle_id"], superseded_by=[second["cycle_id"]], superseded_event_id="ev_" + "a" * 32)
+        self.assertEqual(superseded_first["state"], "superseded")
+        manifest_before = (Path(first["cycle_dir"]) / "manifest.json").read_bytes()
+
+        with self.assertRaises(P.ProducerError) as ctx:
+            P.mark_campaign_superseded(self.root, first["campaign_id"])
+        self.assertEqual(ctx.exception.code, "campaign-has-live-cycles")
+
+        P.mark_cycle_superseded(
+            self.root, second["cycle_id"], superseded_by=[], superseded_event_id="ev_" + "b" * 32)
+        result = P.mark_campaign_superseded(self.root, first["campaign_id"])
+        self.assertEqual(result["state"], "superseded")
+        self.assertEqual(P.read_campaign(self.root, first["campaign_id"])["state"], "superseded")
+        # The sealed manifest's folded cycle.state is untouched by the side record.
+        self.assertEqual((Path(first["cycle_dir"]) / "manifest.json").read_bytes(), manifest_before)
+        document = json.loads(manifest_before.decode("utf-8"))
+        self.assertEqual(document["cycle"]["state"], "completed")
+        self.assertEqual(P.read_cycle_record(self.root, first["cycle_id"])["state"], "superseded")
+        # A key freed only by supersession cannot be resumed through find_campaign_by_key.
+        self.assertIsNone(P.find_campaign_by_key(self.root, "camp-live"))
+
+
 if __name__ == "__main__":
     unittest.main()

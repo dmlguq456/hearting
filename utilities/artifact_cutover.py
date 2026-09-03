@@ -85,6 +85,9 @@ RESIDUE_CONTAINERS = (
     "notes", "proposals", "dev_logs", "test_logs", "evidence", "release-config",
     "research-alternative", "spec-research-alternative", "routes", "_routes",
 )
+RETIRE_DEFAULT_EXCLUDES = (
+    ".runtime/", "campaigns/", "shared/", "_scratch/", "reviews/", "shards/", "_internal/",
+) + SEALED_EVIDENCE_PATHS
 PRESERVED_SUPPORT_CONTAINERS = ("reviews", "shards", "_internal")
 DECLARED_TOP_LEVEL = frozenset({
     "analysis_project", "research", "spec", "plans", "documents", "experiments", "designs",
@@ -1768,17 +1771,90 @@ def compat_close(root: Path, *, maps: Sequence[Path], approval_receipt_sha256: O
     return body
 
 
-def _load_maps(root: Path) -> List[Tuple[str, Dict[str, str]]]:
+def load_map_state(root: Path) -> Dict[str, Any]:
+    """Pure read of the `compat.json` map chain: presence and drift per row.
+
+    Never mutates and never changes `resolve_legacy`'s silent-skip behavior --
+    write/destructive surfaces (`compat_append`, `retire`) consume this to
+    fail closed instead.
+    """
+    root = Path(root).resolve()
     compat = P._read_json(compat_path(root)) or {}
-    out = []
+    maps: List[Dict[str, Any]] = []
+    missing: List[str] = []
+    drifted: List[str] = []
     for entry in compat.get("maps", []):
-        path = Path(entry["path"])
-        if not path.is_file():
+        raw_path = entry.get("path")
+        path = Path(raw_path)
+        present = path.is_file()
+        recorded_sha256 = entry.get("sha256")
+        sha256 = _sha(path) if present else None
+        sha256_matches = (sha256 == recorded_sha256) if present else None
+        if not present:
+            missing.append(raw_path)
+        elif sha256_matches is False:
+            drifted.append(raw_path)
+        maps.append({
+            "path": raw_path, "present": present, "sha256": sha256,
+            "recorded_sha256": recorded_sha256, "sha256_matches": sha256_matches,
+            "rows": entry.get("rows"), "superseded_by": entry.get("superseded_by"),
+            "superseded_at": entry.get("superseded_at"),
+        })
+    return {"maps": maps, "missing": missing, "drifted": drifted}
+
+
+def compat_append(root: Path, *, maps: Sequence[Path], supersedes: Sequence[str] = (),
+                  approval_receipt_sha256: Optional[str] = None) -> Dict[str, Any]:
+    """D-82: republish `compat.json` with the existing `maps[]` chain preserved
+    byte-for-byte (order, path, sha256, rows) and new map rows appended.  Old
+    map **files** are never opened -- only their recorded existence is
+    checked.  `compatibility_window` is carried over unchanged, so append is
+    allowed even in a closed window."""
+    root = Path(root).resolve()
+    _require_active(root)
+    compat = P._read_json(compat_path(root))
+    if compat is None:
+        raise CutoverError("compat-map-missing", str(compat_path(root)))
+    existing_entries = compat.get("maps", [])
+    still_missing = [e["path"] for e in existing_entries if not Path(e["path"]).is_file()]
+    if still_missing:
+        raise CutoverError("compat-map-missing", still_missing[0])
+    new_rows = []
+    for m in maps:
+        m = Path(m).resolve()
+        if not m.is_file():
+            raise CutoverError("map-missing", str(m))
+        with m.open(encoding="utf-8") as handle:
+            row_count = sum(1 for line in handle if line.strip())
+        new_rows.append({"path": str(m), "sha256": _sha(m), "rows": row_count})
+    new_sha256 = new_rows[-1]["sha256"]
+    supersede_set = set(supersedes)
+    superseded_at = _now()
+    existing_rows = []
+    for entry in existing_entries:
+        row = dict(entry)  # preserves path/sha256/rows bytes exactly; never re-derived
+        if row.get("path") in supersede_set:
+            row["superseded_by"] = new_sha256
+            row["superseded_at"] = superseded_at
+        existing_rows.append(row)
+    body = dict(compat)
+    body["maps"] = existing_rows + new_rows
+    body["approval_receipt_sha256"] = approval_receipt_sha256
+    P._ensure_dir(compat_path(root).parent)
+    P._write_atomic(compat_path(root), P._json_bytes(body), 0o600)
+    return body
+
+
+def _load_maps(root: Path) -> List[Tuple[str, Dict[str, str]]]:
+    state = load_map_state(root)
+    out = []
+    for entry in state["maps"]:
+        if not entry["present"]:
             continue
         table = {}
-        for row in _read_jsonl(path):
+        for row in _read_jsonl(Path(entry["path"])):
             table[row["source_locator"]] = row["target_locator"]
-        out.append((str(path), table))
+        out.append((entry["path"], table))
     return out
 
 
@@ -1854,15 +1930,29 @@ def prd_candidates(root: Path) -> List[str]:
 # ---------------------------------------------------------------------------
 
 
-def retire(root: Path, *, maps: Sequence[Path], backup_root: Path, excludes: Sequence[str],
-           approval_receipt_sha256: Optional[str], dry_run: bool = False) -> Dict[str, Any]:
-    root = Path(root).resolve()
-    _require_active(root)
-    identity = P.artifact_lifecycle.read_root_identity(root)
+def _retire_excludes(root: Path, excludes: Sequence[str]) -> List[str]:
+    """D-82/D-84: default excludes, caller excludes, and every compat-chain map path."""
+    merged = list(RETIRE_DEFAULT_EXCLUDES) + list(excludes)
+    for entry in load_map_state(root)["maps"]:
+        path = Path(entry["path"])
+        try:
+            rel = path.resolve().relative_to(root)
+        except ValueError:
+            continue
+        merged.append(rel.as_posix())
+    seen: set = set()
+    out: List[str] = []
+    for item in merged:
+        if item not in seen:
+            seen.add(item)
+            out.append(item)
+    return out
+
+
+def _retire_plan(root: Path, *, maps: Sequence[Path], excludes: Sequence[str]) -> Dict[str, Any]:
     rows: List[Dict[str, Any]] = []
     for m in maps:
         rows.extend(_read_jsonl(Path(m)))
-    # latest map wins for a source seen more than once: later rows overwrite
     files: Dict[str, List[str]] = {}
     dirs: set = set()
     for row in rows:
@@ -1889,7 +1979,9 @@ def retire(root: Path, *, maps: Sequence[Path], backup_root: Path, excludes: Seq
             continue
         digest = _sha(path)
         match = None
-        for target in targets:
+        # latest map wins: walk the chain from the most recently appended
+        # member back to the oldest, same order resolve_legacy already uses.
+        for target in reversed(targets):
             tpath = root / target
             if tpath.is_file() and not os.path.islink(str(tpath)) and _sha(tpath) == digest:
                 match = target
@@ -1898,6 +1990,65 @@ def retire(root: Path, *, maps: Sequence[Path], backup_root: Path, excludes: Seq
             kept.append({"source": src, "reason": "no-target-with-identical-digest", "targets": targets})
             continue
         verified.append({"source": src, "target": match, "sha256": digest, "size": path.stat().st_size})
+    return {"verified": verified, "kept": kept, "absent": absent, "dirs": dirs}
+
+
+def _validate_retire_approval(approval_path: Path, *, root_id: str, inventory_digest: str) -> Dict[str, Any]:
+    try:
+        approval = json.loads(Path(approval_path).read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError) as exc:
+        raise CutoverError("approval-invalid", str(exc))
+    if approval.get("authorized") is not True:
+        raise CutoverError("approval-not-authorized")
+    body = approval.get("body", approval)
+    if body.get("root_id") != root_id:
+        raise CutoverError("approval-root-mismatch")
+    if body.get("retire_inventory_sha256") != inventory_digest:
+        raise CutoverError("approval-stale", "retire-inventory-digest")
+    return approval
+
+
+def retire_approval_package(root: Path, *, maps: Sequence[Path], backup_root: Path,
+                            excludes: Sequence[str], receipt_sha256: str,
+                            retire_inventory: Path) -> Dict[str, Any]:
+    """D-84 approval package: seals root_id, repo_path, the newest map path/sha256,
+    the ordered retire inventory and its digest, the exclude list, the backup
+    root, and the user receipt sha256.  Two calls over unchanged state are
+    byte-identical."""
+    root = Path(root).resolve()
+    identity = P.artifact_lifecycle.read_root_identity(root)
+    if identity is None:
+        raise CutoverError("root-identity-missing")
+    effective_excludes = _retire_excludes(root, excludes)
+    computed = _retire_plan(root, maps=maps, excludes=effective_excludes)
+    verified = computed["verified"]
+    inventory_digest = "sha256:" + hashlib.sha256(_canonical_bytes(verified)).hexdigest()
+    _write_jsonl(Path(retire_inventory), verified)
+    new_map = Path(list(maps)[-1]).resolve()
+    body = {
+        "schema_version": 1, "kind": "w7g-retire-approval",
+        "root_id": identity.artifact_root_id, "repo_path": str(root),
+        "new_map_path": str(new_map), "new_map_sha256": _sha(new_map),
+        "retire_inventory_path": str(Path(retire_inventory).resolve()),
+        "retire_inventory_sha256": inventory_digest,
+        "excluded_prefixes": sorted(effective_excludes),
+        "backup_root": str(Path(backup_root).expanduser().resolve()),
+        "receipt_sha256": receipt_sha256,
+    }
+    return {"schema_version": 1, "kind": "w7g-retire-approval-package", "authorized": False, "body": body}
+
+
+def retire(root: Path, *, maps: Sequence[Path], backup_root: Path, excludes: Sequence[str],
+           approval_receipt_sha256: Optional[str], dry_run: bool = False,
+           approval_path: Optional[Path] = None,
+           crash_after_phase: Optional[str] = None) -> Dict[str, Any]:
+    root = Path(root).resolve()
+    _require_active(root)
+    identity = P.artifact_lifecycle.read_root_identity(root)
+    effective_excludes = _retire_excludes(root, excludes)
+    computed = _retire_plan(root, maps=maps, excludes=effective_excludes)
+    verified, kept, absent = computed["verified"], computed["kept"], computed["absent"]
+    inventory_sha256 = "sha256:" + hashlib.sha256(_canonical_bytes(verified)).hexdigest()
     stamp = _stamp()
     run_dir = migrations_dir(root) / f"{stamp}-retirement"
     backup_dir = Path(backup_root).resolve() / identity.artifact_root_id / stamp
@@ -1905,14 +2056,17 @@ def retire(root: Path, *, maps: Sequence[Path], backup_root: Path, excludes: Seq
         "schema_version": 1, "kind": "w7c-source-retirement", "created_at": _now(), "dry_run": dry_run,
         "artifact_root": str(root), "run_dir": str(run_dir), "backup_dir": str(backup_dir),
         "approval_receipt_sha256": approval_receipt_sha256, "map_files": [str(Path(m).resolve()) for m in maps],
-        "excluded_prefixes": list(excludes), "verified_files": len(verified), "kept_files": len(kept),
-        "already_absent": absent, "kept": kept[:500],
+        "excluded_prefixes": list(effective_excludes), "verified_files": len(verified), "kept_files": len(kept),
+        "already_absent": absent, "kept": kept[:500], "inventory_sha256": inventory_sha256,
     }
     if dry_run:
         report["verified_sample"] = verified[:20]
         return report
     if Path(backup_root).resolve() == root or str(Path(backup_root).resolve()).startswith(str(root) + "/"):
         raise CutoverError("backup-root-inside-artifact-root", str(backup_root))
+    if approval_path is None:
+        raise CutoverError("retire-approval-required")
+    _validate_retire_approval(Path(approval_path), root_id=identity.artifact_root_id, inventory_digest=inventory_sha256)
     run_dir.mkdir(parents=True, exist_ok=False)
     backup_dir.mkdir(parents=True, exist_ok=False)
     archive = backup_dir / "retired-sources.tar.gz"
@@ -1927,6 +2081,8 @@ def retire(root: Path, *, maps: Sequence[Path], backup_root: Path, excludes: Seq
             "file_count": len(verified), "byte_size": sum(r["size"] for r in verified), "artifact_root_id": identity.artifact_root_id,
             "created_at": _now()}
     P._write_atomic(backup_dir / "backup-seal.json", P._json_bytes(seal))
+    if crash_after_phase == "backup-sealed":
+        raise CutoverError("crash-fixture", "backup-sealed")
     # verify the archive before deleting anything
     with tarfile.open(str(archive), "r:gz") as tar:
         names = set(tar.getnames())
@@ -1941,14 +2097,14 @@ def retire(root: Path, *, maps: Sequence[Path], backup_root: Path, excludes: Seq
                         "backup_archive": str(archive), "commit_state": "committed"})
     # prune emptied directories: mapped source dirs plus their ancestors inside the legacy buckets
     pruned = []
-    candidates = set(dirs)
+    candidates = set(computed["dirs"])
     for row in verified:
         p = os.path.dirname(row["source"])
         while p:
             candidates.add(p)
             p = os.path.dirname(p)
     for d in sorted(candidates, key=lambda s: -s.count("/")):
-        if _excluded(d, excludes) or d.split("/", 1)[0] in ("campaigns", "shared") or d.startswith("."):
+        if _excluded(d, effective_excludes) or d.split("/", 1)[0] in ("campaigns", "shared") or d.startswith("."):
             continue
         path = root / d
         if path.is_dir() and not os.path.islink(str(path)):
@@ -2006,6 +2162,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     p.add_argument("--artifact-root", required=True)
     p.add_argument("--map", action="append", required=True)
     p.add_argument("--approval-receipt-sha256")
+    p = sub.add_parser("compat-append")
+    p.add_argument("--artifact-root", required=True)
+    p.add_argument("--map", action="append", required=True)
+    p.add_argument("--supersedes", action="append", default=[])
+    p.add_argument("--approval-receipt-sha256")
     p = sub.add_parser("resolve-legacy")
     p.add_argument("--artifact-root", required=True)
     p.add_argument("--path")
@@ -2017,6 +2178,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     p.add_argument("--exclude", action="append", default=[])
     p.add_argument("--approval-receipt-sha256")
     p.add_argument("--dry-run", action="store_true")
+    p.add_argument("--approval")
+    p = sub.add_parser("retire-approval-package")
+    p.add_argument("--artifact-root", required=True)
+    p.add_argument("--map", action="append", required=True)
+    p.add_argument("--backup-root", required=True)
+    p.add_argument("--exclude", action="append", default=[])
+    p.add_argument("--receipt-sha256", required=True)
+    p.add_argument("--retire-inventory", required=True)
+    p.add_argument("--output")
     p = sub.add_parser("route-sweep")
     p.add_argument("--artifact-root", required=True)
     p.add_argument("--jobs", action="append", default=[])
@@ -2068,6 +2238,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                                   spec_reference=args.spec_reference, analysis_reference=args.analysis_reference)
         elif args.command == "compat-close":
             result = compat_close(root, maps=[Path(m) for m in args.map], approval_receipt_sha256=args.approval_receipt_sha256)
+        elif args.command == "compat-append":
+            result = compat_append(root, maps=[Path(m) for m in args.map], supersedes=args.supersedes,
+                                   approval_receipt_sha256=args.approval_receipt_sha256)
         elif args.command == "resolve-legacy":
             if args.prd_candidates:
                 for line in prd_candidates(root):
@@ -2080,7 +2253,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             return OK if result["resolution"] != "unresolved" else BLOCKED
         elif args.command == "retire":
             result = retire(root, maps=[Path(m) for m in args.map], backup_root=Path(args.backup_root),
-                            excludes=args.exclude, approval_receipt_sha256=args.approval_receipt_sha256, dry_run=args.dry_run)
+                            excludes=args.exclude, approval_receipt_sha256=args.approval_receipt_sha256,
+                            dry_run=args.dry_run, approval_path=Path(args.approval) if args.approval else None)
+        elif args.command == "retire-approval-package":
+            package = retire_approval_package(root, maps=[Path(m) for m in args.map], backup_root=Path(args.backup_root),
+                                              excludes=args.exclude, receipt_sha256=args.receipt_sha256,
+                                              retire_inventory=Path(args.retire_inventory))
+            sys.stdout.buffer.write(_emit_package(package, Path(args.output) if args.output else None))
+            return OK
         elif args.command == "route-sweep":
             package = route_sweep_package(
                 root,

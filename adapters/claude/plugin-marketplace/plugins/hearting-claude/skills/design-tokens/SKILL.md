@@ -21,7 +21,7 @@ Follow an explicit artifact or audience language when provided. Otherwise, write
 
 ## Resolve and Check State
 
-Find `design_state.yaml` under `<artifact-root>/designs/<name>/` or `<artifact-root>/spec/design/`.
+Find `design_state.yaml` under `$AGENT_ARTIFACT_OUTPUT_DIR/designs/<name>/` or `$AGENT_ARTIFACT_OUTPUT_DIR/spec/design/`.
 
 - Require `phases.refs: done`; do not invent tokens without a brief.
 - Read `00_init/asset_inventory.md` and locate existing `tokens.css`, `tailwind.config.ts`, `app/globals.css`, or equivalent project-owned token files.

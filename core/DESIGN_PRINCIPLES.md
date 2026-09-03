@@ -155,8 +155,8 @@ each capability's pause-option contract enforce this principle.
 
 Discover inputs automatically from persistent artifacts in the project context:
 
-- `<artifact-root>/analysis_project/{code,paper,doc}/*` from `analyze-project`;
-- `<artifact-root>/research/<topic>/*` from `autopilot-research`;
+- `$AGENT_ARTIFACT_OUTPUT_DIR/analysis_project/{code,paper,doc}/*` from `analyze-project`;
+- `$AGENT_ARTIFACT_OUTPUT_DIR/research/<topic>/*` from `autopilot-research`;
 - external raw inputs first persisted through `analyze-project --mode code|paper|doc`, then found through contextual matching.
 
 The assumption that one session works in one cwd reduces cognitive cost and increases artifact reuse. Cross-project work changes into the other repository and uses a separate session.

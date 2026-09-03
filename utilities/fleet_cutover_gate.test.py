@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""D-75 tests for `fleet_cutover_gate.py`.
+"""D-75/D-85 tests for `fleet_cutover_gate.py`.
 
 Every fixture uses isolated temporary repos with their own `.agent_reports`;
 the real fleet, canonical root, and registry are never touched.
 """
 import ast
 import contextlib
+import importlib.util
 import io
 import json
 import os
@@ -18,8 +19,20 @@ from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+import artifact_cutover as C  # noqa: E402
 import artifact_producer as P  # noqa: E402
+import artifact_resplit as W  # noqa: E402
 import fleet_cutover_gate as G  # noqa: E402
+
+# `artifact_resplit.test.py` (S2) owns the one-sealed-lump fixture builder
+# (`Fixture`). Its filename has a double `.test.py` extension, so it cannot be
+# imported by name -- load it the same way `artifact_cutover.test.py` loads
+# `capability-route.py`.
+_WF_SPEC = importlib.util.spec_from_file_location(
+    "resplit_fixture_for_gate_test", Path(__file__).with_name("artifact_resplit.test.py"))
+_WF = importlib.util.module_from_spec(_WF_SPEC)
+_WF_SPEC.loader.exec_module(_WF)
+WFixture = _WF.Fixture
 
 REPO_ID = "repo_" + "a" * 32
 ROOT_ID = "root_" + "b" * 32
@@ -322,6 +335,270 @@ class StructureTest(unittest.TestCase):
             if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name) and node.value.id == "P":
                 used.add(node.attr)
         self.assertEqual(used & forbidden, set())
+
+    def test_a16_7_reason_tokens_unchanged(self):
+        source = Path(G.__file__).read_text(encoding="utf-8")
+        self.assertIn('"legacy-top-level-write-denied"', source)
+        self.assertIn('"shared-revision-immutable"', source)
+
+
+# ---------------------------------------------------------------------------
+# A-16.7 -- D-85 gate extension on a real one-sealed-lump fixture (reuses S2's
+# `Fixture` from `artifact_resplit.test.py`; every root is a fresh tempdir).
+# ---------------------------------------------------------------------------
+
+
+class ResplitGateTests(WFixture, unittest.TestCase):
+    def _migrate_run_dir(self):
+        for run in W.C.migrations_dir(self.root).iterdir():
+            if run.is_dir() and "-resplit-" not in run.name and (run / "report.json").is_file():
+                return run
+        raise AssertionError("migrate run dir not found")
+
+    def _approve_retire(self, dry_run_report):
+        n = getattr(self, "_retire_approval_ordinal", 0) + 1
+        self._retire_approval_ordinal = n
+        path = Path(self._tmp.name) / f"retire-approval-{n}.json"
+        path.write_text(json.dumps({
+            "authorized": True,
+            "body": {
+                "root_id": P.artifact_lifecycle.read_root_identity(self.root).artifact_root_id,
+                "retire_inventory_sha256": dry_run_report["inventory_sha256"],
+            },
+        }))
+        return path
+
+    def _snapshot(self):
+        return sorted((str(p), p.stat().st_size, p.stat().st_mtime) for p in self.root.rglob("*") if p.is_file())
+
+    # -- lumped_cycles_remaining / lump_index_state ---------------------
+
+    def test_a16_7_one_remaining_lump_is_incomplete(self):
+        self.r1()
+        fields = G._resplit_fields(self.root)
+        self.assertEqual(fields["lumped_cycles_remaining"], 1)
+        self.assertEqual(fields["lump_index_state"], "ok")
+        verdict, blocking = G.evaluate(
+            [{"repo_path": "x", "state": "active", "probe": {"passed": True}, "waiver": None, **fields}],
+            waived=False, require_resplit=True)
+        self.assertEqual(verdict, "incomplete")
+        self.assertEqual(blocking[0]["reason"], "resplit-incomplete")
+
+    def test_a16_7_zero_lumps_and_retired_is_complete(self):
+        self.r1()
+        migrate_run = self._migrate_run_dir()
+        w7c_map = migrate_run / "compatibility-map.jsonl"
+        backup = Path(self._tmp.name) / "backup-a16-7"
+        dry = W.C.retire(self.root, maps=[w7c_map], backup_root=backup, excludes=[],
+                         approval_receipt_sha256=None, dry_run=True)
+        approval_path = self._approve_retire(dry)
+        W.C.retire(self.root, maps=[w7c_map], backup_root=backup, excludes=[],
+                  approval_receipt_sha256="y" * 64, approval_path=approval_path)
+        route, route_file = self.route()
+        self.r2(route_file)
+        self.r3()
+        fields = G._resplit_fields(self.root)
+        self.assertEqual(fields["lumped_cycles_remaining"], 0)
+        self.assertEqual(fields["lump_index_state"], "ok")
+        self.assertTrue(fields["legacy_top_level_retired"])
+        verdict, blocking = G.evaluate(
+            [{"repo_path": "x", "state": "active", "probe": {"passed": True}, "waiver": None, **fields}],
+            waived=False, require_resplit=True)
+        self.assertEqual(verdict, "complete")
+        self.assertEqual(blocking, [])
+
+    def test_a16_7_invalid_lump_report_is_blocking(self):
+        src = (self._migrate_run_dir() / "report.json")
+        dup = W.C.migrations_dir(self.root) / "20260101T000000Z-dup"
+        dup.mkdir()
+        (dup / "report.json").write_bytes(src.read_bytes())
+        fields = G._resplit_fields(self.root)
+        self.assertEqual(fields["lump_index_state"], "lump-report-invalid")
+        self.assertIsNone(fields["lumped_cycles_remaining"])
+        verdict, blocking = G.evaluate(
+            [{"repo_path": "x", "state": "active", "probe": {"passed": True}, "waiver": None, **fields}],
+            waived=False, require_resplit=True)
+        self.assertEqual(verdict, "incomplete")
+        self.assertEqual(blocking[0]["reason"], "resplit-incomplete")
+
+    def test_a16_7_resplit_hold_surfaced_and_blocking(self):
+        self.r1()
+        route, route_file = self.route()
+        with self.assertRaises(W.ResplitError):
+            self.r2(route_file, crash_at="r2:after-first-cycle-rename")
+        fields = G._resplit_fields(self.root)
+        self.assertEqual(fields["lump_index_state"], "resplit-in-progress")
+        self.assertIsNotNone(fields["resplit_hold"])
+        self.assertIsNone(fields["lumped_cycles_remaining"])
+        verdict, blocking = G.evaluate(
+            [{"repo_path": "x", "state": "active", "probe": {"passed": True}, "waiver": None, **fields}],
+            waived=False, require_resplit=True)
+        self.assertEqual(verdict, "incomplete")
+        self.assertEqual(blocking[0]["reason"], "resplit-incomplete")
+
+    def test_a16_7_event_only_supersession_is_divergent_blocking(self):
+        self.run_full()
+        record_path = P.cycle_record_path(self.root, self.lump_cycle_id)
+        record = json.loads(record_path.read_text())
+        record["state"] = "sealed"
+        record.pop("superseded_by", None)
+        record.pop("superseded_event_id", None)
+        record_path.write_text(json.dumps(record))
+        fields = G._resplit_fields(self.root)
+        self.assertEqual(fields["lump_index_state"], "supersession-record-event-divergent")
+        self.assertIsNone(fields["lumped_cycles_remaining"])
+        self.assertTrue(fields["supersession_divergent"])
+
+    def test_a16_7_record_only_supersession_is_divergent_blocking(self):
+        self.run_full()
+        run_dir = W._find_run_dir(self.root, self.lump_cycle_id)
+        (run_dir / "events.jsonl").write_text("")
+        fields = G._resplit_fields(self.root)
+        self.assertEqual(fields["lump_index_state"], "supersession-record-event-divergent")
+        self.assertIsNone(fields["lumped_cycles_remaining"])
+        self.assertTrue(fields["supersession_divergent"])
+
+    # -- legacy_top_level_retired ----------------------------------------
+
+    def test_a16_7_absent_inventory_is_retired_false(self):
+        self.assertIsNone(W.sealed_retire_inventory(self.root))
+        self.assertFalse(G.legacy_top_level_retired(self.root))
+
+    def test_a16_7_empty_sealed_inventory_yields_retired_true_without_approval(self):
+        for rel in ("plans/2026-04-01_alpha/plan.md", "plans/2026-04-01_alpha/final_report.md",
+                    "plans/2026-04-02_beta/plan.md", "experiments/2026-04-03_exp/run.md",
+                    "experiments/2026-04-03_exp/metrics.json", "research/topic-x/report.md",
+                    "plans/stage-sessions/rt-aaaaaaaaaaaaaaaa/session.json",
+                    "spec/prd.md", "analysis_project/overview.md"):
+            (self.root / rel).unlink()
+        self.r1()
+        inv = W.sealed_retire_inventory(self.root)
+        self.assertEqual(inv["entry_count"], 0)
+        self.assertTrue(G.legacy_top_level_retired(self.root))
+
+    def test_a16_7_marker_bound_empty_inventory_is_the_only_true(self):
+        # a fresh scan (no admitted marker yet) never counts as sealed -- only
+        # the run whose `admitted.marker.json` verifies is read.
+        self.assertIsNone(W.sealed_retire_inventory(self.root))
+        run_dir = W.C.migrations_dir(self.root) / f"{W.C._stamp()}-resplit-{self.lump_cycle_id}"
+        run_dir.mkdir(parents=True)
+        admission = run_dir / "admission"
+        admission.mkdir()
+        empty_inv = {"schema_version": 1, "kind": "w7g-retire-inventory",
+                    "artifact_root_id": P.artifact_lifecycle.read_root_identity(self.root).artifact_root_id,
+                    "sealed_at": W.C._now(), "existence_filter": "applied-at-seal",
+                    "map_files": [], "excludes": [], "entries": [], "entry_count": 0}
+        empty_inv["digest"] = W._canonical_digest(empty_inv)
+        P._write_atomic(admission / "retire-inventory.json", P._json_bytes(empty_inv))
+        # no admitted.marker.json published -> unbound, still not sealed
+        self.assertIsNone(W.sealed_retire_inventory(self.root))
+        self.assertFalse(G.legacy_top_level_retired(self.root))
+
+    def test_a16_7_foreign_root_empty_inventory_is_retired_false(self):
+        run_dir = W.C.migrations_dir(self.root) / f"{W.C._stamp()}-resplit-{self.lump_cycle_id}"
+        admission = run_dir / "admission"
+        admission.mkdir(parents=True)
+        for name in W.ADMISSION_FILES:
+            P._write_atomic(admission / name, b"{}")
+        foreign_inv = {"schema_version": 1, "kind": "w7g-retire-inventory",
+                       "artifact_root_id": "root_" + "f" * 32,
+                       "sealed_at": W.C._now(), "existence_filter": "applied-at-seal",
+                       "map_files": [], "excludes": [], "entries": [], "entry_count": 0}
+        foreign_inv["digest"] = W._canonical_digest(foreign_inv)
+        P._write_atomic(admission / "retire-inventory.json", P._json_bytes(foreign_inv))
+        marker = {"schema_version": 1, "kind": "w7g-admission-marker", "plan_sha256": "sha256:" + "0" * 64,
+                  "bundle_digest": W._bundle_digest(admission), "published_at": W.C._now()}
+        P._write_exclusive(run_dir / "admitted.marker.json", P._json_bytes(marker), 0o600)
+        self.assertIsNone(W.sealed_retire_inventory(self.root))
+        self.assertFalse(G.legacy_top_level_retired(self.root))
+
+    def test_a16_7_malformed_seal_is_retired_false(self):
+        run_dir = W.C.migrations_dir(self.root) / f"{W.C._stamp()}-resplit-{self.lump_cycle_id}"
+        admission = run_dir / "admission"
+        admission.mkdir(parents=True)
+        for name in W.ADMISSION_FILES:
+            P._write_atomic(admission / name, b"{}")
+        bad_inv = {"schema_version": 1, "kind": "w7g-retire-inventory",
+                  "artifact_root_id": P.artifact_lifecycle.read_root_identity(self.root).artifact_root_id,
+                  "sealed_at": W.C._now(), "existence_filter": "applied-at-seal",
+                  "map_files": [], "excludes": [], "entries": [], "entry_count": 0, "digest": "sha256:" + "0" * 64}
+        P._write_atomic(admission / "retire-inventory.json", P._json_bytes(bad_inv))
+        marker = {"schema_version": 1, "kind": "w7g-admission-marker", "plan_sha256": "sha256:" + "0" * 64,
+                  "bundle_digest": W._bundle_digest(admission), "published_at": W.C._now()}
+        P._write_exclusive(run_dir / "admitted.marker.json", P._json_bytes(marker), 0o600)
+        self.assertIsNone(W.sealed_retire_inventory(self.root))
+        self.assertFalse(G.legacy_top_level_retired(self.root))
+
+    def test_a16_7_wrong_kind_empty_inventory_is_retired_false(self):
+        run_dir = W.C.migrations_dir(self.root) / f"{W.C._stamp()}-resplit-{self.lump_cycle_id}"
+        admission = run_dir / "admission"
+        admission.mkdir(parents=True)
+        for name in W.ADMISSION_FILES:
+            P._write_atomic(admission / name, b"{}")
+        wrong_kind = {"schema_version": 1, "kind": "w7g-loose-inventory",
+                     "artifact_root_id": P.artifact_lifecycle.read_root_identity(self.root).artifact_root_id,
+                     "sealed_at": W.C._now(), "existence_filter": "applied-at-seal",
+                     "map_files": [], "excludes": [], "entries": [], "entry_count": 0}
+        wrong_kind["digest"] = W._canonical_digest(wrong_kind)
+        P._write_atomic(admission / "retire-inventory.json", P._json_bytes(wrong_kind))
+        marker = {"schema_version": 1, "kind": "w7g-admission-marker", "plan_sha256": "sha256:" + "0" * 64,
+                  "bundle_digest": W._bundle_digest(admission), "published_at": W.C._now()}
+        P._write_exclusive(run_dir / "admitted.marker.json", P._json_bytes(marker), 0o600)
+        self.assertIsNone(W.sealed_retire_inventory(self.root))
+        self.assertFalse(G.legacy_top_level_retired(self.root))
+
+    def test_a16_7_markerless_empty_file_is_retired_false(self):
+        run_dir = W.C.migrations_dir(self.root) / f"{W.C._stamp()}-resplit-{self.lump_cycle_id}"
+        admission = run_dir / "admission"
+        admission.mkdir(parents=True)
+        (admission / "retire-inventory.json").write_text("")
+        self.assertIsNone(W.sealed_retire_inventory(self.root))
+        self.assertFalse(G.legacy_top_level_retired(self.root))
+
+    # -- invariance / regression ------------------------------------------
+
+    def test_a16_7_post_cutover_writes_and_sealed_evidence_do_not_flip_predicate(self):
+        self.r1()
+        migrate_run = self._migrate_run_dir()
+        w7c_map = migrate_run / "compatibility-map.jsonl"
+        backup = Path(self._tmp.name) / "backup-a16-7b"
+        dry = W.C.retire(self.root, maps=[w7c_map], backup_root=backup, excludes=[],
+                         approval_receipt_sha256=None, dry_run=True)
+        approval_path = self._approve_retire(dry)
+        W.C.retire(self.root, maps=[w7c_map], backup_root=backup, excludes=[],
+                  approval_receipt_sha256="y" * 64, approval_path=approval_path)
+        route, route_file = self.route()
+        self.r2(route_file)
+        self.r3()
+        before = G.legacy_top_level_retired(self.root)
+        self.assertTrue(before)
+        (self.root / "notes" / "post-cutover.md").parent.mkdir(parents=True, exist_ok=True)
+        (self.root / "notes" / "post-cutover.md").write_text("new evidence, unrelated to retirement\n")
+        after = G.legacy_top_level_retired(self.root)
+        self.assertEqual(before, after)
+
+    def test_a16_7_plain_complete_and_a15_3_unchanged(self):
+        self.r1()
+        route, route_file = self.route()
+        with self.assertRaises(W.ResplitError):
+            self.r2(route_file, crash_at="r2:after-first-cycle-rename")
+        fields = G._resplit_fields(self.root)
+        self.assertIsNotNone(fields["resplit_hold"])
+        row = {"repo_path": "x", "state": "active", "probe": {"passed": True}, "waiver": None, **fields}
+        verdict, blocking = G.evaluate([row], waived=False)
+        self.assertEqual(verdict, "complete")
+        self.assertEqual(blocking, [])
+        verdict, blocking = G.evaluate([row], waived=False, require_resplit=False)
+        self.assertEqual(verdict, "complete")
+
+    def test_a16_7_gate_mutates_nothing(self):
+        self.r1()
+        before = self._snapshot()
+        G._resplit_fields(self.root)
+        G.legacy_top_level_retired(self.root)
+        W.scan_lumps(self.root)
+        after = self._snapshot()
+        self.assertEqual(before, after)
 
 
 if __name__ == "__main__":

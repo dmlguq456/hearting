@@ -21,7 +21,7 @@ Follow an explicit artifact or audience language when provided. Otherwise, write
 
 ## Resolve and Check State
 
-Find `design_state.yaml` under `<artifact-root>/designs/<name>/` or the app's `design/` directory.
+Find `design_state.yaml` under `$AGENT_ARTIFACT_OUTPUT_DIR/designs/<name>/` or the app's `design/` directory.
 
 - Require `phases.tokens: done` unless scope is `icon` or `diagram`.
 - Require readable `01_refs/brief.md`.

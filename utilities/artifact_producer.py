@@ -56,6 +56,14 @@ CONTRACT = "artifact-producer/v1"
 ALGORITHM_VERSION = "w7c-producer/v1"
 OK, BLOCKED, USAGE = 0, 65, 64
 
+# D-86: the one-line hint attached to a legacy-top-level-write-denied result.
+# The `reason` token itself (compared verbatim by fleet_cutover_gate's
+# negative probe) never changes; this hint rides in a separate field/detail.
+LEGACY_WRITE_HINT = "run `artifact_producer.py begin --route <route file>` first, then retry"
+
+# D-81: campaign.json `related[]` row kinds (producer-internal API only).
+RELATED_KINDS = ("related", "precedes", "supersedes")
+
 COMPAT_OVERRIDE_NAME = "compat-override.json"
 INACTIVE_FALLBACK_ENV = "AGENT_ARTIFACT_INACTIVE_FALLBACK"
 ROOT_CLASSES = ("active", "inactive-with-legacy", "inactive-empty", "malformed")
@@ -716,6 +724,7 @@ def begin(
     goal: Optional[str] = None,
     parent_cycle_id: Optional[str] = None,
     require_cycle: bool = False,
+    shared_reference_pins: Optional[Sequence[Mapping[str, Any]]] = None,
     allocator: Optional[artifact_identity.IdAllocator] = None,
     now: Optional[float] = None,
 ) -> Dict[str, Any]:
@@ -840,6 +849,8 @@ def begin(
             "manifest_digest": None,
             "title": title or f"{capability} {intensity} cycle",
         }
+        if shared_reference_pins is not None:
+            record["shared_reference_pins"] = [dict(pin) for pin in shared_reference_pins]
         target = cycle_dir(root, campaign["campaign_id"], new_cycle_id)
         if target.exists():
             raise ProducerError("cycle-dir-exists", str(target))
@@ -929,6 +940,77 @@ def _choose_primary(rows: Sequence[Tuple[str, bytes]], primary: Optional[str]) -
             if rel.endswith("/" + wanted) or rel == "artifacts/" + wanted:
                 return rel
     return names[0] if names else None
+
+
+def _shared_pin_reference_path(root: Path, kind: str, ref_id: str) -> Path:
+    return _reference_path(root, kind, ref_id)
+
+
+def _shared_pin_revision_path(root: Path, kind: str, ref_id: str, rrev_id: str) -> Path:
+    return Path(root) / "shared" / kind / ref_id / "revisions" / rrev_id / "revision.json"
+
+
+def _resolve_shared_pin(
+    root: Path, pin: Mapping[str, Any], provenance_fn: Optional[Any] = None,
+) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    """D-78-a: resolve one `shared_reference_pins[]` entry from disk.
+
+    Returns (shared_reference_row, shared_reference_revision_row). Raises a
+    typed `ProducerError` when the pin is malformed or does not resolve --
+    the finalize caller must never silently drop a pin (D-78-a: unresolved or
+    digest-mismatched pins hold the seal, they do not fall back to `[]`).
+    """
+    if not isinstance(pin, Mapping):
+        raise ProducerError("shared-reference-pin-invalid", "pin-not-an-object")
+    kind = pin.get("kind")
+    ref_id = pin.get("shared_reference_id")
+    rrev_id = pin.get("shared_reference_revision_id")
+    expected_digest = pin.get("content_digest")
+    if kind not in SHARED_KINDS:
+        raise ProducerError("shared-reference-pin-invalid", f"kind:{kind}")
+    if not isinstance(ref_id, str) or not artifact_identity.is_well_formed(ref_id, "shared_reference"):
+        raise ProducerError("shared-reference-pin-invalid", f"shared_reference_id:{ref_id}")
+    if not isinstance(rrev_id, str) or not artifact_identity.is_well_formed(rrev_id, "shared_reference_revision"):
+        raise ProducerError("shared-reference-pin-invalid", f"shared_reference_revision_id:{rrev_id}")
+    if expected_digest is not None and not isinstance(expected_digest, str):
+        raise ProducerError("shared-reference-pin-invalid", "content_digest")
+    reference = _read_json(_shared_pin_reference_path(root, kind, ref_id))
+    if reference is None:
+        raise ProducerError("shared-reference-pin-unresolved", f"reference:{kind}:{ref_id}")
+    revision = _read_json(_shared_pin_revision_path(root, kind, ref_id, rrev_id))
+    if revision is None:
+        raise ProducerError("shared-reference-pin-unresolved", f"revision:{kind}:{ref_id}:{rrev_id}")
+    content_digest = revision.get("content_digest")
+    if not isinstance(content_digest, str):
+        raise ProducerError("shared-reference-pin-unresolved", f"revision-digest:{kind}:{ref_id}:{rrev_id}")
+    if expected_digest is not None and expected_digest != content_digest:
+        raise ProducerError("shared-reference-pin-digest-mismatch", f"{ref_id}:{rrev_id}")
+    ref_row = {
+        "shared_reference_id": ref_id, "kind": reference.get("kind"),
+        "title": str(reference.get("title") or ""),
+    }
+    rev_row: Dict[str, Any] = {
+        "shared_reference_revision_id": rrev_id, "shared_reference_id": ref_id,
+        "content_digest": content_digest, "updated_at": revision.get("created_on"),
+    }
+    if provenance_fn is not None:
+        rev_row["provenance"] = provenance_fn(content_digest)
+    return ref_row, rev_row
+
+
+def validate_shared_reference_pins(root: Path, pins: Sequence[Mapping[str, Any]]) -> List[Dict[str, Any]]:
+    """Pure D-78-a validation (no manifest, no provenance) -- R2 calls this
+    before finalize so an unresolved pin holds early. Returns a list of
+    `{"index", "code", "detail"}` violation rows; empty means every pin
+    resolves."""
+    root = Path(root).resolve()
+    violations: List[Dict[str, Any]] = []
+    for i, pin in enumerate(pins):
+        try:
+            _resolve_shared_pin(root, pin)
+        except ProducerError as exc:
+            violations.append({"index": i, "code": exc.code, "detail": exc.detail})
+    return violations
 
 
 def build_manifest(
@@ -1022,6 +1104,17 @@ def build_manifest(
             "provenance": provenance(cycle_digest), "evidence_ids": [], "payload": {},
         })
         routes_row["terminal_evidence_id"] = terminal_event_id
+    # D-78-a: pins are the sole source of shared_references[]/shared_reference_revisions[].
+    # No pins => both stay `[]` and the manifest bytes are unchanged from before this feature.
+    shared_references: List[Dict[str, Any]] = []
+    shared_reference_revisions: List[Dict[str, Any]] = []
+    seen_shared_reference_ids: set = set()
+    for pin in record.get("shared_reference_pins") or []:
+        ref_row, rev_row = _resolve_shared_pin(root, pin, provenance)
+        if ref_row["shared_reference_id"] not in seen_shared_reference_ids:
+            shared_references.append(ref_row)
+            seen_shared_reference_ids.add(ref_row["shared_reference_id"])
+        shared_reference_revisions.append(rev_row)
     document = {
         "schema_version": 2, "manifest_kind": "artifact.cycle",
         "manifest_id": man_id, "manifest_revision_id": mrev_id,
@@ -1042,7 +1135,7 @@ def build_manifest(
             "state": cycle_state,
         },
         "artifacts": artifacts, "artifact_revisions": revisions,
-        "shared_references": [], "shared_reference_revisions": [],
+        "shared_references": shared_references, "shared_reference_revisions": shared_reference_revisions,
         "routes": [routes_row], "events": events,
         "producer": {
             "producer_id": record["producer_id"], "contract_version": artifact_manifest.CONTRACT_VERSION,
@@ -1634,6 +1727,122 @@ def admit_shared(
 
 
 # ---------------------------------------------------------------------------
+# campaign relationships and supersession side records (D-81)
+# ---------------------------------------------------------------------------
+
+
+def _find_campaign_by_key_any_state(root: Path, key: str) -> Optional[Dict[str, Any]]:
+    """Like `find_campaign_by_key`, but not restricted to `state == "active"` --
+    a `related[]` row may point at a campaign that is already superseded."""
+    campaigns = Path(root) / "campaigns"
+    if not campaigns.is_dir():
+        return None
+    for entry in sorted(campaigns.iterdir(), key=lambda p: p.name):
+        record = _read_json(entry / "campaign.json")
+        if record and record.get("key") == key:
+            return record
+    return None
+
+
+def validate_related(root: Path, related: Sequence[Mapping[str, Any]]) -> List[Dict[str, Any]]:
+    """D-81 pure validation of `campaign.json` `related[]` rows -- no write.
+    Returns a list of `{"index", "code", "detail"}` violation rows; empty
+    means every row resolves."""
+    root = Path(root).resolve()
+    violations: List[Dict[str, Any]] = []
+    for i, row in enumerate(related):
+        if not isinstance(row, Mapping):
+            violations.append({"index": i, "code": "campaign-related-invalid", "detail": "not-an-object"})
+            continue
+        kind = row.get("kind")
+        if kind not in RELATED_KINDS:
+            violations.append({"index": i, "code": "campaign-related-invalid", "detail": f"kind:{kind}"})
+            continue
+        campaign_id = row.get("campaign_id")
+        key = row.get("key")
+        if not campaign_id and not key:
+            violations.append({"index": i, "code": "campaign-related-invalid",
+                               "detail": "missing-campaign_id-and-key"})
+            continue
+        found = read_campaign(root, campaign_id) if campaign_id else None
+        if found is None and key:
+            found = _find_campaign_by_key_any_state(root, key)
+        if found is None:
+            violations.append({"index": i, "code": "campaign-related-unresolved",
+                               "detail": str(campaign_id or key)})
+    return violations
+
+
+def set_campaign_related(root: Path, campaign_id: str, *, related: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
+    """D-81: producer-internal API. `campaigns/<camp>/campaign.json` is the
+    `campaign-record-machine-managed` write surface -- no general writer, hook,
+    or agent may call this."""
+    root = Path(root).resolve()
+    violations = validate_related(root, related)
+    if violations:
+        first = violations[0]
+        raise ProducerError(first["code"], first["detail"])
+    lock_fd = artifact_admission._acquire_lock(root, artifact_admission.LOCK_TIMEOUT_DEFAULT)
+    try:
+        campaign = read_campaign(root, campaign_id)
+        if campaign is None:
+            raise ProducerError("campaign-unknown", campaign_id)
+        campaign = dict(campaign)
+        campaign["related"] = [dict(row) for row in related]
+        _write_campaign(root, campaign, exclusive=False)
+        return {"status": "updated", "campaign_id": campaign_id, "related": campaign["related"]}
+    finally:
+        artifact_admission._release_lock(root, lock_fd)
+
+
+def mark_cycle_superseded(
+    root: Path, cycle_id: str, *, superseded_by: Sequence[str], superseded_event_id: str,
+    now: Optional[float] = None,
+) -> Dict[str, Any]:
+    """D-81: mutable side-record supersession marker on a sealed cycle record.
+    The sealed manifest's `cycle.state` stays `completed` forever -- this
+    writes only the cycle record, never the manifest."""
+    root = Path(root).resolve()
+    lock_fd = artifact_admission._acquire_lock(root, artifact_admission.LOCK_TIMEOUT_DEFAULT, now=now)
+    try:
+        record = read_cycle_record(root, cycle_id)
+        if record is None:
+            raise ProducerError("cycle-unknown", cycle_id)
+        if record.get("state") != "sealed":
+            raise ProducerError("cycle-not-sealed", record.get("state", "?"))
+        updated = dict(record)
+        updated["state"] = "superseded"
+        updated["superseded_by"] = list(superseded_by)
+        updated["superseded_event_id"] = superseded_event_id
+        _write_cycle_record(root, updated, exclusive=False)
+        return {"status": "updated", "cycle_id": cycle_id, "state": "superseded",
+                "superseded_by": updated["superseded_by"], "superseded_event_id": superseded_event_id}
+    finally:
+        artifact_admission._release_lock(root, lock_fd)
+
+
+def mark_campaign_superseded(root: Path, campaign_id: str, *, now: Optional[float] = None) -> Dict[str, Any]:
+    """D-81: a campaign may be marked `superseded` only once every cycle it
+    owns already carries the `superseded` side-record state."""
+    root = Path(root).resolve()
+    lock_fd = artifact_admission._acquire_lock(root, artifact_admission.LOCK_TIMEOUT_DEFAULT, now=now)
+    try:
+        campaign = read_campaign(root, campaign_id)
+        if campaign is None:
+            raise ProducerError("campaign-unknown", campaign_id)
+        for cycle_id in campaign.get("cycles", []):
+            record = read_cycle_record(root, cycle_id)
+            if record is None or record.get("state") != "superseded":
+                raise ProducerError("campaign-has-live-cycles", campaign_id)
+        updated = dict(campaign)
+        updated["state"] = "superseded"
+        _write_campaign(root, updated, exclusive=False)
+        return {"status": "updated", "campaign_id": campaign_id, "state": "superseded"}
+    finally:
+        artifact_admission._release_lock(root, lock_fd)
+
+
+# ---------------------------------------------------------------------------
 # write policy (used by hooks and writers)
 # ---------------------------------------------------------------------------
 
@@ -1695,7 +1904,7 @@ def check_write(root: Path, target: Path) -> Dict[str, Any]:
                 "cycle_id": cycle_id, "campaign_id": campaign_id, "bucket": bucket}
     if active:
         return {**base, "verdict": "deny", "reason": "legacy-top-level-write-denied", "layout": "legacy",
-                "bucket": top}
+                "bucket": top, "hint": LEGACY_WRITE_HINT}
     klass = classify_root(root)
     if klass["state"] == "malformed":
         # Same reason string as begin(). A damaged cutover record does not
@@ -1735,8 +1944,7 @@ def resolve_output_dir(root: Path, bucket: str, *, cycle_dir_hint: Optional[str]
             raise ProducerError(verdict["reason"], str(directory))
         return directory / "artifacts" / bucket, "cycle"
     if is_active(root):
-        raise ProducerError("legacy-top-level-write-denied",
-                            f"{bucket}: begin a cycle first (AGENT_ARTIFACT_CYCLE_DIR unset)")
+        raise ProducerError("legacy-top-level-write-denied", f"{bucket}: {LEGACY_WRITE_HINT}")
     klass = classify_root(root)
     if klass["state"] == "malformed":
         raise ProducerError("cutover-record-malformed", klass["reason"] or bucket)
@@ -1785,6 +1993,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     p.add_argument("--goal")
     p.add_argument("--parent-cycle")
     p.add_argument("--require-cycle", action="store_true")
+    p.add_argument("--shared-reference", action="append", default=[],
+                   help="<kind>:<ref>:<rrev>[:<content_digest>], repeatable")
     p.add_argument("--env-file", help="write KEY=VALUE lines for the producer environment")
 
     p = sub.add_parser("finalize")
@@ -1853,10 +2063,23 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         elif args.command == "status":
             result = status(root)
         elif args.command == "begin":
+            pins: List[Dict[str, Any]] = []
+            for row in args.shared_reference:
+                parts = row.split(":", 3)
+                if len(parts) < 3:
+                    raise ProducerError("shared-reference-pin-invalid", row)
+                kind, ref_id, rrev_id = parts[0], parts[1], parts[2]
+                pin: Dict[str, Any] = {
+                    "kind": kind, "shared_reference_id": ref_id, "shared_reference_revision_id": rrev_id,
+                }
+                if len(parts) > 3:
+                    pin["content_digest"] = parts[3]
+                pins.append(pin)
             result = begin(root, route_file=Path(args.route), capability=args.capability,
                            intensity=args.intensity, node_id=args.node, campaign_id=args.campaign,
                            campaign_key=args.campaign_key, title=args.title, goal=args.goal,
-                           parent_cycle_id=args.parent_cycle, require_cycle=args.require_cycle)
+                           parent_cycle_id=args.parent_cycle, require_cycle=args.require_cycle,
+                           shared_reference_pins=pins or None)
             if args.env_file:
                 lines = "".join(f"{k}={v}\n" for k, v in result.get("env", {}).items())
                 Path(args.env_file).write_text(lines, encoding="utf-8")

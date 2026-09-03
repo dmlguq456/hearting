@@ -46,7 +46,7 @@ Before source changes, establish a recoverable working state.
 
 1. Read the resolved plan at `$ARG`.
 2. Set `{log_dir}` to the task root two levels above `plan.md`.
-   - Example: `<artifact-root>/plans/2026-03-18_refactor_engine/plan.md` → `<artifact-root>/plans/2026-03-18_refactor_engine/`
+   - Example: `$AGENT_ARTIFACT_OUTPUT_DIR/plans/2026-03-18_refactor_engine/plan.md` → `$AGENT_ARTIFACT_OUTPUT_DIR/plans/2026-03-18_refactor_engine/`
 3. Detect resume state.
    - If `{log_dir}/checklist.md` contains `[x]`, `[FAIL]`, or `[SKIP-DEP]`, update its `Safety commit:` line, skip completed steps, and continue at the first `[ ]` step.
    - Otherwise create a fresh checklist.

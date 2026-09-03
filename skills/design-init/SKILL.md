@@ -21,7 +21,7 @@ Follow an explicit artifact or audience language when provided. Otherwise, write
 
 ## Pre-Check
 
-Look for `design_state.yaml` under `<artifact-root>/designs/<name>/` or `<artifact-root>/spec/design/`.
+Look for `design_state.yaml` under `$AGENT_ARTIFACT_OUTPUT_DIR/designs/<name>/` or `$AGENT_ARTIFACT_OUTPUT_DIR/spec/design/`.
 
 - If present, stop and report that initialization already exists; recommend the owning new-cycle or resume path rather than deleting the folder automatically.
 - If absent, continue.
@@ -91,7 +91,7 @@ Inspect:
 - `tokens.css` or `tailwind.config.ts`
 - `components/ui/` or the project-equivalent component directory
 - `public/icons/` or another SVG asset directory
-- prior design cycles under `<artifact-root>/designs/*` or `design/`
+- prior design cycles under `$AGENT_ARTIFACT_OUTPUT_DIR/designs/*` or `design/`
 
 Write the result to `00_init/asset_inventory.md`. Existing project assets take precedence over remembered cross-project preferences.
 

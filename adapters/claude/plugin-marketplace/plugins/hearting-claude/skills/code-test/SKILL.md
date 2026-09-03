@@ -97,7 +97,7 @@ Return the report path, executed commands, skipped levels and reasons, blockers,
 
 ## Log Directory
 
-- Plan path: use the task root above `plan/`; for example, `<artifact-root>/plans/2026-03-18_refactor/plan.md` → `<artifact-root>/plans/2026-03-18_refactor/`.
+- Plan path: use the task root above `plan/`; for example, `$AGENT_ARTIFACT_OUTPUT_DIR/plans/2026-03-18_refactor/plan.md` → `$AGENT_ARTIFACT_OUTPUT_DIR/plans/2026-03-18_refactor/`.
 - No plan: use a date-stamped directory under `<artifact-root>/tests/`.
 
 ## Task
