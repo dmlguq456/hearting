@@ -3618,4 +3618,44 @@ class ReservationClaimTimeoutTest(unittest.TestCase):
             self.assertEqual(ctx.exception.reason, "model-worker-reservation-claim-timeout")
 
 
+class SealedLaunchHomeRowFieldTest(unittest.TestCase):
+    # C47-13 (SD-115 axis 4 (a)): dispatch_adapters_v11.test.py's
+    # test_launch_home_row_field_is_the_resolved_release_never_the_current_symlink
+    # spawns each wrapper as a subprocess, which cannot pass in this
+    # environment (noncanonical-model-governor-root fires even on baseline
+    # 9a272951 -- 21 tests/30 failures with no code under test involved).
+    # This burns the shared row-assembly leaf directly instead: every
+    # wrapper's row line is built with the same
+    # f",launch_home={sealed_launch_home(args.agent_home)}" call, so proving
+    # the leaf resolves a mutable pointer to its concrete release proves the
+    # row field for all three adapters without spawning anything.
+    def test_resolves_a_symlinked_pointer_to_the_concrete_release(self):
+        module_root = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory() as td:
+            current = Path(td) / "current"
+            current.symlink_to(module_root)
+            sealed = D.sealed_launch_home(current)
+            self.assertEqual(sealed, module_root.resolve())
+            self.assertNotEqual(str(sealed), str(current))
+
+    def test_non_harness_root_is_returned_unchanged(self):
+        with tempfile.TemporaryDirectory() as td:
+            not_a_release = Path(td) / "not-a-release"
+            not_a_release.mkdir()
+            self.assertEqual(D.sealed_launch_home(not_a_release), not_a_release)
+
+    def test_every_wrapper_seals_launch_home_through_the_shared_leaf(self):
+        # Guards against a future edit silently swapping the shared leaf call
+        # for a raw args.agent_home interpolation in just one wrapper.
+        for harness in ("claude", "codex", "opencode"):
+            source = (module_root_for_adapters() / harness / "bin" / "dispatch-headless.py").read_text()
+            with self.subTest(harness=harness):
+                self.assertIn(
+                    "f\",launch_home={sealed_launch_home(args.agent_home)}\"", source)
+
+
+def module_root_for_adapters():
+    return Path(__file__).resolve().parents[1] / "adapters"
+
+
 if __name__=="__main__": unittest.main()

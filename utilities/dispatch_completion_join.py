@@ -284,6 +284,16 @@ def _log_pending_delivery_refusal(jobs: Path, attempt_id: str, reason: str) -> N
         pass
 
 
+def log_delivery_refusal(jobs: Path, attempt_id: str, reason: str) -> None:
+    """Public surface for a non-join caller (`claude-session-supervisor.py`'s
+    `reconcile()`, SD-115 axis 4 (짝)) to leave the same durable refusal trace
+    this module writes for its own swallowed failures, without reaching past
+    this module's public/private boundary to call the private leaf directly.
+    """
+
+    _log_pending_delivery_refusal(jobs, attempt_id, reason)
+
+
 def materialize_pending_delivery(jobs: Path, row_fields: list[str]) -> Path | None:
     """Carrier-independent idempotent materializer (SD-111 P2 round 2 C-1).
 
@@ -355,7 +365,12 @@ def materialize_after_terminal_close(jobs: Path, attempt_id: str) -> Path | None
     itself failed; it is recorded as ``delivery-persistence-refused`` on
     stderr and swallowed. Idempotent with every other trigger 1/2 call site
     (`dispatch_pending_delivery.create`'s O_EXCL + identity-verify semantics
-    converge N calls on one record).
+    converge N calls on one record). `ImportError` is caught alongside the
+    rest: `pending_record_identity()` lazily imports `owner_route_binding`,
+    and that import raises `ModuleNotFoundError` (a subclass) if the sealed
+    release tree it lives under has already been pruned out from under a
+    still-running process (SD-115 axis 4 (짝)) -- without this, that one
+    exception type escaped every trace this function otherwise guarantees.
     """
 
     try:
@@ -363,7 +378,7 @@ def materialize_after_terminal_close(jobs: Path, attempt_id: str) -> Path | None
         if row is None:
             return None
         return materialize_pending_delivery(jobs, row.raw.split("\t"))
-    except (JoinContractError, pending_delivery.PendingDeliveryError, OSError) as exc:
+    except (JoinContractError, pending_delivery.PendingDeliveryError, OSError, ImportError) as exc:
         sys.stderr.write(
             f"delivery-persistence-refused attempt_id={attempt_id} reason={exc}\n"
         )
@@ -1657,7 +1672,9 @@ def remove_parent_session_state(path: Path | None) -> None:
     remove_supervisor_state(path)
 
 
-def _local_contract_path(base: Path, raw: str, relative: str) -> bool:
+def _local_contract_path(
+    base: Path, raw: str, relative: str, extra_roots: list[Path] | None = None,
+) -> bool:
     candidate = Path(raw)
     if not candidate.is_absolute():
         candidate = base / candidate
@@ -1674,7 +1691,45 @@ def _local_contract_path(base: Path, raw: str, relative: str) -> bool:
         if (parent / "core" / "CORE.md").is_file():
             roots.append(parent)
             break
+    if extra_roots:
+        roots.extend(extra_roots)
     return any(resolved == (root / relative).resolve() for root in roots)
+
+
+def _sealed_launch_home_roots(jobs: Path | None, open_attempt_ids: set[str]) -> list[Path]:
+    """Every guarded attempt's sealed `launch_home` that is itself a valid
+    harness root (SD-115 axis 4 R1).
+
+    Once a row's `launch_home` seals a resolved release path
+    (`dispatch_contract.sealed_launch_home()`), a supervisor whose own
+    `ROOT`/`AGENT_HOME` has since rotated to a newer release must still
+    admit a harvest command that names the row's OWN sealed release --
+    otherwise sealing a release from prune (axis 4 (a)/(b)) is undone by the
+    very next guard that reads the row it protects
+    (`claude-session-supervisor.py:68`'s "Deliberately UNRESOLVED" comment
+    names exactly this trap). Only rows already in the caller's own
+    `open_attempt_ids` (the guarded set the caller computed independently)
+    are consulted -- this never widens which attempts are trusted, only
+    which *path* a trusted attempt's own command may name.
+    """
+
+    if jobs is None or not open_attempt_ids:
+        return []
+    roots: list[Path] = []
+    for attempt_id in open_attempt_ids:
+        try:
+            row = current_attempt_row(jobs, attempt_id)
+        except (JoinContractError, OSError):
+            continue
+        if row is None:
+            continue
+        sealed = row.metadata.get("launch_home")
+        if not sealed:
+            continue
+        candidate = Path(sealed)
+        if (candidate / "core" / "CORE.md").is_file():
+            roots.append(candidate)
+    return roots
 
 
 def _parse_long_options(
@@ -2112,10 +2167,11 @@ def classify_supervised_shell_command(
         return None
     if not tokens:
         return None
+    extra_roots = _sealed_launch_home_roots(jobs, open_attempt_ids)
 
     if (
         len(tokens) >= 2
-        and _local_contract_path(base, tokens[0], "adapters/codex/bin/preflight.sh")
+        and _local_contract_path(base, tokens[0], "adapters/codex/bin/preflight.sh", extra_roots)
         and tokens[1] == "harvest"
     ):
         options = _parse_long_options(
@@ -2170,14 +2226,14 @@ def classify_supervised_shell_command(
             return None
         dispatch_tokens = tokens[1:]
     is_batch = False
-    if _local_contract_path(base, dispatch_tokens[0], "adapters/codex/bin/preflight.sh"):
+    if _local_contract_path(base, dispatch_tokens[0], "adapters/codex/bin/preflight.sh", extra_roots):
         if len(dispatch_tokens) < 2 or dispatch_tokens[1] != "dispatch-batch":
             return None
         dispatch_tokens = [str(ROOT / "utilities" / "dispatch-batch.py"), *dispatch_tokens[2:]]
         is_batch = True
-    elif _local_contract_path(base, dispatch_tokens[0], "utilities/dispatch-batch.py"):
+    elif _local_contract_path(base, dispatch_tokens[0], "utilities/dispatch-batch.py", extra_roots):
         is_batch = True
-    elif not _local_contract_path(base, dispatch_tokens[0], "utilities/dispatch-node.py"):
+    elif not _local_contract_path(base, dispatch_tokens[0], "utilities/dispatch-node.py", extra_roots):
         return None
 
     if is_batch:
@@ -2300,10 +2356,11 @@ def classify_supervised_shell_command_reason(
         return "shell-composition"
     if not tokens:
         return "unrecognized-surface"
+    extra_roots = _sealed_launch_home_roots(jobs, open_attempt_ids)
 
     if (
         len(tokens) >= 2
-        and _local_contract_path(base, tokens[0], "adapters/codex/bin/preflight.sh")
+        and _local_contract_path(base, tokens[0], "adapters/codex/bin/preflight.sh", extra_roots)
         and tokens[1] == "harvest"
     ):
         options = _parse_long_options(
@@ -2337,9 +2394,9 @@ def classify_supervised_shell_command_reason(
             return "unrecognized-surface"
         dispatch_tokens = tokens[1:]
     recognized_surface = (
-        _local_contract_path(base, dispatch_tokens[0], "adapters/codex/bin/preflight.sh")
-        or _local_contract_path(base, dispatch_tokens[0], "utilities/dispatch-batch.py")
-        or _local_contract_path(base, dispatch_tokens[0], "utilities/dispatch-node.py")
+        _local_contract_path(base, dispatch_tokens[0], "adapters/codex/bin/preflight.sh", extra_roots)
+        or _local_contract_path(base, dispatch_tokens[0], "utilities/dispatch-batch.py", extra_roots)
+        or _local_contract_path(base, dispatch_tokens[0], "utilities/dispatch-node.py", extra_roots)
     )
     if not recognized_surface:
         return "unrecognized-surface"

@@ -116,6 +116,25 @@ class AdapterV11Test(unittest.TestCase):
     self.assertEqual(blocked.returncode,73,blocked.stdout+blocked.stderr)
     self.assertIn("reason=global-registry-unwritable",blocked.stdout)
     self.assertIn("child_spawned=0",blocked.stdout)
+ def test_launch_home_row_field_is_the_resolved_release_never_the_current_symlink(self):
+  # SD-115 axis 4 (a): a wrapper launched under a mutable pointer (the real
+  # shape is `<share>/hearting/current`, mirrored here as a plain symlink to
+  # ROOT) must seal the row with the pointer's resolved target, not the
+  # pointer text itself -- otherwise the row can never say which release it
+  # was actually sealed against once the pointer moves on.
+  for harness in ("codex", "claude", "opencode"):
+   with self.subTest(harness=harness), tempfile.TemporaryDirectory() as td:
+    root=Path(td); repo,art=self.fixture(root); jobs=root/"jobs.log"; logs=root/"logs"
+    current=root/"current"; current.symlink_to(ROOT)
+    env={**os.environ,"AGENT_HOME":str(current),"AGENT_ARTIFACT_ROOT":str(art),
+         "AGENT_DISPATCH_JOBS":str(jobs),"OPENCODE_CONFIG_CONTENT":"{}"}
+    self.seed_parent(jobs,repo,harness=harness)
+    env["AGENT_DISPATCH_ATTEMPT_ID"]="att-parent-fixture"
+    registered=subprocess.run(self.command(harness,"register",repo,jobs,logs),text=True,capture_output=True,env=env)
+    self.assertEqual(registered.returncode,0,registered.stdout+registered.stderr)
+    row=jobs.read_text(encoding="utf-8")
+    self.assertIn(f"launch_home={ROOT}",row)
+    self.assertNotIn(f"launch_home={current}",row)
  def test_all_wrapper_previews_are_visibly_non_attempts(self):
   for harness in ADAPTERS:
    with self.subTest(harness=harness), tempfile.TemporaryDirectory() as td:

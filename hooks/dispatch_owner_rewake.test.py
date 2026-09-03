@@ -11,6 +11,7 @@ import io
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 import tempfile
@@ -24,6 +25,13 @@ assert SPEC is not None and SPEC.loader is not None
 rewake = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = rewake
 SPEC.loader.exec_module(rewake)
+
+_JOIN_PATH = Path(__file__).resolve().parents[1] / "utilities" / "dispatch_completion_join.py"
+_JOIN_SPEC = importlib.util.spec_from_file_location("dispatch_completion_join", _JOIN_PATH)
+assert _JOIN_SPEC is not None and _JOIN_SPEC.loader is not None
+JOIN = importlib.util.module_from_spec(_JOIN_SPEC)
+sys.modules[_JOIN_SPEC.name] = JOIN
+_JOIN_SPEC.loader.exec_module(JOIN)
 
 
 def _wait_for_attempt_bridge_states() -> frozenset[str]:
@@ -605,6 +613,58 @@ class DispatchOwnerRewakeTest(unittest.TestCase):
             str(self.root / "adapters" / "codex" / "bin" / "preflight.sh"),
             message,
         )
+
+    def test_sealed_launch_home_harvest_is_admitted_after_release_rotation(self) -> None:
+        # SD-115 axis 4 R1 (conditional, plan.md §8): once (a) seals a row's
+        # `launch_home` to the resolved OLD release, a rotation that moves
+        # `current`/AGENT_HOME/ROOT to a NEW release means the harvest
+        # command this hook renders (naming the OLD sealed release's
+        # preflight.sh) must still be admitted by the supervisor's own
+        # command guard -- `dispatch_completion_join.py`'s
+        # `_local_contract_path` -- not just rendered by this hook.
+        launch = rewake.parse_launch(self.payload())
+        assert launch is not None
+        sealed_home = self.root / "sealed-old-release"
+        (sealed_home / "adapters" / "codex" / "bin").mkdir(parents=True)
+        (sealed_home / "adapters" / "codex" / "bin" / "preflight.sh").write_text("#!/bin/sh\n")
+        (sealed_home / "core").mkdir()
+        (sealed_home / "core" / "CORE.md").write_text("fixture\n", encoding="utf-8")
+        self.jobs.write_text(
+            "2026-08-06T00:00:00Z\topen\t/repo\t/wt\towner\t"
+            f"attempt_schema_version=2,attempt_id=att-owner-1,launch_home={sealed_home}\n",
+            encoding="utf-8",
+        )
+        new_release = self.root / "new-release"
+        (new_release / "core").mkdir(parents=True)
+        (new_release / "core" / "CORE.md").write_text("fixture\n", encoding="utf-8")
+
+        message = rewake.receipt(launch, "attention", "terminal-quiescent", new_release)
+        match = re.search(r"checked harvest command: (.+?)\. Do not", message)
+        assert match is not None, message
+        harvest_line = match.group(1)
+        # The command this hook renders does name the sealed OLD release --
+        # that half of the pipeline already works (see the sibling
+        # `test_receipt_prefers_the_sealed_launch_home_over_a_mutable_root`).
+        self.assertIn(str(sealed_home), harvest_line)
+
+        with mock.patch.dict(os.environ, {"AGENT_HOME": str(new_release)}, clear=False), \
+             mock.patch.object(JOIN, "ROOT", new_release):
+            action = JOIN.classify_supervised_shell_command(
+                base=new_release,
+                command=harvest_line.strip(),
+                open_attempt_ids={"att-owner-1"},
+                parent_slug="owner",
+                jobs=self.jobs,
+            )
+        if action is None:
+            raise AssertionError(
+                "R1 REPRODUCED: _local_contract_path rejects the sealed OLD "
+                "release's harvest command once ROOT/AGENT_HOME rotate to a "
+                "NEW release -- plan.md §8 R1/§9 decision: "
+                "_local_contract_path's roots must be extended to accept a "
+                "valid harness root named by the row's own sealed launch_home."
+            )
+        self.assertEqual(action.attempt_id, "att-owner-1")
 
     def test_stale_ready_snapshot_uses_current_done_failure_action(self) -> None:
         launch = rewake.parse_launch(self.payload())
