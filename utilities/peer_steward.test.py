@@ -317,6 +317,9 @@ def fail(code):
     sys.exit(1)
 
 verb = argv[1] if len(argv) > 1 else ""
+if verb == "get" and mode == "hang-get":
+    with open(os.environ["FAKE_HERDR_FIFO"], "r") as fh:   # wedged socket
+        fh.read()
 if mode == "not-found":
     fail("agent_not_found")
 if verb == "get":
@@ -333,11 +336,55 @@ print(json.dumps(info)); sys.exit(0)
 '''
 
 
+
+def _reap_fixture_processes(marker, fifo=None):
+    """Kill every watcher (session leader -> its group holds the fake herdr) and
+    every leftover fake-herdr child whose cmdline carries this fixture's path,
+    then drain the FIFO so no reader stays blocked on an unlinked pipe
+    (review M4: three tests SIGKILLed the watcher without releasing the FIFO and
+    the reparented `herdr agent wait` child survived until reboot)."""
+    import errno
+    for entry in os.listdir("/proc"):
+        if not entry.isdigit():
+            continue
+        try:
+            with open(f"/proc/{entry}/cmdline", "rb") as fh:
+                cmdline = fh.read()
+        except OSError:
+            continue
+        if marker.encode() not in cmdline:
+            continue
+        pid = int(entry)
+        if pid == os.getpid():
+            continue
+        try:
+            os.killpg(os.getpgid(pid), signal.SIGKILL)
+        except (ProcessLookupError, PermissionError, OSError):
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except OSError:
+                pass
+    if fifo and os.path.exists(fifo):
+        for _ in range(64):
+            try:
+                fd = os.open(fifo, os.O_WRONLY | os.O_NONBLOCK)
+            except OSError as exc:
+                if exc.errno == errno.ENXIO:
+                    break
+                break
+            try:
+                os.write(fd, b"go")
+            except OSError:
+                pass
+            os.close(fd)
+
 class _WatchMixin(_TmpRootMixin):
     """Real subprocesses, real files, only `herdr` faked."""
 
     def setUp(self):
         super().setUp()
+        # Registered before the tmp-dir cleanup so it runs first (LIFO).
+        self.addCleanup(lambda: _reap_fixture_processes(str(self.tmp_root), str(self.tmp_root / "release.fifo")))
         self.bin = self.tmp_root / "fakebin"
         self.bin.mkdir()
         fake = self.bin / "herdr"
@@ -702,6 +749,49 @@ class StatusRearmTest(_WatchMixin, unittest.TestCase):
 
         self._release()
         self._release()
+
+
+class ReviewRoundOneTest(_WatchMixin, unittest.TestCase):
+    def test_rearm_keeps_the_original_steward_identity_without_env(self):
+        # M1: a rearm issued from a process that carries no session id (the
+        # hook) must not rewrite steward.session_id to "".
+        dead = self._fields(self._run("watch", "peer-a", env=self._env("held")).stdout)
+        os.kill(int(dead["pid"]), signal.SIGKILL)
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline and peer_steward._pid_identity_ok(
+            int(dead["pid"]), dead["pid_start"]
+        ):
+            time.sleep(0.02)
+        env = self._env("held")
+        env.pop("CLAUDE_CODE_SESSION_ID", None)
+        out = self._run("rearm", dead["watch_id"], env=env).stdout
+        fields = self._fields(out)
+        self.assertEqual(fields["state"], "rearmed", out)
+        new_arm = json.loads((self.watch_root / f"{fields['watch_id']}.json").read_text())
+        self.assertEqual(new_arm["steward"]["session_id"], "steward-1")
+        self.assertEqual(new_arm["steward"]["harness"], "claude")
+        # Same dedupe key: a third `watch` for the target is `already-armed`, not a second watcher.
+        again = self._run("watch", "peer-a", env=self._env("held"))
+        self.assertIn("state=already-armed", again.stdout)
+        self._release()
+
+    def test_hanging_herdr_get_is_herdr_unavailable_not_a_hang(self):
+        # M3: a wedged `herdr agent get` must return exit 4 within the bound.
+        env = self._env("hang-get")
+        env["AGENT_PEER_STEWARD_HERDR_GET_TIMEOUT"] = "1"
+        started = time.monotonic()
+        proc = self._run("watch", "peer-a", env=env, timeout=30)
+        self.assertLess(time.monotonic() - started, 10)
+        self.assertEqual(proc.returncode, 4, proc.stdout + proc.stderr)
+        self.assertIn("herdr-unavailable", proc.stdout)
+        self.assertEqual(list(self.watch_root.glob("*.json")), [])
+
+    def test_receipt_carries_the_real_herdr_exit_code(self):
+        # m3: a timeout from herdr exits 1; the receipt must say so.
+        armed = self._fields(self._run("watch", "peer-a", env=self._env("timeout")).stdout)
+        receipt = self._wait_for_receipt(armed["watch_id"])
+        self.assertEqual(receipt["state"], "timeout")
+        self.assertEqual(receipt["herdr_exit"], 1)
 
 
 class KillFixtureTest(_WatchMixin, unittest.TestCase):

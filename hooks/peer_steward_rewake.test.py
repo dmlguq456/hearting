@@ -34,11 +34,46 @@ print(json.dumps(info)); sys.exit(0)
 '''
 
 
+def _reap_fixture_processes(marker, fifo):
+    """review M4: kill watchers/fake-herdr children of this fixture, drain the FIFO."""
+    import errno
+    for entry in os.listdir("/proc"):
+        if not entry.isdigit():
+            continue
+        try:
+            with open(f"/proc/{entry}/cmdline", "rb") as fh:
+                cmdline = fh.read()
+        except OSError:
+            continue
+        if marker.encode() not in cmdline or int(entry) == os.getpid():
+            continue
+        pid = int(entry)
+        try:
+            os.killpg(os.getpgid(pid), signal.SIGKILL)
+        except OSError:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except OSError:
+                pass
+    if os.path.exists(fifo):
+        for _ in range(64):
+            try:
+                fd = os.open(fifo, os.O_WRONLY | os.O_NONBLOCK)
+            except OSError:
+                break
+            try:
+                os.write(fd, b"go")
+            except OSError:
+                pass
+            os.close(fd)
+
+
 class _HookMixin:
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
         self.root = Path(self._tmp.name)
+        self.addCleanup(lambda: _reap_fixture_processes(str(self.root), str(self.root / "release.fifo")))
         self.jobs = self.root / "jobs.log"
         self.jobs.touch()
         self.bin = self.root / "fakebin"
@@ -197,6 +232,20 @@ class DeliveryTest(_HookMixin, unittest.TestCase):
         proc = self._run_hook(self._payload(armed), env=env)
         self.assertEqual(proc.returncode, 2, proc.stdout + proc.stderr)
         self.assertIn("state=watcher-dead", proc.stderr)
+
+    def test_join_outlives_the_short_subprocess_cap(self):
+        # B1 regression: the join must not be cut by the utility subprocess cap.
+        # Cap 1 s, release the target after 3 s, expect a real exit-2 wake.
+        armed = self._arm(mode="held")
+        env = self._env("held")
+        env["AGENT_PEER_STEWARD_REWAKE_SUBPROCESS_SECONDS"] = "1"
+        import threading
+        threading.Timer(3.0, self._release).start()
+        proc = self._run_hook(self._payload(armed), env=env, timeout=60)
+        self.assertEqual(proc.returncode, 2, proc.stdout + proc.stderr)
+        self.assertIn("state=idle", proc.stderr)
+        watch_id = self._fields(armed)["watch_id"]
+        self.assertTrue((self._watch_root() / f"{watch_id}.ack.json").exists())
 
     def test_exhausted_budget_is_exit_two_hook_budget_expired(self):
         armed = self._arm(mode="held")

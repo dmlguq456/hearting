@@ -170,7 +170,8 @@ main/orchestrator chooses per job and the wrapper only reflects that choice:
 - Direct registered child completion is selected by the parent runtime, not by
   the child wrapper. An interactive Claude parent receives the successful exact
   owner-start receipt through `PostToolUse(Bash)` and arms one native
-  `asyncRewake` hook for that owner attempt. The hook waits for terminal
+  `asyncRewake` hook for that owner attempt (and, since SD-122 v56, a second
+  `asyncRewake` hook for an exact steward watch armed by `peer-steward.py watch`). The hook waits for terminal
   quiescence outside the model and wakes once with an exact harvest command;
   ordinary Bash calls are silent no-ops, and no Background Bash monitor,
   `dispatch-wait`, progress recap, or periodic re-arm is created. Immediately

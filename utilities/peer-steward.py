@@ -146,10 +146,13 @@ def _run_herdr_wait(target, until, timeout_ms):
         cmd += ["--until", state]
     if timeout_ms is not None:
         cmd += ["--timeout", str(timeout_ms)]
+    global _LAST_HERDR_EXIT
+    _LAST_HERDR_EXIT = None
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True)
     except (OSError, subprocess.SubprocessError):
         return None
+    _LAST_HERDR_EXIT = proc.returncode
     # Measured 2026-09-02 (herdr 0.8.0): a successful wait prints its
     # `agent_info` JSON on stdout and exits 0, but `{"error":{"code":...}}`
     # goes to STDERR with exit 1.  Reading stdout alone therefore turns every
@@ -166,6 +169,9 @@ def _run_herdr_wait(target, until, timeout_ms):
 
 
 _AGENT_STATES = ("idle", "done", "blocked", "working", "unknown")
+_LAST_HERDR_EXIT = None          # real `herdr agent wait` return code of the last call (m3)
+_HERDR_GET_TIMEOUT_SECONDS = 15  # `watch` pre-check must never hang the caller (M3)
+_CLAIM_TIMEOUT_MS = 15_000       # dedupe claim acquisition bound (M3)
 
 
 def _typed_line(state, harness, session_id, name, pane):
@@ -396,11 +402,14 @@ def _lock_held(lock_path):
     except OSError:
         return False
     try:
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except OSError:
-        return True
-    fcntl.flock(fd, fcntl.LOCK_UN)
-    return False
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            return True
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        return False
+    finally:
+        os.close(fd)   # one probe, one descriptor (review m1)
 
 
 def _watcher_present(arm):
@@ -458,10 +467,19 @@ def _exit_for_state(state):
     return _JOIN_EXIT.get(state, 0)
 
 
+def _herdr_get_timeout():
+    try:
+        value = float(os.environ.get("AGENT_PEER_STEWARD_HERDR_GET_TIMEOUT", _HERDR_GET_TIMEOUT_SECONDS))
+    except ValueError:
+        value = float(_HERDR_GET_TIMEOUT_SECONDS)
+    return min(600.0, max(0.5, value))
+
+
 def _run_herdr_get(target):
     try:
         proc = subprocess.run(
-            ["herdr", "agent", "get", target], capture_output=True, text=True
+            ["herdr", "agent", "get", target], capture_output=True, text=True,
+            timeout=_herdr_get_timeout(),   # a wedged socket is `herdr-unavailable`, not a hang (M3)
         )
     except (OSError, subprocess.SubprocessError):
         return None
@@ -478,8 +496,16 @@ def _run_herdr_get(target):
 def cmd_watch(args):
     root = _watch_root()
     root.mkdir(parents=True, exist_ok=True)
-    steward_sid, steward_harness = _current_session_identity()
-    steward_project = _project_of(os.getcwd())
+    identity = getattr(args, "steward_identity", None)
+    if identity:
+        # `rearm` (possibly running inside a hook whose environment carries no
+        # session id) must keep the ORIGINAL steward identity: the dedupe key,
+        # the receipt's `steward.session_id` and the sweep's `--undelivered`
+        # filter all hang off it (review M1).
+        steward_sid, steward_harness, steward_project = identity
+    else:
+        steward_sid, steward_harness = _current_session_identity()
+        steward_project = _project_of(os.getcwd())
     target = args.target
     until = list(args.until or [])
     wake = args.wake
@@ -504,7 +530,8 @@ def cmd_watch(args):
     except OSError as exc:
         return _unavailable(f"watch-claim-failed-{exc.errno}")
     try:
-        fcntl.flock(claim_fd, fcntl.LOCK_EX)
+        if not _acquire_bounded(claim_fd, _CLAIM_TIMEOUT_MS):
+            return _unavailable("watch-claim-contended")
 
         existing_id = ""
         try:
@@ -617,15 +644,19 @@ def cmd_watch(args):
             os.fsync(claim_fd)
         except OSError:
             pass
+
+        # `receipt=<watch_id>` is what distinguishes this `kind=watch` row from
+        # (9) `wait`'s, which carries no receipt. Written while the claim is
+        # still held so a caller killed after the spawn cannot leave a live
+        # watcher with no arm row (review n4).
+        _record(
+            to_harness=agent["harness"] if agent["harness"] != "-" else "unknown",
+            to_name=target, kind="watch", ref=args.ref, receipt=watch_id,
+            from_identity=(steward_sid, steward_harness, steward_project),
+        )
     finally:
         os.close(claim_fd)
 
-    # `receipt=<watch_id>` is what distinguishes this `kind=watch` row from
-    # (9) `wait`'s, which carries no receipt.
-    _record(
-        to_harness=agent["harness"] if agent["harness"] != "-" else "unknown",
-        to_name=target, kind="watch", ref=args.ref, receipt=watch_id,
-    )
     print(_armed_line(arm, paths))
     return 0
 
@@ -681,7 +712,7 @@ def cmd_watch_run(args):
         "done_ts": _utc_now(),
         "state": state,
         "agent": agent,
-        "herdr_exit": 0 if state in _AGENT_STATES else 1,
+        "herdr_exit": _LAST_HERDR_EXIT if _LAST_HERDR_EXIT is not None else -1,
         # Self-describing: taken from this process, not from the arm record, so
         # a caller killed between spawn and the arm write still yields a usable
         # receipt.
@@ -797,7 +828,13 @@ def _watch_entries(root):
     if not root.is_dir():
         return []
     entries = []
-    for arm_path in sorted(root.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True):
+    def _mtime(path):
+        try:
+            return path.stat().st_mtime
+        except OSError:      # vanished between glob and stat (review n3)
+            return 0.0
+
+    for arm_path in sorted(root.glob("*.json"), key=_mtime, reverse=True):
         name = arm_path.name
         if name.endswith(".receipt.json") or name.endswith(".ack.json") or name.startswith("."):
             continue
@@ -896,10 +933,15 @@ def cmd_rearm(args):
 
     # No claim bookkeeping here: `cmd_watch` holds the dedupe lock, sees that the
     # claimed watch is dead with no receipt, and reclaims the key itself.
+    steward = arm.get("steward") or {}
     ns = argparse.Namespace(
         target=arm["target"], until=list(arm.get("until") or []), timeout=arm.get("timeout"),
         ref=list(arm.get("refs") or []), wake=arm.get("wake", "none"),
         rearmed_from=watch_id, rearm_count=int(arm.get("rearm_count", 0)) + 1,
+        steward_identity=(
+            steward.get("session_id", ""), steward.get("harness", "unknown"),
+            steward.get("project", ""),
+        ),
     )
     import io
     buffer = io.StringIO()

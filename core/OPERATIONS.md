@@ -755,7 +755,7 @@ implemented** (v50 spec-only item retired). The primary completion-report path i
 detached watch receipt plus the adapter wake (the watching side reads screen/disk
 directly); `SendMessage` is secondary.
 
-**Detached watch realization.** `peer-steward.py watch <target>` takes an `O_EXCL` dedupe
+**Detached watch realization.** `peer-steward.py watch <target>` takes a blocking exclusive lock on the dedupe
 claim, checks the target once with `herdr agent get`, takes the watch lock, spawns one
 `setsid` watcher holding that same lock, writes an immutable arm record carrying the
 watcher's `{pid, pid_start}`, records `kind=watch … receipt=<watch_id>`, and returns a

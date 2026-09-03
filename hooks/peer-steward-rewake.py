@@ -31,7 +31,7 @@ _PEER_STEWARD = _HOOKS_DIR.parent / "utilities" / "peer-steward.py"
 
 BUDGET_SECONDS = 21_600          # matches the settings.json timeout
 BUDGET_MARGIN_SECONDS = 60       # 21600 - 60 s = 21_540_000 ms
-SUBPROCESS_TIMEOUT_SECONDS = 15
+SUBPROCESS_TIMEOUT_SECONDS = 15   # status/ack/rearm only; never the join
 NOTICE = "화면·디스크를 읽고 판단(idle ≠ done)"
 
 
@@ -73,11 +73,18 @@ def _is_watch_command(command: str) -> bool:
     return False
 
 
-def _run(*argv: str) -> subprocess.CompletedProcess[str] | None:
+def _run(*argv: str, timeout: float | None = None) -> subprocess.CompletedProcess[str] | None:
+    """Run one utility call. `status`/`ack`/`rearm` are short and get the 15 s
+    cap; the `join` call is the one that legitimately blocks for hours and must
+    pass its own bound (review B1, 2026-09-03: a 15 s cap on `join` returned
+    None after 15 s for every real watch and the hook exited 0 -- no wake)."""
+    cap = _bounded_number(
+        "AGENT_PEER_STEWARD_REWAKE_SUBPROCESS_SECONDS", SUBPROCESS_TIMEOUT_SECONDS, 1, 600
+    ) if timeout is None else timeout
     try:
         return subprocess.run(
             [sys.executable, str(_PEER_STEWARD), *argv],
-            capture_output=True, text=True, timeout=SUBPROCESS_TIMEOUT_SECONDS,
+            capture_output=True, text=True, timeout=cap,
         )
     except (OSError, subprocess.SubprocessError):
         return None
@@ -155,9 +162,14 @@ def notice(watch_id: str, target: str, line: str, *, rearmed: int) -> str:
 
 
 def emit(message: str) -> int:
-    """Every terminal receipt exits 2: that is the only code that wakes Claude."""
+    """Every terminal receipt exits 2: that is the only code that wakes Claude.
+
+    Flushed before the caller records any ack: the ack is what silences the
+    prompt sweep, so it must never precede the wake output (review M2)."""
     print(json.dumps({"systemMessage": message}, ensure_ascii=False, separators=(",", ":")))
     print(message, file=sys.stderr)
+    sys.stdout.flush()
+    sys.stderr.flush()
     return 2
 
 
@@ -189,14 +201,20 @@ def main() -> int:
     # contract, and it keeps the "no poll loop in product code" assertion honest.
     rearmed = 0
     for attempt in range(2):
-        joined = _run("join", watch_id, "--timeout", remaining_ms())
+        # The join blocks for the whole remaining budget; its own `--timeout`
+        # is the bound, and the subprocess cap only backstops a wedged utility.
+        join_cap = max(1.0, deadline - time.monotonic()) + BUDGET_MARGIN_SECONDS
+        joined = _run("join", watch_id, "--timeout", remaining_ms(), timeout=join_cap)
         if joined is None:
             return 0
         code = joined.returncode
 
         if code in (0, 2, 3, 4):                      # a receipt exists
+            # Wake first, ack second: an ack with no wake behind it would
+            # permanently disarm the prompt-sweep fallback (review M2).
+            result = emit(notice(watch_id, target, joined.stdout, rearmed=rearmed))
             _run("ack", watch_id, "--carrier", "claude-async-rewake")
-            return emit(notice(watch_id, target, joined.stdout, rearmed=rearmed))
+            return result
 
         if code == 6:                                 # hook budget exhausted
             return emit(

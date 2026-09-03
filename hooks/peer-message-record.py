@@ -145,27 +145,39 @@ def _typed_watch_line(row):
     )
 
 
+def _sweep_env(session_id):
+    env = dict(os.environ)
+    env["CLAUDE_CODE_SESSION_ID"] = str(session_id)
+    return env
+
+
 def sweep_undelivered(payload):
-    """Surface un-acked watch receipts for THIS session, then ack them.
+    """List un-acked watch receipts for THIS session (bounded, read-only).
 
     Fail-soft in its own right: a broken or slow `peer-steward.py` must never
-    cost the user a prompt. Ack is recorded even if the context write later
-    fails -- wake is at-least-once, display is idempotent.
+    cost the user a prompt. Acking is a separate step (`ack_rows`) that runs
+    only AFTER the context has been written: an ack with no display behind it
+    would silence the fallback forever (review M2).
     """
     session_id = payload.get("session_id")
     if not session_id:
         return []
-    env = dict(os.environ)
-    env["CLAUDE_CODE_SESSION_ID"] = str(session_id)
     try:
         proc = subprocess.run(
             [sys.executable, str(_PEER_STEWARD_PY), "status", "--undelivered", "--json"],
-            capture_output=True, text=True, timeout=5, env=env,
+            capture_output=True, text=True, timeout=5, env=_sweep_env(session_id),
         )
         rows = (json.loads(proc.stdout or "{}") or {}).get("watches") or []
     except Exception:
         return []
-    rows = rows[:_SWEEP_MAX]
+    return rows[:_SWEEP_MAX]
+
+
+def ack_rows(payload, rows):
+    session_id = payload.get("session_id")
+    if not session_id:
+        return
+    env = _sweep_env(session_id)
     for row in rows:
         watch_id = row.get("watch_id")
         if not watch_id:
@@ -178,7 +190,6 @@ def sweep_undelivered(payload):
             )
         except Exception:
             continue
-    return rows
 
 
 def main():
@@ -196,7 +207,7 @@ def main():
         rows = sweep_undelivered(payload)
         if rows:
             # The only stdout this path ever writes, and only when something is
-            # actually pending.
+            # actually pending. Written and flushed BEFORE the acks (review M2).
             print(json.dumps({"hookSpecificOutput": {
                 "hookEventName": "UserPromptSubmit",
                 "additionalContext": "\n".join(
@@ -204,6 +215,8 @@ def main():
                     + [_typed_watch_line(row) for row in rows]
                 ),
             }}, ensure_ascii=False))
+            sys.stdout.flush()
+            ack_rows(payload, rows)
 
 
 if __name__ == "__main__":
