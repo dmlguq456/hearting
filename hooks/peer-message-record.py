@@ -178,8 +178,24 @@ def _record(args_list, body):
     )
 
 
+def _is_helper_process():
+    """F-100c: a title/summary refresher or memory distiller runs `claude -p` with the
+    user's prompt text inside ITS prompt, so the trailer would make the helper look like
+    a receiver (measured 2026-09-03: a phantom `notice` under a cairn summary worker's
+    sid). Registered workers and child sessions are not receivers either."""
+    # NOT `CLAUDE_CODE_CHILD_SESSION`: a herdr-started interactive depth-0 child carries
+    # it too (measured 2026-09-03 on hearting-46 itself), and such a child is exactly the
+    # receiver this record exists for.
+    env = os.environ
+    return (env.get("FLEET_TITLE_REFRESH") == "1" or env.get("MEM_DISTILL") == "1"
+            or env.get("AGENT_SESSION_ROLE", "").lower() == "worker"
+            or bool(env.get("AGENT_DISPATCH_DEPTH")))
+
+
 def main():
     mode = sys.argv[1] if len(sys.argv) > 1 else ""
+    if _is_helper_process():
+        return
     payload = _read_stdin_json()
     if mode == "post-tool":
         handle_post_tool(payload)

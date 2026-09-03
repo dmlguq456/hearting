@@ -22,32 +22,56 @@ def _agent_home():
     return dispatch._registry_home()
 
 
+def _runtime_ledger_roots():
+    """F-100c — each installed runtime resolves ITS OWN dispatch state root
+    (`~/.codex/.harness/dispatch`, `~/.config/opencode/.harness/dispatch`, …; measured
+    2026-09-03), so a Codex/OpenCode receiver's `notice` lands in that runtime's ledger,
+    not in the stable per-user root the Claude side writes to. The board reads all of
+    them; existence-gated, so a runtime that was never activated adds nothing."""
+    from . import dispatch as _dispatch
+    out = []
+    for home in (_dispatch._codex_home(), _dispatch._proj_home(), _dispatch._opencode_config_home()):
+        if not home:
+            continue
+        root = os.path.join(home, ".harness", "dispatch")
+        if os.path.isdir(os.path.join(root, "peer-messages")) or os.path.isdir(os.path.join(root, "peer-steward")):
+            out.append(root)
+    return out
+
+
 def _state_roots():
     """F-98d — read through the SAME resolver chain the writer (`peer-message.py`) uses,
     not `dispatch._row_state_roots()`'s no-row default (which pins to the release tree's
     `.dispatch` and ignores an inherited `AGENT_DISPATCH_JOBS`). Modelled on
     `tools/fleet/route.py`'s `_dispatch_state_roots` — lazy import, tolerant of every
-    failure (never raises out of a read-only collector)."""
+    failure (never raises out of a read-only collector). F-100c appends every installed
+    runtime's own dispatch root (`_runtime_ledger_roots`)."""
+    roots = []
     try:
         home = _agent_home()
     except Exception:
-        return ()
-    here = Path(__file__).resolve()
-    for candidate in here.parents:
-        utilities_dir = candidate / "utilities"
-        if (utilities_dir / "dispatch_contract.py").is_file():
-            if str(utilities_dir) not in sys.path:
-                sys.path.insert(0, str(utilities_dir))
-            try:
-                from dispatch_contract import dispatch_state_roots
-
-                return tuple(
-                    str(root) for root in dispatch_state_roots(
-                        Path(home), jobs=os.environ.get("AGENT_DISPATCH_JOBS"))
-                )
-            except Exception:
-                return ()
-    return ()
+        home = None
+    if home is not None:
+        here = Path(__file__).resolve()
+        for candidate in here.parents:
+            utilities_dir = candidate / "utilities"
+            if (utilities_dir / "dispatch_contract.py").is_file():
+                if str(utilities_dir) not in sys.path:
+                    sys.path.insert(0, str(utilities_dir))
+                try:
+                    from dispatch_contract import dispatch_state_roots
+                    roots = [str(root) for root in dispatch_state_roots(
+                        Path(home), jobs=os.environ.get("AGENT_DISPATCH_JOBS"))]
+                except Exception:
+                    roots = []
+                break
+    try:
+        for extra in _runtime_ledger_roots():
+            if extra not in roots:
+                roots.append(extra)
+    except Exception:
+        pass
+    return tuple(roots)
 
 
 def _tail_lines(path):

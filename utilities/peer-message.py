@@ -150,25 +150,31 @@ def mark_steward(harness, session_id, to, kind, ts):
         return False
 
 
-def read_steward_markers():
-    """``{(harness, session_id): marker_dict}`` over every marker under the ledger root."""
+def read_steward_markers(roots=None):
+    """``{(harness, session_id): marker_dict}`` over every marker under the ledger
+    root(s). ``roots`` = iterable of dispatch state roots (F-100c: Fleet passes every
+    installed runtime's own root as well); default = this process's own root."""
     out = {}
-    root = _ledger_root() / "peer-steward"
-    try:
-        harness_dirs = list(root.iterdir())
-    except OSError:
-        return out
-    for hdir in harness_dirs:
-        if not hdir.is_dir():
+    root_list = [Path(r) for r in roots] if roots else [_ledger_root()]
+    for base in root_list:
+        root = base / "peer-steward"
+        try:
+            harness_dirs = list(root.iterdir())
+        except OSError:
             continue
-        for f in hdir.glob("*.json"):
-            try:
-                with open(f, encoding="utf-8") as fh:
-                    data = json.load(fh)
-            except Exception:
+        for hdir in harness_dirs:
+            if not hdir.is_dir():
                 continue
-            if isinstance(data, dict) and data.get("session_id"):
-                out[(hdir.name, str(data["session_id"]))] = data
+            for f in hdir.glob("*.json"):
+                try:
+                    with open(f, encoding="utf-8") as fh:
+                        data = json.load(fh)
+                except Exception:
+                    continue
+                if isinstance(data, dict) and data.get("session_id"):
+                    key = (hdir.name, str(data["session_id"]))
+                    if key not in out or (data.get("updated") or "") > (out[key].get("updated") or ""):
+                        out[key] = data
     return out
 
 

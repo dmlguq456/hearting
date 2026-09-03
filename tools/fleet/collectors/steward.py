@@ -29,12 +29,18 @@ def _peer_message_module():
 
 
 def read_markers():
-    """``{(harness, session_id): marker}``; empty on any failure."""
+    """``{(harness, session_id): marker}`` over every ledger root the board reads (the
+    F-98d resolver chain plus each installed runtime's own root); empty on any failure."""
     mod = _peer_message_module()
     if mod is None:
         return {}
     try:
-        return mod.read_steward_markers() or {}
+        from . import peer_messages as _pm
+        roots = _pm._state_roots()
+    except Exception:
+        roots = None
+    try:
+        return mod.read_steward_markers(roots or None) or {}
     except Exception:
         return {}
 

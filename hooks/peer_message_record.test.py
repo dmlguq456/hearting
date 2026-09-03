@@ -23,6 +23,9 @@ class _BaseTest(unittest.TestCase):
         self.env = dict(os.environ)
         self.env["AGENT_DISPATCH_JOBS"] = str(self.jobs_path)
         self.env.pop("AGENT_HOME", None)
+        for key in ("FLEET_TITLE_REFRESH", "MEM_DISTILL", "AGENT_SESSION_ROLE",
+                    "AGENT_DISPATCH_DEPTH", "CLAUDE_CODE_CHILD_SESSION"):
+            self.env.pop(key, None)
 
     def _run(self, mode, payload):
         return subprocess.run(
@@ -272,6 +275,32 @@ class F100cTrailerAndNameTest(_BaseTest):
         rec = self._all_records()[0]
         self.assertEqual(rec["from"]["name"], "hearting-46")
         self.assertEqual(rec["kind"], "steer")
+
+
+class F100cHelperProcessGuardTest(_BaseTest):
+    """A title refresher / memory distiller / worker never records — it is not a receiver
+    even though the user's prompt (trailer included) is inside its own prompt."""
+
+    def test_helper_env_writes_nothing_on_either_path(self):
+        for key in ("FLEET_TITLE_REFRESH", "MEM_DISTILL", "AGENT_DISPATCH_DEPTH"):
+            with self.subTest(key=key):
+                self.env[key] = "1"
+                self._run("prompt", {"session_id": "sid-helper", "cwd": "/tmp/proj",
+                                     "prompt": "(peer-from: claude sid-a hearting-46)"})
+                self._run("post-tool", {"session_id": "sid-helper", "cwd": "/tmp/proj",
+                                        "tool_name": "SendMessage",
+                                        "tool_input": {"to": {"name": "x"}, "message": "m"}})
+                self.env.pop(key, None)
+        self.env["AGENT_SESSION_ROLE"] = "worker"
+        self._run("prompt", {"session_id": "sid-helper", "cwd": "/tmp/proj",
+                             "prompt": "(peer-from: claude sid-a hearting-46)"})
+        self.assertEqual(self._all_records(), [])
+
+    def test_an_interactive_child_session_is_still_a_receiver(self):
+        self.env["CLAUDE_CODE_CHILD_SESSION"] = "1"
+        self._run("prompt", {"session_id": "sid-child", "cwd": "/tmp/proj",
+                             "prompt": "x (peer-from: claude sid-a hearting-46)"})
+        self.assertEqual(len(self._all_records()), 1)
 
 
 if __name__ == "__main__":

@@ -148,5 +148,52 @@ class StewardCollectorTest(unittest.TestCase):
                 os.environ.update(old)
 
 
+class RuntimeLedgerRootsTest(unittest.TestCase):
+    """F-100c — each installed runtime resolves its own dispatch root, so a Codex or
+    OpenCode receiver's `notice` lives under `<runtime home>/.harness/dispatch`; the
+    board reads those roots too (existence-gated) for both the ledger and the markers."""
+
+    def test_runtime_roots_are_appended_when_present(self):
+        from fleet.collectors import peer_messages
+        with tempfile.TemporaryDirectory() as tmp:
+            old = dict(os.environ)
+            try:
+                codex = os.path.join(tmp, "codex"); oc = os.path.join(tmp, "oc"); cl = os.path.join(tmp, "cl")
+                os.makedirs(os.path.join(codex, ".harness", "dispatch", "peer-messages"))
+                os.makedirs(os.path.join(oc, ".harness", "dispatch", "peer-steward"))
+                os.makedirs(cl)                                   # activated, no ledger yet
+                os.environ["CODEX_HOME"] = codex
+                os.environ["CLAUDE_CONFIG_DIR"] = cl
+                os.environ["HOME"] = tmp
+                from fleet.collectors import dispatch as _d
+                real = _d._opencode_config_home
+                _d._opencode_config_home = lambda: oc
+                try:
+                    roots = peer_messages._runtime_ledger_roots()
+                    all_roots = peer_messages._state_roots()
+                finally:
+                    _d._opencode_config_home = real
+                self.assertEqual(roots, [os.path.join(codex, ".harness", "dispatch"),
+                                         os.path.join(oc, ".harness", "dispatch")])
+                self.assertTrue(set(roots) <= set(all_roots))
+            finally:
+                os.environ.clear(); os.environ.update(old)
+
+    def test_markers_merge_across_roots_newest_wins(self):
+        import importlib.util
+        tool = os.path.join(os.path.dirname(_TOOLS_DIR), "utilities", "peer-message.py")
+        spec = importlib.util.spec_from_file_location("_pm2", tool)
+        pm = importlib.util.module_from_spec(spec); spec.loader.exec_module(pm)
+        with tempfile.TemporaryDirectory() as tmp:
+            a = os.path.join(tmp, "a"); b = os.path.join(tmp, "b")
+            for root, upd in ((a, "2026-09-03T01:00:00Z"), (b, "2026-09-03T02:00:00Z")):
+                d = os.path.join(root, "peer-steward", "codex"); os.makedirs(d)
+                with open(os.path.join(d, "t1.json"), "w") as fh:
+                    json.dump({"session_id": "t1", "updated": upd, "targets": {"x": {"ts": upd}}}, fh)
+            markers = pm.read_steward_markers([a, b])
+            self.assertEqual(markers[("codex", "t1")]["updated"], "2026-09-03T02:00:00Z")
+            self.assertEqual(pm.read_steward_markers([os.path.join(tmp, "missing")]), {})
+
+
 if __name__ == "__main__":
     unittest.main()
