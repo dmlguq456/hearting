@@ -133,22 +133,31 @@ def provenance(pid, max_depth=6):
     env = read_environ(pid)
     if env.get("AGENT_SESSION_ROLE", "").lower() == "worker":
         return "worker"
+    # F-100b: herdr starts the harness THROUGH the user's shell (measured 2026-09-03:
+    # claude -> zsh -> herdr), so stopping at the first match tagged every herdr pane
+    # "terminal". The walk now runs the whole chain: herdr anywhere above wins; otherwise
+    # the nearest terminal/vscode match is what it always was.
     cur, seen = _ppid_of(pid), set()
+    nearest = None
     for _ in range(max_depth):
         if not cur or cur in seen or cur <= 1:
-            return None
+            break
         seen.add(cur)
         comm = (_comm_of(cur) or "").lower()
-        for needle, tag in _PROVENANCE_COMMS:
-            if needle in comm:
-                return tag
-        if comm in ("code", "node"):
-            # vscode-server only — a bare node parent is not evidence of an editor.
-            args = " ".join(read_environ(cur).get("_", "").split())
-            if "vscode-server" in args or "vscode" in args:
-                return "vscode"
+        if "herdr" in comm:
+            return "herdr"
+        if nearest is None:
+            for needle, tag in _PROVENANCE_COMMS:
+                if needle in comm:
+                    nearest = tag
+                    break
+            if nearest is None and comm in ("code", "node"):
+                # vscode-server only — a bare node parent is not evidence of an editor.
+                args = " ".join(read_environ(cur).get("_", "").split())
+                if "vscode-server" in args or "vscode" in args:
+                    nearest = "vscode"
         cur = _ppid_of(cur)
-    return None
+    return nearest
 
 
 def _ps_lines():

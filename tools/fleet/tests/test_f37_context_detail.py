@@ -30,9 +30,10 @@ def text(lines):
 FULL, EMPTY = render._BAR_FULL, render._BAR_EMPTY
 # F-52c: the row leads with the session's own liveness mark, not the old 📚 icon. `idle` is the
 # one state whose glyph is stable across calls (`working` animates the spinner by wall clock).
-# F-55 (v39): the lead cell is the padded state WORD, not the glyph. Taken from the producer so
-# this file tracks the F-55a padding ledger instead of re-deriving it.
-LEAD = render._context_lead_cell("idle")[0]
+# F-55 (v39): the lead cell was the padded state WORD. F-100b (2026-09-03): it is the WHERE
+# chip — ` herdr ` reversed for a session herdr lists — in a slot of the same width. The
+# fixtures below are herdr-attached so the lead stays a distinctive marker in the text.
+LEAD = render._CTX_CHIP_TEXT + " "
 # F-52b: no measured `context_window_tokens` on these fixtures → the 16-cell baseline track.
 BASE = render._CTX_TRACK_MAX
 # A context gauge is the only place a bar track is immediately followed by its right-justified
@@ -42,7 +43,8 @@ CTX_GAUGE_RE = re.compile(r"[%s%s]{2,} *(?:—|\d+%%)" % (re.escape(FULL), re.es
 
 class ContextDetailTruthTableTest(unittest.TestCase):
     def _session(self, **kwargs):
-        base = dict(harness="claude", pid=1, cwd="/x", liveness="working")
+        base = dict(harness="claude", pid=1, cwd="/x", liveness="working",
+                    herdr_attached=True)
         base.update(kwargs)
         return Session(**base)
 
@@ -125,7 +127,11 @@ class ContextDetailTruthTableTest(unittest.TestCase):
                     job, depth=depth, term_width=168)
                 visible = text(detail)
 
-                self.assertEqual(visible.index("working"), indicator_col + 2)
+                # F-100b: a worker's lead slot is blank (never a herdr pane), so the
+                # detail row's first ink is the gauge, one full slot past the indent.
+                leading = len(visible) - len(visible.lstrip(" "))
+                self.assertEqual(leading, indicator_col + 2 + render._CTX_LABEL_W)
+                self.assertNotIn("working", visible)
                 self.assertEqual(
                     {key for line in detail for _part, key in line if key is not None},
                     {"dim"},

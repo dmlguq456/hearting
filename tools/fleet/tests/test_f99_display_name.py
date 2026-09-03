@@ -211,31 +211,49 @@ class RuntimeNameJsonAdditiveTest(unittest.TestCase):
         self.assertIsNone(payload["runtime_name"])
 
 
-class SessionNameCompanionTest(unittest.TestCase):
-    """F-99c — the dim `· <registry_name>` companion appears only when the
-    canonical display name differs from the derived registry label."""
+class TagChipReplacesCompanionTest(unittest.TestCase):
+    """F-100a (user 2026-09-03) — the F-99c dim ` · <registry_name>` companion is retired:
+    it competed with the title for the same name-zone cells. The derived 2-hex tag now
+    rides its own fixed chip slot between the status glyph and the harness text, and the
+    title owns the whole name zone."""
 
-    def test_no_companion_when_names_match(self):
-        session = SimpleNamespace(harness="codex", session_id="sid-1", runtime_name=None,
-                                  title=None, registry_name="hearting-fb", slug="hearting-fb",
-                                  cwd="/work/repo")
-        name = render._session_name(session)
-        self.assertIsNone(render._session_name_companion(session, name))
+    def _derived(self, **over):
+        base = dict(harness="claude", pid=1, cwd="/work/repo", session_id="sid-1",
+                    title="a real title", registry_name="hearting-fb", slug="hearting-fb",
+                    session_tag="fb", liveness="idle", elapsed_min=3)
+        base.update(over)
+        return Session(**base)
 
-    def test_companion_present_when_names_differ(self):
-        session = SimpleNamespace(harness="codex", session_id="sid-1", runtime_name=None,
-                                  title="a real title", registry_name="hearting-fb",
-                                  slug="hearting-fb", cwd="/work/repo")
-        name = render._session_name(session)
-        companion = render._session_name_companion(session, name)
-        self.assertEqual(companion, " · hearting-fb")
+    def test_the_companion_producer_is_gone(self):
+        self.assertFalse(hasattr(render, "_session_name_companion"))
 
-    def test_no_companion_when_registry_name_absent(self):
-        session = SimpleNamespace(harness="codex", session_id="sid-1", runtime_name=None,
-                                  title="a real title", registry_name=None,
-                                  slug=None, cwd="/work/repo")
-        name = render._session_name(session)
-        self.assertIsNone(render._session_name_companion(session, name))
+    def test_wide_row_shows_title_and_chip_never_the_companion(self):
+        segs = render._session_row(self._derived(), narrow=False,
+                                   name_width=render._wide_name_width(168))
+        txt = "".join(t for t, _k in segs)
+        self.assertIn("a real title", txt)
+        self.assertNotIn(" · hearting-fb", txt)
+        self.assertIn((" fb ", "tag_claude"), segs)
+
+    def test_narrow_row_shows_title_and_chip_never_the_companion(self):
+        l1, _l2 = render._session_row_2line(self._derived(), term_width=100)
+        txt = "".join(t for t, _k in l1)
+        self.assertIn("a real title", txt)
+        self.assertNotIn("hearting-fb", txt)
+        self.assertIn((" fb ", "tag_claude"), l1)
+
+    def test_display_name_precedence_is_unchanged_by_the_chip(self):
+        """The chip is additive: the F-99 name chain still decides the name zone."""
+        self.assertEqual(render._session_name(self._derived()), "a real title")
+        self.assertEqual(render._session_name(self._derived(title=None)), "hearting-fb")
+        self.assertEqual(render._session_name(self._derived(runtime_name="mine")), "mine")
+
+    def test_session_serializes_the_new_fields(self):
+        payload = Session(harness="claude", pid=1, session_id="sid-2").to_dict()
+        self.assertIn("session_tag", payload)
+        self.assertIn("herdr_attached", payload)
+        self.assertIsNone(payload["session_tag"])
+        self.assertIsNone(payload["herdr_attached"])
 
 
 if __name__ == "__main__":

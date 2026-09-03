@@ -454,6 +454,14 @@ def _apply_registry(sess, sj):
         # This is the same rule statusline.sh applies via `resolve_display_inputs()`.
         if sj.get("nameSource") != "derived":
             sess.runtime_name = name
+        else:
+            # F-100a — the derived `<basename>-<xx>` name is the only carrier of the
+            # 2-hex tag; read it while the record still says "derived".
+            try:
+                from fleet.session_handle import derived_tag
+                sess.session_tag = derived_tag(name)
+            except Exception:
+                sess.session_tag = None
     kind = sj.get("kind")
     if isinstance(kind, str):
         sess.kind = kind
@@ -538,6 +546,17 @@ def enrich(sess):
         try:
             from fleet.session_handle import resolve_display_inputs
             sess.runtime_name = resolve_display_inputs("claude", sid).get("runtime_name")
+        except Exception:
+            pass
+    # F-100a — snapshot the derived tag on first sight; after a user rename the runtime
+    # record carries only the new name, so the remembered tag is the fallback.
+    if sid:
+        try:
+            from fleet import titles as _tag_store    # deferred like the sidecar import below
+            if sess.session_tag:
+                _tag_store.remember_tag(sid, sess.session_tag, harness="claude")
+            else:
+                sess.session_tag = _tag_store.read_tag(sid, harness="claude")
         except Exception:
             pass
     if sid:

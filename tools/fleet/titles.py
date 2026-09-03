@@ -192,14 +192,101 @@ def write(sid, title, source="refresher", offset=0, now=None, harness="claude", 
     return True
 
 
-def sweep(now=None, max_age=_STALE_SWEEP_SEC):
-    """Delete stale neutral sidecars/temp files across harness namespaces."""
+_TAG_SWEEP_SEC = 30 * 24 * 3600
+
+
+def tags_dir(harness="claude"):
+    """F-100a — sibling of the titles root, NOT under it: ``sweep()`` reaps title
+    sidecars by mtime after 7 days, and a session tag is written once and then never
+    touched, so a long-lived session would lose its tag on the first sweep."""
+    return os.path.join(os.path.dirname(state_root()), "tags", _safe_key(harness, "harness"))
+
+
+def tag_path(sid, harness="claude"):
+    return os.path.join(tags_dir(harness), _safe_key(sid, "session id") + ".json")
+
+
+def read_tag(sid, harness="claude"):
+    """The remembered derived tag for ``sid`` or ``None`` (missing/malformed is harmless)."""
+    if not sid:
+        return None
+    try:
+        data = _read_path(tag_path(sid, harness=harness))
+    except ValueError:
+        return None
+    tag = data.get("tag") if isinstance(data, dict) else None
+    return tag if isinstance(tag, str) and tag else None
+
+
+def remember_tag(sid, tag, harness="claude", now=None):
+    """Persist the derived tag ONCE per session (a rename replaces the runtime record's
+    name, which is the only place the tag lives). Rewrites only when the stored value
+    differs, so the steady-state cost is one small read per tick, never a write."""
+    if not sid or not isinstance(tag, str) or not tag:
+        return False
+    if read_tag(sid, harness=harness) == tag:
+        return False
+    directory = tags_dir(harness)
+    try:
+        os.makedirs(directory, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(
+            dir=directory, prefix="." + _safe_key(sid, "session id"), suffix=".tmp"
+        )
+    except Exception:
+        return False
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump({"tag": tag, "ts": time.time() if now is None else now}, f)
+        os.replace(tmp, tag_path(sid, harness=harness))
+    except Exception:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        return False
+    return True
+
+
+def sweep_tags(now=None, max_age=_TAG_SWEEP_SEC):
+    """Reap tag records untouched for ``max_age`` (30 days — a session tag is written
+    once, so mtime is first-sight time; no live interactive session runs that long)."""
     now = time.time() if now is None else now
     removed = 0
+    root = os.path.join(os.path.dirname(state_root()), "tags")
+    try:
+        harnesses = os.listdir(root)
+    except OSError:
+        return 0
+    for harness in harnesses:
+        directory = os.path.join(root, harness)
+        if not os.path.isdir(directory):
+            continue
+        try:
+            names = os.listdir(directory)
+        except OSError:
+            continue
+        for name in names:
+            if not (name.endswith(".json") or name.endswith(".tmp")):
+                continue
+            path = os.path.join(directory, name)
+            try:
+                if now - os.path.getmtime(path) > max_age:
+                    os.unlink(path)
+                    removed += 1
+            except OSError:
+                pass
+    return removed
+
+
+def sweep(now=None, max_age=_STALE_SWEEP_SEC):
+    """Delete stale neutral sidecars/temp files across harness namespaces (and, on its
+    own 30-day window, the F-100a tag records beside them)."""
+    now = time.time() if now is None else now
+    removed = sweep_tags(now=now)
     try:
         harnesses = os.listdir(state_root())
     except OSError:
-        return 0
+        return removed
     for harness in harnesses:
         directory = os.path.join(state_root(), harness)
         if not os.path.isdir(directory):

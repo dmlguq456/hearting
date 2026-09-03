@@ -78,8 +78,11 @@ def lvl(pct: int, dim: bool = False) -> str:
     return DIM[key] if dim else P[key]
 
 
-def s(text: str, colour: str, bold: bool = False):
-    return (text, colour, bold)
+def s(text: str, colour: str, bold: bool = False, rev: bool = False):
+    """One run. `rev` = reverse video (F-100 chips): the run is drawn as a filled
+    rect in `colour` with the text in the background colour, the SVG analogue of
+    curses A_REVERSE."""
+    return (text, colour, bold, rev)
 
 
 def pad(text: str, width: int) -> str:
@@ -106,9 +109,19 @@ def bracket(pct, width, dim=False):
 FAMILY = {"Opus": "cyan", "Sonnet": "blue", "Fable": "magenta", "gpt": "yellow"}
 
 
+HARNESS_HUE = {"claude code": "cyan", "codex": "magenta", "opencode": "blue"}
+
+
 def card(depth, spin, spin_colour, harness, model, effort, title, branch,
-         stages, age, state, state_colour, pct, detail):
-    """One two-line session card; `depth` controls rail, indent, and brightness."""
+         stages, age, pct, detail, tag=None, where=None):
+    """One two-line session card; `depth` controls rail, indent, and brightness.
+
+    F-100 (2026-09-03): `tag` is the depth-0 session's 2-hex tag, drawn as a reverse
+    chip in the harness hue between the status glyph and the harness text; `where`
+    is the context row's lead — "herdr" (reverse chip), "tty" (dim word) or None
+    (blank). The old `working`/`idle` word no longer lives on the second line: the
+    first line's glyph is the one status indicator.
+    """
     d = depth > 0
     fam = FAMILY.get(model.split()[0].split("-")[0], "soft")
     fam_c = DIM[fam] if d else P[fam]
@@ -117,17 +130,26 @@ def card(depth, spin, spin_colour, harness, model, effort, title, branch,
     rail_a = s("╻ ", P["rail"]) if d else s("", P["rail"])
     rail_b = s("╹ ", P["rail"]) if d else s("", P["rail"])
     who = f"{harness} ({model}·{effort})"
+    chip = (s(f" {tag} ", P[HARNESS_HUE.get(harness, "soft")], rev=True) if tag
+            else s("    ", P["dim"]))
+    if where == "herdr":
+        lead2 = [s(" herdr ", P["soft"], rev=True), s(" ", P["dim"])]
+    elif where == "tty":
+        lead2 = [s(pad("tty", 8), P["dim"])]
+    else:
+        lead2 = [s(" " * 8, P["dim"])]
     line1 = [
         s(lead, P["rail"]), rail_a,
         s(spin + " ", spin_colour),
-        s(pad(who, 36 - depth * 3), fam_c),
+        chip,
+        s(pad(who, 32 - depth * 3), fam_c),
         s(pad(f"{title} ({branch})", 44), text_c),
         s(pad(stages, 96), DIM["blue"] if d else P["dim"]),
         s(age.rjust(7), P["dimmer"]),
     ]
     line2 = [
         s(lead + "  ", P["rail"]), rail_b,
-        s(pad(state, 8), DIM[state_colour] if d else P[state_colour]),
+        *lead2,
         *gauge(pct, 16, d),
         s(f" {pct:>3}%   ", P["dim"]),
         s(detail, P["dimmer"]),
@@ -159,27 +181,27 @@ def lines():
 
     out += card(0, "⣸", P["vanilla"], "claude code", "Opus 5", "xhigh",
                 "Promote Fleet on the landing page", "main", "—", "16h01m",
-                "working", "green", 53, "⚙ python3   render a wide fleet svg for the readme")
+                53, "⚙ python3   render a wide fleet svg for the readme",
+                tag="2f", where="herdr")
     out += card(1, "⣸", P["vanilla"], "claude code", "Opus 5", "xhigh",
                 "autopilot-code owner", "opencode-pa…",
                 "code(debug·std·owner) / mp:deep / unit:_kernel/owner : execute✓ › impl-review › test › report", "1h43m",
-                "working", "green", 27,
-                "3 stage workers dispatched at depth 2, joined before continuation")
+                27, "3 stage workers dispatched at depth 2, joined before continuation")
     out += card(2, "⣸", P["vanilla"], "claude code", "Sonnet 5", "medium",
                 "code-execute", "opencode-pa…",
                 "code-execute(std) / mp:light / unit:dev/backend : running", "22m",
-                "working", "green", 11, "⚙ pytest   dispatch_v20 regression")
+                11, "⚙ pytest   dispatch_v20 regression")
     out += card(2, "●", DIM["blue"], "codex", "gpt-5.6", "medium",
                 "impl-review", "opencode-pa…",
                 "impl-review(std) / mp:light / unit:qa/reviewer : done", "2m",
-                "done", "blue", 34, "0 blocking findings")
+                34, "0 blocking findings")
     out += card(2, "●", DIM["red"], "codex", "gpt-5.6", "xhigh",
                 "failure-mode", "opencode-pa…",
                 "failure-mode(std) / mp:deep / unit:qa/adversary : blocked", "1m",
-                "blocked", "red", 8, "waiting on input")
+                8, "waiting on input")
     out += card(0, "●", P["yellow"], "codex", "gpt-5.6-sol", "xhigh",
                 "Fleet dispatch column widths", "main", "—", "1d6h",
-                "idle", "yellow", 12, "")
+                12, "", where="herdr")
     out += [
         [s("▍", P["rail"]), s("─" * (COLS - 2), "#20222E")],
         [s("▍ ", P["rail"]),
@@ -190,7 +212,7 @@ def lines():
     ]
     out += card(0, "●", P["yellow"], "claude code", "Opus 5", "xhigh",
                 "Loss-function sampling investigation", "main", "—", "51m",
-                "idle", "yellow", 22, "")
+                22, "", tag="9b", where="tty")
     return out
 
 
@@ -203,10 +225,20 @@ def render() -> str:
         if not row:
             continue
         y = TOP + PAD_Y + LINE * (i + 0.8)
+        # F-100 reverse chips: a filled rect the width of the run, on the character grid,
+        # then the run's text in the background colour drawn over it.
+        col = 0
+        for t, c, _b, rev in row:
+            if rev:
+                x0 = PAD_X + col * CHAR
+                body.append(f'<rect x="{x0:.1f}" y="{y - FONT + 1.5:.1f}" '
+                            f'width="{len(t) * CHAR:.1f}" height="{LINE - 3:.1f}" '
+                            f'rx="2" fill="{c}"/>')
+            col += len(t)
         spans = "".join(
             '<tspan fill="%s"%s>%s</tspan>'
-            % (c, ' font-weight="600"' if b else "", escape(t))
-            for t, c, b in row
+            % (BG if rev else c, ' font-weight="600"' if b else "", escape(t))
+            for t, c, b, rev in row
         )
         body.append(f'<text x="{PAD_X:.0f}" y="{y:.1f}" xml:space="preserve">{spans}</text>')
 

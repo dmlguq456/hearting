@@ -159,35 +159,52 @@ class MainOwnershipWeightTest(unittest.TestCase):
             self.assertNotIn((" ▾3", "dim"), row)
 
 
-class F52cLivenessLeadTest(unittest.TestCase):
-    """F-52c's lead-cell SLOT, as corrected by F-55/F-55a/F-55b (v39/v40): the cell holds the
-    state WORD, not a glyph. Its position, color source and legend policy are still F-52c's."""
+class F100bLeadChipTest(unittest.TestCase):
+    """F-52c's lead-cell SLOT, as re-purposed by F-100b (user 2026-09-03): the cell holds
+    the WHERE chip, not the state word — the L1 glyph is the one status indicator. Its
+    position and width are still F-52c/F-55's, so the gauge column never moved."""
 
     def _lead(self, row):
         return row[0][1]
 
-    def test_the_lead_cell_is_the_state_word_in_the_harness_row_color_key(self):
-        for state in ("idle", "blocked", "unused", "queued", "done", "unknown"):
-            with self.subTest(state=state):
-                session = Session(harness="claude", pid=1, cwd="/x", liveness=state,
-                                  ctx_pct=40, slug="s", elapsed_min=1)
-                text, row_key = self._lead(render._context_detail_row(session, term_width=168))
-                self.assertEqual(text, state.ljust(render._CTX_LEAD_W) + " ")
-                self.assertEqual(render._dw(text), render._CTX_LABEL_W)
-                # The word carries the SAME key the harness row's glyph does — that shared
-                # color is the whole point of F-55, so it is asserted against the glyph
-                # producer and against the rendered harness row.
-                self.assertEqual(row_key, render._glyph(state)[1])
-                self.assertIn(row_key, [k for _v, k in render._session_row(session, narrow=False)])
+    def _session(self, state="idle", **over):
+        base = dict(harness="claude", pid=1, cwd="/x", liveness=state, ctx_pct=40,
+                    slug="s", elapsed_min=1)
+        base.update(over)
+        return Session(**base)
 
-    def test_working_shows_the_word_while_the_harness_row_keeps_spinning(self):
-        """The one state whose glyph is animated: the word must not inherit the animation,
-        only the spinner's color key."""
-        session = Session(harness="claude", pid=1, cwd="/x", liveness="working", ctx_pct=40)
-        text, key = self._lead(render._context_detail_row(session, term_width=168))
-        self.assertEqual(text, "working ")
-        self.assertEqual(key, render._glyph("working")[1])
-        self.assertFalse(set(text) & set(render._SPIN))
+    def test_attached_session_leads_with_the_reversed_herdr_chip_in_every_state(self):
+        for state in ("working", "idle", "blocked", "unused", "queued", "done", "unknown"):
+            with self.subTest(state=state):
+                row = render._context_detail_row(self._session(state, herdr_attached=True),
+                                                 term_width=168)[0]
+                self.assertEqual(row[1], (render._CTX_CHIP_TEXT, "herdr_chip"))
+                self.assertEqual(row[2], (" ", None))
+                self.assertEqual(render._dw(row[1][0] + row[2][0]), render._CTX_LABEL_W)
+                self.assertTrue(render._HUE_OF["herdr_chip"][1] & render._A_REVERSE)
+
+    def test_plain_terminal_leads_with_dim_tty_in_the_same_slot(self):
+        text, key = self._lead(render._context_detail_row(
+            self._session(herdr_attached=False), term_width=168))
+        self.assertEqual(text, render._CTX_OFF_TEXT.ljust(render._CTX_CHIP_W) + " ")
+        self.assertEqual(key, "dim")
+        self.assertEqual(render._dw(text), render._CTX_LABEL_W)
+
+    def test_unknown_attachment_leaves_the_slot_blank_never_a_guess(self):
+        text, key = self._lead(render._context_detail_row(self._session(), term_width=168))
+        self.assertEqual(text, " " * render._CTX_LABEL_W)
+        self.assertIsNone(key)
+
+    def test_the_state_word_is_gone_from_the_row(self):
+        """The whole point: `working`/`idle` duplicated the L1 glyph one line down."""
+        for state in ("working", "idle", "blocked", "unused", "queued", "done", "unknown"):
+            for attached in (True, False, None):
+                with self.subTest(state=state, attached=attached):
+                    row = render._context_detail_row(
+                        self._session(state, herdr_attached=attached), term_width=168)[0]
+                    visible = "".join(v for v, _k in row)
+                    self.assertNotIn(state, visible)
+                    self.assertFalse(set(visible) & set(render._SPIN))
 
     def test_plugin_agent_has_no_context_detail_row(self):
         """F-73: plugin-queue telemetry stays JSON-only; the subagent row has no gauge."""
@@ -197,101 +214,78 @@ class F52cLivenessLeadTest(unittest.TestCase):
         self.assertEqual(row, [])
 
     def test_no_book_icon_and_no_new_state_vocabulary(self):
-        session = Session(harness="claude", pid=1, cwd="/x", liveness="idle", ctx_pct=40)
+        session = Session(harness="claude", pid=1, cwd="/x", liveness="idle", ctx_pct=40,
+                          herdr_attached=True)
         visible = "".join(v for v, _k in render._context_detail_row(session)[0])
         self.assertNotIn("\U0001f4da", visible)
         self.assertFalse(hasattr(render, "_CTX_LABEL"))
+        self.assertFalse(hasattr(render, "_context_lead_cell"))
         keys = {k for _v, k in render._context_detail_row(session)[0]}
-        self.assertTrue(keys <= set(render._GLYPH_KEY.values()) | {None, "dim", "lvl_g",
-                                                                  "lvl_y", "lvl_r", "g_spin"})
+        self.assertTrue(keys <= {None, "dim", "lvl_g", "lvl_y", "lvl_r", "herdr_chip"})
 
     def test_label_ledger_matches_the_real_display_cells(self):
-        """`_CTX_LABEL_W` is computed with len() (module load runs before `_dw` exists) — pin it
-        against the actual display width of every word AND of the F-55b glyph fallback."""
-        for state in render._CTX_LEAD_STATES:
-            with self.subTest(state=state):
-                self.assertEqual(render._dw(render._context_lead_cell(state)[0]),
-                                 render._CTX_LABEL_W)
-        for glyph in set(render._LIVE_GLYPH.values()) | set(render._SPIN):
-            with self.subTest(glyph=glyph):
-                self.assertEqual(render._dw(glyph + " "), render._CTX_GLYPH_LABEL_W)
+        """`_CTX_LABEL_W` is computed with len() (module load runs before `_dw` exists) — pin
+        it against the actual display width of both lead shapes, and pin the slot to the
+        F-55 width so the gauge/NOW anchors provably did not move."""
+        self.assertEqual(render._dw(render._CTX_CHIP_TEXT + " "), render._CTX_LABEL_W)
+        self.assertEqual(render._dw(render._CTX_OFF_TEXT.ljust(render._CTX_CHIP_W) + " "),
+                         render._CTX_LABEL_W)
+        self.assertEqual(render._CTX_CHIP_W, 7)          # ` herdr ` == len("working")
+        self.assertEqual(render._CTX_LABEL_W, 8)         # + one trailing space, as F-55
 
-
-class F55LeadDomainTest(unittest.TestCase):
-    """F-55a — the padding width is DERIVED from the states this row can draw, never typed in."""
-
-    def test_the_domain_is_the_classifier_vocabulary_minus_the_omitted_rows(self):
-        from fleet.model import LIVENESS_STATES, PLUGIN_QUEUE_STATES
-        expected = (set(LIVENESS_STATES) | set(PLUGIN_QUEUE_STATES.values())) - {"stale", "dead"}
-        self.assertEqual(set(render._CTX_LEAD_STATES), expected)
-
-    def test_padding_is_seven_because_that_is_the_longest_drawable_state(self):
-        self.assertEqual(render._CTX_LEAD_W, max(len(s) for s in render._CTX_LEAD_STATES))
-        self.assertEqual(render._CTX_LEAD_W, 7)          # working / blocked / unknown
-        self.assertEqual(render._CTX_LABEL_W, 8)         # + one trailing space
-
-    def test_stale_and_dead_never_reach_the_lead_cell_so_they_buy_no_width(self):
+    def test_stale_and_dead_never_reach_the_lead_cell(self):
         for state in ("stale", "dead"):
             with self.subTest(state=state):
-                session = Session(harness="claude", pid=1, cwd="/x", liveness=state, ctx_pct=40)
-                self.assertEqual(render._context_detail_row(session, term_width=168), [])
-        self.assertEqual(render._CTX_LEAD_OMITTED_STATES, ("stale", "dead"))
-
-    def test_degraded_is_a_route_state_and_does_not_widen_the_column(self):
-        """`degraded` is 8 cells but no entity classifier emits it — it must not buy a cell.
-        If one ever arrives at runtime the word is printed WHOLE and only that row shifts."""
-        self.assertNotIn("degraded", render._CTX_LEAD_STATES)
-        session = Session(harness="claude", pid=1, cwd="/x", liveness="degraded", ctx_pct=40)
-        text, key = render._context_detail_row(session, term_width=168)[0][1]
-        self.assertEqual(text, "degraded ")               # whole word, no clip, no ellipsis
-        self.assertEqual(render._dw(text), render._CTX_LABEL_W + 1)
-        self.assertEqual(key, render._glyph("degraded")[1])
+                self.assertEqual(render._context_detail_row(
+                    self._session(state, herdr_attached=True), term_width=168), [])
 
 
-class F55bNarrowDegradeTest(unittest.TestCase):
-    """F-55b — the word is the LAST thing to yield, and it yields whole (glyph), never clipped."""
+class F100bNarrowDegradeTest(unittest.TestCase):
+    """F-55b's drop order, kept for the chip: NOW yields first, the track is a measurement
+    (F-52b) that never shrinks, and the chip is the LAST thing to yield — whole, never
+    clipped to `herd…`."""
 
     def _row(self, width, window=1000000, summary="NOW text here"):
         session = Session(harness="claude", pid=1, cwd="/x", liveness="working", ctx_pct=63,
-                          context_window_tokens=window, summary=summary)
+                          context_window_tokens=window, summary=summary, herdr_attached=True)
         return render._context_detail_row(session, term_width=width)[0]
 
     def _lead_text(self, row):
         return row[1][0]
 
-    def test_now_yields_before_the_word(self):
-        """Shrinking past the point where NOW fits must not touch the lead cell."""
-        # 48→36 for the tight sample: the F-42c gap is `max(_CONTEXT_NOW_GAP, _NAME_COL -
-        # prefix)`, and F-58's narrower `_NAME_COL` (46→36) shrank that gap by 10, so NOW now
-        # survives 10 columns further down. The ORDER under test is unchanged: NOW is still
-        # gone (room 0 at 36) while the word is still whole (it degrades only below 32).
+    def test_now_yields_before_the_chip(self):
         wide = "".join(v for v, _k in self._row(168))
         tight = "".join(v for v, _k in self._row(36))
         self.assertIn("NOW", wide)
         self.assertNotIn("NOW", tight)
-        self.assertEqual(self._lead_text(self._row(36)), "working ")
+        self.assertEqual(self._lead_text(self._row(36)), render._CTX_CHIP_TEXT)
 
-    def test_the_word_degrades_to_the_glyph_only_when_it_cannot_share_the_row(self):
-        # 4 indent + 8 word + 16 track + 4 value = 32 cells is the last width that fits
-        # (F-57b's 20→16 track pulls this boundary in from 36).
-        self.assertEqual(self._lead_text(self._row(32)), "working ")
-        degraded = self._lead_text(self._row(31))
-        self.assertEqual(render._dw(degraded), render._CTX_GLYPH_LABEL_W)
-        self.assertIn(degraded[0], set(render._SPIN))
+    def test_the_chip_yields_whole_only_when_it_cannot_share_the_row(self):
+        # 4 indent + 8 slot + 16 track + 4 value = 32 cells is the last width that fits.
+        self.assertEqual(self._lead_text(self._row(32)), render._CTX_CHIP_TEXT)
+        degraded = self._row(31)
+        visible = "".join(v for v, _k in degraded)
+        self.assertNotIn("herdr", visible)
+        self.assertNotIn("herd", visible)
+        # the gauge now follows the indent directly — no partial slot is left behind
+        self.assertEqual(render._dw(degraded[0][0]), render._CONTEXT_INDENT_W)
+        self.assertIn(degraded[1][0][0], (FULL, EMPTY))
 
-    def test_a_short_track_keeps_the_word_at_widths_a_full_track_could_not(self):
-        """The track is a measurement (F-52b), so a 5-cell Codex window buys the word room
-        instead of the word shrinking the track."""
-        self.assertEqual(self._lead_text(self._row(24, window=256000)), "working ")
+    def test_a_short_track_keeps_the_chip_at_widths_a_full_track_could_not(self):
+        self.assertEqual(self._lead_text(self._row(24, window=256000)), render._CTX_CHIP_TEXT)
 
-    def test_the_degraded_cell_keeps_the_same_color_key_and_never_clips_the_word(self):
+    def test_the_chip_is_whole_or_absent_never_clipped(self):
+        # The 16-cell track is a measurement that never shrinks (F-52b), so below 24
+        # cells the row itself overflows — the contract under test is only that the chip
+        # is whole or gone, never a clipped `herd…`.
         for width in range(10, 40):
             with self.subTest(width=width):
-                row = self._row(width)
-                text, key = row[1]
-                self.assertEqual(key, render._glyph("working")[1])
-                self.assertNotIn("…", text)
-                self.assertIn(text, ("working ", ) + tuple(g + " " for g in render._SPIN))
+                visible = "".join(v for v, _k in self._row(width))
+                self.assertNotIn("…", visible)
+                if "herd" in visible:
+                    self.assertIn(render._CTX_CHIP_TEXT, visible)
+                if width >= 24:
+                    self.assertLessEqual(render._dw(visible), width)
 
 
 class F52WidthLedgerTest(unittest.TestCase):
@@ -312,13 +306,13 @@ class F52WidthLedgerTest(unittest.TestCase):
 
     def test_row_starts_at_the_harness_name_column_and_fits_every_layout(self):
         session = Session(harness="claude", pid=1, cwd="/x", liveness="idle", ctx_pct=63,
-                          context_window_tokens=1000000, summary="NOW")
+                          context_window_tokens=1000000, summary="NOW", herdr_attached=True)
         for width in (168, 138, 120, 100, 60):
             with self.subTest(width=width):
                 visible = "".join(v for v, _k in
                                   render._context_detail_row(session, term_width=width)[0])
                 self.assertLessEqual(render._dw(visible), width)
-                self.assertEqual(render._dw(visible[:visible.index("idle")]),
+                self.assertEqual(render._dw(visible[:visible.index(render._CTX_CHIP_TEXT)]),
                                  render._CONTEXT_INDENT_W)
                 self.assertEqual(render._dw(visible[:visible.index("NOW")]), render._NAME_COL)
 

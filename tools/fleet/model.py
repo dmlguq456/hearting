@@ -305,6 +305,14 @@ class Session:
     runtime_name: Optional[str] = None     # F-99a ①②-tier canonical name (session_handle.resolve_display_inputs)
     kind: Optional[str] = None             # registry `kind` (interactive/...)
     provenance: Optional[str] = None       # best-effort launcher lineage: herdr|terminal|vscode|worker
+    # F-100a — the 2-hex suffix of the harness's derived `<cwd basename>-<xx>` name
+    # (`hearting-46` → `46`), snapshot on first sight so a later user rename keeps it.
+    # None = the harness mints no such name (Codex/OpenCode today) → blank chip cells.
+    session_tag: Optional[str] = None
+    # F-100b — herdr attachment: True = listed by `herdr agent list` right now; False =
+    # herdr answered and this (id-verified) session is not in its list; None = no
+    # evidence either way (herdr absent/unreachable, or an unverified-id harness).
+    herdr_attached: Optional[bool] = None
     state_evidence: Optional[dict] = None  # F-25 classifier verdict + inputs (additive; --json via asdict)
     branch: Optional[str] = None        # git branch override — demo fixtures; None = compute from cwd
     branch_ahead: Optional[int] = None  # additive background git telemetry

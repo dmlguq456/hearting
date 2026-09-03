@@ -242,6 +242,14 @@ def collect_all(harness_filter=None, jobs_path=None, usage="cache-only"):
     except Exception:
         pass
 
+    # F-100b: herdr attachment — one `herdr agent list` per snapshot, exact session-id
+    # match; additive enrichment that never touches liveness or row existence.
+    try:
+        from . import herdr as _herdr
+        _herdr.enrich(sessions)
+    except Exception:
+        pass
+
     # F-51d: JSON telemetry projection — cache-only lookup (never schedules a background
     # `git rev-list`; the live render path's own ahead_behind() calls are what populate the
     # cache over ticks). Absence stays None (F-51d "absence is normal"), never synthesized 0.

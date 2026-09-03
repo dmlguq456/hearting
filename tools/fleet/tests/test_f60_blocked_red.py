@@ -23,12 +23,12 @@ def _blocked(kind="decision", **kw):
 
 class BlockedKeyTest(unittest.TestCase):
     def test_blocked_has_its_own_key_shared_by_every_surface(self):
-        """One key, four places: the harness-row glyph, the context lead word, the legend and
-        (in its reverse variant) the interaction badge."""
+        """One key, three places: the harness-row glyph, the legend and (in its reverse
+        variant) the interaction badge. (The context lead word was the fourth until F-100b
+        retired the state word from that row.)"""
         self.assertEqual(render._GLYPH_KEY["blocked"], "g_blocked")
         self.assertEqual(render._state_key("blocked"), "g_blocked")
         self.assertEqual(render._glyph("blocked")[1], "g_blocked")
-        self.assertEqual(render._context_lead_cell("blocked")[1], "g_blocked")
 
     def test_the_key_is_separate_from_both_idle_and_dead(self):
         """Red is shared with `dead`; the KEY is not, so either can be retuned alone. And it
@@ -96,12 +96,16 @@ class BlockedRowTest(unittest.TestCase):
         self.assertNotIn("g_blocked_chip", self._keys(segs))
         self.assertIn("g_blocked", self._keys(segs))          # the glyph is still red
 
-    def test_context_lead_word_matches_the_harness_glyph_key(self):
+    def test_context_row_carries_no_second_blocked_mark(self):
+        """F-100b retired the context row's state word: the L1 glyph (+ chip) is the one
+        place `blocked` is named, so the context row shows neither the word nor a second
+        red chip — its lead slot is the WHERE chip or blank."""
         row = render._context_detail_row(_blocked(ctx_pct=40), term_width=168)[0]
-        word, key = row[1]
-        self.assertEqual(word.strip(), "blocked")
-        self.assertEqual(key, render._glyph("blocked")[1])
+        visible = "".join(v for v, _k in row)
+        self.assertNotIn("blocked", visible)
         self.assertNotIn("g_blocked_chip", [k for _v, k in row])
+        self.assertNotIn("g_blocked", [k for _v, k in row])
+        self.assertEqual(row[1], (" " * render._CTX_LABEL_W, None))
 
 
 class BlockedVersusDeadTest(unittest.TestCase):

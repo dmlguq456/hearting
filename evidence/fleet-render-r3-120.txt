@@ -1,0 +1,159 @@
+  hearting v2.102.0-dirty · unmanaged
+
+  usage claude code   5h [━━──────────  17%] ↻ 4h 07m   7d [━━━━━───────  45%] ↻ 5d 7h   fable [━━━━━━━─────  56%]
+        codex         7d [━━━━━━━━━━──  83%] ↻ 4d 1h
+        opencode      no usage api — plan quota is console-only
+  fleet ⠋ 4 working   ● 7 idle   ○ 1 detached   ↳ 19 jobs (15 working)
+─────
+  COMPUTE RESOURCES  3/3
+  ⌂ moving4  CPU ━━━─────────────  10/64 thr  · MEM 30/125GB  · SWP 2.6/8GB
+             ● 0: idle     RTX 6000 Ada Gen.   UTIL   0%  VRAM ━───────────   0.0/48GB
+             ● 1: idle     RTX 6000 Ada Gen.   UTIL   0%  VRAM ━───────────   0.0/48GB
+  ◇ cnn      CPU ───────  0/28 thr  · MEM 4.7/62GB  · SWP 0/8GB
+             ● 0: idle     GeForce RTX 5090    UTIL   0%  VRAM ━───────       0.0/32GB
+             ● 1: idle     GeForce RTX 5090    UTIL   0%  VRAM ━───────       0.0/32GB
+  ◇ xavier   CPU ━━──────────────────  7/80 thr  · MEM 14/188GB  · SWP 0.0/2GB
+             ● 0: idle     GeForce RTX 4090    UTIL   0%  VRAM ━─────         0.0/24GB
+             ● 1: idle     GeForce RTX 4090    UTIL   0%  VRAM ━─────         0.0/24GB
+─────
+
+  SESSIONS   narrow · press w to cycle  
+○ ⚙ system 🧠 1
+  ⚙ 야간 큐레이터 2/3 demo-lib 11m
+▍ 🧠 mem memory periodic curator  codex  11m
+
+● hearting/ 🚧 6
+▍ ⠋  46 claude code Fleet session ID/summary slot conflict (main)
+▍   35m             Fable 5.1 (xhigh)        -
+▍    herdr  ━━━━──────────── 26%            F-37/F-52/F-60/F-99 테스트를 새 칩 계약으로 갱신하고 F-100 전용 테스트 파일…
+▍ ●  d5 claude code Peer-steward wait hardening ▾3 (main)
+▍   51m             Fable 5.1 (xhigh)        -
+▍    herdr  ━━━━━━────────── 36%            ⚙ python3 17m  HANDOFF-new-session.md 프롬프트를 읽고 다음 세션 작업 착수…
+▍  ╭─  ⠋ claude     Portable Docs Spe… (⌂wt peer-st…) ────────────────────────────────────────────────────────────────╮
+▍   17m             Opus 5 (xhigh)             code(dev·std·owner)                                                    │
+▍  │             ━━━───────────── 16%       ⚙ python3  Frame legs converged; waiting on human-gate release for SD-123│
+▍  ├──────── frame(2-way) ✓ › plan › plan-check › execute › impl-review › test › report · autopilot-code standard  ───┤
+▍  ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+
+● degrade-project/
+▍ ⌄ orphaned dispatch rows ─────────────────────────────────────────────────────────────────────────────────────────────
+▍ ··  ⠋ opencode    demo-degrade-spec  (orphan)
+▍   14m             glm-5.2                    spec(dev)          : preparing…
+▍               ────────────────   —
+
+● demo-app/
+▍ ⠋  a7 claude code demo-app-a7 ▾4 (main)
+▍   1h 35m          Opus 4.8 (xhigh)         -
+▍    herdr  ━━━━━━━───────── 45%            지금 render.py 그룹 루프의 틴트 적용 경로를 분석 중
+▍  ╭─  ⠋ claude     demo-feat-x (feat-x) ─────────────────────────────────────────────────────────────────────────────╮
+▍   22m             Opus 4.8 (xhigh)           code(dev·adv·owner) : preparing…                                       │
+▍  │             ━━━━━━────────── 38%       ⚙ pytest  지금 feat-x 브랜치의 테스트 실패를 재현하는 중                 │
+▍  ├──────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+▍  │   ⠋ opencode   demo-feat-x-verif… (feat-x-veri…)                                                                 │
+▍   4m              glm-5.2                    test(adv)          : running                                           │
+▍  │             ────────────────   —                                                                                 │
+▍  │   ● codex      demo-feat-x-plan-… (feat-x-plan…)                                                                 │
+▍   6m              gpt-5.5                    plan(adv)          : -                                                 │
+▍  │             ━── 47%                                                                                              │
+▍  ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+▍  ╭─  ⠋ codex      demo-review (review) ─────────────────────────────────────────────────────────────────────────────╮
+▍   8m              gpt-5.5                    review(debug)      : preparing…                                        │
+▍  │             ────────────────   —                                                                                 │
+▍  ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+▍ ⠋  c0 claude code demo-composed-owner ▾2 (feat/compos…)
+▍   18m             Opus 4.8 (high)          -
+▍   tty     ━━━━━━━━━─────── 54%
+▍  ╭─  ⠋ claude     claim-b demo-comp… ───────────────────────────────────────────────────────────────────────────────╮
+▍   6m              Sonnet 5 (medium)          code               : -                                                 │
+▍  │             ────────────────   —                                                                                 │
+▍  ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+▍  ╭─  ⠋ claude     claim-a demo-comp… ───────────────────────────────────────────────────────────────────────────────╮
+▍   6m              Sonnet 5 (medium)          code               : -                                                 │
+▍  │             ────────────────   —                                                                                 │
+▍  ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+▍ ●     codex       demo-app ▾3 (feat/stream…)
+▍   41m             gpt-5.5 (high)           -
+▍    herdr  ━━━━━━━━━━━━──── 72%
+▍  ╭─  ⠋ codex      drill-g6-worktree (main) ─────────────────────────────────────────────────────────────────────────╮
+▍   3m              gpt-5.5 (high)             loop/drill·q·g6    : quick/exec                                        │
+▍  │             ────────────────   —                                                                                 │
+▍  ├──────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+▍  │   ⠋ opencode   drill-g6-opencode…                                                                                │
+▍   1m              glm-5.2                    drill(q)           : running                                           │
+▍  │             ────────────────   —                                                                                 │
+▍  │   ● claude     drill-g6-claude-v…                                                                                │
+▍   2m              Sonnet 5                   drill(q)           : -                                                 │
+▍  │             ────────────────   —                                                                                 │
+▍  ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+▍ ◑  3c claude code demo-app-gate  approval  (feat/gate)
+▍   7m              Opus 5 (xhigh)           -
+▍    herdr  ━━━━━━────────── 37%            배포 승인 대기 중 — 사용자의 확인을 기다리고 있습니다
+▍ ○  9e claude code demo-app-detach (fix/night-r…)
+▍   12h 00m         Opus 4.8 (high)          -
+▍           ━━━━━━━━━━────── 62%
+▍ ⌄ orphaned dispatch rows ─────────────────────────────────────────────────────────────────────────────────────────────
+▍ ··  ⠋ —           demo-route-conduc…  (orphan)
+▍   —               —                          code               : plan ✓ › execute › test › report
+▍         ⠋ claude  execute demo-rout…
+▍   8m              Opus 4.8 (high)            execute            : running
+▍                   ────────────────   —
+▍           ⚡explore (Sonnet 5·md) ●  2m
+
+● demo-svc/
+▍ ⠋     opencode    brave-comet ▾1 (main)
+▍   3h 20m          glm-5.2 (low)            -
+▍           ━━━━━─────────── 31%
+▍  ╭─  ⠋ opencode   demo-spec (spec) ─────────────────────────────────────────────────────────────────────────────────╮
+▍   5m              glm-5.2 (low)              spec(dev)          : preparing…                                        │
+▍  │             ────────────────   —                                                                                 │
+▍  ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+▍ ◑     codex       demo-svc-perm  approval  (fix/perm)
+▍   22m             gpt-5.6-sol (xhigh)      -
+▍           ━━━━━━━━━━────── 64%            쉘 명령 권한 승인을 기다리는 중
+
+● lab-project/
+▍ ⌄ orphaned dispatch rows ─────────────────────────────────────────────────────────────────────────────────────────────
+▍ ··  ⠋ —           demo-lab-conductor  (orphan)
+▍   —               —                          lab                : eval-asr › eval-sep ✕ › eval-vad › +2
+▍         ⠋ claude  eval-asr demo-lab…
+▍   9m              Sonnet 5 (medium)          eval-asr           : running
+▍                   ────────────────   —
+▍         · claude  eval-sep demo-lab…
+▍   3m              Sonnet 5 (medium)          eval-sep           : -
+
+● loops/
+▍  ╭─  ⠋ —          oncall ───────────────────────────────────────────────────────────────────────────────────────────╮
+▍   12m             —                                             : -                                                 │
+▍  ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+
+● demo-cool/  ✓ 1h 32m
+▍ ●     claude code demo-cool-shipped (feat/shipped)
+▍   2h 40m          Opus 4.8 (high)          -
+▍           ━━━───────────── 18%
+
+○ 삼성세미나_음성처리/
+▍ ●  cf claude code FLASH/GAU vs MossFormer architecture com
+▍   23h 42m         Opus 5 (high)            -
+▍    herdr  ━━━━━─────────── 34%            Explaining why input-side projection P⊥ acts as normalization, no… (19h 19m)
+
+○ demo-lib/
+▍ ●     claude code demo-lib-wait (chore/poll)
+▍   34m             Opus 5 (high)            -
+▍           ━━━━──────────── 22%            ⏳ sleep 4m  CI 결과 폴링 대기 — 다음 검사까지 sleep
+▍ ●     opencode    witty-orchid (wip/experim…)
+▍   16m             deepseek-v4-pro (high)   -
+▍           ━───────────────  8%
+▍    +1 stale/companion hidden
+▍ ⌄ orphaned dispatch rows ─────────────────────────────────────────────────────────────────────────────────────────────
+▍ ··  · codex       demo-orphan  (orphan) (orphan)
+▍   12d 2h          —                          debug               debug: -
+
+● cairn/ 🚧 20  ✓ 12m
+▍ ◑  47 claude code Cairn W13 multi-root fleet projection  approval  (main)
+▍   11h 31m         Fable 5 (xhigh)          -
+▍    herdr  ━━━━━━━━━─────── 56%            Detached fleet-rebuild #5 finished successfully (rebuild.done, rc=0).
+
+  ⠹ working   ● idle   ○ detached   · stale   ◑ blocked session    id  session    herdr  pane   tty plain terminal
+  ▾N child jobs   ↳ dispatch   🚧 N worktrees   🧠 1 mem   ⌂wt worktree
+
+# F-100 capture @120 cols: lines=157 max_width=120 overflow_lines=0 tag_chips=6 herdr_chips=8 tty=0 legend_lines=1

@@ -78,17 +78,20 @@ def collect(harness_filter=None):
           slug="demo-app-a7", model="Opus 4.8 (1M context)", effort="xhigh",
           ctx_pct=45, rl_5h=33, rl_7d=12, rl_ms=[["fable", 57]], cost=12.30, elapsed_min=95,
           status="busy", branch="main", liveness="working",
+          # F-100a/b: the derived `demo-app-a7` tag rides the chip slot; herdr lists it.
+          session_tag="a7", herdr_attached=True,
           # F-16/F-17 merge demo — the live subtitle row under a session row.
           summary="지금 render.py 그룹 루프의 틴트 적용 경로를 분석 중"),
         # Deterministic composed-DAG owner: the group row must show both active
         # claim siblings and the route's 1/4 progress with providers disabled.
         S(harness="claude", pid=90008, cwd="/home/demo/demo-app", session_id="demo-composed-owner",
           slug="demo-composed-owner", model="Opus 4.8", effort="high", ctx_pct=54,
-          elapsed_min=18, branch="feat/composed", liveness="working"),
+          elapsed_min=18, branch="feat/composed", liveness="working",
+          session_tag="c0", herdr_attached=False),
         S(harness="codex", pid=90002, cwd="/home/demo/demo-app", session_id="demo-codex-1",
           slug="demo-app", model="gpt-5.5", effort="high",
           ctx_pct=72, rl_5h=94, rl_7d=53, elapsed_min=41,
-          branch="feat/streaming", liveness="idle"),
+          branch="feat/streaming", liveness="idle", herdr_attached=True),
         # F-60: blocked sessions — the whole point of the red key + reverse chip is that these
         # rows are findable at a glance, so the demo board has to contain some. Two producer
         # kinds exercise Fleet's shared `approval` label, and one sits in the same group as a
@@ -96,7 +99,7 @@ def collect(harness_filter=None):
         S(harness="claude", pid=90011, cwd="/home/demo/demo-app", session_id="demo-blocked-1",
           slug="demo-app-gate", model="Opus 5", effort="xhigh",
           ctx_pct=37, rl_5h=33, rl_7d=12, cost=2.80, elapsed_min=7,
-          branch="feat/gate", liveness="blocked",
+          branch="feat/gate", liveness="blocked", session_tag="3c", herdr_attached=True,
           interaction_state={"kind": "approval", "source": "claude-transcript",
                              "waiting_since": time.time() - 7 * 60},
           summary="배포 승인 대기 중 — 사용자의 확인을 기다리고 있습니다"),
@@ -108,7 +111,7 @@ def collect(harness_filter=None):
         S(harness="claude", pid=90004, cwd="/home/demo/demo-lib", session_id="demo-claude-2",
           slug="demo-lib-f0", model="Sonnet 5", effort="medium",
           ctx_pct=88, rl_5h=20, rl_7d=40, cost=3.10, elapsed_min=3000,
-          branch="fix/bug-4821", liveness="stale"),
+          branch="fix/bug-4821", liveness="stale", session_tag="f0"),
         # --- project 'demo-svc' (opencode, low effort) ---
         S(harness="opencode", pid=90005, cwd="/home/demo/demo-svc", session_id="demo-oc-2",
           slug="brave-comet", model="glm-5.2", effort="low",
@@ -131,6 +134,7 @@ def collect(harness_filter=None):
         # detached tmux session (no client attached) — idle but backgrounded, shown with ◌ not ○
         S(harness="claude", pid=90006, cwd="/home/demo/demo-app", session_id="demo-claude-3",
           slug="demo-app-detach", model="Opus 4.8", effort="high", detached=True,
+          session_tag="9e",
           ctx_pct=62, rl_5h=40, rl_7d=22, cost=8.40, elapsed_min=720,
           branch="fix/night-run", liveness="idle"),
         # --- project 'demo-cool' (cooling) — no active work, last transcript write ~92min ago; the

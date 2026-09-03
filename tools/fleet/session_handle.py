@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import unicodedata
 from pathlib import Path
@@ -97,6 +98,24 @@ def display_name(harness: object, session_id: object, *, runtime_name: object = 
             return cleaned
     base = str(cwd or "").rstrip("/").rsplit("/", 1)[-1] if cwd else ""
     return sanitize_title(base) or "?"
+
+
+_DERIVED_TAG_RE = re.compile(r"^.+-(?P<tag>[0-9a-f]{2})$")
+
+
+def derived_tag(name: object) -> Optional[str]:
+    """F-100a — the 2-hex suffix of a harness-derived session name.
+
+    Claude Code mints ``<cwd basename>-<xx>`` (``hearting-46``, ``cairn-47``,
+    ``claude-cf``); the suffix is random, not a function of the session id, so it can
+    only be read off the name. Pure. Returns ``None`` for any other shape. The CALLER
+    must already know the name is derived (``nameSource == "derived"``) — a user-set
+    ``release-1a`` has the same shape and must never be mistaken for a tag.
+    """
+    if not isinstance(name, str):
+        return None
+    m = _DERIVED_TAG_RE.match(name.strip())
+    return m.group("tag") if m else None
 
 
 def _agent_home_for_state_root() -> str:
