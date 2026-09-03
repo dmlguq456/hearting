@@ -212,9 +212,41 @@ class HerdrCollectorTest(unittest.TestCase):
 
     def test_verdicts(self):
         sessions = self._sessions()
-        herdr.enrich(sessions, agents=self._PAYLOAD["result"]["agents"])
+        # F-100c: the pane pid probe answered (empty) → an unmatched id-less session is a
+        # plain terminal (False), not unknown; workers/companions stay None.
+        herdr.enrich(sessions, agents=self._PAYLOAD["result"]["agents"], pids=(set(), set()))
         self.assertEqual([s.herdr_attached for s in sessions],
-                         [True, False, True, False, None, None, None, None])
+                         [True, False, True, False, False, None, None, None])
+
+    def test_pane_pid_probe_attaches_any_harness_without_an_id(self):
+        """F-100c — herdr reports no session id for OpenCode (measured 2026-09-03), but
+        `pane process-info` names the pane's shell pid and foreground pids exactly."""
+        sessions = [
+            Session(harness="opencode", pid=3110298, session_id="ses_x"),   # foreground pid
+            Session(harness="opencode", pid=4242, session_id="ses_y"),      # descends from shell
+            Session(harness="codex", pid=5151),                              # neither
+        ]
+        ppid = {4242: 4000, 4000: 3109434, 5151: 9, 9: 1}.get
+        real = herdr._ppid_of
+        herdr._ppid_of = ppid
+        try:
+            herdr.enrich(sessions, agents=[], pids=({3109434}, {3110298}))
+        finally:
+            herdr._ppid_of = real
+        self.assertEqual([s.herdr_attached for s in sessions], [True, True, False])
+
+    def test_pane_pids_parses_the_measured_process_info_shape(self):
+        panes = [{"pane_id": "w2:p4", "agent": "opencode"}, {"pane_id": "w5:p1", "agent": None}]
+        calls = []
+
+        def runner(argv, **kw):
+            calls.append(argv)
+            return SimpleNamespace(returncode=0, stdout=json.dumps({"result": {"process_info": {
+                "shell_pid": 3109434, "pane_id": argv[-1],
+                "foreground_processes": [{"pid": 3110298, "name": "opencode"}, "junk"]}}}))
+        shells, fg = herdr.pane_pids(panes, runner=runner)
+        self.assertEqual((shells, fg), ({3109434}, {3110298}))
+        self.assertEqual(calls, [["herdr", "pane", "process-info", "--pane", "w2:p4"]])  # agent panes only
 
     def test_absent_herdr_falls_back_to_lineage_and_only_ever_promotes(self):
         sessions = self._sessions()[:4]

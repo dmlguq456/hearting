@@ -28,6 +28,18 @@ _PEER_MESSAGE_PY = _UTILITIES_DIR / "peer-message.py"
 _PEER_STEWARD_PY = _UTILITIES_DIR / "peer-steward.py"
 _SWEEP_MAX = 5
 
+
+def _peer_message_module():
+    """The ledger tool as a module (trailer parser + registry-name lookup), fail-soft."""
+    try:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("_peer_message", str(_PEER_MESSAGE_PY))
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+    except Exception:
+        return None
+
 _PREFIX_KIND = {
     "[steer]": "steer",
     "[handoff]": "handoff",
@@ -71,6 +83,13 @@ def handle_post_tool(payload):
 
     from_session_id = payload.get("session_id") or ""
     from_project = _project_of(payload.get("cwd"))
+    from_name = None
+    mod = _peer_message_module()
+    if mod is not None:
+        try:
+            from_name = mod.claude_session_name(from_session_id)
+        except Exception:
+            from_name = None
 
     args_list = [
         "--from-harness", "claude",
@@ -82,6 +101,8 @@ def handle_post_tool(payload):
         "--status", "sent",
         "--body-stdin",
     ]
+    if from_name:
+        args_list += ["--from-name", from_name]
     if isinstance(to, dict):
         if to.get("session_id"):
             args_list += ["--to-session-id", str(to["session_id"])]
@@ -99,34 +120,62 @@ def handle_post_tool(payload):
 
 
 _CROSS_SESSION_RE = re.compile(r"<cross-session-message\s+from=\"([^\"]*)\"")
+_CROSS_SESSION_NAME_RE = re.compile(r"<cross-session-message\s[^>]*?from-name=\"([^\"]*)\"")
 
 
 def handle_prompt(payload):
     prompt = payload.get("prompt") or ""
-    match = _CROSS_SESSION_RE.search(prompt)
-    if not match:
-        return
     session_id = payload.get("session_id")
     if not session_id:
         # M1: the receiving session's own id is the only verifiable identity
         # source here. Without it we cannot claim an exact to.session_id, and
         # a name fallback would defeat F-98b's exact-session-id join contract.
         return
-    from_name = match.group(1)
+    match = _CROSS_SESSION_RE.search(prompt)
+    if match:
+        from_name = match.group(1)
+        named = _CROSS_SESSION_NAME_RE.search(prompt)
+        args_list = [
+            "--from-harness", "claude",
+            "--from-session-id", "",
+            "--from-project", _project_of(payload.get("cwd")),
+            "--to-harness", "claude",
+            "--to-session-id", str(session_id),
+            "--kind", "notice",
+            "--surface", "claude-native",
+            "--status", "received",
+            "--body-stdin",
+        ]
+        if named and named.group(1):
+            args_list += ["--from-name", named.group(1)]
+        if from_name:
+            args_list += ["--to-name", from_name]
+        _record(args_list, "cross-session message received")
+        return
+    # F-100c: a herdr-delivered steer carries the sender trailer instead of an envelope —
+    # the same rule the Codex hook and the OpenCode plugin apply, so all three harnesses
+    # write the same `notice` shape.
+    mod = _peer_message_module()
+    trailer = mod.parse_peer_trailer(prompt) if mod is not None else None
+    if not trailer:
+        return
     args_list = [
-        "--from-harness", "claude",
-        "--from-session-id", "",
+        "--from-harness", trailer.get("harness") or "unknown",
+        "--from-session-id", trailer.get("session_id") or "",
         "--from-project", _project_of(payload.get("cwd")),
         "--to-harness", "claude",
         "--to-session-id", str(session_id),
         "--kind", "notice",
-        "--surface", "claude-native",
+        "--surface", "herdr",
         "--status", "received",
         "--body-stdin",
     ]
-    if from_name:
-        args_list += ["--to-name", from_name]
-    body = "cross-session message received"
+    if trailer.get("name"):
+        args_list += ["--from-name", trailer["name"]]
+    _record(args_list, "herdr steer received")
+
+
+def _record(args_list, body):
     subprocess.run(
         [sys.executable, str(_PEER_MESSAGE_PY), "record"] + args_list,
         input=body.encode("utf-8"),
@@ -190,10 +239,24 @@ def ack_rows(payload, rows):
             )
         except Exception:
             continue
+def _is_helper_process():
+    """F-100c: a title/summary refresher or memory distiller runs `claude -p` with the
+    user's prompt text inside ITS prompt, so the trailer would make the helper look like
+    a receiver (measured 2026-09-03: a phantom `notice` under a cairn summary worker's
+    sid). Registered workers and child sessions are not receivers either."""
+    # NOT `CLAUDE_CODE_CHILD_SESSION`: a herdr-started interactive depth-0 child carries
+    # it too (measured 2026-09-03 on hearting-46 itself), and such a child is exactly the
+    # receiver this record exists for.
+    env = os.environ
+    return (env.get("FLEET_TITLE_REFRESH") == "1" or env.get("MEM_DISTILL") == "1"
+            or env.get("AGENT_SESSION_ROLE", "").lower() == "worker"
+            or bool(env.get("AGENT_DISPATCH_DEPTH")))
 
 
 def main():
     mode = sys.argv[1] if len(sys.argv) > 1 else ""
+    if _is_helper_process():
+        return
     payload = _read_stdin_json()
     if mode == "post-tool":
         handle_post_tool(payload)

@@ -79,7 +79,10 @@ def collect(harness_filter=None):
           ctx_pct=45, rl_5h=33, rl_7d=12, rl_ms=[["fable", 57]], cost=12.30, elapsed_min=95,
           status="busy", branch="main", liveness="working",
           # F-100a/b: the derived `demo-app-a7` tag rides the chip slot; herdr lists it.
-          session_tag="a7", herdr_attached=True,
+          # F-100c: it stewards two children → bold-yellow tag.
+          session_tag="a7", herdr_attached=True, steward=True,
+          steward_targets=[{"harness": "codex", "session_id": "demo-codex-1",
+                            "name": "demo-app", "kind": "steer", "ts": "2026-09-03T02:00:00Z"}],
           # F-16/F-17 merge demo — the live subtitle row under a session row.
           summary="지금 render.py 그룹 루프의 틴트 적용 경로를 분석 중"),
         # Deterministic composed-DAG owner: the group row must show both active

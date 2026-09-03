@@ -53,7 +53,9 @@ class DegradedStateTest(unittest.TestCase):
         card = render._route_card_l2(view)
         card_text = "".join(text for line in card for text, _key in line)
         self.assertIn("(inline·fleet_visibility=none)", card_text)
-        self.assertNotIn("99", card_text)
+        # the guard is against a `99%` context value, not against the digits themselves —
+        # a route hash can legitimately contain "99" (2026-09-03: `20699d`).
+        self.assertNotIn("99%", card_text)
         self.assertNotIn("secret-model", card_text)
         self.assertNotIn("high", card_text)
         public_node = projection.route_summary_from_projections([job])[0]["nodes"][0]

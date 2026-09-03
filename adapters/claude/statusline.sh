@@ -115,7 +115,21 @@ try:
     name = mod.display_name("claude", sid, runtime_name=inputs.get("runtime_name"),
                              registry_name=inputs.get("registry_name"),
                              title=session_name or None, slug=None, cwd=cwd)
-    print(mod.clip_cells(name, 48))
+    # F-100 (user 2026-09-03 "식별번호가 statusline 같은 곳에 떠야"): the same `[46]`
+    # badge Fleet draws — the derived name's 2-hex tag while the record still says
+    # `derived`, else the tag Fleet snapshot for this sid (a rename keeps it).
+    tag = None
+    try:
+        tag = mod.derived_tag(inputs.get("registry_name")) if not inputs.get("runtime_name") else None
+        if not tag:
+            tspec = importlib.util.spec_from_file_location(
+                "fleet_titles", sys.argv[1].replace("session_handle.py", "titles.py"))
+            tmod = importlib.util.module_from_spec(tspec); tspec.loader.exec_module(tmod)
+            tag = tmod.read_tag(sid, harness="claude")
+    except Exception:
+        tag = None
+    shown = mod.clip_cells(name, 48)
+    print("[%s] %s" % (tag, shown) if tag else shown)
 except Exception:
     pass
 PY

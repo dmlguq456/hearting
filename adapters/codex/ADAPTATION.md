@@ -105,6 +105,30 @@ posture only — no secrets and no machine-specific absolute project paths (the
 merge the relevant lines into `$CODEX_HOME/config.toml` on the target machine.
 (codex-adapter-parity audit P-15: gap closed.)
 
+A **managed interactive** Codex session — one this harness launches through
+`utilities/codex-launcher.py`, meaning bare `codex`, `codex resume`, and
+`codex fork` — starts in bypass by default: the launcher prepends
+`--dangerously-bypass-approvals-and-sandbox` (the `--yolo` alias) ahead of the
+invocation, so it stays a root option even before a subcommand. This is the same
+user decision that already starts a steward-launched child Codex root with that
+flag (`peer-steward.py start`, stage-dispatch SD-122 (9)) and a registered Claude
+worker in `bypassPermissions`: a session the harness starts is unattended by
+design and should come up ready to work. Two things turn it off — the environment
+variable `AGENT_CODEX_INTERACTIVE_PERMISSION_MODE=inherit`, and any invocation
+that already states a posture of its own (`-s/--sandbox`, `-a/--ask-for-approval`,
+`--approve-for-me`, the bypass flag itself, `-p/--profile`, or a
+`-c approval_policy=…`/`sandbox_mode=…`/`sandbox_permissions=…` override), which
+is passed through untouched.
+
+The boundary this does **not** cross is registered dispatch. `codex exec` is a
+passthrough surface that never reaches the managed path, so a registered worker
+keeps `approval_policy=never` with a real sandbox as its security boundary
+(`core/OPERATIONS.md` §5.10, stage-dispatch SD-125 (5)) and never receives the
+bypass flag. Measured 2026-09-03 in `~/.codex/sessions/**/rollout-*.jsonl`
+`turn_context`: launcher default → `never` + `danger-full-access`; launcher with
+`-s read-only -a on-request` → `on-request` + `read-only`; every `codex_exec`
+session in the same window → `never` + `workspace-write`.
+
 ## Native Skill And Plugin Surface
 
 Current Codex support includes generated native Skill projections:

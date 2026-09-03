@@ -24,6 +24,9 @@ class _BaseTest(unittest.TestCase):
         self.env = dict(os.environ)
         self.env["AGENT_DISPATCH_JOBS"] = str(self.jobs_path)
         self.env.pop("AGENT_HOME", None)
+        for key in ("FLEET_TITLE_REFRESH", "MEM_DISTILL", "AGENT_SESSION_ROLE",
+                    "AGENT_DISPATCH_DEPTH", "CLAUDE_CODE_CHILD_SESSION"):
+            self.env.pop(key, None)
 
     def _run(self, mode, payload):
         return subprocess.run(
@@ -344,6 +347,79 @@ class SweepTest(_BaseTest):
         proc = self._run("prompt", {"cwd": str(self.tmp_root), "prompt": ""})
         self.assertEqual(proc.returncode, 0)
         self.assertEqual(proc.stdout, b"")
+class F100cTrailerAndNameTest(_BaseTest):
+    """F-100c — the prompt path records a herdr-trailer steer as a `notice`, and both
+    paths carry the sender's registry name."""
+
+    def _cfg_with(self, sid, name):
+        cfg = self.tmp_root / "cfg"
+        (cfg / "sessions").mkdir(parents=True, exist_ok=True)
+        (cfg / "sessions" / "77.json").write_text(json.dumps(
+            {"sessionId": sid, "name": name, "nameSource": "derived"}))
+        self.env["CLAUDE_CONFIG_DIR"] = str(cfg)
+
+    def test_herdr_trailer_prompt_writes_a_herdr_notice_with_exact_sender(self):
+        self._run("prompt", {"session_id": "sid-recv", "cwd": "/tmp/proj",
+                             "prompt": "[steer] do x\n\n(peer-from: codex thread-9 f100-codex)"})
+        recs = self._all_records()
+        self.assertEqual(len(recs), 1)
+        rec = recs[0]
+        self.assertEqual(rec["kind"], "notice")
+        self.assertEqual(rec["delivery"]["surface"], "herdr")
+        self.assertEqual(rec["delivery"]["status"], "received")
+        self.assertEqual(rec["to"], {"harness": "claude", "session_id": "sid-recv"})
+        self.assertEqual(rec["from"]["harness"], "codex")
+        self.assertEqual(rec["from"]["session_id"], "thread-9")
+        self.assertEqual(rec["from"]["name"], "f100-codex")
+        self.assertEqual(rec["summary"], "herdr steer received")
+
+    def test_plain_prompt_still_writes_nothing(self):
+        self._run("prompt", {"session_id": "sid-recv", "cwd": "/tmp/proj", "prompt": "peer-from: x"})
+        self.assertEqual(self._all_records(), [])
+
+    def test_native_notice_carries_from_name_attribute(self):
+        self._run("prompt", {"session_id": "sid-recv", "cwd": "/tmp/proj",
+                             "prompt": '<cross-session-message from="uds:/x.sock" from-name="cairn-bc" from-mode="bypass">hi</cross-session-message>'})
+        rec = self._all_records()[0]
+        self.assertEqual(rec["from"]["name"], "cairn-bc")
+        self.assertEqual(rec["to"]["name"], "uds:/x.sock")
+        self.assertEqual(rec["delivery"]["surface"], "claude-native")
+
+    def test_sent_record_carries_the_senders_registry_name(self):
+        self._cfg_with("sid-sender", "hearting-46")
+        self._run("post-tool", {"session_id": "sid-sender", "cwd": "/tmp/proj",
+                                "tool_name": "SendMessage",
+                                "tool_input": {"to": {"name": "peer-1"}, "message": "[steer] go"}})
+        rec = self._all_records()[0]
+        self.assertEqual(rec["from"]["name"], "hearting-46")
+        self.assertEqual(rec["kind"], "steer")
+
+
+class F100cHelperProcessGuardTest(_BaseTest):
+    """A title refresher / memory distiller / worker never records — it is not a receiver
+    even though the user's prompt (trailer included) is inside its own prompt."""
+
+    def test_helper_env_writes_nothing_on_either_path(self):
+        for key in ("FLEET_TITLE_REFRESH", "MEM_DISTILL", "AGENT_DISPATCH_DEPTH"):
+            with self.subTest(key=key):
+                self.env[key] = "1"
+                self._run("prompt", {"session_id": "sid-helper", "cwd": "/tmp/proj",
+                                     "prompt": "(peer-from: claude sid-a hearting-46)"})
+                self._run("post-tool", {"session_id": "sid-helper", "cwd": "/tmp/proj",
+                                        "tool_name": "SendMessage",
+                                        "tool_input": {"to": {"name": "x"}, "message": "m"}})
+                self.env.pop(key, None)
+        self.env["AGENT_SESSION_ROLE"] = "worker"
+        self._run("prompt", {"session_id": "sid-helper", "cwd": "/tmp/proj",
+                             "prompt": "(peer-from: claude sid-a hearting-46)"})
+        self.assertEqual(self._all_records(), [])
+
+    def test_an_interactive_child_session_is_still_a_receiver(self):
+        self.env["CLAUDE_CODE_CHILD_SESSION"] = "1"
+        self._run("prompt", {"session_id": "sid-child", "cwd": "/tmp/proj",
+                             "prompt": "x (peer-from: claude sid-a hearting-46)"})
+        self.assertEqual(len(self._all_records()), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

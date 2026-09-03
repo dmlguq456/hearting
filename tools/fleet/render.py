@@ -167,6 +167,10 @@ _HUE_OF = {
     # F-100a: the `[46]` session-tag badge — brackets dim, the tag itself in the same soft
     # white as `herdr_on` (user 2026-09-03: white, so it separates from the harness hue).
     "tag": ("w", 0), "tag_dim": ("d", _A_D),
+    # F-100c: a STEWARD session (depth −1, it has sent steer/handoff/watch records) wears
+    # its tag in bold yellow — the one status hue not already claimed by a liveness
+    # state on the identity column (user 2026-09-03: "id에 노란색이나 눈에 띄는 색").
+    "tag_steward": ("y", _A_B),
     # Badge text, NOT the glyph: plain yellow, distinct from the dim g_unused glyph so the
     # ●>○>◌ ink-weight gradient still reads.
     "g_unused_b": ("y", 0),
@@ -388,6 +392,7 @@ def _init_colors():
     # F-100a/b badges: soft white, plain weight — no fill, no bold.
     _COLOR["tag"] = _COLOR.get("soft", 0)
     _COLOR["tag_dim"] = curses.A_DIM
+    _COLOR["tag_steward"] = _COLOR.get("yellow", 0) | curses.A_BOLD
     _COLOR["herdr_on"] = _COLOR.get("soft", 0)
     _COLOR["grp"] = _COLOR.get("soft", 0) | curses.A_BOLD  # group card title
     _COLOR["grp_live"] = _COLOR.get("green", 0)
@@ -1804,10 +1809,14 @@ def _session_tag_chip(s, dim=False):
     ` · hearting-46` companion: the title owns the whole name zone again and the identity
     token has its own fixed home."""
     tag = getattr(s, "session_tag", None)
+    steward = bool(getattr(s, "steward", False))
     if not isinstance(tag, str) or not tag:
-        return [(" " * _TAG_W, None)]
+        if not steward:
+            return [(" " * _TAG_W, None)]
+        tag = "*"          # F-100c: an untagged steward (Codex/OpenCode today) still gets a badge
     body = tag[: _TAG_W - 3].ljust(_TAG_W - 3)
-    return [("[", "dim"), (body, "tag_dim" if dim else "tag"), ("]", "dim"), (" ", None)]
+    key = "tag_dim" if dim else ("tag_steward" if steward else "tag")
+    return [("[", "dim"), (body, key), ("]", "dim"), (" ", None)]
 
 
 def _session_row(s, narrow, is_parent=False, child_count=0, name_width=None,
@@ -3302,7 +3311,11 @@ def _sort_group_sessions(ss):
         r = _LIVE_RANK.get(s.liveness, 9)
         if s.detached and r < 3:
             r = 3          # Detached sessions sort below working and idle sessions.
-        return (r, -(s.elapsed_min or 0))
+        # F-100c (user 2026-09-03 "steward 세션은 repo의 가장 상단"): a stewarding session
+        # (depth −1 role) leads its repo group regardless of liveness; the ranks below are
+        # unchanged among non-stewards, so existing stable-order anchors keep their order.
+        steward_rank = 0 if getattr(s, "steward", False) else 1
+        return (steward_rank, r, -(s.elapsed_min or 0))
     return sorted(ss, key=k)
 
 
@@ -6012,6 +6025,8 @@ def _build_lines(sessions, jobs, section, narrow, malformed, layout="wide", memo
                 _seen_glyphs.add("detached")
             if getattr(s, "session_tag", None):
                 _seen_glyphs.add("tag")                       # F-100a
+            if getattr(s, "steward", False):
+                _seen_glyphs.add("steward")                   # F-100c
             if getattr(s, "herdr_attached", None) is True:
                 _seen_glyphs.add("herdr")                     # F-100b
             elif getattr(s, "herdr_attached", None) is False:
@@ -6180,6 +6195,8 @@ def _build_lines(sessions, jobs, section, narrow, malformed, layout="wide", memo
         legend += [("◑", "g_blocked"), (" blocked session   ", "dim")]
     if "tag" in _seen_glyphs:
         legend += [("[", "dim"), ("id", "tag"), ("]", "dim"), (" session   ", "dim")]  # F-100a
+    if "steward" in _seen_glyphs:
+        legend += [("[", "dim"), ("id", "tag_steward"), ("]", "dim"), (" steward   ", "dim")]  # F-100c
     if "herdr" in _seen_glyphs:
         legend += [(_CTX_ON_TEXT, "herdr_on"), (" pane   ", "dim")]                  # F-100b
     if "tty" in _seen_glyphs:

@@ -59,6 +59,8 @@ def _current_session_identity():
         return os.environ["CLAUDE_CODE_SESSION_ID"], "claude"
     if os.environ.get("CODEX_THREAD_ID"):
         return os.environ["CODEX_THREAD_ID"], "codex"
+    if os.environ.get("OPENCODE_SESSION_ID"):
+        return os.environ["OPENCODE_SESSION_ID"], "opencode"
     if os.environ.get("AGENT_SESSION_ID"):
         return os.environ["AGENT_SESSION_ID"], "unknown"
     return "", "unknown"
@@ -84,15 +86,48 @@ def _default_permission_mode():
         return DEFAULTS.DEFAULT_STEWARD_CHILD_PERMISSION_MODE
 
 
+def _from_name(from_harness, from_sid):
+    """The sender's stable registry name for the ledger (`hearting-46`); Claude only
+    today — Codex/OpenCode mint no runtime name (F-100c keeps that gap honest: None)."""
+    if from_harness == "claude":
+        try:
+            return peer_message.claude_session_name(from_sid)
+        except Exception:
+            return None
+    return None
+
+
+def _resolve_target(target):
+    """`herdr agent get <target>` → (harness, session_id, name); every miss is None.
+    herdr reports an id for Claude (UUID) and Codex (thread id), none for OpenCode
+    (measured 2026-09-03) — so an OpenCode target keeps session_id=None and the pane
+    pid probe in Fleet's herdr collector is what joins it."""
+    if _herdr_missing():
+        return None, None, None
+    try:
+        proc = subprocess.run(["herdr", "agent", "get", target], capture_output=True,
+                              text=True, timeout=5)
+        payload = json.loads(proc.stdout or "")
+    except Exception:
+        return None, None, None
+    agent = (payload.get("result") or {}).get("agent") if isinstance(payload, dict) else None
+    if not isinstance(agent, dict):
+        return None, None, None
+    harness = (agent.get("agent") or None)
+    sid = (agent.get("agent_session") or {}).get("value") or None
+    return harness, sid, agent.get("name") or None
+
+
 def _record(*, to_harness, to_name, kind, ref=None, summary_text=None,
-            receipt=None, status="sent", from_identity=None):
+            receipt=None, status="sent", from_identity=None, to_session_id=None):
     """Write one peer_message_v1 row.
 
     `from_identity` exists for the detached watcher: `_current_session_identity`
     reads the *environment*, and a watcher re-armed from a hook does not
     necessarily inherit the steward's environment. The watcher therefore carries
     the steward identity on argv and passes it here explicitly. `wait`/`start`
-    keep the environment-derived default.
+    keep the environment-derived default. `to_session_id` (F-100c) is the
+    target's exact session id resolved through `herdr agent get`.
     """
     if from_identity is not None:
         from_sid, from_harness, from_project = from_identity
@@ -110,8 +145,9 @@ def _record(*, to_harness, to_name, kind, ref=None, summary_text=None,
         from_harness=from_harness,
         from_session_id=from_sid,
         from_project=from_project,
+        from_name=_from_name(from_harness, from_sid),
         to_harness=to_harness,
-        to_session_id=None,
+        to_session_id=to_session_id,
         to_name=to_name,
         kind=kind,
         surface="herdr",
@@ -218,8 +254,12 @@ def _interpret_payload(payload, target):
 
 def cmd_wait(args):
     target = args.target
-    # S6: one record at wait start, append-only, never updated on return.
-    _record(to_harness="unknown", to_name=target, kind="watch", ref=args.ref)
+    # S6: one record at wait start, append-only, never updated on return. F-100c: the
+    # target is resolved through herdr first so the record carries an exact session id
+    # (Fleet joins sent/recv and the `←` subtitle on it), the name being only a label.
+    t_harness, t_sid, _t_name = _resolve_target(target)
+    _record(to_harness=t_harness or "unknown", to_name=target, kind="watch", ref=args.ref,
+            to_session_id=t_sid)
 
     if _herdr_missing():
         return _unavailable("herdr-not-found")
@@ -254,9 +294,18 @@ def cmd_start(args):
         return _unavailable("herdr-invocation-failed")
 
     started = proc.returncode == 0
+    # F-100c: herdr answers `agent_started` with the agent block; a Claude/Codex id is
+    # usually present already, OpenCode's never is (measured) — record what we got.
+    started_sid = None
+    try:
+        agent = (json.loads(proc.stdout or "").get("result") or {}).get("agent") or {}
+        started_sid = (agent.get("agent_session") or {}).get("value") or None
+    except Exception:
+        started_sid = None
     _record(
         to_harness=args.kind, to_name=args.name, kind="steer",
         summary_text=f"[start] {args.name} kind={args.kind} mode={mode}",
+        to_session_id=started_sid,
     )
     print(
         f"started={str(started).lower()} agent={args.kind} name={args.name} "
@@ -983,6 +1032,62 @@ def cmd_ack(args):
     print(f"watch_id={args.watch_id} ack=created carrier={args.carrier}")
     return 0
 
+def cmd_prompt(args):
+    """F-100c — the harness-neutral steward send: `herdr agent prompt <target> <body +
+    trailer>`, recorded with the target's exact session id (herdr `agent get`) and the
+    sender's name. The trailer lets the receiving harness write its own `notice`."""
+    if _herdr_missing():
+        return _unavailable("herdr-not-found")
+    if args.body_file:
+        body = open(args.body_file, encoding="utf-8", errors="replace").read()
+    elif args.body_stdin:
+        body = sys.stdin.read()
+    else:
+        body = args.text or ""
+    if not body.strip():
+        print("prompted=false reason=empty-body")
+        return 1
+    from_sid, from_harness = _current_session_identity()
+    text = body.rstrip("\n")
+    if not args.no_trailer:
+        text += "\n\n" + peer_message.peer_trailer(
+            from_harness, from_sid, _from_name(from_harness, from_sid))
+    t_harness, t_sid, _t_name = _resolve_target(args.target)
+    try:
+        proc = subprocess.run(["herdr", "agent", "prompt", args.target, text],
+                              capture_output=True, text=True, timeout=15)
+    except (OSError, subprocess.SubprocessError):
+        return _unavailable("herdr-invocation-failed")
+    prompted = proc.returncode == 0
+    first = body.strip().splitlines()[0] if body.strip() else ""
+    kind = "steer"
+    for prefix, k in (("[steer]", "steer"), ("[handoff]", "handoff"), ("[gate]", "gate-relay")):
+        if first.startswith(prefix):
+            kind = k
+    _record(to_harness=t_harness or "unknown", to_name=args.target, kind=kind,
+            summary_text=body, to_session_id=t_sid, ref=args.ref)
+    print(f"prompted={str(prompted).lower()} target={args.target} "
+          f"to_harness={t_harness or '-'} to_session_id={t_sid or '-'} kind={kind}")
+    return 0 if prompted else 1
+
+
+def cmd_steward(args):
+    """F-100c — explicit steward mode switch. Every steer/handoff/watch SEND already
+    raises the flag implicitly; `on` raises it before the first send (so Fleet shows
+    the yellow tag the moment a session takes the role), `off` releases it."""
+    sid, harness = _current_session_identity()
+    if not sid:
+        print("steward=unchanged reason=no-session-identity")
+        return 1
+    if args.state == "on":
+        ts = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        ok = peer_message.mark_steward(harness, sid, {"harness": "unknown", "name": "-"},
+                                       "watch", ts)
+        print(f"steward={'on' if ok else 'unchanged'} harness={harness} session_id={sid}")
+        return 0 if ok else 1
+    rc = peer_message.cmd_release(peer_message.argparse.Namespace(harness=harness, session_id=sid))
+    print(f"steward=off harness={harness} session_id={sid}")
+    return rc
 
 
 def build_parser():
@@ -1048,6 +1153,18 @@ def build_parser():
     p_ack.add_argument("watch_id")
     p_ack.add_argument("--carrier", required=True)
     p_ack.set_defaults(func=cmd_ack)
+    p_prompt = sub.add_parser("prompt")
+    p_prompt.add_argument("target")
+    p_prompt.add_argument("text", nargs="?", default=None)
+    p_prompt.add_argument("--body-file", default=None)
+    p_prompt.add_argument("--body-stdin", action="store_true")
+    p_prompt.add_argument("--no-trailer", action="store_true")
+    p_prompt.add_argument("--ref", action="append", default=[])
+    p_prompt.set_defaults(func=cmd_prompt)
+
+    p_mode = sub.add_parser("steward")
+    p_mode.add_argument("state", choices=("on", "off"))
+    p_mode.set_defaults(func=cmd_steward)
 
     return parser
 

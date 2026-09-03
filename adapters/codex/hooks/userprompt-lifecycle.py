@@ -348,6 +348,46 @@ def sd111_first_prompt_sweep(sid: str) -> None:
             continue
 
 
+def peer_notice(payload: dict[str, Any], current_prompt: str, current_cwd: str) -> None:
+    """F-100c — the receive side of a herdr steer, harness-neutral: when the prompt
+    carries the `(peer-from: <harness> <sid> <name>)` trailer a steward appended, write
+    one `notice` peer_message_v1 under THIS session's exact id (the same record the
+    Claude hook and the OpenCode plugin write). Fail-soft, bounded, never prints."""
+    if not current_prompt or "peer-from:" not in current_prompt:
+        return
+    sid = interaction_session_id(payload)
+    if not sid:
+        return
+    try:
+        import importlib.util
+        tool = ROOT / "utilities" / "peer-message.py"
+        spec = importlib.util.spec_from_file_location("_peer_message", str(tool))
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        trailer = mod.parse_peer_trailer(current_prompt)
+        if not trailer:
+            return
+        args = [
+            sys.executable, str(tool), "record",
+            "--from-harness", trailer.get("harness") or "unknown",
+            "--from-session-id", trailer.get("session_id") or "",
+            "--from-project", os.path.basename(current_cwd.rstrip("/")) if current_cwd else "",
+            "--to-harness", "codex",
+            "--to-session-id", sid,
+            "--kind", "notice", "--surface", "herdr", "--status", "received",
+            "--body-stdin",
+        ]
+        if trailer.get("name"):
+            args += ["--from-name", trailer["name"]]
+        env = os.environ.copy()
+        env["AGENT_HOME"] = str(ROOT)
+        subprocess.run(args, input=b"herdr steer received", cwd=str(ROOT), env=env,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                       timeout=5, check=False)
+    except Exception:
+        return
+
+
 def main() -> int:
     payload = load_payload()
     # Dispatch prompts carry their own explicit status/prompt-signal/mode
@@ -371,6 +411,7 @@ def main() -> int:
             pass
     sid = session_id(payload)
     current_prompt = nested_string(payload, "prompt")
+    peer_notice(payload, current_prompt, current_cwd)
     if interaction_sid:
         launch_trigger(
             "codex", interaction_sid, "initial", anchor_text=current_prompt
