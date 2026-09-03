@@ -199,6 +199,19 @@ class StartTest(_TmpRootMixin, unittest.TestCase):
             argv += ["--"] + list(agent_args)
         return peer_steward.main(argv)
 
+    def test_name_is_the_positional_right_after_start(self):
+        """herdr `agent start <NAME> --kind --pane`: the name is a required positional.
+        Without it herdr answers `unknown option: claude` and starts nothing, while the
+        wrapper still printed started=false and recorded a `[start]` steer (measured
+        2026-09-03 during the F-100 comms test)."""
+        with mock.patch.object(peer_steward.shutil, "which", return_value="/usr/bin/herdr"), \
+             mock.patch.object(peer_steward.subprocess, "run",
+                                return_value=subprocess.CompletedProcess([], 0, stdout="", stderr="")) as run_mock:
+            self._start(name="peer-c", kind="claude", pane="w1:pM")
+        cmd = run_mock.call_args[0][0]
+        self.assertEqual(cmd[:6], ["herdr", "agent", "start", "peer-c", "--kind", "claude"])
+        self.assertEqual(cmd[6:8], ["--pane", "w1:pM"])
+
     def test_default_bypass_prepends_claude_flag(self):
         with mock.patch.object(peer_steward.shutil, "which", return_value="/usr/bin/herdr"), \
              mock.patch.object(peer_steward.subprocess, "run",

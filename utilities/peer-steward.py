@@ -185,7 +185,10 @@ def cmd_start(args):
     prefix = list(_PERMISSION_FLAGS.get(args.kind, [])) if mode == "bypass" else []
     full_agent_args = prefix + agent_args
 
-    cmd = ["herdr", "agent", "start", "--kind", args.kind, "--pane", args.pane]
+    # herdr `agent start <NAME> --kind --pane` — the display name is a required
+    # positional (herdr 0.8+ prints `unknown option: <kind>` and starts nothing when
+    # it is missing; measured 2026-09-03, F-100 comms test).
+    cmd = ["herdr", "agent", "start", args.name, "--kind", args.kind, "--pane", args.pane]
     if full_agent_args:
         cmd += ["--"] + full_agent_args
 

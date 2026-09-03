@@ -207,7 +207,7 @@ class HerdrCollectorTest(unittest.TestCase):
         sessions = self._sessions()
         herdr.enrich(sessions, agents=self._PAYLOAD["result"]["agents"])
         self.assertEqual([s.herdr_attached for s in sessions],
-                         [True, False, True, None, None, None, None, None])
+                         [True, False, True, False, None, None, None, None])
 
     def test_absent_herdr_falls_back_to_lineage_and_only_ever_promotes(self):
         sessions = self._sessions()[:4]

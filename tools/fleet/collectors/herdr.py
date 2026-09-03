@@ -22,9 +22,10 @@ import subprocess
 
 _TIMEOUT_S = 2.0
 # Harnesses whose Fleet session_id is known to equal herdr's ``agent_session.value``
-# (measured 2026-09-03, herdr 0.8: Claude UUID ↔ ``sessionId``). A harness outside
-# this set can be promoted to True by a match but never demoted to False.
-VERIFIED_ID_HARNESSES = frozenset({"claude"})
+# (measured 2026-09-03, herdr 0.8: Claude UUID ↔ ``sessionId``; Codex thread id
+# ``01a064d8-…`` ↔ the rollout session_id, F-100 comms test). A harness outside this
+# set can be promoted to True by a match but never demoted to False.
+VERIFIED_ID_HARNESSES = frozenset({"claude", "codex"})
 
 
 def list_agents(runner=subprocess.run, which=shutil.which):
