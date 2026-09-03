@@ -565,7 +565,9 @@ class EndToEndTests(Fixture):
             # D-79 loose residue is relocated *into* a new cycle from the root's own
             # top level, so it was never part of the lump's population and must be
             # excluded from the D-78 conservation comparison on the new-cycle side.
-            if parts and parts[0] == W.LOOSE_PREFIX:
+            # Named exactly, so a lump-origin file that somehow landed under
+            # `_internal/` would still fail this comparison.
+            if rel in (f"{W.LOOSE_PREFIX}/notes/n1.md", f"{W.LOOSE_PREFIX}/reports/r1.md"):
                 return None
             if len(parts) > 1 and parts[0] == "plans" and parts[1] == "stage-sessions":
                 return None
@@ -825,6 +827,102 @@ class EmptyCampaignDeferralTests(Fixture):
         self.assertNotIn("reports/r1.md", inv["excludes"])
 
 
+class LooseGuardTests(Fixture):
+    """Round-1 impl-review blockers: an unproduced target and an unmanifestable
+    locator must both be refused *before* R1 seals anything."""
+
+    def test_target_claimed_by_a_campaignless_row_is_refused_at_validate(self):
+        # rule 1 counts `target_ids`, so this proposal used to reach an "ok" verdict
+        # under which two cycle units were never produced and the lump was never
+        # fully resplit.
+        proposal = self.build_proposal()
+        proposal["campaigns"] = [c for c in proposal["campaigns"] if c["proposal_id"] != "prop-b"]
+        verdict = W.validate_proposal(
+            proposal, root=self.root, lump_inventory=W.scan_lumps(self.root, root_slug=self.root_slug),
+            loose_inventory=W._build_loose_inventory(self.root), lump_cycle_id=self.lump_cycle_id)
+        self.assertEqual(verdict["verdict"], "hold")
+        self.assertEqual(verdict["code"], "cycle-assignment-invalid")
+        self.assertTrue(verdict["detail"].startswith("unplaced:"), verdict["detail"])
+
+    def test_loose_row_pointing_at_an_unproduced_cycle_is_deferred_not_dropped(self):
+        # `loose_plan` classifies against the produced plan, not the lump inventory:
+        # a target that will not be created must be deferred (and therefore stay in
+        # the D-84 retire inventory), never silently skipped.
+        verdict = {
+            "root_slug": self.root_slug,
+            "assignments": {f"legacy:{self.root_slug}:plans/2026-04-01_alpha": "wwd-a"},
+            "lump": {"cycle_units": [{"cycle_key": f"legacy:{self.root_slug}:experiments/2026-04-03_exp"}]},
+            "loose": [{"source_locator": "reports/r1.md",
+                      "target_cycle_key": f"legacy:{self.root_slug}:experiments/2026-04-03_exp",
+                      "origin_bucket": "reports"}],
+        }
+        assigned, deferred = W.loose_plan(verdict, W._build_loose_inventory(self.root))
+        self.assertEqual(assigned, {})
+        self.assertEqual(len(deferred), 1)
+        self.assertEqual(deferred[0]["reason"], "target-cycle-not-produced")
+
+    def test_unmanifestable_loose_locator_is_deferred_before_r1_seals(self):
+        # A hidden component cannot be a D-6 locator. Renaming it in and only
+        # finding out at `finalize` is unrecoverable past the batch's first commit,
+        # so the row is refused here and the file stays where it is.
+        self.w("notes/.hidden.md", "hidden\n")
+        proposal = self.build_proposal()
+        proposal["loose_assignments"].append({
+            "proposal_id": "prop-a", "source_locator": "notes/.hidden.md",
+            "target_cycle_key": f"legacy:{self.root_slug}:plans/2026-04-01_alpha",
+            "origin_bucket": "notes"})
+        result = self.r1(proposal_path=self.write_proposal(proposal))
+        self.assertEqual(result["status"], "admitted")
+        self.assertNotIn("notes/.hidden.md", result["loose_relocating"])
+        bad = [d for d in result["loose_deferred"] if d["source_locator"] == "notes/.hidden.md"]
+        self.assertEqual(len(bad), 1)
+        self.assertEqual(bad[0]["reason"], "unmanifestable-locator")
+        self.assertEqual(bad[0]["detail"], "hidden-component")
+        # it stays retirable precisely because it was not relocated
+        self.assertNotIn("notes/.hidden.md", W.sealed_retire_inventory(self.root)["excludes"])
+
+    def test_unmanifestable_loose_locator_does_not_wedge_r2(self):
+        self.w("notes/.hidden.md", "hidden\n")
+        proposal = self.build_proposal()
+        proposal["loose_assignments"].append({
+            "proposal_id": "prop-a", "source_locator": "notes/.hidden.md",
+            "target_cycle_key": f"legacy:{self.root_slug}:plans/2026-04-01_alpha",
+            "origin_bucket": "notes"})
+        self.r1(proposal_path=self.write_proposal(proposal))
+        route, route_file = self.route()
+        self.assertEqual(self.r2(route_file)["status"], "complete")
+        self.assertEqual((self.root / "notes/.hidden.md").read_text(), "hidden\n")
+        self.assertIsNone(W.resplit_hold(self.root))
+
+    def test_r1_replay_still_reports_the_loose_split(self):
+        path = self.write_proposal(self.build_proposal())
+        first = self.r1(proposal_path=path)
+        replay = self.r1(proposal_path=path)
+        self.assertEqual(replay["status"], "already-applied")
+        self.assertEqual(replay["loose_relocating"], first["loose_relocating"])
+        self.assertEqual(replay["loose_deferred"], first["loose_deferred"])
+
+    def test_r2_replay_still_reports_the_deferrals(self):
+        self.r1(proposal_path=self.write_proposal(self.build_proposal(unassigned_loose=True)))
+        route, route_file = self.route()
+        first = self.r2(route_file)
+        replay = self.r2(route_file)
+        self.assertEqual(replay["status"], "already-applied")
+        self.assertEqual(replay["loose_deferred"], first["loose_deferred"])
+        self.assertEqual(replay["deferred_campaigns"], first["deferred_campaigns"])
+
+    def test_r2_dry_run_does_not_call_a_rolled_back_journal_resumable(self):
+        self.r1()
+        route, route_file = self.route()
+        with self.assertRaises(W.ResplitError):
+            self.r2(route_file, crash_at="r2:before-finalize")
+        self.r2(route_file)  # rolls back
+        result = self.r2(route_file, dry_run=True)
+        self.assertFalse(result["resumes_existing_journal"])
+        self.assertIsNone(result["journal"])
+        self.assertEqual(len(result["cycles"]), 4)
+
+
 class RootSlugTests(unittest.TestCase):
     """D-79 `<root-slug>`: the roster `repo_path` basename, not the artifact-root
     container directory name."""
@@ -850,6 +948,40 @@ class RootSlugTests(unittest.TestCase):
         link = self.base / "BC_ResNet_tf"
         link.symlink_to(real, target_is_directory=True)
         self.assertEqual(W._default_root_slug(link / ".agent_reports"), "bc-resnet")
+
+    def test_a_slug_that_cannot_fill_the_cycle_key_field_is_refused(self):
+        long_name = "x" * 65
+        root = self.base / long_name / ".agent_reports"
+        root.mkdir(parents=True)
+        with self.assertRaises(W.ResplitError) as ctx:
+            W._default_root_slug(root)
+        self.assertEqual(ctx.exception.code, "root-slug-invalid")
+
+    def test_a_name_with_no_ascii_alphanumerics_is_refused_not_collapsed_to_root(self):
+        root = self.base / "한글저장소" / ".agent_reports"
+        root.mkdir(parents=True)
+        with self.assertRaises(W.ResplitError) as ctx:
+            W._default_root_slug(root)
+        self.assertEqual(ctx.exception.code, "root-slug-invalid")
+        self.assertIn("underivable", ctx.exception.detail)
+
+    def test_an_explicit_root_slug_is_validated_too(self):
+        root = self.base / "hearting" / ".agent_reports"
+        root.mkdir(parents=True)
+        with self.assertRaises(W.ResplitError) as ctx:
+            W.scan_lumps(root, root_slug="Not A Slug")
+        self.assertEqual(ctx.exception.code, "root-slug-invalid")
+
+    def test_every_roster_repo_yields_a_valid_cycle_key_field(self):
+        # D-79: `<root-slug>`는 roster에서 결정론적으로 유도한 소문자 slug
+        for name in ("BC_ResNet", "Stream_Diar_Baselines", "SR_CorrNet", "SR_CorrNet_DSC",
+                     "SR_CorrNet_SD", "TF_Restormer_release", "TTS_Baselines", "cairn",
+                     "home-os", "hearting"):
+            root = self.base / name / ".agent_reports"
+            root.mkdir(parents=True)
+            slug = W._default_root_slug(root)
+            self.assertTrue(W.ROOT_SLUG_RE.match(slug), (name, slug))
+            self.assertTrue(W.CYCLE_KEY_RE.match(f"legacy:{slug}:plans/2026-04-01_alpha"), (name, slug))
 
     def test_non_container_root_keeps_its_own_name(self):
         root = self.base / "artifact-root"

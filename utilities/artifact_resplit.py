@@ -26,6 +26,9 @@ LUMP_REPORT_KIND = "w7c-delta-migration"
 CYCLE_KEY_RE = re.compile(
     r"^legacy:[a-z0-9][a-z0-9-]{0,63}:(plans|documents|designs|research|experiments)/[^/]{1,128}$"
 )
+# The `<root-slug>` field of `CYCLE_KEY_RE`, isolated so a slug can be rejected
+# where it is derived instead of silently producing an unmatchable cycle key.
+ROOT_SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
 CAMPAIGN_SLUG_RE = re.compile(r"^[a-z0-9-]{3,48}$")
 UNASSIGNED_SLUG = "_unassigned"
 # The two artifact-root container names (`core/CORE.md` write-cutover rule): the
@@ -84,6 +87,17 @@ def _slugify(name: str) -> str:
     return slug or "root"
 
 
+def _require_root_slug(slug: str, source: str) -> str:
+    """A slug that cannot fill `CYCLE_KEY_RE`'s `<root-slug>` field is refused here,
+    not carried into a cycle key nothing will ever match. Reachable two ways since
+    the slug stopped being the constant `agent-reports`: a repo directory longer
+    than 64 characters, and a name with no ASCII alphanumerics at all (which
+    `_slugify` would otherwise collapse to the misleading literal `root`)."""
+    if not ROOT_SLUG_RE.match(slug or ""):
+        raise ResplitError("root-slug-invalid", f"{source}:{slug}")
+    return slug
+
+
 def _default_root_slug(root: Path) -> str:
     """D-79 cycle key `<root-slug>`: the roster `repo_path` basename, slugified.
 
@@ -97,9 +111,12 @@ def _default_root_slug(root: Path) -> str:
     name stays the slug.
     """
     root = Path(root).resolve()
-    if root.name in ARTIFACT_ROOT_DIR_NAMES and root.parent.name:
-        return _slugify(root.parent.name)
-    return _slugify(root.name)
+    name = root.parent.name if (root.name in ARTIFACT_ROOT_DIR_NAMES and root.parent.name) else root.name
+    if not re.search(r"[a-z0-9]", name.lower()):
+        # `_slugify` would return its `or "root"` fallback here, which is a wrong
+        # answer dressed as a real one -- every such root would share one slug.
+        raise ResplitError("root-slug-invalid", f"underivable:{name}")
+    return _require_root_slug(_slugify(name), "derived")
 
 
 def _canonical_digest(body: Dict[str, Any]) -> str:
@@ -225,7 +242,7 @@ def _original_legacy_sources(root: Path) -> Dict[str, str]:
 def scan_lumps(root: Path, *, root_slug: Optional[str] = None) -> Dict[str, Any]:
     """D-76 deterministic scanner (mutation 0). Fresh read every call."""
     root = Path(root).resolve()
-    slug = root_slug or _default_root_slug(root)
+    slug = _require_root_slug(root_slug, "explicit") if root_slug else _default_root_slug(root)
     mdir = C.migrations_dir(root)
     groups: Dict[str, List[Path]] = {}
     if mdir.is_dir():
@@ -790,6 +807,15 @@ def validate_proposal(
             continue
         for key in row.get("target_ids") or []:
             slug_for_target[key] = slug
+    # D-80 rule 1 closure: "배정" means placed in a campaign, not merely named. A
+    # `semantic-boundary` row with no backing `campaigns[]` entry passes the
+    # target_ids count above while contributing no campaign, so its cycle units
+    # would be dropped from `campaigns_out` -- an "ok" verdict under which the lump
+    # is never fully resplit and D-78's conservation invariant cannot hold.
+    unplaced = sorted(k for k in lump_cycle_keys if k not in slug_for_target)
+    if unplaced:
+        return {"verdict": "hold", "code": "cycle-assignment-invalid",
+                "detail": f"unplaced:{unplaced[0]}", "rules_checked": rules_checked}
     loose_target_by_source = {
         row["source_locator"]: row["target_cycle_key"] for row in proposal.get("loose_assignments", [])
     }
@@ -818,44 +844,93 @@ def validate_proposal(
     }
 
 
+# 🔴5 spec-impact (D-79 l.3027 vs D-80 rule 3 l.3076): the PRD says an
+# unplaceable loose file `_unassigned 캠페인의 해당 사이클로 간다` -- it assumes
+# that campaign has a cycle to receive it. D-80 rule 3 says `_unassigned` holds
+# only cycles whose goal could not be determined, so when every lump cycle unit
+# *was* placed (A-16.1's `_unassigned` 0, and the measured hearting proposal)
+# that campaign has no cycle and the destination D-79 names does not exist. The
+# two sentences cannot both be satisfied. This module resolves the tension by
+# deferring: no synthetic loose-only cycle is invented, no empty campaign record
+# is minted, and the file is left byte-identical in place with a typed
+# `loose-deferred` result carried in the journal and every gate's return value.
+# That choice is this module's, not the contract's. The alternative -- minting a
+# loose-only cycle under `_unassigned` -- would put a non-D-23 shape in the cycle
+# population, which D-79 forbids two paragraphs earlier. Resolving this needs a
+# PRD amendment saying which reading wins; until then a deferred file stays a
+# retire candidate (it is deliberately NOT added to the D-84 exclude list) so it
+# can never be silently lost.
+LOOSE_DEFERRAL_REASONS = (
+    "unassigned-campaign-has-no-cycle",  # target is the reserved campaign key, which names no cycle
+    "target-cycle-not-produced",         # target names no cycle this run will create
+    "unmanifestable-locator",            # the post-move locator cannot be a D-6 locator
+)
+
+
 def loose_plan(verdict: Dict[str, Any], loose_inventory: Dict[str, Any]) -> Tuple[Dict[str, List[Dict[str, Any]]], List[Dict[str, Any]]]:
     """D-79 "잔여 loose 파일": split an admitted proposal's `loose_assignments[]`
     into the rows R2 actually relocates and the rows it must leave alone.
 
-    A row is relocatable only when its `target_cycle_key` names a cycle unit this
-    lump will actually produce. Rule 7 also admits the degraded campaign key
-    `legacy:<root-slug>:_unassigned` as a target, but that key names a *campaign*,
-    not a cycle -- and a campaign with no cycle units gets no record at all
-    (`_r2_prepare`), so there is nowhere to put the file. Those rows become typed
-    `loose-deferred` results: reported, journalled, and left byte-identical in
-    place. Nothing is moved or deleted on that path.
+    A row is relocatable only when (a) its `target_cycle_key` names a cycle this
+    run will actually create, and (b) the post-move locator can be a D-6 locator.
+
+    (a) is `verdict["assignments"]`, not the lump inventory's cycle units. A unit
+    can pass rule 1 (its key appears in some `semantic-boundary` row's
+    `target_ids`) and still never be produced, because the row that claimed it has
+    no backing `campaigns[]` entry. Classifying against the lump would then mark
+    the row relocatable, R1 would drop it from the D-84 retire inventory, and R2
+    would silently never move it -- a top-level file that is neither relocated nor
+    retirable, with `legacy_top_level_retired` reporting `true` over it.
+
+    (b) matters only for loose files. Every lump-origin locator is already a row in
+    the lump's validated manifest, so it is manifestable by construction; a loose
+    file is an arbitrary path off the artifact root and may carry a hidden
+    component or a non-locator character. Renaming one in and only discovering that
+    at `finalize` is unrecoverable past the batch's first commit: the cycle raises
+    `output-invalid`/`manifest-invalid` forever, `_r2_roll_forward` is the only
+    remaining path and cannot roll back, and the root stays under
+    `resplit-in-progress` with the file gone from its original path. So the check
+    happens here, before R1 seals anything.
 
     R1 (retire-inventory excludes) and R2 (the renames) both call this, so the two
     gates can never disagree about which loose files are leaving the top level.
     """
     entries_by_locator = {e["source_locator"]: e for e in loose_inventory.get("entries", [])}
-    cycle_keys = {u["cycle_key"] for u in verdict["lump"]["cycle_units"]}
+    produced_cycle_keys = set(verdict.get("assignments") or {})
     unassigned_key = f"legacy:{verdict['root_slug']}:{UNASSIGNED_SLUG}"
     by_cycle_key: Dict[str, List[Dict[str, Any]]] = {}
     deferred: List[Dict[str, Any]] = []
+
+    def defer(src, target_key, entry, row, reason, detail=None):
+        out = {
+            "status": "loose-deferred", "source_locator": src, "target_cycle_key": target_key,
+            "origin_bucket": entry.get("origin_bucket") or row.get("origin_bucket"),
+            "reason": reason,
+        }
+        if detail is not None:
+            out["detail"] = detail
+        deferred.append(out)
+
     for row in verdict.get("loose", []):
         src = row["source_locator"]
         target_key = row["target_cycle_key"]
         entry = entries_by_locator.get(src, {})
-        if target_key in cycle_keys:
-            by_cycle_key.setdefault(target_key, []).append({
-                "source_locator": src,
-                "locator": f"{LOOSE_PREFIX}/{src}",
-                "sha256": entry.get("sha256"),
-                "byte_size": entry.get("byte_size"),
-                "origin_bucket": entry.get("origin_bucket") or row.get("origin_bucket"),
-            })
+        if target_key not in produced_cycle_keys:
+            defer(src, target_key, entry, row,
+                  "unassigned-campaign-has-no-cycle" if target_key == unassigned_key
+                  else "target-cycle-not-produced")
             continue
-        deferred.append({
-            "status": "loose-deferred", "source_locator": src, "target_cycle_key": target_key,
+        locator = f"{LOOSE_PREFIX}/{src}"
+        unmanifestable = P._unmanifestable_reason("artifacts/" + locator)
+        if unmanifestable is not None:
+            defer(src, target_key, entry, row, "unmanifestable-locator", unmanifestable)
+            continue
+        by_cycle_key.setdefault(target_key, []).append({
+            "source_locator": src,
+            "locator": locator,
+            "sha256": entry.get("sha256"),
+            "byte_size": entry.get("byte_size"),
             "origin_bucket": entry.get("origin_bucket") or row.get("origin_bucket"),
-            "reason": ("unassigned-campaign-has-no-cycle" if target_key == unassigned_key
-                      else "target-cycle-not-in-lump"),
         })
     for rows in by_cycle_key.values():
         rows.sort(key=lambda r: r["source_locator"])
@@ -1041,6 +1116,8 @@ def _r1(root: Path, *, lump_cycle_id: str, proposal_path: Path,
     # Deferred rows are *not* excluded: they stay in place and remain retirable.
     loose_assigned, loose_deferred = loose_plan(verdict, loose_inventory)
     relocating = sorted(row["source_locator"] for rows in loose_assigned.values() for row in rows)
+    journal["loose_relocating"] = relocating
+    journal["loose_deferred"] = loose_deferred
     retire_inventory = _build_retire_inventory(root, relocating, identity)
     P._write_atomic(admission_dir / "lump-inventory.json", P._json_bytes(lump_inventory))
     P._write_atomic(admission_dir / "loose-inventory.json", P._json_bytes(loose_inventory))
@@ -1325,8 +1402,13 @@ def _r2_preview(root: Path, verdict: Dict[str, Any], root_slug: str, loose_inven
 
     When a real R2 journal already exists it is reported as-is (that run, not a
     fresh plan, is what would continue); otherwise the plan is derived from the
-    admitted verdict exactly as `_r2_prepare` would derive it.
+    admitted verdict exactly as `_r2_prepare` would derive it. A `rolled-back`
+    journal is normalized away first, mirroring `_r2` -- a re-run after rollback
+    restarts from `prepared`, so reporting it as a resumable run would be a lie in
+    exactly the surface whose whole point is telling the truth.
     """
+    if journal is not None and journal.get("phase") == "rolled-back":
+        journal = None
     campaign_plan, deferred_campaigns = _partition_campaign_plan(
         _campaign_plan_from_verdict(verdict, root_slug))
     loose_by_cycle_key, loose_deferred = loose_plan(verdict, loose_inventory)
@@ -1381,7 +1463,9 @@ def _r2(root: Path, *, lump_cycle_id: str, route_file: Optional[Path] = None, dr
     journal = P._read_json(journal_path)
     plan_sha256 = marker["plan_sha256"]
     if journal is not None and journal.get("phase") == "complete" and journal.get("plan_sha256") == plan_sha256:
-        return {"status": "already-applied", "run_dir": str(run_dir), "journal": journal}
+        return {"status": "already-applied", "run_dir": str(run_dir), "journal": journal,
+                "loose_deferred": journal.get("loose_deferred", []),
+                "deferred_campaigns": journal.get("deferred_campaigns", [])}
     if dry_run:
         # A dry run reports the plan and touches nothing -- not the canonical tree,
         # not `.runtime`, not the root-wide lock. It therefore returns before
