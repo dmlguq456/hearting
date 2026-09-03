@@ -780,13 +780,17 @@ _IO_UNSET = object()
 #     gauge slot    context % bar      stage breadcrumb (plan › exec › test)  ← "how far along"
 # main↔dispatch weight is carried by the badge (reverse vs dim font), so the identity columns can
 # stay aligned for comparison. Job flow never sits under branch/gate.
-_TAG_W = 4                    # F-100a: `[46]` — the session-tag badge: the 2-hex tag in dim
-                              # brackets, between the status glyph and the harness text. A
-                              # tagless row draws the same 4 blank cells so
-                              # the harness column never moves. Charged INSIDE the harness
-                              # field (_HMW / _HW): the measured slack there (wide 40 vs a
-                              # 33-cell worst case, narrow 16 vs `claude code` 11 + 1 gap)
-                              # covers it, so no other ledger — _NAME_COL included — changes.
+_TAG_W = 5                    # F-100a: `[46] ` — the session-tag badge: the 2-hex tag in dim
+                              # brackets plus its own gap cell, between the status glyph and
+                              # the harness text (the reverse chip carried its gap inside the
+                              # run; the outline badge shipped without one — `[bc]claude code`,
+                              # user-visible 2026-09-03). A tagless row draws the same 5 blank
+                              # cells so the harness column never moves. Charged INSIDE the
+                              # harness field (_HMW / _HW): wide keeps 35 for a 33-cell worst
+                              # case; narrow keeps 11, where `claude code` no longer fits whole
+                              # and `_badge_cell` falls back to `claude` exactly as the narrow
+                              # dispatch rows already do. No other ledger — _NAME_COL included —
+                              # changes.
 _HW = 16                      # Bare harness-badge width — narrow/stack L1 badges and the
                               # dispatch-prefix budget math still use this unmerged value.
 _HMW = 40                     # F-33/F-64/F-65: WIDE-layout harness field. The latest small
@@ -1802,8 +1806,8 @@ def _session_tag_chip(s, dim=False):
     tag = getattr(s, "session_tag", None)
     if not isinstance(tag, str) or not tag:
         return [(" " * _TAG_W, None)]
-    body = tag[: _TAG_W - 2].ljust(_TAG_W - 2)
-    return [("[", "dim"), (body, "tag_dim" if dim else "tag"), ("]", "dim")]
+    body = tag[: _TAG_W - 3].ljust(_TAG_W - 3)
+    return [("[", "dim"), (body, "tag_dim" if dim else "tag"), ("]", "dim"), (" ", None)]
 
 
 def _session_row(s, narrow, is_parent=False, child_count=0, name_width=None,
@@ -2853,7 +2857,7 @@ def _session_row_2line(s, is_parent=False, child_count=0, _split=False, term_wid
                 else _NAME_KEY.get(s.harness, "nm_other"))   # F-76b, see `_session_row`
     l1 = ([("  ", None), (gch, gkey), (" ", None)]
           + _session_tag_chip(s, dim=dim_tel)          # F-100a — inside the _HW field
-          + [(_pad(hn, _HW - _TAG_W), hkey)])
+          + [(_badge_cell(hn, _HW - _TAG_W), hkey)])   # word-boundary clip, last cell blank
     suffix = []
     if is_parent and child_count:
         suffix.append((" ▾%d" % child_count, name_key))

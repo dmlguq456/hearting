@@ -124,8 +124,8 @@ def card(depth, spin, spin_colour, harness, model, effort, title, branch,
     rail_a = s("╻ ", P["rail"]) if d else s("", P["rail"])
     rail_b = s("╹ ", P["rail"]) if d else s("", P["rail"])
     who = f"{harness} ({model}·{effort})"
-    chip = ([s("[", P["dim"]), s(tag, P["soft"]), s("]", P["dim"])] if tag
-            else [s("    ", P["dim"])])
+    chip = ([s("[", P["dim"]), s(tag, P["soft"]), s("] ", P["dim"])] if tag
+            else [s("     ", P["dim"])])
     if where == "herdr":
         lead2 = [s(pad("herdr", 8), P["soft"])]
     elif where == "tty":
@@ -136,7 +136,7 @@ def card(depth, spin, spin_colour, harness, model, effort, title, branch,
         s(lead, P["rail"]), rail_a,
         s(spin + " ", spin_colour),
         *chip,
-        s(pad(who, 32 - depth * 3), fam_c),
+        s(pad(who, 31 - depth * 3), fam_c),
         s(pad(f"{title} ({branch})", 44), text_c),
         s(pad(stages, 96), DIM["blue"] if d else P["dim"]),
         s(age.rjust(7), P["dimmer"]),

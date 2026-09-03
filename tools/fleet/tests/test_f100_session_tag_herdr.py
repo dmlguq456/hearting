@@ -61,7 +61,7 @@ class TagChipLedgerTest(unittest.TestCase):
 
     def test_chip_is_exactly_tag_w_cells_tagged_or_not(self):
         self.assertEqual(render._session_tag_chip(self._s(session_tag="46")),
-                         [("[", "dim"), ("46", "tag"), ("]", "dim")])
+                         [("[", "dim"), ("46", "tag"), ("]", "dim"), (" ", None)])
         self.assertEqual(render._session_tag_chip(self._s()), [(" " * render._TAG_W, None)])
         for s in (self._s(session_tag="46"), self._s(), self._s(session_tag="abcd")):
             self.assertEqual(sum(render._dw(t) for t, _k in render._session_tag_chip(s)),
@@ -73,9 +73,9 @@ class TagChipLedgerTest(unittest.TestCase):
         for harness in ("claude", "codex", "opencode", "zzz"):
             with self.subTest(harness=harness):
                 self.assertEqual(render._session_tag_chip(self._s(harness=harness, session_tag="0b")),
-                                 [("[", "dim"), ("0b", "tag"), ("]", "dim")])
+                                 [("[", "dim"), ("0b", "tag"), ("]", "dim"), (" ", None)])
         self.assertEqual(render._session_tag_chip(self._s(session_tag="0b"), dim=True),
-                         [("[", "dim"), ("0b", "tag_dim"), ("]", "dim")])
+                         [("[", "dim"), ("0b", "tag_dim"), ("]", "dim"), (" ", None)])
         self.assertEqual(render._HUE_OF["tag"], ("w", 0))
         self.assertEqual(render._HUE_OF["herdr_on"], ("w", 0))
         for key in ("tag", "tag_dim", "herdr_on"):
@@ -101,8 +101,10 @@ class TagChipLedgerTest(unittest.TestCase):
                 self.assertEqual(sum(render._dw(t) for t, _k in segs[:i]), render._NAME_COL)
                 self.assertEqual(_text(segs).index("a title"), render._NAME_COL)
                 if s.session_tag:
-                    self.assertEqual(segs[3:6], [("[", "dim"), (s.session_tag, "tag"),
-                                                 ("]", "dim")])
+                    self.assertEqual(segs[3:7], [("[", "dim"), (s.session_tag, "tag"),
+                                                 ("]", "dim"), (" ", None)])
+                    self.assertIn("[%s] claude code" % s.session_tag if s.harness == "claude"
+                                  else "[%s] opencode" % s.session_tag, _text(segs))
                 else:
                     self.assertEqual(segs[3], (" " * render._TAG_W, None))
 
@@ -120,9 +122,14 @@ class TagChipLedgerTest(unittest.TestCase):
             prefix = l1[: l1.index(next(seg for seg in l1 if seg[1] in render.NAME_KEYS))]
             self.assertEqual(sum(render._dw(t) for t, _k in prefix), 4 + render._HW)
         self.assertIn(("46", "tag"), tagged)
-        self.assertIn("[46]", _text(tagged))
-        self.assertIn(("claude code ", "hb_claude"), tagged)
-        self.assertNotIn("claude codea", _text(tagged))
+        # narrow: 11 cells remain for the harness badge, so `claude code` falls back to its
+        # first word with the guaranteed blank last cell — the same shape the narrow
+        # dispatch rows already draw — and the badge keeps its own gap cell.
+        self.assertIn("[46] claude", _text(tagged))
+        self.assertIn((render._badge_cell("claude code", render._HW - render._TAG_W), "hb_claude"),
+                      tagged)
+        self.assertNotIn("]claude", _text(tagged))
+        self.assertNotIn("claudea", _text(tagged))
 
     def test_dim_rows_use_the_dim_chip(self):
         for over in (dict(liveness="stale"), dict(detached=True), dict(app_server=True)):
