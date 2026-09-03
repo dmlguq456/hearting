@@ -1,0 +1,179 @@
+  hearting v2.103.0-dirty · unmanaged
+
+  usage claude code   5h [━━──────────  20%] ↻ 3h 44m   7d [━━━━━───────  45%] ↻ 5d 6h   fable [━━━━━━━─────  57%]
+        codex         7d [━━━━━━━━━━──  83%] ↻ 4d 1h
+        opencode      no usage api — plan quota is console-only
+  fleet ⠧ 4 working   ● 8 idle   ○ 1 detached   ↳ 19 jobs (15 working)
+─────
+  COMPUTE RESOURCES  3/3
+  ⌂ moving4  CPU ━━─────────  13/64 thr  M 31/125G  S 2.6/8G
+             ● 0: UTIL   0%  VRAM ━───   0.0/48GB
+             ● 1: UTIL   0%  VRAM ━───   0.0/48GB
+  ◇ cnn      CPU ───────  0/28 thr  M 4.7/62G  S 0/8G
+             ● 0: UTIL   0%  VRAM ━───   0.0/32GB
+             ● 1: UTIL   0%  VRAM ━───   0.0/32GB
+  ◇ xavier   CPU ━───────────  8/80 thr  M 14/188G  S 0.0/2G
+             ● 0: UTIL   0%  VRAM ━───   0.0/24GB
+             ● 1: UTIL   0%  VRAM ━───   0.0/24GB
+─────
+
+  SESSIONS   stack · press w to cycle  
+○ ⚙ system 🧠 1
+  ⚙ 야간 큐레이터 2/3 demo-lib 11m
+▍ 🧠 mem memory periodic curator  codex  11m
+
+● hearting/ 🚧 6
+▍ ⠧ [46]claude code Fleet session ID/summary s… (main)
+▍   58m             Fable 5.1 (xhigh)        -
+▍   herdr   ━━━━━─────────── 33%            Reverting inver…
+▍ ● [d5]claude code Peer-steward wait harde… ▾1 (main)
+▍   1h 14m          Fable 5.1 (xhigh)        -
+▍   herdr   ━━━━━━────────── 36%            ⚙ python3 40m
+▍  ╭─  ⠧ claude     Portable Docs Spe… (⌂wt peer-st…) ────╮
+▍   40m             Opus 5 (xhigh)             code(dev·st│
+▍  │                                                      │
+▍  │             ━━━───────────── 17%       Framing legs c│
+▍  ╰──────────────────────────────────────── plan › +5 ───╯
+
+● degrade-project/
+▍ ⌄ orphaned dispatch rows ─────────────────────────────────
+▍ ··  ⠧ opencode    demo-degrade-spec  (orphan)
+▍   14m             glm-5.2                    spec(dev)          : 
+▍                   preparing…
+▍               ────────────────   —
+
+● demo-app/
+▍ ⠧ [a7]claude code demo-app-a7 ▾4 (main)
+▍   1h 35m          Opus 4.8 (xhigh)         -
+▍   herdr   ━━━━━━━───────── 45%            지금 render.py …
+▍  ╭─  ⠧ claude     demo-feat-x (feat-x) ─────────────────╮
+▍   22m             Opus 4.8 (xhigh)           code(dev·ad│
+▍  │                preparing…                            │
+▍  │             ━━━━━━────────── 38%       ⚙ pytest  지 │
+▍  ├──────────────────────────────────────────────────────┤
+▍  │   ⠧ opencode   demo-feat-x-verif… (feat-x-veri…)     │
+▍   4m              glm-5.2                    test(adv)  │
+▍  │                running                               │
+▍  │             ────────────────   —                     │
+▍  │   ● codex      demo-feat-x-plan-… (feat-x-plan…)     │
+▍   6m              gpt-5.5                    plan(adv)  │
+▍  │                                                      │
+▍  │             ━── 47%                                  │
+▍  ╰──────────────────────────────────────────────────────╯
+▍  ╭─  ⠧ codex      demo-review (review) ─────────────────╮
+▍   8m              gpt-5.5                    review(debu│
+▍  │                preparing…                            │
+▍  │             ────────────────   —                     │
+▍  ╰──────────────────────────────────────────────────────╯
+▍ ⠧ [c0]claude code demo-composed-o… ▾2 (feat/compos…)
+▍   18m             Opus 4.8 (high)          -
+▍   tty     ━━━━━━━━━─────── 54%
+▍  ╭─  ⠧ claude     claim-b demo-comp… ───────────────────╮
+▍   6m              Sonnet 5 (medium)          code       │
+▍  │                                                      │
+▍  │             ────────────────   —                     │
+▍  ╰──────────────────────────────────────────────────────╯
+▍  ╭─  ⠧ claude     claim-a demo-comp… ───────────────────╮
+▍   6m              Sonnet 5 (medium)          code       │
+▍  │                                                      │
+▍  │             ────────────────   —                     │
+▍  ╰──────────────────────────────────────────────────────╯
+▍ ●     codex       demo-app ▾3 (feat/stream…)
+▍   41m             gpt-5.5 (high)           -
+▍   herdr   ━━━━━━━━━━━━──── 72%
+▍  ╭─  ⠧ codex      drill-g6-worktree (main) ─────────────╮
+▍   3m              gpt-5.5 (high)             loop/drill·│
+▍  │                quick/exec                            │
+▍  │             ────────────────   —                     │
+▍  ├──────────────────────────────────────────────────────┤
+▍  │   ⠧ opencode   drill-g6-opencode…                    │
+▍   1m              glm-5.2                    drill(q)   │
+▍  │                running                               │
+▍  │             ────────────────   —                     │
+▍  │   ● claude     drill-g6-claude-v…                    │
+▍   2m              Sonnet 5                   drill(q)   │
+▍  │                                                      │
+▍  │             ────────────────   —                     │
+▍  ╰──────────────────────────────────────────────────────╯
+▍ ◑ [3c]claude code demo-app-g…  approval  (feat/gate)
+▍   7m              Opus 5 (xhigh)           -
+▍   herdr   ━━━━━━────────── 37%            배포 승인 대기 …
+▍ ○ [9e]claude code demo-app-detach (fix/night-r…)
+▍   12h 00m         Opus 4.8 (high)          -
+▍           ━━━━━━━━━━────── 62%
+▍ ⌄ orphaned dispatch rows ─────────────────────────────────
+▍ ··  ⠧ —           demo-route-conduc…  (orphan)
+▍   —               —                          code               : 
+▍                   plan ✓ › execute › test › report
+▍         ⠧ claude  execute demo-rout…
+▍   8m              Opus 4.8 (high)            execute            : 
+▍                   running
+▍                   ────────────────   —
+▍           ⚡explore (Sonnet 5·md) ●  2m
+
+● demo-svc/
+▍ ⠧     opencode    brave-comet ▾1 (main)
+▍   3h 20m          glm-5.2 (low)            -
+▍           ━━━━━─────────── 31%
+▍  ╭─  ⠧ opencode   demo-spec (spec) ─────────────────────╮
+▍   5m              glm-5.2 (low)              spec(dev)  │
+▍  │                preparing…                            │
+▍  │             ────────────────   —                     │
+▍  ╰──────────────────────────────────────────────────────╯
+▍ ◑     codex       demo-svc-pe…  approval  (fix/perm)
+▍   22m             gpt-5.6-sol (xhigh)      -
+▍           ━━━━━━━━━━────── 64%            쉘 명령 권한 승…
+
+● lab-project/
+▍ ⌄ orphaned dispatch rows ─────────────────────────────────
+▍ ··  ⠧ —           demo-lab-conductor  (orphan)
+▍   —               —                          lab                : 
+▍                   eval-asr › eval-sep ✕ › eval-vad › +2
+▍         ⠧ claude  eval-asr demo-lab…
+▍   9m              Sonnet 5 (medium)          eval-asr           : 
+▍                   running
+▍                   ────────────────   —
+▍         · claude  eval-sep demo-lab…
+▍   3m              Sonnet 5 (medium)          eval-sep           : -
+▍                   
+
+● loops/
+▍  ╭─  ⠧ —          oncall ───────────────────────────────╮
+▍   12m             —                                     │
+▍  │                                                      │
+▍  ╰──────────────────────────────────────────────────────╯
+
+● cairn/ 🚧 20  ✓ 0m
+▍ ● [47]claude code Cairn W13 multi-root fleet… (main)
+▍   11h 54m         Fable 5 (xhigh)          -
+▍   herdr   ━━━━━━━━━━────── 60%            ⏳ sleep 12s  r…
+
+● demo-cool/  ✓ 1h 32m
+▍ ●     claude code demo-cool-shipped (feat/shipped)
+▍   2h 40m          Opus 4.8 (high)          -
+▍           ━━━───────────── 18%
+
+○ 삼성세미나_음성처리/
+▍ ● [cf]claude code FLASH/GAU vs MossFormer architect…
+▍   1d 0h           Opus 5 (high)            -
+▍   herdr   ━━━━━─────────── 34%            Expla… (19h 42m)
+
+○ demo-lib/
+▍ ●     claude code demo-lib-wait (chore/poll)
+▍   34m             Opus 5 (high)            -
+▍           ━━━━──────────── 22%            ⏳ sleep 4m  CI…
+▍ ●     opencode    witty-orchid (wip/experim…)
+▍   16m             deepseek-v4-pro (high)   -
+▍           ━───────────────  8%
+▍    +1 stale/companion hidden
+▍ ⌄ orphaned dispatch rows ─────────────────────────────────
+▍ ··  · codex       demo-orphan  (orphan) (orphan)
+▍   12d 2h          —                          debug               
+▍                   debug: -
+
+  ⠹ working   ● idle   ○ detached   · stale
+  ◑ blocked session   [id] session   herdr pane
+  tty plain terminal   ▾N child jobs   ↳ dispatch
+  🚧 N worktrees   🧠 1 mem   ⌂wt worktree
+
+# F-100 bracket capture @60 cols: lines=177 max_width=114 overflow_lines=10 tag_badges=8 herdr=7 tty=2

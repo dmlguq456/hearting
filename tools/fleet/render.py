@@ -160,10 +160,13 @@ _HUE_OF = {
     # context lead word stay plain red — no bold (v47, user 2026-08-05): the chip owns the
     # emphasis, and without color the missing bold is what separates blocked from dead (bold).
     "g_blocked": ("r", 0), "g_blocked_chip": ("r", _A_REVERSE),
-    # F-100b: the herdr chip on the context row — reverse video like the interaction chip
-    # (user 2026-09-03: the reverse chip is not reserved for `blocked`), soft white so it
-    # reads as a WHERE axis, distinct from both the harness hue and the status hues.
-    "herdr_chip": ("w", _A_REVERSE),
+    # F-100b: the `herdr` word leading the context row — soft white, plain weight (the
+    # first cut was a reverse chip; user 2026-09-03 "너무 두껍고 거슬리네"), so it reads as a
+    # WHERE axis distinct from both the harness hue and the status hues.
+    "herdr_on": ("w", 0),
+    # F-100a: the `[46]` session-tag badge — brackets dim, the tag itself in the same soft
+    # white as `herdr_on` (user 2026-09-03: white, so it separates from the harness hue).
+    "tag": ("w", 0), "tag_dim": ("d", _A_D),
     # Badge text, NOT the glyph: plain yellow, distinct from the dim g_unused glyph so the
     # ●>○>◌ ink-weight gradient still reads.
     "g_unused_b": ("y", 0),
@@ -243,13 +246,8 @@ _NAME_HUE = {"claude": "c", "codex": "m", "opencode": "l"}
 for _h, _hue_ch in _NAME_HUE.items():
     _HUE_OF["nm_" + _h] = (_hue_ch, 0)
     _HUE_OF["nmd_" + _h] = (_hue_ch, _A_D)
-    # F-100a: the session-tag chip wears the harness hue in reverse video (a badge, not a
-    # word — the name zone stays the row's single bright text).
-    _HUE_OF["tag_" + _h] = (_hue_ch, _A_REVERSE)
 _HUE_OF["nm_other"] = ("w", _A_B)      # unknown harness keeps the historical white name
 _HUE_OF["nmd_other"] = ("w", _A_D)
-_HUE_OF["tag_other"] = ("w", _A_REVERSE)
-_HUE_OF["tag_dim"] = ("d", _A_REVERSE | _A_D)   # stale/dead/app-server/detached rows
 _NAME_KEY = {h: "nm_" + h for h in _NAME_HUE}
 _NAME_KEY_DIM = {h: "nmd_" + h for h in _NAME_HUE}
 # Every key a row's NAME zone can carry. Consumers that locate the name segment by color
@@ -387,12 +385,10 @@ def _init_colors():
         # harness (h_<h>) → main↔spawned weight is carried by font-color intensity (no bg fill).
         _COLOR["hb_" + h] = hue
     _COLOR["hb_other"] = 0
-    # F-100a/b chips: reverse video on the bright harness hue (tag) / soft white (herdr).
-    for h, hue in _hue.items():
-        _COLOR["tag_" + h] = hue | curses.A_REVERSE
-    _COLOR["tag_other"] = curses.A_REVERSE
-    _COLOR["tag_dim"] = curses.A_REVERSE | curses.A_DIM
-    _COLOR["herdr_chip"] = _COLOR.get("soft", 0) | curses.A_REVERSE
+    # F-100a/b badges: soft white, plain weight — no fill, no bold.
+    _COLOR["tag"] = _COLOR.get("soft", 0)
+    _COLOR["tag_dim"] = curses.A_DIM
+    _COLOR["herdr_on"] = _COLOR.get("soft", 0)
     _COLOR["grp"] = _COLOR.get("soft", 0) | curses.A_BOLD  # group card title
     _COLOR["grp_live"] = _COLOR.get("green", 0)
     _COLOR["grp_hot"] = _COLOR.get("green", 0) | curses.A_BOLD   # active card title (working)
@@ -784,9 +780,9 @@ _IO_UNSET = object()
 #     gauge slot    context % bar      stage breadcrumb (plan › exec › test)  ← "how far along"
 # main↔dispatch weight is carried by the badge (reverse vs dim font), so the identity columns can
 # stay aligned for comparison. Job flow never sits under branch/gate.
-_TAG_W = 4                    # F-100a: ` 46 ` — the session-tag chip: the 2-hex tag padded
-                              # inside its reverse run, between the status glyph and the
-                              # harness text. A tagless row draws the same 4 blank cells so
+_TAG_W = 4                    # F-100a: `[46]` — the session-tag badge: the 2-hex tag in dim
+                              # brackets, between the status glyph and the harness text. A
+                              # tagless row draws the same 4 blank cells so
                               # the harness column never moves. Charged INSIDE the harness
                               # field (_HMW / _HW): the measured slack there (wide 40 vs a
                               # 33-cell worst case, narrow 16 vs `claude code` 11 + 1 gap)
@@ -1796,21 +1792,18 @@ def _interaction_chip(s):
 
 
 def _session_tag_chip(s, dim=False):
-    """F-100a — the 2-hex session tag (`hearting-46` → `46`) as a reverse-video chip in the
-    harness hue, exactly `_TAG_W` cells: ` 46 ` padded INSIDE the reversed run (F-60's chip
-    idiom). A session without a tag draws the same cells blank — the chip is a badge slot,
-    not a suffix, so every harness label starts in the same column. This is what replaced
-    the F-99c ` · hearting-46` companion: the title owns the whole name zone again and the
-    identity token has its own fixed home (user 2026-09-03)."""
+    """F-100a — the 2-hex session tag (`hearting-46` → `46`) as an outline badge, exactly
+    `_TAG_W` cells: dim `[` `]` around the tag in soft white (user 2026-09-03: the reverse
+    chip read too heavy; white, not the harness hue, so it separates from the harness text).
+    A session without a tag draws the same cells blank — the badge is a slot, not a suffix,
+    so every harness label starts in the same column. This is what replaced the F-99c
+    ` · hearting-46` companion: the title owns the whole name zone again and the identity
+    token has its own fixed home."""
     tag = getattr(s, "session_tag", None)
     if not isinstance(tag, str) or not tag:
         return [(" " * _TAG_W, None)]
-    chip = (" %s " % tag)[:_TAG_W]
-    if dim:
-        key = "tag_dim"
-    else:
-        key = "tag_" + s.harness if s.harness in _NAME_HUE else "tag_other"
-    return [(chip.ljust(_TAG_W), key)]
+    body = tag[: _TAG_W - 2].ljust(_TAG_W - 2)
+    return [("[", "dim"), (body, "tag_dim" if dim else "tag"), ("]", "dim")]
 
 
 def _session_row(s, narrow, is_parent=False, child_count=0, name_width=None,
@@ -3673,18 +3666,18 @@ def _dispatch_summary_detail_row(job, depth=1, term_width=None, orphan=False, in
                         summary_ts=getattr(job, "summary_ts", None))
 
 
-# F-100b (user 2026-09-03) — the context row's lead cell is the WHERE chip, not the state
+# F-100b (user 2026-09-03) — the context row's lead cell is the WHERE word, not the state
 # word. F-55's `working`/`idle` word duplicated the harness row's glyph (same state, same
 # color, one line apart), so it is retired; the L1 glyph is the one status indicator. The
-# slot keeps F-55's exact 7+1 cells — ` herdr ` reversed is 7 cells, the same as the
-# longest state word was — so the gauge column and every NOW anchor are unchanged.
-#   · True  → ` herdr ` reverse chip (attached to a herdr pane right now)
+# slot keeps F-55's exact 7+1 cells (the longest state word was 7) so the gauge column and
+# every NOW anchor are unchanged.
+#   · True  → `herdr` in soft white (attached to a herdr pane right now)
 #   · False → dim `tty` (herdr answered; this session is a plain terminal)
 #   · None  → blank cells (no evidence either way — never a guess)
 # `stale`/`dead` still never reach here — F-13 omits the whole row (both callers return []).
-_CTX_CHIP_TEXT = " herdr "
+_CTX_ON_TEXT = "herdr"
 _CTX_OFF_TEXT = "tty"
-_CTX_CHIP_W = len(_CTX_CHIP_TEXT)   # 7 — plain len(): evaluated at module load, before `_dw`.
+_CTX_CHIP_W = 7                     # F-55's slot: plain literal, evaluated before `_dw` exists.
 _CTX_LABEL_W = _CTX_CHIP_W + 1      # + one trailing space = the F-55 slot width, unchanged.
 _CONTEXT_VALUE_W = 4
 _CONTEXT_NOW_GAP = 3          # minimum gap; F-42c widens it until NOW reaches the session column.
@@ -3763,7 +3756,7 @@ def _context_lead_chip(entity, dim=False, degrade=False):
         return []
     attached = getattr(entity, "herdr_attached", None)
     if attached is True:
-        return [(_CTX_CHIP_TEXT, "dim" if dim else "herdr_chip"), (" ", None)]
+        return [(_CTX_ON_TEXT.ljust(_CTX_CHIP_W) + " ", "dim" if dim else "herdr_on")]
     if attached is False:
         return [(_CTX_OFF_TEXT.ljust(_CTX_CHIP_W) + " ", "dim")]
     return [(" " * _CTX_LABEL_W, None)]
@@ -3771,10 +3764,10 @@ def _context_lead_chip(entity, dim=False, degrade=False):
 
 def _context_detail_row(entity, depth=0, term_width=None, dim=False,
                         indent_width=None, muted=False, now_key="now_sub"):
-    """One ``<herdr chip> <gauge> <value>   NOW`` row for every live card.
+    """One ``<herdr|tty> <gauge> <value>   NOW`` row for every live card.
 
-    The lead cell is the F-100b WHERE chip (` herdr ` reversed / dim `tty` / blank) in a
-    slot the exact width of the retired F-55 state word, so nothing to its right moved.
+    The lead cell is the F-100b WHERE word (`herdr` / dim `tty` / blank) in a slot the
+    exact width of the retired F-55 state word, so nothing to its right moved.
     The gauge track is window-proportional (F-52b).
 
     The context block stays under the harness field; F-42c aligns the descriptive NOW text to
@@ -3798,8 +3791,8 @@ def _context_detail_row(entity, depth=0, term_width=None, dim=False,
         shown_pct = None
     # F-55b drop order, kept: NOW and the exec badge yield first (they are sized from
     # whatever is left below), and the track length is a MEASUREMENT (F-52b) that must not be
-    # shrunk to buy room. The chip is the last thing to give, and it gives whole (F-100b):
-    # only when chip + track + value cannot fit the row at all, even with zero NOW room.
+    # shrunk to buy room. The lead word is the last thing to give, and it gives whole
+    # (F-100b): only when word + track + value cannot fit the row at all, even with zero NOW.
     degrade = (_CTX_LABEL_W + track + _CONTEXT_VALUE_W) > available
     segs = [(indent, None)] + _context_lead_chip(entity, dim=dim, degrade=degrade)
     segs.extend(_gauge_segs(shown_pct, gauge_width, track=track))
@@ -6182,9 +6175,9 @@ def _build_lines(sessions, jobs, section, narrow, malformed, layout="wide", memo
     if "blocked" in _seen_glyphs:
         legend += [("◑", "g_blocked"), (" blocked session   ", "dim")]
     if "tag" in _seen_glyphs:
-        legend += [(" id ", "tag_other"), (" session   ", "dim")]        # F-100a
+        legend += [("[", "dim"), ("id", "tag"), ("]", "dim"), (" session   ", "dim")]  # F-100a
     if "herdr" in _seen_glyphs:
-        legend += [(_CTX_CHIP_TEXT, "herdr_chip"), (" pane   ", "dim")]   # F-100b
+        legend += [(_CTX_ON_TEXT, "herdr_on"), (" pane   ", "dim")]                  # F-100b
     if "tty" in _seen_glyphs:
         legend += [(_CTX_OFF_TEXT, "dim"), (" plain terminal   ", "dim")]
     if "child" in _seen_glyphs:

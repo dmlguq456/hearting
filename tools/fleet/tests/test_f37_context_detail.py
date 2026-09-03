@@ -33,7 +33,7 @@ FULL, EMPTY = render._BAR_FULL, render._BAR_EMPTY
 # F-55 (v39): the lead cell was the padded state WORD. F-100b (2026-09-03): it is the WHERE
 # chip — ` herdr ` reversed for a session herdr lists — in a slot of the same width. The
 # fixtures below are herdr-attached so the lead stays a distinctive marker in the text.
-LEAD = render._CTX_CHIP_TEXT + " "
+LEAD = render._CTX_ON_TEXT.ljust(render._CTX_CHIP_W) + " "
 # F-52b: no measured `context_window_tokens` on these fixtures → the 16-cell baseline track.
 BASE = render._CTX_TRACK_MAX
 # A context gauge is the only place a bar track is immediately followed by its right-justified

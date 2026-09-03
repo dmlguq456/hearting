@@ -233,14 +233,16 @@ class TagChipReplacesCompanionTest(unittest.TestCase):
         txt = "".join(t for t, _k in segs)
         self.assertIn("a real title", txt)
         self.assertNotIn(" · hearting-fb", txt)
-        self.assertIn((" fb ", "tag_claude"), segs)
+        self.assertIn(("fb", "tag"), segs)
+        self.assertIn("[fb]", txt)
 
     def test_narrow_row_shows_title_and_chip_never_the_companion(self):
         l1, _l2 = render._session_row_2line(self._derived(), term_width=100)
         txt = "".join(t for t, _k in l1)
         self.assertIn("a real title", txt)
         self.assertNotIn("hearting-fb", txt)
-        self.assertIn((" fb ", "tag_claude"), l1)
+        self.assertIn(("fb", "tag"), l1)
+        self.assertIn("[fb]", txt)
 
     def test_display_name_precedence_is_unchanged_by_the_chip(self):
         """The chip is additive: the F-99 name chain still decides the name zone."""

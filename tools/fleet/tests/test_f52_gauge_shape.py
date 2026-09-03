@@ -173,15 +173,15 @@ class F100bLeadChipTest(unittest.TestCase):
         base.update(over)
         return Session(**base)
 
-    def test_attached_session_leads_with_the_reversed_herdr_chip_in_every_state(self):
+    def test_attached_session_leads_with_the_herdr_word_in_every_state(self):
         for state in ("working", "idle", "blocked", "unused", "queued", "done", "unknown"):
             with self.subTest(state=state):
                 row = render._context_detail_row(self._session(state, herdr_attached=True),
                                                  term_width=168)[0]
-                self.assertEqual(row[1], (render._CTX_CHIP_TEXT, "herdr_chip"))
-                self.assertEqual(row[2], (" ", None))
-                self.assertEqual(render._dw(row[1][0] + row[2][0]), render._CTX_LABEL_W)
-                self.assertTrue(render._HUE_OF["herdr_chip"][1] & render._A_REVERSE)
+                self.assertEqual(row[1], (render._CTX_ON_TEXT.ljust(render._CTX_CHIP_W) + " ",
+                                          "herdr_on"))
+                self.assertEqual(render._dw(row[1][0]), render._CTX_LABEL_W)
+                self.assertFalse(render._HUE_OF["herdr_on"][1] & render._A_REVERSE)
 
     def test_plain_terminal_leads_with_dim_tty_in_the_same_slot(self):
         text, key = self._lead(render._context_detail_row(
@@ -221,16 +221,17 @@ class F100bLeadChipTest(unittest.TestCase):
         self.assertFalse(hasattr(render, "_CTX_LABEL"))
         self.assertFalse(hasattr(render, "_context_lead_cell"))
         keys = {k for _v, k in render._context_detail_row(session)[0]}
-        self.assertTrue(keys <= {None, "dim", "lvl_g", "lvl_y", "lvl_r", "herdr_chip"})
+        self.assertTrue(keys <= {None, "dim", "lvl_g", "lvl_y", "lvl_r", "herdr_on"})
 
     def test_label_ledger_matches_the_real_display_cells(self):
         """`_CTX_LABEL_W` is computed with len() (module load runs before `_dw` exists) — pin
         it against the actual display width of both lead shapes, and pin the slot to the
         F-55 width so the gauge/NOW anchors provably did not move."""
-        self.assertEqual(render._dw(render._CTX_CHIP_TEXT + " "), render._CTX_LABEL_W)
+        self.assertEqual(render._dw(render._CTX_ON_TEXT.ljust(render._CTX_CHIP_W) + " "),
+                         render._CTX_LABEL_W)
         self.assertEqual(render._dw(render._CTX_OFF_TEXT.ljust(render._CTX_CHIP_W) + " "),
                          render._CTX_LABEL_W)
-        self.assertEqual(render._CTX_CHIP_W, 7)          # ` herdr ` == len("working")
+        self.assertEqual(render._CTX_CHIP_W, 7)          # F-55's slot: len("working")
         self.assertEqual(render._CTX_LABEL_W, 8)         # + one trailing space, as F-55
 
     def test_stale_and_dead_never_reach_the_lead_cell(self):
@@ -258,11 +259,11 @@ class F100bNarrowDegradeTest(unittest.TestCase):
         tight = "".join(v for v, _k in self._row(36))
         self.assertIn("NOW", wide)
         self.assertNotIn("NOW", tight)
-        self.assertEqual(self._lead_text(self._row(36)), render._CTX_CHIP_TEXT)
+        self.assertEqual(self._lead_text(self._row(36)), render._CTX_ON_TEXT.ljust(7) + " ")
 
     def test_the_chip_yields_whole_only_when_it_cannot_share_the_row(self):
         # 4 indent + 8 slot + 16 track + 4 value = 32 cells is the last width that fits.
-        self.assertEqual(self._lead_text(self._row(32)), render._CTX_CHIP_TEXT)
+        self.assertEqual(self._lead_text(self._row(32)), render._CTX_ON_TEXT.ljust(7) + " ")
         degraded = self._row(31)
         visible = "".join(v for v, _k in degraded)
         self.assertNotIn("herdr", visible)
@@ -272,7 +273,8 @@ class F100bNarrowDegradeTest(unittest.TestCase):
         self.assertIn(degraded[1][0][0], (FULL, EMPTY))
 
     def test_a_short_track_keeps_the_chip_at_widths_a_full_track_could_not(self):
-        self.assertEqual(self._lead_text(self._row(24, window=256000)), render._CTX_CHIP_TEXT)
+        self.assertEqual(self._lead_text(self._row(24, window=256000)),
+                         render._CTX_ON_TEXT.ljust(7) + " ")
 
     def test_the_chip_is_whole_or_absent_never_clipped(self):
         # The 16-cell track is a measurement that never shrinks (F-52b), so below 24
@@ -283,7 +285,7 @@ class F100bNarrowDegradeTest(unittest.TestCase):
                 visible = "".join(v for v, _k in self._row(width))
                 self.assertNotIn("…", visible)
                 if "herd" in visible:
-                    self.assertIn(render._CTX_CHIP_TEXT, visible)
+                    self.assertIn("herdr", visible)
                 if width >= 24:
                     self.assertLessEqual(render._dw(visible), width)
 
@@ -312,7 +314,7 @@ class F52WidthLedgerTest(unittest.TestCase):
                 visible = "".join(v for v, _k in
                                   render._context_detail_row(session, term_width=width)[0])
                 self.assertLessEqual(render._dw(visible), width)
-                self.assertEqual(render._dw(visible[:visible.index(render._CTX_CHIP_TEXT)]),
+                self.assertEqual(render._dw(visible[:visible.index("herdr")]),
                                  render._CONTEXT_INDENT_W)
                 self.assertEqual(render._dw(visible[:visible.index("NOW")]), render._NAME_COL)
 

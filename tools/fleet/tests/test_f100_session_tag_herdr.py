@@ -61,24 +61,28 @@ class TagChipLedgerTest(unittest.TestCase):
 
     def test_chip_is_exactly_tag_w_cells_tagged_or_not(self):
         self.assertEqual(render._session_tag_chip(self._s(session_tag="46")),
-                         [(" 46 ", "tag_claude")])
+                         [("[", "dim"), ("46", "tag"), ("]", "dim")])
         self.assertEqual(render._session_tag_chip(self._s()), [(" " * render._TAG_W, None)])
         for s in (self._s(session_tag="46"), self._s(), self._s(session_tag="abcd")):
             self.assertEqual(sum(render._dw(t) for t, _k in render._session_tag_chip(s)),
                              render._TAG_W)
 
-    def test_chip_wears_the_harness_hue_in_reverse_and_dims_with_the_row(self):
-        self.assertEqual(render._session_tag_chip(self._s(harness="codex", session_tag="0b")),
-                         [(" 0b ", "tag_codex")])
-        self.assertEqual(render._session_tag_chip(self._s(harness="zzz", session_tag="0b")),
-                         [(" 0b ", "tag_other")])
+    def test_badge_is_soft_white_on_every_harness_and_dims_with_the_row(self):
+        """User 2026-09-03: white, not the harness hue, so the badge separates from the
+        harness text; no reverse video anywhere on the F-100 surfaces."""
+        for harness in ("claude", "codex", "opencode", "zzz"):
+            with self.subTest(harness=harness):
+                self.assertEqual(render._session_tag_chip(self._s(harness=harness, session_tag="0b")),
+                                 [("[", "dim"), ("0b", "tag"), ("]", "dim")])
         self.assertEqual(render._session_tag_chip(self._s(session_tag="0b"), dim=True),
-                         [(" 0b ", "tag_dim")])
-        for key in ("tag_claude", "tag_codex", "tag_opencode", "tag_other", "tag_dim",
-                    "herdr_chip"):
+                         [("[", "dim"), ("0b", "tag_dim"), ("]", "dim")])
+        self.assertEqual(render._HUE_OF["tag"], ("w", 0))
+        self.assertEqual(render._HUE_OF["herdr_on"], ("w", 0))
+        for key in ("tag", "tag_dim", "herdr_on"):
             with self.subTest(key=key):
-                self.assertTrue(render._HUE_OF[key][1] & render._A_REVERSE)
-        self.assertEqual(render._HUE_OF["tag_claude"][0], render._NAME_HUE["claude"])
+                self.assertFalse(render._HUE_OF[key][1] & render._A_REVERSE)
+                self.assertFalse(render._HUE_OF[key][1] & render._A_BOLD)
+        self.assertNotEqual(render._HUE_OF["tag"][0], render._NAME_HUE["claude"])
 
     def test_wide_row_charges_the_chip_inside_the_harness_field(self):
         """Segments after the 3-cell prefix still sum to EXACTLY _HMW (F-33's contract),
@@ -97,7 +101,8 @@ class TagChipLedgerTest(unittest.TestCase):
                 self.assertEqual(sum(render._dw(t) for t, _k in segs[:i]), render._NAME_COL)
                 self.assertEqual(_text(segs).index("a title"), render._NAME_COL)
                 if s.session_tag:
-                    self.assertEqual(segs[3], (" %s " % s.session_tag, "tag_" + s.harness))
+                    self.assertEqual(segs[3:6], [("[", "dim"), (s.session_tag, "tag"),
+                                                 ("]", "dim")])
                 else:
                     self.assertEqual(segs[3], (" " * render._TAG_W, None))
 
@@ -105,8 +110,8 @@ class TagChipLedgerTest(unittest.TestCase):
         segs = render._session_row(self._s(session_tag="46", liveness="idle"), narrow=False,
                                    name_width=render._wide_name_width(168))
         txt = _text(segs)
-        self.assertLess(txt.index(render._LIVE_GLYPH["idle"]), txt.index(" 46 "))
-        self.assertLess(txt.index(" 46 "), txt.index("claude code"))
+        self.assertLess(txt.index(render._LIVE_GLYPH["idle"]), txt.index("[46]"))
+        self.assertLess(txt.index("[46]"), txt.index("claude code"))
 
     def test_narrow_row_keeps_the_name_column_and_one_gap_after_claude_code(self):
         tagged, _ = render._session_row_2line(self._s(session_tag="46"), term_width=100)
@@ -114,7 +119,8 @@ class TagChipLedgerTest(unittest.TestCase):
         for l1 in (tagged, bare):
             prefix = l1[: l1.index(next(seg for seg in l1 if seg[1] in render.NAME_KEYS))]
             self.assertEqual(sum(render._dw(t) for t, _k in prefix), 4 + render._HW)
-        self.assertIn((" 46 ", "tag_claude"), tagged)
+        self.assertIn(("46", "tag"), tagged)
+        self.assertIn("[46]", _text(tagged))
         self.assertIn(("claude code ", "hb_claude"), tagged)
         self.assertNotIn("claude codea", _text(tagged))
 
@@ -123,10 +129,10 @@ class TagChipLedgerTest(unittest.TestCase):
             with self.subTest(over=over):
                 segs = render._session_row(self._s(session_tag="46", **over), narrow=False,
                                            name_width=render._wide_name_width(168))
-                self.assertEqual(segs[3], (" 46 ", "tag_dim"))
+                self.assertEqual(segs[4], ("46", "tag_dim"))
                 l1, _ = render._session_row_2line(self._s(session_tag="46", **over),
                                                   term_width=100)
-                self.assertIn((" 46 ", "tag_dim"), l1)
+                self.assertIn(("46", "tag_dim"), l1)
 
 
 class LegendTest(unittest.TestCase):
@@ -140,11 +146,11 @@ class LegendTest(unittest.TestCase):
 
     def test_entries_appear_only_when_seen(self):
         plain = self._legend()
-        self.assertNotIn(" id ", plain)
+        self.assertNotIn("[id]", plain)
         self.assertNotIn("herdr", plain)
         self.assertNotIn("tty", plain)
-        self.assertIn(" id ", self._legend(session_tag="46"))
-        self.assertIn(render._CTX_CHIP_TEXT, self._legend(herdr_attached=True))
+        self.assertIn("[id]", self._legend(session_tag="46"))
+        self.assertIn("herdr pane", self._legend(herdr_attached=True))
         self.assertIn("tty", self._legend(herdr_attached=False))
 
 
