@@ -1323,6 +1323,10 @@ def enrich(sess, tick=None):
                             "cursor_kind": "byte-offset-v1"}
     if sess.session_id:
         from fleet import titles
+        # F-100b — Codex exposes no derived `<basename>-<xx>` name, so the tag behind the
+        # `[xx]` badge is minted from the thread id. Deterministic, so nothing is stored.
+        from fleet.session_handle import minted_tag
+        sess.session_tag = minted_tag(sess.session_id)
         native_title = _displayable_title(_thread_titles(home).get(sess.session_id))
         sidecar_title = _displayable_title(
             titles.fresh_title(sess.session_id, harness="codex")

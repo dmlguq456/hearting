@@ -68,6 +68,25 @@ VALUE_OPTIONS = {
 }
 PASSTHROUGH_FLAGS = {"-h", "--help", "-V", "--version"}
 
+# Approval/sandbox posture the caller may have selected for itself. Any of these means
+# the invocation already carries an explicit stance and the default must not touch it.
+# `-p/--profile` is in the set because a profile is a user-authored config layer that may
+# pin `approval_policy`/`sandbox_mode`; deferring to it costs a default and never widens
+# access, which is the direction to be wrong in.
+POSTURE_FLAGS = {
+    "-s",
+    "--sandbox",
+    "-a",
+    "--ask-for-approval",
+    "--approve-for-me",
+    "--dangerously-bypass-approvals-and-sandbox",
+    "--yolo",
+    "-p",
+    "--profile",
+}
+POSTURE_CONFIG_KEYS = ("approval_policy", "sandbox_mode", "sandbox_permissions")
+BYPASS_FLAG = "--dangerously-bypass-approvals-and-sandbox"
+
 
 class LauncherError(RuntimeError):
     """Installed launcher state is unsafe or incomplete."""
@@ -264,6 +283,64 @@ def should_manage(args: list[str]) -> bool:
     return True
 
 
+def interactive_permission_mode() -> str:
+    """`bypass` (default) or `inherit`, from AGENT_CODEX_INTERACTIVE_PERMISSION_MODE.
+
+    User decision 2026-09-03: a Codex session this harness launches should come up ready
+    to work, the same way `peer-steward.py start` already starts a child Codex root with
+    the bypass flag and a registered Claude worker starts in `bypassPermissions`. An
+    unrecognized value is not a silent third mode — it falls back to the default.
+    """
+    raw = os.environ.get("AGENT_CODEX_INTERACTIVE_PERMISSION_MODE", "").strip().lower()
+    return "inherit" if raw == "inherit" else "bypass"
+
+
+def selects_own_posture(args: list[str]) -> bool:
+    """True when the invocation already states an approval/sandbox stance of its own."""
+    index = 0
+    while index < len(args):
+        value = args[index]
+        if value == "--":
+            return False
+        if value in POSTURE_FLAGS:
+            return True
+        if any(value.startswith(flag + "=") for flag in POSTURE_FLAGS if flag.startswith("--")):
+            return True
+        if value in {"-c", "--config"}:
+            if index + 1 < len(args) and _is_posture_override(args[index + 1]):
+                return True
+            index += 2
+            continue
+        if value.startswith("--config=") and _is_posture_override(value.partition("=")[2]):
+            return True
+        if value.startswith("-c") and len(value) > 2 and _is_posture_override(value[2:]):
+            return True
+        if value in VALUE_OPTIONS:
+            index += 2
+            continue
+        index += 1
+    return False
+
+
+def _is_posture_override(override: str) -> bool:
+    key = str(override).partition("=")[0].strip()
+    return key in POSTURE_CONFIG_KEYS
+
+
+def apply_interactive_permission_mode(args: list[str]) -> list[str]:
+    """Prepend the bypass flag to a managed interactive invocation that wants the default.
+
+    The flag goes in front so it stays a root-level option even when the invocation is
+    `resume`/`fork`; `codex-managed-entry.py` forwards these verbatim to the TUI client.
+    Only this managed interactive path is affected — `codex exec` and every other
+    passthrough subcommand never reach here, so the registered dispatch wrapper's
+    `approval_policy=never` plus a real sandbox (stage-dispatch SD-125 (5)) is unchanged.
+    """
+    if interactive_permission_mode() != "bypass" or selects_own_posture(args):
+        return list(args)
+    return [BYPASS_FLAG, *args]
+
+
 def managed_auth_ready(home: Path) -> bool:
     """Let the real CLI own first-login and unsafe-auth remediation."""
 
@@ -363,7 +440,9 @@ def main() -> int:
         if state_home == runtime_home and should_manage(args) and managed_auth_ready(runtime_home):
             binding = pinned_runtime(runtime_home)
             export_runtime_binding(binding)
-            command = managed_command(args, runtime_home, real, binding)
+            command = managed_command(
+                apply_interactive_permission_mode(args), runtime_home, real, binding
+            )
         else:
             command = [str(real), *args]
         os.execv(command[0], command)
