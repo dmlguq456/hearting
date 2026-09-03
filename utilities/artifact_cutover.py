@@ -2083,12 +2083,30 @@ def retire(root: Path, *, maps: Sequence[Path], backup_root: Path, excludes: Seq
     P._write_atomic(backup_dir / "backup-seal.json", P._json_bytes(seal))
     if crash_after_phase == "backup-sealed":
         raise CutoverError("crash-fixture", "backup-sealed")
-    # verify the archive before deleting anything
+    # Re-read verification before deleting anything (D-84 l.3184-3185 / A-16.6):
+    # recompute the archive's digest from disk and compare to the sealed digest,
+    # then compare every tar member's path/size/content-digest against the sealed
+    # inventory -- not names alone.
+    reread_archive_sha = _sha(archive)
+    if reread_archive_sha != seal["archive_sha256"]:
+        raise CutoverError("backup-incomplete", "archive-digest-mismatch")
+    by_source = {r["source"]: r for r in verified}
     with tarfile.open(str(archive), "r:gz") as tar:
-        names = set(tar.getnames())
-    missing = [r["source"] for r in verified if r["source"] not in names]
-    if missing:
-        raise CutoverError("backup-incomplete", f"{len(missing)} sources missing from archive")
+        members_by_name = {m.name: m for m in tar.getmembers()}
+        missing = [r["source"] for r in verified if r["source"] not in members_by_name]
+        if missing:
+            raise CutoverError("backup-incomplete", f"{len(missing)} sources missing from archive")
+        for name, member in members_by_name.items():
+            row = by_source.get(name)
+            if row is None:
+                continue
+            if member.size != row["size"]:
+                raise CutoverError("backup-incomplete", f"size-mismatch:{name}")
+            fh = tar.extractfile(member)
+            content = fh.read() if fh is not None else b""
+            content_sha = hashlib.sha256(content).hexdigest()
+            if content_sha != row["sha256"]:
+                raise CutoverError("backup-incomplete", f"content-mismatch:{name}")
     journal: List[Dict[str, Any]] = []
     for ordinal, row in enumerate(verified):
         (root / row["source"]).unlink()

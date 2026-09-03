@@ -35,6 +35,18 @@ PROPOSAL_ROW_KEYS = frozenset({
     "proposal_id", "fingerprint", "lane", "target_ids", "cited_evidence_ids", "source_cutoff",
     "producer_version", "projection_version", "policy_version", "proposed_value", "confidence", "rationale",
 })
+
+# 🔴4 spec-impact (D-80 rule 6, S2 plan §7 D4): the PRD does not define an
+# evidence-id registry or the universe `cited_evidence_ids` must be drawn
+# from. This module provisionally treats the lump cycle unit's own file
+# locators as that universe (see `_rule_6_evidence_in_cutoff`'s call site
+# below) -- not because the contract says so, but because it is the only
+# cutoff-bound identifier space this module already has sealed in
+# `lump-inventory.json`. When a real evidence-id registry/contract lands,
+# this constant name is the single place that needs to change, and the
+# validator logic in `_rule_6_evidence_in_cutoff` should be revisited then,
+# not before.
+RULE_6_EVIDENCE_UNIVERSE_KIND = "lump-cycle-unit-file-locator"
 ADMISSION_FILES = (
     "proposal.json", "lump-inventory.json", "loose-inventory.json",
     "retire-inventory.json", "admission-receipt.json",
@@ -388,6 +400,72 @@ def resplit_hold(root: Path) -> Optional[Dict[str, Any]]:
     return holds[0]
 
 
+RESPLIT_LOCK_NAME = "resplit.lock"
+
+
+def _resplit_lock_path(root: Path) -> Path:
+    return P.producer_dir(root) / RESPLIT_LOCK_NAME
+
+
+def _run_dir_fully_terminal(run_dir: Path) -> bool:
+    """True only once this run_dir's R2 (and, if it got that far, R3) reached a
+    terminal phase. A missing/unreadable journal is treated as *not* terminal
+    (conservative: it cannot be proven safe to reclaim the lock)."""
+    r2_journal = P._read_json(run_dir / "journal-r2.json")
+    if not isinstance(r2_journal, dict) or r2_journal.get("phase") not in R2_TERMINAL:
+        return False
+    if r2_journal.get("phase") == "rolled-back":
+        return True
+    r3_journal = P._read_json(run_dir / "journal-r3.json")
+    return isinstance(r3_journal, dict) and r3_journal.get("phase") in R3_TERMINAL
+
+
+def _acquire_resplit_lock(root: Path, *, lump_cycle_id: str, run_dir: Path) -> None:
+    """D-77-a: root-wide exclusive lock, claimed atomically (O_EXCL), owned from R2
+    start through R3 terminal. The nonterminal-journal read in `resplit_hold` stays
+    the hold predicate reader/gate consume; this is the actual mutual-exclusion
+    primitive so two concurrent processes cannot both pass that read and then both
+    mutate."""
+    lock_path = _resplit_lock_path(root)
+    run_dir_str = str(run_dir)
+    body = {
+        "schema_version": 1, "kind": "w7g-resplit-lock", "lump_cycle_id": lump_cycle_id,
+        "run_dir": run_dir_str, "owner_pid": os.getpid(), "acquired_at": C._now(),
+    }
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        P._write_exclusive(lock_path, P._json_bytes(body), 0o600)
+        return
+    except FileExistsError:
+        pass
+    existing = P._read_json(lock_path)
+    if isinstance(existing, dict) and existing.get("run_dir") == run_dir_str:
+        return  # this run already owns the lock -- idempotent re-entry (e.g. R2 -> R3)
+    existing_run_dir = existing.get("run_dir") if isinstance(existing, dict) else None
+    if existing_run_dir and _run_dir_fully_terminal(Path(existing_run_dir)):
+        # Journal for the lock holder is terminal (complete or rolled-back) but the
+        # lock file itself was left behind -- a stale lock, not a valid hold.
+        try:
+            lock_path.unlink()
+        except OSError:
+            pass
+        P._write_exclusive(lock_path, P._json_bytes(body), 0o600)
+        return
+    raise ResplitError("resplit-in-progress", json.dumps(existing or {}))
+
+
+def _release_resplit_lock_if_done(root: Path, run_dir: Path) -> None:
+    lock_path = _resplit_lock_path(root)
+    existing = P._read_json(lock_path)
+    if not isinstance(existing, dict) or existing.get("run_dir") != str(run_dir):
+        return
+    if _run_dir_fully_terminal(run_dir):
+        try:
+            lock_path.unlink()
+        except OSError:
+            pass
+
+
 # ---------------------------------------------------------------------------
 # D-83 fold consumer (read projection, mutation 0)
 # ---------------------------------------------------------------------------
@@ -435,8 +513,22 @@ def lump_display_state(root: Path) -> Dict[str, Any]:
         fold_entry = fold.get(cid)
         fold_state = fold_entry["state"] if fold_entry else None
         agrees = (record_state == "superseded") == (fold_state == "superseded")
-        lumps_out.append({"lump_cycle_id": cid, "record_state": record_state, "fold_state": fold_state,
-                          "agrees": agrees})
+        # 🟡2: lane① (original pre-W7C path) omission accounting lives only in the
+        # r3 journal's pre_image today -- surface it here so an operator does not
+        # mistake an incomplete-lane resplit for a normal one without opening the
+        # run_dir directly. Mutation stays 0; this is read-only projection.
+        omitted_count = 0
+        run_dir = _find_run_dir(root, cid)
+        if run_dir is not None:
+            r3_journal = P._read_json(run_dir / "journal-r3.json")
+            if isinstance(r3_journal, dict):
+                omitted = (r3_journal.get("pre_image") or {}).get("lane1_omitted_lump_locators") or []
+                omitted_count = len(omitted)
+        lumps_out.append({
+            "lump_cycle_id": cid, "record_state": record_state, "fold_state": fold_state,
+            "agrees": agrees, "compat_lane1_incomplete": omitted_count > 0,
+            "compat_lane1_omitted_count": omitted_count,
+        })
         if not agrees:
             ok = False
             divergent.append({"lump_cycle_id": cid, "record": record_state, "fold": fold_state})
@@ -548,6 +640,10 @@ def _rule_5_freshness(proposal: Dict[str, Any], lump: Dict[str, Any]) -> Optiona
 
 
 def _rule_6_evidence_in_cutoff(proposal: Dict[str, Any], evidence_universe: set) -> Optional[Dict[str, Any]]:
+    """D-80 rule 6. `evidence_universe` is `RULE_6_EVIDENCE_UNIVERSE_KIND` -- see
+    that constant's docstring for why this is a provisional, not contractual,
+    definition. Do not change the comparison itself here without first
+    updating the constant and its spec-impact note (§7 of the S2 plan)."""
     for row in proposal["proposals"]:
         for ev in row.get("cited_evidence_ids") or []:
             if ev not in evidence_universe:
@@ -639,6 +735,7 @@ def validate_proposal(
     if err:
         return {"verdict": "hold", **err, "rules_checked": rules_checked}
     rules_checked.append("6")
+    # universe kind = RULE_6_EVIDENCE_UNIVERSE_KIND -- see that constant's docstring
     evidence_universe = {f["locator"] for u in lump["cycle_units"] for f in u["files"]}
     err = _rule_6_evidence_in_cutoff(proposal, evidence_universe)
     if err:
@@ -911,7 +1008,22 @@ def _per_cycle_route(route: Dict[str, Any], cycle_key: str, run_dir: Path) -> Tu
     """D-71 requires (artifact_root_id, route_id) uniqueness per finalized cycle -- a batch
     admitting several new cycles under one caller-supplied route needs a distinct route
     identity per cycle. Derives one deterministically from the caller's route + cycle_key so
-    reruns are idempotent (same cycle_key -> same synthetic route_id)."""
+    reruns are idempotent (same cycle_key -> same synthetic route_id).
+
+    🟡3 spec-impact (S2 plan §7): this per-cycle synthetic route identity is a
+    design choice made to satisfy D-71 uniqueness, not something the PRD/plan
+    specifies. Its rules, as implemented here (not yet ratified elsewhere):
+    - **identity**: `route_id = "rt-" + sha256(f"{caller_route_id}:{cycle_key}")[:16]`,
+      deterministic and stable across reruns of the same admitted proposal.
+    - **provenance**: the derived route is a full copy of the caller's route
+      (same capability/intensity/gates) plus `resplit_cycle_key`, persisted
+      once under `<run_dir>/routes/<route_id>.json` -- it is not registered
+      in any route ledger outside this run_dir.
+    - **authority**: it carries no capability beyond what the caller's route
+      already granted; it exists solely so each new cycle's `finalize` call
+      has a distinct `route_id` to bind to, not as an independently
+      authorized route.
+    """
     seed = f"{route['route_id']}:{cycle_key}".encode()
     digest = hashlib.sha256(seed).hexdigest()
     derived = dict(route)
@@ -1117,44 +1229,56 @@ def _r2(root: Path, *, lump_cycle_id: str, route_file: Optional[Path] = None, dr
     plan_sha256 = marker["plan_sha256"]
     if journal is not None and journal.get("phase") == "complete" and journal.get("plan_sha256") == plan_sha256:
         return {"status": "already-applied", "run_dir": str(run_dir), "journal": journal}
-    alloc = allocator or artifact_identity.IdAllocator()
-    if journal is not None and journal.get("phase") == "rolled-back":
-        journal = None  # PRD 2959-2964: a re-run after rollback restarts from `prepared`
-    resumed = journal is not None
-    if journal is None:
-        campaign_plan = _campaign_plan_from_verdict(verdict, root_slug)
-        pre_image, cycles = _r2_prepare(root, campaign_plan, alloc, lump_cycle_id, route, route_file, run_dir)
-        journal = {
-            "schema_version": 1, "kind": "w7g-resplit-journal", "gate": "r2", "plan_sha256": plan_sha256,
-            "lump_cycle_id": lump_cycle_id, "run_dir": str(run_dir), "phase": "prepared",
-            "started_at": C._now(), "pre_image": pre_image, "cycles": cycles,
-            "created_dirs": pre_image["created_dirs"], "created_cycle_dirs": pre_image["created_cycle_dirs"],
-            "route_id": route["route_id"],
-        }
-        P._write_atomic(journal_path, P._json_bytes(journal))
-    if dry_run:
-        return {"status": "dry-run", "journal": journal}
-    if crash_after_phase == "prepared":
-        raise ResplitError("crash-fixture", "prepared")
-    cycles = journal["cycles"]
-    if _r2_disk_has_any_commit(root, cycles):
-        # PRD 2962-2964: past the first `finalize` commit, recovery is roll-forward only.
-        _r2_roll_forward(root, run_dir, journal, cycles, crash_at=crash_at, crash_after_phase=crash_after_phase)
-    elif resumed:
-        # A prior call already built this journal and did not reach a commit before
-        # stopping (crash-fixture or process death) -- this retry rolls it back rather
-        # than resuming forward (§S2-d-2: crash recovery, not crash tolerance).
-        _r2_rollback(root, journal, run_dir)
-    else:
-        _r2_execute(root, run_dir, journal, cycles, crash_at=crash_at, crash_after_phase=crash_after_phase)
-    return {"status": journal["phase"], "run_dir": str(run_dir), "journal": journal}
+    # D-77-a: root-wide mutual exclusion from here (R2 start) through R3 terminal.
+    # `other_hold` above is the read-only journal-owned hold predicate (unchanged);
+    # this is the atomic claim that actually prevents two processes from both
+    # passing that read and mutating concurrently.
+    _acquire_resplit_lock(root, lump_cycle_id=lump_cycle_id, run_dir=run_dir)
+    try:
+        alloc = allocator or artifact_identity.IdAllocator()
+        if journal is not None and journal.get("phase") == "rolled-back":
+            journal = None  # PRD 2959-2964: a re-run after rollback restarts from `prepared`
+        resumed = journal is not None
+        if journal is None:
+            campaign_plan = _campaign_plan_from_verdict(verdict, root_slug)
+            pre_image, cycles = _r2_prepare(root, campaign_plan, alloc, lump_cycle_id, route, route_file, run_dir)
+            journal = {
+                "schema_version": 1, "kind": "w7g-resplit-journal", "gate": "r2", "plan_sha256": plan_sha256,
+                "lump_cycle_id": lump_cycle_id, "run_dir": str(run_dir), "phase": "prepared",
+                "started_at": C._now(), "pre_image": pre_image, "cycles": cycles,
+                "created_dirs": pre_image["created_dirs"], "created_cycle_dirs": pre_image["created_cycle_dirs"],
+                "route_id": route["route_id"],
+            }
+            P._write_atomic(journal_path, P._json_bytes(journal))
+        if dry_run:
+            return {"status": "dry-run", "journal": journal}
+        if crash_after_phase == "prepared":
+            raise ResplitError("crash-fixture", "prepared")
+        cycles = journal["cycles"]
+        if _r2_disk_has_any_commit(root, cycles):
+            # PRD 2962-2964: past the first `finalize` commit, recovery is roll-forward only.
+            _r2_roll_forward(root, run_dir, journal, cycles, crash_at=crash_at, crash_after_phase=crash_after_phase)
+        elif resumed:
+            # A prior call already built this journal and did not reach a commit before
+            # stopping (crash-fixture or process death) -- this retry rolls it back rather
+            # than resuming forward (§S2-d-2: crash recovery, not crash tolerance).
+            _r2_rollback(root, journal, run_dir)
+        else:
+            _r2_execute(root, run_dir, journal, cycles, crash_at=crash_at, crash_after_phase=crash_after_phase)
+        return {"status": journal["phase"], "run_dir": str(run_dir), "journal": journal}
+    finally:
+        # Released only once this run's R2 (and, if it got that far, R3) reached a
+        # terminal phase -- a synthetic crash (an exception raised above) leaves the
+        # journal nonterminal, so this is a no-op and the lock stays held, exactly as
+        # a real process death would leave it.
+        _release_resplit_lock_if_done(root, run_dir)
 
 
 def _r2_move_cycle(root: Path, journal: Dict[str, Any], run_dir: Path, cyc: Dict[str, Any],
-                   inverse_rows: List[Dict[str, Any]]) -> None:
+                   inverse_rows: List[Dict[str, Any]], *, crash_after_first_file: bool = False) -> None:
     lump_record = P.read_cycle_record(root, journal["lump_cycle_id"])
     lump = P.cycle_dir(root, lump_record["campaign_id"], journal["lump_cycle_id"])
-    for f in cyc["files"]:
+    for idx, f in enumerate(cyc["files"]):
         source = lump / "artifacts" / f["locator"]
         target = Path(cyc["cycle_dir"]) / "artifacts" / f["locator"]
         if target.is_file():
@@ -1169,6 +1293,13 @@ def _r2_move_cycle(root: Path, journal: Dict[str, Any], run_dir: Path, cyc: Dict
             "sha256": f["sha256"],
         })
         C._write_jsonl(run_dir / "inverse.jsonl", inverse_rows)
+        # 🟡1 (FP-4 granularity): a per-file fault point, distinct from the
+        # whole-cycle boundary above -- a crash here leaves this cycle's file
+        # rename genuinely mid-flight (some files moved, some not), matching
+        # the plan's fault-point wording rather than only a whole-cycle
+        # rename-complete-but-not-finalized boundary.
+        if crash_after_first_file and idx == 0 and len(cyc["files"]) > 1:
+            raise ResplitError("crash-fixture", "mid-cycle-file-rename")
 
 
 def _r2_witness(cyc: Dict[str, Any]) -> None:
@@ -1204,7 +1335,8 @@ def _r2_execute(root: Path, run_dir: Path, journal: Dict[str, Any], cycles: List
     if crash_after_phase == "committed":
         raise ResplitError("crash-fixture", "committed")
     for i, cyc in enumerate(cycles[1:], start=1):
-        _r2_move_cycle(root, journal, run_dir, cyc, inverse_rows)
+        crash_mid_file = crash_at == "r2:mid-cycle-file" and len(cyc["files"]) > 1
+        _r2_move_cycle(root, journal, run_dir, cyc, inverse_rows, crash_after_first_file=crash_mid_file)
         if crash_at == "r2:mid-second-cycle" and i == 1:
             raise ResplitError("crash-fixture", "mid-second-cycle")
         _r2_witness(cyc)
@@ -1261,47 +1393,53 @@ def _r3(root: Path, *, lump_cycle_id: str, backup_root: Optional[Path], dry_run:
     identity = P.artifact_lifecycle.read_root_identity(root)
     alloc = allocator or artifact_identity.IdAllocator()
     new_cycle_ids = [c["cycle_id"] for c in r2_journal["cycles"]]
-    if journal is not None and journal.get("phase") == "rolled-back":
-        journal = None  # PRD 2971-2974: a re-run after rollback restarts from `prepared`
-    resumed = journal is not None
-    if journal is None:
-        lump_record = P.read_cycle_record(root, lump_cycle_id) or {}
-        pre_image = {
-            "schema_version": 1,
-            "side_records": [{
-                "path": os.path.relpath(P.cycle_record_path(root, lump_cycle_id), root),
-                "bytes_b64": _b64(P.cycle_record_path(root, lump_cycle_id).read_bytes()),
-                "sha256": "sha256:" + hashlib.sha256(P.cycle_record_path(root, lump_cycle_id).read_bytes()).hexdigest(),
-            }],
-            "compat_json": None, "written_map_files": [],
-        }
-        compat_path = C.compat_path(root)
-        if compat_path.is_file():
-            data = compat_path.read_bytes()
-            pre_image["compat_json"] = {"bytes_b64": _b64(data), "sha256": "sha256:" + hashlib.sha256(data).hexdigest()}
-        journal = {
-            "schema_version": 1, "kind": "w7g-resplit-journal", "gate": "r3", "plan_sha256": plan_sha256,
-            "lump_cycle_id": lump_cycle_id, "run_dir": str(run_dir), "phase": "prepared",
-            "started_at": C._now(), "pre_image": pre_image, "new_cycle_ids": new_cycle_ids,
-        }
-        P._write_atomic(journal_path, P._json_bytes(journal))
-    if dry_run:
-        return {"status": "dry-run", "journal": journal}
-    if crash_after_phase == "prepared":
-        raise ResplitError("crash-fixture", "prepared")
-    backup_verified = (run_dir / "backup-verified.json").is_file()
-    if backup_verified:
-        # PRD 2971-2974/A-16.2: past the verified backup, recovery is roll-forward only.
-        _r3_execute(root, run_dir, journal, identity, alloc, backup_root,
-                   crash_at=crash_at, crash_after_phase=crash_after_phase)
-    elif resumed:
-        # A prior call already built this journal and did not reach a verified backup
-        # before stopping -- this retry rolls it back rather than resuming forward.
-        _r3_rollback(root, journal, run_dir)
-    else:
-        _r3_execute(root, run_dir, journal, identity, alloc, backup_root,
-                   crash_at=crash_at, crash_after_phase=crash_after_phase)
-    return {"status": journal["phase"], "run_dir": str(run_dir), "journal": journal}
+    # D-77-a: the same root-wide lock claimed at R2 start is still (or, if this is a
+    # fresh process, is re-)claimed here and held through R3 terminal.
+    _acquire_resplit_lock(root, lump_cycle_id=lump_cycle_id, run_dir=run_dir)
+    try:
+        if journal is not None and journal.get("phase") == "rolled-back":
+            journal = None  # PRD 2971-2974: a re-run after rollback restarts from `prepared`
+        resumed = journal is not None
+        if journal is None:
+            lump_record = P.read_cycle_record(root, lump_cycle_id) or {}
+            pre_image = {
+                "schema_version": 1,
+                "side_records": [{
+                    "path": os.path.relpath(P.cycle_record_path(root, lump_cycle_id), root),
+                    "bytes_b64": _b64(P.cycle_record_path(root, lump_cycle_id).read_bytes()),
+                    "sha256": "sha256:" + hashlib.sha256(P.cycle_record_path(root, lump_cycle_id).read_bytes()).hexdigest(),
+                }],
+                "compat_json": None, "written_map_files": [],
+            }
+            compat_path = C.compat_path(root)
+            if compat_path.is_file():
+                data = compat_path.read_bytes()
+                pre_image["compat_json"] = {"bytes_b64": _b64(data), "sha256": "sha256:" + hashlib.sha256(data).hexdigest()}
+            journal = {
+                "schema_version": 1, "kind": "w7g-resplit-journal", "gate": "r3", "plan_sha256": plan_sha256,
+                "lump_cycle_id": lump_cycle_id, "run_dir": str(run_dir), "phase": "prepared",
+                "started_at": C._now(), "pre_image": pre_image, "new_cycle_ids": new_cycle_ids,
+            }
+            P._write_atomic(journal_path, P._json_bytes(journal))
+        if dry_run:
+            return {"status": "dry-run", "journal": journal}
+        if crash_after_phase == "prepared":
+            raise ResplitError("crash-fixture", "prepared")
+        backup_verified = (run_dir / "backup-verified.json").is_file()
+        if backup_verified:
+            # PRD 2971-2974/A-16.2: past the verified backup, recovery is roll-forward only.
+            _r3_execute(root, run_dir, journal, identity, alloc, backup_root,
+                       crash_at=crash_at, crash_after_phase=crash_after_phase)
+        elif resumed:
+            # A prior call already built this journal and did not reach a verified backup
+            # before stopping -- this retry rolls it back rather than resuming forward.
+            _r3_rollback(root, journal, run_dir)
+        else:
+            _r3_execute(root, run_dir, journal, identity, alloc, backup_root,
+                       crash_at=crash_at, crash_after_phase=crash_after_phase)
+        return {"status": journal["phase"], "run_dir": str(run_dir), "journal": journal}
+    finally:
+        _release_resplit_lock_if_done(root, run_dir)
 
 
 def _r3_rollback(root: Path, journal: Dict[str, Any], run_dir: Path) -> None:
@@ -1464,25 +1602,48 @@ def _r3_backup(root: Path, run_dir: Path, lump_dir: Path, *, crash_at: Optional[
     artifacts = lump_dir / "artifacts"
     archive = run_dir / "legacy-artifacts.tar"
     files = [f for f in P._walk_files(artifacts) if f.is_file() and not f.is_symlink()]
+    entries = []
     with tarfile.open(str(archive), "w") as tar:
         for f in files:
-            tar.add(str(f), arcname=f.relative_to(artifacts).as_posix(), recursive=False)
+            rel = f.relative_to(artifacts).as_posix()
+            tar.add(str(f), arcname=rel, recursive=False)
+            entries.append({"path": rel, "byte_size": f.stat().st_size, "sha256": C._sha(f)})
+    entries.sort(key=lambda e: e["path"])
     with archive.open("rb") as handle:
         os.fsync(handle.fileno())
     archive_sha = "sha256:" + C._sha(archive)
     if crash_at == "r3:after-backup-tar-before-seal":
         raise ResplitError("crash-fixture", "after-backup-tar-before-seal")
     seal = {"schema_version": 1, "kind": "w7g-backup-seal", "archive": str(archive),
-            "archive_sha256": archive_sha, "entry_count": len(files),
+            "archive_sha256": archive_sha, "entry_count": len(files), "entries": entries,
             "sealed_at": C._now()}
     P._write_atomic(run_dir / "backup-seal.json", P._json_bytes(seal))
     if crash_at == "r3:after-seal-before-reread":
         raise ResplitError("crash-fixture", "after-seal-before-reread")
+    # Re-read verification (PRD D-84 l.3184-3185 / A-16.6): recompute the archive's
+    # digest from disk and compare it to the sealed digest, then compare every tar
+    # member's path/size/content-digest against the sealed inventory -- not names
+    # alone. Any mismatch is a typed failure before any unlink happens.
+    reread_archive_sha = "sha256:" + C._sha(archive)
+    if reread_archive_sha != seal["archive_sha256"]:
+        raise ResplitError("backup-incomplete", "archive-digest-mismatch")
+    entries_by_path = {e["path"]: e for e in entries}
     with tarfile.open(str(archive), "r") as tar:
-        names = set(tar.getnames())
-    missing = [f.relative_to(artifacts).as_posix() for f in files if f.relative_to(artifacts).as_posix() not in names]
-    if missing:
-        raise ResplitError("backup-incomplete", missing[0])
+        members_by_name = {m.name: m for m in tar.getmembers()}
+        missing = [e["path"] for e in entries if e["path"] not in members_by_name]
+        if missing:
+            raise ResplitError("backup-incomplete", missing[0])
+        for name, member in members_by_name.items():
+            expected = entries_by_path.get(name)
+            if expected is None:
+                continue
+            if member.size != expected["byte_size"]:
+                raise ResplitError("backup-incomplete", f"size-mismatch:{name}")
+            handle = tar.extractfile(member)
+            content = handle.read() if handle is not None else b""
+            content_sha = hashlib.sha256(content).hexdigest()
+            if content_sha != expected["sha256"]:
+                raise ResplitError("backup-incomplete", f"content-mismatch:{name}")
     verified = {"schema_version": 1, "kind": "w7g-backup-verified", "seal_sha256": archive_sha,
                "entry_count": len(files), "verified_at": C._now()}
     P._write_atomic(run_dir / "backup-verified.json", P._json_bytes(verified))

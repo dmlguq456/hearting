@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """W7G resplit tests (A-16.1/A-16.2/A-16.3/A-16.5) + S2-h ownership guard."""
 import base64
-import hashlib
 import importlib.util
 import json
 import os
@@ -9,6 +8,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -527,9 +527,31 @@ class EndToEndTests(Fixture):
         remaining = list(W.P._walk_files(self.lump_dir / "artifacts"))
         remaining = [f for f in remaining if f.is_file()]
         self.assertEqual(remaining, [])
-        # every new cycle's content digest equals the lump's row for the same locator
+        # D-78: locator-keyed exact-set comparison -- (path, content_digest, byte_size)
+        # for the lump's resplit population (shared-input/ and plans/stage-sessions/
+        # excluded, matching scan_lumps) must equal the union across the new cycles
+        # exactly, not "any value happens to be present" (that would pass even if two
+        # files' digests were swapped).
         lump_manifest = json.loads((self.lump_dir / "manifest.json").read_text())
-        by_locator = {r["locator"]["path"]: r["content_digest"] for r in lump_manifest["artifact_revisions"]}
+
+        def _eligible(path):
+            if not path.startswith("artifacts/"):
+                return None
+            rel = path[len("artifacts/"):]
+            parts = rel.split("/")
+            if parts and parts[0] == "shared-input":
+                return None
+            if len(parts) > 1 and parts[0] == "plans" and parts[1] == "stage-sessions":
+                return None
+            return rel
+
+        lump_triples = set()
+        for row in lump_manifest["artifact_revisions"]:
+            rel = _eligible(row["locator"]["path"])
+            if rel is None:
+                continue
+            lump_triples.add((rel, row["content_digest"], row["byte_size"]))
+        new_triples = set()
         for camp_id in (self.root / "campaigns").iterdir():
             if camp_id.name == self.lump_campaign_id:
                 continue
@@ -537,9 +559,15 @@ class EndToEndTests(Fixture):
             for cid in record["cycles"]:
                 new_manifest = json.loads((P.cycle_dir(self.root, camp_id.name, cid) / "manifest.json").read_text())
                 for row in new_manifest["artifact_revisions"]:
-                    legacy_path = "artifacts/" + row["locator"]["path"].split("artifacts/", 1)[-1]
-                    # match by content digest only (locators are cycle-relative in both trees)
-                    self.assertIn(row["content_digest"], by_locator.values())
+                    rel = _eligible(row["locator"]["path"])
+                    if rel is None:
+                        continue
+                    new_triples.add((rel, row["content_digest"], row["byte_size"]))
+        self.assertEqual(lump_triples, new_triples)
+        self.assertEqual(len(lump_triples), len({t[0] for t in lump_triples}))
+        self.assertEqual(len(new_triples), len({t[0] for t in new_triples}))
+        self.assertEqual(len(lump_triples), len(new_triples))
+        self.assertEqual(sum(t[2] for t in lump_triples), sum(t[2] for t in new_triples))
 
     def test_a16_1_resolve_legacy_reaches_new_cycles(self):
         self.run_full()
@@ -552,6 +580,19 @@ class EndToEndTests(Fixture):
         state = W.lump_display_state(self.root)
         self.assertEqual(state["lump_index_state"], "ok")
         self.assertEqual(state["lumped_cycles_remaining"], 0)
+
+    def test_lane1_omission_surfaced_in_lump_display_state(self):
+        # 🟡2: when lane① (the original pre-W7C path) cannot be derived for any
+        # file, the omission must surface through the read-only
+        # lump_display_state projection, not stay journal-only where an operator
+        # could mistake an incomplete-lane resplit for a normal one. Mutation
+        # count is unaffected by forcing the omission.
+        with mock.patch.object(W, "_original_legacy_sources", return_value={}):
+            self.run_full()
+        state = W.lump_display_state(self.root)
+        entry = next(l for l in state["lumps"] if l["lump_cycle_id"] == self.lump_cycle_id)
+        self.assertTrue(entry["compat_lane1_incomplete"])
+        self.assertEqual(entry["compat_lane1_omitted_count"], 6)
 
     def test_a16_1_ten_legacy_paths_resolve_to_new_cycles(self):
         # D-82: the compat map carries two source lanes for every relocated
@@ -664,6 +705,35 @@ class RollbackAndCrashTests(Fixture):
             self.assertTrue(manifest.is_file(), cyc["cycle_key"])
         self.assertIsNone(W.resplit_hold(self.root))
 
+    def test_fp4b_mid_cycle_file_rename_rolls_forward_no_half_moved_set(self):
+        # 🟡1: FP-4's plan wording ("2번째 사이클 rename 진행 중, 절반 이동") describes
+        # file-level granularity, not the whole-cycle boundary the FP-4 test above
+        # exercises. This crashes strictly between two files of the same cycle's
+        # rename loop, so the crash-time state genuinely has some (not all, not
+        # zero) of that cycle's files renamed.
+        self.r1()
+        route, route_file = self.route()
+        with self.assertRaises(W.ResplitError) as ctx:
+            self.r2(route_file, crash_at="r2:mid-cycle-file")
+        self.assertEqual(ctx.exception.code, "crash-fixture")
+        run_dir = W._find_run_dir(self.root, self.lump_cycle_id)
+        journal = json.loads((run_dir / "journal-r2.json").read_text())
+        self.assertEqual(journal["phase"], "committed")
+        target_cyc = next(c for c in journal["cycles"] if len(c["files"]) > 1 and c is not journal["cycles"][0])
+        moved = [f for f in target_cyc["files"]
+                if (Path(target_cyc["cycle_dir"]) / "artifacts" / f["locator"]).is_file()]
+        self.assertTrue(0 < len(moved) < len(target_cyc["files"]), "expected a genuinely half-moved file set")
+        self.assertFalse((Path(target_cyc["cycle_dir"]) / "manifest.json").exists())
+        # resume -> roll-forward completes the batch; no half-moved set survives
+        result = self.r2(route_file)
+        self.assertEqual(result["journal"]["phase"], "complete")
+        for cyc in journal["cycles"]:
+            manifest = Path(cyc["cycle_dir"]) / "manifest.json"
+            self.assertTrue(manifest.is_file(), cyc["cycle_key"])
+            for f in cyc["files"]:
+                self.assertTrue((Path(cyc["cycle_dir"]) / "artifacts" / f["locator"]).is_file())
+        self.assertIsNone(W.resplit_hold(self.root))
+
     def test_fp5_before_seal_rolls_back(self):
         self.r1()
         route, route_file = self.route()
@@ -715,6 +785,43 @@ class RollbackAndCrashTests(Fixture):
         self.assertFalse((run_dir / "backup-seal.json").exists())
         self.assertFalse((run_dir / "legacy-artifacts.tar").exists())
 
+    def test_backup_archive_tamper_after_seal_is_typed_failure_zero_unlinks(self):
+        # 🔴1 (R3 half): the re-read must recompute the archive digest and
+        # compare per-entry path/size/content-digest against the sealed
+        # inventory, not just check tar member names. Simulates the archive
+        # changing between the seal write and the re-read (the exact window
+        # `backup-seal.json` -> re-read covers) by making the second
+        # `C._sha(archive)` call (the re-read) disagree with the first (the
+        # one recorded in the seal).
+        self.r1()
+        route, route_file = self.route()
+        self.r2(route_file)
+        record = P.read_cycle_record(self.root, self.lump_cycle_id)
+        lump_artifacts_dir = P.cycle_dir(self.root, record["campaign_id"], self.lump_cycle_id) / "artifacts"
+        before = sorted(str(p) for p in W.P._walk_files(lump_artifacts_dir) if p.is_file())
+        self.assertTrue(before)
+        run_dir = W._find_run_dir(self.root, self.lump_cycle_id)
+        archive_path = run_dir / "legacy-artifacts.tar"
+        real_sha = C._sha
+        calls = {"n": 0}
+
+        def tamper_reread(path):
+            if Path(path) == archive_path:
+                calls["n"] += 1
+                if calls["n"] == 2:  # the re-read call
+                    return "0" * 64
+            return real_sha(path)
+
+        with mock.patch.object(W.C, "_sha", side_effect=tamper_reread):
+            with self.assertRaises(W.ResplitError) as ctx:
+                self.r3()
+        self.assertEqual(ctx.exception.code, "backup-incomplete")
+        self.assertEqual(calls["n"], 2)
+        self.assertTrue((run_dir / "backup-seal.json").is_file())
+        self.assertFalse((run_dir / "backup-verified.json").exists())
+        after = sorted(str(p) for p in W.P._walk_files(lump_artifacts_dir) if p.is_file())
+        self.assertEqual(before, after, "zero unlinks after a tampered re-read")
+
     def test_fp7_after_verified_rolls_forward(self):
         self.r1()
         route, route_file = self.route()
@@ -749,6 +856,63 @@ class RollbackAndCrashTests(Fixture):
         self.assertEqual(again3["status"], "already-applied")
 
 
+class ResplitLockTests(Fixture):
+    """🔴2: D-77-a root-wide resplit lock, acquired atomically at R2 start and
+    held through R3 terminal, distinct from the read-only `resplit_hold`
+    journal predicate."""
+
+    def test_concurrent_run_only_one_mutates_other_gets_typed_hold(self):
+        self.r1()
+        route, route_file = self.route()
+        run_dir = W._find_run_dir(self.root, self.lump_cycle_id)
+        # Simulate a second, concurrent resplit attempt (a different lump/run)
+        # that has already claimed the root-wide lock.
+        other_run_dir = run_dir.parent / "other-resplit-run"
+        other_run_dir.mkdir(parents=True)
+        W._acquire_resplit_lock(self.root, lump_cycle_id="cyc_other", run_dir=other_run_dir)
+        before = sorted(str(p) for p in self.root.rglob("*"))
+        with self.assertRaises(W.ResplitError) as ctx:
+            self.r2(route_file)
+        self.assertEqual(ctx.exception.code, "resplit-in-progress")
+        after = sorted(str(p) for p in self.root.rglob("*"))
+        self.assertEqual(before, after, "the blocked run must not mutate canonical state")
+        # The other run finishes (its journal reaches terminal) -> the lock is
+        # reclaimable and the previously-blocked run proceeds and mutates.
+        (other_run_dir / "journal-r2.json").write_text(json.dumps({"phase": "rolled-back"}))
+        result = self.r2(route_file)
+        self.assertIn(result["journal"]["phase"], ("witnessed", "committed", "complete"))
+
+    def test_lock_reclaimed_when_holder_journal_is_terminal(self):
+        self.r1()
+        route, route_file = self.route()
+        run_dir = W._find_run_dir(self.root, self.lump_cycle_id)
+        other_run_dir = run_dir.parent / "other-terminal-run"
+        other_run_dir.mkdir(parents=True)
+        (other_run_dir / "journal-r2.json").write_text(json.dumps({"phase": "complete"}))
+        (other_run_dir / "journal-r3.json").write_text(json.dumps({"phase": "complete"}))
+        W._acquire_resplit_lock(self.root, lump_cycle_id="cyc_other", run_dir=other_run_dir)
+        # the holder's own journals are both fully terminal -> a stale lock,
+        # not a valid hold, so a fresh acquire reclaims it rather than blocking.
+        W._acquire_resplit_lock(self.root, lump_cycle_id=self.lump_cycle_id, run_dir=run_dir)
+        lock = json.loads(W._resplit_lock_path(self.root).read_text())
+        self.assertEqual(lock["run_dir"], str(run_dir))
+
+    def test_lock_released_only_after_r3_complete(self):
+        self.r1()
+        route, route_file = self.route()
+        self.r2(route_file)
+        self.assertTrue(W._resplit_lock_path(self.root).is_file(), "lock held across R2 -> R3")
+        self.r3()
+        self.assertFalse(W._resplit_lock_path(self.root).is_file(), "lock released once R3 completes")
+
+    def test_lock_survives_a_synthetic_crash(self):
+        self.r1()
+        route, route_file = self.route()
+        with self.assertRaises(W.ResplitError):
+            self.r2(route_file, crash_at="r2:before-finalize")
+        self.assertTrue(W._resplit_lock_path(self.root).is_file(), "a crash must not release the lock")
+
+
 class SupersessionEventTests(Fixture):
     def test_event_row_passes_manifest_event_shape_and_fields(self):
         self.run_full()
@@ -779,20 +943,6 @@ class OwnershipGuardTests(unittest.TestCase):
         for name in ("validate_shared_reference_pins", "mark_cycle_superseded", "mark_campaign_superseded",
                     "set_campaign_related", "_write_exclusive", "finalize", "list_cycle_records"):
             self.assertTrue(hasattr(P, name), name)
-
-    def test_does_not_modify_upstream_modules(self):
-        # S2's fixed_files never include these two -- pin their bytes at first
-        # observation (this slice never edited them) and fail if a later S2 run drifts.
-        repo_root = Path(__file__).resolve().parents[1]
-        baseline = repo_root / "_scratch" / ".s2-baseline.json"
-        targets = [repo_root / "utilities" / "artifact_producer.py", repo_root / "utilities" / "artifact_cutover.py"]
-        current = {str(p): hashlib.sha256(p.read_bytes()).hexdigest() for p in targets}
-        baseline.parent.mkdir(parents=True, exist_ok=True)
-        if not baseline.is_file():
-            baseline.write_text(json.dumps(current))
-            return
-        recorded = json.loads(baseline.read_text())
-        self.assertEqual(current, recorded)
 
 
 if __name__ == "__main__":

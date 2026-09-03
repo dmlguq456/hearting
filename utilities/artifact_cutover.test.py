@@ -496,6 +496,41 @@ class CutoverTest(unittest.TestCase):
         self.assertTrue((self.root / "spec/prd.md").is_file(), "no source unlinked before seal+reread")
         self.assertTrue((self.root / "research/topic/report.md").is_file())
 
+    def test_a16_6_archive_tamper_after_seal_is_typed_failure_zero_unlinks(self):
+        # 🔴1 (R4 half): the re-read must recompute the archive digest and
+        # compare against the sealed one, not just check tar member names.
+        # Simulates the archive changing between the seal write and the
+        # re-read (the exact window `backup-seal.json` -> re-read covers) by
+        # making the second `_sha(archive)` call (the re-read) disagree with
+        # the first (the one recorded in the seal).
+        report, sealed = self.migrate()
+        w7c_map = Path(report["run_dir"]) / "compatibility-map.jsonl"
+        backup = Path(self._tmp.name) / "backup-a16-6g"
+        dry = C.retire(self.root, maps=[self.w7_map, w7c_map], backup_root=backup, excludes=["plans/keep"],
+                       approval_receipt_sha256=None, dry_run=True)
+        approval_path = self.approve_retire(dry)
+        before_present = (self.root / "spec/prd.md").is_file() and (self.root / "research/topic/report.md").is_file()
+        self.assertTrue(before_present)
+        real_sha = C._sha
+        archive_calls = {"n": 0, "archive": None}
+
+        def tamper_reread(path):
+            p = Path(path)
+            if p.suffix == ".gz" and p.name == "retired-sources.tar.gz":
+                archive_calls["n"] += 1
+                if archive_calls["n"] == 2:  # the re-read call
+                    return "0" * 64
+            return real_sha(p)
+
+        with mock.patch.object(C, "_sha", side_effect=tamper_reread):
+            with self.assertRaises(C.CutoverError) as ctx:
+                C.retire(self.root, maps=[self.w7_map, w7c_map], backup_root=backup, excludes=["plans/keep"],
+                         approval_receipt_sha256="v" * 64, approval_path=approval_path)
+        self.assertEqual(ctx.exception.code, "backup-incomplete")
+        self.assertEqual(archive_calls["n"], 2)
+        self.assertTrue((self.root / "spec/prd.md").is_file(), "zero unlinks after a tampered re-read")
+        self.assertTrue((self.root / "research/topic/report.md").is_file())
+
     def test_a16_6_exclusion_list_preserved(self):
         C.compat_close(self.root, maps=[self.w7_map], approval_receipt_sha256=None)
         dry = C.retire(self.root, maps=[self.w7_map], backup_root=Path(self._tmp.name) / "backup-a16-6d",
