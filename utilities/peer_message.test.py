@@ -354,5 +354,67 @@ class F100cSenderAndStewardTest(unittest.TestCase):
         self.assertIsNone(peer_message.claude_session_name("", config_dir=str(cfg)))
 
 
+class UsableSessionIdTest(_TmpRootMixin, unittest.TestCase):
+    """F-101i input guard — a value that cannot identify a session never becomes one.
+
+    Measured 2026-09-03: a sender emitted the trailer's documentation form verbatim, so
+    `(peer-from: claude <sid> hearting-46)` put the literal string `<sid>` in four ledger
+    records and created a `<sid>.jsonl` shard beside the real per-session ones.
+    """
+
+    def test_real_ids_pass_through_unchanged(self):
+        for sid in ("841d1f64-0cff-4c16-8578-e874a45a2bb6", "01a064d8-e0e6-7ac2-97df-877c380ce013",
+                    "ses_7f3a19c2b0004e11", "sid-a"):
+            with self.subTest(sid=sid):
+                self.assertEqual(peer_message.usable_session_id(sid), sid)
+
+    def test_placeholders_and_absent_markers_are_not_identities(self):
+        for sid in ("<sid>", "-", "", "   ", None, "<session_id>", ".", ".."):
+            with self.subTest(sid=sid):
+                self.assertIsNone(peer_message.usable_session_id(sid))
+
+    def test_a_separator_never_reaches_the_ledger_filename(self):
+        for sid in ("../../escape", "a/b", "a\\b", "a b"):
+            with self.subTest(sid=sid):
+                self.assertIsNone(peer_message.usable_session_id(sid))
+
+    def test_trailer_parse_drops_an_unsubstituted_placeholder(self):
+        parsed = peer_message.parse_peer_trailer("body\n(peer-from: claude <sid> hearting-46)")
+        self.assertEqual(parsed["harness"], "claude")
+        self.assertIsNone(parsed["session_id"])
+        self.assertEqual(parsed["name"], "hearting-46")
+
+    def test_trailer_parse_keeps_a_real_id(self):
+        parsed = peer_message.parse_peer_trailer(
+            "body\n(peer-from: claude 841d1f64-0cff-4c16-8578-e874a45a2bb6 hearting-18)")
+        self.assertEqual(parsed["session_id"], "841d1f64-0cff-4c16-8578-e874a45a2bb6")
+
+    def test_the_module_own_absent_marker_round_trips_as_absent(self):
+        """`peer_trailer` writes `-` when it has no id; parsing it back must not mint one."""
+        text = peer_message.peer_trailer("claude", None, "hearting-46")
+        self.assertIn("(peer-from: claude -", text)
+        self.assertIsNone(peer_message.parse_peer_trailer(text)["session_id"])
+
+    def test_unusable_sender_shards_to_unknown_not_to_a_junk_sibling(self):
+        for sid in ("<sid>", "-", ""):
+            with self.subTest(sid=sid):
+                self.assertEqual(peer_message._ledger_path(sid).name, "unknown.jsonl")
+        self.assertEqual(peer_message._ledger_path("sid-a").name, "sid-a.jsonl")
+
+    def test_record_stores_no_placeholder_on_either_endpoint(self):
+        rc = peer_message.cmd_record(peer_message.argparse.Namespace(
+            from_harness="claude", from_session_id="<sid>", from_project="hearting",
+            from_name="hearting-46", to_harness="claude", to_session_id="<sid>",
+            to_name="hearting-18", kind="notice", surface="herdr", status="received",
+            receipt=None, ref=[], body_file=None, body_stdin=False))
+        self.assertEqual(rc, 0)
+        shard = peer_message._ledger_path("")
+        rec = json.loads(shard.read_text(encoding="utf-8").splitlines()[0])
+        self.assertEqual(rec["from"]["session_id"], "")
+        self.assertNotIn("session_id", rec["to"])
+        # The name is still carried, so `✉` counters and the notice keep working.
+        self.assertEqual(rec["from"]["name"], "hearting-46")
+
+
 if __name__ == "__main__":
     unittest.main()

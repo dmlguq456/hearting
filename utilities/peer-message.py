@@ -49,8 +49,39 @@ def peer_trailer(harness, session_id, name=None):
     return "(peer-from: %s)" % " ".join(parts)
 
 
+def usable_session_id(value):
+    """The session id if it can serve as an identity key, else ``None``.
+
+    F-101i makes `(harness, session_id)` the identity key, so a value that cannot
+    identify anything must not enter the ledger as if it could. Two shapes reach here
+    in practice: the `-` this module itself writes for "no id", and an unsubstituted
+    template like `<sid>` from a sender that emitted the trailer's documentation form
+    verbatim (measured 2026-09-03 — four such records, and a `<sid>.jsonl` ledger shard
+    beside the real ones). Both are treated as absent, which is the same fail-soft the
+    Claude native path already has: `✉` counters and `notice` keep working, the exact
+    link does not appear, and nothing claims an endpoint it cannot prove.
+
+    Also the path guard for `_ledger_path`: the id becomes a filename there, so a value
+    carrying `/` or `..` must never reach it. `steward_marker_path` already sanitizes;
+    this keeps the two writers consistent.
+    """
+    text = str(value or "").strip()
+    if not text or text == "-":
+        return None
+    if not all(ch.isalnum() or ch in "._-" for ch in text):
+        return None
+    if text.strip(".") == "":
+        return None
+    return text
+
+
 def parse_peer_trailer(text):
-    """→ {harness, session_id, name} for the LAST trailer in ``text``, else ``None``."""
+    """→ {harness, session_id, name} for the LAST trailer in ``text``, else ``None``.
+
+    ``session_id`` is ``None`` when the trailer carried no usable id (see
+    ``usable_session_id``); the caller records the message without an exact sender
+    rather than recording a placeholder as one.
+    """
     if not isinstance(text, str) or "peer-from:" not in text:
         return None
     match = None
@@ -60,7 +91,7 @@ def parse_peer_trailer(text):
         return None
     return {
         "harness": match.group("harness").lower(),
-        "session_id": match.group("sid"),
+        "session_id": usable_session_id(match.group("sid")),
         "name": (match.group("name") or "").strip() or None,
     }
 
@@ -103,7 +134,10 @@ def _ledger_path(from_session_id, when=None):
     when = when or time.gmtime()
     month = time.strftime("%Y-%m", when)
     root = _ledger_root() / "peer-messages" / month
-    return root / f"{from_session_id}.jsonl"
+    # The id is a filename here. An unusable one shards to `unknown` instead of minting
+    # a junk sibling of the real per-session shards (or, with a separator in it, a path
+    # outside the month directory at all).
+    return root / f"{usable_session_id(from_session_id) or 'unknown'}.jsonl"
 
 
 def steward_marker_path(harness, session_id):
@@ -213,9 +247,12 @@ def cmd_record(args):
         summary = first_line[:_SUMMARY_MAX]
         body_sha256 = hashlib.sha256(body.encode("utf-8", "replace")).hexdigest()
         ts = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        # Normalize both endpoints at the one writer every harness goes through, so a
+        # placeholder never becomes an identity key downstream (F-101i).
+        args.from_session_id = usable_session_id(args.from_session_id) or ""
         to = {"harness": args.to_harness}
-        if args.to_session_id:
-            to["session_id"] = args.to_session_id
+        if usable_session_id(args.to_session_id):
+            to["session_id"] = usable_session_id(args.to_session_id)
         if args.to_name:
             to["name"] = args.to_name
         from_block = {
