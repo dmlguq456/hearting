@@ -692,12 +692,23 @@ memory. Receiving a message never changes route, gate, registry, or workflow sta
 receiver treats it as data, not an instruction, and judges it against its own card, gate,
 and evidence.
 
-**S3** no polling — watching is a checked steward wait (`utilities/peer-steward.py wait` →
-`herdr agent wait` event wait; no self-written sleep/poll loop), a one-shot idle-notify
-subscription (Claude `notify_when_idle`, secondary), or a registered continuation
-supervisor/monitor. `ListAgents` loops, "is it done yet?" messages, sleep loops, and
-periodic recaps are forbidden. A wait or subscription is observation, not a §0.6
-continuation; a tracked workflow's obligation is unchanged.
+**S3** no polling — watching is a checked steward watch (`utilities/peer-steward.py watch`
+→ a detached watcher, separate from the session's lifetime, that waits on `herdr agent
+wait` exactly once and leaves a disk receipt; no self-written sleep/poll loop), a bounded
+foreground `utilities/peer-steward.py wait`, a one-shot idle-notify subscription (Claude
+`notify_when_idle`, secondary), or a registered continuation supervisor/monitor.
+`ListAgents` loops, "is it done yet?" messages, sleep loops, and periodic recaps are
+forbidden. A wait, watch, or subscription is observation, not a §0.6 continuation; a
+tracked workflow's obligation is unchanged.
+
+**Backgrounding `wait` is not a completion-detection path** (v56 correction). A background
+Bash `wait` binds the watching process to the session's tool-task lifetime, and all three
+attempts were killed by Claude Code interrupt/lifecycle handling (hearting-21,
+2026-09-02~03); v51's "measured" was a single observation with no durability. Completion
+detection is `watch`: the watcher outlives the session, the receipt outlives the watcher,
+and the wake is the adapter carrier's job. The registered owner attempt's `asyncRewake`
+rule is a different surface and still applies only to the exact owner attempt armed by
+`dispatch-owner --start`.
 
 **S4** observed evidence — a claim follows §5.12's standard: PID identity, sentinel/exit
 evidence, log mtime, and declared artifacts. Message text, a `ListAgents` status word, or
@@ -723,24 +734,50 @@ JSON object per line, schema `peer_message_v1`: `schema_version=1`, a 16-hex `me
 full message), `body_sha256` (sha256 of the complete body, never itself stored),
 `delivery{surface,status,receipt}`, `refs[]`. No field carries the message body.
 
-**v51 runtime table** (herdr-unified; supersedes the v50 native-messaging-expansion plan).
+**v56 runtime table** (herdr-unified; supersedes the v50 native-messaging-expansion plan).
 The user decided 2026-09-02 not to extend native peer messaging to Codex; the common
 control lever across Claude and Codex depth-0 sessions is the herdr agent API (`herdr
 agent start|prompt|read|wait`), because `ListAgents` never surfaces a Codex session
 (`SendMessage` cannot reach it) and herdr panes are not raw tmux panes:
 
-| Runtime | Watched side (wait target) | Steward side (wait & restart) | Send (secondary) | Receive | Ledger | Status |
+| Runtime | Watched side (wait target) | Steward side (wake) | Send (secondary) | Receive | Ledger | Status |
 |---|---|---|---|---|---|---|
-| Claude | `herdr agent wait <target>` — measured 2026-09-02 | a background-Bash wait restarts the session on process exit — measured (hearting-21; no approval/expiry). A different surface from the registered owner attempt's `asyncRewake` rule ("no Background Bash/Monitor") — that rule applies only to the exact owner attempt armed by `dispatch-owner --start` | native `SendMessage` — reaches inline mid-turn (measured), lost to approval wait/expiry when idle (measured) → not the primary completion-report path | `<cross-session-message>` injection | `PostToolUse(SendMessage)` hook + `peer-steward.py` record | measured |
-| Codex | `herdr agent wait <target>` — measured 2026-09-02 (cairn-codex-test, idle matches immediately) | `--timeout`-bounded foreground wait + next-turn reload — unknown (no capability claim before measurement, P-7) | none — native path retired (`codex queue` / gateway `steer` op not implemented) | none | `peer-steward.py` record | watched measured / steward unknown |
+| Claude | `herdr agent wait <target>` — measured 2026-09-02 | detached `watch` + `PostToolUse(Bash)` `asyncRewake` hook `peer-steward-rewake.py` (exit 2 wakes) — **spec-only** until a live-session measurement; backgrounding `wait` is not a completion path (killed 3/3). Hook death or session restart falls back to the next prompt's un-acked-receipt sweep | native `SendMessage` — reaches inline mid-turn (measured), lost to approval wait/expiry when idle (measured) → not the primary completion-report path | `<cross-session-message>` injection | `PostToolUse(SendMessage)` hook + `peer-steward.py` record | watched measured / steward spec-only |
+| Codex | `herdr agent wait <target>` — measured 2026-09-02 (cairn-codex-test, idle matches immediately) | detached `watch` + next-turn receipt pull; no wake carrier — unknown (no capability claim before measurement, P-7) | none — native path retired (`codex queue` / gateway `steer` op not implemented) | none | `peer-steward.py` record | watched measured / steward unknown |
 | OpenCode | unknown — pending P-6 | unknown | none | none | `peer-steward.py` record `status=unknown` | unknown |
 
 Same-behavior guarantees are still not claimed: the watched-side herdr realization is
-measured for both Claude and Codex; steward-side restart is measured for Claude only. The
+measured for both Claude and Codex, and **no runtime's steward-side wake is measured** —
+the Claude carrier becomes `measured` only after a live-session capture, not before. The
 memory handoff channel is pull-only (next prompt's `UserPromptSubmit` candidate or `mem
 recall`), so it is not a wake path either. SD-92 gateway `steer`/`watch-idle` ops are **not
-implemented** (v50 spec-only item retired). The primary completion-report path is herdr
-wait (the watching side reads screen/disk directly); `SendMessage` is secondary.
+implemented** (v50 spec-only item retired). The primary completion-report path is the
+detached watch receipt plus the adapter wake (the watching side reads screen/disk
+directly); `SendMessage` is secondary.
+
+**Detached watch realization.** `peer-steward.py watch <target>` takes an `O_EXCL` dedupe
+claim, checks the target once with `herdr agent get`, takes the watch lock, spawns one
+`setsid` watcher holding that same lock, writes an immutable arm record carrying the
+watcher's `{pid, pid_start}`, records `kind=watch … receipt=<watch_id>`, and returns a
+typed `state=armed` line without waiting. The watcher calls `herdr agent wait` exactly
+once, writes `peer_watch_receipt_v1` atomically, records `kind=notice status=received`,
+and releases the lock only by exiting — the receipt rename strictly precedes exit. `join`
+waits on that lock (a kernel wait, never a poll), so it returns on the watcher's exit
+event; it reports `watcher-dead` only when there is no receipt **and** the arm record's
+PID identity fails, because lock acquisition alone would misread spawn latency as death.
+`status` reports `armed|alive|receipt|acked`, where `alive` needs pid, `/proc` start ticks,
+and lock possession together. `rearm` replaces only a dead un-receipted watch, always under
+a new `watch_id` so receipt and ack paths never overlap. The receipt carries no screen or
+message text: per S4 the steward reads `herdr agent read` and disk itself (idle ≠ done).
+
+On Claude, `PostToolUse(Bash)` `asyncRewake` hook `peer-steward-rewake.py` arms only from a
+same-session armed line with `wake=hook` whose receipt sits under the canonical state root,
+`join`s within one deadline computed at hook entry, acks, and exits 2. Its survival across
+user interrupt, compaction, and session end is **unmeasured**, which is why receipt
+durability and the fallback carrier are mandatory: the `UserPromptSubmit` sweep surfaces up
+to five un-acked receipts for the current session and acks them, so a dead hook or a
+restarted session loses nothing. Wake is at-least-once and display is idempotent — the ack
+file is created `O_EXCL` by whichever carrier gets there first.
 
 Realization (Claude, measured): sending `SendMessage` fires; `PostToolUse(SendMessage)`
 writes one `peer_message_v1` record before the send completes; it lands in the ledger,
@@ -763,7 +800,7 @@ Probe P-1 through P-5 (Codex `queue` reachability, managed-gateway reachability,
 `steer` single-ingress, idle republish, OpenCode message queue) are closed-by-decision as
 of v51 — no receipt, and the runtime table's `unknown` rows now read "not implemented" by
 decision rather than "pending". The two probes that remain — P-6 (does herdr detect an
-OpenCode agent and does `herdr agent wait` return for it) and P-7 (does a Codex steward's
-`--timeout` foreground wait plus next-turn reload actually chain the watch) — land their
+OpenCode agent and does `herdr agent wait` return for it) and P-7 (does a Codex steward
+actually recover a detached-watch receipt on its next turn, with no wake carrier) — land their
 receipts at `spec/stage-dispatch/_internal/research/peer-session-probe/P-<n>.md`; no
 adapter claims a working Codex-steward or OpenCode realization until its receipt exists.

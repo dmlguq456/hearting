@@ -294,6 +294,17 @@
             "timeout": 21600
           }
         ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$HOME/.claude/hooks/peer-steward-rewake.py\"",
+            "asyncRewake": true,
+            "timeout": 21600
+          }
+        ]
       }
     ],
     "PostToolUseFailure": [

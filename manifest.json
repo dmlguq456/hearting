@@ -813,6 +813,13 @@
       "hard_block": false
     },
     {
+      "slug": "hook__peer-steward-rewake.py__PostToolUse",
+      "name": "peer-steward-rewake.py",
+      "mono": "peer-steward-rewake.py",
+      "event": "PostToolUse",
+      "hard_block": false
+    },
+    {
       "slug": "hook__spec-read-marker__PostToolUse",
       "name": "spec-read-marker",
       "mono": "spec-read-marker",

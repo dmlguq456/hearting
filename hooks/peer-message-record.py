@@ -5,7 +5,11 @@ Two subcommands, dispatched by argv[1]:
   post-tool  -- PostToolUse hook. Records one peer_message_v1 for each
                 SendMessage tool call.
   prompt     -- UserPromptSubmit hook. Records one `notice` peer_message_v1
-                when the injected prompt carries a cross-session message.
+                when the injected prompt carries a cross-session message, and
+                sweeps up to five un-acked detached-watch receipts into
+                `additionalContext` (SD-122 (10) fallback carrier: the
+                `asyncRewake` hook may die or the session may restart, but the
+                receipt on disk does not).
 
 Fail-soft over its entire body: any exception is swallowed and the process
 exits 0. Never prints permissionDecision/deny. The prompt path never writes
@@ -21,6 +25,8 @@ from pathlib import Path
 _HOOKS_DIR = Path(__file__).resolve().parent
 _UTILITIES_DIR = _HOOKS_DIR.parent / "utilities"
 _PEER_MESSAGE_PY = _UTILITIES_DIR / "peer-message.py"
+_PEER_STEWARD_PY = _UTILITIES_DIR / "peer-steward.py"
+_SWEEP_MAX = 5
 
 _PREFIX_KIND = {
     "[steer]": "steer",
@@ -129,13 +135,75 @@ def handle_prompt(payload):
     )
 
 
+def _typed_watch_line(row):
+    agent = row.get("agent") or {}
+    return (
+        f"state={row.get('receipt_state') or 'unknown'} agent={agent.get('harness', '-')} "
+        f"session_id={agent.get('session_id', '-')} name={agent.get('name') or row.get('target', '-')} "
+        f"pane={agent.get('pane', '-')} watch_id={row.get('watch_id', '-')} "
+        f"receipt={row.get('receipt', '-')}"
+    )
+
+
+def sweep_undelivered(payload):
+    """Surface un-acked watch receipts for THIS session, then ack them.
+
+    Fail-soft in its own right: a broken or slow `peer-steward.py` must never
+    cost the user a prompt. Ack is recorded even if the context write later
+    fails -- wake is at-least-once, display is idempotent.
+    """
+    session_id = payload.get("session_id")
+    if not session_id:
+        return []
+    env = dict(os.environ)
+    env["CLAUDE_CODE_SESSION_ID"] = str(session_id)
+    try:
+        proc = subprocess.run(
+            [sys.executable, str(_PEER_STEWARD_PY), "status", "--undelivered", "--json"],
+            capture_output=True, text=True, timeout=5, env=env,
+        )
+        rows = (json.loads(proc.stdout or "{}") or {}).get("watches") or []
+    except Exception:
+        return []
+    rows = rows[:_SWEEP_MAX]
+    for row in rows:
+        watch_id = row.get("watch_id")
+        if not watch_id:
+            continue
+        try:
+            subprocess.run(
+                [sys.executable, str(_PEER_STEWARD_PY), "ack", str(watch_id),
+                 "--carrier", "userprompt-sweep"],
+                capture_output=True, timeout=5, env=env,
+            )
+        except Exception:
+            continue
+    return rows
+
+
 def main():
     mode = sys.argv[1] if len(sys.argv) > 1 else ""
     payload = _read_stdin_json()
     if mode == "post-tool":
         handle_post_tool(payload)
     elif mode == "prompt":
-        handle_prompt(payload)
+        # The cross-session `notice` record path runs first and unconditionally:
+        # the sweep must never be able to swallow it.
+        try:
+            handle_prompt(payload)
+        except Exception:
+            pass
+        rows = sweep_undelivered(payload)
+        if rows:
+            # The only stdout this path ever writes, and only when something is
+            # actually pending.
+            print(json.dumps({"hookSpecificOutput": {
+                "hookEventName": "UserPromptSubmit",
+                "additionalContext": "\n".join(
+                    ["[peer-steward] undelivered watch receipts:"]
+                    + [_typed_watch_line(row) for row in rows]
+                ),
+            }}, ensure_ascii=False))
 
 
 if __name__ == "__main__":

@@ -189,13 +189,20 @@ Portable hook semantics are named by invariant:
 
 Adapters decide whether each invariant is enforced by native hook, wrapper,
 manual preflight, or unsupported fallback. Realized (steward role, `OPERATIONS §5.14`,
-v51 herdr-unified): Claude — `PostToolUse(SendMessage)` + `UserPromptSubmit` (measured,
-`hooks/peer-message-record.py`) for the ledger, and `utilities/peer-steward.py wait` →
-`herdr agent wait` (measured) for no-poll watching. Codex — `herdr agent wait` watching is
-measured; steward-side `--timeout` foreground wait + next-turn reload is unmeasured
-(P-7). The managed gateway's `steer`/`watch-idle` ops are **not implemented**
-(closed-by-decision, P-1 through P-5 retired, not pending). OpenCode — `unknown`, pending
-probe P-6.
+v56 herdr-unified): Claude — `PostToolUse(SendMessage)` + `UserPromptSubmit` (measured,
+`hooks/peer-message-record.py`) for the ledger, `utilities/peer-steward.py wait` →
+`herdr agent wait` (measured) for bounded foreground watching, and for detached watching
+`utilities/peer-steward.py watch/join/status/rearm/ack` plus two carriers — a
+`PostToolUse(Bash)` `asyncRewake` hook (`hooks/peer-steward-rewake.py`, exit 2 wakes,
+spec-only until a live-session measurement) and a `UserPromptSubmit` sweep of un-acked
+receipts in the same `hooks/peer-message-record.py` (fail-soft, ≤5 lines of
+`additionalContext`). The carrier reaches watch state only through the utility's
+subcommands, never through the state files, so a runtime without a wake carrier keeps the
+same schema. Codex — `herdr agent wait` watching is measured; the portable
+`watch/join/status/rearm/ack` subcommands work, but there is no wake carrier and next-turn
+receipt recovery is unmeasured (P-7); carrier parity is a separate decision. The managed
+gateway's `steer`/`watch-idle` ops are **not implemented** (closed-by-decision, P-1 through
+P-5 retired, not pending). OpenCode — `unknown`, pending probe P-6.
 
 ## 6. Projection Invariant
 
