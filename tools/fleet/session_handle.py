@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -116,6 +117,23 @@ def derived_tag(name: object) -> Optional[str]:
         return None
     m = _DERIVED_TAG_RE.match(name.strip())
     return m.group("tag") if m else None
+
+
+def minted_tag(session_id: object) -> Optional[str]:
+    """F-100b (user 2026-09-03) — the 2-hex tag for a harness that mints no derived name.
+
+    Claude carries its tag inside the derived session name, so ``derived_tag()`` only has
+    to read it off. Codex and OpenCode expose no such name, so Fleet mints the tag itself
+    from the canonical session id. A hash keeps it deterministic — the same session shows
+    the same badge across ticks, restarts, and a lost tag store — so nothing is persisted.
+
+    NOT the id's own leading hex: a Codex thread id is a UUIDv7 and every one of them
+    starts ``01``. Pure. Returns ``None`` for a missing or non-string id. Collisions are
+    possible at 256 values and are the same property Claude's random suffix already has.
+    """
+    if not isinstance(session_id, str) or not session_id.strip():
+        return None
+    return hashlib.sha256(session_id.strip().encode("utf-8")).hexdigest()[:2]
 
 
 def _agent_home_for_state_root() -> str:
