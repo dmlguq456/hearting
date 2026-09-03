@@ -475,24 +475,6 @@ def _run_herdr_get(target):
     return None
 
 
-def _release_claim(claim_path, expected):
-    """Best-effort release of an unfinished dedupe claim.
-
-    Guarded: a concurrent caller may already have reclaimed the key, and
-    unlinking blindly would delete *its* claim. The worst case of not releasing
-    is a duplicate watch on the next call, never a lost one.
-    """
-    try:
-        current = claim_path.read_text(encoding="utf-8").strip()
-    except OSError:
-        return
-    if current in ("", expected):
-        try:
-            os.unlink(claim_path)
-        except OSError:
-            pass
-
-
 def cmd_watch(args):
     root = _watch_root()
     root.mkdir(parents=True, exist_ok=True)
@@ -504,139 +486,142 @@ def cmd_watch(args):
     if wake == "auto":
         wake = "hook" if os.environ.get("CLAUDE_CODE_SESSION_ID") else "none"
 
-    # 1. Dedupe is its own serialization point, taken BEFORE the herdr
-    #    pre-checks. Scan-then-spawn double-spawns under concurrency: two callers
-    #    both scan, both find nothing, both spawn.
+    # Dedupe is its own serialization point, entered BEFORE the herdr pre-checks
+    # and held until the winning watch_id is published. A bare `O_EXCL` create
+    # serializes only the first arm: two callers arriving while a claimed watcher
+    # is dead would both decide to reclaim and both spawn -- the exact
+    # double-spawn the claim exists to prevent. One blocking lock over
+    # decide + spawn + publish removes that whole class, and it lives no longer
+    # than this foreground call.
+    #
+    # `until=[]` (herdr's default set) and `until=["idle","done","blocked"]` are
+    # the same *behaviour* but stay distinct keys on purpose: (10) dedupes on the
+    # "until 집합" as given, and silently normalizing them would suppress a
+    # legitimate second watch.
     claim = root / f"{_dedupe_key(steward_sid, target, until)}.arm"
-    reclaim = False
     try:
-        claim_fd = os.open(str(claim), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-        os.close(claim_fd)
-    except FileExistsError:
+        claim_fd = _open_lock(claim)
+    except OSError as exc:
+        return _unavailable(f"watch-claim-failed-{exc.errno}")
+    try:
+        fcntl.flock(claim_fd, fcntl.LOCK_EX)
+
         existing_id = ""
         try:
             existing_id = claim.read_text(encoding="utf-8").strip()
         except OSError:
             pass
-        existing_arm = _read_json(_watch_paths(existing_id, root).arm) if existing_id else None
-        existing_paths = _watch_paths(existing_id, root) if existing_id else None
-        finished = bool(existing_paths and existing_paths.receipt.exists())
-        if existing_id and not finished and _watcher_present(existing_arm):
-            print(_already_armed_line(existing_id, existing_arm, existing_paths))
-            return 0
-        # Dead with no receipt, or finished: the key is reclaimable.
-        reclaim = True
-    except OSError as exc:
-        return _unavailable(f"watch-claim-failed-{exc.errno}")
+        if existing_id:
+            existing_paths = _watch_paths(existing_id, root)
+            existing_arm = _read_json(existing_paths.arm)
+            if not existing_paths.receipt.exists() and _watcher_present(existing_arm):
+                print(_already_armed_line(existing_id, existing_arm, existing_paths))
+                return 0
+            # Dead with no receipt, or already finished: the key is reclaimable.
 
-    # 2. herdr pre-checks. Nothing beyond the claim exists yet.
-    if _herdr_missing():
-        _release_claim(claim, "")
-        return _unavailable("herdr-not-found")
-    payload = _run_herdr_get(target)
-    state, agent, _code, reason = _interpret_payload(payload, target)
-    if state == "agent-not-found":
-        _release_claim(claim, "")
-        print(_typed_line("agent-not-found", "-", "-", target, "-"))
-        return 2
-    if reason is not None:
-        _release_claim(claim, "")
-        return _unavailable(reason)
+        # herdr pre-checks. Nothing beyond the claim exists yet, so an early
+        # return leaves no watch state behind.
+        if _herdr_missing():
+            return _unavailable("herdr-not-found")
+        state, agent, _code, reason = _interpret_payload(_run_herdr_get(target), target)
+        if state == "agent-not-found":
+            print(_typed_line("agent-not-found", "-", "-", target, "-"))
+            return 2
+        if reason is not None:
+            return _unavailable(reason)
 
-    # 3. Spawn, then write the immutable arm record already carrying the real
-    #    watcher identity. The reverse order would need a mutable arm record.
-    #    This is safe because the watcher takes everything from argv and never
-    #    reads the arm record, and nothing outside can learn the watch_id before
-    #    step 5 prints it.
-    armed_ts = _utc_now()
-    watch_id = _new_watch_id(steward_sid, target, armed_ts, os.urandom(8).hex())
-    paths = _watch_paths(watch_id, root)
-    log_fd = os.open(str(paths.log), os.O_CREAT | os.O_APPEND | os.O_WRONLY, 0o600)
-    # Take the watch lock here, before the spawn, and hand the open file
-    # description to the watcher. A flock belongs to the description, not the
-    # fd, so the child keeps holding it after the caller closes its copy, and
-    # the lock is held continuously from before `watch` prints its armed line.
-    # Letting the watcher take the lock itself leaves a spawn-latency window in
-    # which a `join` can win the lock ahead of the watcher, see no receipt, and
-    # report a healthy watch as timed out or dead.
-    lock_fd = _open_lock(paths.lock)
-    try:
-        fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except OSError:
-        os.close(lock_fd)
+        armed_ts = _utc_now()
+        watch_id = _new_watch_id(steward_sid, target, armed_ts, os.urandom(8).hex())
+        paths = _watch_paths(watch_id, root)
+        log_fd = os.open(str(paths.log), os.O_CREAT | os.O_APPEND | os.O_WRONLY, 0o600)
+
+        # Take the watch lock here, before the spawn, and hand the open file
+        # description to the watcher. A flock belongs to the description, not the
+        # fd, so the child keeps holding it after this process closes its copy,
+        # and the lock is held continuously from before `watch` prints its armed
+        # line. Letting the watcher take its own lock leaves a spawn-latency
+        # window in which a `join` wins the lock first, sees no receipt, and
+        # reports a healthy watch as timed out or dead.
+        lock_fd = _open_lock(paths.lock)
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            os.close(lock_fd)
+            os.close(log_fd)
+            return _unavailable("watch-lock-contended")
+        os.set_inheritable(lock_fd, True)
+
+        argv = [
+            sys.executable, str(Path(__file__).resolve()), "__watch-run",
+            "--watch-id", watch_id, "--target", target,
+            "--steward-harness", steward_harness, "--steward-session-id", steward_sid,
+            "--steward-project", steward_project, "--armed-ts", armed_ts,
+            "--rearm-count", str(args.rearm_count or 0),
+            "--lock-fd", str(lock_fd),
+        ]
+        for state_name in until:
+            argv += ["--until", state_name]
+        if args.timeout is not None:
+            argv += ["--timeout", str(args.timeout)]
+        for ref in args.ref or []:
+            argv += ["--ref", ref]
+        if getattr(args, "rearmed_from", None):
+            argv += ["--rearmed-from", args.rearmed_from]
+
+        try:
+            # Re-exec, never fork: a fork inherits the caller's process group,
+            # file descriptors and interpreter state, which is precisely the
+            # coupling this contract removes.
+            proc = subprocess.Popen(
+                argv, stdin=subprocess.DEVNULL, stdout=log_fd, stderr=subprocess.STDOUT,
+                start_new_session=True, close_fds=True, pass_fds=(lock_fd,), cwd=str(root),
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            os.close(log_fd)
+            os.close(lock_fd)
+            return _unavailable(f"watcher-spawn-failed-{getattr(exc, 'errno', 'unknown')}")
         os.close(log_fd)
-        _release_claim(claim, "")
-        return _unavailable("watch-lock-contended")
-    os.set_inheritable(lock_fd, True)
-    argv = [
-        sys.executable, str(Path(__file__).resolve()), "__watch-run",
-        "--watch-id", watch_id, "--target", target,
-        "--steward-harness", steward_harness, "--steward-session-id", steward_sid,
-        "--steward-project", steward_project, "--armed-ts", armed_ts,
-        "--rearm-count", str(args.rearm_count or 0),
-        "--lock-fd", str(lock_fd),
-    ]
-    for state_name in until:
-        argv += ["--until", state_name]
-    if args.timeout is not None:
-        argv += ["--timeout", str(args.timeout)]
-    for ref in args.ref or []:
-        argv += ["--ref", ref]
-    if getattr(args, "rearmed_from", None):
-        argv += ["--rearmed-from", args.rearmed_from]
-    try:
-        # Re-exec, never fork: a fork inherits the caller's process group, file
-        # descriptors and interpreter state, which is precisely the coupling
-        # this contract removes.
-        proc = subprocess.Popen(
-            argv, stdin=subprocess.DEVNULL, stdout=log_fd, stderr=subprocess.STDOUT,
-            start_new_session=True, close_fds=True, pass_fds=(lock_fd,), cwd=str(root),
-        )
-    except (OSError, subprocess.SubprocessError) as exc:
-        os.close(log_fd)
+        # Closing this copy does not release the flock: the child still holds a
+        # descriptor for the same open file description.
         os.close(lock_fd)
-        _release_claim(claim, "")
-        return _unavailable(f"watcher-spawn-failed-{getattr(exc, 'errno', 'unknown')}")
-    os.close(log_fd)
-    # Closing the caller's copy does not release the flock: the child still holds
-    # a descriptor for the same open file description.
-    os.close(lock_fd)
 
-    arm = {
-        "schema_version": _WATCH_SCHEMA,
-        "watch_id": watch_id,
-        "target": target,
-        "until": until,
-        "timeout": args.timeout,
-        "refs": list(args.ref or []),
-        "steward": {
-            "harness": steward_harness,
-            "session_id": steward_sid,
-            "project": steward_project,
-        },
-        "armed_ts": armed_ts,
-        "wake": wake,
-        "watcher": {"pid": proc.pid, "pid_start": process_start_ticks(proc.pid) or ""},
-        "rearmed_from": getattr(args, "rearmed_from", None) or None,
-        "rearm_count": int(args.rearm_count or 0),
-    }
-    _write_json_atomic(paths.arm, arm)
+        # Spawn first, then the immutable arm record already carrying the real
+        # watcher identity. The reverse order would need a mutable record or a
+        # second write. It is safe because the watcher takes target, until,
+        # timeout and steward identity from argv and never reads the arm record.
+        arm = {
+            "schema_version": _WATCH_SCHEMA,
+            "watch_id": watch_id,
+            "target": target,
+            "until": until,
+            "timeout": args.timeout,
+            "refs": list(args.ref or []),
+            "steward": {
+                "harness": steward_harness,
+                "session_id": steward_sid,
+                "project": steward_project,
+            },
+            "armed_ts": armed_ts,
+            "wake": wake,
+            "watcher": {"pid": proc.pid, "pid_start": process_start_ticks(proc.pid) or ""},
+            "rearmed_from": getattr(args, "rearmed_from", None) or None,
+            "rearm_count": int(args.rearm_count or 0),
+        }
+        _write_json_atomic(paths.arm, arm)
 
-    # 4. Publish the winning watch_id into the dedupe claim.
-    try:
-        if reclaim:
-            fd, tmp = tempfile.mkstemp(dir=str(root), prefix=".claim-")
-            with os.fdopen(fd, "w", encoding="utf-8") as fh:
-                fh.write(watch_id)
-            os.replace(tmp, claim)
-        else:
-            with open(claim, "w", encoding="utf-8") as fh:
-                fh.write(watch_id)
-    except OSError:
-        pass
+        # Publish the winning watch_id into the claim while still holding it.
+        try:
+            os.ftruncate(claim_fd, 0)
+            os.lseek(claim_fd, 0, os.SEEK_SET)
+            os.write(claim_fd, watch_id.encode("ascii"))
+            os.fsync(claim_fd)
+        except OSError:
+            pass
+    finally:
+        os.close(claim_fd)
 
-    # 5. Ledger + typed line. `receipt=<watch_id>` is what distinguishes this
-    #    `kind=watch` row from (9) `wait`'s, which carries no receipt.
+    # `receipt=<watch_id>` is what distinguishes this `kind=watch` row from
+    # (9) `wait`'s, which carries no receipt.
     _record(
         to_harness=agent["harness"] if agent["harness"] != "-" else "unknown",
         to_name=target, kind="watch", ref=args.ref, receipt=watch_id,
@@ -909,9 +894,8 @@ def cmd_rearm(args):
         print(f"watch_id={watch_id} state=unknown receipt={paths.receipt}")
         return 0
 
-    steward_sid = (arm.get("steward") or {}).get("session_id", "")
-    _release_claim(root / f"{_dedupe_key(steward_sid, arm['target'], arm.get('until'))}.arm", watch_id)
-
+    # No claim bookkeeping here: `cmd_watch` holds the dedupe lock, sees that the
+    # claimed watch is dead with no receipt, and reclaims the key itself.
     ns = argparse.Namespace(
         target=arm["target"], until=list(arm.get("until") or []), timeout=arm.get("timeout"),
         ref=list(arm.get("refs") or []), wake=arm.get("wake", "none"),
