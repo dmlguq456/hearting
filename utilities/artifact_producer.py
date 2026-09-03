@@ -1621,11 +1621,21 @@ def _scan_component_set(source_path: Path) -> Set[str]:
     )
 
 
-def _revision_component_set(root: Path, kind: str, ref_id: str, revision_id: str) -> Set[str]:
-    record = _read_json(
-        Path(root) / "shared" / kind / ref_id / "revisions" / revision_id / REVISION_RECORD_NAME
-    )
+def _revision_component_set(
+    root: Path, kind: str, ref_id: str, revision_id: str, *, fallback_to_disk: bool = False
+) -> Set[str]:
+    revision_dir = Path(root) / "shared" / kind / ref_id / "revisions" / revision_id
+    record = _read_json(revision_dir / REVISION_RECORD_NAME)
     if record is None:
+        # W7-relocated / adopted revisions (`artifact_cutover._adopt_reference`)
+        # carry no revision record; the bytes on disk are their only truth.  Use
+        # the directory's top-level entries so D-87 still guards them instead of
+        # hard-blocking every later admit on the reference.  Only a revision
+        # that is absent on disk as well is an error.
+        # The read-only `check-components` surface keeps reporting such a
+        # revision as unreadable; only the admit guard opts into the scan.
+        if fallback_to_disk and revision_dir.is_dir():
+            return _scan_component_set(revision_dir)
         raise ProducerError("revision-record-missing", f"{ref_id}/{revision_id}")
     return component_set(
         str(row.get("path", "")) for row in (record.get("files") or []) if isinstance(row, Mapping)
@@ -1642,7 +1652,9 @@ def _latest_component_set(
     latest = reference.get("latest_revision_id")
     if not latest:
         return None
-    return _revision_component_set(root, kind, reference["shared_reference_id"], str(latest))
+    return _revision_component_set(
+        root, kind, reference["shared_reference_id"], str(latest), fallback_to_disk=True
+    )
 
 
 def check_component_sets(
