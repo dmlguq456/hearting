@@ -131,6 +131,9 @@ def handle_prompt(payload):
         named = _CROSS_SESSION_NAME_RE.search(prompt)
         args_list = [
             "--from-harness", "claude",
+            # F-101h: Claude's native envelope carries neither sender session_id nor kind.
+            # Preserve the empty id; exact endpoint correlation therefore fails soft while
+            # the receive counter and notice record remain honest.
             "--from-session-id", "",
             "--from-project", _project_of(payload.get("cwd")),
             "--to-harness", "claude",

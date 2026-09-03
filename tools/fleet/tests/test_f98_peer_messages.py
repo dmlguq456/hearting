@@ -53,10 +53,10 @@ class CollectorTest(unittest.TestCase):
             ])
             _write_ledger(tmp, "sid-b", [_rec("sid-b", to_sid="sid-a", minutes_ago=1)])
             result = peer_messages.collect(state_roots=[tmp])
-        self.assertEqual(result["by_session"]["sid-a"]["sent_1h"], 2)
-        self.assertEqual(result["by_session"]["sid-a"]["recv_1h"], 1)
-        self.assertEqual(result["by_session"]["sid-b"]["sent_1h"], 1)
-        self.assertEqual(result["by_session"]["sid-b"]["recv_1h"], 2)
+        self.assertEqual(result["by_session"][("claude", "sid-a")]["sent_1h"], 2)
+        self.assertEqual(result["by_session"][("claude", "sid-a")]["recv_1h"], 1)
+        self.assertEqual(result["by_session"][("claude", "sid-b")]["sent_1h"], 1)
+        self.assertEqual(result["by_session"][("claude", "sid-b")]["recv_1h"], 2)
 
     def test_subtitle_latest_record_only(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -65,7 +65,7 @@ class CollectorTest(unittest.TestCase):
                 _rec("sid-a", to_sid="sid-b", minutes_ago=1, kind="handoff"),
             ])
             result = peer_messages.collect(state_roots=[tmp])
-        self.assertEqual(result["by_session"]["sid-b"]["last_recv"]["kind"], "handoff")
+        self.assertEqual(result["by_session"][("claude", "sid-b")]["last_recv"]["kind"], "handoff")
 
     def test_malformed_line_skipped(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -74,7 +74,7 @@ class CollectorTest(unittest.TestCase):
                 fh.write("{not json\n")
             result = peer_messages.collect(state_roots=[tmp])
         self.assertEqual(peer_messages.collect.last_malformed, 1)
-        self.assertEqual(result["by_session"]["sid-b"]["recv_1h"], 1)
+        self.assertEqual(result["by_session"][("claude", "sid-b")]["recv_1h"], 1)
 
     def test_records_older_than_24h_excluded(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -104,7 +104,7 @@ class CollectorTest(unittest.TestCase):
                 fh.write("x" * (200 * 1024) + "\n")  # oversized garbage prefix
                 fh.write(json.dumps(_rec("sid-a", to_sid="sid-b", minutes_ago=1)) + "\n")
             result = peer_messages.collect(state_roots=[tmp])
-        self.assertEqual(result["by_session"]["sid-b"]["recv_1h"], 1)
+        self.assertEqual(result["by_session"][("claude", "sid-b")]["recv_1h"], 1)
 
     def test_json_exposes_summary_only_never_body(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -112,7 +112,8 @@ class CollectorTest(unittest.TestCase):
                 _rec("sid-a", to_sid="sid-b", summary="short summary", minutes_ago=1)
             ])
             result = peer_messages.collect(state_roots=[tmp])
-        raw = json.dumps(result)
+        raw = json.dumps({"records": result["records"],
+                          "by_session": {str(k): v for k, v in result["by_session"].items()}})
         self.assertIn("short summary", raw)
         self.assertNotIn("body", raw.lower().replace("body_sha256", ""))
         self.assertLessEqual(len(result["records"][0]["summary"]), 200)
@@ -123,7 +124,7 @@ class CollectorTest(unittest.TestCase):
                 _rec("sid-a", to_sid="sid-b", to_name="sid-b-display", kind="steer", minutes_ago=1)
             ])
             result = peer_messages.collect(state_roots=[tmp])
-        last_recv = result["by_session"]["sid-b"]["last_recv"]
+        last_recv = result["by_session"][("claude", "sid-b")]["last_recv"]
         self.assertNotEqual(last_recv["from_name"], "sid-b-display")
         self.assertEqual(last_recv["from_name"], "sid-a")
 
@@ -133,8 +134,8 @@ class CollectorTest(unittest.TestCase):
                 _rec("sid-a", to_name="hearting-21 [f3e821]", minutes_ago=1)
             ])
             result = peer_messages.collect(state_roots=[tmp])
-        self.assertNotIn("hearting-21 [f3e821]", result["by_session"])
-        self.assertEqual(result["by_session"]["sid-a"]["sent_1h"], 1)
+        self.assertNotIn(("claude", "hearting-21 [f3e821]"), result["by_session"])
+        self.assertEqual(result["by_session"][("claude", "sid-a")]["sent_1h"], 1)
 
 
 class StableRootResolverTest(unittest.TestCase):
@@ -162,7 +163,7 @@ class StableRootResolverTest(unittest.TestCase):
             stable_root = os.path.join(home, ".local", "state", "hearting", "dispatch")
             _write_ledger(stable_root, "sid-a", [_rec("sid-a", to_sid="sid-b", minutes_ago=1)])
             result = peer_messages.collect()
-        self.assertEqual(result["by_session"]["sid-b"]["recv_1h"], 1)
+        self.assertEqual(result["by_session"][("claude", "sid-b")]["recv_1h"], 1)
 
     def test_collect_with_no_state_roots_honors_agent_dispatch_jobs(self):
         with tempfile.TemporaryDirectory() as base:
@@ -177,7 +178,7 @@ class StableRootResolverTest(unittest.TestCase):
                 os.environ.pop(key, None)
             _write_ledger(registry_dir, "sid-a", [_rec("sid-a", to_sid="sid-b", minutes_ago=1)])
             result = peer_messages.collect()
-        self.assertEqual(result["by_session"]["sid-b"]["recv_1h"], 1)
+        self.assertEqual(result["by_session"][("claude", "sid-b")]["recv_1h"], 1)
 
 
 class RenderByteIdenticalTest(unittest.TestCase):

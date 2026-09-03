@@ -58,5 +58,6 @@ def enrich(sessions, markers=None):
             continue
         targets = marker.get("targets")
         s.steward = True
+        # Stable source order is required by the renderer's front-preserving +N fold.
         s.steward_targets = (sorted(targets.values(), key=lambda t: t.get("ts") or "")
                              if isinstance(targets, dict) else [])

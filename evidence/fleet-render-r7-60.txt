@@ -1,0 +1,45 @@
+  hearting v2.105.0-dirty · unmanaged
+
+  usage claude code   5h [━━━━━━━━━━━─  88%] ↻ 42m   7d [━━━━━━━─────  58%] ↻ 5d 3h   fable [━━━━━━━━━───  72%]
+        codex         7d [━━━━━━━━━━──  84%] ↻ 3d 22h
+  fleet ⠧ 0 working   ● 0 idle   ↳ 4 jobs (2 working)
+  🧠 mem  +11 added(2w·9d) · 4 expired · 9 pruned · last distill 2h 19m · durable 3 over
+─────
+  COMPUTE RESOURCES  1/3
+  ⌂ moving4  CPU ━━━━───────  23/64 thr  M 33/125G  S 2.6/8G
+             gpu unavailable
+  ◇ cnn      down · ssh: connect to host 163.239.13.43 port 
+  ◇ xavier   down · ssh: connect to host 163.239.13.55 port 
+─────
+
+  SESSIONS   stack · press w to cycle  
+● cairn/ 🚧 20
+▍ ⌄ orphaned dispatch rows ─────────────────────────────────
+▍ ··  · claude code Fleet Readability…  (orphan) (feat/w14a-f…)
+▍   35m             Opus 5 (medium)            code(dev·std·owner) : 
+▍                   execute(R1) › impl-review › test › report
+▍               ━━━───────────── 16%        ⚙ Bash  Launch…
+▍         ⠧ codex   execute Implement… (feat/w14a-f…)
+▍   3m              gpt-5.6-luna (medium)      code-execute(std) / dev/backend : 
+▍                   running
+▍                   ━─── 35%                ⚙ zsh  Phase 1…
+▍────────────────────────────────────────────────
+▍ 🧠 11:12 + durable/project sync "2026-09-03 Cairn W13 production apply 완료. prod Turso `wor…"
+▍ 🧠 10:57 − working/unresolved-obligation manual 
+
+● hearting/ 🚧 7
+▍ ⌄ orphaned dispatch rows ─────────────────────────────────
+▍ ··  · claude code Fleet Connection …  (orphan) (⌂wt fleet-c…)
+▍   56m             Opus 5 (xhigh)             code(dev·std·owner) : 
+▍                   execute(R1) › impl-review › test › report
+▍               ━━━───────────── 19%        ⚙ sh  컴파일된…
+▍         ⠧ codex   execute Fleet Con… (⌂wt fleet-c…)
+▍   9m              gpt-5.6-luna (medium)      code-execute(std) / dev/backend : 
+▍                   running
+▍                   ━━── 41%                단계 0 실렌더 …
+▍────────────────────────────────────────────────
+▍ 🧠 11:43 + durable/decision sync "User asked (2026-09-03) that Codex sessions start in yolo b…"
+▍ 🧠 10:58 + durable/artifact-pointer curator "When revisiting F-100/F-100b Fleet depth-0 session-tag disp…"
+
+  ⠹ working   ● idle   ↳ dispatch   🚧 N worktrees
+  🧠 0 mem   ⌂wt worktree

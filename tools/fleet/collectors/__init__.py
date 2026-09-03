@@ -404,9 +404,10 @@ def collect_all(harness_filter=None, jobs_path=None, usage="cache-only"):
     try:
         from . import peer_messages
         peer = peer_messages.collect()
-        by_sid = (peer or {}).get("by_session") or {}
+        by_key = (peer or {}).get("by_session") or {}
         for s in sessions:
-            row = by_sid.get(s.session_id) if s.session_id else None
+            row = by_key.get((str(getattr(s, "harness", "") or "").lower(),
+                              s.session_id)) if s.session_id else None
             if not row:
                 continue
             s.peer_sent_1h = row.get("sent_1h", 0)

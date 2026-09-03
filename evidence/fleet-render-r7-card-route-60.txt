@@ -1,0 +1,5 @@
+  ▾ [code·dev·standard] rt-abcdef12 — 0/1 nodes
+    n1 ●
+     └▸🚀 a-very-long-…  claude code  claude-3-5-sonnet  11m
+                 ────────────────   —
+        ⚡explore (claude-3-5-sonnet·hi) ●  —
