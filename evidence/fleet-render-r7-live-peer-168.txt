@@ -1,0 +1,74 @@
+  hearting 36110e64 · unmanaged
+
+  usage claude code   5h [━━──────────  14%] ↻ 4h 05m   7d [━━━━━━━─────  61%] ↻ 5d 2h   fable [━━━━━━━━━───  76%]
+        codex         7d [━━━━━━━━━━──  87%] ↻ 3d 20h
+        opencode      no usage api — plan quota is console-only
+  fleet ⠸ 5 working   ● 7 idle   
+  🧠 mem  +17 added(3w·14d) · 4 expired · 9 pruned · last distill 3h 56m · durable 3 over
+─────
+  COMPUTE RESOURCES  3/3
+  ⌂ moving4  CPU ━━━─────────────  11/64 thr  · MEM 36/125GB  · SWP 2.6/8GB
+             ● 0: idle     RTX 6000 Ada Gen.   UTIL   0%  VRAM ━───────────   0.0/48GB
+             ● 1: idle     RTX 6000 Ada Gen.   UTIL   0%  VRAM ━───────────   0.0/48GB
+  ◇ cnn      CPU ───────  0/28 thr  · MEM 4.7/62GB  · SWP 0/8GB
+             ● 0: idle     GeForce RTX 5090    UTIL   0%  VRAM ━───────       0.0/32GB
+             ● 1: idle     GeForce RTX 5090    UTIL   0%  VRAM ━───────       0.0/32GB
+  ◇ xavier   CPU ━━──────────────────  6/80 thr  · MEM 14/188GB  · SWP 0.0/2GB
+             ● 0: idle     GeForce RTX 4090    UTIL   0%  VRAM ━─────         0.0/24GB
+             ● 1: idle     GeForce RTX 4090    UTIL   0%  VRAM ━─────         0.0/24GB
+─────
+
+● hearting/ 🚧 7
+▍ ⠸ [46] claude code (Fable 5.1·high)       Fleet session ID/summary slot conflict (main)              -  5h 37m
+▍   herdr   ━───────────────  8%            hearting-18의 handoff(②) 착지를 기다리며 업데이트 타이머 정지 유지 중. (36m)
+▍       ← hearting-d5 · handoff · 1h 05m
+▍       → [bc]
+▍ ⠸ [18] claude code (Opus 5·high)          Fleet session connection layer unifica… (main)             -  4h 30m
+▍   herdr   ━━━━━━────────── 38%            Runtime owner dispatch attempt completed; no further action required.
+▍ ● [d5] claude code (Opus 4.8·high)        Peer-steward wait hardening ▾1 (main)                      -  5h 53m
+▍   herdr   ━━━━━━━━━─────── 54%            ⚙ python3 4h 07m  hearting-46에 실행을 넘기고 이 세션의 개입·watch를 종료했습니다. (1h 04m)
+▍       → [46]
+▍  ╭─  ✕ claude code ────────────────────── Peer-steward watch hardening (⌂wt peer-st…) ──────────── ✕ dead-worker-blocked resume=plan  4h 07m   ─────────────────────╮
+▍  ╰──────────────────────────────────────────────────────────────────────────────────────────────────── plan › plan-check › execute › impl-review › test › report ───╯
+▍ ● [7e] codex (gpt-5.6-sol·xhigh)          [steer] F-100c 수신 확인 3차(새 세션):… (main)             -  3h 38m
+▍   herdr   ━───  3%                        Replying with the fixed acknowledgment line "수신 OK 3 — f100-hearting-codex" without touching files. (3h 38m)
+▍       ← hearting-46 · notice · 3h 38m
+▍ ● [f8] opencode (glm-5.3-flash·high)      Update OpenCode Model Profile (main)                       -  2h 18m
+▍   herdr   ━━────────────── 10%            라우트 기록을 정상적으로 종료했습니다. (1h 35m)
+▍    +2 stale/companion hidden
+▍────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+▍ 🧠 11:43 + durable/decision sync "User asked (2026-09-03) that Codex sessions start in yolo b…"
+▍ 🧠 10:58 + durable/artifact-pointer curator "When revisiting F-100/F-100b Fleet depth-0 session-tag disp…"
+
+● BC_ResNet/ 🚧 8
+▍ ⠸ [80] claude code (Fable 5.1·high)       BC_ResNet artifact-root cutover audit (main)           ✉ 1/0     -  27m
+▍   herdr   ━━━───────────── 18%            ⚙ 2.1.259 19m  hearting-46 이관 대상과 핸드오프 메모리 기록 방식을 확인하는 중.
+▍ ⠸ [94] claude code (Fable 5.1·high)       AC_CMD Baseline & Demo Roadmap (main)                      spec(direct)  1h 14m
+▍   herdr   ━━━━──────────── 23%            데모 시나리오 초안 등 다음 단계 착수 지시를 기다리는 중.
+▍────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+▍ 🧠 14:49 · working/handoff manual 
+▍ 🧠 14:48 + durable/decision manual "사용자 결정(2026-09-03): Phase C1 v4(확장 재학습, consumer …"
+
+● cairn/ 🚧 21
+▍ ⠸ [47] claude code (Fable 5·xhigh)        Cairn W14 artifact viewing platform (main)                 -  16h 33m
+▍   herdr   ━━━━━─────────── 34%            게이트 통과 후 모듈 전체를 읽고 수정하는 중.
+▍ ● [bc] claude code (Fable 5.1·xhigh)      Fleet F-100 comms test relay (main)                        -  4h 35m
+▍   herdr   ━───────────────  5%            세션이 hearting-46에 2차 수신 확인(수신 OK 2)을 응답함. (3h 42m)
+▍       ← hearting-46 · steer · 3h 42m
+▍ ● [64] opencode (big-pickle)              F-100c parity receive test (main)                          -  3h 41m
+▍   herdr   ━──  9%                         Received parity test steer message from opencode peer, replying with confirmation line. (3h 42m)
+▍       ← hearting-46 · notice · 3h 42m
+▍ ● [36] codex (gpt-5.6-sol·xhigh)          아이디어 카탈로그 구현 검토 (main)                         -  1h 24m
+▍   herdr   ━━━─ 64%                        ⚙ find 1h 20m  v172 공유 revision 발행 후 byte 일치·40줄 요약·최신 head 반영 여부를 검증 중. (24m)
+▍────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+▍ 🧠 13:28 + durable/project sync "2026-09-03 Cairn PRD **v170 §80 = W14 산출물 열람 플랫폼** …"
+▍ 🧠 11:12 + durable/project sync "2026-09-03 Cairn W13 production apply 완료. prod Turso `wor…"
+
+● 삼성세미나_음성처리/  ✓ 1h 26m
+▍ ● [cf] claude code (Opus 5·high)          Band-Split Audio Architecture (—)                          -  1d 4h
+▍   herdr   ━━━━━━━───────── 45%            메모리 2건 확인, 카탈로그 개요 정리, 이어쓰기 프롬프트 안내를 완료함. (44m)
+▍────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+▍ 🧠 13:23 + durable/decision manual "논문 메커니즘의 이식 후보를 모으는 '아이디어 카탈로그'를 별…"
+▍ 🧠 13:23 + durable/research-idea manual "TIGER의 band-split을 SR-CorrNet dual-path 코어에 이식하는 …"
+
+  ⠹ working   ● idle   ✕ dead     [id] session   [id] steward   herdr pane   ▾N child jobs   ⚡ sub-agent   ↳ dispatch   🚧 N worktrees   🧠 0 mem   ⌂wt worktree   

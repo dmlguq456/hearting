@@ -127,7 +127,12 @@ def _snapshot_json(sessions, jobs, resource_jobs=None, usage=None, disabled=None
         out["memory"] = mem
     peer = getattr(collect_all, "last_peer_messages", None)
     if isinstance(peer, dict) and peer.get("records"):
-        out["peer_messages"] = peer      # summary(<=200) only; body never present
+        # Collector identity is a tuple internally; JSON keeps the same projection
+        # readable without collapsing cross-harness equal session ids.
+        out["peer_messages"] = dict(peer)
+        out["peer_messages"]["by_session"] = {
+            "%s:%s" % key: row for key, row in (peer.get("by_session") or {}).items()
+        }
     out["route"] = _collect_route(list(sessions) + list(jobs))
     gov = _collect_governor()
     if gov is not None:

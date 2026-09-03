@@ -3491,6 +3491,24 @@ _SUBAGENT_IND = "        "  # strip indent: pure inset, no connector glyph, 8 ce
                           # per-session ⚡N name-zone badge this used to pair with stays retired.
 
 
+def _conn_indent(depth=0, in_card=False):
+    """Shared pure inset for the ordered session connection strips."""
+    shown_depth = min(depth, 1) if in_card else depth
+    return _SUBAGENT_IND + "  " * max(0, shown_depth)
+
+
+def _fit_strip(builders, width):
+    """Pick the first bounded strip variant; preserve legacy unbounded calls."""
+    if not width:
+        return builders[0]()
+    segs = None
+    for build in builders:
+        segs = build()
+        if sum(_dw(text) for text, _key in segs) <= width:
+            return segs
+    return _clip_segs(segs, width)[0]
+
+
 def _subagent_elapsed_min(sa):
     """Runtime minutes: an active entry keeps counting; a completed entry with an
     observed completion time STOPS there (사용자 2026-07-29 — before this, a done
@@ -3511,7 +3529,7 @@ def _subagent_idle_min(sa):
     return max(0, int((time.time() - ended) / 60))
 
 
-def _subagent_strip(subs, depth=0, in_card=False):
+def _subagent_strip(subs, depth=0, in_card=False, term_width=None):
     """One horizontal strip per OWNER ROW (session or dispatch job): `⚡<type> (<Model>·<ef>)
     <glyph> <elapsed> · …` — replaces the old one-row-per-subagent `├⚡`/`└⚡` stack
     (adopted from the discarded two-plane demo's `_agents_strip`, prd.md:290-295).
@@ -3532,38 +3550,95 @@ def _subagent_strip(subs, depth=0, in_card=False):
     no tail). `depth` = the owning dispatch row's
     depth (0 for a session row): each level pushes the strip 2 more cells inward so it
     stays visibly inside its own owner (사용자 2026-07-16 "서브 세션에 서브 에이전트도")."""
-    shown_depth = min(depth, 1) if in_card else depth
-    segs = [(_SUBAGENT_IND + "  " * max(0, shown_depth), None), (_ICON_SUBAGENT, "dim")]
-    for i, sa in enumerate(subs):
-        if i:
-            segs.append((" · ", "dim"))
-        label = sa.agent_type or "agent"
-        elapsed = _subagent_elapsed_min(sa)
-        tail = fmt_min(elapsed) if elapsed is not None else "—"
-        segs.append((label, None if sa.active else "dim"))
-        model = getattr(sa, "model", None)
-        name = _clean_model(_short_model_id(model)) if model else None
-        if name:
-            eff_full = getattr(sa, "effort", None) or ""
-            segs.append((" (", "dim"))
-            segs.append((name, _model_key(model, dim=not sa.active)))
-            if eff_full:
-                segs.append(("·", "dim"))
-                segs.append((_EFF_SHORT.get(eff_full, eff_full),
-                             _eff_key(eff_full, not sa.active) or "dim"))
-            segs.append((")", "dim"))
-        if sa.active:
-            segs.append((" ", None))
-            segs.append(("●", "g_work" if _BLINK_ON else "g_work_off"))
-        else:
-            segs.append((" ✓", "dim"))
-        segs.append(("  " + tail, "dim"))
-        idle = _subagent_idle_min(sa)
-        if idle is not None:
-            # 잠든 시간 (사용자 2026-07-29): total runtime alone can't say WHEN a
-            # completed leg ended — the parenthetical is minutes-asleep since then.
-            segs.append((" (" + fmt_min(idle) + ")", "dim"))
-    return [segs]
+    def build(show_budget, show_idle, show_elapsed):
+        segs = [(_conn_indent(depth, in_card), None), (_ICON_SUBAGENT, "dim")]
+        for i, sa in enumerate(subs):
+            if i:
+                segs.append((" · ", "dim"))
+            label = sa.agent_type or "agent"
+            elapsed = _subagent_elapsed_min(sa)
+            tail = fmt_min(elapsed) if elapsed is not None else "—"
+            segs.append((label, None if sa.active else "dim"))
+            model = getattr(sa, "model", None)
+            name = _clean_model(_short_model_id(model)) if model else None
+            if name and show_budget:
+                eff_full = getattr(sa, "effort", None) or ""
+                segs.append((" (", "dim"))
+                segs.append((name, _model_key(model, dim=not sa.active)))
+                if eff_full:
+                    segs.append(("·", "dim"))
+                    segs.append((_EFF_SHORT.get(eff_full, eff_full),
+                                 _eff_key(eff_full, not sa.active) or "dim"))
+                segs.append((")", "dim"))
+            if sa.active:
+                segs.append((" ", None))
+                segs.append(("●", "g_work" if _BLINK_ON else "g_work_off"))
+            else:
+                segs.append((" ✓", "dim"))
+            if show_elapsed:
+                segs.append(("  " + tail, "dim"))
+            idle = _subagent_idle_min(sa)
+            if idle is not None and show_idle:
+                segs.append((" (" + fmt_min(idle) + ")", "dim"))
+        return segs
+    return [_fit_strip([lambda: build(True, True, True),
+                        lambda: build(False, True, True),
+                        lambda: build(False, False, True),
+                        lambda: build(False, False, False)], term_width)]
+
+
+def _peer_link_strip(last_recv, term_width=None, depth=0, in_card=False):
+    """F-101a/b peer relation strip; caller has already proved endpoint visibility.
+
+    Claude native envelopes can lack the sender id, so that path remains a counter-only
+    fail-soft projection rather than guessing an endpoint.
+    """
+    if not last_recv or not last_recv.get("from_session_id"):
+        return []
+    indent = _conn_indent(depth, in_card)
+    name = last_recv.get("from_name") or "peer"
+    kind = last_recv.get("kind") or ""
+    age = fmt_min(last_recv.get("age_min") or 0)
+    def build(include_kind=True, include_age=True):
+        bits = [indent, "←", " ", name]
+        if include_kind and kind:
+            bits += [" · ", kind]
+        if include_age:
+            bits += [" · ", age]
+        return [(bits[0], None)] + [(part, "dim") for part in bits[1:]]
+    return [_fit_strip([lambda: build(True, True), lambda: build(True, False),
+                        lambda: build(False, False)], term_width)]
+
+
+def _steward_link_strip(targets, tag_by_key, term_width=None, depth=0, in_card=False):
+    """F-101d exact-join child tags with front-preserving bounded folding."""
+    tags = []
+    for target in targets or []:
+        sid = target.get("session_id")
+        if not sid:
+            continue
+        key = (str(target.get("harness") or "").lower(), sid)
+        tag = tag_by_key.get(key)
+        if tag:
+            tags.append(str(tag))
+    if not tags:
+        return []
+    indent = _conn_indent(depth, in_card)
+    def build(count):
+        segs = [(indent, None), ("→", "dim")]
+        for tag in tags[:count]:
+            segs.extend([(" [", "dim"), (tag, "tag"), ("]", "dim")])
+        rest = len(tags) - count
+        if rest:
+            segs.append((" +%d" % rest, "dim"))
+        return segs
+    if not term_width:
+        return [build(len(tags))]
+    for count in range(len(tags), -1, -1):
+        segs = build(count)
+        if sum(_dw(text) for text, _key in segs) <= term_width:
+            return [segs]
+    return [_clip_segs(build(0), term_width)[0]]
 
 
 def _plugin_agent_row(job, orphan=False, term_width=None):
@@ -4183,8 +4258,7 @@ def _gpu_resource_strip(resources, term_width=None, depth=0, in_card=False):
     """One exact-session resource strip, orthogonal to work/stage/liveness rendering."""
     if not resources:
         return []
-    shown_depth = min(depth, 1) if in_card else depth
-    indent = _SUBAGENT_IND + "  " * max(0, shown_depth)
+    indent = _conn_indent(depth, in_card)
     width = max(20, int(term_width or 200))
 
     def build(show_model, show_memory):
@@ -4205,11 +4279,8 @@ def _gpu_resource_strip(resources, term_width=None, depth=0, in_card=False):
         return segs
 
     # F-89: drop model, then memory while preserving pulse + every GPU identity.
-    for flags in ((True, True), (False, True), (False, False)):
-        segs = build(*flags)
-        if sum(_dw(text) for text, _key in segs) <= width:
-            return [segs]
-    return [_clip_segs(build(False, False), width)[0]]
+    return [_fit_strip([lambda: build(True, True), lambda: build(False, True),
+                        lambda: build(False, False)], width)]
 
 
 def _gpu_state(gpu):
@@ -5123,7 +5194,7 @@ def _build_process_lines(sessions, jobs, route_views_by_id, malformed, memory, t
             anchor.append(("  " + str(s.model), "dim"))
         lines.append(anchor)
         if s_subs:
-            lines.extend(_subagent_strip(s_subs))
+            lines.extend(_subagent_strip(s_subs, term_width=term_width))
         if session_resources and not covered:
             lines.extend(_gpu_resource_strip(session_resources, term_width=term_width))
         for plugin_job in plugin_subs:
@@ -5309,6 +5380,32 @@ def _resource_rows(resources, section):
         summary.append(("  +%d more" % (len(ordered) - 3), "dim"))
     rows.append(summary)
     return rows
+
+
+def _group_emission(g, show_sessions, show_jobs):
+    """Single source of truth for the session rows that the group loop emits.
+
+    The earlier visible_order calculation is a conservative card-anchor approximation;
+    it is intentionally separate from this exact emit predicate.
+    """
+    group_sessions = g["sessions"] if show_sessions else []
+    group_jobs = _visible_group_jobs(g["jobs"], show_sessions, show_jobs)
+    if not _SHOW_ALL:
+        group_jobs = [j for j in group_jobs
+                      if j.liveness != "dead" or getattr(j, "_dead_terminal_owner", False)]
+    empty = not group_sessions and not group_jobs
+    if empty:
+        return {"group_sessions": group_sessions, "group_jobs": group_jobs,
+                "empty": True, "fold": False, "shown": [], "hidden": 0}
+    live_sessions = [s for s in group_sessions
+                     if s.liveness not in ("stale", "dead") and not s.app_server]
+    must_show_jobs = any(not getattr(j, "afterglow", False) for j in group_jobs)
+    fold = (not _SHOW_ALL) and (not live_sessions) and (not must_show_jobs)
+    shown = (group_sessions if _SHOW_ALL else
+             [s for s in group_sessions if session_parent_visible(s)])
+    return {"group_sessions": group_sessions, "group_jobs": group_jobs,
+            "empty": False, "fold": fold, "shown": shown,
+            "hidden": len(group_sessions) - len(shown)}
 
 
 def _build_lines(sessions, jobs, section, narrow, malformed, layout="wide", memory=None,
@@ -5503,13 +5600,26 @@ def _build_lines(sessions, jobs, section, narrow, malformed, layout="wide", memo
         visible_tiers = {name: _group_activity_rank(groups[name]) for name in visible_order}
         order = live_order.reconcile_groups(visible_order, visible_tiers) + non_card_order
 
+    emission_by_group = {name: _group_emission(groups[name], show_sessions, show_jobs)
+                         for name in order}
+    emitted_session_keys = set()
+    tag_by_key = {}
+    for emission in emission_by_group.values():
+        for s in emission["shown"]:
+            sid = getattr(s, "session_id", None)
+            if not sid:
+                continue
+            key = (str(getattr(s, "harness", "") or "").lower(), sid)
+            emitted_session_keys.add(key)
+            if getattr(s, "session_tag", None):
+                tag_by_key[key] = s.session_tag
+
     # The product identity is a distinct, quiet title block. Keep one breathing row
     # before account usage begins instead of letting the two metadata zones touch.
     lines = _top_rows(term_width)
     _seen_glyphs = set()
     # F-98b: the peer-message subtitle only makes sense between two sessions BOTH on
     # screen this tick — an off-screen peer still counts toward recv, but gets no line.
-    rendered_session_ids = {s.session_id for s in sessions if s.session_id}
     # F-12(c) legend glyph-appearance tracking — LOCAL to this call (never module/global state,
     # _OFFSET invariant R3): which of the conditional legend glyphs actually got emitted this
     # build. working/idle/dispatch/`~` stay unconditional (always relevant vocabulary); the
@@ -5568,29 +5678,16 @@ def _build_lines(sessions, jobs, section, narrow, malformed, layout="wide", memo
                              # stack of per-dir folded rules at the bottom was visual noise)
     for name in order:
         g = groups[name]
-        group_sessions = g["sessions"] if show_sessions else []
-        group_jobs = _visible_group_jobs(g["jobs"], show_sessions, show_jobs)
-        if not _SHOW_ALL:
-            # F-83: a supervisor-closed dead depth-1 owner whose route still has open
-            # work stays on the board as its own ✕ card (collector `_dead_terminal_owner`).
-            # Hiding it left the owning session card-less, so the route leaked out as the
-            # legacy multi-line stage surface (user 2026-08-26).
-            group_jobs = [j for j in group_jobs
-                          if j.liveness != "dead" or getattr(j, "_dead_terminal_owner", False)]
-        if not group_sessions and not group_jobs:
+        emission = emission_by_group[name]
+        group_sessions = emission["group_sessions"]
+        group_jobs = emission["group_jobs"]
+        if emission["empty"]:
             continue    # empty-group suppression per --section: no dangling header
 
         # group fold decision (R4) — computed BEFORE emitting anything for this group.
+        fold = emission["fold"]
         live_sessions = [s for s in group_sessions
-                          if s.liveness not in ("stale", "dead") and not s.app_server]
-        # conservative: any LIVE job present blocks the fold (R4's "never hide a dispatch").
-        # F-46: an afterglow row is not live work — it must not keep an otherwise dormant
-        # group expanded, per the spec's "접힘을 막지 않는다". The group's own cooling glyph
-        # (✓ + time since completion) already carries "this dir just finished" at the fold
-        # level, so nothing is lost: the afterglow row only ever hides in a group that has
-        # no live session and no live job at all.
-        must_show_jobs = any(not getattr(j, "afterglow", False) for j in group_jobs)
-        fold = (not _SHOW_ALL) and (not live_sessions) and (not must_show_jobs)
+                         if s.liveness not in ("stale", "dead") and not s.app_server]
 
         if fold:
             folded_groups.append((name, len(group_sessions)))
@@ -5602,9 +5699,8 @@ def _build_lines(sessions, jobs, section, narrow, malformed, layout="wide", memo
 
         # F-80 L2a: the exact predicate collect_all's ParentEdgeTracker confirms edges
         # against (model.session_parent_visible) — single definition, not a parallel copy.
-        shown = (group_sessions if _SHOW_ALL else
-                 [s for s in group_sessions if session_parent_visible(s)])
-        hidden = len(group_sessions) - len(shown)
+        shown = emission["shown"]
+        hidden = emission["hidden"]
         shown_sids = set(s.session_id for s in shown if s.session_id)
         shown_cwds = {}
         ambiguous_cwds = set()
@@ -5894,7 +5990,8 @@ def _build_lines(sessions, jobs, section, narrow, malformed, layout="wide", memo
             shown_job_subs = [sa for sa in (job_subs or []) if sa.active or _SHOW_ALL]
             if shown_job_subs:
                 lines.extend(_subagent_strip(
-                    shown_job_subs, depth=depth, in_card=in_card))
+                    shown_job_subs, depth=depth, in_card=in_card,
+                    term_width=term_width))
             job_resources = _gpu_resources_for_session(job, gpu_resources)
             if not job_resources:
                 job_session = _session_for_job(session_by_identity, job)
@@ -6067,17 +6164,8 @@ def _build_lines(sessions, jobs, section, narrow, malformed, layout="wide", memo
             detail = _context_detail_row(s, term_width=term_width, now_key="now_main")
             if detail:
                 lines.extend(detail)
-            # F-98b/G3: subtitle only when BOTH endpoints are on screen this tick; an
-            # off-screen peer's message still counted toward recv above, but earns no line.
-            # G4: summary/body text never appears here — from_name/kind/age only.
+            # F-101a: relation strips follow the session detail rows, not the 44-column subtitle.
             _peer_last = getattr(s, "peer_last_recv", None)
-            if _peer_last and _peer_last.get("from_session_id") in rendered_session_ids:
-                lines.extend(_summary_row(
-                    "← %s · %s · %s" % (
-                        _peer_last.get("from_name") or "peer",
-                        _peer_last.get("kind") or "",
-                        fmt_min(_peer_last.get("age_min") or 0)),
-                    depth=0, term_width=term_width, start_col=_NAME_COL))
             stage_rows = ([] if suppress_session_stage else
                           _projection_stage_detail_rows(s, term_width=term_width))
             if stage_rows:
@@ -6087,10 +6175,18 @@ def _build_lines(sessions, jobs, section, narrow, malformed, layout="wide", memo
             shown_subs = [sa for sa in (getattr(s, "subagents", None) or [])
                          if sa.active or _SHOW_ALL]
             if shown_subs:
-                lines.extend(_subagent_strip(shown_subs))
+                lines.extend(_subagent_strip(shown_subs, term_width=term_width))
             session_resources = _gpu_resources_for_session(s, gpu_resources)
             if session_resources:
                 lines.extend(_gpu_resource_strip(session_resources, term_width=term_width))
+            if _peer_last:
+                peer_key = (str(_peer_last.get("from_harness") or "").lower(),
+                            _peer_last.get("from_session_id"))
+                if _peer_last.get("from_session_id") and peer_key in emitted_session_keys:
+                    lines.extend(_peer_link_strip(_peer_last, term_width=term_width))
+            if getattr(s, "steward", False):
+                lines.extend(_steward_link_strip(getattr(s, "steward_targets", None) or [],
+                                                 tag_by_key, term_width=term_width))
             for plugin_job in plugin_kids:
                 lines.extend(_plugin_agent_row(plugin_job, term_width=term_width))
             for i, cj in enumerate(dispatch_kids):

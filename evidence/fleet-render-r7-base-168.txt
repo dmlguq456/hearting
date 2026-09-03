@@ -1,0 +1,35 @@
+  hearting v2.105.0 · unmanaged
+
+  usage claude code   5h [━━━━━━━━━━──  85%] ↻ 50m   7d [━━━━━━━─────  57%] ↻ 5d 3h   fable [━━━━━━━━━───  72%]
+        codex         7d [━━━━━━━━━━──  84%] ↻ 3d 22h
+  fleet ⠧ 0 working   ● 0 idle   ↳ 4 jobs (2 working)
+  🧠 mem  +11 added(2w·9d) · 4 expired · 9 pruned · last distill 2h 11m · durable 3 over
+─────
+  COMPUTE RESOURCES  1/3
+  ⌂ moving4  CPU ━━──────────────  7/64 thr  · MEM 33/125GB  · SWP 2.6/8GB
+             gpu unavailable
+  ◇ cnn      down · ssh: connect to host 163.239.13.43 port 1689: failure
+  ◇ xavier   down · ssh: connect to host 163.239.13.55 port 1689: failure
+─────
+
+● cairn/ 🚧 20
+▍ ⌄ orphaned dispatch rows ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+▍ ··  · claude code (Opus 5·medium)         Fleet Readability W14a Rollo…  (orphan) (feat/w14a-f…)     code(dev·std·owner) : plan(R3) › plan-check(R2) ✓ › +4  27m
+▍               ━━────────────── 13%        ⚙ bash  Verifying two mechanical fixes from plan-check round 2 as owner before final refine.
+▍         ⠧ codex (gpt-5.6-sol·medium)      plan W14a fleet-readability plan-check… (feat/w14a-f…)     code-plan(std) / plan-author : running  3m
+▍                   ━─── 23%                code-plan 스킬로 라운드 2 blocking 2건 수정 반영 중
+▍────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+▍ 🧠 11:12 + durable/project sync "2026-09-03 Cairn W13 production apply 완료. prod Turso `wor…"
+▍ 🧠 10:57 − working/unresolved-obligation manual 
+
+● hearting/ 🚧 7
+▍ ⌄ orphaned dispatch rows ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+▍ ··  · claude code (Opus 5·xhigh)          Fleet Connection Layer Integ…  (orphan) (⌂wt fleet-c…)     code(dev·std·owner) : execute(R1) › impl-review › test › +1  48m
+▍               ━━━───────────── 19%        ⚙ sh  런타임이 v2.106.0으로 바뀐 상황에서 route가 지정한 v2.105.0 릴리스에 고정 중.
+▍         ⠧ codex (gpt-5.6-luna·medium)     execute Fleet Connection Layer Unifica… (⌂wt fleet-c…)     code-execute(std) / dev/backend : running  1m
+▍                   ━─── 14%                소스 수정 전 clean a1f16631 트리에서 골든 증거 파일 생성 준비 중.
+▍────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+▍ 🧠 11:43 + durable/decision sync "User asked (2026-09-03) that Codex sessions start in yolo b…"
+▍ 🧠 10:58 + durable/artifact-pointer curator "When revisiting F-100/F-100b Fleet depth-0 session-tag disp…"
+
+  ⠹ working   ● idle   ↳ dispatch   🚧 N worktrees   🧠 0 mem   ⌂wt worktree   

@@ -1,0 +1,4 @@
+  ▾ [autopilot-code] a-very-long-degraded-job-slug — no route record
+    -
+                 ────────────────   —
+        ⚡explore (claude-3-5-sonnet·hi) ●  —

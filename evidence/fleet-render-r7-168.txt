@@ -1,0 +1,35 @@
+  hearting 218957a2 · unmanaged
+
+  usage claude code   5h [━───────────   6%] ↻ 4h 23m   7d [━━━━━━━─────  59%] ↻ 5d 2h   fable [━━━━━━━━━───  74%]
+        codex         7d [━━━━━━━━━━──  87%] ↻ 3d 20h
+  fleet ⠇ 0 working   ● 0 idle   ↳ 4 jobs (2 working)
+  🧠 mem  +14 added(2w·12d) · 4 expired · 9 pruned · last distill 3h 38m · durable 3 over
+─────
+  COMPUTE RESOURCES  1/3
+  ⌂ moving4  CPU ━━──────────────  8/64 thr  · MEM 37/125GB  · SWP 2.6/8GB
+             gpu unavailable
+  ◇ cnn      down · ssh: connect to host 163.239.13.43 port 1689: failure
+  ◇ xavier   down · ssh: connect to host 163.239.13.55 port 1689: failure
+─────
+
+● cairn/ 🚧 21
+▍ ⌄ orphaned dispatch rows ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+▍ ··  · claude code (Opus 5·medium)         Fleet Readability W14a Rollo…  (orphan) (feat/w14a-f…)     code(dev·std·owner) : impl-review(R2) ✓ › test › report  1h 55m
+▍               ━━━━──────────── 26%        ⚙ Bash  Re-dispatching the test stage with owner rerun results as evidence for sandbox-blocked commands.
+▍         ⠇ codex (gpt-5.6-luna·medium)     test W14a artifact-tree QA gate (feat/w14a-f…)             code-test(std) / qa/test : running  1m
+▍                   ━─── 12%                code-test 단계에서 owner 재실행 로그 인용 및 직접 검증 후 test_logs/w14a-qa-final.md 작성 준비 중.
+▍────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+▍ 🧠 13:28 + durable/project sync "2026-09-03 Cairn PRD **v170 §80 = W14 산출물 열람 플랫폼** …"
+▍ 🧠 11:12 + durable/project sync "2026-09-03 Cairn W13 production apply 완료. prod Turso `wor…"
+
+● hearting/ 🚧 7
+▍ ⌄ orphaned dispatch rows ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+▍ ··  · claude code (Opus 5·xhigh)          Fleet Connection Layer Integ…  (orphan) (⌂wt fleet-c…)     code(dev·std·owner) : impl-review(R2) ✓ › test › report  2h 15m
+▍               ━━━━──────────── 28%        ⚙ sh  리뷰가 발견한 상관관계 결함을 하나의 bounded correction으로 디스패치하는 중.
+▍         ⠇ codex (gpt-5.6-luna·medium)     test Fleet connection layer F-101 veri… (⌂wt fleet-c…)     code-test(std) / qa/test : running  1m
+▍                   ━─── 11%                ⚙ zsh  HEAD 218957a2 기준 r7 재캡처, overflow 판정, 회귀 테스트, 게이트 (1)~(9) 판정 작성 중.
+▍────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+▍ 🧠 11:43 + durable/decision sync "User asked (2026-09-03) that Codex sessions start in yolo b…"
+▍ 🧠 10:58 + durable/artifact-pointer curator "When revisiting F-100/F-100b Fleet depth-0 session-tag disp…"
+
+  ⠹ working   ● idle   ↳ dispatch   🚧 N worktrees   🧠 0 mem   ⌂wt worktree   

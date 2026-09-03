@@ -132,38 +132,68 @@ def collect(state_roots=None):
     records.sort(key=lambda pair: pair[0], reverse=True)
     records = records[:_MAX_RECORDS]
 
+    ordered = sorted(records, key=lambda pair: pair[0])
     by_session = {}
-    for ts, rec in records:
-        frm = rec.get("from") or {}
-        to = rec.get("to") or {}
-        from_sid = frm.get("session_id")
-        to_sid = to.get("session_id")
+    pending = {}
+
+    def _key(block):
+        sid = block.get("session_id")
+        return (str(block.get("harness") or "").lower(), sid) if sid else None
+
+    def _row(key):
+        return by_session.setdefault(key, {"sent_1h": 0, "recv_1h": 0, "last_recv": None})
+
+    def _record_recv(to_key, kind, frm, to, from_key, age_min):
+        row = _row(to_key)
+        if age_min <= 60:
+            row["recv_1h"] += 1
+        from_sid = from_key[1] if from_key else None
+        from_name = (frm.get("name") or from_sid or "")
+        row["last_recv"] = {"from_name": from_name, "from_session_id": from_sid,
+                             "from_harness": from_key[0] if from_key else "",
+                             "kind": kind, "age_min": age_min}
+
+    def _upgrade_recv(to_key, inherited, frm, to, from_key, age_min):
+        # A correlated notice is, by construction, the newest successful receipt for
+        # `to_key` (it is processed in ts order and only reached once its matching
+        # sent record popped off `pending`) — so it replaces `last_recv` unconditionally,
+        # even when a later record from a different sender had already overwritten it.
+        # `recv_1h` is untouched here: the notice and its correlated sent record are one
+        # logical message and must count once (F-101i).
+        row = _row(to_key)
+        from_sid = from_key[1] if from_key else None
+        from_name = (frm.get("name") or from_sid or "")
+        row["last_recv"] = {"from_name": from_name, "from_session_id": from_sid,
+                             "from_harness": from_key[0] if from_key else "",
+                             "kind": inherited, "age_min": age_min}
+
+    # Correlation is bounded by the existing tail/window/max limits. A clipped sender
+    # leaves a notice as `notice` (honest miss); LIFO reduces but cannot eliminate an
+    # ambiguity when the same exact pair sends several kinds in quick succession.
+    for ts, rec in ordered:
+        frm, to = rec.get("from") or {}, rec.get("to") or {}
+        from_key, to_key = _key(frm), _key(to)
         age_min = max(0, int((now - ts) // 60))
-        if from_sid:
-            row = by_session.setdefault(from_sid, {"sent_1h": 0, "recv_1h": 0, "last_recv": None})
+        kind = rec.get("kind")
+        status = ((rec.get("delivery") or {}).get("status") or "").lower()
+        deliverable = status != "failed"
+        if from_key:
+            row = _row(from_key)
             if age_min <= 60:
                 row["sent_1h"] += 1
-        if to_sid:
-            row = by_session.setdefault(to_sid, {"sent_1h": 0, "recv_1h": 0, "last_recv": None})
-            if age_min <= 60:
-                row["recv_1h"] += 1
-            if row["last_recv"] is None:
-                # `to.name` is the recipient's own name on an ordinary sent record —
-                # using it as the sender would let the recipient's subtitle claim
-                # the message came from itself. The one exception is a `notice`
-                # record: it is self-authored by the receiving session on receipt,
-                # and there `to.name` is repurposed to carry the extracted sender
-                # name (F-98b §10-5), the only name-shaped hint available for it.
-                if rec.get("kind") == "notice":
-                    from_name = frm.get("name") or to.get("name") or from_sid or ""
-                else:
-                    from_name = frm.get("name") or from_sid or ""
-                row["last_recv"] = {
-                    "from_name": from_name,
-                    "from_session_id": from_sid,
-                    "kind": rec.get("kind"),
-                    "age_min": age_min,
-                }
+        if kind != "notice":
+            if from_key and to_key and deliverable:
+                pending.setdefault((from_key, to_key), []).append(kind)
+            if to_key and deliverable:
+                _record_recv(to_key, kind, frm, to, from_key, age_min)
+        else:
+            stack = pending.get((from_key, to_key)) if from_key and to_key else None
+            if stack:
+                inherited = stack.pop()
+                if to_key and deliverable:
+                    _upgrade_recv(to_key, inherited, frm, to, from_key, age_min)
+            elif to_key and deliverable:
+                _record_recv(to_key, "notice", frm, to, from_key, age_min)
 
     collect.last_diagnostics = []
     collect.last_malformed = malformed
