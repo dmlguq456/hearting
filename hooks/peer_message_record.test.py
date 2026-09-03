@@ -3,6 +3,7 @@
 import hashlib
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -323,25 +324,50 @@ class SweepTest(_BaseTest):
         receipt_lines = [l for l in context.splitlines() if l.startswith("state=")]
         self.assertEqual(len(receipt_lines), 5)
 
+    def _hook_copy_with_broken_steward(self):
+        # E-m5: the hook calls `_PEER_STEWARD_PY`, built from `__file__` at
+        # module load, so `PATH` never touches it -- the previous version of
+        # this test set PATH="/nonexistent" and asserted a pass, but that
+        # never actually routed through the fail-soft branch in
+        # `sweep_undelivered` (dispatch_contract.py: `except Exception:
+        # return []`). Copy the hook and a full sibling `utilities/` tree
+        # into a fresh root and swap in a steward stub that exits non-zero
+        # immediately, so the copied hook's own resolved `_PEER_STEWARD_PY`
+        # actually points at a broken process.
+        root = self.tmp_root / "broken-steward-tree"
+        (root / "hooks").mkdir(parents=True)
+        shutil.copyfile(_HOOK, root / "hooks" / "peer-message-record.py")
+        shutil.copytree(_HERE.parent / "utilities", root / "utilities")
+        stub = root / "utilities" / "peer-steward.py"
+        stub.write_text("#!/usr/bin/env python3\nimport sys\nsys.exit(1)\n")
+        stub.chmod(0o755)
+        return root / "hooks" / "peer-message-record.py"
+
     def test_broken_peer_steward_stays_fail_soft_and_keeps_the_notice_record(self):
         # A `peer-steward.py` that cannot run must cost neither the prompt nor
-        # the pre-existing cross-session `notice` record.
-        env_path = self.env["PATH"]
-        self.env["PATH"] = "/nonexistent"
-        broken = self.tmp_root / "broken-steward.py"
-        try:
-            proc = self._run("prompt", {
+        # the pre-existing cross-session `notice` record, and the un-acked
+        # receipt it could not read must stay un-acked (never silently
+        # consumed by a sweep that could not actually see it).
+        watch_id = self._arm_and_complete("peer-a")
+        notices_before = [r for r in self._all_records() if r["kind"] == "notice"]
+        hook_path = self._hook_copy_with_broken_steward()
+        proc = subprocess.run(
+            [sys.executable, str(hook_path), "prompt"],
+            input=json.dumps({
                 "session_id": self.session, "cwd": str(self.tmp_root),
                 "prompt": '<cross-session-message from="peer-x">hi</cross-session-message>',
-            })
-            self.assertEqual(proc.returncode, 0)
-            self.assertEqual(proc.stdout, b"")
-            notices = [r for r in self._all_records() if r["kind"] == "notice"]
-            self.assertEqual(len(notices), 1)
-            self.assertEqual(notices[0]["to"]["session_id"], self.session)
-        finally:
-            self.env["PATH"] = env_path
-            del broken
+            }).encode("utf-8"),
+            capture_output=True, env=self.env, timeout=10,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(proc.stdout, b"")
+        notices_after = [r for r in self._all_records() if r["kind"] == "notice"]
+        # exactly one new notice: the cross-session-message record. The broken
+        # steward must neither block it nor add or remove anything else.
+        self.assertEqual(len(notices_after), len(notices_before) + 1)
+        new_notice = [r for r in notices_after if r not in notices_before][0]
+        self.assertEqual(new_notice["to"]["session_id"], self.session)
+        self.assertFalse((self._watch_root() / f"{watch_id}.ack.json").exists())
 
     def test_prompt_without_session_id_writes_nothing(self):
         proc = self._run("prompt", {"cwd": str(self.tmp_root), "prompt": ""})
