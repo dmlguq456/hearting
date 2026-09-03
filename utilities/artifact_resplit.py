@@ -28,6 +28,12 @@ CYCLE_KEY_RE = re.compile(
 )
 CAMPAIGN_SLUG_RE = re.compile(r"^[a-z0-9-]{3,48}$")
 UNASSIGNED_SLUG = "_unassigned"
+# The two artifact-root container names (`core/CORE.md` write-cutover rule): the
+# canonical `.agent_reports` and the legacy `.claude_reports` fallback.
+ARTIFACT_ROOT_DIR_NAMES = (".agent_reports", ".claude_reports")
+# D-79 loose files land under the target cycle's `artifacts/<LOOSE_PREFIX>/<source
+# locator>` so the origin bucket name stays in the path.
+LOOSE_PREFIX = "_internal"
 CYCLE_BUCKETS = C.CYCLE_BUCKETS
 SHARED_SNAPSHOT = C.SHARED_SNAPSHOT
 LANES = ("semantic-boundary", "relationship", "display-quality")
@@ -78,9 +84,33 @@ def _slugify(name: str) -> str:
     return slug or "root"
 
 
+def _default_root_slug(root: Path) -> str:
+    """D-79 cycle key `<root-slug>`: the roster `repo_path` basename, slugified.
+
+    The artifact root is `<repo_path>/.agent_reports` (or the legacy
+    `.claude_reports`), so the repo basename is the root's *parent* directory
+    name -- `_slugify(root.name)` would yield `agent-reports` for every root in
+    the fleet and collapse all their cycle keys onto one slug. `resolve()`
+    happens first so a symlinked repo (`BC_ResNet_tf` -> `BC_ResNet`) slugs from
+    its realpath, matching the roster entry (`bc-resnet`). A root that is not one
+    of those two container names is not a repo-relative artifact root, so its own
+    name stays the slug.
+    """
+    root = Path(root).resolve()
+    if root.name in ARTIFACT_ROOT_DIR_NAMES and root.parent.name:
+        return _slugify(root.parent.name)
+    return _slugify(root.name)
+
+
 def _canonical_digest(body: Dict[str, Any]) -> str:
+    # `P._digest` already returns a `sha256:`-prefixed value; prefixing again here
+    # produced `sha256:sha256:<hex>` in every sealed W7G inventory digest. The
+    # comparison sites are all self-consistent, so the doubling was invisible until
+    # a digest was read by anything outside this module. No root has an admitted
+    # resplit run yet (PRD v12 §29 status), and R1 re-seals every inventory, so the
+    # single-prefix form is the only one production will ever observe.
     stripped = {k: v for k, v in body.items() if k != "digest"}
-    return "sha256:" + P._digest(P._canonical(stripped))
+    return P._digest(P._canonical(stripped))
 
 
 def _find_campaign_by_key_local(root: Path, key: str) -> Optional[Dict[str, Any]]:
@@ -195,7 +225,7 @@ def _original_legacy_sources(root: Path) -> Dict[str, str]:
 def scan_lumps(root: Path, *, root_slug: Optional[str] = None) -> Dict[str, Any]:
     """D-76 deterministic scanner (mutation 0). Fresh read every call."""
     root = Path(root).resolve()
-    slug = root_slug or _slugify(root.name)
+    slug = root_slug or _default_root_slug(root)
     mdir = C.migrations_dir(root)
     groups: Dict[str, List[Path]] = {}
     if mdir.is_dir():
@@ -315,7 +345,7 @@ def _bundle_digest(admission_dir: Path) -> str:
         if p.is_file():
             rows.append({"name": name, "sha256": "sha256:" + C._sha(p)})
     rows.sort(key=lambda r: r["name"])
-    return "sha256:" + P._digest(P._canonical(rows))
+    return P._digest(P._canonical(rows))  # `P._digest` already prefixes `sha256:`
 
 
 def _valid_admitted_run(root: Path, run_dir: Path) -> Optional[Dict[str, Any]]:
@@ -327,8 +357,12 @@ def _valid_admitted_run(root: Path, run_dir: Path) -> Optional[Dict[str, Any]]:
     return marker
 
 
-def lump_index(root: Path) -> Dict[str, Any]:
-    """Sealed lump inventory from the latest verifiably-admitted run, else a fresh scan."""
+def lump_index(root: Path, *, root_slug: Optional[str] = None) -> Dict[str, Any]:
+    """Sealed lump inventory from the latest verifiably-admitted run, else a fresh scan.
+
+    `root_slug` only reaches the fresh scan -- a sealed inventory already carries
+    the slug R1 admitted and is never re-slugged by a later reader.
+    """
     root = Path(root).resolve()
     for run_dir in reversed(_run_dirs(root)):
         marker = _valid_admitted_run(root, run_dir)
@@ -339,7 +373,7 @@ def lump_index(root: Path) -> Dict[str, Any]:
             stripped = {k: v for k, v in inv.items() if k != "digest"}
             if _canonical_digest(stripped) == inv.get("digest"):
                 return inv
-    return scan_lumps(root)
+    return scan_lumps(root, root_slug=root_slug)
 
 
 def sealed_retire_inventory(root: Path) -> Optional[Dict[str, Any]]:
@@ -716,7 +750,7 @@ def validate_proposal(
         return {"verdict": "hold", "code": "resplit-stale", "detail": "lump-not-uniquely-identified",
                 "rules_checked": rules_checked}
     lump = lumps[0]
-    root_slug = proposal.get("root_slug") or lump_inventory.get("root_slug") or _slugify(root.name)
+    root_slug = proposal.get("root_slug") or lump_inventory.get("root_slug") or _default_root_slug(root)
     lump_cycle_keys = {u["cycle_key"] for u in lump["cycle_units"]}
     rules_checked.append("1")
     err = _rule_1_exactly_once(proposal, lump_cycle_keys)
@@ -782,6 +816,51 @@ def validate_proposal(
         "campaigns": campaigns_out, "assignments": slug_for_target, "loose": loose_out,
         "root_slug": root_slug, "lump": lump,
     }
+
+
+def loose_plan(verdict: Dict[str, Any], loose_inventory: Dict[str, Any]) -> Tuple[Dict[str, List[Dict[str, Any]]], List[Dict[str, Any]]]:
+    """D-79 "잔여 loose 파일": split an admitted proposal's `loose_assignments[]`
+    into the rows R2 actually relocates and the rows it must leave alone.
+
+    A row is relocatable only when its `target_cycle_key` names a cycle unit this
+    lump will actually produce. Rule 7 also admits the degraded campaign key
+    `legacy:<root-slug>:_unassigned` as a target, but that key names a *campaign*,
+    not a cycle -- and a campaign with no cycle units gets no record at all
+    (`_r2_prepare`), so there is nowhere to put the file. Those rows become typed
+    `loose-deferred` results: reported, journalled, and left byte-identical in
+    place. Nothing is moved or deleted on that path.
+
+    R1 (retire-inventory excludes) and R2 (the renames) both call this, so the two
+    gates can never disagree about which loose files are leaving the top level.
+    """
+    entries_by_locator = {e["source_locator"]: e for e in loose_inventory.get("entries", [])}
+    cycle_keys = {u["cycle_key"] for u in verdict["lump"]["cycle_units"]}
+    unassigned_key = f"legacy:{verdict['root_slug']}:{UNASSIGNED_SLUG}"
+    by_cycle_key: Dict[str, List[Dict[str, Any]]] = {}
+    deferred: List[Dict[str, Any]] = []
+    for row in verdict.get("loose", []):
+        src = row["source_locator"]
+        target_key = row["target_cycle_key"]
+        entry = entries_by_locator.get(src, {})
+        if target_key in cycle_keys:
+            by_cycle_key.setdefault(target_key, []).append({
+                "source_locator": src,
+                "locator": f"{LOOSE_PREFIX}/{src}",
+                "sha256": entry.get("sha256"),
+                "byte_size": entry.get("byte_size"),
+                "origin_bucket": entry.get("origin_bucket") or row.get("origin_bucket"),
+            })
+            continue
+        deferred.append({
+            "status": "loose-deferred", "source_locator": src, "target_cycle_key": target_key,
+            "origin_bucket": entry.get("origin_bucket") or row.get("origin_bucket"),
+            "reason": ("unassigned-campaign-has-no-cycle" if target_key == unassigned_key
+                      else "target-cycle-not-in-lump"),
+        })
+    for rows in by_cycle_key.values():
+        rows.sort(key=lambda r: r["source_locator"])
+    deferred.sort(key=lambda r: r["source_locator"])
+    return by_cycle_key, deferred
 
 
 def campaign_proposal_validate(
@@ -900,21 +979,29 @@ def _build_retire_inventory(root: Path, extra_excludes: Sequence[str], identity)
 
 def _r1(root: Path, *, lump_cycle_id: str, proposal_path: Path,
        confirmed_constraints_path: Optional[Path], dry_run: bool,
-       crash_after_phase: Optional[str]) -> Dict[str, Any]:
+       crash_after_phase: Optional[str], root_slug: Optional[str] = None) -> Dict[str, Any]:
     root = Path(root).resolve()
     C._require_active(root)
     identity = P.artifact_lifecycle.read_root_identity(root)
     proposal_bytes = Path(proposal_path).read_bytes()
     plan_sha256 = "sha256:" + hashlib.sha256(proposal_bytes).hexdigest()
     proposal = json.loads(proposal_bytes.decode("utf-8"))
+    # An explicit `--root-slug` is only the fallback: a proposal that declares its
+    # own `root_slug` stays authoritative, because every campaign key in the package
+    # was already sealed against that slug.
+    effective_slug = proposal.get("root_slug") or root_slug
     if dry_run:
-        lump_inventory = scan_lumps(root, root_slug=proposal.get("root_slug"))
+        lump_inventory = scan_lumps(root, root_slug=effective_slug)
         loose_inventory = _build_loose_inventory(root)
         confirmed = P._read_json(Path(confirmed_constraints_path)) if confirmed_constraints_path else None
         verdict = validate_proposal(proposal, root=root, lump_inventory=lump_inventory,
                                     loose_inventory=loose_inventory, confirmed_constraints=confirmed,
                                     lump_cycle_id=lump_cycle_id)
-        return {"status": "dry-run", "plan_sha256": plan_sha256, **verdict}
+        result = {"status": "dry-run", "plan_sha256": plan_sha256, **verdict}
+        if verdict["verdict"] == "ok":
+            _, deferred = loose_plan(verdict, loose_inventory)
+            result["loose_deferred"] = deferred
+        return result
     run_dir = _find_run_dir(root, lump_cycle_id) or (C.migrations_dir(root) / f"{C._stamp()}-resplit-{lump_cycle_id}")
     run_dir.mkdir(parents=True, exist_ok=True)
     journal_path = run_dir / "journal-r1.json"
@@ -932,7 +1019,7 @@ def _r1(root: Path, *, lump_cycle_id: str, proposal_path: Path,
         P._write_atomic(journal_path, P._json_bytes(journal))
     if crash_after_phase == "prepared":
         raise ResplitError("crash-fixture", "prepared")
-    lump_inventory = scan_lumps(root, root_slug=proposal.get("root_slug"))
+    lump_inventory = scan_lumps(root, root_slug=effective_slug)
     loose_inventory = _build_loose_inventory(root)
     confirmed = P._read_json(Path(confirmed_constraints_path)) if confirmed_constraints_path else None
     verdict = validate_proposal(proposal, root=root, lump_inventory=lump_inventory,
@@ -948,7 +1035,13 @@ def _r1(root: Path, *, lump_cycle_id: str, proposal_path: Path,
         raise ResplitError("crash-fixture", "proposal-validated")
     admission_dir = _admission_dir(run_dir)
     admission_dir.mkdir(parents=True, exist_ok=True)
-    retire_inventory = _build_retire_inventory(root, [], identity)
+    # D-84 + D-79: a loose file R2 is about to relocate must not also be listed as a
+    # retire target -- after the rename its top-level path is gone, and a retire
+    # inventory that still names it would report a permanently unsatisfiable entry.
+    # Deferred rows are *not* excluded: they stay in place and remain retirable.
+    loose_assigned, loose_deferred = loose_plan(verdict, loose_inventory)
+    relocating = sorted(row["source_locator"] for rows in loose_assigned.values() for row in rows)
+    retire_inventory = _build_retire_inventory(root, relocating, identity)
     P._write_atomic(admission_dir / "lump-inventory.json", P._json_bytes(lump_inventory))
     P._write_atomic(admission_dir / "loose-inventory.json", P._json_bytes(loose_inventory))
     P._write_atomic(admission_dir / "retire-inventory.json", P._json_bytes(retire_inventory))
@@ -983,7 +1076,8 @@ def _r1(root: Path, *, lump_cycle_id: str, proposal_path: Path,
     journal["phase"] = "admitted"
     P._write_atomic(journal_path, P._json_bytes(journal))
     return {"status": "admitted", "run_dir": str(run_dir), "bundle_digest": bundle_digest,
-            "lump_cycle_id": lump_cycle_id, "verdict": verdict}
+            "lump_cycle_id": lump_cycle_id, "verdict": verdict,
+            "loose_relocating": relocating, "loose_deferred": loose_deferred}
 
 
 # ---------------------------------------------------------------------------
@@ -1002,6 +1096,26 @@ def _campaign_plan_from_verdict(verdict: Dict[str, Any], root_slug: str) -> List
         })
     plan.sort(key=lambda c: c["slug"])
     return plan
+
+
+def _partition_campaign_plan(campaign_plan: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """Split the plan into campaigns that get a record and campaigns that do not.
+
+    A campaign no cycle unit was assigned to has nothing to contain. Creating its
+    `campaign.json` anyway would mint a permanently empty canonical record -- in
+    practice the reserved `_unassigned` container, which D-80 rule 3 admits only as
+    a degraded fallback for cycles that could not be placed. Any loose row that
+    pointed at it is already `loose-deferred` (see `loose_plan`), so skipping the
+    record leaves nothing unowned. The dry-run preview and the real prepare share
+    this function so they can never report different campaigns.
+    """
+    deferred = [
+        {"slug": c["slug"], "key": c["key"], "status": "campaign-not-created",
+         "reason": "no-cycle-units", "degraded": bool(c.get("degraded"))}
+        for c in campaign_plan if not c["cycle_units"]
+    ]
+    kept = [c for c in campaign_plan if c["cycle_units"]]
+    return kept, deferred
 
 
 def _per_cycle_route(route: Dict[str, Any], cycle_key: str, run_dir: Path) -> Tuple[Dict[str, Any], Path]:
@@ -1038,8 +1152,12 @@ def _per_cycle_route(route: Dict[str, Any], cycle_key: str, run_dir: Path) -> Tu
 
 
 def _r2_prepare(root: Path, campaign_plan: List[Dict[str, Any]], alloc, lump_cycle_id: str,
-                route: Dict[str, Any], route_file: Path, run_dir: Path) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
+                route: Dict[str, Any], route_file: Path, run_dir: Path,
+                loose_by_cycle_key: Optional[Dict[str, List[Dict[str, Any]]]] = None,
+                ) -> Tuple[Dict[str, Any], List[Dict[str, Any]], List[Dict[str, Any]]]:
     lump_record = P.read_cycle_record(root, lump_cycle_id) or {}
+    loose_by_cycle_key = loose_by_cycle_key or {}
+    campaign_plan, deferred_campaigns = _partition_campaign_plan(campaign_plan)
     campaign_pre: List[Dict[str, Any]] = []
     cycle_pre: List[Dict[str, Any]] = []
     created_dirs: List[str] = []
@@ -1084,6 +1202,7 @@ def _r2_prepare(root: Path, campaign_plan: List[Dict[str, Any]], alloc, lump_cyc
                 "cycle_dir": str(cdir), "created": created, "bucket": unit["bucket"],
                 "depth1_name": unit["depth1_name"], "started_on": unit["started_on"], "title": unit["title"],
                 "files": unit["files"],
+                "loose_files": list(loose_by_cycle_key.get(unit["cycle_key"], [])),
             })
             if created:
                 created_cycle_dirs.append(os.path.relpath(cdir, root))
@@ -1137,7 +1256,7 @@ def _r2_prepare(root: Path, campaign_plan: List[Dict[str, Any]], alloc, lump_cyc
         "schema_version": 1, "campaign_records": campaign_pre, "cycle_records": cycle_pre,
         "created_cycle_dirs": created_cycle_dirs, "created_dirs": created_dirs,
     }
-    return pre_image, cycles_out
+    return pre_image, cycles_out, deferred_campaigns
 
 
 def _r2_disk_has_any_commit(root: Path, cycles: Sequence[Dict[str, Any]]) -> bool:
@@ -1200,6 +1319,40 @@ def _r2_rollback(root: Path, journal: Dict[str, Any], run_dir: Path) -> None:
     P._write_atomic(run_dir / "journal-r2.json", P._json_bytes(journal))
 
 
+def _r2_preview(root: Path, verdict: Dict[str, Any], root_slug: str, loose_inventory: Dict[str, Any],
+                run_dir: Path, journal: Optional[Dict[str, Any]], plan_sha256: str) -> Dict[str, Any]:
+    """Read-only answer to "what would R2 do?" -- zero writes, zero ID allocation.
+
+    When a real R2 journal already exists it is reported as-is (that run, not a
+    fresh plan, is what would continue); otherwise the plan is derived from the
+    admitted verdict exactly as `_r2_prepare` would derive it.
+    """
+    campaign_plan, deferred_campaigns = _partition_campaign_plan(
+        _campaign_plan_from_verdict(verdict, root_slug))
+    loose_by_cycle_key, loose_deferred = loose_plan(verdict, loose_inventory)
+    planned_cycles = []
+    for camp in campaign_plan:
+        for unit in camp["cycle_units"]:
+            existing = _find_cycle_by_key(root, unit["cycle_key"])
+            loose_rows = loose_by_cycle_key.get(unit["cycle_key"], [])
+            planned_cycles.append({
+                "cycle_key": unit["cycle_key"], "campaign_slug": camp["slug"], "campaign_key": camp["key"],
+                "bucket": unit["bucket"], "depth1_name": unit["depth1_name"], "title": unit["title"],
+                "started_on": unit["started_on"], "file_count": unit["file_count"],
+                "byte_count": unit["byte_count"], "loose_file_count": len(loose_rows),
+                "loose_locators": [r["locator"] for r in loose_rows],
+                "existing_cycle_id": existing["cycle_id"] if existing else None,
+            })
+    return {
+        "status": "dry-run", "run_dir": str(run_dir), "plan_sha256": plan_sha256,
+        "journal": journal, "resumes_existing_journal": journal is not None,
+        "campaigns": [{"slug": c["slug"], "key": c["key"], "cycle_count": len(c["cycle_units"])}
+                     for c in campaign_plan],
+        "cycles": planned_cycles, "loose_deferred": loose_deferred,
+        "deferred_campaigns": deferred_campaigns,
+    }
+
+
 def _r2(root: Path, *, lump_cycle_id: str, route_file: Optional[Path] = None, dry_run: bool = False,
        crash_after_phase: Optional[str] = None, crash_at: Optional[str] = None,
        allocator=None) -> Dict[str, Any]:
@@ -1229,6 +1382,16 @@ def _r2(root: Path, *, lump_cycle_id: str, route_file: Optional[Path] = None, dr
     plan_sha256 = marker["plan_sha256"]
     if journal is not None and journal.get("phase") == "complete" and journal.get("plan_sha256") == plan_sha256:
         return {"status": "already-applied", "run_dir": str(run_dir), "journal": journal}
+    if dry_run:
+        # A dry run reports the plan and touches nothing -- not the canonical tree,
+        # not `.runtime`, not the root-wide lock. It therefore returns before
+        # `_acquire_resplit_lock`/`_r2_prepare`, both of which write: `_r2_prepare`
+        # allocates IDs and commits campaign records, cycle records and cycle
+        # directories, and the journal write that followed it published a
+        # nonterminal R2 journal -- which `resplit_hold` then reports as
+        # `resplit-in-progress`, putting the whole root on hold because someone
+        # asked what *would* happen.
+        return _r2_preview(root, verdict, root_slug, loose_inventory, run_dir, journal, plan_sha256)
     # D-77-a: root-wide mutual exclusion from here (R2 start) through R3 terminal.
     # `other_hold` above is the read-only journal-owned hold predicate (unchanged);
     # this is the atomic claim that actually prevents two processes from both
@@ -1241,17 +1404,19 @@ def _r2(root: Path, *, lump_cycle_id: str, route_file: Optional[Path] = None, dr
         resumed = journal is not None
         if journal is None:
             campaign_plan = _campaign_plan_from_verdict(verdict, root_slug)
-            pre_image, cycles = _r2_prepare(root, campaign_plan, alloc, lump_cycle_id, route, route_file, run_dir)
+            loose_by_cycle_key, loose_deferred = loose_plan(verdict, loose_inventory)
+            pre_image, cycles, deferred_campaigns = _r2_prepare(
+                root, campaign_plan, alloc, lump_cycle_id, route, route_file, run_dir,
+                loose_by_cycle_key=loose_by_cycle_key)
             journal = {
                 "schema_version": 1, "kind": "w7g-resplit-journal", "gate": "r2", "plan_sha256": plan_sha256,
                 "lump_cycle_id": lump_cycle_id, "run_dir": str(run_dir), "phase": "prepared",
                 "started_at": C._now(), "pre_image": pre_image, "cycles": cycles,
                 "created_dirs": pre_image["created_dirs"], "created_cycle_dirs": pre_image["created_cycle_dirs"],
                 "route_id": route["route_id"],
+                "loose_deferred": loose_deferred, "deferred_campaigns": deferred_campaigns,
             }
             P._write_atomic(journal_path, P._json_bytes(journal))
-        if dry_run:
-            return {"status": "dry-run", "journal": journal}
         if crash_after_phase == "prepared":
             raise ResplitError("crash-fixture", "prepared")
         cycles = journal["cycles"]
@@ -1265,7 +1430,9 @@ def _r2(root: Path, *, lump_cycle_id: str, route_file: Optional[Path] = None, dr
             _r2_rollback(root, journal, run_dir)
         else:
             _r2_execute(root, run_dir, journal, cycles, crash_at=crash_at, crash_after_phase=crash_after_phase)
-        return {"status": journal["phase"], "run_dir": str(run_dir), "journal": journal}
+        return {"status": journal["phase"], "run_dir": str(run_dir), "journal": journal,
+                "loose_deferred": journal.get("loose_deferred", []),
+                "deferred_campaigns": journal.get("deferred_campaigns", [])}
     finally:
         # Released only once this run's R2 (and, if it got that far, R3) reached a
         # terminal phase -- a synthetic crash (an exception raised above) leaves the
@@ -1300,11 +1467,61 @@ def _r2_move_cycle(root: Path, journal: Dict[str, Any], run_dir: Path, cyc: Dict
         # rename-complete-but-not-finalized boundary.
         if crash_after_first_file and idx == 0 and len(cyc["files"]) > 1:
             raise ResplitError("crash-fixture", "mid-cycle-file-rename")
+    _r2_move_loose(root, run_dir, cyc, inverse_rows)
+
+
+def _r2_move_loose(root: Path, run_dir: Path, cyc: Dict[str, Any],
+                   inverse_rows: List[Dict[str, Any]]) -> None:
+    """D-79 "잔여 loose 파일": relocate the top-level residue this cycle owns.
+
+    Same rules as the lump renames -- same-filesystem `os.rename` only (never a
+    copy), one `rename_back` inverse row per file written before the next move, and
+    an existing target is a completed move, not a conflict. The only differences are
+    the source (the artifact root's own top level, not the lump's `artifacts/`) and
+    the target locator, which keeps the origin bucket name under `_internal/` so the
+    file's provenance survives the move.
+    """
+    for f in cyc.get("loose_files", []):
+        source = root / f["source_locator"]
+        target = Path(cyc["cycle_dir"]) / "artifacts" / f["locator"]
+        if target.is_file():
+            continue
+        if source.is_symlink() or not source.is_file():
+            raise ResplitError("resplit-stale", f["source_locator"])
+        if "sha256:" + C._sha(source) != f["sha256"]:
+            raise ResplitError("resplit-stale", f"loose-digest-drift:{f['source_locator']}")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        os.rename(source, target)
+        inverse_rows.append({
+            "ordinal": len(inverse_rows), "action": "rename_back",
+            "source_locator": f["source_locator"], "target_locator": os.path.relpath(target, root),
+            "sha256": f["sha256"],
+        })
+        C._write_jsonl(run_dir / "inverse.jsonl", inverse_rows)
+
+
+def _loose_locators(cyc: Dict[str, Any]) -> List[str]:
+    """D-79: relocated loose files carry manifest role `support`, not `output` --
+    they are provenance-preserved residue attached to the cycle, not something the
+    cycle produced."""
+    return [f["locator"] for f in cyc.get("loose_files", [])]
+
+
+def _cycle_expected_files(cyc: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Every file the finished cycle must contain: the lump's own rows plus the
+    D-79 loose rows at their post-move locators. Both witnesses (D-78: right after
+    the renames, and again immediately before `finalize`) compare against this, so
+    a loose file that failed to move is caught at the same point a lump file would
+    be -- before the commit, while roll-back is still possible."""
+    return list(cyc["files"]) + [
+        {"locator": f["locator"], "sha256": f["sha256"], "byte_size": f["byte_size"]}
+        for f in cyc.get("loose_files", [])
+    ]
 
 
 def _r2_witness(cyc: Dict[str, Any]) -> None:
     actual = C._tree_digest(Path(cyc["cycle_dir"]) / "artifacts")
-    expected = _expected_tree_digest(cyc["files"])
+    expected = _expected_tree_digest(_cycle_expected_files(cyc))
     if actual["tree_sha256"] != expected["tree_sha256"]:
         raise ResplitError("resplit-stale", f"witness-mismatch:{cyc['cycle_id']}")
 
@@ -1325,7 +1542,8 @@ def _r2_execute(root: Path, run_dir: Path, journal: Dict[str, Any], cycles: List
     _r2_witness(first)  # witness (2): re-checked immediately before finalize
     if crash_at == "r2:before-finalize":
         raise ResplitError("crash-fixture", "before-finalize")
-    sealed = P.finalize(root, cycle_id=first["cycle_id"], state="completed", allow_open_route=True)
+    sealed = P.finalize(root, cycle_id=first["cycle_id"], state="completed", allow_open_route=True,
+                       support_locators=_loose_locators(first))
     if sealed.get("status") not in {"sealed", "already-sealed"}:
         raise ResplitError("resplit-stale", f"finalize-failed:{sealed.get('status')}")
     if crash_at == "r2:after-finalize-before-journal":
@@ -1340,7 +1558,8 @@ def _r2_execute(root: Path, run_dir: Path, journal: Dict[str, Any], cycles: List
         if crash_at == "r2:mid-second-cycle" and i == 1:
             raise ResplitError("crash-fixture", "mid-second-cycle")
         _r2_witness(cyc)
-        sealed = P.finalize(root, cycle_id=cyc["cycle_id"], state="completed", allow_open_route=True)
+        sealed = P.finalize(root, cycle_id=cyc["cycle_id"], state="completed", allow_open_route=True,
+                           support_locators=_loose_locators(cyc))
         if sealed.get("status") not in {"sealed", "already-sealed"}:
             raise ResplitError("resplit-stale", f"finalize-failed:{sealed.get('status')}")
     journal["phase"] = "complete"
@@ -1362,7 +1581,8 @@ def _r2_roll_forward(root: Path, run_dir: Path, journal: Dict[str, Any], cycles:
             P._write_atomic(journal_path, P._json_bytes(journal))
             raise ResplitError("crash-fixture", "mid-second-cycle")
         _r2_witness(cyc)
-        sealed = P.finalize(root, cycle_id=cyc["cycle_id"], state="completed", allow_open_route=True)
+        sealed = P.finalize(root, cycle_id=cyc["cycle_id"], state="completed", allow_open_route=True,
+                           support_locators=_loose_locators(cyc))
         if sealed.get("status") not in {"sealed", "already-sealed"}:
             raise ResplitError("resplit-stale", f"finalize-failed:{sealed.get('status')}")
     journal["phase"] = "complete"
@@ -1393,6 +1613,14 @@ def _r3(root: Path, *, lump_cycle_id: str, backup_root: Optional[Path], dry_run:
     identity = P.artifact_lifecycle.read_root_identity(root)
     alloc = allocator or artifact_identity.IdAllocator()
     new_cycle_ids = [c["cycle_id"] for c in r2_journal["cycles"]]
+    if dry_run:
+        # Same rule as the R2 dry run: report, write nothing, and do not claim the
+        # root-wide lock. The old ordering built and published `journal-r3.json`
+        # first, which `resplit_hold` reads as `resplit-in-progress`.
+        return {"status": "dry-run", "run_dir": str(run_dir), "plan_sha256": plan_sha256,
+                "journal": journal, "resumes_existing_journal": journal is not None,
+                "lump_cycle_id": lump_cycle_id, "new_cycle_ids": new_cycle_ids,
+                "backup_verified": (run_dir / "backup-verified.json").is_file()}
     # D-77-a: the same root-wide lock claimed at R2 start is still (or, if this is a
     # fresh process, is re-)claimed here and held through R3 terminal.
     _acquire_resplit_lock(root, lump_cycle_id=lump_cycle_id, run_dir=run_dir)
@@ -1421,8 +1649,6 @@ def _r3(root: Path, *, lump_cycle_id: str, backup_root: Optional[Path], dry_run:
                 "started_at": C._now(), "pre_image": pre_image, "new_cycle_ids": new_cycle_ids,
             }
             P._write_atomic(journal_path, P._json_bytes(journal))
-        if dry_run:
-            return {"status": "dry-run", "journal": journal}
         if crash_after_phase == "prepared":
             raise ResplitError("crash-fixture", "prepared")
         backup_verified = (run_dir / "backup-verified.json").is_file()
@@ -1551,6 +1777,15 @@ def _r3_execute(root: Path, run_dir: Path, journal: Dict[str, Any], identity, al
                     rows.append({"schema_version": C.MAP_SCHEMA, "kind": "file",
                                 "source_locator": lump_locator,
                                 "target_locator": target, "sha256": f["sha256"], "identity_refs": []})
+                # D-79/D-82: a relocated loose file has only one source lane. It was
+                # never copied into the lump, so its original legacy path *is* its
+                # top-level `source_locator` -- there is no lump locator to invert and
+                # nothing to count as a lane-1 omission.
+                for lf in cyc.get("loose_files", []):
+                    rows.append({"schema_version": C.MAP_SCHEMA, "kind": "file",
+                                "source_locator": lf["source_locator"],
+                                "target_locator": f"{new_dir_rel}/artifacts/{lf['locator']}",
+                                "sha256": lf["sha256"], "identity_refs": []})
             C._write_jsonl(map_path, rows)
             C.compat_append(root, maps=[map_path], supersedes=[])
             written_maps = [os.path.relpath(map_path, root)]
@@ -1654,15 +1889,17 @@ def resplit_legacy_cycle(
     confirmed_constraints: Optional[Path] = None, route_file: Optional[Path] = None,
     backup_root: Optional[Path] = None, dry_run: bool = False,
     crash_after_phase: Optional[str] = None, crash_at: Optional[str] = None,
-    allocator=None,
+    allocator=None, root_slug: Optional[str] = None,
 ) -> Dict[str, Any]:
+    """`root_slug` is the D-79 `<root-slug>` fallback for R1's fresh lump scan. R2
+    and R3 read the inventory R1 already sealed, so it has no effect there."""
     root = Path(root).resolve()
     if gate == "r1":
         if proposal is None:
             raise ResplitError("admission-marker-missing", "proposal-required")
         return _r1(root, lump_cycle_id=lump_cycle_id, proposal_path=Path(proposal),
                   confirmed_constraints_path=Path(confirmed_constraints) if confirmed_constraints else None,
-                  dry_run=dry_run, crash_after_phase=crash_after_phase)
+                  dry_run=dry_run, crash_after_phase=crash_after_phase, root_slug=root_slug)
     if gate == "r2":
         return _r2(root, lump_cycle_id=lump_cycle_id, route_file=route_file, dry_run=dry_run,
                   crash_after_phase=crash_after_phase, crash_at=crash_at, allocator=allocator)
@@ -1686,7 +1923,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("--artifact-root", required=True)
     sub = parser.add_subparsers(dest="command", required=True)
 
-    sub.add_parser("lump-index")
+    lump_index_p = sub.add_parser("lump-index")
+    lump_index_p.add_argument("--root-slug", help="D-79 <root-slug> for a fresh scan "
+                              "(default: the artifact root's repo directory name, slugified)")
     sub.add_parser("hold")
     sub.add_parser("retire-inventory")
 
@@ -1707,6 +1946,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     r.add_argument("--route-file")
     r.add_argument("--backup-root")
     r.add_argument("--dry-run", action="store_true")
+    r.add_argument("--root-slug", help="D-79 <root-slug> fallback for the r1 lump scan; "
+                   "a proposal that declares its own root_slug still wins")
     r.add_argument("--crash-after-phase")
     r.add_argument("--crash-at")
 
@@ -1714,7 +1955,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     root = Path(args.artifact_root)
     try:
         if args.command == "lump-index":
-            _print(lump_index(root))
+            _print(lump_index(root, root_slug=args.root_slug))
             return OK
         if args.command == "hold":
             hold = resplit_hold(root)
@@ -1742,6 +1983,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 route_file=Path(args.route_file) if args.route_file else None,
                 backup_root=Path(args.backup_root) if args.backup_root else None,
                 dry_run=args.dry_run, crash_after_phase=args.crash_after_phase, crash_at=args.crash_at,
+                root_slug=args.root_slug,
             )
             _print(result)
             return OK if result.get("status") not in {"hold"} else BLOCKED

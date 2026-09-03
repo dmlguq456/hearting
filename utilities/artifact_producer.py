@@ -928,8 +928,12 @@ def _enumerate_output(directory: Path, *, exclude_hidden: bool = False,
     return rows, violations
 
 
-def _choose_primary(rows: Sequence[Tuple[str, bytes]], primary: Optional[str]) -> Optional[str]:
-    names = [rel for rel, _ in rows]
+def _choose_primary(rows: Sequence[Tuple[str, bytes]], primary: Optional[str],
+                    support: Sequence[str] = ()) -> Optional[str]:
+    # A `support` row is attached evidence, not this cycle's output, so it is never
+    # auto-nominated as the primary artifact -- an explicit `primary` still wins.
+    support_set = set(support)
+    names = [rel for rel, _ in rows if rel not in support_set]
     if primary:
         candidate = primary if primary.startswith("artifacts/") else "artifacts/" + primary
         if candidate not in names:
@@ -1025,6 +1029,7 @@ def build_manifest(
     allocator: artifact_identity.IdAllocator,
     now: Optional[float],
     abandon_reason: Optional[str] = None,
+    support_locators: Sequence[str] = (),
 ) -> Dict[str, Any]:
     identity = artifact_lifecycle.read_root_identity(root)
     if identity is None:
@@ -1035,7 +1040,12 @@ def build_manifest(
     man_id = allocator.allocate("manifest")
     mrev_id = allocator.allocate("manifest_revision")
     when = _rfc3339(now)
-    primary_rel = _choose_primary(rows, primary)
+    # `support_locators` are `artifacts/`-relative locators the caller marks as
+    # attached evidence rather than cycle output (W7G D-79 relocates lump-external
+    # loose files into a cycle this way). Empty by default, so an ordinary cycle's
+    # manifest bytes are unchanged.
+    support_rels = {"artifacts/" + rel.lstrip("/") for rel in support_locators}
+    primary_rel = _choose_primary(rows, primary, support=support_rels)
 
     def provenance(digest: str) -> Dict[str, Any]:
         return {
@@ -1054,7 +1064,7 @@ def build_manifest(
         inner = rel[len("artifacts/"):]
         artifacts.append({
             "artifact_id": art_id, "cycle_id": record["cycle_id"],
-            "role": "primary" if rel == primary_rel else "output",
+            "role": "support" if rel in support_rels else ("primary" if rel == primary_rel else "output"),
             "type": _bucket_type(inner), "capability": record["capability"], "title": inner,
         })
         revisions.append({
@@ -1317,6 +1327,7 @@ def finalize(
     adopt_root_outputs: Sequence[str] = (),
     abandon_reason: Optional[str] = None,
     force_abandon_ignoring_lease: bool = False,
+    support_locators: Sequence[str] = (),
 ) -> Dict[str, Any]:
     root = Path(root).resolve()
     if state not in {"completed", "abandoned"}:
@@ -1393,7 +1404,7 @@ def finalize(
         document = build_manifest(
             root, record, route, rows, state=state, primary=primary,
             allow_open_route=allow_open_route, allocator=alloc, now=now,
-            abandon_reason=abandon_reason,
+            abandon_reason=abandon_reason, support_locators=support_locators,
         )
         report = artifact_manifest.validate(document)
         if not report.ok:

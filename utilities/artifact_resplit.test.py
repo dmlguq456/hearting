@@ -2,8 +2,10 @@
 """W7G resplit tests (A-16.1/A-16.2/A-16.3/A-16.5) + S2-h ownership guard."""
 import base64
 import importlib.util
+import io
 import json
 import os
+import shutil
 import sys
 import tempfile
 import unittest
@@ -120,7 +122,7 @@ class Fixture(unittest.TestCase):
     def lump_manifest_digest(self):
         return "sha256:" + C._sha(self.lump_dir / "manifest.json")
 
-    def build_proposal(self, *, two_campaigns=True):
+    def build_proposal(self, *, two_campaigns=True, unassigned_loose=False):
         cutoff = {"lump_cycle_id": self.lump_cycle_id, "lump_manifest_digest": self.lump_manifest_digest(),
                   "lump_inventory_digest": "sha256:" + "0" * 64}
         keys = {
@@ -151,6 +153,25 @@ class Fixture(unittest.TestCase):
             {"proposal_id": groups[0][0], "source_locator": "reports/r1.md", "target_cycle_key": keys["a1"],
              "origin_bucket": "reports"},
         ]
+        if unassigned_loose:
+            # Mirrors the real hearting proposal: one degraded `_unassigned` campaign
+            # backed by a semantic-boundary row with no cycle targets, and a loose row
+            # pointing at it because no cycle could own the file.
+            proposals.append({
+                "proposal_id": "prop-u", "fingerprint": "fp-prop-u", "lane": "semantic-boundary",
+                "target_ids": [], "cited_evidence_ids": [],
+                "source_cutoff": cutoff, "producer_version": "v1", "projection_version": "v1",
+                "policy_version": "v1", "proposed_value": {"campaign_slug": W.UNASSIGNED_SLUG},
+                "confidence": 0.1, "rationale": "no cycle could own this residue",
+            })
+            campaigns.append({"proposal_id": "prop-u", "slug": W.UNASSIGNED_SLUG,
+                              "title": "unassigned", "goal": "degraded fallback", "degraded": True,
+                              "completion_criterion": {"statement": "sealed"}, "related": []})
+            loose_assignments[1] = {
+                "proposal_id": "prop-u", "source_locator": "reports/r1.md",
+                "target_cycle_key": f"legacy:{self.root_slug}:{W.UNASSIGNED_SLUG}",
+                "origin_bucket": "reports",
+            }
         return {
             "schema_version": 1, "contract": "artifact-campaign-proposal/v1", "root_slug": self.root_slug,
             "source_cutoff": cutoff, "producer_version": "v1", "projection_version": "v1", "policy_version": "v1",
@@ -541,6 +562,11 @@ class EndToEndTests(Fixture):
             parts = rel.split("/")
             if parts and parts[0] == "shared-input":
                 return None
+            # D-79 loose residue is relocated *into* a new cycle from the root's own
+            # top level, so it was never part of the lump's population and must be
+            # excluded from the D-78 conservation comparison on the new-cycle side.
+            if parts and parts[0] == W.LOOSE_PREFIX:
+                return None
             if len(parts) > 1 and parts[0] == "plans" and parts[1] == "stage-sessions":
                 return None
             return rel
@@ -622,6 +648,372 @@ class EndToEndTests(Fixture):
         self.assertEqual(len(legacy_paths) + len(lump_paths), 12)
         # both lanes for the same file land on the same new-cycle target
         self.assertEqual(len(resolved_targets), len(cycle_unit_rels))
+
+
+class LooseRelocationTests(Fixture):
+    """D-79 "잔여 loose 파일" -- A-16.1's `loose 2` actually leaving the top level."""
+
+    def _new_cycle_dirs(self):
+        out = []
+        for camp in (self.root / "campaigns").iterdir():
+            if camp.name == self.lump_campaign_id:
+                continue
+            for cid in P.read_campaign(self.root, camp.name)["cycles"]:
+                out.append(P.cycle_dir(self.root, camp.name, cid))
+        return out
+
+    def test_loose_two_are_relocated_under_internal_with_origin_bucket_preserved(self):
+        self.assertTrue((self.root / "notes/n1.md").is_file())
+        self.assertTrue((self.root / "reports/r1.md").is_file())
+        self.run_full()
+        target_key = f"legacy:{self.root_slug}:plans/2026-04-01_alpha"
+        record = W._find_cycle_by_key(self.root, target_key)
+        cdir = P.cycle_dir(self.root, record["campaign_id"], record["cycle_id"])
+        moved = {
+            "_internal/notes/n1.md": "note 1\n",
+            "_internal/reports/r1.md": "report 1\n",
+        }
+        for locator, body in moved.items():
+            path = cdir / "artifacts" / locator
+            self.assertTrue(path.is_file(), locator)
+            self.assertEqual(path.read_text(), body)
+        # same-filesystem rename, not a copy: the originals are gone, and no third
+        # copy exists anywhere else in the root
+        self.assertFalse((self.root / "notes/n1.md").exists())
+        self.assertFalse((self.root / "reports/r1.md").exists())
+        for name in ("n1.md", "r1.md"):
+            found = [f for f in P._walk_files(self.root) if f.name == name]
+            self.assertEqual(len(found), 1, name)
+
+    def test_loose_rows_are_sealed_with_role_support_and_never_primary(self):
+        self.run_full()
+        target_key = f"legacy:{self.root_slug}:plans/2026-04-01_alpha"
+        record = W._find_cycle_by_key(self.root, target_key)
+        cdir = P.cycle_dir(self.root, record["campaign_id"], record["cycle_id"])
+        manifest = json.loads((cdir / "manifest.json").read_text())
+        by_title = {a["title"]: a for a in manifest["artifacts"]}
+        for locator in ("_internal/notes/n1.md", "_internal/reports/r1.md"):
+            self.assertEqual(by_title[locator]["role"], "support", locator)
+        # the cycle's own output rows keep their roles, and the primary is still a
+        # lump-origin artifact
+        self.assertEqual(by_title["plans/2026-04-01_alpha/final_report.md"]["role"], "primary")
+        self.assertEqual(by_title["plans/2026-04-01_alpha/plan.md"]["role"], "output")
+
+    def test_loose_files_are_covered_by_the_cycle_witness(self):
+        # D-78 dual witness: a loose file that silently failed to move must fail the
+        # pre-finalize witness, not slip through because only lump rows were counted.
+        real_move = W._r2_move_loose
+
+        def skip_one(root, run_dir, cyc, inverse_rows):
+            cyc = dict(cyc, loose_files=[])
+            return real_move(root, run_dir, cyc, inverse_rows)
+
+        self.r1()
+        route, route_file = self.route()
+        with mock.patch.object(W, "_r2_move_loose", side_effect=skip_one):
+            with self.assertRaises(W.ResplitError) as ctx:
+                self.r2(route_file)
+        self.assertEqual(ctx.exception.code, "resplit-stale")
+        self.assertIn("witness-mismatch", ctx.exception.detail)
+
+    def test_loose_original_path_resolves_to_the_new_cycle(self):
+        self.run_full()
+        for source in ("notes/n1.md", "reports/r1.md"):
+            resolved = C.resolve_legacy(self.root, source)
+            self.assertIn(resolved["resolution"], ("mapped", "mapped-ancestor"), source)
+            target = self.root / resolved["target"]
+            self.assertTrue(target.is_file(), source)
+            self.assertIn(f"/{W.LOOSE_PREFIX}/{source}", resolved["target"])
+
+    def test_loose_rows_are_excluded_from_the_sealed_retire_inventory(self):
+        result = self.r1()
+        self.assertEqual(sorted(result["loose_relocating"]), ["notes/n1.md", "reports/r1.md"])
+        inv = W.sealed_retire_inventory(self.root)
+        self.assertIsNotNone(inv)
+        sources = {e["source_locator"] for e in inv["entries"]}
+        self.assertNotIn("notes/n1.md", sources)
+        self.assertNotIn("reports/r1.md", sources)
+        for rel in ("notes/n1.md", "reports/r1.md"):
+            self.assertIn(rel, inv["excludes"])
+
+    def test_rollback_restores_relocated_loose_files(self):
+        self.r1()
+        route, route_file = self.route()
+        with self.assertRaises(W.ResplitError):
+            self.r2(route_file, crash_at="r2:before-finalize")
+        self.r2(route_file)  # retry rolls the uncommitted batch back
+        journal = P._read_json(W._find_run_dir(self.root, self.lump_cycle_id) / "journal-r2.json")
+        self.assertEqual(journal["phase"], "rolled-back")
+        self.assertEqual((self.root / "notes/n1.md").read_text(), "note 1\n")
+        self.assertEqual((self.root / "reports/r1.md").read_text(), "report 1\n")
+
+    def test_inverse_rows_for_loose_files_are_rename_back_only(self):
+        # W7G forbids the `remove_file` inverse family (D-77-a): replaying it on a
+        # rename would delete the only copy.
+        self.r1()
+        route, route_file = self.route()
+        with self.assertRaises(W.ResplitError):
+            self.r2(route_file, crash_at="r2:before-finalize")
+        rows = C._read_jsonl(W._find_run_dir(self.root, self.lump_cycle_id) / "inverse.jsonl")
+        self.assertTrue(rows)
+        self.assertEqual({r["action"] for r in rows}, {"rename_back"})
+        loose_rows = [r for r in rows if r["source_locator"] in ("notes/n1.md", "reports/r1.md")]
+        self.assertEqual(len(loose_rows), 2)
+
+
+class EmptyCampaignDeferralTests(Fixture):
+    """A campaign no cycle unit was assigned to gets no record; its loose rows are
+    reported as `loose-deferred` and left in place."""
+
+    def _run(self):
+        proposal = self.write_proposal(self.build_proposal(unassigned_loose=True))
+        self.r1(proposal_path=proposal)
+        route, route_file = self.route()
+        return self.r2(route_file)
+
+    def test_validate_still_passes_with_an_unassigned_targeted_loose_row(self):
+        proposal = self.build_proposal(unassigned_loose=True)
+        verdict = W.validate_proposal(
+            proposal, root=self.root, lump_inventory=W.scan_lumps(self.root, root_slug=self.root_slug),
+            loose_inventory=W._build_loose_inventory(self.root), lump_cycle_id=self.lump_cycle_id)
+        self.assertEqual(verdict["verdict"], "ok")
+        self.assertIn("7", verdict["rules_checked"])
+
+    def test_no_campaign_record_is_created_for_the_cycleless_unassigned_campaign(self):
+        self._run()
+        keys = set()
+        for camp in (self.root / "campaigns").iterdir():
+            record = P.read_campaign(self.root, camp.name)
+            if record:
+                keys.add(record.get("key"))
+        self.assertNotIn(f"legacy:{self.root_slug}:{W.UNASSIGNED_SLUG}", keys)
+        new_campaigns = [c for c in (self.root / "campaigns").iterdir() if c.name != self.lump_campaign_id]
+        self.assertEqual(len(new_campaigns), 2)
+
+    def test_deferred_loose_row_is_typed_and_the_file_is_untouched(self):
+        before = (self.root / "reports/r1.md").read_bytes()
+        result = self._run()
+        deferred = result["loose_deferred"]
+        self.assertEqual(len(deferred), 1)
+        self.assertEqual(deferred[0]["status"], "loose-deferred")
+        self.assertEqual(deferred[0]["source_locator"], "reports/r1.md")
+        self.assertEqual(deferred[0]["reason"], "unassigned-campaign-has-no-cycle")
+        self.assertEqual(deferred[0]["origin_bucket"], "reports")
+        self.assertEqual((self.root / "reports/r1.md").read_bytes(), before)
+        # the assigned sibling still moved
+        self.assertFalse((self.root / "notes/n1.md").exists())
+
+    def test_deferred_campaign_is_reported_and_journalled(self):
+        result = self._run()
+        campaigns = result["deferred_campaigns"]
+        self.assertEqual(len(campaigns), 1)
+        self.assertEqual(campaigns[0]["slug"], W.UNASSIGNED_SLUG)
+        self.assertEqual(campaigns[0]["reason"], "no-cycle-units")
+        self.assertTrue(campaigns[0]["degraded"])
+        journal = P._read_json(W._find_run_dir(self.root, self.lump_cycle_id) / "journal-r2.json")
+        self.assertEqual(journal["deferred_campaigns"], campaigns)
+        self.assertEqual(journal["loose_deferred"], result["loose_deferred"])
+
+    def test_deferred_loose_row_stays_in_the_retire_inventory(self):
+        # it was not relocated, so it is still a retirable top-level source
+        proposal = self.write_proposal(self.build_proposal(unassigned_loose=True))
+        result = self.r1(proposal_path=proposal)
+        self.assertEqual(result["loose_relocating"], ["notes/n1.md"])
+        self.assertEqual([d["source_locator"] for d in result["loose_deferred"]], ["reports/r1.md"])
+        inv = W.sealed_retire_inventory(self.root)
+        self.assertIn("notes/n1.md", inv["excludes"])
+        self.assertNotIn("reports/r1.md", inv["excludes"])
+
+
+class RootSlugTests(unittest.TestCase):
+    """D-79 `<root-slug>`: the roster `repo_path` basename, not the artifact-root
+    container directory name."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.base = Path(self._tmp.name)
+        self.addCleanup(self._tmp.cleanup)
+
+    def test_agent_reports_root_slugs_from_the_repo_directory(self):
+        root = self.base / "hearting" / ".agent_reports"
+        root.mkdir(parents=True)
+        self.assertEqual(W._default_root_slug(root), "hearting")
+
+    def test_legacy_claude_reports_root_slugs_from_the_repo_directory(self):
+        root = self.base / "SR_CorrNet_DSC" / ".claude_reports"
+        root.mkdir(parents=True)
+        self.assertEqual(W._default_root_slug(root), "sr-corrnet-dsc")
+
+    def test_symlinked_repo_slugs_from_its_realpath(self):
+        real = self.base / "BC_ResNet"
+        (real / ".agent_reports").mkdir(parents=True)
+        link = self.base / "BC_ResNet_tf"
+        link.symlink_to(real, target_is_directory=True)
+        self.assertEqual(W._default_root_slug(link / ".agent_reports"), "bc-resnet")
+
+    def test_non_container_root_keeps_its_own_name(self):
+        root = self.base / "artifact-root"
+        root.mkdir()
+        self.assertEqual(W._default_root_slug(root), "artifact-root")
+
+    def test_scan_lumps_uses_the_derived_slug_not_agent_reports(self):
+        root = self.base / "hearting" / ".agent_reports"
+        root.mkdir(parents=True)
+        self.assertEqual(W.scan_lumps(root)["root_slug"], "hearting")
+        self.assertEqual(W.scan_lumps(root, root_slug="override")["root_slug"], "override")
+
+
+class RootSlugCliTests(Fixture):
+    def test_lump_index_accepts_an_explicit_root_slug(self):
+        out = io.StringIO()
+        with mock.patch("sys.stdout", out):
+            rc = W.main(["--artifact-root", str(self.root), "lump-index", "--root-slug", "hearting"])
+        self.assertEqual(rc, W.OK)
+        payload = json.loads(out.getvalue())
+        self.assertEqual(payload["root_slug"], "hearting")
+        self.assertTrue(payload["lumps"][0]["cycle_units"][0]["cycle_key"].startswith("legacy:hearting:"))
+
+    def test_lump_index_default_slug_is_the_root_name_for_a_non_container_root(self):
+        out = io.StringIO()
+        with mock.patch("sys.stdout", out):
+            W.main(["--artifact-root", str(self.root), "lump-index"])
+        self.assertEqual(json.loads(out.getvalue())["root_slug"], self.root_slug)
+
+    def test_r1_root_slug_flag_is_a_fallback_the_proposal_overrides(self):
+        # the proposal declares `artifact-root`; the flag must not silently re-slug
+        # a package whose campaign keys were sealed against the declared slug
+        path = self.write_proposal(self.build_proposal())
+        result = W.resplit_legacy_cycle(self.root, gate="r1", lump_cycle_id=self.lump_cycle_id,
+                                        proposal=path, dry_run=True, root_slug="hearting")
+        self.assertEqual(result["verdict"], "ok")
+        self.assertEqual(result["root_slug"], self.root_slug)
+
+
+class CanonicalDigestTests(Fixture):
+    def test_inventory_digests_carry_exactly_one_sha256_prefix(self):
+        self.r1()
+        for inv in (W.lump_index(self.root), W.sealed_loose_inventory(self.root),
+                    W.sealed_retire_inventory(self.root)):
+            self.assertIsNotNone(inv)
+            self.assertTrue(inv["digest"].startswith("sha256:"), inv["kind"])
+            self.assertNotIn("sha256:sha256:", inv["digest"])
+            self.assertEqual(len(inv["digest"].split(":")[1]), 64)
+        marker = P._read_json(W._marker_path(W._find_run_dir(self.root, self.lump_cycle_id)))
+        self.assertNotIn("sha256:sha256:", marker["bundle_digest"])
+
+    def test_a_legacy_double_prefixed_seal_is_not_trusted_and_r1_reseals_it(self):
+        # The double-prefix fix changes every W7G inventory digest. No root has an
+        # admitted resplit run yet, so the only compatibility question is what
+        # happens if one did: it is refused, never silently accepted, and a fresh
+        # R1 re-seal restores a fully usable admission bundle.
+        fixed_digest, fixed_bundle = W._canonical_digest, W._bundle_digest
+
+        def legacy(body):
+            return "sha256:" + fixed_digest(body)
+
+        def legacy_bundle(admission_dir):
+            return "sha256:" + fixed_bundle(admission_dir)
+
+        with mock.patch.object(W, "_canonical_digest", side_effect=legacy), \
+                mock.patch.object(W, "_bundle_digest", side_effect=legacy_bundle):
+            self.r1()
+        run_dir = W._find_run_dir(self.root, self.lump_cycle_id)
+        sealed = P._read_json(W._admission_dir(run_dir) / "lump-inventory.json")
+        self.assertIn("sha256:sha256:", sealed["digest"])
+        self.assertIsNone(W._valid_admitted_run(self.root, run_dir))
+        self.assertIsNone(W.sealed_loose_inventory(self.root))
+        self.assertIsNone(W.sealed_retire_inventory(self.root))
+        # a stale seal is not mistaken for the index -- `lump_index` falls back to a
+        # fresh, single-prefixed scan
+        self.assertNotIn("sha256:sha256:", W.lump_index(self.root)["digest"])
+        route, route_file = self.route()
+        with self.assertRaises(W.ResplitError) as ctx:
+            self.r2(route_file)
+        self.assertEqual(ctx.exception.code, "admission-marker-missing")
+        # R1 re-seals: same proposal, new run, everything trusted again
+        shutil.rmtree(run_dir)
+        self.r1()
+        self.assertIsNotNone(W._valid_admitted_run(self.root, W._find_run_dir(self.root, self.lump_cycle_id)))
+        self.assertNotIn("sha256:sha256:", W.sealed_loose_inventory(self.root)["digest"])
+        route, route_file = self.route()
+        self.assertEqual(self.r2(route_file)["status"], "complete")
+
+
+class DryRunNoTraceTests(Fixture):
+    """A dry run answers "what would happen" and writes nothing -- not the canonical
+    tree, not `.runtime`, not the root-wide resplit lock."""
+
+    def _snapshot(self):
+        out = {}
+        for path in sorted(self.root.rglob("*")):
+            if path.is_symlink():
+                out[str(path.relative_to(self.root))] = "symlink"
+            elif path.is_file():
+                out[str(path.relative_to(self.root))] = C._sha(path)
+            elif path.is_dir():
+                out[str(path.relative_to(self.root))] = "dir"
+        return out
+
+    def test_r1_dry_run_leaves_no_trace(self):
+        before = self._snapshot()
+        result = self.r1(dry_run=True)
+        self.assertEqual(result["status"], "dry-run")
+        self.assertEqual(result["verdict"], "ok")
+        self.assertEqual(result["loose_deferred"], [])
+        self.assertEqual(self._snapshot(), before)
+        self.assertIsNone(W.resplit_hold(self.root))
+
+    def test_r2_dry_run_leaves_no_trace_and_reports_the_plan(self):
+        self.r1()
+        route, route_file = self.route()
+        before = self._snapshot()
+        result = self.r2(route_file, dry_run=True)
+        self.assertEqual(result["status"], "dry-run")
+        self.assertFalse(result["resumes_existing_journal"])
+        self.assertEqual(len(result["cycles"]), 4)
+        alpha = next(c for c in result["cycles"] if c["depth1_name"] == "2026-04-01_alpha")
+        self.assertEqual(alpha["loose_file_count"], 2)
+        self.assertEqual(sorted(alpha["loose_locators"]),
+                         ["_internal/notes/n1.md", "_internal/reports/r1.md"])
+        self.assertEqual(self._snapshot(), before)
+        # no campaign record, no cycle record, no journal, no lock, no hold
+        self.assertIsNone(W.resplit_hold(self.root))
+        self.assertFalse(W._resplit_lock_path(self.root).exists())
+        self.assertFalse((W._find_run_dir(self.root, self.lump_cycle_id) / "journal-r2.json").exists())
+
+    def test_r2_dry_run_reports_deferrals_without_creating_anything(self):
+        proposal = self.write_proposal(self.build_proposal(unassigned_loose=True))
+        self.r1(proposal_path=proposal)
+        route, route_file = self.route()
+        before = self._snapshot()
+        result = self.r2(route_file, dry_run=True)
+        self.assertEqual([c["slug"] for c in result["deferred_campaigns"]], [W.UNASSIGNED_SLUG])
+        self.assertEqual([d["source_locator"] for d in result["loose_deferred"]], ["reports/r1.md"])
+        self.assertNotIn(W.UNASSIGNED_SLUG, [c["key"].split(":")[-1] for c in result["campaigns"]])
+        self.assertEqual(self._snapshot(), before)
+
+    def test_r3_dry_run_leaves_no_trace(self):
+        self.r1()
+        route, route_file = self.route()
+        self.r2(route_file)
+        before = self._snapshot()
+        result = self.r3(dry_run=True)
+        self.assertEqual(result["status"], "dry-run")
+        self.assertEqual(len(result["new_cycle_ids"]), 4)
+        self.assertEqual(self._snapshot(), before)
+        self.assertFalse((W._find_run_dir(self.root, self.lump_cycle_id) / "journal-r3.json").exists())
+        self.assertIsNone(W.resplit_hold(self.root))
+
+    def test_r2_dry_run_after_a_real_run_reports_that_run(self):
+        self.r1()
+        route, route_file = self.route()
+        with self.assertRaises(W.ResplitError):
+            self.r2(route_file, crash_at="r2:before-finalize")
+        before = self._snapshot()
+        result = self.r2(route_file, dry_run=True)
+        self.assertTrue(result["resumes_existing_journal"])
+        self.assertEqual(result["journal"]["phase"], "witnessed")
+        self.assertEqual(self._snapshot(), before)
 
 
 class RollbackAndCrashTests(Fixture):
