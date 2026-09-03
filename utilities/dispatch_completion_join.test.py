@@ -2693,6 +2693,64 @@ class MaterializePendingDeliveryTest(unittest.TestCase):
                 self.assertIn("forced", entry["reason"])
 
 
+class TerminalReconcileWithMissingSealedTreeTest(unittest.TestCase):
+    """SD-115 axis 4 (짝), C47-14: `pending_record_identity`'s lazy
+    `from owner_route_binding import (...)` (`dispatch_completion_join.py:239`)
+    raises `ModuleNotFoundError` -- a subclass of `ImportError`, not one of
+    the exception types `materialize_after_terminal_close`'s except tuple
+    caught before this cycle -- when the sealed release tree it lives under
+    has already been pruned out from under a still-running process. Before
+    the fix that one exception type escaped `materialize_after_terminal_close`
+    entirely: no refusal record, no trace anywhere (R6: the fix must not
+    silently swallow a *different*, unrelated exception either -- the
+    assertions below check the refusal's `reason` actually names
+    `ModuleNotFoundError`/the missing module, not just that some refusal
+    exists).
+    """
+
+    OWNER_METADATA = (
+        "attempt_schema_version=2,dispatch_depth=1,transport=headless,"
+        "execution_surface=registered-headless,registered_worker=1,"
+        "fallback_hop=same-harness-headless,worker_type=owner,unit=_kernel/owner"
+    )
+
+    def _owner_row(self, attempt="att-missing-sealed-tree"):
+        pipe = ",".join([
+            self.OWNER_METADATA,
+            f"attempt_id={attempt}",
+            "parent_attempt_id=-",
+            "parent_completion_delivery=claude-parent-runtime",
+            "parent_sid=sess-missing-sealed-tree",
+            "harness=claude",
+        ])
+        return f"2026-09-03T00:00:00Z\topen\t/r\t/w\towner-slug\t{pipe}"
+
+    def test_missing_sealed_tree_terminal_reconcile_leaves_a_typed_refusal(self):
+        attempt = "att-missing-sealed-tree"
+        with tempfile.TemporaryDirectory() as td:
+            jobs = Path(td) / "jobs.log"
+            jobs.write_text(self._owner_row(attempt) + "\n", encoding="utf-8")
+            self.assertTrue(D.close_attempt_row(jobs, attempt, "completed-marker"))
+
+            # Simulate the sealed release tree `owner_route_binding` lives
+            # under having been pruned: the module is simply gone.
+            with mock.patch.dict(sys.modules, {"owner_route_binding": None}):
+                result = JOIN.materialize_after_terminal_close(jobs, attempt)
+
+            self.assertIsNone(result)
+            log = Path(td) / "logs" / JOIN.PENDING_DELIVERY_LOG
+            entries = [
+                json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()
+            ]
+            refusals = [e for e in entries if e["attempt_id"] == attempt]
+            self.assertEqual(len(refusals), 1)
+            # The row-close itself never raised (materialize_after_terminal_close
+            # returned None, not an exception) -- the escaping type was
+            # ModuleNotFoundError specifically, caught only because it is an
+            # ImportError subclass; the refusal reason names the missing module.
+            self.assertIn("owner_route_binding", refusals[0]["reason"])
+
+
 class ReconcilePendingDeliveryTest(unittest.TestCase):
     """SD-111 P2 trigger 2 + expiry actor (§2-b-2/§2-c).
 
@@ -2837,6 +2895,34 @@ class ReconcilePendingDeliveryTest(unittest.TestCase):
             jobs.write_text("fixture\n", encoding="utf-8")
             result = JOIN.reconcile_pending_delivery(jobs)
             self.assertEqual(result, {"materialized": 0, "expired": 0, "skipped": 0})
+
+
+class RefusalWriterOwnFailureStaysSilentTest(unittest.TestCase):
+    """Review round 1 🟡5 (residual R7, left explicit rather than fixed):
+    `_log_pending_delivery_refusal`/`log_delivery_refusal` is the durable
+    trace every `reconcile()` call site now writes when its own reconcile
+    attempt fails (C47-14). But the writer's *own* `mkdir`/`open`/`write`
+    failure is still caught by a bare `except OSError: pass` -- there is no
+    secondary durable surface for "the refusal ledger itself is gone", only
+    whatever stderr the caller happens to emit next to it. Framing this
+    cycle explicitly ruled a new durable fallback surface out of scope (R7);
+    this test does not add one. It only pins the current, honestly
+    unobservable-past-stderr behavior so a future change to it is a visible
+    diff, not a silent regression in either direction."""
+
+    def test_mkdir_failure_in_the_writer_itself_raises_nothing_and_leaves_no_record(self):
+        with tempfile.TemporaryDirectory() as td:
+            jobs = Path(td) / "jobs.log"
+            jobs.write_text("", encoding="utf-8")
+            log_dir = Path(td) / "logs"
+            with mock.patch.object(
+                Path, "mkdir", side_effect=OSError("simulated refusal-ledger mkdir failure")
+            ):
+                JOIN.log_delivery_refusal(jobs, "att-writer-failure", "some-reason")
+            # No exception escaped (verified by reaching this line), and --
+            # this is the gap review 🟡5 flags -- no trace of the failed
+            # write survives anywhere on disk either.
+            self.assertFalse(log_dir.exists())
 
 
 if __name__ == "__main__":

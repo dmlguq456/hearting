@@ -2278,7 +2278,219 @@ def _release_reference_registries(candidate: Path) -> list[Path]:
     return registries
 
 
-def _release_in_use(candidate: Path, stable_snapshot: list[dict]) -> tuple[bool, str]:
+# SD-115 axis 4 (b): every registry loop above resolves `launch_home` at
+# *judgment* time (`os.path.realpath` right below), so a row that sealed a
+# mutable pointer such as `<share>/hearting/current` always resolves to
+# whatever release is current *right now*, never to the release that was
+# actually live when the row was written -- a sealed, still-open attempt is
+# exactly the case this misses. `.runtime/routes/rt-*.json` route records
+# carry `launch_home` **already resolved at compile time**
+# (`capability-route.py:317 launch_compatibility_tuple()`), so they are the
+# one source that still names the release a still-open attempt sealed
+# against. These readers are installer-local, stdlib-only mirrors -- the same
+# convention as `_commit_forced_prune_gap_record` above -- because
+# `tools/install/*` cannot import `utilities/` (see `stable_state_root()`
+# docstring).
+_ROUTE_SCAN_MAX_FILES = 20000  # measured 1909 route files across 10 artifact roots
+_ROUTE_RECORD_MAX_BYTES = 1_048_576  # same cap as claude-session-supervisor.py:107
+
+
+class _Undecidable:
+    """Sentinel: an open-shaped route record could not be read or parsed."""
+
+    def __repr__(self) -> str:  # pragma: no cover - debug aid only
+        return "_UNDECIDABLE"
+
+
+_UNDECIDABLE = _Undecidable()
+
+
+def _open_route_artifact_roots(
+    environ: dict[str, str],
+) -> tuple[set[str], list[str], str]:
+    """Union of every place an open route's artifact root or route file can
+    be discovered from stable per-user state. Returns `(artifact_roots,
+    explicit_route_files, unreliable_reason)`.
+
+    Three additive sources (SD-115 axis 4 plan.md §3):
+    - the stable registry's `artifact_root=` pipe field on every row -- the
+      primary path (measured 443/443 rows carry it);
+    - the same row's `owner_route_file=` pipe field, when present, naming a
+      route file directly (measured 45/443 rows);
+    - `owner-route-bindings/*.json`'s `route_file` key -- the only path left
+      when the registry has no row at all for an attempt. Registry rows are
+      not guaranteed for every attempt; bindings are published only for a
+      registered depth-1 owner's first route compile
+      (`owner_route_binding.py`), so they cover a narrower set than the
+      registry but reach attempts the registry cannot.
+
+    A single unreadable or malformed binding file is skipped, not
+    escalated: binding *presence* is a discovery hint, never openness proof
+    on its own (plan.md §3.1 -- every binding measured on disk today points
+    at an already-closed route). But a failure to *list* the bindings
+    directory itself is not a hint, it is the only surviving discovery path
+    for a registry-row-less attempt going dark: `owner-route-bindings` is
+    where that route's binding-only evidence lives (see
+    `test_route_record_alone_protects_the_release_with_no_registry_row`), so
+    a non-empty `unreliable_reason` here must make the caller treat every
+    candidate release as in-use rather than silently scanning as if the
+    directory were empty.
+    """
+
+    roots: set[str] = set()
+    route_files: list[str] = []
+    try:
+        state_root = stable_state_root(environ)
+    except DistributionError:
+        return roots, route_files, ""
+
+    jobs = state_root / "jobs.log"
+    if jobs.is_file():
+        try:
+            text = jobs.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            text = ""
+        for line in text.splitlines():
+            if not line.strip():
+                continue
+            fields = line.split("\t")
+            if len(fields) < 6:
+                continue
+            for item in fields[5].split(","):
+                if item.startswith("artifact_root="):
+                    roots.add(item[len("artifact_root="):])
+                elif item.startswith("owner_route_file="):
+                    route_files.append(item[len("owner_route_file="):])
+
+    bindings_dir = state_root / "owner-route-bindings"
+    if bindings_dir.is_dir():
+        try:
+            binding_files = list(bindings_dir.glob("*.json"))
+        except OSError:
+            return roots, route_files, f"route-discovery-unreliable:{bindings_dir}"
+        for entry in binding_files:
+            try:
+                payload = json.loads(entry.read_text(encoding="utf-8"))
+            except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+                continue
+            route_file = payload.get("route_file") if isinstance(payload, dict) else None
+            if isinstance(route_file, str) and route_file:
+                route_files.append(route_file)
+    return roots, route_files, ""
+
+
+def _route_record_launch_home(path: Path):
+    """`launch_compatibility_tuple.launch_home.path` from one route record.
+
+    Returns `None` if the route is **closed** -- an `.outcome.json` sibling
+    exists next to `path` (`capability-route.py:2296 outcome_path()`'s
+    naming convention: `{stem}.outcome.json`) -- since a closed route's
+    `launch_home` is stale by definition and must never block prune. A
+    corrupt *closed* route record is likewise ignored: one rotten record
+    among hundreds of closed ones must not block prune forever (over-eager
+    fail-closed is its own bug).
+
+    Returns `_UNDECIDABLE` if the record looks open (no outcome sibling) but
+    cannot be trusted: oversized, unreadable, unparsable, or missing the
+    field. An open-shaped record that cannot be trusted is exactly the
+    judgment-cannot-be-made case that C47-12's "undecidable = in_use" rule
+    covers -- the caller must fail closed, never skip silently.
+
+    Otherwise returns the resolved `launch_home` path string.
+    """
+
+    outcome = path.with_name(path.stem + ".outcome.json")
+    if outcome.exists():
+        return None
+    try:
+        if path.stat().st_size > _ROUTE_RECORD_MAX_BYTES:
+            return _UNDECIDABLE
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return _UNDECIDABLE
+    if not isinstance(raw, dict):
+        return _UNDECIDABLE
+    launch_home = (raw.get("launch_compatibility_tuple") or {}).get("launch_home")
+    value = launch_home.get("path") if isinstance(launch_home, dict) else None
+    if not isinstance(value, str) or not value:
+        return _UNDECIDABLE
+    return value
+
+
+def _open_route_launch_homes(environ: dict[str, str]) -> tuple[list[tuple[str, str]], str]:
+    """`([(route_id, launch_home_path), ...], unreliable_reason)`.
+
+    An empty `unreliable_reason` means the scan is trustworthy (possibly
+    empty -- no open route found is not the same as a failed scan). A
+    non-empty reason means the caller must treat every candidate release as
+    in-use (판정 불가 = in_use) instead of trusting a partial or failed scan.
+
+    Only the canonical `<artifact_root>/.runtime/routes/*.json` directory is
+    scanned per discovered artifact root -- the four legacy route locations
+    (`capability-route.py`'s `classify_route_location()`) are compile-time
+    write targets this reader does not need to trust, since D-2 already
+    treats them as read-only historical drift, not the current write path.
+    `route_id` is taken from the filename stem, not re-parsed from the JSON
+    body -- `canonical_route_path()` names every route file exactly
+    `{route_id}.json`, and the body has already been read once for
+    `launch_home`; a second parse of the same bytes just to recover a value
+    already encoded in the name would be pure waste.
+
+    A discovered `artifact_root` that no longer exists, or whose
+    `.runtime/routes` is missing or not a directory, is skipped, not an
+    error -- a stale root name in stable state is not evidence of anything
+    by itself (review requirement: explicit non-directory/absent handling).
+    """
+
+    roots, explicit_route_files, bindings_unreliable = _open_route_artifact_roots(environ)
+    if bindings_unreliable:
+        return [], bindings_unreliable
+    candidates: dict[str, Path] = {}
+    # Bounded set covers both discovery paths together (review 🟡4): an
+    # unbounded explicit-route tail from `owner_route_file=`/bindings would
+    # otherwise let the scan cap be walked around entirely by growing that
+    # list instead of the directory glob.
+    scanned = 0
+    for root in roots:
+        routes_dir = Path(root) / ".runtime" / "routes"
+        if not routes_dir.is_dir():
+            continue
+        try:
+            entries = list(routes_dir.glob("*.json"))
+        except OSError:
+            return [], f"route-discovery-unreliable:{routes_dir}"
+        for entry in entries:
+            if entry.name.endswith(".outcome.json"):
+                continue
+            scanned += 1
+            if scanned > _ROUTE_SCAN_MAX_FILES:
+                return [], "route-discovery-unreliable:scan-cap"
+            candidates[str(entry.resolve(strict=False))] = entry
+    for route_file in explicit_route_files:
+        scanned += 1
+        if scanned > _ROUTE_SCAN_MAX_FILES:
+            return [], "route-discovery-unreliable:scan-cap"
+        path = Path(route_file)
+        candidates[str(path.resolve(strict=False))] = path
+
+    results: list[tuple[str, str]] = []
+    for path in candidates.values():
+        if not path.is_file():
+            continue
+        launch_home = _route_record_launch_home(path)
+        if launch_home is None:
+            continue
+        if launch_home is _UNDECIDABLE:
+            return [], f"route-record-unparsable:{path}"
+        results.append((path.stem, launch_home))
+    return results, ""
+
+
+def _release_in_use(
+    candidate: Path,
+    stable_snapshot: list[dict],
+    route_snapshot: tuple[list[tuple[str, str]], str] | None = None,
+) -> tuple[bool, str]:
     """Return (in_use, reason). Undecidable evidence returns (True, ...).
 
     `stable_snapshot` is `_stable_registry_snapshot()`'s pre-parsed result --
@@ -2289,6 +2501,17 @@ def _release_in_use(candidate: Path, stable_snapshot: list[dict]) -> tuple[bool,
     A stable-registry open row with no `launch_home` is never candidate-local
     authority on its own (unlike a candidate-local legacy row) -- it is not
     scoped to any one release.
+
+    `route_snapshot` is `_open_route_launch_homes()`'s pre-parsed result
+    (SD-115 axis 4 (b)) -- the fourth reference source, evaluated last and
+    purely additive. It is the only source that names a release by its
+    *compile-time-resolved* `launch_home`, so it is the one that still
+    protects a release after `sealed_launch_home()` seals a mutable pointer
+    (SD-115 axis 4 (a)) that a plain judgment-time `realpath()` on the
+    registry row would otherwise re-resolve to whatever is current now.
+    `route_snapshot=None` keeps the existing direct-call/test surface
+    working unchanged; the production caller, `_cleanup_releases`, always
+    passes a real snapshot computed once outside the per-candidate loop.
     """
 
     try:
@@ -2355,6 +2578,18 @@ def _release_in_use(candidate: Path, stable_snapshot: list[dict]) -> tuple[bool,
                     break
             identifier = attempt_id or fields[4]
             return True, f"open-attempt:{identifier}"
+
+    routes, unreliable = route_snapshot if route_snapshot is not None else ([], "")
+    if unreliable:
+        return True, unreliable
+    for route_id, launch_home in routes:
+        try:
+            home_real = os.path.realpath(launch_home)
+            common = os.path.commonpath((candidate_real, home_real))
+        except (OSError, ValueError):
+            return True, f"route-launch-home-unresolvable:{route_id}"
+        if common == candidate_real:
+            return True, f"open-route:{route_id}"
     return False, ""
 
 
@@ -2455,6 +2690,10 @@ def _cleanup_releases(keep: set[Path], *, force_prune_unproven: bool = False) ->
     # unreadable/malformed stable registry raises here and aborts the whole
     # cleanup pass rather than being silently re-attempted per candidate.
     stable_snapshot = _stable_registry_snapshot(os.environ)
+    # Also parsed once, outside the per-candidate loop -- SD-115 axis 4 (b)'s
+    # fourth reference source (route records; see `_release_in_use`'s
+    # docstring).
+    route_snapshot = _open_route_launch_homes(os.environ)
     candidates = sorted(
         (path for path in releases.iterdir() if path.is_dir() and not path.is_symlink()),
         key=lambda path: path.stat().st_mtime,
@@ -2465,7 +2704,7 @@ def _cleanup_releases(keep: set[Path], *, force_prune_unproven: bool = False) ->
         if candidate in keep or retained < 2:
             retained += 1
             continue
-        in_use, why = _release_in_use(candidate, stable_snapshot)
+        in_use, why = _release_in_use(candidate, stable_snapshot, route_snapshot)
         if in_use:
             print(
                 f"harness release: {candidate} is still referenced by a live dispatch "

@@ -374,6 +374,28 @@ def resolve_agent_home(runtime_pointer: str | Path | None = None) -> Path:
         return _MODULE_ROOT
 
 
+def sealed_launch_home(agent_home: str | Path) -> Path:
+    """The concrete release path to seal into a dispatch row.
+
+    Fixes a mutable pointer like `<share>/hearting/current` **at record
+    time**. Prune resolves realpath again at judgment time, so a row that
+    carries the raw symlink can never say which release it was actually
+    sealed against (SD-115 axis 4 (a)).
+
+    A resolve failure or a result that isn't a harness root is returned
+    unchanged -- a wrong record beats a missing one, but a wrong record is
+    still better than one that goes silently missing.
+    """
+    candidate = Path(agent_home)
+    try:
+        resolved = candidate.resolve(strict=False)
+    except OSError:
+        return candidate
+    if not (resolved / "core" / "CORE.md").is_file():
+        return candidate
+    return resolved
+
+
 def agent_home_equivalent(a: str | Path, b: str | Path) -> bool:
     """Compare two agent-home candidates by resolved identity.
 

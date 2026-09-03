@@ -55,6 +55,7 @@ from dispatch_contract import (  # noqa: E402
     resolve_global_registry,
     resolve_dispatch_state_root,
     resolve_agent_home as _resolve_agent_home,
+    sealed_launch_home,
     resolve_live_parent_attempt,
     resolve_model_governor_root,
     replica_batch_expectation,
@@ -1381,7 +1382,7 @@ def append_job(jobs: Path, args: argparse.Namespace) -> bool:
     # layout — the registry row may live in a different runtime home than the logs.
     pipe += (
         f",artifact_root={args.artifact_root},log_file={args.log_path}"
-        f",launch_home={args.agent_home}"
+        f",launch_home={sealed_launch_home(args.agent_home)}"
     )
     pipe += stage_session_metadata(args)
     if args.attempt_id:

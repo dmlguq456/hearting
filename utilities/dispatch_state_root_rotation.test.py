@@ -1679,6 +1679,370 @@ class StableRegistrySnapshotAndDeletionPreconditionTest(unittest.TestCase):
         self.assertTrue(ok, reason)
 
 
+class OpenAttemptSealedReleasePruneTest(unittest.TestCase):
+    """SD-115 axis 4 (b), C47-11/C47-12: a route record's compile-time-
+    resolved `launch_home` (`_open_route_launch_homes`/`_route_record_launch_home`)
+    is the fourth reference source `_release_in_use` consults, so a release an
+    open attempt sealed against survives prune even when the registry row that
+    names it carries a mutable pointer (`current`) that has since moved on.
+
+    All fixtures live under a per-test `HARNESS_DATA_ROOT`/`HOME`; the real
+    `~/.local/share/hearting/releases` is never touched (plan.md R9).
+    """
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.base = Path(self.temp.name)
+        self.prior_env = {
+            key: os.environ.get(key)
+            for key in (
+                "HOME", "XDG_STATE_HOME", "HARNESS_STATE_ROOT", "HARNESS_DATA_ROOT",
+                "AGENT_HOME", "AGENT_DISPATCH_JOBS",
+            )
+        }
+        os.environ.pop("HARNESS_STATE_ROOT", None)
+        os.environ.pop("AGENT_DISPATCH_JOBS", None)
+        os.environ.pop("AGENT_HOME", None)
+        os.environ.pop("XDG_STATE_HOME", None)
+        os.environ["HOME"] = str(self.base / "home")
+        os.environ["HARNESS_DATA_ROOT"] = str(self.base / "data")
+        self.addCleanup(self._restore_env)
+
+        self.releases_root = self.base / "data" / "releases"
+        self.stable_root = DISTRIBUTION.stable_state_root(os.environ)
+        self.artifact_root = self.base / "artifact"
+
+    def _restore_env(self):
+        for key, value in self.prior_env.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+    def _make_release(self, name, mtime):
+        path = self.releases_root / name
+        (path / "core").mkdir(parents=True)
+        (path / "core" / "CORE.md").write_text("fixture\n", encoding="utf-8")
+        os.utime(path, (mtime, mtime))
+        return path
+
+    def _seal_current(self, target):
+        # `_retention_containment_precondition`'s non-promoted branch resolves
+        # its surviving root through `current_path()` -- give it somewhere
+        # real to land so an unrelated precondition never masks what this
+        # test actually exercises (route-record protection).
+        current = self.base / "data" / "current"
+        current.symlink_to(target)
+        return current
+
+    def _write_registry_row(self, status, attempt_id, extra_pipe=""):
+        pipe = f"attempt_id={attempt_id},harness=claude"
+        if extra_pipe:
+            pipe += "," + extra_pipe
+        line = f"2026-09-03T00:00:00Z\t{status}\t/r\t/w\t{attempt_id}\t{pipe}\n"
+        jobs = self.stable_root / "jobs.log"
+        jobs.parent.mkdir(parents=True, exist_ok=True)
+        with open(jobs, "a", encoding="utf-8") as fh:
+            fh.write(line)
+
+    def _write_route_record(self, route_id, launch_home_path, *, closed=False, corrupt=False, routes_dir=None):
+        routes_dir = routes_dir or (self.artifact_root / ".runtime" / "routes")
+        routes_dir.mkdir(parents=True, exist_ok=True)
+        route_file = routes_dir / f"{route_id}.json"
+        if corrupt:
+            route_file.write_text("{not json", encoding="utf-8")
+        else:
+            route_file.write_text(
+                json.dumps({
+                    "route_id": route_id,
+                    "launch_compatibility_tuple": {"launch_home": {"path": str(launch_home_path)}},
+                }),
+                encoding="utf-8",
+            )
+        if closed:
+            (routes_dir / f"{route_id}.outcome.json").write_text("{}", encoding="utf-8")
+        return route_file
+
+    def test_open_owner_sealed_in_release_n_survives_rotation_to_n_plus_two(self):
+        n = self._make_release("vN", 1000.0)
+        n1 = self._make_release("vN+1", 2000.0)
+        n2 = self._make_release("vN+2", 3000.0)
+        self._seal_current(n2)
+        self._write_registry_row("open", "att-sealed", f"artifact_root={self.artifact_root}")
+        self._write_route_record("rt-sealed1", n)
+
+        before = sorted(str(p) for p in n.rglob("*"))
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            DISTRIBUTION._cleanup_releases(keep=set())
+        after = sorted(str(p) for p in n.rglob("*"))
+
+        self.assertTrue(n.is_dir())
+        self.assertEqual(before, after)
+        self.assertIn("open-route:rt-sealed1", stderr.getvalue())
+        self.assertTrue(n1.is_dir())
+        self.assertTrue(n2.is_dir())
+
+    def test_forced_prune_never_overrides_an_open_sealed_release(self):
+        n = self._make_release("vN", 1000.0)
+        self._make_release("vN+1", 2000.0)
+        n2 = self._make_release("vN+2", 3000.0)
+        self._seal_current(n2)
+        self._write_registry_row("open", "att-sealed", f"artifact_root={self.artifact_root}")
+        self._write_route_record("rt-sealed-force", n)
+
+        DISTRIBUTION._cleanup_releases(keep=set(), force_prune_unproven=True)
+        self.assertTrue(n.is_dir())
+
+    def test_current_symlink_launch_home_row_is_protected_by_the_route_record(self):
+        n = self._make_release("vN", 1000.0)
+        self._make_release("vN+1", 2000.0)
+        n2 = self._make_release("vN+2", 3000.0)
+        current = self._seal_current(n2)
+        # The registry row's launch_home is the mutable `current` pointer --
+        # judged at prune time it resolves to n2, never n. Only the route
+        # record (recorded with n already resolved) can protect n here.
+        self._write_registry_row(
+            "open", "att-current", f"artifact_root={self.artifact_root},launch_home={current}"
+        )
+        self._write_route_record("rt-current-protects-n", n)
+
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            DISTRIBUTION._cleanup_releases(keep=set())
+
+        self.assertTrue(n.is_dir())
+        self.assertIn("open-route:rt-current-protects-n", stderr.getvalue())
+
+    def test_route_record_alone_protects_the_release_with_no_registry_row(self):
+        n = self._make_release("vN", 1000.0)
+        self._make_release("vN+1", 2000.0)
+        n2 = self._make_release("vN+2", 3000.0)
+        self._seal_current(n2)
+        # No jobs.log row for this attempt at all -- the owner-route-bindings
+        # entry is the only surviving discovery path (plan.md §3: bindings
+        # are published only for a registered depth-1 owner's first compile,
+        # independent of any registry row).
+        route_file = self._write_route_record("rt-binding-only", n)
+        bindings_dir = self.stable_root / "owner-route-bindings"
+        bindings_dir.mkdir(parents=True, exist_ok=True)
+        (bindings_dir / "att-binding.json").write_text(
+            json.dumps({"route_file": str(route_file)}), encoding="utf-8"
+        )
+
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            DISTRIBUTION._cleanup_releases(keep=set())
+
+        self.assertTrue(n.is_dir())
+        self.assertIn("open-route:rt-binding-only", stderr.getvalue())
+
+    def test_unreadable_binding_directory_with_no_registry_row_is_treated_as_in_use(self):
+        # Review round 1 🔴1: registry-row-less discovery has exactly one
+        # surviving path -- owner-route-bindings. A binding-directory
+        # enumeration failure used to be swallowed to `binding_files=[]`
+        # (a "normal empty scan"), so `_open_route_launch_homes` returned
+        # `(empty, "")` and `_release_in_use` happily pruned n. This must
+        # instead come back undecidable, per C47-12 (판정 불가 = in_use).
+        n = self._make_release("vN", 1000.0)
+        self._make_release("vN+1", 2000.0)
+        n2 = self._make_release("vN+2", 3000.0)
+        self._seal_current(n2)
+        # No jobs.log row at all -- deliberately mirrors
+        # test_route_record_alone_protects_the_release_with_no_registry_row.
+        route_file = self._write_route_record("rt-binding-dir-unreadable", n)
+        bindings_dir = self.stable_root / "owner-route-bindings"
+        bindings_dir.mkdir(parents=True, exist_ok=True)
+        (bindings_dir / "att-binding.json").write_text(
+            json.dumps({"route_file": str(route_file)}), encoding="utf-8"
+        )
+
+        real_glob = Path.glob
+
+        def _boom(self_path, pattern):
+            if self_path == bindings_dir and pattern == "*.json":
+                raise OSError("simulated unreadable bindings directory")
+            return real_glob(self_path, pattern)
+
+        with mock.patch.object(Path, "glob", _boom):
+            stderr = io.StringIO()
+            with contextlib.redirect_stderr(stderr):
+                DISTRIBUTION._cleanup_releases(keep=set())
+        self.assertTrue(n.is_dir())
+        self.assertIn(f"route-discovery-unreliable:{bindings_dir}", stderr.getvalue())
+
+    def test_unreadable_route_discovery_is_treated_as_in_use(self):
+        n = self._make_release("vN", 1000.0)
+        self._make_release("vN+1", 2000.0)
+        n2 = self._make_release("vN+2", 3000.0)
+        self._seal_current(n2)
+        self._write_registry_row("open", "att-x", f"artifact_root={self.artifact_root}")
+        routes_dir = self.artifact_root / ".runtime" / "routes"
+        routes_dir.mkdir(parents=True, exist_ok=True)
+
+        # Deterministic injection (plan-review requirement): a chmod-based
+        # unreadable directory is not guaranteed to reproduce under every
+        # execution UID (e.g. root), so patch `Path.glob` itself to raise for
+        # exactly this directory instead.
+        real_glob = Path.glob
+
+        def _boom(self_path, pattern):
+            if self_path == routes_dir and pattern == "*.json":
+                raise OSError("simulated unreadable directory")
+            return real_glob(self_path, pattern)
+
+        with mock.patch.object(Path, "glob", _boom):
+            stderr = io.StringIO()
+            with contextlib.redirect_stderr(stderr):
+                DISTRIBUTION._cleanup_releases(keep=set())
+        self.assertTrue(n.is_dir())
+        self.assertIn("route-discovery-unreliable", stderr.getvalue())
+
+        # Second undecidable shape: the scan cap itself, patched down to a
+        # deterministically small value rather than materializing 20000 files.
+        self._write_route_record("rt-cap-1", n)
+        self._write_route_record("rt-cap-2", n)
+        with mock.patch.object(DISTRIBUTION, "_ROUTE_SCAN_MAX_FILES", 1):
+            stderr2 = io.StringIO()
+            with contextlib.redirect_stderr(stderr2):
+                DISTRIBUTION._cleanup_releases(keep=set())
+        self.assertTrue(n.is_dir())
+        self.assertIn("route-discovery-unreliable:scan-cap", stderr2.getvalue())
+
+    def test_scan_cap_also_bounds_explicit_route_files_not_only_directory_glob(self):
+        # Review round 1 🟡4: `_ROUTE_SCAN_MAX_FILES` used to apply only to
+        # files discovered by globbing `.runtime/routes` -- an
+        # `owner_route_file=`/binding-derived explicit path list was appended
+        # to `candidates` afterward with no cap of its own, so a large
+        # explicit list could walk around the bound entirely. Cap explicit
+        # route files alone (no directory-glob candidates in this fixture) to
+        # prove the bound now covers that source too.
+        n = self._make_release("vN", 1000.0)
+        self._make_release("vN+1", 2000.0)
+        n2 = self._make_release("vN+2", 3000.0)
+        self._seal_current(n2)
+        self._write_registry_row("open", "att-x", f"artifact_root={self.artifact_root}")
+        route_a = self._write_route_record(
+            "rt-explicit-cap-a", n, routes_dir=self.stable_root / "explicit-routes-a",
+        )
+        route_b = self._write_route_record(
+            "rt-explicit-cap-b", n, routes_dir=self.stable_root / "explicit-routes-b",
+        )
+        jobs = self.stable_root / "jobs.log"
+        with open(jobs, "a", encoding="utf-8") as fh:
+            fh.write(
+                "2026-09-03T00:00:00Z\topen\t/r\t/w\tatt-explicit-a\t"
+                f"attempt_id=att-explicit-a,harness=claude,artifact_root={self.artifact_root},"
+                f"owner_route_file={route_a}\n"
+            )
+            fh.write(
+                "2026-09-03T00:00:00Z\topen\t/r\t/w\tatt-explicit-b\t"
+                f"attempt_id=att-explicit-b,harness=claude,artifact_root={self.artifact_root},"
+                f"owner_route_file={route_b}\n"
+            )
+
+        with mock.patch.object(DISTRIBUTION, "_ROUTE_SCAN_MAX_FILES", 1):
+            stderr = io.StringIO()
+            with contextlib.redirect_stderr(stderr):
+                DISTRIBUTION._cleanup_releases(keep=set())
+        self.assertTrue(n.is_dir())
+        self.assertIn("route-discovery-unreliable:scan-cap", stderr.getvalue())
+
+    def test_closed_route_record_never_blocks_prune(self):
+        n = self._make_release("vN", 1000.0)
+        self._make_release("vN+1", 2000.0)
+        n2 = self._make_release("vN+2", 3000.0)
+        self._seal_current(n2)
+        self._write_registry_row("open", "att-x", f"artifact_root={self.artifact_root}")
+        # A corrupt route record that is already CLOSED (.outcome.json
+        # sibling present) must never block prune -- over-eager fail-closed
+        # on hundreds of harmless closed records would be its own bug.
+        self._write_route_record("rt-closed-corrupt", n, corrupt=True, closed=True)
+
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            DISTRIBUTION._cleanup_releases(keep=set())
+
+        self.assertFalse(n.is_dir())
+        self.assertNotIn("route-discovery-unreliable", stderr.getvalue())
+        self.assertNotIn("route-record-unparsable", stderr.getvalue())
+
+
+class RouteRecordReaderParityTest(unittest.TestCase):
+    """C47-13 parity: the installer-local reader (`_route_record_launch_home`)
+    must read the exact same `launch_home` field the runtime writer
+    (`capability-route.py`'s `launch_compatibility_tuple()`) actually
+    produces -- the two modules cannot import each other (installer/`
+    utilities/` boundary), so only a fixture that exercises both catches a
+    field-name or nesting drift between them."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.base = Path(self.temp.name)
+        self.release = self.base / "release"
+        (self.release / "core").mkdir(parents=True)
+        (self.release / "core" / "CORE.md").write_text("fixture\n", encoding="utf-8")
+
+        self.repo = self.base / "repo"
+        self.repo.mkdir()
+        import subprocess
+        subprocess.run(["git", "init", "-q", str(self.repo)], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "config", "user.email", "fixture@example.com"], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "config", "user.name", "Fixture"], check=True)
+        (self.repo / "x").write_text("x", encoding="utf-8")
+        subprocess.run(["git", "-C", str(self.repo), "add", "x"], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "init"], check=True)
+
+        self.artifact = self.base / ".agent_reports"
+        self.artifact.mkdir()
+
+        self.prior_env = {
+            key: os.environ.get(key)
+            for key in ("AGENT_HOME", "AGENT_DISPATCH_JOBS", "CLAUDE_HOME")
+        }
+        os.environ["AGENT_HOME"] = str(self.release)
+        os.environ["AGENT_DISPATCH_JOBS"] = str(self.base / "rt" / ".harness" / "dispatch" / "jobs.log")
+        os.environ.pop("CLAUDE_HOME", None)
+        self.addCleanup(self._restore_env)
+
+    def _restore_env(self):
+        for key, value in self.prior_env.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+    def test_installer_route_reader_matches_runtime_launch_tuple_field(self):
+        rows = [{
+            "parent_harness": "codex", "parent_transport": "headless",
+            "parent_sandbox": "workspace-write", "child_harness": "codex",
+            "launch_authority": "conductor", "status": "supported",
+            "probe_source": "parity-fixture", "probe_time": "2026-09-03T00:00:00Z",
+            "failure_class": "", "checked_worktree": str(self.repo.resolve()),
+            "failure_scope": "none", "codex_command": "ok",
+            "retry_on_isolated_worktree": 0,
+        }]
+        gate = {
+            "spec_read": {"satisfied": True, "source": "fixture"},
+            "drift_verdict": "within-spec", "workflow_mode": "tracked",
+            "artifact_guard": {"satisfied": True, "source": "fixture"},
+        }
+        route = ROUTE.compile_route(
+            "autopilot-code", "dev", "strong", self.repo, self.artifact,
+            signals=["shared-contract"], transport="headless", tracking="tracked",
+            tracked_gate_evidence=gate,
+            dispatch_evidence={"tuples": rows, "native_subagent": []},
+        )
+        route_file = self.artifact / ".runtime" / "routes" / f"{route['route_id']}.json"
+        route_file.parent.mkdir(parents=True, exist_ok=True)
+        route_file.write_text(json.dumps(route), encoding="utf-8")
+
+        expected = route["launch_compatibility_tuple"]["launch_home"]["path"]
+        self.assertEqual(DISTRIBUTION._route_record_launch_home(route_file), expected)
+
+
 class PostPromotionPruneAliasIntegrationTest(unittest.TestCase):
     """SD-112 B-3/B-14 rotation legs (installer side): after a real M0-M4
     promotion AND a real `_cleanup_releases` prune of the source release,

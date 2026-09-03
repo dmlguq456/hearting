@@ -1949,5 +1949,42 @@ class PermissionPosturePassthrough(unittest.TestCase):
         self.assertNotIn("--allowedTools", command)
 
 
+class TerminalReconcileRefusalRecordTest(unittest.TestCase):
+    """SD-115 axis 4 (짝), C47-14 (호출부): `reconcile()`'s `except Exception`
+    already reported failure to its caller via `return False` -- it never
+    swallowed the exception. What was missing was a durable trace: an
+    `emit()`-only report is stdout/stderr-only and vanishes with the
+    process (materialize_after_terminal_close's own swallowed failures at
+    least got `_log_pending_delivery_refusal`; this call site got nothing).
+    This asserts the fix leaves both: the emitted event AND a durable
+    refusal record."""
+
+    def test_supervisor_terminal_reconcile_failure_leaves_a_durable_refusal(self):
+        with tempfile.TemporaryDirectory() as td:
+            jobs = Path(td) / "jobs.log"
+            jobs.write_text("", encoding="utf-8")
+            args = SimpleNamespace(jobs=str(jobs), parent_attempt_id=PARENT)
+            emitted = []
+            with mock.patch.object(
+                supervisor, "reconcile_supervisor_terminal",
+                side_effect=RuntimeError("simulated-terminal-reconcile-crash"),
+            ), mock.patch.object(supervisor, "emit", emitted.append):
+                result = supervisor.reconcile(args, terminal=None)
+
+            self.assertFalse(result)
+            self.assertEqual(len(emitted), 1)
+            self.assertEqual(emitted[0]["type"], "dispatch.supervisor.error")
+            self.assertIn("RuntimeError", emitted[0]["reason"])
+
+            log = Path(td) / "logs" / join.PENDING_DELIVERY_LOG
+            self.assertTrue(log.is_file())
+            entries = [
+                json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()
+            ]
+            refusals = [e for e in entries if e["attempt_id"] == PARENT]
+            self.assertEqual(len(refusals), 1)
+            self.assertEqual(refusals[0]["reason"], emitted[0]["reason"])
+
+
 if __name__ == "__main__":
     unittest.main()

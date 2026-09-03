@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import fcntl, hashlib, json, os, stat, subprocess, sys, tempfile, time, unittest
+import fcntl, hashlib, importlib.util, json, os, stat, subprocess, sys, tempfile, time, unittest
 from unittest import mock
 from pathlib import Path
 
@@ -3616,6 +3616,151 @@ class ReservationClaimTimeoutTest(unittest.TestCase):
                 D.wait_governor_reservation_claim(Path("/g"), Path("/r"), "tok", DeadProc())
             self.assertLess(time.monotonic() - start, 5.0)
             self.assertEqual(ctx.exception.reason, "model-worker-reservation-claim-timeout")
+
+
+class SealedLaunchHomeRowFieldTest(unittest.TestCase):
+    # C47-13 (SD-115 axis 4 (a)): dispatch_adapters_v11.test.py's
+    # test_launch_home_row_field_is_the_resolved_release_never_the_current_symlink
+    # spawns each wrapper as a subprocess, which cannot pass in this
+    # environment (noncanonical-model-governor-root fires even on baseline
+    # 9a272951 -- 21 tests/30 failures with no code under test involved).
+    # This burns the shared row-assembly leaf directly instead: every
+    # wrapper's row line is built with the same
+    # f",launch_home={sealed_launch_home(args.agent_home)}" call, so proving
+    # the leaf resolves a mutable pointer to its concrete release proves the
+    # row field for all three adapters without spawning anything.
+    def test_resolves_a_symlinked_pointer_to_the_concrete_release(self):
+        module_root = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory() as td:
+            current = Path(td) / "current"
+            current.symlink_to(module_root)
+            sealed = D.sealed_launch_home(current)
+            self.assertEqual(sealed, module_root.resolve())
+            self.assertNotEqual(str(sealed), str(current))
+
+    def test_non_harness_root_is_returned_unchanged(self):
+        with tempfile.TemporaryDirectory() as td:
+            not_a_release = Path(td) / "not-a-release"
+            not_a_release.mkdir()
+            self.assertEqual(D.sealed_launch_home(not_a_release), not_a_release)
+
+    def test_every_wrapper_seals_launch_home_through_the_shared_leaf(self):
+        # Guards against a future edit silently swapping the shared leaf call
+        # for a raw args.agent_home interpolation in just one wrapper.
+        for harness in ("claude", "codex", "opencode"):
+            source = (module_root_for_adapters() / harness / "bin" / "dispatch-headless.py").read_text()
+            with self.subTest(harness=harness):
+                self.assertIn(
+                    "f\",launch_home={sealed_launch_home(args.agent_home)}\"", source)
+
+
+def module_root_for_adapters():
+    return Path(__file__).resolve().parents[1] / "adapters"
+
+
+class ActualRowAssemblyLaunchHomeTest(unittest.TestCase):
+    """C47-13 (review round 1 🟡3): `SealedLaunchHomeRowFieldTest` above proves
+    the shared `sealed_launch_home` leaf resolves a symlink and that all three
+    wrappers' *source* currently calls it, but it never runs a wrapper's own
+    `append_job()` -- an import alias mistake, a different code branch, or a
+    pipe-field ordering/escaping bug in just one adapter would not show up in
+    either check. This exercises `--register` (append an open job without
+    launching, per `parser()`'s own help text) through each wrapper's real
+    `main()`, in-process via `importlib` (never a subprocess -- no `claude`,
+    `codex`, or `opencode` binary needs to exist, and nothing is launched:
+    `child_spawned=0` in every fixture run below), against a throwaway
+    `AGENT_HOME`/`AGENT_ARTIFACT_ROOT`/`--jobs` -- never the real
+    `~/.local/share/hearting/releases` or this repo's own registry.
+    """
+
+    def _fixture(self, root):
+        repo = root / "repo"
+        repo.mkdir()
+        for cmd in (
+            ["git", "init", "-q", str(repo)],
+            ["git", "-C", str(repo), "config", "user.email", "fixture@example.com"],
+            ["git", "-C", str(repo), "config", "user.name", "Fixture"],
+        ):
+            subprocess.run(cmd, check=True)
+        (repo / "x").write_text("x", encoding="utf-8")
+        subprocess.run(["git", "-C", str(repo), "add", "x"], check=True)
+        subprocess.run(["git", "-C", str(repo), "commit", "-qm", "init"], check=True)
+        artifact_root = root / ".agent_reports"
+        artifact_root.mkdir()
+        release = root / "release"
+        (release / "core").mkdir(parents=True)
+        (release / "core" / "CORE.md").write_text("fixture\n", encoding="utf-8")
+        current = root / "current"
+        current.symlink_to(release)
+        return repo, artifact_root, current, release
+
+    def _load_wrapper(self, harness):
+        path = module_root_for_adapters() / harness / "bin" / "dispatch-headless.py"
+        spec = importlib.util.spec_from_file_location(f"{harness}_append_job_fixture", path)
+        module = importlib.util.module_from_spec(spec)
+        # Importing by path writes `adapters/<h>/bin/__pycache__` into the
+        # projection tree, and `tools/check-adaptation-boundary.sh` fails a
+        # bytecode cache there -- a mandatory pre-commit/pre-push gate. A test
+        # must not make the tree it reads unmergeable.
+        previous = sys.dont_write_bytecode
+        sys.dont_write_bytecode = True
+        try:
+            spec.loader.exec_module(module)
+        finally:
+            sys.dont_write_bytecode = previous
+        return module
+
+    MODEL_ARGS = {
+        "claude": ["--model-role", "fast implementer"],
+        "codex": ["--model", "gpt-test", "--reasoning", "low"],
+        "opencode": ["--model", "provider/test", "--variant", "low"],
+    }
+
+    def test_each_wrapper_seals_the_resolved_release_with_no_current_literal(self):
+        for harness in ("claude", "codex", "opencode"):
+            with self.subTest(harness=harness), tempfile.TemporaryDirectory() as td:
+                root = Path(td)
+                repo, artifact_root, current, release = self._fixture(root)
+                jobs = root / "jobs.log"
+                wrapper = self._load_wrapper(harness)
+                argv = [
+                    "dispatch-headless.py", "--register",
+                    "--worktree", str(repo), "--slug", f"{harness}-append-job-fx",
+                    "--capability", "autopilot-code", "--capability-mode", "debug",
+                    "--jobs", str(jobs), "--attempt-id", f"att-{harness}-append-job-fx",
+                ] + self.MODEL_ARGS[harness]
+                env = {
+                    **os.environ,
+                    "AGENT_HOME": str(current),
+                    "AGENT_ARTIFACT_ROOT": str(artifact_root),
+                    "HOME": str(root / "home"),
+                }
+                for stale in (
+                    "AGENT_DISPATCH_JOBS", "AGENT_MODEL_GOVERNOR_ROOT",
+                    "CLAUDE_CODE_SESSION_ID", "CODEX_THREAD_ID",
+                    # A fixture that drives a wrapper must not inherit the
+                    # ambient session's route binding: run from inside a
+                    # dispatch owner, these make the wrapper refuse with
+                    # `owner-route-verification-failed` and the row is never
+                    # written, so the assertion below would fail for reasons
+                    # that have nothing to do with `launch_home`.
+                    "AGENT_OWNER_ROUTE_FILE", "AGENT_OWNER_ROUTE_ID",
+                    "AGENT_OWNER_ROUTE_HASH", "AGENT_ROUTE_FILE",
+                    "AGENT_ROUTE_ID", "AGENT_ROUTE_NODE",
+                ):
+                    env.pop(stale, None)
+                with mock.patch.dict(os.environ, env, clear=True):
+                    rc = wrapper.main(argv)
+                self.assertEqual(rc, 0, harness)
+                self.assertTrue(jobs.is_file(), harness)
+                row = jobs.read_text(encoding="utf-8").strip()
+                # `--register` never launches (parser() help text); the row's
+                # own `launch_claimed=0` is that adapter-agnostic proof.
+                self.assertIn(",launch_claimed=0", row, harness)
+                fields = row.split("\t")[5].split(",")
+                launch_home_field = next(f for f in fields if f.startswith("launch_home="))
+                self.assertEqual(launch_home_field, f"launch_home={release}", harness)
+                self.assertNotIn("current", launch_home_field, harness)
 
 
 if __name__=="__main__": unittest.main()

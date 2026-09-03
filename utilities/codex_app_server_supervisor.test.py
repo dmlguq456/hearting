@@ -1499,5 +1499,45 @@ class NoticeRenderingIsSharedAcrossSupervisorsTest(unittest.TestCase):
         self.assertIs(codex_module.budget_record.render_notice, claude_module.budget_record.render_notice)
 
 
+class TerminalReconcileRefusalRecordTest(unittest.TestCase):
+    """SD-115 axis 4 (round 2, review 🔴2): mirrors
+    `claude_session_supervisor.test.py`'s `TerminalReconcileRefusalRecordTest`.
+    The Claude adapter's `reconcile()` already writes a durable
+    `log_delivery_refusal()` record when `reconcile_supervisor_terminal(...)`
+    raises; the Codex adapter's identically-shaped `reconcile()` only called
+    `emit()`, which vanishes with the process. This proves the Codex call
+    site now leaves the same durable trace."""
+
+    def test_supervisor_terminal_reconcile_failure_leaves_a_durable_refusal(self):
+        sys.path.insert(0, str(ROOT / "utilities"))
+        import dispatch_completion_join as join
+
+        module = load_supervisor_module()
+        with tempfile.TemporaryDirectory() as td:
+            jobs = Path(td) / "jobs.log"
+            jobs.write_text("", encoding="utf-8")
+            args = argparse.Namespace(jobs=str(jobs), parent_attempt_id=PARENT)
+            emitted = []
+            with mock.patch.object(
+                module, "reconcile_supervisor_terminal",
+                side_effect=RuntimeError("simulated-terminal-reconcile-crash"),
+            ), mock.patch.object(module, "emit", emitted.append):
+                result = module.reconcile(args, terminal=None)
+
+            self.assertFalse(result)
+            self.assertEqual(len(emitted), 1)
+            self.assertEqual(emitted[0]["type"], "dispatch.supervisor.error")
+            self.assertIn("RuntimeError", emitted[0]["reason"])
+
+            log = Path(td) / "logs" / join.PENDING_DELIVERY_LOG
+            self.assertTrue(log.is_file())
+            entries = [
+                json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()
+            ]
+            refusals = [e for e in entries if e["attempt_id"] == PARENT]
+            self.assertEqual(len(refusals), 1)
+            self.assertEqual(refusals[0]["reason"], emitted[0]["reason"])
+
+
 if __name__ == "__main__":
     unittest.main()
