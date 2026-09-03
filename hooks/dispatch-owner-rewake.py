@@ -753,8 +753,14 @@ def _gate_notices(launch: Launch) -> list[str]:
                 # parallel-group rewakes raced, or after `mark_sent_ambiguous`.
                 # The sibling call in `dispatch_session_sweep.sweep_deliver`
                 # always passed it; this one never did, and no test covered it.
+                # `monotonic_ns`, not `time_ns`: `reclaim` compares `now_ns`
+                # against `claim_deadline_ns`, which `claim` stamps from
+                # `time.monotonic_ns()`. An epoch-clock value is astronomically
+                # larger, so every deadline would look passed and a live lease
+                # would be reclaimed out from under its holder. The sweep sibling
+                # passes `time.monotonic_ns()` for the same reason.
                 pending_delivery.reclaim(
-                    root, recipient_key, delivery_id, now_ns=time.time_ns()
+                    root, recipient_key, delivery_id, now_ns=time.monotonic_ns()
                 )
             pending_delivery.claim(
                 root, recipient_key, delivery_id, claim_owner=claim_owner,

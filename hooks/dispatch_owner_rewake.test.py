@@ -1362,7 +1362,20 @@ class GateCarrierTest(unittest.TestCase):
         self.state = self.root / "dispatch"
         self.state.mkdir()
         self.jobs = self.state / "jobs.log"
-        self.jobs.write_text("", encoding="utf-8")
+        # `_gate_notices` finds the recipient through the owner row's `parent_sid`,
+        # so an empty registry means it returns [] and exercises nothing.
+        meta = ",".join([
+            "attempt_schema_version=2", "dispatch_depth=1", "transport=headless",
+            "execution_surface=registered-headless", "registered_worker=1",
+            "attempt_id=att-gate-owner", "parent_sid=session-gate",
+            "parent_completion_delivery=claude-parent-runtime",
+            "route_id=rt-gate", "route_node=frame", "harness=claude",
+        ])
+        self.jobs.write_text(
+            "\t".join(["2026-09-04T00:00:00Z", "open", "/repo", "/wt", "owner", meta])
+            + "\n",
+            encoding="utf-8",
+        )
 
     def _gate_record(self, *, delivery_id="delivery-gate-0001", state=None):
         receipt = {
@@ -1406,33 +1419,57 @@ class GateCarrierTest(unittest.TestCase):
         )
         self.assertTrue(rewake.is_human_gate_record(record))
 
-    def test_reclaiming_an_expired_claim_does_not_kill_the_hook(self):
-        """The regression: `reclaim` is keyword-only in `now_ns`, and the
-        TypeError from omitting it is not a `PendingDeliveryError`, so it
-        escaped the surrounding except and took the whole hook down — the parent
-        then got no completion receipt at all, not merely no gate."""
+    def _launch(self):
+        return rewake.Launch(
+            attempt_id="att-gate-owner", jobs=self.jobs, session_id="session-gate",
+        )
+
+    def test_gate_notices_surfaces_an_open_gate(self):
+        self._gate_record()
+        notices = rewake._gate_notices(self._launch())
+        self.assertEqual(len(notices), 1)
+        self.assertIn("human-gate:frame-review", notices[0])
+
+    def test_gate_notices_survives_an_expired_claim(self):
+        """The regression, executed rather than inspected. `reclaim` is
+        keyword-only in `now_ns`; omitting it raised TypeError, which is not a
+        `PendingDeliveryError`, so it escaped the surrounding except and took the
+        whole hook down — the parent then got no completion receipt at all, not
+        merely no gate. Reached when a sweep claimed the record first, or after
+        `mark_sent_ambiguous`."""
         for state in ("claimed", "sent-ambiguous"):
             with self.subTest(state=state):
-                delivery_id = self._gate_record(
-                    delivery_id=f"delivery-gate-{state[:4]}", state=state,
-                )
-                signature = inspect.signature(rewake.pending_delivery.reclaim)
-                self.assertEqual(
-                    signature.parameters["now_ns"].kind,
-                    inspect.Parameter.KEYWORD_ONLY,
-                )
-                reclaimed = rewake.pending_delivery.reclaim(
-                    self.state, "session-gate", delivery_id, now_ns=time.time_ns(),
-                )
-                self.assertEqual(reclaimed["state"], "pending")
+                self._gate_record(delivery_id=f"delivery-gate-{state[:4]}",
+                                  state=state)
+                time.sleep(0.01)  # let the 1 ms lease lapse
+                notices = rewake._gate_notices(self._launch())
+                self.assertTrue(notices, "the hook produced no notice")
+                self.assertTrue(any("human-gate:frame-review" in n for n in notices))
 
-    def test_the_reclaim_call_site_passes_now_ns(self):
-        """Source census: the call that shipped without it is the one this
-        class exists for, and its sibling in the sweep always had it."""
-        source = Path(rewake.__file__).read_text(encoding="utf-8")
-        index = source.index("pending_delivery.reclaim(")
-        window = source[index:index + 200]
-        self.assertIn("now_ns=", window)
+    def test_a_live_claim_is_left_to_its_holder(self):
+        """The other half of the same branch: an unexpired lease belongs to
+        whoever holds it, so this carrier stays quiet rather than reclaiming."""
+        delivery_id = self._gate_record(delivery_id="delivery-gate-live")
+        rewake.pending_delivery.claim(
+            self.state, "session-gate", delivery_id,
+            claim_owner="the-sweep", lease_seconds=120.0,
+        )
+        self.assertEqual(rewake._gate_notices(self._launch()), [])
+        record = json.loads(
+            rewake.pending_delivery.record_path(
+                self.state, "session-gate", delivery_id
+            ).read_text(encoding="utf-8")
+        )
+        self.assertEqual(record["claim_owner"], "the-sweep")
+
+    def test_reclaim_is_keyword_only_so_the_omission_was_a_type_error(self):
+        """Why the omission was fatal rather than a refusal: the signature makes
+        it a TypeError, and only `PendingDeliveryError` was being caught."""
+        signature = inspect.signature(rewake.pending_delivery.reclaim)
+        self.assertEqual(signature.parameters["now_ns"].kind,
+                         inspect.Parameter.KEYWORD_ONLY)
+        with self.assertRaises(TypeError):
+            rewake.pending_delivery.reclaim(self.state, "session-gate", "delivery-x")
 
     def test_a_non_gate_record_is_left_to_the_ordinary_path(self):
         receipt = {

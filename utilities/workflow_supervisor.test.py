@@ -1562,6 +1562,93 @@ class TestGateSubjectNotCaller(WorkflowFixture):
                       "--block", "--jobs", str(jobs)])
         self.assertIn("gate-artifact-required", str(caught.exception))
 
+    def test_a_repeated_block_converges_on_one_record(self):
+        """Review New-1: `assert_transition` returns early when current == target
+        and `set_workflow_state` appends regardless, so without a state guard a
+        second `--block` minted a second raise epoch and a second record. The
+        release then acked only the newest and the older stayed pending forever,
+        which is the closed-gate announcement #3 exists to remove."""
+        _route, path = self.two_stage_route(human_gate="frame-review")
+        jobs, session, _attempt = self.owner_registry(route_id="rt-fixture0000000")
+        seen = []
+        for _ in range(2):
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                self.assertEqual(0, SUP.main([
+                    "gate", "--route", str(path), "--gate", "frame-review", "--block",
+                    "--jobs", str(jobs), "--artifact", "a.json"]))
+            seen.append(json.loads(buf.getvalue()))
+        self.assertTrue(seen[0]["delivery_created"])
+        self.assertFalse(seen[1]["delivery_created"])
+        self.assertEqual(seen[0]["delivery"], seen[1]["delivery"])
+        directory = PENDING.record_directory(
+            Path(jobs).resolve(strict=False).parent, session)
+        self.assertEqual(len(list(directory.glob("delivery-*.json"))), 1)
+
+    def test_blocking_a_different_gate_while_one_is_in_force_is_refused(self):
+        _route, path = self.two_stage_route(human_gate="frame-review")
+        jobs, _session, _attempt = self.owner_registry(route_id="rt-fixture0000000")
+        with contextlib.redirect_stdout(io.StringIO()):
+            SUP.main(["gate", "--route", str(path), "--gate", "frame-review", "--block",
+                      "--jobs", str(jobs), "--artifact", "a.json"])
+        route = json.loads(path.read_text(encoding="utf-8"))
+        route["human_gates"].append("other-review")
+        route["human_gate_bindings"].append(
+            {"gate": "other-review", "node": "verify", "position": "entry"})
+        path.write_text(json.dumps(route), encoding="utf-8")
+        with self.assertRaises(SUP.SupervisorError) as caught:
+            SUP.main(["gate", "--route", str(path), "--gate", "other-review", "--block",
+                      "--jobs", str(jobs), "--artifact", "b.json"])
+        self.assertIn("gate-already-blocked", str(caught.exception))
+
+    def test_the_created_flag_uses_the_clock_create_stamps_with(self):
+        """`PENDING.create` stamps `created_at_ns` with `time.monotonic_ns()`.
+        Comparing it against `time.time_ns()` made the flag always False, so
+        `delivery_created` misreported and the rollback could never fire."""
+        source = Path(SUP.__file__).read_text(encoding="utf-8")
+        index = source.index("before_ns = ")
+        self.assertIn("monotonic_ns", source[index:index + 40])
+        _route, path = self.two_stage_route(human_gate="frame-review")
+        jobs, _session, _attempt = self.owner_registry(route_id="rt-fixture0000000")
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            SUP.main(["gate", "--route", str(path), "--gate", "frame-review", "--block",
+                      "--jobs", str(jobs), "--artifact", "a.json"])
+        self.assertTrue(json.loads(buf.getvalue())["delivery_created"])
+
+    def test_release_retirement_survives_a_ledger_failure(self):
+        """Review New-2: `ledger_for`/`gate_raise_epoch` sat outside the try, so a
+        non-OSError there aborted the CLI after the release had already been
+        committed, and the retry then failed with "workflow is RUNNING"."""
+        route, path = self.two_stage_route(human_gate="frame-review")
+        jobs, _session, _attempt = self.owner_registry(route_id="rt-fixture0000000")
+        with contextlib.redirect_stdout(io.StringIO()):
+            SUP.main(["gate", "--route", str(path), "--gate", "frame-review", "--block",
+                      "--jobs", str(jobs), "--artifact", "a.json"])
+        with mock.patch.object(SUP, "gate_raise_epoch",
+                               side_effect=RuntimeError("ledger unreadable")):
+            self.assertIsNone(SUP.retire_gate_delivery(route, "frame-review", str(jobs)))
+
+    def test_release_subcommand_can_retire_its_record(self):
+        """Review #3: the `release` subparser had no `--jobs`, so retirement there
+        was silently skipped."""
+        _route, path = self.two_stage_route(
+            human_gate="frame-review",
+            continuation={"kind": "human-gate", "gate": "frame-review"})
+        jobs, session, _attempt = self.owner_registry(route_id="rt-fixture0000000")
+        root = Path(jobs).resolve(strict=False).parent
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            SUP.main(["gate", "--route", str(path), "--gate", "frame-review", "--block",
+                      "--jobs", str(jobs), "--artifact", "a.json"])
+        delivery_id = json.loads(
+            Path(json.loads(buf.getvalue())["delivery"]).read_text("utf-8")
+        )["delivery_id"]
+        with contextlib.redirect_stdout(io.StringIO()):
+            SUP.main(["release", "--route", str(path), "--gate", "frame-review",
+                      "--decision", "stop", "--jobs", str(jobs)])
+        self.assertEqual(PENDING.read(root, session, delivery_id)["state"], "acked")
+
     def test_no_test_in_this_class_writes_outside_its_temporary_root(self):
         """The leak was a test writing into real runtime state. Pin the invariant."""
         canonical = Path.home() / ".agent_reports"

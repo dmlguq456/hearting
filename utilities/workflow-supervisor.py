@@ -551,6 +551,25 @@ def cmd_gate(args):
             # blocked gate nobody can be told about, and there is no compensating
             # action for that. `delivery_id` is deterministic, so the unlink
             # below can only remove the record this call just created.
+            blocked_on = currently_blocked_gate(ledger)
+            if blocked_on is not None and blocked_on != args.gate:
+                raise SupervisorError(
+                    f"gate-already-blocked: workflow is blocked on {blocked_on!r}, "
+                    f"not {args.gate!r}"
+                )
+            if blocked_on == args.gate:
+                # `assert_transition` returns early when current == target and
+                # `set_workflow_state` appends anyway, so without this guard a
+                # repeated `--block` minted a SECOND raise epoch and a second
+                # record. Releasing then acked only the newest, leaving the older
+                # one pending forever — the sweep would announce a closed gate on
+                # every prompt, the exact symptom the release-time retirement
+                # exists to remove. Converge on the raise already made.
+                payload.update(existing_gate_delivery(route, args.gate, args.jobs))
+                payload.update({"action": "blocked",
+                                "workflow_state": ledger.state()["workflow_state"]})
+                print(json.dumps(payload, sort_keys=True))
+                return 0
             if not args.artifact or args.artifact == "-":
                 # Contract (a) names the reviewable artifact as part of the
                 # record. A gate that arrives saying `artifact=-` tells the
@@ -572,10 +591,7 @@ def cmd_gate(args):
                                           actor="gate")
             except BaseException:
                 if created:
-                    try:
-                        record_path.unlink()
-                    except OSError:
-                        pass
+                    _rollback_gate_delivery(record_path)
                 raise
             payload.update({"delivery": str(record_path), "delivery_created": created})
             action = "blocked"
@@ -600,6 +616,8 @@ def cmd_gate(args):
 # No new polling surface, no new command, no schema change.
 
 # The recipient kinds whose carriers were actually taught `human-gate:` (v59).
+# One kind, two carriers: asyncRewake and the UserPromptSubmit sweep both
+# deliver to a `claude-parent-runtime` recipient.
 GATE_CARRIER_KINDS = frozenset({"claude-parent-runtime"})
 
 GATE_SESSION_GENERATION = "unsupported"
@@ -680,6 +698,44 @@ def gate_recipient(route, jobs_path):
     return recipient_key, recipient_kind, attempt_id, meta.get("harness", "-")
 
 
+def currently_blocked_gate(ledger):
+    """The gate the workflow is blocked on right now, or None.
+
+    Read from the journal rather than inferred: `state()` carries the workflow
+    state but not which gate produced it.
+    """
+    if ledger.state()["workflow_state"] != "BLOCKED_HUMAN_GATE":
+        return None
+    for entry in reversed(ledger.journal()):
+        if entry.get("workflow_state") != "BLOCKED_HUMAN_GATE":
+            continue
+        gate = (entry.get("evidence") or {}).get("gate")
+        if gate:
+            return gate
+    return None
+
+
+def existing_gate_delivery(route, gate, jobs):
+    """The record for the raise already in force, for a repeated `--block`.
+
+    Reports `delivery_created: False` and never allocates a new raise epoch, so
+    one raise keeps one record.
+    """
+    ledger = ledger_for(route)
+    epoch = max(gate_raise_epoch(ledger, gate) - 1, 0)
+    try:
+        jobs_path = Path(jobs) if jobs else default_jobs_path()
+        recipient_key, _kind, attempt_id, _harness = gate_recipient(route, jobs_path)
+        root = Path(jobs_path).resolve(strict=False).parent
+    except (SupervisorError, OSError):
+        return {"delivery": None, "delivery_created": False}
+    delivery_id = gate_delivery_id(recipient_key, route["route_id"], gate,
+                                   attempt_id, epoch)
+    path = PENDING.record_path(root, recipient_key, delivery_id)
+    return {"delivery": str(path) if path.is_file() else None,
+            "delivery_created": False}
+
+
 def gate_raise_epoch(ledger, gate):
     """How many times this gate has already been raised on this route.
 
@@ -713,9 +769,11 @@ def gate_delivery_id(recipient_key, route_id, gate, attempt_id, epoch):
         gate reached nobody — the precise failure SD-123 (8) exists to end.
 
     So the discriminator is the raise: attempt id plus the ledger's raise epoch.
-    Repeated work inside one raise still converges (the epoch is read before the
-    transition is appended), and the ledger refuses a second BLOCKED transition
-    while one is open, so no legitimate caller creates two records for one raise.
+    Repeated work inside one raise converges because `cmd_gate` refuses to mint a
+    second raise while one is in force. It is NOT the ledger that prevents it:
+    `assert_transition` returns early when current == target and
+    `set_workflow_state` appends regardless, so a second `--block` really did
+    create a second record before that guard existed.
     """
     payload = json.dumps(
         {"attempt_id": attempt_id, "epoch": epoch, "gate": gate,
@@ -770,14 +828,20 @@ def create_gate_delivery(route, gate, artifact, jobs_path, epoch):
     )
     root = Path(jobs_path).resolve(strict=False).parent
     path = PENDING.record_path(root, recipient_key, delivery_id)
+    # Reading existence before `create` was a TOCTOU, and holding
+    # `PENDING._record_lock` across the call deadlocks because `create` takes the
+    # same flock on its own descriptor. So ask the record itself: `create` stamps
+    # `created_at_ns` inside that lock, and a record that already existed carries
+    # an older stamp than this instant.
+    #
+    # The clock has to be the SAME clock. `create` uses `time.monotonic_ns()`;
+    # comparing against `time.time_ns()` made this test always false, so
+    # `delivery_created` was always reported False and the compensating rollback
+    # below could never fire. CLOCK_MONOTONIC is system-wide on Linux, so the
+    # comparison holds across processes.
+    before_ns = time.monotonic_ns()
     try:
-        with PENDING._record_lock(path):
-            # Read existence under the same lock `create` takes, so the caller's
-            # rollback can only ever unlink the record this call created. Reading
-            # it outside let a concurrent raise of the same gate turn our
-            # compensating `unlink` into the deletion of someone else's record.
-            existed = PENDING._read_unlocked(path) is not None
-        PENDING.create(
+        record = PENDING.create(
             root,
             recipient_kind=recipient_kind,
             recipient_key=recipient_key,
@@ -794,7 +858,23 @@ def create_gate_delivery(route, gate, artifact, jobs_path, epoch):
         )
     except PENDING.PendingDeliveryError as exc:
         raise SupervisorError(f"gate-delivery-refused: {exc}") from exc
-    return path, not existed
+    created = bool(record) and (record.get("created_at_ns") or 0) >= before_ns
+    return path, created
+
+
+def _rollback_gate_delivery(record_path):
+    """Remove a gate record whose transition did not happen — but only while it is
+    still untouched, so a carrier that already claimed it never loses it."""
+    try:
+        record = json.loads(Path(record_path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return
+    if not isinstance(record, dict) or record.get("state") != "pending":
+        return
+    try:
+        Path(record_path).unlink()
+    except OSError:
+        pass
 
 
 def _gate_route_node(route, gate_name):
@@ -838,12 +918,17 @@ def retire_gate_delivery(route, gate, jobs):
         jobs_path = Path(jobs) if jobs else default_jobs_path()
         recipient_key, _kind, attempt_id, _harness = gate_recipient(route, jobs_path)
         root = Path(jobs_path).resolve(strict=False).parent
-    except (SupervisorError, OSError):
+        # Inside the try as well: the release transition and its sidecar row are
+        # already committed by the time this runs, so a `WorkflowStateError` from
+        # reading the ledger would abort the CLI with no payload and leave a retry
+        # failing with "workflow is RUNNING". Retirement is best-effort by design.
+        ledger = ledger_for(route)
+        highest = gate_raise_epoch(ledger, gate)
+    except Exception:
         return None
-    ledger = ledger_for(route)
     # Every raise of this gate, newest first: a release closes whichever raise is
     # still outstanding, and older ones may legitimately be acked already.
-    for epoch in range(gate_raise_epoch(ledger, gate), -1, -1):
+    for epoch in range(highest, -1, -1):
         delivery_id = gate_delivery_id(recipient_key, route["route_id"], gate,
                                        attempt_id, epoch)
         try:
@@ -1038,7 +1123,7 @@ def cmd_release(args):
         payload["actor_kind"] = actor_kind
         record_gate_release(route, args.route, gate=args.gate, decision=args.decision,
                             released_by=actor, actor_kind=actor_kind)
-        retire_gate_delivery(route, args.gate, getattr(args, "jobs", None))
+        retire_gate_delivery(route, args.gate, args.jobs)
     print(json.dumps(payload, sort_keys=True))
     return 0
 
@@ -1536,6 +1621,10 @@ def build_parser():
     release.add_argument("--gate", required=True)
     release.add_argument("--decision", required=True, choices=("proceed", "revise", "stop"))
     release.add_argument("--actor")
+    release.add_argument("--jobs",
+                         help="canonical registry, used to retire the gate's pending "
+                              "delivery record; without it retirement is skipped and a "
+                              "released gate keeps being announced by the sweep")
 
     status = sub.add_parser("status", help="portable workflow/stage/resource projection")
     status.add_argument("--route", required=True)
