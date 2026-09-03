@@ -192,7 +192,15 @@ class Fixture(unittest.TestCase):
         return W.resplit_legacy_cycle(self.root, gate="r2", lump_cycle_id=self.lump_cycle_id,
                                       route_file=route_file, **kw)
 
+    def backup_root(self):
+        """D-84's rule reaches R3: the tar lives outside the artifact root, so every
+        real R3 in these tests names one (`base/backup-root`, a sibling of `self.root`)."""
+        path = Path(self._tmp.name) / "backup-root"
+        path.mkdir(exist_ok=True)
+        return path
+
     def r3(self, **kw):
+        kw.setdefault("backup_root", self.backup_root())
         return W.resplit_legacy_cycle(self.root, gate="r3", lump_cycle_id=self.lump_cycle_id, **kw)
 
     def run_full(self):
@@ -239,7 +247,10 @@ class ScanAndPredicateTests(Fixture):
         idx = W.scan_lumps(self.root, root_slug=self.root_slug)
         unit = next(u for u in idx["lumps"][0]["cycle_units"]
                    if u["cycle_key"] == f"legacy:{self.root_slug}:research/topic-x")
-        self.assertEqual(unit["started_on"], "2026-03-15")
+        # D-6 wants an RFC3339 instant; D-79 yields a date. The date is widened to
+        # that day's UTC midnight rather than being sealed as an invalid timestamp.
+        self.assertEqual(unit["started_on"], "2026-03-15T00:00:00Z")
+        self.assertEqual(unit["started_on_source"], "entry-document-date")
         lump_record = P.read_cycle_record(self.root, self.lump_cycle_id)
         self.assertNotEqual(unit["started_on"], lump_record.get("started_on"))
 
@@ -1325,7 +1336,9 @@ class RollbackAndCrashTests(Fixture):
         before = sorted(str(p) for p in W.P._walk_files(lump_artifacts_dir) if p.is_file())
         self.assertTrue(before)
         run_dir = W._find_run_dir(self.root, self.lump_cycle_id)
-        archive_path = run_dir / "legacy-artifacts.tar"
+        backup_root = self.backup_root()
+        identity = P.artifact_lifecycle.read_root_identity(self.root)
+        archive_path = W._r3_backup_dir(self.root, run_dir, backup_root, identity) / "legacy-artifacts.tar"
         real_sha = C._sha
         calls = {"n": 0}
 
@@ -1338,7 +1351,7 @@ class RollbackAndCrashTests(Fixture):
 
         with mock.patch.object(W.C, "_sha", side_effect=tamper_reread):
             with self.assertRaises(W.ResplitError) as ctx:
-                self.r3()
+                self.r3(backup_root=backup_root)
         self.assertEqual(ctx.exception.code, "backup-incomplete")
         self.assertEqual(calls["n"], 2)
         self.assertTrue((run_dir / "backup-seal.json").is_file())
@@ -1455,6 +1468,372 @@ class SupersessionEventTests(Fixture):
         })
         record = P.read_cycle_record(self.root, self.lump_cycle_id)
         self.assertEqual(record["superseded_event_id"], event["event_id"])
+
+
+HEARTING_CANARY_ROOT = Path("/home/nas/user/Uihyeop/personal/hearting/.agent_reports")
+HEARTING_CANARY_LUMP = "cyc_7d129f5a4b4059fdc8ff3005333e1668"
+
+
+class StartedOnTests(Fixture):
+    """(a) D-79: the cycle's own date, and the display-quality row that corrects it."""
+
+    def cycles(self):
+        run_dir = W._find_run_dir(self.root, self.lump_cycle_id)
+        journal = json.loads((run_dir / "journal-r2.json").read_text())
+        return {c["cycle_key"]: c for c in journal["cycles"]}
+
+    def test_started_on_is_the_work_date_not_the_resplit_run_clock(self):
+        self.run_full()
+        expected = {
+            f"legacy:{self.root_slug}:plans/2026-04-01_alpha": "2026-04-01T00:00:00Z",
+            f"legacy:{self.root_slug}:plans/2026-04-02_beta": "2026-04-02T00:00:00Z",
+            f"legacy:{self.root_slug}:experiments/2026-04-03_exp": "2026-04-03T00:00:00Z",
+            f"legacy:{self.root_slug}:research/topic-x": "2026-03-15T00:00:00Z",
+        }
+        cycles = self.cycles()
+        self.assertEqual(set(cycles), set(expected))
+        for key, want in expected.items():
+            cyc = cycles[key]
+            record = P.read_cycle_record(self.root, cyc["cycle_id"])
+            manifest = json.loads((Path(cyc["cycle_dir"]) / "manifest.json").read_text())
+            self.assertEqual(record["started_on"], want, key)
+            self.assertEqual(manifest["cycle"]["started_on"], want, key)
+            # the run's own clock stays, under a name that says what it is
+            self.assertNotIn("resplit_started_on", record)
+            self.assertTrue(record["resplit_run_at"].endswith("Z"))
+            self.assertNotEqual(record["resplit_run_at"], record["started_on"])
+
+    def test_started_on_source_records_which_priority_decided(self):
+        self.r1()
+        route, route_file = self.route()
+        self.r2(route_file)
+        cycles = self.cycles()
+        self.assertEqual(
+            cycles[f"legacy:{self.root_slug}:plans/2026-04-01_alpha"]["started_on_source"],
+            "directory-date-prefix")
+        self.assertEqual(
+            cycles[f"legacy:{self.root_slug}:research/topic-x"]["started_on_source"],
+            "entry-document-date")
+
+    def display_quality_proposal(self, *, value="2026-02-01", target=None):
+        proposal = self.build_proposal()
+        target = target or f"legacy:{self.root_slug}:research/topic-x"
+        proposal["proposals"].append({
+            "proposal_id": "prop-dq", "fingerprint": "fp-prop-dq", "lane": "display-quality",
+            "target_ids": [target], "cited_evidence_ids": ["research/topic-x/report.md"],
+            "source_cutoff": proposal["source_cutoff"], "producer_version": "v1",
+            "projection_version": "v1", "policy_version": "v1",
+            "proposed_value": {"started_on": value}, "confidence": 0.8,
+            "rationale": "the entry document's date is the review date, not the start date",
+        })
+        return proposal
+
+    def test_display_quality_started_on_is_applied_at_r1_and_used_by_r2(self):
+        self.r1(self.write_proposal(self.display_quality_proposal()))
+        route, route_file = self.route()
+        self.r2(route_file)
+        cyc = self.cycles()[f"legacy:{self.root_slug}:research/topic-x"]
+        record = P.read_cycle_record(self.root, cyc["cycle_id"])
+        manifest = json.loads((Path(cyc["cycle_dir"]) / "manifest.json").read_text())
+        self.assertEqual(record["started_on"], "2026-02-01T00:00:00Z")
+        self.assertEqual(manifest["cycle"]["started_on"], "2026-02-01T00:00:00Z")
+        self.assertEqual(record["started_on_source"], "display-quality-proposal")
+        # the sealed inventory keeps the derived value; only the verdict carries the fix
+        run_dir = W._find_run_dir(self.root, self.lump_cycle_id)
+        inv = json.loads((W._admission_dir(run_dir) / "lump-inventory.json").read_text())
+        unit = next(u for u in inv["lumps"][0]["cycle_units"] if u["bucket"] == "research")
+        self.assertEqual(unit["started_on"], "2026-03-15T00:00:00Z")
+
+    def test_display_quality_started_on_malformed_value_is_typed_hold(self):
+        campaigns_before = sorted(p.name for p in (self.root / "campaigns").iterdir())
+        cycles_before = sorted(r["cycle_id"] for r in P.list_cycle_records(self.root))
+        result = self.r1(self.write_proposal(self.display_quality_proposal(value="last April")))
+        self.assertEqual(result["status"], "hold")
+        self.assertEqual(result["code"], "display-quality-invalid")
+        # A-16.3: a hold changes the canonical artifact tree not at all
+        self.assertEqual(sorted(p.name for p in (self.root / "campaigns").iterdir()), campaigns_before)
+        self.assertEqual(sorted(r["cycle_id"] for r in P.list_cycle_records(self.root)), cycles_before)
+
+    def test_display_quality_started_on_unknown_target_is_typed_hold(self):
+        proposal = self.display_quality_proposal(target=f"legacy:{self.root_slug}:plans/not-a-unit")
+        result = self.r1(self.write_proposal(proposal))
+        self.assertEqual(result["status"], "hold")
+        self.assertEqual(result["code"], "display-quality-invalid")
+        self.assertTrue(result["detail"].startswith("unknown-target:"))
+
+    def test_display_quality_started_on_conflicting_rows_are_typed_hold(self):
+        proposal = self.display_quality_proposal(value="2026-02-01")
+        conflict = dict(proposal["proposals"][-1])
+        conflict["proposal_id"] = "prop-dq2"
+        conflict["proposed_value"] = {"started_on": "2026-02-02"}
+        proposal["proposals"].append(conflict)
+        result = self.r1(self.write_proposal(proposal))
+        self.assertEqual(result["status"], "hold")
+        self.assertEqual(result["code"], "display-quality-invalid")
+        self.assertTrue(result["detail"].startswith("conflict:"))
+
+    def test_dry_run_preview_reports_the_derived_date_capability_and_priority(self):
+        self.r1(self.write_proposal(self.display_quality_proposal()))
+        route, route_file = self.route()
+        preview = self.r2(route_file, dry_run=True)
+        by_key = {c["cycle_key"]: c for c in preview["cycles"]}
+        research = by_key[f"legacy:{self.root_slug}:research/topic-x"]
+        self.assertEqual(research["started_on"], "2026-02-01T00:00:00Z")
+        self.assertEqual(research["started_on_source"], "display-quality-proposal")
+        self.assertEqual(research["capability"], "autopilot-research")
+        self.assertEqual(research["intensity"], W.RESPLIT_CYCLE_INTENSITY)
+        alpha = by_key[f"legacy:{self.root_slug}:plans/2026-04-01_alpha"]
+        self.assertEqual(alpha["started_on_source"], "directory-date-prefix")
+        self.assertEqual(alpha["capability"], "autopilot-code")
+
+
+class PerCycleRouteClosureTests(Fixture):
+    """(b) D-10/D-77-b: the retro seal reports `completed`, on a ledger-admitted route."""
+
+    def cycles(self):
+        run_dir = W._find_run_dir(self.root, self.lump_cycle_id)
+        return json.loads((run_dir / "journal-r2.json").read_text())["cycles"]
+
+    def test_new_cycles_seal_as_completed(self):
+        self.run_full()
+        for cyc in self.cycles():
+            manifest = json.loads((Path(cyc["cycle_dir"]) / "manifest.json").read_text())
+            self.assertEqual(manifest["cycle"]["state"], "completed", cyc["cycle_key"])
+            terminal = [e for e in manifest["events"] if e["event_type"] == "route.terminal.recorded"]
+            self.assertEqual(len(terminal), 1, cyc["cycle_key"])
+
+    def test_per_cycle_route_is_admitted_to_the_canonical_ledger_and_closed(self):
+        self.run_full()
+        run_dir = W._find_run_dir(self.root, self.lump_cycle_id)
+        for cyc in self.cycles():
+            record = P.read_cycle_record(self.root, cyc["cycle_id"])
+            route_file = Path(record["route_file"])
+            self.assertEqual(route_file, L.canonical_route_path(self.root, record["route_id"]))
+            self.assertTrue(route_file.is_file())
+            self.assertTrue(L.canonical_outcome_path(self.root, record["route_id"]).is_file())
+            route = json.loads(route_file.read_text())
+            self.assertEqual(route["resplit_cycle_key"], cyc["cycle_key"])
+            self.assertTrue(P.route_is_closed(self.root, route))
+            # the run_dir copy survives as an execution log, not as identity
+            self.assertTrue((run_dir / "routes" / f"{record['route_id']}.json").is_file())
+
+    def test_route_id_is_not_derived_from_the_cycle_key_or_caller_route(self):
+        self.run_full()
+        for cyc in self.cycles():
+            record = P.read_cycle_record(self.root, cyc["cycle_id"])
+            seeded = "rt-" + __import__("hashlib").sha256(
+                f"{json.loads(Path(record['route_file']).read_text())['route_id']}:{cyc['cycle_key']}"
+                .encode()).hexdigest()[:16]
+            self.assertNotEqual(record["route_id"], seeded)
+            self.assertTrue(W.P.artifact_lifecycle._ROUTE_ID_RE.fullmatch(record["route_id"]))
+
+    def test_rerun_reuses_the_route_the_cycle_key_already_maps_to(self):
+        self.r1()
+        route, route_file = self.route()
+        self.r2(route_file)
+        first = {c["cycle_key"]: P.read_cycle_record(self.root, c["cycle_id"])["route_id"]
+                 for c in self.cycles()}
+        again = self.r2(route_file)
+        self.assertEqual(again["status"], "already-applied")
+        second = {c["cycle_key"]: P.read_cycle_record(self.root, c["cycle_id"])["route_id"]
+                  for c in self.cycles()}
+        self.assertEqual(first, second)
+        for cycle_key, route_id in first.items():
+            found = W._find_ledger_route_by_cycle_key(self.root, cycle_key)
+            self.assertEqual(found["route_id"], route_id)
+
+    def test_rollback_releases_every_route_it_admitted(self):
+        self.r1()
+        route, route_file = self.route()
+        with self.assertRaises(W.ResplitError):
+            self.r2(route_file, crash_after_phase="prepared")
+        admitted = [json.loads(p.read_text()) for p in
+                    sorted((self.root / ".runtime" / "routes").glob("*.json"))
+                    if not p.name.endswith(".outcome.json")]
+        self.assertTrue([r for r in admitted if "resplit_cycle_key" in r])
+        self.r2(route_file)  # the retry rolls the prepared batch back
+        left = [json.loads(p.read_text()) for p in
+                sorted((self.root / ".runtime" / "routes").glob("*.json"))
+                if not p.name.endswith(".outcome.json")]
+        self.assertEqual([r for r in left if "resplit_cycle_key" in r], [])
+
+
+class BucketCapabilityTests(Fixture):
+    """(c) D-7/D-79: capability follows the bucket, not the route that ran the resplit."""
+
+    def test_capability_and_route_capability_come_from_the_bucket(self):
+        self.run_full()
+        run_dir = W._find_run_dir(self.root, self.lump_cycle_id)
+        cycles = json.loads((run_dir / "journal-r2.json").read_text())["cycles"]
+        want = {
+            f"legacy:{self.root_slug}:plans/2026-04-01_alpha": "autopilot-code",
+            f"legacy:{self.root_slug}:plans/2026-04-02_beta": "autopilot-code",
+            f"legacy:{self.root_slug}:experiments/2026-04-03_exp": "autopilot-lab",
+            f"legacy:{self.root_slug}:research/topic-x": "autopilot-research",
+        }
+        for cyc in cycles:
+            record = P.read_cycle_record(self.root, cyc["cycle_id"])
+            expected = want[cyc["cycle_key"]]
+            self.assertEqual(record["capability"], expected, cyc["cycle_key"])
+            self.assertEqual(record["route_capability"], expected, cyc["cycle_key"])
+            self.assertEqual(record["intensity"], W.RESPLIT_CYCLE_INTENSITY)
+            manifest = json.loads((Path(cyc["cycle_dir"]) / "manifest.json").read_text())
+            self.assertEqual({a["capability"] for a in manifest["artifacts"]}, {expected})
+
+    def test_caller_route_capability_is_not_inherited(self):
+        self.run_full()
+        run_dir = W._find_run_dir(self.root, self.lump_cycle_id)
+        cycles = json.loads((run_dir / "journal-r2.json").read_text())["cycles"]
+        research = next(c for c in cycles if c["bucket"] == "research")
+        record = P.read_cycle_record(self.root, research["cycle_id"])
+        # the caller route that ran R2 is `autopilot-code`; the research cycle is not
+        self.assertEqual(record["capability"], "autopilot-research")
+        self.assertEqual(W.BUCKET_CAPABILITY["research"], "autopilot-research")
+
+
+class CompatSupersessionTests(Fixture):
+    """(d) D-82/A-16.4: an overridden map entry is marked, and its file is untouched."""
+
+    def test_superseded_by_and_at_are_written_on_the_overridden_map(self):
+        state_before = C.load_map_state(self.root)
+        old_paths = [e["path"] for e in state_before["maps"]]
+        old_bytes = {p: Path(p).read_bytes() for p in old_paths}
+        self.run_full()
+        compat = json.loads(C.compat_path(self.root).read_text())
+        self.assertEqual(len(compat["maps"]), len(old_paths) + 1)
+        new_row = compat["maps"][-1]
+        for row in compat["maps"][:-1]:
+            self.assertEqual(row["superseded_by"], new_row["sha256"], row["path"])
+            self.assertTrue(row["superseded_at"].endswith("Z"))
+            # the old map file's bytes and its recorded digest are unchanged
+            self.assertEqual(Path(row["path"]).read_bytes(), old_bytes[row["path"]])
+            self.assertEqual(row["sha256"], next(
+                e["sha256"] for e in state_before["maps"] if e["path"] == row["path"]))
+        self.assertNotIn("superseded_by", new_row)
+
+    def test_load_map_state_exposes_the_supersession(self):
+        self.run_full()
+        state = C.load_map_state(self.root)
+        self.assertEqual(state["missing"], [])
+        self.assertEqual(state["drifted"], [])
+        self.assertTrue(all(e["superseded_by"] for e in state["maps"][:-1]))
+        self.assertIsNone(state["maps"][-1]["superseded_by"])
+
+
+class BackupRootTests(Fixture):
+    """(e) D-84: R3's tar lives outside the artifact root, run_dir keeps the pointer."""
+
+    def backup_dir(self):
+        run_dir = W._find_run_dir(self.root, self.lump_cycle_id)
+        identity = P.artifact_lifecycle.read_root_identity(self.root)
+        return W._r3_backup_dir(self.root, run_dir, self.backup_root(), identity)
+
+    def test_archive_lands_under_backup_root_and_run_dir_keeps_only_the_pointer(self):
+        self.run_full()
+        run_dir = W._find_run_dir(self.root, self.lump_cycle_id)
+        backup_dir = self.backup_dir()
+        archive = backup_dir / "legacy-artifacts.tar"
+        self.assertTrue(archive.is_file())
+        self.assertEqual(backup_dir.parent.name, ROOT_ID)
+        self.assertFalse((run_dir / "legacy-artifacts.tar").exists())
+        location = json.loads((run_dir / "backup-location.json").read_text())
+        self.assertEqual(location["archive"], str(archive))
+        self.assertEqual(location["archive_sha256"], "sha256:" + C._sha(archive))
+        # the seal copy in the run_dir is byte-identical to the sealed one
+        self.assertEqual((run_dir / "backup-seal.json").read_bytes(),
+                         (backup_dir / "backup-seal.json").read_bytes())
+        self.assertFalse(W._is_within(self.root, str(archive)))
+
+    def test_backup_root_inside_the_artifact_root_is_refused(self):
+        self.r1()
+        route, route_file = self.route()
+        self.r2(route_file)
+        inside = self.root / "_scratch" / "backups"
+        inside.mkdir(parents=True, exist_ok=True)
+        with self.assertRaises(W.ResplitError) as ctx:
+            self.r3(backup_root=inside)
+        self.assertEqual(ctx.exception.code, "backup-root-inside-artifact-root")
+        run_dir = W._find_run_dir(self.root, self.lump_cycle_id)
+        self.assertFalse((run_dir / "journal-r3.json").exists())
+
+    def test_backup_root_is_required(self):
+        self.r1()
+        route, route_file = self.route()
+        self.r2(route_file)
+        with self.assertRaises(W.ResplitError) as ctx:
+            W.resplit_legacy_cycle(self.root, gate="r3", lump_cycle_id=self.lump_cycle_id)
+        self.assertEqual(ctx.exception.code, "backup-root-required")
+
+    def test_dry_run_needs_no_backup_root_and_writes_nothing(self):
+        self.r1()
+        route, route_file = self.route()
+        self.r2(route_file)
+        run_dir = W._find_run_dir(self.root, self.lump_cycle_id)
+        before = sorted(p.name for p in run_dir.iterdir())
+        result = W.resplit_legacy_cycle(self.root, gate="r3", lump_cycle_id=self.lump_cycle_id,
+                                        dry_run=True)
+        self.assertEqual(result["status"], "dry-run")
+        self.assertEqual(sorted(p.name for p in run_dir.iterdir()), before)
+
+
+class DeviationAuditTests(Fixture):
+    """The read-only regression surface: what a finished run actually produced."""
+
+    def test_a_fixed_run_reports_zero_deviations(self):
+        self.run_full()
+        report = W.resplit_deviations(self.root, lump_cycle_id=self.lump_cycle_id)
+        self.assertEqual(report["deviations"], [], report["checks"])
+        self.assertEqual(report["status"], "ok")
+        self.assertEqual({c["status"] for c in report["checks"]}, {"ok"})
+
+    def test_audit_is_read_only(self):
+        self.run_full()
+        run_dir = W._find_run_dir(self.root, self.lump_cycle_id)
+        before = {str(p): (p.stat().st_mtime_ns, p.stat().st_size)
+                  for p in P._walk_files(run_dir) if p.is_file()}
+        W.resplit_deviations(self.root, lump_cycle_id=self.lump_cycle_id)
+        after = {str(p): (p.stat().st_mtime_ns, p.stat().st_size)
+                 for p in P._walk_files(run_dir) if p.is_file()}
+        self.assertEqual(before, after)
+
+    def test_no_run_is_reported_as_no_run_not_as_clean(self):
+        report = W.resplit_deviations(self.root)
+        self.assertEqual(report["status"], "no-run")
+        self.assertEqual(report["checks"], [])
+
+
+@unittest.skipUnless(
+    (HEARTING_CANARY_ROOT / ".runtime" / "artifact-producer" / "v1" / "migrations").is_dir(),
+    "hearting canary artifact root not present on this machine")
+class HeartingCanaryRegressionTests(unittest.TestCase):
+    """The 2026-09-04 canary is a frozen read-only regression subject.
+
+    Its 16 cycles were sealed by the pre-hotfix code and stay exactly as sealed
+    (D-6/D-11 forbid rewriting them; `canary-deviations.md` in the run_dir is the
+    authorized record). What this asserts is that the audit still *sees* all five
+    deviations there -- if a later change made the audit report that run clean, the
+    audit stopped measuring the thing it exists to measure.
+    """
+
+    def test_canary_run_still_reports_all_five_recorded_deviations(self):
+        report = W.resplit_deviations(HEARTING_CANARY_ROOT, lump_cycle_id=HEARTING_CANARY_LUMP)
+        self.assertEqual(sorted(report["deviations"]), sorted(W.DEVIATION_CHECKS))
+        by_id = {c["id"]: c for c in report["checks"]}
+        self.assertEqual(len(by_id["cycle-state"]["rows"]), 16)
+        self.assertEqual(len(by_id["started-on"]["rows"]), 16)
+        self.assertTrue(all(r["observed"] == "active" for r in by_id["cycle-state"]["rows"]))
+        self.assertTrue(all(r["observed"] == "autopilot-code" and r["expected"] != "autopilot-code"
+                            for r in by_id["capability"]["rows"]))
+
+    def test_auditing_the_canary_mutates_nothing(self):
+        run_dir = HEARTING_CANARY_ROOT / ".runtime" / "artifact-producer" / "v1" / "migrations" / (
+            "20260903T151118Z-resplit-" + HEARTING_CANARY_LUMP)
+        before = {str(p): (p.stat().st_mtime_ns, p.stat().st_size)
+                  for p in P._walk_files(run_dir) if p.is_file()}
+        W.resplit_deviations(HEARTING_CANARY_ROOT, lump_cycle_id=HEARTING_CANARY_LUMP)
+        after = {str(p): (p.stat().st_mtime_ns, p.stat().st_size)
+                 for p in P._walk_files(run_dir) if p.is_file()}
+        self.assertEqual(before, after)
 
 
 class OwnershipGuardTests(unittest.TestCase):
