@@ -307,5 +307,118 @@ class CodexLauncherRuntimeTest(unittest.TestCase):
                 self.assertEqual(launcher.launcher_state_home(private_home), private_home)
 
 
+class InteractivePermissionModeTest(unittest.TestCase):
+    """User decision 2026-09-03 — a managed interactive Codex session starts in bypass."""
+
+    def _mode_env(self, value=None):
+        env = {} if value is None else {"AGENT_CODEX_INTERACTIVE_PERMISSION_MODE": value}
+        return mock.patch.dict(os.environ, env, clear=False)
+
+    def _cleared(self):
+        return mock.patch.dict(
+            os.environ, {"AGENT_CODEX_INTERACTIVE_PERMISSION_MODE": ""}, clear=False
+        )
+
+    def test_default_mode_is_bypass_and_only_inherit_opts_out(self) -> None:
+        with self._cleared():
+            self.assertEqual(launcher.interactive_permission_mode(), "bypass")
+        for value, expected in (("inherit", "inherit"), ("INHERIT", "inherit"),
+                                (" inherit ", "inherit"), ("bypass", "bypass"),
+                                ("yolo", "bypass"), ("", "bypass"), ("off", "bypass")):
+            with self.subTest(value=value), self._mode_env(value):
+                self.assertEqual(launcher.interactive_permission_mode(), expected)
+
+    def test_bare_and_resume_invocations_gain_the_flag_in_front(self) -> None:
+        with self._cleared():
+            for args in ([], ["hello"], ["resume", "--last"], ["fork"],
+                         ["--model", "gpt-test", "resume", "thread-id"]):
+                with self.subTest(args=args):
+                    applied = launcher.apply_interactive_permission_mode(list(args))
+                    # In front, so it stays a root option ahead of any subcommand.
+                    self.assertEqual(applied, [launcher.BYPASS_FLAG, *args])
+
+    def test_inherit_leaves_the_invocation_byte_identical(self) -> None:
+        with self._mode_env("inherit"):
+            for args in ([], ["resume", "--last"], ["hello"]):
+                with self.subTest(args=args):
+                    self.assertEqual(
+                        launcher.apply_interactive_permission_mode(list(args)), list(args)
+                    )
+
+    def test_a_caller_selected_posture_is_never_overridden(self) -> None:
+        explicit = (
+            ["-s", "read-only"],
+            ["--sandbox", "workspace-write"],
+            ["--sandbox=read-only"],
+            ["-a", "on-request"],
+            ["--ask-for-approval", "never"],
+            ["--ask-for-approval=on-request"],
+            ["--approve-for-me"],
+            [launcher.BYPASS_FLAG],
+            ["--yolo"],
+            ["-p", "hardened"],
+            ["--profile", "hardened"],
+            ["-c", "approval_policy=never"],
+            ["-c", "sandbox_mode=read-only"],
+            ["--config", "sandbox_permissions=[]"],
+            ["--config=approval_policy=never"],
+            ["-capproval_policy=never"],
+            ["resume", "--last", "-s", "read-only"],
+        )
+        with self._cleared():
+            for args in explicit:
+                with self.subTest(args=args):
+                    self.assertTrue(launcher.selects_own_posture(list(args)))
+                    self.assertEqual(
+                        launcher.apply_interactive_permission_mode(list(args)), list(args)
+                    )
+
+    def test_unrelated_options_do_not_look_like_a_posture(self) -> None:
+        with self._cleared():
+            for args in (["--model", "gpt-test"], ["-m", "gpt-test"], ["-c", "model=\"o3\""],
+                         ["--config", "features.hooks=true"], ["--search"],
+                         ["-i", "shot.png"], ["--cd", "/tmp"], ["--no-alt-screen"]):
+                with self.subTest(args=args):
+                    self.assertFalse(launcher.selects_own_posture(list(args)))
+                    self.assertEqual(
+                        launcher.apply_interactive_permission_mode(list(args))[0],
+                        launcher.BYPASS_FLAG,
+                    )
+
+    def test_a_value_that_merely_looks_like_a_flag_is_not_read_as_one(self) -> None:
+        """`--model --sandbox` is a model NAMED `--sandbox`; value slots are skipped."""
+        with self._cleared():
+            self.assertFalse(launcher.selects_own_posture(["--model", "--sandbox"]))
+
+    def test_everything_after_a_bare_double_dash_is_the_prompt(self) -> None:
+        with self._cleared():
+            self.assertFalse(launcher.selects_own_posture(["--", "-s", "read-only"]))
+
+    def test_passthrough_surfaces_never_reach_the_default(self) -> None:
+        """`codex exec` is the registered dispatch surface (stage-dispatch SD-125 (5)):
+        approval_policy=never with a real sandbox, and no bypass flag. It must stay
+        outside `should_manage`, which is what keeps it away from this default."""
+        for args in (["exec", "task"], ["--model", "gpt-test", "exec", "task"],
+                     ["review", "--help"], ["app-server"], ["--remote", "unix:///tmp/x"]):
+            with self.subTest(args=args):
+                self.assertFalse(launcher.should_manage(list(args)))
+
+    def test_managed_command_carries_the_flag_through_to_the_entry(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            agent_home = root / "runtime"
+            (agent_home / "utilities").mkdir(parents=True)
+            (agent_home / "utilities" / "codex-managed-entry.py").write_text("", "utf-8")
+            home = root / ".codex"
+            (home / ".harness").mkdir(parents=True)
+            binding = {"active_root": agent_home, "mode": "linked",
+                       "revision": "rev-test", "identity": "linked:rev-test:-"}
+            with self._cleared():
+                applied = launcher.apply_interactive_permission_mode(["resume", "--last"])
+            command = launcher.managed_command(applied, home, Path("/usr/bin/codex"), binding)
+            trailing = command[command.index("--") + 1:]
+            self.assertEqual(trailing, [launcher.BYPASS_FLAG, "resume", "--last"])
+
+
 if __name__ == "__main__":
     unittest.main()
