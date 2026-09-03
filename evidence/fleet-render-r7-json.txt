@@ -1,0 +1,5949 @@
+{
+  "sessions": [
+    {
+      "harness": "claude",
+      "pid": 545520,
+      "cwd": "/home/nas/user/Uihyeop/personal/hearting-wt/fleet-connection-layer",
+      "orphan": false,
+      "app_server": false,
+      "managed_dir": null,
+      "is_child": true,
+      "detached": true,
+      "elapsed_min": 70,
+      "session_id": "15aab7b0-ae52-42cf-a930-597d2a0c0530",
+      "slug": "fleet-connection-layer-ea",
+      "title": "Fleet Connection Layer Integration",
+      "model": null,
+      "effort": null,
+      "ctx_pct": null,
+      "rl_5h": null,
+      "rl_7d": null,
+      "rl_ms": null,
+      "rl_rs": null,
+      "rl_windows": null,
+      "cost": null,
+      "tokens": null,
+      "active_context_tokens": null,
+      "context_window_tokens": null,
+      "session_input_tokens": null,
+      "session_cached_input_tokens": null,
+      "session_output_tokens": null,
+      "session_reasoning_output_tokens": null,
+      "session_total_tokens": null,
+      "status": null,
+      "task_lifecycle": null,
+      "exec_child": null,
+      "exec_tool": null,
+      "interaction_state": null,
+      "mtime": null,
+      "liveness": "idle",
+      "proc_start": "283947586",
+      "registry_proc_start": "283947586",
+      "started_at": 1788405667.949,
+      "updated_at": null,
+      "registry_name": "fleet-connection-layer-ea",
+      "runtime_name": null,
+      "kind": "interactive",
+      "provenance": null,
+      "session_tag": "ea",
+      "herdr_attached": null,
+      "steward": false,
+      "steward_targets": null,
+      "state_evidence": {
+        "state": "idle",
+        "tier": 3,
+        "source": "mtime",
+        "rule": "no mtime and no registry status",
+        "derived": true,
+        "inputs": {
+          "harness": "claude",
+          "pid": 545520,
+          "pid_alive": true,
+          "proc_start": "283947586",
+          "proc_start_match": true,
+          "orphan": false,
+          "status": null,
+          "task_lifecycle": null,
+          "exec_child": null,
+          "interaction_wait": null,
+          "mtime": null,
+          "transcript": false,
+          "started_at": 1788405667.949,
+          "updated_at": null,
+          "activity_ms": null,
+          "is_worker": true,
+          "fd_owner": null
+        },
+        "raw_status": null,
+        "hysteresis": null
+      },
+      "branch": null,
+      "branch_ahead": null,
+      "branch_behind": null,
+      "worktree_count": 0,
+      "peer_sent_1h": 0,
+      "peer_recv_1h": 0,
+      "peer_last_recv": null,
+      "mem_worker": false,
+      "subagents": null,
+      "summary": "검증 항목 4개의 테스트 커버리지 보완 세션을 디스패치 중",
+      "summary_ts": 1788409876.5036352,
+      "route_file": "/home/nas/user/Uihyeop/personal/hearting/.agent_reports/.runtime/routes/rt-aa1344860be4f2a6.json",
+      "route_id": "rt-aa1344860be4f2a6",
+      "route_hash": null,
+      "route_node": null,
+      "attempt_id": "att-4e8b010b7d8f4d74884519d7d7c10f8f",
+      "assigned_contract": "autopilot-code",
+      "unit": "_kernel/owner",
+      "worker_type": "owner",
+      "owner": "autopilot-code",
+      "model_role": null,
+      "context": {
+        "used_pct": null,
+        "band": "unknown",
+        "source": "unknown"
+      },
+      "work_projection": {
+        "source": "registry-exact",
+        "route_id": "rt-aa1344860be4f2a6",
+        "route_hash": null,
+        "route_node": null,
+        "attempt_id": "att-4e8b010b7d8f4d74884519d7d7c10f8f",
+        "assigned_contract": "autopilot-code",
+        "unit": "_kernel/owner",
+        "stage_label": "autopilot-code",
+        "node_state": "unknown",
+        "active_nodes": [],
+        "progress": null,
+        "ambiguity": [
+          "route-record-mismatch"
+        ]
+      },
+      "cap_grounding": null,
+      "association_ambiguity": null
+    },
+    {
+      "harness": "opencode",
+      "pid": 644173,
+      "cwd": "/home/nas/user/Uihyeop/personal/hearting",
+      "orphan": false,
+      "app_server": false,
+      "managed_dir": null,
+      "is_child": false,
+      "detached": false,
+      "elapsed_min": 56,
+      "session_id": "ses_f9a9e5306ffeAbUCW2RWszqylh",
+      "slug": "stellar-eagle",
+      "title": "Update OpenCode Model Profile",
+      "model": "glm-5.3-flash",
+      "effort": "high",
+      "ctx_pct": 10,
+      "rl_5h": null,
+      "rl_7d": null,
+      "rl_ms": null,
+      "rl_rs": null,
+      "rl_windows": null,
+      "cost": 0.147232565,
+      "tokens": 142586,
+      "active_context_tokens": 95005,
+      "context_window_tokens": 1000000,
+      "session_input_tokens": 112257,
+      "session_cached_input_tokens": null,
+      "session_output_tokens": 18389,
+      "session_reasoning_output_tokens": 11940,
+      "session_total_tokens": 142586,
+      "status": null,
+      "task_lifecycle": null,
+      "exec_child": null,
+      "exec_tool": null,
+      "interaction_state": null,
+      "mtime": 1788409157.897,
+      "liveness": "idle",
+      "proc_start": "284033386",
+      "registry_proc_start": null,
+      "started_at": null,
+      "updated_at": null,
+      "registry_name": null,
+      "runtime_name": null,
+      "kind": null,
+      "provenance": null,
+      "session_tag": "f8",
+      "herdr_attached": true,
+      "steward": false,
+      "steward_targets": null,
+      "state_evidence": {
+        "state": "idle",
+        "tier": 3,
+        "source": "mtime",
+        "rule": "no activity within 60s",
+        "derived": true,
+        "inputs": {
+          "harness": "opencode",
+          "pid": 644173,
+          "pid_alive": true,
+          "proc_start": "284033386",
+          "proc_start_match": null,
+          "orphan": false,
+          "status": null,
+          "task_lifecycle": null,
+          "exec_child": null,
+          "interaction_wait": null,
+          "mtime": 1788409157.897,
+          "transcript": true,
+          "started_at": null,
+          "updated_at": null,
+          "activity_ms": null,
+          "is_worker": false,
+          "fd_owner": null
+        },
+        "raw_status": null,
+        "hysteresis": null
+      },
+      "branch": null,
+      "branch_ahead": null,
+      "branch_behind": null,
+      "worktree_count": 0,
+      "peer_sent_1h": 0,
+      "peer_recv_1h": 0,
+      "peer_last_recv": null,
+      "mem_worker": false,
+      "subagents": [],
+      "summary": "라우트 기록을 정상적으로 종료했습니다.",
+      "summary_ts": 1788409169.137214,
+      "route_file": null,
+      "route_id": null,
+      "route_hash": null,
+      "route_node": null,
+      "attempt_id": null,
+      "assigned_contract": null,
+      "unit": null,
+      "worker_type": null,
+      "owner": null,
+      "model_role": null,
+      "context": {
+        "used_pct": 10,
+        "band": "normal",
+        "source": "opencode-db"
+      },
+      "work_projection": {
+        "source": "none",
+        "route_id": null,
+        "route_hash": null,
+        "route_node": null,
+        "attempt_id": null,
+        "assigned_contract": null,
+        "unit": null,
+        "stage_label": null,
+        "node_state": null,
+        "active_nodes": [],
+        "progress": null,
+        "ambiguity": []
+      },
+      "cap_grounding": null,
+      "association_ambiguity": null
+    },
+    {
+      "harness": "claude",
+      "pid": 666655,
+      "cwd": "/home/nas/user/Uihyeop/personal/cairn",
+      "orphan": false,
+      "app_server": false,
+      "managed_dir": null,
+      "is_child": true,
+      "detached": true,
+      "elapsed_min": 50,
+      "session_id": "fdefa276-8559-4ce7-a527-271a33479506",
+      "slug": "cairn-bc",
+      "title": "Fleet Readability W14a Rollout",
+      "model": null,
+      "effort": null,
+      "ctx_pct": null,
+      "rl_5h": null,
+      "rl_7d": null,
+      "rl_ms": null,
+      "rl_rs": null,
+      "rl_windows": null,
+      "cost": null,
+      "tokens": null,
+      "active_context_tokens": null,
+      "context_window_tokens": null,
+      "session_input_tokens": null,
+      "session_cached_input_tokens": null,
+      "session_output_tokens": null,
+      "session_reasoning_output_tokens": null,
+      "session_total_tokens": null,
+      "status": null,
+      "task_lifecycle": null,
+      "exec_child": {
+        "pid": 1070662,
+        "comm": "sleep",
+        "etime_s": 56
+      },
+      "exec_tool": null,
+      "interaction_state": null,
+      "mtime": null,
+      "liveness": "idle",
+      "proc_start": "284070539",
+      "registry_proc_start": "284070539",
+      "started_at": 1788406897.423,
+      "updated_at": null,
+      "registry_name": "cairn-bc",
+      "runtime_name": null,
+      "kind": "interactive",
+      "provenance": null,
+      "session_tag": "bc",
+      "herdr_attached": null,
+      "steward": false,
+      "steward_targets": null,
+      "state_evidence": {
+        "state": "idle",
+        "tier": 3,
+        "source": "mtime",
+        "rule": "no mtime and no registry status",
+        "derived": true,
+        "inputs": {
+          "harness": "claude",
+          "pid": 666655,
+          "pid_alive": true,
+          "proc_start": "284070539",
+          "proc_start_match": true,
+          "orphan": false,
+          "status": null,
+          "task_lifecycle": null,
+          "exec_child": {
+            "pid": 1070662,
+            "comm": "sleep",
+            "etime_s": 56
+          },
+          "interaction_wait": null,
+          "mtime": null,
+          "transcript": false,
+          "started_at": 1788406897.423,
+          "updated_at": null,
+          "activity_ms": null,
+          "is_worker": true,
+          "fd_owner": null
+        },
+        "raw_status": null,
+        "hysteresis": null
+      },
+      "branch": null,
+      "branch_ahead": null,
+      "branch_behind": null,
+      "worktree_count": 0,
+      "peer_sent_1h": 0,
+      "peer_recv_1h": 0,
+      "peer_last_recv": null,
+      "mem_worker": false,
+      "subagents": null,
+      "summary": "Dispatching the remaining execution gap.",
+      "summary_ts": 1788409908.6443594,
+      "route_file": "/home/nas/user/Uihyeop/personal/cairn/.claude_reports/.runtime/routes/rt-0391ef5dff924982.json",
+      "route_id": "rt-0391ef5dff924982",
+      "route_hash": null,
+      "route_node": null,
+      "attempt_id": "att-53638303258743d1a19f5ec5390ffacd",
+      "assigned_contract": "autopilot-code",
+      "unit": "_kernel/owner",
+      "worker_type": "owner",
+      "owner": "autopilot-code",
+      "model_role": null,
+      "context": {
+        "used_pct": null,
+        "band": "unknown",
+        "source": "unknown"
+      },
+      "work_projection": {
+        "source": "registry-exact",
+        "route_id": "rt-0391ef5dff924982",
+        "route_hash": null,
+        "route_node": null,
+        "attempt_id": "att-53638303258743d1a19f5ec5390ffacd",
+        "assigned_contract": "autopilot-code",
+        "unit": "_kernel/owner",
+        "stage_label": "autopilot-code",
+        "node_state": "unknown",
+        "active_nodes": [],
+        "progress": null,
+        "ambiguity": [
+          "route-record-mismatch"
+        ]
+      },
+      "cap_grounding": null,
+      "association_ambiguity": null
+    },
+    {
+      "harness": "codex",
+      "pid": 1059022,
+      "cwd": "/home/nas/user/Uihyeop/personal/cairn",
+      "orphan": false,
+      "app_server": false,
+      "managed_dir": null,
+      "is_child": false,
+      "detached": false,
+      "elapsed_min": 2,
+      "session_id": "01a06587-63ee-73f3-b93d-78b6478976f4",
+      "slug": "cairn",
+      "title": "Cairn에 '아이디어 카탈로그' 영역을 만들 수 있는지 검토하고, 가능하면 구현해줘. [무엇을 모으는가] 논문에서 읽은 메커니즘 중 우리 모델에 이식해볼 가치가 있는 것들이다. 기존 조사 카드가 \"그 논문이 무엇을 했나\"를 기록한다면, 이 카탈로그는 \"그중 무엇을 가져올 수 있나\"를 기록한다. 둘은 목적이 다르므로 카드에 필드를 더하는 것으로는 부족할 수 있다. [항목 스키마 — 8필드] 아이디어 무엇을 무엇에 이식하는가 출처 어느 논문의 어느 메커니즘 (표·수치까지) 적용 대상 우리 쪽 어느 모델의 어느 부분 작동 가설 왜 통할 것 같은가 (메커니즘 한 줄) 반증 조건 무엇을 관측하면 접는가 최소 실험 가장 싸게 참/거짓을 가르는 한 판 주의 결과 해석에서 오판하기 쉬운 지점 상태 미착수 / 진행 / 폐기(+이유) '반증 조건'과 '주의'가 이 형식의 존재 이유다. 이 둘이 없으면 아이디어 목록은 읽히지 않는 위시리스트가 되고 항목이 쌓이기만 한다. 스키마 설계에서 이 두 필드를 선택 항목으로 두지 말 것. [먼저 확인할 것] 1. /home/nas/user/Uihyeop/personal/cairn 의 drizzle 스키마와 기존 artifact 타입. 필드를 얹어 해결되는지, 별도 영역이 필요한지 판단하고 근거를 남겨줘. 2. 상태 전이(미착수 → 진행 → 폐기)를 어떻게 표현할지. 폐기 이유가 반드시 남도록. 3. 외부 조사 카드(.agent_reports/research/**/cards/*.md)와의 링크를 어떤 형태로 유지할지. 저장소가 다르므로 경로 참조인지 복사인지 결정 필요. 4. 정본을 어디에 둘지 — Cairn 항목인지, 저장소 시드 문서인지. 양쪽에 중복 보관하면 곧 어긋난다. [참고할 메모리] mem show research-idea_research-idea-tiger의-band_27dc99 → 스키마를 실제로 채운 첫 항목. 필드가 충분한지 이걸로 검증할 것. mem show decision_decision-논문-메커니즘의-이식_813a6a → 형식 확정 배경과 미결 사항 [제약] - 스키마 설계가 특정 도메인(음성 분리)에 종속되지 않게 할 것. - 과한 휴리스틱 지양. 필드를 늘리기보다 적은 필드가 강제되게. - 구현이 과하다고 판단되면 이유를 적고 설계안만 내도 된다. [완료 기준] 확인 1~4의 판단과 근거, 변경 파일과 diff, 첫 항목을 실제로 넣어본 결과.",
+      "model": "gpt-5.6-sol",
+      "effort": "xhigh",
+      "ctx_pct": 42,
+      "rl_5h": 85,
+      "rl_7d": 85,
+      "rl_ms": null,
+      "rl_rs": [
+        null,
+        1788747948.0
+      ],
+      "rl_windows": [
+        [
+          "7d",
+          85,
+          1788747948.0
+        ]
+      ],
+      "cost": null,
+      "tokens": 114780,
+      "active_context_tokens": 114780,
+      "context_window_tokens": 258400,
+      "session_input_tokens": 1177729,
+      "session_cached_input_tokens": 1066880,
+      "session_output_tokens": 7312,
+      "session_reasoning_output_tokens": 3081,
+      "session_total_tokens": 1185041,
+      "status": null,
+      "task_lifecycle": null,
+      "exec_child": null,
+      "exec_tool": null,
+      "interaction_state": null,
+      "mtime": 1788409910.625911,
+      "liveness": "working",
+      "proc_start": "284357494",
+      "registry_proc_start": null,
+      "started_at": null,
+      "updated_at": null,
+      "registry_name": null,
+      "runtime_name": "아이디어 카탈로그 구현 검토",
+      "kind": null,
+      "provenance": null,
+      "session_tag": "36",
+      "herdr_attached": true,
+      "steward": false,
+      "steward_targets": null,
+      "state_evidence": {
+        "state": "working",
+        "tier": 3,
+        "source": "mtime",
+        "rule": "activity within 60s",
+        "derived": true,
+        "inputs": {
+          "harness": "codex",
+          "pid": 1059022,
+          "pid_alive": true,
+          "proc_start": "284357494",
+          "proc_start_match": null,
+          "orphan": false,
+          "status": null,
+          "task_lifecycle": null,
+          "exec_child": null,
+          "interaction_wait": null,
+          "mtime": 1788409910.625911,
+          "transcript": true,
+          "started_at": null,
+          "updated_at": null,
+          "activity_ms": null,
+          "is_worker": false,
+          "fd_owner": null
+        },
+        "raw_status": null,
+        "hysteresis": null
+      },
+      "branch": null,
+      "branch_ahead": null,
+      "branch_behind": null,
+      "worktree_count": 0,
+      "peer_sent_1h": 0,
+      "peer_recv_1h": 0,
+      "peer_last_recv": null,
+      "mem_worker": false,
+      "subagents": [],
+      "summary": null,
+      "summary_ts": null,
+      "route_file": null,
+      "route_id": null,
+      "route_hash": null,
+      "route_node": null,
+      "attempt_id": null,
+      "assigned_contract": null,
+      "unit": null,
+      "worker_type": null,
+      "owner": null,
+      "model_role": null,
+      "context": {
+        "used_pct": 42,
+        "band": "normal",
+        "source": "legacy"
+      },
+      "work_projection": {
+        "source": "none",
+        "route_id": null,
+        "route_hash": null,
+        "route_node": null,
+        "attempt_id": null,
+        "assigned_contract": null,
+        "unit": null,
+        "stage_label": null,
+        "node_state": null,
+        "active_nodes": [],
+        "progress": null,
+        "ambiguity": []
+      },
+      "cap_grounding": null,
+      "association_ambiguity": null
+    },
+    {
+      "harness": "claude",
+      "pid": 1073384,
+      "cwd": "/home/nas/user/Uihyeop/personal/hearting-wt/fleet-connection-layer",
+      "orphan": false,
+      "app_server": false,
+      "managed_dir": null,
+      "is_child": true,
+      "detached": true,
+      "elapsed_min": 0,
+      "session_id": "f2032d9d-211e-4e2e-baed-590bdd05c9a7",
+      "slug": "fleet-connection-layer-51",
+      "title": null,
+      "model": null,
+      "effort": null,
+      "ctx_pct": null,
+      "rl_5h": null,
+      "rl_7d": null,
+      "rl_ms": null,
+      "rl_rs": null,
+      "rl_windows": null,
+      "cost": null,
+      "tokens": null,
+      "active_context_tokens": null,
+      "context_window_tokens": null,
+      "session_input_tokens": null,
+      "session_cached_input_tokens": null,
+      "session_output_tokens": null,
+      "session_reasoning_output_tokens": null,
+      "session_total_tokens": null,
+      "status": null,
+      "task_lifecycle": null,
+      "exec_child": null,
+      "exec_tool": null,
+      "interaction_state": null,
+      "mtime": null,
+      "liveness": "idle",
+      "proc_start": "284368536",
+      "registry_proc_start": "284368536",
+      "started_at": 1788409877.464,
+      "updated_at": null,
+      "registry_name": "fleet-connection-layer-51",
+      "runtime_name": null,
+      "kind": "interactive",
+      "provenance": "worker",
+      "session_tag": "51",
+      "herdr_attached": null,
+      "steward": false,
+      "steward_targets": null,
+      "state_evidence": {
+        "state": "idle",
+        "tier": 3,
+        "source": "mtime",
+        "rule": "no mtime and no registry status",
+        "derived": true,
+        "inputs": {
+          "harness": "claude",
+          "pid": 1073384,
+          "pid_alive": true,
+          "proc_start": "284368536",
+          "proc_start_match": true,
+          "orphan": false,
+          "status": null,
+          "task_lifecycle": null,
+          "exec_child": null,
+          "interaction_wait": null,
+          "mtime": null,
+          "transcript": false,
+          "started_at": 1788409877.464,
+          "updated_at": null,
+          "activity_ms": null,
+          "is_worker": true,
+          "fd_owner": null
+        },
+        "raw_status": null,
+        "hysteresis": null
+      },
+      "branch": null,
+      "branch_ahead": null,
+      "branch_behind": null,
+      "worktree_count": 0,
+      "peer_sent_1h": 0,
+      "peer_recv_1h": 0,
+      "peer_last_recv": null,
+      "mem_worker": false,
+      "subagents": null,
+      "summary": null,
+      "summary_ts": null,
+      "route_file": "/home/nas/user/Uihyeop/personal/hearting/.agent_reports/.runtime/routes/rt-aa1344860be4f2a6.json",
+      "route_id": "rt-aa1344860be4f2a6",
+      "route_hash": null,
+      "route_node": "execute",
+      "attempt_id": "att-50df4ba3257150745c1a6873dbbcd0b9481e1786c86c7bad",
+      "assigned_contract": "code-execute",
+      "unit": "dev/backend",
+      "worker_type": "stage",
+      "owner": "autopilot-code",
+      "model_role": null,
+      "context": {
+        "used_pct": null,
+        "band": "unknown",
+        "source": "unknown"
+      },
+      "work_projection": {
+        "source": "route-exact",
+        "route_id": "rt-aa1344860be4f2a6",
+        "route_hash": "sha256:aa1344860be4f2a64227c89cfbc844e0d7b782beee68f4818a26b7d463f7440a",
+        "route_node": "execute",
+        "attempt_id": "att-50df4ba3257150745c1a6873dbbcd0b9481e1786c86c7bad",
+        "assigned_contract": "code-execute",
+        "unit": "dev/backend",
+        "stage_label": "code-execute",
+        "node_state": "active",
+        "active_nodes": [
+          {
+            "id": "execute",
+            "depends_on": [
+              "plan-check"
+            ],
+            "level": 3,
+            "unit": "dev/backend",
+            "unit_choices": [
+              "dev/backend",
+              "dev/frontend",
+              "dev/new-lib",
+              "dev/refactor"
+            ],
+            "gate": "code-execute",
+            "write_scope": [
+              "source/**",
+              "checklist.md",
+              "dev_logs/**",
+              "evidence/**"
+            ],
+            "state": "active",
+            "progress": null,
+            "parallel_group": null,
+            "replica_group": null,
+            "model_profile": "light",
+            "perspective": null,
+            "degradation": null
+          }
+        ],
+        "progress": {
+          "done": 4,
+          "total": 8
+        },
+        "ambiguity": []
+      },
+      "cap_grounding": null,
+      "association_ambiguity": null
+    },
+    {
+      "harness": "claude",
+      "pid": 1846953,
+      "cwd": "/home/nas/user/Uihyeop/IIPLab/areas/conferences_and_seminars/삼성세미나_음성처리",
+      "orphan": false,
+      "app_server": false,
+      "managed_dir": null,
+      "is_child": false,
+      "detached": false,
+      "elapsed_min": 1642,
+      "session_id": "9b325958-a6d9-4469-bea7-7a711b5225c7",
+      "slug": "claude-cf",
+      "title": "Band-Split Audio Architecture",
+      "model": "Opus 5 (1M context)",
+      "effort": "high",
+      "ctx_pct": 45,
+      "rl_5h": 89,
+      "rl_7d": 58,
+      "rl_ms": [
+        [
+          "fable",
+          72
+        ]
+      ],
+      "rl_rs": [
+        1788411600.616246,
+        1788854400.616274
+      ],
+      "rl_windows": null,
+      "cost": 38.29060050000001,
+      "tokens": 447867,
+      "active_context_tokens": 446890,
+      "context_window_tokens": 1000000,
+      "session_input_tokens": 446890,
+      "session_cached_input_tokens": null,
+      "session_output_tokens": 977,
+      "session_reasoning_output_tokens": null,
+      "session_total_tokens": 447867,
+      "status": "idle",
+      "task_lifecycle": null,
+      "exec_child": null,
+      "exec_tool": null,
+      "interaction_state": null,
+      "mtime": 1788409688.806,
+      "liveness": "idle",
+      "proc_start": "274516789",
+      "registry_proc_start": "274516789",
+      "started_at": 1788311363.007,
+      "updated_at": 1788409688.806,
+      "registry_name": "claude-cf",
+      "runtime_name": null,
+      "kind": "interactive",
+      "provenance": null,
+      "session_tag": "cf",
+      "herdr_attached": true,
+      "steward": false,
+      "steward_targets": null,
+      "state_evidence": {
+        "state": "idle",
+        "tier": 1,
+        "source": "claude-registry",
+        "rule": "registry status=idle",
+        "derived": false,
+        "inputs": {
+          "harness": "claude",
+          "pid": 1846953,
+          "pid_alive": true,
+          "proc_start": "274516789",
+          "proc_start_match": true,
+          "orphan": false,
+          "status": "idle",
+          "task_lifecycle": null,
+          "exec_child": null,
+          "interaction_wait": null,
+          "mtime": 1788409688.806,
+          "transcript": false,
+          "started_at": 1788311363.007,
+          "updated_at": 1788409688.806,
+          "activity_ms": 98325799.0000248,
+          "is_worker": false,
+          "fd_owner": null
+        },
+        "raw_status": "idle",
+        "hysteresis": null
+      },
+      "branch": null,
+      "branch_ahead": null,
+      "branch_behind": null,
+      "worktree_count": 0,
+      "peer_sent_1h": 0,
+      "peer_recv_1h": 0,
+      "peer_last_recv": null,
+      "mem_worker": false,
+      "subagents": null,
+      "summary": "문서가 아니라 메모리에 쓰라고 정정함",
+      "summary_ts": 1788409696.507627,
+      "route_file": null,
+      "route_id": null,
+      "route_hash": null,
+      "route_node": null,
+      "attempt_id": null,
+      "assigned_contract": null,
+      "unit": null,
+      "worker_type": null,
+      "owner": null,
+      "model_role": null,
+      "context": {
+        "used_pct": 45,
+        "band": "normal",
+        "source": "legacy"
+      },
+      "work_projection": {
+        "source": "none",
+        "route_id": null,
+        "route_hash": null,
+        "route_node": null,
+        "attempt_id": null,
+        "assigned_contract": null,
+        "unit": null,
+        "stage_label": null,
+        "node_state": null,
+        "active_nodes": [],
+        "progress": null,
+        "ambiguity": []
+      },
+      "cap_grounding": null,
+      "association_ambiguity": null
+    },
+    {
+      "harness": "claude",
+      "pid": 2252485,
+      "cwd": "/home/nas/user/Uihyeop/personal/cairn",
+      "orphan": false,
+      "app_server": false,
+      "managed_dir": null,
+      "is_child": false,
+      "detached": false,
+      "elapsed_min": 911,
+      "session_id": "0432af5b-f14f-427f-aff5-10bf9e27b9fe",
+      "slug": "cairn-47",
+      "title": "Cairn W14 artifact viewing platform",
+      "model": "Fable 5",
+      "effort": "xhigh",
+      "ctx_pct": 30,
+      "rl_5h": 89,
+      "rl_7d": 58,
+      "rl_ms": [
+        [
+          "fable",
+          72
+        ]
+      ],
+      "rl_rs": [
+        1788411600.616246,
+        1788854400.616274
+      ],
+      "rl_windows": null,
+      "cost": 332.3312950000005,
+      "tokens": 298121,
+      "active_context_tokens": 297776,
+      "context_window_tokens": 1000000,
+      "session_input_tokens": 297776,
+      "session_cached_input_tokens": null,
+      "session_output_tokens": 345,
+      "session_reasoning_output_tokens": null,
+      "session_total_tokens": 298121,
+      "status": "idle",
+      "task_lifecycle": null,
+      "exec_child": {
+        "pid": 667382,
+        "comm": "python3",
+        "etime_s": 3005
+      },
+      "exec_tool": null,
+      "interaction_state": null,
+      "mtime": 1788409261.795,
+      "liveness": "idle",
+      "proc_start": "278905154",
+      "registry_proc_start": "278905154",
+      "started_at": 1788355244.145,
+      "updated_at": 1788406911.874,
+      "registry_name": "cairn-47",
+      "runtime_name": null,
+      "kind": "interactive",
+      "provenance": null,
+      "session_tag": "47",
+      "herdr_attached": true,
+      "steward": false,
+      "steward_targets": null,
+      "state_evidence": {
+        "state": "idle",
+        "tier": 1,
+        "source": "claude-registry",
+        "rule": "registry status=idle",
+        "derived": false,
+        "inputs": {
+          "harness": "claude",
+          "pid": 2252485,
+          "pid_alive": true,
+          "proc_start": "278905154",
+          "proc_start_match": true,
+          "orphan": false,
+          "status": "idle",
+          "task_lifecycle": null,
+          "exec_child": {
+            "pid": 667382,
+            "comm": "python3",
+            "etime_s": 3005
+          },
+          "interaction_wait": null,
+          "mtime": 1788409261.795,
+          "transcript": true,
+          "started_at": 1788355244.145,
+          "updated_at": 1788406911.874,
+          "activity_ms": 51667729.00009155,
+          "is_worker": false,
+          "fd_owner": null
+        },
+        "raw_status": "idle",
+        "hysteresis": null
+      },
+      "branch": null,
+      "branch_ahead": null,
+      "branch_behind": null,
+      "worktree_count": 0,
+      "peer_sent_1h": 0,
+      "peer_recv_1h": 0,
+      "peer_last_recv": null,
+      "mem_worker": false,
+      "subagents": [],
+      "summary": "W14a 게이트를 proceed로 해제하고 owner를 plan 단계부터 재발진했다.",
+      "summary_ts": 1788407175.9894881,
+      "route_file": null,
+      "route_id": null,
+      "route_hash": null,
+      "route_node": null,
+      "attempt_id": null,
+      "assigned_contract": null,
+      "unit": null,
+      "worker_type": null,
+      "owner": null,
+      "model_role": null,
+      "context": {
+        "used_pct": 30,
+        "band": "normal",
+        "source": "claude-transcript"
+      },
+      "work_projection": {
+        "source": "route-exact",
+        "route_id": "rt-0391ef5dff924982",
+        "route_hash": "sha256:0391ef5dff9249824d090e6f110ffa9ba6149a038e7b36237893465a91366d70",
+        "route_node": null,
+        "attempt_id": null,
+        "assigned_contract": null,
+        "unit": null,
+        "stage_label": null,
+        "node_state": "unknown",
+        "active_nodes": [],
+        "progress": {
+          "done": 5,
+          "total": 8
+        },
+        "ambiguity": []
+      },
+      "cap_grounding": null,
+      "association_ambiguity": null
+    },
+    {
+      "harness": "claude",
+      "pid": 2725838,
+      "cwd": "/home/nas/user/Uihyeop/personal/hearting",
+      "orphan": false,
+      "app_server": false,
+      "managed_dir": null,
+      "is_child": false,
+      "detached": false,
+      "elapsed_min": 271,
+      "session_id": "2adec7a7-0fc7-44e8-893a-dee4864891a9",
+      "slug": "hearting-d5",
+      "title": "Peer-steward wait hardening",
+      "model": "Opus 4.8",
+      "effort": "high",
+      "ctx_pct": 51,
+      "rl_5h": 89,
+      "rl_7d": 58,
+      "rl_ms": [
+        [
+          "fable",
+          72
+        ]
+      ],
+      "rl_rs": [
+        1788411600.616246,
+        1788854400.616274
+      ],
+      "rl_windows": null,
+      "cost": 64.60205199999994,
+      "tokens": 513495,
+      "active_context_tokens": 512396,
+      "context_window_tokens": 1000000,
+      "session_input_tokens": 512396,
+      "session_cached_input_tokens": null,
+      "session_output_tokens": 1099,
+      "session_reasoning_output_tokens": null,
+      "session_total_tokens": 513495,
+      "status": "idle",
+      "task_lifecycle": null,
+      "exec_child": {
+        "pid": 3088173,
+        "comm": "python3",
+        "etime_s": 9883
+      },
+      "exec_tool": null,
+      "interaction_state": null,
+      "mtime": 1788408946.7070057,
+      "liveness": "idle",
+      "proc_start": "282745354",
+      "registry_proc_start": "282745354",
+      "started_at": 1788393645.871,
+      "updated_at": 1788408946.695,
+      "registry_name": "hearting-d5",
+      "runtime_name": null,
+      "kind": "interactive",
+      "provenance": null,
+      "session_tag": "d5",
+      "herdr_attached": true,
+      "steward": true,
+      "steward_targets": [
+        {
+          "harness": "claude",
+          "session_id": null,
+          "name": "a569-target",
+          "kind": "steer",
+          "ts": "2026-09-03T03:59:32Z"
+        },
+        {
+          "harness": "claude",
+          "session_id": null,
+          "name": "a569-steward",
+          "kind": "steer",
+          "ts": "2026-09-03T03:59:35Z"
+        }
+      ],
+      "state_evidence": {
+        "state": "idle",
+        "tier": 1,
+        "source": "claude-registry",
+        "rule": "registry status=idle",
+        "derived": false,
+        "inputs": {
+          "harness": "claude",
+          "pid": 2725838,
+          "pid_alive": true,
+          "proc_start": "282745354",
+          "proc_start_match": true,
+          "orphan": false,
+          "status": "idle",
+          "task_lifecycle": null,
+          "exec_child": {
+            "pid": 3088173,
+            "comm": "python3",
+            "etime_s": 9883
+          },
+          "interaction_wait": null,
+          "mtime": 1788408946.7070057,
+          "transcript": true,
+          "started_at": 1788393645.871,
+          "updated_at": 1788408946.695,
+          "activity_ms": 15300823.999881744,
+          "is_worker": false,
+          "fd_owner": null
+        },
+        "raw_status": "idle",
+        "hysteresis": null
+      },
+      "branch": null,
+      "branch_ahead": null,
+      "branch_behind": null,
+      "worktree_count": 0,
+      "peer_sent_1h": 2,
+      "peer_recv_1h": 0,
+      "peer_last_recv": null,
+      "mem_worker": false,
+      "subagents": [
+        {
+          "agent_type": "deep",
+          "active": false,
+          "started_at": 1788405890.443,
+          "source": "claude-sidechain",
+          "model": "claude-opus-5",
+          "effort": "xhigh",
+          "ended_at": 1788406727.976
+        }
+      ],
+      "summary": "추가 결함 수정과 동시 릴리즈 조율의 착수 지시를 요청했습니다.",
+      "summary_ts": 1788408988.5644536,
+      "route_file": null,
+      "route_id": null,
+      "route_hash": null,
+      "route_node": null,
+      "attempt_id": null,
+      "assigned_contract": null,
+      "unit": null,
+      "worker_type": null,
+      "owner": null,
+      "model_role": null,
+      "context": {
+        "used_pct": 51,
+        "band": "normal",
+        "source": "claude-transcript"
+      },
+      "work_projection": {
+        "source": "route-exact",
+        "route_id": "rt-d7541f1033ae677f",
+        "route_hash": "sha256:d7541f1033ae677f77c4b4127fc66682816b3dbadf6148438cf6c398108a50d1",
+        "route_node": null,
+        "attempt_id": null,
+        "assigned_contract": null,
+        "unit": null,
+        "stage_label": null,
+        "node_state": "unknown",
+        "active_nodes": [],
+        "progress": {
+          "done": 0,
+          "total": 6
+        },
+        "ambiguity": []
+      },
+      "cap_grounding": null,
+      "association_ambiguity": null
+    },
+    {
+      "harness": "claude",
+      "pid": 2758089,
+      "cwd": "/home/nas/user/Uihyeop/personal/hearting",
+      "orphan": false,
+      "app_server": false,
+      "managed_dir": null,
+      "is_child": false,
+      "detached": false,
+      "elapsed_min": 254,
+      "session_id": "7a001534-ea46-4a67-971b-199c586889e2",
+      "slug": "hearting-46",
+      "title": "Fleet session ID/summary slot conflict",
+      "model": "Fable 5.1",
+      "effort": "high",
+      "ctx_pct": 6,
+      "rl_5h": 89,
+      "rl_7d": 58,
+      "rl_ms": [
+        [
+          "fable",
+          72
+        ]
+      ],
+      "rl_rs": [
+        1788411600.616246,
+        1788854400.616274
+      ],
+      "rl_windows": null,
+      "cost": 53.404319000000015,
+      "tokens": 62120,
+      "active_context_tokens": 60931,
+      "context_window_tokens": 1000000,
+      "session_input_tokens": 60931,
+      "session_cached_input_tokens": null,
+      "session_output_tokens": 1189,
+      "session_reasoning_output_tokens": null,
+      "session_total_tokens": 62120,
+      "status": "idle",
+      "task_lifecycle": null,
+      "exec_child": null,
+      "exec_tool": null,
+      "interaction_state": null,
+      "mtime": 1788409074.678,
+      "liveness": "idle",
+      "proc_start": "282843911",
+      "registry_proc_start": "282843911",
+      "started_at": 1788394631.494,
+      "updated_at": 1788405739.319,
+      "registry_name": "hearting-46",
+      "runtime_name": null,
+      "kind": "interactive",
+      "provenance": null,
+      "session_tag": "46",
+      "herdr_attached": true,
+      "steward": true,
+      "steward_targets": [
+        {
+          "harness": "unknown",
+          "session_id": null,
+          "name": "-",
+          "kind": "watch",
+          "ts": "2026-09-03T02:03:00Z"
+        },
+        {
+          "harness": "claude",
+          "session_id": "892abd4f-f092-4c76-9c73-7f443a260869",
+          "name": "f100-cairn-claude",
+          "kind": "steer",
+          "ts": "2026-09-03T02:12:15Z"
+        },
+        {
+          "harness": "codex",
+          "session_id": "01a064d8-e0e6-7ac2-97df-877c380ce013",
+          "name": "f100-hearting-codex",
+          "kind": "steer",
+          "ts": "2026-09-03T02:12:16Z"
+        },
+        {
+          "harness": "opencode",
+          "session_id": null,
+          "name": "f100-cairn-opencode",
+          "kind": "steer",
+          "ts": "2026-09-03T02:12:21Z"
+        },
+        {
+          "harness": "codex",
+          "session_id": null,
+          "name": "f100-hearting-codex",
+          "kind": "steer",
+          "ts": "2026-09-03T02:16:02Z"
+        },
+        {
+          "harness": "claude",
+          "session_id": null,
+          "name": "uds:/run/user/1002/cc-socks/2952102.sock",
+          "kind": "steer",
+          "ts": "2026-09-03T02:21:17Z"
+        },
+        {
+          "harness": "claude",
+          "session_id": null,
+          "name": "hearting-18",
+          "kind": "watch",
+          "ts": "2026-09-03T02:32:33Z"
+        }
+      ],
+      "state_evidence": {
+        "state": "idle",
+        "tier": 1,
+        "source": "claude-registry",
+        "rule": "registry status=idle",
+        "derived": false,
+        "inputs": {
+          "harness": "claude",
+          "pid": 2758089,
+          "pid_alive": true,
+          "proc_start": "282843911",
+          "proc_start_match": true,
+          "orphan": false,
+          "status": "idle",
+          "task_lifecycle": null,
+          "exec_child": null,
+          "interaction_wait": null,
+          "mtime": 1788409074.678,
+          "transcript": true,
+          "started_at": 1788394631.494,
+          "updated_at": 1788405739.319,
+          "activity_ms": 11107825.000047684,
+          "is_worker": false,
+          "fd_owner": null
+        },
+        "raw_status": "idle",
+        "hysteresis": null
+      },
+      "branch": null,
+      "branch_ahead": null,
+      "branch_behind": null,
+      "worktree_count": 0,
+      "peer_sent_1h": 0,
+      "peer_recv_1h": 0,
+      "peer_last_recv": null,
+      "mem_worker": false,
+      "subagents": [],
+      "summary": "F-101h 결함(SendMessage 봉투가 발신 세션 id를 비움) 확인하고 ② 구현 사이클 handoff 대기 중.",
+      "summary_ts": 1788405910.3918517,
+      "route_file": null,
+      "route_id": null,
+      "route_hash": null,
+      "route_node": null,
+      "attempt_id": null,
+      "assigned_contract": null,
+      "unit": null,
+      "worker_type": null,
+      "owner": null,
+      "model_role": null,
+      "context": {
+        "used_pct": 6,
+        "band": "normal",
+        "source": "claude-transcript"
+      },
+      "work_projection": {
+        "source": "none",
+        "route_id": null,
+        "route_hash": null,
+        "route_node": null,
+        "attempt_id": null,
+        "assigned_contract": null,
+        "unit": null,
+        "stage_label": null,
+        "node_state": null,
+        "active_nodes": [],
+        "progress": null,
+        "ambiguity": []
+      },
+      "cap_grounding": null,
+      "association_ambiguity": null
+    },
+    {
+      "harness": "claude",
+      "pid": 2939467,
+      "cwd": "/home/nas/user/Uihyeop/personal/cairn",
+      "orphan": false,
+      "app_server": false,
+      "managed_dir": null,
+      "is_child": false,
+      "detached": false,
+      "elapsed_min": 193,
+      "session_id": "892abd4f-f092-4c76-9c73-7f443a260869",
+      "slug": "cairn-bc",
+      "title": "Fleet F-100 comms test relay",
+      "model": "Fable 5.1",
+      "effort": "xhigh",
+      "ctx_pct": 5,
+      "rl_5h": 89,
+      "rl_7d": 58,
+      "rl_ms": [
+        [
+          "fable",
+          72
+        ]
+      ],
+      "rl_rs": [
+        1788411600.616246,
+        1788854400.616274
+      ],
+      "rl_windows": null,
+      "cost": 0.7574282499999999,
+      "tokens": 53491,
+      "active_context_tokens": 53471,
+      "context_window_tokens": 1000000,
+      "session_input_tokens": 53471,
+      "session_cached_input_tokens": null,
+      "session_output_tokens": 20,
+      "session_reasoning_output_tokens": null,
+      "session_total_tokens": 53491,
+      "status": "idle",
+      "task_lifecycle": null,
+      "exec_child": null,
+      "exec_tool": null,
+      "interaction_state": null,
+      "mtime": 1788409159.071,
+      "liveness": "idle",
+      "proc_start": "283213445",
+      "registry_proc_start": "283213445",
+      "started_at": 1788398326.855,
+      "updated_at": 1788401538.783,
+      "registry_name": "cairn-bc",
+      "runtime_name": null,
+      "kind": "interactive",
+      "provenance": null,
+      "session_tag": "bc",
+      "herdr_attached": true,
+      "steward": false,
+      "steward_targets": null,
+      "state_evidence": {
+        "state": "idle",
+        "tier": 1,
+        "source": "claude-registry",
+        "rule": "registry status=idle",
+        "derived": false,
+        "inputs": {
+          "harness": "claude",
+          "pid": 2939467,
+          "pid_alive": true,
+          "proc_start": "283213445",
+          "proc_start_match": true,
+          "orphan": false,
+          "status": "idle",
+          "task_lifecycle": null,
+          "exec_child": null,
+          "interaction_wait": null,
+          "mtime": 1788409159.071,
+          "transcript": true,
+          "started_at": 1788398326.855,
+          "updated_at": 1788401538.783,
+          "activity_ms": 3211927.999973297,
+          "is_worker": false,
+          "fd_owner": null
+        },
+        "raw_status": "idle",
+        "hysteresis": null
+      },
+      "branch": null,
+      "branch_ahead": null,
+      "branch_behind": null,
+      "worktree_count": 0,
+      "peer_sent_1h": 0,
+      "peer_recv_1h": 0,
+      "peer_last_recv": {
+        "from_name": "hearting-46",
+        "from_session_id": "7a001534-ea46-4a67-971b-199c586889e2",
+        "from_harness": "claude",
+        "kind": "steer",
+        "age_min": 139
+      },
+      "mem_worker": false,
+      "subagents": [],
+      "summary": "세션이 hearting-46에 2차 수신 확인(수신 OK 2)을 응답함.",
+      "summary_ts": 1788401545.2066689,
+      "route_file": null,
+      "route_id": null,
+      "route_hash": null,
+      "route_node": null,
+      "attempt_id": null,
+      "assigned_contract": null,
+      "unit": null,
+      "worker_type": null,
+      "owner": null,
+      "model_role": null,
+      "context": {
+        "used_pct": 5,
+        "band": "normal",
+        "source": "claude-transcript"
+      },
+      "work_projection": {
+        "source": "none",
+        "route_id": null,
+        "route_hash": null,
+        "route_node": null,
+        "attempt_id": null,
+        "assigned_contract": null,
+        "unit": null,
+        "stage_label": null,
+        "node_state": null,
+        "active_nodes": [],
+        "progress": null,
+        "ambiguity": []
+      },
+      "cap_grounding": null,
+      "association_ambiguity": null
+    },
+    {
+      "harness": "codex",
+      "pid": 2940178,
+      "cwd": "/home/nas/user/Uihyeop/personal/hearting",
+      "orphan": false,
+      "app_server": true,
+      "managed_dir": "/home/Uihyeop/.codex/.harness/managed-sessions/session-4uwbfzev",
+      "is_child": false,
+      "detached": false,
+      "elapsed_min": 193,
+      "session_id": "01a064d8-e0e6-7ac2-97df-877c380ce013",
+      "slug": "hearting",
+      "title": "Fleet F-100 test communication check",
+      "model": "gpt-5.6-sol",
+      "effort": "xhigh",
+      "ctx_pct": 4,
+      "rl_5h": 83,
+      "rl_7d": 85,
+      "rl_ms": null,
+      "rl_rs": [
+        null,
+        1788747948.0
+      ],
+      "rl_windows": [
+        [
+          "7d",
+          85,
+          1788747948.0
+        ]
+      ],
+      "cost": null,
+      "tokens": 22894,
+      "active_context_tokens": 22894,
+      "context_window_tokens": 258400,
+      "session_input_tokens": 65223,
+      "session_cached_input_tokens": 41984,
+      "session_output_tokens": 276,
+      "session_reasoning_output_tokens": 205,
+      "session_total_tokens": 65499,
+      "status": null,
+      "task_lifecycle": "task_complete",
+      "exec_child": null,
+      "exec_tool": null,
+      "interaction_state": null,
+      "mtime": 1788401539.130983,
+      "liveness": "idle",
+      "proc_start": "283213779",
+      "registry_proc_start": null,
+      "started_at": null,
+      "updated_at": null,
+      "registry_name": null,
+      "runtime_name": "세션 통신을 확인하세요",
+      "kind": null,
+      "provenance": null,
+      "session_tag": "5f",
+      "herdr_attached": null,
+      "steward": false,
+      "steward_targets": null,
+      "state_evidence": {
+        "state": "idle",
+        "tier": 2,
+        "source": "codex-lifecycle",
+        "rule": "latest exact Codex task is task_complete",
+        "derived": false,
+        "inputs": {
+          "harness": "codex",
+          "pid": 2940178,
+          "pid_alive": true,
+          "proc_start": "283213779",
+          "proc_start_match": null,
+          "orphan": false,
+          "status": null,
+          "task_lifecycle": "task_complete",
+          "exec_child": null,
+          "interaction_wait": null,
+          "mtime": 1788401539.130983,
+          "transcript": true,
+          "started_at": null,
+          "updated_at": null,
+          "activity_ms": null,
+          "is_worker": false,
+          "fd_owner": null
+        },
+        "raw_status": null,
+        "hysteresis": null
+      },
+      "branch": null,
+      "branch_ahead": null,
+      "branch_behind": null,
+      "worktree_count": 0,
+      "peer_sent_1h": 0,
+      "peer_recv_1h": 0,
+      "peer_last_recv": {
+        "from_name": "hearting-46",
+        "from_session_id": "7a001534-ea46-4a67-971b-199c586889e2",
+        "from_harness": "claude",
+        "kind": "steer",
+        "age_min": 139
+      },
+      "mem_worker": false,
+      "subagents": [],
+      "summary": "두 번째 수신 확인 요청에 응답 대기 중.",
+      "summary_ts": 1788401544.028844,
+      "route_file": null,
+      "route_id": null,
+      "route_hash": null,
+      "route_node": null,
+      "attempt_id": null,
+      "assigned_contract": null,
+      "unit": null,
+      "worker_type": null,
+      "owner": null,
+      "model_role": null,
+      "context": {
+        "used_pct": 4,
+        "band": "normal",
+        "source": "legacy"
+      },
+      "work_projection": {
+        "source": "none",
+        "route_id": null,
+        "route_hash": null,
+        "route_node": null,
+        "attempt_id": null,
+        "assigned_contract": null,
+        "unit": null,
+        "stage_label": null,
+        "node_state": null,
+        "active_nodes": [],
+        "progress": null,
+        "ambiguity": []
+      },
+      "cap_grounding": null,
+      "association_ambiguity": null
+    },
+    {
+      "harness": "claude",
+      "pid": 2952102,
+      "cwd": "/home/nas/user/Uihyeop/personal/hearting",
+      "orphan": false,
+      "app_server": false,
+      "managed_dir": null,
+      "is_child": false,
+      "detached": false,
+      "elapsed_min": 187,
+      "session_id": "841d1f64-0cff-4c16-8578-e874a45a2bb6",
+      "slug": "hearting-18",
+      "title": "Fleet session connection layer unificati",
+      "model": "Opus 5 (1M context)",
+      "effort": "high",
+      "ctx_pct": 37,
+      "rl_5h": 89,
+      "rl_7d": 58,
+      "rl_ms": [
+        [
+          "fable",
+          72
+        ]
+      ],
+      "rl_rs": [
+        1788411600.616246,
+        1788854400.616274
+      ],
+      "rl_windows": null,
+      "cost": 29.253892000000015,
+      "tokens": 368897,
+      "active_context_tokens": 367783,
+      "context_window_tokens": 1000000,
+      "session_input_tokens": 367783,
+      "session_cached_input_tokens": null,
+      "session_output_tokens": 1114,
+      "session_reasoning_output_tokens": null,
+      "session_total_tokens": 368897,
+      "status": "idle",
+      "task_lifecycle": null,
+      "exec_child": {
+        "pid": 546026,
+        "comm": "python3",
+        "etime_s": 4234
+      },
+      "exec_tool": null,
+      "interaction_state": null,
+      "mtime": 1788409454.522,
+      "liveness": "idle",
+      "proc_start": "283246026",
+      "registry_proc_start": "283246026",
+      "started_at": 1788398652.623,
+      "updated_at": 1788405730.187,
+      "registry_name": "hearting-18",
+      "runtime_name": null,
+      "kind": "interactive",
+      "provenance": null,
+      "session_tag": "18",
+      "herdr_attached": true,
+      "steward": true,
+      "steward_targets": [
+        {
+          "harness": "claude",
+          "session_id": null,
+          "name": "hearting-46",
+          "kind": "handoff",
+          "ts": "2026-09-03T03:21:50Z"
+        }
+      ],
+      "state_evidence": {
+        "state": "idle",
+        "tier": 1,
+        "source": "claude-registry",
+        "rule": "registry status=idle",
+        "derived": false,
+        "inputs": {
+          "harness": "claude",
+          "pid": 2952102,
+          "pid_alive": true,
+          "proc_start": "283246026",
+          "proc_start_match": true,
+          "orphan": false,
+          "status": "idle",
+          "task_lifecycle": null,
+          "exec_child": {
+            "pid": 546026,
+            "comm": "python3",
+            "etime_s": 4234
+          },
+          "interaction_wait": null,
+          "mtime": 1788409454.522,
+          "transcript": true,
+          "started_at": 1788398652.623,
+          "updated_at": 1788405730.187,
+          "activity_ms": 7077564.0001297,
+          "is_worker": false,
+          "fd_owner": null
+        },
+        "raw_status": "idle",
+        "hysteresis": null
+      },
+      "branch": null,
+      "branch_ahead": null,
+      "branch_behind": null,
+      "worktree_count": 0,
+      "peer_sent_1h": 0,
+      "peer_recv_1h": 0,
+      "peer_last_recv": null,
+      "mem_worker": false,
+      "subagents": [],
+      "summary": "F-101 구현(att-4e8b010b) 진행 중, 완료 시 실 캡처로 확인 예정.",
+      "summary_ts": 1788405853.4684436,
+      "route_file": null,
+      "route_id": null,
+      "route_hash": null,
+      "route_node": null,
+      "attempt_id": null,
+      "assigned_contract": null,
+      "unit": null,
+      "worker_type": null,
+      "owner": null,
+      "model_role": null,
+      "context": {
+        "used_pct": 37,
+        "band": "normal",
+        "source": "claude-transcript"
+      },
+      "work_projection": {
+        "source": "route-exact",
+        "route_id": "rt-aa1344860be4f2a6",
+        "route_hash": "sha256:aa1344860be4f2a64227c89cfbc844e0d7b782beee68f4818a26b7d463f7440a",
+        "route_node": "execute",
+        "attempt_id": null,
+        "assigned_contract": null,
+        "unit": null,
+        "stage_label": "execute",
+        "node_state": "active",
+        "active_nodes": [
+          {
+            "id": "execute",
+            "depends_on": [
+              "plan-check"
+            ],
+            "level": 3,
+            "unit": "dev/backend",
+            "unit_choices": [
+              "dev/backend",
+              "dev/frontend",
+              "dev/new-lib",
+              "dev/refactor"
+            ],
+            "gate": "code-execute",
+            "write_scope": [
+              "source/**",
+              "checklist.md",
+              "dev_logs/**",
+              "evidence/**"
+            ],
+            "state": "active",
+            "progress": null,
+            "parallel_group": null,
+            "replica_group": null,
+            "model_profile": "light",
+            "perspective": null,
+            "degradation": null
+          }
+        ],
+        "progress": {
+          "done": 4,
+          "total": 8
+        },
+        "ambiguity": []
+      },
+      "cap_grounding": {
+        "capability": "autopilot-spec",
+        "intensity": "standard",
+        "cwd": "/home/nas/user/Uihyeop/personal/hearting"
+      },
+      "association_ambiguity": null
+    },
+    {
+      "harness": "opencode",
+      "pid": 3613172,
+      "cwd": "/home/nas/user/Uihyeop/personal/cairn",
+      "orphan": false,
+      "app_server": false,
+      "managed_dir": null,
+      "is_child": false,
+      "detached": false,
+      "elapsed_min": 139,
+      "session_id": "ses_f9af61ac1ffeoirDfb61NRwmRF",
+      "slug": "brave-circuit",
+      "title": "F-100c parity receive test",
+      "model": "big-pickle",
+      "effort": null,
+      "ctx_pct": 9,
+      "rl_5h": null,
+      "rl_7d": null,
+      "rl_ms": null,
+      "rl_rs": null,
+      "rl_windows": null,
+      "cost": 0.0,
+      "tokens": 15836,
+      "active_context_tokens": 17589,
+      "context_window_tokens": 200000,
+      "session_input_tokens": 15797,
+      "session_cached_input_tokens": null,
+      "session_output_tokens": 39,
+      "session_reasoning_output_tokens": 0,
+      "session_total_tokens": 15836,
+      "status": null,
+      "task_lifecycle": null,
+      "exec_child": null,
+      "exec_tool": null,
+      "interaction_state": null,
+      "mtime": 1788401546.91,
+      "liveness": "idle",
+      "proc_start": "283534799",
+      "registry_proc_start": null,
+      "started_at": null,
+      "updated_at": null,
+      "registry_name": null,
+      "runtime_name": null,
+      "kind": null,
+      "provenance": null,
+      "session_tag": "64",
+      "herdr_attached": true,
+      "steward": false,
+      "steward_targets": null,
+      "state_evidence": {
+        "state": "idle",
+        "tier": 3,
+        "source": "mtime",
+        "rule": "no activity within 60s",
+        "derived": true,
+        "inputs": {
+          "harness": "opencode",
+          "pid": 3613172,
+          "pid_alive": true,
+          "proc_start": "283534799",
+          "proc_start_match": null,
+          "orphan": false,
+          "status": null,
+          "task_lifecycle": null,
+          "exec_child": null,
+          "interaction_wait": null,
+          "mtime": 1788401546.91,
+          "transcript": true,
+          "started_at": null,
+          "updated_at": null,
+          "activity_ms": null,
+          "is_worker": false,
+          "fd_owner": null
+        },
+        "raw_status": null,
+        "hysteresis": null
+      },
+      "branch": null,
+      "branch_ahead": null,
+      "branch_behind": null,
+      "worktree_count": 0,
+      "peer_sent_1h": 0,
+      "peer_recv_1h": 0,
+      "peer_last_recv": {
+        "from_name": "hearting-46",
+        "from_session_id": "7a001534-ea46-4a67-971b-199c586889e2",
+        "from_harness": "claude",
+        "kind": "notice",
+        "age_min": 139
+      },
+      "mem_worker": false,
+      "subagents": [],
+      "summary": "Received parity test steer message from opencode peer, replying with confirmation line.",
+      "summary_ts": 1788401550.910174,
+      "route_file": null,
+      "route_id": null,
+      "route_hash": null,
+      "route_node": null,
+      "attempt_id": null,
+      "assigned_contract": null,
+      "unit": null,
+      "worker_type": null,
+      "owner": null,
+      "model_role": null,
+      "context": {
+        "used_pct": 9,
+        "band": "normal",
+        "source": "opencode-db"
+      },
+      "work_projection": {
+        "source": "none",
+        "route_id": null,
+        "route_hash": null,
+        "route_node": null,
+        "attempt_id": null,
+        "assigned_contract": null,
+        "unit": null,
+        "stage_label": null,
+        "node_state": null,
+        "active_nodes": [],
+        "progress": null,
+        "ambiguity": []
+      },
+      "cap_grounding": null,
+      "association_ambiguity": null
+    },
+    {
+      "harness": "codex",
+      "pid": 3638695,
+      "cwd": "/home/nas/user/Uihyeop/personal/hearting",
+      "orphan": false,
+      "app_server": true,
+      "managed_dir": "/home/Uihyeop/.codex/.harness/managed-sessions/session-55_jgc__",
+      "is_child": false,
+      "detached": false,
+      "elapsed_min": 135,
+      "session_id": null,
+      "slug": "hearting",
+      "title": null,
+      "model": "gpt-5.6-sol",
+      "effort": "xhigh",
+      "ctx_pct": null,
+      "rl_5h": null,
+      "rl_7d": 85,
+      "rl_ms": null,
+      "rl_rs": [
+        null,
+        1788747948.0
+      ],
+      "rl_windows": [
+        [
+          "7d",
+          85,
+          1788747948.0
+        ]
+      ],
+      "cost": null,
+      "tokens": null,
+      "active_context_tokens": null,
+      "context_window_tokens": null,
+      "session_input_tokens": null,
+      "session_cached_input_tokens": null,
+      "session_output_tokens": null,
+      "session_reasoning_output_tokens": null,
+      "session_total_tokens": null,
+      "status": null,
+      "task_lifecycle": null,
+      "exec_child": null,
+      "exec_tool": null,
+      "interaction_state": null,
+      "mtime": null,
+      "liveness": "idle",
+      "proc_start": "283556812",
+      "registry_proc_start": null,
+      "started_at": null,
+      "updated_at": null,
+      "registry_name": null,
+      "runtime_name": null,
+      "kind": null,
+      "provenance": null,
+      "session_tag": null,
+      "herdr_attached": null,
+      "steward": false,
+      "steward_targets": null,
+      "state_evidence": {
+        "state": "idle",
+        "tier": 3,
+        "source": "mtime",
+        "rule": "no mtime and no registry status",
+        "derived": true,
+        "inputs": {
+          "harness": "codex",
+          "pid": 3638695,
+          "pid_alive": true,
+          "proc_start": "283556812",
+          "proc_start_match": null,
+          "orphan": false,
+          "status": null,
+          "task_lifecycle": null,
+          "exec_child": null,
+          "interaction_wait": null,
+          "mtime": null,
+          "transcript": false,
+          "started_at": null,
+          "updated_at": null,
+          "activity_ms": null,
+          "is_worker": false,
+          "fd_owner": null
+        },
+        "raw_status": null,
+        "hysteresis": null
+      },
+      "branch": null,
+      "branch_ahead": null,
+      "branch_behind": null,
+      "worktree_count": 0,
+      "peer_sent_1h": 0,
+      "peer_recv_1h": 0,
+      "peer_last_recv": null,
+      "mem_worker": false,
+      "subagents": null,
+      "summary": null,
+      "summary_ts": null,
+      "route_file": null,
+      "route_id": null,
+      "route_hash": null,
+      "route_node": null,
+      "attempt_id": null,
+      "assigned_contract": null,
+      "unit": null,
+      "worker_type": null,
+      "owner": null,
+      "model_role": null,
+      "context": {
+        "used_pct": null,
+        "band": "unknown",
+        "source": "unknown"
+      },
+      "work_projection": {
+        "source": "none",
+        "route_id": null,
+        "route_hash": null,
+        "route_node": null,
+        "attempt_id": null,
+        "assigned_contract": null,
+        "unit": null,
+        "stage_label": null,
+        "node_state": null,
+        "active_nodes": [],
+        "progress": null,
+        "ambiguity": []
+      },
+      "cap_grounding": null,
+      "association_ambiguity": null
+    },
+    {
+      "harness": "codex",
+      "pid": 3638881,
+      "cwd": "/home/nas/user/Uihyeop/personal/hearting",
+      "orphan": false,
+      "app_server": false,
+      "managed_dir": "/home/Uihyeop/.codex/.harness/managed-sessions/session-55_jgc__",
+      "is_child": false,
+      "detached": false,
+      "elapsed_min": 135,
+      "session_id": "01a0650d-3afe-7812-b652-b82e29b97b0c",
+      "slug": "hearting",
+      "title": "F-100c peer receipt confirmation relay",
+      "model": "gpt-5.6-sol",
+      "effort": "xhigh",
+      "ctx_pct": 3,
+      "rl_5h": 83,
+      "rl_7d": 85,
+      "rl_ms": null,
+      "rl_rs": [
+        null,
+        1788747948.0
+      ],
+      "rl_windows": [
+        [
+          "7d",
+          85,
+          1788747948.0
+        ]
+      ],
+      "cost": null,
+      "tokens": 20505,
+      "active_context_tokens": 20505,
+      "context_window_tokens": 258400,
+      "session_input_tokens": 20488,
+      "session_cached_input_tokens": 0,
+      "session_output_tokens": 17,
+      "session_reasoning_output_tokens": 0,
+      "session_total_tokens": 20505,
+      "status": null,
+      "task_lifecycle": "task_complete",
+      "exec_child": null,
+      "exec_tool": null,
+      "interaction_state": null,
+      "mtime": 1788401767.7261639,
+      "liveness": "idle",
+      "proc_start": "283556828",
+      "registry_proc_start": null,
+      "started_at": null,
+      "updated_at": null,
+      "registry_name": null,
+      "runtime_name": "[steer] F-100c 수신 확인 3차(새 세션): 한 줄로",
+      "kind": null,
+      "provenance": null,
+      "session_tag": "7e",
+      "herdr_attached": true,
+      "steward": false,
+      "steward_targets": null,
+      "state_evidence": {
+        "state": "idle",
+        "tier": 2,
+        "source": "codex-lifecycle",
+        "rule": "latest exact Codex task is task_complete",
+        "derived": false,
+        "inputs": {
+          "harness": "codex",
+          "pid": 3638881,
+          "pid_alive": true,
+          "proc_start": "283556828",
+          "proc_start_match": null,
+          "orphan": false,
+          "status": null,
+          "task_lifecycle": "task_complete",
+          "exec_child": null,
+          "interaction_wait": null,
+          "mtime": 1788401767.7261639,
+          "transcript": true,
+          "started_at": null,
+          "updated_at": null,
+          "activity_ms": null,
+          "is_worker": false,
+          "fd_owner": null
+        },
+        "raw_status": null,
+        "hysteresis": null
+      },
+      "branch": null,
+      "branch_ahead": null,
+      "branch_behind": null,
+      "worktree_count": 0,
+      "peer_sent_1h": 0,
+      "peer_recv_1h": 0,
+      "peer_last_recv": {
+        "from_name": "hearting-46",
+        "from_session_id": "7a001534-ea46-4a67-971b-199c586889e2",
+        "from_harness": "claude",
+        "kind": "notice",
+        "age_min": 135
+      },
+      "mem_worker": false,
+      "subagents": [],
+      "summary": "Replying with the fixed acknowledgment line \"수신 OK 3 — f100-hearting-codex\" without touching files.",
+      "summary_ts": 1788401773.9531558,
+      "route_file": null,
+      "route_id": null,
+      "route_hash": null,
+      "route_node": null,
+      "attempt_id": null,
+      "assigned_contract": null,
+      "unit": null,
+      "worker_type": null,
+      "owner": null,
+      "model_role": null,
+      "context": {
+        "used_pct": 3,
+        "band": "normal",
+        "source": "legacy"
+      },
+      "work_projection": {
+        "source": "none",
+        "route_id": null,
+        "route_hash": null,
+        "route_node": null,
+        "attempt_id": null,
+        "assigned_contract": null,
+        "unit": null,
+        "stage_label": null,
+        "node_state": null,
+        "active_nodes": [],
+        "progress": null,
+        "ambiguity": []
+      },
+      "cap_grounding": null,
+      "association_ambiguity": null
+    }
+  ],
+  "jobs": [
+    {
+      "key": "code",
+      "stage": null,
+      "mode": null,
+      "capability_mode": "dev",
+      "worker_mode": null,
+      "mode_axis_conflict": false,
+      "qa": "standard",
+      "pid": 3087609,
+      "proc_start": "283382755",
+      "pid_scope": null,
+      "pid_local": 3087609,
+      "pid_local_start": "283382755",
+      "pid_host": null,
+      "pid_host_start": null,
+      "pid_host_ns": null,
+      "pid_ns": "pid:[4026531836]",
+      "pid_observer_ns": "pid:[4026531836]",
+      "pid_host_proof": null,
+      "pgid": 3087609,
+      "pid_identity_source": "local",
+      "model": "opus",
+      "elapsed_min": 164,
+      "slug": "peer-steward-watch",
+      "cwd": "/home/nas/user/Uihyeop/personal/hearting-wt/peer-steward-watch",
+      "parent_sid": "2adec7a7-0fc7-44e8-893a-dee4864891a9",
+      "parent_cwd": "/home/nas/user/Uihyeop/personal/hearting",
+      "parent_managed_dir": null,
+      "is_child": true,
+      "harness": "claude",
+      "qa_source": "jobslog",
+      "source": "jobs",
+      "surface_kind": null,
+      "status": "done",
+      "afterglow": false,
+      "row_terminal_mismatch": false,
+      "liveness": "dead",
+      "profile": null,
+      "artifact_root": "/home/nas/user/Uihyeop/personal/hearting/.agent_reports",
+      "branch": null,
+      "branch_ahead": null,
+      "branch_behind": null,
+      "worktree_count": 0,
+      "location_kind": "isolated-wt",
+      "location_repo": null,
+      "location_wt": "peer-steward-watch",
+      "campaign_label": "SD-122 cycle 4 — detache",
+      "depth": 1,
+      "dispatch_depth": 1,
+      "transport": "headless",
+      "execution_surface": "registered-headless",
+      "registered_worker": true,
+      "fallback_hop": "same-harness-headless",
+      "attempt_schema_version": 2,
+      "legacy_read_only": false,
+      "attempt_contract_status": "current",
+      "parent_slug": null,
+      "intensity": "standard",
+      "worker_type": "owner",
+      "assigned_contract": "autopilot-code",
+      "unit": "_kernel/owner",
+      "worker_role": null,
+      "capability_owner": "autopilot-code",
+      "effort": "xhigh",
+      "model_role": "_kernel/owner",
+      "model_profile": "deep",
+      "model_tier": "deep",
+      "profile_granularity": "full",
+      "parallel_group": null,
+      "replica_group": null,
+      "perspective": null,
+      "parallel_leg_index": null,
+      "parallel_leg_count": null,
+      "state_evidence": {
+        "state": "done",
+        "tier": 1,
+        "source": "registry",
+        "rule": "jobs.log status=done",
+        "derived": false,
+        "inputs": {
+          "source": "jobs",
+          "key": "code",
+          "is_loop": false,
+          "harness": "claude",
+          "status": "done",
+          "elapsed_min": 164,
+          "slug": "peer-steward-watch",
+          "pid": 3087609,
+          "proc_start": "283382755",
+          "pid_scope": null,
+          "pid_authoritative": true,
+          "pid_identity_source": "local",
+          "pid_local": 3087609,
+          "pid_local_start": "283382755",
+          "pid_host": null,
+          "pid_host_start": null,
+          "pid_host_ns": null,
+          "pid_ns": "pid:[4026531836]",
+          "pid_observer_ns": "pid:[4026531836]",
+          "pid_host_proof": null,
+          "pgid": 3087609,
+          "actual_proc_start": null,
+          "pid_alive": false,
+          "proc_start_match": false,
+          "attempt_id": "att-5f5112a4ef8e4573a75a0682c9962c28",
+          "route_id": null,
+          "route_node": null,
+          "registry_transition": {
+            "status": "done"
+          },
+          "heartbeat": null,
+          "terminal_observation": null,
+          "observed_liveness": {
+            "state": "alive",
+            "reason": "registry-terminal-process-live",
+            "process_state": "live",
+            "process_reason": "attempt-descendant-live"
+          },
+          "parent_extinction": null,
+          "transcript": "stale",
+          "proc_liveness": null,
+          "row_terminal_mismatch": false
+        },
+        "raw_status": "done",
+        "hysteresis": null
+      },
+      "route_file": null,
+      "route_id": null,
+      "route_hash": null,
+      "route_node": null,
+      "owner_route_file": "/home/nas/user/Uihyeop/personal/hearting/.agent_reports/.runtime/routes/rt-d7541f1033ae677f.json",
+      "owner_route_id": "rt-d7541f1033ae677f",
+      "owner_route_hash": "sha256:d7541f1033ae677f77c4b4127fc66682816b3dbadf6148438cf6c398108a50d1",
+      "attempt_id": "att-5f5112a4ef8e4573a75a0682c9962c28",
+      "registry_order": 390,
+      "registry_priority": 0,
+      "title": "Peer-steward watch hardening",
+      "summary": "Fixing a joiner/watcher lock race exposed by flaky tests before rerunning the full suite.",
+      "summary_ts": 1788402356.9778082,
+      "subagents": [],
+      "note": "dead-worker-blocked",
+      "resume_boundary": "plan",
+      "plugin_job": null,
+      "plugin_telemetry": null,
+      "ctx_pct": 37,
+      "active_context_tokens": 365068,
+      "context_window_tokens": 1000000,
+      "session_input_tokens": null,
+      "session_cached_input_tokens": null,
+      "session_output_tokens": null,
+      "session_reasoning_output_tokens": null,
+      "session_total_tokens": null,
+      "exec_child": null,
+      "exec_tool": null,
+      "context": {
+        "used_pct": null,
+        "band": "unknown",
+        "source": "claude-session-transcript"
+      },
+      "work_projection": {
+        "source": "route-exact",
+        "route_id": "rt-d7541f1033ae677f",
+        "route_hash": "sha256:d7541f1033ae677f77c4b4127fc66682816b3dbadf6148438cf6c398108a50d1",
+        "route_node": null,
+        "attempt_id": "att-5f5112a4ef8e4573a75a0682c9962c28",
+        "assigned_contract": "autopilot-code",
+        "unit": "_kernel/owner",
+        "stage_label": null,
+        "node_state": "unknown",
+        "active_nodes": [],
+        "progress": {
+          "done": 0,
+          "total": 6
+        },
+        "ambiguity": []
+      },
+      "cap_grounding": null,
+      "association_ambiguity": null
+    },
+    {
+      "key": "code",
+      "stage": "execute",
+      "mode": null,
+      "capability_mode": "dev",
+      "worker_mode": null,
+      "mode_axis_conflict": false,
+      "qa": "standard",
+      "pid": 545509,
+      "proc_start": "283947573",
+      "pid_scope": null,
+      "pid_local": 545509,
+      "pid_local_start": "283947573",
+      "pid_host": null,
+      "pid_host_start": null,
+      "pid_host_ns": null,
+      "pid_ns": "pid:[4026531836]",
+      "pid_observer_ns": "pid:[4026531836]",
+      "pid_host_proof": null,
+      "pgid": 545509,
+      "pid_identity_source": "local",
+      "model": "opus",
+      "elapsed_min": 70,
+      "slug": "fleet-conn-code",
+      "cwd": "/home/nas/user/Uihyeop/personal/hearting-wt/fleet-connection-layer",
+      "parent_sid": "841d1f64-0cff-4c16-8578-e874a45a2bb6",
+      "parent_cwd": "/home/nas/user/Uihyeop/personal/hearting",
+      "parent_managed_dir": null,
+      "is_child": true,
+      "harness": "claude",
+      "qa_source": "jobslog",
+      "source": "jobs",
+      "surface_kind": null,
+      "status": "open",
+      "afterglow": false,
+      "row_terminal_mismatch": false,
+      "liveness": "working",
+      "profile": null,
+      "artifact_root": "/home/nas/user/Uihyeop/personal/hearting/.agent_reports",
+      "branch": null,
+      "branch_ahead": null,
+      "branch_behind": null,
+      "worktree_count": 0,
+      "location_kind": "isolated-wt",
+      "location_repo": null,
+      "location_wt": "fleet-connection-layer",
+      "campaign_label": "F-101 세션 연결 계층 통합",
+      "depth": 1,
+      "dispatch_depth": 1,
+      "transport": "headless",
+      "execution_surface": "registered-headless",
+      "registered_worker": true,
+      "fallback_hop": "same-harness-headless",
+      "attempt_schema_version": 2,
+      "legacy_read_only": false,
+      "attempt_contract_status": "current",
+      "parent_slug": null,
+      "intensity": "standard",
+      "worker_type": "owner",
+      "assigned_contract": "autopilot-code",
+      "unit": "_kernel/owner",
+      "worker_role": null,
+      "capability_owner": "autopilot-code",
+      "effort": "xhigh",
+      "model_role": "_kernel/owner",
+      "model_profile": "deep",
+      "model_tier": "deep",
+      "profile_granularity": "full",
+      "parallel_group": null,
+      "replica_group": null,
+      "perspective": null,
+      "parallel_leg_index": null,
+      "parallel_leg_count": null,
+      "state_evidence": {
+        "state": "working",
+        "tier": 2,
+        "source": "shared-observer",
+        "rule": "shared observed-liveness: alive (local-pid-live)",
+        "derived": false,
+        "inputs": {
+          "source": "jobs",
+          "key": "code",
+          "is_loop": false,
+          "harness": "claude",
+          "status": "open",
+          "elapsed_min": 70,
+          "slug": "fleet-conn-code",
+          "pid": 545509,
+          "proc_start": "283947573",
+          "pid_scope": null,
+          "pid_authoritative": true,
+          "pid_identity_source": "local",
+          "pid_local": 545509,
+          "pid_local_start": "283947573",
+          "pid_host": null,
+          "pid_host_start": null,
+          "pid_host_ns": null,
+          "pid_ns": "pid:[4026531836]",
+          "pid_observer_ns": "pid:[4026531836]",
+          "pid_host_proof": null,
+          "pgid": 545509,
+          "actual_proc_start": "283947573",
+          "pid_alive": true,
+          "proc_start_match": true,
+          "attempt_id": "att-4e8b010b7d8f4d74884519d7d7c10f8f",
+          "route_id": null,
+          "route_node": null,
+          "registry_transition": {
+            "status": "open"
+          },
+          "heartbeat": null,
+          "terminal_observation": null,
+          "observed_liveness": {
+            "state": "alive",
+            "reason": "local-pid-live",
+            "process_state": "live",
+            "process_reason": "local-pid-live"
+          },
+          "parent_extinction": null,
+          "transcript": "dead",
+          "proc_liveness": null,
+          "row_terminal_mismatch": false
+        },
+        "raw_status": "open",
+        "hysteresis": null,
+        "classifier_source": "tools.fleet.model.classify_attempt_evidence",
+        "attempt": {
+          "state": "working",
+          "tier": 2,
+          "source": "shared-observer",
+          "rule": "shared observed-liveness: alive (local-pid-live)",
+          "classifier_source": "tools.fleet.model.classify_attempt_evidence",
+          "attempt_id": "att-4e8b010b7d8f4d74884519d7d7c10f8f",
+          "route_id": null,
+          "route_node": null,
+          "pid": 545509,
+          "pid_scope": null,
+          "proc_start": "283947573",
+          "actual_proc_start": "283947573",
+          "pid_authoritative": true,
+          "pid_identity_source": "local",
+          "pid_local": 545509,
+          "pid_local_start": "283947573",
+          "pid_host": null,
+          "pid_host_start": null,
+          "pid_host_ns": null,
+          "pid_ns": "pid:[4026531836]",
+          "pid_observer_ns": "pid:[4026531836]",
+          "pid_host_proof": null,
+          "pgid": 545509,
+          "heartbeat": null,
+          "terminal_observation": null,
+          "parent_extinction": null,
+          "observed_liveness": {
+            "state": "alive",
+            "reason": "local-pid-live",
+            "process_state": "live",
+            "process_reason": "local-pid-live"
+          },
+          "registry_transition": {
+            "status": "open"
+          },
+          "progress_fingerprint": "b6fe26dbc88f81aa53585a6ffa3aa9bb57f830f0b99c92bb328d2c66e5b5403d",
+          "observed_at": 1788409911.6014323
+        }
+      },
+      "route_file": null,
+      "route_id": null,
+      "route_hash": null,
+      "route_node": null,
+      "owner_route_file": "/home/nas/user/Uihyeop/personal/hearting/.agent_reports/.runtime/routes/rt-aa1344860be4f2a6.json",
+      "owner_route_id": "rt-aa1344860be4f2a6",
+      "owner_route_hash": "sha256:aa1344860be4f2a64227c89cfbc844e0d7b782beee68f4818a26b7d463f7440a",
+      "attempt_id": "att-4e8b010b7d8f4d74884519d7d7c10f8f",
+      "registry_order": 396,
+      "registry_priority": 0,
+      "title": "Fleet Connection Layer Integration",
+      "summary": "검증 항목 4개의 테스트 커버리지 보완 세션을 디스패치 중",
+      "summary_ts": 1788409876.5036352,
+      "subagents": [],
+      "note": null,
+      "resume_boundary": null,
+      "plugin_job": null,
+      "plugin_telemetry": null,
+      "ctx_pct": 22,
+      "active_context_tokens": 215915,
+      "context_window_tokens": 1000000,
+      "session_input_tokens": null,
+      "session_cached_input_tokens": null,
+      "session_output_tokens": null,
+      "session_reasoning_output_tokens": null,
+      "session_total_tokens": null,
+      "exec_child": null,
+      "exec_tool": {
+        "name": "cat"
+      },
+      "context": {
+        "used_pct": 22,
+        "band": "normal",
+        "source": "claude-attempt-stream"
+      },
+      "work_projection": {
+        "source": "route-exact",
+        "route_id": "rt-aa1344860be4f2a6",
+        "route_hash": "sha256:aa1344860be4f2a64227c89cfbc844e0d7b782beee68f4818a26b7d463f7440a",
+        "route_node": "execute",
+        "attempt_id": "att-4e8b010b7d8f4d74884519d7d7c10f8f",
+        "assigned_contract": "autopilot-code",
+        "unit": "dev/backend",
+        "stage_label": "execute",
+        "node_state": "active",
+        "active_nodes": [
+          {
+            "id": "execute",
+            "depends_on": [
+              "plan-check"
+            ],
+            "level": 3,
+            "unit": "dev/backend",
+            "unit_choices": [
+              "dev/backend",
+              "dev/frontend",
+              "dev/new-lib",
+              "dev/refactor"
+            ],
+            "gate": "code-execute",
+            "write_scope": [
+              "source/**",
+              "checklist.md",
+              "dev_logs/**",
+              "evidence/**"
+            ],
+            "state": "active",
+            "progress": null,
+            "parallel_group": null,
+            "replica_group": null,
+            "model_profile": "light",
+            "perspective": null,
+            "degradation": null
+          }
+        ],
+        "progress": {
+          "done": 4,
+          "total": 8
+        },
+        "ambiguity": []
+      },
+      "cap_grounding": null,
+      "association_ambiguity": null
+    },
+    {
+      "key": "code",
+      "stage": null,
+      "mode": null,
+      "capability_mode": "dev",
+      "worker_mode": null,
+      "mode_axis_conflict": false,
+      "qa": "standard",
+      "pid": 666644,
+      "proc_start": "284070526",
+      "pid_scope": null,
+      "pid_local": 666644,
+      "pid_local_start": "284070526",
+      "pid_host": null,
+      "pid_host_start": null,
+      "pid_host_ns": null,
+      "pid_ns": "pid:[4026531836]",
+      "pid_observer_ns": "pid:[4026531836]",
+      "pid_host_proof": null,
+      "pgid": 666644,
+      "pid_identity_source": "local",
+      "model": "opus",
+      "elapsed_min": 50,
+      "slug": "w14a-owner-2",
+      "cwd": "/home/nas/user/Uihyeop/personal/cairn",
+      "parent_sid": "0432af5b-f14f-427f-aff5-10bf9e27b9fe",
+      "parent_cwd": "/home/nas/user/Uihyeop/personal/cairn",
+      "parent_managed_dir": null,
+      "is_child": true,
+      "harness": "claude",
+      "qa_source": "jobslog",
+      "source": "jobs",
+      "surface_kind": null,
+      "status": "open",
+      "afterglow": false,
+      "row_terminal_mismatch": false,
+      "liveness": "working",
+      "profile": null,
+      "artifact_root": "/home/nas/user/Uihyeop/personal/cairn/.claude_reports",
+      "branch": null,
+      "branch_ahead": null,
+      "branch_behind": null,
+      "worktree_count": 0,
+      "location_kind": "primary",
+      "location_repo": null,
+      "location_wt": null,
+      "campaign_label": "W14a fleet readability",
+      "depth": 1,
+      "dispatch_depth": 1,
+      "transport": "headless",
+      "execution_surface": "registered-headless",
+      "registered_worker": true,
+      "fallback_hop": "same-harness-headless",
+      "attempt_schema_version": 2,
+      "legacy_read_only": false,
+      "attempt_contract_status": "current",
+      "parent_slug": null,
+      "intensity": "standard",
+      "worker_type": "owner",
+      "assigned_contract": "autopilot-code",
+      "unit": "_kernel/owner",
+      "worker_role": null,
+      "capability_owner": "autopilot-code",
+      "effort": "medium",
+      "model_role": "_kernel/owner",
+      "model_profile": "balanced-deep",
+      "model_tier": "deep",
+      "profile_granularity": "full",
+      "parallel_group": null,
+      "replica_group": null,
+      "perspective": null,
+      "parallel_leg_index": null,
+      "parallel_leg_count": null,
+      "state_evidence": {
+        "state": "working",
+        "tier": 2,
+        "source": "shared-observer",
+        "rule": "shared observed-liveness: alive (local-pid-live)",
+        "derived": false,
+        "inputs": {
+          "source": "jobs",
+          "key": "code",
+          "is_loop": false,
+          "harness": "claude",
+          "status": "open",
+          "elapsed_min": 50,
+          "slug": "w14a-owner-2",
+          "pid": 666644,
+          "proc_start": "284070526",
+          "pid_scope": null,
+          "pid_authoritative": true,
+          "pid_identity_source": "local",
+          "pid_local": 666644,
+          "pid_local_start": "284070526",
+          "pid_host": null,
+          "pid_host_start": null,
+          "pid_host_ns": null,
+          "pid_ns": "pid:[4026531836]",
+          "pid_observer_ns": "pid:[4026531836]",
+          "pid_host_proof": null,
+          "pgid": 666644,
+          "actual_proc_start": "284070526",
+          "pid_alive": true,
+          "proc_start_match": true,
+          "attempt_id": "att-53638303258743d1a19f5ec5390ffacd",
+          "route_id": null,
+          "route_node": null,
+          "registry_transition": {
+            "status": "open"
+          },
+          "heartbeat": null,
+          "terminal_observation": null,
+          "observed_liveness": {
+            "state": "alive",
+            "reason": "local-pid-live",
+            "process_state": "live",
+            "process_reason": "local-pid-live"
+          },
+          "parent_extinction": null,
+          "transcript": "working",
+          "proc_liveness": null,
+          "row_terminal_mismatch": false
+        },
+        "raw_status": "open",
+        "hysteresis": null,
+        "classifier_source": "tools.fleet.model.classify_attempt_evidence",
+        "attempt": {
+          "state": "working",
+          "tier": 2,
+          "source": "shared-observer",
+          "rule": "shared observed-liveness: alive (local-pid-live)",
+          "classifier_source": "tools.fleet.model.classify_attempt_evidence",
+          "attempt_id": "att-53638303258743d1a19f5ec5390ffacd",
+          "route_id": null,
+          "route_node": null,
+          "pid": 666644,
+          "pid_scope": null,
+          "proc_start": "284070526",
+          "actual_proc_start": "284070526",
+          "pid_authoritative": true,
+          "pid_identity_source": "local",
+          "pid_local": 666644,
+          "pid_local_start": "284070526",
+          "pid_host": null,
+          "pid_host_start": null,
+          "pid_host_ns": null,
+          "pid_ns": "pid:[4026531836]",
+          "pid_observer_ns": "pid:[4026531836]",
+          "pid_host_proof": null,
+          "pgid": 666644,
+          "heartbeat": null,
+          "terminal_observation": null,
+          "parent_extinction": null,
+          "observed_liveness": {
+            "state": "alive",
+            "reason": "local-pid-live",
+            "process_state": "live",
+            "process_reason": "local-pid-live"
+          },
+          "registry_transition": {
+            "status": "open"
+          },
+          "progress_fingerprint": "fcfef2d92855b6a8f3901c1bf5f028659c11f5f8e59c002c0c472b8d506c55ce",
+          "observed_at": 1788409911.6014323
+        }
+      },
+      "route_file": null,
+      "route_id": null,
+      "route_hash": null,
+      "route_node": null,
+      "owner_route_file": "/home/nas/user/Uihyeop/personal/cairn/.claude_reports/.runtime/routes/rt-0391ef5dff924982.json",
+      "owner_route_id": "rt-0391ef5dff924982",
+      "owner_route_hash": "sha256:0391ef5dff9249824d090e6f110ffa9ba6149a038e7b36237893465a91366d70",
+      "attempt_id": "att-53638303258743d1a19f5ec5390ffacd",
+      "registry_order": 403,
+      "registry_priority": 0,
+      "title": "Fleet Readability W14a Rollout",
+      "summary": "Dispatching the remaining execution gap.",
+      "summary_ts": 1788409908.6443594,
+      "subagents": [],
+      "note": null,
+      "resume_boundary": null,
+      "plugin_job": null,
+      "plugin_telemetry": null,
+      "ctx_pct": 17,
+      "active_context_tokens": 169553,
+      "context_window_tokens": 1000000,
+      "session_input_tokens": null,
+      "session_cached_input_tokens": null,
+      "session_output_tokens": null,
+      "session_reasoning_output_tokens": null,
+      "session_total_tokens": null,
+      "exec_child": null,
+      "exec_tool": {
+        "name": "Bash"
+      },
+      "context": {
+        "used_pct": 17,
+        "band": "normal",
+        "source": "claude-attempt-stream"
+      },
+      "work_projection": {
+        "source": "route-exact",
+        "route_id": "rt-0391ef5dff924982",
+        "route_hash": "sha256:0391ef5dff9249824d090e6f110ffa9ba6149a038e7b36237893465a91366d70",
+        "route_node": null,
+        "attempt_id": "att-53638303258743d1a19f5ec5390ffacd",
+        "assigned_contract": "autopilot-code",
+        "unit": "_kernel/owner",
+        "stage_label": null,
+        "node_state": "unknown",
+        "active_nodes": [],
+        "progress": {
+          "done": 5,
+          "total": 8
+        },
+        "ambiguity": []
+      },
+      "cap_grounding": null,
+      "association_ambiguity": null
+    },
+    {
+      "key": "code",
+      "stage": "code-execute",
+      "mode": null,
+      "capability_mode": "dev",
+      "worker_mode": "dev/backend",
+      "mode_axis_conflict": false,
+      "qa": "standard",
+      "pid": 995998,
+      "proc_start": "284312310",
+      "pid_scope": "namespace-local",
+      "pid_local": 995998,
+      "pid_local_start": "284312310",
+      "pid_host": null,
+      "pid_host_start": null,
+      "pid_host_ns": null,
+      "pid_ns": "pid:[4026531836]",
+      "pid_observer_ns": "pid:[4026531836]",
+      "pid_host_proof": null,
+      "pgid": 995998,
+      "pid_identity_source": "local",
+      "model": "gpt-5.6-luna",
+      "elapsed_min": 9,
+      "slug": "w14a-execute-2",
+      "cwd": "/home/nas/user/Uihyeop/personal/cairn",
+      "parent_sid": "0432af5b-f14f-427f-aff5-10bf9e27b9fe",
+      "parent_cwd": "/home/nas/user/Uihyeop/personal/cairn",
+      "parent_managed_dir": null,
+      "is_child": true,
+      "harness": "codex",
+      "qa_source": "jobslog",
+      "source": "jobs",
+      "surface_kind": null,
+      "status": "done",
+      "afterglow": true,
+      "row_terminal_mismatch": false,
+      "liveness": "done",
+      "profile": null,
+      "artifact_root": "/home/nas/user/Uihyeop/personal/cairn/.claude_reports",
+      "branch": null,
+      "branch_ahead": null,
+      "branch_behind": null,
+      "worktree_count": 0,
+      "location_kind": "primary",
+      "location_repo": null,
+      "location_wt": null,
+      "campaign_label": "W14a fleet readability",
+      "depth": 2,
+      "dispatch_depth": 2,
+      "transport": "headless",
+      "execution_surface": "registered-headless",
+      "registered_worker": true,
+      "fallback_hop": "cross-harness-headless",
+      "attempt_schema_version": 2,
+      "legacy_read_only": false,
+      "attempt_contract_status": "current",
+      "parent_slug": "w14a-owner-2",
+      "intensity": "standard",
+      "worker_type": "stage",
+      "assigned_contract": "code-execute",
+      "unit": "dev/backend",
+      "worker_role": null,
+      "capability_owner": "autopilot-code",
+      "effort": "medium",
+      "model_role": "fast implementer",
+      "model_profile": "light",
+      "model_tier": "light",
+      "profile_granularity": "full",
+      "parallel_group": null,
+      "replica_group": null,
+      "perspective": null,
+      "parallel_leg_index": null,
+      "parallel_leg_count": null,
+      "state_evidence": {
+        "state": "done",
+        "tier": 1,
+        "source": "registry",
+        "rule": "jobs.log status=done",
+        "derived": false,
+        "inputs": {
+          "source": "jobs",
+          "key": "code",
+          "is_loop": false,
+          "harness": "codex",
+          "status": "done",
+          "elapsed_min": 9,
+          "slug": "w14a-execute-2",
+          "pid": 995998,
+          "proc_start": "284312310",
+          "pid_scope": "namespace-local",
+          "pid_authoritative": true,
+          "pid_identity_source": "local",
+          "pid_local": 995998,
+          "pid_local_start": "284312310",
+          "pid_host": null,
+          "pid_host_start": null,
+          "pid_host_ns": null,
+          "pid_ns": "pid:[4026531836]",
+          "pid_observer_ns": "pid:[4026531836]",
+          "pid_host_proof": null,
+          "pgid": 995998,
+          "actual_proc_start": null,
+          "pid_alive": false,
+          "proc_start_match": false,
+          "attempt_id": "att-9b2c5e45445ccada39566e08650aae7bcb14818b5ab669b3",
+          "route_id": "rt-0391ef5dff924982",
+          "route_node": "execute",
+          "registry_transition": {
+            "status": "done"
+          },
+          "heartbeat": {
+            "attempt_id": "att-9b2c5e45445ccada39566e08650aae7bcb14818b5ab669b3",
+            "evidence": "execute-2-complete",
+            "evidence_digest": "83f30920e733d51b5360dc8eb4a0ef7760591151b3c90bebb69d8dc93ec14b53",
+            "kind": "artifact",
+            "phase": "terminal",
+            "route_id": "rt-0391ef5dff924982",
+            "route_node": "execute",
+            "schema_version": 1,
+            "sequence": 6,
+            "updated_at": 1788409877.678321
+          },
+          "terminal_observation": null,
+          "observed_liveness": {
+            "state": "terminal",
+            "reason": "registry-closed",
+            "process_state": "quiescent",
+            "process_reason": "governed-process-group-drained"
+          },
+          "parent_extinction": null,
+          "transcript": "working",
+          "proc_liveness": null,
+          "row_terminal_mismatch": false
+        },
+        "raw_status": "done",
+        "hysteresis": null
+      },
+      "route_file": "/home/nas/user/Uihyeop/personal/cairn/.claude_reports/.runtime/routes/rt-0391ef5dff924982.json",
+      "route_id": "rt-0391ef5dff924982",
+      "route_hash": "sha256:0391ef5dff9249824d090e6f110ffa9ba6149a038e7b36237893465a91366d70",
+      "route_node": "execute",
+      "owner_route_file": null,
+      "owner_route_id": null,
+      "owner_route_hash": null,
+      "attempt_id": "att-9b2c5e45445ccada39566e08650aae7bcb14818b5ab669b3",
+      "registry_order": 414,
+      "registry_priority": 0,
+      "title": "W14a Fleet Readability",
+      "summary": "두 번째 실행 결과가 통과되었고 차단 요소는 없다.",
+      "summary_ts": 1788409897.9945426,
+      "subagents": null,
+      "note": null,
+      "resume_boundary": null,
+      "plugin_job": null,
+      "plugin_telemetry": null,
+      "ctx_pct": 42,
+      "active_context_tokens": 115538,
+      "context_window_tokens": 258400,
+      "session_input_tokens": 6122493,
+      "session_cached_input_tokens": 5977344,
+      "session_output_tokens": 21756,
+      "session_reasoning_output_tokens": 4576,
+      "session_total_tokens": 6144249,
+      "exec_child": null,
+      "exec_tool": null,
+      "context": {
+        "used_pct": 42,
+        "band": "normal",
+        "source": "codex-attempt-rollout"
+      },
+      "work_projection": {
+        "source": "route-exact",
+        "route_id": "rt-0391ef5dff924982",
+        "route_hash": "sha256:0391ef5dff9249824d090e6f110ffa9ba6149a038e7b36237893465a91366d70",
+        "route_node": "execute",
+        "attempt_id": "att-9b2c5e45445ccada39566e08650aae7bcb14818b5ab669b3",
+        "assigned_contract": "code-execute",
+        "unit": "dev/backend",
+        "stage_label": "code-execute",
+        "node_state": "done",
+        "active_nodes": [],
+        "progress": {
+          "done": 5,
+          "total": 8
+        },
+        "ambiguity": []
+      },
+      "cap_grounding": null,
+      "association_ambiguity": null
+    },
+    {
+      "key": "code",
+      "stage": "code-execute",
+      "mode": null,
+      "capability_mode": "dev",
+      "worker_mode": "dev/backend",
+      "mode_axis_conflict": false,
+      "qa": "standard",
+      "pid": 1073316,
+      "proc_start": "284368429",
+      "pid_scope": "namespace-local",
+      "pid_local": 1073316,
+      "pid_local_start": "284368429",
+      "pid_host": null,
+      "pid_host_start": null,
+      "pid_host_ns": null,
+      "pid_ns": "pid:[4026531836]",
+      "pid_observer_ns": "pid:[4026531836]",
+      "pid_host_proof": null,
+      "pgid": 1073316,
+      "pid_identity_source": "local",
+      "model": "sonnet",
+      "elapsed_min": 0,
+      "slug": "f101-exec-gap",
+      "cwd": "/home/nas/user/Uihyeop/personal/hearting-wt/fleet-connection-layer",
+      "parent_sid": "841d1f64-0cff-4c16-8578-e874a45a2bb6",
+      "parent_cwd": "/home/nas/user/Uihyeop/personal/hearting",
+      "parent_managed_dir": null,
+      "is_child": true,
+      "harness": "claude",
+      "qa_source": "jobslog",
+      "source": "jobs",
+      "surface_kind": null,
+      "status": "open",
+      "afterglow": false,
+      "row_terminal_mismatch": false,
+      "liveness": "working",
+      "profile": null,
+      "artifact_root": "/home/nas/user/Uihyeop/personal/hearting/.agent_reports",
+      "branch": null,
+      "branch_ahead": null,
+      "branch_behind": null,
+      "worktree_count": 0,
+      "location_kind": "isolated-wt",
+      "location_repo": null,
+      "location_wt": "fleet-connection-layer",
+      "campaign_label": "F-101 세션 연결 계층 통합",
+      "depth": 2,
+      "dispatch_depth": 2,
+      "transport": "headless",
+      "execution_surface": "registered-headless",
+      "registered_worker": true,
+      "fallback_hop": "same-harness-headless",
+      "attempt_schema_version": 2,
+      "legacy_read_only": false,
+      "attempt_contract_status": "current",
+      "parent_slug": "fleet-conn-code",
+      "intensity": "standard",
+      "worker_type": "stage",
+      "assigned_contract": "code-execute",
+      "unit": "dev/backend",
+      "worker_role": null,
+      "capability_owner": "autopilot-code",
+      "effort": "medium",
+      "model_role": "fast implementer",
+      "model_profile": "light",
+      "model_tier": "light",
+      "profile_granularity": "full",
+      "parallel_group": null,
+      "replica_group": null,
+      "perspective": null,
+      "parallel_leg_index": null,
+      "parallel_leg_count": null,
+      "state_evidence": {
+        "state": "working",
+        "tier": 2,
+        "source": "shared-observer",
+        "rule": "shared observed-liveness: alive (local-pid-live)",
+        "derived": false,
+        "inputs": {
+          "source": "jobs",
+          "key": "code",
+          "is_loop": false,
+          "harness": "claude",
+          "status": "open",
+          "elapsed_min": 0,
+          "slug": "f101-exec-gap",
+          "pid": 1073316,
+          "proc_start": "284368429",
+          "pid_scope": "namespace-local",
+          "pid_authoritative": true,
+          "pid_identity_source": "local",
+          "pid_local": 1073316,
+          "pid_local_start": "284368429",
+          "pid_host": null,
+          "pid_host_start": null,
+          "pid_host_ns": null,
+          "pid_ns": "pid:[4026531836]",
+          "pid_observer_ns": "pid:[4026531836]",
+          "pid_host_proof": null,
+          "pgid": 1073316,
+          "actual_proc_start": "284368429",
+          "pid_alive": true,
+          "proc_start_match": true,
+          "attempt_id": "att-50df4ba3257150745c1a6873dbbcd0b9481e1786c86c7bad",
+          "route_id": "rt-aa1344860be4f2a6",
+          "route_node": "execute",
+          "registry_transition": {
+            "status": "open"
+          },
+          "heartbeat": {
+            "attempt_id": "att-50df4ba3257150745c1a6873dbbcd0b9481e1786c86c7bad",
+            "evidence": "analysis-entered",
+            "evidence_digest": "318d3ecdb0b3a1173be8c9bee929c095cabf9778ffb60c827c9cf04a958b0250",
+            "kind": "registry",
+            "phase": "analysis",
+            "route_id": "rt-aa1344860be4f2a6",
+            "route_node": "execute",
+            "schema_version": 1,
+            "sequence": 2,
+            "updated_at": 1788409886.5368593
+          },
+          "terminal_observation": null,
+          "observed_liveness": {
+            "state": "alive",
+            "reason": "local-pid-live",
+            "process_state": "live",
+            "process_reason": "local-pid-live"
+          },
+          "parent_extinction": null,
+          "transcript": "dead",
+          "proc_liveness": null,
+          "row_terminal_mismatch": false
+        },
+        "raw_status": "open",
+        "hysteresis": null,
+        "classifier_source": "tools.fleet.model.classify_attempt_evidence",
+        "attempt": {
+          "state": "working",
+          "tier": 2,
+          "source": "shared-observer",
+          "rule": "shared observed-liveness: alive (local-pid-live)",
+          "classifier_source": "tools.fleet.model.classify_attempt_evidence",
+          "attempt_id": "att-50df4ba3257150745c1a6873dbbcd0b9481e1786c86c7bad",
+          "route_id": "rt-aa1344860be4f2a6",
+          "route_node": "execute",
+          "pid": 1073316,
+          "pid_scope": "namespace-local",
+          "proc_start": "284368429",
+          "actual_proc_start": "284368429",
+          "pid_authoritative": true,
+          "pid_identity_source": "local",
+          "pid_local": 1073316,
+          "pid_local_start": "284368429",
+          "pid_host": null,
+          "pid_host_start": null,
+          "pid_host_ns": null,
+          "pid_ns": "pid:[4026531836]",
+          "pid_observer_ns": "pid:[4026531836]",
+          "pid_host_proof": null,
+          "pgid": 1073316,
+          "heartbeat": {
+            "attempt_id": "att-50df4ba3257150745c1a6873dbbcd0b9481e1786c86c7bad",
+            "evidence": "analysis-entered",
+            "evidence_digest": "318d3ecdb0b3a1173be8c9bee929c095cabf9778ffb60c827c9cf04a958b0250",
+            "kind": "registry",
+            "phase": "analysis",
+            "route_id": "rt-aa1344860be4f2a6",
+            "route_node": "execute",
+            "schema_version": 1,
+            "sequence": 2,
+            "updated_at": 1788409886.5368593
+          },
+          "terminal_observation": null,
+          "parent_extinction": null,
+          "observed_liveness": {
+            "state": "alive",
+            "reason": "local-pid-live",
+            "process_state": "live",
+            "process_reason": "local-pid-live"
+          },
+          "registry_transition": {
+            "status": "open"
+          },
+          "progress_fingerprint": "2e4ca02915409af800b52af38f5b75f8366b463b351cdbafd99f930dbe6491d7",
+          "observed_at": 1788409911.6014323
+        }
+      },
+      "route_file": "/home/nas/user/Uihyeop/personal/hearting/.agent_reports/.runtime/routes/rt-aa1344860be4f2a6.json",
+      "route_id": "rt-aa1344860be4f2a6",
+      "route_hash": "sha256:aa1344860be4f2a64227c89cfbc844e0d7b782beee68f4818a26b7d463f7440a",
+      "route_node": "execute",
+      "owner_route_file": null,
+      "owner_route_id": null,
+      "owner_route_hash": null,
+      "attempt_id": "att-50df4ba3257150745c1a6873dbbcd0b9481e1786c86c7bad",
+      "registry_order": 415,
+      "registry_priority": 0,
+      "title": null,
+      "summary": null,
+      "summary_ts": null,
+      "subagents": [],
+      "note": null,
+      "resume_boundary": null,
+      "plugin_job": null,
+      "plugin_telemetry": null,
+      "ctx_pct": 6,
+      "active_context_tokens": 56026,
+      "context_window_tokens": 1000000,
+      "session_input_tokens": null,
+      "session_cached_input_tokens": null,
+      "session_output_tokens": null,
+      "session_reasoning_output_tokens": null,
+      "session_total_tokens": null,
+      "exec_child": null,
+      "exec_tool": {
+        "name": "Bash"
+      },
+      "context": {
+        "used_pct": 6,
+        "band": "normal",
+        "source": "claude-attempt-stream"
+      },
+      "work_projection": {
+        "source": "route-exact",
+        "route_id": "rt-aa1344860be4f2a6",
+        "route_hash": "sha256:aa1344860be4f2a64227c89cfbc844e0d7b782beee68f4818a26b7d463f7440a",
+        "route_node": "execute",
+        "attempt_id": "att-50df4ba3257150745c1a6873dbbcd0b9481e1786c86c7bad",
+        "assigned_contract": "code-execute",
+        "unit": "dev/backend",
+        "stage_label": "code-execute",
+        "node_state": "active",
+        "active_nodes": [
+          {
+            "id": "execute",
+            "depends_on": [
+              "plan-check"
+            ],
+            "level": 3,
+            "unit": "dev/backend",
+            "unit_choices": [
+              "dev/backend",
+              "dev/frontend",
+              "dev/new-lib",
+              "dev/refactor"
+            ],
+            "gate": "code-execute",
+            "write_scope": [
+              "source/**",
+              "checklist.md",
+              "dev_logs/**",
+              "evidence/**"
+            ],
+            "state": "active",
+            "progress": null,
+            "parallel_group": null,
+            "replica_group": null,
+            "model_profile": "light",
+            "perspective": null,
+            "degradation": null
+          }
+        ],
+        "progress": {
+          "done": 4,
+          "total": 8
+        },
+        "ambiguity": []
+      },
+      "cap_grounding": null,
+      "association_ambiguity": null
+    }
+  ],
+  "resource_jobs": [],
+  "summary": {
+    "session_count": 15,
+    "by_harness": {
+      "claude": 9,
+      "opencode": 2,
+      "codex": 4
+    },
+    "dispatch_count": 5,
+    "resource_count": 0,
+    "resource_working": 0,
+    "resource_stale": 0,
+    "resource_exited": 0
+  },
+  "memory": {
+    "journal_available": true,
+    "graveyard_available": true,
+    "today": {
+      "added_working": 2,
+      "added_durable": 12,
+      "added": 14,
+      "expired": 4,
+      "pruned": 9
+    },
+    "last_distill_min": 153,
+    "recent": [
+      {
+        "ts": "2026-09-03T13:28:35",
+        "action": "add",
+        "tier": "durable",
+        "type": "project",
+        "actor": "sync",
+        "sid": "",
+        "snippet": "2026-09-03 Cairn PRD **v170 §80 = W14 산출물 열람 플랫폼** 등재 완료. 사용자 확정: 독립 노트 열람 경험을 산"
+      },
+      {
+        "ts": "2026-09-03T13:23:30",
+        "action": "add",
+        "tier": "durable",
+        "type": "decision",
+        "actor": "manual",
+        "sid": "",
+        "snippet": "논문 메커니즘의 이식 후보를 모으는 '아이디어 카탈로그'를 별도 형식으로 운영하기로 함 (2026-09-03). 조사 카드(cards/*.md)"
+      },
+      {
+        "ts": "2026-09-03T13:23:17",
+        "action": "add",
+        "tier": "durable",
+        "type": "research-idea",
+        "actor": "manual",
+        "sid": "",
+        "snippet": "TIGER의 band-split을 SR-CorrNet dual-path 코어에 이식하는 안 (2026-09-03 삼성세미나 조사 대화에서 도출)"
+      },
+      {
+        "ts": "2026-09-03T11:43:54",
+        "action": "add",
+        "tier": "durable",
+        "type": "decision",
+        "actor": "sync",
+        "sid": "",
+        "snippet": "User asked (2026-09-03) that Codex sessions start in yolo by default, the same w"
+      },
+      {
+        "ts": "2026-09-03T11:12:27",
+        "action": "add",
+        "tier": "durable",
+        "type": "project",
+        "actor": "sync",
+        "sid": "",
+        "snippet": "2026-09-03 Cairn W13 production apply 완료. prod Turso `worklog-board` active proj"
+      },
+      {
+        "ts": "2026-09-03T10:58:27",
+        "action": "add",
+        "tier": "durable",
+        "type": "artifact-pointer",
+        "actor": "curator",
+        "sid": "",
+        "snippet": "When revisiting F-100/F-100b Fleet depth-0 session-tag display, retrieve the imp"
+      },
+      {
+        "ts": "2026-09-03T10:57:08",
+        "action": "add",
+        "tier": "durable",
+        "type": "project",
+        "actor": "manual",
+        "sid": "",
+        "snippet": "2026-09-03 Cairn W13 production apply 완료: prod Turso worklog-board active projec"
+      },
+      {
+        "ts": "2026-09-03T10:57:08",
+        "action": "delete",
+        "tier": "working",
+        "type": "unresolved-obligation",
+        "actor": "manual",
+        "sid": "",
+        "snippet": ""
+      }
+    ],
+    "by_repo": {
+      "cairn": [
+        {
+          "ts": "2026-09-03T13:28:35",
+          "action": "add",
+          "tier": "durable",
+          "type": "project",
+          "actor": "sync",
+          "sid": "",
+          "snippet": "2026-09-03 Cairn PRD **v170 §80 = W14 산출물 열람 플랫폼** 등재 완료. 사용자 확정: 독립 노트 열람 경험을 산"
+        },
+        {
+          "ts": "2026-09-03T11:12:27",
+          "action": "add",
+          "tier": "durable",
+          "type": "project",
+          "actor": "sync",
+          "sid": "",
+          "snippet": "2026-09-03 Cairn W13 production apply 완료. prod Turso `worklog-board` active proj"
+        },
+        {
+          "ts": "2026-09-03T10:57:08",
+          "action": "delete",
+          "tier": "working",
+          "type": "unresolved-obligation",
+          "actor": "manual",
+          "sid": "",
+          "snippet": ""
+        },
+        {
+          "ts": "2026-09-03T10:57:08",
+          "action": "add",
+          "tier": "durable",
+          "type": "project",
+          "actor": "manual",
+          "sid": "",
+          "snippet": "2026-09-03 Cairn W13 production apply 완료: prod Turso worklog-board active projec"
+        },
+        {
+          "ts": "2026-09-03T09:16:43",
+          "action": "delete",
+          "tier": "durable",
+          "type": "unresolved-obligation",
+          "actor": "manual",
+          "sid": "",
+          "snippet": ""
+        },
+        {
+          "ts": "2026-09-03T09:16:43",
+          "action": "add",
+          "tier": "durable",
+          "type": "reference",
+          "actor": "manual",
+          "sid": "",
+          "snippet": "Turso 플랜 실측(2026-09-03, turso plan show): org personal, plan starter, overages d"
+        },
+        {
+          "ts": "2026-09-03T04:03:17",
+          "action": "reinforce",
+          "tier": "working",
+          "type": "unresolved-obligation",
+          "actor": "curator",
+          "sid": "",
+          "snippet": ""
+        },
+        {
+          "ts": "2026-09-03T00:14:14",
+          "action": "add",
+          "tier": "working",
+          "type": "unresolved-obligation",
+          "actor": "manual",
+          "sid": "",
+          "snippet": "W13 production apply in flight: fix 12d67cc landed, rebuild #2 running, prod cop"
+        },
+        {
+          "ts": "2026-09-03T00:14:07",
+          "action": "delete",
+          "tier": "working",
+          "type": "unresolved-obligation",
+          "actor": "manual",
+          "sid": "",
+          "snippet": ""
+        }
+      ],
+      "SR_CorrNet_DSC": [
+        {
+          "ts": "2026-09-03T04:01:48",
+          "action": "reinforce",
+          "tier": "durable",
+          "type": "project",
+          "actor": "curator",
+          "sid": "",
+          "snippet": ""
+        },
+        {
+          "ts": "2026-09-03T04:01:48",
+          "action": "reinforce",
+          "tier": "durable",
+          "type": "lesson",
+          "actor": "curator",
+          "sid": "",
+          "snippet": ""
+        },
+        {
+          "ts": "2026-09-03T04:01:47",
+          "action": "prune",
+          "tier": "durable",
+          "type": "project",
+          "actor": "curator",
+          "sid": "",
+          "snippet": ""
+        },
+        {
+          "ts": "2026-09-03T04:01:47",
+          "action": "reinforce",
+          "tier": "durable",
+          "type": "decision",
+          "actor": "curator",
+          "sid": "",
+          "snippet": ""
+        }
+      ],
+      "BC_ResNet": [
+        {
+          "ts": "2026-09-03T04:03:58",
+          "action": "supersede",
+          "tier": "working",
+          "type": "handoff",
+          "actor": "curator",
+          "sid": "",
+          "snippet": "superseded_by=decision_decision-v3-6-run_d995b5"
+        }
+      ],
+      "Stream_Diar_Baselines": [
+        {
+          "ts": "2026-09-03T04:05:02",
+          "action": "merge",
+          "tier": "durable",
+          "type": "project",
+          "actor": "curator",
+          "sid": "",
+          "snippet": "← project_project-codex-companion-codex_c1a476,project_project-codex-companion-m"
+        }
+      ],
+      "Uihyeop": [
+        {
+          "ts": "2026-09-03T04:07:00",
+          "action": "prune",
+          "tier": "durable",
+          "type": "feedback",
+          "actor": "curator",
+          "sid": "",
+          "snippet": ""
+        },
+        {
+          "ts": "2026-09-03T04:07:00",
+          "action": "prune",
+          "tier": "durable",
+          "type": "project",
+          "actor": "curator",
+          "sid": "",
+          "snippet": ""
+        },
+        {
+          "ts": "2026-09-03T04:06:59",
+          "action": "prune",
+          "tier": "durable",
+          "type": "feedback",
+          "actor": "curator",
+          "sid": "",
+          "snippet": ""
+        },
+        {
+          "ts": "2026-09-03T04:05:39",
+          "action": "merge",
+          "tier": "durable",
+          "type": "user",
+          "actor": "curator",
+          "sid": "",
+          "snippet": "← user_user-user-is-a_d48ddb"
+        }
+      ],
+      "hearting": [
+        {
+          "ts": "2026-09-03T11:43:54",
+          "action": "add",
+          "tier": "durable",
+          "type": "decision",
+          "actor": "sync",
+          "sid": "",
+          "snippet": "User asked (2026-09-03) that Codex sessions start in yolo by default, the same w"
+        },
+        {
+          "ts": "2026-09-03T10:58:27",
+          "action": "add",
+          "tier": "durable",
+          "type": "artifact-pointer",
+          "actor": "curator",
+          "sid": "",
+          "snippet": "When revisiting F-100/F-100b Fleet depth-0 session-tag display, retrieve the imp"
+        },
+        {
+          "ts": "2026-09-03T10:56:45",
+          "action": "add",
+          "tier": "durable",
+          "type": "feedback",
+          "actor": "sync",
+          "sid": "",
+          "snippet": "F-100 (2026-09-03, hearting-46 session). User decisions for Fleet **depth-0 main"
+        },
+        {
+          "ts": "2026-09-03T10:56:45",
+          "action": "add",
+          "tier": "durable",
+          "type": "project",
+          "actor": "sync",
+          "sid": "",
+          "snippet": "**State (2026-09-03, session 2adec7a7 = hearting-21 handoff steward):**"
+        },
+        {
+          "ts": "2026-09-03T10:12:31",
+          "action": "add",
+          "tier": "durable",
+          "type": "user-correction",
+          "actor": "distiller",
+          "sid": "",
+          "snippet": "Fleet F-100 슬롯 경쟁의 실체는 세션 태그와 herdr 표시가 아니라, 세션 제목이 주제 요약으로 덮어써지는 구조였음(사용자 정정, 이"
+        },
+        {
+          "ts": "2026-09-03T10:12:31",
+          "action": "add",
+          "tier": "working",
+          "type": "unresolved-obligation",
+          "actor": "distiller",
+          "sid": "",
+          "snippet": "사용자가 반전칩이 '너무 두껍고 거슬린다'고 지적, 대안 3종(A 괄호 배지 [46]/herdr, B #46 해시, C 반전 유지+색만 죽임) "
+        },
+        {
+          "ts": "2026-09-03T08:59:16",
+          "action": "add",
+          "tier": "durable",
+          "type": "project",
+          "actor": "manual",
+          "sid": "",
+          "snippet": "hearting-21(steward, CL/32f8c282) 세션이 오래되어 사용자가 새 세션으로 이관. 종결 상태:"
+        },
+        {
+          "ts": "2026-09-03T08:53:36",
+          "action": "lifecycle-expire",
+          "tier": "working",
+          "type": "session-note",
+          "actor": "lifecycle",
+          "sid": "",
+          "snippet": "2026-08-12 릴리즈 복구 전말: 다른 세션의 mm CLI 커밋(958faaf0)이 projection census 미분류로 Release"
+        },
+        {
+          "ts": "2026-09-03T08:53:36",
+          "action": "lifecycle-expire",
+          "tier": "working",
+          "type": "unresolved-obligation",
+          "actor": "lifecycle",
+          "sid": "",
+          "snippet": "Fleet 수정 커밋 7548d288은 main에 push됐지만 release/install은 아직 수행되지 않았다. 다음 release/ins"
+        },
+        {
+          "ts": "2026-09-03T08:53:36",
+          "action": "lifecycle-expire",
+          "tier": "working",
+          "type": "unresolved-obligation",
+          "actor": "lifecycle",
+          "sid": "",
+          "snippet": "Fleet 행에 dispatch depth를 명시적으로 표시하고 회귀 테스트로 검증해야 한다. 현재는 실제 depth 값을 읽지만 ↳ 들여쓰기만"
+        },
+        {
+          "ts": "2026-09-03T08:53:36",
+          "action": "lifecycle-expire",
+          "tier": "working",
+          "type": "unresolved-obligation",
+          "actor": "lifecycle",
+          "sid": "",
+          "snippet": "실행 중인 execute 자식은 보존한다. 종료 후 exact harvest로 completion marker와 quiescence를 확인하고,"
+        }
+      ],
+      "삼성세미나_음성처리": [
+        {
+          "ts": "2026-09-03T13:23:30",
+          "action": "add",
+          "tier": "durable",
+          "type": "decision",
+          "actor": "manual",
+          "sid": "",
+          "snippet": "논문 메커니즘의 이식 후보를 모으는 '아이디어 카탈로그'를 별도 형식으로 운영하기로 함 (2026-09-03). 조사 카드(cards/*.md)"
+        },
+        {
+          "ts": "2026-09-03T13:23:17",
+          "action": "add",
+          "tier": "durable",
+          "type": "research-idea",
+          "actor": "manual",
+          "sid": "",
+          "snippet": "TIGER의 band-split을 SR-CorrNet dual-path 코어에 이식하는 안 (2026-09-03 삼성세미나 조사 대화에서 도출)"
+        }
+      ]
+    },
+    "alerts": {
+      "durable_over": [
+        [
+          "git:github.com/dmlguq456/agent-note",
+          314
+        ],
+        [
+          "git:github.com/dmlguq456/agent_setting",
+          728
+        ],
+        [
+          "git:github.com/dmlguq456/hearting",
+          252
+        ]
+      ],
+      "distill_stale": false
+    },
+    "periodic_curate": null
+  },
+  "peer_messages": {
+    "records": [
+      {
+        "schema_version": 1,
+        "message_id": "1f71c4837e4008fe",
+        "ts": "2026-09-03T04:02:35Z",
+        "from": {
+          "harness": "claude",
+          "session_id": "91850343-c994-4470-a52d-8d931f11b9e8",
+          "project": "a569",
+          "name": "a569-b7"
+        },
+        "to": {
+          "harness": "claude",
+          "name": "a569-target"
+        },
+        "kind": "watch",
+        "summary": "",
+        "body_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "delivery": {
+          "surface": "herdr",
+          "status": "sent",
+          "receipt": "d0e081d1a1609230"
+        },
+        "refs": []
+      },
+      {
+        "schema_version": 1,
+        "message_id": "5cd9d17323295ad9",
+        "ts": "2026-09-03T04:01:58Z",
+        "from": {
+          "harness": "claude",
+          "session_id": "91850343-c994-4470-a52d-8d931f11b9e8",
+          "project": "a569",
+          "name": "a569-b7"
+        },
+        "to": {
+          "harness": "claude",
+          "name": "a569-target"
+        },
+        "kind": "notice",
+        "summary": "[notice] watch 37a7d988900b1fde state=done target=a569-target",
+        "body_sha256": "c01bc22eea9baf1309f76081b6f95b666a62453acd08e101a9b94950747a6371",
+        "delivery": {
+          "surface": "herdr",
+          "status": "received",
+          "receipt": "37a7d988900b1fde"
+        },
+        "refs": []
+      },
+      {
+        "schema_version": 1,
+        "message_id": "1f463c9d2963503d",
+        "ts": "2026-09-03T04:00:43Z",
+        "from": {
+          "harness": "claude",
+          "session_id": "91850343-c994-4470-a52d-8d931f11b9e8",
+          "project": "a569",
+          "name": "a569-b7"
+        },
+        "to": {
+          "harness": "claude",
+          "name": "a569-target"
+        },
+        "kind": "watch",
+        "summary": "",
+        "body_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "delivery": {
+          "surface": "herdr",
+          "status": "sent",
+          "receipt": "37a7d988900b1fde"
+        },
+        "refs": []
+      },
+      {
+        "schema_version": 1,
+        "message_id": "64187c140a0e4744",
+        "ts": "2026-09-03T03:59:35Z",
+        "from": {
+          "harness": "claude",
+          "session_id": "2adec7a7-0fc7-44e8-893a-dee4864891a9",
+          "project": "a569",
+          "name": "hearting-d5"
+        },
+        "to": {
+          "harness": "claude",
+          "name": "a569-steward"
+        },
+        "kind": "steer",
+        "summary": "[start] a569-steward kind=claude mode=bypass",
+        "body_sha256": "13ed12aeecc6df7ac560d3d1e8c37cc1991e65b74a45e44da657ea690a99f449",
+        "delivery": {
+          "surface": "herdr",
+          "status": "sent",
+          "receipt": null
+        },
+        "refs": []
+      },
+      {
+        "schema_version": 1,
+        "message_id": "5aa28cf85e4bdf63",
+        "ts": "2026-09-03T03:59:32Z",
+        "from": {
+          "harness": "claude",
+          "session_id": "2adec7a7-0fc7-44e8-893a-dee4864891a9",
+          "project": "a569",
+          "name": "hearting-d5"
+        },
+        "to": {
+          "harness": "claude",
+          "name": "a569-target"
+        },
+        "kind": "steer",
+        "summary": "[start] a569-target kind=claude mode=bypass",
+        "body_sha256": "a56edd6032daeafecf3caf466611ff8ecb01cfb2087ed665f8ff205e1b3e8fc4",
+        "delivery": {
+          "surface": "herdr",
+          "status": "sent",
+          "receipt": null
+        },
+        "refs": []
+      },
+      {
+        "schema_version": 1,
+        "message_id": "73b570c1fcd92355",
+        "ts": "2026-09-03T03:21:50Z",
+        "from": {
+          "harness": "claude",
+          "session_id": "841d1f64-0cff-4c16-8578-e874a45a2bb6",
+          "project": "hearting",
+          "name": "hearting-18"
+        },
+        "to": {
+          "harness": "claude",
+          "name": "hearting-46"
+        },
+        "kind": "handoff",
+        "summary": "[handoff] ① spec 트랜잭션 완료 — 새 revision `rrev_d58475dcd0d43813b25458c5948a4814`. fleet PRD **v78→v79**, stage-dispatch PRD **v56→v57**. route rt-95a5287a27c3da05 closed, terminal_gate_proven=true. **레포 ",
+        "body_sha256": "dc1e0056a21ba6b3da60e33934ea6cfe92aa09667a28437bc685c3f85926d179",
+        "delivery": {
+          "surface": "claude-native",
+          "status": "sent",
+          "receipt": null
+        },
+        "refs": []
+      },
+      {
+        "schema_version": 1,
+        "message_id": "690bbc60b9f4482c",
+        "ts": "2026-09-03T02:34:26Z",
+        "from": {
+          "harness": "claude",
+          "session_id": "841d1f64-0cff-4c16-8578-e874a45a2bb6",
+          "project": "hearting",
+          "name": "hearting-18"
+        },
+        "to": {
+          "harness": "claude",
+          "name": "hearting-46"
+        },
+        "kind": "steer",
+        "summary": "[notice] 착수 — hearting-18. 사용자 §0.4 카드 승인 받았고, 묶음 단위는 사용자 결정으로 **①spec 트랜잭션 + ②Fleet 연결 계층 먼저**, ③3하네스 steward 진입 / ④Codex·OpenCode 제목 배지 / ⑤herdr wait 실측은 화면 확인 뒤 별도 사이클입니다. 이유: 진입 표면을 연결 계층 모양이 확정되기",
+        "body_sha256": "09c3f676874cda59e2b898be48f329d985813a57810a1e6e0eb45bb7cfb0f1d0",
+        "delivery": {
+          "surface": "claude-native",
+          "status": "sent",
+          "receipt": null
+        },
+        "refs": []
+      },
+      {
+        "schema_version": 1,
+        "message_id": "d7cfc8432f1c2afd",
+        "ts": "2026-09-03T02:32:33Z",
+        "from": {
+          "harness": "claude",
+          "session_id": "7a001534-ea46-4a67-971b-199c586889e2",
+          "project": "hearting",
+          "name": "hearting-46"
+        },
+        "to": {
+          "harness": "claude",
+          "name": "hearting-18"
+        },
+        "kind": "watch",
+        "summary": "[handoff] 사용자 지시로 F-100 후속 작업 단위를 hearting-18에 위임합니다(hearting-46은 steward로 남고 병합·릴리즈만 직렬 처리). 이 세션에서 직접 하지 말라는 사용자 지시라 제가 손대지 않습니다. 기반은 main a1f16631(v2.105.0 설치 완료).",
+        "body_sha256": "9dca6d9f963e5cbcbaed13d39f96a842527233c00b77939e2a160da0d82b26fb",
+        "delivery": {
+          "surface": "claude-native",
+          "status": "sent",
+          "receipt": null
+        },
+        "refs": []
+      },
+      {
+        "schema_version": 1,
+        "message_id": "295cc4b70d6d2fb0",
+        "ts": "2026-09-03T02:22:07Z",
+        "from": {
+          "harness": "claude",
+          "session_id": "841d1f64-0cff-4c16-8578-e874a45a2bb6",
+          "project": "hearting",
+          "name": "hearting-18"
+        },
+        "to": {
+          "harness": "claude",
+          "name": "hearting-46"
+        },
+        "kind": "steer",
+        "summary": "[notice] 정리 완료 — 워크트리 제거, 로컬·원격 브랜치 codex-interactive-yolo 삭제(a1f16631로 병합 확인). 이쪽은 더 열린 작업 없습니다.",
+        "body_sha256": "edb3ab87c786667ac6d41169349458a0ee74b59877018d1fd0071754536d0dd8",
+        "delivery": {
+          "surface": "claude-native",
+          "status": "sent",
+          "receipt": null
+        },
+        "refs": []
+      },
+      {
+        "schema_version": 1,
+        "message_id": "2e6609e7c7e80a49",
+        "ts": "2026-09-03T02:21:17Z",
+        "from": {
+          "harness": "claude",
+          "session_id": "7a001534-ea46-4a67-971b-199c586889e2",
+          "project": "hearting",
+          "name": "hearting-46"
+        },
+        "to": {
+          "harness": "claude",
+          "name": "uds:/run/user/1002/cc-socks/2952102.sock"
+        },
+        "kind": "steer",
+        "summary": "[notice] handoff 수락 — codex-interactive-yolo 두 커밋을 main에 병합했습니다(a1f16631, 제 F-100c 후속 ce21136a 위). test_f100b 11/11·codex_launcher 21/21·F-100 계열 96건 통과, 실렌더에서 `[7e] codex`·`[64] opencode` 배지 확인. 릴리즈→",
+        "body_sha256": "dcce0c5f4817493cde6a9a54c36bd94eebe6acac1c589148afc2829f7312bc76",
+        "delivery": {
+          "surface": "claude-native",
+          "status": "sent",
+          "receipt": null
+        },
+        "refs": []
+      },
+      {
+        "schema_version": 1,
+        "message_id": "b5a624ec36086584",
+        "ts": "2026-09-03T02:21:01Z",
+        "from": {
+          "harness": "claude",
+          "session_id": "<sid>",
+          "project": "hearting",
+          "name": "hearting-46"
+        },
+        "to": {
+          "harness": "claude",
+          "session_id": "7840e5e9-4f0b-415c-aef9-51c039f86a1a"
+        },
+        "kind": "notice",
+        "summary": "herdr steer received",
+        "body_sha256": "6de0bb2bad3cfa7ecc5dfb1bbdd700f2982c72207e1320f9686d6dd635095261",
+        "delivery": {
+          "surface": "herdr",
+          "status": "received",
+          "receipt": null
+        },
+        "refs": []
+      },
+      {
+        "schema_version": 1,
+        "message_id": "094c69c319acdc12",
+        "ts": "2026-09-03T02:18:48Z",
+        "from": {
+          "harness": "claude",
+          "session_id": "<sid>",
+          "project": "hearting",
+          "name": "hearting-46"
+        },
+        "to": {
+          "harness": "claude",
+          "session_id": "84031cf7-0769-4685-800f-c266ad5a777d"
+        },
+        "kind": "notice",
+        "summary": "herdr steer received",
+        "body_sha256": "6de0bb2bad3cfa7ecc5dfb1bbdd700f2982c72207e1320f9686d6dd635095261",
+        "delivery": {
+          "surface": "herdr",
+          "status": "received",
+          "receipt": null
+        },
+        "refs": []
+      },
+      {
+        "schema_version": 1,
+        "message_id": "b776e150806d6368",
+        "ts": "2026-09-03T02:18:19Z",
+        "from": {
+          "harness": "claude",
+          "session_id": "841d1f64-0cff-4c16-8578-e874a45a2bb6",
+          "project": "hearting",
+          "name": "hearting-18"
+        },
+        "to": {
+          "harness": "claude",
+          "name": "hearting-46"
+        },
+        "kind": "handoff",
+        "summary": "[handoff] 브랜치 codex-interactive-yolo push 완료 — 4da723a6 위로 리베이스한 커밋 2개. main 직푸시·릴리즈는 안 했습니다.",
+        "body_sha256": "89264369f872236470b284434a75d6077fb251d4f8d19ebb274362e64dbc6777",
+        "delivery": {
+          "surface": "claude-native",
+          "status": "sent",
+          "receipt": null
+        },
+        "refs": []
+      },
+      {
+        "schema_version": 1,
+        "message_id": "8102776d05b94fb6",
+        "ts": "2026-09-03T02:17:19Z",
+        "from": {
+          "harness": "claude",
+          "session_id": "dbg",
+          "project": ""
+        },
+        "to": {
+          "harness": "opencode",
+          "session_id": "dbg-oc"
+        },
+        "kind": "notice",
+        "summary": "x",
+        "body_sha256": "2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881",
+        "delivery": {
+          "surface": "herdr",
+          "status": "received",
+          "receipt": null
+        },
+        "refs": []
+      },
+      {
+        "schema_version": 1,
+        "message_id": "a34a249b91e05993",
+        "ts": "2026-09-03T02:16:43Z",
+        "from": {
+          "harness": "claude",
+          "session_id": "7a001534-ea46-4a67-971b-199c586889e2",
+          "project": "cairn",
+          "name": "hearting-46"
+        },
+        "to": {
+          "harness": "opencode",
+          "session_id": "ses_pluginTest1"
+        },
+        "kind": "notice",
+        "summary": "herdr steer received",
+        "body_sha256": "6de0bb2bad3cfa7ecc5dfb1bbdd700f2982c72207e1320f9686d6dd635095261",
+        "delivery": {
+          "surface": "herdr",
+          "status": "received",
+          "receipt": null
+        },
+        "refs": []
+      },
+      {
+        "schema_version": 1,
+        "message_id": "24a77fe0de4ae0fa",
+        "ts": "2026-09-03T02:16:35Z",
+        "from": {
+          "harness": "claude",
+          "session_id": "<sid>",
+          "project": "hearting",
+          "name": "hearting-46"
+        },
+        "to": {
+          "harness": "claude",
+          "session_id": "578551e7-076f-4f29-a5a9-1cae3a39b8d5"
+        },
+        "kind": "notice",
+        "summary": "herdr steer received",
+        "body_sha256": "6de0bb2bad3cfa7ecc5dfb1bbdd700f2982c72207e1320f9686d6dd635095261",
+        "delivery": {
+          "surface": "herdr",
+          "status": "received",
+          "receipt": null
+        },
+        "refs": []
+      },
+      {
+        "schema_version": 1,
+        "message_id": "03efca65fdf8a0d2",
+        "ts": "2026-09-03T02:16:09Z",
+        "from": {
+          "harness": "claude",
+          "session_id": "7a001534-ea46-4a67-971b-199c586889e2",
+          "project": "source",
+          "name": "hearting-46"
+        },
+        "to": {
+          "harness": "claude",
+          "session_id": "87550f66-28bd-419f-8dd4-9432e301d6e7"
+        },
+        "kind": "notice",
+        "summary": "herdr steer received",
+        "body_sha256": "6de0bb2bad3cfa7ecc5dfb1bbdd700f2982c72207e1320f9686d6dd635095261",
+        "delivery": {
+          "surface": "herdr",
+          "status": "received",
+          "receipt": null
+        },
+        "refs": []
+      },
+      {
+        "schema_version": 1,
+        "message_id": "98bfb00d2dac21d2",
+        "ts": "2026-09-03T02:16:04Z",
+        "from": {
+          "harness": "claude",
+          "session_id": "7a001534-ea46-4a67-971b-199c586889e2",
+          "project": "hearting",
+          "name": "hearting-46"
+        },
+        "to": {
+          "harness": "codex",
+          "session_id": "01a0650d-3afe-7812-b652-b82e29b97b0c"
+        },
+        "kind": "notice",
+        "summary": "herdr steer received",
+        "body_sha256": "6de0bb2bad3cfa7ecc5dfb1bbdd700f2982c72207e1320f9686d6dd635095261",
+        "delivery": {
+          "surface": "herdr",
+          "status": "received",
+          "receipt": null
+        },
+        "refs": []
+      },
+      {
+        "schema_version": 1,
+        "message_id": "093e50bd8366b820",
+        "ts": "2026-09-03T02:16:02Z",
+        "from": {
+          "harness": "claude",
+          "session_id": "7a001534-ea46-4a67-971b-199c586889e2",
+          "project": "hearting",
+          "name": "hearting-46"
+        },
+        "to": {
+          "harness": "codex",
+          "name": "f100-hearting-codex"
+        },
+        "kind": "steer",
+        "summary": "[steer] F-100c 수신 확인 3차(새 세션): 한 줄로 '수신 OK 3 — f100-hearting-codex'만 답하세요. 파일은 수정하지 마세요.",
+        "body_sha256": "5eb352efb60a318ec235502401319d4e2e5059f4738c8473e33acf257f2d16e1",
+        "delivery": {
+          "surface": "herdr",
+          "status": "sent",
+          "receipt": null
+        },
+        "refs": []
+      },
+      {
+        "schema_version": 1,
+        "message_id": "1d733c4ee53bbf58",
+        "ts": "2026-09-03T02:14:25Z",
+        "from": {
+          "harness": "claude",
+          "session_id": "<sid>",
+          "project": "hearting",
+          "name": "hearting-46"
+        },
+        "to": {
+          "harness": "claude",
+          "session_id": "d8e44ff4-bae2-4271-9e4a-65c6f2fef086"
+        },
+        "kind": "notice",
+        "summary": "herdr steer received",
+        "body_sha256": "6de0bb2bad3cfa7ecc5dfb1bbdd700f2982c72207e1320f9686d6dd635095261",
+        "delivery": {
+          "surface": "herdr",
+          "status": "received",
+          "receipt": null
+        },
+        "refs": []
+      },
+      {
+        "schema_version": 1,
+        "message_id": "08549e021ecdef09",
+        "ts": "2026-09-03T02:13:57Z",
+        "from": {
+          "harness": "claude",
+          "session_id": "7a001534-ea46-4a67-971b-199c586889e2",
+          "project": "hearting",
+          "name": "hearting-46"
+        },
+        "to": {
+          "harness": "codex",
+          "name": "f100-hearting-codex"
+        },
+        "kind": "steer",
+        "summary": "[steer] F-100c 수신 확인 3차(새 세션): 한 줄로 '수신 OK 3 — f100-hearting-codex'만 답하세요. 파일은 수정하지 마세요.",
+        "body_sha256": "5eb352efb60a318ec235502401319d4e2e5059f4738c8473e33acf257f2d16e1",
+        "delivery": {
+          "surface": "herdr",
+          "status": "sent",
+          "receipt": null
+        },
+        "refs": []
+      },
+      {
+        "schema_version": 1,
+        "message_id": "0b7f8bee22d30abb",
+        "ts": "2026-09-03T02:13:20Z",
+        "from": {
+          "harness": "claude",
+          "session_id": "7a001534-ea46-4a67-971b-199c586889e2",
+          "project": "hearting",
+          "name": "hearting-46"
+        },
+        "to": {
+          "harness": "codex",
+          "session_id": "codex-hooktest-1"
+        },
+        "kind": "notice",
+        "summary": "herdr steer received",
+        "body_sha256": "6de0bb2bad3cfa7ecc5dfb1bbdd700f2982c72207e1320f9686d6dd635095261",
+        "delivery": {
+          "surface": "herdr",
+          "status": "received",
+          "receipt": null
+        },
+        "refs": []
+      },
+      {
+        "schema_version": 1,
+        "message_id": "f43c52431e600db5",
+        "ts": "2026-09-03T02:12:26Z",
+        "from": {
+          "harness": "claude",
+          "session_id": "7a001534-ea46-4a67-971b-199c586889e2",
+          "project": "source",
+          "name": "hearting-46"
+        },
+        "to": {
+          "harness": "claude",
+          "session_id": "96aba9d6-90d3-414c-8d53-d6d6faeb634b"
+        },
+        "kind": "notice",
+        "summary": "herdr steer received",
+        "body_sha256": "6de0bb2bad3cfa7ecc5dfb1bbdd700f2982c72207e1320f9686d6dd635095261",
+        "delivery": {
+          "surface": "herdr",
+          "status": "received",
+          "receipt": null
+        },
+        "refs": []
+      },
+      {
+        "schema_version": 1,
+        "message_id": "215d41015232e51c",
+        "ts": "2026-09-03T02:12:22Z",
+        "from": {
+          "harness": "claude",
+          "session_id": "7a001534-ea46-4a67-971b-199c586889e2",
+          "project": "cairn",
+          "name": "hearting-46"
+        },
+        "to": {
+          "harness": "opencode",
+          "session_id": "ses_f9af61ac1ffeoirDfb61NRwmRF"
+        },
+        "kind": "notice",
+        "summary": "herdr steer received",
+        "body_sha256": "6de0bb2bad3cfa7ecc5dfb1bbdd700f2982c72207e1320f9686d6dd635095261",
+        "delivery": {
+          "surface": "herdr",
+          "status": "received",
+          "receipt": null
+        },
+        "refs": []
+      },
+      {
+        "schema_version": 1,
+        "message_id": "641a6ce643526311",
+        "ts": "2026-09-03T02:12:21Z",
+        "from": {
+          "harness": "claude",
+          "session_id": "7a001534-ea46-4a67-971b-199c586889e2",
+          "project": "cairn",
+          "name": "hearting-46"
+        },
+        "to": {
+          "harness": "claude",
+          "session_id": "e0fcd9e8-75f0-4e5f-98ca-d9f582afc7ea"
+        },
+        "kind": "notice",
+        "summary": "herdr steer received",
+        "body_sha256": "6de0bb2bad3cfa7ecc5dfb1bbdd700f2982c72207e1320f9686d6dd635095261",
+        "delivery": {
+          "surface": "herdr",
+          "status": "received",
+          "receipt": null
+        },
+        "refs": []
+      },
+      {
+        "schema_version": 1,
+        "message_id": "c3e05cc2d8f328f9",
+        "ts": "2026-09-03T02:12:21Z",
+        "from": {
+          "harness": "claude",
+          "session_id": "7a001534-ea46-4a67-971b-199c586889e2",
+          "project": "hearting",
+          "name": "hearting-46"
+        },
+        "to": {
+          "harness": "opencode",
+          "name": "f100-cairn-opencode"
+        },
+        "kind": "steer",
+        "summary": "[steer] F-100c parity receive test: reply with one line 'recv OK — f100-cairn-opencode'. Do not modify files.",
+        "body_sha256": "fb54c9d308617a556f4f4ebf4f443fc005253272ef4132829c8359270c404c78",
+        "delivery": {
+          "surface": "herdr",
+          "status": "sent",
+          "receipt": null
+        },
+        "refs": []
+      },
+      {
+        "schema_version": 1,
+        "message_id": "d6e5d0ac850f096c",
+        "ts": "2026-09-03T02:12:20Z",
+        "from": {
+          "harness": "claude",
+          "session_id": "7a001534-ea46-4a67-971b-199c586889e2",
+          "project": "source",
+          "name": "hearting-46"
+        },
+        "to": {
+          "harness": "claude",
+          "session_id": "3e756f4a-3354-4792-a1c7-422c4a84cde4"
+        },
+        "kind": "notice",
+        "summary": "herdr steer received",
+        "body_sha256": "6de0bb2bad3cfa7ecc5dfb1bbdd700f2982c72207e1320f9686d6dd635095261",
+        "delivery": {
+          "surface": "herdr",
+          "status": "received",
+          "receipt": null
+        },
+        "refs": []
+      },
+      {
+        "schema_version": 1,
+        "message_id": "ddaf60da93a88af9",
+        "ts": "2026-09-03T02:12:16Z",
+        "from": {
+          "harness": "claude",
+          "session_id": "7a001534-ea46-4a67-971b-199c586889e2",
+          "project": "hearting",
+          "name": "hearting-46"
+        },
+        "to": {
+          "harness": "codex",
+          "session_id": "01a064d8-e0e6-7ac2-97df-877c380ce013",
+          "name": "f100-hearting-codex"
+        },
+        "kind": "steer",
+        "summary": "[steer] F-100c 수신 확인 2차: 한 줄로 '수신 OK 2 — f100-hearting-codex'만 답하세요. 파일은 수정하지 마세요.",
+        "body_sha256": "731cb6a8b74d9f4dbde2caa4567d27463ca3489f86247e54114c84f3ef9496ad",
+        "delivery": {
+          "surface": "herdr",
+          "status": "sent",
+          "receipt": null
+        },
+        "refs": []
+      },
+      {
+        "schema_version": 1,
+        "message_id": "10819846fc2a2a42",
+        "ts": "2026-09-03T02:12:16Z",
+        "from": {
+          "harness": "claude",
+          "session_id": "7a001534-ea46-4a67-971b-199c586889e2",
+          "project": "cairn",
+          "name": "hearting-46"
+        },
+        "to": {
+          "harness": "claude",
+          "session_id": "892abd4f-f092-4c76-9c73-7f443a260869"
+        },
+        "kind": "notice",
+        "summary": "herdr steer received",
+        "body_sha256": "6de0bb2bad3cfa7ecc5dfb1bbdd700f2982c72207e1320f9686d6dd635095261",
+        "delivery": {
+          "surface": "herdr",
+          "status": "received",
+          "receipt": null
+        },
+        "refs": []
+      },
+      {
+        "schema_version": 1,
+        "message_id": "49cb666d7d8676a1",
+        "ts": "2026-09-03T02:12:15Z",
+        "from": {
+          "harness": "claude",
+          "session_id": "7a001534-ea46-4a67-971b-199c586889e2",
+          "project": "hearting",
+          "name": "hearting-46"
+        },
+        "to": {
+          "harness": "claude",
+          "session_id": "892abd4f-f092-4c76-9c73-7f443a260869",
+          "name": "f100-cairn-claude"
+        },
+        "kind": "steer",
+        "summary": "[steer] F-100c 수신 확인 2차: 한 줄로 '수신 OK 2 — f100-cairn-claude'만 답하세요. 파일은 수정하지 마세요.",
+        "body_sha256": "6232a554e99e4f0ccad1f49c3e1e8bf77098fdbd5fbf783718aa26067f08ff60",
+        "delivery": {
+          "surface": "herdr",
+          "status": "sent",
+          "receipt": null
+        },
+        "refs": []
+      },
+      {
+        "schema_version": 1,
+        "message_id": "8f94d257bdc84f77",
+        "ts": "2026-09-03T02:06:08Z",
+        "from": {
+          "harness": "claude",
+          "session_id": "7a001534-ea46-4a67-971b-199c586889e2",
+          "project": "hearting"
+        },
+        "to": {
+          "harness": "claude",
+          "name": "hearting-18"
+        },
+        "kind": "steer",
+        "summary": "[notice] main이 4da723a6(F-100c 패리티: 원장 to.session_id/from.name, peer-steward.py prompt/steward on|off, 세 하네스 notice 훅, Fleet steward 플래그·정렬, herdr pane pid 프로브)로 이동했습니다. 브랜치를 그 위로 다시 리베이스한 뒤 push하고 [h",
+        "body_sha256": "c104214d6c736eb08f45b71156962a4f38fd2178a7dcfa4d4b0d74162437b28d",
+        "delivery": {
+          "surface": "claude-native",
+          "status": "sent",
+          "receipt": null
+        },
+        "refs": []
+      },
+      {
+        "schema_version": 1,
+        "message_id": "d05295fd61249318",
+        "ts": "2026-09-03T02:03:00Z",
+        "from": {
+          "harness": "claude",
+          "session_id": "7a001534-ea46-4a67-971b-199c586889e2",
+          "project": "hearting",
+          "name": "hearting-46"
+        },
+        "to": {
+          "harness": "claude",
+          "session_id": "892abd4f-f092-4c76-9c73-7f443a260869",
+          "name": "f100-cairn-claude"
+        },
+        "kind": "steer",
+        "summary": "[steer] F-100c 패리티 테스트: 이 프롬프트 끝의 (peer-from: …) 트레일러를 그대로 두고, 한 줄로 '수신 OK — f100-cairn-claude'만 답하세요. 파일은 수정하지 마세요.",
+        "body_sha256": "5eac56448dde9c7d713b89ab8b17a18f5320d77ad07fa6bb5e66a48982d619bb",
+        "delivery": {
+          "surface": "herdr",
+          "status": "sent",
+          "receipt": null
+        },
+        "refs": []
+      },
+      {
+        "schema_version": 1,
+        "message_id": "17b954d7987a6dba",
+        "ts": "2026-09-03T02:03:00Z",
+        "from": {
+          "harness": "claude",
+          "session_id": "7a001534-ea46-4a67-971b-199c586889e2",
+          "project": "hearting",
+          "name": "hearting-46"
+        },
+        "to": {
+          "harness": "codex",
+          "session_id": "01a064d8-e0e6-7ac2-97df-877c380ce013",
+          "name": "f100-hearting-codex"
+        },
+        "kind": "steer",
+        "summary": "[steer] F-100c 패리티 테스트: 이 프롬프트 끝의 (peer-from: …) 트레일러를 그대로 두고, 한 줄로 '수신 OK — f100-hearting-codex'만 답하세요. 파일은 수정하지 마세요.",
+        "body_sha256": "86a82d21140790fa00dc51f7d2c6b0b9ffe3287eb29dd99758ee4470e53728f9",
+        "delivery": {
+          "surface": "herdr",
+          "status": "sent",
+          "receipt": null
+        },
+        "refs": []
+      },
+      {
+        "schema_version": 1,
+        "message_id": "644a3c600aa8eb7c",
+        "ts": "2026-09-03T02:03:00Z",
+        "from": {
+          "harness": "claude",
+          "session_id": "7a001534-ea46-4a67-971b-199c586889e2",
+          "project": "hearting",
+          "name": "hearting-46"
+        },
+        "to": {
+          "harness": "opencode",
+          "name": "f100-cairn-opencode"
+        },
+        "kind": "steer",
+        "summary": "[steer] F-100c 패리티 테스트: 이 프롬프트 끝의 (peer-from: …) 트레일러를 그대로 두고, 한 줄로 '수신 OK — f100-cairn-opencode'만 답하세요. 파일은 수정하지 마세요.",
+        "body_sha256": "707e8339f34989ab845b8a2916b22ab3891fcc53d6ba585d96b02bd2d1c52eec",
+        "delivery": {
+          "surface": "herdr",
+          "status": "sent",
+          "receipt": null
+        },
+        "refs": []
+      },
+      {
+        "schema_version": 1,
+        "message_id": "c669eac4e71077a0",
+        "ts": "2026-09-03T01:43:36Z",
+        "from": {
+          "harness": "claude",
+          "session_id": "7a001534-ea46-4a67-971b-199c586889e2",
+          "project": "hearting"
+        },
+        "to": {
+          "harness": "codex",
+          "session_id": "01a064d8-e0e6-7ac2-97df-877c380ce013",
+          "name": "f100-hearting-codex"
+        },
+        "kind": "steer",
+        "summary": "[steer] (재기록) 수신자 session_id 포함 — f100-hearting-codex",
+        "body_sha256": "a69ab98f19cfbe9e781315902f48d12e6afa2d8aaf2de5b11b86a2f1f9b57368",
+        "delivery": {
+          "surface": "herdr",
+          "status": "sent",
+          "receipt": null
+        },
+        "refs": []
+      },
+      {
+        "schema_version": 1,
+        "message_id": "c776e3193b6f312d",
+        "ts": "2026-09-03T01:43:36Z",
+        "from": {
+          "harness": "claude",
+          "session_id": "7a001534-ea46-4a67-971b-199c586889e2",
+          "project": "hearting"
+        },
+        "to": {
+          "harness": "claude",
+          "session_id": "892abd4f-f092-4c76-9c73-7f443a260869",
+          "name": "f100-cairn-claude"
+        },
+        "kind": "steer",
+        "summary": "[steer] (재기록) 수신자 session_id 포함 — f100-cairn-claude",
+        "body_sha256": "e8d7e0bc6ac0561c12dc665a63577d071d7845575ae37a68211f6ccd6c728586",
+        "delivery": {
+          "surface": "herdr",
+          "status": "sent",
+          "receipt": null
+        },
+        "refs": []
+      },
+      {
+        "schema_version": 1,
+        "message_id": "8ffeb45aae3ee121",
+        "ts": "2026-09-03T01:38:33Z",
+        "from": {
+          "harness": "claude",
+          "session_id": "7a001534-ea46-4a67-971b-199c586889e2",
+          "project": "hearting"
+        },
+        "to": {
+          "harness": "claude",
+          "name": "uds:/run/user/1002/cc-socks/2952102.sock"
+        },
+        "kind": "steer",
+        "summary": "[steer] 동의 — session_tag만 발급하고 registry_name 합성·herdr_session_projection/statusline 정렬은 보류하세요. ②(zero-injection: 런타임 소유 라벨 자리에 Fleet이 지어낸 문자열을 앉히지 않는다)가 결정 근거입니다.",
+        "body_sha256": "66f9dc634d6b726f682fbd07b3026ceebda548b928aac5682637bc234c54d86f",
+        "delivery": {
+          "surface": "claude-native",
+          "status": "sent",
+          "receipt": null
+        },
+        "refs": []
+      },
+      {
+        "schema_version": 1,
+        "message_id": "5a9ec3d1fc293f5b",
+        "ts": "2026-09-03T01:38:10Z",
+        "from": {
+          "harness": "claude",
+          "session_id": "841d1f64-0cff-4c16-8578-e874a45a2bb6",
+          "project": "hearting"
+        },
+        "to": {
+          "harness": "claude",
+          "name": "hearting-46"
+        },
+        "kind": "steer",
+        "summary": "[notice] 착수 — hearting-18, 브랜치 codex-interactive-yolo (origin/main a6b476e5 리베이스 예정). 커밋 2개(태그 발급 / 대화형 --yolo 기본값) 후 push + [handoff] 보내겠습니다.",
+        "body_sha256": "db81d0956e4950280a9b265b4472f1714bd189240cbd6df5ab544725e193fa39",
+        "delivery": {
+          "surface": "claude-native",
+          "status": "sent",
+          "receipt": null
+        },
+        "refs": []
+      },
+      {
+        "schema_version": 1,
+        "message_id": "2a124f8427709266",
+        "ts": "2026-09-03T01:37:26Z",
+        "from": {
+          "harness": "claude",
+          "session_id": "7a001534-ea46-4a67-971b-199c586889e2",
+          "project": "hearting"
+        },
+        "to": {
+          "harness": "claude",
+          "name": "hearting-18"
+        },
+        "kind": "watch",
+        "summary": "[steer] 사용자 지시로 hearting-46(F-100 담당)이 이 세션을 관리합니다. 대기 풀고 진행하세요: Codex/OpenCode 세션 태그 발급 + 대화형 Codex --yolo 기본값.",
+        "body_sha256": "3247d16367de84f4cf47fd8691195e05e68415faa52e59921179f967306cdf5e",
+        "delivery": {
+          "surface": "claude-native",
+          "status": "sent",
+          "receipt": null
+        },
+        "refs": []
+      },
+      {
+        "schema_version": 1,
+        "message_id": "57d20ffe84ba91b9",
+        "ts": "2026-09-03T01:27:56Z",
+        "from": {
+          "harness": "claude",
+          "session_id": "7a001534-ea46-4a67-971b-199c586889e2",
+          "project": "hearting"
+        },
+        "to": {
+          "harness": "claude",
+          "name": "f100-cairn-claude"
+        },
+        "kind": "steer",
+        "summary": "[steer] Fleet F-100 테스트 통신 프롬프트 (f100-cairn-claude)",
+        "body_sha256": "40b129c14f09d3720ab6284e9eec8d065dde1cc01e50525576f590c5e0f8c217",
+        "delivery": {
+          "surface": "herdr",
+          "status": "sent",
+          "receipt": null
+        },
+        "refs": []
+      },
+      {
+        "schema_version": 1,
+        "message_id": "d3a4105d7d11317c",
+        "ts": "2026-09-03T01:27:56Z",
+        "from": {
+          "harness": "claude",
+          "session_id": "7a001534-ea46-4a67-971b-199c586889e2",
+          "project": "hearting"
+        },
+        "to": {
+          "harness": "codex",
+          "name": "f100-hearting-codex"
+        },
+        "kind": "steer",
+        "summary": "[steer] Fleet F-100 테스트 통신 프롬프트 (f100-hearting-codex)",
+        "body_sha256": "ebaa21cb1bc45d8537f841712f19d0fffc59c0ad9c4c1991b308e00136650984",
+        "delivery": {
+          "surface": "herdr",
+          "status": "sent",
+          "receipt": null
+        },
+        "refs": []
+      },
+      {
+        "schema_version": 1,
+        "message_id": "049bc13b946a227e",
+        "ts": "2026-09-03T01:27:52Z",
+        "from": {
+          "harness": "claude",
+          "session_id": "7a001534-ea46-4a67-971b-199c586889e2",
+          "project": "hearting"
+        },
+        "to": {
+          "harness": "claude",
+          "name": "uds:/run/user/1002/cc-socks/2939467.sock"
+        },
+        "kind": "steer",
+        "summary": "[notice] 수신 확인 — hearting-46이 \"통신 OK — f100-cairn-claude\"를 받았습니다. Claude↔Claude 왕복 통신 테스트 완료. 추가 작업 없이 대기하세요.",
+        "body_sha256": "4a76bb6254c8be830a5afcc0d79ca47a1c101bbcfc41bb42faa7d866fbab5af6",
+        "delivery": {
+          "surface": "claude-native",
+          "status": "sent",
+          "receipt": null
+        },
+        "refs": []
+      },
+      {
+        "schema_version": 1,
+        "message_id": "4d560f17eb0c795e",
+        "ts": "2026-09-03T01:19:28Z",
+        "from": {
+          "harness": "claude",
+          "session_id": "892abd4f-f092-4c76-9c73-7f443a260869",
+          "project": "cairn"
+        },
+        "to": {
+          "harness": "claude",
+          "name": "hearting-46"
+        },
+        "kind": "steer",
+        "summary": "[notice] 통신 OK — f100-cairn-claude",
+        "body_sha256": "db5fe949d599c39a56abb0049d8d428c959f27f445b5ebb8791d4c040431d035",
+        "delivery": {
+          "surface": "claude-native",
+          "status": "sent",
+          "receipt": null
+        },
+        "refs": []
+      },
+      {
+        "schema_version": 1,
+        "message_id": "d87e2ad690b3f64c",
+        "ts": "2026-09-03T01:18:34Z",
+        "from": {
+          "harness": "claude",
+          "session_id": "7a001534-ea46-4a67-971b-199c586889e2",
+          "project": "hearting"
+        },
+        "to": {
+          "harness": "codex",
+          "name": "f100-hearting-codex"
+        },
+        "kind": "steer",
+        "summary": "[start] f100-hearting-codex kind=codex mode=bypass",
+        "body_sha256": "23f036770f6c86e8ac2de1dd8efb0fae15d02661c16f299924744c5b4863e38f",
+        "delivery": {
+          "surface": "herdr",
+          "status": "sent",
+          "receipt": null
+        },
+        "refs": []
+      },
+      {
+        "schema_version": 1,
+        "message_id": "95d66d7198c9232b",
+        "ts": "2026-09-03T01:18:33Z",
+        "from": {
+          "harness": "claude",
+          "session_id": "7a001534-ea46-4a67-971b-199c586889e2",
+          "project": "hearting"
+        },
+        "to": {
+          "harness": "claude",
+          "name": "f100-cairn-claude"
+        },
+        "kind": "steer",
+        "summary": "[start] f100-cairn-claude kind=claude mode=bypass",
+        "body_sha256": "f445605c460a9e8969c0964e908f40e6dacb998ff36411fd4fe8e1b3c987da0b",
+        "delivery": {
+          "surface": "herdr",
+          "status": "sent",
+          "receipt": null
+        },
+        "refs": []
+      },
+      {
+        "schema_version": 1,
+        "message_id": "441161a03ae0b8ee",
+        "ts": "2026-09-02T13:43:27Z",
+        "from": {
+          "harness": "claude",
+          "session_id": "62b32e44-1c3a-45df-9531-11c11e49b700",
+          "project": "hearting"
+        },
+        "to": {
+          "harness": "claude",
+          "name": "hearting-21"
+        },
+        "kind": "handoff",
+        "summary": "[handoff] cycle 2 완료 — v2.102.0 배포·3런타임 정렬, spec v51/v78/v55 admit, 실렌더 증거 확보 (hearting-fb, 62b32e44)",
+        "body_sha256": "fee2559a4b493b11da4065a60c2e68391ffa34b0e3d16156cd79bccabdf8fa53",
+        "delivery": {
+          "surface": "claude-native",
+          "status": "sent",
+          "receipt": null
+        },
+        "refs": []
+      },
+      {
+        "schema_version": 1,
+        "message_id": "106109bf15100c57",
+        "ts": "2026-09-02T13:37:36Z",
+        "from": {
+          "harness": "claude",
+          "session_id": "62b32e44-1c3a-45df-9531-11c11e49b700",
+          "project": "hearting"
+        },
+        "to": {
+          "harness": "unknown",
+          "name": "w1:pP"
+        },
+        "kind": "watch",
+        "summary": "",
+        "body_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "delivery": {
+          "surface": "herdr",
+          "status": "sent",
+          "receipt": null
+        },
+        "refs": [
+          "rt-9f4580280c5a04b3"
+        ]
+      },
+      {
+        "schema_version": 1,
+        "message_id": "02cf7528bec3ecfc",
+        "ts": "2026-09-02T12:24:22Z",
+        "from": {
+          "harness": "claude",
+          "session_id": "e707261a-12e3-4b9f-9fa0-8c9f7d631b4f",
+          "project": "peer-steward-cycle2"
+        },
+        "to": {
+          "harness": "unknown",
+          "name": "t"
+        },
+        "kind": "watch",
+        "summary": "",
+        "body_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "delivery": {
+          "surface": "herdr",
+          "status": "sent",
+          "receipt": null
+        },
+        "refs": []
+      },
+      {
+        "schema_version": 1,
+        "message_id": "4bbc1949e83ef97c",
+        "ts": "2026-09-02T12:24:13Z",
+        "from": {
+          "harness": "claude",
+          "session_id": "e707261a-12e3-4b9f-9fa0-8c9f7d631b4f",
+          "project": "peer-steward-cycle2"
+        },
+        "to": {
+          "harness": "unknown",
+          "name": "w1:pD"
+        },
+        "kind": "watch",
+        "summary": "",
+        "body_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "delivery": {
+          "surface": "herdr",
+          "status": "sent",
+          "receipt": null
+        },
+        "refs": []
+      },
+      {
+        "schema_version": 1,
+        "message_id": "bf64b47444fed189",
+        "ts": "2026-09-02T12:24:12Z",
+        "from": {
+          "harness": "claude",
+          "session_id": "e707261a-12e3-4b9f-9fa0-8c9f7d631b4f",
+          "project": "peer-steward-cycle2"
+        },
+        "to": {
+          "harness": "unknown",
+          "name": "fleet-cycle2"
+        },
+        "kind": "watch",
+        "summary": "",
+        "body_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "delivery": {
+          "surface": "herdr",
+          "status": "sent",
+          "receipt": null
+        },
+        "refs": []
+      },
+      {
+        "schema_version": 1,
+        "message_id": "2715d872ea5b956e",
+        "ts": "2026-09-02T12:04:46Z",
+        "from": {
+          "harness": "claude",
+          "session_id": "e707261a-12e3-4b9f-9fa0-8c9f7d631b4f",
+          "project": "peer-steward-cycle2"
+        },
+        "to": {
+          "harness": "unknown",
+          "name": "w1:pD"
+        },
+        "kind": "watch",
+        "summary": "",
+        "body_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "delivery": {
+          "surface": "herdr",
+          "status": "sent",
+          "receipt": null
+        },
+        "refs": []
+      },
+      {
+        "schema_version": 1,
+        "message_id": "2715d872ea5b956e",
+        "ts": "2026-09-02T12:04:46Z",
+        "from": {
+          "harness": "claude",
+          "session_id": "e707261a-12e3-4b9f-9fa0-8c9f7d631b4f",
+          "project": "peer-steward-cycle2"
+        },
+        "to": {
+          "harness": "unknown",
+          "name": "w1:pD"
+        },
+        "kind": "watch",
+        "summary": "",
+        "body_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "delivery": {
+          "surface": "herdr",
+          "status": "sent",
+          "receipt": null
+        },
+        "refs": []
+      },
+      {
+        "schema_version": 1,
+        "message_id": "3d67d5a38dd5b122",
+        "ts": "2026-09-02T12:04:46Z",
+        "from": {
+          "harness": "claude",
+          "session_id": "e707261a-12e3-4b9f-9fa0-8c9f7d631b4f",
+          "project": "peer-steward-cycle2"
+        },
+        "to": {
+          "harness": "unknown",
+          "name": "fleet-cycle2"
+        },
+        "kind": "watch",
+        "summary": "",
+        "body_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "delivery": {
+          "surface": "herdr",
+          "status": "sent",
+          "receipt": null
+        },
+        "refs": []
+      },
+      {
+        "schema_version": 1,
+        "message_id": "7dca24b32df9fcb1",
+        "ts": "2026-09-02T12:04:35Z",
+        "from": {
+          "harness": "claude",
+          "session_id": "e707261a-12e3-4b9f-9fa0-8c9f7d631b4f",
+          "project": "peer-steward-cycle2"
+        },
+        "to": {
+          "harness": "unknown",
+          "name": "w1:pD"
+        },
+        "kind": "watch",
+        "summary": "",
+        "body_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "delivery": {
+          "surface": "herdr",
+          "status": "sent",
+          "receipt": null
+        },
+        "refs": []
+      },
+      {
+        "schema_version": 1,
+        "message_id": "5e984abee26bb11f",
+        "ts": "2026-09-02T12:04:34Z",
+        "from": {
+          "harness": "claude",
+          "session_id": "e707261a-12e3-4b9f-9fa0-8c9f7d631b4f",
+          "project": "peer-steward-cycle2"
+        },
+        "to": {
+          "harness": "unknown",
+          "name": "fleet-cycle2"
+        },
+        "kind": "watch",
+        "summary": "",
+        "body_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "delivery": {
+          "surface": "herdr",
+          "status": "sent",
+          "receipt": null
+        },
+        "refs": []
+      },
+      {
+        "schema_version": 1,
+        "message_id": "dbede04a54b9a3ff",
+        "ts": "2026-09-02T12:03:34Z",
+        "from": {
+          "harness": "claude",
+          "session_id": "e707261a-12e3-4b9f-9fa0-8c9f7d631b4f",
+          "project": "peer-steward-cycle2"
+        },
+        "to": {
+          "harness": "unknown",
+          "name": "fleet-cycle2"
+        },
+        "kind": "watch",
+        "summary": "",
+        "body_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "delivery": {
+          "surface": "herdr",
+          "status": "sent",
+          "receipt": null
+        },
+        "refs": []
+      },
+      {
+        "schema_version": 1,
+        "message_id": "36e924c9ad1e2589",
+        "ts": "2026-09-02T12:03:19Z",
+        "from": {
+          "harness": "claude",
+          "session_id": "e707261a-12e3-4b9f-9fa0-8c9f7d631b4f",
+          "project": "peer-steward-cycle2"
+        },
+        "to": {
+          "harness": "unknown",
+          "name": "fleet-cycle2"
+        },
+        "kind": "watch",
+        "summary": "",
+        "body_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "delivery": {
+          "surface": "herdr",
+          "status": "sent",
+          "receipt": null
+        },
+        "refs": []
+      },
+      {
+        "schema_version": 1,
+        "message_id": "0d8de013271f695f",
+        "ts": "2026-09-02T12:03:10Z",
+        "from": {
+          "harness": "claude",
+          "session_id": "e707261a-12e3-4b9f-9fa0-8c9f7d631b4f",
+          "project": "peer-steward-cycle2"
+        },
+        "to": {
+          "harness": "unknown",
+          "name": "w1:pD"
+        },
+        "kind": "watch",
+        "summary": "",
+        "body_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "delivery": {
+          "surface": "herdr",
+          "status": "sent",
+          "receipt": null
+        },
+        "refs": []
+      },
+      {
+        "schema_version": 1,
+        "message_id": "e30a4c97b60ba116",
+        "ts": "2026-09-02T11:52:13Z",
+        "from": {
+          "harness": "claude",
+          "session_id": "d09227fc-f2f3-464e-ac92-7dc2f9f05010",
+          "project": "peer-steward-cycle2"
+        },
+        "to": {
+          "harness": "unknown",
+          "name": "fleet-cycle2"
+        },
+        "kind": "watch",
+        "summary": "",
+        "body_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "delivery": {
+          "surface": "herdr",
+          "status": "sent",
+          "receipt": null
+        },
+        "refs": []
+      },
+      {
+        "schema_version": 1,
+        "message_id": "13c3df40c34a2c87",
+        "ts": "2026-09-02T11:51:01Z",
+        "from": {
+          "harness": "claude",
+          "session_id": "d09227fc-f2f3-464e-ac92-7dc2f9f05010",
+          "project": "peer-steward-cycle2"
+        },
+        "to": {
+          "harness": "unknown",
+          "name": "fleet-cycle2"
+        },
+        "kind": "watch",
+        "summary": "",
+        "body_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "delivery": {
+          "surface": "herdr",
+          "status": "sent",
+          "receipt": null
+        },
+        "refs": []
+      },
+      {
+        "schema_version": 1,
+        "message_id": "39e6898cf94968f3",
+        "ts": "2026-09-02T10:36:00Z",
+        "from": {
+          "harness": "claude",
+          "session_id": "32f8c282-9afd-467d-adc4-3d1ae232611f",
+          "project": "hearting"
+        },
+        "to": {
+          "harness": "claude",
+          "name": "aba436200d2eb7208"
+        },
+        "kind": "steer",
+        "summary": "Final narrow check: commit ecc863d3 (same branch/worktree, read-only) addresses your remaining M2 item. Author's claim: new codex_dispatch_terminal.carrier_terminal_note() upgrades a compat-view dead-",
+        "body_sha256": "87b432183c67039a8f8cafbf4d414e65bf23721bffcf52b63a565c12c2c5ba74",
+        "delivery": {
+          "surface": "claude-native",
+          "status": "sent",
+          "receipt": null
+        },
+        "refs": []
+      },
+      {
+        "schema_version": 1,
+        "message_id": "02a1c2f501ed5ee7",
+        "ts": "2026-09-02T10:15:40Z",
+        "from": {
+          "harness": "claude",
+          "session_id": "32f8c282-9afd-467d-adc4-3d1ae232611f",
+          "project": "hearting"
+        },
+        "to": {
+          "harness": "claude",
+          "name": "aba436200d2eb7208"
+        },
+        "kind": "steer",
+        "summary": "Verification pass requested: the author pushed commit 7dd75b79 on top of fcb4f011 (branch review-verdict-contract; worktree /home/nas/user/Uihyeop/personal/hearting-wt/review-verdict-contract, read-on",
+        "body_sha256": "5305a25cc19b96b13154aca84f7f09ae1e51c3062f9cb16e61796f9a34a64ed3",
+        "delivery": {
+          "surface": "claude-native",
+          "status": "sent",
+          "receipt": null
+        },
+        "refs": []
+      },
+      {
+        "schema_version": 1,
+        "message_id": "900b4749c3bb0494",
+        "ts": "2026-09-02T09:33:51Z",
+        "from": {
+          "harness": "claude",
+          "session_id": "7981959a-138c-4726-865c-0100877389fe",
+          "project": "review-verdict-contract"
+        },
+        "to": {
+          "harness": "claude",
+          "name": "hearting-21"
+        },
+        "kind": "steer",
+        "summary": "review-verdict-contract 완료: 브랜치 review-verdict-contract 커밋 fcb4f011(base v2.101.0 e8ba7ddf) push 됨 — main 통합·release build·harness update는 hearting-21 소유로 남김.",
+        "body_sha256": "62b9701b25de44ca08bf451fd46163bd274933786505da873f5999ef759ec4ea",
+        "delivery": {
+          "surface": "claude-native",
+          "status": "sent",
+          "receipt": null
+        },
+        "refs": []
+      },
+      {
+        "schema_version": 1,
+        "message_id": "4ffcd5624b768a80",
+        "ts": "2026-09-02T08:41:13Z",
+        "from": {
+          "harness": "claude",
+          "session_id": "62b32e44-1c3a-45df-9531-11c11e49b700",
+          "project": "hearting"
+        },
+        "to": {
+          "harness": "claude",
+          "name": "hearting-21"
+        },
+        "kind": "steer",
+        "summary": "[steer] hearting-fb 세션이 Fleet 시각화·세션 통신 계약 cycle 2(SD-123 + F-99 + 가시성 실증 + 후속 4건 + cycle 3 폐기 반영)를 시작했습니다.",
+        "body_sha256": "9cb386819e9ddab3608e957f492f249c47bc3851613a77bf10779b2910a24c70",
+        "delivery": {
+          "surface": "claude-native",
+          "status": "sent",
+          "receipt": null
+        },
+        "refs": []
+      }
+    ],
+    "by_session": {
+      "claude:62b32e44-1c3a-45df-9531-11c11e49b700": {
+        "sent_1h": 0,
+        "recv_1h": 0,
+        "last_recv": null
+      },
+      "claude:7981959a-138c-4726-865c-0100877389fe": {
+        "sent_1h": 0,
+        "recv_1h": 0,
+        "last_recv": null
+      },
+      "claude:32f8c282-9afd-467d-adc4-3d1ae232611f": {
+        "sent_1h": 0,
+        "recv_1h": 0,
+        "last_recv": null
+      },
+      "claude:d09227fc-f2f3-464e-ac92-7dc2f9f05010": {
+        "sent_1h": 0,
+        "recv_1h": 0,
+        "last_recv": null
+      },
+      "claude:e707261a-12e3-4b9f-9fa0-8c9f7d631b4f": {
+        "sent_1h": 0,
+        "recv_1h": 0,
+        "last_recv": null
+      },
+      "claude:7a001534-ea46-4a67-971b-199c586889e2": {
+        "sent_1h": 0,
+        "recv_1h": 0,
+        "last_recv": null
+      },
+      "claude:892abd4f-f092-4c76-9c73-7f443a260869": {
+        "sent_1h": 0,
+        "recv_1h": 0,
+        "last_recv": {
+          "from_name": "hearting-46",
+          "from_session_id": "7a001534-ea46-4a67-971b-199c586889e2",
+          "from_harness": "claude",
+          "kind": "steer",
+          "age_min": 139
+        }
+      },
+      "claude:841d1f64-0cff-4c16-8578-e874a45a2bb6": {
+        "sent_1h": 0,
+        "recv_1h": 0,
+        "last_recv": null
+      },
+      "codex:01a064d8-e0e6-7ac2-97df-877c380ce013": {
+        "sent_1h": 0,
+        "recv_1h": 0,
+        "last_recv": {
+          "from_name": "hearting-46",
+          "from_session_id": "7a001534-ea46-4a67-971b-199c586889e2",
+          "from_harness": "claude",
+          "kind": "steer",
+          "age_min": 139
+        }
+      },
+      "claude:3e756f4a-3354-4792-a1c7-422c4a84cde4": {
+        "sent_1h": 0,
+        "recv_1h": 0,
+        "last_recv": {
+          "from_name": "hearting-46",
+          "from_session_id": "7a001534-ea46-4a67-971b-199c586889e2",
+          "from_harness": "claude",
+          "kind": "notice",
+          "age_min": 139
+        }
+      },
+      "claude:e0fcd9e8-75f0-4e5f-98ca-d9f582afc7ea": {
+        "sent_1h": 0,
+        "recv_1h": 0,
+        "last_recv": {
+          "from_name": "hearting-46",
+          "from_session_id": "7a001534-ea46-4a67-971b-199c586889e2",
+          "from_harness": "claude",
+          "kind": "notice",
+          "age_min": 139
+        }
+      },
+      "opencode:ses_f9af61ac1ffeoirDfb61NRwmRF": {
+        "sent_1h": 0,
+        "recv_1h": 0,
+        "last_recv": {
+          "from_name": "hearting-46",
+          "from_session_id": "7a001534-ea46-4a67-971b-199c586889e2",
+          "from_harness": "claude",
+          "kind": "notice",
+          "age_min": 139
+        }
+      },
+      "claude:96aba9d6-90d3-414c-8d53-d6d6faeb634b": {
+        "sent_1h": 0,
+        "recv_1h": 0,
+        "last_recv": {
+          "from_name": "hearting-46",
+          "from_session_id": "7a001534-ea46-4a67-971b-199c586889e2",
+          "from_harness": "claude",
+          "kind": "notice",
+          "age_min": 139
+        }
+      },
+      "codex:codex-hooktest-1": {
+        "sent_1h": 0,
+        "recv_1h": 0,
+        "last_recv": {
+          "from_name": "hearting-46",
+          "from_session_id": "7a001534-ea46-4a67-971b-199c586889e2",
+          "from_harness": "claude",
+          "kind": "notice",
+          "age_min": 138
+        }
+      },
+      "claude:<sid>": {
+        "sent_1h": 0,
+        "recv_1h": 0,
+        "last_recv": null
+      },
+      "claude:d8e44ff4-bae2-4271-9e4a-65c6f2fef086": {
+        "sent_1h": 0,
+        "recv_1h": 0,
+        "last_recv": {
+          "from_name": "hearting-46",
+          "from_session_id": "<sid>",
+          "from_harness": "claude",
+          "kind": "notice",
+          "age_min": 137
+        }
+      },
+      "codex:01a0650d-3afe-7812-b652-b82e29b97b0c": {
+        "sent_1h": 0,
+        "recv_1h": 0,
+        "last_recv": {
+          "from_name": "hearting-46",
+          "from_session_id": "7a001534-ea46-4a67-971b-199c586889e2",
+          "from_harness": "claude",
+          "kind": "notice",
+          "age_min": 135
+        }
+      },
+      "claude:87550f66-28bd-419f-8dd4-9432e301d6e7": {
+        "sent_1h": 0,
+        "recv_1h": 0,
+        "last_recv": {
+          "from_name": "hearting-46",
+          "from_session_id": "7a001534-ea46-4a67-971b-199c586889e2",
+          "from_harness": "claude",
+          "kind": "notice",
+          "age_min": 135
+        }
+      },
+      "claude:578551e7-076f-4f29-a5a9-1cae3a39b8d5": {
+        "sent_1h": 0,
+        "recv_1h": 0,
+        "last_recv": {
+          "from_name": "hearting-46",
+          "from_session_id": "<sid>",
+          "from_harness": "claude",
+          "kind": "notice",
+          "age_min": 135
+        }
+      },
+      "opencode:ses_pluginTest1": {
+        "sent_1h": 0,
+        "recv_1h": 0,
+        "last_recv": {
+          "from_name": "hearting-46",
+          "from_session_id": "7a001534-ea46-4a67-971b-199c586889e2",
+          "from_harness": "claude",
+          "kind": "notice",
+          "age_min": 135
+        }
+      },
+      "claude:dbg": {
+        "sent_1h": 0,
+        "recv_1h": 0,
+        "last_recv": null
+      },
+      "opencode:dbg-oc": {
+        "sent_1h": 0,
+        "recv_1h": 0,
+        "last_recv": {
+          "from_name": "dbg",
+          "from_session_id": "dbg",
+          "from_harness": "claude",
+          "kind": "notice",
+          "age_min": 134
+        }
+      },
+      "claude:84031cf7-0769-4685-800f-c266ad5a777d": {
+        "sent_1h": 0,
+        "recv_1h": 0,
+        "last_recv": {
+          "from_name": "hearting-46",
+          "from_session_id": "<sid>",
+          "from_harness": "claude",
+          "kind": "notice",
+          "age_min": 133
+        }
+      },
+      "claude:7840e5e9-4f0b-415c-aef9-51c039f86a1a": {
+        "sent_1h": 0,
+        "recv_1h": 0,
+        "last_recv": {
+          "from_name": "hearting-46",
+          "from_session_id": "<sid>",
+          "from_harness": "claude",
+          "kind": "notice",
+          "age_min": 130
+        }
+      },
+      "claude:2adec7a7-0fc7-44e8-893a-dee4864891a9": {
+        "sent_1h": 2,
+        "recv_1h": 0,
+        "last_recv": null
+      },
+      "claude:91850343-c994-4470-a52d-8d931f11b9e8": {
+        "sent_1h": 3,
+        "recv_1h": 0,
+        "last_recv": null
+      }
+    }
+  },
+  "route": [
+    {
+      "route_id": "rt-aa1344860be4f2a6",
+      "route_hash": null,
+      "source": "record",
+      "capability": null,
+      "capability_mode": null,
+      "execution_topology": null,
+      "unit_catalog_digest": null,
+      "composed": false,
+      "effective_intensity": null,
+      "progress": null,
+      "ambiguity": [
+        "route-record-mismatch"
+      ],
+      "nodes": []
+    },
+    {
+      "route_id": "rt-0391ef5dff924982",
+      "route_hash": null,
+      "source": "record",
+      "capability": null,
+      "capability_mode": null,
+      "execution_topology": null,
+      "unit_catalog_digest": null,
+      "composed": false,
+      "effective_intensity": null,
+      "progress": null,
+      "ambiguity": [
+        "route-record-mismatch"
+      ],
+      "nodes": []
+    },
+    {
+      "route_id": "rt-d7541f1033ae677f",
+      "route_hash": "sha256:d7541f1033ae677f77c4b4127fc66682816b3dbadf6148438cf6c398108a50d1",
+      "source": "record",
+      "capability": "autopilot-code",
+      "capability_mode": "dev",
+      "execution_topology": "staged",
+      "unit_catalog_digest": "sha256:8803ace11472ce267848b071eb3b11a6fa330041ab3b3332bc35b3635e58d003",
+      "composed": false,
+      "effective_intensity": "standard",
+      "progress": {
+        "done": 0,
+        "total": 6
+      },
+      "ambiguity": null,
+      "nodes": [
+        {
+          "id": "plan",
+          "depends_on": [],
+          "level": 0,
+          "unit": "plan/plan-author",
+          "unit_choices": [],
+          "parallel_group": null,
+          "replica_group": null,
+          "model_profile": "balanced-deep",
+          "perspective": null,
+          "write_scope": [
+            "plan.md",
+            "checklist.md"
+          ],
+          "state": "pending",
+          "gate": "code-plan",
+          "gate_passed": null,
+          "note": null,
+          "elapsed_min": null,
+          "model": null,
+          "harness": null,
+          "effort": null,
+          "degradation": null,
+          "attempt_round": null
+        },
+        {
+          "id": "plan-check",
+          "depends_on": [
+            "plan"
+          ],
+          "level": 1,
+          "unit": "qa/plan-review",
+          "unit_choices": [],
+          "parallel_group": null,
+          "replica_group": null,
+          "model_profile": "light",
+          "perspective": null,
+          "write_scope": [
+            "_internal/plan_reviews/**"
+          ],
+          "state": "pending",
+          "gate": "code-plan-check",
+          "gate_passed": null,
+          "note": null,
+          "elapsed_min": null,
+          "model": null,
+          "harness": null,
+          "effort": null,
+          "degradation": null,
+          "attempt_round": null
+        },
+        {
+          "id": "execute",
+          "depends_on": [
+            "plan-check"
+          ],
+          "level": 2,
+          "unit": "dev/backend",
+          "unit_choices": [
+            "dev/backend",
+            "dev/frontend",
+            "dev/new-lib",
+            "dev/refactor"
+          ],
+          "parallel_group": null,
+          "replica_group": null,
+          "model_profile": "light",
+          "perspective": null,
+          "write_scope": [
+            "source/**",
+            "checklist.md",
+            "dev_logs/**",
+            "evidence/**"
+          ],
+          "state": "pending",
+          "gate": "code-execute",
+          "gate_passed": null,
+          "note": null,
+          "elapsed_min": null,
+          "model": null,
+          "harness": null,
+          "effort": null,
+          "degradation": null,
+          "attempt_round": null
+        },
+        {
+          "id": "impl-review",
+          "depends_on": [
+            "execute"
+          ],
+          "level": 3,
+          "unit": "qa/code-review",
+          "unit_choices": [],
+          "parallel_group": null,
+          "replica_group": null,
+          "model_profile": "light",
+          "perspective": null,
+          "write_scope": [
+            "_internal/dev_reviews/**"
+          ],
+          "state": "pending",
+          "gate": "code-impl-review",
+          "gate_passed": null,
+          "note": null,
+          "elapsed_min": null,
+          "model": null,
+          "harness": null,
+          "effort": null,
+          "degradation": null,
+          "attempt_round": null
+        },
+        {
+          "id": "test",
+          "depends_on": [
+            "impl-review"
+          ],
+          "level": 4,
+          "unit": "qa/test",
+          "unit_choices": [],
+          "parallel_group": null,
+          "replica_group": null,
+          "model_profile": "light",
+          "perspective": null,
+          "write_scope": [
+            "test_logs/**",
+            "_internal/test_reviews/**",
+            "evidence/**"
+          ],
+          "state": "pending",
+          "gate": "code-test",
+          "gate_passed": null,
+          "note": null,
+          "elapsed_min": null,
+          "model": null,
+          "harness": null,
+          "effort": null,
+          "degradation": null,
+          "attempt_round": null
+        },
+        {
+          "id": "report",
+          "depends_on": [
+            "test"
+          ],
+          "level": 5,
+          "unit": "editorial/report",
+          "unit_choices": [],
+          "parallel_group": null,
+          "replica_group": null,
+          "model_profile": "light",
+          "perspective": null,
+          "write_scope": [
+            "pipeline_summary.md",
+            "final_report.md",
+            "analysis_project/code/**"
+          ],
+          "state": "pending",
+          "gate": "code-report",
+          "gate_passed": null,
+          "note": null,
+          "elapsed_min": null,
+          "model": null,
+          "harness": null,
+          "effort": null,
+          "degradation": null,
+          "attempt_round": null
+        }
+      ]
+    }
+  ],
+  "governor": {
+    "active": 2,
+    "cap": 12,
+    "classes": {
+      "dispatch": 2
+    }
+  },
+  "usage": {
+    "claude": {
+      "freshness": "fresh",
+      "observed_at": 1788409738.7673903
+    },
+    "codex": {
+      "freshness": "fresh",
+      "observed_at": 1788409871.867349
+    },
+    "freshness": "fresh",
+    "observed_at": 1788409871.867349,
+    "api_disabled": false
+  },
+  "disabled": {
+    "recognized": [],
+    "ignored": [],
+    "api_disabled": false
+  },
+  "hearting": {
+    "version": "v2.105.0-1-g2798aea1",
+    "install_method": "unmanaged",
+    "source": "fallback",
+    "runtimes": []
+  },
+  "compute_hosts": {
+    "hosts": [
+      {
+        "conda": "/home/Uihyeop/anaconda3",
+        "cpu_count": 64,
+        "cpu_thread_utilization_pct": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          9,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          10,
+          0,
+          0,
+          55,
+          0,
+          10,
+          0,
+          9,
+          11,
+          0,
+          0,
+          18,
+          9,
+          0,
+          44,
+          18,
+          10,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          9,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          9,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "cpu_utilization_pct": 3,
+        "gpus": [
+          {
+            "free_mib": 49125,
+            "index": 0,
+            "memory_total_mib": 49140,
+            "memory_used_mib": 15,
+            "name": "NVIDIA RTX 6000 Ada Generation",
+            "processes": [],
+            "total_mib": 49140,
+            "used_mib": 15,
+            "utilization_gpu_pct": 0,
+            "uuid": "GPU-e4fec2b5-49b5-5a10-1824-f262b7ab8a21"
+          },
+          {
+            "free_mib": 49125,
+            "index": 1,
+            "memory_total_mib": 49140,
+            "memory_used_mib": 15,
+            "name": "NVIDIA RTX 6000 Ada Generation",
+            "processes": [],
+            "total_mib": 49140,
+            "used_mib": 15,
+            "utilization_gpu_pct": 0,
+            "uuid": "GPU-eae1998a-6e5a-f7d8-35dc-7d2d542d3901"
+          }
+        ],
+        "host": "moving4",
+        "hostname": "workstation",
+        "load": "2.98 3.55 3.64",
+        "memory_total_mib": 128276,
+        "memory_used_mib": 34033,
+        "note": "2x RTX 6000 Ada 49GB, driver 580 — primary session host",
+        "observed_at": 1788409916.898352,
+        "port": 1689,
+        "reachable": true,
+        "self": true,
+        "ssh": "moving4.iiplab.dev",
+        "swap_total_mib": 8191,
+        "swap_used_mib": 2617,
+        "unmatched_processes": []
+      },
+      {
+        "conda": "/home/Uihyeop/anaconda3",
+        "cpu_count": 28,
+        "cpu_thread_utilization_pct": [
+          0,
+          0,
+          0,
+          0,
+          9,
+          9,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "cpu_utilization_pct": 1,
+        "gpus": [
+          {
+            "free_mib": 32592,
+            "index": 0,
+            "memory_total_mib": 32607,
+            "memory_used_mib": 15,
+            "name": "NVIDIA GeForce RTX 5090",
+            "processes": [],
+            "total_mib": 32607,
+            "used_mib": 15,
+            "utilization_gpu_pct": 0,
+            "uuid": "GPU-ef7f20c1-aae1-850d-b014-1b430ac77979"
+          },
+          {
+            "free_mib": 32566,
+            "index": 1,
+            "memory_total_mib": 32607,
+            "memory_used_mib": 41,
+            "name": "NVIDIA GeForce RTX 5090",
+            "processes": [],
+            "total_mib": 32607,
+            "used_mib": 41,
+            "utilization_gpu_pct": 0,
+            "uuid": "GPU-3eb0aa4b-c462-4b14-b5d9-7a09c5b1052a"
+          }
+        ],
+        "host": "cnn",
+        "hostname": "cnn",
+        "load": "0.08 0.15 0.11",
+        "memory_total_mib": 63969,
+        "memory_used_mib": 4821,
+        "note": "2x RTX 5090 32GB, driver 580",
+        "observed_at": 1788409917.3049834,
+        "port": 1689,
+        "reachable": true,
+        "self": false,
+        "ssh": "163.239.13.43",
+        "swap_total_mib": 8191,
+        "swap_used_mib": 0,
+        "unmatched_processes": []
+      },
+      {
+        "conda": "/home/Uihyeop/anaconda3",
+        "cpu_count": 80,
+        "cpu_thread_utilization_pct": [
+          0,
+          0,
+          0,
+          64,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          9,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          18,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          11,
+          0,
+          40,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          60,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "cpu_utilization_pct": 2,
+        "gpus": [
+          {
+            "free_mib": 24553,
+            "index": 0,
+            "memory_total_mib": 24564,
+            "memory_used_mib": 11,
+            "name": "NVIDIA GeForce RTX 4090",
+            "processes": [],
+            "total_mib": 24564,
+            "used_mib": 11,
+            "utilization_gpu_pct": 0,
+            "uuid": "GPU-16dedaf7-891e-86af-5a1a-b161d3245cf3"
+          },
+          {
+            "free_mib": 24536,
+            "index": 1,
+            "memory_total_mib": 24564,
+            "memory_used_mib": 28,
+            "name": "NVIDIA GeForce RTX 4090",
+            "processes": [],
+            "total_mib": 24564,
+            "used_mib": 28,
+            "utilization_gpu_pct": 0,
+            "uuid": "GPU-2740e80f-57cd-a2ec-62cc-911675f59ef1"
+          }
+        ],
+        "host": "xavier",
+        "hostname": "xavier",
+        "load": "2.14 2.27 2.32",
+        "memory_total_mib": 192012,
+        "memory_used_mib": 14125,
+        "note": "2x RTX 4090 24GB, driver 535 — unstable, being retired as session host",
+        "observed_at": 1788409917.3282719,
+        "port": 1689,
+        "reachable": true,
+        "self": false,
+        "ssh": "163.239.13.55",
+        "swap_total_mib": 2047,
+        "swap_used_mib": 19,
+        "unmatched_processes": []
+      }
+    ],
+    "run_root": "/home/nas/user/Uihyeop/.compute-runs",
+    "configured": true,
+    "observed_at": 1788409917.3282719
+  }
+}
