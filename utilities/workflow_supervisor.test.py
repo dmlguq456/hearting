@@ -97,6 +97,16 @@ class WorkflowFixture(unittest.TestCase):
         (self.agent_home / "core" / "CORE.md").write_text("fixture\n", encoding="utf-8")
         self._previous_agent_home = os.environ.get("AGENT_HOME")
         os.environ["AGENT_HOME"] = str(self.agent_home)
+        # `release_actor_kind()` reads the ambient dispatch env, so a test run
+        # launched *from* a registered worker would otherwise classify every
+        # fixture release as `headless-owner`. Tests opt in explicitly instead.
+        self._previous_dispatch = {
+            key: os.environ.get(key)
+            for key in ("AGENT_DISPATCH_REGISTERED_WORKER", "AGENT_DISPATCH_ATTEMPT_ID",
+                        "AGENT_OWNER_ROUTE_FILE")
+        }
+        for key in self._previous_dispatch:
+            os.environ.pop(key, None)
         self.addCleanup(self._restore)
         self.addCleanup(self.tmp.cleanup)
 
@@ -109,6 +119,11 @@ class WorkflowFixture(unittest.TestCase):
             os.environ.pop("AGENT_HOME", None)
         else:
             os.environ["AGENT_HOME"] = self._previous_agent_home
+        for key, value in self._previous_dispatch.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
 
     # -- fixtures -------------------------------------------------------------
     def write_route(self, nodes, route_id="rt-fixture0000000", route_hash="sha256:fixture"):
@@ -144,6 +159,40 @@ class WorkflowFixture(unittest.TestCase):
                 {"gate": human_gate, "node": "verify", "position": "entry"}]
             path.write_text(json.dumps(route, indent=2), encoding="utf-8")
         return route, path
+
+    def owner_registry(self, route_id="rt-fixture0000000", *,
+                       attempt_id="att-fixtureowner0001",
+                       session_id="sess-fixture-depth0",
+                       recipient_kind="claude-parent-runtime"):
+        """A depth-1 owner row plus the dispatch state root the gate record lands in.
+
+        SD-123 (8): the recipient of a gate is the depth-0 session that opened the
+        route, and the only place naming it is the owner's registry row
+        (`parent_sid`) -- the route record's `owner_attempt_id` is `-` for a
+        standard+ route compiled by that session.
+        """
+        state_root = self.base / "dispatch"
+        state_root.mkdir(parents=True, exist_ok=True)
+        jobs = state_root / "jobs.log"
+        metadata = ",".join([
+            f"attempt_id={attempt_id}", f"parent_sid={session_id}",
+            f"parent_completion_delivery={recipient_kind}", "dispatch_depth=1",
+            "worker_type=owner", f"owner_route_id={route_id}", "harness=claude",
+            "registered_worker=1", "execution_surface=registered-headless",
+        ])
+        jobs.write_text(
+            "\t".join(["2026-09-03T00:00:00Z", "open", str(self.base), str(self.base),
+                       "fixture-owner", metadata]) + "\n",
+            encoding="utf-8",
+        )
+        return jobs, session_id, attempt_id
+
+    def block_gate(self, path, gate, jobs=None, artifact="shards/frame/frame-summary.json",
+                   route_id="rt-fixture0000000"):
+        if jobs is None:
+            jobs, _session, _attempt = self.owner_registry(route_id=route_id)
+        return jobs, SUP.main(["gate", "--route", str(path), "--gate", gate, "--block",
+                               "--jobs", str(jobs), "--artifact", artifact])
 
     def resource_registry(self, *, exit_code=0, pid=None, starttime=None,
                           command_hash=None, status="running", sentinel=True):
@@ -373,7 +422,7 @@ class TestSupervisorAdvance(WorkflowFixture):
         registry = self.resource_registry(exit_code=0)
         with self.assertRaisesRegex(SUP.SupervisorError, "supervisor governs only"):
             self.arm(path, registry, extra=["--successor-external"])
-        SUP.main(["gate", "--route", str(path), "--gate", "run-authorization", "--block"])
+        self.block_gate(path, "run-authorization")
         ledger = SUP.ledger_for(route)
         self.assertEqual(ledger.state()["workflow_state"], "BLOCKED_HUMAN_GATE")
         self.assertEqual(SUP.poll_once(route, ledger), [])
@@ -438,7 +487,7 @@ class TestGateRelease(WorkflowFixture):
         route, path = self.two_stage_route(
             continuation={"kind": "human-gate", "gate": "frame-review"},
             human_gate="frame-review")
-        SUP.main(["gate", "--route", str(path), "--gate", "frame-review", "--block"])
+        self.jobs, _code = self.block_gate(path, "frame-review")
         return route, path
 
     def test_proceed_claims_and_reports_the_successor_exactly_once(self):
@@ -913,7 +962,7 @@ class TestCapabilityIntegration(WorkflowFixture):
         registry = self.resource_registry(exit_code=0)
         with self.assertRaisesRegex(SUP.SupervisorError, "supervisor governs only"):
             self.arm(path, registry, node="release-review")
-        SUP.main(["gate", "--route", str(path), "--gate", "deploy-authorization", "--block"])
+        self.block_gate(path, "deploy-authorization", route_id=route["route_id"])
         ledger = SUP.ledger_for(route)
         self.assertEqual(ledger.state()["workflow_state"], "BLOCKED_HUMAN_GATE")
         self.assertEqual(ledger.claims(), {})
@@ -1153,7 +1202,7 @@ class TestSurvey(WorkflowFixture):
         route_a, path_a = self.two_stage_route(human_gate="run-authorization")
         registry_a = self.resource_registry(exit_code=0)
         self.arm_external(path_a, registry_a)
-        SUP.main(["gate", "--route", str(path_a), "--gate", "run-authorization", "--block"])
+        self.block_gate(path_a, "run-authorization", route_id=route_a["route_id"])
         _code, payload_a = self.run_survey()
         row_a = next(row for row in payload_a["rows"] if row["route_id"] == route_a["route_id"])
         self.assertNotEqual(row_a["risk"]["tier"], "abandoned")

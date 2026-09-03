@@ -1222,5 +1222,215 @@ class SharedReferencePinAndRelatedTest(ProducerTestBase):
         self.assertIsNone(P.find_campaign_by_key(self.root, "camp-live"))
 
 
+class ComponentSetPreservation(ProducerTestBase):
+    """D-87 (a)(b)(c): a partial admit must not silently delete the components it
+    did not carry. On 2026-09-03 two admits one minute apart took a three-component
+    reference down to one and two PRDs vanished from `latest`."""
+
+    def _cycle(self, generations):
+        """One sealed cycle holding every generation as its own source subtree.
+
+        Generations are separate sources, not separate routes: a second compile of
+        the same tuple is a duplicate runtime route, and what this suite needs to
+        vary is the admitted tree, not the route.
+        """
+        self.activate()
+        route, route_file, result = self.begin("direct", "autopilot-spec", "update")
+        for index, components in enumerate(generations):
+            for name in components:
+                self.write_output(result, f"gen{index}/{name}/prd.md",
+                                  f"# {name} g{index}\n".encode("utf-8"))
+        self.close(route, route_file)
+        P.finalize(self.root, cycle_id=result["cycle_id"])
+        return result
+
+    def _admit(self, result, generation, **kw):
+        return P.admit_shared(self.root, cycle_id=result["cycle_id"], kind="spec",
+                              source=f"gen{generation}", key="prd", **kw)
+
+    def _reference(self, reference_id):
+        return json.loads(
+            (self.root / "shared" / "spec" / reference_id / "reference.json").read_text()
+        )
+
+    def _staging_leftovers(self, reference_id):
+        revisions = self.root / "shared" / "spec" / reference_id / "revisions"
+        return sorted(p.name for p in revisions.iterdir() if p.name.startswith(".admitting-"))
+
+    def _journals(self):
+        directory = P.shared_journal_path(self.root, "rrev_probe").parent
+        return sorted(p.name for p in directory.glob("*.json")) if directory.is_dir() else []
+
+    def test_regressed_component_set_is_refused(self):
+        """A17-1: refusal names every component that would have vanished, and
+        leaves no revision, no journal and no staging behind."""
+        result = self._cycle([["a", "b"], ["a"]])
+        admitted = self._admit(result, 0)
+        reference_id = admitted["shared_reference_id"]
+        before, journals_before = self._reference(reference_id), self._journals()
+        with self.assertRaises(P.ProducerError) as ctx:
+            self._admit(result, 1)
+        self.assertEqual(ctx.exception.code, "component-set-regressed")
+        self.assertIn("b", ctx.exception.detail)
+        after = self._reference(reference_id)
+        self.assertEqual(after["revisions"], before["revisions"])
+        self.assertEqual(after["latest_revision_id"], before["latest_revision_id"])
+        self.assertEqual(self._staging_leftovers(reference_id), [])
+        self.assertEqual(self._journals(), journals_before)
+
+    def test_drop_component_admits_and_records(self):
+        """A17-2."""
+        result = self._cycle([["a", "b"], ["a"]])
+        admitted = self._admit(result, 0)
+        dropped = self._admit(result, 1, drop_components=["b"], drop_reason="superseded by a")
+        self.assertEqual(dropped["status"], "admitted")
+        record = json.loads((Path(dropped["revision_dir"]) / "revision.json").read_text())
+        self.assertEqual(record["dropped_components"],
+                         [{"name": "b", "reason": "superseded by a"}])
+        reference = self._reference(admitted["shared_reference_id"])
+        self.assertEqual(reference["latest_revision_id"], dropped["shared_reference_revision_id"])
+
+    def test_drop_reason_defaults_when_absent(self):
+        result = self._cycle([["a", "b"], ["a"]])
+        self._admit(result, 0)
+        dropped = self._admit(result, 1, drop_components=["b"])
+        record = json.loads((Path(dropped["revision_dir"]) / "revision.json").read_text())
+        self.assertEqual(record["dropped_components"], [{"name": "b", "reason": "unspecified"}])
+
+    def test_drop_component_unknown_is_refused(self):
+        result = self._cycle([["a", "b"], ["a", "b"]])
+        self._admit(result, 0)
+        with self.assertRaises(P.ProducerError) as ctx:
+            self._admit(result, 1, drop_components=["zzz"])
+        self.assertEqual(ctx.exception.code, "drop-component-unknown")
+
+    def test_superset_is_not_a_regression(self):
+        """A17-3: adding a component is not a regression."""
+        result = self._cycle([["a", "b"], ["a", "b", "c"]])
+        self._admit(result, 0)
+        widened = self._admit(result, 1)
+        self.assertEqual(widened["status"], "admitted")
+        record = json.loads((Path(widened["revision_dir"]) / "revision.json").read_text())
+        self.assertNotIn("dropped_components", record)
+        self.assertEqual(P.component_set(row["path"] for row in record["files"]), {"a", "b", "c"})
+
+    def test_single_component_reference_unchanged(self):
+        """A17-4: the ordinary single-component admit behaves exactly as before and
+        its revision record gains no key."""
+        result = self._cycle([["a"], ["a"]])
+        one = self._admit(result, 0)
+        two = self._admit(result, 1)
+        for admitted in (one, two):
+            record = json.loads((Path(admitted["revision_dir"]) / "revision.json").read_text())
+            self.assertNotIn("dropped_components", record)
+        self.assertEqual(
+            json.loads((Path(two["revision_dir"]) / "revision.json").read_text())["sequence"], 2
+        )
+
+    def test_first_revision_is_exempt(self):
+        """A17-6: no predecessor, nothing to regress against."""
+        result = self._cycle([["a", "b"]])
+        admitted = self._admit(result, 0)
+        self.assertEqual(admitted["status"], "admitted")
+        self.assertTrue(admitted["reference_created"])
+
+    def test_flat_top_level_files_are_components(self):
+        """`rrev_15cf1d9f` admitted `prd.md` flat; defining components as top-level
+        directories would read that revision as empty and miss the regression."""
+        self.assertEqual(P.component_set(["prd.md", "a/b.md", "revision.json"]), {"prd.md", "a"})
+
+
+class ComponentSetCheckSurface(ProducerTestBase):
+    """D-87 (d): read-only adjacent-pair check, `components(new) >= components(old) - dropped(new)`."""
+
+    def _chain(self, generations):
+        """Build a reference whose history already regressed, the way the real one
+        did before (a) existed: admit with an explicit drop, then erase the drop
+        record so the pair reads as a silent loss."""
+        self.activate()
+        route, route_file, result = self.begin("direct", "autopilot-spec", "update")
+        for index, components in enumerate(generations):
+            for name in components:
+                self.write_output(result, f"gen{index}/{name}/prd.md",
+                                  f"# {name} g{index}\n".encode("utf-8"))
+        self.close(route, route_file)
+        P.finalize(self.root, cycle_id=result["cycle_id"])
+        ids, admitted = [], None
+        for index, components in enumerate(generations):
+            previous = generations[index - 1] if index else []
+            admitted = P.admit_shared(
+                self.root, cycle_id=result["cycle_id"], kind="spec", source=f"gen{index}",
+                key="prd",
+                drop_components=[name for name in previous if name not in components],
+            )
+            ids.append(admitted["shared_reference_revision_id"])
+            record_path = Path(admitted["revision_dir"]) / "revision.json"
+            record = json.loads(record_path.read_text())
+            if record.pop("dropped_components", None) is not None:
+                record_path.chmod(0o600)
+                record_path.write_text(json.dumps(record, sort_keys=True), encoding="utf-8")
+        return admitted["shared_reference_id"], ids
+
+    def test_reports_regression_and_recovery(self):
+        """A17-5 shape: violations while components vanish, zero once restored."""
+        reference_id, ids = self._chain([["a", "b", "c"], ["a"], ["b"], ["a", "b", "c"]])
+        report = P.check_component_sets(self.root, "spec", reference_id)
+        self.assertEqual(report["violations"], 2)
+        self.assertEqual([pair["verdict"] for pair in report["pairs"]],
+                         ["regressed", "regressed", "ok"])
+        recovered = P.check_component_sets(self.root, "spec", reference_id, from_revision=ids[-1])
+        self.assertEqual(recovered["violations"], 0)
+
+    def test_window_bounds_the_report(self):
+        """The window is not cosmetic: unbounded, the real reference reports nine
+        violations reaching back to seq 8, and A17-5 asks about two."""
+        reference_id, ids = self._chain([["a", "b", "c"], ["a"], ["b"], ["a", "b", "c"]])
+        window = P.check_component_sets(self.root, "spec", reference_id,
+                                        from_revision=ids[1], to_revision=ids[2])
+        self.assertEqual(window["violations"], 1)
+        self.assertEqual(len(window["pairs"]), 1)
+
+    def test_unknown_window_bound_is_refused(self):
+        reference_id, _ids = self._chain([["a", "b"], ["a"]])
+        with self.assertRaises(P.ProducerError) as ctx:
+            P.check_component_sets(self.root, "spec", reference_id, from_revision="rrev_nope")
+        self.assertEqual(ctx.exception.code, "revision-unknown")
+
+    def test_explicit_drop_is_not_a_violation(self):
+        self.activate()
+        route, route_file, result = self.begin("direct", "autopilot-spec", "update")
+        for name in ("a", "b"):
+            self.write_output(result, f"gen0/{name}/prd.md", b"x\n")
+        self.write_output(result, "gen1/a/prd.md", b"y\n")
+        self.close(route, route_file)
+        P.finalize(self.root, cycle_id=result["cycle_id"])
+        admitted = P.admit_shared(self.root, cycle_id=result["cycle_id"], kind="spec",
+                                  source="gen0", key="prd")
+        P.admit_shared(self.root, cycle_id=result["cycle_id"], kind="spec", source="gen1",
+                       key="prd", drop_components=["b"], drop_reason="retired")
+        report = P.check_component_sets(self.root, "spec", admitted["shared_reference_id"])
+        self.assertEqual(report["violations"], 0)
+        self.assertEqual(report["pairs"][-1]["dropped"], ["b"])
+
+    def test_missing_revision_record_is_reported_not_raised(self):
+        """`rrev_3af0bce6` has no `revision.json`; the check must say so, not crash."""
+        reference_id, ids = self._chain([["a", "b"], ["a"]])
+        record = (self.root / "shared" / "spec" / reference_id / "revisions" / ids[0]
+                  / "revision.json")
+        record.chmod(0o600)
+        record.unlink()
+        report = P.check_component_sets(self.root, "spec", reference_id)
+        self.assertEqual(report["unreadable"], [ids[0]])
+        self.assertEqual([pair["verdict"] for pair in report["pairs"]], ["unknown"])
+
+    def test_check_writes_nothing(self):
+        reference_id, _ids = self._chain([["a", "b"], ["a"]])
+        shared = self.root / "shared"
+        before = {p: p.stat().st_mtime_ns for p in sorted(shared.rglob("*")) if p.is_file()}
+        P.check_component_sets(self.root, "spec", reference_id)
+        after = {p: p.stat().st_mtime_ns for p in sorted(shared.rglob("*")) if p.is_file()}
+        self.assertEqual(before, after)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -69,9 +69,35 @@ def _append_self_instrumentation(
 DELIVER_LEASE_SECONDS = 120.0
 
 
+HUMAN_GATE_PREFIX = "human-gate:"
+
+
+def is_human_gate_record(record: object) -> bool:
+    """True when this record is a SD-123 (8) gate notice rather than an attempt
+    completion. The two need different instructions -- one is harvested, the
+    other is released -- and they are told apart by the `required_action`
+    vocabulary alone, so no field was added to the record schema."""
+
+    if not isinstance(record, dict):
+        return False
+    receipt = record.get("receipt") if isinstance(record.get("receipt"), dict) else {}
+    children = receipt.get("children") if isinstance(receipt.get("children"), list) else []
+    return any(
+        isinstance(child, dict)
+        and str(child.get("required_action", "")).startswith(HUMAN_GATE_PREFIX)
+        for child in children
+    )
+
+
 def _bounded_receipt_text(record: dict) -> str:
     """One bounded line per pending record for `additionalContext`; never the
-    receipt body, transcript, or artifact contents (SD-111 receipt policy)."""
+    receipt body, transcript, or artifact contents (SD-111 receipt policy).
+
+    A gate record renders its gate name and the artifact **path** (carried in
+    `reason`). Without that the recipient would learn a gate is open and not
+    what to look at -- contract (a) names the path as part of the record, so
+    rendering it is the contract, not decoration.
+    """
 
     receipt = record.get("receipt") if isinstance(record.get("receipt"), dict) else {}
     children = receipt.get("children") if isinstance(receipt.get("children"), list) else []
@@ -79,9 +105,17 @@ def _bounded_receipt_text(record: dict) -> str:
     for child in children:
         if not isinstance(child, dict):
             continue
+        action = str(child.get("required_action", "-"))
+        if action.startswith(HUMAN_GATE_PREFIX):
+            parts.append(
+                f"attempt_id={child.get('attempt_id', '-')} required_action={action} "
+                f"gate={action[len(HUMAN_GATE_PREFIX):] or '-'} "
+                f"artifact={child.get('reason', '-')}"
+            )
+            continue
         parts.append(
             f"attempt_id={child.get('attempt_id', '-')} status={child.get('status', '-')} "
-            f"required_action={child.get('required_action', '-')} "
+            f"required_action={action} "
             f"classification={child.get('delivery_classification', '-')}"
         )
     return (
