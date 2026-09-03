@@ -40,6 +40,23 @@ LOOSE_PREFIX = "_internal"
 CYCLE_BUCKETS = C.CYCLE_BUCKETS
 SHARED_SNAPSHOT = C.SHARED_SNAPSHOT
 LANES = ("semantic-boundary", "relationship", "display-quality")
+# D-79/D-7: a resplit cycle's capability is a function of its D-23 bucket, never of
+# the route that happens to be running the resplit. Inheriting the caller's
+# capability made all 16 hearting cycles `autopilot-code` including the research
+# ones, which the read projection then reports as code work that never happened.
+BUCKET_CAPABILITY = {
+    "plans": "autopilot-code",
+    "experiments": "autopilot-lab",
+    "research": "autopilot-research",
+    "documents": "autopilot-draft",
+    "designs": "autopilot-design",
+}
+# The lump record's intensity describes the W7C migration call, not the original
+# work, so it is no more honest than the caller's. A retrospective cycle records
+# the neutral default instead of claiming a rigor nobody measured.
+RESPLIT_CYCLE_INTENSITY = "standard"
+_DATE_ONLY_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+_RFC3339_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,9})?Z$")
 PROPOSAL_ROW_KEYS = frozenset({
     "proposal_id", "fingerprint", "lane", "target_ids", "cited_evidence_ids", "source_cutoff",
     "producer_version", "projection_version", "policy_version", "proposed_value", "confidence", "rationale",
@@ -216,15 +233,41 @@ def _entry_document_written_date(cdir: Path, bucket: str, depth1: str, files: Se
     return m.group(1) if m else None
 
 
+def _as_rfc3339(value: Optional[str]) -> Optional[str]:
+    """D-6 requires `cycle.started_on` to be RFC3339 UTC, but D-79's first two
+    priorities yield a bare `YYYY-MM-DD`. A date is widened to that day's UTC
+    midnight -- the only reading that keeps the contract's date and the schema's
+    timestamp the same instant. Anything else is not a date and returns `None` so
+    the caller falls through to the next priority instead of sealing garbage."""
+    if not isinstance(value, str):
+        return None
+    value = value.strip()
+    if _DATE_ONLY_RE.match(value):
+        return value + "T00:00:00Z"
+    if _RFC3339_RE.match(value):
+        return value
+    return None
+
+
 def _lump_started_on(cdir: Path, bucket: str, depth1_name: str, files: Sequence[Dict[str, Any]],
-                     record_started_on: Optional[str]) -> str:
+                     record_started_on: Optional[str]) -> Tuple[str, str]:
+    """D-79 `started_on` priority, with the source that decided it.
+
+    (1) the directory name's `YYYY-MM-DD_` prefix, (2) the written date inside the
+    unit's entry document, (3) the lump cycle's own `started_on`. mtime is never
+    consulted -- every W7C copy carries its copy time. The run's wall clock is not
+    a priority at all: it is the resplit's timestamp, not the work's, and it lives
+    in the record's `resplit_run_at`.
+    """
     m = re.match(r"^(\d{4}-\d{2}-\d{2})_", depth1_name)
     if m:
-        return m.group(1)
-    written = _entry_document_written_date(cdir, bucket, depth1_name, files)
+        widened = _as_rfc3339(m.group(1))
+        if widened:
+            return widened, "directory-date-prefix"
+    written = _as_rfc3339(_entry_document_written_date(cdir, bucket, depth1_name, files))
     if written:
-        return written
-    return record_started_on or ""
+        return written, "entry-document-date"
+    return (_as_rfc3339(record_started_on) or ""), "lump-record"
 
 
 def _original_legacy_sources(root: Path) -> Dict[str, str]:
@@ -312,9 +355,11 @@ def scan_lumps(root: Path, *, root_slug: Optional[str] = None) -> Dict[str, Any]
         cycle_units_out = []
         for (bucket, depth1), unit in sorted(cycle_units.items()):
             files = sorted(unit["files"], key=lambda f: f["locator"])
+            started_on, started_on_source = _lump_started_on(
+                cdir, bucket, depth1, files, record.get("started_on"))
             cycle_units_out.append({
                 "cycle_key": f"legacy:{slug}:{bucket}/{depth1}", "bucket": bucket, "depth1_name": depth1,
-                "started_on": _lump_started_on(cdir, bucket, depth1, files, record.get("started_on")), "title": depth1,
+                "started_on": started_on, "started_on_source": started_on_source, "title": depth1,
                 "file_count": len(files), "byte_count": sum(f["byte_size"] or 0 for f in files),
                 "files": files,
             })
@@ -593,6 +638,114 @@ def lump_display_state(root: Path) -> Dict[str, Any]:
     }
 
 
+DEVIATION_CHECKS = ("started-on", "cycle-state", "capability", "compat-supersession", "backup-location")
+
+
+def _cycle_key_bucket(cycle_key: Optional[str]) -> Optional[str]:
+    if not isinstance(cycle_key, str):
+        return None
+    tail = cycle_key.split(":", 2)[-1]
+    bucket = tail.split("/", 1)[0]
+    return bucket if bucket in CYCLE_BUCKETS else None
+
+
+def resplit_deviations(root: Path, *, lump_cycle_id: Optional[str] = None) -> Dict[str, Any]:
+    """Read-only audit of what an already-executed resplit run actually produced.
+
+    Five things this module used to get wrong are invisible once a cycle is
+    sealed: the manifest cannot be rewritten, so the only remaining question is
+    whether a given run's output matches the contract or is a recorded deviation.
+    This answers that question without touching anything -- it is the regression
+    surface for the hearting canary, whose 16 cycles stay exactly as they were
+    sealed (D-6/D-11) and are read here, never repaired.
+
+    Every check reports `ok`, `deviation`, or `not-evaluated` (its evidence does
+    not exist in this run yet); `not-evaluated` is never counted as a pass.
+    """
+    root = Path(root).resolve()
+    run_dir = _find_run_dir(root, lump_cycle_id) if lump_cycle_id else None
+    if run_dir is None:
+        candidates = [d for d in _run_dirs(root) if (d / "journal-r2.json").is_file()]
+        run_dir = candidates[-1] if candidates else None
+    if run_dir is None:
+        return {"status": "no-run", "run_dir": None, "lump_cycle_id": lump_cycle_id,
+                "checks": [], "deviations": []}
+    r2 = P._read_json(run_dir / "journal-r2.json") or {}
+    r3 = P._read_json(run_dir / "journal-r3.json") or {}
+    lump_id = r2.get("lump_cycle_id") or lump_cycle_id
+    inventory = P._read_json(_admission_dir(run_dir) / "lump-inventory.json") or {}
+    expected_started_on = {}
+    for lump in inventory.get("lumps", []):
+        for unit in lump.get("cycle_units", []):
+            expected_started_on[unit["cycle_key"]] = _as_rfc3339(unit.get("started_on"))
+    checks: Dict[str, Dict[str, Any]] = {
+        cid: {"id": cid, "status": "not-evaluated", "rows": []} for cid in DEVIATION_CHECKS
+    }
+    for cyc in r2.get("cycles", []):
+        record = P.read_cycle_record(root, cyc["cycle_id"])
+        if record is None:
+            continue
+        manifest = P._read_json(Path(cyc["cycle_dir"]) / "manifest.json") or {}
+        sealed_cycle = manifest.get("cycle") or {}
+        key = cyc.get("cycle_key") or record.get("cycle_key")
+        want = expected_started_on.get(key)
+        got = sealed_cycle.get("started_on") or record.get("started_on")
+        if want and got and want != got:
+            checks["started-on"]["rows"].append(
+                {"cycle_id": cyc["cycle_id"], "cycle_key": key, "expected": want, "observed": got})
+        if sealed_cycle:
+            checks["cycle-state"]["status"] = "ok"
+            if sealed_cycle.get("state") != "completed":
+                checks["cycle-state"]["rows"].append(
+                    {"cycle_id": cyc["cycle_id"], "cycle_key": key, "observed": sealed_cycle.get("state")})
+        if want and got:
+            checks["started-on"]["status"] = "ok"
+        bucket = _cycle_key_bucket(key)
+        if bucket:
+            checks["capability"]["status"] = "ok"
+            want_capability = BUCKET_CAPABILITY[bucket]
+            if record.get("capability") != want_capability or record.get("route_capability") != want_capability:
+                checks["capability"]["rows"].append({
+                    "cycle_id": cyc["cycle_id"], "cycle_key": key, "expected": want_capability,
+                    "observed": record.get("capability"),
+                    "observed_route_capability": record.get("route_capability")})
+    map_path = run_dir / "compatibility-map.jsonl"
+    state = C.load_map_state(root)
+    recorded = {entry["path"] for entry in state["maps"]}
+    if map_path.is_file() and str(map_path) in recorded:
+        checks["compat-supersession"]["status"] = "ok"
+        new_sources = {row["source_locator"] for row in C._read_jsonl(map_path)}
+        for entry in state["maps"]:
+            if entry["path"] == str(map_path) or not entry["present"]:
+                continue
+            table = {row["source_locator"] for row in C._read_jsonl(Path(entry["path"]))}
+            if new_sources.intersection(table) and not entry.get("superseded_by"):
+                checks["compat-supersession"]["rows"].append(
+                    {"map": entry["path"], "shared_sources": len(new_sources & table)})
+    if r3.get("phase") in {"backup-sealed", "artifacts-removed", "complete"}:
+        checks["backup-location"]["status"] = "ok"
+        if (run_dir / "legacy-artifacts.tar").is_file():
+            checks["backup-location"]["rows"].append(
+                {"code": "backup-inside-artifact-root", "path": str(run_dir / "legacy-artifacts.tar")})
+        location = P._read_json(run_dir / "backup-location.json")
+        if not isinstance(location, dict) or not location.get("archive"):
+            checks["backup-location"]["rows"].append({"code": "backup-location-missing"})
+        elif _is_within(root, location["archive"]):
+            checks["backup-location"]["rows"].append(
+                {"code": "backup-inside-artifact-root", "path": location["archive"]})
+    rows = []
+    for cid in DEVIATION_CHECKS:
+        check = checks[cid]
+        if check["rows"]:
+            check["status"] = "deviation"
+        rows.append(check)
+    deviations = [c["id"] for c in rows if c["status"] == "deviation"]
+    return {
+        "status": "deviation" if deviations else "ok", "run_dir": str(run_dir),
+        "lump_cycle_id": lump_id, "checks": rows, "deviations": deviations,
+    }
+
+
 # ---------------------------------------------------------------------------
 # D-80 proposal validator
 # ---------------------------------------------------------------------------
@@ -751,6 +904,56 @@ def _rule_8_confirmed_constraints(proposal: Dict[str, Any], confirmed_constraint
     return None
 
 
+def _apply_started_on_override(unit: Dict[str, Any], overrides: Dict[str, str]) -> Dict[str, Any]:
+    """Return the cycle unit R2 will build from. The sealed lump inventory keeps the
+    derived value; only the verdict's copy carries the admitted correction, so the
+    inventory stays a record of what the tree said and the verdict a record of what
+    was admitted."""
+    value = overrides.get(unit["cycle_key"])
+    if value is None:
+        return unit
+    return {**unit, "started_on": value, "started_on_source": "display-quality-proposal"}
+
+
+def _display_quality_started_on(proposal: Dict[str, Any], lump_cycle_keys: set,
+                                ) -> Tuple[Dict[str, str], Optional[Dict[str, Any]]]:
+    """D-17/D-79: the only lane allowed to correct a derived `started_on`.
+
+    D-79 fixes the derivation (directory prefix -> entry-document date -> lump
+    record) and then says display improvements move through a `display-quality`
+    proposal. A unit whose directory carries no date and whose entry document
+    records the wrong one is exactly that case, so the row is applied here -- at
+    R1 admit, onto the sealed cycle unit -- rather than being noticed after R2 has
+    already sealed a manifest that can never be rewritten.
+
+    Everything about the row is checked by code (D-7): the target must be a lump
+    cycle key, the value must be a date or an RFC3339 instant, and two rows may
+    not disagree about one key. Agent output picks the value; it never picks which
+    cycle it lands on or whether the value is well formed.
+    """
+    overrides: Dict[str, str] = {}
+    for row in proposal["proposals"]:
+        if row.get("lane") != "display-quality":
+            continue
+        proposed = row.get("proposed_value") or {}
+        if not isinstance(proposed, dict) or "started_on" not in proposed:
+            continue
+        widened = _as_rfc3339(proposed.get("started_on"))
+        if widened is None:
+            return {}, {"code": "display-quality-invalid",
+                        "detail": f"started_on:{row.get('proposal_id')}:{proposed.get('started_on')}"}
+        targets = row.get("target_ids") or []
+        if not targets:
+            return {}, {"code": "display-quality-invalid", "detail": f"no-target:{row.get('proposal_id')}"}
+        for key in targets:
+            if key not in lump_cycle_keys:
+                return {}, {"code": "display-quality-invalid", "detail": f"unknown-target:{key}"}
+            if overrides.get(key, widened) != widened:
+                return {}, {"code": "display-quality-invalid", "detail": f"conflict:{key}"}
+            overrides[key] = widened
+    return overrides, None
+
+
 def validate_proposal(
     proposal: Any, *, root: Path, lump_inventory: Dict[str, Any], loose_inventory: Dict[str, Any],
     confirmed_constraints: Optional[Dict[str, Any]] = None, lump_cycle_id: Optional[str] = None,
@@ -823,10 +1026,15 @@ def validate_proposal(
     err = _rule_8_confirmed_constraints(proposal, confirmed_constraints, slug_for_target, loose_target_by_source)
     if err:
         return {"verdict": "hold", **err, "rules_checked": rules_checked}
+    rules_checked.append("display-quality")
+    started_on_overrides, err = _display_quality_started_on(proposal, lump_cycle_keys)
+    if err:
+        return {"verdict": "hold", **err, "rules_checked": rules_checked}
     campaigns_out = []
     for camp_row in proposal.get("campaigns", []):
         slug = camp_row["slug"]
-        units = [u for u in lump["cycle_units"] if slug_for_target.get(u["cycle_key"]) == slug]
+        units = [_apply_started_on_override(u, started_on_overrides)
+                 for u in lump["cycle_units"] if slug_for_target.get(u["cycle_key"]) == slug]
         campaigns_out.append({
             "slug": slug, "title": camp_row.get("title"), "goal": camp_row.get("goal"),
             "degraded": bool(camp_row.get("degraded")), "related": camp_row.get("related") or [],
@@ -840,6 +1048,7 @@ def validate_proposal(
     return {
         "verdict": "ok", "code": None, "rules_checked": rules_checked,
         "campaigns": campaigns_out, "assignments": slug_for_target, "loose": loose_out,
+        "started_on_overrides": started_on_overrides,
         "root_slug": root_slug, "lump": lump,
     }
 
@@ -1195,37 +1404,159 @@ def _partition_campaign_plan(campaign_plan: List[Dict[str, Any]]) -> Tuple[List[
     return kept, deferred
 
 
-def _per_cycle_route(route: Dict[str, Any], cycle_key: str, run_dir: Path) -> Tuple[Dict[str, Any], Path]:
-    """D-71 requires (artifact_root_id, route_id) uniqueness per finalized cycle -- a batch
-    admitting several new cycles under one caller-supplied route needs a distinct route
-    identity per cycle. Derives one deterministically from the caller's route + cycle_key so
-    reruns are idempotent (same cycle_key -> same synthetic route_id).
+RESPLIT_SEAL_NODE_ID = "resplit-seal"
+RESPLIT_SEAL_GATE = "inline-complete"
 
-    🟡3 spec-impact (S2 plan §7): this per-cycle synthetic route identity is a
-    design choice made to satisfy D-71 uniqueness, not something the PRD/plan
-    specifies. Its rules, as implemented here (not yet ratified elsewhere):
-    - **identity**: `route_id = "rt-" + sha256(f"{caller_route_id}:{cycle_key}")[:16]`,
-      deterministic and stable across reruns of the same admitted proposal.
-    - **provenance**: the derived route is a full copy of the caller's route
-      (same capability/intensity/gates) plus `resplit_cycle_key`, persisted
-      once under `<run_dir>/routes/<route_id>.json` -- it is not registered
-      in any route ledger outside this run_dir.
-    - **authority**: it carries no capability beyond what the caller's route
-      already granted; it exists solely so each new cycle's `finalize` call
-      has a distinct `route_id` to bind to, not as an independently
-      authorized route.
+
+def _resplit_seal_node() -> Dict[str, Any]:
+    """The synthetic route's only node: one inline, dispatch-depth-0 terminal seal.
+
+    The caller's own node graph is not copied. A `standard+` caller carries
+    depth-2 nodes and sealed parallel groups, and reusing them would make the
+    per-cycle route's completion gate depend on markers and arbitration records
+    that belong to the resplit's own work, not to the cycle being sealed. One
+    inline terminal node grants strictly less than the caller's route already
+    granted (D-77-b `authority`) and is the whole reason the route exists: to give
+    `finalize` a distinct closed route to bind the commit to.
     """
-    seed = f"{route['route_id']}:{cycle_key}".encode()
-    digest = hashlib.sha256(seed).hexdigest()
-    derived = dict(route)
-    derived["route_id"] = "rt-" + digest[:16]
-    derived["route_hash"] = "sha256:" + digest
-    derived["resplit_cycle_key"] = cycle_key
+    return {
+        "id": RESPLIT_SEAL_NODE_ID, "kind": "capability-owner", "role": "orchestrator",
+        "dispatch_depth": 0, "execution_surface": "inline", "registered_worker": False,
+        "resource_class": "normal", "terminal": True,
+        "completion_gate": RESPLIT_SEAL_GATE, "terminal_gate": RESPLIT_SEAL_GATE,
+        "write_scope": ["source-scoped"],
+    }
+
+
+def ledger_resplit_routes(root: Path) -> Dict[str, Dict[str, Any]]:
+    """`resplit_cycle_key` -> the route the canonical ledger already holds for it.
+
+    Read once per batch rather than once per cycle: a mature root's
+    `.runtime/routes/` holds four figures of route records (hearting: 1,112), and
+    a per-cycle rescan turns idempotency into an O(cycles x routes) file sweep.
+    """
+    routes_dir = Path(root) / ".runtime" / "routes"
+    mapping: Dict[str, Dict[str, Any]] = {}
+    if not routes_dir.is_dir():
+        return mapping
+    for path in sorted(routes_dir.glob("*.json")):
+        if path.name.endswith(".outcome.json"):
+            continue
+        record = P._read_json(path)
+        if isinstance(record, dict) and isinstance(record.get("resplit_cycle_key"), str):
+            mapping.setdefault(record["resplit_cycle_key"], record)
+    return mapping
+
+
+def _find_ledger_route_by_cycle_key(root: Path, cycle_key: str) -> Optional[Dict[str, Any]]:
+    """D-77-b: idempotency is carried by the `cycle_key` -> ledger mapping, not by a
+    reproducible id. A rerun looks the key up in the canonical route ledger and
+    reuses the route already admitted for it."""
+    return ledger_resplit_routes(root).get(cycle_key)
+
+
+def _write_run_dir_route_log(run_dir: Path, derived: Dict[str, Any]) -> Path:
+    """The run_dir copy is an execution log, not route identity (D-77-b)."""
     path = run_dir / "routes" / f"{derived['route_id']}.json"
     path.parent.mkdir(parents=True, exist_ok=True)
     if not path.is_file():
         P._write_atomic(path, P._json_bytes(derived))
-    return derived, path
+    return path
+
+
+def _per_cycle_route(root: Path, route: Dict[str, Any], cycle_key: str, capability: str,
+                     run_dir: Path, ledger: Optional[Dict[str, Dict[str, Any]]] = None,
+                     ) -> Tuple[Dict[str, Any], Path, bool]:
+    """D-77-b per-cycle route identity: an opaque id, admitted to the canonical ledger.
+
+    D-5 defines a route as `(artifact_root_id, route_id)` and D-71 makes `finalize`
+    the only publication boundary, so a batch that seals several cycles under one
+    caller route has no distinct identity per commit. The route issued here fixes
+    that, and three properties are contractual rather than incidental:
+
+    - **identity is entropy, not derivation.** The id comes from `os.urandom`. The
+      previous `sha256(caller_route_id ‖ cycle_key)[:16]` seeded identity from a
+      `cycle_key` that embeds `<bucket>/<depth1-name>`, which is a path -- D-4
+      forbids that transitively, not just directly.
+    - **the ledger owns it.** `admit_runtime_route` creates
+      `.runtime/routes/<route_id>.json` with O_EXCL, so D-5's uniqueness is
+      enforced by the same index every other route goes through. The `<run_dir>`
+      copy stays, as an execution log.
+    - **idempotency is the key's job.** A rerun finds the route by
+      `resplit_cycle_key` instead of recomputing an id.
+
+    Returns `(route, canonical route file, created_by_this_run)`.
+    """
+    ledger = ledger_resplit_routes(root) if ledger is None else ledger
+    existing = ledger.get(cycle_key)
+    if existing is not None:
+        _write_run_dir_route_log(run_dir, existing)
+        return existing, P.artifact_lifecycle.canonical_route_path(root, existing["route_id"]), False
+    digest = hashlib.sha256(os.urandom(32)).hexdigest()
+    derived = dict(route)
+    derived["route_id"] = "rt-" + digest[:16]
+    derived["route_hash"] = "sha256:" + digest
+    derived["capability"] = capability
+    derived["effective_intensity"] = RESPLIT_CYCLE_INTENSITY
+    derived["requested_intensity"] = RESPLIT_CYCLE_INTENSITY
+    derived["nodes"] = [_resplit_seal_node()]
+    derived["completion_gates"] = [RESPLIT_SEAL_GATE]
+    derived["parallel_groups"] = []
+    derived["human_gates"] = []
+    derived["human_gate_bindings"] = []
+    derived["conditional_extensions"] = []
+    derived["max_dispatch_depth"] = 0
+    derived["execution_topology"] = "inline"
+    derived["resplit_cycle_key"] = cycle_key
+    binding = P.artifact_lifecycle.admit_runtime_route(root, derived)
+    ledger[cycle_key] = derived
+    _write_run_dir_route_log(run_dir, derived)
+    return derived, Path(binding.route_file), True
+
+
+def _cycle_seal_evidence(run_dir: Path, cyc: Dict[str, Any], route_id: str, lump_cycle_id: str) -> Path:
+    """Completion evidence for the synthetic route's one gate. Deterministic bytes:
+    the marker replay check compares the evidence digest, so a rerun must produce
+    the same file rather than a new one that reads as a different attempt."""
+    path = run_dir / "routes" / f"{route_id}.completion-evidence.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    body = {"schema_version": 1, "kind": "w7g-resplit-cycle-seal", "cycle_key": cyc["cycle_key"],
+            "cycle_id": cyc["cycle_id"], "campaign_id": cyc["campaign_id"],
+            "lump_cycle_id": lump_cycle_id, "run_dir": str(run_dir)}
+    if not path.is_file():
+        P._write_atomic(path, P._json_bytes(body))
+    return path
+
+
+def _close_cycle_route(root: Path, run_dir: Path, cyc: Dict[str, Any], lump_cycle_id: str) -> None:
+    """Close the cycle's own route before `finalize` so the sealed manifest says
+    `completed` (D-10) instead of the provisional `active` `build_manifest` records
+    for an open route.
+
+    The work these cycles describe finished years before the resplit ran; a
+    retrospective seal that reports it as still active is simply wrong, and the
+    manifest is committed with O_EXCL and can never be corrected afterwards. So the
+    closure happens on this side of the commit point: write the terminal node's
+    completion marker, close the route through the ordinary outcome-sidecar
+    contract, and refuse to continue if the gate did not actually prove.
+    """
+    record = P.read_cycle_record(root, cyc["cycle_id"])
+    if record is None or record.get("state") != "open":
+        return
+    route_file = Path(record["route_file"])
+    route = P.load_route(root, route_file)
+    if P.route_is_closed(root, route):
+        return
+    route_module = P.artifact_lifecycle._load_capability_route()
+    evidence = _cycle_seal_evidence(run_dir, cyc, route["route_id"], lump_cycle_id)
+    for node in route.get("nodes", []):
+        if node.get("terminal") is True:
+            route_module.write_completion_marker(route, node, node["id"], evidence)
+    outcome, _fresh = route_module.close_route(
+        route, route_file, commit=None,
+        summary=f"W7G retrospective resplit seal for {cyc['cycle_key']}")
+    if outcome.get("terminal_gate_proven") is not True:
+        raise ResplitError("resplit-stale", f"per-cycle-route-unproven:{cyc['cycle_id']}")
 
 
 def _r2_prepare(root: Path, campaign_plan: List[Dict[str, Any]], alloc, lump_cycle_id: str,
@@ -1239,6 +1570,8 @@ def _r2_prepare(root: Path, campaign_plan: List[Dict[str, Any]], alloc, lump_cyc
     cycle_pre: List[Dict[str, Any]] = []
     created_dirs: List[str] = []
     created_cycle_dirs: List[str] = []
+    created_routes: List[Dict[str, str]] = []
+    ledger = ledger_resplit_routes(root)
     cycles_out: List[Dict[str, Any]] = []
     for camp in campaign_plan:
         existing = _find_campaign_by_key_local(root, camp["key"])
@@ -1277,7 +1610,9 @@ def _r2_prepare(root: Path, campaign_plan: List[Dict[str, Any]], alloc, lump_cyc
             cycles_out.append({
                 "cycle_key": unit["cycle_key"], "cycle_id": cycle_id, "campaign_id": camp["campaign_id"],
                 "cycle_dir": str(cdir), "created": created, "bucket": unit["bucket"],
-                "depth1_name": unit["depth1_name"], "started_on": unit["started_on"], "title": unit["title"],
+                "depth1_name": unit["depth1_name"], "started_on": unit["started_on"],
+                "started_on_source": unit.get("started_on_source"), "title": unit["title"],
+                "capability": BUCKET_CAPABILITY[unit["bucket"]],
                 "files": unit["files"],
                 "loose_files": list(loose_by_cycle_key.get(unit["cycle_key"], [])),
             })
@@ -1306,18 +1641,29 @@ def _r2_prepare(root: Path, campaign_plan: List[Dict[str, Any]], alloc, lump_cyc
             cdir = Path(cyc["cycle_dir"])
             (cdir / "artifacts").mkdir(parents=True, exist_ok=True)
             created_dirs.append(os.path.relpath(cdir / "artifacts", root))
-            cyc_route, cyc_route_file = _per_cycle_route(route, cyc["cycle_key"], run_dir)
+            capability = cyc["capability"]
+            cyc_route, cyc_route_file, route_created = _per_cycle_route(
+                root, route, cyc["cycle_key"], capability, run_dir, ledger)
+            if route_created:
+                created_routes.append({
+                    "route_id": cyc_route["route_id"],
+                    "route_file": os.path.relpath(cyc_route_file, root),
+                })
+            cyc["route_id"] = cyc_route["route_id"]
+            cyc["route_file"] = str(cyc_route_file.resolve())
             record = {
                 "schema_version": 1, "contract": P.CONTRACT, "cycle_id": cid, "campaign_id": camp["campaign_id"],
                 "producer_id": alloc.allocate("producer"), "parent_cycle_id": None,
-                "capability": cyc_route.get("capability", "autopilot-code"),
-                "route_capability": cyc_route.get("capability", "autopilot-code"),
-                "intensity": cyc_route.get("effective_intensity", "standard"),
+                # D-79/D-7: bucket-derived, never inherited from the calling route.
+                "capability": capability, "route_capability": capability,
+                "intensity": RESPLIT_CYCLE_INTENSITY,
                 "route_id": cyc_route["route_id"], "route_hash": cyc_route["route_hash"],
                 "route_file": str(cyc_route_file.resolve()), "node_id": None, "state": "open",
-                "started_on": C._now(), "sealed_on": None, "manifest_digest": None,
+                # D-79: the work's own date, not the resplit's wall clock.
+                "started_on": cyc["started_on"], "sealed_on": None, "manifest_digest": None,
                 "title": cyc["title"], "cycle_key": cyc["cycle_key"], "derived_from_cycle_id": lump_cycle_id,
-                "resplit_started_on": cyc["started_on"],
+                "started_on_source": cyc.get("started_on_source"),
+                "resplit_run_at": C._now(),
             }
             P._write_cycle_record(root, record, exclusive=True)
             camp_cycles.append(cid)
@@ -1332,6 +1678,7 @@ def _r2_prepare(root: Path, campaign_plan: List[Dict[str, Any]], alloc, lump_cyc
     pre_image = {
         "schema_version": 1, "campaign_records": campaign_pre, "cycle_records": cycle_pre,
         "created_cycle_dirs": created_cycle_dirs, "created_dirs": created_dirs,
+        "created_routes": created_routes,
     }
     return pre_image, cycles_out, deferred_campaigns
 
@@ -1352,6 +1699,24 @@ def _prune_empty_tree(path: Path) -> None:
             cur.rmdir()
         except OSError:
             raise ResplitError("rollback-residue", str(cur))
+
+
+def _release_created_routes(root: Path, created_routes: Sequence[Dict[str, str]]) -> None:
+    route_module = P.artifact_lifecycle._load_capability_route()
+    for entry in created_routes:
+        route_file = root / entry["route_file"]
+        for path in (route_file, route_file.with_name(route_file.stem + ".outcome.json")):
+            if path.is_file():
+                path.unlink()
+        completion = route_module.completion_dir(entry["route_id"])
+        if completion.is_dir():
+            for child in sorted(completion.iterdir()):
+                if child.is_file():
+                    child.unlink()
+            try:
+                completion.rmdir()
+            except OSError:
+                pass
 
 
 def _r2_rollback(root: Path, journal: Dict[str, Any], run_dir: Path) -> None:
@@ -1390,6 +1755,10 @@ def _r2_rollback(root: Path, journal: Dict[str, Any], run_dir: Path) -> None:
         else:
             data = base64.b64decode(entry["bytes_b64"])
             P._write_atomic(path, data)
+    # D-8 "실패 시 canonical 노출 0" reaches the route ledger too: a rolled-back batch
+    # must not leave the routes it admitted (or their outcome sidecars and completion
+    # markers) behind, or the re-run would meet its own leftovers as a duplicate.
+    _release_created_routes(root, pre_image.get("created_routes", []))
     if inverse_path.is_file():
         inverse_path.unlink()
     journal["phase"] = "rolled-back"
@@ -1420,7 +1789,9 @@ def _r2_preview(root: Path, verdict: Dict[str, Any], root_slug: str, loose_inven
             planned_cycles.append({
                 "cycle_key": unit["cycle_key"], "campaign_slug": camp["slug"], "campaign_key": camp["key"],
                 "bucket": unit["bucket"], "depth1_name": unit["depth1_name"], "title": unit["title"],
-                "started_on": unit["started_on"], "file_count": unit["file_count"],
+                "capability": BUCKET_CAPABILITY[unit["bucket"]], "intensity": RESPLIT_CYCLE_INTENSITY,
+                "started_on": unit["started_on"], "started_on_source": unit.get("started_on_source"),
+                "file_count": unit["file_count"],
                 "byte_count": unit["byte_count"], "loose_file_count": len(loose_rows),
                 "loose_locators": [r["locator"] for r in loose_rows],
                 "existing_cycle_id": existing["cycle_id"] if existing else None,
@@ -1626,7 +1997,8 @@ def _r2_execute(root: Path, run_dir: Path, journal: Dict[str, Any], cycles: List
     _r2_witness(first)  # witness (2): re-checked immediately before finalize
     if crash_at == "r2:before-finalize":
         raise ResplitError("crash-fixture", "before-finalize")
-    sealed = P.finalize(root, cycle_id=first["cycle_id"], state="completed", allow_open_route=True,
+    _close_cycle_route(root, run_dir, first, journal["lump_cycle_id"])
+    sealed = P.finalize(root, cycle_id=first["cycle_id"], state="completed",
                        support_locators=_loose_locators(first))
     if sealed.get("status") not in {"sealed", "already-sealed"}:
         raise ResplitError("resplit-stale", f"finalize-failed:{sealed.get('status')}")
@@ -1642,7 +2014,8 @@ def _r2_execute(root: Path, run_dir: Path, journal: Dict[str, Any], cycles: List
         if crash_at == "r2:mid-second-cycle" and i == 1:
             raise ResplitError("crash-fixture", "mid-second-cycle")
         _r2_witness(cyc)
-        sealed = P.finalize(root, cycle_id=cyc["cycle_id"], state="completed", allow_open_route=True,
+        _close_cycle_route(root, run_dir, cyc, journal["lump_cycle_id"])
+        sealed = P.finalize(root, cycle_id=cyc["cycle_id"], state="completed",
                            support_locators=_loose_locators(cyc))
         if sealed.get("status") not in {"sealed", "already-sealed"}:
             raise ResplitError("resplit-stale", f"finalize-failed:{sealed.get('status')}")
@@ -1665,7 +2038,8 @@ def _r2_roll_forward(root: Path, run_dir: Path, journal: Dict[str, Any], cycles:
             P._write_atomic(journal_path, P._json_bytes(journal))
             raise ResplitError("crash-fixture", "mid-second-cycle")
         _r2_witness(cyc)
-        sealed = P.finalize(root, cycle_id=cyc["cycle_id"], state="completed", allow_open_route=True,
+        _close_cycle_route(root, run_dir, cyc, journal["lump_cycle_id"])
+        sealed = P.finalize(root, cycle_id=cyc["cycle_id"], state="completed",
                            support_locators=_loose_locators(cyc))
         if sealed.get("status") not in {"sealed", "already-sealed"}:
             raise ResplitError("resplit-stale", f"finalize-failed:{sealed.get('status')}")
@@ -1694,6 +2068,8 @@ def _r3(root: Path, *, lump_cycle_id: str, backup_root: Optional[Path], dry_run:
     plan_sha256 = r2_journal["plan_sha256"]
     if journal is not None and journal.get("phase") == "complete" and journal.get("plan_sha256") == plan_sha256:
         return {"status": "already-applied", "run_dir": str(run_dir), "journal": journal}
+    if not dry_run:
+        backup_root = _validated_backup_root(root, backup_root)
     identity = P.artifact_lifecycle.read_root_identity(root)
     alloc = allocator or artifact_identity.IdAllocator()
     new_cycle_ids = [c["cycle_id"] for c in r2_journal["cycles"]]
@@ -1770,15 +2146,29 @@ def _r3_rollback(root: Path, journal: Dict[str, Any], run_dir: Path) -> None:
         p = root / rel
         if p.is_file():
             p.unlink()
-    for name in ("legacy-artifacts.tar", "backup-seal.json"):
+    for name in ("legacy-artifacts.tar", "backup-seal.json", "backup-location.json"):
         p = run_dir / name
         if p.is_file():
             p.unlink()
+    # The tar now lives outside the artifact root (D-84 backup rule), so the
+    # roll-back has to reach it there; leaving it behind would let a later run
+    # inherit a partial archive as if it had been sealed.
+    backup_dir = journal.get("backup_dir")
+    if backup_dir:
+        bdir = Path(backup_dir)
+        for name in ("legacy-artifacts.tar", "backup-seal.json"):
+            p = bdir / name
+            if p.is_file():
+                p.unlink()
+        try:
+            bdir.rmdir()
+        except OSError:
+            pass
     journal["phase"] = "rolled-back"
     P._write_atomic(run_dir / "journal-r3.json", P._json_bytes(journal))
 
 
-def _r3_execute(root: Path, run_dir: Path, journal: Dict[str, Any], identity, alloc, backup_root: Optional[Path],
+def _r3_execute(root: Path, run_dir: Path, journal: Dict[str, Any], identity, alloc, backup_root: Path,
                 *, crash_at: Optional[str], crash_after_phase: Optional[str]) -> None:
     journal_path = run_dir / "journal-r3.json"
     lump_cycle_id = journal["lump_cycle_id"]
@@ -1871,9 +2261,18 @@ def _r3_execute(root: Path, run_dir: Path, journal: Dict[str, Any], identity, al
                                 "target_locator": f"{new_dir_rel}/artifacts/{lf['locator']}",
                                 "sha256": lf["sha256"], "identity_refs": []})
             C._write_jsonl(map_path, rows)
-            C.compat_append(root, maps=[map_path], supersedes=[])
+            # D-82: the chain is append-only, and an older map whose sources this map
+            # now re-targets is superseded, not rewritten. Its row keeps its path,
+            # `sha256` and `rows` byte-for-byte and gains only the pointer forward, so
+            # `resolve_legacy`'s latest-wins answer and the chain's own account of why
+            # it wins finally say the same thing.
+            new_sources = {row["source_locator"] for row in rows}
+            supersedes = [path for path, table in C._load_maps(root)
+                          if new_sources.intersection(table)]
+            C.compat_append(root, maps=[map_path], supersedes=supersedes)
             written_maps = [os.path.relpath(map_path, root)]
             pre_image["written_map_files"] = written_maps
+            pre_image["superseded_map_files"] = supersedes
             pre_image["lane1_omitted_lump_locators"] = omitted_lane1
             journal["pre_image"] = pre_image
         journal["phase"] = "compat-reissued"
@@ -1884,7 +2283,10 @@ def _r3_execute(root: Path, run_dir: Path, journal: Dict[str, Any], identity, al
     if phase == "compat-reissued":
         record = P.read_cycle_record(root, lump_cycle_id)
         lump_dir = P.cycle_dir(root, record["campaign_id"], lump_cycle_id)
-        _r3_backup(root, run_dir, lump_dir, crash_at=crash_at)
+        backup_dir = _r3_backup_dir(root, run_dir, backup_root, identity)
+        journal["backup_dir"] = str(backup_dir)
+        P._write_atomic(journal_path, P._json_bytes(journal))
+        _r3_backup(root, run_dir, lump_dir, backup_dir, crash_at=crash_at)
         if crash_at == "r3:after-reread-before-removal":
             raise ResplitError("crash-fixture", "after-reread-before-removal")
         journal["phase"] = "backup-sealed"
@@ -1917,9 +2319,37 @@ def _r3_execute(root: Path, run_dir: Path, journal: Dict[str, Any], identity, al
         P._write_atomic(journal_path, P._json_bytes(journal))
 
 
-def _r3_backup(root: Path, run_dir: Path, lump_dir: Path, *, crash_at: Optional[str]) -> None:
+def _validated_backup_root(root: Path, backup_root: Optional[Path]) -> Path:
+    """D-84's backup rule, applied to R3's tar as well as R4's.
+
+    R3 removes the lump's `artifacts/` once the backup verifies, so that tar is the
+    only remaining copy of those bytes. Writing it under `<root>/.runtime/` put the
+    sole copy inside the tree it is insurance against, and `--backup-root` was
+    accepted and then ignored, which is worse than not offering it. There is no
+    default: the caller names the location or R3 refuses.
+    """
+    if backup_root is None:
+        raise ResplitError("backup-root-required", "r3")
+    resolved = Path(backup_root).expanduser().resolve()
+    if resolved == root or str(resolved).startswith(str(root) + os.sep):
+        raise ResplitError("backup-root-inside-artifact-root", str(resolved))
+    return resolved
+
+
+def _r3_backup_dir(root: Path, run_dir: Path, backup_root: Path, identity) -> Path:
+    """`<backup-root>/<artifact_root_id>/<stamp>/`, the same shape `retire` uses. The
+    stamp is the run's own, not a fresh one, so a roll-forward retry lands in the
+    directory the interrupted attempt was already filling."""
+    root_id = identity.artifact_root_id if identity else "root-unissued"
+    stamp = run_dir.name.split("-resplit-", 1)[0]
+    return Path(backup_root) / root_id / stamp
+
+
+def _r3_backup(root: Path, run_dir: Path, lump_dir: Path, backup_dir: Path, *,
+               crash_at: Optional[str]) -> None:
     artifacts = lump_dir / "artifacts"
-    archive = run_dir / "legacy-artifacts.tar"
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    archive = backup_dir / "legacy-artifacts.tar"
     files = [f for f in P._walk_files(artifacts) if f.is_file() and not f.is_symlink()]
     entries = []
     with tarfile.open(str(archive), "w") as tar:
@@ -1936,7 +2366,17 @@ def _r3_backup(root: Path, run_dir: Path, lump_dir: Path, *, crash_at: Optional[
     seal = {"schema_version": 1, "kind": "w7g-backup-seal", "archive": str(archive),
             "archive_sha256": archive_sha, "entry_count": len(files), "entries": entries,
             "sealed_at": C._now()}
-    P._write_atomic(run_dir / "backup-seal.json", P._json_bytes(seal))
+    seal_bytes = P._json_bytes(seal)
+    P._write_atomic(backup_dir / "backup-seal.json", seal_bytes)
+    # The run_dir keeps the seal copy and a pointer, never the payload.
+    P._write_atomic(run_dir / "backup-seal.json", seal_bytes)
+    P._write_atomic(run_dir / "backup-location.json", P._json_bytes({
+        "schema_version": 1, "kind": "w7g-backup-location", "backup_dir": str(backup_dir),
+        "archive": str(archive), "archive_sha256": archive_sha,
+        "seal": str(backup_dir / "backup-seal.json"),
+        "seal_sha256": "sha256:" + hashlib.sha256(seal_bytes).hexdigest(),
+        "entry_count": len(files),
+    }))
     if crash_at == "r3:after-seal-before-reread":
         raise ResplitError("crash-fixture", "after-seal-before-reread")
     # Re-read verification (PRD D-84 l.3184-3185 / A-16.6): recompute the archive's
@@ -2013,6 +2453,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     sub.add_parser("hold")
     sub.add_parser("retire-inventory")
 
+    dev = sub.add_parser("deviations", help="read-only audit of an executed resplit run "
+                         "against the D-79/D-10/D-82/D-84 contract points (mutation 0)")
+    dev.add_argument("--lump-cycle-id")
+
     validate_p = sub.add_parser("campaign-proposal")
     validate_sub = validate_p.add_subparsers(dest="proposal_command", required=True)
     v = validate_sub.add_parser("validate")
@@ -2049,6 +2493,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             inv = sealed_retire_inventory(root)
             _print(inv or {})
             return OK
+        if args.command == "deviations":
+            report = resplit_deviations(root, lump_cycle_id=args.lump_cycle_id)
+            _print(report)
+            return BLOCKED if report["deviations"] else OK
         if args.command == "campaign-proposal" and args.proposal_command == "validate":
             result = campaign_proposal_validate(
                 root, proposal_path=Path(args.proposal),
