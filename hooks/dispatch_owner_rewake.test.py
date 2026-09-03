@@ -14,6 +14,8 @@ from pathlib import Path
 import re
 import subprocess
 import sys
+import inspect
+import time
 import tempfile
 import unittest
 from unittest import mock
@@ -1289,10 +1291,6 @@ class A12ArmingFailureFixture(unittest.TestCase):
         self._terminal_edge_and_recover()
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class RegistryCanonicalJobsFallbackTest(RegistryConfirmArmTest):
     """An unexpanded `--jobs "$J"` plus no AGENT_DISPATCH_JOBS still arms from the
     canonical registry the wrapper actually wrote (2026-08-26 incident)."""
@@ -1350,3 +1348,157 @@ class PreflightLaunchSurfaceTest(unittest.TestCase):
     def test_unrelated_mentions_still_never_arm(self) -> None:
         self.assertIsNone(rewake._start_surface("grep dispatch-owner --start jobs.log"))
         self.assertIsNone(rewake._start_surface("cat preflight.sh dispatch-owner"))
+
+
+class GateCarrierTest(unittest.TestCase):
+    """SD-123 (8)(b) carrier 1. This file had zero references to `human-gate`
+    before, which is exactly why the missing `now_ns` in `_gate_notices`'
+    `reclaim` call shipped: nothing here ever executed that branch."""
+
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name)
+        self.state = self.root / "dispatch"
+        self.state.mkdir()
+        self.jobs = self.state / "jobs.log"
+        # `_gate_notices` finds the recipient through the owner row's `parent_sid`,
+        # so an empty registry means it returns [] and exercises nothing.
+        meta = ",".join([
+            "attempt_schema_version=2", "dispatch_depth=1", "transport=headless",
+            "execution_surface=registered-headless", "registered_worker=1",
+            "attempt_id=att-gate-owner", "parent_sid=session-gate",
+            "parent_completion_delivery=claude-parent-runtime",
+            "route_id=rt-gate", "route_node=frame", "harness=claude",
+        ])
+        self.jobs.write_text(
+            "\t".join(["2026-09-04T00:00:00Z", "open", "/repo", "/wt", "owner", meta])
+            + "\n",
+            encoding="utf-8",
+        )
+
+    def _gate_record(self, *, delivery_id="delivery-gate-0001", state=None):
+        receipt = {
+            "schema_version": 2, "state": "attention",
+            "parent_attempt_id": "att-gate-owner", "job_registry": str(self.jobs),
+            "delivery_classification": "attention",
+            "children": [{
+                "attempt_id": "att-gate-owner", "status": "open",
+                "readiness": "human-gate", "reason": "shards/frame/frame-summary.json",
+                "required_action": "human-gate:frame-review", "harness": "claude",
+                "delivery_classification": "attention",
+            }],
+        }
+        rewake.pending_delivery.create(
+            self.state,
+            recipient_kind="claude-parent-runtime", recipient_key="session-gate",
+            delivery_id=delivery_id, session_generation="unsupported",
+            session_generation_supported="0", attempt_ids=["att-gate-owner"],
+            parent_attempt_id="att-gate-owner", route_id="rt-gate",
+            route_node="frame", receipt=receipt,
+            receipt_digest=rewake.pending_delivery._canonical_receipt_digest(receipt),
+            row_revisions={"att-gate-owner": "human-gate:frame-review"},
+        )
+        if state in {"claimed", "sent-ambiguous"}:
+            rewake.pending_delivery.claim(
+                self.state, "session-gate", delivery_id,
+                claim_owner="someone-else", lease_seconds=0.001,
+            )
+            if state == "sent-ambiguous":
+                rewake.pending_delivery.mark_sent_ambiguous(
+                    self.state, "session-gate", delivery_id,
+                    claim_owner="someone-else",
+                )
+        return delivery_id
+
+    def test_a_gate_record_is_recognised_as_one(self):
+        record = json.loads(
+            rewake.pending_delivery.record_path(
+                self.state, "session-gate", self._gate_record()
+            ).read_text(encoding="utf-8")
+        )
+        self.assertTrue(rewake.is_human_gate_record(record))
+
+    def _launch(self):
+        return rewake.Launch(
+            attempt_id="att-gate-owner", jobs=self.jobs, session_id="session-gate",
+        )
+
+    def test_gate_notices_surfaces_an_open_gate(self):
+        self._gate_record()
+        notices = rewake._gate_notices(self._launch())
+        self.assertEqual(len(notices), 1)
+        self.assertIn("human-gate:frame-review", notices[0])
+
+    def test_gate_notices_survives_an_expired_claim(self):
+        """The regression, executed rather than inspected. `reclaim` is
+        keyword-only in `now_ns`; omitting it raised TypeError, which is not a
+        `PendingDeliveryError`, so it escaped the surrounding except and took the
+        whole hook down — the parent then got no completion receipt at all, not
+        merely no gate. Reached when a sweep claimed the record first, or after
+        `mark_sent_ambiguous`."""
+        for state in ("claimed", "sent-ambiguous"):
+            with self.subTest(state=state):
+                self._gate_record(delivery_id=f"delivery-gate-{state[:4]}",
+                                  state=state)
+                time.sleep(0.01)  # let the 1 ms lease lapse
+                notices = rewake._gate_notices(self._launch())
+                self.assertTrue(notices, "the hook produced no notice")
+                self.assertTrue(any("human-gate:frame-review" in n for n in notices))
+
+    def test_a_live_claim_is_left_to_its_holder(self):
+        """The other half of the same branch: an unexpired lease belongs to
+        whoever holds it, so this carrier stays quiet rather than reclaiming."""
+        delivery_id = self._gate_record(delivery_id="delivery-gate-live")
+        rewake.pending_delivery.claim(
+            self.state, "session-gate", delivery_id,
+            claim_owner="the-sweep", lease_seconds=120.0,
+        )
+        self.assertEqual(rewake._gate_notices(self._launch()), [])
+        record = json.loads(
+            rewake.pending_delivery.record_path(
+                self.state, "session-gate", delivery_id
+            ).read_text(encoding="utf-8")
+        )
+        self.assertEqual(record["claim_owner"], "the-sweep")
+
+    def test_reclaim_is_keyword_only_so_the_omission_was_a_type_error(self):
+        """Why the omission was fatal rather than a refusal: the signature makes
+        it a TypeError, and only `PendingDeliveryError` was being caught."""
+        signature = inspect.signature(rewake.pending_delivery.reclaim)
+        self.assertEqual(signature.parameters["now_ns"].kind,
+                         inspect.Parameter.KEYWORD_ONLY)
+        with self.assertRaises(TypeError):
+            rewake.pending_delivery.reclaim(self.state, "session-gate", "delivery-x")
+
+    def test_a_non_gate_record_is_left_to_the_ordinary_path(self):
+        receipt = {
+            "schema_version": 2, "state": "success",
+            "parent_attempt_id": "att-gate-owner", "job_registry": str(self.jobs),
+            "delivery_classification": "success",
+            "children": [{
+                "attempt_id": "att-gate-owner", "status": "done",
+                "readiness": "ready", "reason": "terminal-complete",
+                "required_action": "advance-completed", "harness": "claude",
+                "delivery_classification": "success",
+            }],
+        }
+        rewake.pending_delivery.create(
+            self.state, recipient_kind="claude-parent-runtime",
+            recipient_key="session-gate", delivery_id="delivery-ordinary-1",
+            session_generation="unsupported", session_generation_supported="0",
+            attempt_ids=["att-gate-owner"], parent_attempt_id="att-gate-owner",
+            route_id="rt-gate", route_node="report", receipt=receipt,
+            receipt_digest=rewake.pending_delivery._canonical_receipt_digest(receipt),
+            row_revisions={"att-gate-owner": "rev"},
+        )
+        record = json.loads(
+            rewake.pending_delivery.record_path(
+                self.state, "session-gate", "delivery-ordinary-1"
+            ).read_text(encoding="utf-8")
+        )
+        self.assertFalse(rewake.is_human_gate_record(record))
+
+
+if __name__ == "__main__":
+    unittest.main()

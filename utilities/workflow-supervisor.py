@@ -24,6 +24,7 @@ read as "the stage succeeded".
 from __future__ import annotations
 
 import argparse
+import hashlib
 import importlib.util
 import json
 import os
@@ -38,6 +39,7 @@ sys.path.insert(0, str(ROOT / "utilities"))
 
 import workflow_state as WS  # noqa: E402
 import resource_run_registry as RR  # noqa: E402
+import dispatch_pending_delivery as PENDING  # noqa: E402
 
 ARMED_SCHEMA_VERSION = 1
 PREDECESSOR_KINDS = ("resource", "registered")
@@ -524,23 +526,502 @@ def cmd_gate(args):
     gates = {row["gate"]: row for row in (route.get("human_gate_bindings") or [])}
     if args.gate not in gates:
         raise SupervisorError(f"route declares no human gate {args.gate!r}")
+    payload = {"gate": args.gate}
     with ledger.lock():
         if args.release:
             state = ledger.state()["workflow_state"]
             if state != "BLOCKED_HUMAN_GATE":
                 raise SupervisorError(f"workflow is {state}, not blocked on a human gate")
+            actor_kind = release_actor_kind()
+            released_by = resolved_released_by(actor_kind, args.by)
             ledger.set_workflow_state("RUNNING", evidence={"released_gate": args.gate,
-                                                           "released_by": args.by or "user"},
+                                                           "released_by": released_by,
+                                                           "actor_kind": actor_kind},
                                       actor="gate")
+            record_gate_release(route, args.route, gate=args.gate, decision="proceed",
+                                released_by=released_by, actor_kind=actor_kind)
+            retired = retire_gate_delivery(route, args.gate, args.jobs)
+            payload.update({"released_by": released_by, "actor_kind": actor_kind,
+                            "delivery_retired": retired})
             action = "released"
         else:
-            ledger.set_workflow_state("BLOCKED_HUMAN_GATE",
-                                      evidence={"gate": args.gate,
-                                                "binding": gates[args.gate]}, actor="gate")
+            # SD-123 (8)(a): the record and the transition are one transaction.
+            # Creating the record first is what makes "transition failed ->
+            # zero records" recoverable at all: the reverse order can leave a
+            # blocked gate nobody can be told about, and there is no compensating
+            # action for that. `delivery_id` is deterministic, so the unlink
+            # below can only remove the record this call just created.
+            blocked_on = currently_blocked_gate(ledger)
+            if blocked_on is not None and blocked_on != args.gate:
+                raise SupervisorError(
+                    f"gate-already-blocked: workflow is blocked on {blocked_on!r}, "
+                    f"not {args.gate!r}"
+                )
+            if blocked_on == args.gate:
+                # `assert_transition` returns early when current == target and
+                # `set_workflow_state` appends anyway, so without this guard a
+                # repeated `--block` minted a SECOND raise epoch and a second
+                # record. Releasing then acked only the newest, leaving the older
+                # one pending forever — the sweep would announce a closed gate on
+                # every prompt, the exact symptom the release-time retirement
+                # exists to remove. Converge on the raise already made.
+                payload.update(existing_gate_delivery(route, args.gate, args.jobs))
+                payload.update({"action": "blocked",
+                                "workflow_state": ledger.state()["workflow_state"]})
+                print(json.dumps(payload, sort_keys=True))
+                return 0
+            if not args.artifact or args.artifact == "-":
+                # Contract (a) names the reviewable artifact as part of the
+                # record. A gate that arrives saying `artifact=-` tells the
+                # person nothing to look at, which defeats the delivery.
+                raise SupervisorError(
+                    "gate-artifact-required: --artifact must name the artifact a "
+                    "person reviews at this gate"
+                )
+            jobs_path = Path(args.jobs) if args.jobs else default_jobs_path()
+            record_path, created = create_gate_delivery(
+                route, args.gate, args.artifact, jobs_path,
+                gate_raise_epoch(ledger, args.gate),
+            )
+            try:
+                ledger.set_workflow_state("BLOCKED_HUMAN_GATE",
+                                          evidence={"gate": args.gate,
+                                                    "binding": gates[args.gate],
+                                                    "delivery": str(record_path)},
+                                          actor="gate")
+            except BaseException:
+                if created:
+                    _rollback_gate_delivery(record_path)
+                raise
+            payload.update({"delivery": str(record_path), "delivery_created": created})
             action = "blocked"
-    print(json.dumps({"gate": args.gate, "action": action,
-                      "workflow_state": ledger.state()["workflow_state"]}, sort_keys=True))
+    payload.update({"action": action, "workflow_state": ledger.state()["workflow_state"]})
+    print(json.dumps(payload, sort_keys=True))
     return 0
+
+
+# --- SD-123 (8): the gate has to reach a person -------------------------------
+#
+# Until v59 a human gate was a ledger state and nothing else. The two carriers
+# that wake a depth-0 session -- `hooks/dispatch-owner-rewake.py` (asyncRewake)
+# and `hooks/dispatch-session-sweep.py` (UserPromptSubmit) -- both read only
+# `<dispatch-state-root>/pending-delivery/<sha256(session_id)>/`, and nothing
+# wrote a gate there, because a gate is workflow state while those carriers wait
+# on an *attempt*. So an owner that raised a gate had two options and both were
+# wrong: wait forever (one owner sat 53 minutes and died BLOCKED) or press its
+# own gate (two cycles did). A gate that does not reach a person is not a gate.
+#
+# The fix is deliberately small: the one transition into BLOCKED_HUMAN_GATE also
+# writes one SD-111 record, in the same storage, with the same lock discipline.
+# No new polling surface, no new command, no schema change.
+
+# The recipient kinds whose carriers were actually taught `human-gate:` (v59).
+# One kind, two carriers: asyncRewake and the UserPromptSubmit sweep both
+# deliver to a `claude-parent-runtime` recipient.
+GATE_CARRIER_KINDS = frozenset({"claude-parent-runtime"})
+
+GATE_SESSION_GENERATION = "unsupported"
+GATE_SESSION_GENERATION_SUPPORTED = "0"
+
+
+def default_jobs_path():
+    from dispatch_contract import resolve_agent_home, resolve_dispatch_state_root
+
+    return resolve_dispatch_state_root(
+        resolve_agent_home(), os.environ.get("AGENT_DISPATCH_JOBS") or None
+    ) / "jobs.log"
+
+
+def _owner_row(rows, route_id):
+    """The depth-1 owner row for this route, latest wins.
+
+    `AGENT_DISPATCH_ATTEMPT_ID` is a shortcut for the common case where the
+    caller *is* this route's owner, but it describes the CALLER, not the subject.
+    So the shortcut counts only when that row also belongs to `route_id`;
+    otherwise it is ignored and the route scan decides. Without the check, an
+    owner of route A that blocks a gate on route B derives the recipient from
+    A's row and the gate is delivered to the wrong depth-0 session — the person
+    who owns route B is never told, and someone else is handed a gate that is
+    not theirs.
+    """
+    attempt_id = os.environ.get("AGENT_DISPATCH_ATTEMPT_ID", "")
+    if attempt_id:
+        for row in reversed(rows):
+            meta = row["meta"]
+            if meta.get("attempt_id") != attempt_id:
+                continue
+            if route_id in (meta.get("owner_route_id"), meta.get("route_id")):
+                return row
+            break
+    for row in reversed(rows):
+        meta = row["meta"]
+        if meta.get("dispatch_depth") != "1":
+            continue
+        if route_id in (meta.get("owner_route_id"), meta.get("route_id")):
+            return row
+    return None
+
+
+def gate_recipient(route, jobs_path):
+    """`(recipient_key, recipient_kind, owner_attempt_id, harness)` for one gate.
+
+    The recipient is not in the route record: `owner_attempt_id` there is
+    `AGENT_DISPATCH_ATTEMPT_ID or "-"`, and a standard+ route is compiled by the
+    depth-0 session, which has no attempt id. The registry row is the only place
+    that names the session that opened the route, under the same key SD-111
+    already delivers to -- `parent_sid`.
+    """
+    row = _owner_row(_registry_rows(jobs_path), route["route_id"])
+    if row is None:
+        raise SupervisorError("gate-recipient-unresolved: no depth-1 owner row for this route")
+    meta = row["meta"]
+    recipient_key = meta.get("parent_sid", "")
+    recipient_kind = meta.get("parent_completion_delivery", "")
+    attempt_id = meta.get("attempt_id", "")
+    if not recipient_key or not attempt_id:
+        raise SupervisorError("gate-recipient-unresolved: owner row names no parent session")
+    if recipient_kind not in PENDING.RECIPIENT_KINDS:
+        raise SupervisorError(f"gate-recipient-unresolved: recipient kind {recipient_kind!r}")
+    if recipient_kind not in GATE_CARRIER_KINDS:
+        # Only the two Claude carriers learned the `human-gate:` vocabulary in
+        # v59. `utilities/codex-managed-gateway.py` rejects this receipt on three
+        # counts (readiness, required_action, reason), so writing the record for a
+        # Codex or OpenCode parent produces something that can never be delivered
+        # AND poisons that session's delivery pass. Refuse loudly instead, and
+        # keep the refusal typed so the caller can act on it. Extending the other
+        # two vocabularies is SD-OPEN-33; until then this is the honest boundary.
+        raise SupervisorError(
+            "gate-carrier-unsupported: no human-gate carrier for recipient kind "
+            f"{recipient_kind!r} (SD-OPEN-33); supported: "
+            + ", ".join(sorted(GATE_CARRIER_KINDS))
+        )
+    return recipient_key, recipient_kind, attempt_id, meta.get("harness", "-")
+
+
+def currently_blocked_gate(ledger):
+    """The gate the workflow is blocked on right now, or None.
+
+    Read from the journal rather than inferred: `state()` carries the workflow
+    state but not which gate produced it.
+    """
+    if ledger.state()["workflow_state"] != "BLOCKED_HUMAN_GATE":
+        return None
+    for entry in reversed(ledger.journal()):
+        if entry.get("workflow_state") != "BLOCKED_HUMAN_GATE":
+            continue
+        gate = (entry.get("evidence") or {}).get("gate")
+        if gate:
+            return gate
+    return None
+
+
+def existing_gate_delivery(route, gate, jobs):
+    """The record for the raise already in force, for a repeated `--block`.
+
+    Reports `delivery_created: False` and never allocates a new raise epoch, so
+    one raise keeps one record.
+    """
+    ledger = ledger_for(route)
+    epoch = max(gate_raise_epoch(ledger, gate) - 1, 0)
+    try:
+        jobs_path = Path(jobs) if jobs else default_jobs_path()
+        recipient_key, _kind, attempt_id, _harness = gate_recipient(route, jobs_path)
+        root = Path(jobs_path).resolve(strict=False).parent
+    except (SupervisorError, OSError):
+        return {"delivery": None, "delivery_created": False}
+    delivery_id = gate_delivery_id(recipient_key, route["route_id"], gate,
+                                   attempt_id, epoch)
+    path = PENDING.record_path(root, recipient_key, delivery_id)
+    return {"delivery": str(path) if path.is_file() else None,
+            "delivery_created": False}
+
+
+def gate_raise_epoch(ledger, gate):
+    """How many times this gate has already been raised on this route.
+
+    Read from the append-only ledger journal before the new transition is
+    appended, so it is stable for the raise being made and increments for the
+    next one.
+    """
+    epoch = 0
+    for entry in ledger.journal():
+        if entry.get("workflow_state") != "BLOCKED_HUMAN_GATE":
+            continue
+        if ((entry.get("evidence") or {}).get("gate")) == gate:
+            epoch += 1
+    return epoch
+
+
+def gate_delivery_id(recipient_key, route_id, gate, attempt_id, epoch):
+    """Identity for one RAISE of a gate, not for the gate.
+
+    Keying only on `(recipient, route, gate)` looked idempotent and was in fact
+    two bugs, because `dispatch_pending_delivery.IMMUTABLE_FIELDS` includes
+    `attempt_ids` and `receipt_digest`, which are per-attempt:
+
+      · a NEW owner attempt re-raising the same gate hit
+        `pending-delivery-identity-conflict: attempt_ids`, `create_gate_delivery`
+        turned that into a refusal, and the transition was refused with it — the
+        owner could not raise its gate at all. This branch's own
+        `release --decision revise` -> retry path lands exactly here.
+      · the SAME attempt re-raising after the first record was acked got the
+        acked record back with `created=False`, the transition proceeded, and the
+        gate reached nobody — the precise failure SD-123 (8) exists to end.
+
+    So the discriminator is the raise: attempt id plus the ledger's raise epoch.
+    Repeated work inside one raise converges because `cmd_gate` refuses to mint a
+    second raise while one is in force. It is NOT the ledger that prevents it:
+    `assert_transition` returns early when current == target and
+    `set_workflow_state` appends regardless, so a second `--block` really did
+    create a second record before that guard existed.
+    """
+    payload = json.dumps(
+        {"attempt_id": attempt_id, "epoch": epoch, "gate": gate,
+         "recipient": recipient_key, "route_id": route_id},
+        separators=(",", ":"), sort_keys=True,
+    ).encode("utf-8")
+    return "delivery-" + hashlib.sha256(payload).hexdigest()[:32]
+
+
+def gate_receipt(*, attempt_id, jobs_path, gate, artifact, harness):
+    """The gate receipt, built from the existing canonical key vocabulary only.
+
+    `CANONICAL_RECEIPT_KEYS`/`CANONICAL_CHILD_KEYS` are duplicated by hand across
+    three modules and any widening breaks the digest in all of them, so the
+    artifact **path** rides in `reason` -- already a free-form string, and a path
+    is neither a body nor a summary. Contract (a) forbids body and summary text;
+    it does not forbid reusing a field.
+    """
+    child = {
+        "attempt_id": attempt_id,
+        "status": "open",
+        "readiness": "human-gate",
+        "reason": str(artifact),
+        "required_action": f"human-gate:{gate}",
+        "harness": harness or "-",
+        "delivery_classification": "attention",
+    }
+    return {
+        "schema_version": 2,
+        "state": "attention",
+        "parent_attempt_id": attempt_id,
+        "job_registry": str(jobs_path),
+        "children": [child],
+        "delivery_classification": "attention",
+    }
+
+
+def create_gate_delivery(route, gate, artifact, jobs_path, epoch):
+    """Write the one durable record a gate transition owes its depth-0 session.
+
+    Returns `(record_path, created)`. Raises `SupervisorError` on any refusal --
+    the caller must not take the transition if this fails, so a gate never exists
+    without a way to reach a person.
+    """
+    recipient_key, recipient_kind, attempt_id, harness = gate_recipient(route, jobs_path)
+    receipt = gate_receipt(
+        attempt_id=attempt_id, jobs_path=jobs_path, gate=gate,
+        artifact=artifact, harness=harness,
+    )
+    delivery_id = gate_delivery_id(
+        recipient_key, route["route_id"], gate, attempt_id, epoch
+    )
+    root = Path(jobs_path).resolve(strict=False).parent
+    path = PENDING.record_path(root, recipient_key, delivery_id)
+    # Reading existence before `create` was a TOCTOU, and holding
+    # `PENDING._record_lock` across the call deadlocks because `create` takes the
+    # same flock on its own descriptor. So ask the record itself: `create` stamps
+    # `created_at_ns` inside that lock, and a record that already existed carries
+    # an older stamp than this instant.
+    #
+    # The clock has to be the SAME clock. `create` uses `time.monotonic_ns()`;
+    # comparing against `time.time_ns()` made this test always false, so
+    # `delivery_created` was always reported False and the compensating rollback
+    # below could never fire. CLOCK_MONOTONIC is system-wide on Linux, so the
+    # comparison holds across processes.
+    before_ns = time.monotonic_ns()
+    try:
+        record = PENDING.create(
+            root,
+            recipient_kind=recipient_kind,
+            recipient_key=recipient_key,
+            delivery_id=delivery_id,
+            session_generation=GATE_SESSION_GENERATION,
+            session_generation_supported=GATE_SESSION_GENERATION_SUPPORTED,
+            attempt_ids=[attempt_id],
+            parent_attempt_id=attempt_id,
+            route_id=route["route_id"],
+            route_node=_gate_route_node(route, gate),
+            receipt=receipt,
+            receipt_digest=PENDING._canonical_receipt_digest(receipt),
+            row_revisions={attempt_id: f"human-gate:{gate}"},
+        )
+    except PENDING.PendingDeliveryError as exc:
+        raise SupervisorError(f"gate-delivery-refused: {exc}") from exc
+    created = bool(record) and (record.get("created_at_ns") or 0) >= before_ns
+    return path, created
+
+
+def _rollback_gate_delivery(record_path):
+    """Remove a gate record whose transition did not happen — but only while it is
+    still untouched, so a carrier that already claimed it never loses it."""
+    try:
+        record = json.loads(Path(record_path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return
+    if not isinstance(record, dict) or record.get("state") != "pending":
+        return
+    try:
+        Path(record_path).unlink()
+    except OSError:
+        pass
+
+
+def _gate_route_node(route, gate_name):
+    node = _gate_predecessor_node(route, gate_name)
+    if node is not None:
+        return str(node["id"])
+    binding = next(
+        (row for row in (route.get("human_gate_bindings") or []) if row.get("gate") == gate_name),
+        None,
+    )
+    return str((binding or {}).get("node") or "_gate")
+
+
+def resolved_released_by(actor_kind, requested):
+    """`released_by` for this release, refusing a registered worker's own label.
+
+    The first cut only compared the requested value against the literal
+    `"user"`, so `--by shinuh` from a headless owner recorded
+    `released_by=shinuh` and only `actor_kind` still betrayed it — the exact
+    indistinguishability contract (d) exists to prevent. A registered worker now
+    may not name the releaser at all; its label is derived.
+    """
+    if actor_kind == "headless-owner" and requested:
+        raise SupervisorError(
+            "gate-release-actor-refused: a registered headless owner may not name "
+            "the releaser; released_by is derived as headless-owner"
+        )
+    return requested or actor_kind
+
+
+def retire_gate_delivery(route, gate, jobs):
+    """Retire the pending gate record once the gate is released.
+
+    Without this the record stays `pending` after a release, and the next
+    `UserPromptSubmit` sweep keeps announcing a gate that is already closed.
+    Fail-soft on purpose: the ledger transition is the authoritative release, so
+    a record that cannot be retired must never fail the release. Returns the
+    state it reached, or None when there was nothing to retire.
+    """
+    try:
+        jobs_path = Path(jobs) if jobs else default_jobs_path()
+        recipient_key, _kind, attempt_id, _harness = gate_recipient(route, jobs_path)
+        root = Path(jobs_path).resolve(strict=False).parent
+        # Inside the try as well: the release transition and its sidecar row are
+        # already committed by the time this runs, so a `WorkflowStateError` from
+        # reading the ledger would abort the CLI with no payload and leave a retry
+        # failing with "workflow is RUNNING". Retirement is best-effort by design.
+        ledger = ledger_for(route)
+        highest = gate_raise_epoch(ledger, gate)
+    except Exception:
+        return None
+    # Every raise of this gate, newest first: a release closes whichever raise is
+    # still outstanding, and older ones may legitimately be acked already.
+    for epoch in range(highest, -1, -1):
+        delivery_id = gate_delivery_id(recipient_key, route["route_id"], gate,
+                                       attempt_id, epoch)
+        try:
+            record = PENDING.read(root, recipient_key, delivery_id)
+            if record is None or record.get("state") in {"acked", "expired"}:
+                continue
+            if record.get("state") in {"claimed", "sent-ambiguous"}:
+                PENDING.reclaim(root, recipient_key, delivery_id, now_ns=time.time_ns())
+            PENDING.claim(root, recipient_key, delivery_id,
+                          claim_owner=f"gate-release:{os.getpid()}",
+                          lease_seconds=60.0, require_generation_proof=False)
+            PENDING.ack(root, recipient_key, delivery_id,
+                        acked_by=f"gate-released:{gate}")
+            return "acked"
+        except (PENDING.PendingDeliveryError, OSError, TypeError):
+            continue
+    return None
+
+
+def release_actor_kind():
+    """`headless-owner` when the process recording the release is a registered
+    worker, `user` otherwise.
+
+    Contract (d) does not forbid a headless owner from releasing its own gate --
+    forbidding it just makes the 53-minute death the only ending. It forbids that
+    release from being *indistinguishable* from a person's, which is what
+    actually happened on 2026-09-03: both cycles were honest in prose and the
+    data could not tell. The discriminator is deliberately harness-neutral, so
+    Codex/OpenCode parity (SD-OPEN-33) needs no new predicate here.
+    """
+    if os.environ.get("AGENT_DISPATCH_REGISTERED_WORKER") == "1":
+        return "headless-owner"
+    return "user"
+
+
+def gate_release_sidecar_path(route_path):
+    """The sidecar beside the route being released — the path the caller named.
+
+    This used to read `AGENT_OWNER_ROUTE_FILE` first and fall back to
+    `route["route_file"]`. Both halves were wrong. A live route record
+    (`rt-*.json`) carries no `route_file` at all — only its `.outcome.json` does,
+    written from `args.route` at close — so the fallback never fired and the
+    function was effectively env-only. And the env names the route the CALLING
+    owner runs under, not the route being released.
+
+    Measured 2026-09-03: an owner running its own suite put eight fixture
+    releases (`route_hash: "sha256:fixture"`) into the real
+    `rt-6579b69141dc0c00.gate-release.json`, and `close_route` folds that
+    sidecar into the route outcome, so those eight would have entered a real
+    route's history. The same precedence misfiles a genuine release whenever an
+    owner releases a gate on a nested or continuation route.
+
+    So the subject is passed in, the way `close_route` already builds
+    `route_file` from `args.route`. No env, no guessing: without a path there is
+    no sidecar, and the ledger remains the authoritative record of the release.
+    """
+    if not route_path:
+        return None
+    path = Path(route_path)
+    return path.with_name(path.stem + ".gate-release.json")
+
+
+def record_gate_release(route, route_path, *, gate, decision, released_by, actor_kind):
+    """Append one gate release to the route's sidecar; `close_route` folds it into
+    the outcome. Fail-soft: a release must never be lost because a sidecar could
+    not be written, and the ledger already holds the authoritative transition.
+
+    `route_path` is the file the caller named, kept separate from `route` because
+    a loaded route record does not know its own path (see
+    `gate_release_sidecar_path`)."""
+    path = gate_release_sidecar_path(route_path)
+    if path is None:
+        return None
+    row = {
+        "gate": gate, "decision": decision, "released_by": released_by,
+        "actor_kind": actor_kind, "route_hash": route.get("route_hash", ""),
+        "at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+    }
+    try:
+        existing = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
+        rows = existing.get("gate_releases") if isinstance(existing, dict) else None
+        rows = list(rows) if isinstance(rows, list) else []
+        rows.append(row)
+        payload = json.dumps(
+            {"schema_version": 1, "route_id": route["route_id"], "gate_releases": rows},
+            sort_keys=True, indent=2,
+        ) + "\n"
+        tmp = path.with_name(path.name + ".tmp")
+        tmp.write_text(payload, encoding="utf-8")
+        os.replace(str(tmp), str(path))
+    except OSError:
+        return None
+    return path
 
 
 def _gate_predecessor_node(route, gate_name):
@@ -574,7 +1055,11 @@ def cmd_release(args):
             f"route declares no node continuing into human gate {args.gate!r}"
         )
     node_id = str(predecessor["id"])
-    actor = args.actor or "user"
+    # SD-123 (8)(d): `released_by` is derived, not asserted. A registered
+    # headless owner may release its own gate -- forbidding it leaves only the
+    # 53-minute BLOCKED death -- but it may not sign that release as a person.
+    actor_kind = release_actor_kind()
+    actor = resolved_released_by(actor_kind, args.actor)
     with ledger.lock():
         state = ledger.state()["workflow_state"]
         if state != "BLOCKED_HUMAN_GATE":
@@ -634,6 +1119,11 @@ def cmd_release(args):
                       "workflow_state": ledger.state()["workflow_state"]}
         else:
             raise SupervisorError(f"unknown --decision: {args.decision!r}")
+        payload["released_by"] = actor
+        payload["actor_kind"] = actor_kind
+        record_gate_release(route, args.route, gate=args.gate, decision=args.decision,
+                            released_by=actor, actor_kind=actor_kind)
+        retire_gate_delivery(route, args.gate, args.jobs)
     print(json.dumps(payload, sort_keys=True))
     return 0
 
@@ -1118,6 +1608,10 @@ def build_parser():
     gate.add_argument("--route", required=True)
     gate.add_argument("--gate", required=True)
     gate.add_argument("--by")
+    gate.add_argument("--jobs", help="canonical registry path (default: dispatch state root)")
+    gate.add_argument("--artifact", default="-",
+                      help="path to the artifact a person reviews at this gate; "
+                           "carried in the delivery record, never its contents")
     group = gate.add_mutually_exclusive_group(required=True)
     group.add_argument("--release", action="store_true")
     group.add_argument("--block", action="store_true")
@@ -1127,6 +1621,10 @@ def build_parser():
     release.add_argument("--gate", required=True)
     release.add_argument("--decision", required=True, choices=("proceed", "revise", "stop"))
     release.add_argument("--actor")
+    release.add_argument("--jobs",
+                         help="canonical registry, used to retire the gate's pending "
+                              "delivery record; without it retirement is skipped and a "
+                              "released gate keeps being announced by the sweep")
 
     status = sub.add_parser("status", help="portable workflow/stage/resource projection")
     status.add_argument("--route", required=True)

@@ -26,7 +26,12 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "utilities"))
 from dispatch_contract import dispatch_state_roots, resolve_agent_home  # noqa: E402
-from dispatch_session_sweep import _bounded_receipt_text, ack_delivered, sweep_deliver  # noqa: E402
+from dispatch_session_sweep import (  # noqa: E402
+    _bounded_receipt_text,
+    ack_delivered,
+    is_human_gate_record,
+    sweep_deliver,
+)
 
 RECIPIENT_KIND = "claude-parent-runtime"
 SESSION_GENERATION = "unsupported"
@@ -62,6 +67,7 @@ def main() -> int:
         return 0
     seen: set[Path] = set()
     lines: list[str] = []
+    gate_lines: list[str] = []
     for root in roots:
         if root in seen:
             continue
@@ -77,21 +83,38 @@ def main() -> int:
         if not records:
             continue
         for record in records:
-            lines.append(_bounded_receipt_text(record))
+            text = _bounded_receipt_text(record)
+            (gate_lines if is_human_gate_record(record) else lines).append(text)
         try:
             ack_delivered(root, session_id, records, acked_by=f"session-sweep:{session_id}")
         except Exception:  # noqa: BLE001
             pass
-    if not lines:
+    if not lines and not gate_lines:
         return 0
-    context = (
-        "Hearting dispatch completion delivery (SD-111 durable pending records for this "
-        "session; a record may repeat one earlier async notice -- if that attempt was already "
-        "harvested, ignore it). Harvest each attempt with the exact checked surface "
-        "(`dispatch-attempt-ready.py --attempt <id>` or `preflight.sh harvest`), then continue "
-        "the owning route. Do not start Monitor, dispatch-wait, or a polling loop.\n"
-        + "\n".join(f"- {line}" for line in lines)
-    )
+    blocks: list[str] = []
+    if gate_lines:
+        # SD-123 (8)(b) carrier 2. This is the required fallback, not a nicety:
+        # whether the `asyncRewake` hook process survives an interrupt or a
+        # compaction is unmeasured (SD-OPEN-29/32), so the gate must also reach
+        # the session on its next prompt. Telling the recipient to *harvest* a
+        # gate would be wrong -- a gate is answered, not collected.
+        blocks.append(
+            "Hearting human gate awaiting your decision (SD-123). Read the named artifact, then "
+            "record the answer with `workflow-supervisor.py release --route <route file> "
+            "--gate <name> --decision proceed|revise|stop`. Do not start Monitor, dispatch-wait, "
+            "or a polling loop.\n"
+            + "\n".join(f"- {line}" for line in gate_lines)
+        )
+    if lines:
+        blocks.append(
+            "Hearting dispatch completion delivery (SD-111 durable pending records for this "
+            "session; a record may repeat one earlier async notice -- if that attempt was already "
+            "harvested, ignore it). Harvest each attempt with the exact checked surface "
+            "(`dispatch-attempt-ready.py --attempt <id>` or `preflight.sh harvest`), then continue "
+            "the owning route. Do not start Monitor, dispatch-wait, or a polling loop.\n"
+            + "\n".join(f"- {line}" for line in lines)
+        )
+    context = "\n\n".join(blocks)
     print(
         json.dumps(
             {

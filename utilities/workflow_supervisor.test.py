@@ -20,6 +20,10 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import dispatch_pending_delivery as PENDING  # noqa: E402
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
@@ -97,6 +101,16 @@ class WorkflowFixture(unittest.TestCase):
         (self.agent_home / "core" / "CORE.md").write_text("fixture\n", encoding="utf-8")
         self._previous_agent_home = os.environ.get("AGENT_HOME")
         os.environ["AGENT_HOME"] = str(self.agent_home)
+        # `release_actor_kind()` reads the ambient dispatch env, so a test run
+        # launched *from* a registered worker would otherwise classify every
+        # fixture release as `headless-owner`. Tests opt in explicitly instead.
+        self._previous_dispatch = {
+            key: os.environ.get(key)
+            for key in ("AGENT_DISPATCH_REGISTERED_WORKER", "AGENT_DISPATCH_ATTEMPT_ID",
+                        "AGENT_OWNER_ROUTE_FILE")
+        }
+        for key in self._previous_dispatch:
+            os.environ.pop(key, None)
         self.addCleanup(self._restore)
         self.addCleanup(self.tmp.cleanup)
 
@@ -109,6 +123,11 @@ class WorkflowFixture(unittest.TestCase):
             os.environ.pop("AGENT_HOME", None)
         else:
             os.environ["AGENT_HOME"] = self._previous_agent_home
+        for key, value in self._previous_dispatch.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
 
     # -- fixtures -------------------------------------------------------------
     def write_route(self, nodes, route_id="rt-fixture0000000", route_hash="sha256:fixture"):
@@ -144,6 +163,40 @@ class WorkflowFixture(unittest.TestCase):
                 {"gate": human_gate, "node": "verify", "position": "entry"}]
             path.write_text(json.dumps(route, indent=2), encoding="utf-8")
         return route, path
+
+    def owner_registry(self, route_id="rt-fixture0000000", *,
+                       attempt_id="att-fixtureowner0001",
+                       session_id="sess-fixture-depth0",
+                       recipient_kind="claude-parent-runtime"):
+        """A depth-1 owner row plus the dispatch state root the gate record lands in.
+
+        SD-123 (8): the recipient of a gate is the depth-0 session that opened the
+        route, and the only place naming it is the owner's registry row
+        (`parent_sid`) -- the route record's `owner_attempt_id` is `-` for a
+        standard+ route compiled by that session.
+        """
+        state_root = self.base / "dispatch"
+        state_root.mkdir(parents=True, exist_ok=True)
+        jobs = state_root / "jobs.log"
+        metadata = ",".join([
+            f"attempt_id={attempt_id}", f"parent_sid={session_id}",
+            f"parent_completion_delivery={recipient_kind}", "dispatch_depth=1",
+            "worker_type=owner", f"owner_route_id={route_id}", "harness=claude",
+            "registered_worker=1", "execution_surface=registered-headless",
+        ])
+        jobs.write_text(
+            "\t".join(["2026-09-03T00:00:00Z", "open", str(self.base), str(self.base),
+                       "fixture-owner", metadata]) + "\n",
+            encoding="utf-8",
+        )
+        return jobs, session_id, attempt_id
+
+    def block_gate(self, path, gate, jobs=None, artifact="shards/frame/frame-summary.json",
+                   route_id="rt-fixture0000000"):
+        if jobs is None:
+            jobs, _session, _attempt = self.owner_registry(route_id=route_id)
+        return jobs, SUP.main(["gate", "--route", str(path), "--gate", gate, "--block",
+                               "--jobs", str(jobs), "--artifact", artifact])
 
     def resource_registry(self, *, exit_code=0, pid=None, starttime=None,
                           command_hash=None, status="running", sentinel=True):
@@ -373,7 +426,7 @@ class TestSupervisorAdvance(WorkflowFixture):
         registry = self.resource_registry(exit_code=0)
         with self.assertRaisesRegex(SUP.SupervisorError, "supervisor governs only"):
             self.arm(path, registry, extra=["--successor-external"])
-        SUP.main(["gate", "--route", str(path), "--gate", "run-authorization", "--block"])
+        self.block_gate(path, "run-authorization")
         ledger = SUP.ledger_for(route)
         self.assertEqual(ledger.state()["workflow_state"], "BLOCKED_HUMAN_GATE")
         self.assertEqual(SUP.poll_once(route, ledger), [])
@@ -438,7 +491,7 @@ class TestGateRelease(WorkflowFixture):
         route, path = self.two_stage_route(
             continuation={"kind": "human-gate", "gate": "frame-review"},
             human_gate="frame-review")
-        SUP.main(["gate", "--route", str(path), "--gate", "frame-review", "--block"])
+        self.jobs, _code = self.block_gate(path, "frame-review")
         return route, path
 
     def test_proceed_claims_and_reports_the_successor_exactly_once(self):
@@ -913,7 +966,7 @@ class TestCapabilityIntegration(WorkflowFixture):
         registry = self.resource_registry(exit_code=0)
         with self.assertRaisesRegex(SUP.SupervisorError, "supervisor governs only"):
             self.arm(path, registry, node="release-review")
-        SUP.main(["gate", "--route", str(path), "--gate", "deploy-authorization", "--block"])
+        self.block_gate(path, "deploy-authorization", route_id=route["route_id"])
         ledger = SUP.ledger_for(route)
         self.assertEqual(ledger.state()["workflow_state"], "BLOCKED_HUMAN_GATE")
         self.assertEqual(ledger.claims(), {})
@@ -1153,7 +1206,7 @@ class TestSurvey(WorkflowFixture):
         route_a, path_a = self.two_stage_route(human_gate="run-authorization")
         registry_a = self.resource_registry(exit_code=0)
         self.arm_external(path_a, registry_a)
-        SUP.main(["gate", "--route", str(path_a), "--gate", "run-authorization", "--block"])
+        self.block_gate(path_a, "run-authorization", route_id=route_a["route_id"])
         _code, payload_a = self.run_survey()
         row_a = next(row for row in payload_a["rows"] if row["route_id"] == route_a["route_id"])
         self.assertNotEqual(row_a["risk"]["tier"], "abandoned")
@@ -1279,6 +1332,330 @@ class TestSurvey(WorkflowFixture):
             self.assertTrue(l_row["read_only"])
             self.assertIn("duplicate_locations", c_row)
             self.assertIn("duplicate_locations", l_row)
+
+
+class TestGateSubjectNotCaller(WorkflowFixture):
+    """Defect I and its sibling — the caller's identity must never override the
+    route the call names.
+
+    Measured 2026-09-03: the implementation owner ran its own suite, and eight
+    fixture releases landed in the REAL `rt-6579b69141dc0c00.gate-release.json`
+    under `.agent_reports/.runtime/routes/` because `AGENT_OWNER_ROUTE_FILE` was
+    preferred over the route passed in. `close_route` folds that sidecar into the
+    route outcome, so those eight would have become part of a real route's
+    history. Evidence kept out of tree at
+    `<scratchpad>/leaked-gate-release.json`; it is deliberately NOT restored
+    beside the route.
+    """
+
+    def test_sidecar_is_written_beside_the_route_argument_not_the_callers_route(self):
+        route, path = self.two_stage_route(human_gate="frame-review")
+        foreign = self.base / "rt-callers-own-route.json"
+        foreign.write_text("{}", encoding="utf-8")
+        with mock.patch.dict(os.environ, {"AGENT_OWNER_ROUTE_FILE": str(foreign)}):
+            sidecar = SUP.gate_release_sidecar_path(path)
+        self.assertEqual(sidecar, path.with_name(path.stem + ".gate-release.json"))
+        self.assertFalse(foreign.with_name(foreign.stem + ".gate-release.json").exists())
+
+    def test_a_release_leaves_nothing_beside_the_callers_route(self):
+        route, path = self.two_stage_route(human_gate="frame-review")
+        jobs, _code = self.block_gate(path, "frame-review")
+        foreign = self.base / "rt-callers-own-route.json"
+        foreign.write_text("{}", encoding="utf-8")
+        env = {"AGENT_OWNER_ROUTE_FILE": str(foreign),
+               "AGENT_DISPATCH_REGISTERED_WORKER": "1"}
+        with mock.patch.dict(os.environ, env), contextlib.redirect_stdout(io.StringIO()):
+            code = SUP.main(["gate", "--route", str(path), "--gate", "frame-review",
+                             "--release"])
+        self.assertEqual(code, 0)
+        self.assertFalse(foreign.with_name(foreign.stem + ".gate-release.json").exists())
+        rows = json.loads(
+            path.with_name(path.stem + ".gate-release.json").read_text(encoding="utf-8")
+        )["gate_releases"]
+        self.assertEqual([r["gate"] for r in rows], ["frame-review"])
+        self.assertEqual(rows[0]["route_hash"], route["route_hash"])
+
+    def test_no_path_means_no_sidecar_rather_than_a_guess(self):
+        """A live `rt-*.json` carries no `route_file`, so the old record fallback
+        never fired and the env decided everything. With no path there is simply
+        no sidecar; the ledger still holds the release."""
+        self.assertIsNone(SUP.gate_release_sidecar_path(None))
+        self.assertIsNone(SUP.gate_release_sidecar_path(""))
+        _route, path = self.two_stage_route(human_gate="frame-review")
+        record = json.loads(path.read_text(encoding="utf-8"))
+        self.assertNotIn("route_file", record)
+
+    def test_a_foreign_attempt_id_does_not_choose_the_recipient(self):
+        """`AGENT_DISPATCH_ATTEMPT_ID` describes the caller. An owner of route A
+        blocking a gate on route B must resolve B's owner row, or the gate is
+        delivered to a session that does not own it."""
+        _route, path = self.two_stage_route(human_gate="frame-review",
+                                            route_id="rt-fixture0000000")
+        jobs, _session, _attempt = self.owner_registry(route_id="rt-fixture0000000")
+        foreign_meta = ",".join([
+            "attempt_id=att-foreign-owner0001", "parent_sid=sess-foreign-depth0",
+            "parent_completion_delivery=claude-parent-runtime", "dispatch_depth=1",
+            "worker_type=owner", "owner_route_id=rt-someone-elses0", "harness=claude",
+            "registered_worker=1", "execution_surface=registered-headless",
+        ])
+        with jobs.open("a", encoding="utf-8") as fh:
+            fh.write("\t".join(["2026-09-03T00:00:01Z", "open", str(self.base),
+                                str(self.base), "foreign-owner", foreign_meta]) + "\n")
+        rows = SUP._registry_rows(jobs)
+        with mock.patch.dict(os.environ,
+                             {"AGENT_DISPATCH_ATTEMPT_ID": "att-foreign-owner0001"}):
+            row = SUP._owner_row(rows, "rt-fixture0000000")
+        self.assertIsNotNone(row)
+        self.assertEqual(row["meta"]["attempt_id"], "att-fixtureowner0001")
+        self.assertEqual(row["meta"]["parent_sid"], "sess-fixture-depth0")
+
+    def test_the_attempt_id_shortcut_still_wins_for_its_own_route(self):
+        _route, path = self.two_stage_route(human_gate="frame-review")
+        jobs, _session, _attempt = self.owner_registry(route_id="rt-fixture0000000")
+        rows = SUP._registry_rows(jobs)
+        with mock.patch.dict(os.environ,
+                             {"AGENT_DISPATCH_ATTEMPT_ID": "att-fixtureowner0001"}):
+            row = SUP._owner_row(rows, "rt-fixture0000000")
+        self.assertEqual(row["meta"]["attempt_id"], "att-fixtureowner0001")
+
+    def test_close_route_folds_the_sidecar_into_the_outcome(self):
+        """The commit claimed `close_route` folded the sidecar; nothing read it.
+        A release recorded in a file no consumer opens is the same silence
+        contract (d) exists to end."""
+        route, path = self.two_stage_route(human_gate="frame-review")
+        self.block_gate(path, "frame-review")
+        env = {"AGENT_DISPATCH_REGISTERED_WORKER": "1"}
+        with mock.patch.dict(os.environ, env), contextlib.redirect_stdout(io.StringIO()):
+            SUP.main(["gate", "--route", str(path), "--gate", "frame-review",
+                      "--release"])
+        releases = ROUTE._gate_releases(str(path))
+        self.assertEqual([r["gate"] for r in releases], ["frame-review"])
+        self.assertEqual(releases[0]["actor_kind"], "headless-owner")
+
+    def test_a_missing_or_malformed_sidecar_folds_to_nothing(self):
+        _route, path = self.two_stage_route(human_gate="frame-review")
+        self.assertEqual(ROUTE._gate_releases(str(path)), [])
+        path.with_name(path.stem + ".gate-release.json").write_text("{not json",
+                                                                    encoding="utf-8")
+        self.assertEqual(ROUTE._gate_releases(str(path)), [])
+        path.with_name(path.stem + ".gate-release.json").write_text(
+            json.dumps({"gate_releases": [{"no_gate": 1}, "junk"]}), encoding="utf-8")
+        self.assertEqual(ROUTE._gate_releases(str(path)), [])
+
+    def test_a_new_attempt_can_re_raise_the_same_gate(self):
+        """Blocking finding #2(a). `IMMUTABLE_FIELDS` includes `attempt_ids`, so a
+        delivery id keyed only on (recipient, route, gate) made a second attempt's
+        raise a `pending-delivery-identity-conflict` — and `create_gate_delivery`
+        turns that into a refusal, so the owner could not raise its gate at all.
+        `release --decision revise` -> retry lands exactly here."""
+        _route, path = self.two_stage_route(human_gate="frame-review")
+        jobs, _session, _attempt = self.owner_registry(route_id="rt-fixture0000000")
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(0, SUP.main([
+                "gate", "--route", str(path), "--gate", "frame-review", "--block",
+                "--jobs", str(jobs), "--artifact", "shards/frame/frame-summary.json"]))
+            SUP.main(["gate", "--route", str(path), "--gate", "frame-review",
+                      "--release"])
+            # A different attempt now owns the route and raises the same gate.
+            second = ",".join([
+                "attempt_id=att-fixtureowner0002", "parent_sid=sess-fixture-depth0",
+                "parent_completion_delivery=claude-parent-runtime", "dispatch_depth=1",
+                "worker_type=owner", "owner_route_id=rt-fixture0000000",
+                "harness=claude", "registered_worker=1",
+                "execution_surface=registered-headless",
+            ])
+            with jobs.open("a", encoding="utf-8") as fh:
+                fh.write("\t".join(["2026-09-04T00:00:00Z", "open", str(self.base),
+                                     str(self.base), "owner-2", second]) + "\n")
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                code = SUP.main([
+                    "gate", "--route", str(path), "--gate", "frame-review", "--block",
+                    "--jobs", str(jobs), "--artifact",
+                    "shards/frame/frame-summary.json"])
+        self.assertEqual(code, 0)
+        payload = json.loads(buf.getvalue())
+        self.assertTrue(payload["delivery_created"])
+        self.assertTrue(Path(payload["delivery"]).is_file())
+
+    def test_re_raising_after_an_ack_reaches_someone_again(self):
+        """Blocking finding #2(b). The same attempt re-raising after the first
+        record was acked used to get `created=False` and the gate reached nobody
+        — the exact silence SD-123 (8) exists to end."""
+        _route, path = self.two_stage_route(human_gate="frame-review")
+        jobs, session, _attempt = self.owner_registry(route_id="rt-fixture0000000")
+        root = Path(jobs).resolve(strict=False).parent
+        first = io.StringIO()
+        with contextlib.redirect_stdout(first):
+            SUP.main(["gate", "--route", str(path), "--gate", "frame-review", "--block",
+                      "--jobs", str(jobs), "--artifact", "a.json"])
+        first_path = Path(json.loads(first.getvalue())["delivery"])
+        delivery_id = json.loads(first_path.read_text(encoding="utf-8"))["delivery_id"]
+        PENDING.claim(root, session, delivery_id, claim_owner="carrier",
+                      lease_seconds=30.0)
+        PENDING.ack(root, session, delivery_id, acked_by="carrier")
+        second = io.StringIO()
+        with contextlib.redirect_stdout(io.StringIO()):
+            SUP.main(["gate", "--route", str(path), "--gate", "frame-review",
+                      "--release"])
+        with contextlib.redirect_stdout(second):
+            code = SUP.main(["gate", "--route", str(path), "--gate", "frame-review",
+                             "--block", "--jobs", str(jobs), "--artifact", "a.json"])
+        self.assertEqual(code, 0)
+        payload = json.loads(second.getvalue())
+        self.assertTrue(payload["delivery_created"], "the re-raise reached nobody")
+        self.assertNotEqual(Path(payload["delivery"]), first_path)
+
+    def test_release_retires_the_pending_record(self):
+        """Finding #3: a released gate that stays `pending` keeps being announced
+        by the next UserPromptSubmit sweep."""
+        _route, path = self.two_stage_route(human_gate="frame-review")
+        jobs, session, _attempt = self.owner_registry(route_id="rt-fixture0000000")
+        root = Path(jobs).resolve(strict=False).parent
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            SUP.main(["gate", "--route", str(path), "--gate", "frame-review", "--block",
+                      "--jobs", str(jobs), "--artifact", "a.json"])
+        record = json.loads(Path(json.loads(out.getvalue())["delivery"]).read_text("utf-8"))
+        self.assertEqual(record["state"], "pending")
+        with contextlib.redirect_stdout(io.StringIO()):
+            SUP.main(["gate", "--route", str(path), "--gate", "frame-review",
+                      "--release", "--jobs", str(jobs)])
+        after = PENDING.read(root, session, record["delivery_id"])
+        self.assertEqual(after["state"], "acked")
+
+    def test_a_registered_worker_may_not_name_the_releaser(self):
+        """Finding #4: enforcement compared against the literal "user" only, so
+        `--by shinuh` from a headless owner recorded that name."""
+        _route, path = self.two_stage_route(human_gate="frame-review")
+        self.block_gate(path, "frame-review")
+        env = {"AGENT_DISPATCH_REGISTERED_WORKER": "1"}
+        for label in ("user", "shinuh", "headless-owner"):
+            with self.subTest(label=label), mock.patch.dict(os.environ, env):
+                with self.assertRaises(SUP.SupervisorError) as caught:
+                    SUP.resolved_released_by("headless-owner", label)
+                self.assertIn("gate-release-actor-refused", str(caught.exception))
+        self.assertEqual(SUP.resolved_released_by("user", "shinuh"), "shinuh")
+        self.assertEqual(SUP.resolved_released_by("headless-owner", None),
+                         "headless-owner")
+
+    def test_only_a_taught_carrier_may_receive_a_gate(self):
+        """Finding #5: `gate_recipient` admitted all four recipient kinds, but the
+        Codex gateway rejects this receipt on three counts — the record would be
+        written, never deliverable, and would poison that session's delivery
+        pass. Codex/OpenCode parity is SD-OPEN-33."""
+        route, path = self.two_stage_route(human_gate="frame-review")
+        jobs, _session, _attempt = self.owner_registry(
+            route_id="rt-fixture0000000", recipient_kind="codex-stop-hook")
+        with self.assertRaises(SUP.SupervisorError) as caught:
+            SUP.gate_recipient(route, jobs)
+        self.assertIn("gate-carrier-unsupported", str(caught.exception))
+        self.assertIn("SD-OPEN-33", str(caught.exception))
+
+    def test_a_gate_must_name_the_artifact_a_person_reviews(self):
+        """Nit #8: `--artifact` defaulted to `-`, so a gate could arrive telling
+        the reader nothing to look at."""
+        _route, path = self.two_stage_route(human_gate="frame-review")
+        jobs, _session, _attempt = self.owner_registry(route_id="rt-fixture0000000")
+        with self.assertRaises(SUP.SupervisorError) as caught:
+            SUP.main(["gate", "--route", str(path), "--gate", "frame-review",
+                      "--block", "--jobs", str(jobs)])
+        self.assertIn("gate-artifact-required", str(caught.exception))
+
+    def test_a_repeated_block_converges_on_one_record(self):
+        """Review New-1: `assert_transition` returns early when current == target
+        and `set_workflow_state` appends regardless, so without a state guard a
+        second `--block` minted a second raise epoch and a second record. The
+        release then acked only the newest and the older stayed pending forever,
+        which is the closed-gate announcement #3 exists to remove."""
+        _route, path = self.two_stage_route(human_gate="frame-review")
+        jobs, session, _attempt = self.owner_registry(route_id="rt-fixture0000000")
+        seen = []
+        for _ in range(2):
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                self.assertEqual(0, SUP.main([
+                    "gate", "--route", str(path), "--gate", "frame-review", "--block",
+                    "--jobs", str(jobs), "--artifact", "a.json"]))
+            seen.append(json.loads(buf.getvalue()))
+        self.assertTrue(seen[0]["delivery_created"])
+        self.assertFalse(seen[1]["delivery_created"])
+        self.assertEqual(seen[0]["delivery"], seen[1]["delivery"])
+        directory = PENDING.record_directory(
+            Path(jobs).resolve(strict=False).parent, session)
+        self.assertEqual(len(list(directory.glob("delivery-*.json"))), 1)
+
+    def test_blocking_a_different_gate_while_one_is_in_force_is_refused(self):
+        _route, path = self.two_stage_route(human_gate="frame-review")
+        jobs, _session, _attempt = self.owner_registry(route_id="rt-fixture0000000")
+        with contextlib.redirect_stdout(io.StringIO()):
+            SUP.main(["gate", "--route", str(path), "--gate", "frame-review", "--block",
+                      "--jobs", str(jobs), "--artifact", "a.json"])
+        route = json.loads(path.read_text(encoding="utf-8"))
+        route["human_gates"].append("other-review")
+        route["human_gate_bindings"].append(
+            {"gate": "other-review", "node": "verify", "position": "entry"})
+        path.write_text(json.dumps(route), encoding="utf-8")
+        with self.assertRaises(SUP.SupervisorError) as caught:
+            SUP.main(["gate", "--route", str(path), "--gate", "other-review", "--block",
+                      "--jobs", str(jobs), "--artifact", "b.json"])
+        self.assertIn("gate-already-blocked", str(caught.exception))
+
+    def test_the_created_flag_uses_the_clock_create_stamps_with(self):
+        """`PENDING.create` stamps `created_at_ns` with `time.monotonic_ns()`.
+        Comparing it against `time.time_ns()` made the flag always False, so
+        `delivery_created` misreported and the rollback could never fire."""
+        source = Path(SUP.__file__).read_text(encoding="utf-8")
+        index = source.index("before_ns = ")
+        self.assertIn("monotonic_ns", source[index:index + 40])
+        _route, path = self.two_stage_route(human_gate="frame-review")
+        jobs, _session, _attempt = self.owner_registry(route_id="rt-fixture0000000")
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            SUP.main(["gate", "--route", str(path), "--gate", "frame-review", "--block",
+                      "--jobs", str(jobs), "--artifact", "a.json"])
+        self.assertTrue(json.loads(buf.getvalue())["delivery_created"])
+
+    def test_release_retirement_survives_a_ledger_failure(self):
+        """Review New-2: `ledger_for`/`gate_raise_epoch` sat outside the try, so a
+        non-OSError there aborted the CLI after the release had already been
+        committed, and the retry then failed with "workflow is RUNNING"."""
+        route, path = self.two_stage_route(human_gate="frame-review")
+        jobs, _session, _attempt = self.owner_registry(route_id="rt-fixture0000000")
+        with contextlib.redirect_stdout(io.StringIO()):
+            SUP.main(["gate", "--route", str(path), "--gate", "frame-review", "--block",
+                      "--jobs", str(jobs), "--artifact", "a.json"])
+        with mock.patch.object(SUP, "gate_raise_epoch",
+                               side_effect=RuntimeError("ledger unreadable")):
+            self.assertIsNone(SUP.retire_gate_delivery(route, "frame-review", str(jobs)))
+
+    def test_release_subcommand_can_retire_its_record(self):
+        """Review #3: the `release` subparser had no `--jobs`, so retirement there
+        was silently skipped."""
+        _route, path = self.two_stage_route(
+            human_gate="frame-review",
+            continuation={"kind": "human-gate", "gate": "frame-review"})
+        jobs, session, _attempt = self.owner_registry(route_id="rt-fixture0000000")
+        root = Path(jobs).resolve(strict=False).parent
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            SUP.main(["gate", "--route", str(path), "--gate", "frame-review", "--block",
+                      "--jobs", str(jobs), "--artifact", "a.json"])
+        delivery_id = json.loads(
+            Path(json.loads(buf.getvalue())["delivery"]).read_text("utf-8")
+        )["delivery_id"]
+        with contextlib.redirect_stdout(io.StringIO()):
+            SUP.main(["release", "--route", str(path), "--gate", "frame-review",
+                      "--decision", "stop", "--jobs", str(jobs)])
+        self.assertEqual(PENDING.read(root, session, delivery_id)["state"], "acked")
+
+    def test_no_test_in_this_class_writes_outside_its_temporary_root(self):
+        """The leak was a test writing into real runtime state. Pin the invariant."""
+        canonical = Path.home() / ".agent_reports"
+        route, path = self.two_stage_route(human_gate="frame-review")
+        sidecar = SUP.gate_release_sidecar_path(path)
+        self.assertTrue(str(sidecar).startswith(str(self.base)))
+        self.assertFalse(str(sidecar).startswith(str(canonical)))
 
 
 if __name__ == "__main__":

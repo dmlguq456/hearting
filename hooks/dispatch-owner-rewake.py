@@ -31,6 +31,11 @@ from dispatch_completion_join import (  # noqa: E402
     delivery_required_action,
 )
 import dispatch_pending_delivery as pending_delivery  # noqa: E402
+from dispatch_session_sweep import (  # noqa: E402
+    HUMAN_GATE_PREFIX,
+    _bounded_receipt_text,
+    is_human_gate_record,
+)
 # SD-111 P3 §4.4: carrier 1 must never create a pending-delivery record --
 # it only claims one trigger 1/2 already produced. The materializer function
 # from dispatch_completion_join is deliberately absent from this import
@@ -524,6 +529,14 @@ def classified_receipt(
             )
         elif required_action == "advance-completed":
             instruction = "No harvest command is required; advance or finish the route."
+        elif required_action.startswith(HUMAN_GATE_PREFIX):
+            instruction = (
+                "A human gate is open; it is answered, not harvested. Read the artifact named "
+                "in the gate record, then record the answer with "
+                "workflow-supervisor.py release --route <route file> --gate "
+                f"{shlex.quote(required_action[len(HUMAN_GATE_PREFIX):] or '-')} "
+                "--decision proceed|revise|stop."
+            )
         else:
             instruction = (
                 "Inspect the exact current row and completion marker with: "
@@ -688,6 +701,83 @@ def _carrier_one_claim(launch: Launch, metadata: dict[str, str]) -> ClaimWin | N
     return ClaimWin(claim_owner, recipient_key, delivery_id, root)
 
 
+def _gate_notices(launch: Launch) -> list[str]:
+    """SD-123 (8)(b) carrier 1: fold every open gate record for this recipient
+    into the wake this hook is already about to emit.
+
+    Deliberately NOT a probe inside `wait_for_attempt`'s loop. Contract (c) makes
+    the gate independent of the owner's lifetime, so the owner raises the gate
+    and ends; its terminal wake is the same wake, and no new polling surface,
+    timer, or re-arm is created. Waking the parent for a non-terminal condition
+    while the owner is still working would be a second wake per attempt, which
+    the asyncRewake discipline does not allow.
+
+    Each record is claimed and then acked -- not left `sent-ambiguous`. A gate
+    record is a pointer; the gate itself is durable in the workflow ledger, so
+    the usual at-least-once argument does not apply, and re-delivery would put
+    the same gate in front of the user on every prompt (A59-3 forbids that).
+    """
+
+    try:
+        row = current_attempt_row(launch.jobs, launch.attempt_id)
+    except (JoinContractError, OSError):
+        return []
+    recipient_key = row.metadata.get("parent_sid", "") if row is not None else ""
+    if not recipient_key:
+        return []
+    root = launch.jobs.resolve(strict=False).parent
+    try:
+        directory = pending_delivery.record_directory(root, recipient_key)
+        entries = sorted(p for p in directory.glob("delivery-*.json") if p.is_file())
+    except (pending_delivery.PendingDeliveryError, OSError):
+        return []
+    notices: list[str] = []
+    for entry in entries:
+        delivery_id = entry.stem
+        try:
+            record = pending_delivery.read(root, recipient_key, delivery_id)
+        except pending_delivery.PendingDeliveryError:
+            continue
+        if record is None or record.get("state") not in {"pending", "claimed", "sent-ambiguous"}:
+            continue
+        if not is_human_gate_record(record):
+            continue
+        claim_owner = f"claude-async-rewake-gate:{os.getpid()}:{time.monotonic_ns()}"
+        try:
+            if record.get("state") in {"claimed", "sent-ambiguous"}:
+                # `now_ns` is keyword-only and required. Omitting it raised
+                # TypeError, which the `except PendingDeliveryError` below does
+                # NOT catch — so the whole rewake hook died and the parent lost
+                # its completion receipt entirely, not just the gate. Reachable
+                # whenever a sweep claimed the record first, an ack failed, two
+                # parallel-group rewakes raced, or after `mark_sent_ambiguous`.
+                # The sibling call in `dispatch_session_sweep.sweep_deliver`
+                # always passed it; this one never did, and no test covered it.
+                # `monotonic_ns`, not `time_ns`: `reclaim` compares `now_ns`
+                # against `claim_deadline_ns`, which `claim` stamps from
+                # `time.monotonic_ns()`. An epoch-clock value is astronomically
+                # larger, so every deadline would look passed and a live lease
+                # would be reclaimed out from under its holder. The sweep sibling
+                # passes `time.monotonic_ns()` for the same reason.
+                pending_delivery.reclaim(
+                    root, recipient_key, delivery_id, now_ns=time.monotonic_ns()
+                )
+            pending_delivery.claim(
+                root, recipient_key, delivery_id, claim_owner=claim_owner,
+                lease_seconds=CLAIM_LEASE_SECONDS, require_generation_proof=False,
+            )
+        except pending_delivery.PendingDeliveryError:
+            continue
+        notices.append(_bounded_receipt_text(record))
+        try:
+            pending_delivery.ack(
+                root, recipient_key, delivery_id, acked_by=f"async-rewake:{launch.session_id}"
+            )
+        except pending_delivery.PendingDeliveryError:
+            pass
+    return notices
+
+
 def no_arm_notice(payload: object) -> int:
     """One typed notice when a successful start armed neither bridge path.
 
@@ -747,6 +837,17 @@ def main() -> int:
     else:
         wait_state, wait_reason = wait_for_attempt(launch, readiness)
         state, message = classified_receipt(launch, wait_state, wait_reason, root)
+    # SD-123 (8)(b): an open gate rides this same wake. It also forces the
+    # attention state -- a route whose next step is a human decision has not
+    # succeeded, however cleanly the owner attempt ended.
+    gates = _gate_notices(launch)
+    if gates:
+        state = "attention"
+        message = (
+            message
+            + " A human gate is open and awaiting your decision; it is answered, not harvested. "
+            + " ".join(gates)
+        )
     block = _attention_has_open_child(message)
     if block:
         # A live owned child is still open -- no delivery-owing terminal

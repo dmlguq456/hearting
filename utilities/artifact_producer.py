@@ -40,7 +40,7 @@ import shutil
 import sys
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Set, Tuple
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -53,6 +53,7 @@ from dispatch_contract import process_start_ticks  # noqa: E402
 
 PRODUCER_REL = ".runtime/artifact-producer/v1"
 CONTRACT = "artifact-producer/v1"
+REVISION_RECORD_NAME = "revision.json"
 ALGORITHM_VERSION = "w7c-producer/v1"
 OK, BLOCKED, USAGE = 0, 65, 64
 
@@ -1579,6 +1580,134 @@ def find_reference_by_key(root: Path, kind: str, key: str) -> Optional[Dict[str,
     return None
 
 
+# --- D-87: component-set preservation -------------------------------------
+#
+# A shared reference may carry several top-level components (`stage-dispatch/`,
+# `agent-fleet-dashboard/`, ...).  `admit_shared` copies only the source tree,
+# so a partial admit silently drops every component the source omits and
+# `latest_revision_id` then points at the reduced set.  On 2026-09-03 two
+# admits one minute apart took `ref_4d540b57...` from 246 files / 3 components
+# to 41 files / 1 component.  The contract (a) is a typed refusal, (b) an
+# explicit `--drop-component`, and (d) a read-only adjacent-pair check.
+# Carry-forward is deliberately NOT implemented: (c) rejects it, because a
+# revision must only contain what its admit actually carried.
+
+
+def component_set(paths: Iterable[str]) -> Set[str]:
+    """The component set of a revision or tree: the first path segment of every
+    relative path.  A top-level file is its own component -- `rrev_15cf1d9f`
+    admitted `prd.md` and friends flat, so defining components as "top-level
+    directories" would read that revision as empty.  `revision.json` is
+    revision metadata, not content."""
+    components: Set[str] = set()
+    for path in paths:
+        rel = str(path).strip().lstrip("./")
+        if not rel or rel == REVISION_RECORD_NAME:
+            continue
+        components.add(rel.split("/", 1)[0])
+    return components
+
+
+def _scan_component_set(source_path: Path) -> Set[str]:
+    """Component set of the incoming tree, read-only.
+
+    Deliberately does not reuse `_copy_tree_files`: contract (a) requires that a
+    refusal create no staging directory at all, and that helper writes as it
+    walks."""
+    if source_path.is_file():
+        return component_set([source_path.name])
+    return component_set(
+        entry.relative_to(source_path).as_posix() for entry in _walk_files(source_path)
+    )
+
+
+def _revision_component_set(root: Path, kind: str, ref_id: str, revision_id: str) -> Set[str]:
+    record = _read_json(
+        Path(root) / "shared" / kind / ref_id / "revisions" / revision_id / REVISION_RECORD_NAME
+    )
+    if record is None:
+        raise ProducerError("revision-record-missing", f"{ref_id}/{revision_id}")
+    return component_set(
+        str(row.get("path", "")) for row in (record.get("files") or []) if isinstance(row, Mapping)
+    )
+
+
+def _latest_component_set(
+    root: Path, kind: str, reference: Optional[Mapping[str, Any]]
+) -> Optional[Set[str]]:
+    """The previous latest revision's component set, or `None` when there is no
+    predecessor to regress against (A17-6: the first revision is exempt)."""
+    if not reference:
+        return None
+    latest = reference.get("latest_revision_id")
+    if not latest:
+        return None
+    return _revision_component_set(root, kind, reference["shared_reference_id"], str(latest))
+
+
+def check_component_sets(
+    root: Path,
+    kind: str,
+    reference_id: str,
+    *,
+    from_revision: Optional[str] = None,
+    to_revision: Optional[str] = None,
+) -> Dict[str, Any]:
+    """D-87 (d): read-only check of `components(new) >= components(old) - dropped(new)`
+    over adjacent revision pairs.  Writes nothing.
+
+    `from_revision`/`to_revision` bound the inspected window.  The bound is not
+    cosmetic: run unbounded over `ref_4d540b57...` this reports nine violations
+    reaching back to seq 8, because a partial admit was a chronic pattern long
+    before the 2026-09-03 incident.  A caller asking about one incident needs to
+    ask about its window.
+    """
+    root = Path(root).resolve()
+    reference = _read_json(_reference_path(root, kind, reference_id))
+    if reference is None:
+        raise ProducerError("reference-unknown", reference_id)
+    revisions = [str(value) for value in (reference.get("revisions") or [])]
+    if from_revision is not None:
+        if from_revision not in revisions:
+            raise ProducerError("revision-unknown", from_revision)
+        revisions = revisions[revisions.index(from_revision):]
+    if to_revision is not None:
+        if to_revision not in revisions:
+            raise ProducerError("revision-unknown", to_revision)
+        revisions = revisions[: revisions.index(to_revision) + 1]
+    pairs: List[Dict[str, Any]] = []
+    unreadable: List[str] = []
+    sets: Dict[str, Optional[Set[str]]] = {}
+    for revision_id in revisions:
+        try:
+            sets[revision_id] = _revision_component_set(root, kind, reference_id, revision_id)
+        except ProducerError:
+            sets[revision_id] = None
+            unreadable.append(revision_id)
+    violations = 0
+    for older, newer in zip(revisions, revisions[1:]):
+        old_set, new_set = sets[older], sets[newer]
+        if old_set is None or new_set is None:
+            pairs.append({"old": older, "new": newer, "dropped": [], "missing": [],
+                          "verdict": "unknown"})
+            continue
+        record = _read_json(
+            Path(root) / "shared" / kind / reference_id / "revisions" / newer / REVISION_RECORD_NAME
+        ) or {}
+        dropped = sorted(
+            str(row.get("name", ""))
+            for row in (record.get("dropped_components") or [])
+            if isinstance(row, Mapping)
+        )
+        missing = sorted(old_set - new_set - set(dropped))
+        if missing:
+            violations += 1
+        pairs.append({"old": older, "new": newer, "dropped": dropped, "missing": missing,
+                      "verdict": "regressed" if missing else "ok"})
+    return {"status": "checked", "kind": kind, "reference_id": reference_id,
+            "pairs": pairs, "violations": violations, "unreadable": sorted(unreadable)}
+
+
 def _commit_shared(root: Path, journal: Mapping[str, Any]) -> None:
     kind = journal["kind"]
     ref_id = journal["reference_id"]
@@ -1614,6 +1743,8 @@ def admit_shared(
     promote_research: bool = False,
     promotion_evidence: Optional[str] = None,
     allocator: Optional[artifact_identity.IdAllocator] = None,
+    drop_components: Sequence[str] = (),
+    drop_reason: Optional[str] = None,
     now: Optional[float] = None,
 ) -> Dict[str, Any]:
     root = Path(root).resolve()
@@ -1667,6 +1798,26 @@ def admit_shared(
         else:
             reference_id = reference["shared_reference_id"]
             created = False
+        # D-87 (a): refuse before anything exists.  This sits above the id
+        # allocation, the journal write and the staging directory on purpose --
+        # the contract requires a refused admit to leave no revision, no journal
+        # and no staging behind.
+        dropped = sorted({str(name) for name in drop_components if str(name)})
+        previous = _latest_component_set(root, kind, reference)
+        if previous is not None:
+            unknown = sorted(set(dropped) - previous)
+            if unknown:
+                raise ProducerError("drop-component-unknown", ",".join(unknown))
+            missing = sorted(previous - _scan_component_set(source_path) - set(dropped))
+            if missing:
+                raise ProducerError(
+                    "component-set-regressed",
+                    "source omits components carried by the previous latest revision: "
+                    + ",".join(missing)
+                    + "; admit the whole tree or drop them explicitly with --drop-component",
+                )
+        elif dropped:
+            raise ProducerError("drop-component-unknown", ",".join(dropped))
         revision_id = alloc.allocate("shared_reference_revision")
         revisions_dir = Path(root) / "shared" / kind / reference_id / "revisions"
         _ensure_dir(revisions_dir)
@@ -1709,7 +1860,16 @@ def admit_shared(
                 ),
                 "files": [{"path": rel, "sha256": digest, "byte_size": size} for rel, digest, size in rows],
             }
-            _write_exclusive(staging / "revision.json", _json_bytes(revision))
+            # D-87 (b): an explicit removal is named and reasoned in the record.
+            # The key is omitted entirely when nothing was dropped, so an
+            # ordinary admit's revision record is byte-identical to before
+            # (A17-4). `content_digest` covers `files[]` only, so this key never
+            # moves the digest either way.
+            if dropped:
+                revision["dropped_components"] = [
+                    {"name": name, "reason": drop_reason or "unspecified"} for name in dropped
+                ]
+            _write_exclusive(staging / REVISION_RECORD_NAME, _json_bytes(revision))
             _fsync_dir(staging)
         except BaseException:
             shutil.rmtree(str(staging), ignore_errors=True)
@@ -2036,6 +2196,17 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     p.add_argument("--title")
     p.add_argument("--promote-research", action="store_true")
     p.add_argument("--promotion-evidence")
+    p.add_argument("--drop-component", action="append", default=[], metavar="NAME",
+                   help="D-87 (b): drop this top-level component from the reference "
+                        "(repeatable); the only way to shrink the component set")
+    p.add_argument("--drop-reason", help="reason recorded with --drop-component")
+
+    p = sub.add_parser("check-components")
+    p.add_argument("--artifact-root", required=True)
+    p.add_argument("--kind", required=True)
+    p.add_argument("--reference", required=True)
+    p.add_argument("--from-revision", help="first revision of the inspected window")
+    p.add_argument("--to-revision", help="last revision of the inspected window")
 
     p = sub.add_parser("recover")
     p.add_argument("--artifact-root", required=True)
@@ -2116,7 +2287,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             result = admit_shared(root, cycle_id=args.cycle, kind=args.kind, source=args.source,
                                   reference_id=args.reference, key=args.key, title=args.title,
                                   promote_research=args.promote_research,
-                                  promotion_evidence=args.promotion_evidence)
+                                  promotion_evidence=args.promotion_evidence,
+                                  drop_components=args.drop_component,
+                                  drop_reason=args.drop_reason)
+        elif args.command == "check-components":
+            result = check_component_sets(root, args.kind, args.reference,
+                                          from_revision=args.from_revision,
+                                          to_revision=args.to_revision)
+            _print(result)
+            return OK if result["violations"] == 0 else BLOCKED
         elif args.command == "recover":
             result = recover(root)
         elif args.command == "check-write":
