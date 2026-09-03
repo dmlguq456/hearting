@@ -2897,5 +2897,33 @@ class ReconcilePendingDeliveryTest(unittest.TestCase):
             self.assertEqual(result, {"materialized": 0, "expired": 0, "skipped": 0})
 
 
+class RefusalWriterOwnFailureStaysSilentTest(unittest.TestCase):
+    """Review round 1 🟡5 (residual R7, left explicit rather than fixed):
+    `_log_pending_delivery_refusal`/`log_delivery_refusal` is the durable
+    trace every `reconcile()` call site now writes when its own reconcile
+    attempt fails (C47-14). But the writer's *own* `mkdir`/`open`/`write`
+    failure is still caught by a bare `except OSError: pass` -- there is no
+    secondary durable surface for "the refusal ledger itself is gone", only
+    whatever stderr the caller happens to emit next to it. Framing this
+    cycle explicitly ruled a new durable fallback surface out of scope (R7);
+    this test does not add one. It only pins the current, honestly
+    unobservable-past-stderr behavior so a future change to it is a visible
+    diff, not a silent regression in either direction."""
+
+    def test_mkdir_failure_in_the_writer_itself_raises_nothing_and_leaves_no_record(self):
+        with tempfile.TemporaryDirectory() as td:
+            jobs = Path(td) / "jobs.log"
+            jobs.write_text("", encoding="utf-8")
+            log_dir = Path(td) / "logs"
+            with mock.patch.object(
+                Path, "mkdir", side_effect=OSError("simulated refusal-ledger mkdir failure")
+            ):
+                JOIN.log_delivery_refusal(jobs, "att-writer-failure", "some-reason")
+            # No exception escaped (verified by reaching this line), and --
+            # this is the gap review 🟡5 flags -- no trace of the failed
+            # write survives anywhere on disk either.
+            self.assertFalse(log_dir.exists())
+
+
 if __name__ == "__main__":
     unittest.main()

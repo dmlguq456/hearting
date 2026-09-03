@@ -25,6 +25,7 @@ from dispatch_completion_join import (
     delivery_timing_fields,
     exact_attempt_row,
     harvest_command_lines,
+    log_delivery_refusal,
     materialize_after_terminal_close,
     prepare_supervisor_outbox,
     refresh_supervisor_outbox_actions,
@@ -238,12 +239,15 @@ def reconcile(args: argparse.Namespace, terminal: SupervisorTerminal) -> bool:
             materialize_after_terminal_close(Path(args.jobs), args.parent_attempt_id)
         return True
     except Exception as exc:
-        emit(
-            {
-                "type": "dispatch.supervisor.error",
-                "reason": f"terminal-reconcile-failed-{type(exc).__name__}",
-            }
-        )
+        reason = f"terminal-reconcile-failed-{type(exc).__name__}"
+        # SD-115 axis 4 (round 2, review 🔴2): mirrors
+        # claude-session-supervisor.py's `reconcile()` -- an emit()-only
+        # report is stdout/stderr-only and vanishes with the process, so a
+        # sealed-tree loss (or any reconcile exception) that escapes to here
+        # left zero durable trace on the Codex adapter even though the
+        # Claude adapter already wrote one.
+        log_delivery_refusal(Path(args.jobs), args.parent_attempt_id, reason)
+        emit({"type": "dispatch.supervisor.error", "reason": reason})
         return False
 
 

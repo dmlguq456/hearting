@@ -1838,6 +1838,40 @@ class OpenAttemptSealedReleasePruneTest(unittest.TestCase):
         self.assertTrue(n.is_dir())
         self.assertIn("open-route:rt-binding-only", stderr.getvalue())
 
+    def test_unreadable_binding_directory_with_no_registry_row_is_treated_as_in_use(self):
+        # Review round 1 🔴1: registry-row-less discovery has exactly one
+        # surviving path -- owner-route-bindings. A binding-directory
+        # enumeration failure used to be swallowed to `binding_files=[]`
+        # (a "normal empty scan"), so `_open_route_launch_homes` returned
+        # `(empty, "")` and `_release_in_use` happily pruned n. This must
+        # instead come back undecidable, per C47-12 (판정 불가 = in_use).
+        n = self._make_release("vN", 1000.0)
+        self._make_release("vN+1", 2000.0)
+        n2 = self._make_release("vN+2", 3000.0)
+        self._seal_current(n2)
+        # No jobs.log row at all -- deliberately mirrors
+        # test_route_record_alone_protects_the_release_with_no_registry_row.
+        route_file = self._write_route_record("rt-binding-dir-unreadable", n)
+        bindings_dir = self.stable_root / "owner-route-bindings"
+        bindings_dir.mkdir(parents=True, exist_ok=True)
+        (bindings_dir / "att-binding.json").write_text(
+            json.dumps({"route_file": str(route_file)}), encoding="utf-8"
+        )
+
+        real_glob = Path.glob
+
+        def _boom(self_path, pattern):
+            if self_path == bindings_dir and pattern == "*.json":
+                raise OSError("simulated unreadable bindings directory")
+            return real_glob(self_path, pattern)
+
+        with mock.patch.object(Path, "glob", _boom):
+            stderr = io.StringIO()
+            with contextlib.redirect_stderr(stderr):
+                DISTRIBUTION._cleanup_releases(keep=set())
+        self.assertTrue(n.is_dir())
+        self.assertIn(f"route-discovery-unreliable:{bindings_dir}", stderr.getvalue())
+
     def test_unreadable_route_discovery_is_treated_as_in_use(self):
         n = self._make_release("vN", 1000.0)
         self._make_release("vN+1", 2000.0)
@@ -1875,6 +1909,45 @@ class OpenAttemptSealedReleasePruneTest(unittest.TestCase):
                 DISTRIBUTION._cleanup_releases(keep=set())
         self.assertTrue(n.is_dir())
         self.assertIn("route-discovery-unreliable:scan-cap", stderr2.getvalue())
+
+    def test_scan_cap_also_bounds_explicit_route_files_not_only_directory_glob(self):
+        # Review round 1 🟡4: `_ROUTE_SCAN_MAX_FILES` used to apply only to
+        # files discovered by globbing `.runtime/routes` -- an
+        # `owner_route_file=`/binding-derived explicit path list was appended
+        # to `candidates` afterward with no cap of its own, so a large
+        # explicit list could walk around the bound entirely. Cap explicit
+        # route files alone (no directory-glob candidates in this fixture) to
+        # prove the bound now covers that source too.
+        n = self._make_release("vN", 1000.0)
+        self._make_release("vN+1", 2000.0)
+        n2 = self._make_release("vN+2", 3000.0)
+        self._seal_current(n2)
+        self._write_registry_row("open", "att-x", f"artifact_root={self.artifact_root}")
+        route_a = self._write_route_record(
+            "rt-explicit-cap-a", n, routes_dir=self.stable_root / "explicit-routes-a",
+        )
+        route_b = self._write_route_record(
+            "rt-explicit-cap-b", n, routes_dir=self.stable_root / "explicit-routes-b",
+        )
+        jobs = self.stable_root / "jobs.log"
+        with open(jobs, "a", encoding="utf-8") as fh:
+            fh.write(
+                "2026-09-03T00:00:00Z\topen\t/r\t/w\tatt-explicit-a\t"
+                f"attempt_id=att-explicit-a,harness=claude,artifact_root={self.artifact_root},"
+                f"owner_route_file={route_a}\n"
+            )
+            fh.write(
+                "2026-09-03T00:00:00Z\topen\t/r\t/w\tatt-explicit-b\t"
+                f"attempt_id=att-explicit-b,harness=claude,artifact_root={self.artifact_root},"
+                f"owner_route_file={route_b}\n"
+            )
+
+        with mock.patch.object(DISTRIBUTION, "_ROUTE_SCAN_MAX_FILES", 1):
+            stderr = io.StringIO()
+            with contextlib.redirect_stderr(stderr):
+                DISTRIBUTION._cleanup_releases(keep=set())
+        self.assertTrue(n.is_dir())
+        self.assertIn("route-discovery-unreliable:scan-cap", stderr.getvalue())
 
     def test_closed_route_record_never_blocks_prune(self):
         n = self._make_release("vN", 1000.0)

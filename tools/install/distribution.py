@@ -2305,10 +2305,12 @@ class _Undecidable:
 _UNDECIDABLE = _Undecidable()
 
 
-def _open_route_artifact_roots(environ: dict[str, str]) -> tuple[set[str], list[str]]:
+def _open_route_artifact_roots(
+    environ: dict[str, str],
+) -> tuple[set[str], list[str], str]:
     """Union of every place an open route's artifact root or route file can
     be discovered from stable per-user state. Returns `(artifact_roots,
-    explicit_route_files)`.
+    explicit_route_files, unreliable_reason)`.
 
     Three additive sources (SD-115 axis 4 plan.md §3):
     - the stable registry's `artifact_root=` pipe field on every row -- the
@@ -2325,10 +2327,14 @@ def _open_route_artifact_roots(environ: dict[str, str]) -> tuple[set[str], list[
     A single unreadable or malformed binding file is skipped, not
     escalated: binding *presence* is a discovery hint, never openness proof
     on its own (plan.md §3.1 -- every binding measured on disk today points
-    at an already-closed route). Only a failure to list the bindings
-    directory itself denies the caller real information, so that failure is
-    surfaced by returning an empty result for that source rather than a
-    partial one silently passed off as complete.
+    at an already-closed route). But a failure to *list* the bindings
+    directory itself is not a hint, it is the only surviving discovery path
+    for a registry-row-less attempt going dark: `owner-route-bindings` is
+    where that route's binding-only evidence lives (see
+    `test_route_record_alone_protects_the_release_with_no_registry_row`), so
+    a non-empty `unreliable_reason` here must make the caller treat every
+    candidate release as in-use rather than silently scanning as if the
+    directory were empty.
     """
 
     roots: set[str] = set()
@@ -2336,7 +2342,7 @@ def _open_route_artifact_roots(environ: dict[str, str]) -> tuple[set[str], list[
     try:
         state_root = stable_state_root(environ)
     except DistributionError:
-        return roots, route_files
+        return roots, route_files, ""
 
     jobs = state_root / "jobs.log"
     if jobs.is_file():
@@ -2361,7 +2367,7 @@ def _open_route_artifact_roots(environ: dict[str, str]) -> tuple[set[str], list[
         try:
             binding_files = list(bindings_dir.glob("*.json"))
         except OSError:
-            binding_files = []
+            return roots, route_files, f"route-discovery-unreliable:{bindings_dir}"
         for entry in binding_files:
             try:
                 payload = json.loads(entry.read_text(encoding="utf-8"))
@@ -2370,7 +2376,7 @@ def _open_route_artifact_roots(environ: dict[str, str]) -> tuple[set[str], list[
             route_file = payload.get("route_file") if isinstance(payload, dict) else None
             if isinstance(route_file, str) and route_file:
                 route_files.append(route_file)
-    return roots, route_files
+    return roots, route_files, ""
 
 
 def _route_record_launch_home(path: Path):
@@ -2436,8 +2442,14 @@ def _open_route_launch_homes(environ: dict[str, str]) -> tuple[list[tuple[str, s
     by itself (review requirement: explicit non-directory/absent handling).
     """
 
-    roots, explicit_route_files = _open_route_artifact_roots(environ)
+    roots, explicit_route_files, bindings_unreliable = _open_route_artifact_roots(environ)
+    if bindings_unreliable:
+        return [], bindings_unreliable
     candidates: dict[str, Path] = {}
+    # Bounded set covers both discovery paths together (review 🟡4): an
+    # unbounded explicit-route tail from `owner_route_file=`/bindings would
+    # otherwise let the scan cap be walked around entirely by growing that
+    # list instead of the directory glob.
     scanned = 0
     for root in roots:
         routes_dir = Path(root) / ".runtime" / "routes"
@@ -2455,6 +2467,9 @@ def _open_route_launch_homes(environ: dict[str, str]) -> tuple[list[tuple[str, s
                 return [], "route-discovery-unreliable:scan-cap"
             candidates[str(entry.resolve(strict=False))] = entry
     for route_file in explicit_route_files:
+        scanned += 1
+        if scanned > _ROUTE_SCAN_MAX_FILES:
+            return [], "route-discovery-unreliable:scan-cap"
         path = Path(route_file)
         candidates[str(path.resolve(strict=False))] = path
 
