@@ -154,12 +154,18 @@ def collect(state_roots=None):
                              "kind": kind, "age_min": age_min}
 
     def _upgrade_recv(to_key, inherited, frm, to, from_key, age_min):
+        # A correlated notice is, by construction, the newest successful receipt for
+        # `to_key` (it is processed in ts order and only reached once its matching
+        # sent record popped off `pending`) — so it replaces `last_recv` unconditionally,
+        # even when a later record from a different sender had already overwritten it.
+        # `recv_1h` is untouched here: the notice and its correlated sent record are one
+        # logical message and must count once (F-101i).
         row = _row(to_key)
-        last = row.get("last_recv") or {}
-        if (last.get("from_session_id"), last.get("from_harness")) == (
-                from_key[1], from_key[0]):
-            last["kind"] = inherited
-            last["age_min"] = age_min
+        from_sid = from_key[1] if from_key else None
+        from_name = (frm.get("name") or from_sid or "")
+        row["last_recv"] = {"from_name": from_name, "from_session_id": from_sid,
+                             "from_harness": from_key[0] if from_key else "",
+                             "kind": inherited, "age_min": age_min}
 
     # Correlation is bounded by the existing tail/window/max limits. A clipped sender
     # leaves a notice as `notice` (honest miss); LIFO reduces but cannot eliminate an

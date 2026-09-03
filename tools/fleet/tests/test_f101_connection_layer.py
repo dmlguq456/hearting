@@ -69,6 +69,20 @@ class PeerCorrelationTest(unittest.TestCase):
         self.assertEqual(set(row["last_recv"]),
                          {"from_name", "from_session_id", "from_harness", "kind", "age_min"})
 
+    def test_correlated_notice_replaces_stale_intervening_sender(self):
+        """A correlated notice is the newest successful receipt for `to`, even when a
+        different sender's record landed in between — `last_recv` must move to the
+        notice's correlated (sender, kind), not stay pinned on the intervening sender.
+        `recv_1h` still counts the notice's logical message once (F-101i)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            self._write(tmp, [_rec("a", "b", "steer", minutes=3),
+                              _rec("c", "b", "handoff", minutes=2),
+                              _rec("a", "b", "notice", minutes=1)])
+            row = peer_messages.collect(state_roots=[tmp])["by_session"][("claude", "b")]
+        self.assertEqual(row["recv_1h"], 2)
+        self.assertEqual(row["last_recv"]["from_session_id"], "a")
+        self.assertEqual(row["last_recv"]["kind"], "steer")
+
     def test_cross_harness_identity_and_failed_delivery(self):
         with tempfile.TemporaryDirectory() as tmp:
             self._write(tmp, [_rec("a", "same", "steer", harness="claude"),
