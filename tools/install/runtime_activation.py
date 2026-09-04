@@ -2246,14 +2246,16 @@ def _bundle_checksum(active_root: Path) -> Optional[str]:
     if not isinstance(expected, str):
         return None
     if metadata.get("source_link"):
-        # A linked bundle owns no content of its own: what can go stale is the
-        # link, not the tree behind it (a managed release is immutable and
-        # versioned by path). Verify the identity that this bundle actually
-        # asserts, and do not re-walk a release on every status call.
+        # A linked bundle asserts two things and both must hold: the link still
+        # names the release it recorded, AND that release still hashes to what was
+        # sealed. Verifying only the link would make `bundle_stale` unfalsifiable
+        # (status compares this value against the one it just came from), and a
+        # release replaced in place under the same version tag would read as fresh.
         recorded = metadata.get("source_root")
         if not isinstance(recorded, str) or not active_root.is_symlink():
             return None
-        return expected if _same_tree(active_root, Path(recorded)) else None
+        if not _same_tree(active_root, Path(recorded)):
+            return None
     return expected if _tree_digest(active_root) == expected else None
 
 
@@ -2834,6 +2836,11 @@ BUNDLE_STATE_DIR_NAMES = (".agent_reports", ".claude_reports")
 BUNDLE_STATE_MAX_FINDINGS = 8
 
 
+def _bundle_source_is_link(active_root: Path) -> bool:
+    """True when this bundle addresses its source by symlink rather than copying it."""
+    return Path(active_root).is_symlink()
+
+
 def bundle_runtime_state(active_root: Path) -> List[str]:
     """Return runtime-state directories written inside an immutable release bundle.
 
@@ -2851,6 +2858,13 @@ def bundle_runtime_state(active_root: Path) -> List[str]:
 
     parts = active_root.parts
     if ".harness" not in parts or "bundles" not in parts:
+        return []
+    if _bundle_source_is_link(active_root):
+        # A linked bundle owns no tree: walking it would descend into the managed
+        # release and report the release's own contents as bundle residue. The
+        # docstring's premise ("replaced wholesale on update, so writes are lost")
+        # is true of a copy and false of a link -- a release is versioned by path
+        # and its cleanliness is the release's invariant, not this bundle's.
         return []
     found: List[str] = []
     for current, dirnames, _files in os.walk(active_root):

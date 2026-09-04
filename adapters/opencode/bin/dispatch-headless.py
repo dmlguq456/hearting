@@ -29,6 +29,7 @@ ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT / "utilities"))
 from dispatch_contract import (  # noqa: E402
     DispatchContractError,
+    bytecode_cache_env,
     GROUP_REAP_PROOF,
     GOVERNOR_RESERVATION_ENV,
     REPLICA_RESERVATION_ROW_KEYS,
@@ -1616,6 +1617,9 @@ def main(argv: list[str]) -> int:
             GOVERNOR_RESERVATION_ENV: reservation_token,
             "AGENT_HOME": str(args.agent_home),
             "AGENT_DISPATCH_JOBS": str(jobs),
+            # Same rule as the other two adapters: a worker inherits AGENT_HOME
+            # at the managed release; keep its bytecode out of that tree.
+            **bytecode_cache_env(),
             "AGENT_DISPATCH_CURRENT_HARNESS": "opencode",
             "AGENT_DISPATCH_CURRENT_TRANSPORT": "headless",
             "AGENT_DISPATCH_CURRENT_SANDBOX": "adapter-default",

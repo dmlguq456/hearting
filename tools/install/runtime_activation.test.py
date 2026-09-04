@@ -353,6 +353,38 @@ class LinkedReleaseBundleTest(unittest.TestCase):
             self.assertTrue(release.is_dir())
             self.assertTrue((release / "utilities" / "tool.py").is_file())
 
+    def test_a_linked_bundle_is_not_scanned_as_bundle_residue(self):
+        # bundle_runtime_state walks the active bundle to find runtime state
+        # written inside an immutable tree. A linked bundle owns no tree, so
+        # walking it would descend into the release and report the release's own
+        # contents as this bundle's residue.
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            release = self._release(root)
+            (release / ".agent_reports").mkdir()
+            bundle_source, _ = self._build(release, root / "codex-home")
+            self.assertEqual(activation.bundle_runtime_state(bundle_source), [])
+            # A copied bundle keeps reporting exactly as before. The residue has
+            # to be written after the build: `_bundle_ignore` never copies it in.
+            checkout = self._checkout(root)
+            copied, _ = self._build(checkout, root / "codex-home-2")
+            (copied / ".agent_reports").mkdir()
+            self.assertEqual(
+                activation.bundle_runtime_state(copied), [str(copied / ".agent_reports")]
+            )
+
+    def test_linked_bundle_checksum_still_asserts_content(self):
+        # Review S1: verifying only the link made `bundle_stale` unfalsifiable —
+        # status compares this value against the one it came from — so a release
+        # replaced in place under the same version tag would have read as fresh.
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            release = self._release(root)
+            bundle_source, _ = self._build(release, root / "codex-home")
+            self.assertIsInstance(activation._bundle_checksum(bundle_source), str)
+            (release / "utilities" / "tool.py").write_text("print(2)\n", encoding="utf-8")
+            self.assertIsNone(activation._bundle_checksum(bundle_source))
+
     def test_linked_bundle_checksum_tracks_the_link_not_a_tree_walk(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
