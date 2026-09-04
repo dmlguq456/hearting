@@ -125,6 +125,22 @@ def _sealed_owner_harnesses(path):
     return _sealed_owner_context(path)["harnesses"]
 
 
+def export_owner_route_env(child_env, binding):
+    """Publish the owner's route identity into the child environment.
+
+    Every owner needs all three, whatever its intensity: the prompt and the
+    wrapper args name only the route *id*, so a call that wants the route
+    **file** — `artifact_producer.py begin --route` — has nothing to name
+    unless this is set. `quick` used to skip it and its owners had to guess the
+    path; one helper for both branches keeps them from drifting apart again.
+    """
+
+    child_env["AGENT_OWNER_ROUTE_FILE"] = binding.route_file
+    child_env["AGENT_OWNER_ROUTE_ID"] = binding.route_id
+    child_env["AGENT_OWNER_ROUTE_HASH"] = binding.route_hash
+    return child_env
+
+
 def _caller_harness(env):
     """Keep the interactive caller distinct from the selected child adapter."""
 
@@ -507,6 +523,7 @@ def main(argv):
                               "--route-hash", binding.route_hash, "--route-node", binding.route_node,
                               "--registry-digest", binding.registry_digest, "--write-scope", binding.write_scope,
                               "--completion-gate", binding.completion_gate]
+                export_owner_route_env(child_env, binding)
             else:
                 binding = validate_owner_route_binding(
                 route_evidence,
@@ -516,9 +533,7 @@ def main(argv):
                 intensity=values["--intensity"],
                 harness=selected,
             )
-                child_env["AGENT_OWNER_ROUTE_FILE"] = binding.route_file
-                child_env["AGENT_OWNER_ROUTE_ID"] = binding.route_id
-                child_env["AGENT_OWNER_ROUTE_HASH"] = binding.route_hash
+                export_owner_route_env(child_env, binding)
         child = subprocess.run([str(wrapper), *forwarded], env=child_env)
         return child.returncode
     except (OwnerError, OwnerRouteBindingError, OSError) as exc:
