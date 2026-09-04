@@ -2417,16 +2417,20 @@ def main(argv: list[str]) -> int:
             if fence_failure is not None:
                 reason = str(fence_failure["reason"])
                 # The fence knows exactly which sealed root disagreed with the
-                # live one; without this the row carried only the bare reason and
-                # the offending root had to be inferred after the fact.
-                annotate_attempt_row(
-                    jobs,
-                    args.attempt_id,
-                    {
-                        "launch_outcome": "never-launched",
-                        **launch_mismatch_annotation(str(fence_failure["detail"])),
-                    },
-                )
+                # live one. This is a diagnostic on a path that is ALREADY
+                # failing, so it can never be allowed to prevent the row from
+                # closing: a raise here would leak the attempt open with a sealed
+                # launch_home, which then pins its release against pruning.
+                annotation = {"launch_outcome": "never-launched"}
+                try:
+                    annotation.update(
+                        launch_mismatch_annotation(str(fence_failure["detail"]))
+                    )
+                    annotate_attempt_row(jobs, args.attempt_id, annotation)
+                except DispatchContractError:
+                    annotate_attempt_row(
+                        jobs, args.attempt_id, {"launch_outcome": "never-launched"}
+                    )
                 close_job_row(
                     jobs, args.slug, args.worktree, reason, "", args.attempt_id,
                 )

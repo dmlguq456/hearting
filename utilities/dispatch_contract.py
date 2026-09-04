@@ -174,6 +174,14 @@ ATTEMPT_MUTABLE_METADATA = {
     "cancellation_receipt_digest",
     "quiescence_pgid_proof",
     "quiescence_descendant_proof",
+    # Launch-root diagnostics, written once on the fence-failure path. They must be
+    # MUTABLE, not terminal evidence: `_immutable_attempt_identity` folds every key
+    # outside this set into the row's identity, so recording them as evidence would
+    # make two observations of one attempt disagree (`attempt-identity-conflict`).
+    "launch_mismatch_roots",
+    "launch_mismatch_fields",
+    "launch_mismatch_expected",
+    "launch_mismatch_observed",
 }
 ATTEMPT_TERMINAL_EVIDENCE_KEYS = {
     "api_status",
@@ -3757,6 +3765,14 @@ def stable_state_root(environ: dict[str, str] | os._Environ[str]) -> Path:
 
 LAUNCH_MISMATCH_VALUE_MAX = 180
 
+# `\t` delimits row fields and `,`/`=` delimit metadata pairs. The rest is every
+# character `str.splitlines()` treats as a line break -- what every registry reader
+# and writer splits rows on. Linux permits all of them in a path, and stripping only
+# `\t\n\r=,` left eight that still split a row (VT, FF, FS, GS, RS, NEL, LS, PS).
+_REGISTRY_UNSAFE = frozenset(
+    ",=\t\n\r\v\f\x1c\x1d\x1e\x85\u2028\u2029"
+)
+
 
 def _registry_safe(value: str, limit: int = LAUNCH_MISMATCH_VALUE_MAX) -> str:
     """One registry metadata value: no separator may survive inside it.
@@ -3767,7 +3783,7 @@ def _registry_safe(value: str, limit: int = LAUNCH_MISMATCH_VALUE_MAX) -> str:
     """
 
     cleaned = "".join(
-        "_" if character in ",\t\n\r=" else character for character in str(value)
+        "_" if character in _REGISTRY_UNSAFE else character for character in str(value)
     )
     return cleaned[:limit]
 
@@ -3798,19 +3814,26 @@ def launch_mismatch_annotation(detail: str) -> dict[str, str]:
         return {}
     roots = sorted(str(name) for name in mismatches)
     annotation = {"launch_mismatch_roots": _registry_safe("|".join(roots))}
-    first = mismatches.get(roots[0])
-    if isinstance(first, dict):
-        fields = first.get("fields")
+    # The detail paths can only describe ONE root, so name it: an alphabetical
+    # first pick made a row list three roots while its paths silently described
+    # `grounding_roots.cwd`, which is the inference this record exists to remove.
+    # `runtime_root` is the one that produced defect Q, so it is preferred.
+    subject = "runtime_root" if "runtime_root" in mismatches else roots[0]
+    detail_of = mismatches.get(subject)
+    if isinstance(detail_of, dict):
+        fields = detail_of.get("fields")
         if isinstance(fields, list) and fields:
             annotation["launch_mismatch_fields"] = _registry_safe(
-                "|".join(str(item) for item in fields)
+                subject + ":" + "|".join(str(item) for item in fields)
             )
         for key, source in (("expected", "launch_mismatch_expected"),
                             ("actual", "launch_mismatch_observed")):
-            side = first.get(key)
+            side = detail_of.get(key)
             path = side.get("path") if isinstance(side, dict) else side
             if path:
-                annotation[source] = _registry_safe(path)
+                # `:` qualifies, never `=` -- that one separates metadata pairs and
+                # `_registry_safe` strips it, which would silently mangle the value.
+                annotation[source] = _registry_safe(subject) + ":" + _registry_safe(path)
     return annotation
 
 
