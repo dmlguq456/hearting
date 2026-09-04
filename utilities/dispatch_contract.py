@@ -3755,6 +3755,65 @@ def stable_state_root(environ: dict[str, str] | os._Environ[str]) -> Path:
     return state_root(environ) / "dispatch"
 
 
+LAUNCH_MISMATCH_VALUE_MAX = 180
+
+
+def _registry_safe(value: str, limit: int = LAUNCH_MISMATCH_VALUE_MAX) -> str:
+    """One registry metadata value: no separator may survive inside it.
+
+    Rows are tab-delimited with a comma-separated `k=v` metadata field, so a
+    value carrying a comma, tab, newline or `=` would be parsed back as extra
+    keys. Paths are the realistic offender.
+    """
+
+    cleaned = "".join(
+        "_" if character in ",\t\n\r=" else character for character in str(value)
+    )
+    return cleaned[:limit]
+
+
+def launch_mismatch_annotation(detail: str) -> dict[str, str]:
+    """Turn a launch-fence `launch-runtime-root-mismatch` detail into row fields.
+
+    The fence already reports which sealed root disagreed with the live one
+    (`revalidate_launch_compatibility` returns a per-root `expected`/`actual`/
+    `fields` map, and `launch-fence.py` serializes it), but the launcher recorded
+    only the bare reason on the row. Three codex owners died on 2026-09-04
+    (att-4dbfe919, att-7629175b, att-ce81b143) and the row said
+    `dead-launch-runtime-root-mismatch` with no way to tell whether the offending
+    root was `runtime_root`, `grounding_roots.cwd` or `jobs_path` -- the cause had
+    to be inferred. Carry the answer on the row instead.
+
+    Returns `{}` for any detail this cannot read: a diagnostic must never be the
+    reason a failure path fails.
+    """
+
+    _, _, payload = detail.partition(" ")
+    try:
+        parsed = json.loads(payload)
+    except (ValueError, TypeError):
+        return {}
+    mismatches = parsed.get("mismatches") if isinstance(parsed, dict) else None
+    if not isinstance(mismatches, dict) or not mismatches:
+        return {}
+    roots = sorted(str(name) for name in mismatches)
+    annotation = {"launch_mismatch_roots": _registry_safe("|".join(roots))}
+    first = mismatches.get(roots[0])
+    if isinstance(first, dict):
+        fields = first.get("fields")
+        if isinstance(fields, list) and fields:
+            annotation["launch_mismatch_fields"] = _registry_safe(
+                "|".join(str(item) for item in fields)
+            )
+        for key, source in (("expected", "launch_mismatch_expected"),
+                            ("actual", "launch_mismatch_observed")):
+            side = first.get(key)
+            path = side.get("path") if isinstance(side, dict) else side
+            if path:
+                annotation[source] = _registry_safe(path)
+    return annotation
+
+
 def bytecode_cache_env(
     environ: dict[str, str] | os._Environ[str] | None = None,
 ) -> dict[str, str]:

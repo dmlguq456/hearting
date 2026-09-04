@@ -38,6 +38,7 @@ from dispatch_contract import (  # noqa: E402
     anchored_capacity_failure,
     annotate_attempt_row,
     bytecode_cache_env,
+    launch_mismatch_annotation,
     attempt_launch_is_available,
     attempt_launch_state,
     cancel_governor_reservation,
@@ -2768,8 +2769,16 @@ def main(argv: list[str]) -> int:
             cancel_governor_reservation(governor, governor_root, reservation_token)
             if fence_failure is not None:
                 reason = str(fence_failure["reason"])
+                # The fence knows exactly which sealed root disagreed with the
+                # live one; without this the row carried only the bare reason and
+                # the offending root had to be inferred after the fact.
                 annotate_attempt_row(
-                    jobs, args.attempt_id, {"launch_outcome": "never-launched"}
+                    jobs,
+                    args.attempt_id,
+                    {
+                        "launch_outcome": "never-launched",
+                        **launch_mismatch_annotation(str(fence_failure["detail"])),
+                    },
                 )
                 close_job_row(
                     jobs, args.slug, args.worktree, reason, "", args.attempt_id,
