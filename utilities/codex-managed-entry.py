@@ -157,6 +157,26 @@ def tui_feature_args(feature_status: str) -> list[str]:
     return []
 
 
+def _bytecode_cache_env() -> dict:
+    """`PYTHONPYCACHEPREFIX` for the managed session, imported lazily.
+
+    This gateway sets `AGENT_HOME` to the release, so every hook and utility it
+    launches would otherwise write `__pycache__` into a tree that must stay
+    byte-identical to what it was built from. Imported at call time rather than at
+    module scope: this is an interactive ingress and the contract module is large.
+    Any failure leaves the environment untouched -- bytecode placement must never
+    be the reason a session cannot start.
+    """
+
+    try:
+        sys.path.insert(0, str(ROOT / "utilities"))
+        import dispatch_contract
+
+        return dispatch_contract.bytecode_cache_env()
+    except Exception:
+        return {}
+
+
 def check_runtime(codex: str, workspace: Path, environment: dict[str, str]) -> str:
     """Verify the two runtime surfaces needed by managed entry without login I/O."""
 
@@ -277,6 +297,7 @@ def execute(args: argparse.Namespace) -> int:
         if path.exists() or path.is_symlink():
             raise EntryError(f"managed-socket-already-exists:{path.name}")
     environment = dict(os.environ)
+    environment.update(_bytecode_cache_env())
     environment.update(
         {
             "CODEX_HOME": str(codex_home),

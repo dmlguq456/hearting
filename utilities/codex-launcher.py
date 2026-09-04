@@ -184,11 +184,11 @@ def pinned_runtime(home: Path) -> dict:
         or value.get("mode") not in {"packaged", "linked"}
     ):
         raise LauncherError(f"runtime activation state is incomplete: {path}")
-    active = Path(str(value.get("active_root", "")))
-    if not active.is_absolute() or active.is_symlink():
+    declared = Path(str(value.get("active_root", "")))
+    if not declared.is_absolute():
         raise LauncherError("runtime activation root is unsafe")
     try:
-        active = active.resolve(strict=True)
+        active = declared.resolve(strict=True)
         projected = (home / "hearting").resolve(strict=True)
     except OSError as exc:
         raise LauncherError("runtime activation projection is unavailable") from exc
@@ -199,12 +199,20 @@ def pinned_runtime(home: Path) -> dict:
         raise LauncherError("runtime activation revision is missing")
     checksum = value.get("bundle_checksum")
     if value["mode"] == "packaged":
+        # A packaged bundle addresses the release by symlink when the activation
+        # source was an immutable managed release, so containment and metadata are
+        # asserted on the DECLARED bundle path -- what activation wrote -- and the
+        # resolved path is only used to prove the tree is really there. Resolving
+        # first made a linked bundle read as "escapes bundle storage" and put its
+        # `bundle.json` beside the release, which refused every managed codex
+        # launch with exit 69.
         bundle_root = (home / ".harness" / "bundles").resolve(strict=False)
+        declared_parent = declared.parent
         try:
-            active.relative_to(bundle_root)
+            declared.parent.parent.resolve(strict=False).relative_to(bundle_root)
         except ValueError as exc:
             raise LauncherError("packaged runtime root escapes bundle storage") from exc
-        metadata = active.parent / "bundle.json"
+        metadata = declared_parent / "bundle.json"
         try:
             bundle = json.loads(metadata.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:

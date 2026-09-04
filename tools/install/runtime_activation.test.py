@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import os
 import socket
 import sys
 import tempfile
@@ -244,6 +245,164 @@ class BundleRuntimeStateTest(unittest.TestCase):
                 activation.bundle_runtime_state(source),
                 [str(source / ".agent_reports")],
             )
+
+
+class LinkedReleaseBundleTest(unittest.TestCase):
+    """Defect Q: a packaged bundle copied from an immutable managed release gave
+    one content two paths, and `resolve_agent_home()` ranks the runtime's own
+    bundle pointer above the managed `current` pointer -- so codex/opencode
+    resolved AGENT_HOME to the bundle while the registry sealed the release, and
+    every launch without an explicit AGENT_HOME failed launch-runtime-root-mismatch."""
+
+    def _release(self, root: Path, version: str = "v9.9.9") -> Path:
+        release = root / "releases" / version
+        (release / "core").mkdir(parents=True)
+        (release / "core" / "CORE.md").write_text("release core\n", encoding="utf-8")
+        (release / "utilities").mkdir()
+        (release / "utilities" / "tool.py").write_text("print(1)\n", encoding="utf-8")
+        (release / "RELEASE_VERSION").write_text(version + "\n", encoding="utf-8")
+        return release
+
+    def _checkout(self, root: Path) -> Path:
+        checkout = root / "checkout"
+        (checkout / "core").mkdir(parents=True)
+        (checkout / "core" / "CORE.md").write_text("dev core\n", encoding="utf-8")
+        return checkout
+
+    def _build(self, source: Path, state_home: Path, runtime: str = "codex"):
+        import os
+        previous = os.environ.get("CODEX_HOME")
+        os.environ["CODEX_HOME"] = str(state_home)
+        try:
+            revision = activation.source_revision(source)
+            return activation._build_bundle(runtime, source, revision, "global"), revision
+        finally:
+            if previous is None:
+                os.environ.pop("CODEX_HOME", None)
+            else:
+                os.environ["CODEX_HOME"] = previous
+
+    def test_a_managed_release_is_linked_not_copied(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            release = self._release(root)
+            bundle_source, revision = self._build(release, root / "codex-home")
+            self.assertTrue(revision.startswith("release:"), revision)
+            self.assertTrue(bundle_source.is_symlink())
+            self.assertEqual(
+                Path(os.path.realpath(bundle_source)), Path(os.path.realpath(release))
+            )
+            # The link is the whole bundle payload: nothing was duplicated.
+            self.assertFalse((bundle_source.parent / "source" / "utilities").is_symlink())
+            self.assertTrue((bundle_source / "utilities" / "tool.py").is_file())
+
+    def test_the_bundle_pointer_and_the_release_are_one_object(self):
+        # The exact condition defect Q needed: two paths, one content. After the
+        # fix the two candidate AGENT_HOME values name one filesystem object, so
+        # every consumer that resolves a path (launch tuple, runtime-root guard)
+        # reaches the same identity and the mismatch cannot be constructed.
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            release = self._release(root)
+            bundle_source, _ = self._build(release, root / "codex-home")
+            self.assertNotEqual(str(bundle_source), str(release))
+            self.assertTrue(activation._same_tree(bundle_source, release))
+            self.assertEqual(
+                (bundle_source / "core" / "CORE.md").read_text(encoding="utf-8"),
+                (release / "core" / "CORE.md").read_text(encoding="utf-8"),
+            )
+
+    def test_a_dev_checkout_is_still_copied(self):
+        # A checkout is mutable, so the bundle must still freeze it.
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            checkout = self._checkout(root)
+            bundle_source, revision = self._build(checkout, root / "codex-home")
+            self.assertFalse(revision.startswith("release:"), revision)
+            self.assertFalse(bundle_source.is_symlink())
+            self.assertTrue((bundle_source / "core" / "CORE.md").is_file())
+            checkout_core = checkout / "core" / "CORE.md"
+            checkout_core.write_text("mutated\n", encoding="utf-8")
+            self.assertEqual(
+                (bundle_source / "core" / "CORE.md").read_text(encoding="utf-8"),
+                "dev core\n",
+            )
+
+    def test_rebuilding_reuses_the_link_and_repairs_a_repointed_one(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            release = self._release(root)
+            bundle_source, _ = self._build(release, root / "codex-home")
+            again, _ = self._build(release, root / "codex-home")
+            self.assertEqual(bundle_source, again)
+            elsewhere = self._release(root, "v8.8.8")
+            bundle_source.unlink()
+            os.symlink(elsewhere, bundle_source, target_is_directory=True)
+            repaired, _ = self._build(release, root / "codex-home")
+            self.assertTrue(activation._same_tree(repaired, release))
+
+    def test_discarding_a_linked_bundle_never_removes_the_release(self):
+        import shutil
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            release = self._release(root)
+            bundle_source, _ = self._build(release, root / "codex-home")
+            bundles = bundle_source.parent.parent
+            shutil.rmtree(bundles)
+            self.assertFalse(bundles.exists())
+            self.assertTrue(release.is_dir())
+            self.assertTrue((release / "utilities" / "tool.py").is_file())
+
+    def test_a_linked_bundle_is_not_scanned_as_bundle_residue(self):
+        # bundle_runtime_state walks the active bundle to find runtime state
+        # written inside an immutable tree. A linked bundle owns no tree, so
+        # walking it would descend into the release and report the release's own
+        # contents as this bundle's residue.
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            release = self._release(root)
+            (release / ".agent_reports").mkdir()
+            bundle_source, _ = self._build(release, root / "codex-home")
+            self.assertEqual(activation.bundle_runtime_state(bundle_source), [])
+            # A copied bundle keeps reporting exactly as before. The residue has
+            # to be written after the build: `_bundle_ignore` never copies it in.
+            checkout = self._checkout(root)
+            copied, _ = self._build(checkout, root / "codex-home-2")
+            (copied / ".agent_reports").mkdir()
+            self.assertEqual(
+                activation.bundle_runtime_state(copied), [str(copied / ".agent_reports")]
+            )
+
+    def test_linked_bundle_checksum_still_asserts_content(self):
+        # Review S1: verifying only the link made `bundle_stale` unfalsifiable —
+        # status compares this value against the one it came from — so a release
+        # replaced in place under the same version tag would have read as fresh.
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            release = self._release(root)
+            bundle_source, _ = self._build(release, root / "codex-home")
+            self.assertIsInstance(activation._bundle_checksum(bundle_source), str)
+            (release / "utilities" / "tool.py").write_text("print(2)\n", encoding="utf-8")
+            self.assertIsNone(activation._bundle_checksum(bundle_source))
+
+    def test_linked_bundle_checksum_tracks_the_link_not_a_tree_walk(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            release = self._release(root)
+            bundle_source, _ = self._build(release, root / "codex-home")
+            checksum = activation._bundle_checksum(bundle_source)
+            self.assertIsInstance(checksum, str)
+            # A release stays byte-identical, but a runtime dropping a __pycache__
+            # into it must not read as a stale bundle (it is digest-ignored, and a
+            # linked bundle asserts its link, not the tree behind it).
+            (release / "utilities" / "__pycache__").mkdir()
+            (release / "utilities" / "__pycache__" / "tool.pyc").write_bytes(b"\x00")
+            self.assertEqual(activation._bundle_checksum(bundle_source), checksum)
+            # Repointing the link is exactly what "stale" must mean here.
+            elsewhere = self._release(root, "v7.7.7")
+            bundle_source.unlink()
+            os.symlink(elsewhere, bundle_source, target_is_directory=True)
+            self.assertIsNone(activation._bundle_checksum(bundle_source))
 
 
 if __name__ == "__main__":

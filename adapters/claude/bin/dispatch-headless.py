@@ -36,6 +36,8 @@ from dispatch_contract import (  # noqa: E402
     REPLICA_RESERVATION_ROW_KEYS,
     anchored_capacity_failure,
     annotate_attempt_row,
+    bytecode_cache_env,
+    launch_mismatch_annotation,
     attempt_launch_is_available,
     attempt_launch_state,
     cancel_governor_reservation,
@@ -2213,6 +2215,9 @@ def main(argv: list[str]) -> int:
             GOVERNOR_RESERVATION_ENV: reservation_token,
             "AGENT_HOME": str(args.agent_home),
             "AGENT_DISPATCH_JOBS": str(jobs),
+            # A worker inherits AGENT_HOME at the managed release; keep its
+            # bytecode out of that immutable tree (defect Q pairing).
+            **bytecode_cache_env(),
             "AGENT_DISPATCH_CURRENT_HARNESS": "claude",
             "AGENT_DISPATCH_CURRENT_TRANSPORT": "headless",
             "AGENT_DISPATCH_CURRENT_SANDBOX": "adapter-default",
@@ -2411,9 +2416,21 @@ def main(argv: list[str]) -> int:
             cancel_governor_reservation(governor, governor_root, reservation_token)
             if fence_failure is not None:
                 reason = str(fence_failure["reason"])
-                annotate_attempt_row(
-                    jobs, args.attempt_id, {"launch_outcome": "never-launched"}
-                )
+                # The fence knows exactly which sealed root disagreed with the
+                # live one. This is a diagnostic on a path that is ALREADY
+                # failing, so it can never be allowed to prevent the row from
+                # closing: a raise here would leak the attempt open with a sealed
+                # launch_home, which then pins its release against pruning.
+                annotation = {"launch_outcome": "never-launched"}
+                try:
+                    annotation.update(
+                        launch_mismatch_annotation(str(fence_failure["detail"]))
+                    )
+                    annotate_attempt_row(jobs, args.attempt_id, annotation)
+                except DispatchContractError:
+                    annotate_attempt_row(
+                        jobs, args.attempt_id, {"launch_outcome": "never-launched"}
+                    )
                 close_job_row(
                     jobs, args.slug, args.worktree, reason, "", args.attempt_id,
                 )

@@ -2712,6 +2712,21 @@ def _cleanup_releases(keep: set[Path], *, force_prune_unproven: bool = False) ->
                 file=sys.stderr,
             )
             continue
+        # A runtime activation is a reference this loop never consulted. That was
+        # survivable while a packaged bundle held its own copy; once a bundle
+        # addresses the release by symlink, deleting the release leaves the
+        # runtime pointing at nothing and `harness runtime status` reports
+        # `missing`. `_release_in_use` cannot see this: it reads dispatch rows and
+        # routes, so it covers a release pinned by an OPEN attempt (SD-115 axis 4)
+        # and not one pinned by an idle activation -- an update that skips a
+        # runtime as `foreign` leaves exactly that shape behind.
+        if _release_projection_referenced(candidate):
+            print(
+                f"harness release: {candidate} is still the activation source of a "
+                "runtime; keeping it instead of deleting it",
+                file=sys.stderr,
+            )
+            continue
         if not _succeed_dispatch_state(candidate):
             print(
                 f"harness release: dispatch state carry-forward incomplete for "

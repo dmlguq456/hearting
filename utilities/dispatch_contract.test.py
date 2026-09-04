@@ -3763,4 +3763,141 @@ class ActualRowAssemblyLaunchHomeTest(unittest.TestCase):
                 self.assertNotIn("current", launch_home_field, harness)
 
 
+
+class LaunchMismatchAnnotationTest(unittest.TestCase):
+    """Three codex owners died on 2026-09-04 with `dead-launch-runtime-root-mismatch`
+    and nothing on the row said which root diverged; the cause had to be inferred."""
+
+    def _detail(self, mismatches):
+        return "launch-runtime-root-mismatch " + json.dumps(
+            {"phase": "start", "mismatches": mismatches}, sort_keys=True
+        )
+
+    def test_names_the_diverged_roots_and_fields(self):
+        detail = self._detail({
+            "runtime_root": {
+                "expected": {"path": "/home/u/.local/share/hearting/releases/v1"},
+                "actual": {"path": "/home/u/.codex/.harness/bundles/release-v1-a/source"},
+                "fields": ["binding_digest", "path", "release_id"],
+            },
+        })
+        annotation = D.launch_mismatch_annotation(detail)
+        self.assertEqual(annotation["launch_mismatch_roots"], "runtime_root")
+        self.assertEqual(
+            annotation["launch_mismatch_fields"],
+            "runtime_root:binding_digest|path|release_id",
+        )
+        self.assertEqual(
+            annotation["launch_mismatch_expected"],
+            "runtime_root:/home/u/.local/share/hearting/releases/v1",
+        )
+        self.assertEqual(
+            annotation["launch_mismatch_observed"],
+            "runtime_root:/home/u/.codex/.harness/bundles/release-v1-a/source",
+        )
+
+    def test_every_diverged_root_is_listed(self):
+        detail = self._detail({
+            "runtime_root": {"fields": ["path"]},
+            "jobs_path": {"fields": ["path"]},
+            "grounding_roots.cwd": {"fields": ["release_id"]},
+        })
+        self.assertEqual(
+            D.launch_mismatch_annotation(detail)["launch_mismatch_roots"],
+            "grounding_roots.cwd|jobs_path|runtime_root",
+        )
+
+    def test_values_can_never_break_the_row_encoding(self):
+        # Rows are tab-delimited with comma-separated `k=v` metadata; a raw path
+        # carrying any separator would parse back as extra keys.
+        detail = self._detail({
+            "runtime_root": {
+                "expected": {"path": "/weird,path\twith=separators"},
+                "actual": {"path": "/x"},
+                "fields": ["path"],
+            },
+        })
+        annotation = D.launch_mismatch_annotation(detail)
+        # Every character `str.splitlines()` breaks on, not just the obvious few:
+        # a path may legally contain any of them and each one splits a row.
+        value = annotation["launch_mismatch_expected"].split(":", 1)[1]
+        for separator in (",", "\t", "\n", "\r", "\v", "\f",
+                          "\x1c", "\x1d", "\x1e", "\x85", "\u2028", "\u2029"):
+            self.assertNotIn(separator, value)
+        row = D.parse_registry_metadata(
+            ",".join(f"{key}={value}" for key, value in annotation.items())
+        )
+        self.assertEqual(row["launch_mismatch_observed"], "runtime_root:/x")
+        self.assertEqual(row["launch_mismatch_roots"], "runtime_root")
+
+    def test_the_annotation_survives_the_real_registry_writer(self):
+        # Review B3: the four keys were absent from ATTEMPT_MUTABLE_METADATA, so
+        # annotate_attempt_row raised attempt-immutable-metadata-mutation inside
+        # the launcher's except block, `close_job_row` never ran, and the attempt
+        # leaked open with a sealed launch_home. Every unit test passed because
+        # none of them went through the writer. This one does.
+        detail = self._detail({
+            "runtime_root": {
+                "expected": {"path": "/home/u/.local/share/hearting/releases/v1"},
+                "actual": {"path": "/home/u/.codex/.harness/bundles/release-v1-a/source"},
+                "fields": ["path", "release_id"],
+            },
+        })
+        with tempfile.TemporaryDirectory() as tmp:
+            jobs = Path(tmp) / "jobs.log"
+            attempt = "att-" + "b" * 32
+            meta = ",".join((
+                "attempt_schema_version=2", "dispatch_depth=1", "transport=headless",
+                "execution_surface=registered-headless", "registered_worker=1",
+                "fallback_hop=same-harness-headless", "worker_type=owner",
+                "unit=_kernel/owner", f"attempt_id={attempt}", "launch_claimed=1",
+            ))
+            jobs.write_text("\t".join((
+                "2026-09-04T00:00:00Z", "open", "repo", "worktree", "q-fixture", meta,
+            )) + "\n", encoding="utf-8")
+            annotation = {"launch_outcome": "never-launched"}
+            annotation.update(D.launch_mismatch_annotation(detail))
+            self.assertTrue(D.annotate_attempt_row(jobs, attempt, annotation))
+            row = D.parse_registry_metadata(
+                jobs.read_text(encoding="utf-8").splitlines()[-1].split("\t")[5]
+            )
+            self.assertEqual(row["launch_mismatch_roots"], "runtime_root")
+            self.assertEqual(row["launch_mismatch_fields"], "runtime_root:path|release_id")
+            self.assertTrue(row["launch_mismatch_expected"].startswith("runtime_root:"))
+            self.assertEqual(row["launch_outcome"], "never-launched")
+            # The row still closes, and the diagnostic survives the close.
+            self.assertTrue(
+                D.close_attempt_row(jobs, attempt, "dead-launch-runtime-root-mismatch")
+            )
+            closed = D.parse_registry_metadata(
+                jobs.read_text(encoding="utf-8").splitlines()[-1].split("\t")[5]
+            )
+            self.assertEqual(closed["launch_mismatch_roots"], "runtime_root")
+
+    def test_the_reported_paths_name_the_root_they_describe(self):
+        # Review S7: an alphabetical first pick let a row list three roots while
+        # its paths silently described a different one.
+        detail = self._detail({
+            "grounding_roots.cwd": {"expected": {"path": "/CWD-A"},
+                                    "actual": {"path": "/CWD-B"}, "fields": ["release_id"]},
+            "jobs_path": {"fields": ["path"]},
+            "runtime_root": {"expected": {"path": "/REL"}, "actual": {"path": "/BUNDLE"},
+                             "fields": ["path"]},
+        })
+        annotation = D.launch_mismatch_annotation(detail)
+        self.assertEqual(
+            annotation["launch_mismatch_roots"],
+            "grounding_roots.cwd|jobs_path|runtime_root",
+        )
+        self.assertEqual(annotation["launch_mismatch_fields"], "runtime_root:path")
+        self.assertEqual(annotation["launch_mismatch_expected"], "runtime_root:/REL")
+        self.assertEqual(annotation["launch_mismatch_observed"], "runtime_root:/BUNDLE")
+
+    def test_an_unreadable_detail_is_not_a_second_failure(self):
+        for detail in ("", "launch-runtime-root-mismatch", "reason not-json",
+                       'reason {"mismatches":{}}', 'reason {"mismatches":[]}',
+                       "reason null"):
+            self.assertEqual(D.launch_mismatch_annotation(detail), {}, detail)
+
+
 if __name__=="__main__": unittest.main()

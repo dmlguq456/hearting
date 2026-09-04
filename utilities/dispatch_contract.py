@@ -174,6 +174,14 @@ ATTEMPT_MUTABLE_METADATA = {
     "cancellation_receipt_digest",
     "quiescence_pgid_proof",
     "quiescence_descendant_proof",
+    # Launch-root diagnostics, written once on the fence-failure path. They must be
+    # MUTABLE, not terminal evidence: `_immutable_attempt_identity` folds every key
+    # outside this set into the row's identity, so recording them as evidence would
+    # make two observations of one attempt disagree (`attempt-identity-conflict`).
+    "launch_mismatch_roots",
+    "launch_mismatch_fields",
+    "launch_mismatch_expected",
+    "launch_mismatch_observed",
 }
 ATTEMPT_TERMINAL_EVIDENCE_KEYS = {
     "api_status",
@@ -3753,6 +3761,111 @@ def stable_state_root(environ: dict[str, str] | os._Environ[str]) -> Path:
     §13.33.2-(1)): `state_root(environ) / "dispatch"`."""
 
     return state_root(environ) / "dispatch"
+
+
+LAUNCH_MISMATCH_VALUE_MAX = 180
+
+# `\t` delimits row fields and `,`/`=` delimit metadata pairs. The rest is every
+# character `str.splitlines()` treats as a line break -- what every registry reader
+# and writer splits rows on. Linux permits all of them in a path, and stripping only
+# `\t\n\r=,` left eight that still split a row (VT, FF, FS, GS, RS, NEL, LS, PS).
+_REGISTRY_UNSAFE = frozenset(
+    ",=\t\n\r\v\f\x1c\x1d\x1e\x85\u2028\u2029"
+)
+
+
+def _registry_safe(value: str, limit: int = LAUNCH_MISMATCH_VALUE_MAX) -> str:
+    """One registry metadata value: no separator may survive inside it.
+
+    Rows are tab-delimited with a comma-separated `k=v` metadata field, so a
+    value carrying a comma, tab, newline or `=` would be parsed back as extra
+    keys. Paths are the realistic offender.
+    """
+
+    cleaned = "".join(
+        "_" if character in _REGISTRY_UNSAFE else character for character in str(value)
+    )
+    return cleaned[:limit]
+
+
+def launch_mismatch_annotation(detail: str) -> dict[str, str]:
+    """Turn a launch-fence `launch-runtime-root-mismatch` detail into row fields.
+
+    The fence already reports which sealed root disagreed with the live one
+    (`revalidate_launch_compatibility` returns a per-root `expected`/`actual`/
+    `fields` map, and `launch-fence.py` serializes it), but the launcher recorded
+    only the bare reason on the row. Three codex owners died on 2026-09-04
+    (att-4dbfe919, att-7629175b, att-ce81b143) and the row said
+    `dead-launch-runtime-root-mismatch` with no way to tell whether the offending
+    root was `runtime_root`, `grounding_roots.cwd` or `jobs_path` -- the cause had
+    to be inferred. Carry the answer on the row instead.
+
+    Returns `{}` for any detail this cannot read: a diagnostic must never be the
+    reason a failure path fails.
+    """
+
+    _, _, payload = detail.partition(" ")
+    try:
+        parsed = json.loads(payload)
+    except (ValueError, TypeError):
+        return {}
+    mismatches = parsed.get("mismatches") if isinstance(parsed, dict) else None
+    if not isinstance(mismatches, dict) or not mismatches:
+        return {}
+    roots = sorted(str(name) for name in mismatches)
+    annotation = {"launch_mismatch_roots": _registry_safe("|".join(roots))}
+    # The detail paths can only describe ONE root, so name it: an alphabetical
+    # first pick made a row list three roots while its paths silently described
+    # `grounding_roots.cwd`, which is the inference this record exists to remove.
+    # `runtime_root` is the one that produced defect Q, so it is preferred.
+    subject = "runtime_root" if "runtime_root" in mismatches else roots[0]
+    detail_of = mismatches.get(subject)
+    if isinstance(detail_of, dict):
+        fields = detail_of.get("fields")
+        if isinstance(fields, list) and fields:
+            annotation["launch_mismatch_fields"] = _registry_safe(
+                subject + ":" + "|".join(str(item) for item in fields)
+            )
+        for key, source in (("expected", "launch_mismatch_expected"),
+                            ("actual", "launch_mismatch_observed")):
+            side = detail_of.get(key)
+            path = side.get("path") if isinstance(side, dict) else side
+            if path:
+                # `:` qualifies, never `=` -- that one separates metadata pairs and
+                # `_registry_safe` strips it, which would silently mangle the value.
+                annotation[source] = _registry_safe(subject) + ":" + _registry_safe(path)
+    return annotation
+
+
+def bytecode_cache_env(
+    environ: dict[str, str] | os._Environ[str] | None = None,
+) -> dict[str, str]:
+    """`PYTHONPYCACHEPREFIX` pointing at the state root, for a harness child.
+
+    A managed release must stay byte-identical to what it was built from, but
+    Python writes `__pycache__` beside every module it imports, so any process
+    running with `AGENT_HOME` at a release drops bytecode into it (91 files were
+    already there before this was wired). That was tolerable while each runtime
+    held its own bundle copy; once packaged bundles link the release, all three
+    runtimes write into the one shared tree.
+
+    A prefix keeps the caching (the point of it) and moves the artifacts to
+    state, where every other mutable byte the harness produces already lives.
+    Digests are unaffected either way -- `__pycache__` is in `_IGNORE_NAMES` --
+    so this is about the immutability invariant, not about a checksum.
+
+    Returns an empty mapping when the state root cannot be resolved: bytecode
+    placement must never be the reason a launch fails.
+    """
+
+    source = os.environ if environ is None else environ
+    if source.get("PYTHONPYCACHEPREFIX") or source.get("PYTHONDONTWRITEBYTECODE"):
+        return {}
+    try:
+        root = state_root(source)
+    except (DispatchContractError, OSError):
+        return {}
+    return {"PYTHONPYCACHEPREFIX": str(root / "pycache")}
 
 
 def _fallback_registry(
