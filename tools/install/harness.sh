@@ -25,6 +25,22 @@ if [ -z "${AGENT_HOME:-}" ]; then
   export AGENT_HOME
 fi
 
+# A managed release must stay byte-identical to what it was built from, but
+# Python writes `__pycache__` beside every module it imports, so running this CLI
+# with AGENT_HOME at a release drops bytecode into it. Keep the caching, put the
+# artifacts in state. An explicit caller preference always wins.
+if [ -z "${PYTHONPYCACHEPREFIX:-}" ] && [ -z "${PYTHONDONTWRITEBYTECODE:-}" ]; then
+  _state_root=${HARNESS_STATE_ROOT:-${XDG_STATE_HOME:+$XDG_STATE_HOME/hearting}}
+  if [ -z "$_state_root" ] && [ -n "${HOME:-}" ]; then
+    _state_root=$HOME/.local/state/hearting
+  fi
+  if [ -n "$_state_root" ]; then
+    PYTHONPYCACHEPREFIX=$_state_root/pycache
+    export PYTHONPYCACHEPREFIX
+  fi
+  unset _state_root
+fi
+
 PY=$(command -v python3 || command -v python || true)
 if [ -z "$PY" ]; then echo "harness: python3 is required." >&2; exit 1; fi
 if [ ! -f "$INSTALLER_PY" ]; then echo "harness: installer.py was not found ($INSTALLER_PY)." >&2; exit 1; fi

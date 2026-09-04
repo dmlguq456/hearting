@@ -37,6 +37,7 @@ from dispatch_contract import (  # noqa: E402
     SUPERVISOR_LEASE_KIND,
     anchored_capacity_failure,
     annotate_attempt_row,
+    bytecode_cache_env,
     attempt_launch_is_available,
     attempt_launch_state,
     cancel_governor_reservation,
@@ -2557,6 +2558,9 @@ def main(argv: list[str]) -> int:
             GOVERNOR_RESERVATION_ENV: reservation_token,
             "AGENT_HOME": str(args.agent_home),
             "AGENT_DISPATCH_JOBS": str(jobs),
+            # A worker inherits AGENT_HOME at the managed release; keep its
+            # bytecode out of that immutable tree (defect Q pairing).
+            **bytecode_cache_env(),
             "AGENT_DISPATCH_CURRENT_HARNESS": "codex",
             "AGENT_DISPATCH_CURRENT_TRANSPORT": "headless",
             "AGENT_DISPATCH_CURRENT_SANDBOX": effective_runtime_sandbox(args),

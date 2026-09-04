@@ -201,6 +201,14 @@ def _real_source(source: Optional[str]) -> Path:
     return root
 
 
+def _same_tree(left: Path, right: Path) -> bool:
+    """True when two paths name one filesystem object, symlinks resolved."""
+    try:
+        return os.path.realpath(left) == os.path.realpath(right)
+    except OSError:
+        return False
+
+
 def validate_request(
     runtime: str,
     command: str,
@@ -633,8 +641,38 @@ def _validate_source_symlinks(source_root: Path) -> None:
                 ) from exc
 
 
+def _managed_release_source(source_root: Path, revision: str) -> bool:
+    """True when the activation source is an immutable managed release.
+
+    `source_revision()` returns a `release:<version>:<digest>` revision only for a
+    tree carrying a real `RELEASE_VERSION` marker, which is exactly the shape the
+    release publisher produces and never what a dev checkout produces. That is the
+    one signal for "this tree is already immutable and versioned", so it is also
+    the condition under which copying it a second time buys nothing.
+    """
+    return revision.startswith("release:") and (source_root / "RELEASE_VERSION").is_file()
+
+
 # destructive-ok: reason=publish or discard one immutable runtime bundle staging tree; boundary=one revision bundle and sibling staging directory below runtime state
 def _build_bundle(runtime: str, source_root: Path, revision: str, scope: str) -> Path:
+    """Materialize the packaged runtime root for one revision.
+
+    An immutable managed release is *linked*, not copied. `packaged` was designed
+    (e681b454, 2026-07-14) to give a runtime a checkout-independent immutable root
+    back when the only alternative was a live dev checkout; the managed release
+    tree now provides exactly that, per version, on its own. Copying it again
+    produced a second path for one content, and `resolve_agent_home()` ranks the
+    runtime's own bundle pointer above the managed `current` pointer -- so codex
+    and opencode resolved AGENT_HOME to the bundle while the dispatch registry
+    sealed `launch_home` at the release, and every launch without an explicit
+    AGENT_HOME failed `launch-runtime-root-mismatch` (defect Q). The validity test
+    asked "is this a hearting root?" and never "is it the same root everyone else
+    agreed on".
+
+    A link makes those two paths one filesystem object, so the question cannot be
+    answered two ways. A dev checkout keeps the copy: it is mutable, so a bundle
+    still has to freeze it.
+    """
     if "+dirty:" in revision:
         raise ActivationError("packaged activation refuses a dirty git source")
     state_dir = paths.harness_state_dir(runtime, scope)
@@ -644,25 +682,34 @@ def _build_bundle(runtime: str, source_root: Path, revision: str, scope: str) ->
     bundle = state_dir / "bundles" / key
     bundle_source = bundle / "source"
     metadata_path = bundle / "bundle.json"
+    linked = _managed_release_source(source_root, revision)
     if metadata_path.exists() and bundle_source.is_dir():
         metadata = _load_json(metadata_path) or {}
-        actual_checksum = _tree_digest(bundle_source)
-        if (
+        if bool(metadata.get("source_link")) == linked and (
             metadata.get("source_revision") == revision
-            and metadata.get("checksum") == actual_checksum
         ):
-            return bundle_source
+            if linked:
+                # The link target is the identity; re-walking the tree would only
+                # re-derive the release digest the key already carries.
+                if bundle_source.is_symlink() and _same_tree(bundle_source, source_root):
+                    return bundle_source
+            elif metadata.get("checksum") == _tree_digest(bundle_source):
+                return bundle_source
 
     staging = state_dir / "bundles" / (".staging-" + uuid.uuid4().hex)
     staging_source = staging / "source"
     staging.parent.mkdir(parents=True, exist_ok=True)
     try:
-        shutil.copytree(
-            source_root,
-            staging_source,
-            symlinks=True,
-            ignore=_bundle_ignore,
-        )
+        if linked:
+            staging.mkdir(parents=True, exist_ok=True)
+            os.symlink(source_root, staging_source, target_is_directory=True)
+        else:
+            shutil.copytree(
+                source_root,
+                staging_source,
+                symlinks=True,
+                ignore=_bundle_ignore,
+            )
         _atomic_json(
             staging / "bundle.json",
             {
@@ -670,12 +717,15 @@ def _build_bundle(runtime: str, source_root: Path, revision: str, scope: str) ->
                 "runtime": runtime,
                 "source_root": str(source_root),
                 "source_revision": revision,
+                "source_link": linked,
                 "checksum": _tree_digest(staging_source),
                 "created_at": _utc_now(),
                 "external_dependencies": [],
             },
         )
         if bundle.exists():
+            # rmtree never follows a symlink into its target, so discarding a
+            # linked bundle removes the link and leaves the release alone.
             shutil.rmtree(bundle)
         os.replace(staging, bundle)
     except Exception:
@@ -2195,6 +2245,15 @@ def _bundle_checksum(active_root: Path) -> Optional[str]:
     expected = metadata.get("checksum")
     if not isinstance(expected, str):
         return None
+    if metadata.get("source_link"):
+        # A linked bundle owns no content of its own: what can go stale is the
+        # link, not the tree behind it (a managed release is immutable and
+        # versioned by path). Verify the identity that this bundle actually
+        # asserts, and do not re-walk a release on every status call.
+        recorded = metadata.get("source_root")
+        if not isinstance(recorded, str) or not active_root.is_symlink():
+            return None
+        return expected if _same_tree(active_root, Path(recorded)) else None
     return expected if _tree_digest(active_root) == expected else None
 
 

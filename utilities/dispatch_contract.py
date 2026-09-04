@@ -3755,6 +3755,37 @@ def stable_state_root(environ: dict[str, str] | os._Environ[str]) -> Path:
     return state_root(environ) / "dispatch"
 
 
+def bytecode_cache_env(
+    environ: dict[str, str] | os._Environ[str] | None = None,
+) -> dict[str, str]:
+    """`PYTHONPYCACHEPREFIX` pointing at the state root, for a harness child.
+
+    A managed release must stay byte-identical to what it was built from, but
+    Python writes `__pycache__` beside every module it imports, so any process
+    running with `AGENT_HOME` at a release drops bytecode into it (91 files were
+    already there before this was wired). That was tolerable while each runtime
+    held its own bundle copy; once packaged bundles link the release, all three
+    runtimes write into the one shared tree.
+
+    A prefix keeps the caching (the point of it) and moves the artifacts to
+    state, where every other mutable byte the harness produces already lives.
+    Digests are unaffected either way -- `__pycache__` is in `_IGNORE_NAMES` --
+    so this is about the immutability invariant, not about a checksum.
+
+    Returns an empty mapping when the state root cannot be resolved: bytecode
+    placement must never be the reason a launch fails.
+    """
+
+    source = os.environ if environ is None else environ
+    if source.get("PYTHONPYCACHEPREFIX") or source.get("PYTHONDONTWRITEBYTECODE"):
+        return {}
+    try:
+        root = state_root(source)
+    except (DispatchContractError, OSError):
+        return {}
+    return {"PYTHONPYCACHEPREFIX": str(root / "pycache")}
+
+
 def _fallback_registry(
     agent_home: Path, environ: dict[str, str] | os._Environ[str]
 ) -> Path:
