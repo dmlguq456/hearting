@@ -210,10 +210,14 @@ def _r4_retired_rows(root: Path) -> Tuple[bool, set]:
 
 
 def legacy_top_level_retired(root: Path) -> bool:
-    """D-85: reads only the R1-sealed retire ordered inventory (D-84). Absent
+    """D-85: judged from the R1-sealed retire ordered inventory (D-84). Absent
     inventory is fail-closed `False`; an empty inventory is `True`; otherwise
-    `True` only when a completed R4 run's evidence covers every entry and none
-    of those source paths remain as a regular file."""
+    `True` only when every entry is accounted for -- by a completed R4 run's evidence,
+    or (for the `plans/stage-sessions` rows D-79 assigns to `C-RT`) by a re-verified
+    relocation disposition -- and none of the still-outstanding source paths remain as
+    a regular file. Reading that second source is an extension of D-85's wording and is
+    reported as spec-impact for the closing W7G transaction.
+    """
     inventory = RS.sealed_retire_inventory(root)
     if inventory is None:
         return False
@@ -221,10 +225,20 @@ def legacy_top_level_retired(root: Path) -> bool:
     if not entries:
         return True
     wanted = {(e.get("source_locator"), _sha256_key(e.get("sha256"))) for e in entries}
-    approved, retired = _r4_retired_rows(root)
-    if not approved or not wanted <= retired:
-        return False
+    # D-79 C-RT relocations are accounted for by their own re-verified disposition
+    # record, not by an R4 deletion that can never happen for them. Every other entry
+    # still needs R4's approval and evidence, so a partly-disposed inventory is not a
+    # shortcut past the retirement gate.
+    disposed = {(source, _sha256_key(sha)) for source, sha in RS.stage_sessions_disposed_rows(root)}
+    outstanding = wanted - disposed
+    if outstanding:
+        approved, retired = _r4_retired_rows(root)
+        if not approved or not outstanding <= retired:
+            return False
     for entry in entries:
+        key = (entry.get("source_locator"), _sha256_key(entry.get("sha256")))
+        if key in disposed:
+            continue
         path = root / entry["source_locator"]
         if path.is_file() and not path.is_symlink():
             return False

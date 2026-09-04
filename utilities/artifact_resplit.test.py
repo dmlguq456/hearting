@@ -29,6 +29,25 @@ ALL = ["atomic-outcome", "known-scope", "no-shared-contract", "no-resource-run",
 REPO_ID, ROOT_ID = "repo_" + "a" * 32, "root_" + "b" * 32
 
 
+def _tree_snapshot(root, skip_runtime=True):
+    """path -> (size, mtime_ns) for every regular file, hidden ones included.
+
+    `skip_runtime` drops the producer's own runtime directory so a snapshot taken
+    around a read-only call is not defeated by an unrelated lock refresh.
+    """
+    out = {}
+    root = Path(root)
+    for path in sorted(root.rglob("*")):
+        if not path.is_file() or path.is_symlink():
+            continue
+        rel = path.relative_to(root).as_posix()
+        if skip_runtime and rel.startswith(".runtime/artifact-producer/v1/journal"):
+            continue
+        st = path.stat()
+        out[rel] = (st.st_size, st.st_mtime_ns)
+    return out
+
+
 class Fixture(unittest.TestCase):
     """Base: a temp artifact root with one sealed W7C lump cycle (the fixture in §5)."""
 
@@ -1472,6 +1491,11 @@ class SupersessionEventTests(Fixture):
 
 HEARTING_CANARY_ROOT = Path("/home/nas/user/Uihyeop/personal/hearting/.agent_reports")
 HEARTING_CANARY_LUMP = "cyc_7d129f5a4b4059fdc8ff3005333e1668"
+# The five deviations the canary run recorded before this cycle. It is spelled out
+# rather than derived from `DEVIATION_CHECKS` so that adding a check cannot silently
+# change what this regression claims the canary shows.
+CANARY_RECORDED_DEVIATIONS = ("started-on", "cycle-state", "capability",
+                              "compat-supersession", "backup-location")
 
 
 class StartedOnTests(Fixture):
@@ -1799,7 +1823,12 @@ class DeviationAuditTests(Fixture):
     def test_no_run_is_reported_as_no_run_not_as_clean(self):
         report = W.resplit_deviations(self.root)
         self.assertEqual(report["status"], "no-run")
-        self.assertEqual(report["checks"], [])
+        # The five run-scoped checks have no evidence yet; the two side-record checks
+        # are still judged, so an untouched root can never read as clean.
+        self.assertEqual(sorted(report["not_evaluated"]),
+                         sorted(["started-on", "cycle-state", "capability",
+                                 "compat-supersession", "backup-location"]))
+        self.assertEqual({c["id"] for c in report["checks"]}, set(W.DEVIATION_CHECKS))
 
 
 @unittest.skipUnless(
@@ -1817,8 +1846,14 @@ class HeartingCanaryRegressionTests(unittest.TestCase):
 
     def test_canary_run_still_reports_all_five_recorded_deviations(self):
         report = W.resplit_deviations(HEARTING_CANARY_ROOT, lump_cycle_id=HEARTING_CANARY_LUMP)
-        self.assertEqual(sorted(report["deviations"]), sorted(W.DEVIATION_CHECKS))
+        self.assertEqual(sorted(report["deviations"]), sorted(CANARY_RECORDED_DEVIATIONS))
+        self.assertEqual(report["not_evaluated"], [])
         by_id = {c["id"]: c for c in report["checks"]}
+        # The two checks added by this cycle are clean on the canary and must stay so:
+        # its lump campaign still holds a live relocation cycle (so `active` is correct
+        # there), and it has no `plans/stage-sessions` residue at all.
+        self.assertEqual(by_id["campaign-state"]["status"], "ok")
+        self.assertEqual(by_id["stage-sessions"]["status"], "ok")
         self.assertEqual(len(by_id["cycle-state"]["rows"]), 16)
         self.assertEqual(len(by_id["started-on"]["rows"]), 16)
         self.assertTrue(all(r["observed"] == "active" for r in by_id["cycle-state"]["rows"]))
@@ -1834,6 +1869,646 @@ class HeartingCanaryRegressionTests(unittest.TestCase):
         after = {str(p): (p.stat().st_mtime_ns, p.stat().st_size)
                  for p in P._walk_files(run_dir) if p.is_file()}
         self.assertEqual(before, after)
+
+
+class DatePrefixParserTests(Fixture):
+    """D-79 priority (1). `20260727_slug` is the shape TTS_Baselines actually uses."""
+
+    def _unit(self, name, body="body\n"):
+        rel = f"plans/{name}/plan.md"
+        self.w(rel, body)
+        rows_path = Path(self._tmp.name) / f"census-{name}.jsonl"
+        rows_path.write_text(json.dumps({
+            "path": rel, "kind": "file", "disposition": "w6-baseline-legacy",
+            "detail": "cycle-candidate:plans"}) + "\n")
+        route, route_file = self.route()
+        report = C.migrate_delta(self.root, census_rows=rows_path, route_file=route_file,
+                                 capability="autopilot-code", intensity="direct", excludes=[],
+                                 approval_receipt_sha256=None, campaign_id=self.lump_campaign_id)
+        self.close(route, route_file)
+        C.migrate_seal(self.root, run_dir=Path(report["run_dir"]))
+        C.compat_append(self.root, maps=[Path(report["run_dir"]) / "compatibility-map.jsonl"])
+        idx = W.scan_lumps(self.root, root_slug=self.root_slug)
+        lump = next(l for l in idx["lumps"] if l["lump_cycle_id"] == report["cycle_id"])
+        return next(u for u in lump["cycle_units"]
+                    if u["cycle_key"] == f"legacy:{self.root_slug}:plans/{name}")
+
+    def test_eight_digit_underscore_prefix_is_a_date(self):
+        unit = self._unit("20260727_dataset_campaign_pilot")
+        self.assertEqual(unit["started_on"], "2026-07-27T00:00:00Z")
+        self.assertEqual(unit["started_on_source"], "directory-date-prefix")
+
+    def test_eight_digit_dash_prefix_is_a_date(self):
+        unit = self._unit("20260806-supertonic")
+        self.assertEqual(unit["started_on"], "2026-08-06T00:00:00Z")
+
+    def test_dashed_prefix_still_parses(self):
+        unit = self._unit("2026-07-31_english_probe")
+        self.assertEqual(unit["started_on"], "2026-07-31T00:00:00Z")
+
+    def test_eight_digits_that_are_not_a_calendar_date_fall_through(self):
+        # `12345678_x` is a run id, not 1234-56-78. Without the calendar check the old
+        # widening would seal an impossible instant as the cycle's start.
+        unit = self._unit("12345678_run", body="written on 2026-02-11\n")
+        self.assertEqual(unit["started_on"], "2026-02-11T00:00:00Z")
+        self.assertEqual(unit["started_on_source"], "entry-document-date")
+
+    def test_february_thirtieth_is_refused(self):
+        unit = self._unit("20260230_impossible", body="written on 2026-03-09\n")
+        self.assertEqual(unit["started_on_source"], "entry-document-date")
+
+
+class DeviationStartedOnOverrideTests(Fixture):
+    """J: an admitted display-quality correction is the expectation, not a deviation."""
+
+    def _proposal_with_override(self, value="2026-05-05"):
+        proposal = self.build_proposal()
+        proposal["proposals"].append({
+            "proposal_id": "prop-dq", "fingerprint": "fp-prop-dq", "lane": "display-quality",
+            "target_ids": [f"legacy:{self.root_slug}:plans/2026-04-01_alpha"],
+            "cited_evidence_ids": ["plans/2026-04-01_alpha/plan.md"],
+            "source_cutoff": proposal["source_cutoff"], "producer_version": "v1",
+            "projection_version": "v1", "policy_version": "v1",
+            "proposed_value": {"started_on": value}, "confidence": 0.9, "rationale": "fixture",
+        })
+        return proposal
+
+    def _run(self, proposal):
+        self.r1(self.write_proposal(proposal))
+        route, route_file = self.route()
+        self.r2(route_file)
+        self.r3()
+
+    def test_admitted_override_is_the_expected_value(self):
+        self._run(self._proposal_with_override())
+        report = W.resplit_deviations(self.root, lump_cycle_id=self.lump_cycle_id)
+        self.assertEqual([c for c in report["checks"] if c["id"] == "started-on"][0]["rows"], [])
+        record = W._find_cycle_by_key(self.root, f"legacy:{self.root_slug}:plans/2026-04-01_alpha")
+        self.assertEqual(record["started_on_source"], "display-quality-proposal")
+        self.assertEqual(record["started_on"], "2026-05-05T00:00:00Z")
+
+    def test_derived_value_would_have_been_reported_as_a_deviation(self):
+        # The sealed inventory still carries the derived date. Dropping the record's
+        # `started_on_source` puts the audit back on the pre-fix comparison, and it must
+        # report the admitted correction as a deviation -- that is the false positive the
+        # override branch exists to remove, shown failing.
+        self._run(self._proposal_with_override())
+        run_dir = W._find_run_dir(self.root, self.lump_cycle_id)
+        inv = P._read_json(W._admission_dir(run_dir) / "lump-inventory.json")
+        unit = next(u for l in inv["lumps"] for u in l["cycle_units"]
+                    if u["cycle_key"].endswith("plans/2026-04-01_alpha"))
+        self.assertEqual(unit["started_on"], "2026-04-01T00:00:00Z")
+        key = f"legacy:{self.root_slug}:plans/2026-04-01_alpha"
+        record = dict(W._find_cycle_by_key(self.root, key))
+        record["started_on_source"] = "directory-date-prefix"
+        P._write_cycle_record(self.root, record, exclusive=False)
+        report = W.resplit_deviations(self.root, lump_cycle_id=self.lump_cycle_id)
+        rows = [c for c in report["checks"] if c["id"] == "started-on"][0]["rows"]
+        self.assertEqual([(r["expected"], r["observed"]) for r in rows],
+                         [("2026-04-01T00:00:00Z", "2026-05-05T00:00:00Z")])
+
+    def test_one_proposal_row_covering_two_cycles_is_applied_to_both(self):
+        proposal = self._proposal_with_override()
+        proposal["proposals"][-1]["target_ids"] = [
+            f"legacy:{self.root_slug}:plans/2026-04-01_alpha",
+            f"legacy:{self.root_slug}:plans/2026-04-02_beta",
+        ]
+        self._run(proposal)
+        report = W.resplit_deviations(self.root, lump_cycle_id=self.lump_cycle_id)
+        self.assertEqual([c for c in report["checks"] if c["id"] == "started-on"][0]["rows"], [])
+        for name in ("plans/2026-04-01_alpha", "plans/2026-04-02_beta"):
+            record = W._find_cycle_by_key(self.root, f"legacy:{self.root_slug}:{name}")
+            self.assertEqual(record["started_on"], "2026-05-05T00:00:00Z")
+            self.assertEqual(record["started_on_source"], "display-quality-proposal")
+
+    def test_missing_proposal_evidence_is_a_deviation_not_a_pass(self):
+        self._run(self._proposal_with_override())
+        run_dir = W._find_run_dir(self.root, self.lump_cycle_id)
+        (W._admission_dir(run_dir) / "proposal.json").unlink()
+        report = W.resplit_deviations(self.root, lump_cycle_id=self.lump_cycle_id)
+        rows = [c for c in report["checks"] if c["id"] == "started-on"][0]["rows"]
+        self.assertTrue(any(r.get("code") == "override-evidence-missing" for r in rows))
+        self.assertIn("started-on", report["deviations"])
+
+    def test_corrupt_proposal_evidence_is_a_deviation(self):
+        self._run(self._proposal_with_override())
+        run_dir = W._find_run_dir(self.root, self.lump_cycle_id)
+        (W._admission_dir(run_dir) / "proposal.json").write_text("{not json")
+        report = W.resplit_deviations(self.root, lump_cycle_id=self.lump_cycle_id)
+        rows = [c for c in report["checks"] if c["id"] == "started-on"][0]["rows"]
+        self.assertTrue(any(r.get("code") in {"override-evidence-missing", "override-evidence-invalid"}
+                            for r in rows))
+
+
+class CampaignSupersessionTests(Fixture):
+    """H (D-81): the lump's campaign follows its cycles."""
+
+    def test_r3_supersedes_a_campaign_whose_every_cycle_is_superseded(self):
+        self.run_full()
+        campaign = P.read_campaign(self.root, self.lump_campaign_id)
+        self.assertEqual(campaign["state"], "superseded")
+        run_dir = W._find_run_dir(self.root, self.lump_cycle_id)
+        rows = C._read_jsonl(run_dir / "events-campaign.jsonl")
+        self.assertEqual([r["event_type"] for r in rows], ["campaign.superseded"])
+        self.assertEqual(rows[0]["target_id"], self.lump_campaign_id)
+        self.assertEqual(rows[0]["stream_sequence"], 2)
+
+    def test_a_campaign_with_a_live_cycle_stays_active(self):
+        # hearting's shape: the lump shares its campaign with a real relocation cycle.
+        self.w("documents/live-unit/notes.md", "written on 2026-04-09\n")
+        rows_path = Path(self._tmp.name) / "live-rows.jsonl"
+        rows_path.write_text(json.dumps({
+            "path": "documents/live-unit/notes.md", "kind": "file",
+            "disposition": "w6-baseline-legacy", "detail": "cycle-candidate:documents"}) + "\n")
+        route, route_file = self.route()
+        report = C.migrate_delta(self.root, census_rows=rows_path, route_file=route_file,
+                                 capability="autopilot-code", intensity="direct", excludes=[],
+                                 approval_receipt_sha256=None, campaign_id=self.lump_campaign_id)
+        self.close(route, route_file)
+        C.migrate_seal(self.root, run_dir=Path(report["run_dir"]))
+        C.compat_append(self.root, maps=[Path(report["run_dir"]) / "compatibility-map.jsonl"])
+        self.run_full()
+        campaign = P.read_campaign(self.root, self.lump_campaign_id)
+        self.assertEqual(campaign["state"], "active")
+        run_dir = W._find_run_dir(self.root, self.lump_cycle_id)
+        journal = P._read_json(run_dir / "journal-r3.json")
+        self.assertEqual(journal["campaign_supersede"]["code"], "campaign-retained-live-cycles")
+        self.assertFalse((run_dir / "events-campaign.jsonl").is_file())
+
+    def test_fold_reads_the_campaign_event_file(self):
+        self.run_full()
+        fold = W.fold_supersession_events(self.root)
+        self.assertEqual(fold[self.lump_campaign_id]["state"], "superseded")
+        self.assertEqual(fold[self.lump_cycle_id]["state"], "superseded")
+
+    def test_the_campaign_step_is_read_then_act_so_a_replay_duplicates_nothing(self):
+        # A crash anywhere inside the `campaign-superseded` phase replays the whole
+        # phase. Both of its actions have to notice they already happened, otherwise a
+        # roll-forward calls the producer twice and appends a second event row.
+        self.run_full()
+        run_dir = W._find_run_dir(self.root, self.lump_cycle_id)
+        first = C._read_jsonl(run_dir / "events-campaign.jsonl")
+        replay = W._supersede_campaign(self.root, self.lump_cycle_id, dry_run=False)
+        self.assertEqual((replay["phase"], replay["code"]), ("no-op", "already-superseded"))
+        W._campaign_supersession_event(self.root, run_dir, self.lump_campaign_id, [])
+        self.assertEqual(C._read_jsonl(run_dir / "events-campaign.jsonl"), first)
+        self.assertEqual(len(first), 1)
+
+    def test_a_crash_in_the_campaign_phase_before_the_backup_rolls_back(self):
+        self.r1()
+        route, route_file = self.route()
+        self.r2(route_file)
+        with self.assertRaises(W.ResplitError):
+            self.r3(crash_after_phase="campaign-superseded")
+        run_dir = W._find_run_dir(self.root, self.lump_cycle_id)
+        self.assertEqual(P._read_json(run_dir / "journal-r3.json")["phase"], "campaign-superseded")
+        self.assertEqual(len(C._read_jsonl(run_dir / "events-campaign.jsonl")), 1)
+        self.r3()  # A-16.2: before a verified backup, a resumed run rolls back.
+        self.assertEqual(P._read_json(run_dir / "journal-r3.json")["phase"], "rolled-back")
+
+    def test_rollback_restores_the_campaign_record_and_drops_its_events(self):
+        self.r1()
+        route, route_file = self.route()
+        self.r2(route_file)
+        before = (P.campaign_dir(self.root, self.lump_campaign_id) / "campaign.json").read_bytes()
+        with self.assertRaises(W.ResplitError):
+            self.r3(crash_after_phase="campaign-superseded")
+        self.r3()  # resumed without a verified backup -> rolls back
+        run_dir = W._find_run_dir(self.root, self.lump_cycle_id)
+        self.assertEqual(P._read_json(run_dir / "journal-r3.json")["phase"], "rolled-back")
+        after = (P.campaign_dir(self.root, self.lump_campaign_id) / "campaign.json").read_bytes()
+        self.assertEqual(before, after)
+        self.assertFalse((run_dir / "events-campaign.jsonl").is_file())
+
+    def test_correction_gate_supersedes_and_is_idempotent(self):
+        self.run_full()
+        # undo the R3-side effect so the post-hoc surface has something to close, exactly
+        # like the nine roots that finished before it existed
+        campaign = dict(P.read_campaign(self.root, self.lump_campaign_id))
+        campaign["state"] = "active"
+        P._write_campaign(self.root, campaign, exclusive=False)
+        (W._find_run_dir(self.root, self.lump_cycle_id) / "events-campaign.jsonl").unlink()
+        first = W.resplit_legacy_cycle(self.root, gate="campaign-supersede",
+                                       lump_cycle_id=self.lump_cycle_id)
+        self.assertEqual(first["status"], "complete")
+        self.assertEqual(P.read_campaign(self.root, self.lump_campaign_id)["state"], "superseded")
+        second = W.resplit_legacy_cycle(self.root, gate="campaign-supersede",
+                                        lump_cycle_id=self.lump_cycle_id)
+        self.assertEqual(second["status"], "already-applied")
+        run_dir = W._find_run_dir(self.root, self.lump_cycle_id)
+        self.assertEqual(len(C._read_jsonl(run_dir / "events-campaign.jsonl")), 1)
+
+    def test_dry_run_preview_reports_a_live_cycle_instead_of_promising_a_supersede(self):
+        # The producer refuses a campaign with a live cycle anyway, so only the *preview*
+        # depends on this pre-check being right -- and a preview that says
+        # `would-supersede` for a campaign that cannot be superseded is the whole point
+        # of running a dry run first.
+        self.w("documents/live-unit/notes.md", "written on 2026-04-09\n")
+        rows_path = Path(self._tmp.name) / "live-preview-rows.jsonl"
+        rows_path.write_text(json.dumps({
+            "path": "documents/live-unit/notes.md", "kind": "file",
+            "disposition": "w6-baseline-legacy", "detail": "cycle-candidate:documents"}) + "\n")
+        route, route_file = self.route()
+        report = C.migrate_delta(self.root, census_rows=rows_path, route_file=route_file,
+                                 capability="autopilot-code", intensity="direct", excludes=[],
+                                 approval_receipt_sha256=None, campaign_id=self.lump_campaign_id)
+        self.close(route, route_file)
+        C.migrate_seal(self.root, run_dir=Path(report["run_dir"]))
+        C.compat_append(self.root, maps=[Path(report["run_dir"]) / "compatibility-map.jsonl"])
+        self.run_full()
+        result = W.resplit_legacy_cycle(self.root, gate="campaign-supersede",
+                                        lump_cycle_id=self.lump_cycle_id, dry_run=True)
+        self.assertEqual(result["would"]["code"], "campaign-retained-live-cycles")
+        self.assertEqual(result["would"]["phase"], "no-op")
+
+    def test_correction_gate_is_a_typed_no_op_when_the_campaign_is_already_superseded(self):
+        self.run_full()
+        result = W.resplit_legacy_cycle(self.root, gate="campaign-supersede",
+                                        lump_cycle_id=self.lump_cycle_id)
+        self.assertEqual(result["status"], "no-op")
+        self.assertEqual(result["result"]["code"], "already-superseded")
+
+    def test_correction_gate_dry_run_writes_nothing(self):
+        self.run_full()
+        campaign = dict(P.read_campaign(self.root, self.lump_campaign_id))
+        campaign["state"] = "active"
+        P._write_campaign(self.root, campaign, exclusive=False)
+        before = _tree_snapshot(self.root)
+        result = W.resplit_legacy_cycle(self.root, gate="campaign-supersede",
+                                        lump_cycle_id=self.lump_cycle_id, dry_run=True)
+        self.assertEqual(result["status"], "dry-run")
+        self.assertEqual(result["would"]["phase"], "complete")
+        self.assertEqual(before, _tree_snapshot(self.root))
+
+
+class R3BackupRootRegressionTests(Fixture):
+    """A real R3 must validate its backup root; a dry run must not need one.
+
+    Pinned explicitly because this guard was silently inverted once (a dispatched
+    verification worker's mutation that its own `git diff --stat` check could not see,
+    since the file was already modified). The three `BackupRootTests` cases cover it,
+    but this states the invariant in one place.
+    """
+
+    def test_a_real_r3_validates_its_backup_root_and_a_dry_run_does_not(self):
+        self.r1()
+        route, route_file = self.route()
+        self.r2(route_file)
+        with self.assertRaises(W.ResplitError) as ctx:
+            W.resplit_legacy_cycle(self.root, gate="r3", lump_cycle_id=self.lump_cycle_id)
+        self.assertEqual(ctx.exception.code, "backup-root-required")
+        preview = W.resplit_legacy_cycle(self.root, gate="r3",
+                                         lump_cycle_id=self.lump_cycle_id, dry_run=True)
+        self.assertEqual(preview["status"], "dry-run")
+
+
+class StageSessionRelocationTests(Fixture):
+    """I (D-79 C-RT / D-84 / D-85)."""
+
+    STAGE_SOURCE = "plans/stage-sessions/rt-aaaaaaaaaaaaaaaa/session.json"
+    STAGE_TARGET = ".runtime/stage-sessions/rt-aaaaaaaaaaaaaaaa/session.json"
+
+    def test_r1_keeps_stage_sessions_out_of_the_retire_inventory(self):
+        self.r1()
+        inv = W.sealed_retire_inventory(self.root)
+        self.assertNotIn(self.STAGE_SOURCE, [e["source_locator"] for e in inv["entries"]])
+
+    def test_r1_disposition_records_the_plan_and_self_digests(self):
+        self.r1()
+        run_dir = W._find_run_dir(self.root, self.lump_cycle_id)
+        body = P._read_json(W._admission_dir(run_dir) / "r1-disposition.json")
+        self.assertEqual(body["kind"], "w7g-r1-disposition")
+        self.assertEqual(W._canonical_digest({k: v for k, v in body.items() if k != "digest"}),
+                         body["digest"])
+        self.assertEqual([r["source_locator"] for r in body["stage_sessions"]], [self.STAGE_SOURCE])
+
+    def test_r1_disposition_is_not_in_the_admission_bundle_digest(self):
+        # Adding a file to ADMISSION_FILES would change how an already-admitted bundle is
+        # digested; keeping it out means the nine finished roots stay verifiable.
+        self.assertNotIn("r1-disposition.json", W.ADMISSION_FILES)
+
+    def test_r1_reports_hidden_unmanifestable_residue_without_moving_it(self):
+        self.w("experiments/2026-04-03_exp/.visual-harness/report.png", "png\n")
+        self.r1()
+        run_dir = W._find_run_dir(self.root, self.lump_cycle_id)
+        body = P._read_json(W._admission_dir(run_dir) / "r1-disposition.json")
+        self.assertIn("experiments/2026-04-03_exp/.visual-harness/report.png",
+                      [r["locator"] for r in body["hidden_residue"]])
+        self.assertTrue((self.root / "experiments/2026-04-03_exp/.visual-harness/report.png").is_file())
+
+    def test_r3_relocates_the_top_level_stage_session_and_seals_a_disposition(self):
+        self.run_full()
+        self.assertFalse((self.root / self.STAGE_SOURCE).exists())
+        self.assertTrue((self.root / self.STAGE_TARGET).is_file())
+        run_dir = W._find_run_dir(self.root, self.lump_cycle_id)
+        body = P._read_json(run_dir / W.STAGE_SESSIONS_DISPOSITION)
+        self.assertEqual(body["kind"], "w7g-stage-sessions-disposition")
+        self.assertEqual([r["status"] for r in body["rows"]], ["relocated"])
+        self.assertEqual(body["rows"][0]["target_locator"], self.STAGE_TARGET)
+
+    def _finished_run_without_relocation(self):
+        """Reproduce a root that finished R1~R3 before this gate existed."""
+        self.run_full()
+        run_dir = W._find_run_dir(self.root, self.lump_cycle_id)
+        (run_dir / W.STAGE_SESSIONS_DISPOSITION).unlink()
+        target = self.root / self.STAGE_TARGET
+        source = self.root / self.STAGE_SOURCE
+        source.parent.mkdir(parents=True, exist_ok=True)
+        os.rename(target, source)
+        return run_dir
+
+    def test_correction_gate_relocates_and_is_idempotent(self):
+        run_dir = self._finished_run_without_relocation()
+        first = W.resplit_legacy_cycle(self.root, gate="stage-sessions-relocate",
+                                       lump_cycle_id=self.lump_cycle_id)
+        self.assertEqual(first["status"], "complete")
+        self.assertTrue((self.root / self.STAGE_TARGET).is_file())
+        self.assertFalse((self.root / self.STAGE_SOURCE).exists())
+        second = W.resplit_legacy_cycle(self.root, gate="stage-sessions-relocate",
+                                        lump_cycle_id=self.lump_cycle_id)
+        self.assertEqual(second["status"], "already-applied")
+        self.assertEqual([r["status"] for r in P._read_json(
+            run_dir / W.STAGE_SESSIONS_DISPOSITION)["rows"]], ["relocated"])
+
+    def test_identical_target_is_a_no_op_that_keeps_the_source(self):
+        self._finished_run_without_relocation()
+        target = self.root / self.STAGE_TARGET
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes((self.root / self.STAGE_SOURCE).read_bytes())
+        result = W.resplit_legacy_cycle(self.root, gate="stage-sessions-relocate",
+                                        lump_cycle_id=self.lump_cycle_id)
+        self.assertEqual(result["status"], "no-op")
+        self.assertEqual([r["status"] for r in result["result"]["rows"]],
+                         ["target-present-identical"])
+        # D-84 grants deletion only through an approval package, so the source stays.
+        self.assertTrue((self.root / self.STAGE_SOURCE).is_file())
+
+    def test_divergent_target_is_a_typed_hold_and_moves_nothing(self):
+        self._finished_run_without_relocation()
+        target = self.root / self.STAGE_TARGET
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("different bytes\n")
+        before = _tree_snapshot(self.root, skip_runtime=False)
+        result = W.resplit_legacy_cycle(self.root, gate="stage-sessions-relocate",
+                                        lump_cycle_id=self.lump_cycle_id)
+        self.assertEqual(result["status"], "hold")
+        self.assertEqual([r["status"] for r in result["result"]["rows"]], ["hold"])
+        self.assertTrue((self.root / self.STAGE_SOURCE).is_file())
+        self.assertEqual(target.read_text(), "different bytes\n")
+        moved = {k: v for k, v in _tree_snapshot(self.root, skip_runtime=False).items()
+                 if not k.endswith(("journal-stage-sessions-relocate.json",
+                                    W.STAGE_SESSIONS_DISPOSITION))}
+        self.assertEqual({k: v for k, v in before.items()}, moved)
+
+    def test_correction_gate_dry_run_creates_no_lock_journal_or_disposition(self):
+        self._finished_run_without_relocation()
+        before = _tree_snapshot(self.root, skip_runtime=False)
+        result = W.resplit_legacy_cycle(self.root, gate="stage-sessions-relocate",
+                                        lump_cycle_id=self.lump_cycle_id, dry_run=True)
+        self.assertEqual(result["status"], "dry-run")
+        self.assertEqual([r["status"] for r in result["would"]["rows"]], ["relocated"])
+        self.assertEqual(before, _tree_snapshot(self.root, skip_runtime=False))
+
+    def test_a_hold_shows_up_in_the_deviation_audit(self):
+        self._finished_run_without_relocation()
+        target = self.root / self.STAGE_TARGET
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("different bytes\n")
+        W.resplit_legacy_cycle(self.root, gate="stage-sessions-relocate",
+                               lump_cycle_id=self.lump_cycle_id)
+        report = W.resplit_deviations(self.root, lump_cycle_id=self.lump_cycle_id)
+        codes = {r.get("code") for c in report["checks"] if c["id"] == "stage-sessions"
+                 for r in c["rows"]}
+        self.assertIn("stage-session-hold", codes)
+
+
+class DeviationEvidenceTests(Fixture):
+    """The new checks must stay evaluable, and absent evidence must not read as a pass."""
+
+    def test_no_run_still_judges_campaign_state_and_stage_sessions(self):
+        report = W.resplit_deviations(self.root)
+        self.assertEqual(report["status"], "no-run")
+        by_id = {c["id"]: c for c in report["checks"]}
+        self.assertEqual(by_id["campaign-state"]["status"], "ok")
+        self.assertIn("stage-sessions", report["deviations"])
+        self.assertEqual(sorted(report["not_evaluated"]),
+                         sorted(["started-on", "cycle-state", "capability",
+                                 "compat-supersession", "backup-location"]))
+
+    def test_cli_exit_treats_not_evaluated_as_failure(self):
+        out = io.StringIO()
+        with mock.patch("sys.stdout", out):
+            code = W.main(["--artifact-root", str(self.root), "deviations"])
+        self.assertEqual(code, W.BLOCKED)
+        payload = json.loads(out.getvalue())
+        self.assertTrue(payload["not_evaluated"])
+
+    def test_a_fully_corrected_run_is_clean(self):
+        self.run_full()
+        out = io.StringIO()
+        with mock.patch("sys.stdout", out):
+            code = W.main(["--artifact-root", str(self.root), "deviations",
+                           "--lump-cycle-id", self.lump_cycle_id])
+        self.assertEqual(code, W.OK)
+        payload = json.loads(out.getvalue())
+        self.assertEqual(payload["deviations"], [])
+        self.assertEqual(payload["not_evaluated"], [])
+
+    def test_campaign_state_deviation_is_reported_from_the_side_record(self):
+        self.run_full()
+        campaign = dict(P.read_campaign(self.root, self.lump_campaign_id))
+        campaign["state"] = "active"
+        P._write_campaign(self.root, campaign, exclusive=False)
+        report = W.resplit_deviations(self.root, lump_cycle_id=self.lump_cycle_id)
+        rows = [c for c in report["checks"] if c["id"] == "campaign-state"][0]["rows"]
+        self.assertEqual(rows[0]["campaign_id"], self.lump_campaign_id)
+        self.assertEqual((rows[0]["expected"], rows[0]["observed"]), ("superseded", "active"))
+
+
+class ImplReviewRound1Tests(Fixture):
+    """Round 1 impl-review 🔴1~🔴5: each test fails on the pre-fix code."""
+
+    STAGE_SOURCE = "plans/stage-sessions/rt-aaaaaaaaaaaaaaaa/session.json"
+    STAGE_TARGET = ".runtime/stage-sessions/rt-aaaaaaaaaaaaaaaa/session.json"
+
+    # 🔴1 -- a campaign naming a cycle with no record must not read as clean
+    def test_a_campaign_naming_a_missing_cycle_record_is_a_deviation(self):
+        self.run_full()
+        campaign = dict(P.read_campaign(self.root, self.lump_campaign_id))
+        campaign["cycles"] = list(campaign.get("cycles", [])) + ["cyc_" + "f" * 32]
+        P._write_campaign(self.root, campaign, exclusive=False)
+        report = W.resplit_deviations(self.root, lump_cycle_id=self.lump_cycle_id)
+        rows = [c for c in report["checks"] if c["id"] == "campaign-state"][0]["rows"]
+        self.assertEqual([r.get("code") for r in rows], ["campaign-cycle-record-missing"])
+        self.assertIn("campaign-state", report["deviations"])
+
+    # 🔴3 -- shape and containment are checked before any rename
+    def test_a_stage_session_dir_that_is_not_a_route_id_is_not_planned(self):
+        self.run_full()
+        run_dir = W._find_run_dir(self.root, self.lump_cycle_id)
+        inv = P._read_json(W._admission_dir(run_dir) / "lump-inventory.json")
+        for lump in inv["lumps"]:
+            for item in lump.get("stage_sessions", []):
+                item["locator"] = "plans/stage-sessions/../../escape/session.json"
+        P._write_atomic(W._admission_dir(run_dir) / "lump-inventory.json", P._json_bytes(inv))
+        self.assertEqual(W._stage_session_plan(self.root, run_dir), [])
+
+    def test_a_source_whose_bytes_diverge_from_the_seal_is_a_hold_not_a_move(self):
+        run_dir = self._finished_without_relocation()
+        (self.root / self.STAGE_SOURCE).write_text('{"tampered": true}\n')
+        result = W.resplit_legacy_cycle(self.root, gate="stage-sessions-relocate",
+                                        lump_cycle_id=self.lump_cycle_id)
+        self.assertEqual(result["status"], "hold")
+        self.assertTrue((self.root / self.STAGE_SOURCE).is_file())
+        self.assertFalse((self.root / self.STAGE_TARGET).exists())
+
+    # 🔴4 -- an orphaned lock is reclaimable
+    def test_an_orphan_lock_from_a_dead_owner_is_reclaimed(self):
+        run_dir = self._finished_without_relocation()
+        lock = run_dir / "resplit-stage-sessions-relocate.lock"
+        P._write_atomic(lock, P._json_bytes({
+            "schema_version": 1, "kind": "w7g-correction-lock",
+            "gate": "stage-sessions-relocate", "owner_pid": 2 ** 22 - 1}))
+        result = W.resplit_legacy_cycle(self.root, gate="stage-sessions-relocate",
+                                        lump_cycle_id=self.lump_cycle_id)
+        self.assertEqual(result["status"], "complete")
+        self.assertFalse(lock.exists())
+
+    def test_a_live_owner_still_holds_the_lock(self):
+        run_dir = self._finished_without_relocation()
+        lock = run_dir / "resplit-stage-sessions-relocate.lock"
+        P._write_atomic(lock, P._json_bytes({
+            "schema_version": 1, "kind": "w7g-correction-lock",
+            "gate": "stage-sessions-relocate", "owner_pid": os.getpid(),
+            "owner_pid_start": W._pid_start(os.getpid())}))
+        with self.assertRaises(W.ResplitError) as ctx:
+            W.resplit_legacy_cycle(self.root, gate="stage-sessions-relocate",
+                                   lump_cycle_id=self.lump_cycle_id)
+        self.assertEqual(ctx.exception.code, "resplit-in-progress")
+        self.assertTrue((self.root / self.STAGE_SOURCE).is_file())
+
+    # 🔴5 -- a replay after a partial move converges instead of stranding the row
+    def test_a_replayed_relocation_is_recorded_and_still_counts(self):
+        run_dir = self._finished_without_relocation()
+        row = W._stage_session_plan(self.root, run_dir)[0]
+        # simulate an interrupted run: row moved, disposition never sealed
+        target = self.root / row["target_locator"]
+        target.parent.mkdir(parents=True, exist_ok=True)
+        os.rename(self.root / row["source_locator"], target)
+        # `already-relocated`, not `relocated`: this call moved nothing and does not
+        # claim to. The gate still accepts it, because its predicate is about the tree.
+        self.assertEqual(W._stage_session_decide(self.root, row), "already-relocated")
+        result = W.resplit_legacy_cycle(self.root, gate="stage-sessions-relocate",
+                                        lump_cycle_id=self.lump_cycle_id)
+        self.assertEqual([r["status"] for r in result["result"]["rows"]], ["already-relocated"])
+        self.assertEqual([r["moved_by_this_run"] for r in result["result"]["rows"]], [False])
+        self.assertEqual(W.stage_sessions_disposed_rows(self.root), set())  # not in retire inv.
+
+    def test_a_relocation_this_run_performed_is_marked_as_such(self):
+        self._finished_without_relocation()
+        result = W.resplit_legacy_cycle(self.root, gate="stage-sessions-relocate",
+                                        lump_cycle_id=self.lump_cycle_id)
+        self.assertEqual([r["status"] for r in result["result"]["rows"]], ["relocated"])
+        self.assertEqual([r["moved_by_this_run"] for r in result["result"]["rows"]], [True])
+
+    # round 2 🔴N1 -- a symlinked ancestor must not carry a rename out of the root
+    def test_a_symlinked_ancestor_is_not_contained(self):
+        outside = Path(self._tmp.name) / "outside"
+        outside.mkdir()
+        link = self.root / ".runtime" / "stage-sessions"
+        link.parent.mkdir(parents=True, exist_ok=True)
+        if link.exists():
+            shutil.rmtree(link)
+        link.symlink_to(outside)
+        self.assertFalse(W._is_contained(self.root, link / "rt-aaaaaaaaaaaaaaaa" / "session.json"))
+        self.assertTrue(W._is_contained(self.root, self.root / "plans" / "x.md"))
+
+    def test_a_lexical_parent_escape_is_not_contained(self):
+        self.assertFalse(W._is_contained(self.root, self.root / ".." / "escaped.md"))
+
+    # round 2 🔴N3 -- a reused pid must not hand a live owner's lock away
+    def test_a_reused_pid_does_not_reclaim_a_live_lock(self):
+        self.assertTrue(W._owner_still_running(os.getpid(), W._pid_start(os.getpid())))
+        self.assertFalse(W._owner_still_running(os.getpid(), "1"))
+        self.assertFalse(W._owner_still_running(2 ** 22 - 1, None))
+
+    def test_a_lock_whose_recorded_start_time_differs_is_reclaimed(self):
+        run_dir = self._finished_without_relocation()
+        lock = run_dir / "resplit-stage-sessions-relocate.lock"
+        P._write_atomic(lock, P._json_bytes({
+            "schema_version": 1, "kind": "w7g-correction-lock",
+            "gate": "stage-sessions-relocate", "owner_pid": os.getpid(),
+            "owner_pid_start": "1"}))  # same pid, different process
+        result = W.resplit_legacy_cycle(self.root, gate="stage-sessions-relocate",
+                                        lump_cycle_id=self.lump_cycle_id)
+        self.assertEqual(result["status"], "complete")
+
+    def test_an_identical_target_with_the_source_still_present_stays_a_no_op(self):
+        run_dir = self._finished_without_relocation()
+        row = W._stage_session_plan(self.root, run_dir)[0]
+        target = self.root / row["target_locator"]
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes((self.root / row["source_locator"]).read_bytes())
+        self.assertEqual(W._stage_session_decide(self.root, row), "target-present-identical")
+
+    def _finished_without_relocation(self):
+        self.run_full()
+        run_dir = W._find_run_dir(self.root, self.lump_cycle_id)
+        (run_dir / W.STAGE_SESSIONS_DISPOSITION).unlink()
+        source = self.root / self.STAGE_SOURCE
+        source.parent.mkdir(parents=True, exist_ok=True)
+        os.rename(self.root / self.STAGE_TARGET, source)
+        return run_dir
+
+
+class CorrectionGateGuardTests(Fixture):
+    def test_correction_refuses_while_r2_or_r3_is_nonterminal(self):
+        self.r1()
+        route, route_file = self.route()
+        self.r2(route_file)
+        run_dir = W._find_run_dir(self.root, self.lump_cycle_id)
+        journal = P._read_json(run_dir / "journal-r3.json") or {
+            "schema_version": 1, "kind": "w7g-resplit-journal", "gate": "r3",
+            "lump_cycle_id": self.lump_cycle_id, "run_dir": str(run_dir)}
+        journal["phase"] = "backup-sealed"
+        P._write_atomic(run_dir / "journal-r3.json", P._json_bytes(journal))
+        with self.assertRaises(W.ResplitError) as ctx:
+            W.resplit_legacy_cycle(self.root, gate="campaign-supersede",
+                                   lump_cycle_id=self.lump_cycle_id)
+        self.assertEqual(ctx.exception.code, "resplit-stale")
+
+    def test_correction_refuses_without_an_admitted_run(self):
+        with self.assertRaises(W.ResplitError) as ctx:
+            W.resplit_legacy_cycle(self.root, gate="campaign-supersede",
+                                   lump_cycle_id=self.lump_cycle_id)
+        self.assertEqual(ctx.exception.code, "admission-marker-missing")
+
+    def test_a_nonterminal_correction_journal_is_a_root_hold(self):
+        self.run_full()
+        run_dir = W._find_run_dir(self.root, self.lump_cycle_id)
+        P._write_atomic(run_dir / "journal-campaign-supersede.json", P._json_bytes({
+            "schema_version": 1, "kind": "w7g-resplit-journal", "gate": "campaign-supersede",
+            "lump_cycle_id": self.lump_cycle_id, "run_dir": str(run_dir), "phase": "prepared"}))
+        hold = W.resplit_hold(self.root)
+        self.assertIsNotNone(hold)
+        self.assertEqual(hold["gate"], "campaign-supersede")
+
+    def test_a_terminal_correction_journal_is_not_a_hold(self):
+        self.run_full()
+        run_dir = W._find_run_dir(self.root, self.lump_cycle_id)
+        for phase in ("complete", "no-op", "hold"):
+            P._write_atomic(run_dir / "journal-campaign-supersede.json", P._json_bytes({
+                "schema_version": 1, "kind": "w7g-resplit-journal", "gate": "campaign-supersede",
+                "lump_cycle_id": self.lump_cycle_id, "run_dir": str(run_dir), "phase": phase}))
+            self.assertIsNone(W.resplit_hold(self.root), phase)
+
+    def test_r1_replay_leaves_the_sealed_admission_bundle_byte_identical(self):
+        self.r1()
+        run_dir = W._find_run_dir(self.root, self.lump_cycle_id)
+        before = _tree_snapshot(W._admission_dir(run_dir), skip_runtime=False)
+        result = self.r1()
+        self.assertEqual(result["status"], "already-applied")
+        self.assertEqual(before, _tree_snapshot(W._admission_dir(run_dir), skip_runtime=False))
 
 
 class OwnershipGuardTests(unittest.TestCase):
