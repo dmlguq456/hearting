@@ -204,6 +204,36 @@ class ActivateAndBeginTest(ProducerTestBase):
         self.assertEqual(second["status"], "resumed")
         self.assertEqual(second["cycle_id"], first["cycle_id"])
 
+    def test_begin_accepts_a_bare_route_id(self):
+        """A quick owner is told only the route id; it must not have to guess the path."""
+        self.activate()
+        route, route_file = self.route()
+        result = P.begin(
+            self.root, route_file=route["route_id"],
+            capability="autopilot-code", intensity="direct",
+        )
+        self.assertEqual(result["status"], "begun")
+        self.assertEqual(
+            P.resolve_route_argument(self.root, route["route_id"]).resolve(),
+            route_file.resolve(),
+        )
+
+    def test_unresolvable_route_id_still_reports_route_unreadable(self):
+        self.activate()
+        with self.assertRaises(P.ProducerError) as ctx:
+            P.begin(
+                self.root, route_file="rt-deadbeefdeadbeef",
+                capability="autopilot-code", intensity="direct",
+            )
+        self.assertEqual(ctx.exception.code, "route-unreadable")
+
+    def test_an_explicit_path_is_never_reinterpreted_as_an_id(self):
+        self.activate()
+        route, route_file = self.route()
+        self.assertEqual(
+            P.resolve_route_argument(self.root, route_file), Path(route_file)
+        )
+
     def test_begin_rejects_capability_and_intensity_mismatch(self):
         self.activate()
         route, route_file = self.route("direct")

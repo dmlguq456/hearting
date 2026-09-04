@@ -536,7 +536,31 @@ def _remove_journal(root: Path, cycle_id: str) -> None:
 # ---------------------------------------------------------------------------
 
 
+_ROUTE_ID_RE = re.compile(r"^rt-[0-9a-f]{6,}$")
+
+
+def resolve_route_argument(root: Path, value: "str | Path") -> Path:
+    """Accept either a route file path or a bare route id.
+
+    A `quick` dispatch-depth-1 owner is handed only the route **id** — the
+    prompt and the wrapper args carry `--route-id`, never the file path — so an
+    owner that passed that id straight through used to die with
+    `route-unreadable` naming the id it was given. A bare id is unambiguous: it
+    resolves to exactly one canonical location under the artifact root. Resolve
+    it instead of refusing. Anything else is returned untouched and is read as
+    the path it is, so an explicit path always wins.
+    """
+
+    text = str(value)
+    if _ROUTE_ID_RE.match(text):
+        candidate = artifact_lifecycle.canonical_route_path(Path(root), text)
+        if candidate.is_file():
+            return candidate
+    return Path(value)
+
+
 def load_route(root: Path, route_file: Path) -> Dict[str, Any]:
+    route_file = resolve_route_argument(root, route_file)
     route = _read_json(Path(route_file))
     if route is None:
         raise ProducerError("route-unreadable", str(route_file))
@@ -2166,7 +2190,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     p = sub.add_parser("begin")
     p.add_argument("--artifact-root", required=True)
-    p.add_argument("--route", required=True)
+    p.add_argument(
+        "--route",
+        required=True,
+        help="path to the route file, or a bare route id resolved under the artifact root",
+    )
     p.add_argument("--node", default=None)
     p.add_argument("--capability", required=True)
     p.add_argument("--intensity", required=True)

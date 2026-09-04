@@ -660,6 +660,7 @@ def dispatch_prompt(
         f"- guard_session_id: {args.attempt_id}\n"
         f"- assigned_contract: {args.assigned_contract}\n"
         f"- route_node: {args.route_node or '-'}\n"
+        f"- route_file: {getattr(args, 'route_file', None) or '-'}\n"
         f"- model_role: {getattr(args, 'resolved_model_settings', {}).get('role') or args.model_role or '-'}\n"
         f"- model_profile: {getattr(args, 'resolved_model_settings', {}).get('profile') or getattr(args, 'model_profile', None) or '-'}\n"
         f"- parent: {args.parent_slug or '-'}\n"

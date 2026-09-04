@@ -9,6 +9,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from types import SimpleNamespace
 from datetime import datetime, timezone
 from unittest import mock
 
@@ -649,6 +650,25 @@ class RouteEvidenceOwnerHarnessTest(unittest.TestCase):
         with self.assertRaises(OWNER.OwnerError) as caught:
             OWNER._sealed_owner_harnesses(path)
         self.assertEqual(str(caught.exception), "route-evidence-direct-route-has-no-owner")
+
+    def test_owner_route_env_is_exported_for_every_intensity(self):
+        """quick used to skip these, leaving its owner to guess the route file path."""
+        binding = SimpleNamespace(
+            route_file="/w/.agent_reports/.runtime/routes/rt-abc123.json",
+            route_id="rt-abc123", route_hash="sha256:abc123",
+        )
+        env = OWNER.export_owner_route_env({}, binding)
+        self.assertEqual(env["AGENT_OWNER_ROUTE_FILE"], binding.route_file)
+        self.assertEqual(env["AGENT_OWNER_ROUTE_ID"], binding.route_id)
+        self.assertEqual(env["AGENT_OWNER_ROUTE_HASH"], binding.route_hash)
+
+    def test_both_binding_branches_publish_the_route_env(self):
+        """The quick and standard+ branches must not drift apart again."""
+        source = Path(OWNER.__file__).read_text(encoding="utf-8")
+        body = source.split("if route_data.get(\"effective_intensity\") == \"quick\":", 1)[1]
+        quick, standard = body.split("else:", 1)
+        for branch, name in ((quick, "quick"), (standard, "standard+")):
+            self.assertIn("export_owner_route_env(child_env, binding)", branch, name)
 
     def test_selector_only_option_never_reaches_the_wrapper(self):
         _, _, forwarded, evidence = OWNER._parse([
