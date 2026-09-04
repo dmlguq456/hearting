@@ -485,7 +485,23 @@ def inspect_terminal_attempt(
                 "contract-violation",
                 reason="artifact-outside-root",
             )
-        if not artifact_path.is_file() or not os.access(artifact_path, os.R_OK):
+        # A worker's artifact is legitimately either one file or one directory of
+        # them: a cycle's document bucket, a plans directory, an evidence tree. The
+        # contract says "an in-root artifact", never "a regular file", and the
+        # worker prompt asks for a path. Requiring `is_file()` silently converted
+        # every directory-shaped deliverable into `dead-invalid-envelope` — three
+        # of the five owners lost on 2026-09-04 (att-8864fd04, att-93a8e494,
+        # att-836c2026) had emitted a well-formed `verdict: PASS` envelope and a
+        # readable directory holding their output.
+        # The artifact root itself is not a deliverable — naming it says no more
+        # than naming nothing, and it would let any run "produce" the whole tree.
+        # An artifact must be a real member of the root.
+        names_root = artifact_path == root
+        readable = not names_root and (
+            (artifact_path.is_file() and os.access(artifact_path, os.R_OK))
+            or (artifact_path.is_dir() and os.access(artifact_path, os.R_OK | os.X_OK))
+        )
+        if not readable:
             return _result(
                 3,
                 "invalid",
@@ -493,9 +509,18 @@ def inspect_terminal_attempt(
                 "-",
                 "missing",
                 "contract-violation",
-                reason="artifact-missing",
+                # Name the shape so an operator can tell "the path is not there" from
+                # "the path is there but this reader would not take it".
+                reason=(
+                    "artifact-is-root"
+                    if names_root
+                    else "artifact-unreadable"
+                    if artifact_path.exists()
+                    else "artifact-missing"
+                ),
             )
         parsed["artifact_state"] = "readable"
+        parsed["artifact_shape"] = "directory" if artifact_path.is_dir() else "file"
         parsed["artifact_path_b64"] = _encode_path(artifact_path)
 
     if review_blocking_handoff(parsed, worker_type):

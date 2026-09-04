@@ -1866,6 +1866,38 @@ class TestContinuation(unittest.TestCase):
    for item in value.values(): self._assert_no_alias_key(item)
   elif isinstance(value,list):
    for item in value: self._assert_no_alias_key(item)
+ def test_evidence_digest_names_a_file_or_a_directory(self):
+  # A worker's artifact is legitimately either shape. Before this, the envelope
+  # inspector rejected a directory and `write_completion_marker` would have died
+  # `IsADirectoryError` on `read_bytes()` had it got that far.
+  import hashlib
+  with tempfile.TemporaryDirectory() as tmp:
+   root=Path(tmp)
+   single=root/"report.md"; single.write_text("body\n",encoding="utf-8")
+   self.assertEqual(R.evidence_digest(single),
+                    hashlib.sha256(b"body\n").hexdigest())
+   bucket=root/"documents"; (bucket/"sub").mkdir(parents=True)
+   (bucket/"b.md").write_text("b\n",encoding="utf-8")
+   (bucket/"a.md").write_text("a\n",encoding="utf-8")
+   (bucket/"sub"/"c.md").write_text("c\n",encoding="utf-8")
+   first=R.evidence_digest(bucket)
+   self.assertEqual(first,R.evidence_digest(bucket))          # stable
+   self.assertNotEqual(first,R.evidence_digest(single))
+   (bucket/"a.md").write_text("a2\n",encoding="utf-8")
+   self.assertNotEqual(first,R.evidence_digest(bucket))       # content-sensitive
+   renamed=root/"documents2"; bucket.rename(renamed)
+   moved=R.evidence_digest(renamed)
+   (renamed/"a.md").write_text("a\n",encoding="utf-8")
+   self.assertEqual(first,R.evidence_digest(renamed))         # path-independent
+   self.assertNotEqual(first,moved)
+   # A symlink is recorded by its target text, never followed: a marker must
+   # describe the tree it was handed.
+   outside=root/"outside.md"; outside.write_text("secret\n",encoding="utf-8")
+   (renamed/"link.md").symlink_to(outside)
+   with_link=R.evidence_digest(renamed)
+   outside.write_text("changed\n",encoding="utf-8")
+   self.assertEqual(with_link,R.evidence_digest(renamed))
+
  def test_at1_reuses_exact_prefix_and_publishes_suffix_only(self):
   from unittest import mock
   with tempfile.TemporaryDirectory() as tmp:

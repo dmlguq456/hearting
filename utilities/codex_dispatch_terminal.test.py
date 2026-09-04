@@ -321,6 +321,60 @@ class CodexDispatchTerminalTest(unittest.TestCase):
         self.assertEqual(escaped["artifact_state"], "outside-root")
         self.assertNotIn("RAW_OUTSIDE_SENTINEL", repr(escaped))
 
+    def test_a_directory_artifact_is_a_valid_deliverable(self):
+        # 2026-09-04: three depth-1 codex owners emitted a well-formed
+        # `verdict: PASS` envelope naming a cycle document directory and were all
+        # recorded `dead-invalid-envelope / terminal-invalid:artifact-missing`.
+        # The contract says "an in-root artifact", never "a regular file".
+        bucket = self.root / "documents" / "2026-09-04_cmdset_v6_final"
+        bucket.mkdir(parents=True)
+        (bucket / "CONTRACT.md").write_text("one\n", encoding="utf-8")
+        (bucket / "EVIDENCE.md").write_text("two\n", encoding="utf-8")
+        result = self.inspect(
+            self.write_log(verdict="PASS", blocker="none", artifact=bucket, sandbox=False)
+        )
+        self.assertEqual(result["state"], "valid")
+        self.assertEqual(result["artifact_state"], "readable")
+        self.assertEqual(result["artifact_shape"], "directory")
+        decoded = base64.urlsafe_b64decode(
+            result["artifact_path_b64"] + "=" * (-len(result["artifact_path_b64"]) % 4)
+        ).decode("utf-8")
+        self.assertEqual(Path(decoded), bucket.resolve())
+
+    def test_a_single_file_artifact_is_unchanged(self):
+        single = self.root / "report.md"
+        single.write_text("body\n", encoding="utf-8")
+        result = self.inspect(
+            self.write_log(verdict="PASS", blocker="none", artifact=single, sandbox=False)
+        )
+        self.assertEqual(
+            (result["state"], result["artifact_state"], result["artifact_shape"]),
+            ("valid", "readable", "file"),
+        )
+
+    def test_present_but_unreadable_is_told_apart_from_absent(self):
+        # "the path is not there" and "the path is there but this reader will not
+        # take it" are different operator actions, so they get different reasons.
+        absent = self.inspect(
+            self.write_log(
+                verdict="PASS", blocker="none", artifact=self.root / "nope.md", sandbox=False
+            )
+        )
+        self.assertEqual(absent["reason"], "artifact-missing")
+        locked = self.root / "locked"
+        locked.mkdir()
+        (locked / "inner.md").write_text("x\n", encoding="utf-8")
+        os.chmod(locked, 0o000)
+        try:
+            if os.access(locked, os.R_OK | os.X_OK):
+                self.skipTest("cannot drop directory access as this user")
+            result = self.inspect(
+                self.write_log(verdict="PASS", blocker="none", artifact=locked, sandbox=False)
+            )
+            self.assertEqual(result["reason"], "artifact-unreadable")
+        finally:
+            os.chmod(locked, 0o700)
+
     def test_failure_detail_is_opt_in_escaped_independently_bounded_and_never_pass(self):
         blocker = "B\t" + "한" * 400
         diagnostic = "D\n\x01" + "界" * 400

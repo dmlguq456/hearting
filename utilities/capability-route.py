@@ -2516,7 +2516,7 @@ def _completion_marker_replay(route, node, node_id, evidence, axes, directory):
         return None
     existing=json.loads(canonical_path.read_text(encoding="utf-8"))
     identity={
-        "evidence_sha256":hashlib.sha256(evidence.read_bytes()).hexdigest(),
+        "evidence_sha256":evidence_digest(evidence),
         **axes,
     }
     existing_identity={
@@ -2543,11 +2543,38 @@ def _completion_marker_replay(route, node, node_id, evidence, axes, directory):
         raise ValueError("canonical completion marker history conflict")
     return existing
 
+def evidence_digest(evidence):
+    """One sha256 over an artifact that may be a file OR a directory of files.
+
+    A worker's artifact is legitimately either shape, and the envelope inspector
+    accepts both, so the marker has to be able to name either. A directory is
+    digested over its sorted root-relative paths and contents, so the value is
+    stable across runs and changes when any member does. Symlinks are recorded by
+    their target text and never followed: a marker must describe the tree it was
+    given, not wherever that tree points today.
+    """
+    path=Path(evidence)
+    if path.is_file() and not path.is_symlink():
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+    digest=hashlib.sha256(b"artifact-directory-v1\0")
+    for child in sorted(
+        (item for item in path.rglob("*")), key=lambda item: str(item.relative_to(path))
+    ):
+        relative=str(child.relative_to(path)).encode("utf-8")
+        if child.is_symlink():
+            digest.update(b"L\0"+relative+b"\0"+os.readlink(child).encode("utf-8"))
+        elif child.is_dir():
+            digest.update(b"D\0"+relative+b"\0")
+        else:
+            digest.update(b"F\0"+relative+b"\0")
+            digest.update(hashlib.sha256(child.read_bytes()).digest())
+    return digest.hexdigest()
+
 def write_completion_marker(route, node, node_id, evidence, *, attempt_id=None, attempt_metadata=None):
     _migrate_completion_dir_forward(route["route_id"])
     directory=completion_dir(route["route_id"])
     canonical_path=directory/f"{node_id}.json"
-    sha=hashlib.sha256(evidence.read_bytes()).hexdigest()
+    sha=evidence_digest(evidence)
     axes=_marker_attempt_axes(node, attempt_id, attempt_metadata)
     replayed=_completion_marker_replay(route,node,node_id,evidence,axes,directory)
     if replayed is not None:
@@ -2976,7 +3003,7 @@ def arbitrate_group(route, group_id, evidence):
         "auxiliary_findings_considered": list(considered),
         "evidence": {
             "path": str(evidence),
-            "sha256": hashlib.sha256(evidence.read_bytes()).hexdigest(),
+            "sha256": evidence_digest(evidence),
         },
     }
     path = arbitration_path(route["route_id"], group_id)
@@ -3016,7 +3043,7 @@ def _publish_completion_locked(
 
     _validate_auxiliary_arbiter(route, node, evidence)
     axes=_marker_attempt_axes(node,attempt_id,attempt_metadata)
-    evidence_sha=hashlib.sha256(evidence.read_bytes()).hexdigest()
+    evidence_sha=evidence_digest(evidence)
     attempt_path=(
         _attempt_completion_path(route,node_id,attempt_id)
         if attempt_id else None
@@ -4211,7 +4238,10 @@ def main():
             if a.command=="node": print(json.dumps(node,sort_keys=True))
             else:
                 evidence=Path(a.evidence).resolve()
-                if not evidence.is_file(): raise SystemExit("completion evidence missing")
+                # A completion artifact is one file or one directory of them; the
+                # envelope inspector accepts both and `evidence_digest` names both.
+                if not (evidence.is_file() or evidence.is_dir()):
+                    raise SystemExit("completion evidence missing")
                 # C-25b: check before completion runs, so a colliding `--output`
                 # neither overwrites the pre-existing file's bytes nor leaves a
                 # completion marker written behind a refused copy.
