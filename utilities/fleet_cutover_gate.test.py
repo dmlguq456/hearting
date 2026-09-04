@@ -591,6 +591,208 @@ class ResplitGateTests(WFixture, unittest.TestCase):
         verdict, blocking = G.evaluate([row], waived=False, require_resplit=False)
         self.assertEqual(verdict, "complete")
 
+    # -- D-85 extension: C-RT relocation disposition ----------------------
+
+    STAGE_SOURCE = "plans/stage-sessions/rt-aaaaaaaaaaaaaaaa/session.json"
+
+    def _sealed_with_stage_session_row(self):
+        """A root whose sealed retire inventory still names the stage-session file.
+
+        Reproduces the nine roots sealed before `plans/stage-sessions` was excluded:
+        R1 runs with the exclusion, then the row is put back into the sealed inventory
+        (re-digesting it) so the gate has the historical shape to reason about.
+        """
+        self.r1()
+        run_dir = W._find_run_dir(self.root, self.lump_cycle_id)
+        admission = W._admission_dir(run_dir)
+        inv = P._read_json(admission / "retire-inventory.json")
+        source = self.STAGE_SOURCE
+        path = self.root / source
+        entries = list(inv["entries"]) + [{
+            "ordinal": len(inv["entries"]), "source_locator": source,
+            "target_locator": "campaigns/x/cycles/y/artifacts/" + source,
+            "sha256": "sha256:" + W.C._sha(path), "byte_size": path.stat().st_size,
+        }]
+        inv["entries"] = entries
+        inv["entry_count"] = len(entries)
+        inv["digest"] = W._canonical_digest({k: v for k, v in inv.items() if k != "digest"})
+        P._write_atomic(admission / "retire-inventory.json", P._json_bytes(inv))
+        # re-publish the marker so the bundle digest still verifies
+        marker = P._read_json(W._marker_path(run_dir))
+        marker["bundle_digest"] = W._bundle_digest(admission)
+        P._write_atomic(W._marker_path(run_dir), P._json_bytes(marker))
+        return run_dir, entries[-1]
+
+    def _write_disposition(self, run_dir, rows, **overrides):
+        identity = P.artifact_lifecycle.read_root_identity(self.root)
+        body = {"schema_version": 1, "kind": "w7g-stage-sessions-disposition",
+                "artifact_root_id": identity.artifact_root_id,
+                "recorded_at": W.C._now(), "rows": rows}
+        body.update(overrides)
+        W._write_self_digest(run_dir / W.STAGE_SESSIONS_DISPOSITION, body)
+        return run_dir / W.STAGE_SESSIONS_DISPOSITION
+
+    def _relocate_on_disk(self, entry):
+        source = self.root / entry["source_locator"]
+        target = self.root / ".runtime/stage-sessions/rt-aaaaaaaaaaaaaaaa/session.json"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        os.rename(source, target)
+        return {"source_locator": entry["source_locator"],
+                "target_locator": ".runtime/stage-sessions/rt-aaaaaaaaaaaaaaaa/session.json",
+                "sha256": entry["sha256"], "retire_inventory_ordinal": entry["ordinal"],
+                "status": "relocated"}
+
+    def test_relocation_disposition_is_the_only_row_that_needs_no_r4(self):
+        run_dir, entry = self._sealed_with_stage_session_row()
+        self.assertFalse(G.legacy_top_level_retired(self.root))
+        row = self._relocate_on_disk(entry)
+        self._write_disposition(run_dir, [row])
+        # every other inventory entry still needs R4, so this alone is not enough
+        self.assertFalse(G.legacy_top_level_retired(self.root))
+        self.assertEqual(W.stage_sessions_disposed_rows(self.root),
+                         {(entry["source_locator"], entry["sha256"])})
+
+    def test_all_entries_disposed_needs_no_r4_approval(self):
+        run_dir, entry = self._sealed_with_stage_session_row()
+        admission = W._admission_dir(run_dir)
+        inv = P._read_json(admission / "retire-inventory.json")
+        inv["entries"] = [dict(entry, ordinal=0)]
+        inv["entry_count"] = 1
+        inv["digest"] = W._canonical_digest({k: v for k, v in inv.items() if k != "digest"})
+        P._write_atomic(admission / "retire-inventory.json", P._json_bytes(inv))
+        marker = P._read_json(W._marker_path(run_dir))
+        marker["bundle_digest"] = W._bundle_digest(admission)
+        P._write_atomic(W._marker_path(run_dir), P._json_bytes(marker))
+        row = self._relocate_on_disk(dict(entry, ordinal=0))
+        self._write_disposition(run_dir, [row])
+        self.assertTrue(G.legacy_top_level_retired(self.root))
+
+    def _disposed_then(self, mutate):
+        run_dir, entry = self._sealed_with_stage_session_row()
+        admission = W._admission_dir(run_dir)
+        inv = P._read_json(admission / "retire-inventory.json")
+        inv["entries"] = [dict(entry, ordinal=0)]
+        inv["entry_count"] = 1
+        inv["digest"] = W._canonical_digest({k: v for k, v in inv.items() if k != "digest"})
+        P._write_atomic(admission / "retire-inventory.json", P._json_bytes(inv))
+        marker = P._read_json(W._marker_path(run_dir))
+        marker["bundle_digest"] = W._bundle_digest(admission)
+        P._write_atomic(W._marker_path(run_dir), P._json_bytes(marker))
+        row = self._relocate_on_disk(dict(entry, ordinal=0))
+        path = self._write_disposition(run_dir, [row])
+        self.assertTrue(G.legacy_top_level_retired(self.root))
+        mutate(run_dir, path, row)
+        return run_dir
+
+    def test_absent_disposition_is_false(self):
+        self._disposed_then(lambda run_dir, path, row: path.unlink())
+        self.assertFalse(G.legacy_top_level_retired(self.root))
+
+    def test_unparseable_disposition_is_false(self):
+        self._disposed_then(lambda run_dir, path, row: path.write_text("{not json"))
+        self.assertFalse(G.legacy_top_level_retired(self.root))
+
+    def test_wrong_kind_is_false(self):
+        def mutate(run_dir, path, row):
+            body = P._read_json(path)
+            body["kind"] = "something-else"
+            P._write_atomic(path, P._json_bytes(body))
+        self._disposed_then(mutate)
+        self.assertFalse(G.legacy_top_level_retired(self.root))
+
+    def test_tampered_self_digest_is_false(self):
+        def mutate(run_dir, path, row):
+            body = P._read_json(path)
+            body["rows"][0]["status"] = "relocated"
+            body["recorded_at"] = "2026-01-01T00:00:00Z"  # digest no longer matches
+            P._write_atomic(path, P._json_bytes(body))
+        self._disposed_then(mutate)
+        self.assertFalse(G.legacy_top_level_retired(self.root))
+
+    def test_foreign_artifact_root_id_is_false(self):
+        def mutate(run_dir, path, row):
+            body = P._read_json(path)
+            body["artifact_root_id"] = "root_" + "c" * 32
+            W._write_self_digest(path, body)
+        self._disposed_then(mutate)
+        self.assertFalse(G.legacy_top_level_retired(self.root))
+
+    def test_ordinal_citation_mismatch_is_false(self):
+        def mutate(run_dir, path, row):
+            body = P._read_json(path)
+            body["rows"][0]["retire_inventory_ordinal"] = 99
+            W._write_self_digest(path, body)
+        self._disposed_then(mutate)
+        self.assertFalse(G.legacy_top_level_retired(self.root))
+
+    def test_tampered_target_digest_is_false(self):
+        def mutate(run_dir, path, row):
+            (self.root / row["target_locator"]).write_text("different bytes\n")
+        self._disposed_then(mutate)
+        self.assertFalse(G.legacy_top_level_retired(self.root))
+
+    def test_source_that_came_back_is_false(self):
+        def mutate(run_dir, path, row):
+            source = self.root / row["source_locator"]
+            source.parent.mkdir(parents=True, exist_ok=True)
+            source.write_text("{}\n")
+        self._disposed_then(mutate)
+        self.assertFalse(G.legacy_top_level_retired(self.root))
+
+    def test_already_relocated_is_accepted_because_the_predicate_is_about_the_tree(self):
+        # round 2 🔴N2: a replay records `already-relocated` (this run moved nothing).
+        # D-85's predicate is a statement about the disk -- sealed bytes at the canonical
+        # path, legacy path gone -- so the row still counts, and the gate re-verifies both.
+        def mutate(run_dir, path, row):
+            body = P._read_json(path)
+            body["rows"][0]["status"] = "already-relocated"
+            body["rows"][0]["moved_by_this_run"] = False
+            W._write_self_digest(path, body)
+        self._disposed_then(mutate)
+        self.assertTrue(G.legacy_top_level_retired(self.root))
+
+    def test_target_present_identical_is_not_accepted_as_disposed(self):
+        # D-79 calls this a no-op and D-84 grants deletion only through an approval
+        # package, so the source is still there -- the row must not shorten the gate.
+        def mutate(run_dir, path, row):
+            body = P._read_json(path)
+            body["rows"][0]["status"] = "target-present-identical"
+            source = self.root / row["source_locator"]
+            source.parent.mkdir(parents=True, exist_ok=True)
+            source.write_bytes((self.root / row["target_locator"]).read_bytes())
+            W._write_self_digest(path, body)
+        self._disposed_then(mutate)
+        self.assertFalse(G.legacy_top_level_retired(self.root))
+        self.assertEqual(W.stage_sessions_disposed_rows(self.root), set())
+
+    def test_a_row_digest_that_is_not_the_sealed_one_is_false(self):
+        # impl-review 🔴2: without the row/entry digest equality check, a disposition can
+        # cite ordinal N, carry bytes of its own, satisfy the target check against those,
+        # and still contribute the *sealed* key -- retiring an entry that never moved.
+        def mutate(run_dir, path, row):
+            forged = self.root / row["target_locator"]
+            forged.write_text("forged bytes\n")
+            body = P._read_json(path)
+            body["rows"][0]["sha256"] = "sha256:" + W.C._sha(forged)
+            W._write_self_digest(path, body)
+        self._disposed_then(mutate)
+        self.assertEqual(W.stage_sessions_disposed_rows(self.root), set())
+        self.assertFalse(G.legacy_top_level_retired(self.root))
+
+    def test_a_target_outside_the_artifact_root_is_false(self):
+        def mutate(run_dir, path, row):
+            body = P._read_json(path)
+            body["rows"][0]["target_locator"] = "../escaped/session.json"
+            W._write_self_digest(path, body)
+        self._disposed_then(mutate)
+        self.assertFalse(G.legacy_top_level_retired(self.root))
+
+    def test_disposition_in_an_unadmitted_run_is_ignored(self):
+        def mutate(run_dir, path, row):
+            W._marker_path(run_dir).unlink()
+        self._disposed_then(mutate)
+        self.assertFalse(G.legacy_top_level_retired(self.root))
+
     def test_a16_7_gate_mutates_nothing(self):
         self.r1()
         before = self._snapshot()

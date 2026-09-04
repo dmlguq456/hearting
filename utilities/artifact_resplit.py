@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import datetime
 import hashlib
 import json
 import os
@@ -199,6 +200,9 @@ def _lump_manifest_digest(cycle_dir: Path) -> Optional[str]:
 
 
 _WRITTEN_DATE_RE = re.compile(r"\b(20\d{2}-\d{2}-\d{2})\b")
+# D-5 route filename shape. A stage-session directory that is not a route id is not the
+# `C-RT` record this relocation owns, so it is left where it is instead of moved.
+_ROUTE_ID_RE = re.compile(r"^rt-[0-9a-f]{16}$")
 
 
 def _entry_document_written_date(cdir: Path, bucket: str, depth1: str, files: Sequence[Dict[str, Any]]) -> Optional[str]:
@@ -259,11 +263,14 @@ def _lump_started_on(cdir: Path, bucket: str, depth1_name: str, files: Sequence[
     a priority at all: it is the resplit's timestamp, not the work's, and it lives
     in the record's `resplit_run_at`.
     """
-    m = re.match(r"^(\d{4}-\d{2}-\d{2})_", depth1_name)
+    m = re.match(r"^(\d{4})-?(\d{2})-?(\d{2})[_-]", depth1_name)
     if m:
-        widened = _as_rfc3339(m.group(1))
-        if widened:
-            return widened, "directory-date-prefix"
+        try:
+            parsed = datetime.date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+        except ValueError:
+            parsed = None
+        if parsed is not None:
+            return _as_rfc3339(parsed.isoformat()) or "", "directory-date-prefix"
     written = _as_rfc3339(_entry_document_written_date(cdir, bucket, depth1_name, files))
     if written:
         return written, "entry-document-date"
@@ -474,12 +481,112 @@ def sealed_loose_inventory(root: Path) -> Optional[Dict[str, Any]]:
     return best
 
 
+def _is_contained(root: Path, candidate: Path) -> bool:
+    """True when `candidate` is inside `root` both lexically and after symlinks.
+
+    Two checks, because either alone is defeatable. `normpath` folds a `..` that a
+    sealed locator should never contain but might; `realpath` on the deepest existing
+    ancestor catches the other direction, where every component is innocent but a parent
+    directory is a symlink pointing out of the artifact root. Only the existing prefix is
+    resolved so a target that has not been created yet can still be judged.
+    """
+    root = Path(root).resolve()
+    lexical = Path(os.path.normpath(str(candidate)))
+    try:
+        if os.path.commonpath([str(root), str(lexical)]) != str(root):
+            return False
+    except ValueError:
+        return False
+    probe = lexical
+    tail = []
+    while not probe.exists() and probe.parent != probe:
+        tail.insert(0, probe.name)
+        probe = probe.parent
+    resolved = probe.resolve()
+    for part in tail:
+        resolved = resolved / part
+    try:
+        return os.path.commonpath([str(root), str(resolved)]) == str(root)
+    except ValueError:
+        return False
+
+
+def stage_sessions_disposed_rows(root: Path) -> set:
+    """D-85 extension: retire-inventory rows a C-RT relocation already accounted for.
+
+    The nine roots that finished R1~R4 before this gate existed sealed their
+    `plans/stage-sessions` files into the retire inventory, where R4 could never clear
+    them: R3 had already deleted the lump copy those rows named as their target, so the
+    digest comparison kept them forever and `legacy_top_level_retired` stayed `false`.
+    A relocation is the honest disposition for them -- but only when it can still be
+    proven, so every one of these holds before a row counts:
+
+      (a) the run directory carries a valid admission marker,
+      (b) `stage-sessions-disposition.json` exists, parses, and has the right `kind`,
+      (c) its self-digest matches, so the record has not been edited after the fact,
+      (d) its `artifact_root_id` is this root's,
+      (e) the row's status is `relocated` or `already-relocated` (a
+          `target-present-identical` row left the source in place and is deliberately
+          *not* an excuse -- see `_stage_session_decide`),
+      (f) the row cites the sealed inventory's own `ordinal`, and that entry's
+          `source_locator` matches, and
+      (g) on disk right now the target is a regular file with the row's digest and the
+          source is gone.
+
+    Anything else is dropped silently, which returns that entry to the ordinary R4 path
+    rather than granting it a pass.
+    """
+    root = Path(root).resolve()
+    inventory = sealed_retire_inventory(root)
+    identity = P.artifact_lifecycle.read_root_identity(root)
+    if inventory is None or identity is None:
+        return set()
+    by_ordinal = {e.get("ordinal"): e for e in inventory.get("entries") or []}
+    out: set = set()
+    for run_dir in _run_dirs(root):
+        if _valid_admitted_run(root, run_dir) is None:
+            continue
+        body = P._read_json(run_dir / STAGE_SESSIONS_DISPOSITION)
+        if not isinstance(body, dict) or body.get("kind") != "w7g-stage-sessions-disposition":
+            continue
+        if body.get("artifact_root_id") != identity.artifact_root_id:
+            continue
+        if _canonical_digest({k: v for k, v in body.items() if k != "digest"}) != body.get("digest"):
+            continue
+        for row in body.get("rows") or []:
+            if row.get("status") not in {"relocated", "already-relocated"}:
+                continue
+            entry = by_ordinal.get(row.get("retire_inventory_ordinal"))
+            if not entry or entry.get("source_locator") != row.get("source_locator"):
+                continue
+            # The row's own digest has to be the sealed one. Without this, a disposition
+            # could cite ordinal N, carry a digest of its own, satisfy the target check
+            # against that digest, and still contribute the *sealed* key to `disposed` --
+            # retiring an entry whose bytes were never the ones that moved.
+            if entry.get("sha256") != row.get("sha256"):
+                continue
+            source = root / str(row.get("source_locator") or "")
+            target = root / str(row.get("target_locator") or "")
+            if not _is_contained(root, target) or not _is_contained(root, source):
+                continue
+            if source.exists():
+                continue
+            if not target.is_file() or target.is_symlink():
+                continue
+            if "sha256:" + C._sha(target) != entry.get("sha256"):
+                continue
+            out.add((entry["source_locator"], entry.get("sha256")))
+    return out
+
+
 def resplit_hold(root: Path) -> Optional[Dict[str, Any]]:
     """D-77-a: hold is owned by the nonterminal journal on disk, never process liveness."""
     root = Path(root).resolve()
     holds = []
     for run_dir in _run_dirs(root):
-        for gate, terminal in (("r2", R2_TERMINAL), ("r3", R3_TERMINAL)):
+        for gate, terminal in (("r2", R2_TERMINAL), ("r3", R3_TERMINAL),
+                               ("campaign-supersede", {"complete", "no-op", "hold"}),
+                               ("stage-sessions-relocate", {"complete", "no-op", "hold"})):
             journal = P._read_json(run_dir / f"journal-{gate}.json")
             if journal is None:
                 continue
@@ -574,10 +681,9 @@ def fold_supersession_events(root: Path) -> Dict[str, Dict[str, Any]]:
         journal = P._read_json(run_dir / "journal-r3.json")
         if not isinstance(journal, dict) or journal.get("phase") != "complete":
             continue
-        events_path = run_dir / "events.jsonl"
-        if not events_path.is_file():
-            continue
-        rows.extend(C._read_jsonl(events_path))
+        for events_path in (run_dir / "events.jsonl", run_dir / "events-campaign.jsonl"):
+            if events_path.is_file():
+                rows.extend(C._read_jsonl(events_path))
     rows.sort(key=lambda r: (r.get("stream_id") or "", r.get("stream_sequence") or 0))
     out: Dict[str, Dict[str, Any]] = {}
     for row in rows:
@@ -638,7 +744,8 @@ def lump_display_state(root: Path) -> Dict[str, Any]:
     }
 
 
-DEVIATION_CHECKS = ("started-on", "cycle-state", "capability", "compat-supersession", "backup-location")
+DEVIATION_CHECKS = ("started-on", "cycle-state", "capability", "compat-supersession", "backup-location",
+                    "campaign-state", "stage-sessions")
 
 
 def _cycle_key_bucket(cycle_key: Optional[str]) -> Optional[str]:
@@ -649,10 +756,96 @@ def _cycle_key_bucket(cycle_key: Optional[str]) -> Optional[str]:
     return bucket if bucket in CYCLE_BUCKETS else None
 
 
+def _admitted_started_on_overrides(run_dir: Optional[Path], cycle_keys: set) -> Tuple[Dict[str, str], Optional[str]]:
+    """The admitted `display-quality` corrections, read back from the sealed proposal.
+
+    The sealed lump inventory keeps the *derived* `started_on` (what the tree said);
+    only the admitted proposal carries the correction R1 actually applied. Comparing a
+    corrected record against the derived value reports every admitted correction as a
+    deviation -- the audit would flag exactly the rows the contract asked for. So when a
+    cycle record says `started_on_source == "display-quality-proposal"`, the expectation
+    is the value that proposal admitted, not the derived one.
+
+    Returns `(overrides, error_code)`. A missing or unreadable proposal is an error, not
+    an empty override map: silently falling back to the derived value would turn absent
+    evidence into a pass.
+    """
+    if run_dir is None:
+        return {}, "override-evidence-missing"
+    path = _admission_dir(run_dir) / "proposal.json"
+    if not path.is_file():
+        return {}, "override-evidence-missing"
+    proposal = P._read_json(path)
+    if not isinstance(proposal, dict) or not isinstance(proposal.get("proposals"), list):
+        return {}, "override-evidence-invalid"
+    try:
+        overrides, err = _display_quality_started_on(proposal, cycle_keys)
+    except (KeyError, TypeError):
+        return {}, "override-evidence-invalid"
+    if err:
+        return {}, "override-evidence-invalid"
+    return overrides, None
+
+
+def _campaign_state_rows(root: Path) -> List[Dict[str, Any]]:
+    """D-81 predicate, read straight off the side records so it is always evaluable.
+
+    A campaign whose every cycle is `superseded` must itself be `superseded`; a campaign
+    with one live cycle must not be. This reads `campaigns/*/campaign.json` and the cycle
+    records directly rather than the run journal, because a root that never ran R2 still
+    has a campaign state that can be wrong -- and a check that needs a journal reports
+    `not-evaluated` there, which is the fail-open shape this audit exists to prevent.
+    """
+    rows: List[Dict[str, Any]] = []
+    campaigns_dir = Path(root) / "campaigns"
+    if not campaigns_dir.is_dir():
+        return rows
+    for entry in sorted(campaigns_dir.iterdir(), key=lambda q: q.name):
+        campaign = P._read_json(entry / "campaign.json")
+        if not isinstance(campaign, dict):
+            continue
+        cycle_ids = campaign.get("cycles") or []
+        if not cycle_ids:
+            continue
+        states = []
+        unresolved = []
+        for cid in cycle_ids:
+            record = P.read_cycle_record(root, cid)
+            if record is None:
+                unresolved.append(cid)
+            else:
+                states.append(record.get("state"))
+        if unresolved:
+            # A campaign naming a cycle with no side record cannot be judged either way.
+            # Counting the missing one as "live" would quietly hold the campaign at
+            # `active` and read as a pass, so the broken reference is the finding.
+            rows.append({"campaign_id": campaign.get("campaign_id"), "key": campaign.get("key"),
+                         "code": "campaign-cycle-record-missing", "cycle_ids": sorted(unresolved)})
+            continue
+        expected = "superseded" if all(s == "superseded" for s in states) else "active"
+        observed = campaign.get("state")
+        if observed != expected:
+            rows.append({"campaign_id": campaign.get("campaign_id"), "key": campaign.get("key"),
+                         "expected": expected, "observed": observed,
+                         "cycle_states": sorted(set(s for s in states if s))})
+    return rows
+
+
+def _stage_session_residue(root: Path) -> List[str]:
+    """Top-level `plans/stage-sessions/**` regular files still on disk (D-79 C-RT)."""
+    stage_root = Path(root) / "plans" / "stage-sessions"
+    if not stage_root.is_dir():
+        return []
+    return sorted(
+        p.relative_to(root).as_posix()
+        for p in stage_root.rglob("*") if p.is_file() and not p.is_symlink()
+    )
+
+
 def resplit_deviations(root: Path, *, lump_cycle_id: Optional[str] = None) -> Dict[str, Any]:
     """Read-only audit of what an already-executed resplit run actually produced.
 
-    Five things this module used to get wrong are invisible once a cycle is
+    Seven things this module used to get wrong are invisible once a cycle is
     sealed: the manifest cannot be rewritten, so the only remaining question is
     whether a given run's output matches the contract or is a recorded deviation.
     This answers that question without touching anything -- it is the regression
@@ -660,27 +853,31 @@ def resplit_deviations(root: Path, *, lump_cycle_id: Optional[str] = None) -> Di
     sealed (D-6/D-11) and are read here, never repaired.
 
     Every check reports `ok`, `deviation`, or `not-evaluated` (its evidence does
-    not exist in this run yet); `not-evaluated` is never counted as a pass.
+    not exist in this run yet); `not-evaluated` is never counted as a pass, which
+    is why the CLI's exit code reads `not_evaluated` as well as `deviations`.
+    `campaign-state` and `stage-sessions` read side records and the disk, so they
+    stay evaluable even when no run directory exists -- a root that never ran R1
+    must not look clean.
     """
     root = Path(root).resolve()
     run_dir = _find_run_dir(root, lump_cycle_id) if lump_cycle_id else None
     if run_dir is None:
         candidates = [d for d in _run_dirs(root) if (d / "journal-r2.json").is_file()]
         run_dir = candidates[-1] if candidates else None
-    if run_dir is None:
-        return {"status": "no-run", "run_dir": None, "lump_cycle_id": lump_cycle_id,
-                "checks": [], "deviations": []}
-    r2 = P._read_json(run_dir / "journal-r2.json") or {}
-    r3 = P._read_json(run_dir / "journal-r3.json") or {}
+    r2 = (P._read_json(run_dir / "journal-r2.json") or {}) if run_dir else {}
+    r3 = (P._read_json(run_dir / "journal-r3.json") or {}) if run_dir else {}
     lump_id = r2.get("lump_cycle_id") or lump_cycle_id
-    inventory = P._read_json(_admission_dir(run_dir) / "lump-inventory.json") or {}
-    expected_started_on = {}
+    inventory = (P._read_json(_admission_dir(run_dir) / "lump-inventory.json") or {}) if run_dir else {}
+    derived_started_on = {}
     for lump in inventory.get("lumps", []):
         for unit in lump.get("cycle_units", []):
-            expected_started_on[unit["cycle_key"]] = _as_rfc3339(unit.get("started_on"))
+            derived_started_on[unit["cycle_key"]] = _as_rfc3339(unit.get("started_on"))
     checks: Dict[str, Dict[str, Any]] = {
         cid: {"id": cid, "status": "not-evaluated", "rows": []} for cid in DEVIATION_CHECKS
     }
+    overrides: Dict[str, str] = {}
+    override_error: Optional[str] = None
+    override_loaded = False
     for cyc in r2.get("cycles", []):
         record = P.read_cycle_record(root, cyc["cycle_id"])
         if record is None:
@@ -688,8 +885,25 @@ def resplit_deviations(root: Path, *, lump_cycle_id: Optional[str] = None) -> Di
         manifest = P._read_json(Path(cyc["cycle_dir"]) / "manifest.json") or {}
         sealed_cycle = manifest.get("cycle") or {}
         key = cyc.get("cycle_key") or record.get("cycle_key")
-        want = expected_started_on.get(key)
         got = sealed_cycle.get("started_on") or record.get("started_on")
+        if record.get("started_on_source") == "display-quality-proposal":
+            if not override_loaded:
+                overrides, override_error = _admitted_started_on_overrides(
+                    run_dir, set(derived_started_on))
+                override_loaded = True
+            if override_error:
+                checks["started-on"]["rows"].append(
+                    {"cycle_id": cyc["cycle_id"], "cycle_key": key, "code": override_error,
+                     "observed": got})
+                want = None
+            else:
+                want = overrides.get(key)
+                if want is None:
+                    checks["started-on"]["rows"].append(
+                        {"cycle_id": cyc["cycle_id"], "cycle_key": key,
+                         "code": "override-evidence-missing", "observed": got})
+        else:
+            want = derived_started_on.get(key)
         if want and got and want != got:
             checks["started-on"]["rows"].append(
                 {"cycle_id": cyc["cycle_id"], "cycle_key": key, "expected": want, "observed": got})
@@ -709,30 +923,50 @@ def resplit_deviations(root: Path, *, lump_cycle_id: Optional[str] = None) -> Di
                     "cycle_id": cyc["cycle_id"], "cycle_key": key, "expected": want_capability,
                     "observed": record.get("capability"),
                     "observed_route_capability": record.get("route_capability")})
-    map_path = run_dir / "compatibility-map.jsonl"
-    state = C.load_map_state(root)
-    recorded = {entry["path"] for entry in state["maps"]}
-    if map_path.is_file() and str(map_path) in recorded:
-        checks["compat-supersession"]["status"] = "ok"
-        new_sources = {row["source_locator"] for row in C._read_jsonl(map_path)}
-        for entry in state["maps"]:
-            if entry["path"] == str(map_path) or not entry["present"]:
-                continue
-            table = {row["source_locator"] for row in C._read_jsonl(Path(entry["path"]))}
-            if new_sources.intersection(table) and not entry.get("superseded_by"):
-                checks["compat-supersession"]["rows"].append(
-                    {"map": entry["path"], "shared_sources": len(new_sources & table)})
-    if r3.get("phase") in {"backup-sealed", "artifacts-removed", "complete"}:
-        checks["backup-location"]["status"] = "ok"
-        if (run_dir / "legacy-artifacts.tar").is_file():
-            checks["backup-location"]["rows"].append(
-                {"code": "backup-inside-artifact-root", "path": str(run_dir / "legacy-artifacts.tar")})
-        location = P._read_json(run_dir / "backup-location.json")
-        if not isinstance(location, dict) or not location.get("archive"):
-            checks["backup-location"]["rows"].append({"code": "backup-location-missing"})
-        elif _is_within(root, location["archive"]):
-            checks["backup-location"]["rows"].append(
-                {"code": "backup-inside-artifact-root", "path": location["archive"]})
+    # D-81 / D-79 C-RT: evaluated from side records and disk, never from the journal, so
+    # a root with no run directory is still judged instead of reported as clean.
+    checks["campaign-state"]["status"] = "ok"
+    checks["campaign-state"]["rows"].extend(_campaign_state_rows(root))
+    checks["stage-sessions"]["status"] = "ok"
+    disposed = {source for source, _sha in stage_sessions_disposed_rows(root)}
+    for rel in _stage_session_residue(root):
+        if rel in disposed:
+            continue
+        checks["stage-sessions"]["rows"].append({"code": "stage-session-residue", "source_locator": rel})
+    for run in _run_dirs(root):
+        disposition = P._read_json(run / "stage-sessions-disposition.json")
+        if not isinstance(disposition, dict):
+            continue
+        for row in disposition.get("rows", []):
+            if row.get("status") == "hold":
+                checks["stage-sessions"]["rows"].append(
+                    {"code": "stage-session-hold", "source_locator": row.get("source_locator"),
+                     "target_locator": row.get("target_locator")})
+    if run_dir is not None:
+        map_path = run_dir / "compatibility-map.jsonl"
+        state = C.load_map_state(root)
+        recorded = {entry["path"] for entry in state["maps"]}
+        if map_path.is_file() and str(map_path) in recorded:
+            checks["compat-supersession"]["status"] = "ok"
+            new_sources = {row["source_locator"] for row in C._read_jsonl(map_path)}
+            for entry in state["maps"]:
+                if entry["path"] == str(map_path) or not entry["present"]:
+                    continue
+                table = {row["source_locator"] for row in C._read_jsonl(Path(entry["path"]))}
+                if new_sources.intersection(table) and not entry.get("superseded_by"):
+                    checks["compat-supersession"]["rows"].append(
+                        {"map": entry["path"], "shared_sources": len(new_sources & table)})
+        if r3.get("phase") in {"backup-sealed", "artifacts-removed", "complete"}:
+            checks["backup-location"]["status"] = "ok"
+            if (run_dir / "legacy-artifacts.tar").is_file():
+                checks["backup-location"]["rows"].append(
+                    {"code": "backup-inside-artifact-root", "path": str(run_dir / "legacy-artifacts.tar")})
+            location = P._read_json(run_dir / "backup-location.json")
+            if not isinstance(location, dict) or not location.get("archive"):
+                checks["backup-location"]["rows"].append({"code": "backup-location-missing"})
+            elif _is_within(root, location["archive"]):
+                checks["backup-location"]["rows"].append(
+                    {"code": "backup-inside-artifact-root", "path": location["archive"]})
     rows = []
     for cid in DEVIATION_CHECKS:
         check = checks[cid]
@@ -740,9 +974,12 @@ def resplit_deviations(root: Path, *, lump_cycle_id: Optional[str] = None) -> Di
             check["status"] = "deviation"
         rows.append(check)
     deviations = [c["id"] for c in rows if c["status"] == "deviation"]
+    not_evaluated = [c["id"] for c in rows if c["status"] == "not-evaluated"]
     return {
-        "status": "deviation" if deviations else "ok", "run_dir": str(run_dir),
+        "status": ("no-run" if run_dir is None else ("deviation" if deviations else "ok")),
+        "run_dir": str(run_dir) if run_dir else None,
         "lump_cycle_id": lump_id, "checks": rows, "deviations": deviations,
+        "not_evaluated": not_evaluated,
     }
 
 
@@ -1261,6 +1498,58 @@ def _build_retire_inventory(root: Path, extra_excludes: Sequence[str], identity)
     return body
 
 
+def _sealed_stage_session_sources(root: Path, inventory: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Resolve the sealed lump stage-session rows to their original legacy paths."""
+    inverted = _original_legacy_sources(root)
+    rows: List[Dict[str, Any]] = []
+    for lump in inventory.get("lumps", []):
+        lump_dir = Path(lump.get("cycle_dir", ""))
+        lump_rel = os.path.relpath(lump_dir, root)
+        for ordinal, item in enumerate(lump.get("stage_sessions", [])):
+            target = f"{lump_rel}/artifacts/{item.get('locator', '')}"
+            source = inverted.get(target)
+            if not source or not source.startswith("plans/stage-sessions/"):
+                continue
+            path = root / source
+            if path.is_file() and not path.is_symlink():
+                rows.append({"source_locator": source, "sha256": "sha256:" + C._sha(path),
+                             "byte_size": path.stat().st_size, "lump_cycle_id": lump.get("lump_cycle_id"),
+                             "ordinal": ordinal})
+    return sorted(rows, key=lambda r: r["source_locator"])
+
+
+def _hidden_residue(root: Path) -> List[Dict[str, Any]]:
+    """Report-only: top-level bucket files whose locator can never be a D-6 locator.
+
+    `artifact_manifest` rejects any path component starting with a dot, so a file like
+    `experiments/<unit>/.visual-harness/report.png` cannot enter a cycle manifest and
+    was never copied into the lump -- which also keeps it out of the compat map and out
+    of the retire inventory. It is therefore invisible to every existing predicate. R1
+    names it here so an operator sees it, and nothing moves or deletes it: which
+    contract owns this residue is still open (PRD §29.3).
+    """
+    rows: List[Dict[str, Any]] = []
+    for bucket in CYCLE_BUCKETS:
+        base = Path(root) / bucket
+        if not base.is_dir():
+            continue
+        for path in sorted(P._walk_files(base)):
+            if not path.is_file() or path.is_symlink():
+                continue
+            rel = path.relative_to(root).as_posix()
+            if not any(part.startswith(".") for part in rel.split("/")):
+                continue
+            rows.append({"locator": rel, "byte_size": path.stat().st_size,
+                         "reason": "hidden-component-unmanifestable"})
+    return rows
+
+
+def _write_self_digest(path: Path, body: Dict[str, Any]) -> None:
+    payload = dict(body)
+    payload["digest"] = _canonical_digest({k: v for k, v in payload.items() if k != "digest"})
+    P._write_atomic(path, P._json_bytes(payload))
+
+
 def _r1(root: Path, *, lump_cycle_id: str, proposal_path: Path,
        confirmed_constraints_path: Optional[Path], dry_run: bool,
        crash_after_phase: Optional[str], root_slug: Optional[str] = None) -> Dict[str, Any]:
@@ -1327,10 +1616,16 @@ def _r1(root: Path, *, lump_cycle_id: str, proposal_path: Path,
     relocating = sorted(row["source_locator"] for rows in loose_assigned.values() for row in rows)
     journal["loose_relocating"] = relocating
     journal["loose_deferred"] = loose_deferred
-    retire_inventory = _build_retire_inventory(root, relocating, identity)
+    stage_rows = _sealed_stage_session_sources(root, lump_inventory)
+    stage_sources = [r["source_locator"] for r in stage_rows]
+    retire_inventory = _build_retire_inventory(root, relocating + stage_sources, identity)
     P._write_atomic(admission_dir / "lump-inventory.json", P._json_bytes(lump_inventory))
     P._write_atomic(admission_dir / "loose-inventory.json", P._json_bytes(loose_inventory))
     P._write_atomic(admission_dir / "retire-inventory.json", P._json_bytes(retire_inventory))
+    disposition = {"schema_version": 1, "kind": "w7g-r1-disposition",
+                   "artifact_root_id": identity.artifact_root_id if identity else None,
+                   "stage_sessions": stage_rows, "hidden_residue": _hidden_residue(root)}
+    _write_self_digest(admission_dir / "r1-disposition.json", disposition)
     journal["phase"] = "inventories-sealed"
     P._write_atomic(journal_path, P._json_bytes(journal))
     if crash_after_phase == "inventories-sealed":
@@ -2099,6 +2394,14 @@ def _r3(root: Path, *, lump_cycle_id: str, backup_root: Optional[Path], dry_run:
                 }],
                 "compat_json": None, "written_map_files": [],
             }
+            campaign_id = lump_record.get("campaign_id")
+            campaign_path = P._campaign_path(root, campaign_id) if campaign_id else None
+            if campaign_path and campaign_path.is_file():
+                data = campaign_path.read_bytes()
+                pre_image["side_records"].append({
+                    "path": os.path.relpath(campaign_path, root), "bytes_b64": _b64(data),
+                    "sha256": "sha256:" + hashlib.sha256(data).hexdigest(),
+                })
             compat_path = C.compat_path(root)
             if compat_path.is_file():
                 data = compat_path.read_bytes()
@@ -2136,6 +2439,9 @@ def _r3_rollback(root: Path, journal: Dict[str, Any], run_dir: Path) -> None:
     events_path = run_dir / "events.jsonl"
     if events_path.is_file():
         events_path.unlink()
+    campaign_events_path = run_dir / "events-campaign.jsonl"
+    if campaign_events_path.is_file():
+        campaign_events_path.unlink()
     compat_pre = pre_image.get("compat_json")
     compat_path = C.compat_path(root)
     if compat_pre is not None:
@@ -2225,7 +2531,23 @@ def _r3_execute(root: Path, run_dir: Path, journal: Dict[str, Any], identity, al
         phase = journal["phase"]
         if crash_after_phase == phase:
             raise ResplitError("crash-fixture", phase)
+    # D-81: the campaign can only be superseded once its cycles are, so this phase sits
+    # after the cycle event and before the compat re-issue. Both of its actions are
+    # read-then-act, so a crash anywhere inside it replays without a second producer
+    # call and without a duplicate event row.
     if phase == "events-appended":
+        result = _supersede_campaign(root, lump_cycle_id, dry_run=False)
+        journal["campaign_supersede"] = result
+        P._write_atomic(journal_path, P._json_bytes(journal))
+        if result["phase"] == "complete":
+            _campaign_supersession_event(root, run_dir, result["campaign_id"], new_cycle_ids,
+                                         allocator=alloc)
+        journal["phase"] = "campaign-superseded"
+        P._write_atomic(journal_path, P._json_bytes(journal))
+        phase = journal["phase"]
+        if crash_after_phase == phase:
+            raise ResplitError("crash-fixture", phase)
+    if phase == "campaign-superseded":
         pre_image = journal.get("pre_image") or {}
         written_maps = pre_image.get("written_map_files") or []
         if not written_maps:
@@ -2315,8 +2637,345 @@ def _r3_execute(root: Path, run_dir: Path, journal: Dict[str, Any], identity, al
         if crash_after_phase == phase:
             raise ResplitError("crash-fixture", phase)
     if phase == "artifacts-removed":
+        # D-79 C-RT: `plans/stage-sessions` was never cycle population, so relocating it
+        # is not part of the lump's byte conservation and must not be able to wedge a run
+        # that is already past its verified backup. The step is journaled, idempotent and
+        # advisory here; its own gate re-runs it when it holds.
+        journal["stage_sessions"] = _relocate_stage_sessions(root, run_dir, dry_run=False)
         journal["phase"] = "complete"
         P._write_atomic(journal_path, P._json_bytes(journal))
+
+
+CORRECTION_GATES = ("campaign-supersede", "stage-sessions-relocate")
+CORRECTION_TERMINAL = {"complete", "no-op", "hold"}
+STAGE_SESSIONS_DISPOSITION = "stage-sessions-disposition.json"
+
+
+def _stage_session_plan(root: Path, run_dir: Path) -> List[Dict[str, Any]]:
+    """The rows a stage-session relocation may touch, from the one sealed source.
+
+    D-79 excludes `plans/stage-sessions` from the cycle population, so the sealed
+    `lump-inventory.json` already lists it separately in `stage_sessions[]` -- and that
+    file exists in every admitted bundle, including the nine roots that finished before
+    this gate existed. `admission/r1-disposition.json` is a newer convenience record and
+    is deliberately *not* an input here, because re-running R1 to create one would have
+    to rewrite a sealed inventory.
+
+    Only the original top-level legacy path is a relocation source. The copy inside the
+    lump is removed by R3 with the rest of `artifacts/` and is already inside the R3
+    backup tar, so moving it would take bytes out of a sealed conservation set.
+    """
+    inventory = P._read_json(_admission_dir(run_dir) / "lump-inventory.json") or {}
+    retire = P._read_json(_admission_dir(run_dir) / "retire-inventory.json") or {}
+    ordinal_by_source = {e.get("source_locator"): e for e in retire.get("entries", [])}
+    inverted = _original_legacy_sources(root)
+    rows: List[Dict[str, Any]] = []
+    seen: set = set()
+    for lump in inventory.get("lumps", []):
+        lump_dir = lump.get("cycle_dir")
+        if not lump_dir:
+            continue
+        lump_rel = os.path.relpath(Path(lump_dir), root)
+        for item in lump.get("stage_sessions", []):
+            locator = item.get("locator") or ""
+            source_locator = inverted.get(f"{lump_rel}/artifacts/{locator}") or locator
+            if not source_locator.startswith("plans/stage-sessions/") or source_locator in seen:
+                continue
+            parts = source_locator.split("/", 3)
+            if len(parts) < 4 or not _ROUTE_ID_RE.match(parts[2]) or not parts[3]:
+                continue
+            # Both locators come from sealed records, but a `..` in either would let the
+            # rename reach outside the artifact root, so containment is checked here --
+            # before any path is handed to `os.rename` -- rather than trusted.
+            target_locator = f".runtime/stage-sessions/{parts[2]}/{parts[3]}"
+            if not _is_contained(root, root / source_locator) or not _is_contained(root, root / target_locator):
+                continue
+            seen.add(source_locator)
+            entry = ordinal_by_source.get(source_locator) or {}
+            rows.append({
+                "source_locator": source_locator,
+                "target_locator": target_locator,
+                # The sealed digest, and the only value a rename is allowed to move.
+                "sha256": entry.get("sha256") or item.get("sha256"),
+                "retire_inventory_ordinal": entry.get("ordinal"),
+            })
+    return sorted(rows, key=lambda r: r["source_locator"])
+
+
+def _stage_session_decide(root: Path, row: Dict[str, Any]) -> str:
+    """Classify one row against the disk, without moving anything.
+
+    `relocated` covers two shapes that have to be the same answer: the move this call is
+    about to make, and a move a previous interrupted call already made. A run that
+    renamed row 1 and then died leaves row 1 with its target in place and its source
+    gone; if the replay called that `target-present-identical` the row would be excluded
+    from the gate's evidence while its source was already deleted, and the entry could
+    never be satisfied by anything again.
+    """
+    source = root / row["source_locator"]
+    target = root / row["target_locator"]
+    sealed = row.get("sha256")
+    source_present = source.is_file() and not source.is_symlink()
+    if target.exists():
+        if not target.is_file() or target.is_symlink() or "sha256:" + C._sha(target) != sealed:
+            return "hold"
+        # Identical target, source gone -> the end state this relocation aims at already
+        # holds. It is reported as `already-relocated` rather than `relocated` because
+        # this call did not move anything and cannot claim to have: the row is evidence
+        # about the tree, not about an actor. The gate accepts both, since D-85's own
+        # predicate is a statement about what is on disk (`the sealed bytes are at the
+        # canonical path and the legacy path is gone`), not about provenance.
+        if not source.exists():
+            return "already-relocated"
+        # Identical target, source still here -> D-79's no-op. Nothing is copied, and
+        # nothing is deleted either, because only D-84's approval package grants that.
+        # `stage_sessions_disposed_rows` refuses to count this row, so the root stays
+        # honestly short of `legacy_top_level_retired` until R4 runs.
+        return "target-present-identical"
+    if not source.exists():
+        return "already-absent"
+    if not source_present:
+        return "hold"
+    # Only the sealed bytes may move; anything else is a divergence to report, not carry.
+    if "sha256:" + C._sha(source) != sealed:
+        return "hold"
+    return "relocated"
+
+
+def _relocate_stage_sessions(root: Path, run_dir: Path, *, dry_run: bool) -> Dict[str, Any]:
+    """Execute (or, in dry run, only decide) the D-79 C-RT relocation. Idempotent."""
+    plan = _stage_session_plan(root, run_dir)
+    rows: List[Dict[str, Any]] = []
+    try:
+        for row in plan:
+            decision = _stage_session_decide(root, row)
+            out = dict(row)
+            out["status"] = decision
+            out["moved_by_this_run"] = bool(decision == "relocated" and not dry_run)
+            if decision == "relocated" and not dry_run:
+                source = root / row["source_locator"]
+                target = root / row["target_locator"]
+                if source.is_file() and not source.is_symlink():
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    os.rename(source, target)
+            rows.append(out)
+    except OSError:
+        # Seal what actually happened before the failure propagates. Without this a run
+        # that moved row 1 and failed on row 2 would leave row 1's source deleted with no
+        # record naming it, and the gate would have nothing to re-verify.
+        if not dry_run and rows:
+            _seal_stage_session_disposition(root, run_dir, rows)
+        raise
+    statuses = {r["status"] for r in rows}
+    if "hold" in statuses:
+        phase = "hold"
+    elif "relocated" in statuses:
+        phase = "complete"
+    elif "already-relocated" in statuses:
+        phase = "no-op"
+    else:
+        phase = "no-op"
+    result = {"phase": phase, "rows": rows, "row_count": len(rows)}
+    if dry_run:
+        return result
+    _seal_stage_session_disposition(root, run_dir, rows)
+    return result
+
+
+def _seal_stage_session_disposition(root: Path, run_dir: Path, rows: List[Dict[str, Any]]) -> None:
+    identity = P.artifact_lifecycle.read_root_identity(root)
+    _write_self_digest(run_dir / STAGE_SESSIONS_DISPOSITION, {
+        "schema_version": 1, "kind": "w7g-stage-sessions-disposition",
+        "artifact_root_id": identity.artifact_root_id if identity else None,
+        "recorded_at": C._now(), "rows": rows,
+    })
+
+
+def _supersede_campaign(root: Path, lump_cycle_id: str, *, dry_run: bool) -> Dict[str, Any]:
+    """D-81: mark the lump's campaign superseded once every cycle it owns is.
+
+    `mark_campaign_superseded` enforces the "no live cycle" precondition itself, so this
+    only classifies the outcome: a campaign that still holds a live cycle (hearting's
+    does) is a typed skip, not a failure.
+    """
+    record = P.read_cycle_record(root, lump_cycle_id) or {}
+    campaign_id = record.get("campaign_id")
+    campaign = P.read_campaign(root, campaign_id) if campaign_id else None
+    if campaign is None:
+        return {"phase": "hold", "code": "campaign-unknown", "campaign_id": campaign_id}
+    if campaign.get("state") == "superseded":
+        return {"phase": "no-op", "code": "already-superseded", "campaign_id": campaign_id}
+    states = [(P.read_cycle_record(root, cid) or {}).get("state") for cid in campaign.get("cycles") or []]
+    if not states or any(state != "superseded" for state in states):
+        return {"phase": "no-op", "code": "campaign-retained-live-cycles", "campaign_id": campaign_id,
+                "cycle_states": sorted(set(s for s in states if s))}
+    if dry_run:
+        return {"phase": "complete", "code": "would-supersede", "campaign_id": campaign_id}
+    try:
+        P.mark_campaign_superseded(root, campaign_id)
+    except P.ProducerError as exc:
+        if getattr(exc, "code", "") != "campaign-has-live-cycles":
+            raise
+        return {"phase": "no-op", "code": "campaign-retained-live-cycles", "campaign_id": campaign_id}
+    return {"phase": "complete", "code": "superseded", "campaign_id": campaign_id}
+
+
+def _campaign_supersession_event(root: Path, run_dir: Path, campaign_id: str,
+                                 superseded_by: Sequence[str], allocator=None) -> None:
+    """Append the D-83 `campaign.superseded` row, once, to its own event file.
+
+    It is a separate file from `events.jsonl` on purpose: R3 keeps the cycle event
+    idempotent with an `if not existing:` guard over that file, so appending a second
+    row there would make a roll-forward skip writing the cycle event at all. The reader
+    folds both files and sorts by `(stream_id, stream_sequence)`, so the two stay one
+    ordered stream.
+    """
+    path = run_dir / "events-campaign.jsonl"
+    existing = C._read_jsonl(path) if path.is_file() else []
+    if any(row.get("event_type") == "campaign.superseded" and row.get("target_id") == campaign_id
+           for row in existing):
+        return
+    r3 = P._read_json(run_dir / "journal-r3.json") or {}
+    identity = P.artifact_lifecycle.read_root_identity(root)
+    alloc = allocator or artifact_identity.IdAllocator()
+    event = {
+        "event_id": alloc.allocate("event"),
+        "stream_id": r3.get("stream_id") or alloc.allocate("stream"),
+        "stream_sequence": 2, "event_type": "campaign.superseded", "target_id": campaign_id,
+        "actor": {"kind": "producer", "id": identity.repository_id if identity else "unknown"},
+        "recorded_at": C._now(),
+        "payload": {"superseded_by": list(superseded_by), "resplit_run_dir": str(run_dir)},
+    }
+    C._write_jsonl(path, existing + [event])
+
+
+def _pid_start(pid: Any) -> Optional[str]:
+    """The process's start time from `/proc/<pid>/stat` field 22, or `None`.
+
+    A bare pid is not an identity: pids are reused, and a lock reclaimed on pid liveness
+    alone can be taken from a different, live process that happens to have inherited the
+    number. Pairing the pid with its start time makes the check exact wherever procfs is
+    available; where it is not, `None` is recorded and the pid alone is used, which is
+    the pre-existing weaker guarantee rather than a new one.
+    """
+    if not isinstance(pid, int) or pid <= 0:
+        return None
+    try:
+        with open(f"/proc/{pid}/stat", encoding="utf-8") as handle:
+            fields = handle.read().rsplit(") ", 1)[-1].split()
+        return fields[19]  # field 22 overall, 20th after the comm field
+    except (OSError, IndexError):
+        return None
+
+
+def _owner_still_running(pid: Any, recorded_start: Any) -> bool:
+    """True only when the recorded owner is provably the process still holding it."""
+    if not isinstance(pid, int) or pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        pass
+    except OSError:
+        return True
+    current_start = _pid_start(pid)
+    if recorded_start and current_start and recorded_start != current_start:
+        return False  # same number, different process -- the owner is gone
+    return True
+
+
+def _claim_correction_lock(run_dir: Path, *, gate: str, lump_cycle_id: str) -> Path:
+    """Exclusive per-gate lock that a dead owner cannot wedge forever.
+
+    `resplit_hold` deliberately reads journals rather than process liveness, because a
+    hold has to survive a reboot. A *lock* is the opposite case: if the process that
+    took it is gone, refusing every later call would leave the correction surface
+    permanently unusable with no operator command to clear it. So the lock is reclaimed
+    only when its recorded owner is provably not running.
+    """
+    lock_path = run_dir / f"resplit-{gate}.lock"
+    body = {"schema_version": 1, "kind": "w7g-correction-lock", "gate": gate,
+            "lump_cycle_id": lump_cycle_id, "owner_pid": os.getpid(),
+            "owner_pid_start": _pid_start(os.getpid()), "acquired_at": C._now()}
+    try:
+        P._write_exclusive(lock_path, P._json_bytes(body), 0o600)
+        return lock_path
+    except FileExistsError:
+        pass
+    existing = P._read_json(lock_path)
+    if isinstance(existing, dict) and not _owner_still_running(
+            existing.get("owner_pid"), existing.get("owner_pid_start")):
+        try:
+            lock_path.unlink()
+        except OSError:
+            pass
+        try:
+            P._write_exclusive(lock_path, P._json_bytes(body), 0o600)
+            return lock_path
+        except FileExistsError:
+            pass
+    raise ResplitError("resplit-in-progress", json.dumps(existing or {"gate": gate}))
+
+
+def _correction_gate(root: Path, *, gate: str, lump_cycle_id: str, dry_run: bool) -> Dict[str, Any]:
+    """The two post-hoc correction surfaces for roots that finished R1~R4 already.
+
+    Neither touches a sealed manifest or a sealed admission bundle: `campaign-supersede`
+    writes only the mutable campaign side record and its own event file, and
+    `stage-sessions-relocate` renames paths D-79 excluded from the cycle population in
+    the first place. Both are idempotent, journaled before they mutate, and refuse to
+    start while an R2/R3 journal is nonterminal.
+    """
+    run_dir = _find_run_dir(root, lump_cycle_id)
+    if run_dir is None or _valid_admitted_run(root, run_dir) is None:
+        raise ResplitError("admission-marker-missing", lump_cycle_id)
+    journal_path = run_dir / f"journal-{gate}.json"
+    journal = P._read_json(journal_path)
+    if isinstance(journal, dict) and journal.get("phase") in CORRECTION_TERMINAL:
+        return {"status": "already-applied", "gate": gate, "run_dir": str(run_dir), "journal": journal}
+    r3 = P._read_json(run_dir / "journal-r3.json") or {}
+    if r3.get("phase") != "complete":
+        raise ResplitError("resplit-stale", "r3-not-complete")
+    if dry_run:
+        # No journal, no lock, no directory: a dry run against a real root has to leave
+        # the tree byte-identical, and the lock alone would create `.runtime/...`.
+        if gate == "campaign-supersede":
+            preview = _supersede_campaign(root, lump_cycle_id, dry_run=True)
+        else:
+            preview = _relocate_stage_sessions(root, run_dir, dry_run=True)
+        return {"status": "dry-run", "gate": gate, "run_dir": str(run_dir),
+                "would": preview, "resumes_existing_journal": journal is not None}
+    hold = resplit_hold(root)
+    if hold is not None and hold.get("gate") in {"r2", "r3"}:
+        raise ResplitError("resplit-in-progress", json.dumps(hold))
+    # The journal is written before the lock on purpose: a lock with no journal beside it
+    # can only be an orphan, and that is the shape `_claim_correction_lock` reclaims.
+    journal = {"schema_version": 1, "kind": "w7g-resplit-journal", "gate": gate,
+               "lump_cycle_id": lump_cycle_id, "run_dir": str(run_dir),
+               "phase": "prepared", "started_at": C._now(), "owner_pid": os.getpid()}
+    P._write_atomic(journal_path, P._json_bytes(journal))
+    lock_path = _claim_correction_lock(run_dir, gate=gate, lump_cycle_id=lump_cycle_id)
+    try:
+        if gate == "campaign-supersede":
+            result = _supersede_campaign(root, lump_cycle_id, dry_run=False)
+            if result["phase"] == "complete":
+                _campaign_supersession_event(
+                    root, run_dir, result["campaign_id"],
+                    (P._read_json(run_dir / "journal-r3.json") or {}).get("new_cycle_ids") or [])
+        else:
+            result = _relocate_stage_sessions(root, run_dir, dry_run=False)
+        journal["phase"] = result["phase"]
+        journal["result"] = result
+        P._write_atomic(journal_path, P._json_bytes(journal))
+        return {"status": result["phase"], "gate": gate, "run_dir": str(run_dir),
+                "result": result, "journal": journal}
+    finally:
+        try:
+            lock_path.unlink()
+        except OSError:
+            pass
 
 
 def _validated_backup_root(root: Path, backup_root: Optional[Path]) -> Path:
@@ -2429,7 +3088,9 @@ def resplit_legacy_cycle(
                   crash_after_phase=crash_after_phase, crash_at=crash_at, allocator=allocator)
     if gate == "r3":
         return _r3(root, lump_cycle_id=lump_cycle_id, backup_root=backup_root, dry_run=dry_run,
-                  crash_after_phase=crash_after_phase, crash_at=crash_at, allocator=allocator)
+                   crash_after_phase=crash_after_phase, crash_at=crash_at, allocator=allocator)
+    if gate in CORRECTION_GATES:
+        return _correction_gate(root, gate=gate, lump_cycle_id=lump_cycle_id, dry_run=dry_run)
     raise ResplitError("resplit-stale", f"gate-unknown:{gate}")
 
 
@@ -2467,7 +3128,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     v.add_argument("--lump-cycle-id")
 
     r = sub.add_parser("resplit-legacy-cycle")
-    r.add_argument("--gate", required=True, choices=("r1", "r2", "r3"))
+    r.add_argument("--gate", required=True, choices=("r1", "r2", "r3") + CORRECTION_GATES)
     r.add_argument("--lump-cycle-id", required=True)
     r.add_argument("--proposal")
     r.add_argument("--confirmed-constraints")
@@ -2496,7 +3157,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         if args.command == "deviations":
             report = resplit_deviations(root, lump_cycle_id=args.lump_cycle_id)
             _print(report)
-            return BLOCKED if report["deviations"] else OK
+            return OK if not report["deviations"] and not report.get("not_evaluated") else BLOCKED
         if args.command == "campaign-proposal" and args.proposal_command == "validate":
             result = campaign_proposal_validate(
                 root, proposal_path=Path(args.proposal),
