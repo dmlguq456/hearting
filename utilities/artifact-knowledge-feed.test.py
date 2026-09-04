@@ -231,10 +231,22 @@ class LayeredLayoutTests(unittest.TestCase):
 
     def _cycle_root(self, base: Path) -> tuple[Path, Path]:
         root = base / "artifacts"
-        cyc = root / "campaigns" / ("camp_" + "a" * 32) / "cycles" / ("cyc_" + "b" * 32) / "artifacts"
+        campaign_id = "camp_" + "a" * 32
+        cycle_id = "cyc_" + "b" * 32
+        campaign = root / "campaigns" / campaign_id
+        cyc_root = campaign / "cycles" / cycle_id
+        cyc = cyc_root / "artifacts"
         (cyc / "plans" / "2026-08-26_relocated").mkdir(parents=True)
         (cyc / "plans" / "2026-08-26_relocated" / "plan.md").write_text("plan", encoding="utf-8")
         (cyc / "plans" / "2026-08-26_relocated" / "final_report.md").write_text("done", encoding="utf-8")
+        (campaign / "campaign.json").write_text(
+            json.dumps({"campaign_id": campaign_id, "cycles": [cycle_id]}),
+            encoding="utf-8",
+        )
+        (cyc_root / "manifest.json").write_text(
+            json.dumps({"cycle": {"cycle_id": cycle_id}}),
+            encoding="utf-8",
+        )
         return root, cyc
 
     def test_cycle_layout_alone_satisfies_the_required_plans_bucket(self):

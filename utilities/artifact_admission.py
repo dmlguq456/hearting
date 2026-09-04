@@ -29,6 +29,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import artifact_index
+import artifact_locator
 import artifact_manifest
 from artifact_identity import IdAllocator, RootIdentity
 from artifact_manifest import Violation
@@ -284,12 +285,23 @@ def force_release_lock(root: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _path_under_root(root: Path, candidate: Path) -> Path:
+    """Return candidate only when existing parent symlinks cannot escape root."""
+
+    try:
+        root_resolved = Path(root).resolve(strict=False)
+        candidate.resolve(strict=False).relative_to(root_resolved)
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise ValueError("publish-path-outside-artifact-root") from exc
+    return candidate
+
+
 def publish_plan(root: Path, campaign_id: str, cycle_id: str) -> Tuple[Path, Path, Optional[Path]]:
     root = Path(root)
-    campaigns_dir = root / "campaigns"
-    campaign_dir = campaigns_dir / campaign_id
-    cycles_dir = campaign_dir / "cycles"
-    cycle_dir = cycles_dir / cycle_id
+    campaigns_dir = _path_under_root(root, root / "campaigns")
+    campaign_dir = _path_under_root(root, campaigns_dir / campaign_id)
+    cycles_dir = _path_under_root(root, campaign_dir / "cycles")
+    cycle_dir = _path_under_root(root, cycles_dir / cycle_id)
 
     if not campaigns_dir.exists():
         publish_target, parent = campaigns_dir, root
@@ -683,16 +695,10 @@ def _compute_rebuilt_index(
     fallback_keys: List[str] = []
     items = []
     if campaigns_dir.exists():
-        for campaign_id in sorted(os.listdir(str(campaigns_dir))):
-            if campaign_id.startswith("."):
+        for campaign_dir in sorted(campaigns_dir.iterdir(), key=lambda path: path.name):
+            if campaign_dir.name.startswith(".") or campaign_dir.is_symlink() or not campaign_dir.is_dir():
                 continue
-            cycles_dir = campaigns_dir / campaign_id / "cycles"
-            if not cycles_dir.is_dir():
-                continue
-            for cycle_id in sorted(os.listdir(str(cycles_dir))):
-                if cycle_id.startswith("."):
-                    continue
-                cycle_dir = cycles_dir / cycle_id
+            for cycle_dir, _layout in artifact_locator.iter_cycle_dirs(campaign_dir):
                 manifest_path = cycle_dir / "manifest.json"
                 if not manifest_path.is_file():
                     continue
@@ -980,9 +986,14 @@ def admit(
             # The index is a derived accelerator: a no-op verdict must be
             # backed by the canonical folder it claims exists, or a forged or
             # drifted index row would fake an admission that never published.
-            published_manifest = (
-                (root / cycle_path / "manifest.json") if isinstance(cycle_path, str) else None
-            )
+            published_manifest = None
+            if isinstance(cycle_path, str) and not Path(cycle_path).is_absolute():
+                try:
+                    published_manifest = _path_under_root(
+                        root, root / cycle_path / "manifest.json"
+                    )
+                except ValueError:
+                    published_manifest = None
             if published_manifest is None or not published_manifest.is_file():
                 return AdmissionOutcome(
                     status="rejected",
@@ -1028,7 +1039,16 @@ def admit(
         cycle_id = cycle["cycle_id"]
 
         # step 8 -- publish plan.
-        publish_target, deepest_parent, staging = publish_plan(root, campaign_id, cycle_id)
+        try:
+            publish_target, deepest_parent, staging = publish_plan(root, campaign_id, cycle_id)
+        except ValueError as exc:
+            return AdmissionOutcome(
+                status="rejected",
+                cycle_path=None,
+                manifest_digest=digest,
+                violations=(Violation("publish-path-invalid", "$", str(exc)),),
+                index_changed=False,
+            )
         if staging is None:
             # cycle_id already exists on disk and it was not an idempotent
             # retry (index.check would have already rejected it, but guard
@@ -1053,8 +1073,20 @@ def admit(
                 index_changed=False,
             )
 
-        cycles_dir_for_cycle = root / "campaigns" / campaign_id / "cycles"
-        cycle_dir = cycles_dir_for_cycle / cycle_id
+        try:
+            cycles_dir_for_cycle = _path_under_root(
+                root, root / "campaigns" / campaign_id / "cycles"
+            )
+            cycle_dir = _path_under_root(root, cycles_dir_for_cycle / cycle_id)
+        except ValueError as exc:
+            _remove_tree(staging)
+            return AdmissionOutcome(
+                status="rejected",
+                cycle_path=None,
+                manifest_digest=digest,
+                violations=(Violation("publish-path-invalid", "$", str(exc)),),
+                index_changed=False,
+            )
 
         try:
             cycle_content_dir = _stage_tree(

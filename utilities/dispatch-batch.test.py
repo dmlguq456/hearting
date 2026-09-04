@@ -2798,7 +2798,8 @@ class DispatchBatchIntegrationTest(unittest.TestCase):
             compile_result = subprocess.run(
                 [
                     sys.executable, str(ROOT / "utilities" / "capability-route.py"),
-                    "compile", "--capability", "autopilot-code",
+                    "compile", "--slug", "dispatch-batch-fixture",
+                    "--capability", "autopilot-code",
                     "--capability-mode", "dev", "--intensity", "strong",
                     "--cwd", str(repo), "--artifact-root", str(artifact_root),
                     "--signal", "shared-contract", "--transport", "headless",

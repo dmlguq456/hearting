@@ -135,6 +135,38 @@ class TestRoute(unittest.TestCase):
   # recipe's declared bindings) -- assert that explicitly now that
   # autopilot-code's recipe declares a non-empty frame-review binding.
   self.assertEqual(a["human_gate_bindings"],[])
+ def test_slug_is_canonicalized_and_sealed_while_legacy_absence_verifies(self):
+  legacy=R.compile_route(**self.args())
+  self.assertNotIn("slug",legacy)
+  self.assertNotIn("slug_truncated",legacy)
+  R.verify_route(legacy,R.ROOT)
+  raw="Cycle A "+("Deterministic Locator "*4)
+  expected,truncated=R.ARTIFACT_LOCATOR.slugify(raw)
+  route=R.compile_route(**self.args(slug=raw))
+  other=R.compile_route(**self.args(slug="cycle-b"))
+  self.assertEqual(route["slug"],expected)
+  self.assertEqual(route["slug_truncated"],truncated)
+  self.assertTrue(route["slug_truncated"])
+  self.assertNotEqual(route["route_hash"],other["route_hash"])
+  R.verify_route(route,R.ROOT)
+  marker_tampered=json.loads(json.dumps(route))
+  marker_tampered["slug_truncated"]=False
+  with self.assertRaisesRegex(ValueError,"stale or modified route hash"):
+   R.verify_route(marker_tampered,R.ROOT)
+ def test_verify_rejects_resealed_noncanonical_or_incomplete_slug(self):
+  route=R.compile_route(**self.args(slug="cycle-a"))
+  for key,value,message in (
+      ("slug","Cycle A","route slug is not canonical"),
+      ("slug_truncated",None,"invalid route slug metadata"),
+  ):
+   with self.subTest(key=key):
+    invalid=json.loads(json.dumps(route))
+    if value is None: invalid.pop(key)
+    else: invalid[key]=value
+    invalid["route_hash"]=R.route_hash(invalid)
+    invalid["route_id"]="rt-"+invalid["route_hash"].split(":",1)[1][:16]
+    with self.assertRaisesRegex(ValueError,message):
+     R.verify_route(invalid,R.ROOT)
  def test_ambiguous_quick(self):
   a=R.compile_route(**self.args(predicates=[],transport=None,inline_reason=None,registered_headless_evidence=self.registered_headless()))
   self.assertEqual(a["effective_intensity"],"quick")
@@ -1474,7 +1506,8 @@ class TestRoute(unittest.TestCase):
    escape.symlink_to(outside)
    self.assertEqual(R.classify_route_location(escape/"a.json",root),"outside")
  def _compile_cli_args(self,artifact_root,*,output=None):
-  args=["--capability","autopilot-code","--capability-mode","dev","--intensity","direct",
+  args=["--capability","autopilot-code","--capability-mode","dev","--slug","CLI Route",
+        "--intensity","direct",
         "--cwd",str(R.ROOT),"--artifact-root",str(artifact_root)]
   for predicate in ALL: args+=["--predicate",predicate]
   args+=["--tracking","tracked","--spec-read","true","--drift-verdict","within-spec",
@@ -1501,6 +1534,8 @@ class TestRoute(unittest.TestCase):
    result=self._run_compile_cli(self._compile_cli_args(artifact_root))
    self.assertEqual(result.returncode,0,result.stderr)
    route=json.loads(result.stdout)
+   self.assertEqual(route["slug"],"cli-route")
+   self.assertFalse(route["slug_truncated"])
    launch=route["launch_compatibility_tuple"]
    self.assertEqual(launch["contract_version"],R.LAUNCH_COMPATIBILITY_TUPLE_VERSION)
    self.assertEqual(launch["tuple_version"],R.LAUNCH_COMPATIBILITY_TUPLE_VERSION)
@@ -1508,6 +1543,14 @@ class TestRoute(unittest.TestCase):
    self.assertTrue(expected.is_file())
    self.assertIn(f"route_file={expected.resolve()}",result.stderr)
    self.assertEqual(json.loads(expected.read_text(encoding="utf-8"))["route_id"],route["route_id"])
+ def test_compile_cli_requires_slug(self):
+  with tempfile.TemporaryDirectory() as tmp:
+   argv=self._compile_cli_args(Path(tmp))
+   slug_index=argv.index("--slug")
+   del argv[slug_index:slug_index+2]
+   result=self._run_compile_cli(argv)
+   self.assertEqual(result.returncode,2,result.stderr)
+   self.assertIn("--slug",result.stderr)
  def test_complete_output_collision_is_refused_and_preserves_original(self):
   # C-25b: `complete --output` used to overwrite any existing file at that
   # path unconditionally (`if a.output: atomic_write(a.output, marker)`),
@@ -1797,7 +1840,7 @@ class TestContinuation(unittest.TestCase):
    "execution_surface":"codex-native-subagent","registered_worker":False,
    "status":"supported","check_source":"continuation-fixture",
   }]}
- def _source(self,artifact_root,cwd=None):
+ def _source(self,artifact_root,cwd=None,slug=None):
   gate={
    "spec_read":{"satisfied":True,"source":"canonical-prd-sha256"},
    "drift_verdict":"within-spec","workflow_mode":"tracked",
@@ -1808,6 +1851,7 @@ class TestContinuation(unittest.TestCase):
    predicates=[],signals=["shared-contract"],transport="headless",
    tracking="tracked",tracked_gate_evidence=gate,
    dispatch_evidence=self._dispatch(cwd),
+   slug=slug,
   )
   route["runtime_lineage"]={
    "runtime":"codex","thread_id":"thread-source",
@@ -1990,6 +2034,15 @@ class TestContinuation(unittest.TestCase):
    outside.write_text("changed\n",encoding="utf-8")
    self.assertEqual(with_link,R.evidence_digest(renamed))
 
+ def test_slug_metadata_is_inherited_by_continuation(self):
+  with tempfile.TemporaryDirectory() as tmp:
+   artifact=Path(tmp)/"artifacts"
+   source=self._source(artifact,slug="Cycle A")
+   self._complete_prefix(source,"test",Path(tmp)/"evidence")
+   continuation=self._build(source)
+   self.assertEqual(continuation["slug"],"cycle-a")
+   self.assertFalse(continuation["slug_truncated"])
+   R.verify_route(continuation,R.ROOT)
  def test_at1_reuses_exact_prefix_and_publishes_suffix_only(self):
   from unittest import mock
   with tempfile.TemporaryDirectory() as tmp:
@@ -2200,7 +2253,8 @@ class TestContinuation(unittest.TestCase):
    })
    result=subprocess.run([
     sys.executable,str(P),"compile","--capability","autopilot-code",
-    "--capability-mode","dev","--intensity","strong","--cwd",str(R.ROOT),
+    "--capability-mode","dev","--slug","CLI Owner Route",
+    "--intensity","strong","--cwd",str(R.ROOT),
     "--artifact-root",str(artifact),"--signal","shared-contract",
     "--transport","headless","--tracking","tracked",
     "--dispatch-evidence",str(dispatch_path),"--spec-read","true",
@@ -2241,7 +2295,8 @@ class TestContinuation(unittest.TestCase):
    })
    result=subprocess.run([
     sys.executable,str(P),"compile","--capability","autopilot-code",
-    "--capability-mode","dev","--intensity","strong","--cwd",str(R.ROOT),
+    "--capability-mode","dev","--slug","CLI Stage Route",
+    "--intensity","strong","--cwd",str(R.ROOT),
     "--artifact-root",str(artifact),"--signal","shared-contract",
     "--transport","headless","--tracking","tracked",
     "--dispatch-evidence",str(dispatch_path),"--spec-read","true",
@@ -2795,6 +2850,7 @@ class TestValidationBasis(unittest.TestCase):
    })
    common=["route",
     "--capability","autopilot-code","--capability-mode","debug",
+    "--slug","Runtime Preflight Route",
     "--intensity","direct","--cwd",str(workspace),
     "--tracking","tracked","--spec-read","true",
     "--drift-verdict","within-spec","--workflow-mode","tracked",

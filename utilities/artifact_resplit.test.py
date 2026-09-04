@@ -555,13 +555,16 @@ class R1Tests(Fixture):
 class EndToEndTests(Fixture):
     def test_a16_1_two_campaigns_zero_unassigned_four_cycles(self):
         self.run_full()
-        campaigns = sorted(p.name for p in (self.root / "campaigns").iterdir())
+        campaigns = sorted([
+            P._read_json(p / "campaign.json")
+            for p in (self.root / "campaigns").iterdir()
+            if p.is_dir() and (p / "campaign.json").is_file()
+        ], key=lambda row: row["campaign_id"])
         # lump campaign + 2 new campaigns
-        new_campaigns = [c for c in campaigns if c != self.lump_campaign_id]
+        new_campaigns = [c for c in campaigns if c["campaign_id"] != self.lump_campaign_id]
         self.assertEqual(len(new_campaigns), 2)
         total_cycles = 0
-        for camp_id in new_campaigns:
-            record = P.read_campaign(self.root, camp_id)
+        for record in new_campaigns:
             self.assertNotEqual(record.get("key", "").split(":")[-1], W.UNASSIGNED_SLUG)
             total_cycles += len(record["cycles"])
         self.assertEqual(total_cycles, 4)
@@ -610,12 +613,12 @@ class EndToEndTests(Fixture):
                 continue
             lump_triples.add((rel, row["content_digest"], row["byte_size"]))
         new_triples = set()
-        for camp_id in (self.root / "campaigns").iterdir():
-            if camp_id.name == self.lump_campaign_id:
+        for camp_path in P.artifact_locator.iter_campaign_dirs(self.root):
+            record = P._read_json(camp_path / "campaign.json")
+            if record["campaign_id"] == self.lump_campaign_id:
                 continue
-            record = P.read_campaign(self.root, camp_id.name)
             for cid in record["cycles"]:
-                new_manifest = json.loads((P.cycle_dir(self.root, camp_id.name, cid) / "manifest.json").read_text())
+                new_manifest = json.loads((P.cycle_dir(self.root, record["campaign_id"], cid) / "manifest.json").read_text())
                 for row in new_manifest["artifact_revisions"]:
                     rel = _eligible(row["locator"]["path"])
                     if rel is None:
@@ -687,11 +690,12 @@ class LooseRelocationTests(Fixture):
 
     def _new_cycle_dirs(self):
         out = []
-        for camp in (self.root / "campaigns").iterdir():
-            if camp.name == self.lump_campaign_id:
+        for camp in P.artifact_locator.iter_campaign_dirs(self.root):
+            record = P._read_json(camp / "campaign.json")
+            if record["campaign_id"] == self.lump_campaign_id:
                 continue
-            for cid in P.read_campaign(self.root, camp.name)["cycles"]:
-                out.append(P.cycle_dir(self.root, camp.name, cid))
+            for cid in record["cycles"]:
+                out.append(P.cycle_dir(self.root, record["campaign_id"], cid))
         return out
 
     def test_loose_two_are_relocated_under_internal_with_origin_bucket_preserved(self):
@@ -814,12 +818,15 @@ class EmptyCampaignDeferralTests(Fixture):
     def test_no_campaign_record_is_created_for_the_cycleless_unassigned_campaign(self):
         self._run()
         keys = set()
-        for camp in (self.root / "campaigns").iterdir():
-            record = P.read_campaign(self.root, camp.name)
+        for camp in P.artifact_locator.iter_campaign_dirs(self.root):
+            record = P._read_json(camp / "campaign.json")
             if record:
                 keys.add(record.get("key"))
         self.assertNotIn(f"legacy:{self.root_slug}:{W.UNASSIGNED_SLUG}", keys)
-        new_campaigns = [c for c in (self.root / "campaigns").iterdir() if c.name != self.lump_campaign_id]
+        new_campaigns = [
+            c for c in P.artifact_locator.iter_campaign_dirs(self.root)
+            if P._read_json(c / "campaign.json").get("campaign_id") != self.lump_campaign_id
+        ]
         self.assertEqual(len(new_campaigns), 2)
 
     def test_deferred_loose_row_is_typed_and_the_file_is_untouched(self):
@@ -1637,6 +1644,9 @@ class PerCycleRouteClosureTests(Fixture):
             self.assertTrue(L.canonical_outcome_path(self.root, record["route_id"]).is_file())
             route = json.loads(route_file.read_text())
             self.assertEqual(route["resplit_cycle_key"], cyc["cycle_key"])
+            self.assertEqual(route["route_hash"], P.route_identity.route_hash(route))
+            self.assertEqual(
+                route["route_id"], "rt-" + route["resplit_route_nonce"].split(":", 1)[1][:16])
             self.assertTrue(P.route_is_closed(self.root, route))
             # the run_dir copy survives as an execution log, not as identity
             self.assertTrue((run_dir / "routes" / f"{record['route_id']}.json").is_file())

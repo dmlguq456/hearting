@@ -148,8 +148,9 @@ for group, layout in GROUPS.items():
         if base.is_dir():
             scan(base, 1, files)
         if campaigns.is_dir():
-            for arts in campaigns.glob("*/cycles/*/artifacts/" + bucket):
-                scan(arts, 1, files)
+            for pattern in ("*/*/artifacts/" + bucket, "*/cycles/*/artifacts/" + bucket):
+                for arts in campaigns.glob(pattern):
+                    scan(arts, 1, files)
     for kind in layout["shared"]:
         base = root / "shared" / kind
         if base.is_dir():

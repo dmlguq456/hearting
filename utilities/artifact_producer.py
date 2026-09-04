@@ -2,7 +2,7 @@
 """W7C artifact write-cutover: producer begin/finalize lifecycle.
 
 Correction to the W7 relocation: new cycle output is written in place under
-`<artifact-root>/campaigns/<campaign_id>/cycles/<cycle_id>/artifacts/` and the
+`<artifact-root>/campaigns/<campaign-locator>/<cycle-locator>/artifacts/` and the
 typed IDs are issued by `begin` *before* the first write (D-2, D-4).  The
 step-1 modules stay the only lineage authorities: `artifact_identity` issues
 IDs, `artifact_manifest` validates the closed D-6 schema, `artifact_index`
@@ -11,9 +11,10 @@ mutex, and the derived index.
 
 Layout (D-2, closed):
 
-    campaigns/<camp>/campaign.json                    mutable campaign record
-    campaigns/<camp>/cycles/<cyc>/artifacts/...       producer output (open)
-    campaigns/<camp>/cycles/<cyc>/manifest.json       finalize commit point
+    campaigns/<campaign-locator>/campaign.json              mutable campaign record
+    campaigns/<campaign-locator>/<cycle-locator>/.cycle.json stable-ID locator binding
+    campaigns/<campaign-locator>/<cycle-locator>/artifacts  producer output (open)
+    campaigns/<campaign-locator>/<cycle-locator>/manifest.json finalize commit point
     shared/<spec|analysis|research>/<ref>/reference.json
     shared/<kind>/<ref>/revisions/<rrev>/...          immutable revision
     .runtime/artifact-producer/v1/cutover.json        cutover state (approval-gated)
@@ -48,7 +49,9 @@ import artifact_admission  # noqa: E402
 import artifact_identity  # noqa: E402
 import artifact_index  # noqa: E402
 import artifact_lifecycle  # noqa: E402
+import artifact_locator  # noqa: E402
 import artifact_manifest  # noqa: E402
+import route_identity  # noqa: E402
 from dispatch_contract import process_start_ticks  # noqa: E402
 
 PRODUCER_REL = ".runtime/artifact-producer/v1"
@@ -284,6 +287,8 @@ def compat_override_path(root: Path) -> Path:
 
 
 def cycle_record_path(root: Path, cycle_id: str) -> Path:
+    if not artifact_identity.is_well_formed(cycle_id, "cycle"):
+        raise ProducerError("cycle-id-invalid", str(cycle_id))
     return producer_dir(root) / "cycles" / f"{cycle_id}.json"
 
 
@@ -295,12 +300,43 @@ def shared_journal_path(root: Path, revision_id: str) -> Path:
     return producer_dir(root) / "shared-journal" / f"{revision_id}.json"
 
 
-def campaign_dir(root: Path, campaign_id: str) -> Path:
-    return Path(root) / "campaigns" / campaign_id
+def campaign_dir(root: Path, campaign_id: str, record: Optional[Mapping[str, Any]] = None) -> Path:
+    """Resolve an existing campaign by record identity, with old-ID fallback.
+
+    Creation sites must pass a record containing its persisted ``locator``;
+    this function never derives a readable path from the stable ID.
+    """
+    root = Path(root)
+    found = artifact_locator.find_path_by_id(root, campaign_id)
+    if found is not None and (found / "campaign.json").is_file():
+        return found
+    try:
+        campaigns = artifact_locator.safe_child(root, root, "campaigns")
+        if record is not None and record.get("campaign_id") == campaign_id and record.get("locator"):
+            return artifact_locator.safe_child(root, campaigns, record["locator"])
+        return artifact_locator.safe_child(root, campaigns, campaign_id)
+    except artifact_locator.LocatorError as exc:
+        raise ProducerError("record-locator-invalid", exc.detail or exc.code) from exc
 
 
-def cycle_dir(root: Path, campaign_id: str, cycle_id: str) -> Path:
-    return campaign_dir(root, campaign_id) / "cycles" / cycle_id
+def cycle_dir(root: Path, campaign_id: str, cycle_id: str,
+              record: Optional[Mapping[str, Any]] = None) -> Path:
+    """Resolve an existing cycle, accepting readable, hybrid, and old layouts."""
+    root = Path(root)
+    found = artifact_locator.find_path_by_id(root, cycle_id)
+    if found is not None:
+        return found
+    if record is None:
+        record = read_cycle_record(root, cycle_id)
+    campaign = read_campaign(root, campaign_id)
+    parent = campaign_dir(root, campaign_id, campaign)
+    try:
+        if record is not None and record.get("campaign_id") == campaign_id and record.get("locator"):
+            return artifact_locator.safe_child(root, parent, record["locator"])
+        cycles = artifact_locator.safe_child(root, parent, "cycles")
+        return artifact_locator.safe_child(root, cycles, cycle_id)
+    except artifact_locator.LocatorError as exc:
+        raise ProducerError("record-locator-invalid", exc.detail or exc.code) from exc
 
 
 def read_cutover(root: Path) -> Dict[str, Any]:
@@ -490,6 +526,8 @@ def _fallback_blocks(fallback: Optional[Mapping[str, Any]]) -> bool:
 
 
 def read_cycle_record(root: Path, cycle_id: str) -> Optional[Dict[str, Any]]:
+    if not artifact_identity.is_well_formed(cycle_id, "cycle"):
+        return None
     return _read_json(cycle_record_path(root, cycle_id))
 
 
@@ -501,6 +539,16 @@ def _write_cycle_record(root: Path, record: Dict[str, Any], *, exclusive: bool) 
         _write_exclusive(path, data, 0o600)
     else:
         _write_atomic(path, data, 0o600)
+
+
+def _write_cycle_binding(directory: Path, campaign_id: str, cycle_id: str) -> None:
+    marker = Path(directory) / artifact_locator.CYCLE_BINDING
+    data = artifact_locator.cycle_binding_bytes(campaign_id, cycle_id)
+    if marker.is_file() and not marker.is_symlink():
+        if marker.read_bytes() != data:
+            raise ProducerError("cycle-binding-conflict", str(marker))
+        return
+    _write_exclusive(marker, data)
 
 
 def list_cycle_records(root: Path) -> List[Dict[str, Any]]:
@@ -571,6 +619,28 @@ def load_route(root: Path, route_file: Path) -> Dict[str, Any]:
         raise ProducerError("route-artifact-root-mismatch")
     if route["effective_intensity"] not in INTENSITIES:
         raise ProducerError("route-invalid", "effective_intensity")
+    if route.get("route_hash") != route_identity.route_hash(route):
+        raise ProducerError("route-invalid", "stale or modified route hash")
+    if "resplit_cycle_key" in route:
+        nonce = route.get("resplit_route_nonce")
+        if not isinstance(nonce, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", nonce):
+            raise ProducerError("route-invalid", "resplit route nonce")
+        expected_route_id = "rt-" + nonce.split(":", 1)[-1][:16]
+    else:
+        expected_route_id = "rt-" + str(route["route_hash"]).split(":", 1)[-1][:16]
+    if route.get("route_id") != expected_route_id:
+        raise ProducerError("route-invalid", "route id/hash mismatch")
+    if "slug" in route:
+        if not isinstance(route.get("slug"), str) or not isinstance(route.get("slug_truncated"), bool):
+            raise ProducerError("route-invalid", "slug metadata")
+        try:
+            canonical_slug, _truncated = artifact_locator.slugify(route["slug"])
+        except artifact_locator.LocatorError as exc:
+            raise ProducerError("route-invalid", "slug metadata") from exc
+        if canonical_slug != route["slug"]:
+            raise ProducerError("route-invalid", "slug is not canonical")
+    elif "slug_truncated" in route:
+        raise ProducerError("route-invalid", "slug metadata incomplete")
     return route
 
 
@@ -596,19 +666,28 @@ def _route_node(route: Mapping[str, Any], node_id: Optional[str]) -> Optional[Di
 # ---------------------------------------------------------------------------
 
 
-def _campaign_path(root: Path, campaign_id: str) -> Path:
-    return campaign_dir(root, campaign_id) / "campaign.json"
+def _campaign_path(root: Path, campaign_id: str,
+                   record: Optional[Mapping[str, Any]] = None) -> Path:
+    return campaign_dir(root, campaign_id, record) / "campaign.json"
 
 
 def read_campaign(root: Path, campaign_id: str) -> Optional[Dict[str, Any]]:
-    return _read_json(_campaign_path(root, campaign_id))
+    if not artifact_identity.is_well_formed(campaign_id, "campaign"):
+        return None
+    found = artifact_locator.find_path_by_id(root, campaign_id)
+    if found is not None:
+        record = _read_json(found / "campaign.json")
+        if record is not None and record.get("campaign_id") == campaign_id:
+            return record
+    fallback = _read_json(Path(root) / "campaigns" / campaign_id / "campaign.json")
+    return fallback if fallback is not None and fallback.get("campaign_id") == campaign_id else None
 
 
 def find_campaign_by_key(root: Path, key: str) -> Optional[Dict[str, Any]]:
     campaigns = Path(root) / "campaigns"
     if not campaigns.is_dir():
         return None
-    for entry in sorted(campaigns.iterdir(), key=lambda p: p.name):
+    for entry in artifact_locator.iter_campaign_dirs(root):
         record = _read_json(entry / "campaign.json")
         if record and record.get("key") == key and record.get("state") == "active":
             return record
@@ -616,7 +695,7 @@ def find_campaign_by_key(root: Path, key: str) -> Optional[Dict[str, Any]]:
 
 
 def _write_campaign(root: Path, record: Dict[str, Any], *, exclusive: bool) -> None:
-    path = _campaign_path(root, record["campaign_id"])
+    path = _campaign_path(root, record["campaign_id"], record)
     _ensure_dir(path.parent)
     if exclusive:
         _write_exclusive(path, _json_bytes(record))
@@ -725,7 +804,7 @@ def status(root: Path) -> Dict[str, Any]:
 
 
 def _env_for(root: Path, record: Mapping[str, Any]) -> Dict[str, str]:
-    directory = cycle_dir(root, record["campaign_id"], record["cycle_id"])
+    directory = cycle_dir(root, record["campaign_id"], record["cycle_id"], record)
     return {
         "AGENT_ARTIFACT_ROOT": str(root),
         "AGENT_ARTIFACT_CAMPAIGN_ID": record["campaign_id"],
@@ -734,6 +813,32 @@ def _env_for(root: Path, record: Mapping[str, Any]) -> Dict[str, str]:
         "AGENT_ARTIFACT_CYCLE_DIR": str(directory),
         "AGENT_ARTIFACT_OUTPUT_DIR": str(directory / "artifacts"),
     }
+
+
+def _route_naming(
+    route: Mapping[str, Any], campaign: Optional[Mapping[str, Any]],
+    *, title: Optional[str], goal: Optional[str],
+) -> Tuple[str, str, str, bool]:
+    """Return canonical slug, display title, source, and truncation fact.
+
+    Slugless records are pre-W7I routes.  During the explicit transition
+    window they remain usable and are marked so migration can distinguish
+    them from routes that sealed a slug.
+    """
+    route_slug = route.get("slug")
+    if isinstance(route_slug, str) and route_slug:
+        slug, normalized_truncated = artifact_locator.slugify(route_slug)
+        return slug, str(title or slug), "route", bool(route.get("slug_truncated")) or normalized_truncated
+    candidates = []
+    if campaign is not None:
+        candidates.extend((campaign.get("slug"), campaign.get("title")))
+    candidates.extend((title, goal))
+    if campaign is not None:
+        candidates.append(campaign.get("goal"))
+    raw = next((str(value) for value in candidates if isinstance(value, str) and value.strip()), "unnamed")
+    slug, truncated = artifact_locator.slugify(raw, fallback="unnamed")
+    display_title = str(title or (campaign or {}).get("title") or slug)
+    return slug, display_title, "derived-legacy-route", truncated
 
 
 def begin(
@@ -758,7 +863,8 @@ def begin(
         raise ProducerError("capability-unknown", capability)
     if intensity not in INTENSITIES:
         raise ProducerError("intensity-unknown", intensity)
-    route = load_route(root, Path(route_file))
+    resolved_route_file = resolve_route_argument(root, Path(route_file))
+    route = load_route(root, resolved_route_file)
     route_capability = route["capability"]
     if capability in ENTRY_CAPABILITIES and route_capability != capability:
         raise ProducerError("route-capability-mismatch", f"{route_capability}!={capability}")
@@ -801,6 +907,14 @@ def begin(
         raise ProducerError("root-identity-missing")
     lock_fd = artifact_admission._acquire_lock(root, artifact_admission.LOCK_TIMEOUT_DEFAULT, now=now)
     try:
+        # W7G owns a root-wide resplit from R2 through R3.  Check its atomic
+        # claim while holding the same admission mutex used for locator and
+        # campaign updates, so begin cannot race the gap before its first
+        # journal is durable or lose a campaign cycles[] update.
+        resplit_lock = producer_dir(root) / "resplit.lock"
+        if resplit_lock.exists() or resplit_lock.is_symlink():
+            detail = _read_json(resplit_lock)
+            raise ProducerError("resplit-in-progress", json.dumps(detail or {}, sort_keys=True))
         # Idempotent per route: one open cycle per route.
         for record in list_cycle_records(root):
             if record.get("route_id") == route["route_id"] and record.get("state") == "open":
@@ -809,7 +923,7 @@ def begin(
                 return {
                     "status": "resumed", "layout": "cycle", "campaign_id": record["campaign_id"],
                     "cycle_id": record["cycle_id"], "producer_id": record["producer_id"],
-                    "cycle_dir": str(cycle_dir(root, record["campaign_id"], record["cycle_id"])),
+                    "cycle_dir": str(cycle_dir(root, record["campaign_id"], record["cycle_id"], record)),
                     "env": _env_for(root, record),
                 }
         index = artifact_admission.load_index(root)
@@ -833,27 +947,56 @@ def begin(
             if campaign is None:
                 campaign = read_campaign(root, parent["campaign_id"])
         campaign_created = False
+        slug, display_title, slug_source, slug_truncated = _route_naming(
+            route, campaign, title=title, goal=goal)
+        started_on = _rfc3339(now)
         if campaign is None:
             new_campaign_id = alloc.allocate("campaign")
-            while new_campaign_id in index.stable_ids or campaign_dir(root, new_campaign_id).exists():
+            while new_campaign_id in index.stable_ids:
                 new_campaign_id = alloc.allocate("campaign")
+            locator, locator_suffix = artifact_locator.allocate_locator(
+                root / "campaigns", started_on, slug)
             campaign = {
                 "schema_version": 1,
                 "contract": CONTRACT,
                 "campaign_id": new_campaign_id,
                 "key": campaign_key or f"{route_capability}:{route['route_id']}",
-                "title": title or f"{route_capability} campaign",
+                "slug": slug,
+                "title": display_title,
+                "slug_source": slug_source,
+                "slug_truncated": slug_truncated,
+                "locator": locator,
+                "locator_suffix": locator_suffix,
                 "goal": goal or f"{route_capability} cycle output",
                 "completion_criterion": {"statement": "every cycle sealed with a manifest"},
                 "state": "active",
-                "created_on": _rfc3339(now),
+                "created_on": started_on,
                 "cycles": [],
             }
             campaign_created = True
+            # The readable locator is persisted before children are created.
+            _write_campaign(root, campaign, exclusive=True)
+        else:
+            # Existing W7 records keep their physical path until Cycle B, but
+            # missing display fields are filled from this route for hybrid joins.
+            campaign = dict(campaign)
+            changed = False
+            for key, value in (
+                ("slug", slug), ("title", display_title), ("slug_source", slug_source),
+                ("slug_truncated", slug_truncated),
+            ):
+                if key not in campaign:
+                    campaign[key] = value
+                    changed = True
+            if changed:
+                _write_campaign(root, campaign, exclusive=False)
         new_cycle_id = alloc.allocate("cycle")
         while new_cycle_id in index.stable_ids or cycle_record_path(root, new_cycle_id).exists():
             new_cycle_id = alloc.allocate("cycle")
         producer_id = alloc.allocate("producer")
+        campaign_path = campaign_dir(root, campaign["campaign_id"], campaign)
+        cycle_locator, cycle_locator_suffix = artifact_locator.allocate_locator(
+            campaign_path, started_on, slug)
         record = {
             "schema_version": 1,
             "contract": CONTRACT,
@@ -866,17 +1009,22 @@ def begin(
             "intensity": intensity,
             "route_id": route["route_id"],
             "route_hash": route["route_hash"],
-            "route_file": str(Path(route_file).resolve()),
+            "route_file": str(resolved_route_file.resolve()),
             "node_id": node["id"] if node else None,
             "state": "open",
-            "started_on": _rfc3339(now),
+            "started_on": started_on,
             "sealed_on": None,
             "manifest_digest": None,
-            "title": title or f"{capability} {intensity} cycle",
+            "slug": slug,
+            "title": display_title,
+            "slug_source": slug_source,
+            "slug_truncated": slug_truncated,
+            "locator": cycle_locator,
+            "locator_suffix": cycle_locator_suffix,
         }
         if shared_reference_pins is not None:
             record["shared_reference_pins"] = [dict(pin) for pin in shared_reference_pins]
-        target = cycle_dir(root, campaign["campaign_id"], new_cycle_id)
+        target = campaign_path / cycle_locator
         if target.exists():
             raise ProducerError("cycle-dir-exists", str(target))
         # Order: durable record first (crash before dir => recover drops the
@@ -885,7 +1033,9 @@ def begin(
         _write_cycle_record(root, record, exclusive=True)
         _ensure_dir(target / "artifacts")
         campaign["cycles"] = list(campaign.get("cycles", [])) + [new_cycle_id]
-        _write_campaign(root, campaign, exclusive=campaign_created)
+        _write_campaign(root, campaign, exclusive=False)
+        _write_cycle_binding(target, campaign["campaign_id"], new_cycle_id)
+        artifact_locator.rebuild_indexes(root)
         return {
             "status": "begun", "layout": "cycle", "campaign_id": campaign["campaign_id"],
             "cycle_id": new_cycle_id, "producer_id": producer_id, "cycle_dir": str(target),
@@ -933,6 +1083,9 @@ def _enumerate_output(directory: Path, *, exclude_hidden: bool = False,
         raise ProducerError("artifacts-dir-missing", str(artifacts))
     for entry in _walk_files(directory):
         rel = entry.relative_to(directory).as_posix()
+        if rel == artifact_locator.CYCLE_BINDING:
+            # Machine-owned locator binding, not user output or manifest data.
+            continue
         if os.path.islink(str(entry)):
             violations.append(f"symlink-forbidden:{rel}")
             continue
@@ -1191,8 +1344,11 @@ def build_manifest(
 
 
 def _remove_empty_cycle(root: Path, record: Mapping[str, Any]) -> None:
-    directory = cycle_dir(root, record["campaign_id"], record["cycle_id"])
+    directory = cycle_dir(root, record["campaign_id"], record["cycle_id"], record)
     artifacts = directory / "artifacts"
+    binding = directory / artifact_locator.CYCLE_BINDING
+    if binding.is_file() and not binding.is_symlink():
+        binding.unlink()
     for path in (artifacts, directory):
         try:
             path.rmdir()
@@ -1204,13 +1360,14 @@ def _remove_empty_cycle(root: Path, record: Mapping[str, Any]) -> None:
         if not campaign["cycles"] and campaign.get("key", "").endswith(record["route_id"]):
             # Campaign created by this begin and never populated: drop it.
             try:
-                _campaign_path(root, campaign["campaign_id"]).unlink()
-                (campaign_dir(root, campaign["campaign_id"]) / "cycles").rmdir()
-                campaign_dir(root, campaign["campaign_id"]).rmdir()
+                campaign_path = campaign_dir(root, campaign["campaign_id"], campaign)
+                _campaign_path(root, campaign["campaign_id"], campaign).unlink()
+                campaign_path.rmdir()
             except OSError:
                 _write_campaign(root, campaign, exclusive=False)
         else:
             _write_campaign(root, campaign, exclusive=False)
+    artifact_locator.rebuild_indexes(root)
 
 
 def _review_lease_dir(root: Path, cycle_id: str) -> Path:
@@ -1384,7 +1541,7 @@ def finalize(
                 abandon_reason = "operator-override-live-review"
             if abandon_reason not in ABANDON_REASONS:
                 raise ProducerError("abandon-reason-required", str(abandon_reason))
-        directory = cycle_dir(root, record["campaign_id"], cycle_id)
+        directory = cycle_dir(root, record["campaign_id"], cycle_id, record)
         route = load_route(root, Path(record["route_file"]))
         if route["route_hash"] != record["route_hash"]:
             raise ProducerError("route-hash-drift", cycle_id)
@@ -1481,7 +1638,7 @@ def finalize(
 def _commit_sealed(
     root: Path, record: Mapping[str, Any], document: Mapping[str, Any], digest: str, *, now: Optional[float]
 ) -> None:
-    directory = cycle_dir(root, record["campaign_id"], record["cycle_id"])
+    directory = cycle_dir(root, record["campaign_id"], record["cycle_id"], record)
     index = artifact_admission.load_index(root)
     if record["cycle_id"] not in index.manifests:
         index = artifact_index.apply(
@@ -1498,6 +1655,7 @@ def _commit_sealed(
     _write_journal(root, record["cycle_id"], state="committed", manifest_digest=digest,
                    cycle_path=os.path.relpath(str(directory), str(root)))
     _remove_journal(root, record["cycle_id"])
+    artifact_locator.rebuild_indexes(root)
 
 
 # ---------------------------------------------------------------------------
@@ -1536,7 +1694,7 @@ def _recover_locked(root: Path, *, now: Optional[float] = None) -> Dict[str, Lis
     for record in list_cycle_records(root):
         if record.get("state") != "open":
             continue
-        directory = cycle_dir(root, record["campaign_id"], record["cycle_id"])
+        directory = cycle_dir(root, record["campaign_id"], record["cycle_id"], record)
         if not directory.is_dir():
             dropped = dict(record)
             dropped["state"] = "dropped"
@@ -1805,7 +1963,7 @@ def admit_shared(
             raise ProducerError("cycle-unknown", cycle_id)
         if record.get("state") != "sealed":
             raise ProducerError("cycle-not-sealed", record.get("state", "?"))
-        directory = cycle_dir(root, record["campaign_id"], cycle_id)
+        directory = cycle_dir(root, record["campaign_id"], cycle_id, record)
         source_rel = source if source.startswith("artifacts/") else "artifacts/" + source
         if ".." in source_rel.split("/"):
             raise ProducerError("source-unsafe", source)
@@ -1944,7 +2102,7 @@ def _find_campaign_by_key_any_state(root: Path, key: str) -> Optional[Dict[str, 
     campaigns = Path(root) / "campaigns"
     if not campaigns.is_dir():
         return None
-    for entry in sorted(campaigns.iterdir(), key=lambda p: p.name):
+    for entry in artifact_locator.iter_campaign_dirs(root):
         record = _read_json(entry / "campaign.json")
         if record and record.get("key") == key:
             return record
@@ -2093,20 +2251,42 @@ def check_write(root: Path, target: Path) -> Dict[str, Any]:
     if top == "shared":
         return {**base, "verdict": "deny", "reason": "shared-revision-immutable", "layout": "shared"}
     if top == "campaigns":
-        if len(parts) < 5 or parts[2] != "cycles":
+        legacy = len(parts) >= 5 and parts[2] == "cycles"
+        readable = len(parts) >= 4 and parts[2] != "cycles"
+        if not legacy and not readable:
             return {**base, "verdict": "deny", "reason": "campaign-record-machine-managed", "layout": "cycle"}
-        campaign_id, cycle_id = parts[1], parts[3]
-        if len(parts) < 6 or parts[4] != "artifacts":
+        artifacts_index = 4 if legacy else 3
+        cycle_path = root.joinpath(*parts[:artifacts_index])
+        campaign_path = root / "campaigns" / parts[1]
+        campaign = _read_json(campaign_path / "campaign.json") or {}
+        campaign_id = campaign.get("campaign_id")
+        cycle_id = None
+        record = None
+        try:
+            locator_mapping, _rows = artifact_locator.scan_index(root)
+            cycle_relative = cycle_path.resolve().relative_to(root).as_posix()
+            cycle_id = next(
+                (identifier for identifier, path in locator_mapping.items() if path == cycle_relative),
+                None,
+            )
+        except (artifact_locator.LocatorError, OSError, RuntimeError, ValueError):
+            cycle_id = None
+        if isinstance(cycle_id, str):
+            record = read_cycle_record(root, cycle_id)
+        manifest = _read_json(cycle_path / "manifest.json")
+        manifest_cycle = manifest.get("cycle") if isinstance(manifest, dict) else None
+        if cycle_id is None and isinstance(manifest_cycle, dict):
+            cycle_id = manifest_cycle.get("cycle_id")
+        if len(parts) <= artifacts_index or parts[artifacts_index] != "artifacts":
             return {**base, "verdict": "deny", "reason": "outside-cycle-artifacts", "layout": "cycle",
                     "cycle_id": cycle_id}
-        record = read_cycle_record(root, cycle_id)
-        sealed_on_disk = (cycle_dir(root, campaign_id, cycle_id) / "manifest.json").exists()
+        sealed_on_disk = manifest is not None
         if record is None:
             reason = "cycle-sealed" if sealed_on_disk else "cycle-unknown"
             return {**base, "verdict": "deny", "reason": reason, "layout": "cycle", "cycle_id": cycle_id}
         if record.get("state") != "open" or record.get("campaign_id") != campaign_id or sealed_on_disk:
             return {**base, "verdict": "deny", "reason": "cycle-not-open", "layout": "cycle", "cycle_id": cycle_id}
-        bucket = parts[5] if len(parts) > 6 else None
+        bucket = parts[artifacts_index + 1] if len(parts) > artifacts_index + 2 else None
         return {**base, "verdict": "allow", "reason": "open-cycle-artifacts", "layout": "cycle",
                 "cycle_id": cycle_id, "campaign_id": campaign_id, "bucket": bucket}
     if active:
@@ -2135,8 +2315,26 @@ def cycle_bucket(root: Path, target: Path) -> Optional[Tuple[str, str]]:
     if rel is None:
         return None
     parts = rel.split("/")
-    if len(parts) >= 7 and parts[0] == "campaigns" and parts[2] == "cycles" and parts[4] == "artifacts":
-        return parts[5], parts[3]
+    if parts[0] != "campaigns":
+        return None
+    legacy = len(parts) >= 7 and parts[2] == "cycles" and parts[4] == "artifacts"
+    readable = len(parts) >= 6 and parts[2] != "cycles" and parts[3] == "artifacts"
+    if not legacy and not readable:
+        return None
+    bucket_index = 5 if legacy else 4
+    artifacts_index = 4 if legacy else 3
+    cycle_path = Path(root).resolve().joinpath(*parts[:artifacts_index])
+    try:
+        mapping, _rows = artifact_locator.scan_index(Path(root))
+        relative = cycle_path.resolve().relative_to(Path(root).resolve()).as_posix()
+    except (artifact_locator.LocatorError, OSError, RuntimeError, ValueError):
+        return None
+    for cycle_id, path in mapping.items():
+        if path != relative:
+            continue
+        record = read_cycle_record(root, cycle_id)
+        if record and record.get("state") == "open":
+            return parts[bucket_index], cycle_id
     return None
 
 

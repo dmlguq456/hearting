@@ -29,6 +29,7 @@ from typing import Any, Dict, Mapping, Optional, Sequence, Tuple
 import artifact_admission
 import artifact_identity
 import artifact_index
+import artifact_locator
 import artifact_manifest
 
 
@@ -357,14 +358,16 @@ def bind_existing_runtime_route(
 def read_admitted_cycle(
     artifact_root: Path, campaign_id: str, cycle_id: str
 ) -> Optional[Mapping[str, Any]]:
-    path = (
-        Path(artifact_root)
-        / "campaigns"
-        / campaign_id
-        / "cycles"
-        / cycle_id
-        / "manifest.json"
-    )
+    # Admission must not trust the rebuildable campaigns/INDEX cache. Resolve
+    # stable identity from campaign/manifest records so readable locators,
+    # renamed sealed locators, and the historical ID layout remain readable.
+    try:
+        directory = artifact_locator.find_path_by_id(Path(artifact_root), cycle_id)
+    except artifact_locator.LocatorError as exc:
+        raise LifecycleError("cycle-prior-descriptor-unverified", str(exc)) from exc
+    if directory is None:
+        return None
+    path = directory / "manifest.json"
     if not path.is_file():
         return None
     try:

@@ -43,14 +43,20 @@ class DispatchV20ConformanceTest(unittest.TestCase):
             sys.executable, str(ROUTE), "compile",
             "--capability", "autopilot-code",
             "--capability-mode", "dev",
+            "--slug", "dispatch-v20-fixture",
             "--intensity", "quick",
             "--cwd", str(self.repo),
             "--artifact-root", str(self.artifact),
             "--registered-headless-evidence", str(evidence_path),
-            "--output", str(output),
             *self.gate_args,
         ]
         result = subprocess.run(command, text=True, capture_output=True)
+        if result.returncode == 0:
+            route = json.loads(result.stdout)
+            output = (
+                self.artifact / ".runtime" / "routes" /
+                f"{route['route_id']}.json"
+            )
         return result, output
 
     def wrapper_command(self, adapter, intensity, jobs, logs, *extra):

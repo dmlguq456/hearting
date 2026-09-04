@@ -86,7 +86,8 @@ def dispatch_evidence():
 
 
 def compile_for(capability, mode, intensity, root):
-    common = dict(cwd=R.ROOT, artifact_root=root, tracking="tracked", tracked_gate_evidence=gate_evidence())
+    common = dict(cwd=R.ROOT, artifact_root=root, tracking="tracked",
+                  tracked_gate_evidence=gate_evidence(), slug="artifact-producer-canary")
     if intensity == "direct":
         return R.compile_route(capability, mode, "direct", predicates=ALL_PREDICATES, transport=None,
                                inline_reason="atomic-direct", **common)
@@ -165,7 +166,10 @@ class Canary:
         assert begun["status"] == "begun", begun
         row["cycle_id"], row["campaign_id"], row["producer_id"] = begun["cycle_id"], begun["campaign_id"], begun["producer_id"]
         cycle_dir = Path(begun["cycle_dir"])
-        assert sorted(os.listdir(cycle_dir)) == ["artifacts"], "ids issued before first write"
+        assert sorted(os.listdir(cycle_dir)) == [".cycle.json", "artifacts"], "ids issued before first write"
+        binding = json.loads((cycle_dir / ".cycle.json").read_text(encoding="utf-8"))
+        assert binding["cycle_id"] == begun["cycle_id"], "cycle binding must carry stable identity"
+        assert "cycles" not in cycle_dir.relative_to(self.root).parts, "new cycles layer must be flat"
         row["checks"].append("ids-issued-before-first-write")
         bucket = BUCKET[capability]
         target = cycle_dir / "artifacts" / bucket / f"{capability}-{intensity}" / ("probe.md" if self.live else "final_report.md")

@@ -128,6 +128,7 @@ PYEOF
 COMPILE_ERR="$TMP/compile.err"
 env -u AGENT_HOME -u CLAUDE_HOME HOME="$RUNENV_HOME" AGENT_DISPATCH_JOBS="$JOBS" \
   python3 "$WORKTREE/utilities/capability-route.py" compile \
+  --slug stage-advance-fixture \
   --capability autopilot-apply --capability-mode default --intensity standard \
   --cwd "$WORKTREE" --artifact-root "$TMP/route-artifact-root" \
   --tracking tracked --spec-read true --drift-verdict within-spec \

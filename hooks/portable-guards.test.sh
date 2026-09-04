@@ -95,6 +95,7 @@ fixture_route() {
   fixture_stderr="$TMP/$fixture_name.route.err"
   AGENT_HOME="$ROOT" AGENT_DISPATCH_JOBS="$ROUTE_FIXTURE_JOBS" \
   python3 "$ROOT/utilities/capability-route.py" compile \
+    --slug "$fixture_name" \
     --capability "$fixture_capability" --capability-mode "$fixture_mode" \
     --intensity direct --cwd "$TMP/proj" \
     --artifact-root "$TMP/proj/.agent_reports" \
@@ -2600,7 +2601,7 @@ if python3 -c 'import json,sys; d=json.loads(sys.argv[1]); assert d["decision"]=
 else
   bad "source-bearing functions.exec_command commit should be denied [$commit_decision]"
 fi
-codex_route_args="--capability autopilot-code --capability-mode dev --intensity direct --cwd $TMP/repo --artifact-root $TMP/repo/.agent_reports --predicate atomic-outcome --predicate known-scope --predicate no-shared-contract --predicate no-resource-run --predicate no-artifact-handoff --predicate no-independent-verifier --predicate focused-verification --tracking untracked --spec-read not-applicable --drift-verdict no-project-spec --workflow-mode untracked --artifact-guard preflight-passed --inline-reason atomic-direct"
+codex_route_args="--capability autopilot-code --capability-mode dev --slug material-route-fixture --intensity direct --cwd $TMP/repo --artifact-root $TMP/repo/.agent_reports --predicate atomic-outcome --predicate known-scope --predicate no-shared-contract --predicate no-resource-run --predicate no-artifact-handoff --predicate no-independent-verifier --predicate focused-verification --tracking untracked --spec-read not-applicable --drift-verdict no-project-spec --workflow-mode untracked --artifact-guard preflight-passed --inline-reason atomic-direct"
 MATERIAL_ROUTE_JOBS="$TMP/repo/.dispatch/jobs.log"
 mkdir -p "$(dirname "$MATERIAL_ROUTE_JOBS")"
 codex_bind_session="codex-bind-$(basename "$TMP")"
@@ -3622,7 +3623,7 @@ fi
 # subsequent material Write; every negative creates no marker while
 # preserving the compiler's own stdout/stderr/exit status.
 mkdir -p "$TMP/repo/.agent_reports/.runtime/routes"
-opencode_route_args="--capability autopilot-code --capability-mode dev --intensity direct --cwd $TMP/repo --artifact-root $TMP/repo/.agent_reports --predicate atomic-outcome --predicate known-scope --predicate no-shared-contract --predicate no-resource-run --predicate no-artifact-handoff --predicate no-independent-verifier --predicate focused-verification --tracking untracked --spec-read not-applicable --drift-verdict no-project-spec --workflow-mode untracked --artifact-guard preflight-passed --inline-reason atomic-direct"
+opencode_route_args="--capability autopilot-code --capability-mode dev --slug material-route-fixture --intensity direct --cwd $TMP/repo --artifact-root $TMP/repo/.agent_reports --predicate atomic-outcome --predicate known-scope --predicate no-shared-contract --predicate no-resource-run --predicate no-artifact-handoff --predicate no-independent-verifier --predicate focused-verification --tracking untracked --spec-read not-applicable --drift-verdict no-project-spec --workflow-mode untracked --artifact-guard preflight-passed --inline-reason atomic-direct"
 env -u OPENCODE_SESSION_ID AGENT_HOME="$ROOT" AGENT_DISPATCH_JOBS="$MATERIAL_ROUTE_JOBS" \
   "$OPENCODE" route $opencode_route_args >"$TMP/opencode_route_probe.json" 2>"$TMP/opencode_route_probe.err"
 opencode_route_id=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1],encoding="utf-8"))["route_id"])' "$TMP/opencode_route_probe.json")

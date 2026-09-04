@@ -27,6 +27,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import artifact_admission as adm
 import artifact_identity as idm
 import artifact_index as idx
+import artifact_lifecycle as lifecycle
+import artifact_locator
 import artifact_manifest as m
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -379,6 +381,46 @@ class TestLineageAndRootIdentity(AdmissionContractBase):
 
 
 class TestIndexAuthority(AdmissionContractBase):
+    def test_manifest_only_legacy_admission_is_resolved_by_stable_ids(self):
+        document, outcome = self._admit_valid(key="k-manifest-only-locator")
+        expected_cycle = self.root / outcome.cycle_path
+        expected_campaign = expected_cycle.parent.parent
+        self.assertFalse((expected_campaign / "campaign.json").exists())
+        self.assertEqual(
+            artifact_locator.find_path_by_id(self.root, document["campaign"]["campaign_id"]),
+            expected_campaign,
+        )
+        self.assertEqual(
+            artifact_locator.resolve_path(self.root, document["cycle"]["cycle_id"]),
+            expected_cycle,
+        )
+        admitted = lifecycle.read_admitted_cycle(
+            self.root, document["campaign"]["campaign_id"], document["cycle"]["cycle_id"])
+        self.assertEqual(admitted["cycle_id"], document["cycle"]["cycle_id"])
+
+    def test_rebuild_scans_readable_and_legacy_layouts_without_locator_cache_authority(self):
+        identity = self._identity()
+        legacy, legacy_content = _make_valid_document(self.alloc, identity, content=b"legacy")
+        readable, readable_content = _make_valid_document(self.alloc, identity, content=b"readable")
+        campaigns = self.root / "campaigns"
+        legacy_dir = (
+            campaigns / legacy["campaign"]["campaign_id"] / "cycles" /
+            legacy["cycle"]["cycle_id"]
+        )
+        readable_campaign = campaigns / "2026-09-04_readable"
+        readable_dir = readable_campaign / "2026-09-04_readable"
+        for directory, document in ((legacy_dir, legacy), (readable_dir, readable)):
+            directory.mkdir(parents=True)
+            (directory / "manifest.json").write_bytes(
+                m.canonical_bytes(document)
+            )
+        (campaigns / "INDEX.json").write_text(json.dumps({
+            readable["cycle"]["cycle_id"]: "campaigns/hostile/cycles/hostile",
+        }), encoding="utf-8")
+        rebuilt = adm.rebuild_index(self.root)
+        self.assertIn(legacy["cycle"]["cycle_id"], rebuilt.cycles)
+        self.assertIn(readable["cycle"]["cycle_id"], rebuilt.cycles)
+
     def test_rebuild_index_matches_incremental_bytes(self):
         identity = self._identity()
         for n, key in enumerate(("k-idx-1", "k-idx-2")):
@@ -473,7 +515,6 @@ class TestStagingSafety(AdmissionContractBase):
         self._assert_rejected_and_unchanged(
             doc, src, "k-extra", expect_code="staging-undeclared-extra-file"
         )
-
 
 # ---------------------------------------------------------------------------
 # F-1 defence (graft G-2) and the non-scope invariants

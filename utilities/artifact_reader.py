@@ -4,7 +4,8 @@
 Readers that used to open `<artifact-root>/<bucket>/...` directly resolve
 their inputs here instead.  The canonical layout is:
 
-- cycle output: `campaigns/<camp>/cycles/<cyc>/artifacts/<bucket>/...`
+- cycle output: `campaigns/<campaign-locator>/<cycle-locator>/artifacts/<bucket>/...`
+- legacy cycle output: `campaigns/<camp-id>/cycles/<cycle-id>/artifacts/<bucket>/...`
 - shared references: `shared/<kind>/<ref>/revisions/<rrev>/...` (latest
   revision per `reference.json`)
 - legacy top-level buckets (`plans/`, `spec/`, ...): READ-ONLY fallback.
@@ -26,6 +27,7 @@ from typing import Dict, Iterator, List, Optional, Sequence, Tuple
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import artifact_cutover as C  # noqa: E402
+import artifact_locator  # noqa: E402
 import artifact_resplit as RS  # noqa: E402
 
 LEGACY_BUCKETS = ("plans", "spec", "research", "documents", "analysis_project", "experiments", "designs")
@@ -44,20 +46,27 @@ def _cycle_state(cycle_dir: Path) -> str:
 
 
 def cycle_bucket_dirs(root: Path, bucket: str) -> List[Tuple[Path, Dict[str, str]]]:
-    """Every `campaigns/*/cycles/*/artifacts/<bucket>` directory, sorted by path."""
+    """Every recorded cycle's artifact bucket, across new and legacy layouts."""
     root = Path(root)
     out: List[Tuple[Path, Dict[str, str]]] = []
-    campaigns = root / "campaigns"
-    if not _is_real_dir(campaigns):
-        return out
-    for camp in sorted(campaigns.iterdir()):
-        cycles = camp / "cycles"
-        if not _is_real_dir(cycles):
+    # The rebuildable INDEX files are deliberately not consulted here. Stable
+    # identity comes from campaign/manifest/open-cycle records on every scan;
+    # locator basenames are display values and may be renamed after sealing.
+    mapping, _rows = artifact_locator.scan_index(root)
+    identities = {relative: identifier for identifier, relative in mapping.items()}
+    for camp in artifact_locator.iter_campaign_dirs(root):
+        campaign_rel = camp.resolve().relative_to(root.resolve()).as_posix()
+        campaign_id = identities.get(campaign_rel)
+        if campaign_id is None:
             continue
-        for cyc in sorted(cycles.iterdir()):
+        for cyc, _physical_layout in artifact_locator.iter_cycle_dirs(camp):
+            cycle_rel = cyc.resolve().relative_to(root.resolve()).as_posix()
+            cycle_id = identities.get(cycle_rel)
+            if cycle_id is None:
+                continue
             target = cyc / "artifacts" / bucket
             if _is_real_dir(target):
-                out.append((target, {"layout": LAYOUT_CYCLE, "campaign_id": camp.name, "cycle_id": cyc.name,
+                out.append((target, {"layout": LAYOUT_CYCLE, "campaign_id": campaign_id, "cycle_id": cycle_id,
                                      "cycle_state": _cycle_state(cyc)}))
     return out
 

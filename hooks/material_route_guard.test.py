@@ -60,6 +60,7 @@ class MaterialRouteGuardTest(unittest.TestCase):
         (self.home / "utilities").symlink_to(ROOT / "utilities", target_is_directory=True)
         command = [
             sys.executable, str(ROUTER), "compile",
+            "--slug", "material-route-fixture",
             "--capability", "autopilot-code",
             "--capability-mode", "dev",
             "--intensity", "direct",
@@ -345,6 +346,7 @@ class MaterialRouteGuardTest(unittest.TestCase):
         blocked_compile = subprocess.run(
             [
                 sys.executable, str(ROUTER), "compile",
+                "--slug", "blocked-research-fixture",
                 "--capability", "autopilot-research",
                 "--capability-mode", "academic",
                 "--intensity", "standard",
@@ -386,6 +388,7 @@ class MaterialRouteGuardTest(unittest.TestCase):
 
         direct = [
             sys.executable, str(ROUTER), "compile",
+            "--slug", "direct-research-fixture",
             "--capability", "autopilot-research",
             "--capability-mode", "academic",
             "--intensity", "direct",
@@ -506,6 +509,7 @@ class MaterialRouteGuardTest(unittest.TestCase):
         route.parent.mkdir(parents=True)
         command = [
             sys.executable, str(ROUTER), "compile",
+            "--slug", "linked-worktree-fixture",
             "--capability", "autopilot-code",
             "--capability-mode", "dev",
             "--intensity", "direct",
@@ -859,6 +863,7 @@ class MaterialRouteGuardTest(unittest.TestCase):
     def _compile_command(self) -> list[str]:
         command = [
             sys.executable, str(ROUTER), "compile",
+            "--slug", "compile-command-fixture",
             "--capability", "autopilot-code",
             "--capability-mode", "dev",
             "--intensity", "direct",
@@ -1047,7 +1052,7 @@ class MaterialRouteGuardTest(unittest.TestCase):
         def compile_command(target: Path, output: str | None = None) -> str:
             args = [
                 wrapper_rel, "route", "--capability", "autopilot-code",
-                "--capability-mode", "dev", "--intensity", "direct",
+                "--capability-mode", "dev", "--slug", "wrapper-fixture", "--intensity", "direct",
                 "--cwd", str(target), "--artifact-root", str(canonical),
             ]
             for predicate in PREDICATES:

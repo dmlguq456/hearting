@@ -11,6 +11,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -261,6 +262,38 @@ class ArtifactLifecycleCycleTest(LifecycleTestBase):
 
     def test_read_admitted_cycle_returns_none_when_absent(self):
         self.assertIsNone(L.read_admitted_cycle(self.root, "camp_" + "1" * 32, "cyc_" + "1" * 32))
+
+    def _write_cycle_descriptor(self, campaign_id, cycle_id, campaign_locator, cycle_locator, *, legacy=False):
+        campaign = self.root / "campaigns" / campaign_locator
+        cycle = (campaign / "cycles" / cycle_locator) if legacy else (campaign / cycle_locator)
+        cycle.mkdir(parents=True)
+        (campaign / "campaign.json").write_text(json.dumps({
+            "campaign_id": campaign_id, "title": "fixture", "cycles": [cycle_id],
+        }), encoding="utf-8")
+        descriptor = _cycle(campaign_id=campaign_id, cycle_id=cycle_id)
+        (cycle / "manifest.json").write_text(json.dumps({"cycle": descriptor}), encoding="utf-8")
+        return descriptor
+
+    def test_read_admitted_cycle_supports_readable_locator_and_ignores_stale_cache(self):
+        campaign_id = "camp_" + "2" * 32
+        cycle_id = "cyc_" + "3" * 32
+        descriptor = self._write_cycle_descriptor(
+            campaign_id, cycle_id, "2026-09-04_readable-campaign", "renamed-sealed-cycle",
+        )
+        (self.root / "campaigns" / "INDEX.json").write_text(json.dumps({
+            cycle_id: "campaigns/wrong/cycles/wrong",
+        }), encoding="utf-8")
+        with mock.patch.object(L.artifact_manifest, "validate", return_value=mock.Mock(ok=True)):
+            self.assertEqual(L.read_admitted_cycle(self.root, campaign_id, cycle_id), descriptor)
+
+    def test_read_admitted_cycle_preserves_legacy_id_layout(self):
+        campaign_id = "camp_" + "4" * 32
+        cycle_id = "cyc_" + "5" * 32
+        descriptor = self._write_cycle_descriptor(
+            campaign_id, cycle_id, campaign_id, cycle_id, legacy=True,
+        )
+        with mock.patch.object(L.artifact_manifest, "validate", return_value=mock.Mock(ok=True)):
+            self.assertEqual(L.read_admitted_cycle(self.root, campaign_id, cycle_id), descriptor)
 
 
 class ArtifactLifecycleCompletionTest(LifecycleTestBase):

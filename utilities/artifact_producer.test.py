@@ -11,6 +11,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -66,8 +67,12 @@ def dispatch_evidence():
     }]}
 
 
-def compile_for(intensity, root, capability="autopilot-code", mode="dev"):
-    common = dict(cwd=R.ROOT, artifact_root=root, tracking="tracked", tracked_gate_evidence=gate_evidence())
+def compile_for(intensity, root, capability="autopilot-code", mode="dev", *,
+                slug="w7i-test", gate_source="fixture"):
+    gate = gate_evidence()
+    gate["spec_read"]["source"] = gate_source
+    common = dict(cwd=R.ROOT, artifact_root=root, tracking="tracked",
+                  tracked_gate_evidence=gate, slug=slug)
     if intensity == "direct":
         return R.compile_route(capability, mode, "direct", predicates=ALL, transport=None,
                                inline_reason="atomic-direct", **common)
@@ -106,8 +111,8 @@ class ProducerTestBase(unittest.TestCase):
         return P.activate(self.root, repository_id=REPO_ID, artifact_root_id=ROOT_ID,
                           w7={"campaign_id": "camp_" + "c" * 32})
 
-    def route(self, intensity="direct", capability="autopilot-code", mode="dev"):
-        route = compile_for(intensity, self.root, capability, mode)
+    def route(self, intensity="direct", capability="autopilot-code", mode="dev", **compile_kw):
+        route = compile_for(intensity, self.root, capability, mode, **compile_kw)
         binding = L.admit_runtime_route(self.root, route)
         return route, Path(binding.route_file)
 
@@ -187,15 +192,224 @@ class ActivateAndBeginTest(ProducerTestBase):
         self.assertTrue(idm.is_well_formed(result["cycle_id"], "cycle"))
         self.assertTrue(idm.is_well_formed(result["producer_id"], "producer"))
         cycle_dir = Path(result["cycle_dir"])
-        self.assertEqual(cycle_dir, self.root / "campaigns" / result["campaign_id"] / "cycles" / result["cycle_id"])
+        campaign = P.read_campaign(self.root, result["campaign_id"])
+        self.assertEqual(cycle_dir.parent, self.root / "campaigns" / campaign["locator"])
+        self.assertNotIn("cycles", cycle_dir.relative_to(self.root).parts)
+        self.assertEqual(cycle_dir.name, "2026-09-04_w7i-test")
         self.assertTrue((cycle_dir / "artifacts").is_dir())
-        self.assertEqual(sorted(os.listdir(cycle_dir)), ["artifacts"])
+        self.assertEqual(sorted(os.listdir(cycle_dir)), [".cycle.json", "artifacts"])
+        binding = json.loads((cycle_dir / ".cycle.json").read_text())
+        self.assertEqual(
+            (binding["campaign_id"], binding["cycle_id"]),
+            (result["campaign_id"], result["cycle_id"]),
+        )
         self.assertEqual(result["env"]["AGENT_ARTIFACT_OUTPUT_DIR"], str(cycle_dir / "artifacts"))
         record = P.read_cycle_record(self.root, result["cycle_id"])
         self.assertEqual(record["state"], "open")
         self.assertEqual(record["route_id"], route["route_id"])
-        campaign = P.read_campaign(self.root, result["campaign_id"])
         self.assertEqual(campaign["cycles"], [result["cycle_id"]])
+        for named in (campaign, record):
+            self.assertEqual(named["slug"], "w7i-test")
+            self.assertEqual(named["title"], "w7i-test")
+            self.assertEqual(named["slug_source"], "route")
+            self.assertEqual(named["locator_suffix"], "")
+        self.assertEqual(json.loads((self.root / "campaigns" / "INDEX.json").read_text())[result["cycle_id"]],
+                         cycle_dir.relative_to(self.root).as_posix())
+
+    def test_slug_normalization_truncation_and_legacy_derivation_are_recorded(self):
+        self.activate()
+        raw = "  W7I /// " + "Very Long Name " * 8
+        route, route_file = self.route(slug=raw)
+        result = P.begin(self.root, route_file=route_file, capability="autopilot-code", intensity="direct")
+        record = P.read_cycle_record(self.root, result["cycle_id"])
+        self.assertEqual(len(record["slug"]), 48)
+        self.assertTrue(record["slug_truncated"])
+        self.assertRegex(record["slug"], r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
+        legacy, legacy_file = self.route(slug=None, gate_source="legacy-route")
+        derived = P.begin(
+            self.root, route_file=legacy_file, capability="autopilot-code", intensity="direct",
+            campaign_key="legacy-derived", goal="Legacy Goal For Naming",
+        )
+        legacy_record = P.read_cycle_record(self.root, derived["cycle_id"])
+        legacy_campaign = P.read_campaign(self.root, derived["campaign_id"])
+        for named in (legacy_campaign, legacy_record):
+            self.assertEqual(named["slug"], "legacy-goal-for-naming")
+            self.assertEqual(named["slug_source"], "derived-legacy-route")
+
+    def test_collision_suffix_is_smallest_and_resume_keeps_it(self):
+        self.activate()
+        results = []
+        routes = []
+        for ordinal in range(3):
+            route, route_file = self.route(slug="same name", gate_source=f"fixture-{ordinal}")
+            result = P.begin(
+                self.root, route_file=route_file, capability="autopilot-code", intensity="direct",
+                campaign_key="same-campaign",
+            )
+            routes.append((route, route_file))
+            results.append(result)
+        records = [P.read_cycle_record(self.root, row["cycle_id"]) for row in results]
+        self.assertEqual([row["locator_suffix"] for row in records], ["", "-2", "-3"])
+        self.assertEqual([Path(row["cycle_dir"]).name for row in results], [
+            "2026-09-04_same-name", "2026-09-04_same-name-2", "2026-09-04_same-name-3",
+        ])
+        resumed = P.begin(
+            self.root, route_file=routes[2][1], capability="autopilot-code", intensity="direct")
+        self.assertEqual(resumed["cycle_id"], results[2]["cycle_id"])
+        self.assertEqual(P.read_cycle_record(self.root, resumed["cycle_id"])["locator_suffix"], "-3")
+
+    def test_locator_index_recovers_deleted_corrupt_stale_and_renamed_path(self):
+        self.activate()
+        route, route_file, result = self.begin()
+        self.write_output(result)
+        self.close(route, route_file)
+        P.finalize(self.root, cycle_id=result["cycle_id"])
+        original = Path(result["cycle_dir"])
+        index_path = self.root / "campaigns" / "INDEX.json"
+        markdown_path = self.root / "campaigns" / "INDEX.md"
+        for payload in (None, "{", json.dumps({result["cycle_id"]: "campaigns/not-real"})):
+            if payload is None:
+                index_path.unlink()
+            else:
+                index_path.write_text(payload, encoding="utf-8")
+            self.assertEqual(P.artifact_locator.resolve_path(self.root, result["cycle_id"]), original)
+        for payload in (None, "corrupt\n", "# stale\n"):
+            if payload is None:
+                markdown_path.unlink()
+            else:
+                markdown_path.write_text(payload, encoding="utf-8")
+            self.assertEqual(P.artifact_locator.resolve_path(self.root, result["cycle_id"]), original)
+        renamed = original.with_name(original.name + "-manual")
+        original.rename(renamed)
+        self.assertEqual(P.artifact_locator.resolve_path(self.root, result["cycle_id"]), renamed)
+        rebuilt = json.loads(index_path.read_text())
+        self.assertEqual(rebuilt[result["cycle_id"]], renamed.relative_to(self.root).as_posix())
+
+    def test_open_cycle_rename_resolves_writes_and_resume_without_reidentifying(self):
+        self.activate()
+        route, route_file, result = self.begin()
+        original = Path(result["cycle_dir"])
+        renamed = original.with_name(original.name + "-operator-name")
+        original.rename(renamed)
+        (self.root / "campaigns" / "INDEX.json").unlink()
+        (self.root / "campaigns" / "INDEX.md").write_text("broken\n", encoding="utf-8")
+
+        self.assertEqual(P.artifact_locator.resolve_path(self.root, result["cycle_id"]), renamed)
+        target = renamed / "artifacts" / "spec" / "prd.md"
+        verdict = P.check_write(self.root, target)
+        self.assertEqual((verdict["verdict"], verdict["cycle_id"]), ("allow", result["cycle_id"]))
+        self.assertEqual(P.cycle_bucket(self.root, target), ("spec", result["cycle_id"]))
+        resumed = P.begin(
+            self.root, route_file=route_file, capability="autopilot-code", intensity="direct")
+        self.assertEqual(resumed["cycle_id"], result["cycle_id"])
+        self.assertEqual(Path(resumed["cycle_dir"]), renamed)
+        self.assertEqual(resumed["env"]["AGENT_ARTIFACT_CYCLE_DIR"], str(renamed))
+
+    def test_multiple_open_cycle_renames_and_name_swap_preserve_each_id(self):
+        self.activate()
+        first_route, first_file = self.route(slug="first", gate_source="first")
+        first = P.begin(
+            self.root, route_file=first_file, capability="autopilot-code", intensity="direct",
+            campaign_key="rename-set")
+        second_route, second_file = self.route(slug="second", gate_source="second")
+        second = P.begin(
+            self.root, route_file=second_file, capability="autopilot-code", intensity="direct",
+            campaign_key="rename-set")
+        first_path, second_path = Path(first["cycle_dir"]), Path(second["cycle_dir"])
+        temporary = first_path.with_name("temporary-swap")
+        first_path.rename(temporary)
+        second_path.rename(first_path)
+        temporary.rename(second_path)
+
+        self.assertEqual(P.artifact_locator.resolve_path(self.root, first["cycle_id"]), second_path)
+        self.assertEqual(P.artifact_locator.resolve_path(self.root, second["cycle_id"]), first_path)
+        self.assertEqual(
+            Path(P.begin(
+                self.root, route_file=first_file, capability="autopilot-code", intensity="direct",
+            )["cycle_dir"]),
+            second_path,
+        )
+        self.assertEqual(
+            Path(P.begin(
+                self.root, route_file=second_file, capability="autopilot-code", intensity="direct",
+            )["cycle_dir"]),
+            first_path,
+        )
+
+    def test_index_pair_rolls_back_when_second_replace_fails(self):
+        self.activate()
+        _route, _route_file, result = self.begin()
+        index_path = self.root / "campaigns" / "INDEX.json"
+        markdown_path = self.root / "campaigns" / "INDEX.md"
+        before = (index_path.read_bytes(), markdown_path.read_bytes())
+        cycle_dir = Path(result["cycle_dir"])
+        renamed = cycle_dir.with_name(cycle_dir.name + "-during-write")
+        cycle_dir.rename(renamed)
+        real_atomic_write = P.artifact_locator._atomic_write
+
+        def fail_markdown(path, data):
+            if Path(path).name == "INDEX.md":
+                raise OSError("injected second index write failure")
+            return real_atomic_write(path, data)
+
+        with mock.patch.object(P.artifact_locator, "_atomic_write", side_effect=fail_markdown):
+            with self.assertRaises(OSError):
+                P.artifact_locator.rebuild_indexes(self.root)
+        self.assertEqual((index_path.read_bytes(), markdown_path.read_bytes()), before)
+        self.assertEqual(P.artifact_locator.resolve_path(self.root, result["cycle_id"]), renamed)
+
+    def test_modified_route_slug_is_rejected_before_artifact_creation(self):
+        self.activate()
+        route, route_file = self.route(slug="original")
+        route["slug"] = "tampered"
+        route_file.write_text(json.dumps(route), encoding="utf-8")
+        with self.assertRaises(P.ProducerError) as ctx:
+            P.begin(self.root, route_file=route_file, capability="autopilot-code", intensity="direct")
+        self.assertEqual(ctx.exception.code, "route-invalid")
+        self.assertEqual(list(P.artifact_locator.iter_campaign_dirs(self.root)), [])
+
+    def test_begin_refuses_an_active_root_resplit_claim(self):
+        self.activate()
+        _route, route_file = self.route()
+        lock_path = P.producer_dir(self.root) / "resplit.lock"
+        lock_path.write_text(json.dumps({"lump_cycle_id": "cyc_fixture"}), encoding="utf-8")
+        with self.assertRaises(P.ProducerError) as ctx:
+            P.begin(self.root, route_file=route_file, capability="autopilot-code", intensity="direct")
+        self.assertEqual(ctx.exception.code, "resplit-in-progress")
+        self.assertEqual(list(P.artifact_locator.iter_campaign_dirs(self.root)), [])
+
+    def test_mutated_record_locators_cannot_escape_artifact_root(self):
+        self.activate()
+        route, route_file, result = self.begin()
+        cycle_record = P.read_cycle_record(self.root, result["cycle_id"])
+        cycle_record["locator"] = "../../escaped-cycle"
+        P.cycle_record_path(self.root, result["cycle_id"]).write_text(
+            json.dumps(cycle_record), encoding="utf-8")
+        campaign = P.read_campaign(self.root, result["campaign_id"])
+        campaign["locator"] = "../../escaped-campaign"
+        campaign_path = Path(result["cycle_dir"]).parent / "campaign.json"
+        campaign_path.write_text(json.dumps(campaign), encoding="utf-8")
+
+        resumed = P.begin(
+            self.root, route_file=route_file, capability="autopilot-code", intensity="direct")
+        self.assertEqual(Path(resumed["cycle_dir"]), Path(result["cycle_dir"]))
+        self.assertFalse((self.root.parent / "escaped-cycle").exists())
+        self.assertFalse((self.root.parent / "escaped-campaign").exists())
+
+    def test_record_lookups_reject_mismatched_and_path_like_ids(self):
+        self.activate()
+        requested = "camp_" + "1" * 32
+        different = "camp_" + "2" * 32
+        fallback = self.root / "campaigns" / requested
+        fallback.mkdir(parents=True)
+        (fallback / "campaign.json").write_text(
+            json.dumps({"campaign_id": different, "cycles": []}), encoding="utf-8")
+        self.assertIsNone(P.read_campaign(self.root, requested))
+        self.assertIsNone(P.read_cycle_record(self.root, "../outside"))
+        self.assertIsNone(P.artifact_locator.read_cycle_record(self.root, "../outside"))
+        with self.assertRaises(P.ProducerError) as ctx:
+            P.cycle_record_path(self.root, "../outside")
+        self.assertEqual(ctx.exception.code, "cycle-id-invalid")
 
     def test_begin_is_idempotent_per_route(self):
         self.activate()
@@ -617,14 +831,14 @@ class CheckWriteTest(ProducerTestBase):
         self.activate()
         route, route_file, result = self.begin()
         camp, cyc = result["campaign_id"], result["cycle_id"]
-        base = self.root / "campaigns" / camp
-        self.assertEqual(P.check_write(self.root, base / "campaign.json")["reason"], "campaign-record-machine-managed")
-        self.assertEqual(P.check_write(self.root, base / "cycles" / cyc / "manifest.json")["reason"], "outside-cycle-artifacts")
-        ok = P.check_write(self.root, base / "cycles" / cyc / "artifacts" / "plans" / "plan.md")
+        base = Path(result["cycle_dir"])
+        self.assertEqual(P.check_write(self.root, base.parent / "campaign.json")["reason"], "campaign-record-machine-managed")
+        self.assertEqual(P.check_write(self.root, base / "manifest.json")["reason"], "outside-cycle-artifacts")
+        ok = P.check_write(self.root, base / "artifacts" / "plans" / "plan.md")
         self.assertEqual((ok["verdict"], ok["reason"], ok["bucket"]), ("allow", "open-cycle-artifacts", "plans"))
-        unknown = P.check_write(self.root, base / "cycles" / ("cyc_" + "9" * 32) / "artifacts" / "x.md")
+        unknown = P.check_write(self.root, base.parent / "2026-09-04_unknown" / "artifacts" / "x.md")
         self.assertEqual(unknown["reason"], "cycle-unknown")
-        self.assertEqual(P.cycle_bucket(self.root, base / "cycles" / cyc / "artifacts" / "spec" / "prd.md"), ("spec", cyc))
+        self.assertEqual(P.cycle_bucket(self.root, base / "artifacts" / "spec" / "prd.md"), ("spec", cyc))
 
     def test_sealed_cycle_denies_new_writes(self):
         self.activate()

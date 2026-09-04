@@ -11,6 +11,7 @@ DEFAULTS_SPEC = importlib.util.spec_from_file_location("dispatch_defaults", ROOT
 DEFAULTS = importlib.util.module_from_spec(DEFAULTS_SPEC); DEFAULTS_SPEC.loader.exec_module(DEFAULTS)
 VALID_AFFINITY = DEFAULTS.AFFINITY_VALUES | {"unspecified"}
 sys.path.insert(0, str(ROOT/"utilities"))
+import artifact_locator as ARTIFACT_LOCATOR
 import route_identity as ROUTE_IDENTITY
 import review_round_cap as REVIEW_ROUND_CAP
 from dispatch_continuation_budget import COMPATIBILITY_FLOOR, TERMINAL_RESERVE_DEFAULT
@@ -851,7 +852,8 @@ def build_continuation_route(
         ),
     }
     inherited_keys=(
-        "schema_version","capability","capability_mode","requested_intensity",
+        "schema_version","capability","capability_mode","slug","slug_truncated",
+        "requested_intensity",
         "effective_intensity","owner_model_profile","execution_topology",
         "owner_dispatch_depth","max_dispatch_depth","tracking",
         "tracked_gate_evidence","spec_touch","cwd","source_commit",
@@ -1531,7 +1533,7 @@ def compile_route(capability, capability_mode, requested_intensity, cwd, artifac
                   predicates=(), signals=(), transport=None,
                   transport_evidence="caller-selected", inline_reason=None,
                   tracking="tracked", tracked_gate_evidence=None, dispatch_evidence=None,
-                  registered_headless_evidence=None):
+                  registered_headless_evidence=None, slug=None):
     registry=TOPO.load_registry(); TOPO.validate_registry(registry)
     recipe=TOPO.resolve_recipe(registry, capability, capability_mode)
     return _compile_from_recipe(
@@ -1540,7 +1542,7 @@ def compile_route(capability, capability_mode, requested_intensity, cwd, artifac
         transport_evidence=transport_evidence, inline_reason=inline_reason,
         tracking=tracking, tracked_gate_evidence=tracked_gate_evidence,
         dispatch_evidence=dispatch_evidence,
-        registered_headless_evidence=registered_headless_evidence)
+        registered_headless_evidence=registered_headless_evidence, slug=slug)
 
 def compile_composed_route(composed_recipe, capability_mode, requested_intensity, cwd, artifact_root,
                            **kwargs):
@@ -1564,9 +1566,13 @@ def _compile_from_recipe(registry, recipe, capability, capability_mode, requeste
                          cwd, artifact_root, predicates=(), signals=(), transport=None,
                          transport_evidence="caller-selected", inline_reason=None,
                          tracking="tracked", tracked_gate_evidence=None, dispatch_evidence=None,
-                         registered_headless_evidence=None, composed=False):
+                         registered_headless_evidence=None, slug=None, composed=False):
     cwd=Path(cwd).resolve(strict=True); artifact=Path(artifact_root).resolve()
     if not cwd.is_absolute() or not artifact.is_absolute(): raise ValueError("cwd and artifact root must be absolute")
+    slug_fields={}
+    if slug is not None:
+        canonical_slug,slug_truncated=ARTIFACT_LOCATOR.slugify(slug)
+        slug_fields={"slug":canonical_slug,"slug_truncated":slug_truncated}
     known_pred=set(recipe["direct_predicates"]); predicates=sorted(set(predicates))
     unknown=set(predicates)-known_pred
     if unknown: raise ValueError("unknown predicates: "+",".join(sorted(unknown)))
@@ -1706,6 +1712,7 @@ def _compile_from_recipe(registry, recipe, capability, capability_mode, requeste
           **launch_compatibility_tuple(artifact_root=artifact,cwd=cwd),
       },
       "advance_generation":0}
+    payload.update(slug_fields)
     if checked_dispatch is not None:
         payload["dispatch_evidence_scope_version"]=DISPATCH_EVIDENCE_SCOPE_VERSION
     if composed:
@@ -1814,6 +1821,17 @@ def verify_route(route, expected_cwd=None, *, allow_stale_registry=False):
         raise ValueError(
             f"legacy route schema_version={route.get('schema_version')!r} rejected for mutating/resume use"
         )
+    if "slug" in route:
+        if not isinstance(route["slug"],str) or not isinstance(route.get("slug_truncated"),bool):
+            raise ValueError("invalid route slug metadata")
+        try:
+            canonical_slug,_=ARTIFACT_LOCATOR.slugify(route["slug"])
+        except ARTIFACT_LOCATOR.LocatorError as exc:
+            raise ValueError("invalid route slug") from exc
+        if canonical_slug != route["slug"]:
+            raise ValueError("route slug is not canonical")
+    elif "slug_truncated" in route:
+        raise ValueError("route slug metadata incomplete")
     if route.get("dispatch_contract_version") != DISPATCH_CONTRACT_VERSION:
         raise ValueError("legacy dispatch contract is read-only")
     scope_version=route.get("dispatch_evidence_scope_version")
@@ -3994,6 +4012,7 @@ def complete_subsession_stage(route, node, node_id, evidence, manifest_path, job
 def main():
     p=argparse.ArgumentParser(); sub=p.add_subparsers(dest="command",required=True)
     c=sub.add_parser("compile"); c.add_argument("--capability",required=True); c.add_argument("--capability-mode",default="default")
+    c.add_argument("--slug",required=True)
     c.add_argument("--intensity",default="auto"); c.add_argument("--cwd",required=True); c.add_argument("--artifact-root",required=True)
     c.add_argument("--predicate",action="append",default=[]); c.add_argument("--signal",action="append",default=[])
     c.add_argument("--transport",default=None); c.add_argument("--transport-evidence",default="caller-selected")
@@ -4065,12 +4084,14 @@ def main():
                 tracking=a.tracking,tracked_gate_evidence=gate,
                 dispatch_evidence=dispatch_evidence,
                 registered_headless_evidence=registered_headless_evidence,
+                slug=a.slug,
             )
         else:
             route=compile_route(
                 a.capability,a.capability_mode,a.intensity,a.cwd,a.artifact_root,
                 a.predicate,a.signal,a.transport,a.transport_evidence,a.inline_reason,
                 a.tracking,gate,dispatch_evidence,registered_headless_evidence,
+                slug=a.slug,
             )
         vbasis=route.get("validation_basis") or {}
         if vbasis.get("runtime_root_match") is False:

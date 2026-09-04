@@ -923,7 +923,11 @@ class RegistryConfirmArmTest(unittest.TestCase):
 
     def test_missing_all_sealed_registry_sources_does_not_reconstruct_agent_home(self) -> None:
         payload = self.payload(stdout="check=ok")
-        with mock.patch.dict(os.environ, {}, clear=True):
+        # Keep this negative fixture hermetic: a maintainer machine may have a
+        # live fallback registry under its stable per-user state root.
+        with mock.patch.dict(os.environ, {}, clear=True), mock.patch.object(
+            rewake, "_canonical_jobs", return_value=None
+        ):
             self.assertIsNone(rewake.registry_launch(payload))
 
     def test_a_start_free_dispatch_owner_command_never_arms(self) -> None:
@@ -1298,7 +1302,11 @@ class RegistryCanonicalJobsFallbackTest(RegistryConfirmArmTest):
     def setUp(self) -> None:
         super().setUp()
         self.environment.stop()
-        self.no_env = mock.patch.dict(os.environ, {}, clear=False)
+        # This subclass removes only the registry env var; it still needs the
+        # checkout's real readiness helper under isolated `env -i` runs.
+        self.no_env = mock.patch.dict(
+            os.environ, {"AGENT_HOME": str(self.agent_home)}, clear=False
+        )
         self.no_env.start()
         os.environ.pop("AGENT_DISPATCH_JOBS", None)
         self.addCleanup(self.no_env.stop)

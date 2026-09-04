@@ -49,7 +49,7 @@ binds `direct`, `quick`, and `standard+`; only the acting owner differs.
    While the cutover is inactive this returns `legacy-compat` and the legacy
    `<artifact-root>/experiments/` layout stays writable; once active it
    issues `campaign_id`/`cycle_id`/`producer_id` and the cycle directory
-   `campaigns/<camp>/cycles/<cyc>/artifacts/` before any artifact exists.
+   `campaigns/<campaign-locator>/<cycle-locator>/artifacts/` before any artifact exists.
 2. **write only inside the open cycle.** Every durable artifact goes under
    `<cycle_dir>/artifacts/experiments/...` (`AGENT_ARTIFACT_OUTPUT_DIR`).
    `artifact_producer.py check-write` is the single allow/deny oracle used by

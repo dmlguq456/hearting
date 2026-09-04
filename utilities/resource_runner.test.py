@@ -56,7 +56,8 @@ class TestRunner(unittest.TestCase):
             "codex_command": "ok", "retry_on_isolated_worktree": 0,
         }], "native_subagent": []}))
         result = subprocess.run([
-            sys.executable, str(ROUTER), "compile", "--capability", "autopilot-lab",
+            sys.executable, str(ROUTER), "compile", "--slug", "resource-runner-fixture",
+            "--capability", "autopilot-lab",
             "--capability-mode", "setup", "--intensity", "auto", "--signal", "resource-run",
             "--cwd", str(self.repo), "--artifact-root", str(self.artifacts),
             "--dispatch-evidence", str(evidence), "--tracking", "untracked",
