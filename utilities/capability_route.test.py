@@ -2470,14 +2470,14 @@ class TestContinuation(unittest.TestCase):
     repo=self._git_repo(tmp); artifact=Path(tmp)/"artifacts"
     source=self._source(artifact,cwd=repo)
     pinned=source["source_commit"]; self.assertEqual(pinned,self._git_head(repo))
-    self._complete_prefix(source,"test",Path(tmp)/"evidence")
+    self._complete_prefix(source,"plan",Path(tmp)/"evidence")
     (repo/"x").write_text("b"); subprocess.run(["git","-C",str(repo),"commit","-qam","fast-forward"],check=True)
     head=self._git_head(repo); self.assertNotEqual(head,pinned)
     source_path=Path(tmp)/"source-route.json"
     source_path.write_text(json.dumps(source),encoding="utf-8")
     result=subprocess.run([
      sys.executable,str(P),"continuation","--source-route",str(source_path),
-     "--resume-from-node","test","--requested-boundary","test",
+     "--resume-from-node","plan","--requested-boundary","plan",
      "--reason","resume-after-fast-forward","--artifact-root",str(artifact),
     ],capture_output=True,text=True,cwd=str(R.ROOT),env=os.environ.copy())
     self.assertEqual(result.returncode,0,result.stderr)
@@ -2487,15 +2487,72 @@ class TestContinuation(unittest.TestCase):
     self.assertEqual(route["launch_compatibility_tuple"]["grounding_roots"]["cwd"]["release_id"],head)
     published=json.loads(R.canonical_route_path(artifact,route["route_id"]).read_text(encoding="utf-8"))
     self.assertEqual(R.verify_route(published)["source_commit"],head)
-    # The guard that refused the incident's plan/plan-check/execute now passes the
-    # first runnable node against the rebound pin.
-    _,node,_=G.validate_route_contract(R.canonical_route_path(artifact,route["route_id"]),"test",repo,artifact)
-    self.assertEqual(node["id"],"test")
+    # `plan` is pre-mutation, so it gets no lineage exemption from the guard: on
+    # main this exact call raises route-source-commit-mismatch. It passes here
+    # only because the pin was rebound.
+    _,node,_=G.validate_route_contract(R.canonical_route_path(artifact,route["route_id"]),"plan",repo,artifact)
+    self.assertEqual(node["id"],"plan")
    finally:
     if previous_home is None: os.environ.pop("AGENT_HOME",None)
     else: os.environ["AGENT_HOME"]=previous_home
     if previous_jobs is None: os.environ.pop("AGENT_DISPATCH_JOBS",None)
     else: os.environ["AGENT_DISPATCH_JOBS"]=previous_jobs
+
+ def test_c_rebind_declines_an_sd67_mutation_retry(self):
+  # Review blocking #1: rebinding unconditionally would let a continuation resume
+  # at `execute` after execute already ran and committed, pinning the new HEAD and
+  # walking past SD-67's retry-evidence gate. When the first runnable node mutates
+  # the worktree AND the source route already has an attempt on it, the pin is
+  # kept and the guard adjudicates with real registry evidence.
+  import subprocess
+  with tempfile.TemporaryDirectory() as tmp:
+   previous_jobs=os.environ.get("AGENT_DISPATCH_JOBS")
+   jobs=Path(tmp)/"state"/"jobs.log"; jobs.parent.mkdir(parents=True)
+   os.environ["AGENT_DISPATCH_JOBS"]=str(jobs)
+   try:
+    repo=self._git_repo(tmp); artifact=Path(tmp)/"artifacts"
+    source=self._source(artifact,cwd=repo)
+    pinned=source["source_commit"]
+    self._complete_prefix(source,"execute",Path(tmp)/"evidence")
+    execute=next(node for node in source["nodes"] if node["id"]=="execute")
+    self.assertTrue(R._node_mutates_worktree(execute))
+    # execute already ran once under this route, and its commit advanced HEAD.
+    self._write_attempt_row(jobs,source["route_id"],"execute","att-execute-prior")
+    (repo/"x").write_text("b"); subprocess.run(["git","-C",str(repo),"commit","-qam","execute output"],check=True)
+    declined=self._build(source,resume_from_node="execute",requested_boundary="execute")
+    self.assertEqual(declined["source_commit"],pinned)
+    self.assertNotIn("source_commit_rebind",declined)
+    # Same route, same moved HEAD, but no prior attempt on the mutation node:
+    # this route never mutated the tree, so the move is external and rebinds.
+    jobs.write_text("",encoding="utf-8")
+    rebound=self._build(source,resume_from_node="execute",requested_boundary="execute")
+    self.assertEqual(rebound["source_commit"],self._git_head(repo))
+   finally:
+    if previous_jobs is None: os.environ.pop("AGENT_DISPATCH_JOBS",None)
+    else: os.environ["AGENT_DISPATCH_JOBS"]=previous_jobs
+
+ def _write_attempt_row(self,jobs,route_id,node_id,attempt_id,status="done"):
+  meta=f"route_id={route_id},route_node={node_id},attempt_id={attempt_id}"
+  with Path(jobs).open("a",encoding="utf-8") as handle:
+   handle.write("\t".join(["2026-09-04T00:00:00Z",status,"repo","worktree","slug",meta])+"\n")
+
+ def test_c_pin_and_grounding_must_name_one_commit(self):
+  # S5: the pin (`git rev-parse HEAD`) and the grounding (`source_revision`) are
+  # read by different functions at different moments -- exactly defect C's shape.
+  # The builder asserts they agree instead of arguing that they do.
+  def launch(release_id):
+   return {"grounding_roots":{"cwd":{"release_id":release_id}}}
+  head="a"*40; other="b"*40
+  R._assert_pin_matches_grounding(head,launch(head))
+  R._assert_pin_matches_grounding(head,launch(head+"+dirty:0123456789ab"))
+  with self.assertRaisesRegex(ValueError,"continuation-source-commit-grounding-mismatch"):
+   R._assert_pin_matches_grounding(head,launch(other))
+  with self.assertRaisesRegex(ValueError,"continuation-source-commit-grounding-mismatch"):
+   R._assert_pin_matches_grounding(head,launch(other+"+dirty:0123456789ab"))
+  # Non-git grounding shapes carry no commit to compare and are left alone.
+  for shape in ("release:v2.109.0:3b081cf992a6","tree:88a3ef6ba1f9a6071812",None,17):
+   R._assert_pin_matches_grounding(head,launch(shape))
+  R._assert_pin_matches_grounding(None,launch(head))
 
  def test_c_continuation_rebind_record_is_verified(self):
   import subprocess
@@ -2512,6 +2569,7 @@ class TestContinuation(unittest.TestCase):
     lambda route:route["source_commit_rebind"].update(basis="cherry-pick"),
     lambda route:route["source_commit_rebind"].update(contract_version=2),
     lambda route:route["source_commit_rebind"].pop("inherited_source_commit"),
+    lambda route:route["source_commit_rebind"].update(cwd="/nonexistent/elsewhere"),
    ):
     tampered=json.loads(json.dumps(continuation)); tamper(tampered)
     tampered["route_hash"]=R.route_hash(tampered)
