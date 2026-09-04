@@ -164,11 +164,31 @@ def verification_process_digest(pid):
     return hashlib.sha256(raw).hexdigest()
 
 
+OWNER_PROGRESS_NODE = "_owner"
+
+
 def require_row(args):
     row = exact_row(args.jobs, args.attempt_id)
     if row is None:
         raise DispatchContractError("progress-attempt-missing", args.attempt_id)
-    if row[1].get("route_id") != args.route_id or row[1].get("route_node") != args.route_node:
+    metadata = row[1]
+    # A depth-1 owner is not a route node: its row carries `owner_route_id` and no
+    # `route_id`/`route_node` at all, so the node comparison below could never
+    # match and every owner heartbeat failed `progress-route-mismatch`. The
+    # registry already names an owner's node `_owner` in its delivery records, so
+    # that is the identity accepted here. An owner still has to name its own
+    # route.
+    if metadata.get("route_id") is None and metadata.get("owner_route_id"):
+        matched = (
+            metadata.get("owner_route_id") == args.route_id
+            and args.route_node == OWNER_PROGRESS_NODE
+        )
+    else:
+        matched = (
+            metadata.get("route_id") == args.route_id
+            and metadata.get("route_node") == args.route_node
+        )
+    if not matched:
         raise DispatchContractError("progress-route-mismatch", args.attempt_id)
     validate_attempt_metadata(row[1])
     return row

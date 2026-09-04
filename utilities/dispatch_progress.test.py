@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import argparse
 import importlib.util
 import hashlib
 import json
@@ -431,6 +432,57 @@ class ProgressTest(unittest.TestCase):
         result=subprocess.run(command,text=True,capture_output=True,env={**os.environ,"AGENT_HOME":str(ROOT)})
         self.assertEqual(result.returncode,0,result.stdout+result.stderr)
         self.assertEqual(P.inspect(self.args(),1)["classifier_source"],model.ATTEMPT_CLASSIFIER_SOURCE)
+
+
+
+class OwnerHeartbeatTest(unittest.TestCase):
+    """A depth-1 owner is not a route node: its row carries `owner_route_id` and no
+    `route_id`/`route_node`, so the node comparison could never match and every
+    owner heartbeat failed `progress-route-mismatch` — behind the read-only
+    sandbox failure that hid it (2026-09-04, att-07b70e5a / att-ba545845)."""
+
+    def _jobs(self, tmp, meta_extra):
+        jobs = Path(tmp) / "jobs.log"
+        meta = ",".join((
+            "attempt_schema_version=2", "dispatch_depth=1", "transport=headless",
+            "execution_surface=registered-headless", "registered_worker=1",
+            "fallback_hop=same-harness-headless", "worker_type=owner",
+            "unit=_kernel/owner", "attempt_id=att-owner1", *meta_extra,
+        ))
+        jobs.write_text("\t".join((
+            "2026-09-04T00:00:00Z", "open", "repo", "wt", "slug", meta,
+        )) + "\n", encoding="utf-8")
+        return jobs
+
+    def _args(self, jobs, node):
+        return argparse.Namespace(
+            jobs=jobs, attempt_id="att-owner1",
+            route_id="rt-owner", route_node=node,
+        )
+
+    def test_owner_row_matches_on_owner_route_id_and_the_owner_node(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            jobs = self._jobs(tmp, ("owner_route_id=rt-owner",))
+            row = P.require_row(self._args(jobs, "_owner"))
+            self.assertEqual(row[1]["attempt_id"], "att-owner1")
+
+    def test_owner_row_still_refuses_a_foreign_route_or_node(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            jobs = self._jobs(tmp, ("owner_route_id=rt-owner",))
+            for node, route in (("execute", "rt-owner"), ("_owner", "rt-other")):
+                args = self._args(jobs, node)
+                args.route_id = route
+                with self.assertRaises(P.DispatchContractError) as caught:
+                    P.require_row(args)
+                self.assertEqual(caught.exception.reason, "progress-route-mismatch")
+
+    def test_a_route_node_row_is_unchanged(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            jobs = self._jobs(tmp, ("route_id=rt-owner", "route_node=execute"))
+            row = P.require_row(self._args(jobs, "execute"))
+            self.assertEqual(row[1]["route_node"], "execute")
+            with self.assertRaises(P.DispatchContractError):
+                P.require_row(self._args(jobs, "_owner"))
 
 
 if __name__ == "__main__": unittest.main()
