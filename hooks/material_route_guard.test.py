@@ -138,6 +138,21 @@ class MaterialRouteGuardTest(unittest.TestCase):
             env={**clean, "MEM_RECALL_RECEIPTS": str(self.receipts), **(env or {})},
         )
 
+    def close_route(self) -> Path:
+        """Write the closure sidecar the way `capability-route.py close` does."""
+        sidecar = self.route.with_name(self.route.stem + ".outcome.json")
+        sidecar.write_text(
+            json.dumps({
+                "schema_version": 3,
+                "route_id": self.route_id,
+                "route_file": str(self.route),
+                "closed_at": "2026-09-04T00:00:00Z",
+                "terminal_gate_proven": True,
+            }),
+            encoding="utf-8",
+        )
+        return sidecar
+
     def bind(self, session: str = "session-a") -> subprocess.CompletedProcess[str]:
         return subprocess.run(
             [
@@ -1240,6 +1255,60 @@ class MaterialRouteGuardTest(unittest.TestCase):
         self.assertEqual(projection.resolve(), GUARD.resolve())
 
 
+    def test_j_closed_route_marker_refuses_material_edit(self):
+        # Defect J (rt-a2d042ad): edits kept flowing under an already-closed route's
+        # bind marker. The route record is immutable and says nothing about closure,
+        # so the closure sidecar must be the gate.
+        self.assertEqual(self.bind().returncode, 0)
+        self.assertEqual(self.guard("--tool", "Edit", "--file", str(self.repo / "app.py")).returncode, 0)
+        self.close_route()
+        denied = self.guard("--tool", "Edit", "--file", str(self.repo / "app.py"))
+        self.assertEqual(denied.returncode, 2, denied.stdout + denied.stderr)
+        self.assertIn("reason=route-closed", denied.stdout + denied.stderr)
+        # A material commit under the same dead marker is refused for the same reason.
+        (self.repo / "app.py").write_text("print('two')\n", encoding="utf-8")
+        commit = self.guard(
+            "--tool", "Bash",
+            "--command", "git -C %s commit -am wip" % shlex.quote(str(self.repo)),
+        )
+        self.assertEqual(commit.returncode, 2, commit.stdout + commit.stderr)
+        self.assertIn("reason=route-closed", commit.stdout + commit.stderr)
+
+    def test_j_closed_route_cannot_be_bound(self):
+        # Binding a route that is already closed is refused up front, so the marker
+        # never exists; a later write then fails as a plain missing route.
+        self.close_route()
+        bound = self.bind()
+        self.assertNotEqual(bound.returncode, 0)
+        self.assertIn("route-closed", bound.stdout + bound.stderr)
+
+    def test_j_registered_worker_route_is_not_closed_gated(self):
+        # A worker's route lifetime is the dispatch contract's; a racing owner close
+        # must not refuse a worker mid-stage.
+        self.close_route()
+        allowed = self.guard(
+            "--tool", "Edit", "--file", str(self.repo / "app.py"),
+            env={
+                "AGENT_ROUTE_FILE": str(self.route),
+                "AGENT_ROUTE_ID": self.route_id,
+                "AGENT_ROUTE_NODE": "inline",
+            },
+            opportunity=False,
+        )
+        self.assertEqual(allowed.returncode, 0, allowed.stdout + allowed.stderr)
+
+    def test_j_symlinked_outcome_sidecar_is_not_closure_evidence(self):
+        # The sidecar is trusted, so it must be a real file in the canonical route
+        # dir -- a symlink planted there is not closure evidence (same rule the
+        # route record itself follows).
+        self.assertEqual(self.bind().returncode, 0)
+        other = self.base / "foreign-outcome.json"
+        other.write_text("{}", encoding="utf-8")
+        self.route.with_name(self.route.stem + ".outcome.json").symlink_to(other)
+        allowed = self.guard("--tool", "Edit", "--file", str(self.repo / "app.py"))
+        self.assertEqual(allowed.returncode, 0, allowed.stdout + allowed.stderr)
+
+
 class ArtifactBucketCapsTest(unittest.TestCase):
     """W7C: one bucket table gates legacy, cycle, and shared layouts."""
 
@@ -1262,6 +1331,7 @@ class ArtifactBucketCapsTest(unittest.TestCase):
     def test_capability_artifact_caps_path_entry(self):
         path = Path("/tmp/proj/.agent_reports/campaigns/camp_1/cycles/cyc_2/artifacts/research/topic/report.md")
         self.assertEqual(MATERIAL_GUARD.capability_artifact_caps(path), MATERIAL_GUARD.CAPABILITY_ARTIFACT_CAPS["research"])
+
 
 
 if __name__ == "__main__":

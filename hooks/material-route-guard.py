@@ -405,6 +405,23 @@ def _verifier_crashed(result: subprocess.CompletedProcess[str]) -> bool:
     return "Traceback (most recent call last)" in (result.stderr or "")
 
 
+def route_is_closed(route_file: Path) -> bool:
+    """True when this exact route already carries its closure sidecar.
+
+    `capability-route.py close` writes `<route>.outcome.json` beside the record
+    (`capability-route.py::outcome_path`). The record itself is immutable and
+    says nothing about closure, so a session that kept its bind marker went on
+    writing under a route whose outcome was already sealed (defect J,
+    rt-a2d042ad). The sidecar is the only closure truth; read it from the same
+    place the writer puts it.
+    """
+    sidecar = route_file.with_name(route_file.stem + ".outcome.json")
+    try:
+        return sidecar.is_file() and not sidecar.is_symlink()
+    except OSError:
+        return False
+
+
 def verify_route(
     route_file: Path,
     expected_root: Path,
@@ -413,6 +430,7 @@ def verify_route(
     expected_route_id: str | None = None,
     expected_node: str | None = None,
     accepted_capabilities: set[str] | None = None,
+    allow_closed: bool = False,
 ) -> dict[str, Any]:
     if route_file.is_symlink():
         raise RouteError("route-file-unsafe")
@@ -468,6 +486,8 @@ def verify_route(
         expected_root, str(route.get("source_commit") or ""), head
     ):
         raise RouteError("route-source-commit-stale")
+    if not allow_closed and route_is_closed(route_file):
+        raise RouteError("route-closed")
     if expected_route_id and route.get("route_id") != expected_route_id:
         raise RouteError("route-id-mismatch")
     if expected_node:
@@ -629,6 +649,10 @@ def worker_route(
         return None
     if not route_file or not route_id:
         raise RouteError("worker-route-binding-incomplete")
+    # A registered worker's route lifetime is owned by the dispatch contract, which
+    # closes the route only after the worker's own node is terminal. Applying the
+    # main-session closure rule here would refuse a worker mid-stage on a route a
+    # racing owner closed, so `route-closed` stays a main-session rule (defect J).
     return verify_route(
         Path(route_file),
         root,
@@ -636,6 +660,7 @@ def worker_route(
         expected_route_id=route_id,
         expected_node=route_node or None,
         accepted_capabilities=accepted_capabilities,
+        allow_closed=True,
     )
 
 
@@ -1211,6 +1236,11 @@ def check_action(
 
 def deny_json(reason: str) -> None:
     recovery = ""
+    if reason == "route-closed":
+        recovery = (
+            " 이 세션의 bind marker가 가리키는 route는 이미 close(outcome 기록)됐습니다. "
+            "새 작업은 capability-route.py compile로 새 route를 열고 다시 bind하세요."
+        )
     if reason.startswith("recall-opportunity"):
         recovery = (
             " 현재 turn의 memory candidate probe가 없거나 오래됐습니다. "
