@@ -1949,7 +1949,7 @@ class TestContinuation(unittest.TestCase):
    # A FIFO is never read (it would block forever). With a real file beside it
    # the tree is a deliverable, and the pipe is refused as a member.
    fifo_dir=root/"fifo"; fifo_dir.mkdir(); os.mkfifo(fifo_dir/"pipe")
-   with self.assertRaisesRegex(ValueError,"evidence-empty-directory"):
+   with self.assertRaisesRegex(ValueError,"evidence-no-regular-file"):
     R.evidence_digest(fifo_dir)
    (fifo_dir/"REPORT.md").write_text("body\n",encoding="utf-8")
    with self.assertRaisesRegex(ValueError,"evidence-member-not-regular"):

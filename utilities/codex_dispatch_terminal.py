@@ -411,9 +411,13 @@ def directory_artifact_reason(artifact_path: Path, root: Path | None = None) -> 
     one readable regular file somewhere in the tree.
 
     `root` is optional: the inspector has an artifact root to contain members
-    against, the digest does not. The size and entry limits apply either way, so
-    a deliverable can never pass classification and then be refused at
-    completion for being too large.
+    against, the digest does not. Everything except containment therefore holds
+    at both doors — size, entry count, emptiness and unreadable members all
+    refuse identically, so a deliverable cannot pass classification and then be
+    refused at completion. **Member containment is the one inspector-only rule**:
+    a marker written through `complete --evidence` can still attest a tree with a
+    member pointing outside the root. Nothing leaks (the digest records link
+    target text and never follows), but the two doors are not identical there.
     """
 
     # Access first: an unreadable directory yields nothing from `rglob` (it
@@ -450,11 +454,19 @@ def directory_artifact_reason(artifact_path: Path, root: Path | None = None) -> 
             has_file = True
     except OSError:
         return "artifact-unreadable"
+    # ANY unreadable member, not just "no readable file at all": the digest
+    # cannot hash what it cannot read, so a tree that classifies valid here and
+    # then refuses at completion would be the disagreement this shared rule
+    # exists to remove.
+    if unreadable_member:
+        return "artifact-unreadable-member"
     if has_file:
         return ""
-    # "the one file here cannot be read" is a different operator action from
-    # "there is nothing here", one level down from the same distinction above.
-    return "artifact-unreadable-member" if unreadable_member else "artifact-empty-directory"
+    if entries:
+        # Not empty — it holds only links, directories or non-regular members,
+        # none of which the digest can attest as content.
+        return "artifact-no-regular-file"
+    return "artifact-empty-directory"
 
 
 def _encode_path(path: Path) -> str:

@@ -364,13 +364,14 @@ class CodexDispatchTerminalTest(unittest.TestCase):
         )
         self.assertEqual(result["state"], "invalid")
         self.assertEqual(result["reason"], "artifact-empty-directory")
-        # A directory holding only empty subdirectories is the same case.
+        # A directory holding only subdirectories is not empty, but it holds no
+        # content the digest can attest, so it gets its own reason.
         (empty / "nested" / "deeper").mkdir(parents=True)
         self.assertEqual(
             self.inspect(
                 self.write_log(verdict="PASS", blocker="none", artifact=empty, sandbox=False)
             )["reason"],
-            "artifact-empty-directory",
+            "artifact-no-regular-file",
         )
         # One readable regular file anywhere in the tree is enough.
         (empty / "nested" / "REPORT.md").write_text("body\n", encoding="utf-8")
@@ -380,6 +381,26 @@ class CodexDispatchTerminalTest(unittest.TestCase):
             )["artifact_state"],
             "readable",
         )
+
+    def test_one_unreadable_member_refuses_at_classification_not_at_completion(self):
+        # Review round 3 (a): returning valid as soon as ONE readable file exists
+        # let a bucket classify valid and then raise `evidence-member-unreadable`
+        # at completion — the disagreement this shared rule exists to remove.
+        bucket = self.root / "documents" / "partly_unreadable"
+        bucket.mkdir(parents=True)
+        (bucket / "REPORT.md").write_text("body\n", encoding="utf-8")
+        blocked = bucket / "locked.md"
+        blocked.write_text("secret\n", encoding="utf-8")
+        os.chmod(blocked, 0o000)
+        try:
+            if os.access(blocked, os.R_OK):
+                self.skipTest("cannot drop file access as this user")
+            result = self.inspect(
+                self.write_log(verdict="PASS", blocker="none", artifact=bucket, sandbox=False)
+            )
+            self.assertEqual(result["reason"], "artifact-unreadable-member")
+        finally:
+            os.chmod(blocked, 0o600)
 
     def test_a_directory_member_may_not_escape_the_artifact_root(self):
         # The completion marker attests this tree; a consumer that later copies or
