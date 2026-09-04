@@ -100,5 +100,45 @@ class TierBUndecidableTest(unittest.TestCase):
         self.assertTrue(result["undecidable"])
 
 
+class LineContinuationTest(unittest.TestCase):
+    """A `\\`+newline is whitespace to the shell; posix shlex leaves the newline
+    glued to the next token, so the head reads as "\\ncp" / "\\npython3" and the
+    whole segment used to be dropped -- no Tier A block, no Tier B record. Found
+    on a real write: cairn 2026-09-03, a `cp` into a cutover-denied spec path was
+    neither blocked nor observed."""
+
+    def test_continued_tier_a_verb_is_still_seen(self):
+        cmd = 'mkdir -p "$D"; \\\n' + "cp /a/prd.md /root/spec/prd.md"
+        result = t.parse(cmd, Path("/tmp"))
+        self.assertIn("/root/spec/prd.md", result["decidable"])
+
+    def test_continued_redirect_is_still_seen(self):
+        cmd = "echo hi; \\\n" + "echo x > /root/spec/prd.md"
+        self.assertIn("/root/spec/prd.md", t.parse(cmd, Path("/tmp"))["decidable"])
+
+    def test_continued_interpreter_is_still_observed(self):
+        cmd = "AH=/x; \\\n" + "export FOO=1 \\\n" + "  BAR=2; \\\n" + "python3 /y/z.py run"
+        result = t.parse(cmd, Path("/tmp"))
+        self.assertTrue(result["undecidable"])
+        self.assertEqual(
+            [row["reason"] for row in result["undecidable"]],
+            ["interpreter-mediated-write"],
+        )
+
+    def test_continuation_does_not_merge_or_invent_segments(self):
+        import importlib.util
+
+        spec = importlib.util.spec_from_file_location(
+            "mrg_probe", Path(__file__).resolve().parent / "material-route-guard.py"
+        )
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        cmd = "AH=/x; \\\n" + "export FOO=1 \\\n" + "  BAR=2; \\\n" + "python3 /y/z.py run"
+        self.assertEqual(
+            list(module._shell_segments(cmd)),
+            [["AH=/x"], ["export", "FOO=1", "BAR=2"], ["python3", "/y/z.py", "run"]],
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

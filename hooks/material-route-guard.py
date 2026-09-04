@@ -792,6 +792,15 @@ def _shell_segments(command: str) -> Iterable[list[str]]:
         tokens = list(lexer)
     except ValueError:
         return []
+    # A shell line continuation (`\` + newline) is whitespace to the shell, but
+    # posix shlex consumes only the backslash and leaves the newline glued to the
+    # next token: `python3` arrives as "\npython3", `cp` as "\ncp". Every consumer
+    # then matches the head against no known verb and drops the whole segment --
+    # silently, for Tier A writes as well as interpreters. That is how a real
+    # `cp` into a cutover-denied artifact path went unblocked AND unrecorded
+    # (cairn 2026-09-03 12:14:57 / 12:18:54). Strip it here so both this guard
+    # and hooks/artifact_write_targets.py see the command the shell ran.
+    tokens = [stripped for stripped in (token.strip("\r\n") for token in tokens) if stripped]
     segments: list[list[str]] = []
     current: list[str] = []
     for token in tokens:
