@@ -336,6 +336,7 @@ class LinkedReleaseBundleTest(unittest.TestCase):
             again, _ = self._build(release, root / "codex-home")
             self.assertEqual(bundle_source, again)
             elsewhere = self._release(root, "v8.8.8")
+            # destructive-ok: reason=repoint the bundle link so the repair path has something stale to fix; boundary=the one symlink this test just created under its own temporary codex home
             bundle_source.unlink()
             os.symlink(elsewhere, bundle_source, target_is_directory=True)
             repaired, _ = self._build(release, root / "codex-home")
@@ -348,6 +349,7 @@ class LinkedReleaseBundleTest(unittest.TestCase):
             release = self._release(root)
             bundle_source, _ = self._build(release, root / "codex-home")
             bundles = bundle_source.parent.parent
+            # destructive-ok: reason=prove the linked release survives losing its bundle store; boundary=the bundle root inside this test's own temporary directory
             shutil.rmtree(bundles)
             self.assertFalse(bundles.exists())
             self.assertTrue(release.is_dir())
@@ -400,6 +402,7 @@ class LinkedReleaseBundleTest(unittest.TestCase):
             self.assertEqual(activation._bundle_checksum(bundle_source), checksum)
             # Repointing the link is exactly what "stale" must mean here.
             elsewhere = self._release(root, "v7.7.7")
+            # destructive-ok: reason=repoint the bundle link to make the checksum stale; boundary=the one symlink this test just created under its own temporary codex home
             bundle_source.unlink()
             os.symlink(elsewhere, bundle_source, target_is_directory=True)
             self.assertIsNone(activation._bundle_checksum(bundle_source))
