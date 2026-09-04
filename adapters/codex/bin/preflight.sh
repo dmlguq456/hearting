@@ -374,16 +374,18 @@ case "$cmd" in
     # (round_1-corrected plan.md Step 1.4). Only appended when set — the gate
     # itself falls through to the marker when no route is resolved.
     set -- ; [ -n "${AGENT_ROUTE_FILE:-}" ] && set -- --route "$AGENT_ROUTE_FILE"
-    # W7D: the artifact write cutover moved cycle output to
-    # campaigns/<c>/cycles/<c>/artifacts/<bucket>/ and the shared spec reference to
-    # shared/spec/<ref>/revisions/<rev>/, so the same gate must fire there; the
-    # legacy top-level buckets stay matched as a read-only fallback. Blueprint
+    # W7I: readable cycle output lives at campaigns/<campaign-locator>/
+    # <cycle-locator>/artifacts/<bucket>/; the W7C ID/cycles form remains a
+    # read-compatible fallback. The same gate must fire for both and for shared
+    # spec references. Legacy top-level buckets stay matched read-only. Blueprint
     # matching moved to a basename case so every layout gates the same seven files.
     case "$file" in
       */.agent_reports/plans/*|*/.claude_reports/plans/*|\
+      */campaigns/*/*/artifacts/plans/*|\
       */campaigns/*/cycles/*/artifacts/plans/*)
         "$ROOT/hooks/spec-skill-gate.sh" --skill autopilot-code --cwd "$(dirname "$file")" --session "$sid" "$@" ;;
       */.agent_reports/spec/*|*/.claude_reports/spec/*|\
+      */campaigns/*/*/artifacts/spec/*|\
       */campaigns/*/cycles/*/artifacts/spec/*|\
       */shared/spec/*/revisions/*)
         # Authored blueprints only. `_internal/**` holds harness-written snapshots

@@ -694,7 +694,8 @@ def capability_artifact_caps(path: Path) -> set[str] | None:
 def artifact_bucket_caps(rel_parts: tuple[str, ...]) -> set[str] | None:
     """Map artifact-root-relative parts onto the owning capability set.
 
-    Legacy `<bucket>/...`, W7C cycle `campaigns/<camp>/cycles/<cyc>/artifacts/
+    Legacy `<bucket>/...`, current `campaigns/<campaign-locator>/<cycle-locator>/
+    artifacts/<bucket>/...`, historical `campaigns/<camp>/cycles/<cyc>/artifacts/
     <bucket>/...`, and `shared/<kind>/...` all resolve through one table.
     """
 
@@ -704,6 +705,8 @@ def artifact_bucket_caps(rel_parts: tuple[str, ...]) -> set[str] | None:
     if top == "campaigns":
         if len(rel_parts) >= 7 and rel_parts[2] == "cycles" and rel_parts[4] == "artifacts":
             return CAPABILITY_ARTIFACT_CAPS.get(rel_parts[5])
+        if len(rel_parts) >= 6 and rel_parts[3] == "artifacts":
+            return CAPABILITY_ARTIFACT_CAPS.get(rel_parts[4])
         return None
     if top == "shared":
         if len(rel_parts) >= 3:

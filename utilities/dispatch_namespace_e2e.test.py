@@ -533,6 +533,7 @@ class NamespaceE2E(unittest.TestCase):
                     "compile",
                     "--capability", "autopilot-code",
                     "--capability-mode", "dev",
+                    "--slug", "dispatch-namespace-fixture",
                     "--intensity", "standard",
                     "--cwd", str(repo),
                     "--artifact-root", str(artifact_root),

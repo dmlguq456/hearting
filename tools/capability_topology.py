@@ -1297,8 +1297,11 @@ def _validate_producer_lifecycle(registry):
     if table.get("legacy_top_level_writes") != {"inactive": "allowed-compat-window", "active": "denied"}:
         raise TopologyError("producer_lifecycle.legacy_top_level_writes policy mismatch")
     buckets = registry.get("artifact_buckets", {})
-    if buckets.get("campaign-cycle") != "campaigns/<campaign>/cycles/<cycle>/artifacts":
+    campaign_cycle = "campaigns/<campaign-locator>/<cycle-locator>/artifacts"
+    if buckets.get("campaign-cycle") != campaign_cycle:
         raise TopologyError("artifact_buckets.campaign-cycle must declare the W7C cycle output layout")
+    if table.get("cycle_layout") != f"{campaign_cycle}/<bucket>/...":
+        raise TopologyError("producer_lifecycle.cycle_layout must match artifact_buckets.campaign-cycle")
     if buckets.get("shared-revision") != "shared/<kind>/<reference>/revisions/<revision>":
         raise TopologyError("artifact_buckets.shared-revision must declare the immutable shared layout")
 

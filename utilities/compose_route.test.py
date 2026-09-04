@@ -57,7 +57,8 @@ class TestComposeRoute(unittest.TestCase):
         return C.unit_io_gate_index(C._load_topology().load_registry())
 
     def _run(self, units, *, tracking="tracked", spec_read="canonical-sha",
-             workflow_mode="tracked", output=None, capability_mode="code", artifact_root=None):
+             workflow_mode="tracked", output=None, capability_mode="code", artifact_root=None,
+             slug="Compose Route"):
         """Invoke the compose-route.py CLI as a real caller would."""
         with tempfile.TemporaryDirectory() as tmp:
             evidence_path = Path(tmp) / "evidence.json"
@@ -77,6 +78,8 @@ class TestComposeRoute(unittest.TestCase):
                 "--dispatch-evidence", str(evidence_path),
                 "--cycle-anchor", "analysis_project", "--review-anchor", "reviews",
             ]
+            if slug is not None:
+                command += ["--slug", slug]
             if output is not None:
                 command += ["--output", output]
             result = subprocess.run(command, text=True, capture_output=True, check=False)
@@ -127,12 +130,19 @@ class TestComposeRoute(unittest.TestCase):
             self.assertIs(route["composed"], True)
             self.assertEqual(route["effective_intensity"], "standard")
             self.assertEqual(route["capability"], "analyze-project")
+            self.assertEqual(route["slug"], "compose-route")
+            self.assertFalse(route["slug_truncated"])
             self.assertFalse(route["spec_touch"])
             self.assertEqual([n["id"] for n in route["nodes"]], ["survey", "claim"])
             # the sealed file is byte-identical to stdout and passes verify.
             output = Path(out_dir) / ".runtime" / "routes" / f"{route['route_id']}.json"
             self.assertEqual(json.loads(output.read_text()), route)
             R.verify_route(route, ROOT)
+
+    def test_cli_requires_slug(self):
+        result = self._run(UNITS, slug=None)
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn("--slug", result.stderr)
 
     def test_live_probe_refuses_a_path_other_than_final_route_cwd(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -271,6 +281,7 @@ class TestComposeRoute(unittest.TestCase):
             command = [
                 sys.executable, str(COMPOSE),
                 "--capability", "analyze-project", "--capability-mode", "code",
+                "--slug", "Compose Route",
                 "--units-json", json.dumps(units),
                 "--cwd", str(ROOT), "--artifact-root", artifact_root,
                 "--tracking", "tracked", "--spec-read", "canonical-sha",

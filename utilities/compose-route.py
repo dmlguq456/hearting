@@ -392,6 +392,7 @@ def run_compile(args, recipe, evidence) -> str:
             sys.executable, str(COMPILE), "compile",
             "--capability", args.capability,
             "--capability-mode", args.capability_mode,
+            "--slug", args.slug,
             "--intensity", args.intensity,
             "--cwd", args.cwd,
             "--artifact-root", args.artifact_root,
@@ -432,6 +433,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--capability", required=True)
     parser.add_argument("--capability-mode", required=True)
+    parser.add_argument("--slug", required=True)
     parser.add_argument("--units", help="JSON file: a list of node specs (or {\"units\": [...]})")
     parser.add_argument("--units-json", help="inline JSON node-spec list (alternative to --units)")
     parser.add_argument("--cwd", required=True)

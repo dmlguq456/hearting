@@ -4138,7 +4138,7 @@
     "designs": "designs/<cycle>",
     "spec-component": "spec/<component>",
     "user_profile": "user_profile",
-    "campaign-cycle": "campaigns/<campaign>/cycles/<cycle>/artifacts",
+    "campaign-cycle": "campaigns/<campaign-locator>/<cycle-locator>/artifacts",
     "shared-revision": "shared/<kind>/<reference>/revisions/<revision>"
   },
   "producer_lifecycle": {
@@ -4148,7 +4148,7 @@
       "inactive",
       "active"
     ],
-    "cycle_layout": "campaigns/<campaign>/cycles/<cycle>/artifacts/<bucket>/...",
+    "cycle_layout": "campaigns/<campaign-locator>/<cycle-locator>/artifacts/<bucket>/...",
     "shared_layout": "shared/<kind>/<reference>/revisions/<revision>/...",
     "shared_kinds": {
       "spec": "canonical",

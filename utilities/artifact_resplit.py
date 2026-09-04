@@ -1760,6 +1760,7 @@ def _write_run_dir_route_log(run_dir: Path, derived: Dict[str, Any]) -> Path:
 
 
 def _per_cycle_route(root: Path, route: Dict[str, Any], cycle_key: str, capability: str,
+                     slug: str,
                      run_dir: Path, ledger: Optional[Dict[str, Dict[str, Any]]] = None,
                      ) -> Tuple[Dict[str, Any], Path, bool]:
     """D-77-b per-cycle route identity: an opaque id, admitted to the canonical ledger.
@@ -1787,10 +1788,10 @@ def _per_cycle_route(root: Path, route: Dict[str, Any], cycle_key: str, capabili
     if existing is not None:
         _write_run_dir_route_log(run_dir, existing)
         return existing, P.artifact_lifecycle.canonical_route_path(root, existing["route_id"]), False
-    digest = hashlib.sha256(os.urandom(32)).hexdigest()
+    nonce = hashlib.sha256(os.urandom(32)).hexdigest()
     derived = dict(route)
-    derived["route_id"] = "rt-" + digest[:16]
-    derived["route_hash"] = "sha256:" + digest
+    derived.pop("route_id", None)
+    derived.pop("route_hash", None)
     derived["capability"] = capability
     derived["effective_intensity"] = RESPLIT_CYCLE_INTENSITY
     derived["requested_intensity"] = RESPLIT_CYCLE_INTENSITY
@@ -1803,6 +1804,16 @@ def _per_cycle_route(root: Path, route: Dict[str, Any], cycle_key: str, capabili
     derived["max_dispatch_depth"] = 0
     derived["execution_topology"] = "inline"
     derived["resplit_cycle_key"] = cycle_key
+    # Keep route identity opaque without confusing entropy with an integrity
+    # digest.  The nonce is part of the sealed payload; the route hash is then
+    # computed over the complete derived route like every compiler-issued route.
+    derived["resplit_route_nonce"] = "sha256:" + nonce
+    derived["slug"], derived["slug_truncated"] = P.artifact_locator.slugify(slug, fallback="unnamed")
+    derived["route_hash"] = P.route_identity.route_hash(derived)
+    # D-77-b deliberately differs from compiler routes: route_hash protects
+    # the whole record, while route_id is derived only from fresh entropy so
+    # path-bearing resplit_cycle_key can never seed stable identity.
+    derived["route_id"] = "rt-" + nonce[:16]
     binding = P.artifact_lifecycle.admit_runtime_route(root, derived)
     ledger[cycle_key] = derived
     _write_run_dir_route_log(run_dir, derived)
@@ -1868,11 +1879,12 @@ def _r2_prepare(root: Path, campaign_plan: List[Dict[str, Any]], alloc, lump_cyc
     created_routes: List[Dict[str, str]] = []
     ledger = ledger_resplit_routes(root)
     cycles_out: List[Dict[str, Any]] = []
+    reserved_cycle_locators: Dict[str, set] = {}
     for camp in campaign_plan:
         existing = _find_campaign_by_key_local(root, camp["key"])
         if existing is not None:
             campaign_id = existing["campaign_id"]
-            path = P.campaign_dir(root, campaign_id) / "campaign.json"
+            path = P.campaign_dir(root, campaign_id, existing) / "campaign.json"
             original = path.read_bytes()
             campaign_pre.append({"path": os.path.relpath(path, root), "created_by_this_run": False,
                                  "bytes_b64": _b64(original), "sha256": "sha256:" + hashlib.sha256(original).hexdigest(),
@@ -1880,11 +1892,31 @@ def _r2_prepare(root: Path, campaign_plan: List[Dict[str, Any]], alloc, lump_cyc
             camp["campaign_created"] = False
         else:
             campaign_id = alloc.allocate("campaign")
-            path = P.campaign_dir(root, campaign_id) / "campaign.json"
+            created_on = C._now()
+            campaign_slug, campaign_slug_truncated = P.artifact_locator.slugify(
+                camp["slug"], fallback="unnamed")
+            campaign_locator, campaign_suffix = P.artifact_locator.allocate_locator(
+                root / "campaigns", created_on, campaign_slug)
+            record = {
+                "schema_version": 1, "contract": P.CONTRACT, "campaign_id": campaign_id,
+                "key": camp["key"], "slug": campaign_slug, "title": camp["title"],
+                "slug_source": "resplit-proposal", "slug_truncated": campaign_slug_truncated,
+                "locator": campaign_locator, "locator_suffix": campaign_suffix,
+                "goal": camp["goal"],
+                "completion_criterion": {"statement": "every cycle sealed with a manifest"},
+                "state": "active", "created_on": created_on, "cycles": [],
+            }
+            if camp["slug"] == UNASSIGNED_SLUG:
+                record["degraded"] = True
+            if camp["related"]:
+                record["related"] = camp["related"]
+            path = root / "campaigns" / campaign_locator / "campaign.json"
             campaign_pre.append({"path": os.path.relpath(path, root), "created_by_this_run": True,
                                  "bytes_b64": None, "sha256": None, "cycles_added": []})
             camp["campaign_created"] = True
+            P._write_campaign(root, record, exclusive=True)
         camp["campaign_id"] = campaign_id
+        camp["campaign_path"] = str(path.parent)
     for camp in campaign_plan:
         for unit in camp["cycle_units"]:
             existing_cycle = _find_cycle_by_key(root, unit["cycle_key"])
@@ -1901,12 +1933,39 @@ def _r2_prepare(root: Path, campaign_plan: List[Dict[str, Any]], alloc, lump_cyc
                 cycle_pre.append({"path": os.path.relpath(cpath, root), "created_by_this_run": True,
                                   "bytes_b64": None, "sha256": None})
                 created = True
-            cdir = P.cycle_dir(root, camp["campaign_id"], cycle_id)
+            cycle_slug, cycle_slug_truncated = P.artifact_locator.slugify(
+                unit["title"], fallback=camp["slug"])
+            if created:
+                parent = Path(camp["campaign_path"])
+                reserved = reserved_cycle_locators.setdefault(camp["campaign_id"], set())
+                base = P.artifact_locator.locator_base(unit["started_on"], cycle_slug)
+                ordinal = 1
+                cycle_locator, cycle_suffix = base, ""
+                while True:
+                    try:
+                        (parent / cycle_locator).lstat()
+                        occupied = True
+                    except FileNotFoundError:
+                        occupied = False
+                    if not occupied and cycle_locator not in reserved:
+                        break
+                    ordinal += 1
+                    cycle_suffix = f"-{ordinal}"
+                    cycle_locator = base + cycle_suffix
+                reserved.add(cycle_locator)
+                cdir = parent / cycle_locator
+            else:
+                existing_record = P.read_cycle_record(root, cycle_id)
+                cdir = P.cycle_dir(root, camp["campaign_id"], cycle_id, existing_record)
+                cycle_locator = (existing_record or {}).get("locator", cdir.name)
+                cycle_suffix = (existing_record or {}).get("locator_suffix", "")
             cycles_out.append({
                 "cycle_key": unit["cycle_key"], "cycle_id": cycle_id, "campaign_id": camp["campaign_id"],
                 "cycle_dir": str(cdir), "created": created, "bucket": unit["bucket"],
                 "depth1_name": unit["depth1_name"], "started_on": unit["started_on"],
                 "started_on_source": unit.get("started_on_source"), "title": unit["title"],
+                "slug": cycle_slug, "slug_truncated": cycle_slug_truncated,
+                "locator": cycle_locator, "locator_suffix": cycle_suffix,
                 "capability": BUCKET_CAPABILITY[unit["bucket"]],
                 "files": unit["files"],
                 "loose_files": list(loose_by_cycle_key.get(unit["cycle_key"], [])),
@@ -1914,18 +1973,6 @@ def _r2_prepare(root: Path, campaign_plan: List[Dict[str, Any]], alloc, lump_cyc
             if created:
                 created_cycle_dirs.append(os.path.relpath(cdir, root))
     for camp in campaign_plan:
-        if camp["campaign_created"]:
-            record = {
-                "schema_version": 1, "contract": P.CONTRACT, "campaign_id": camp["campaign_id"],
-                "key": camp["key"], "title": camp["title"], "goal": camp["goal"],
-                "completion_criterion": {"statement": "every cycle sealed with a manifest"},
-                "state": "active", "created_on": C._now(), "cycles": [],
-            }
-            if camp["slug"] == UNASSIGNED_SLUG:
-                record["degraded"] = True
-            if camp["related"]:
-                record["related"] = camp["related"]
-            P._write_campaign(root, record, exclusive=True)
         camp_record = P.read_campaign(root, camp["campaign_id"])
         camp_cycles = list(camp_record.get("cycles", []))
         added = []
@@ -1938,7 +1985,7 @@ def _r2_prepare(root: Path, campaign_plan: List[Dict[str, Any]], alloc, lump_cyc
             created_dirs.append(os.path.relpath(cdir / "artifacts", root))
             capability = cyc["capability"]
             cyc_route, cyc_route_file, route_created = _per_cycle_route(
-                root, route, cyc["cycle_key"], capability, run_dir, ledger)
+                root, route, cyc["cycle_key"], capability, cyc["slug"], run_dir, ledger)
             if route_created:
                 created_routes.append({
                     "route_id": cyc_route["route_id"],
@@ -1956,7 +2003,10 @@ def _r2_prepare(root: Path, campaign_plan: List[Dict[str, Any]], alloc, lump_cyc
                 "route_file": str(cyc_route_file.resolve()), "node_id": None, "state": "open",
                 # D-79: the work's own date, not the resplit's wall clock.
                 "started_on": cyc["started_on"], "sealed_on": None, "manifest_digest": None,
-                "title": cyc["title"], "cycle_key": cyc["cycle_key"], "derived_from_cycle_id": lump_cycle_id,
+                "slug": cyc["slug"], "title": cyc["title"],
+                "slug_source": "resplit-cycle-title", "slug_truncated": cyc["slug_truncated"],
+                "locator": cyc["locator"], "locator_suffix": cyc["locator_suffix"],
+                "cycle_key": cyc["cycle_key"], "derived_from_cycle_id": lump_cycle_id,
                 "started_on_source": cyc.get("started_on_source"),
                 "resplit_run_at": C._now(),
             }
@@ -1967,9 +2017,14 @@ def _r2_prepare(root: Path, campaign_plan: List[Dict[str, Any]], alloc, lump_cyc
             camp_record = dict(camp_record)
             camp_record["cycles"] = camp_cycles
             P._write_campaign(root, camp_record, exclusive=False)
+            for cyc in cycles_out:
+                if cyc["campaign_id"] == camp["campaign_id"] and cyc["cycle_id"] in added:
+                    P._write_cycle_binding(
+                        Path(cyc["cycle_dir"]), camp["campaign_id"], cyc["cycle_id"])
         for entry in campaign_pre:
-            if entry["path"] == os.path.relpath(P.campaign_dir(root, camp["campaign_id"]) / "campaign.json", root):
+            if entry["path"] == os.path.relpath(Path(camp["campaign_path"]) / "campaign.json", root):
                 entry["cycles_added"] = added
+    P.artifact_locator.rebuild_indexes(root)
     pre_image = {
         "schema_version": 1, "campaign_records": campaign_pre, "cycle_records": cycle_pre,
         "created_cycle_dirs": created_cycle_dirs, "created_dirs": created_dirs,
@@ -2036,7 +2091,11 @@ def _r2_rollback(root: Path, journal: Dict[str, Any], run_dir: Path) -> None:
             data = base64.b64decode(entry["bytes_b64"])
             P._write_atomic(path, data)
     for rel in sorted(pre_image.get("created_cycle_dirs", []), key=lambda p: -p.count("/")):
-        _prune_empty_tree(root / rel)
+        cycle_path = root / rel
+        marker = cycle_path / P.artifact_locator.CYCLE_BINDING
+        if marker.is_file() and not marker.is_symlink():
+            marker.unlink()
+        _prune_empty_tree(cycle_path)
     for rel in sorted(pre_image.get("created_dirs", []), key=lambda p: -p.count("/")):
         path = root / rel
         if path.is_dir():
@@ -2153,20 +2212,25 @@ def _r2(root: Path, *, lump_cycle_id: str, route_file: Optional[Path] = None, dr
             journal = None  # PRD 2959-2964: a re-run after rollback restarts from `prepared`
         resumed = journal is not None
         if journal is None:
-            campaign_plan = _campaign_plan_from_verdict(verdict, root_slug)
-            loose_by_cycle_key, loose_deferred = loose_plan(verdict, loose_inventory)
-            pre_image, cycles, deferred_campaigns = _r2_prepare(
-                root, campaign_plan, alloc, lump_cycle_id, route, route_file, run_dir,
-                loose_by_cycle_key=loose_by_cycle_key)
-            journal = {
-                "schema_version": 1, "kind": "w7g-resplit-journal", "gate": "r2", "plan_sha256": plan_sha256,
-                "lump_cycle_id": lump_cycle_id, "run_dir": str(run_dir), "phase": "prepared",
-                "started_at": C._now(), "pre_image": pre_image, "cycles": cycles,
-                "created_dirs": pre_image["created_dirs"], "created_cycle_dirs": pre_image["created_cycle_dirs"],
-                "route_id": route["route_id"],
-                "loose_deferred": loose_deferred, "deferred_campaigns": deferred_campaigns,
-            }
-            P._write_atomic(journal_path, P._json_bytes(journal))
+            admission_lock_fd = P.artifact_admission._acquire_lock(
+                root, P.artifact_admission.LOCK_TIMEOUT_DEFAULT)
+            try:
+                campaign_plan = _campaign_plan_from_verdict(verdict, root_slug)
+                loose_by_cycle_key, loose_deferred = loose_plan(verdict, loose_inventory)
+                pre_image, cycles, deferred_campaigns = _r2_prepare(
+                    root, campaign_plan, alloc, lump_cycle_id, route, route_file, run_dir,
+                    loose_by_cycle_key=loose_by_cycle_key)
+                journal = {
+                    "schema_version": 1, "kind": "w7g-resplit-journal", "gate": "r2", "plan_sha256": plan_sha256,
+                    "lump_cycle_id": lump_cycle_id, "run_dir": str(run_dir), "phase": "prepared",
+                    "started_at": C._now(), "pre_image": pre_image, "cycles": cycles,
+                    "created_dirs": pre_image["created_dirs"], "created_cycle_dirs": pre_image["created_cycle_dirs"],
+                    "route_id": route["route_id"],
+                    "loose_deferred": loose_deferred, "deferred_campaigns": deferred_campaigns,
+                }
+                P._write_atomic(journal_path, P._json_bytes(journal))
+            finally:
+                P.artifact_admission._release_lock(root, admission_lock_fd)
         if crash_after_phase == "prepared":
             raise ResplitError("crash-fixture", "prepared")
         cycles = journal["cycles"]

@@ -152,6 +152,9 @@ def build_isolated_env(tmpdir: Path) -> dict[str, str]:
     env["XDG_DATA_HOME"] = str(xdg_data)
     env["XDG_CACHE_HOME"] = str(xdg_cache)
     env["TMPDIR"] = str(runner_tmp)
+    # Admission contract suites otherwise prefer the repository's canonical
+    # artifact root. Full-suite verification must remain fixture-only.
+    env["ARTIFACT_ADMISSION_TEST_ROOT"] = str(tmpdir / "artifact-admission")
     # _EXPLICIT_UNSET_KEYS are simply omitted from `env` (env -i semantics: a
     # subprocess launched with this dict as its full environment never sees
     # them, regardless of what the caller's ambient shell has set).

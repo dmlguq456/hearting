@@ -22,9 +22,18 @@ RREV_NEW = "rrev_" + "e" * 32
 
 
 def build(root: Path) -> None:
-    cyc = root / "campaigns" / CAMP / "cycles" / CYC / "artifacts"
+    campaign = root / "campaigns" / CAMP
+    campaign.mkdir(parents=True)
+    (campaign / "campaign.json").write_text(json.dumps({
+        "campaign_id": CAMP, "title": "legacy fixture", "cycles": [CYC],
+    }), encoding="utf-8")
+    cycle = campaign / "cycles" / CYC
+    cyc = cycle / "artifacts"
     (cyc / "plans" / "2026-08-26_cycle-plan").mkdir(parents=True)
     (cyc / "spec" / "component").mkdir(parents=True)
+    (cycle / "manifest.json").write_text(json.dumps({
+        "cycle": {"campaign_id": CAMP, "cycle_id": CYC},
+    }), encoding="utf-8")
     (root / "plans" / "2026-01-01_legacy-plan").mkdir(parents=True)
     (root / "plans" / ".hidden").mkdir()
     (root / "spec" / "component" / "_internal").mkdir(parents=True)  # retirement exclusion, no prd
@@ -57,6 +66,26 @@ class ReaderTests(unittest.TestCase):
         names = [p.name for p in reader.glob_bucket(self.root, "plans", "*plan")]
         self.assertEqual(names, ["2026-08-26_cycle-plan", "2026-01-01_legacy-plan"])
         self.assertEqual(reader.glob_bucket(self.root, "plans", ".hidden"), [])
+
+    def test_cycle_buckets_use_record_ids_across_readable_and_legacy_paths(self):
+        campaign_id = "camp_" + "2" * 32
+        cycle_id = "cyc_" + "3" * 32
+        campaign = self.root / "campaigns" / "2026-09-04_readable-campaign"
+        cycle = campaign / "renamed-sealed-cycle"
+        (cycle / "artifacts" / "plans" / "readable-plan").mkdir(parents=True)
+        (campaign / "campaign.json").write_text(json.dumps({
+            "campaign_id": campaign_id, "title": "Readable campaign", "cycles": [cycle_id],
+        }), encoding="utf-8")
+        (cycle / "manifest.json").write_text(json.dumps({
+            "cycle": {"campaign_id": campaign_id, "cycle_id": cycle_id},
+        }), encoding="utf-8")
+
+        rows = reader.cycle_bucket_dirs(self.root, "plans")
+        by_name = {path.parent.parent.name: meta for path, meta in rows}
+        self.assertEqual(by_name[CYC]["campaign_id"], CAMP)
+        self.assertEqual(by_name[CYC]["cycle_id"], CYC)
+        self.assertEqual(by_name["renamed-sealed-cycle"]["campaign_id"], campaign_id)
+        self.assertEqual(by_name["renamed-sealed-cycle"]["cycle_id"], cycle_id)
 
     def test_spec_dir_prefers_open_cycle_then_latest_shared(self):
         cycle_dir = self.root / "campaigns" / CAMP / "cycles" / CYC

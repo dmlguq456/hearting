@@ -285,11 +285,15 @@ def live_stage(jcwd, slug, fb):
     # worktree slug → plans/*_<slug>/ 산출물로 실제 파이프 단계 유도 (argv 라벨이 정적 → 실시간 반영). fb = argv 추정 단계.
     if not jcwd or not slug: return fb
     ar = ".agent_reports" if os.path.isdir(jcwd + "/.agent_reports") else ".claude_reports"
-    # W7D — cutover 후 cycle 산출물은 campaigns/*/cycles/*/artifacts/plans 에 있고
-    # 최상위 plans/ 는 읽기 전용 레거시 폴백(뒤에 붙임). 정본 리졸버는
+    # W7I — 새 cycle 산출물은 campaigns/*/*/artifacts/plans 에 있고 W7C의
+    # campaigns/*/cycles/*/artifacts/plans 도 읽기 호환한다. 최상위 plans/ 는
+    # 읽기 전용 레거시 폴백(뒤에 붙임). 정본 리졸버는
     # utilities/artifact_reader.py 지만 statusline 은 매 렌더 경로라 import 40ms 를
     # 피해 같은 레이아웃을 glob 로 미러링한다 (읽기만, 아티팩트 쓰기 없음).
-    bases = sorted(glob.glob(jcwd + "/" + ar + "/campaigns/*/cycles/*/artifacts/plans"))
+    bases = sorted(set(
+        glob.glob(jcwd + "/" + ar + "/campaigns/*/*/artifacts/plans") +
+        glob.glob(jcwd + "/" + ar + "/campaigns/*/cycles/*/artifacts/plans")
+    ))
     if os.path.isdir(jcwd + "/" + ar + "/plans"): bases.append(jcwd + "/" + ar + "/plans")
     def kids(b):
         try: return [b + "/" + d for d in os.listdir(b)]

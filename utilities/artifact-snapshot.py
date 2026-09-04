@@ -48,10 +48,13 @@ def target_parts(artifact_root: Path, target: Path) -> tuple[Path,Path]:
     except ValueError as exc:
         raise SnapshotError("target-outside-artifact-root") from exc
     parts=rel.parts
-    # W7C cycle layout: campaigns/<camp>/cycles/<cyc>/artifacts/<bucket>/<name>/...
+    # Current and historical cycle layouts both retain the bucket-relative
+    # ownership rules below.
     prefix=()
     if len(parts)>=5 and parts[0]=="campaigns" and parts[2]=="cycles" and parts[4]=="artifacts":
         prefix=parts[:5]; parts=parts[5:]
+    elif len(parts)>=4 and parts[0]=="campaigns" and parts[3]=="artifacts":
+        prefix=parts[:4]; parts=parts[4:]
     elif parts[:1]==("shared",):
         raise SnapshotError("target-shared-immutable")
     if len(parts)<3 or parts[0] not in OWNED_CONTAINERS:

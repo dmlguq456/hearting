@@ -336,8 +336,12 @@ class Bundle:
             if r["identity_class"] != "manifest":
                 continue
             parts = r["locator"].split("/")
-            # campaigns/<camp>/cycles/<cyc>/artifacts/<bucket>/<entry>/...
-            key = "/".join(parts[:7]) if len(parts) > 7 else "/".join(parts[:6])
+            if len(parts) >= 4 and parts[0] == "campaigns" and parts[3] == "artifacts":
+                # campaigns/<campaign-locator>/<cycle-locator>/artifacts/<bucket>/<entry>/...
+                key = "/".join(parts[:6]) if len(parts) > 6 else "/".join(parts[:5])
+            else:
+                # Historical campaigns/<camp>/cycles/<cyc>/artifacts/<bucket>/<entry>/...
+                key = "/".join(parts[:7]) if len(parts) > 7 else "/".join(parts[:6])
             groups[key].append(r)
         proposal = []
         for key, rows in sorted(groups.items()):
@@ -357,7 +361,8 @@ class Bundle:
                 "repository_id": self.identity.repository_id, "artifact_root_id": self.identity.artifact_root_id,
                 "cycles": list(self.manifests), "shared_references": sorted({(r["kind"], r["shared_reference_id"]) for r in self.shared}),
                 "facets": [{"capability": c, "bucket": b, "count": n} for (c, b), n in sorted(facets.items(), key=lambda x: (str(x[0][0]), str(x[0][1])))],
-                "locator_prefix_map": {"campaigns/<camp>/cycles/<cyc>/artifacts/<bucket>/": "cycle output",
+                "locator_prefix_map": {"campaigns/<campaign-locator>/<cycle-locator>/artifacts/<bucket>/": "cycle output",
+                                       "campaigns/<camp>/cycles/<cyc>/artifacts/<bucket>/": "legacy cycle output",
                                        "shared/<kind>/<ref>/revisions/<rrev>/": "shared reference revision"},
                 "note": "facets narrow candidates; they are never a match key"}
 

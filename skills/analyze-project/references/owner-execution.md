@@ -100,6 +100,7 @@ assembles nested-eligibility dispatch evidence, and delegates sealing to
 ```bash
 python3 "$AGENT_HOME/utilities/compose-route.py" \
   --capability analyze-project --capability-mode code \
+  --slug "$TASK_SLUG" \
   --units-json '[{"id":"survey","unit":"research/research-survey","write_scope":["analysis_project/code/**"],"gate":"research-retrieval"}]' \
   --cwd "$PWD" --artifact-root "$ARTIFACT_ROOT" \
   --tracking tracked --spec-read "$PRD_SHA" --drift-verdict within-spec \
