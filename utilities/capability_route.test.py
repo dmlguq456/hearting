@@ -1901,6 +1901,35 @@ class TestContinuation(unittest.TestCase):
     R._marker_identity_row(source,node,"frame",node.get("completion_gate"))["passed"]
    )
 
+ def test_an_empty_directory_cannot_complete_a_node(self):
+  # Review R2: the non-empty rule lived only on the inspector path, so the
+  # documented manual `capability-route.py complete --evidence` surface still
+  # completed a node on the cycle's pre-created, empty `artifacts/` directory and
+  # the terminal gate passed it. One rule, applied at every door.
+  with tempfile.TemporaryDirectory() as tmp:
+   artifact=Path(tmp)/"artifacts"
+   source=self._source(artifact)
+   node=next(row for row in source["nodes"] if row["id"]=="frame")
+   metadata={
+    "attempt_schema_version":2,"dispatch_depth":node["dispatch_depth"],
+    "transport":"headless","execution_surface":"registered-headless",
+    "registered_worker":"1","fallback_hop":"same-harness-headless",
+   }
+   empty=Path(tmp)/"evidence"/"artifacts"
+   empty.mkdir(parents=True)
+   with self.assertRaisesRegex(ValueError,"evidence-empty-directory"):
+    R.complete_node(source,node,"frame",empty,attempt_id="att-empty",
+                    explicit_attempt_metadata=metadata)
+   # no marker was written, so the gate cannot pass on it either
+   self.assertFalse((R.completion_dir(source["route_id"])/"frame.json").exists())
+   # the same directory completes once it actually holds output
+   (empty/"REPORT.md").write_text("body\n",encoding="utf-8")
+   R.complete_node(source,node,"frame",empty,attempt_id="att-empty",
+                   explicit_attempt_metadata=metadata)
+   self.assertTrue(
+    R._marker_identity_row(source,node,"frame",node.get("completion_gate"))["passed"]
+   )
+
  def test_evidence_digest_refuses_what_it_cannot_attest(self):
   # Review B2/S4: a missing path used to return the empty-directory constant, so
   # "deleted before the gate" and "empty at completion" verified as one artifact.
@@ -1911,12 +1940,18 @@ class TestContinuation(unittest.TestCase):
    with self.assertRaisesRegex(ValueError,"evidence-not-a-file-or-directory"):
     R.evidence_digest(root/"absent")
    empty=root/"empty"; empty.mkdir()
-   self.assertNotEqual(R.evidence_digest(empty),"")   # a digest, not an error
+   with self.assertRaisesRegex(ValueError,"evidence-empty-directory"):
+    R.evidence_digest(empty)
    link=root/"link.md"; (root/"real.md").write_text("x\n",encoding="utf-8")
    link.symlink_to(root/"real.md")
    with self.assertRaisesRegex(ValueError,"evidence-symlink-not-attestable"):
     R.evidence_digest(link)
+   # A FIFO is never read (it would block forever). With a real file beside it
+   # the tree is a deliverable, and the pipe is refused as a member.
    fifo_dir=root/"fifo"; fifo_dir.mkdir(); os.mkfifo(fifo_dir/"pipe")
+   with self.assertRaisesRegex(ValueError,"evidence-empty-directory"):
+    R.evidence_digest(fifo_dir)
+   (fifo_dir/"REPORT.md").write_text("body\n",encoding="utf-8")
    with self.assertRaisesRegex(ValueError,"evidence-member-not-regular"):
     R.evidence_digest(fifo_dir)
    odd=root/"odd"; odd.mkdir()

@@ -41,7 +41,11 @@ from dispatch_contract import (
 from stage_session_contract import load_manifest
 from dispatch_degradation import record_degradation  # noqa: E402
 from dispatch_completion_join import materialize_after_terminal_close  # noqa: E402
-from codex_dispatch_terminal import REVIEW_BLOCKING_NOTE, inspect_terminal_attempt  # noqa: E402
+from codex_dispatch_terminal import (  # noqa: E402
+    REVIEW_BLOCKING_NOTE,
+    directory_artifact_reason,
+    inspect_terminal_attempt,
+)
 from replica_batch_contract import verify_manifest as verify_batch_manifest  # noqa: E402
 ORDER = {"direct":0,"quick":1,"standard":2,"strong":3,"thorough":4,"adversarial":5}
 TRACKING = {"tracked", "untracked"}
@@ -2543,9 +2547,6 @@ def _completion_marker_replay(route, node, node_id, evidence, axes, directory):
         raise ValueError("canonical completion marker history conflict")
     return existing
 
-EVIDENCE_DIGEST_MAX_ENTRIES=20000
-EVIDENCE_DIGEST_MAX_BYTES=2*1024**3
-
 def evidence_digest(evidence):
     """One sha256 over an artifact that may be a file OR a directory of files.
 
@@ -2570,12 +2571,14 @@ def evidence_digest(evidence):
         return hashlib.sha256(path.read_bytes()).hexdigest()
     if not path.is_dir():
         raise ValueError(f"evidence-not-a-file-or-directory:{path}")
+    # The SAME rule the envelope inspector applies, imported rather than
+    # restated: an empty or oversized directory must be refused at every door,
+    # including the documented manual `complete --evidence` one.
+    refusal=directory_artifact_reason(path)
+    if refusal:
+        raise ValueError(f"evidence-{refusal.removeprefix('artifact-')}:{path}")
     digest=hashlib.sha256(b"artifact-directory-v1\0")
-    entries=0; total=0
     for child in sorted(path.rglob("*"), key=lambda item: item.relative_to(path).parts):
-        entries+=1
-        if entries>EVIDENCE_DIGEST_MAX_ENTRIES:
-            raise ValueError(f"evidence-directory-too-many-entries:{path}")
         # `os.fsencode` and not `.encode("utf-8")`: a filename is bytes, and a
         # non-UTF-8 name arrives surrogate-escaped and would raise on encode.
         relative=os.fsencode(child.relative_to(path))
@@ -2584,11 +2587,12 @@ def evidence_digest(evidence):
         elif child.is_dir():
             digest.update(b"D\0"+relative+b"\0")
         elif child.is_file():
-            total+=child.stat().st_size
-            if total>EVIDENCE_DIGEST_MAX_BYTES:
-                raise ValueError(f"evidence-directory-too-large:{path}")
             digest.update(b"F\0"+relative+b"\0")
-            digest.update(hashlib.sha256(child.read_bytes()).digest())
+            try:
+                digest.update(hashlib.sha256(child.read_bytes()).digest())
+            except OSError as exc:
+                # Typed, never a traceback: this runs inside completion.
+                raise ValueError(f"evidence-member-unreadable:{child}") from exc
         else:
             raise ValueError(f"evidence-member-not-regular:{child}")
     return digest.hexdigest()
@@ -4301,4 +4305,6 @@ def main():
 
 if __name__=="__main__":
     try: main()
-    except (ValueError,TOPO.TopologyError) as exc: print(f"capability-route: {exc}",file=sys.stderr); raise SystemExit(64)
+    # OSError too: completion walks a worker-supplied tree, and a refusal there
+    # must be a typed line, never a traceback (review S-a).
+    except (ValueError,OSError,TOPO.TopologyError) as exc: print(f"capability-route: {exc}",file=sys.stderr); raise SystemExit(64)

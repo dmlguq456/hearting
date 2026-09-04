@@ -391,11 +391,17 @@ def _resolve_safe_root(
     return root, "none"
 
 
-_ARTIFACT_MAX_ENTRIES = 20000
+ARTIFACT_MAX_ENTRIES = 20000
+ARTIFACT_MAX_BYTES = 2 * 1024**3
 
 
-def _directory_artifact_reason(artifact_path: Path, root: Path) -> str:
+def directory_artifact_reason(artifact_path: Path, root: Path | None = None) -> str:
     """Return a typed refusal for a directory that cannot stand as a deliverable.
+
+    ONE definition, used by both the envelope inspector and
+    `capability-route.evidence_digest`. Splitting it left the automated path
+    guarded and the documented manual `capability-route.py complete --evidence`
+    path open — the same fail-open, one door over (review R2).
 
     An existing, readable directory is not by itself evidence of work. The
     harness pre-creates the cycle's `artifacts/` directory before a worker's
@@ -404,9 +410,10 @@ def _directory_artifact_reason(artifact_path: Path, root: Path) -> str:
     that produced nothing name the path it was handed and pass. Require at least
     one readable regular file somewhere in the tree.
 
-    Members must also stay inside the artifact root. The completion marker
-    attests this tree, and a consumer that later copies or publishes it would
-    follow a symlink pointing out of the root.
+    `root` is optional: the inspector has an artifact root to contain members
+    against, the digest does not. The size and entry limits apply either way, so
+    a deliverable can never pass classification and then be refused at
+    completion for being too large.
     """
 
     # Access first: an unreadable directory yields nothing from `rglob` (it
@@ -415,21 +422,39 @@ def _directory_artifact_reason(artifact_path: Path, root: Path) -> str:
     if not os.access(artifact_path, os.R_OK | os.X_OK):
         return "artifact-unreadable"
     entries = 0
+    total = 0
     has_file = False
+    unreadable_member = False
     try:
         for child in artifact_path.rglob("*"):
             entries += 1
-            if entries > _ARTIFACT_MAX_ENTRIES:
+            if entries > ARTIFACT_MAX_ENTRIES:
                 return "artifact-directory-too-large"
+            if root is not None:
+                try:
+                    child.resolve(strict=False).relative_to(root)
+                except (OSError, ValueError):
+                    return "artifact-member-outside-root"
+            if child.is_symlink() or not child.is_file():
+                continue
+            if not os.access(child, os.R_OK):
+                unreadable_member = True
+                continue
             try:
-                child.resolve(strict=False).relative_to(root)
-            except (OSError, ValueError):
-                return "artifact-member-outside-root"
-            if not has_file and child.is_file() and os.access(child, os.R_OK):
-                has_file = True
+                total += child.stat().st_size
+            except OSError:
+                unreadable_member = True
+                continue
+            if total > ARTIFACT_MAX_BYTES:
+                return "artifact-directory-too-large"
+            has_file = True
     except OSError:
         return "artifact-unreadable"
-    return "" if has_file else "artifact-empty-directory"
+    if has_file:
+        return ""
+    # "the one file here cannot be read" is a different operator action from
+    # "there is nothing here", one level down from the same distinction above.
+    return "artifact-unreadable-member" if unreadable_member else "artifact-empty-directory"
 
 
 def _encode_path(path: Path) -> str:
@@ -540,7 +565,7 @@ def inspect_terminal_attempt(
         names_root = artifact_path == root
         directory_reason = ""
         if not names_root and artifact_path.is_dir():
-            directory_reason = _directory_artifact_reason(artifact_path, root)
+            directory_reason = directory_artifact_reason(artifact_path, root)
         readable = not names_root and not directory_reason and (
             (artifact_path.is_file() and os.access(artifact_path, os.R_OK))
             or (artifact_path.is_dir() and os.access(artifact_path, os.R_OK | os.X_OK))
