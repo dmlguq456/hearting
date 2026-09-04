@@ -111,6 +111,51 @@ class WorkerRouteGuardTest(unittest.TestCase):
    with self.assertRaisesRegex(G.WorkerRouteError,"expected=.* observed=") as ctx: G.validate_route_contract(path,"execute",repo,repo)
    self.assertEqual(ctx.exception.reason,"route-source-commit-mismatch")
 
+ def _continuation(self,route,artifact_root):
+  first=route["nodes"][0]["id"]
+  return R.build_continuation_route(route,resume_from_node=first,requested_boundary=first,reason="resume-after-fast-forward",artifact_root=artifact_root)
+
+ def test_c_continuation_after_fast_forward_dispatches_pre_mutation_nodes(self):
+  # Defect C (route rt-d7541f1033ae677f): a continuation built after depth-0
+  # fast-forwarded the worktree inherited the source route's compile-time pin while
+  # sealing the new HEAD as grounding, so plan/plan-check/execute were refused with
+  # route-source-commit-mismatch. The continuation must rebind the pin to HEAD and
+  # every pre-mutation node must validate against it.
+  with tempfile.TemporaryDirectory() as td:
+   repo,source,_=self._lineage_repo(td)
+   (repo/"x").write_text("b"); subprocess.run(["git","-C",str(repo),"commit","-am","fast-forward","-q"],check=True)
+   head=subprocess.run(["git","-C",str(repo),"rev-parse","HEAD"],text=True,capture_output=True,check=True).stdout.strip()
+   self.assertNotEqual(head,source["source_commit"])
+   continuation=self._continuation(source,repo)
+   self.assertEqual(continuation["source_commit"],head)
+   rebind=continuation["source_commit_rebind"]
+   self.assertEqual(rebind["inherited_source_commit"],source["source_commit"])
+   self.assertEqual(rebind["rebound_source_commit"],head)
+   self.assertEqual(rebind["basis"],"first-parent-descendant")
+   self.assertEqual(continuation["launch_compatibility_tuple"]["grounding_roots"]["cwd"]["release_id"],head)
+   path=Path(td)/"continuation.json"; path.write_text(json.dumps(continuation))
+   for node_id in ("plan","plan-check","execute","test"):
+    _,node,git=G.validate_route_contract(path,node_id,repo,repo)
+    self.assertEqual(node["id"],node_id); self.assertEqual(git["head"],head)
+
+ def test_c_continuation_on_unchanged_head_keeps_inherited_pin(self):
+  with tempfile.TemporaryDirectory() as td:
+   repo,source,_=self._lineage_repo(td)
+   continuation=self._continuation(source,repo)
+   self.assertEqual(continuation["source_commit"],source["source_commit"])
+   self.assertNotIn("source_commit_rebind",continuation)
+   path=Path(td)/"continuation.json"; path.write_text(json.dumps(continuation))
+   _,node,_=G.validate_route_contract(path,"plan",repo,repo); self.assertEqual(node["id"],"plan")
+
+ def test_c_continuation_on_diverged_head_refused_typed(self):
+  # A rewritten HEAD is off the history the source route bound: no node of such a
+  # continuation could dispatch, so it is refused before any route file exists.
+  with tempfile.TemporaryDirectory() as td:
+   repo,source,_=self._lineage_repo(td)
+   subprocess.run(["git","-C",str(repo),"commit","--amend","-qm","a-rewritten"],check=True)
+   with self.assertRaisesRegex(ValueError,"continuation-source-commit-diverged"):
+    self._continuation(source,repo)
+
  def _write_registry_row(self,jobs_path,route_id,node_id,attempt_id,status="done"):
   pipe=f"route_id={route_id},route_node={node_id},attempt_id={attempt_id}"
   line="\t".join(["2026-07-19T00:00:00Z",status,"repo","worktree","slug",pipe])

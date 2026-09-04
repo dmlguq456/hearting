@@ -5,6 +5,8 @@ from unittest import mock
 
 P=Path(__file__).with_name("capability-route.py")
 S=importlib.util.spec_from_file_location("route",P); R=importlib.util.module_from_spec(S); S.loader.exec_module(R)
+GUARD_P=P.with_name("worker-route-guard.py")
+GUARD_S=importlib.util.spec_from_file_location("guard",GUARD_P); G=importlib.util.module_from_spec(GUARD_S); GUARD_S.loader.exec_module(G)
 FLEET_P=P.parent.parent/"tools"/"fleet"/"route.py"
 FLEET_S=importlib.util.spec_from_file_location("fleet_route",FLEET_P)
 FLEET_ROUTE=importlib.util.module_from_spec(FLEET_S); FLEET_S.loader.exec_module(FLEET_ROUTE)
@@ -2439,6 +2441,90 @@ class TestContinuation(unittest.TestCase):
     else: os.environ["AGENT_HOME"]=previous_home
     if previous_jobs is None: os.environ.pop("AGENT_DISPATCH_JOBS",None)
     else: os.environ["AGENT_DISPATCH_JOBS"]=previous_jobs
+
+ def _git_repo(self,root):
+  import subprocess
+  repo=Path(root)/"repo"; repo.mkdir(parents=True)
+  subprocess.run(["git","init","-q",str(repo)],check=True)
+  subprocess.run(["git","-C",str(repo),"config","user.email","fixture@example.com"],check=True)
+  subprocess.run(["git","-C",str(repo),"config","user.name","Fixture"],check=True)
+  (repo/"x").write_text("a"); subprocess.run(["git","-C",str(repo),"add","x"],check=True)
+  subprocess.run(["git","-C",str(repo),"commit","-qm","a"],check=True)
+  return repo
+ def _git_head(self,repo):
+  import subprocess
+  return subprocess.run(["git","-C",str(repo),"rev-parse","HEAD"],text=True,capture_output=True,check=True).stdout.strip()
+
+ def test_c_continuation_cli_rebinds_source_commit_after_fast_forward(self):
+  # Defect C end-to-end through the checked CLI: the source route was compiled at
+  # commit A, depth-0 fast-forwarded the worktree to B, and the published
+  # continuation must pin B (what its grounding tuple seals), not A.
+  import subprocess,sys
+  with tempfile.TemporaryDirectory() as tmp:
+   previous_home=os.environ.get("AGENT_HOME")
+   previous_jobs=os.environ.get("AGENT_DISPATCH_JOBS")
+   jobs=str(Path(tmp)/"state"/"jobs.log")
+   os.environ["AGENT_HOME"]=str(R.ROOT)
+   os.environ["AGENT_DISPATCH_JOBS"]=jobs
+   try:
+    repo=self._git_repo(tmp); artifact=Path(tmp)/"artifacts"
+    source=self._source(artifact,cwd=repo)
+    pinned=source["source_commit"]; self.assertEqual(pinned,self._git_head(repo))
+    self._complete_prefix(source,"test",Path(tmp)/"evidence")
+    (repo/"x").write_text("b"); subprocess.run(["git","-C",str(repo),"commit","-qam","fast-forward"],check=True)
+    head=self._git_head(repo); self.assertNotEqual(head,pinned)
+    source_path=Path(tmp)/"source-route.json"
+    source_path.write_text(json.dumps(source),encoding="utf-8")
+    result=subprocess.run([
+     sys.executable,str(P),"continuation","--source-route",str(source_path),
+     "--resume-from-node","test","--requested-boundary","test",
+     "--reason","resume-after-fast-forward","--artifact-root",str(artifact),
+    ],capture_output=True,text=True,cwd=str(R.ROOT),env=os.environ.copy())
+    self.assertEqual(result.returncode,0,result.stderr)
+    route=json.loads(result.stdout)
+    self.assertEqual(route["source_commit"],head)
+    self.assertEqual(route["source_commit_rebind"]["inherited_source_commit"],pinned)
+    self.assertEqual(route["launch_compatibility_tuple"]["grounding_roots"]["cwd"]["release_id"],head)
+    published=json.loads(R.canonical_route_path(artifact,route["route_id"]).read_text(encoding="utf-8"))
+    self.assertEqual(R.verify_route(published)["source_commit"],head)
+    # The guard that refused the incident's plan/plan-check/execute now passes the
+    # first runnable node against the rebound pin.
+    _,node,_=G.validate_route_contract(R.canonical_route_path(artifact,route["route_id"]),"test",repo,artifact)
+    self.assertEqual(node["id"],"test")
+   finally:
+    if previous_home is None: os.environ.pop("AGENT_HOME",None)
+    else: os.environ["AGENT_HOME"]=previous_home
+    if previous_jobs is None: os.environ.pop("AGENT_DISPATCH_JOBS",None)
+    else: os.environ["AGENT_DISPATCH_JOBS"]=previous_jobs
+
+ def test_c_continuation_rebind_record_is_verified(self):
+  import subprocess
+  with tempfile.TemporaryDirectory() as tmp:
+   repo=self._git_repo(tmp); artifact=Path(tmp)/"artifacts"
+   source=self._source(artifact,cwd=repo)
+   self._complete_prefix(source,"test",Path(tmp)/"evidence")
+   (repo/"x").write_text("b"); subprocess.run(["git","-C",str(repo),"commit","-qam","fast-forward"],check=True)
+   continuation=self._build(source)
+   self.assertEqual(continuation["source_commit"],self._git_head(repo))
+   R.verify_route(continuation)
+   for tamper in (
+    lambda route:route["source_commit_rebind"].update(rebound_source_commit=route["source_commit_rebind"]["inherited_source_commit"]),
+    lambda route:route["source_commit_rebind"].update(basis="cherry-pick"),
+    lambda route:route["source_commit_rebind"].update(contract_version=2),
+    lambda route:route["source_commit_rebind"].pop("inherited_source_commit"),
+   ):
+    tampered=json.loads(json.dumps(continuation)); tamper(tampered)
+    tampered["route_hash"]=R.route_hash(tampered)
+    tampered["route_id"]="rt-"+tampered["route_hash"].split(":",1)[1][:16]
+    with self.assertRaisesRegex(ValueError,"continuation-source-commit-rebind-invalid"):
+     R.verify_route(tampered)
+   # A diverged HEAD (the pinned root commit itself rewritten) is refused typed,
+   # with no route built. Amending only the fast-forward commit would still
+   # descend from the pin and is legitimately a rebind, not a divergence.
+   subprocess.run(["git","-C",str(repo),"reset","-q","--hard",source["source_commit"]],check=True)
+   subprocess.run(["git","-C",str(repo),"commit","--amend","-qm","rewritten"],check=True)
+   with self.assertRaisesRegex(ValueError,"continuation-source-commit-diverged"):
+    self._build(source)
 
  def test_continuation_cli_requires_exact_registered_depth1_owner(self):
   import subprocess,sys
