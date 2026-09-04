@@ -391,6 +391,84 @@ def _resolve_safe_root(
     return root, "none"
 
 
+ARTIFACT_MAX_ENTRIES = 20000
+ARTIFACT_MAX_BYTES = 2 * 1024**3
+
+
+def directory_artifact_reason(artifact_path: Path, root: Path | None = None) -> str:
+    """Return a typed refusal for a directory that cannot stand as a deliverable.
+
+    ONE definition, used by both the envelope inspector and
+    `capability-route.evidence_digest`. Splitting it left the automated path
+    guarded and the documented manual `capability-route.py complete --evidence`
+    path open — the same fail-open, one door over (review R2).
+
+    An existing, readable directory is not by itself evidence of work. The
+    harness pre-creates the cycle's `artifacts/` directory before a worker's
+    first write (`artifact_producer.begin`) and exports that exact path as
+    `AGENT_ARTIFACT_OUTPUT_DIR`, so accepting any directory would let a worker
+    that produced nothing name the path it was handed and pass. Require at least
+    one readable regular file somewhere in the tree.
+
+    `root` is optional: the inspector has an artifact root to contain members
+    against, the digest does not. Everything except containment therefore holds
+    at both doors — size, entry count, emptiness and unreadable members all
+    refuse identically, so a deliverable cannot pass classification and then be
+    refused at completion. **Member containment is the one inspector-only rule**:
+    a marker written through `complete --evidence` can still attest a tree with a
+    member pointing outside the root. Nothing leaks (the digest records link
+    target text and never follows), but the two doors are not identical there.
+    """
+
+    # Access first: an unreadable directory yields nothing from `rglob` (it
+    # swallows PermissionError), which would read as "empty" instead of "cannot
+    # be read" and send an operator after the wrong problem.
+    if not os.access(artifact_path, os.R_OK | os.X_OK):
+        return "artifact-unreadable"
+    entries = 0
+    total = 0
+    has_file = False
+    unreadable_member = False
+    try:
+        for child in artifact_path.rglob("*"):
+            entries += 1
+            if entries > ARTIFACT_MAX_ENTRIES:
+                return "artifact-directory-too-large"
+            if root is not None:
+                try:
+                    child.resolve(strict=False).relative_to(root)
+                except (OSError, ValueError):
+                    return "artifact-member-outside-root"
+            if child.is_symlink() or not child.is_file():
+                continue
+            if not os.access(child, os.R_OK):
+                unreadable_member = True
+                continue
+            try:
+                total += child.stat().st_size
+            except OSError:
+                unreadable_member = True
+                continue
+            if total > ARTIFACT_MAX_BYTES:
+                return "artifact-directory-too-large"
+            has_file = True
+    except OSError:
+        return "artifact-unreadable"
+    # ANY unreadable member, not just "no readable file at all": the digest
+    # cannot hash what it cannot read, so a tree that classifies valid here and
+    # then refuses at completion would be the disagreement this shared rule
+    # exists to remove.
+    if unreadable_member:
+        return "artifact-unreadable-member"
+    if has_file:
+        return ""
+    if entries:
+        # Not empty — it holds only links, directories or non-regular members,
+        # none of which the digest can attest as content.
+        return "artifact-no-regular-file"
+    return "artifact-empty-directory"
+
+
 def _encode_path(path: Path) -> str:
     return base64.urlsafe_b64encode(str(path).encode("utf-8")).decode("ascii").rstrip("=")
 
@@ -485,7 +563,26 @@ def inspect_terminal_attempt(
                 "contract-violation",
                 reason="artifact-outside-root",
             )
-        if not artifact_path.is_file() or not os.access(artifact_path, os.R_OK):
+        # A worker's artifact is legitimately either one file or one directory of
+        # them: a cycle's document bucket, a plans directory, an evidence tree. The
+        # contract says "an in-root artifact", never "a regular file", and the
+        # worker prompt asks for a path. Requiring `is_file()` silently converted
+        # every directory-shaped deliverable into `dead-invalid-envelope` — three
+        # of the five owners lost on 2026-09-04 (att-8864fd04, att-93a8e494,
+        # att-836c2026) had emitted a well-formed `verdict: PASS` envelope and a
+        # readable directory holding their output.
+        # The artifact root itself is not a deliverable — naming it says no more
+        # than naming nothing, and it would let any run "produce" the whole tree.
+        # An artifact must be a real member of the root.
+        names_root = artifact_path == root
+        directory_reason = ""
+        if not names_root and artifact_path.is_dir():
+            directory_reason = directory_artifact_reason(artifact_path, root)
+        readable = not names_root and not directory_reason and (
+            (artifact_path.is_file() and os.access(artifact_path, os.R_OK))
+            or (artifact_path.is_dir() and os.access(artifact_path, os.R_OK | os.X_OK))
+        )
+        if directory_reason:
             return _result(
                 3,
                 "invalid",
@@ -493,9 +590,28 @@ def inspect_terminal_attempt(
                 "-",
                 "missing",
                 "contract-violation",
-                reason="artifact-missing",
+                reason=directory_reason,
+            )
+        if not readable:
+            return _result(
+                3,
+                "invalid",
+                str(parsed["source"]),
+                "-",
+                "missing",
+                "contract-violation",
+                # Name the shape so an operator can tell "the path is not there" from
+                # "the path is there but this reader would not take it".
+                reason=(
+                    "artifact-is-root"
+                    if names_root
+                    else "artifact-unreadable"
+                    if artifact_path.exists()
+                    else "artifact-missing"
+                ),
             )
         parsed["artifact_state"] = "readable"
+        parsed["artifact_shape"] = "directory" if artifact_path.is_dir() else "file"
         parsed["artifact_path_b64"] = _encode_path(artifact_path)
 
     if review_blocking_handoff(parsed, worker_type):

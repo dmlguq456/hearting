@@ -321,6 +321,125 @@ class CodexDispatchTerminalTest(unittest.TestCase):
         self.assertEqual(escaped["artifact_state"], "outside-root")
         self.assertNotIn("RAW_OUTSIDE_SENTINEL", repr(escaped))
 
+    def test_a_directory_artifact_is_a_valid_deliverable(self):
+        # 2026-09-04: three depth-1 codex owners emitted a well-formed
+        # `verdict: PASS` envelope naming a cycle document directory and were all
+        # recorded `dead-invalid-envelope / terminal-invalid:artifact-missing`.
+        # The contract says "an in-root artifact", never "a regular file".
+        bucket = self.root / "documents" / "2026-09-04_cmdset_v6_final"
+        bucket.mkdir(parents=True)
+        (bucket / "CONTRACT.md").write_text("one\n", encoding="utf-8")
+        (bucket / "EVIDENCE.md").write_text("two\n", encoding="utf-8")
+        result = self.inspect(
+            self.write_log(verdict="PASS", blocker="none", artifact=bucket, sandbox=False)
+        )
+        self.assertEqual(result["state"], "valid")
+        self.assertEqual(result["artifact_state"], "readable")
+        self.assertEqual(result["artifact_shape"], "directory")
+        decoded = base64.urlsafe_b64decode(
+            result["artifact_path_b64"] + "=" * (-len(result["artifact_path_b64"]) % 4)
+        ).decode("utf-8")
+        self.assertEqual(Path(decoded), bucket.resolve())
+
+    def test_a_single_file_artifact_is_unchanged(self):
+        single = self.root / "report.md"
+        single.write_text("body\n", encoding="utf-8")
+        result = self.inspect(
+            self.write_log(verdict="PASS", blocker="none", artifact=single, sandbox=False)
+        )
+        self.assertEqual(
+            (result["state"], result["artifact_state"], result["artifact_shape"]),
+            ("valid", "readable", "file"),
+        )
+
+    def test_an_empty_directory_is_not_a_deliverable(self):
+        # The harness pre-creates the cycle's `artifacts/` directory before the
+        # worker's first write and exports it as AGENT_ARTIFACT_OUTPUT_DIR, so a
+        # worker that produced nothing could otherwise name the path it was handed
+        # and pass. Existence is not evidence of work.
+        empty = self.root / "documents" / "empty_bucket"
+        empty.mkdir(parents=True)
+        result = self.inspect(
+            self.write_log(verdict="PASS", blocker="none", artifact=empty, sandbox=False)
+        )
+        self.assertEqual(result["state"], "invalid")
+        self.assertEqual(result["reason"], "artifact-empty-directory")
+        # A directory holding only subdirectories is not empty, but it holds no
+        # content the digest can attest, so it gets its own reason.
+        (empty / "nested" / "deeper").mkdir(parents=True)
+        self.assertEqual(
+            self.inspect(
+                self.write_log(verdict="PASS", blocker="none", artifact=empty, sandbox=False)
+            )["reason"],
+            "artifact-no-regular-file",
+        )
+        # One readable regular file anywhere in the tree is enough.
+        (empty / "nested" / "REPORT.md").write_text("body\n", encoding="utf-8")
+        self.assertEqual(
+            self.inspect(
+                self.write_log(verdict="PASS", blocker="none", artifact=empty, sandbox=False)
+            )["artifact_state"],
+            "readable",
+        )
+
+    def test_one_unreadable_member_refuses_at_classification_not_at_completion(self):
+        # Review round 3 (a): returning valid as soon as ONE readable file exists
+        # let a bucket classify valid and then raise `evidence-member-unreadable`
+        # at completion — the disagreement this shared rule exists to remove.
+        bucket = self.root / "documents" / "partly_unreadable"
+        bucket.mkdir(parents=True)
+        (bucket / "REPORT.md").write_text("body\n", encoding="utf-8")
+        blocked = bucket / "locked.md"
+        blocked.write_text("secret\n", encoding="utf-8")
+        os.chmod(blocked, 0o000)
+        try:
+            if os.access(blocked, os.R_OK):
+                self.skipTest("cannot drop file access as this user")
+            result = self.inspect(
+                self.write_log(verdict="PASS", blocker="none", artifact=bucket, sandbox=False)
+            )
+            self.assertEqual(result["reason"], "artifact-unreadable-member")
+        finally:
+            os.chmod(blocked, 0o600)
+
+    def test_a_directory_member_may_not_escape_the_artifact_root(self):
+        # The completion marker attests this tree; a consumer that later copies or
+        # publishes it would follow a link pointing out of the root.
+        outside = self.base / "outside.md"
+        outside.write_text("RAW_OUTSIDE_SENTINEL", encoding="utf-8")
+        bucket = self.root / "documents" / "escaping"
+        bucket.mkdir(parents=True)
+        (bucket / "REPORT.md").write_text("body\n", encoding="utf-8")
+        (bucket / "escape.md").symlink_to(outside)
+        result = self.inspect(
+            self.write_log(verdict="PASS", blocker="none", artifact=bucket, sandbox=False)
+        )
+        self.assertEqual(result["reason"], "artifact-member-outside-root")
+        self.assertNotIn("RAW_OUTSIDE_SENTINEL", repr(result))
+
+    def test_present_but_unreadable_is_told_apart_from_absent(self):
+        # "the path is not there" and "the path is there but this reader will not
+        # take it" are different operator actions, so they get different reasons.
+        absent = self.inspect(
+            self.write_log(
+                verdict="PASS", blocker="none", artifact=self.root / "nope.md", sandbox=False
+            )
+        )
+        self.assertEqual(absent["reason"], "artifact-missing")
+        locked = self.root / "locked"
+        locked.mkdir()
+        (locked / "inner.md").write_text("x\n", encoding="utf-8")
+        os.chmod(locked, 0o000)
+        try:
+            if os.access(locked, os.R_OK | os.X_OK):
+                self.skipTest("cannot drop directory access as this user")
+            result = self.inspect(
+                self.write_log(verdict="PASS", blocker="none", artifact=locked, sandbox=False)
+            )
+            self.assertEqual(result["reason"], "artifact-unreadable")
+        finally:
+            os.chmod(locked, 0o700)
+
     def test_failure_detail_is_opt_in_escaped_independently_bounded_and_never_pass(self):
         blocker = "B\t" + "한" * 400
         diagnostic = "D\n\x01" + "界" * 400

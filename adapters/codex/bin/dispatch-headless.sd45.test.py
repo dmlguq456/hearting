@@ -495,6 +495,50 @@ class CodexSD78CompletionDelivery(unittest.TestCase):
         command = WH.shell_command(args, Path("/tmp/p.txt"), Path("/tmp/l.log"))
         self.assertIn("--writable-root /tmp/fixture-report-bundles", command)
 
+    def test_depth1_owner_can_write_its_heartbeat_without_the_state_root(self):
+        # 2026-09-04: a depth-1 owner matched neither branch that grants the
+        # dispatch state root, so under workspace-write `preflight.sh
+        # stage-heartbeat` died `[Errno 30] Read-only file system` on
+        # `<state root>/watchdog/<attempt>.lock` and the owner reported BLOCKED
+        # with its work already finished.
+        args = _prompt_args(attempt_id="att-owner", dispatch_depth=1)
+        command = WH.shell_command(args, Path("/tmp/p.txt"), Path("/tmp/l.log"))
+        state_root = "/tmp/fixture-agent-home/.dispatch"
+        self.assertIn(f"--writable-root {state_root}/heartbeats", command)
+        self.assertIn(f"--writable-root {state_root}/watchdog", command)
+        # Progress only: the registry, logs and supervisor state stay closed.
+        self.assertNotIn(f"--writable-root {state_root} ", command + " ")
+
+    def test_exec_builder_grants_the_same_progress_directories(self):
+        # The `codex exec` builder serves one-shot and poll-fallback delivery and
+        # emits `--add-dir`, not `--writable-root`; it was missed the first time
+        # and kept the read-only heartbeat failure on those paths.
+        state_root = "/tmp/fixture-agent-home/.dispatch"
+        for delivery in ("one-shot", "poll-fallback"):
+            args = _prompt_args(
+                attempt_id="att-owner", dispatch_depth=1,
+                resolved_completion_delivery=delivery,
+            )
+            command = WH.shell_command(args, Path("/tmp/p.txt"), Path("/tmp/l.log"))
+            self.assertIn(f"--add-dir {state_root}/heartbeats", command, delivery)
+            self.assertIn(f"--add-dir {state_root}/watchdog", command, delivery)
+            self.assertNotIn(f"--add-dir {state_root} ", command + " ", delivery)
+        widened = _prompt_args(
+            attempt_id="att-owner", nested_headless_network=True,
+            resolved_completion_delivery="one-shot",
+        )
+        command = WH.shell_command(widened, Path("/tmp/p.txt"), Path("/tmp/l.log"))
+        self.assertIn(f"--add-dir {state_root} ", command + " ")
+        self.assertNotIn(f"--add-dir {state_root}/heartbeats", command)
+
+    def test_owner_network_widening_still_grants_the_whole_state_root(self):
+        args = _prompt_args(attempt_id="att-owner", nested_headless_network=True)
+        command = WH.shell_command(args, Path("/tmp/p.txt"), Path("/tmp/l.log"))
+        state_root = "/tmp/fixture-agent-home/.dispatch"
+        self.assertIn(f"--writable-root {state_root} ", command + " ")
+        # and does not also enumerate the narrow pair, which it already contains
+        self.assertNotIn(f"--writable-root {state_root}/heartbeats", command)
+
     def test_report_bundle_root_resolver_is_publish_stage_only(self):
         with tempfile.TemporaryDirectory() as td, mock.patch.dict(
             os.environ,

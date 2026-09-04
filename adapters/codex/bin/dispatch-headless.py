@@ -1081,13 +1081,36 @@ def route_bound_worker_writable_dirs(args: argparse.Namespace) -> tuple[Path, ..
     )
 
 
+def progress_writable_dirs(args: argparse.Namespace) -> tuple[Path, ...]:
+    """The exact dispatch-state subdirectories a sandboxed attempt writes progress into.
+
+    SD-58's heartbeat/watchdog files live at `<state root>/heartbeats/<attempt>.json`
+    and `<state root>/watchdog/<attempt>.{json,lock}`. A depth-1 owner matched none
+    of the conditions that grant the state root (owner network widening, or a
+    depth-2 route-bound launch), so under codex's workspace-write sandbox those
+    paths were read-only and `preflight.sh stage-heartbeat` died
+    `[Errno 30] Read-only file system`. Two of the five owners lost on 2026-09-04
+    then reported BLOCKED and were recorded as failures despite finished work.
+
+    Only these two directories are exposed, not the state root: the owner needs to
+    record progress, not to reach the registry, logs, or supervisor state. A
+    launch that legitimately needs the registry keeps getting it through
+    `nested_owner_writable_dirs`.
+    """
+
+    if not getattr(args, "jobs_path", None):
+        return ()
+    root = dispatch_state_root(args.jobs_path)
+    return (root / "heartbeats", root / "watchdog")
+
+
 def ensure_owner_writable_dirs(args: argparse.Namespace) -> None:
     """Create every directory this launch will grant sandbox write access to,
     once, before the child command is built. A query function (above) never
     has this side effect -- a create failure here is a typed launch failure,
     not a silently narrowed grant list."""
 
-    to_create = []
+    to_create = list(progress_writable_dirs(args))
     if getattr(args, "nested_headless_network", False):
         to_create.append(owner_root())
     if getattr(args, "route_id", None) or getattr(
@@ -1239,6 +1262,12 @@ def shell_command(args: argparse.Namespace, prompt_path: Path, log_path: Path) -
                 "--writable-root",
                 str(dispatch_state_root(args.jobs_path)),
             ]
+        else:
+            # Everyone else still has to be able to heartbeat. Grant the two
+            # progress directories only -- the state root above stays reserved for
+            # the launches that genuinely need the registry.
+            for progress_dir in progress_writable_dirs(args):
+                command += ["--writable-root", str(progress_dir)]
         for writable_dir in nested_owner_writable_dirs(args):
             command += ["--writable-root", str(writable_dir)]
         if args.route_id or args.nested_headless_network:
@@ -1279,6 +1308,13 @@ def shell_command(args: argparse.Namespace, prompt_path: Path, log_path: Path) -
             "--add-dir",
             str(dispatch_state_root(args.jobs_path)),
         ]
+    else:
+        # Same rule as the sandboxed builder above: every attempt has to be able
+        # to record progress, so grant the two progress directories and nothing
+        # more. This branch serves one-shot and poll-fallback delivery, which the
+        # app-server builder never reaches.
+        for progress_dir in progress_writable_dirs(args):
+            cmd += ["--add-dir", str(progress_dir)]
     for writable_dir in nested_owner_writable_dirs(args):
         # Core read markers and Claude's Bash pre-exec snapshot are the only
         # home-scoped writes needed by a recursive standard+ Codex owner.

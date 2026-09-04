@@ -36,7 +36,10 @@ from dispatch_contract import (  # noqa: E402
     validate_attempt_metadata,
 )
 from codex_dispatch_terminal import carrier_terminal_note  # noqa: E402
-from dispatch_completion_join import materialize_after_terminal_close  # noqa: E402
+from dispatch_completion_join import (  # noqa: E402
+    OWNER_ROUTE_NODE,
+    materialize_after_terminal_close,
+)
 
 KINDS = {"registry", "tool", "file", "artifact", "test", "terminal"}
 
@@ -164,11 +167,33 @@ def verification_process_digest(pid):
     return hashlib.sha256(raw).hexdigest()
 
 
+# One definition of the owner node name, imported rather than restated: the
+# registry already calls an owner's node `_owner` for SD-111 delivery identity.
+OWNER_PROGRESS_NODE = OWNER_ROUTE_NODE
+
+
 def require_row(args):
     row = exact_row(args.jobs, args.attempt_id)
     if row is None:
         raise DispatchContractError("progress-attempt-missing", args.attempt_id)
-    if row[1].get("route_id") != args.route_id or row[1].get("route_node") != args.route_node:
+    metadata = row[1]
+    # A depth-1 owner is not a route node: its row carries `owner_route_id` and no
+    # `route_id`/`route_node` at all, so the node comparison below could never
+    # match and every owner heartbeat failed `progress-route-mismatch`. The
+    # registry already names an owner's node `_owner` in its delivery records, so
+    # that is the identity accepted here. An owner still has to name its own
+    # route.
+    if metadata.get("route_id") is None and metadata.get("owner_route_id"):
+        matched = (
+            metadata.get("owner_route_id") == args.route_id
+            and args.route_node == OWNER_PROGRESS_NODE
+        )
+    else:
+        matched = (
+            metadata.get("route_id") == args.route_id
+            and metadata.get("route_node") == args.route_node
+        )
+    if not matched:
         raise DispatchContractError("progress-route-mismatch", args.attempt_id)
     validate_attempt_metadata(row[1])
     return row

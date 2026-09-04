@@ -1866,6 +1866,130 @@ class TestContinuation(unittest.TestCase):
    for item in value.values(): self._assert_no_alias_key(item)
   elif isinstance(value,list):
    for item in value: self._assert_no_alias_key(item)
+ def test_a_directory_artifact_completes_and_then_passes_the_terminal_gate(self):
+  # Review B1: the envelope inspector and the marker writer were converted but the
+  # two VERIFICATION sites still did `Path(evidence["path"]).read_bytes()`, so a
+  # directory artifact wrote a canonical marker and was then refused
+  # `completion-evidence-unreadable` at the gate — the same "finished work booked
+  # as failure", later and under a stranger reason. Completing is not enough; the
+  # gate has to agree.
+  with tempfile.TemporaryDirectory() as tmp:
+   artifact=Path(tmp)/"artifacts"
+   source=self._source(artifact)
+   node=next(row for row in source["nodes"] if row["id"]=="frame")
+   bucket=Path(tmp)/"evidence"/"documents"/"bucket"
+   bucket.mkdir(parents=True)
+   (bucket/"REPORT.md").write_text("body\n",encoding="utf-8")
+   R.complete_node(
+    source,node,"frame",bucket,attempt_id="att-directory-artifact",
+    explicit_attempt_metadata={
+     "attempt_schema_version":2,"dispatch_depth":node["dispatch_depth"],
+     "transport":"headless","execution_surface":"registered-headless",
+     "registered_worker":"1","fallback_hop":"same-harness-headless",
+    },
+   )
+   row=R._marker_identity_row(source,node,"frame",node.get("completion_gate"))
+   self.assertTrue(row["passed"], row)
+   # and the digest the marker stored is the directory digest, not a file hash
+   marker=json.loads(
+    (R.completion_dir(source["route_id"])/"frame.json").read_text(encoding="utf-8")
+   )
+   self.assertEqual(marker["evidence"]["sha256"],R.evidence_digest(bucket))
+   # a member changing invalidates the gate, so the attestation is real
+   (bucket/"REPORT.md").write_text("tampered\n",encoding="utf-8")
+   self.assertFalse(
+    R._marker_identity_row(source,node,"frame",node.get("completion_gate"))["passed"]
+   )
+
+ def test_an_empty_directory_cannot_complete_a_node(self):
+  # Review R2: the non-empty rule lived only on the inspector path, so the
+  # documented manual `capability-route.py complete --evidence` surface still
+  # completed a node on the cycle's pre-created, empty `artifacts/` directory and
+  # the terminal gate passed it. One rule, applied at every door.
+  with tempfile.TemporaryDirectory() as tmp:
+   artifact=Path(tmp)/"artifacts"
+   source=self._source(artifact)
+   node=next(row for row in source["nodes"] if row["id"]=="frame")
+   metadata={
+    "attempt_schema_version":2,"dispatch_depth":node["dispatch_depth"],
+    "transport":"headless","execution_surface":"registered-headless",
+    "registered_worker":"1","fallback_hop":"same-harness-headless",
+   }
+   empty=Path(tmp)/"evidence"/"artifacts"
+   empty.mkdir(parents=True)
+   with self.assertRaisesRegex(ValueError,"evidence-empty-directory"):
+    R.complete_node(source,node,"frame",empty,attempt_id="att-empty",
+                    explicit_attempt_metadata=metadata)
+   # no marker was written, so the gate cannot pass on it either
+   self.assertFalse((R.completion_dir(source["route_id"])/"frame.json").exists())
+   # the same directory completes once it actually holds output
+   (empty/"REPORT.md").write_text("body\n",encoding="utf-8")
+   R.complete_node(source,node,"frame",empty,attempt_id="att-empty",
+                   explicit_attempt_metadata=metadata)
+   self.assertTrue(
+    R._marker_identity_row(source,node,"frame",node.get("completion_gate"))["passed"]
+   )
+
+ def test_evidence_digest_refuses_what_it_cannot_attest(self):
+  # Review B2/S4: a missing path used to return the empty-directory constant, so
+  # "deleted before the gate" and "empty at completion" verified as one artifact.
+  # A FIFO member blocked forever; a non-UTF-8 name raised on encode.
+  import os
+  with tempfile.TemporaryDirectory() as tmp:
+   root=Path(tmp)
+   with self.assertRaisesRegex(ValueError,"evidence-not-a-file-or-directory"):
+    R.evidence_digest(root/"absent")
+   empty=root/"empty"; empty.mkdir()
+   with self.assertRaisesRegex(ValueError,"evidence-empty-directory"):
+    R.evidence_digest(empty)
+   link=root/"link.md"; (root/"real.md").write_text("x\n",encoding="utf-8")
+   link.symlink_to(root/"real.md")
+   with self.assertRaisesRegex(ValueError,"evidence-symlink-not-attestable"):
+    R.evidence_digest(link)
+   # A FIFO is never read (it would block forever). With a real file beside it
+   # the tree is a deliverable, and the pipe is refused as a member.
+   fifo_dir=root/"fifo"; fifo_dir.mkdir(); os.mkfifo(fifo_dir/"pipe")
+   with self.assertRaisesRegex(ValueError,"evidence-no-regular-file"):
+    R.evidence_digest(fifo_dir)
+   (fifo_dir/"REPORT.md").write_text("body\n",encoding="utf-8")
+   with self.assertRaisesRegex(ValueError,"evidence-member-not-regular"):
+    R.evidence_digest(fifo_dir)
+   odd=root/"odd"; odd.mkdir()
+   (odd/os.fsdecode(b"na\xffme.md")).write_bytes(b"body\n")
+   self.assertNotEqual(R.evidence_digest(odd),"")     # non-UTF-8 name digests
+
+ def test_evidence_digest_names_a_file_or_a_directory(self):
+  # A worker's artifact is legitimately either shape. Before this, the envelope
+  # inspector rejected a directory and `write_completion_marker` would have died
+  # `IsADirectoryError` on `read_bytes()` had it got that far.
+  import hashlib
+  with tempfile.TemporaryDirectory() as tmp:
+   root=Path(tmp)
+   single=root/"report.md"; single.write_text("body\n",encoding="utf-8")
+   self.assertEqual(R.evidence_digest(single),
+                    hashlib.sha256(b"body\n").hexdigest())
+   bucket=root/"documents"; (bucket/"sub").mkdir(parents=True)
+   (bucket/"b.md").write_text("b\n",encoding="utf-8")
+   (bucket/"a.md").write_text("a\n",encoding="utf-8")
+   (bucket/"sub"/"c.md").write_text("c\n",encoding="utf-8")
+   first=R.evidence_digest(bucket)
+   self.assertEqual(first,R.evidence_digest(bucket))          # stable
+   self.assertNotEqual(first,R.evidence_digest(single))
+   (bucket/"a.md").write_text("a2\n",encoding="utf-8")
+   self.assertNotEqual(first,R.evidence_digest(bucket))       # content-sensitive
+   renamed=root/"documents2"; bucket.rename(renamed)
+   moved=R.evidence_digest(renamed)
+   (renamed/"a.md").write_text("a\n",encoding="utf-8")
+   self.assertEqual(first,R.evidence_digest(renamed))         # path-independent
+   self.assertNotEqual(first,moved)
+   # A symlink is recorded by its target text, never followed: a marker must
+   # describe the tree it was handed.
+   outside=root/"outside.md"; outside.write_text("secret\n",encoding="utf-8")
+   (renamed/"link.md").symlink_to(outside)
+   with_link=R.evidence_digest(renamed)
+   outside.write_text("changed\n",encoding="utf-8")
+   self.assertEqual(with_link,R.evidence_digest(renamed))
+
  def test_at1_reuses_exact_prefix_and_publishes_suffix_only(self):
   from unittest import mock
   with tempfile.TemporaryDirectory() as tmp:

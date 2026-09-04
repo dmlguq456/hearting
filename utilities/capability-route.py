@@ -41,7 +41,11 @@ from dispatch_contract import (
 from stage_session_contract import load_manifest
 from dispatch_degradation import record_degradation  # noqa: E402
 from dispatch_completion_join import materialize_after_terminal_close  # noqa: E402
-from codex_dispatch_terminal import REVIEW_BLOCKING_NOTE, inspect_terminal_attempt  # noqa: E402
+from codex_dispatch_terminal import (  # noqa: E402
+    REVIEW_BLOCKING_NOTE,
+    directory_artifact_reason,
+    inspect_terminal_attempt,
+)
 from replica_batch_contract import verify_manifest as verify_batch_manifest  # noqa: E402
 ORDER = {"direct":0,"quick":1,"standard":2,"strong":3,"thorough":4,"adversarial":5}
 TRACKING = {"tracked", "untracked"}
@@ -2516,7 +2520,7 @@ def _completion_marker_replay(route, node, node_id, evidence, axes, directory):
         return None
     existing=json.loads(canonical_path.read_text(encoding="utf-8"))
     identity={
-        "evidence_sha256":hashlib.sha256(evidence.read_bytes()).hexdigest(),
+        "evidence_sha256":evidence_digest(evidence),
         **axes,
     }
     existing_identity={
@@ -2543,11 +2547,61 @@ def _completion_marker_replay(route, node, node_id, evidence, axes, directory):
         raise ValueError("canonical completion marker history conflict")
     return existing
 
+def evidence_digest(evidence):
+    """One sha256 over an artifact that may be a file OR a directory of files.
+
+    A worker's artifact is legitimately either shape, and the envelope inspector
+    accepts both, so the marker has to be able to name either. A directory is
+    digested over its sorted root-relative paths and contents, so the value is
+    stable across runs and changes when any member does. Symlinks are recorded by
+    their target text and never followed: a marker must describe the tree it was
+    given, not wherever that tree points today.
+
+    Anything that cannot be attested raises rather than returning a digest. In
+    particular a path that is neither a file nor a directory raises instead of
+    yielding the empty-directory constant — otherwise "deleted before the gate"
+    and "empty at completion" would verify as the same artifact. A non-regular
+    member (FIFO, socket, device) is refused rather than read: reading a FIFO
+    blocks forever, and a completion digest must not be able to wedge.
+    """
+    path=Path(evidence)
+    if path.is_symlink():
+        raise ValueError(f"evidence-symlink-not-attestable:{path}")
+    if path.is_file():
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+    if not path.is_dir():
+        raise ValueError(f"evidence-not-a-file-or-directory:{path}")
+    # The SAME rule the envelope inspector applies, imported rather than
+    # restated: an empty or oversized directory must be refused at every door,
+    # including the documented manual `complete --evidence` one.
+    refusal=directory_artifact_reason(path)
+    if refusal:
+        raise ValueError(f"evidence-{refusal.removeprefix('artifact-')}:{path}")
+    digest=hashlib.sha256(b"artifact-directory-v1\0")
+    for child in sorted(path.rglob("*"), key=lambda item: item.relative_to(path).parts):
+        # `os.fsencode` and not `.encode("utf-8")`: a filename is bytes, and a
+        # non-UTF-8 name arrives surrogate-escaped and would raise on encode.
+        relative=os.fsencode(child.relative_to(path))
+        if child.is_symlink():
+            digest.update(b"L\0"+relative+b"\0"+os.fsencode(os.readlink(child)))
+        elif child.is_dir():
+            digest.update(b"D\0"+relative+b"\0")
+        elif child.is_file():
+            digest.update(b"F\0"+relative+b"\0")
+            try:
+                digest.update(hashlib.sha256(child.read_bytes()).digest())
+            except OSError as exc:
+                # Typed, never a traceback: this runs inside completion.
+                raise ValueError(f"evidence-member-unreadable:{child}") from exc
+        else:
+            raise ValueError(f"evidence-member-not-regular:{child}")
+    return digest.hexdigest()
+
 def write_completion_marker(route, node, node_id, evidence, *, attempt_id=None, attempt_metadata=None):
     _migrate_completion_dir_forward(route["route_id"])
     directory=completion_dir(route["route_id"])
     canonical_path=directory/f"{node_id}.json"
-    sha=hashlib.sha256(evidence.read_bytes()).hexdigest()
+    sha=evidence_digest(evidence)
     axes=_marker_attempt_axes(node, attempt_id, attempt_metadata)
     replayed=_completion_marker_replay(route,node,node_id,evidence,axes,directory)
     if replayed is not None:
@@ -2856,8 +2910,8 @@ def _marker_identity_row(route, node, node_id, gate, *, jobs=None):
         return {"passed": False, "reason": "completion-marker-identity-mismatch"}
     evidence = marker.get("evidence") or {}
     try:
-        digest = hashlib.sha256(Path(evidence["path"]).read_bytes()).hexdigest()
-    except (OSError, KeyError, TypeError):
+        digest = evidence_digest(Path(evidence["path"]))
+    except (OSError, KeyError, TypeError, ValueError):
         return {"passed": False, "reason": "completion-evidence-unreadable"}
     if digest != evidence.get("sha256"):
         return {"passed": False, "reason": "completion-evidence-hash-mismatch"}
@@ -2894,8 +2948,8 @@ def _arbitration_observation(route, group_id, error=None, *, path=None):
         return {"passed": False, "reason": "completion-marker-identity-mismatch"}
     evidence = record.get("evidence") or {}
     try:
-        digest = hashlib.sha256(Path(evidence["path"]).read_bytes()).hexdigest()
-    except (OSError, KeyError, TypeError):
+        digest = evidence_digest(Path(evidence["path"]))
+    except (OSError, KeyError, TypeError, ValueError):
         return {"passed": False, "reason": "completion-evidence-unreadable"}
     if digest != evidence.get("sha256"):
         return {"passed": False, "reason": "completion-evidence-hash-mismatch"}
@@ -2976,7 +3030,7 @@ def arbitrate_group(route, group_id, evidence):
         "auxiliary_findings_considered": list(considered),
         "evidence": {
             "path": str(evidence),
-            "sha256": hashlib.sha256(evidence.read_bytes()).hexdigest(),
+            "sha256": evidence_digest(evidence),
         },
     }
     path = arbitration_path(route["route_id"], group_id)
@@ -3016,7 +3070,7 @@ def _publish_completion_locked(
 
     _validate_auxiliary_arbiter(route, node, evidence)
     axes=_marker_attempt_axes(node,attempt_id,attempt_metadata)
-    evidence_sha=hashlib.sha256(evidence.read_bytes()).hexdigest()
+    evidence_sha=evidence_digest(evidence)
     attempt_path=(
         _attempt_completion_path(route,node_id,attempt_id)
         if attempt_id else None
@@ -4211,7 +4265,10 @@ def main():
             if a.command=="node": print(json.dumps(node,sort_keys=True))
             else:
                 evidence=Path(a.evidence).resolve()
-                if not evidence.is_file(): raise SystemExit("completion evidence missing")
+                # A completion artifact is one file or one directory of them; the
+                # envelope inspector accepts both and `evidence_digest` names both.
+                if not (evidence.is_file() or evidence.is_dir()):
+                    raise SystemExit("completion evidence missing")
                 # C-25b: check before completion runs, so a colliding `--output`
                 # neither overwrites the pre-existing file's bytes nor leaves a
                 # completion marker written behind a refused copy.
@@ -4248,4 +4305,6 @@ def main():
 
 if __name__=="__main__":
     try: main()
-    except (ValueError,TOPO.TopologyError) as exc: print(f"capability-route: {exc}",file=sys.stderr); raise SystemExit(64)
+    # OSError too: completion walks a worker-supplied tree, and a refusal there
+    # must be a typed line, never a traceback (review S-a).
+    except (ValueError,OSError,TOPO.TopologyError) as exc: print(f"capability-route: {exc}",file=sys.stderr); raise SystemExit(64)

@@ -272,7 +272,14 @@ class _TerminalCellFixture:
         self.jobs = base / "jobs.log"
         log = base / "child.codex.jsonl"
 
-        if artifact_kind == "dir":
+        if artifact_kind == "bucket":
+            # The ordinary shape of a real deliverable: a directory of files
+            # inside the artifact root (a cycle's document bucket).
+            bucket = self.root / "documents" / "2026-09-04_deliverable"
+            bucket.mkdir(parents=True, exist_ok=True)
+            (bucket / "REPORT.md").write_text("body\n", encoding="utf-8")
+            artifact = str(bucket)
+        elif artifact_kind == "dir":
             artifact = f"{self.root}/"
         elif artifact_kind == "file":
             artifact_path = self.root / "plan.alternative.md"
@@ -457,7 +464,10 @@ class TerminalHandoffMarkerBoundaryTest(unittest.TestCase):
 
 class InvalidEnvelopeChildDegradeTest(unittest.TestCase):
     """Supervisor-side cells: `close_finished_child` on a child whose envelope
-    can never legally complete (artifact not a readable in-root file). Pre-fix
+    can never legally complete. The fixture's invalid artifact is the artifact
+    ROOT itself, which is refused as `artifact-is-root` — a directory deliverable
+    inside the root is valid (a cycle document bucket is the ordinary shape), and
+    the root names no more than nothing does. Pre-fix
     it returned only a skip reason, the owner got an impossible remediation
     prompt, and the second resume raised owned-children-remain-open-after-resume
     — killing the whole pipeline (incident owner att-7eb9d956, exit 70).
@@ -477,7 +487,7 @@ class InvalidEnvelopeChildDegradeTest(unittest.TestCase):
             closed = cell.jobs.read_text(encoding="utf-8")
         self.assertIn("\tdone\t", closed)
         self.assertIn("note=dead-invalid-envelope", closed)
-        self.assertIn("reconcile_reason=terminal-invalid:artifact-missing", closed)
+        self.assertIn("reconcile_reason=terminal-invalid:artifact-is-root", closed)
 
     def test_quiescent_pass_without_artifact_closes_typed_dead(self):
         with tempfile.TemporaryDirectory() as td:
@@ -488,6 +498,22 @@ class InvalidEnvelopeChildDegradeTest(unittest.TestCase):
             closed = cell.jobs.read_text(encoding="utf-8")
         self.assertIn("note=dead-invalid-envelope", closed)
 
+    def test_a_directory_deliverable_is_not_degraded(self):
+        # The regression this cycle exists for: three depth-1 owners emitted a
+        # PASS envelope naming a document directory and were closed
+        # `dead-invalid-envelope`. A bucket inside the root must reach completion,
+        # not the degrade path.
+        with tempfile.TemporaryDirectory() as td:
+            cell = _TerminalCellFixture(td, artifact_kind="bucket", process="dead")
+            row = cell.child_row()
+            with mock.patch.dict(os.environ, {"AGENT_ARTIFACT_ROOT": str(cell.root)}):
+                outcome = J.close_finished_child(row, jobs=cell.jobs)
+            # It reaches route completion (which this fixture has no route for)
+            # instead of being refused as an invalid envelope.
+            self.assertEqual(outcome, "completion-rejected")
+            closed = cell.jobs.read_text(encoding="utf-8")
+        self.assertNotIn("note=dead-invalid-envelope", closed)
+
     def test_live_process_keeps_skip_and_row_open(self):
         # Never race a still-draining worker: with the exact process live the
         # skip reason is preserved and the row stays open.
@@ -495,7 +521,7 @@ class InvalidEnvelopeChildDegradeTest(unittest.TestCase):
             cell = _TerminalCellFixture(td, artifact_kind="dir", process="live")
             with mock.patch.dict(os.environ, {"AGENT_ARTIFACT_ROOT": str(cell.root)}):
                 outcome = J.close_finished_child(cell.child_row(), jobs=cell.jobs)
-            self.assertEqual(outcome, "terminal-invalid:artifact-missing")
+            self.assertEqual(outcome, "terminal-invalid:artifact-is-root")
             self.assertIn("\topen\t", cell.jobs.read_text(encoding="utf-8"))
 
     def test_unverifiable_process_keeps_row_open(self):
@@ -510,7 +536,7 @@ class InvalidEnvelopeChildDegradeTest(unittest.TestCase):
                              metadata=metadata)
             with mock.patch.dict(os.environ, {"AGENT_ARTIFACT_ROOT": str(cell.root)}):
                 outcome = J.close_finished_child(row, jobs=cell.jobs)
-            self.assertEqual(outcome, "terminal-invalid:artifact-missing")
+            self.assertEqual(outcome, "terminal-invalid:artifact-is-root")
             self.assertIn("\topen\t", cell.jobs.read_text(encoding="utf-8"))
 
     def test_valid_readable_artifact_still_routes_completion(self):

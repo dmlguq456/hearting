@@ -126,7 +126,10 @@ def _complete_exact_routed_attempt(jobs: Path, metadata: dict[str, str], complet
     if node is None:
         raise ValueError("route-node-unknown")
     evidence = Path(str(marker.get("evidence", {}).get("path", "")))
-    if not evidence.is_absolute() or not evidence.is_file():
+    # A deliverable is one file or one directory of them; this was the last gate
+    # that still said "file", so a directory-artifact marker re-driven here was
+    # refused. `complete_node` re-validates the shape anyway.
+    if not evidence.is_absolute() or not (evidence.is_file() or evidence.is_dir()):
         raise ValueError("completion-evidence-missing")
     ROUTE.complete_node(
         route,
