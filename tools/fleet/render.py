@@ -5262,11 +5262,13 @@ def _usage_header_rows(sessions, layout="wide", now=None, api_disabled=False,
     for s in sessions or ():
         freshness = getattr(s, "_usage_freshness", None)
         if (s.rl_5h is not None or s.rl_7d is not None or s.rl_ms
-                or getattr(s, "rl_windows", None) or freshness):
+                or getattr(s, "rl_windows", None) or freshness
+                or getattr(s, "_usage_error", None)):
             cur = rl.get(s.harness)
             if cur is None or (s.mtime or 0) > (cur[3] or 0):
                 rl[s.harness] = (s.rl_5h, s.rl_7d, s.rl_ms, s.mtime, s.rl_rs,
-                                 getattr(s, "rl_windows", None), freshness)
+                                 getattr(s, "rl_windows", None), freshness,
+                                 getattr(s, "_usage_error", None))
     # A quota snapshot is account-scoped.  It must remain visible when there is no current
     # process row for that harness (for example immediately after session cleanup).
     for harness, snapshot in (usage_snapshots or {}).items():
@@ -5278,16 +5280,17 @@ def _usage_header_rows(sessions, layout="wide", now=None, api_disabled=False,
         r5 = payload.get("rl_5h")
         r7 = payload.get("rl_7d")
         rms = payload.get("rl_ms")
+        err = payload.get("error")
         rwins = payload.get("rl_windows")
         if rwins is None:
             rwins = payload.get("windows")
-        if r5 is None and r7 is None and not rms and not rwins:
+        if r5 is None and r7 is None and not rms and not rwins and not err:
             continue
         observed_at = snapshot.get("observed_at")
         rl[harness] = (
             r5, r7, rms, observed_at,
             (payload.get("rs_5h"), payload.get("rs_7d")), rwins,
-            snapshot.get("freshness"),
+            snapshot.get("freshness"), err,
         )
     live = live_harnesses(sessions)
     if not rl and not live:
@@ -5310,7 +5313,13 @@ def _usage_header_rows(sessions, layout="wide", now=None, api_disabled=False,
                             else "no usage api — plan quota is console-only", "dim"))
             rows.append(row)
             continue
-        r5, r7, rms, _mt, rrs, rwins, freshness = rl[h]
+        r5, r7, rms, _mt, rrs, rwins, freshness, err = rl[h]
+        if err == "auth":
+            # 401/403 from the provider: the key is present but rejected (rotated,
+            # expired, wrong scope). Say so instead of a silently blank gauge.
+            row.append(("usage api — key rejected (401/403)", "dim"))
+            rows.append(row)
+            continue
         rs5, rs7 = (rrs or (None, None))[0], (rrs or (None, None))[1]
         gauges = ([(str(lbl) + " ", pct, reset) for lbl, pct, reset in rwins]
                   if rwins else [("5h ", r5, rs5), ("7d ", r7, rs7)])

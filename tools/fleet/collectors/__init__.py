@@ -282,6 +282,8 @@ def collect_all(harness_filter=None, jobs_path=None, usage="cache-only"):
             payload = snap.get("payload") or {}
             if not isinstance(payload, dict):
                 continue
+            if payload.get("error"):
+                usage_meta[harness]["error"] = payload.get("error")
             account_windows = payload.get("rl_windows")
             if account_windows is None:
                 account_windows = payload.get("windows")
@@ -301,6 +303,11 @@ def collect_all(harness_filter=None, jobs_path=None, usage="cache-only"):
                     s.rl_windows = None
                 if payload.get("rs_5h") or payload.get("rs_7d"):
                     s.rl_rs = (payload.get("rs_5h"), payload.get("rs_7d"))
+                if payload.get("error"):
+                    # Fetch-level failure class (e.g. opencode-go {"error": "auth"} —
+                    # key present but rejected). Render shows the cause instead of a
+                    # silently blank gauge.
+                    s._usage_error = payload.get("error")
                 s._usage_freshness = snap.get("freshness")
                 s._usage_observed_at = snap.get("observed_at")
     except Exception:

@@ -16,6 +16,7 @@ it rides rl_windows with its true label.
 import json
 import os
 import time
+import urllib.error
 import urllib.request
 
 _TTL = 180.0
@@ -23,6 +24,7 @@ _STALE_MAX = 900.0
 _cache = {"ts": 0.0, "ok_ts": 0.0, "data": None}
 
 _ENDPOINT = "https://opencode.ai/zen/go/v1/usage"
+_USER_AGENT = "opencode-fleet-usage/1"
 
 
 def _auth_path():
@@ -59,12 +61,23 @@ def _fetch():
     tok = _token()
     if not tok:
         return None
+    # Cloudflare in front of opencode.ai bans the default `Python-urllib/3.x`
+    # fingerprint with 403 "error code: 1010" (measured 2026-09-04: same key,
+    # same machine — 403 with the default UA, 200 with any explicit UA). An
+    # explicit User-Agent is therefore load-bearing here, not cosmetic.
     req = urllib.request.Request(
         _ENDPOINT, headers={"Authorization": "Bearer " + tok,
-                            "Content-Type": "application/json"})
+                            "Content-Type": "application/json",
+                            "User-Agent": _USER_AGENT})
     try:
         with urllib.request.urlopen(req, timeout=3) as r:
             d = json.load(r)
+    except urllib.error.HTTPError as e:
+        if e.code in (401, 403):
+            # key-present-but-rejected (rotated/expired/wrong scope) — a distinct
+            # state from a transient outage; the render shows "key rejected".
+            return {"error": "auth", "detail": e.code}
+        return None
     except Exception:
         return None
     windows_in = (d if isinstance(d, dict) else {}).get("usage")
@@ -90,14 +103,17 @@ def account_usage():
     """TTL-cached Go plan usage {rl_5h, rl_7d, rl_windows} for the opencode-go plan, or None.
 
     Serve stale data on failure so one timeout does not blank the gauges: a failed refresh
-    keeps the previous payload up to _STALE_MAX; only a 15min-long outage drops to None."""
+    keeps the previous payload up to _STALE_MAX; only a 15min-long outage drops the
+    honest state. Auth-reject payloads ({"error": "auth"} — key rotated/expired/rejected)
+    are served only after the same staleness ceiling, so a rejected key keeps showing the
+    last-known gauges (dimmed stale) before flipping to the explicit rejection state."""
     now = time.time()
     if now - _cache["ts"] > _TTL:
         d = _fetch()
         _cache["ts"] = now              # failures throttle too — no retry storm inside the TTL
-        if d is not None:
+        if isinstance(d, dict) and "error" not in d:
             _cache["data"] = d
             _cache["ok_ts"] = now
         elif now - _cache["ok_ts"] > _STALE_MAX:
-            _cache["data"] = None
+            _cache["data"] = d           # None (no key / transient) or the error marker
     return _cache["data"]
