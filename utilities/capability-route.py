@@ -2543,6 +2543,9 @@ def _completion_marker_replay(route, node, node_id, evidence, axes, directory):
         raise ValueError("canonical completion marker history conflict")
     return existing
 
+EVIDENCE_DIGEST_MAX_ENTRIES=20000
+EVIDENCE_DIGEST_MAX_BYTES=2*1024**3
+
 def evidence_digest(evidence):
     """One sha256 over an artifact that may be a file OR a directory of files.
 
@@ -2552,22 +2555,42 @@ def evidence_digest(evidence):
     stable across runs and changes when any member does. Symlinks are recorded by
     their target text and never followed: a marker must describe the tree it was
     given, not wherever that tree points today.
+
+    Anything that cannot be attested raises rather than returning a digest. In
+    particular a path that is neither a file nor a directory raises instead of
+    yielding the empty-directory constant — otherwise "deleted before the gate"
+    and "empty at completion" would verify as the same artifact. A non-regular
+    member (FIFO, socket, device) is refused rather than read: reading a FIFO
+    blocks forever, and a completion digest must not be able to wedge.
     """
     path=Path(evidence)
-    if path.is_file() and not path.is_symlink():
+    if path.is_symlink():
+        raise ValueError(f"evidence-symlink-not-attestable:{path}")
+    if path.is_file():
         return hashlib.sha256(path.read_bytes()).hexdigest()
+    if not path.is_dir():
+        raise ValueError(f"evidence-not-a-file-or-directory:{path}")
     digest=hashlib.sha256(b"artifact-directory-v1\0")
-    for child in sorted(
-        (item for item in path.rglob("*")), key=lambda item: str(item.relative_to(path))
-    ):
-        relative=str(child.relative_to(path)).encode("utf-8")
+    entries=0; total=0
+    for child in sorted(path.rglob("*"), key=lambda item: item.relative_to(path).parts):
+        entries+=1
+        if entries>EVIDENCE_DIGEST_MAX_ENTRIES:
+            raise ValueError(f"evidence-directory-too-many-entries:{path}")
+        # `os.fsencode` and not `.encode("utf-8")`: a filename is bytes, and a
+        # non-UTF-8 name arrives surrogate-escaped and would raise on encode.
+        relative=os.fsencode(child.relative_to(path))
         if child.is_symlink():
-            digest.update(b"L\0"+relative+b"\0"+os.readlink(child).encode("utf-8"))
+            digest.update(b"L\0"+relative+b"\0"+os.fsencode(os.readlink(child)))
         elif child.is_dir():
             digest.update(b"D\0"+relative+b"\0")
-        else:
+        elif child.is_file():
+            total+=child.stat().st_size
+            if total>EVIDENCE_DIGEST_MAX_BYTES:
+                raise ValueError(f"evidence-directory-too-large:{path}")
             digest.update(b"F\0"+relative+b"\0")
             digest.update(hashlib.sha256(child.read_bytes()).digest())
+        else:
+            raise ValueError(f"evidence-member-not-regular:{child}")
     return digest.hexdigest()
 
 def write_completion_marker(route, node, node_id, evidence, *, attempt_id=None, attempt_metadata=None):
@@ -2883,8 +2906,8 @@ def _marker_identity_row(route, node, node_id, gate, *, jobs=None):
         return {"passed": False, "reason": "completion-marker-identity-mismatch"}
     evidence = marker.get("evidence") or {}
     try:
-        digest = hashlib.sha256(Path(evidence["path"]).read_bytes()).hexdigest()
-    except (OSError, KeyError, TypeError):
+        digest = evidence_digest(Path(evidence["path"]))
+    except (OSError, KeyError, TypeError, ValueError):
         return {"passed": False, "reason": "completion-evidence-unreadable"}
     if digest != evidence.get("sha256"):
         return {"passed": False, "reason": "completion-evidence-hash-mismatch"}
@@ -2921,8 +2944,8 @@ def _arbitration_observation(route, group_id, error=None, *, path=None):
         return {"passed": False, "reason": "completion-marker-identity-mismatch"}
     evidence = record.get("evidence") or {}
     try:
-        digest = hashlib.sha256(Path(evidence["path"]).read_bytes()).hexdigest()
-    except (OSError, KeyError, TypeError):
+        digest = evidence_digest(Path(evidence["path"]))
+    except (OSError, KeyError, TypeError, ValueError):
         return {"passed": False, "reason": "completion-evidence-unreadable"}
     if digest != evidence.get("sha256"):
         return {"passed": False, "reason": "completion-evidence-hash-mismatch"}

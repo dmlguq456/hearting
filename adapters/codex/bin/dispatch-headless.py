@@ -1308,6 +1308,13 @@ def shell_command(args: argparse.Namespace, prompt_path: Path, log_path: Path) -
             "--add-dir",
             str(dispatch_state_root(args.jobs_path)),
         ]
+    else:
+        # Same rule as the sandboxed builder above: every attempt has to be able
+        # to record progress, so grant the two progress directories and nothing
+        # more. This branch serves one-shot and poll-fallback delivery, which the
+        # app-server builder never reaches.
+        for progress_dir in progress_writable_dirs(args):
+            cmd += ["--add-dir", str(progress_dir)]
     for writable_dir in nested_owner_writable_dirs(args):
         # Core read markers and Claude's Bash pre-exec snapshot are the only
         # home-scoped writes needed by a recursive standard+ Codex owner.

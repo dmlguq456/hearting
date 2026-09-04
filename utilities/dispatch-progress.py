@@ -36,7 +36,10 @@ from dispatch_contract import (  # noqa: E402
     validate_attempt_metadata,
 )
 from codex_dispatch_terminal import carrier_terminal_note  # noqa: E402
-from dispatch_completion_join import materialize_after_terminal_close  # noqa: E402
+from dispatch_completion_join import (  # noqa: E402
+    OWNER_ROUTE_NODE,
+    materialize_after_terminal_close,
+)
 
 KINDS = {"registry", "tool", "file", "artifact", "test", "terminal"}
 
@@ -164,7 +167,9 @@ def verification_process_digest(pid):
     return hashlib.sha256(raw).hexdigest()
 
 
-OWNER_PROGRESS_NODE = "_owner"
+# One definition of the owner node name, imported rather than restated: the
+# registry already calls an owner's node `_owner` for SD-111 delivery identity.
+OWNER_PROGRESS_NODE = OWNER_ROUTE_NODE
 
 
 def require_row(args):

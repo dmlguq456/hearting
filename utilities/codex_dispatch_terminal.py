@@ -391,6 +391,47 @@ def _resolve_safe_root(
     return root, "none"
 
 
+_ARTIFACT_MAX_ENTRIES = 20000
+
+
+def _directory_artifact_reason(artifact_path: Path, root: Path) -> str:
+    """Return a typed refusal for a directory that cannot stand as a deliverable.
+
+    An existing, readable directory is not by itself evidence of work. The
+    harness pre-creates the cycle's `artifacts/` directory before a worker's
+    first write (`artifact_producer.begin`) and exports that exact path as
+    `AGENT_ARTIFACT_OUTPUT_DIR`, so accepting any directory would let a worker
+    that produced nothing name the path it was handed and pass. Require at least
+    one readable regular file somewhere in the tree.
+
+    Members must also stay inside the artifact root. The completion marker
+    attests this tree, and a consumer that later copies or publishes it would
+    follow a symlink pointing out of the root.
+    """
+
+    # Access first: an unreadable directory yields nothing from `rglob` (it
+    # swallows PermissionError), which would read as "empty" instead of "cannot
+    # be read" and send an operator after the wrong problem.
+    if not os.access(artifact_path, os.R_OK | os.X_OK):
+        return "artifact-unreadable"
+    entries = 0
+    has_file = False
+    try:
+        for child in artifact_path.rglob("*"):
+            entries += 1
+            if entries > _ARTIFACT_MAX_ENTRIES:
+                return "artifact-directory-too-large"
+            try:
+                child.resolve(strict=False).relative_to(root)
+            except (OSError, ValueError):
+                return "artifact-member-outside-root"
+            if not has_file and child.is_file() and os.access(child, os.R_OK):
+                has_file = True
+    except OSError:
+        return "artifact-unreadable"
+    return "" if has_file else "artifact-empty-directory"
+
+
 def _encode_path(path: Path) -> str:
     return base64.urlsafe_b64encode(str(path).encode("utf-8")).decode("ascii").rstrip("=")
 
@@ -497,10 +538,23 @@ def inspect_terminal_attempt(
         # than naming nothing, and it would let any run "produce" the whole tree.
         # An artifact must be a real member of the root.
         names_root = artifact_path == root
-        readable = not names_root and (
+        directory_reason = ""
+        if not names_root and artifact_path.is_dir():
+            directory_reason = _directory_artifact_reason(artifact_path, root)
+        readable = not names_root and not directory_reason and (
             (artifact_path.is_file() and os.access(artifact_path, os.R_OK))
             or (artifact_path.is_dir() and os.access(artifact_path, os.R_OK | os.X_OK))
         )
+        if directory_reason:
+            return _result(
+                3,
+                "invalid",
+                str(parsed["source"]),
+                "-",
+                "missing",
+                "contract-violation",
+                reason=directory_reason,
+            )
         if not readable:
             return _result(
                 3,
