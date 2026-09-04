@@ -1,0 +1,1 @@
+../../../../../tools/fleet/collectors/zen_go_usage.py

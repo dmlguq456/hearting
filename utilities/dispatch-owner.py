@@ -523,7 +523,13 @@ def main(argv):
                               "--route-hash", binding.route_hash, "--route-node", binding.route_node,
                               "--registry-digest", binding.registry_digest, "--write-scope", binding.write_scope,
                               "--completion-gate", binding.completion_gate]
-                export_owner_route_env(child_env, binding)
+                # Deliberately NOT export_owner_route_env() here. The adapters
+                # treat "env binding present" as the discriminator for a
+                # standard+ owner and refuse `owner-route-binding-tuple-invalid`
+                # when a route file argument arrives alongside it. quick already
+                # carries its route through `--route-file`, which reaches the
+                # owner in the prompt; exporting the env as well killed every
+                # quick owner at launch (regression shipped in v2.109.2).
             else:
                 binding = validate_owner_route_binding(
                 route_evidence,

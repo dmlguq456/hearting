@@ -662,13 +662,23 @@ class RouteEvidenceOwnerHarnessTest(unittest.TestCase):
         self.assertEqual(env["AGENT_OWNER_ROUTE_ID"], binding.route_id)
         self.assertEqual(env["AGENT_OWNER_ROUTE_HASH"], binding.route_hash)
 
-    def test_both_binding_branches_publish_the_route_env(self):
-        """The quick and standard+ branches must not drift apart again."""
+    def test_quick_forwards_the_route_but_must_not_also_export_the_env(self):
+        """Both signals at once is what the adapters refuse.
+
+        The adapters read "env binding present" as "this is a standard+ owner"
+        and raise `owner-route-binding-tuple-invalid` if a route file argument
+        comes with it, so quick must pick exactly one channel. v2.109.2 set
+        both and every quick owner died at launch.
+        """
         source = Path(OWNER.__file__).read_text(encoding="utf-8")
         body = source.split("if route_data.get(\"effective_intensity\") == \"quick\":", 1)[1]
         quick, standard = body.split("else:", 1)
-        for branch, name in ((quick, "quick"), (standard, "standard+")):
-            self.assertIn("export_owner_route_env(child_env, binding)", branch, name)
+        self.assertIn('"--route-file", binding.route_file', quick)
+        code = "\n".join(
+            line for line in quick.splitlines() if not line.lstrip().startswith("#")
+        )
+        self.assertNotIn("export_owner_route_env(", code)
+        self.assertIn("export_owner_route_env(child_env, binding)", standard)
 
     def test_selector_only_option_never_reaches_the_wrapper(self):
         _, _, forwarded, evidence = OWNER._parse([

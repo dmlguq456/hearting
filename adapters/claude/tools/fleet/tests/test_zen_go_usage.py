@@ -1,0 +1,1 @@
+../../../../../tools/fleet/tests/test_zen_go_usage.py
