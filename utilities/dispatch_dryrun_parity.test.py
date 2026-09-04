@@ -15,6 +15,7 @@ import importlib.util
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -98,6 +99,24 @@ def _opencode_args(**overrides):
     return argparse.Namespace(**base)
 
 
+def _granted_dirs(command: str, flag: str) -> list[str]:
+    """Every value passed to `flag` in a rendered command, as exact paths.
+
+    Substring matching cannot tell a directory from its children: once the
+    progress grant added `<state root>/heartbeats`, `assertNotIn(state_root,
+    command)` matched the child and `assertIn(f"--add-dir {state_root}", …)`
+    would have been satisfied by the child alone. Both assertions stopped
+    measuring what they were written to measure. Compare tokens, not substrings.
+    """
+
+    tokens = shlex.split(command)
+    return [
+        tokens[index + 1]
+        for index, token in enumerate(tokens[:-1])
+        if token == flag
+    ]
+
+
 class CodexDryRunStartParity(unittest.TestCase):
     def test_exec_branch_command_is_identical_and_carries_state_root(self):
         dry = _codex_args(attempt_id=None, command_attempt_id=ATTEMPT, route_id="rt-parity-fixture")
@@ -107,16 +126,27 @@ class CodexDryRunStartParity(unittest.TestCase):
         start_cmd = CODEX.shell_command(start, prompt_path, log_path)
         self.assertEqual(dry_cmd, start_cmd)
         state_root = str(CODEX.dispatch_state_root(dry.jobs_path))
-        self.assertIn(f"--add-dir {state_root}", dry_cmd)
-        self.assertIn(f"--add-dir {state_root}", start_cmd)
+        self.assertIn(state_root, _granted_dirs(dry_cmd, "--add-dir"))
+        self.assertIn(state_root, _granted_dirs(start_cmd, "--add-dir"))
 
     def test_exec_branch_without_command_attempt_id_omits_state_root(self):
-        # Sanity control: the state-root grant genuinely depends on a preserved
-        # command_attempt_id, not on some other accidental condition.
+        # Sanity control: the WHOLE state-root grant genuinely depends on a
+        # preserved command_attempt_id, not on some other accidental condition.
+        # The two SD-58 progress directories are a separate, deliberately narrow
+        # grant that every attempt gets so it can heartbeat; they are children of
+        # the state root and must not be read as the state root itself.
         args = _codex_args(attempt_id=None, command_attempt_id=None)
         command = CODEX.shell_command(args, Path("/tmp/p.txt"), Path("/tmp/l.log"))
         state_root = str(CODEX.dispatch_state_root(args.jobs_path))
-        self.assertNotIn(state_root, command)
+        granted = _granted_dirs(command, "--add-dir")
+        self.assertNotIn(state_root, granted)
+        self.assertIn(f"{state_root}/heartbeats", granted)
+        self.assertIn(f"{state_root}/watchdog", granted)
+        # Nothing else under the state root is exposed by this branch.
+        self.assertEqual(
+            sorted(item for item in granted if item.startswith(state_root)),
+            sorted([f"{state_root}/heartbeats", f"{state_root}/watchdog"]),
+        )
 
     def test_app_server_branch_both_sides_carry_isolated_state_root(self):
         dry = _codex_args(
@@ -131,8 +161,8 @@ class CodexDryRunStartParity(unittest.TestCase):
         dry_cmd = CODEX.shell_command(dry, prompt_path, log_path)
         start_cmd = CODEX.shell_command(start, prompt_path, log_path)
         state_root = str(CODEX.dispatch_state_root(dry.jobs_path))
-        self.assertIn(f"--writable-root {state_root}", dry_cmd)
-        self.assertIn(f"--writable-root {state_root}", start_cmd)
+        self.assertIn(state_root, _granted_dirs(dry_cmd, "--writable-root"))
+        self.assertIn(state_root, _granted_dirs(start_cmd, "--writable-root"))
         self.assertEqual(_normalize(dry_cmd, ATTEMPT), _normalize(start_cmd, ATTEMPT))
 
     def test_writer_attempt_token_matches_command_attempt_id_on_both_sides(self):
