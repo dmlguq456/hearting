@@ -6,7 +6,7 @@ import threading
 import time
 
 SCHEMA_VERSION = 1
-FRESH_WINDOWS = {"claude": 180.0, "codex": 60.0}
+FRESH_WINDOWS = {"claude": 180.0, "codex": 60.0, "opencode": 180.0}
 STALE_MAX = 900.0
 RETRY_AFTER = 60.0
 LEASE_MAX = 60.0
@@ -42,6 +42,9 @@ def _fetcher(harness):
         if harness == "codex":
             from . import codex
             return codex.account_usage
+        if harness == "opencode":
+            from . import zen_go_usage
+            return zen_go_usage.account_usage
     except Exception:
         return None
     return None
@@ -173,4 +176,10 @@ def _fetch_codex():
     return codex.account_usage()
 
 
-FETCHERS.update({"claude": _fetch_claude, "codex": _fetch_codex})
+def _fetch_opencode():
+    from . import zen_go_usage
+    return zen_go_usage.account_usage()
+
+
+FETCHERS.update({"claude": _fetch_claude, "codex": _fetch_codex,
+                 "opencode": _fetch_opencode})

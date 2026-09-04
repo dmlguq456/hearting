@@ -196,6 +196,7 @@ class F51UsageCacheTest(unittest.TestCase):
             "claude": {"payload": {"rl_5h": 31, "rl_7d": 81},
                        "freshness": "fresh", "observed_at": 1000},
             "codex": {"payload": None, "freshness": "unknown", "observed_at": None},
+            "opencode": {"payload": None, "freshness": "unknown", "observed_at": None},
         }
         with tempfile.TemporaryDirectory() as jobs_tmp, \
              mock.patch.object(procscan, "scan", return_value=[]), \
@@ -208,6 +209,7 @@ class F51UsageCacheTest(unittest.TestCase):
             {"rl_5h": 31, "rl_7d": 81},
             collectors.collect_all.last_usage_snapshots["claude"]["payload"],
         )
+        self.assertIn("opencode", collectors.collect_all.last_usage_snapshots)
 
     def test_collect_all_replaces_stale_codex_window_label_from_account_cache(self):
         from fleet import collectors
@@ -221,6 +223,7 @@ class F51UsageCacheTest(unittest.TestCase):
             "codex": {"payload": {"rl_5h": None, "rl_7d": 48,
                                    "windows": [["7d", 48, 2000]]},
                       "freshness": "fresh", "observed_at": 1000},
+            "opencode": {"payload": None, "freshness": "unknown", "observed_at": None},
         }
         with tempfile.TemporaryDirectory() as jobs_tmp, \
              mock.patch.object(procscan, "scan", return_value=[session]), \

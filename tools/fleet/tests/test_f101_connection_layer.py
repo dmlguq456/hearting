@@ -234,7 +234,11 @@ class LedgerAbsentByteIdenticalTest(unittest.TestCase):
     """F-101g-(7) — with no connection-layer fields set at all (ledger absent), a
     fixed 3-session render must stay byte-identical to the pre-F-101 golden captured
     on `a1f16631` (see plan.md §5, procedure step 3). These goldens are never
-    regenerated here; a mismatch is a real regression, not a stale fixture."""
+    regenerated here; a mismatch is a real regression, not a stale fixture.
+    Exception on record: 2026-09-04 the opencode row's source-absence message was
+    corrected ("plan quota is console-only" → "opencode-go key not found") after the
+    Go usage API shipped upstream (#31084/PR #2879) — the four r7 goldens were
+    regenerated with the exact capture procedure above for that intentional change."""
 
     def _render(self, width):
         with mock.patch("time.time", return_value=1700000000.0):

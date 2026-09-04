@@ -273,7 +273,7 @@ def collect_all(harness_filter=None, jobs_path=None, usage="cache-only"):
     usage_snapshots = {}
     try:
         from . import usage_cache
-        for harness in ("claude", "codex"):
+        for harness in ("claude", "codex", "opencode"):
             if harness_filter is not None and harness not in set(harness_filter):
                 continue
             snap = usage_cache.account_usage(harness, usage=usage if usage == "refresh" else "cache-only")

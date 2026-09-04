@@ -297,4 +297,5 @@ def enrich(sess):
             )
     if isinstance(tupd, (int, float)):
         sess.mtime = tupd / 1000.0                  # ms → s
-    # rl_5h / rl_7d: opencode has no rate-limit column → left None ('—').
+    # rl_5h / rl_7d: the Go plan account quota rides the usage cache (collectors
+    # __init__ account-usage loop) — nothing per-session here stays None.

@@ -5254,9 +5254,9 @@ def _usage_header_rows(sessions, layout="wide", now=None, api_disabled=False,
     """Build account usage rows independently of the main line builder.
 
     F-51c: `api_disabled` (user opted out via FLEET_DISABLE=usage-api / --no-usage-api) is
-    "the user turned it off" — distinct from opencode's "no usage api" (structurally no
-    source). A claude/codex harness with no passive-tap value while opted out renders as an
-    unknown gauge (blank track + `—`), never the opencode-only opt-out sentence.
+    "the user turned it off" — distinct from a harness with no usage source (opencode without
+    an opencode-go key). A claude/codex harness with no passive-tap value while opted out
+    renders as an unknown gauge (blank track + `—`), never the source-absence sentence.
     """
     rl = {}
     for s in sessions or ():
@@ -5306,7 +5306,8 @@ def _usage_header_rows(sessions, layout="wide", now=None, api_disabled=False,
                 row += [("·" * _GAUGE_W, "dim"), ("   —", "dim")]
                 row.append(("]", "dim"))
             else:
-                row.append(("no usage api — plan quota is console-only", "dim"))
+                row.append(("no usage api — opencode-go key not found" if h == "opencode"
+                            else "no usage api — plan quota is console-only", "dim"))
             rows.append(row)
             continue
         r5, r7, rms, _mt, rrs, rwins, freshness = rl[h]
