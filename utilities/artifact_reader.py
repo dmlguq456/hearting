@@ -30,6 +30,7 @@ import artifact_cutover as C  # noqa: E402
 import artifact_locator  # noqa: E402
 import artifact_resplit as RS  # noqa: E402
 import artifact_relayout as RL  # noqa: E402
+import artifact_residue as RES  # noqa: E402
 
 LEGACY_BUCKETS = ("plans", "spec", "research", "documents", "analysis_project", "experiments", "designs")
 SHARED_KIND_FOR_BUCKET = {"spec": "spec", "analysis_project": "analysis", "research": "research"}
@@ -147,9 +148,9 @@ def resplit_hold(root: Path) -> Optional[Dict[str, object]]:
 
 
 def migration_hold(root: Path) -> Optional[Dict[str, object]]:
-    """Any nonterminal migration journal: W7G resplit (D-77-a) or W7I relayout
-    (A-17.8). Readers and gates treat both as typed `in-progress`."""
-    return RL.migration_hold(Path(root))
+    """Any nonterminal migration journal: W7G resplit (D-77-a), W7I relayout
+    (A-17.8) or W7H residue. Readers and gates treat all as typed `in-progress`."""
+    return RES.migration_hold(Path(root))
 
 
 def _emit(payload) -> None:
