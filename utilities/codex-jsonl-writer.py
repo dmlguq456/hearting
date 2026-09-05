@@ -59,6 +59,18 @@ def run(log: Path, attempt: str, argv: list[str]) -> int:
     usage_path = _usage_path(log, attempt)
     child = subprocess.Popen(argv, stdin=sys.stdin, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     found_usage: dict[str, int] = {}
+    # Defect L: this log is a live feed, not just a post-mortem record. Fleet's
+    # `_parse_codex_attempt_tail` reads it while the child runs to recover the
+    # thread id (and from there the rollout that carries the context window).
+    # Python's default 8 KiB block buffer kept a real attempt log at 0 bytes for
+    # 19 minutes while the child streamed one long response, so Fleet found no
+    # `thread.started`, never reached the rollout fallback, and rendered no ctx.
+    #
+    # Buffered plus an explicit per-line flush, NOT `buffering=0`: the unbuffered
+    # form returns a raw `FileIO` whose `write()` may legally short-write, and the
+    # return value here is ignored. This log lives on an NFS mount, where that
+    # guarantee is weakest. Keeping the BufferedWriter keeps its short-write loop;
+    # the flush gives the same visibility.
     with log.open("ab") as out:
         assert child.stdout is not None
         for raw in iter(child.stdout.readline, b""):
@@ -68,9 +80,11 @@ def run(log: Path, attempt: str, argv: list[str]) -> int:
                 event = json.loads(line.decode("utf-8"))
             except (UnicodeDecodeError, json.JSONDecodeError):
                 out.write(raw)
+                out.flush()
                 continue
             if not isinstance(event, dict):
                 out.write(raw)
+                out.flush()
                 continue
             if "timestamp" not in event:
                 event["timestamp"] = _timestamp()
@@ -78,6 +92,7 @@ def run(log: Path, attempt: str, argv: list[str]) -> int:
             if usage:
                 found_usage.update(usage)
             out.write((json.dumps(event, ensure_ascii=False, separators=(",", ":")) + ending.decode("ascii", "ignore")).encode("utf-8"))
+            out.flush()
         child.wait()
     if usage_path is not None and found_usage:
         tmp = usage_path.with_suffix(usage_path.suffix + ".tmp")

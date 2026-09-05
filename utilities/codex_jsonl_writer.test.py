@@ -89,6 +89,49 @@ class CodexJsonlWriterTests(unittest.TestCase):
             self.assertEqual(WRITER.run(log, "", [sys.executable, "-c", code]), 0)
             self.assertEqual(log.read_bytes(), b"\xff\xfe\n")
 
+    def test_events_are_visible_on_disk_while_the_child_is_still_alive(self):
+        # Defect L: every other test in this file reads the log only after the
+        # child exits, so an 8 KiB block buffer passed all of them while Fleet
+        # saw a 0-byte log for 19 minutes. The child here emits one small event,
+        # then blocks on a file that only appears once the test has observed
+        # that event on disk -- so the assertion can only pass if the writer put
+        # it there before the child ended.
+        import threading, time
+        with tempfile.TemporaryDirectory() as td:
+            log = Path(td) / "live.jsonl"
+            release = Path(td) / "release"
+            code = (
+                "import json,sys,time\n"
+                "print(json.dumps({'type':'thread.started','thread_id':'th-live'},separators=(',',':')),flush=True)\n"
+                f"deadline=time.time()+30\n"
+                f"while not __import__('os').path.exists({str(release)!r}) and time.time()<deadline: time.sleep(0.02)\n"
+            )
+            result: dict[str, object] = {}
+            worker = threading.Thread(
+                target=lambda: result.setdefault(
+                    "rc", WRITER.run(log, "att-live", [sys.executable, "-c", code])
+                )
+            )
+            worker.start()
+            try:
+                observed = None
+                deadline = time.time() + 20
+                while time.time() < deadline:
+                    if log.exists() and log.read_bytes():
+                        observed = log.read_text()
+                        break
+                    time.sleep(0.02)
+                self.assertIsNotNone(observed, "attempt log stayed empty while the child was alive")
+                event = json.loads(observed.splitlines()[0])
+                self.assertEqual(event["thread_id"], "th-live")
+                self.assertIn("timestamp", event)
+                self.assertTrue(worker.is_alive(), "child exited before the liveness assertion")
+            finally:
+                release.write_text("go")
+                worker.join(timeout=40)
+            self.assertFalse(worker.is_alive())
+            self.assertEqual(result["rc"], 0)
+
     def test_final_partial_line_without_trailing_newline_is_kept(self):
         with tempfile.TemporaryDirectory() as td:
             log = Path(td) / "x.jsonl"
