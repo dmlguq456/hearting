@@ -195,7 +195,8 @@ class ActivateAndBeginTest(ProducerTestBase):
         campaign = P.read_campaign(self.root, result["campaign_id"])
         self.assertEqual(cycle_dir.parent, self.root / "campaigns" / campaign["locator"])
         self.assertNotIn("cycles", cycle_dir.relative_to(self.root).parts)
-        self.assertEqual(cycle_dir.name, "2026-09-04_w7i-test")
+        record = P.read_cycle_record(self.root, result["cycle_id"])
+        self.assertEqual(cycle_dir.name, f"{record['started_on'][:10]}_w7i-test")
         self.assertTrue((cycle_dir / "artifacts").is_dir())
         self.assertEqual(sorted(os.listdir(cycle_dir)), [".cycle.json", "artifacts"])
         binding = json.loads((cycle_dir / ".cycle.json").read_text())
@@ -250,8 +251,9 @@ class ActivateAndBeginTest(ProducerTestBase):
             results.append(result)
         records = [P.read_cycle_record(self.root, row["cycle_id"]) for row in results]
         self.assertEqual([row["locator_suffix"] for row in records], ["", "-2", "-3"])
+        day = records[0]["started_on"][:10]
         self.assertEqual([Path(row["cycle_dir"]).name for row in results], [
-            "2026-09-04_same-name", "2026-09-04_same-name-2", "2026-09-04_same-name-3",
+            f"{day}_same-name", f"{day}_same-name-2", f"{day}_same-name-3",
         ])
         resumed = P.begin(
             self.root, route_file=routes[2][1], capability="autopilot-code", intensity="direct")

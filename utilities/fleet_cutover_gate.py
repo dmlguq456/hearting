@@ -19,6 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import artifact_cutover as C  # noqa: E402
 import artifact_producer as P  # noqa: E402
 import artifact_resplit as RS  # noqa: E402
+import artifact_relayout as RL  # noqa: E402
 
 SCHEMA_VERSION = 1
 KIND = "fleet-cutover-gate/v1"
@@ -167,6 +168,25 @@ def _empty_resplit_fields() -> Dict[str, Any]:
     return {
         "lumped_cycles_remaining": None, "lump_index_state": None,
         "legacy_top_level_retired": False, "resplit_hold": None, "supersession_divergent": [],
+        **_empty_relayout_fields(),
+    }
+
+
+def _empty_relayout_fields() -> Dict[str, Any]:
+    return {"readable_layout": None, "legacy_campaign_dirs": None, "legacy_cycle_dirs": None,
+            "relayout_hold": None, "transition_window": None}
+
+
+def _relayout_fields(root: Path) -> Dict[str, Any]:
+    """W7I A-17.8 read-only view: legacy-shaped directories left, the typed
+    relayout hold if a run is nonterminal, and the D-91 transition window."""
+    view = RL.status(root)
+    return {
+        "readable_layout": view["readable_layout"],
+        "legacy_campaign_dirs": view["legacy_campaign_dirs"],
+        "legacy_cycle_dirs": view["legacy_cycle_dirs"],
+        "relayout_hold": view["relayout_hold"],
+        "transition_window": view["transition_window"],
     }
 
 
@@ -248,16 +268,19 @@ def legacy_top_level_retired(root: Path) -> bool:
 def _resplit_fields(root: Path) -> Dict[str, Any]:
     hold = RS.resplit_hold(root)
     retired = legacy_top_level_retired(root)
+    relayout = _relayout_fields(root)
     if hold is not None:
         return {
             "lumped_cycles_remaining": None, "lump_index_state": "resplit-in-progress",
             "legacy_top_level_retired": retired, "resplit_hold": hold, "supersession_divergent": [],
+            **relayout,
         }
     scan = RS.scan_lumps(root)
     if scan.get("invalid"):
         return {
             "lumped_cycles_remaining": None, "lump_index_state": "lump-report-invalid",
             "legacy_top_level_retired": retired, "resplit_hold": None, "supersession_divergent": [],
+            **relayout,
         }
     display = RS.lump_display_state(root)
     return {
@@ -265,6 +288,7 @@ def _resplit_fields(root: Path) -> Dict[str, Any]:
         "lump_index_state": display["lump_index_state"],
         "legacy_top_level_retired": retired, "resplit_hold": None,
         "supersession_divergent": display["divergent"],
+        **relayout,
     }
 
 
@@ -408,7 +432,7 @@ def _apply_waivers(rows: Sequence[Dict[str, Any]], waivers_payload: Optional[Map
 
 
 def evaluate(rows: Sequence[Mapping[str, Any]], *, waived: bool,
-            require_resplit: bool = False) -> Tuple[str, List[Dict[str, str]]]:
+            require_resplit: bool = False, require_relayout: bool = False) -> Tuple[str, List[Dict[str, str]]]:
     blocking: List[Dict[str, str]] = []
     for row in rows:
         base_passed = row.get("state") == "active" and row.get("probe", {}).get("passed") is True
@@ -416,7 +440,14 @@ def evaluate(rows: Sequence[Mapping[str, Any]], *, waived: bool,
         if require_resplit:
             resplit_passed = (row.get("lumped_cycles_remaining") == 0
                               and row.get("legacy_top_level_retired") is True)
-        if base_passed and resplit_passed:
+        relayout_passed = True
+        if require_relayout:
+            # A-17: no legacy-shaped directory left, no nonterminal run, and the
+            # D-91 transition window closed by a completed relayout.
+            relayout_passed = (row.get("readable_layout") == "readable"
+                               and row.get("relayout_hold") is None
+                               and row.get("transition_window") == "closed")
+        if base_passed and resplit_passed and relayout_passed:
             continue
         waiver = row.get("waiver") or {}
         if waived and waiver.get("status") == "accepted":
@@ -425,8 +456,10 @@ def evaluate(rows: Sequence[Mapping[str, Any]], *, waived: bool,
             reason = row.get("reason") or row.get("state")
         elif not base_passed:
             reason = "negative-probe-failed"
-        else:
+        elif not resplit_passed:
             reason = "resplit-incomplete"
+        else:
+            reason = "relayout-incomplete"
         blocking.append({"repo_path": row["repo_path"], "state": row.get("state"), "reason": reason})
     return ("incomplete" if blocking else "complete"), blocking
 
@@ -514,6 +547,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     p.add_argument("--output")
     p.add_argument("--timeout", type=float, default=RESOLVE_TIMEOUT_DEFAULT)
     p.add_argument("--require-resplit", action="store_true")
+    p.add_argument("--require-relayout", action="store_true")
 
     args = parser.parse_args(argv)
     try:
@@ -537,7 +571,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             waivers_payload, waivers_digest = load_waivers(Path(args.waivers))
         waivers_result = _apply_waivers(rows, waivers_payload, now=None)
         verdict, blocking = evaluate(rows, waived=waivers_payload is not None,
-                                     require_resplit=args.require_resplit)
+                                     require_resplit=args.require_resplit,
+                                     require_relayout=args.require_relayout)
         payload = _build_payload(
             command="complete", roster=roster, roster_digest=roster_digest,
             roster_path=str(args.roster), rows=rows,

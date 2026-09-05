@@ -350,6 +350,26 @@ def is_active(root: Path) -> bool:
     return read_cutover(root).get("state") == "active"
 
 
+RELAYOUT_STATE_NAME = "relayout.json"
+
+
+def relayout_state_path(root: Path) -> Path:
+    return producer_dir(root) / RELAYOUT_STATE_NAME
+
+
+def read_relayout_state(root: Path) -> Dict[str, Any]:
+    """W7I Cycle B per-root state. Absent means the D-91 transition window is
+    still open (slugless pre-W7I routes are named by derivation, not refused)."""
+    value = _read_json(relayout_state_path(root))
+    if value is None:
+        return {"state": "pending", "transition_window": "open"}
+    return value
+
+
+def transition_window_closed(root: Path) -> bool:
+    return read_relayout_state(root).get("transition_window") == "closed"
+
+
 def _is_runtime_owned_top_level(name: str) -> bool:
     return name.startswith(".") or name in RUNTIME_OWNED_EXACT
 
@@ -817,18 +837,22 @@ def _env_for(root: Path, record: Mapping[str, Any]) -> Dict[str, str]:
 
 def _route_naming(
     route: Mapping[str, Any], campaign: Optional[Mapping[str, Any]],
-    *, title: Optional[str], goal: Optional[str],
+    *, title: Optional[str], goal: Optional[str], root: Optional[Path] = None,
 ) -> Tuple[str, str, str, bool]:
     """Return canonical slug, display title, source, and truncation fact.
 
     Slugless records are pre-W7I routes.  During the explicit transition
     window they remain usable and are marked so migration can distinguish
-    them from routes that sealed a slug.
+    them from routes that sealed a slug.  D-91 closes that window when the
+    root's relayout completes; from then on a slugless route is a typed
+    refusal, never a silent derived name.
     """
     route_slug = route.get("slug")
     if isinstance(route_slug, str) and route_slug:
         slug, normalized_truncated = artifact_locator.slugify(route_slug)
         return slug, str(title or slug), "route", bool(route.get("slug_truncated")) or normalized_truncated
+    if root is not None and transition_window_closed(root):
+        raise ProducerError("route-slug-missing", str(route.get("route_id") or "route"))
     candidates = []
     if campaign is not None:
         candidates.extend((campaign.get("slug"), campaign.get("title")))
@@ -948,7 +972,7 @@ def begin(
                 campaign = read_campaign(root, parent["campaign_id"])
         campaign_created = False
         slug, display_title, slug_source, slug_truncated = _route_naming(
-            route, campaign, title=title, goal=goal)
+            route, campaign, title=title, goal=goal, root=root)
         started_on = _rfc3339(now)
         if campaign is None:
             new_campaign_id = alloc.allocate("campaign")

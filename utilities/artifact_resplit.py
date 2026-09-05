@@ -329,6 +329,14 @@ def scan_lumps(root: Path, *, root_slug: Optional[str] = None) -> Dict[str, Any]
         except ValueError:
             invalid.append({"lump_cycle_id": cycle_id, "code": "lump-report-invalid", "detail": "cycle-dir-outside-root"})
             continue
+        if not (cdir / "manifest.json").is_file():
+            # D-88: the report's absolute path is a display value frozen at
+            # seal time; after the W7I relayout the record (via its locator
+            # binding) says where the sealed lump lives now.
+            try:
+                cdir = P.cycle_dir(root, campaign_id, cycle_id)
+            except P.ProducerError:
+                pass
         manifest_digest = _lump_manifest_digest(cdir)
         record = P.read_cycle_record(root, cycle_id)
         if manifest_digest is None or record is None or record.get("manifest_digest") != manifest_digest:
@@ -842,6 +850,24 @@ def _stage_session_residue(root: Path) -> List[str]:
     )
 
 
+def _journal_cycle_dir(root: Path, cyc: Dict[str, Any], record: Optional[Dict[str, Any]] = None) -> Path:
+    """A journal's absolute ``cycle_dir`` is a display value frozen when the run
+    executed. Once the W7I relayout has moved the cycle, the record (D-88) says
+    where it lives; the frozen path is only trusted while it still holds the
+    manifest, so an audit never reports "clean" merely because it looked at an
+    empty old location."""
+    frozen = Path(cyc["cycle_dir"])
+    if (frozen / "manifest.json").is_file():
+        return frozen
+    record = record or P.read_cycle_record(root, cyc["cycle_id"])
+    if record is None:
+        return frozen
+    try:
+        return P.cycle_dir(root, record["campaign_id"], cyc["cycle_id"], record)
+    except (P.ProducerError, KeyError):
+        return frozen
+
+
 def resplit_deviations(root: Path, *, lump_cycle_id: Optional[str] = None) -> Dict[str, Any]:
     """Read-only audit of what an already-executed resplit run actually produced.
 
@@ -882,7 +908,7 @@ def resplit_deviations(root: Path, *, lump_cycle_id: Optional[str] = None) -> Di
         record = P.read_cycle_record(root, cyc["cycle_id"])
         if record is None:
             continue
-        manifest = P._read_json(Path(cyc["cycle_dir"]) / "manifest.json") or {}
+        manifest = P._read_json(_journal_cycle_dir(root, cyc, record) / "manifest.json") or {}
         sealed_cycle = manifest.get("cycle") or {}
         key = cyc.get("cycle_key") or record.get("cycle_key")
         got = sealed_cycle.get("started_on") or record.get("started_on")
