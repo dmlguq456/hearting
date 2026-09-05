@@ -1327,11 +1327,10 @@ def hook_main(payload: dict[str, Any], agent_home: Path) -> int:
                 # which is exactly what just failed. Say why, once, on stderr.
                 if str(exc) == "route-closed":
                     print(
-                        "material-route-guard: bind skipped — that route is already "
-                        "closed. Its outcome sidecar is still beside the record; a "
-                        "recompile of an identical request reproduces the same "
-                        "route id. Change an input (e.g. --slug) or retire the "
-                        "sidecar before rebinding.",
+                        "material-route-guard: bind skipped — that route was "
+                        "already closed when this compile ran, so its closure was "
+                        "not retired. Recompile (an identical request reopens the "
+                        "same route id and retires the stale closure), then bind.",
                         file=sys.stderr,
                     )
             except (OSError, subprocess.SubprocessError):

@@ -1337,9 +1337,11 @@ class MaterialRouteGuardTest(unittest.TestCase):
         sidecar = self.route.with_name(self.route.stem + ".outcome.json")
         self.assertFalse(sidecar.exists())
         # The closure is retired, not destroyed: it recorded a real cycle.
-        self.assertEqual(
-            len(list(sidecar.parent.glob(f"{self.route.stem}.outcome.superseded-*.json"))), 1
-        )
+        retired = list(sidecar.parent.glob(f"{self.route.stem}.superseded-*.outcome.json"))
+        self.assertEqual(len(retired), 1)
+        # The suffix must stay `.outcome.json` or five scanners misread the
+        # retained closure as an open/malformed route and plan it as residue.
+        self.assertTrue(retired[0].name.endswith(".outcome.json"))
         self.assertEqual(self.bind().returncode, 0)
         self.assertEqual(
             self.guard("--tool", "Edit", "--file", str(self.repo / "app.py")).returncode, 0

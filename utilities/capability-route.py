@@ -2336,12 +2336,27 @@ def retire_stale_closure(route_file):
         return None
     from datetime import datetime, timezone
     stamp=datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    retired=sidecar.with_name(f"{sidecar.stem}.superseded-{stamp}.json")
+    # The suffix stays `.outcome.json`. Five scanners filter on exactly that
+    # (`fleet_cutover_gate.route_bookkeeping`, `route_status`'s diagnostics,
+    # `artifact_cutover`'s route population, `artifact_lifecycle`,
+    # `artifact_resplit`), so a `.superseded-<ts>.json` tail made a retired
+    # closure read as an open route, as a malformed record, and as
+    # `migrate-residue` — which would relocate the very history this keeps.
+    # `<route_id>.superseded-<ts>.outcome.json` cannot collide with a real
+    # `outcome_path()`: no route file `<route_id>.superseded-<ts>.json` exists.
+    base=route_file.stem
+    retired=sidecar.with_name(f"{base}.superseded-{stamp}.outcome.json")
     index=1
     while retired.exists():
         index+=1
-        retired=sidecar.with_name(f"{sidecar.stem}.superseded-{stamp}-{index}.json")
-    os.replace(sidecar,retired)
+        retired=sidecar.with_name(f"{base}.superseded-{stamp}-{index}.outcome.json")
+    try:
+        os.replace(sidecar,retired)
+    except FileNotFoundError:
+        # A concurrent identical compile retired it first. `write_once` has
+        # already succeeded, so dying here would fail a compile over a race on
+        # bookkeeping.
+        return None
     return retired
 
 def outcome_path(route_file):
