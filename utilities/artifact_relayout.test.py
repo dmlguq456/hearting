@@ -467,6 +467,34 @@ class ReviewRegressionTests(RelayoutFixture):
         self.assertEqual(RL.run_dirs(self.root), [])
 
 
+class ResplitLumpReportTests(RelayoutFixture):
+    """The W7C lump report freezes an absolute cycle_dir; the gate must still
+    find the sealed lump after the relayout moved it (hearting canary finding)."""
+
+    def test_scan_lumps_resolves_moved_lump_through_records(self):
+        import artifact_resplit as RS
+        _route, sealed = self.cycle(slug="lump", title="W7C delta migration", campaign_key="w7c-delta-migration")
+        self.legacyize(keep_titles=True)
+        old_dir = self.root / "campaigns" / sealed["campaign_id"] / "cycles" / sealed["cycle_id"]
+        run_dir = C.migrations_dir(self.root) / f"20260826T000000Z-{sealed['cycle_id']}"
+        run_dir.mkdir(parents=True)
+        (run_dir / "report.json").write_bytes(P._json_bytes({
+            "schema_version": 1, "kind": RS.LUMP_REPORT_KIND, "state": "sealed",
+            "cycle_id": sealed["cycle_id"], "campaign_id": sealed["campaign_id"],
+            "cycle_dir": str(old_dir), "artifact_root": str(self.root),
+        }))
+        self.assertEqual(RS.scan_lumps(self.root)["invalid"], [])
+        self.apply()
+        self.assertFalse(old_dir.exists())
+        scan = RS.scan_lumps(self.root)
+        self.assertEqual(scan["invalid"], [], scan)
+        self.assertEqual(len(scan["lumps"]), 1)
+        row = {"repo_path": "/x", "state": "active", "probe": {"passed": True},
+               **G._resplit_fields(self.root)}
+        self.assertEqual(row["lump_index_state"], "ok", row)
+        self.assertEqual(row["readable_layout"], "readable")
+
+
 class NamingTests(RelayoutFixture):
     """A-17.7: every D-92 priority fires once and is journaled."""
 
