@@ -2315,6 +2315,50 @@ def atomic_write(path, payload):
 OUTCOME_SCHEMA_VERSION=3
 PUBLICATION_RESULTS=frozenset({"not-offered","skipped","succeeded","failed"})
 
+def retire_stale_closure(route_file):
+    """Move a previous cycle's closure sidecar aside when this identity reopens.
+
+    `route_hash` is a pure function of the compile request, so recompiling an
+    identical request at the same HEAD reproduces the same `route_id` and the
+    same canonical path — and `write_once` returns quietly because the bytes
+    match. The route is therefore "open" again while the old
+    `<route_id>.outcome.json` still sits beside it. Anything that reads that
+    sidecar as closure truth (the material-route-guard bind gate) then refuses
+    the new cycle, and the refusal is unrecoverable by recompiling, because
+    recompiling is what lands here.
+
+    The closure is retired, never deleted: it records a real completed cycle.
+
+    Returns the retired path, or None when there was nothing to retire.
+    """
+    sidecar=outcome_path(route_file)
+    if not sidecar.is_file():
+        return None
+    from datetime import datetime, timezone
+    stamp=datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    # The suffix stays `.outcome.json`. Five scanners filter on exactly that
+    # (`fleet_cutover_gate.route_bookkeeping`, `route_status`'s diagnostics,
+    # `artifact_cutover`'s route population, `artifact_lifecycle`,
+    # `artifact_resplit`), so a `.superseded-<ts>.json` tail made a retired
+    # closure read as an open route, as a malformed record, and as
+    # `migrate-residue` — which would relocate the very history this keeps.
+    # `<route_id>.superseded-<ts>.outcome.json` cannot collide with a real
+    # `outcome_path()`: no route file `<route_id>.superseded-<ts>.json` exists.
+    base=route_file.stem
+    retired=sidecar.with_name(f"{base}.superseded-{stamp}.outcome.json")
+    index=1
+    while retired.exists():
+        index+=1
+        retired=sidecar.with_name(f"{base}.superseded-{stamp}-{index}.outcome.json")
+    try:
+        os.replace(sidecar,retired)
+    except FileNotFoundError:
+        # A concurrent identical compile retired it first. `write_once` has
+        # already succeeded, so dying here would fail a compile over a race on
+        # bookkeeping.
+        return None
+    return retired
+
 def outcome_path(route_file):
     path=Path(route_file); return path.with_name(path.stem+".outcome.json")
 
@@ -4114,6 +4158,9 @@ def main():
         else:
             output_path=expected_output
         write_once(output_path,route)
+        retired=retire_stale_closure(output_path)
+        if retired is not None:
+            print(f"route_closure_retired={retired}",file=sys.stderr)
         # A registered depth-1 owner can compile its first route only after it
         # has started.  Attach those immutable bytes to the exact active owner
         # attempt; non-owner and ordinary interactive compiles remain no-ops.

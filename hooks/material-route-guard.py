@@ -405,6 +405,35 @@ def _verifier_crashed(result: subprocess.CompletedProcess[str]) -> bool:
     return "Traceback (most recent call last)" in (result.stderr or "")
 
 
+def route_is_closed(route_file: Path) -> bool:
+    """True when this exact route already carries its closure sidecar.
+
+    `capability-route.py close` writes `<route>.outcome.json` beside the record
+    (`capability-route.py::outcome_path`). The record itself is immutable and
+    says nothing about closure, so a session that kept its bind marker went on
+    writing under a route whose outcome was already sealed (defect J,
+    rt-a2d042ad). The sidecar is the only closure truth; read it from the same
+    place the writer puts it.
+    """
+    sidecar = route_file.with_name(route_file.stem + ".outcome.json")
+    try:
+        # NOTE the asymmetry with the route RECORD, which refuses a symlink outright
+        # (`route-file-unsafe`): the record is authority and must not be aliased,
+        # while the sidecar is a fact about the record that any of the writers
+        # below may leave. `is_file()` follows symlinks, matching
+        # `artifact_producer.route_is_closed`,
+        # `capability-route.close_route` and `route_status`. The guard previously
+        # refused to count a symlinked sidecar, so a symlink there made `close`
+        # report "already closed" while this gate kept admitting writes — defect J
+        # silently un-fixed. One question, one answer.
+        return sidecar.is_file()
+    except OSError:
+        # Fail open: this gate's false positives stop a human, and the route record
+        # itself was just read from the same directory, so an isolated stat failure
+        # on the sidecar alone is close to impossible.
+        return False
+
+
 def verify_route(
     route_file: Path,
     expected_root: Path,
@@ -413,6 +442,7 @@ def verify_route(
     expected_route_id: str | None = None,
     expected_node: str | None = None,
     accepted_capabilities: set[str] | None = None,
+    allow_closed: bool = False,
 ) -> dict[str, Any]:
     if route_file.is_symlink():
         raise RouteError("route-file-unsafe")
@@ -468,6 +498,8 @@ def verify_route(
         expected_root, str(route.get("source_commit") or ""), head
     ):
         raise RouteError("route-source-commit-stale")
+    if not allow_closed and route_is_closed(route_file):
+        raise RouteError("route-closed")
     if expected_route_id and route.get("route_id") != expected_route_id:
         raise RouteError("route-id-mismatch")
     if expected_node:
@@ -599,6 +631,13 @@ def artifact_active_route(
             expected_route_id=route_id,
             expected_node=route_node or None,
             accepted_capabilities=accepted_capabilities,
+            # Same exemption as `worker_route`, and for the same reason: a
+            # registered worker's route lifetime belongs to the dispatch
+            # contract. Without it a worker on a route its owner closed could
+            # still edit source but not write its own report artifact — the
+            # inverse of any coherent rule, and a dead stage
+            # (`artifact-guard.sh` turns it into `capability-artifact-route-required`).
+            allow_closed=True,
         )
         return route, True, sealed_root
 
@@ -629,6 +668,10 @@ def worker_route(
         return None
     if not route_file or not route_id:
         raise RouteError("worker-route-binding-incomplete")
+    # A registered worker's route lifetime is owned by the dispatch contract, which
+    # closes the route only after the worker's own node is terminal. Applying the
+    # main-session closure rule here would refuse a worker mid-stage on a route a
+    # racing owner closed, so `route-closed` stays a main-session rule (defect J).
     return verify_route(
         Path(route_file),
         root,
@@ -636,6 +679,7 @@ def worker_route(
         expected_route_id=route_id,
         expected_node=route_node or None,
         accepted_capabilities=accepted_capabilities,
+        allow_closed=True,
     )
 
 
@@ -767,6 +811,23 @@ def _shell_segments(command: str) -> Iterable[list[str]]:
         tokens = list(lexer)
     except ValueError:
         return []
+    # A shell line continuation (`\` + newline) is whitespace to the shell, but
+    # posix shlex consumes only the backslash and leaves the newline glued to the
+    # next token: `python3` arrives as "\npython3", `cp` as "\ncp". Every consumer
+    # then matches the head against no known verb and drops the whole segment --
+    # silently, for Tier A writes as well as interpreters. That is how a real
+    # `cp` into a cutover-denied artifact path went unblocked AND unrecorded
+    # (cairn 2026-09-03 12:14:57 / 12:18:54). Strip it here so both this guard
+    # and hooks/artifact_write_targets.py see the command the shell ran.
+    # Strip the continuation newline, but KEEP a token that was already empty:
+    # `git commit --author "" -m msg` would otherwise lose the empty value, shift
+    # `-m` into its place and leave `msg` read as a pathspec, which narrows the
+    # materiality diff and lets a material commit past this gate.
+    tokens = [
+        stripped
+        for stripped, original in ((token.strip("\r\n"), token) for token in tokens)
+        if stripped or not original
+    ]
     segments: list[list[str]] = []
     current: list[str] = []
     for token in tokens:
@@ -1211,6 +1272,11 @@ def check_action(
 
 def deny_json(reason: str) -> None:
     recovery = ""
+    if reason == "route-closed":
+        recovery = (
+            " 이 세션의 bind marker가 가리키는 route는 이미 close(outcome 기록)됐습니다. "
+            "새 작업은 capability-route.py compile로 새 route를 열고 다시 bind하세요."
+        )
     if reason.startswith("recall-opportunity"):
         recovery = (
             " 현재 turn의 memory candidate probe가 없거나 오래됐습니다. "
@@ -1255,7 +1321,19 @@ def hook_main(payload: dict[str, Any], agent_home: Path) -> int:
         if session_id and len(outputs) == 1 and len(invocations) == 1:
             try:
                 bind_route(outputs[0], invocations[0].effective_cwd, session_id, agent_home)
-            except (RouteError, OSError, subprocess.SubprocessError):
+            except RouteError as exc:
+                # A silent failure here is worse than none: the next Edit is denied
+                # `session-route-missing`, whose advice is "compile and bind" —
+                # which is exactly what just failed. Say why, once, on stderr.
+                if str(exc) == "route-closed":
+                    print(
+                        "material-route-guard: bind skipped — that route was "
+                        "already closed when this compile ran, so its closure was "
+                        "not retired. Recompile (an identical request reopens the "
+                        "same route id and retires the stale closure), then bind.",
+                        file=sys.stderr,
+                    )
+            except (OSError, subprocess.SubprocessError):
                 pass
         elif (
             session_id
