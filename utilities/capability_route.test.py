@@ -1820,7 +1820,14 @@ class TestContinuation(unittest.TestCase):
   self._previous_agent_home=os.environ.get("AGENT_HOME")
   self._previous_dispatch_jobs=os.environ.get("AGENT_DISPATCH_JOBS")
   os.environ["AGENT_HOME"]=self._tmp_home.name
-  os.environ.pop("AGENT_DISPATCH_JOBS",None)
+  # Not popped: with no AGENT_DISPATCH_JOBS the state root resolves from
+  # XDG_STATE_HOME/HOME, not from AGENT_HOME, so every fixture route sealed the
+  # operator's *live* jobs.log -- and once completing a node registered an
+  # attempt, the suite appended fake rows there (measured: 660). Bind it to this
+  # test's own tmpdir so a fixture registry is always a fixture registry.
+  self._jobs=Path(self._tmp_home.name)/"state"/"jobs.log"
+  self._jobs.parent.mkdir(parents=True,exist_ok=True)
+  os.environ["AGENT_DISPATCH_JOBS"]=str(self._jobs)
   self.addCleanup(self._restore)
  def _restore(self):
   if self._previous_agent_home is None: os.environ.pop("AGENT_HOME",None)
@@ -2756,10 +2763,29 @@ class TestContinuation(unittest.TestCase):
     else: os.environ["AGENT_DISPATCH_JOBS"]=previous_jobs
 
  def _write_attempt_row(self,jobs,route_id,node_id,attempt_id,status="done"):
+  # A fixture registry is a tmpdir registry. A route built without
+  # AGENT_DISPATCH_JOBS pointed at one seals the *canonical* jobs path, and
+  # appending there writes fake attempt rows into the operator's live registry
+  # -- measured, 660 rows, after `_complete_node` started registering every
+  # completed node. Refuse loudly instead of polluting shared state.
+  jobs=Path(jobs)
+  if not self._is_fixture_registry(jobs):
+   raise AssertionError(
+    f"refusing to write a fixture attempt row to a non-tmpdir registry: {jobs}. "
+    "Set AGENT_DISPATCH_JOBS to a path under the test's TemporaryDirectory "
+    "before building the route."
+   )
   meta=f"route_id={route_id},route_node={node_id},attempt_id={attempt_id}"
-  Path(jobs).parent.mkdir(parents=True,exist_ok=True)
-  with Path(jobs).open("a",encoding="utf-8") as handle:
+  jobs.parent.mkdir(parents=True,exist_ok=True)
+  with jobs.open("a",encoding="utf-8") as handle:
    handle.write("\t".join(["2026-09-04T00:00:00Z",status,"repo","worktree","slug",meta])+"\n")
+
+ @staticmethod
+ def _is_fixture_registry(jobs):
+  root=Path(tempfile.gettempdir()).resolve(strict=False)
+  try: Path(jobs).resolve(strict=False).relative_to(root)
+  except ValueError: return False
+  return True
 
  def test_c_pin_and_grounding_must_name_one_commit(self):
   # S5: the pin (`git rev-parse HEAD`) and the grounding (`source_revision`) are
