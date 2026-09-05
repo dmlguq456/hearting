@@ -333,6 +333,69 @@ class SymlinkAndSanitizeTests(ResidueFixture):
         self.assertRegex(resolved["target"], r"/notes/_-[0-9a-f]{8}\.md$|/notes/[A-Za-z0-9_-]+-[0-9a-f]{8}\.md$")
 
 
+class ReviewRegressionTests(ResidueFixture):
+    """Independent review (2026-09-05): per-cycle commit point, reserved names, clock."""
+
+    def test_seal_failure_midway_rolls_forward_never_back(self):
+        self.seed("_internal/dev_reviews/phase.md")
+        self.seed("papers/2026-03-30_rebuttal/draft.md")
+        with self.assertRaises(RES.ResidueError):
+            self.apply(crash_at="seal:after-first-cycle")
+        hold = RES.residue_hold(self.root)
+        self.assertEqual(hold["phase"], "sealing")
+        with self.assertRaises(RES.ResidueError) as ctx:
+            RES.rollback(self.root)
+        self.assertEqual(ctx.exception.code, "residue-past-commit-point")
+        resumed = self.apply()
+        self.assertEqual(resumed["status"], "complete", resumed)
+        self.assertEqual(resumed["resumed_from"], "sealing")
+        for cyc in resumed["report"]["cycles"]:
+            manifest = json.loads((self.root / cyc["cycle_dir"] / "manifest.json").read_text())
+            for rev in manifest["artifact_revisions"]:
+                self.assertTrue((self.root / cyc["cycle_dir"] / rev["locator"]["path"]).is_file(), rev["locator"]["path"])
+        self.assertEqual(RES.status(self.root)["legacy_top_level"], "empty")
+
+    def test_reserved_manifest_name_is_sanitized_and_seals(self):
+        self.seed("plans/2026-08-19_pilot/evidence/staging/campaigns/x/cycles/y/manifest.json", "{}")
+        plan = RES.build_plan(self.root)
+        target = plan["cycles"][0]["files"][0]["target"]
+        self.assertNotEqual(Path(target).name, "manifest.json")
+        self.assertTrue(Path(target).name.startswith("manifest-") and target.endswith(".json"), target)
+        result = self.apply()
+        self.assertEqual(result["status"], "complete", result)
+        resolved = C.resolve_legacy(self.root, "plans/2026-08-19_pilot/evidence/staging/campaigns/x/cycles/y/manifest.json")
+        self.assertEqual(resolved["resolution"], "mapped")
+
+    def test_cycles_are_dated_without_backdating_the_clock(self):
+        from unittest import mock
+        self.seed("plans/2026-07-01_never-migrated/plan.md")
+        seen = []
+        real_begin = P.begin
+
+        def spy(root, **kw):
+            seen.append(kw.get("now"))
+            return real_begin(root, **kw)
+
+        with mock.patch.object(P, "begin", spy):
+            result = self.apply()
+        self.assertEqual(result["status"], "complete", result)
+        self.assertEqual(seen, [None])
+        cyc = result["report"]["cycles"][0]
+        record = P.read_cycle_record(self.root, cyc["cycle_id"])
+        self.assertEqual(record["started_on"][:10], "2026-07-01")
+        self.assertTrue(record["locator"].startswith("2026-07-01_"))
+        self.assertEqual(P.cycle_dir(self.root, record["campaign_id"], cyc["cycle_id"]), self.root / cyc["cycle_dir"])
+
+    def test_residue_hold_blocks_relayout(self):
+        self.seed("_internal/dev_reviews/phase.md")
+        with self.assertRaises(RES.ResidueError):
+            self.apply(crash_after_phase="renamed")
+        with self.assertRaises(RL.RelayoutError) as ctx:
+            RL.apply(self.root, jobs_path=self.jobs)
+        self.assertEqual(ctx.exception.code, "residue-in-progress")
+        self.assertEqual(self.apply()["status"], "rolled-back")
+
+
 class TrashTests(ResidueFixture):
     def test_trash_needs_authorized_approval_and_is_backed_up(self):
         self.seed("plans/.gitkeep", "")

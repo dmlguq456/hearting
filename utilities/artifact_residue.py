@@ -69,6 +69,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import artifact_cutover as C  # noqa: E402
 import artifact_locator  # noqa: E402
+import artifact_manifest  # noqa: E402
+import artifact_admission  # noqa: E402
 import artifact_producer as P  # noqa: E402
 import artifact_relayout as RL  # noqa: E402
 import artifact_resplit as RS  # noqa: E402
@@ -91,10 +93,10 @@ REPORT_KIND = "w7h-residue-report"
 TRASH_APPROVAL_KIND = "w7h-residue-trash-approval"
 HOLD_EXIT = 65
 
-PHASES = ("planned", "cycles-begun", "renaming", "renamed", "witnessed", "sealed",
+PHASES = ("planned", "cycles-begun", "renaming", "renamed", "witnessed", "sealing", "sealed",
           "compat-reissued", "indexed", "complete")
 ROLLBACK_PHASES = frozenset({"planned", "cycles-begun", "renaming", "renamed", "witnessed"})
-ROLL_FORWARD_PHASES = frozenset({"sealed", "compat-reissued", "indexed"})
+ROLL_FORWARD_PHASES = frozenset({"sealing", "sealed", "compat-reissued", "indexed"})
 TERMINAL_PHASES = frozenset({"complete", "rolled-back", "no-op"})
 
 SUPPORT_TOPS = frozenset({"_internal", "shards", "reviews", "dev_logs", "test_logs", "evidence", "proposals",
@@ -243,9 +245,15 @@ _MAP_SOURCES: Dict[str, List[Tuple[str, str]]] = {}
 
 
 def _map_sources(root: Path) -> List[Tuple[str, str]]:
-    """Every (source, target) row of the compat chain, latest map last."""
-    key = str(root)
+    """Every (source, target) row of the compat chain, latest map last (cached per compat.json version)."""
+    compat = C.compat_path(root)
+    try:
+        st = compat.stat()
+        key = f"{root}|{st.st_mtime_ns}|{st.st_size}"
+    except OSError:
+        key = f"{root}|absent"
     if key not in _MAP_SOURCES:
+        _MAP_SOURCES.clear()
         rows: List[Tuple[str, str]] = []
         for _name, table in C._load_maps(root):
             rows.extend(table.items())
@@ -300,7 +308,7 @@ def sanitize_component(component: str) -> str:
     the compat row whose `source_locator` keeps the original path. A short
     digest of the original keeps two different originals from colliding.
     """
-    if P._unmanifestable_reason(component) is None:
+    if P._unmanifestable_reason(component) is None and component not in artifact_manifest._RESERVED_LOCATOR_NAMES:
         return component
     tag = hashlib.sha256(component.encode("utf-8")).hexdigest()[:8]
     stem, dot, ext = component.rpartition(".")
@@ -312,9 +320,19 @@ def sanitize_component(component: str) -> str:
 
 
 def sanitize_locator(rel: str) -> Tuple[str, bool]:
+    """A locator the manifest accepts: safe components, no reserved leaf name,
+    at most `_MAX_LOCATOR_COMPONENTS` components and `_MAX_LOCATOR_LENGTH` bytes."""
     parts = rel.split("/")
     cleaned = [sanitize_component(part) for part in parts]
-    return "/".join(cleaned), cleaned != parts
+    limit = artifact_manifest._MAX_LOCATOR_COMPONENTS - 4  # room for artifacts/_internal/<bucket>/<d1>
+    if len(cleaned) > limit:
+        tag = hashlib.sha256("/".join(parts).encode("utf-8")).hexdigest()[:8]
+        cleaned = cleaned[:limit - 1] + [f"{tag}-{cleaned[-1]}"[:128]]
+    joined = "/".join(cleaned)
+    if len(joined) > artifact_manifest._MAX_LOCATOR_LENGTH - 96:
+        tag = hashlib.sha256(rel.encode("utf-8")).hexdigest()[:8]
+        joined = "/".join(cleaned[:2] + [f"{tag}-{cleaned[-1]}"[:128]])
+    return joined, joined != rel
 
 
 def classify(root: Path, rel: str, *, origin_cache: Dict[str, Optional[Dict[str, Any]]]) -> Dict[str, Any]:
@@ -473,7 +491,7 @@ def build_plan(root: Path) -> Dict[str, Any]:
     for entry in sorted(root.iterdir(), key=lambda p: p.name):
         if _is_runtime_owned(entry.name) or entry.is_symlink() or not entry.is_dir():
             continue
-        if not any(p.is_file() for p in P._walk_files(entry)):
+        if not any(p.is_file() or p.is_symlink() for p in P._walk_files(entry)):
             empty_dirs.append(entry.name)
     spec_impact = []
     if any(r["disposition"] == "material-cycle" for r in rows):
@@ -596,12 +614,14 @@ def _phase_begin(root: Path, run_dir: Path, journal: Dict[str, Any], plan: Dict[
         else:
             existing = P.find_campaign_by_key(root, cycle["campaign_key"])
         _remember_campaign(root, pre, run_dir, journal, existing)
-        now = _epoch(cycle["date"]) if cycle.get("date") else None
+        # `begin` runs on the real clock: its `now` also drives the admission
+        # lock deadline, so a back-dated value would collapse the 30 s wait.
         begun = P.begin(root, route_file=derived_file, capability=capability, intensity=RS.RESPLIT_CYCLE_INTENSITY,
                         campaign_id=campaign_id, campaign_key=cycle.get("campaign_key"),
-                        title=cycle["title"], goal=cycle.get("campaign_goal"), now=now)
+                        title=cycle["title"], goal=cycle.get("campaign_goal"))
         if begun.get("status") != "begun":
             raise ResidueError("residue-begin-failed", str(begun.get("status")))
+        begun = _date_cycle(root, begun, cycle)
         if begun.get("campaign_created"):
             pre["created_campaigns"].append(begun["campaign_id"])
             if cycle.get("campaign_title"):
@@ -610,6 +630,7 @@ def _phase_begin(root: Path, run_dir: Path, journal: Dict[str, Any], plan: Dict[
                 P._write_campaign(root, camp, exclusive=False)
         pre["created_cycle_records"].append(begun["cycle_id"])
         pre["created_cycle_dirs"].append(_rel(root, Path(begun["cycle_dir"])))
+        _write_journal(run_dir, journal)
         record = P.read_cycle_record(root, begun["cycle_id"])
         record["residue_group"] = cycle["group"]
         record["residue_algorithm"] = RESIDUE_ALGORITHM_VERSION
@@ -623,6 +644,26 @@ def _phase_begin(root: Path, run_dir: Path, journal: Dict[str, Any], plan: Dict[
                              "route_file": _rel(root, derived_file)}
         _write_journal(run_dir, journal)
         _crash(journal, "begin:after-first-cycle")
+
+
+def _date_cycle(root: Path, begun: Dict[str, Any], cycle: Mapping[str, Any]) -> Dict[str, Any]:
+    """Give a freshly begun residue cycle the work's own date (D-79 spirit):
+    record `started_on` first, then the display locator, records winning."""
+    date = cycle.get("date")
+    record = P.read_cycle_record(root, begun["cycle_id"])
+    if not date or record is None or record.get("started_on", "")[:10] == date:
+        return begun
+    campaign = P.read_campaign(root, begun["campaign_id"])
+    campaign_path = P.campaign_dir(root, begun["campaign_id"], campaign)
+    started_on = f"{date}T00:00:00Z"
+    locator, suffix = artifact_locator.allocate_locator(campaign_path, started_on, record["slug"])
+    old_dir = Path(begun["cycle_dir"])
+    new_dir = campaign_path / locator
+    record.update({"started_on": started_on, "locator": locator, "locator_suffix": suffix})
+    P._write_cycle_record(root, record, exclusive=False)
+    os.rename(old_dir, new_dir)
+    artifact_locator.rebuild_indexes(root)
+    return {**begun, "cycle_dir": str(new_dir)}
 
 
 def _rename(root: Path, run_dir: Path, rows: List[Dict[str, Any]], source: Path, target: Path) -> None:
@@ -828,6 +869,12 @@ def _execute(root: Path, run_dir: Path, journal: Dict[str, Any], plan: Dict[str,
         _crash_after(journal, "witnessed")
         phase = "witnessed"
     if phase == "witnessed":
+        # The first `finalize` commits a manifest with O_EXCL; from here on the
+        # run can only move forward, so the phase says so before it happens.
+        journal["phase"] = "sealing"
+        _write_journal(run_dir, journal)
+        phase = "sealing"
+    if phase == "sealing":
         _phase_seal(root, run_dir, journal, plan)
         journal["phase"] = "sealed"
         _write_journal(run_dir, journal)
@@ -857,6 +904,11 @@ def _execute(root: Path, run_dir: Path, journal: Dict[str, Any], plan: Dict[str,
 
 
 def _rollback(root: Path, run_dir: Path, journal: Dict[str, Any]) -> None:
+    if journal.get("sealed_cycles"):
+        raise ResidueError("residue-past-commit-point", "a residue cycle is already sealed; resume rolls forward")
+    for begun in (journal.get("begun") or {}).values():
+        if (root / begun["cycle_dir"] / "manifest.json").exists():
+            raise ResidueError("residue-past-commit-point", begun["cycle_dir"])
     for row in sorted(_inverse_rows(run_dir), key=lambda r: -r["ordinal"]):
         if row["action"] == "rename_back":
             target, source = root / row["target"], root / row["source"]
@@ -871,13 +923,18 @@ def _rollback(root: Path, run_dir: Path, journal: Dict[str, Any]) -> None:
         path = P.cycle_record_path(root, cycle_id)
         if path.is_file():
             path.unlink()
-    for rel in sorted(pre.get("created_cycle_dirs", []), key=lambda p: -p.count("/")):
+    created_dirs = list(pre.get("created_cycle_dirs", []))
+    created_dirs += [b["cycle_dir"] for b in (journal.get("begun") or {}).values() if b["cycle_dir"] not in created_dirs]
+    for rel in sorted(created_dirs, key=lambda p: -p.count("/")):
         path = root / rel
         marker = path / artifact_locator.CYCLE_BINDING
         if marker.is_file():
             marker.unlink()
         if path.is_dir():
-            RS._prune_empty_tree(path)
+            try:
+                RS._prune_empty_tree(path)
+            except RS.ResplitError as exc:
+                raise ResidueError("residue-rollback-residue", str(exc))
     for entry in pre.get("campaign_records", []):
         P._write_atomic(root / entry["path"], base64.b64decode(entry["bytes_b64"]))
     for campaign_id in pre.get("created_campaigns", []):
@@ -992,13 +1049,18 @@ def apply(root: Path, *, route_file: Optional[Path] = None, dry_run: bool = Fals
         _write_journal(run_dir, journal)
         try:
             _execute(root, run_dir, journal, plan, Path(route_file))
-        except (ResidueError, P.ProducerError, C.CutoverError, artifact_locator.LocatorError) as exc:
+        except Exception as exc:  # noqa: BLE001 - every failure is journaled before it propagates
             if isinstance(exc, ResidueError) and exc.code == "crash-fixture":
                 raise
             journal["error"] = {"code": getattr(exc, "code", type(exc).__name__), "detail": str(exc)}
             _write_journal(run_dir, journal)
             if journal["phase"] in ROLLBACK_PHASES:
-                _rollback(root, run_dir, journal)
+                try:
+                    _rollback(root, run_dir, journal)
+                except Exception as rollback_exc:  # noqa: BLE001
+                    journal["rollback_error"] = {"code": getattr(rollback_exc, "code", type(rollback_exc).__name__),
+                                                 "detail": str(rollback_exc)}
+                    _write_journal(run_dir, journal)
             raise
         report = _report(root, run_dir, journal, plan, dry_run=False)
         return {"status": "complete", "run_dir": str(run_dir), "report": report}
@@ -1267,7 +1329,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             return 0 if hold is None else HOLD_EXIT
         elif args.command == "status":
             _print(status(root))
-    except (ResidueError, C.CutoverError, P.ProducerError) as exc:
+    except (ResidueError, C.CutoverError, P.ProducerError, artifact_admission.AdmissionBusy) as exc:
         code = getattr(exc, "code", None) or (str(exc.args[0]) if exc.args else type(exc).__name__)
         detail = getattr(exc, "detail", None) or (str(exc.args[1]) if len(exc.args) > 1 else "")
         _print({"status": "blocked", "code": code, "detail": detail})
