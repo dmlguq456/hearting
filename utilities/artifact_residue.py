@@ -339,8 +339,12 @@ def classify(root: Path, rel: str, *, origin_cache: Dict[str, Optional[Dict[str,
     parts = rel.split("/")
     top, name = parts[0], parts[-1]
     row: Dict[str, Any] = {"path": rel, "top": top}
-    if (Path(root) / rel).is_symlink():
-        row.update(shape="symlink", disposition="deferred", group=None, target=None, reason="symlink")
+    link = Path(root) / rel
+    if link.is_symlink():
+        target = os.readlink(link)
+        resolved = Path(target) if os.path.isabs(target) else link.parent / target
+        row.update(shape="symlink", disposition="deferred", group=None, target=None, reason="symlink",
+                   link_target=target, dangling=not resolved.exists())
         return row
     if name == ".gitkeep" or any(p in {".agent_reports", ".claude_reports", ".runtime"} for p in parts[1:]):
         row.update(shape="trash", disposition="retire-with-approval", group=None, target=None)
@@ -474,7 +478,9 @@ def build_plan(root: Path) -> Dict[str, Any]:
     routes = [{"path": r["path"], "target": r["target"], "size": r["size"], "inode": r["inode"]}
               for r in rows if r["disposition"] == "runtime-routes-legacy"]
     trash = [{"path": r["path"], "size": r["size"]} for r in rows if r["disposition"] == "retire-with-approval"]
-    deferred = [{"path": r["path"], "shape": r["shape"], "reason": r["reason"]} for r in rows if r["disposition"] == "deferred"]
+    deferred = [{"path": r["path"], "shape": r["shape"], "reason": r["reason"],
+                 **({"link_target": r["link_target"], "dangling": r["dangling"]} if r["shape"] == "symlink" else {})}
+                for r in rows if r["disposition"] == "deferred"]
     map_state = C.load_map_state(root) if C.compat_path(root).is_file() else {"maps": [], "missing": [], "drifted": []}
     moved_maps = []
     for entry in map_state["maps"]:
@@ -515,7 +521,8 @@ def build_plan(root: Path) -> Dict[str, Any]:
                    "route_files": len(routes), "trash": len(trash), "deferred": len(deferred),
                    "movable": len(rows) - len(trash) - len(deferred), "empty_dirs": len(empty_dirs),
                    "renamed_locators": sum(c["renamed_locators"] for c in cycles),
-                   "symlinks": sum(1 for r in rows if r["shape"] == "symlink")},
+                   "symlinks": sum(1 for r in rows if r["shape"] == "symlink"),
+                   "symlinks_dangling": sum(1 for r in rows if r["shape"] == "symlink" and r.get("dangling"))},
         "by_disposition": dict(sorted(by_disposition.items())), "by_shape": dict(sorted(by_shape.items())),
         "cycles": cycles, "routes": routes, "trash": trash, "deferred": deferred, "empty_dirs": empty_dirs,
         "moved_compat_maps": moved_maps,
@@ -1127,7 +1134,12 @@ def rollback(root: Path, *, run_dir: Optional[Path] = None) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-def trash_inventory(root: Path, *, include_symlinks: bool = False) -> Dict[str, Any]:
+def trash_inventory(root: Path, *, include_symlinks: bool = False,
+                    include_dangling_symlinks: bool = False) -> Dict[str, Any]:
+    """Deletion candidates: trash always; symlinks only on request -- every
+    symlink with `include_symlinks`, or only those whose target no longer
+    exists with `include_dangling_symlinks` (a link into live data such as a
+    corpus wav is a reference the operator keeps)."""
     root = Path(root).resolve()
     identity = P.artifact_lifecycle.read_root_identity(root)
     origin_cache: Dict[str, Optional[Dict[str, Any]]] = {}
@@ -1136,11 +1148,13 @@ def trash_inventory(root: Path, *, include_symlinks: bool = False) -> Dict[str, 
         row = classify(root, rel, origin_cache=origin_cache)
         is_trash = row["disposition"] == "retire-with-approval"
         is_symlink = row["shape"] == "symlink"
-        if is_trash or (include_symlinks and is_symlink):
+        wanted_symlink = is_symlink and (include_symlinks or (include_dangling_symlinks and row.get("dangling")))
+        if is_trash or wanted_symlink:
             path = root / rel
             if is_symlink:
                 rows.append({"path": rel, "size": 0, "sha256": _sha_bytes(os.readlink(path).encode("utf-8")),
-                             "reason": "symlink", "link_target": os.readlink(path)})
+                             "reason": "symlink-dangling" if row.get("dangling") else "symlink",
+                             "link_target": os.readlink(path)})
             else:
                 rows.append({"path": rel, "size": path.stat().st_size, "sha256": _sha_file(path), "reason": "trash"})
     body = {"schema_version": 1, "kind": "w7h-residue-trash-inventory",
@@ -1150,8 +1164,10 @@ def trash_inventory(root: Path, *, include_symlinks: bool = False) -> Dict[str, 
     return body
 
 
-def trash_approval_package(root: Path, *, backup_root: Path, include_symlinks: bool = False) -> Dict[str, Any]:
-    inventory = trash_inventory(root, include_symlinks=include_symlinks)
+def trash_approval_package(root: Path, *, backup_root: Path, include_symlinks: bool = False,
+                           include_dangling_symlinks: bool = False) -> Dict[str, Any]:
+    inventory = trash_inventory(root, include_symlinks=include_symlinks,
+                                include_dangling_symlinks=include_dangling_symlinks)
     return {"schema_version": 1, "kind": TRASH_APPROVAL_KIND, "authorized": False,
             "body": {"artifact_root_id": inventory["artifact_root_id"], "repo_path": str(Path(root).resolve()),
                      "trash_inventory_sha256": inventory["digest"], "entry_count": inventory["entry_count"],
@@ -1160,10 +1176,11 @@ def trash_approval_package(root: Path, *, backup_root: Path, include_symlinks: b
 
 
 def retire_trash(root: Path, *, approval_path: Optional[Path], backup_root: Path, dry_run: bool = False,
-                 include_symlinks: bool = False) -> Dict[str, Any]:
+                 include_symlinks: bool = False, include_dangling_symlinks: bool = False) -> Dict[str, Any]:
     root = Path(root).resolve()
     C._require_active(root)
-    inventory = trash_inventory(root, include_symlinks=include_symlinks)
+    inventory = trash_inventory(root, include_symlinks=include_symlinks,
+                                include_dangling_symlinks=include_dangling_symlinks)
     if dry_run or not inventory["entries"]:
         return {"status": "dry-run" if dry_run else "no-op", "inventory": inventory}
     if approval_path is None:
@@ -1191,7 +1208,7 @@ def retire_trash(root: Path, *, approval_path: Optional[Path], backup_root: Path
     with tarfile.open(str(archive), "r") as tar:
         for row in inventory["entries"]:
             member = tar.getmember(row["path"])
-            if row.get("reason") == "symlink":
+            if row.get("reason", "").startswith("symlink"):
                 if not member.issym() or _sha_bytes(member.linkname.encode("utf-8")) != row["sha256"]:
                     raise ResidueError("backup-incomplete", row["path"])
                 continue
@@ -1241,7 +1258,8 @@ def status(root: Path) -> Dict[str, Any]:
             counts[row["disposition"]] += 1
             total += 1
             if row["disposition"] == "deferred":
-                deferred.append({"path": rel, "reason": row["reason"]})
+                deferred.append({"path": rel, "reason": row["reason"],
+                                 **({"link_target": row["link_target"], "dangling": row["dangling"]} if row["shape"] == "symlink" else {})})
     except (ResidueError, artifact_locator.LocatorError) as exc:
         error = {"code": exc.code, "detail": exc.detail}
     except OSError as exc:
@@ -1259,6 +1277,7 @@ def status(root: Path) -> Dict[str, Any]:
         layout = "residue"
     return {"legacy_top_level": layout, "legacy_top_level_files": total, "by_disposition": dict(sorted(counts.items())),
             "symlinks": sum(1 for d in deferred if d["reason"] == "symlink"),
+            "symlinks_dangling": sum(1 for d in deferred if d.get("dangling")),
             "deferred": deferred, "trash_pending": counts.get("retire-with-approval", 0), "residue_hold": hold,
             "residue_state": state.get("state"), "error": error}
 
@@ -1291,11 +1310,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     trash_p = sub.add_parser("trash-approval-package", help="approval body for retire-trash (authorized:false)")
     trash_p.add_argument("--backup-root", required=True)
     trash_p.add_argument("--include-symlinks", action="store_true")
+    trash_p.add_argument("--include-dangling-symlinks", action="store_true")
     retire_p = sub.add_parser("retire-trash", help="delete trash after backup; needs an authorized approval file")
     retire_p.add_argument("--approval")
     retire_p.add_argument("--backup-root", required=True)
     retire_p.add_argument("--dry-run", action="store_true")
     retire_p.add_argument("--include-symlinks", action="store_true")
+    retire_p.add_argument("--include-dangling-symlinks", action="store_true",
+                          help="also delete symlinks whose target no longer exists (live links stay deferred)")
     sub.add_parser("hold")
     sub.add_parser("status")
     args = parser.parse_args(argv)
@@ -1318,11 +1340,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             _print(rollback(root, run_dir=Path(args.run_dir) if args.run_dir else None))
         elif args.command == "trash-approval-package":
             _print(trash_approval_package(root, backup_root=Path(args.backup_root),
-                                          include_symlinks=args.include_symlinks))
+                                          include_symlinks=args.include_symlinks,
+                                          include_dangling_symlinks=args.include_dangling_symlinks))
         elif args.command == "retire-trash":
             _print(retire_trash(root, approval_path=Path(args.approval) if args.approval else None,
                                 backup_root=Path(args.backup_root), dry_run=args.dry_run,
-                                include_symlinks=args.include_symlinks))
+                                include_symlinks=args.include_symlinks,
+                                include_dangling_symlinks=args.include_dangling_symlinks))
         elif args.command == "hold":
             hold = residue_hold(root)
             _print({"hold": hold})
