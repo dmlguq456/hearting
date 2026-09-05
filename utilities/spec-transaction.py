@@ -68,9 +68,7 @@ def seed_cycle_spec(spec_base: Path, artifact: Path):
                 if dst.exists() or src.is_symlink() or not src.is_file():
                     continue
                 dst.parent.mkdir(parents=True,exist_ok=True); dst.write_bytes(src.read_bytes()); history+=1
-    versions=[p for p in spec_base.rglob("prd.md") if len(p.relative_to(spec_base).parts)>=4 and p.relative_to(spec_base).parts[-4]=="_internal"]
-    return {"status":"seeded","source":str(revision),"files":copied,"history_versions":history,
-            "version_history_present":bool(versions),"spec_base":str(spec_base)}
+    return {"status":"seeded","source":str(revision),"files":copied,"history_versions":history,"spec_base":str(spec_base)}
 
 
 def legacy_spec_state(artifact: Path):
@@ -204,9 +202,11 @@ def main():
             # transactions on one cycle must not interleave a half copy.
             seeded=seed_cycle_spec(spec_base,artifact)
             emit({**seeded,"route_id":route["route_id"]},args.events)
-            if seeded["status"]=="seeded" and not seeded["version_history_present"]:
-                emit({"status":"version-history-absent","route_id":route["route_id"],"detail":"seeded revision carries no _internal/versions history; the counter restarts at 1"},args.events)
         version=next_version(spec_root)
+        if spec_layout=="cycle" and version==1 and (spec_root/"prd.md").is_file():
+            # A pre-image with no history under THIS spec root: the counter
+            # restarts at 1 even though the PRD is not new. Say so.
+            emit({"status":"version-history-absent","route_id":route["route_id"],"spec_root":str(spec_root),"detail":"prd.md present but no _internal/versions history under this spec root; the counter restarts at 1"},args.events)
         owner={"route_id":route["route_id"],"node_id":node["id"],"worktree":str(worktree.resolve()),"pid":os.getpid(),"next_version":version}
         lock.seek(0); lock.truncate(); lock.write(json.dumps(owner,sort_keys=True)+"\n"); lock.flush(); os.fsync(lock.fileno())
         emit({"status":"acquired","action":"latest-reread","route_id":route["route_id"],"next_version":version,"waited":waited,"layout":spec_layout,"spec_root":str(spec_root)},args.events)

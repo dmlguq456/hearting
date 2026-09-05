@@ -183,7 +183,7 @@ class CycleLayoutTest(unittest.TestCase):
   self.assertEqual(result.returncode,0,result.stdout+result.stderr)
   rows=[json.loads(l) for l in events.read_text().splitlines()]
   seeded=[r for r in rows if r["status"]=="seeded"][0]
-  self.assertEqual(seeded["history_versions"],1); self.assertTrue(seeded["version_history_present"])
+  self.assertEqual(seeded["history_versions"],1)
   spec=cycle_dir/"artifacts"/"spec"
   self.assertEqual((spec/"_internal"/"versions"/"v1"/"prd.md").read_text(),"v0\n")
   self.assertEqual((spec/"_internal"/"versions"/"v2"/"prd.md").read_text(),"v3\n")

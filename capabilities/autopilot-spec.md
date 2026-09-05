@@ -80,7 +80,7 @@ binds `direct`, `quick`, and `standard+`; only the acting owner differs.
    commits `manifest.json` (the commit point), applies the index, and seals
    the cycle record. Empty output leaves no lineage (D-9). `recover` rolls a
    crashed finalize forward or back from its journal.
-5. **shared admission.** `spec` output is admitted to `shared/spec/` by `admit-shared --kind spec` after the cycle is sealed (canonical shared kind). A root holds one canonical `spec` reference: a repeat admit without `--reference`/`--key` lands on that single reference; a `--key` that matches none of the existing references is refused (`shared-reference-exists`) and a second reference is only ever created with `--new-reference`.
+5. **shared admission.** `spec` output is admitted to `shared/spec/` by `admit-shared --kind spec` after the cycle is sealed (canonical shared kind). A root holds one canonical `spec` reference: a repeat admit without `--reference`/`--key` lands on that single reference (several references without a selector is `shared-reference-ambiguous`); a `--key` that matches none of the existing references is refused (`shared-reference-exists`) and a second reference is only ever created with `--new-reference`.
 
 ## Role Requirements
 
