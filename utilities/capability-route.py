@@ -427,7 +427,10 @@ def _first_parent_contains(path, ancestor, descendant):
             ["git","-C",str(path),"rev-list","--first-parent",descendant],
             text=True,capture_output=True,timeout=30,
         )
-    except (OSError,subprocess.TimeoutExpired):
+    except (OSError,subprocess.SubprocessError):
+        # Same set as `_inside_git_worktree`: two probes of the same shape must
+        # not disagree about what counts as "cannot answer" (round 3, S4).
+        # `TimeoutExpired` is a `SubprocessError`, so this only widens.
         return False
     return probe.returncode == 0 and ancestor in probe.stdout.split()
 
@@ -1110,37 +1113,93 @@ def _stage_fallback():
         _STAGE_FALLBACK=module
     return _STAGE_FALLBACK
 
-def _prior_registry_attempt(source_route, node_id):
-    """Did the source route already record an attempt on this node?
+def _continuation_lineage_route_ids(source_route):
+    """Every route id in this continuation's lineage, nearest ancestor first.
 
-    Read through the source route's own sealed jobs binding, not the caller's
-    environment: the question is what *that* route did, and `AGENT_DISPATCH_JOBS`
-    in a resuming session may name a different registry.
-
-    **Fail closed.** Every unreadable answer -- an unresolved jobs binding, a
-    registry that is missing or is not a regular file, an OS or parse error --
-    returns True, which declines the rebind and keeps the inherited pin. The
-    alternative reading (absence of rows means the node never ran) is exactly
-    what deleting or truncating `jobs.log` produces, and it would re-pin a route
-    straight past the SD-67 evidence gate. Declining on an unreadable registry
-    is never worse than the behaviour before defect C was fixed.
-
-    `registry_rows` returns `[]` for a missing file rather than raising, so the
-    file is proved to exist here; it cannot be inferred from an empty result.
+    A declined continuation records no attempts of its own -- the guard refuses
+    its whole pre-mutation prefix -- so asking the registry only about the
+    immediate predecessor finds a clean slate one generation later, and the
+    decline evaporates (review round 3, B1). The lineage is already carried:
+    `source_route_id` names the predecessor and `supersession_edges` accumulates
+    every earlier `from_route_id`.
     """
+    ids=[]
+    candidates=[source_route.get("route_id"),source_route.get("source_route_id")]
+    for edge in (source_route.get("supersession_edges") or []):
+        if isinstance(edge,dict):
+            candidates.append(edge.get("from_route_id"))
+    for value in candidates:
+        if isinstance(value,str) and value and value not in ids:
+            ids.append(value)
+    return ids
+
+def _authoritative_lineage_registry(source_route):
+    """The registry this lineage provably wrote to, or None if unprovable.
+
+    Deliberately stricter than `_continuation_source_jobs`, which may fall
+    through to the live canonical registry so that a continuation can still read
+    *migrated markers* when a sealed release tree is pruned. Markers carry their
+    own route binding and attempt link, so that substitution is safe there. Here
+    the evidence is the **absence** of a row, and absence read out of a registry
+    this lineage never wrote to is not evidence at all (review round 3, B2a: the
+    compat window silently answers from a different `jobs.log`, which exists and
+    is a regular file, and reports no rows).
+
+    Only `exact` and `aliased` resolutions are accepted -- `aliased` because the
+    migration journal digest-verifies the substitution.
+    """
+    jobs=(
+        ((source_route.get("launch_compatibility_tuple") or {}).get("jobs_path") or {})
+        .get("path")
+    )
+    if not isinstance(jobs,str) or not jobs or not Path(jobs).is_absolute():
+        return None
     try:
-        jobs=Path(_continuation_source_jobs(source_route))
-    except (ValueError,OSError):
+        sealed=Path(jobs).expanduser().resolve(strict=False)
+        resolution=resolve_dangling_registry(sealed)
+    except (OSError,ValueError,DispatchContractError):
+        return None
+    if resolution.status=="exact":
+        return sealed
+    if resolution.status=="aliased":
+        return resolution.jobs_path
+    return None
+
+def _prior_registry_attempt(source_route, node_id):
+    """Did this continuation's lineage already record an attempt on this node?
+
+    **Fail closed.** The rebind is declined -- return True -- whenever the answer
+    cannot be *proved* negative. Three things must all hold before an absent row
+    is read as "this node never ran":
+
+    1. the registry is provably the one the lineage wrote to
+       (`_authoritative_lineage_registry`),
+    2. the lineage is non-empty, and
+    3. that registry actually contains at least one row for the lineage.
+
+    (3) is what separates "no attempt on this node" from "this registry never saw
+    this route". `registry_rows` returns `[]` for a missing file and for a
+    truncated one alike, so an empty read is ambiguous by construction -- and
+    deleting or truncating `jobs.log` is exactly the shape an operator produces
+    (review round 3, B2b). Declining on an unprovable answer is never worse than
+    the behaviour before defect C was fixed: the pin simply stays inherited.
+    """
+    jobs=_authoritative_lineage_registry(source_route)
+    if jobs is None:
+        return True
+    lineage=_continuation_lineage_route_ids(source_route)
+    if not lineage:
         return True
     try:
-        if not jobs.is_file():
-            return True
-        rows=_stage_fallback().registry_rows(
-            jobs,str(source_route.get("route_id") or ""),str(node_id),
-        )
+        rows=_stage_fallback().registry_route_rows(jobs,lineage)
     except (OSError,ValueError):
         return True
-    return any(row.get("attempt_id") for row in rows)
+    if not rows:
+        return True
+    return any(
+        row.get("attempt_id") and row.get("route_node")==str(node_id)
+        for row in rows
+    )
 
 def _retry_mutation_node(source_route, continuation_nodes):
     """The first node this continuation re-runs that is an SD-67 mutation retry.

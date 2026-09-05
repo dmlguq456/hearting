@@ -63,12 +63,31 @@ class WorkerRouteGuardTest(unittest.TestCase):
    with self.assertRaisesRegex(G.WorkerRouteError,"expected=.* observed=") as ctx: G.validate_route_contract(path,"execute",repo,repo)
    self.assertEqual(ctx.exception.reason,"route-source-commit-mismatch")
 
- def _lineage_repo(self,td):
+ def _lineage_repo(self,td,*,lineage_rows=True):
   repo=Path(td)/"repo"; repo.mkdir(); subprocess.run(["git","init","-q",str(repo)],check=True)
   subprocess.run(["git","-C",str(repo),"config","user.email","fixture@example.com"],check=True); subprocess.run(["git","-C",str(repo),"config","user.name","Fixture"],check=True)
   (repo/"x").write_text("a"); subprocess.run(["git","-C",str(repo),"add","x"],check=True); subprocess.run(["git","-C",str(repo),"commit","-qm","a"],check=True)
+  # Seal a tmpdir registry, never the operator's live one, and give the route the
+  # shape production always has: a source route that reached a continuation has
+  # dispatched something, so its lineage HAS rows. A registry holding no rows for
+  # the lineage is indistinguishable from a truncated or foreign one, so the
+  # continuation declines to re-pin there (SD-128 (4)).
+  jobs=Path(td)/"state"/"jobs.log"; jobs.parent.mkdir(parents=True,exist_ok=True)
+  jobs.touch()
+  previous=os.environ.get("AGENT_DISPATCH_JOBS")
+  os.environ["AGENT_DISPATCH_JOBS"]=str(jobs)
+  def restore():
+   if previous is None: os.environ.pop("AGENT_DISPATCH_JOBS",None)
+   else: os.environ["AGENT_DISPATCH_JOBS"]=previous
+  self.addCleanup(restore)
   gate={"spec_read":{"satisfied":True,"source":"prd"},"drift_verdict":"within-spec","workflow_mode":"tracked","artifact_guard":{"satisfied":True,"source":"conductor"}}
   route=R.compile_route("autopilot-code","dev","strong",repo,repo,signals=["shared-contract"],transport="headless",tracking="tracked",tracked_gate_evidence=gate,dispatch_evidence=dispatch(repo))
+  if lineage_rows:
+   # `frame` ran; `execute` has not -- so nothing declines the rebind.
+   self._write_registry_row(
+    Path(route["launch_compatibility_tuple"]["jobs_path"]["path"]),
+    route["route_id"],"frame","att-frame-prior",
+   )
   path=Path(td)/"route.json"; path.write_text(json.dumps(route))
   return repo,route,path
 
@@ -146,6 +165,40 @@ class WorkerRouteGuardTest(unittest.TestCase):
    self.assertNotIn("source_commit_rebind",continuation)
    path=Path(td)/"continuation.json"; path.write_text(json.dumps(continuation))
    _,node,_=G.validate_route_contract(path,"plan",repo,repo); self.assertEqual(node["id"],"plan")
+
+ def test_c_declined_continuation_refuses_the_whole_pre_mutation_prefix(self):
+  # Round 3, S1: a decline is not "one node is refused". It keeps the inherited
+  # pin for the WHOLE route, so every node at or before the mutation node is
+  # refused and the continuation cannot start -- it does not run up to execute
+  # and stop there. Post-mutation nodes still pass on the SD-65 descendant
+  # branch. Measured here rather than asserted in prose.
+  with tempfile.TemporaryDirectory() as td:
+   repo,source,_=self._lineage_repo(td,lineage_rows=False)
+   (repo/"x").write_text("b"); subprocess.run(["git","-C",str(repo),"commit","-am","fast-forward","-q"],check=True)
+   head=subprocess.run(["git","-C",str(repo),"rev-parse","HEAD"],text=True,capture_output=True,check=True).stdout.strip()
+   continuation=self._continuation(source,repo)
+   # No lineage rows anywhere: the registry cannot prove the mutation node never
+   # ran, so the pin stays inherited.
+   self.assertEqual(continuation["source_commit"],source["source_commit"])
+   self.assertNotIn("source_commit_rebind",continuation)
+   path=Path(td)/"declined.json"; path.write_text(json.dumps(continuation))
+   refused=[]
+   accepted=[]
+   for node in continuation["nodes"]:
+    try:
+     G.validate_route_contract(path,node["id"],repo,repo)
+    except G.WorkerRouteError as exc:
+     self.assertEqual(exc.reason,"route-source-commit-mismatch")
+     refused.append(node["id"])
+    else:
+     accepted.append(node["id"])
+   self.assertIn("plan",refused)
+   self.assertIn("execute",refused)
+   self.assertIn("test",accepted)
+   self.assertNotEqual(head,source["source_commit"])
+   # Every refused node is at or before the mutation node; nothing after it.
+   ids=[node["id"] for node in continuation["nodes"]]
+   self.assertLess(max(ids.index(n) for n in refused),min(ids.index(n) for n in accepted))
 
  def test_c_continuation_on_diverged_head_refused_typed(self):
   # A rewritten HEAD is off the history the source route bound: no node of such a

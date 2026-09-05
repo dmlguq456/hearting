@@ -628,7 +628,15 @@ def registry_failures(jobs: Path, route_id: str, node_id: str) -> dict[str, list
     return failures
 
 
-def registry_rows(jobs: Path, route_id: str, node_id: str) -> list[dict[str, str]]:
+def registry_route_rows(jobs: Path, route_ids) -> list[dict[str, str]]:
+    """Every row whose `route_id` is one of `route_ids`, in one pass.
+
+    One definition of the row parse; `registry_rows` narrows this by node.
+    A continuation asks the lineage form of the question (SD-128): a declined
+    continuation writes no rows of its own, so asking only about the immediate
+    predecessor finds a clean registry one generation later.
+    """
+    wanted = {route_ids} if isinstance(route_ids, str) else set(route_ids)
     rows: list[dict[str, str]] = []
     if not jobs.is_file():
         return rows
@@ -637,10 +645,15 @@ def registry_rows(jobs: Path, route_id: str, node_id: str) -> list[dict[str, str
         if len(fields) != 6:
             continue
         metadata = dict(part.split("=", 1) for part in fields[5].split(",") if "=" in part)
-        if metadata.get("route_id") != route_id or metadata.get("route_node") != node_id:
+        if metadata.get("route_id") not in wanted:
             continue
         rows.append({**metadata, "_status": fields[1], "_slug": fields[4], "_order": str(order)})
     return rows
+
+
+def registry_rows(jobs: Path, route_id: str, node_id: str) -> list[dict[str, str]]:
+    return [row for row in registry_route_rows(jobs, route_id)
+            if row.get("route_node") == node_id]
 
 
 def metadata_tuple_key(metadata: dict[str, str]) -> str:
