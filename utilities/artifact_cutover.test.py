@@ -588,9 +588,10 @@ class CloseoutTest(unittest.TestCase):
         P.activate(self.root, repository_id=REPO_ID, artifact_root_id=ROOT_ID)
         self.core_file = Path(self._tmp.name) / "CORE.md"
         rows = [
-            f"| `{path}/` | fixture | `C-LEG(sealed-evidence)` |"
-            if path != "research/hermes-agent/.gitignore"
-            else f"| `{path}` | fixture | `C-LEG(sealed-evidence)` |"
+            (f"| `{path}/` | fixture | `C-LEG(sealed-evidence)` |"
+             if path != "research/hermes-agent/.gitignore"
+             else f"| `{path}` | fixture | `C-LEG(sealed-evidence)` |")
+            + f" `{C.SEALED_EVIDENCE_CAMPAIGN}/{C.SEALED_EVIDENCE_RELOCATIONS[path]}/` |"
             for path in C.SEALED_EVIDENCE_PATHS
         ]
         self.core_file.write_text("\n".join(rows) + "\n", encoding="utf-8")
@@ -710,6 +711,26 @@ class CloseoutTest(unittest.TestCase):
         for path in C.SEALED_EVIDENCE_PATHS:
             self.assertTrue((self.root / path).exists())
         self.assertFalse(self.dead_route_file.with_name(self.dead_route_file.stem + ".outcome.json").exists())
+
+    def test_core_sync_requires_relocation_locators_after_w7h(self):
+        # PRD v15 §31 D-85-b: a CORE §3 table that still names only the legacy
+        # prefixes is not synchronised once the evidence moved.
+        legacy_only = [
+            f"| `{path}/` | fixture | `C-LEG(sealed-evidence)` |"
+            if path != "research/hermes-agent/.gitignore"
+            else f"| `{path}` | fixture | `C-LEG(sealed-evidence)` |"
+            for path in C.SEALED_EVIDENCE_PATHS
+        ]
+        stale = Path(self._tmp.name) / "CORE-stale.md"
+        stale.write_text("\n".join(legacy_only) + "\n", encoding="utf-8")
+        observed = C._core_sync_observation(self.root, stale, "rt-none", set())
+        self.assertTrue(observed["sealed_evidence_class_declared"])
+        self.assertFalse(observed["sealed_evidence_relocations_declared"])
+        self.assertFalse(observed["proven"])
+        self.assertEqual(set(observed["sealed_evidence_relocation_rows"]), set(C.SEALED_EVIDENCE_PATHS))
+        current = C._core_sync_observation(self.root, self.core_file, "rt-none", set())
+        self.assertTrue(current["sealed_evidence_relocations_declared"])
+        self.assertEqual(tuple(C.SEALED_EVIDENCE_RELOCATIONS), C.SEALED_EVIDENCE_PATHS)
 
     def test_duplicate_noncanonical_aliases_reserve_one_canonical_target(self):
         duplicate_route, duplicate_file = self.route("audit")

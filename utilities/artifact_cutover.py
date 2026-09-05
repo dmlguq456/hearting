@@ -81,6 +81,19 @@ SEALED_EVIDENCE_PATHS = (
     "spec/artifact-path-contract/_internal/research",
     "research/hermes-agent/.gitignore",
 )
+# W7H (PRD v15 §31 D-85-b): the sealed-evidence set stays closed, but its content
+# now lives in sealed residue cycles under this campaign locator. The legacy
+# prefix keeps naming the compat-row source; CORE §3 must declare both.
+SEALED_EVIDENCE_CAMPAIGN = "campaigns/2026-09-05_2026-08-24-artifact-knowledge-index-w7"
+SEALED_EVIDENCE_RELOCATIONS = {
+    "plans/2026-08-24_artifact-knowledge-index-w7": "2026-08-24_2026-08-24-artifact-knowledge-index-w7",
+    "plans/2026-08-25_artifact-knowledge-index-w7-e1": "2026-08-25_2026-08-25-artifact-knowledge-index-w7-e1",
+    "plans/2026-08-25_artifact-knowledge-index-w7-e2-e3": "2026-08-25_2026-08-25-artifact-knowledge-index-w7-e2-e3",
+    "plans/2026-08-25_artifact-write-cutover-w7c": "2026-08-25_2026-08-25-artifact-write-cutover-w7c",
+    "spec/artifact-path-contract/_internal/research": "2026-08-24_artifact-path-contract",
+    "research/hermes-agent/.gitignore": "2026-06-29_hermes-agent",
+}
+assert tuple(SEALED_EVIDENCE_RELOCATIONS) == SEALED_EVIDENCE_PATHS
 RESIDUE_CONTAINERS = (
     "notes", "proposals", "dev_logs", "test_logs", "evidence", "release-config",
     "research-alternative", "spec-research-alternative", "routes", "_routes",
@@ -489,6 +502,12 @@ def _core_sync_observation(root: Path, core_file: Path, sync_route_id: str,
         for path in SEALED_EVIDENCE_PATHS
     }
     class_declared = "C-LEG(sealed-evidence)" in text and all(exact_rows.values())
+    # D-85-b: each row must also name the cycle locator the evidence moved to.
+    relocation_rows = {
+        path: f"`{SEALED_EVIDENCE_CAMPAIGN}/{locator}/`" in text
+        for path, locator in SEALED_EVIDENCE_RELOCATIONS.items()
+    }
+    relocations_declared = all(relocation_rows.values())
     outcome_path = root / ".runtime" / "routes" / f"{sync_route_id}.outcome.json"
     outcome_valid = False
     outcome_digest = None
@@ -515,12 +534,14 @@ def _core_sync_observation(root: Path, core_file: Path, sync_route_id: str,
         "core_sha256": "sha256:" + _sha(core) if core.is_file() else None,
         "sealed_evidence_rows": exact_rows,
         "sealed_evidence_class_declared": class_declared,
+        "sealed_evidence_relocation_rows": relocation_rows,
+        "sealed_evidence_relocations_declared": relocations_declared,
         "sync_route_id": sync_route_id,
         "sync_outcome": os.path.relpath(outcome_path, root),
         "sync_outcome_sha256": outcome_digest,
         "terminal_proven": outcome_valid,
         "undeclared_top_level": undeclared,
-        "proven": class_declared and outcome_valid and not undeclared,
+        "proven": class_declared and relocations_declared and outcome_valid and not undeclared,
     }
 
 
