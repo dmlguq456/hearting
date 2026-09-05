@@ -310,6 +310,34 @@ class SymlinkAndSanitizeTests(ResidueFixture):
         self.assertEqual(done["report"]["retired_files"], 1)
         self.assertEqual(RES.status(self.root)["legacy_top_level"], "empty")
 
+    def test_only_dangling_symlinks_are_retired_with_the_dangling_flag(self):
+        self.seed("experiments/2026-07-27_x/report.md")
+        (self.root / "experiments" / "2026-07-27_x" / "dead").symlink_to("/nonexistent/target.wav")
+        # A live link points outside the residue (a corpus file); a link whose
+        # target moves into a cycle becomes dangling by the move itself.
+        live_target = Path(self._tmp.name) / "corpus" / "real.wav"
+        live_target.parent.mkdir(); live_target.write_bytes(b"RIFF")
+        (self.root / "experiments" / "2026-07-27_x" / "alive").symlink_to(live_target)
+        plan = RES.build_plan(self.root)
+        self.assertEqual(plan["totals"]["symlinks"], 2)
+        self.assertEqual(plan["totals"]["symlinks_dangling"], 1)
+        self.apply()
+        backup = Path(self._tmp.name) / "backup"
+        package = RES.trash_approval_package(self.root, backup_root=backup, include_dangling_symlinks=True)
+        self.assertEqual([e["path"] for e in package["body"]["entries"]], ["experiments/2026-07-27_x/dead"])
+        self.assertEqual(package["body"]["entries"][0]["reason"], "symlink-dangling")
+        package["authorized"] = True
+        approval = Path(self._tmp.name) / "approval.json"
+        approval.write_text(json.dumps(package))
+        done = RES.retire_trash(self.root, approval_path=approval, backup_root=backup, include_dangling_symlinks=True)
+        self.assertEqual(done["report"]["retired_files"], 1)
+        self.assertTrue((self.root / "experiments" / "2026-07-27_x" / "alive").is_symlink())
+        view = RES.status(self.root)
+        self.assertEqual(view["legacy_top_level"], "deferred-only")
+        self.assertEqual(view["symlinks"], 1)
+        self.assertEqual(view["symlinks_dangling"], 0)
+        self.assertEqual(view["deferred"][0]["link_target"], str(live_target))
+
     def test_sanitized_locator_round_trips_through_inventory_and_compat(self):
         original = "notes/한글 이름 (v2).md"
         self.seed(original, "body\n")
