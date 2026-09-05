@@ -40,11 +40,11 @@ find_prd() {
       --artifact-root "$artifact_root" --prd-candidates 2>/dev/null)
   fi
 
-  if [ -z "$candidates" ] && [ -f "$artifact_root/spec/prd.md" ]; then
-    candidates="$artifact_root/spec/prd.md"
-  fi
-
   if [ -z "$candidates" ]; then
+    # Legacy bucket: the root prd.md plus every one-level component prd.md.
+    if [ -f "$artifact_root/spec/prd.md" ]; then
+      candidates="$artifact_root/spec/prd.md"
+    fi
     for d in "$artifact_root"/spec/*/; do
       [ -d "$d" ] || continue
       d="${d%/}"
