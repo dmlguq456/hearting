@@ -1012,6 +1012,10 @@ def apply(root: Path, *, jobs_path: Optional[Path] = None, dry_run: bool = False
     resplit = RS.resplit_hold(root)
     if resplit is not None:
         raise RelayoutError("resplit-in-progress", resplit["journal"])
+    import artifact_residue  # noqa: WPS433 - residue imports this module; late import breaks the cycle
+    residue = artifact_residue.residue_hold(root)
+    if residue is not None:
+        raise RelayoutError("residue-in-progress", residue["journal"])
     open_run = _open_run(root)
     if open_run is not None:
         if dry_run:

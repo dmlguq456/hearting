@@ -20,6 +20,7 @@ import artifact_cutover as C  # noqa: E402
 import artifact_producer as P  # noqa: E402
 import artifact_resplit as RS  # noqa: E402
 import artifact_relayout as RL  # noqa: E402
+import artifact_residue as RES  # noqa: E402
 
 SCHEMA_VERSION = 1
 KIND = "fleet-cutover-gate/v1"
@@ -174,7 +175,24 @@ def _empty_resplit_fields() -> Dict[str, Any]:
 
 def _empty_relayout_fields() -> Dict[str, Any]:
     return {"readable_layout": None, "legacy_campaign_dirs": None, "legacy_cycle_dirs": None,
-            "relayout_hold": None, "transition_window": None}
+            "relayout_hold": None, "transition_window": None, **_empty_residue_fields()}
+
+
+def _empty_residue_fields() -> Dict[str, Any]:
+    return {"legacy_top_level": None, "legacy_top_level_files": None, "residue_deferred": None,
+            "residue_trash_pending": None, "residue_hold": None}
+
+
+def _residue_fields(root: Path) -> Dict[str, Any]:
+    """W7H read-only view: what is still at the legacy top level, typed."""
+    view = RES.status(root)
+    return {
+        "legacy_top_level": view["legacy_top_level"],
+        "legacy_top_level_files": view["legacy_top_level_files"],
+        "residue_deferred": len(view["deferred"]),
+        "residue_trash_pending": view["trash_pending"],
+        "residue_hold": view["residue_hold"],
+    }
 
 
 def _relayout_fields(root: Path) -> Dict[str, Any]:
@@ -187,6 +205,7 @@ def _relayout_fields(root: Path) -> Dict[str, Any]:
         "legacy_cycle_dirs": view["legacy_cycle_dirs"],
         "relayout_hold": view["relayout_hold"],
         "transition_window": view["transition_window"],
+        **_residue_fields(root),
     }
 
 
@@ -432,7 +451,8 @@ def _apply_waivers(rows: Sequence[Dict[str, Any]], waivers_payload: Optional[Map
 
 
 def evaluate(rows: Sequence[Mapping[str, Any]], *, waived: bool,
-            require_resplit: bool = False, require_relayout: bool = False) -> Tuple[str, List[Dict[str, str]]]:
+            require_resplit: bool = False, require_relayout: bool = False,
+            require_residue: bool = False) -> Tuple[str, List[Dict[str, str]]]:
     blocking: List[Dict[str, str]] = []
     for row in rows:
         base_passed = row.get("state") == "active" and row.get("probe", {}).get("passed") is True
@@ -447,7 +467,14 @@ def evaluate(rows: Sequence[Mapping[str, Any]], *, waived: bool,
             relayout_passed = (row.get("readable_layout") == "readable"
                                and row.get("relayout_hold") is None
                                and row.get("transition_window") == "closed")
-        if base_passed and resplit_passed and relayout_passed:
+        residue_passed = True
+        if require_residue:
+            # W7H: the legacy top level holds nothing but typed deferrals, no
+            # nonterminal run, and no trash still awaiting its approval gate.
+            residue_passed = (row.get("legacy_top_level") in {"empty", "deferred-only"}
+                              and row.get("residue_hold") is None
+                              and row.get("residue_trash_pending") == 0)
+        if base_passed and resplit_passed and relayout_passed and residue_passed:
             continue
         waiver = row.get("waiver") or {}
         if waived and waiver.get("status") == "accepted":
@@ -458,8 +485,10 @@ def evaluate(rows: Sequence[Mapping[str, Any]], *, waived: bool,
             reason = "negative-probe-failed"
         elif not resplit_passed:
             reason = "resplit-incomplete"
-        else:
+        elif not relayout_passed:
             reason = "relayout-incomplete"
+        else:
+            reason = "residue-remaining"
         blocking.append({"repo_path": row["repo_path"], "state": row.get("state"), "reason": reason})
     return ("incomplete" if blocking else "complete"), blocking
 
@@ -548,6 +577,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     p.add_argument("--timeout", type=float, default=RESOLVE_TIMEOUT_DEFAULT)
     p.add_argument("--require-resplit", action="store_true")
     p.add_argument("--require-relayout", action="store_true")
+    p.add_argument("--require-residue", action="store_true")
 
     args = parser.parse_args(argv)
     try:
@@ -572,7 +602,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         waivers_result = _apply_waivers(rows, waivers_payload, now=None)
         verdict, blocking = evaluate(rows, waived=waivers_payload is not None,
                                      require_resplit=args.require_resplit,
-                                     require_relayout=args.require_relayout)
+                                     require_relayout=args.require_relayout,
+                                     require_residue=args.require_residue)
         payload = _build_payload(
             command="complete", roster=roster, roster_digest=roster_digest,
             roster_path=str(args.roster), rows=rows,
