@@ -58,6 +58,20 @@ class MaterialRouteGuardTest(unittest.TestCase):
         (self.home / "core").mkdir(parents=True)
         (self.home / "core" / "CORE.md").write_text("core\n", encoding="utf-8")
         (self.home / "utilities").symlink_to(ROOT / "utilities", target_is_directory=True)
+        result = self.compile_route()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.route_id = json.loads(result.stdout)["route_id"]
+        self.route = self.artifacts / ".runtime" / "routes" / f"{self.route_id}.json"
+        self.assertTrue(self.route.is_file())
+        self.receipts = self.base / "recall-opportunities"
+
+    def compile_route(self) -> subprocess.CompletedProcess[str]:
+        """The fixture's exact compile request, rerunnable.
+
+        `route_id` is a pure function of this request, so a second call
+        reproduces the same id and the same canonical path — which is the
+        condition review B1 is about.
+        """
         command = [
             sys.executable, str(ROUTER), "compile",
             "--slug", "material-route-fixture",
@@ -81,12 +95,7 @@ class MaterialRouteGuardTest(unittest.TestCase):
         compile_env = os.environ.copy()
         compile_env["AGENT_HOME"] = str(ROOT)
         compile_env.pop("AGENT_DISPATCH_JOBS", None)
-        result = subprocess.run(command, text=True, capture_output=True, env=compile_env)
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.route_id = json.loads(result.stdout)["route_id"]
-        self.route = self.artifacts / ".runtime" / "routes" / f"{self.route_id}.json"
-        self.assertTrue(self.route.is_file())
-        self.receipts = self.base / "recall-opportunities"
+        return subprocess.run(command, text=True, capture_output=True, env=compile_env)
 
     def _restore_agent_home(self) -> None:
         if self._original_agent_home is None:
@@ -1297,16 +1306,94 @@ class MaterialRouteGuardTest(unittest.TestCase):
         )
         self.assertEqual(allowed.returncode, 0, allowed.stdout + allowed.stderr)
 
-    def test_j_symlinked_outcome_sidecar_is_not_closure_evidence(self):
-        # The sidecar is trusted, so it must be a real file in the canonical route
-        # dir -- a symlink planted there is not closure evidence (same rule the
-        # route record itself follows).
+    def test_j_symlinked_outcome_sidecar_counts_as_closure(self):
+        # One question, one answer: `artifact_producer.route_is_closed`,
+        # `capability-route.close_route` and `route_status` all follow symlinks.
+        # While this guard alone refused to, a symlink at the sidecar path made
+        # `close` report "already closed" and `status` show closed while writes
+        # kept being admitted -- defect J silently un-fixed on that path.
         self.assertEqual(self.bind().returncode, 0)
         other = self.base / "foreign-outcome.json"
         other.write_text("{}", encoding="utf-8")
         self.route.with_name(self.route.stem + ".outcome.json").symlink_to(other)
-        allowed = self.guard("--tool", "Edit", "--file", str(self.repo / "app.py"))
+        denied = self.guard("--tool", "Edit", "--file", str(self.repo / "app.py"))
+        self.assertEqual(denied.returncode, 2, denied.stdout + denied.stderr)
+        self.assertIn("reason=route-closed", denied.stdout + denied.stderr)
+
+    def test_j_recompiling_after_close_reopens_the_route(self):
+        # Review B1: `route_id` is a pure function of the compile request, so an
+        # identical recompile reproduces the same id and the same canonical path,
+        # and `write_once` returns quietly because the bytes match. The old
+        # closure sidecar was still there, so bind refused `route-closed` and the
+        # deny text told the reader to compile and rebind -- which is exactly what
+        # had just failed. Unbreakable loop until HEAD or an input changed.
+        self.assertEqual(self.bind().returncode, 0)
+        self.close_route()
+        self.assertEqual(self.bind().returncode, 2)
+        recompiled = self.compile_route()
+        self.assertEqual(recompiled.returncode, 0, recompiled.stderr)
+        self.assertEqual(json.loads(recompiled.stdout)["route_id"], self.route_id)
+        self.assertIn("route_closure_retired=", recompiled.stderr)
+        sidecar = self.route.with_name(self.route.stem + ".outcome.json")
+        self.assertFalse(sidecar.exists())
+        # The closure is retired, not destroyed: it recorded a real cycle.
+        self.assertEqual(
+            len(list(sidecar.parent.glob(f"{self.route.stem}.outcome.superseded-*.json"))), 1
+        )
+        self.assertEqual(self.bind().returncode, 0)
+        self.assertEqual(
+            self.guard("--tool", "Edit", "--file", str(self.repo / "app.py")).returncode, 0
+        )
+
+    def test_j_registered_worker_may_still_write_its_artifact_on_a_closed_route(self):
+        # Review B2: `worker_route` was exempted but the identical branch inside
+        # `artifact_active_route` was not, so a worker on a route its owner closed
+        # could edit source and yet not write its own report -- a dead stage.
+        self.close_route()
+        env = {
+            "AGENT_ROUTE_FILE": str(self.route),
+            "AGENT_ROUTE_ID": self.route_id,
+            "AGENT_ROUTE_NODE": "inline",
+        }
+        # `capability_artifact_caps` keys off a `.agent_reports` path segment, so
+        # the target must actually look like an artifact-root path or the whole
+        # ArtifactWrite branch returns early and the test proves nothing.
+        target = self.artifacts / ".agent_reports" / "plans" / "cycle" / "final_report.md"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        self.assertIsNotNone(
+            MATERIAL_GUARD.capability_artifact_caps(target),
+            "fixture path must be a route-gated artifact bucket",
+        )
+        allowed = self.guard(
+            "--tool", "ArtifactWrite", "--file", str(target), env=env, opportunity=False
+        )
         self.assertEqual(allowed.returncode, 0, allowed.stdout + allowed.stderr)
+
+    def test_j_an_empty_commit_argument_does_not_slip_past_the_gate(self):
+        # The continuation strip must not drop a legitimately EMPTY token: losing
+        # the empty `--author` value shifts `-m` into its place and leaves `msg`
+        # read as a pathspec, which narrows the materiality diff enough to skip
+        # the route check on a material commit.
+        (self.repo / "app.py").write_text("print('two')\n", encoding="utf-8")
+        # Staged, because a commit without `-a` takes its materiality from the index.
+        subprocess.run(["git", "-C", str(self.repo), "add", "app.py"], check=True)
+        denied = self.guard(
+            "--tool", "Bash",
+            "--command", "git -C %s commit --author '' -m msg" % shlex.quote(str(self.repo)),
+            opportunity=False,
+        )
+        self.assertEqual(denied.returncode, 2, denied.stdout + denied.stderr)
+
+    def test_j_a_continued_commit_is_still_seen_by_the_gate(self):
+        # The tokenizer fix also un-blinds this guard's own commit scanner: before
+        # it, `git \<newline> commit -am wip` produced no commit segment at all.
+        (self.repo / "app.py").write_text("print('three')\n", encoding="utf-8")
+        denied = self.guard(
+            "--tool", "Bash",
+            "--command", "git -C %s \\\n commit -am wip" % shlex.quote(str(self.repo)),
+            opportunity=False,
+        )
+        self.assertEqual(denied.returncode, 2, denied.stdout + denied.stderr)
 
 
 class ArtifactBucketCapsTest(unittest.TestCase):

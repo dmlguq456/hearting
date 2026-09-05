@@ -417,8 +417,20 @@ def route_is_closed(route_file: Path) -> bool:
     """
     sidecar = route_file.with_name(route_file.stem + ".outcome.json")
     try:
-        return sidecar.is_file() and not sidecar.is_symlink()
+        # NOTE the asymmetry with the route RECORD, which refuses a symlink outright
+        # (`route-file-unsafe`): the record is authority and must not be aliased,
+        # while the sidecar is a fact about the record that any of the writers
+        # below may leave. `is_file()` follows symlinks, matching
+        # `artifact_producer.route_is_closed`,
+        # `capability-route.close_route` and `route_status`. The guard previously
+        # refused to count a symlinked sidecar, so a symlink there made `close`
+        # report "already closed" while this gate kept admitting writes — defect J
+        # silently un-fixed. One question, one answer.
+        return sidecar.is_file()
     except OSError:
+        # Fail open: this gate's false positives stop a human, and the route record
+        # itself was just read from the same directory, so an isolated stat failure
+        # on the sidecar alone is close to impossible.
         return False
 
 
@@ -619,6 +631,13 @@ def artifact_active_route(
             expected_route_id=route_id,
             expected_node=route_node or None,
             accepted_capabilities=accepted_capabilities,
+            # Same exemption as `worker_route`, and for the same reason: a
+            # registered worker's route lifetime belongs to the dispatch
+            # contract. Without it a worker on a route its owner closed could
+            # still edit source but not write its own report artifact — the
+            # inverse of any coherent rule, and a dead stage
+            # (`artifact-guard.sh` turns it into `capability-artifact-route-required`).
+            allow_closed=True,
         )
         return route, True, sealed_root
 
@@ -800,7 +819,15 @@ def _shell_segments(command: str) -> Iterable[list[str]]:
     # `cp` into a cutover-denied artifact path went unblocked AND unrecorded
     # (cairn 2026-09-03 12:14:57 / 12:18:54). Strip it here so both this guard
     # and hooks/artifact_write_targets.py see the command the shell ran.
-    tokens = [stripped for stripped in (token.strip("\r\n") for token in tokens) if stripped]
+    # Strip the continuation newline, but KEEP a token that was already empty:
+    # `git commit --author "" -m msg` would otherwise lose the empty value, shift
+    # `-m` into its place and leave `msg` read as a pathspec, which narrows the
+    # materiality diff and lets a material commit past this gate.
+    tokens = [
+        stripped
+        for stripped, original in ((token.strip("\r\n"), token) for token in tokens)
+        if stripped or not original
+    ]
     segments: list[list[str]] = []
     current: list[str] = []
     for token in tokens:
@@ -1294,7 +1321,20 @@ def hook_main(payload: dict[str, Any], agent_home: Path) -> int:
         if session_id and len(outputs) == 1 and len(invocations) == 1:
             try:
                 bind_route(outputs[0], invocations[0].effective_cwd, session_id, agent_home)
-            except (RouteError, OSError, subprocess.SubprocessError):
+            except RouteError as exc:
+                # A silent failure here is worse than none: the next Edit is denied
+                # `session-route-missing`, whose advice is "compile and bind" —
+                # which is exactly what just failed. Say why, once, on stderr.
+                if str(exc) == "route-closed":
+                    print(
+                        "material-route-guard: bind skipped — that route is already "
+                        "closed. Its outcome sidecar is still beside the record; a "
+                        "recompile of an identical request reproduces the same "
+                        "route id. Change an input (e.g. --slug) or retire the "
+                        "sidecar before rebinding.",
+                        file=sys.stderr,
+                    )
+            except (OSError, subprocess.SubprocessError):
                 pass
         elif (
             session_id

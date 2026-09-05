@@ -105,7 +105,11 @@ class LineContinuationTest(unittest.TestCase):
     glued to the next token, so the head reads as "\\ncp" / "\\npython3" and the
     whole segment used to be dropped -- no Tier A block, no Tier B record. Found
     on a real write: cairn 2026-09-03, a `cp` into a cutover-denied spec path was
-    neither blocked nor observed."""
+    neither blocked nor observed.
+
+    This affects anything that dispatches on the segment HEAD (verbs,
+    interpreters, and `material-route-guard`'s own `git commit` scanner).
+    Redirect scanning never reads the head and was never affected."""
 
     def test_continued_tier_a_verb_is_still_seen(self):
         cmd = 'mkdir -p "$D"; \\\n' + "cp /a/prd.md /root/spec/prd.md"
@@ -113,6 +117,9 @@ class LineContinuationTest(unittest.TestCase):
         self.assertIn("/root/spec/prd.md", result["decidable"])
 
     def test_continued_redirect_is_still_seen(self):
+        # Regression guard only: the redirect scan never looked at the segment
+        # head, so a continued redirect was NOT among the writes this defect
+        # dropped. Kept so the fix cannot break the case it does not fix.
         cmd = "echo hi; \\\n" + "echo x > /root/spec/prd.md"
         self.assertIn("/root/spec/prd.md", t.parse(cmd, Path("/tmp"))["decidable"])
 
