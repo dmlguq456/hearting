@@ -5,6 +5,8 @@ from unittest import mock
 
 P=Path(__file__).with_name("capability-route.py")
 S=importlib.util.spec_from_file_location("route",P); R=importlib.util.module_from_spec(S); S.loader.exec_module(R)
+GUARD_P=P.with_name("worker-route-guard.py")
+GUARD_S=importlib.util.spec_from_file_location("guard",GUARD_P); G=importlib.util.module_from_spec(GUARD_S); GUARD_S.loader.exec_module(G)
 FLEET_P=P.parent.parent/"tools"/"fleet"/"route.py"
 FLEET_S=importlib.util.spec_from_file_location("fleet_route",FLEET_P)
 FLEET_ROUTE=importlib.util.module_from_spec(FLEET_S); FLEET_S.loader.exec_module(FLEET_ROUTE)
@@ -1818,7 +1820,14 @@ class TestContinuation(unittest.TestCase):
   self._previous_agent_home=os.environ.get("AGENT_HOME")
   self._previous_dispatch_jobs=os.environ.get("AGENT_DISPATCH_JOBS")
   os.environ["AGENT_HOME"]=self._tmp_home.name
-  os.environ.pop("AGENT_DISPATCH_JOBS",None)
+  # Not popped: with no AGENT_DISPATCH_JOBS the state root resolves from
+  # XDG_STATE_HOME/HOME, not from AGENT_HOME, so every fixture route sealed the
+  # operator's *live* jobs.log -- and once completing a node registered an
+  # attempt, the suite appended fake rows there (measured: 660). Bind it to this
+  # test's own tmpdir so a fixture registry is always a fixture registry.
+  self._jobs=Path(self._tmp_home.name)/"state"/"jobs.log"
+  self._jobs.parent.mkdir(parents=True,exist_ok=True)
+  os.environ["AGENT_DISPATCH_JOBS"]=str(self._jobs)
   self.addCleanup(self._restore)
  def _restore(self):
   if self._previous_agent_home is None: os.environ.pop("AGENT_HOME",None)
@@ -1887,6 +1896,10 @@ class TestContinuation(unittest.TestCase):
    "last_turn_id":f"turn-{node['id']}",
   })
   R.atomic_write(link_path,link)
+  # A completed node has a registry row: production cannot reach a completion
+  # marker without one. Fixtures that skipped this were the only reason the
+  # rebind ever saw a missing registry, which B2 now (correctly) declines.
+  self._write_attempt_row(jobs,route["route_id"],node["id"],attempt_id)
   return evidence
  def _complete_prefix(self,route,resume_from,evidence_root,skip=()):
   evidence={}
@@ -2439,6 +2452,569 @@ class TestContinuation(unittest.TestCase):
     else: os.environ["AGENT_HOME"]=previous_home
     if previous_jobs is None: os.environ.pop("AGENT_DISPATCH_JOBS",None)
     else: os.environ["AGENT_DISPATCH_JOBS"]=previous_jobs
+
+ def _git_repo(self,root):
+  import subprocess
+  repo=Path(root)/"repo"; repo.mkdir(parents=True)
+  subprocess.run(["git","init","-q",str(repo)],check=True)
+  subprocess.run(["git","-C",str(repo),"config","user.email","fixture@example.com"],check=True)
+  subprocess.run(["git","-C",str(repo),"config","user.name","Fixture"],check=True)
+  (repo/"x").write_text("a"); subprocess.run(["git","-C",str(repo),"add","x"],check=True)
+  subprocess.run(["git","-C",str(repo),"commit","-qm","a"],check=True)
+  return repo
+ def _git_head(self,repo):
+  import subprocess
+  return subprocess.run(["git","-C",str(repo),"rev-parse","HEAD"],text=True,capture_output=True,check=True).stdout.strip()
+
+ def test_c_continuation_cli_rebinds_source_commit_after_fast_forward(self):
+  # Defect C end-to-end through the checked CLI: the source route was compiled at
+  # commit A, depth-0 fast-forwarded the worktree to B, and the published
+  # continuation must pin B (what its grounding tuple seals), not A.
+  import subprocess,sys
+  with tempfile.TemporaryDirectory() as tmp:
+   previous_home=os.environ.get("AGENT_HOME")
+   previous_jobs=os.environ.get("AGENT_DISPATCH_JOBS")
+   jobs=str(Path(tmp)/"state"/"jobs.log")
+   os.environ["AGENT_HOME"]=str(R.ROOT)
+   os.environ["AGENT_DISPATCH_JOBS"]=jobs
+   try:
+    repo=self._git_repo(tmp); artifact=Path(tmp)/"artifacts"
+    source=self._source(artifact,cwd=repo)
+    pinned=source["source_commit"]; self.assertEqual(pinned,self._git_head(repo))
+    self._complete_prefix(source,"plan",Path(tmp)/"evidence")
+    (repo/"x").write_text("b"); subprocess.run(["git","-C",str(repo),"commit","-qam","fast-forward"],check=True)
+    head=self._git_head(repo); self.assertNotEqual(head,pinned)
+    source_path=Path(tmp)/"source-route.json"
+    source_path.write_text(json.dumps(source),encoding="utf-8")
+    child_env=os.environ.copy()
+    # The caller's attempt id must not reach the child: inherited, owner-route
+    # binding fails `owner-route-owner-row-not-unique`, so this suite fails when
+    # it is run from inside a registered worker -- which is how the harness runs
+    # it (round 3, S3).
+    child_env.pop("AGENT_DISPATCH_ATTEMPT_ID",None)
+    result=subprocess.run([
+     sys.executable,str(P),"continuation","--source-route",str(source_path),
+     "--resume-from-node","plan","--requested-boundary","plan",
+     "--reason","resume-after-fast-forward","--artifact-root",str(artifact),
+    ],capture_output=True,text=True,cwd=str(R.ROOT),env=child_env)
+    self.assertEqual(result.returncode,0,result.stderr)
+    route=json.loads(result.stdout)
+    self.assertEqual(route["source_commit"],head)
+    self.assertEqual(route["source_commit_rebind"]["inherited_source_commit"],pinned)
+    self.assertEqual(route["launch_compatibility_tuple"]["grounding_roots"]["cwd"]["release_id"],head)
+    published=json.loads(R.canonical_route_path(artifact,route["route_id"]).read_text(encoding="utf-8"))
+    self.assertEqual(R.verify_route(published)["source_commit"],head)
+    # `plan` is pre-mutation, so it gets no lineage exemption from the guard: on
+    # main this exact call raises route-source-commit-mismatch. It passes here
+    # only because the pin was rebound.
+    _,node,_=G.validate_route_contract(R.canonical_route_path(artifact,route["route_id"]),"plan",repo,artifact)
+    self.assertEqual(node["id"],"plan")
+   finally:
+    if previous_home is None: os.environ.pop("AGENT_HOME",None)
+    else: os.environ["AGENT_HOME"]=previous_home
+    if previous_jobs is None: os.environ.pop("AGENT_DISPATCH_JOBS",None)
+    else: os.environ["AGENT_DISPATCH_JOBS"]=previous_jobs
+
+ def test_c_rebind_declines_an_sd67_mutation_retry(self):
+  # Review blocking #1: rebinding unconditionally would let a continuation resume
+  # at `execute` after execute already ran and committed, pinning the new HEAD and
+  # walking past SD-67's retry-evidence gate. When a node this continuation
+  # re-runs mutates the worktree AND the source route already has an attempt on
+  # it, the pin is kept. The guard then refuses that node (it looks retry
+  # evidence up under the continuation's own route_id, where the prior rows are
+  # not) -- which is exactly what main does, so declining is never a regression.
+  import subprocess
+  with tempfile.TemporaryDirectory() as tmp:
+   previous_jobs=os.environ.get("AGENT_DISPATCH_JOBS")
+   jobs=Path(tmp)/"state"/"jobs.log"; jobs.parent.mkdir(parents=True)
+   os.environ["AGENT_DISPATCH_JOBS"]=str(jobs)
+   try:
+    repo=self._git_repo(tmp); artifact=Path(tmp)/"artifacts"
+    source=self._source(artifact,cwd=repo)
+    pinned=source["source_commit"]
+    self._complete_prefix(source,"execute",Path(tmp)/"evidence")
+    execute=next(node for node in source["nodes"] if node["id"]=="execute")
+    self.assertTrue(R._node_mutates_worktree(execute))
+    # execute already ran once under this route, and its commit advanced HEAD.
+    self._write_attempt_row(jobs,source["route_id"],"execute","att-execute-prior")
+    (repo/"x").write_text("b"); subprocess.run(["git","-C",str(repo),"commit","-qam","execute output"],check=True)
+    declined=self._build(source,resume_from_node="execute",requested_boundary="execute")
+    self.assertEqual(declined["source_commit"],pinned)
+    self.assertNotIn("source_commit_rebind",declined)
+    # Same route, same moved HEAD, but no prior attempt on the mutation node:
+    # this route never mutated the tree, so the move is external and rebinds.
+    # The completed prefix's rows stay -- emptying the file instead would be the
+    # truncation case, which now (correctly) declines (round 3, B2b).
+    self._drop_attempt_rows(jobs,node_id="execute")
+    rebound=self._build(source,resume_from_node="execute",requested_boundary="execute")
+    self.assertEqual(rebound["source_commit"],self._git_head(repo))
+   finally:
+    if previous_jobs is None: os.environ.pop("AGENT_DISPATCH_JOBS",None)
+    else: os.environ["AGENT_DISPATCH_JOBS"]=previous_jobs
+
+
+ def test_c_decline_looks_past_the_resume_node_to_every_node_it_reruns(self):
+  # Review round 2, B1 -- the regression this fix exists to close. Asking only
+  # about the resume node let a `plan`-time resume re-pin the route: in a real
+  # autopilot-code route `execute` is the only worktree-mutating node, so `plan`
+  # answered "not a mutation" and the rebind went through. `execute` then ran
+  # later against `head == source_commit` and passed the guard on the trivial
+  # branch, never reaching SD-67's evidence gate. main refuses both nodes.
+  import subprocess
+  with tempfile.TemporaryDirectory() as tmp:
+   previous_jobs=os.environ.get("AGENT_DISPATCH_JOBS")
+   jobs=Path(tmp)/"state"/"jobs.log"; jobs.parent.mkdir(parents=True)
+   os.environ["AGENT_DISPATCH_JOBS"]=str(jobs)
+   try:
+    repo=self._git_repo(tmp); artifact=Path(tmp)/"artifacts"
+    source=self._source(artifact,cwd=repo)
+    pinned=source["source_commit"]
+    self._complete_prefix(source,"plan",Path(tmp)/"evidence")
+    execute=next(node for node in source["nodes"] if node["id"]=="execute")
+    self.assertTrue(R._node_mutates_worktree(execute))
+    plan=next(node for node in source["nodes"] if node["id"]=="plan")
+    # The resume node itself is innocent; that is the whole point.
+    self.assertFalse(R._node_mutates_worktree(plan))
+    self._write_attempt_row(jobs,source["route_id"],"execute","att-execute-prior")
+    (repo/"x").write_text("b")
+    subprocess.run(["git","-C",str(repo),"commit","-qam","execute output"],check=True)
+    declined=self._build(source,resume_from_node="plan",requested_boundary="plan")
+    self.assertEqual(declined["source_commit"],pinned)
+    self.assertNotIn("source_commit_rebind",declined)
+    # `execute` is carried by this continuation, which is why it counts.
+    self.assertIn("execute",[node["id"] for node in declined["nodes"]])
+    # Remove the prior attempt on the mutation node and the same resume rebinds:
+    # the decline is about that evidence, not about resuming at `plan`.
+    self._drop_attempt_rows(jobs,node_id="execute")
+    rebound=self._build(source,resume_from_node="plan",requested_boundary="plan")
+    self.assertEqual(rebound["source_commit"],self._git_head(repo))
+   finally:
+    if previous_jobs is None: os.environ.pop("AGENT_DISPATCH_JOBS",None)
+    else: os.environ["AGENT_DISPATCH_JOBS"]=previous_jobs
+
+ def test_c_unreadable_registry_declines_the_rebind(self):
+  # Review round 2, B2 -- the read was fail-open, so deleting or truncating
+  # jobs.log turned "this node already ran" into "no rows found" and re-pinned
+  # the route past the SD-67 gate. `registry_rows` returns [] for a missing file
+  # rather than raising, so absence of rows can never prove absence of attempts.
+  import subprocess
+  with tempfile.TemporaryDirectory() as tmp:
+   previous_jobs=os.environ.get("AGENT_DISPATCH_JOBS")
+   jobs=Path(tmp)/"state"/"jobs.log"; jobs.parent.mkdir(parents=True)
+   os.environ["AGENT_DISPATCH_JOBS"]=str(jobs)
+   try:
+    repo=self._git_repo(tmp); artifact=Path(tmp)/"artifacts"
+    source=self._source(artifact,cwd=repo)
+    pinned=source["source_commit"]
+    self._complete_prefix(source,"execute",Path(tmp)/"evidence")
+    (repo/"x").write_text("b")
+    subprocess.run(["git","-C",str(repo),"commit","-qam","execute output"],check=True)
+    moved=self._git_head(repo)
+    self.assertNotEqual(moved,pinned)
+    sealed=Path(source["launch_compatibility_tuple"]["jobs_path"]["path"])
+    for name,wreck in (
+     ("registry deleted",lambda: sealed.unlink()),
+     ("registry is a directory",lambda: (sealed.unlink(),sealed.mkdir())),
+    ):
+     with self.subTest(name):
+      if sealed.exists() or sealed.is_dir():
+       if sealed.is_dir(): sealed.rmdir()
+       elif sealed.exists(): sealed.unlink()
+      sealed.parent.mkdir(parents=True,exist_ok=True)
+      sealed.write_text("",encoding="utf-8")
+      wreck()
+      declined=self._build(source,resume_from_node="execute",requested_boundary="execute")
+      self.assertEqual(declined["source_commit"],pinned)
+      self.assertNotIn("source_commit_rebind",declined)
+    # An unresolved jobs binding is unreadable in the same sense.
+    if sealed.is_dir(): sealed.rmdir()
+    unbound=json.loads(json.dumps(source))
+    unbound["launch_compatibility_tuple"]["jobs_path"]={"path":None,"unresolved":"fixture"}
+    self.assertTrue(R._prior_registry_attempt(unbound,"execute"))
+   finally:
+    if previous_jobs is None: os.environ.pop("AGENT_DISPATCH_JOBS",None)
+    else: os.environ["AGENT_DISPATCH_JOBS"]=previous_jobs
+
+ def test_c_route_and_guard_share_one_mutating_scope_definition(self):
+  # S1: the builder's decline and the guard that adjudicates the same node must
+  # answer one question one way. A copied predicate would drift silently, so
+  # there is no copy -- the guard calls this function.
+  #
+  # Scope of this claim (round 3, Q2): the route/guard pair, not the repo.
+  # `artifact-postscan.py` and `hooks/artifact-guard.sh` map the same scope
+  # words to artifact-root path patterns, which is an adjacent question ("what
+  # may this node write"), and both predate this branch verbatim.
+  # Within the guard process there is one object: the name it uses *is* the
+  # route module's function. (This test file execs its own copy of the route
+  # module, so `R`'s function is a different instance of the same definition --
+  # comparing against it would only prove the two files were loaded twice.)
+  self.assertIs(G._worktree_mutating_scope,G.ROUTE.worktree_mutating_scope)
+  guard_source=(Path(R.ROOT)/"utilities"/"worker-route-guard.py").read_text(encoding="utf-8")
+  self.assertNotIn("def _worktree_mutating_scope",guard_source)
+  self.assertEqual(
+   G._worktree_mutating_scope.__code__.co_code,
+   R.worktree_mutating_scope.__code__.co_code,
+  )
+  for scope,mutating in (
+   ("target-artifact",True),("source-scoped",True),("source",True),
+   ("source/**",True),("target-artifact-adjacent",False),
+   ("artifact",False),("artifact/**",False),("spec",False),
+  ):
+   self.assertEqual(G._worktree_mutating_scope(scope),mutating,scope)
+   self.assertEqual(R.worktree_mutating_scope(scope),mutating,scope)
+
+ def test_c_refreshed_cwd_leaves_one_revision_per_path_in_the_tuple(self):
+  # S2: the targeted refresh re-read `grounding_cwd` while `runtime_root` /
+  # `launch_home` answered from cache. Under dev activation those name the same
+  # path, so one tuple carried two release ids for one path -- defect C's own
+  # shape, reintroduced by the fix for defect C.
+  #
+  # `resolve_agent_home()` validates a harness root and would reject a fixture
+  # repo (an earlier version of this test set AGENT_HOME and silently tested
+  # nothing, because runtime_root then resolved to the installed release and
+  # never shared a path with the cwd). Patch the resolver so the two genuinely
+  # are one path, which is what dev activation means.
+  import subprocess
+  with tempfile.TemporaryDirectory() as tmp:
+   repo=self._git_repo(tmp)
+   previous=R.resolve_agent_home
+   R.resolve_agent_home=lambda *a,**k: str(repo)
+   try:
+    first=R.launch_compatibility_tuple(artifact_root=str(Path(tmp)/"artifacts"),cwd=repo)
+    stale=self._git_head(repo)
+    self.assertEqual(first["runtime_root"]["path"],str(repo))
+    self.assertEqual(first["grounding_roots"]["cwd"]["path"],str(repo))
+    self.assertEqual(first["runtime_root"]["release_id"],stale)
+    (repo/"x").write_text("moved")
+    subprocess.run(["git","-C",str(repo),"commit","-qam","moved"],check=True)
+    fresh=self._git_head(repo)
+    self.assertNotEqual(fresh,stale)
+    tuple_=R.launch_compatibility_tuple(
+     artifact_root=str(Path(tmp)/"artifacts"),cwd=repo,refresh_cwd=True,
+    )
+    by_path={}
+    for identity in (
+     tuple_["runtime_root"],tuple_["launch_home"],tuple_["registry_root"],
+     tuple_["grounding_roots"]["cwd"],
+    ):
+     by_path.setdefault(identity["path"],set()).add(identity["release_id"])
+    self.assertIn(str(repo),by_path)
+    for path,revisions in by_path.items():
+     self.assertEqual(len(revisions),1,f"{path} carries {revisions}")
+    self.assertEqual(by_path[str(repo)],{fresh})
+   finally:
+    R.resolve_agent_home=previous
+
+ def test_c_lineage_recheck_reaches_a_repo_subdirectory(self):
+  # S3: `(cwd/".git").exists()` answers only for a repository root, so a route
+  # whose cwd is any subdirectory skipped the recheck entirely -- the tamper case
+  # below passed verification. Ask git whether it is inside a worktree instead.
+  with tempfile.TemporaryDirectory() as tmp:
+   repo=self._git_repo(tmp)
+   nested=repo/"pkg"/"sub"; nested.mkdir(parents=True)
+   self.assertFalse((nested/".git").exists())
+   self.assertTrue(R._inside_git_worktree(nested))
+   self.assertTrue(R._inside_git_worktree(repo))
+   self.assertFalse(R._inside_git_worktree(Path(tmp)/"not-a-repo"))
+   # And the call site: a rebind claiming a lineage the tree denies must be
+   # refused when the route cwd is that subdirectory, not waved through.
+   previous_jobs=os.environ.get("AGENT_DISPATCH_JOBS")
+   jobs=Path(tmp)/"state"/"jobs.log"; jobs.parent.mkdir(parents=True)
+   os.environ["AGENT_DISPATCH_JOBS"]=str(jobs)
+   try:
+    import subprocess
+    artifact=Path(tmp)/"artifacts"
+    source=self._source(artifact,cwd=repo)
+    self._complete_prefix(source,"plan",Path(tmp)/"evidence")
+    (repo/"x").write_text("b")
+    subprocess.run(["git","-C",str(repo),"commit","-qam","fast-forward"],check=True)
+    built=self._build(source,resume_from_node="plan",requested_boundary="plan")
+    self.assertIn("source_commit_rebind",built)
+    R._verify_continuation_route(json.loads(json.dumps(built)))
+    tampered=json.loads(json.dumps(built))
+    tampered["cwd"]=str(nested)
+    tampered["source_commit_rebind"]["cwd"]=str(nested)
+    tampered["source_commit_rebind"]["inherited_source_commit"]="c"*40
+    with self.assertRaisesRegex(
+     ValueError,"continuation-source-commit-rebind-lineage-unproven"
+    ):
+     R._verify_continuation_route(tampered)
+   finally:
+    if previous_jobs is None: os.environ.pop("AGENT_DISPATCH_JOBS",None)
+    else: os.environ["AGENT_DISPATCH_JOBS"]=previous_jobs
+
+ def test_c_builder_asserts_pin_against_grounding(self):
+  # S5: round 1 added the assertion but nothing covered its call site, so the
+  # builder could have stopped calling it without a test noticing.
+  import subprocess
+  with tempfile.TemporaryDirectory() as tmp:
+   previous_jobs=os.environ.get("AGENT_DISPATCH_JOBS")
+   jobs=Path(tmp)/"state"/"jobs.log"; jobs.parent.mkdir(parents=True)
+   os.environ["AGENT_DISPATCH_JOBS"]=str(jobs)
+   try:
+    repo=self._git_repo(tmp); artifact=Path(tmp)/"artifacts"
+    source=self._source(artifact,cwd=repo)
+    self._complete_prefix(source,"plan",Path(tmp)/"evidence")
+    (repo/"x").write_text("b")
+    subprocess.run(["git","-C",str(repo),"commit","-qam","fast-forward"],check=True)
+    calls=[]
+    real=R._assert_pin_matches_grounding
+    def spy(source_commit,launch):
+     calls.append((source_commit,launch))
+     return real(source_commit,launch)
+    R._assert_pin_matches_grounding=spy
+    try:
+     built=self._build(source,resume_from_node="plan",requested_boundary="plan")
+    finally:
+     R._assert_pin_matches_grounding=real
+    self.assertEqual(len(calls),1)
+    pin,launch=calls[0]
+    self.assertEqual(pin,built["source_commit"])
+    self.assertIs(launch,built["launch_compatibility_tuple"])
+   finally:
+    if previous_jobs is None: os.environ.pop("AGENT_DISPATCH_JOBS",None)
+    else: os.environ["AGENT_DISPATCH_JOBS"]=previous_jobs
+
+
+ def test_c_decline_survives_another_continuation_generation(self):
+  # Review round 3, B1 -- the decline was defeated by building one more
+  # continuation. A declined continuation records no attempts of its own (the
+  # guard refuses its whole pre-mutation prefix), so a continuation built FROM
+  # it saw a clean registry, did not decline, and re-pinned. `execute` then met
+  # `head == source_commit` and was accepted on the guard's trivial branch --
+  # round 2's defect, one generation later. main refuses at every generation.
+  import subprocess
+  with tempfile.TemporaryDirectory() as tmp:
+   repo=self._git_repo(tmp); artifact=Path(tmp)/"artifacts"
+   jobs=Path(os.environ["AGENT_DISPATCH_JOBS"])
+   source=self._source(artifact,cwd=repo)
+   pinned=source["source_commit"]
+   self._complete_prefix(source,"plan",Path(tmp)/"evidence")
+   self._write_attempt_row(jobs,source["route_id"],"execute","att-execute-prior")
+   (repo/"x").write_text("b")
+   subprocess.run(["git","-C",str(repo),"commit","-qam","execute output"],check=True)
+   moved=self._git_head(repo)
+   first=self._build(source,resume_from_node="plan",requested_boundary="plan")
+   self.assertEqual(first["source_commit"],pinned)
+   # The declined continuation is a valid source route with its own new id, and
+   # it wrote no rows -- which is exactly why asking only about it is not enough.
+   self.assertNotEqual(first["route_id"],source["route_id"])
+   self.assertEqual(
+    self._stage_rows(jobs,first["route_id"]),[],
+    "a declined continuation should have no registry rows of its own",
+   )
+   second=self._build(first,resume_from_node="plan",requested_boundary="plan")
+   self.assertEqual(
+    second["source_commit"],pinned,
+    "the decline must survive a second continuation generation",
+   )
+   self.assertNotIn("source_commit_rebind",second)
+   self.assertIn("execute",[node["id"] for node in second["nodes"]])
+   # And the ancestor whose rows carry the evidence is reachable from the
+   # second-generation source route.
+   self.assertIn(source["route_id"],R._continuation_lineage_route_ids(first))
+   self.assertNotEqual(moved,pinned)
+
+ def _stage_rows(self,jobs,route_id):
+  fallback=R._stage_fallback()
+  return fallback.registry_route_rows(Path(jobs),[route_id])
+
+ def test_c_unprovable_registry_declines_the_rebind(self):
+  # Review round 3, B2. `registry_rows` returns [] for a missing file, for a
+  # truncated one, and for a registry that simply never saw this route -- three
+  # different truths, one signal. Absence is only evidence once the registry is
+  # proved to be the lineage's own and proved to hold that lineage.
+  import subprocess
+  with tempfile.TemporaryDirectory() as tmp:
+   repo=self._git_repo(tmp); artifact=Path(tmp)/"artifacts"
+   jobs=Path(os.environ["AGENT_DISPATCH_JOBS"])
+   source=self._source(artifact,cwd=repo)
+   pinned=source["source_commit"]
+   self._complete_prefix(source,"execute",Path(tmp)/"evidence")
+   self._write_attempt_row(jobs,source["route_id"],"execute","att-execute-prior")
+   (repo/"x").write_text("b")
+   subprocess.run(["git","-C",str(repo),"commit","-qam","execute output"],check=True)
+   moved=self._git_head(repo)
+   self.assertNotEqual(moved,pinned)
+   sealed=Path(source["launch_compatibility_tuple"]["jobs_path"]["path"])
+   intact=sealed.read_text(encoding="utf-8")
+
+   def rebuild():
+    return self._build(source,resume_from_node="execute",requested_boundary="execute")
+
+   # Positive control (S2): with the registry intact and readable, this same
+   # fixture rebinds once the mutation node's row is gone -- so a decline below
+   # is attributable to the registry state and not to anything else.
+   self._drop_attempt_rows(sealed,node_id="execute")
+   self.assertEqual(rebuild()["source_commit"],moved)
+   sealed.write_text(intact,encoding="utf-8")
+   self.assertEqual(rebuild()["source_commit"],pinned)
+
+   cases={}
+   def restore():
+    if sealed.is_dir(): sealed.rmdir()
+    elif sealed.exists(): sealed.unlink()
+    sealed.parent.mkdir(parents=True,exist_ok=True)
+    sealed.write_text(intact,encoding="utf-8")
+
+   restore(); sealed.unlink(); cases["deleted"]=rebuild()
+   restore(); sealed.unlink(); sealed.mkdir(); cases["directory"]=rebuild()
+   # B2b: truncation. The docstring named it; only deletion was covered, and two
+   # tests actively asserted that an empty registry rebinds.
+   restore(); sealed.write_text("",encoding="utf-8"); cases["truncated"]=rebuild()
+   # A registry that is readable but never saw this lineage: same empty read,
+   # same ambiguity.
+   restore(); self._write_attempt_row(sealed,"rt-someone-elses","execute","att-other")
+   sealed.write_text("".join(
+    f"{line}\n" for line in sealed.read_text(encoding="utf-8").splitlines()
+    if source["route_id"] not in line
+   ),encoding="utf-8")
+   cases["foreign-lineage"]=rebuild()
+   restore()
+   for name,route in cases.items():
+    with self.subTest(name):
+     self.assertEqual(route["source_commit"],pinned)
+     self.assertNotIn("source_commit_rebind",route)
+
+ def test_c_pruned_release_registry_is_not_authoritative(self):
+  # Review round 3, B2a. When the sealed dispatch root's parent is gone,
+  # `_continuation_source_jobs` falls through to the LIVE canonical registry so
+  # that migrated markers stay readable. That substitution is safe for markers
+  # (each carries its own route binding) and unsafe here, where the evidence is
+  # an absent row: the live file exists, is a regular file, and holds no rows
+  # for the old route id.
+  import subprocess
+  with tempfile.TemporaryDirectory() as tmp:
+   repo=self._git_repo(tmp); artifact=Path(tmp)/"artifacts"
+   sealed_root=Path(tmp)/"releases"/"v1"/".dispatch"
+   sealed_root.mkdir(parents=True)
+   sealed=sealed_root/"jobs.log"
+   previous=os.environ.get("AGENT_DISPATCH_JOBS")
+   os.environ["AGENT_DISPATCH_JOBS"]=str(sealed)
+   try:
+    source=self._source(artifact,cwd=repo)
+    self.assertEqual(source["launch_compatibility_tuple"]["jobs_path"]["path"],str(sealed))
+    pinned=source["source_commit"]
+    # Resume at the first node, so no reused-evidence markers are needed and
+    # pruning the sealed tree cannot block the build for an unrelated reason.
+    self._write_attempt_row(sealed,source["route_id"],"execute","att-execute-prior")
+    (repo/"x").write_text("b")
+    subprocess.run(["git","-C",str(repo),"commit","-qam","execute output"],check=True)
+    # Control: the sealed registry is intact, so the decline is provable.
+    self.assertEqual(
+     self._build(source,resume_from_node="frame",requested_boundary="frame")["source_commit"],
+     pinned,
+    )
+    self.assertIsNotNone(R._authoritative_lineage_registry(source))
+    # Prune the release tree the sealed root lived in, and stand up a live
+    # canonical registry that never saw this route -- the observed shape the
+    # compat window exists for (release pruning, 2026-08-27).
+    import shutil
+    shutil.rmtree(Path(tmp)/"releases")  # reason=fixture boundary=test-tmpdir
+    live=Path(tmp)/"state"/"jobs.log"; live.parent.mkdir(parents=True,exist_ok=True)
+    live.write_text("",encoding="utf-8")
+    os.environ["AGENT_DISPATCH_JOBS"]=str(live)
+    # The fall-through registry is a real, readable, regular file with no rows
+    # for this route -- which the old read scored as "never ran".
+    resolved=R._continuation_source_jobs(source)
+    self.assertTrue(Path(resolved).is_file())
+    self.assertEqual(self._stage_rows(resolved,source["route_id"]),[])
+    self.assertIsNone(
+     R._authoritative_lineage_registry(source),
+     "a compat-window substitution is not the lineage's own registry",
+    )
+    declined=self._build(source,resume_from_node="frame",requested_boundary="frame")
+    self.assertEqual(declined["source_commit"],pinned)
+    self.assertNotIn("source_commit_rebind",declined)
+   finally:
+    if previous is None: os.environ.pop("AGENT_DISPATCH_JOBS",None)
+    else: os.environ["AGENT_DISPATCH_JOBS"]=previous
+
+ def _drop_attempt_rows(self,jobs,node_id):
+  """Remove one node's rows, keeping the rest of the lineage's.
+
+  Emptying the registry is a different case entirely: an empty read cannot
+  distinguish "this node never ran" from "someone truncated the file", so it
+  declines. A fixture that wants "no attempt on this node" has to say exactly
+  that.
+  """
+  jobs=Path(jobs)
+  kept=[line for line in jobs.read_text(encoding="utf-8").splitlines()
+        if f"route_node={node_id}," not in line+"," ]
+  jobs.write_text("".join(f"{line}\n" for line in kept),encoding="utf-8")
+
+ def _write_attempt_row(self,jobs,route_id,node_id,attempt_id,status="done"):
+  # A fixture registry is a tmpdir registry. A route built without
+  # AGENT_DISPATCH_JOBS pointed at one seals the *canonical* jobs path, and
+  # appending there writes fake attempt rows into the operator's live registry
+  # -- measured, 660 rows, after `_complete_node` started registering every
+  # completed node. Refuse loudly instead of polluting shared state.
+  jobs=Path(jobs)
+  if not self._is_fixture_registry(jobs):
+   raise AssertionError(
+    f"refusing to write a fixture attempt row to a non-tmpdir registry: {jobs}. "
+    "Set AGENT_DISPATCH_JOBS to a path under the test's TemporaryDirectory "
+    "before building the route."
+   )
+  meta=f"route_id={route_id},route_node={node_id},attempt_id={attempt_id}"
+  jobs.parent.mkdir(parents=True,exist_ok=True)
+  with jobs.open("a",encoding="utf-8") as handle:
+   handle.write("\t".join(["2026-09-04T00:00:00Z",status,"repo","worktree","slug",meta])+"\n")
+
+ @staticmethod
+ def _is_fixture_registry(jobs):
+  root=Path(tempfile.gettempdir()).resolve(strict=False)
+  try: Path(jobs).resolve(strict=False).relative_to(root)
+  except ValueError: return False
+  return True
+
+ def test_c_pin_and_grounding_must_name_one_commit(self):
+  # S5: the pin (`git rev-parse HEAD`) and the grounding (`source_revision`) are
+  # read by different functions at different moments -- exactly defect C's shape.
+  # The builder asserts they agree instead of arguing that they do.
+  def launch(release_id):
+   return {"grounding_roots":{"cwd":{"release_id":release_id}}}
+  head="a"*40; other="b"*40
+  R._assert_pin_matches_grounding(head,launch(head))
+  R._assert_pin_matches_grounding(head,launch(head+"+dirty:0123456789ab"))
+  with self.assertRaisesRegex(ValueError,"continuation-source-commit-grounding-mismatch"):
+   R._assert_pin_matches_grounding(head,launch(other))
+  with self.assertRaisesRegex(ValueError,"continuation-source-commit-grounding-mismatch"):
+   R._assert_pin_matches_grounding(head,launch(other+"+dirty:0123456789ab"))
+  # Non-git grounding shapes carry no commit to compare and are left alone.
+  for shape in ("release:v2.109.0:3b081cf992a6","tree:88a3ef6ba1f9a6071812",None,17):
+   R._assert_pin_matches_grounding(head,launch(shape))
+  R._assert_pin_matches_grounding(None,launch(head))
+
+ def test_c_continuation_rebind_record_is_verified(self):
+  import subprocess
+  with tempfile.TemporaryDirectory() as tmp:
+   repo=self._git_repo(tmp); artifact=Path(tmp)/"artifacts"
+   source=self._source(artifact,cwd=repo)
+   self._complete_prefix(source,"test",Path(tmp)/"evidence")
+   (repo/"x").write_text("b"); subprocess.run(["git","-C",str(repo),"commit","-qam","fast-forward"],check=True)
+   continuation=self._build(source)
+   self.assertEqual(continuation["source_commit"],self._git_head(repo))
+   R.verify_route(continuation)
+   for tamper in (
+    lambda route:route["source_commit_rebind"].update(rebound_source_commit=route["source_commit_rebind"]["inherited_source_commit"]),
+    lambda route:route["source_commit_rebind"].update(basis="cherry-pick"),
+    lambda route:route["source_commit_rebind"].update(contract_version=2),
+    lambda route:route["source_commit_rebind"].pop("inherited_source_commit"),
+    lambda route:route["source_commit_rebind"].update(cwd="/nonexistent/elsewhere"),
+   ):
+    tampered=json.loads(json.dumps(continuation)); tamper(tampered)
+    tampered["route_hash"]=R.route_hash(tampered)
+    tampered["route_id"]="rt-"+tampered["route_hash"].split(":",1)[1][:16]
+    with self.assertRaisesRegex(ValueError,"continuation-source-commit-rebind-invalid"):
+     R.verify_route(tampered)
+   # A diverged HEAD (the pinned root commit itself rewritten) is refused typed,
+   # with no route built. Amending only the fast-forward commit would still
+   # descend from the pin and is legitimately a rebind, not a divergence.
+   subprocess.run(["git","-C",str(repo),"reset","-q","--hard",source["source_commit"]],check=True)
+   subprocess.run(["git","-C",str(repo),"commit","--amend","-qm","rewritten"],check=True)
+   with self.assertRaisesRegex(ValueError,"continuation-source-commit-diverged"):
+    self._build(source)
 
  def test_continuation_cli_requires_exact_registered_depth1_owner(self):
   import subprocess,sys

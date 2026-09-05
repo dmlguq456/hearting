@@ -54,10 +54,10 @@ def _scopes(value: str | None) -> list[str]:
 # topologies.json write_scope vocabulary realized: these are the only scopes that
 # name the versioned worktree/target file being edited in place (git-committed),
 # as opposed to artifact-root outputs (reviews/**, dev_logs/**, plan/**, ...).
-def _worktree_mutating_scope(scope: str) -> bool:
-    if scope in ("target-artifact", "source-scoped"): return True
-    root = scope[:-3] if scope.endswith("/**") else scope
-    return root == "source"
+# One definition of the rule, in the route contract module this guard already
+# imports. The continuation builder asks the same question when it decides
+# whether to keep a route's pin, and both must get the same answer.
+_worktree_mutating_scope = ROUTE.worktree_mutating_scope
 
 
 def _post_mutation_node(nodes: list[dict], node_id: str) -> bool:

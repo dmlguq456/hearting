@@ -73,6 +73,9 @@ ROUTE_SCHEMA_VERSION = 2
 VALIDATION_BASIS_VERSION = 1
 LAUNCH_COMPATIBILITY_TUPLE_VERSION = 1
 CONTINUATION_CONTRACT_VERSION = 1
+# Strict equality on purpose: a future v2 changes what the record *means*, so an
+# older verifier must refuse it rather than read it under v1 rules (fail closed).
+CONTINUATION_SOURCE_COMMIT_REBIND_VERSION = 1
 _LAUNCH_CODE_ANCHORS = (
     "core/CORE.md",
     "harness-manifest.json",
@@ -290,6 +293,28 @@ def immutable_code_root_equivalent(a,b):
     right=_verified_immutable_release_identity(b)
     return left is not None and left == right
 
+def _forget_launch_path(path):
+    """Drop every memoized identity naming this path, before any of them is read.
+
+    The caches exist for immutable code roots, but a route cwd is the mutation
+    worktree and moves under them: a process that already sealed that cwd (an
+    earlier compile, a test) would otherwise hand a continuation the HEAD as it
+    was then.
+
+    Every identity for the path goes, not just the one being re-read. Under dev
+    activation `runtime_root`, `launch_home` and `registry_root` can *be* that
+    same path, and re-reading one of them while the others answer from cache
+    puts two release ids for one path in a single tuple -- the same
+    two-sources-one-value shape defect C was (review round 2, S2). Eviction is
+    keyed by resolved path, so identities for genuinely different paths are
+    untouched.
+    """
+    resolved=str(Path(path).expanduser().resolve(strict=False))
+    for key in [key for key in _LAUNCH_ROOT_IDENTITY_CACHE if key[1]==resolved]:
+        _LAUNCH_ROOT_IDENTITY_CACHE.pop(key,None)
+    _LAUNCH_SOURCE_REVISION_CACHE.pop(resolved,None)
+    _LAUNCH_CONTENT_DIGEST_CACHE.pop(resolved,None)
+
 def _launch_root_identity(kind, path, *, resolver_identity=None):
     """Return one memoized code-root identity or runtime-bound mutable path identity."""
     resolved=Path(path).expanduser().resolve(strict=False)
@@ -317,11 +342,15 @@ def _launch_root_identity(kind, path, *, resolver_identity=None):
         }
     return json.loads(json.dumps(_LAUNCH_ROOT_IDENTITY_CACHE[key]))
 
-def launch_compatibility_tuple(*, artifact_root, jobs=None, cwd=None):
+def launch_compatibility_tuple(*, artifact_root, jobs=None, cwd=None, refresh_cwd=False):
     """Compute v1 bounded launch identities without hashing mutable state contents."""
     runtime_root=Path(resolve_agent_home()).resolve(strict=False)
-    runtime_identity=_launch_root_identity("runtime_root",runtime_root)
     grounding_cwd=Path(cwd if cwd is not None else Path.cwd()).resolve(strict=False)
+    if refresh_cwd:
+        # Up front, before the first identity is read, so every identity in this
+        # tuple comes from one reading of the tree.
+        _forget_launch_path(grounding_cwd)
+    runtime_identity=_launch_root_identity("runtime_root",runtime_root)
     result={
         "tuple_version":LAUNCH_COMPATIBILITY_TUPLE_VERSION,
         "registry_root":_launch_root_identity("registry_root",TOPO.ROOT),
@@ -366,6 +395,45 @@ def _launch_tuple_roots(payload):
 
 _GIT_SHA=re.compile(r"[0-9a-f]{40}")
 
+def _inside_git_worktree(path):
+    """Is this path inside a git worktree? Ask git, not the filesystem.
+
+    `(cwd/".git").exists()` answers only for a repository *root*: a route whose
+    cwd is any subdirectory has no `.git` entry, so the lineage recheck below
+    silently skipped exactly the cases it was written for (review round 2, S3).
+    A missing directory, a non-repository, or an unavailable git all read as
+    "cannot answer here", and the probe is skipped rather than guessed at -- the
+    launch guard still proves the same lineage against real HEAD before anything
+    dispatches.
+    """
+    try:
+        proc=subprocess.run(
+            ["git","-C",str(path),"rev-parse","--is-inside-work-tree"],
+            text=True,capture_output=True,timeout=30,
+        )
+    except (OSError,subprocess.SubprocessError):
+        return False
+    return proc.returncode==0 and proc.stdout.strip()=="true"
+
+def _first_parent_contains(path, ancestor, descendant):
+    """True when `ancestor` is on `descendant`'s first-parent line in this tree.
+
+    One probe for the whole file: `_grounding_cwd_lineage_ok` (sealed-vs-fresh
+    grounding) and the continuation pin rebind ask the same git question, and a
+    second copy would be a second place to forget the timeout.
+    """
+    try:
+        probe=subprocess.run(
+            ["git","-C",str(path),"rev-list","--first-parent",descendant],
+            text=True,capture_output=True,timeout=30,
+        )
+    except (OSError,subprocess.SubprocessError):
+        # Same set as `_inside_git_worktree`: two probes of the same shape must
+        # not disagree about what counts as "cannot answer" (round 3, S4).
+        # `TimeoutExpired` is a `SubprocessError`, so this only widens.
+        return False
+    return probe.returncode == 0 and ancestor in probe.stdout.split()
+
 def _grounding_cwd_lineage_ok(path, sealed_release, actual_release):
     """SD-107 × SD-67/69: the route cwd is the mutation worktree, so its HEAD legitimately
     moves during the route (an execute stage dirties it; the owner commits after the gate).
@@ -382,16 +450,7 @@ def _grounding_cwd_lineage_ok(path, sealed_release, actual_release):
         return False
     if sealed == actual:
         return True
-    try:
-        probe=subprocess.run(
-            ["git","-C",str(path),"rev-list","--first-parent",actual],
-            text=True,capture_output=True,timeout=30,
-        )
-    except (OSError,subprocess.TimeoutExpired):
-        return False
-    if probe.returncode != 0:
-        return False
-    return sealed in probe.stdout.split()
+    return _first_parent_contains(path,sealed,actual)
 
 def _jobs_path_alias_relieves_mismatch(route, expected, actual):
     """SD-112 §13.33.2-(3) decision 1: a `jobs_path`-only mismatch may be
@@ -845,10 +904,12 @@ def build_continuation_route(
             "new_attempt_count":0,
         })
     result["new_nodes"]=descriptors
+    # A continuation is sealed at resume time: ground it in the cwd as it is now,
+    # not as a memoized earlier seal of the same process saw it (defect C pairing).
     launch={
         "contract_version":LAUNCH_COMPATIBILITY_TUPLE_VERSION,
         **launch_compatibility_tuple(
-            artifact_root=artifact_root,cwd=source_route.get("cwd"),
+            artifact_root=artifact_root,cwd=source_route.get("cwd"),refresh_cwd=True,
         ),
     }
     inherited_keys=(
@@ -867,6 +928,19 @@ def build_continuation_route(
     route={key:json.loads(json.dumps(source_route[key]))
            for key in inherited_keys if key in source_route}
     route.update(result)
+    # Defect C: the pin must name the same commit the grounding tuple above sealed.
+    source_commit,source_commit_rebind,rebind_declined=_continuation_source_commit(
+        source_route,route_nodes,
+    )
+    if source_commit is not None:
+        route["source_commit"]=source_commit
+    if source_commit_rebind is not None:
+        route["source_commit_rebind"]=source_commit_rebind
+    if not rebind_declined:
+        # A declined rebind deliberately keeps the older pin (an SD-67 retry the
+        # launch guard must adjudicate), so pin and grounding legitimately differ
+        # there and only there.
+        _assert_pin_matches_grounding(route.get("source_commit"),launch)
     route["artifact_root"]=str(Path(artifact_root).resolve(strict=False))
     route["nodes"]=route_nodes
     route["parallel_groups"]=_realized_parallel_groups(route_nodes)
@@ -956,6 +1030,30 @@ def _verify_continuation_route(route):
     launch=route.get("launch_compatibility_tuple") or {}
     if launch.get("contract_version") != LAUNCH_COMPATIBILITY_TUPLE_VERSION:
         raise ValueError("launch-compatibility-tuple-required")
+    rebind=route.get("source_commit_rebind")
+    if rebind is not None:
+        inherited=rebind.get("inherited_source_commit") if isinstance(rebind,dict) else None
+        rebound=rebind.get("rebound_source_commit") if isinstance(rebind,dict) else None
+        if (
+            not isinstance(rebind,dict)
+            or rebind.get("contract_version") != CONTINUATION_SOURCE_COMMIT_REBIND_VERSION
+            or rebind.get("basis") != "first-parent-descendant"
+            or not isinstance(inherited,str) or not _COMMIT_SHA.fullmatch(inherited)
+            or not isinstance(rebound,str) or not _COMMIT_SHA.fullmatch(rebound)
+            or inherited == rebound
+            or rebound != route.get("source_commit")
+            or Path(str(rebind.get("cwd") or "")).resolve(strict=False)
+               != Path(str(route.get("cwd") or "")).resolve(strict=False)
+        ):
+            raise ValueError("continuation-source-commit-rebind-invalid")
+        # The claimed basis is re-proved against the tree when the tree is here.
+        # `verify_route` also runs where the worktree is absent or not a repo (a
+        # closure on another host, a fixture), and the launch guard proves the
+        # same lineage against real HEAD before anything dispatches -- so an
+        # unanswerable probe is skipped, never guessed at.
+        cwd=Path(str(route.get("cwd") or ""))
+        if _inside_git_worktree(cwd) and not _first_parent_contains(cwd,inherited,rebound):
+            raise ValueError("continuation-source-commit-rebind-lineage-unproven")
     _validate_output_scopes(route.get("nodes",[]))
     return route
 
@@ -984,6 +1082,214 @@ def publish_continuation_route(route,source_route,output_path):
 def _git_commit(cwd):
     p=subprocess.run(["git","-C",str(cwd),"rev-parse","HEAD"],text=True,capture_output=True)
     return p.stdout.strip() if p.returncode == 0 else "unversioned"
+
+def worktree_mutating_scope(scope):
+    """Does this write scope let a node mutate the worktree?
+
+    The **one** definition of the rule. `worker-route-guard.py` imports this
+    module and calls this function, so the decline below classifies a node
+    exactly the way the guard that adjudicates it does. A second near-identical
+    copy would be two answers to one question, and the drift would be silent.
+    """
+    if scope in ("target-artifact","source-scoped"):
+        return True
+    root=scope[:-3] if str(scope).endswith("/**") else scope
+    return root=="source"
+
+def _node_mutates_worktree(node):
+    return any(worktree_mutating_scope(scope) for scope in (node.get("write_scope") or []))
+
+_STAGE_FALLBACK=None
+
+def _stage_fallback():
+    """Load the shared registry reader the launch guard uses, once."""
+    global _STAGE_FALLBACK
+    if _STAGE_FALLBACK is None:
+        spec=importlib.util.spec_from_file_location(
+            "_capability_route_stage_fallback",ROOT/"utilities"/"stage-dispatch-fallback.py",
+        )
+        module=importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        _STAGE_FALLBACK=module
+    return _STAGE_FALLBACK
+
+def _continuation_lineage_route_ids(source_route):
+    """Every route id in this continuation's lineage, nearest ancestor first.
+
+    A declined continuation records no attempts of its own -- the guard refuses
+    its whole pre-mutation prefix -- so asking the registry only about the
+    immediate predecessor finds a clean slate one generation later, and the
+    decline evaporates (review round 3, B1). The lineage is already carried:
+    `source_route_id` names the predecessor and `supersession_edges` accumulates
+    every earlier `from_route_id`.
+    """
+    ids=[]
+    candidates=[source_route.get("route_id"),source_route.get("source_route_id")]
+    for edge in (source_route.get("supersession_edges") or []):
+        if isinstance(edge,dict):
+            candidates.append(edge.get("from_route_id"))
+    for value in candidates:
+        if isinstance(value,str) and value and value not in ids:
+            ids.append(value)
+    return ids
+
+def _authoritative_lineage_registry(source_route):
+    """The registry this lineage provably wrote to, or None if unprovable.
+
+    Deliberately stricter than `_continuation_source_jobs`, which may fall
+    through to the live canonical registry so that a continuation can still read
+    *migrated markers* when a sealed release tree is pruned. Markers carry their
+    own route binding and attempt link, so that substitution is safe there. Here
+    the evidence is the **absence** of a row, and absence read out of a registry
+    this lineage never wrote to is not evidence at all (review round 3, B2a: the
+    compat window silently answers from a different `jobs.log`, which exists and
+    is a regular file, and reports no rows).
+
+    Only `exact` and `aliased` resolutions are accepted -- `aliased` because the
+    migration journal digest-verifies the substitution.
+    """
+    jobs=(
+        ((source_route.get("launch_compatibility_tuple") or {}).get("jobs_path") or {})
+        .get("path")
+    )
+    if not isinstance(jobs,str) or not jobs or not Path(jobs).is_absolute():
+        return None
+    try:
+        sealed=Path(jobs).expanduser().resolve(strict=False)
+        resolution=resolve_dangling_registry(sealed)
+    except (OSError,ValueError,DispatchContractError):
+        return None
+    if resolution.status=="exact":
+        return sealed
+    if resolution.status=="aliased":
+        return resolution.jobs_path
+    return None
+
+def _prior_registry_attempt(source_route, node_id):
+    """Did this continuation's lineage already record an attempt on this node?
+
+    **Fail closed.** The rebind is declined -- return True -- whenever the answer
+    cannot be *proved* negative. Three things must all hold before an absent row
+    is read as "this node never ran":
+
+    1. the registry is provably the one the lineage wrote to
+       (`_authoritative_lineage_registry`),
+    2. the lineage is non-empty, and
+    3. that registry actually contains at least one row for the lineage.
+
+    (3) is what separates "no attempt on this node" from "this registry never saw
+    this route". `registry_rows` returns `[]` for a missing file and for a
+    truncated one alike, so an empty read is ambiguous by construction -- and
+    deleting or truncating `jobs.log` is exactly the shape an operator produces
+    (review round 3, B2b). Declining on an unprovable answer is never worse than
+    the behaviour before defect C was fixed: the pin simply stays inherited.
+    """
+    jobs=_authoritative_lineage_registry(source_route)
+    if jobs is None:
+        return True
+    lineage=_continuation_lineage_route_ids(source_route)
+    if not lineage:
+        return True
+    try:
+        rows=_stage_fallback().registry_route_rows(jobs,lineage)
+    except (OSError,ValueError):
+        return True
+    if not rows:
+        return True
+    return any(
+        row.get("attempt_id") and row.get("route_node")==str(node_id)
+        for row in rows
+    )
+
+def _retry_mutation_node(source_route, continuation_nodes):
+    """The first node this continuation re-runs that is an SD-67 mutation retry.
+
+    Not just the resume node: a continuation resuming at `plan` still carries
+    `execute`, and in a real `autopilot-code` route `execute` is the only
+    worktree-mutating node. Asking about the resume node alone let a plan-time
+    resume re-pin the route, after which `execute` met `head == source_commit`
+    and passed the guard on the trivial branch -- walking past the very gate
+    the decline exists to protect (review round 2, B1).
+    """
+    for node in continuation_nodes or ():
+        if not _node_mutates_worktree(node):
+            continue
+        if _prior_registry_attempt(source_route,node.get("id")):
+            return node
+    return None
+
+_COMMIT_SHA=re.compile(r"[0-9a-f]{40}")
+
+def _assert_pin_matches_grounding(source_commit, launch):
+    """The pin and the grounding cwd must name one commit, or say so loudly.
+
+    The two are read by different functions at different moments -- `_git_commit`
+    (`git rev-parse HEAD`) for the pin, `runtime_activation.source_revision` for
+    the grounding -- which is exactly the shape defect C had. `source_revision`
+    appends `+<dirty-digest>` for a dirty tree and returns `release:`/`tree:`
+    forms for non-git roots; only the git shapes are comparable, and the dirty
+    suffix is split off the same way `_grounding_cwd_lineage_ok` does.
+    """
+    sealed=((launch.get("grounding_roots") or {}).get("cwd") or {}).get("release_id")
+    if not isinstance(sealed,str) or not isinstance(source_commit,str):
+        return
+    base=sealed.split("+",1)[0]
+    if not _COMMIT_SHA.fullmatch(base) or not _COMMIT_SHA.fullmatch(source_commit):
+        return
+    if base != source_commit:
+        raise ValueError(
+            f"continuation-source-commit-grounding-mismatch: pin={source_commit} grounding={base}"
+        )
+
+def _continuation_source_commit(source_route, continuation_nodes):
+    """Seal the resume-time HEAD as the continuation's `source_commit`.
+
+    The source route pinned the HEAD it was compiled at, but a continuation seals
+    the *current* worktree HEAD into `launch_compatibility_tuple.grounding_roots.cwd`.
+    Inheriting the old pin made the route contradict itself: after depth-0
+    fast-forwarded the worktree, worker-route-guard refused every pre-mutation node
+    with `route-source-commit-mismatch` (defect C, route rt-d7541f1033ae677f).
+    Two sources, one value: the pin and the grounding must name the same commit.
+
+    Returns `(source_commit, rebind_record, rebind_declined)`.
+
+    The rebind is **declined** -- the inherited pin is kept, exactly as before this
+    fix -- when *any* node this continuation will re-run mutates the worktree and
+    the source route already recorded an attempt on it. That is SD-67's mutation
+    retry, whose evidence gate lives in `worker-route-guard.py`. Re-pinning there
+    would let a continuation launder a retry past that gate, which
+    `OPERATIONS §5.10` forbids ("never re-pin the route to manufacture this
+    evidence").
+
+    A declined rebind **refuses** the mutation node; it does not hand it to an
+    adjudicating guard. The guard looks its retry evidence up under
+    `route["route_id"]`, which is the continuation's own id, while the prior rows
+    were written under the source route's -- so it finds none and raises
+    `route-source-commit-mismatch`. That is precisely what main does today, so
+    declining is never a regression, but the operator is refused rather than
+    adjudicated. Teaching the guard to follow `source_route_id` is a separate
+    change with its own spec question, not something to smuggle in here.
+    """
+    inherited=source_route.get("source_commit")
+    cwd=source_route.get("cwd")
+    if not inherited or not cwd:
+        return inherited,None,False
+    if _retry_mutation_node(source_route,continuation_nodes) is not None:
+        return inherited,None,True
+    head=_git_commit(cwd)
+    if head == inherited or head == "unversioned" or inherited == "unversioned":
+        return inherited,None,False
+    if not _first_parent_contains(cwd,inherited,head):
+        raise ValueError(
+            f"continuation-source-commit-diverged: expected={inherited} observed={head}"
+        )
+    return head,{
+        "contract_version":CONTINUATION_SOURCE_COMMIT_REBIND_VERSION,
+        "inherited_source_commit":inherited,
+        "rebound_source_commit":head,
+        "basis":"first-parent-descendant",
+        "cwd":str(Path(cwd).resolve(strict=False)),
+    },False
 
 def _validate_tracking_evidence(tracking, evidence):
     if tracking not in TRACKING: raise ValueError("invalid tracking value")
@@ -4216,14 +4522,24 @@ def main():
                 "failed_source_attempt_id":a.failed_source_attempt_id,
                 "gap_leg_id":a.gap_leg_id,
             }
-        route=build_continuation_route(
-            source,resume_from_node=a.resume_from_node,
-            requested_boundary=a.requested_boundary,reason=a.reason,
-            artifact_root=artifact,lineage_operation=a.lineage_operation,
-            thread_id=a.thread_id,new_thread_id=a.new_thread_id,
-            forked_from_id=a.forked_from_id,last_turn_id=a.last_turn_id,
-            ephemeral=a.ephemeral,partial_group=partial,
-        )
+        try:
+            route=build_continuation_route(
+                source,resume_from_node=a.resume_from_node,
+                requested_boundary=a.requested_boundary,reason=a.reason,
+                artifact_root=artifact,lineage_operation=a.lineage_operation,
+                thread_id=a.thread_id,new_thread_id=a.new_thread_id,
+                forked_from_id=a.forked_from_id,last_turn_id=a.last_turn_id,
+                ephemeral=a.ephemeral,partial_group=partial,
+            )
+        except ValueError:
+            # Every other refusal on this command prints the zeroed receipt line
+            # before raising; one raised from inside the builder must too, or a
+            # reader cannot tell "nothing was launched" from "unknown".
+            print(
+                "route_file_written=0 predecessor_attempts=0 registered=0 "
+                "started=0 child_spawned=0",file=sys.stderr,
+            )
+            raise
         if (
             route.get("requested_boundary_blocker")
             or route.get("first_runnable_blocker")
