@@ -18,6 +18,19 @@ EOF
 
 # True when the legacy bucket still carries a governing prd.md (root or a
 # one-level component); `_internal/` never counts.
+shared_has_revision() {
+  base=$1
+  [ -d "$base" ] || return 1
+  for ref in "$base"/*/; do
+    [ -d "$ref" ] || continue
+    [ -f "${ref%/}/reference.json" ] || continue
+    for rev in "${ref%/}"/revisions/*/; do
+      [ -d "$rev" ] && [ -f "${rev%/}/prd.md" ] && return 0
+    done
+  done
+  return 1
+}
+
 legacy_has_prd() {
   legacy=$1
   [ -d "$legacy" ] || return 1
@@ -90,16 +103,18 @@ mark_read() {
   fi
   canonical=$("$ARTIFACT_ROOT_RESOLVER" "$file_root" 2>/dev/null) || return 0
   if [ -n "$shared_prd" ]; then
-    # A shared/spec read counts only while the legacy `spec/` bucket holds no
-    # prd.md candidate — the same precedence spec-skill-gate.sh applies. The
-    # bucket directory itself may survive retirement (W7D: it keeps excluded
-    # `_internal/` evidence), so its mere existence is not the test.
-    legacy_has_prd "$canonical/spec" && return 0
+    # A shared/spec revision read is the canonical read whenever a shared
+    # revision exists — the same precedence spec-skill-gate.sh and
+    # artifact_reader.spec_dir apply (defect K: the three surfaces disagreed).
     canonical_prd="$fp"
-  elif [ -z "$slug" ]; then
-    canonical_prd="$canonical/spec/prd.md"
   else
-    canonical_prd="$canonical/spec/$slug/prd.md"
+    # A legacy `spec/` read counts only while no shared/spec revision exists.
+    shared_has_revision "$canonical/shared/spec" && return 0
+    if [ -z "$slug" ]; then
+      canonical_prd="$canonical/spec/prd.md"
+    else
+      canonical_prd="$canonical/spec/$slug/prd.md"
+    fi
   fi
   canonical_parent=$(dirname "$canonical_prd")
   canonical_parent=$(CDPATH= cd -- "$canonical_parent" 2>/dev/null && pwd -P) || return 0

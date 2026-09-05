@@ -30,29 +30,34 @@ find_prd() {
   dir=$(CDPATH= cd -- "$dir" && pwd -P)
   artifact_root=$("$ARTIFACT_ROOT_RESOLVER" "$dir" 2>/dev/null) || return 0
 
-  if [ -f "$artifact_root/spec/prd.md" ]; then
+  # One read order for every consumer (artifact_reader.spec_dir /
+  # artifact_cutover.prd_candidates): the latest immutable `shared/spec/`
+  # revision governs whenever one exists; the legacy `spec/` bucket only while
+  # none does. Defect K (cairn 2026-09-03) came from this gate being
+  # legacy-first while the reader was shared-first.
+  if [ -d "$artifact_root/shared/spec" ] && command -v python3 >/dev/null 2>&1; then
+    candidates=$(python3 "$SCRIPT_DIR/../utilities/artifact_cutover.py" resolve-legacy \
+      --artifact-root "$artifact_root" --prd-candidates 2>/dev/null)
+  fi
+
+  if [ -z "$candidates" ] && [ -f "$artifact_root/spec/prd.md" ]; then
     candidates="$artifact_root/spec/prd.md"
   fi
 
-  for d in "$artifact_root"/spec/*/; do
-    [ -d "$d" ] || continue
-    d="${d%/}"
-    slug=$(basename "$d")
-    [ "$slug" = "_internal" ] && continue
-    [ -f "$d/prd.md" ] || continue
-    if [ -z "$candidates" ]; then
-      candidates="$d/prd.md"
-    else
-      candidates="$candidates
+  if [ -z "$candidates" ]; then
+    for d in "$artifact_root"/spec/*/; do
+      [ -d "$d" ] || continue
+      d="${d%/}"
+      slug=$(basename "$d")
+      [ "$slug" = "_internal" ] && continue
+      [ -f "$d/prd.md" ] || continue
+      if [ -z "$candidates" ]; then
+        candidates="$d/prd.md"
+      else
+        candidates="$candidates
 $d/prd.md"
-    fi
-  done
-
-  # W7C (gate G4): once the legacy `spec/` bucket is retired, the canonical
-  # prd.md candidates live in the latest immutable `shared/spec/` revision.
-  if [ -z "$candidates" ] && [ -d "$artifact_root/shared/spec" ] && command -v python3 >/dev/null 2>&1; then
-    candidates=$(python3 "$SCRIPT_DIR/../utilities/artifact_cutover.py" resolve-legacy \
-      --artifact-root "$artifact_root" --prd-candidates 2>/dev/null)
+      fi
+    done
   fi
 
   [ -n "$candidates" ] && root=$(dirname "$artifact_root")

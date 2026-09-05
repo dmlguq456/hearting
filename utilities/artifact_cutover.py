@@ -1901,28 +1901,35 @@ def latest_shared_revision(root: Path, kind: str) -> Optional[Path]:
     return best[1] if best else None
 
 
-def prd_candidates(root: Path) -> List[str]:
-    """Canonical prd.md candidates: legacy `spec/` first, else the latest shared/spec revision."""
-    root = Path(root).resolve()
+def _prd_candidates_in(base: Path) -> List[str]:
     out: List[str] = []
-    legacy = root / "spec"
-    if legacy.is_dir():
-        if (legacy / "prd.md").is_file():
-            out.append(str(legacy / "prd.md"))
-        for d in sorted(legacy.iterdir()):
-            if d.is_dir() and d.name != "_internal" and (d / "prd.md").is_file():
-                out.append(str(d / "prd.md"))
-    if out:
+    if not base.is_dir():
         return out
-    revision = latest_shared_revision(root, "spec")
-    if revision is None:
-        return out
-    if (revision / "prd.md").is_file():
-        out.append(str(revision / "prd.md"))
-    for d in sorted(revision.iterdir()):
+    if (base / "prd.md").is_file():
+        out.append(str(base / "prd.md"))
+    for d in sorted(base.iterdir()):
         if d.is_dir() and d.name != "_internal" and (d / "prd.md").is_file():
             out.append(str(d / "prd.md"))
     return out
+
+
+def prd_candidates(root: Path) -> List[str]:
+    """Canonical prd.md candidates in `artifact_reader.spec_dir` order: the
+    latest immutable shared/spec revision first, the legacy `spec/` bucket only
+    while no shared revision exists.
+
+    Defect K (cairn, 2026-09-03): this used to be legacy-first while the
+    reader was shared-first, so the spec gate grounded agents on a PRD two
+    versions behind the one every other consumer resolved, and operators kept
+    the legacy file alive to satisfy it. One order, one definition.
+    """
+    root = Path(root).resolve()
+    revision = latest_shared_revision(root, "spec")
+    if revision is not None:
+        shared = _prd_candidates_in(revision)
+        if shared:
+            return shared
+    return _prd_candidates_in(root / "spec")
 
 
 # ---------------------------------------------------------------------------

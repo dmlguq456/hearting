@@ -1775,6 +1775,24 @@ def _reference_path(root: Path, kind: str, ref_id: str) -> Path:
     return Path(root) / "shared" / kind / ref_id / "reference.json"
 
 
+# Shared kinds a root holds exactly one canonical reference of unless told
+# otherwise. `analysis` lineages are per subject (a root legitimately carries
+# several); `research` promotions are per promotion.
+CANONICAL_SINGLE_REFERENCE_KINDS = ("spec",)
+
+
+def list_references(root: Path, kind: str) -> List[Dict[str, Any]]:
+    base = Path(root) / "shared" / kind
+    if not base.is_dir():
+        return []
+    out = []
+    for entry in sorted(base.iterdir(), key=lambda p: p.name):
+        record = _read_json(entry / "reference.json")
+        if record and record.get("shared_reference_id"):
+            out.append(record)
+    return out
+
+
 def find_reference_by_key(root: Path, kind: str, key: str) -> Optional[Dict[str, Any]]:
     base = Path(root) / "shared" / kind
     if not base.is_dir():
@@ -1963,6 +1981,7 @@ def admit_shared(
     allocator: Optional[artifact_identity.IdAllocator] = None,
     drop_components: Sequence[str] = (),
     drop_reason: Optional[str] = None,
+    allow_new_reference: bool = False,
     now: Optional[float] = None,
 ) -> Dict[str, Any]:
     root = Path(root).resolve()
@@ -2010,6 +2029,18 @@ def admit_shared(
                 raise ProducerError("reference-unknown", reference_id)
         elif key:
             reference = find_reference_by_key(root, kind, key)
+        if reference is None and kind in CANONICAL_SINGLE_REFERENCE_KINDS and not allow_new_reference:
+            # Defect K (cairn 2026-09-03): `--key cairn-spec` missed the
+            # canonical `spec` reference and silently minted a second one, after
+            # which "the latest spec" flipped on every admit. A second reference
+            # of a canonical-singular kind is an explicit act, never a miss.
+            existing = list_references(root, kind)
+            if existing:
+                raise ProducerError(
+                    "shared-reference-exists",
+                    f"{kind}: " + ", ".join(f"{r['shared_reference_id']}(key={r.get('key')})" for r in existing)
+                    + "; pass --reference <id> or --key <existing key>, or --new-reference to add another",
+                )
         if reference is None:
             reference_id = alloc.allocate("shared_reference")
             created = True
@@ -2462,6 +2493,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                    help="D-87 (b): drop this top-level component from the reference "
                         "(repeatable); the only way to shrink the component set")
     p.add_argument("--drop-reason", help="reason recorded with --drop-component")
+    p.add_argument("--new-reference", action="store_true",
+                   help="allow a second reference of a canonical-singular kind (spec) when neither --reference nor --key matches")
 
     p = sub.add_parser("check-components")
     p.add_argument("--artifact-root", required=True)
@@ -2551,7 +2584,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                                   promote_research=args.promote_research,
                                   promotion_evidence=args.promotion_evidence,
                                   drop_components=args.drop_component,
-                                  drop_reason=args.drop_reason)
+                                  drop_reason=args.drop_reason,
+                                  allow_new_reference=args.new_reference)
         elif args.command == "check-components":
             result = check_component_sets(root, args.kind, args.reference,
                                           from_revision=args.from_revision,

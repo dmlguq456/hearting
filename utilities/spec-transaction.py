@@ -19,6 +19,7 @@ SPEC=importlib.util.spec_from_file_location("worker_route_guard",ROOT/"utilities
 GUARD=importlib.util.module_from_spec(SPEC); SPEC.loader.exec_module(GUARD)
 sys.path.insert(0,str(ROOT/"utilities"))
 import artifact_producer as PRODUCER  # noqa: E402
+import artifact_cutover as CUTOVER  # noqa: E402
 
 
 def emit(event, events=None):
@@ -26,6 +27,41 @@ def emit(event, events=None):
     print(line,flush=True)
     if events:
         with open(events,"a",encoding="utf-8") as fh: fh.write(line+"\n")
+
+
+def seed_cycle_spec(spec_base: Path, artifact: Path):
+    """W7C cycle layout: a fresh cycle's `artifacts/spec` is empty, so the
+    transaction would see no pre-image and write no `_internal/versions/vN`
+    snapshot -- which is why operators copied the previous version by hand
+    (cairn v169/v170, defect K). Seed the whole latest shared/spec revision
+    (every component, D-87) so the pre-image, the version counter and the
+    snapshot all come from the tool. Returns (revision_dir, files) or None."""
+    if any(p.is_file() for p in spec_base.rglob("*")):
+        return None
+    revision=CUTOVER.latest_shared_revision(artifact,"spec")
+    if revision is None:
+        return None
+    copied=0
+    for src in sorted(revision.rglob("*")):
+        if not src.is_file() or src.is_symlink():
+            continue
+        rel=src.relative_to(revision)
+        if rel.as_posix()=="revision.json":
+            continue
+        dst=spec_base/rel; dst.parent.mkdir(parents=True,exist_ok=True)
+        dst.write_bytes(src.read_bytes()); copied+=1
+    return revision,copied
+
+
+def legacy_spec_state(artifact: Path):
+    legacy=artifact/"spec"
+    state={}
+    if not legacy.is_dir():
+        return state
+    for path in legacy.rglob("*"):
+        if path.is_file() and not path.is_symlink() and path.name!=".pipeline-lock":
+            st=path.stat(); state[path.relative_to(legacy).as_posix()]=(st.st_size,st.st_mtime_ns)
+    return state
 
 
 def next_version(spec_root: Path) -> int:
@@ -111,6 +147,10 @@ def main():
     except PRODUCER.ProducerError as exc:
         emit({"status":"blocked","reason":exc.code,"detail":exc.detail,"artifact_root":str(artifact)},args.events); return 65
     spec_base=spec_base.resolve()
+    if spec_layout=="cycle":
+        seeded=seed_cycle_spec(spec_base,artifact)
+        if seeded is not None:
+            emit({"status":"seeded","source":str(seeded[0]),"files":seeded[1],"spec_base":str(spec_base)},args.events)
     spec_root=(Path(args.spec_root).expanduser() if args.spec_root else spec_base)
     # A relative component root is relative to the resolved spec bucket, which
     # is the open cycle's `artifacts/spec` once the cutover is active (W7D fix:
@@ -165,7 +205,18 @@ def main():
                 return 65
             emit({"status":"snapshot-prepared","snapshot":prepared_status,"route_id":route["route_id"],"version":version,"path":str(prepared_path),"preimage_sha256":hashlib.sha256(preimage).hexdigest()},args.events)
         env={**os.environ,"AGENT_SPEC_LOCK_HELD":"1","AGENT_SPEC_NEXT_VERSION":str(version),"AGENT_SPEC_ROOT":str(spec_root),"AGENT_ROUTE_FILE":str(Path(args.route).resolve()),"AGENT_ROUTE_ID":route["route_id"],"AGENT_ROUTE_NODE":node["id"]}
+        legacy_before=legacy_spec_state(artifact) if spec_layout=="cycle" else {}
         result=subprocess.run(command,cwd=str(worktree),env=env)
+        if spec_layout=="cycle":
+            # Defect K: the transaction protected an empty cycle directory while
+            # the child wrote the legacy `spec/` tree and reported success. A
+            # cycle-layout transaction whose window changed the legacy bucket is
+            # a typed failure, whatever the child's exit code said.
+            legacy_after=legacy_spec_state(artifact)
+            changed=sorted(set(k for k in set(legacy_before)|set(legacy_after) if legacy_before.get(k)!=legacy_after.get(k)))
+            if changed:
+                emit({"status":"blocked","reason":"legacy-spec-written","route_id":route["route_id"],"changed":changed[:20],"spec_root":str(spec_root)},args.events)
+                result=subprocess.CompletedProcess(command,65)
         try:
             postimage=read_regular_file(prd,allow_missing=True)
         except ValueError as exc:
