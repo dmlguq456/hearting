@@ -179,14 +179,19 @@ class CutoverTest(unittest.TestCase):
         self.assertIn(anc["resolution"], ("mapped", "mapped-ancestor"))
         self.assertEqual(C.resolve_legacy(self.root, "plans/none.md")["resolution"], "unresolved")
 
-    def test_prd_candidates_fall_back_to_latest_shared_revision(self):
-        self.assertEqual(C.prd_candidates(self.root), [str(self.root / "spec/prd.md"), str(self.root / "spec/comp/prd.md")])
+    def test_prd_candidates_prefer_latest_shared_revision_over_legacy(self):
+        # The fixture root already carries a shared/spec revision: it governs
+        # over the legacy bucket even before the migration (defect K order).
+        before = C.prd_candidates(self.root)
+        self.assertTrue(before and all(c.startswith(str(self.root / "shared/spec")) for c in before), before)
         report, sealed = self.migrate()
+        rev = Path(sealed["shared_admissions"]["spec"]["revision_dir"])
+        # Defect K: while the legacy bucket still exists, the shared revision governs.
+        self.assertTrue((self.root / "spec/prd.md").is_file())
+        self.assertEqual(C.prd_candidates(self.root), [str(rev / "prd.md"), str(rev / "comp/prd.md")])
         import shutil
         shutil.rmtree(self.root / "spec")
-        cands = C.prd_candidates(self.root)
-        rev = Path(sealed["shared_admissions"]["spec"]["revision_dir"])
-        self.assertEqual(cands, [str(rev / "prd.md"), str(rev / "comp/prd.md")])
+        self.assertEqual(C.prd_candidates(self.root), [str(rev / "prd.md"), str(rev / "comp/prd.md")])
 
     def test_retire_verifies_backs_up_and_deletes(self):
         report, sealed = self.migrate()

@@ -95,4 +95,122 @@ class SpecTransactionTest(unittest.TestCase):
    self.assertEqual((component/"_internal/versions/v1/prd.md").read_text(),"before\n")
    self.assertFalse((artifact/"spec/_internal/versions/v1").exists())
 
-if __name__=="__main__": unittest.main()
+class CycleLayoutTest(unittest.TestCase):
+ """W7C cycle layout (defect K): the transaction seeds the empty cycle spec
+ root from the latest shared revision so the snapshot comes from the tool,
+ and a child that writes the legacy bucket is a typed failure."""
+
+ def setUp(self):
+  sys.path.insert(0,str(ROOT/"utilities"))
+  import artifact_producer as P, artifact_lifecycle as L
+  self.P,self.L=P,L
+  self.PT=load("producer_test_for_spec_tx",ROOT/"utilities/artifact_producer.test.py")
+  self._tmp=tempfile.TemporaryDirectory(); base=Path(self._tmp.name)
+  self.repo=base/"repo"; self.repo.mkdir()
+  subprocess.run(["git","init","-q",str(self.repo)],check=True)
+  subprocess.run(["git","-C",str(self.repo),"config","user.email","f@x"],check=True)
+  subprocess.run(["git","-C",str(self.repo),"config","user.name","F"],check=True)
+  (self.repo/"README").write_text("x\n"); subprocess.run(["git","-C",str(self.repo),"add","README"],check=True); subprocess.run(["git","-C",str(self.repo),"commit","-qm","init"],check=True)
+  self.artifact=self.repo/".agent_reports"; self.artifact.mkdir()
+  home=base/"agent-home"; (home/"core").mkdir(parents=True); (home/"core"/"CORE.md").write_text("fixture\n")
+  self._env={k:os.environ.get(k) for k in ("AGENT_HOME","AGENT_DISPATCH_JOBS","AGENT_ARTIFACT_CYCLE_DIR","AGENT_ARTIFACT_ROOT")}
+  os.environ["AGENT_HOME"]=str(home)
+  for k in ("AGENT_DISPATCH_JOBS","AGENT_ARTIFACT_CYCLE_DIR","AGENT_ARTIFACT_ROOT"): os.environ.pop(k,None)
+  P.activate(self.artifact,repository_id="repo_"+"a"*32,artifact_root_id="root_"+"b"*32,w7={"campaign_id":"camp_"+"c"*32})
+  gate={"spec_read":{"satisfied":True,"source":"fixture"},"drift_verdict":"within-spec","workflow_mode":"tracked","artifact_guard":{"satisfied":True,"source":"fixture"}}
+  spec_route=R.compile_route("autopilot-spec","update","strong",self.repo,self.artifact,signals=["shared-contract"],transport="headless",tracking="tracked",tracked_gate_evidence=gate,dispatch_evidence=dispatch(self.repo),slug="spec-tx")
+  self.spec_route=self.repo/"route.json"; self.spec_route.write_text(json.dumps(spec_route))
+
+ def tearDown(self):
+  for k,v in self._env.items():
+   if v is None: os.environ.pop(k,None)
+   else: os.environ[k]=v
+  self._tmp.cleanup()
+
+ def _cycle(self, slug):
+  route=self.PT.compile_for("direct",self.artifact,"autopilot-code","dev",slug=slug)
+  binding=self.L.admit_runtime_route(self.artifact,route)
+  begun=self.P.begin(self.artifact,route_file=Path(binding.route_file),capability="autopilot-code",intensity="direct")
+  return route,Path(binding.route_file),begun
+
+ def _close(self, route, route_file):
+  evidence=Path(self._tmp.name)/f"ev-{route['route_id']}.txt"; evidence.write_text("ok\n")
+  for node in route["nodes"]:
+   if node.get("terminal") is True: R.write_completion_marker(route,node,node["id"],evidence)
+  R.close_route(route,route_file,commit="a"*40,summary="fixture")
+
+ def _shared_v1(self):
+  route,route_file,begun=self._cycle("seed-source")
+  spec=Path(begun["cycle_dir"])/"artifacts"/"spec"; (spec/"_internal"/"versions"/"v1").mkdir(parents=True)
+  (spec/"prd.md").write_text("v1\n"); (spec/"_internal"/"versions"/"v1"/"prd.md").write_text("v0\n"); (spec/"pipeline_state.yaml").write_text("s\n")
+  self._close(route,route_file); self.P.finalize(self.artifact,cycle_id=begun["cycle_id"])
+  return self.P.admit_shared(self.artifact,cycle_id=begun["cycle_id"],kind="spec",source="spec",key="spec")
+
+ def _run(self, cycle_dir, code, events):
+  env={**os.environ,"AGENT_ARTIFACT_CYCLE_DIR":str(cycle_dir),"AGENT_ARTIFACT_ROOT":str(self.artifact)}
+  cmd=[sys.executable,str(ROOT/"utilities/spec-transaction.py"),"run","--artifact-root",str(self.artifact),"--worktree",str(self.repo),"--route",str(self.spec_route),"--node","prd-transaction","--events",str(events),"--",sys.executable,"-c",code]
+  return subprocess.run(cmd,text=True,capture_output=True,env=env)
+
+ def test_cycle_spec_is_seeded_and_snapshot_comes_from_the_tool(self):
+  self._shared_v1()
+  _r,_f,begun=self._cycle("spec-edit"); cycle_dir=Path(begun["cycle_dir"]); events=Path(self._tmp.name)/"ev.jsonl"
+  code="import os; from pathlib import Path; Path(os.environ['AGENT_SPEC_ROOT'],'prd.md').write_text('v2\\n')"
+  result=self._run(cycle_dir,code,events)
+  self.assertEqual(result.returncode,0,result.stdout+result.stderr)
+  rows=[json.loads(l) for l in events.read_text().splitlines()]
+  seeded=[r for r in rows if r["status"]=="seeded"]
+  self.assertEqual(len(seeded),1); self.assertEqual(seeded[0]["files"],3)
+  spec=cycle_dir/"artifacts"/"spec"
+  self.assertEqual((spec/"prd.md").read_text(),"v2\n")
+  self.assertEqual((spec/"_internal"/"versions"/"v1"/"prd.md").read_text(),"v0\n")   # seeded history
+  self.assertEqual((spec/"_internal"/"versions"/"v2"/"prd.md").read_text(),"v1\n")   # tool-written snapshot
+  self.assertEqual((spec/"pipeline_state.yaml").read_text(),"s\n")                   # whole tree seeded (D-87)
+  self.assertTrue(any(r["status"]=="snapshot" and r["version"]==2 for r in rows),rows)
+
+ def test_seed_unions_version_history_across_revisions(self):
+  # Latest revision carries the PRD but no history (cairn's rrev_511a shape);
+  # an earlier revision holds _internal/versions/v3. The counter must continue at 4.
+  self._shared_v1()
+  route,route_file,begun=self._cycle("seed-source-2")
+  spec=Path(begun["cycle_dir"])/"artifacts"/"spec"; spec.mkdir(parents=True)
+  (spec/"prd.md").write_text("v3\n"); (spec/"pipeline_state.yaml").write_text("s\n")
+  self._close(route,route_file); self.P.finalize(self.artifact,cycle_id=begun["cycle_id"])
+  # cairn's rrev_511a shape (3 files, history dropped) predates D-87; model it explicitly.
+  self.P.admit_shared(self.artifact,cycle_id=begun["cycle_id"],kind="spec",source="spec",key="spec",drop_components=["_internal"],drop_reason="fixture: pre-D-87 shape")
+  _r,_f,begun=self._cycle("spec-edit-3"); cycle_dir=Path(begun["cycle_dir"]); events=Path(self._tmp.name)/"ev3.jsonl"
+  code="import os; from pathlib import Path; Path(os.environ['AGENT_SPEC_ROOT'],'prd.md').write_text('v4\\n')"
+  result=self._run(cycle_dir,code,events)
+  self.assertEqual(result.returncode,0,result.stdout+result.stderr)
+  rows=[json.loads(l) for l in events.read_text().splitlines()]
+  seeded=[r for r in rows if r["status"]=="seeded"][0]
+  self.assertEqual(seeded["history_versions"],1)
+  spec=cycle_dir/"artifacts"/"spec"
+  self.assertEqual((spec/"_internal"/"versions"/"v1"/"prd.md").read_text(),"v0\n")
+  self.assertEqual((spec/"_internal"/"versions"/"v2"/"prd.md").read_text(),"v3\n")
+  self.assertEqual((spec/"prd.md").read_text(),"v4\n")
+  self.assertFalse(any(r["status"]=="version-history-absent" for r in rows))
+
+ def test_refused_route_seeds_nothing(self):
+  self._shared_v1()
+  _r,_f,begun=self._cycle("spec-edit-4"); cycle_dir=Path(begun["cycle_dir"]); events=Path(self._tmp.name)/"ev4.jsonl"
+  env={**os.environ,"AGENT_ARTIFACT_CYCLE_DIR":str(cycle_dir),"AGENT_ARTIFACT_ROOT":str(self.artifact)}
+  cmd=[sys.executable,str(ROOT/"utilities/spec-transaction.py"),"run","--artifact-root",str(self.artifact),"--worktree",str(self.repo),"--route",str(self.spec_route),"--node","no-such-node","--events",str(events),"--",sys.executable,"-c","pass"]
+  result=subprocess.run(cmd,text=True,capture_output=True,env=env)
+  self.assertEqual(result.returncode,65,result.stdout+result.stderr)
+  self.assertEqual([p for p in (cycle_dir/"artifacts"/"spec").rglob("*") if p.is_file()],[])
+  self.assertFalse(any(json.loads(l)["status"]=="seeded" for l in events.read_text().splitlines()))
+
+ def test_child_writing_legacy_spec_is_a_typed_failure(self):
+  self._shared_v1()
+  legacy=self.artifact/"spec"; legacy.mkdir(); (legacy/"prd.md").write_text("stale\n")
+  _r,_f,begun=self._cycle("spec-edit-2"); cycle_dir=Path(begun["cycle_dir"]); events=Path(self._tmp.name)/"ev2.jsonl"
+  code=f"from pathlib import Path; Path({str(legacy/'prd.md')!r}).write_text('rogue\\n')"
+  result=self._run(cycle_dir,code,events)
+  self.assertEqual(result.returncode,65,result.stdout+result.stderr)
+  rows=[json.loads(l) for l in events.read_text().splitlines()]
+  blocked=[r for r in rows if r["status"]=="blocked" and r["reason"]=="legacy-spec-written"]
+  self.assertEqual(len(blocked),1); self.assertEqual(blocked[0]["changed"],["prd.md"])
+
+
+if __name__=="__main__":
+ unittest.main()

@@ -18,6 +18,48 @@ Without arguments, reads Claude hook JSON from stdin.
 EOF
 }
 
+# Governing prd.md candidates for one artifact root -- ONE definition:
+# `utilities/artifact_cutover.py prd_candidates` (latest shared/spec revision
+# first, the legacy `spec/` bucket only while no shared revision exists, the
+# order `artifact_reader.spec_dir` uses). The checkout's own copy wins (the
+# adapter hook is a symlink into it); the plugin projection, which carries no
+# utilities, resolves the installed harness through `agent-home.sh` instead of
+# `$AGENT_HOME` (there it is the plugin *state* dir, never a harness root).
+# Without python, or on a root with no `shared/spec` at all, the fallback is
+# the legacy scan -- and spec-read-marker.sh carries the identical function and
+# fallback, so the gate and the marker can never disagree about which file
+# governs (defect K: they did, and operators wrote where the gate looked).
+prd_candidates_for() {
+  ar=$1
+  out=""
+  if [ -d "$ar/shared/spec" ] && command -v python3 >/dev/null 2>&1; then
+    cutover="$SCRIPT_DIR/../utilities/artifact_cutover.py"
+    if [ ! -f "$cutover" ]; then
+      harness=$("$SCRIPT_DIR/../utilities/agent-home.sh" 2>/dev/null) || harness=""
+      cutover="$harness/utilities/artifact_cutover.py"
+    fi
+    if [ -f "$cutover" ]; then
+      out=$(python3 "$cutover" resolve-legacy --artifact-root "$ar" --prd-candidates 2>/dev/null) || out=""
+    fi
+  fi
+  if [ -z "$out" ]; then
+    [ -f "$ar/spec/prd.md" ] && out="$ar/spec/prd.md"
+    for d in "$ar"/spec/*/; do
+      [ -d "$d" ] || continue
+      d="${d%/}"
+      [ "$(basename "$d")" = "_internal" ] && continue
+      [ -f "$d/prd.md" ] || continue
+      if [ -z "$out" ]; then
+        out="$d/prd.md"
+      else
+        out="$out
+$d/prd.md"
+      fi
+    done
+  fi
+  printf '%s' "$out"
+}
+
 find_prd() {
   dir=$1
   candidates=""
@@ -30,30 +72,7 @@ find_prd() {
   dir=$(CDPATH= cd -- "$dir" && pwd -P)
   artifact_root=$("$ARTIFACT_ROOT_RESOLVER" "$dir" 2>/dev/null) || return 0
 
-  if [ -f "$artifact_root/spec/prd.md" ]; then
-    candidates="$artifact_root/spec/prd.md"
-  fi
-
-  for d in "$artifact_root"/spec/*/; do
-    [ -d "$d" ] || continue
-    d="${d%/}"
-    slug=$(basename "$d")
-    [ "$slug" = "_internal" ] && continue
-    [ -f "$d/prd.md" ] || continue
-    if [ -z "$candidates" ]; then
-      candidates="$d/prd.md"
-    else
-      candidates="$candidates
-$d/prd.md"
-    fi
-  done
-
-  # W7C (gate G4): once the legacy `spec/` bucket is retired, the canonical
-  # prd.md candidates live in the latest immutable `shared/spec/` revision.
-  if [ -z "$candidates" ] && [ -d "$artifact_root/shared/spec" ] && command -v python3 >/dev/null 2>&1; then
-    candidates=$(python3 "$SCRIPT_DIR/../utilities/artifact_cutover.py" resolve-legacy \
-      --artifact-root "$artifact_root" --prd-candidates 2>/dev/null)
-  fi
+  candidates=$(prd_candidates_for "$artifact_root")
 
   [ -n "$candidates" ] && root=$(dirname "$artifact_root")
 }

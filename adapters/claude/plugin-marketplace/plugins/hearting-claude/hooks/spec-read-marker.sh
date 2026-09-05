@@ -16,19 +16,58 @@ Without arguments, reads Claude hook JSON from stdin.
 EOF
 }
 
-# True when the legacy bucket still carries a governing prd.md (root or a
-# one-level component); `_internal/` never counts.
-legacy_has_prd() {
-  legacy=$1
-  [ -d "$legacy" ] || return 1
-  [ -f "$legacy/prd.md" ] && return 0
-  for d in "$legacy"/*/; do
-    [ -d "$d" ] || continue
-    d="${d%/}"
-    [ "$(basename "$d")" = "_internal" ] && continue
-    [ -f "$d/prd.md" ] && return 0
-  done
-  return 1
+# Governing prd.md candidates for one artifact root -- ONE definition:
+# `utilities/artifact_cutover.py prd_candidates` (latest shared/spec revision
+# first, the legacy `spec/` bucket only while no shared revision exists, the
+# order `artifact_reader.spec_dir` uses). The checkout's own copy wins (the
+# adapter hook is a symlink into it); the plugin projection, which carries no
+# utilities, resolves the installed harness through `agent-home.sh` instead of
+# `$AGENT_HOME` (there it is the plugin *state* dir, never a harness root).
+# Without python, or on a root with no `shared/spec` at all, the fallback is
+# the legacy scan -- and spec-read-marker.sh carries the identical function and
+# fallback, so the gate and the marker can never disagree about which file
+# governs (defect K: they did, and operators wrote where the gate looked).
+prd_candidates_for() {
+  ar=$1
+  out=""
+  if [ -d "$ar/shared/spec" ] && command -v python3 >/dev/null 2>&1; then
+    cutover="$SCRIPT_DIR/../utilities/artifact_cutover.py"
+    if [ ! -f "$cutover" ]; then
+      harness=$("$SCRIPT_DIR/../utilities/agent-home.sh" 2>/dev/null) || harness=""
+      cutover="$harness/utilities/artifact_cutover.py"
+    fi
+    if [ -f "$cutover" ]; then
+      out=$(python3 "$cutover" resolve-legacy --artifact-root "$ar" --prd-candidates 2>/dev/null) || out=""
+    fi
+  fi
+  if [ -z "$out" ]; then
+    [ -f "$ar/spec/prd.md" ] && out="$ar/spec/prd.md"
+    for d in "$ar"/spec/*/; do
+      [ -d "$d" ] || continue
+      d="${d%/}"
+      [ "$(basename "$d")" = "_internal" ] && continue
+      [ -f "$d/prd.md" ] || continue
+      if [ -z "$out" ]; then
+        out="$d/prd.md"
+      else
+        out="$out
+$d/prd.md"
+      fi
+    done
+  fi
+  printf '%s' "$out"
+}
+
+# Marker key for one prd.md candidate: `spec/prd.md` and
+# `shared/spec/<ref>/revisions/<rrev>/prd.md` share the root key; a component
+# prd (`spec/<slug>/prd.md` or `.../<rrev>/<slug>/prd.md`) keys by its slug.
+prd_slug() {
+  parent=$(dirname "$1")
+  parent_base=$(basename "$parent")
+  case "$parent_base" in
+    spec|rrev_*) printf '' ;;
+    *) printf '%s' "$parent_base" ;;
+  esac
 }
 
 mark_read() {
@@ -40,74 +79,35 @@ mark_read() {
     *) fp="$PWD/$fp" ;;
   esac
 
-  slug=""
-  shared_prd=""
+  [ "$(basename "$fp")" = prd.md ] || return 0
+  # Locate the artifact-reports dir the file lives under; the file's exact
+  # shape is decided by candidate membership below, not by a second parser.
   case "$fp" in
-    */.agent_reports/spec/prd.md) ;;
-    */.claude_reports/spec/prd.md) ;;
-    */.agent_reports/shared/spec/*/revisions/*/prd.md|*/.claude_reports/shared/spec/*/revisions/*/prd.md)
-      # W7C: an immutable shared/spec revision read counts as the canonical
-      # prd read once the legacy bucket is retired. `<rrev>/prd.md` is the
-      # root spec; `<rrev>/<slug>/prd.md` is a one-level component spec.
-      [ "$(basename "$fp")" = prd.md ] || return 0
-      d1=$(dirname "$fp")
-      case "$(basename "$d1")" in
-        rrev_*) shared_prd="root" ;;
-        _internal) return 0 ;;
-        *)
-          case "$(basename "$(dirname "$d1")")" in
-            rrev_*) slug=$(basename "$d1"); shared_prd="component" ;;
-            *) return 0 ;;
-          esac ;;
-      esac
-      ;;
-    *)
-      # Structural depth check for a one-level sub-spec: .../<agent-reports-dir>/spec/<slug>/prd.md.
-      # A `case` glob's `*` matches `/`, so a literal pattern here would also swallow
-      # spec/<slug>/_internal/versions/v1/prd.md; walk dirname() instead.
-      [ "$(basename "$fp")" = prd.md ] || return 0
-      d1=$(dirname "$fp")
-      d2=$(dirname "$d1")
-      d3=$(dirname "$d2")
-      [ "$(basename "$d2")" = spec ] || return 0
-      case "$(basename "$d3")" in
-        .agent_reports|.claude_reports) ;;
-        *) return 0 ;;
-      esac
-      slug=$(basename "$d1")
-      [ "$slug" = "_internal" ] && return 0
-      ;;
+    */.agent_reports/*) file_root=${fp%%/.agent_reports/*} ;;
+    */.claude_reports/*) file_root=${fp%%/.claude_reports/*} ;;
+    *) return 0 ;;
   esac
   [ -f "$fp" ] || return 0
 
-  if [ -n "$shared_prd" ]; then
-    reports_dir=${fp%/shared/spec/*}
-    file_root=$(dirname "$reports_dir")
-  elif [ -z "$slug" ]; then
-    file_root=$(dirname "$(dirname "$(dirname "$fp")")")
-  else
-    file_root=$(dirname "$d3")
-  fi
   canonical=$("$ARTIFACT_ROOT_RESOLVER" "$file_root" 2>/dev/null) || return 0
-  if [ -n "$shared_prd" ]; then
-    # A shared/spec read counts only while the legacy `spec/` bucket holds no
-    # prd.md candidate — the same precedence spec-skill-gate.sh applies. The
-    # bucket directory itself may survive retirement (W7D: it keeps excluded
-    # `_internal/` evidence), so its mere existence is not the test.
-    legacy_has_prd "$canonical/spec" && return 0
-    canonical_prd="$fp"
-  elif [ -z "$slug" ]; then
-    canonical_prd="$canonical/spec/prd.md"
-  else
-    canonical_prd="$canonical/spec/$slug/prd.md"
-  fi
-  canonical_parent=$(dirname "$canonical_prd")
-  canonical_parent=$(CDPATH= cd -- "$canonical_parent" 2>/dev/null && pwd -P) || return 0
-  canonical_prd="$canonical_parent/$(basename "$canonical_prd")"
   file_parent=$(dirname "$fp")
   file_parent=$(CDPATH= cd -- "$file_parent" 2>/dev/null && pwd -P) || return 0
   fp="$file_parent/$(basename "$fp")"
-  [ "$fp" = "$canonical_prd" ] || return 0
+  # The read counts only when the file IS one of the governing candidates the
+  # gate will name -- the same list, from the same function.
+  match=""
+  candidates=$(prd_candidates_for "$canonical")
+  oldifs=$IFS
+  IFS='
+'
+  for c in $candidates; do
+    c_parent=$(dirname "$c")
+    c_parent=$(CDPATH= cd -- "$c_parent" 2>/dev/null && pwd -P) || continue
+    [ "$c_parent/$(basename "$c")" = "$fp" ] && match=1
+  done
+  IFS=$oldifs
+  [ -n "$match" ] || return 0
+  slug=$(prd_slug "$fp")
 
   root=$(dirname "$canonical")
   key=$(printf '%s' "$root" | sed 's#[/ ]#_#g')
