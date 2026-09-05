@@ -293,16 +293,30 @@ def immutable_code_root_equivalent(a,b):
     right=_verified_immutable_release_identity(b)
     return left is not None and left == right
 
-def _launch_root_identity(kind, path, *, resolver_identity=None, refresh=False):
-    """Return one memoized code-root identity or runtime-bound mutable path identity.
+def _forget_launch_path(path):
+    """Drop every memoized identity naming this path, before any of them is read.
 
-    `refresh` re-reads exactly this (kind, path) identity. The caches exist for
-    immutable code roots; the route cwd is the mutation worktree, so a process
-    that already sealed that cwd (an earlier compile, a test) would otherwise
-    hand a continuation the HEAD as it was then. Only this one identity is
-    dropped — evicting every entry for the path would also discard runtime_root
-    / launch_home / registry_root, which are the same path under dev activation.
+    The caches exist for immutable code roots, but a route cwd is the mutation
+    worktree and moves under them: a process that already sealed that cwd (an
+    earlier compile, a test) would otherwise hand a continuation the HEAD as it
+    was then.
+
+    Every identity for the path goes, not just the one being re-read. Under dev
+    activation `runtime_root`, `launch_home` and `registry_root` can *be* that
+    same path, and re-reading one of them while the others answer from cache
+    puts two release ids for one path in a single tuple -- the same
+    two-sources-one-value shape defect C was (review round 2, S2). Eviction is
+    keyed by resolved path, so identities for genuinely different paths are
+    untouched.
     """
+    resolved=str(Path(path).expanduser().resolve(strict=False))
+    for key in [key for key in _LAUNCH_ROOT_IDENTITY_CACHE if key[1]==resolved]:
+        _LAUNCH_ROOT_IDENTITY_CACHE.pop(key,None)
+    _LAUNCH_SOURCE_REVISION_CACHE.pop(resolved,None)
+    _LAUNCH_CONTENT_DIGEST_CACHE.pop(resolved,None)
+
+def _launch_root_identity(kind, path, *, resolver_identity=None):
+    """Return one memoized code-root identity or runtime-bound mutable path identity."""
     resolved=Path(path).expanduser().resolve(strict=False)
     resolver_key=None
     if resolver_identity is not None:
@@ -311,14 +325,6 @@ def _launch_root_identity(kind, path, *, resolver_identity=None, refresh=False):
             resolver_identity.get("content_digest"),
         )
     key=(kind,str(resolved),resolver_key)
-    if refresh:
-        # Only this identity, plus the two path-keyed leaves it is derived from.
-        # Sweeping every kind for the path would also drop runtime_root /
-        # launch_home / registry_root, which are the same path under dev
-        # activation, and those are the immutable roots the caches exist for.
-        _LAUNCH_ROOT_IDENTITY_CACHE.pop(key,None)
-        _LAUNCH_SOURCE_REVISION_CACHE.pop(str(resolved),None)
-        _LAUNCH_CONTENT_DIGEST_CACHE.pop(str(resolved),None)
     if key not in _LAUNCH_ROOT_IDENTITY_CACHE:
         if resolver_identity is None:
             release_id=_launch_source_revision(resolved)
@@ -339,17 +345,19 @@ def _launch_root_identity(kind, path, *, resolver_identity=None, refresh=False):
 def launch_compatibility_tuple(*, artifact_root, jobs=None, cwd=None, refresh_cwd=False):
     """Compute v1 bounded launch identities without hashing mutable state contents."""
     runtime_root=Path(resolve_agent_home()).resolve(strict=False)
-    runtime_identity=_launch_root_identity("runtime_root",runtime_root)
     grounding_cwd=Path(cwd if cwd is not None else Path.cwd()).resolve(strict=False)
+    if refresh_cwd:
+        # Up front, before the first identity is read, so every identity in this
+        # tuple comes from one reading of the tree.
+        _forget_launch_path(grounding_cwd)
+    runtime_identity=_launch_root_identity("runtime_root",runtime_root)
     result={
         "tuple_version":LAUNCH_COMPATIBILITY_TUPLE_VERSION,
         "registry_root":_launch_root_identity("registry_root",TOPO.ROOT),
         "launch_home":_launch_root_identity("launch_home",runtime_root),
         "runtime_root":runtime_identity,
         "grounding_roots":{
-            "cwd":_launch_root_identity(
-                "grounding_cwd",grounding_cwd,refresh=refresh_cwd,
-            ),
+            "cwd":_launch_root_identity("grounding_cwd",grounding_cwd),
             "artifact_root":_launch_root_identity(
                 "grounding_artifact_root",artifact_root,
                 resolver_identity=runtime_identity,
@@ -386,6 +394,26 @@ def _launch_tuple_roots(payload):
     return roots
 
 _GIT_SHA=re.compile(r"[0-9a-f]{40}")
+
+def _inside_git_worktree(path):
+    """Is this path inside a git worktree? Ask git, not the filesystem.
+
+    `(cwd/".git").exists()` answers only for a repository *root*: a route whose
+    cwd is any subdirectory has no `.git` entry, so the lineage recheck below
+    silently skipped exactly the cases it was written for (review round 2, S3).
+    A missing directory, a non-repository, or an unavailable git all read as
+    "cannot answer here", and the probe is skipped rather than guessed at -- the
+    launch guard still proves the same lineage against real HEAD before anything
+    dispatches.
+    """
+    try:
+        proc=subprocess.run(
+            ["git","-C",str(path),"rev-parse","--is-inside-work-tree"],
+            text=True,capture_output=True,timeout=30,
+        )
+    except (OSError,subprocess.SubprocessError):
+        return False
+    return proc.returncode==0 and proc.stdout.strip()=="true"
 
 def _first_parent_contains(path, ancestor, descendant):
     """True when `ancestor` is on `descendant`'s first-parent line in this tree.
@@ -899,7 +927,7 @@ def build_continuation_route(
     route.update(result)
     # Defect C: the pin must name the same commit the grounding tuple above sealed.
     source_commit,source_commit_rebind,rebind_declined=_continuation_source_commit(
-        source_route,route_nodes[0] if route_nodes else None,
+        source_route,route_nodes,
     )
     if source_commit is not None:
         route["source_commit"]=source_commit
@@ -1021,7 +1049,7 @@ def _verify_continuation_route(route):
         # same lineage against real HEAD before anything dispatches -- so an
         # unanswerable probe is skipped, never guessed at.
         cwd=Path(str(route.get("cwd") or ""))
-        if (cwd/".git").exists() and not _first_parent_contains(cwd,inherited,rebound):
+        if _inside_git_worktree(cwd) and not _first_parent_contains(cwd,inherited,rebound):
             raise ValueError("continuation-source-commit-rebind-lineage-unproven")
     _validate_output_scopes(route.get("nodes",[]))
     return route
@@ -1052,12 +1080,13 @@ def _git_commit(cwd):
     p=subprocess.run(["git","-C",str(cwd),"rev-parse","HEAD"],text=True,capture_output=True)
     return p.stdout.strip() if p.returncode == 0 else "unversioned"
 
-def _worktree_mutating_scope(scope):
-    """Byte-for-byte the guard's rule (`worker-route-guard.py::_worktree_mutating_scope`).
+def worktree_mutating_scope(scope):
+    """Does this write scope let a node mutate the worktree?
 
-    The decline below has to classify a node exactly the way the guard that
-    adjudicates it does; two nearly-identical predicates would be two answers to
-    one question.
+    The **one** definition of the rule. `worker-route-guard.py` imports this
+    module and calls this function, so the decline below classifies a node
+    exactly the way the guard that adjudicates it does. A second near-identical
+    copy would be two answers to one question, and the drift would be silent.
     """
     if scope in ("target-artifact","source-scoped"):
         return True
@@ -1065,7 +1094,7 @@ def _worktree_mutating_scope(scope):
     return root=="source"
 
 def _node_mutates_worktree(node):
-    return any(_worktree_mutating_scope(scope) for scope in (node.get("write_scope") or []))
+    return any(worktree_mutating_scope(scope) for scope in (node.get("write_scope") or []))
 
 _STAGE_FALLBACK=None
 
@@ -1082,23 +1111,53 @@ def _stage_fallback():
     return _STAGE_FALLBACK
 
 def _prior_registry_attempt(source_route, node_id):
-    """True when the source route already recorded an attempt on this node.
+    """Did the source route already record an attempt on this node?
 
     Read through the source route's own sealed jobs binding, not the caller's
     environment: the question is what *that* route did, and `AGENT_DISPATCH_JOBS`
     in a resuming session may name a different registry.
+
+    **Fail closed.** Every unreadable answer -- an unresolved jobs binding, a
+    registry that is missing or is not a regular file, an OS or parse error --
+    returns True, which declines the rebind and keeps the inherited pin. The
+    alternative reading (absence of rows means the node never ran) is exactly
+    what deleting or truncating `jobs.log` produces, and it would re-pin a route
+    straight past the SD-67 evidence gate. Declining on an unreadable registry
+    is never worse than the behaviour before defect C was fixed.
+
+    `registry_rows` returns `[]` for a missing file rather than raising, so the
+    file is proved to exist here; it cannot be inferred from an empty result.
     """
     try:
-        jobs=_continuation_source_jobs(source_route)
-    except ValueError:
-        return False
+        jobs=Path(_continuation_source_jobs(source_route))
+    except (ValueError,OSError):
+        return True
     try:
+        if not jobs.is_file():
+            return True
         rows=_stage_fallback().registry_rows(
-            Path(jobs),str(source_route.get("route_id") or ""),str(node_id),
+            jobs,str(source_route.get("route_id") or ""),str(node_id),
         )
     except (OSError,ValueError):
-        return False
+        return True
     return any(row.get("attempt_id") for row in rows)
+
+def _retry_mutation_node(source_route, continuation_nodes):
+    """The first node this continuation re-runs that is an SD-67 mutation retry.
+
+    Not just the resume node: a continuation resuming at `plan` still carries
+    `execute`, and in a real `autopilot-code` route `execute` is the only
+    worktree-mutating node. Asking about the resume node alone let a plan-time
+    resume re-pin the route, after which `execute` met `head == source_commit`
+    and passed the guard on the trivial branch -- walking past the very gate
+    the decline exists to protect (review round 2, B1).
+    """
+    for node in continuation_nodes or ():
+        if not _node_mutates_worktree(node):
+            continue
+        if _prior_registry_attempt(source_route,node.get("id")):
+            return node
+    return None
 
 _COMMIT_SHA=re.compile(r"[0-9a-f]{40}")
 
@@ -1123,7 +1182,7 @@ def _assert_pin_matches_grounding(source_commit, launch):
             f"continuation-source-commit-grounding-mismatch: pin={source_commit} grounding={base}"
         )
 
-def _continuation_source_commit(source_route, first_runnable_node):
+def _continuation_source_commit(source_route, continuation_nodes):
     """Seal the resume-time HEAD as the continuation's `source_commit`.
 
     The source route pinned the HEAD it was compiled at, but a continuation seals
@@ -1136,33 +1195,27 @@ def _continuation_source_commit(source_route, first_runnable_node):
     Returns `(source_commit, rebind_record, rebind_declined)`.
 
     The rebind is **declined** -- the inherited pin is kept, exactly as before this
-    fix -- when the first runnable node mutates the worktree and the source route
-    already recorded an attempt on it. That is precisely SD-67's mutation retry,
-    whose evidence gate lives in `worker-route-guard.py` (the node must be a
-    declared `resume_retry_boundaries` member with a prior registry attempt).
-    Re-pinning there would let a continuation launder a retry past that gate,
-    which `OPERATIONS §5.10` forbids ("never re-pin the route to manufacture this
-    evidence"). Declining costs nothing: the guard's own SD-67 branch adjudicates
-    the same launch with real registry evidence.
+    fix -- when *any* node this continuation will re-run mutates the worktree and
+    the source route already recorded an attempt on it. That is SD-67's mutation
+    retry, whose evidence gate lives in `worker-route-guard.py`. Re-pinning there
+    would let a continuation launder a retry past that gate, which
+    `OPERATIONS §5.10` forbids ("never re-pin the route to manufacture this
+    evidence").
 
-    Otherwise `rebind_record` is `None` when the inherited pin still names HEAD (or
-    either side is unversioned); else HEAD must be a first-parent descendant of the
-    pin -- SD-65's invariant, "is the worktree still on the history the route
-    bound?" -- and the record names both commits. A HEAD off that history is
-    refused as `continuation-source-commit-diverged` before any route file is
-    written, since no node of such a continuation could ever dispatch. (A shallow
-    clone whose graft boundary hides the pin reads as diverged; that is the same
-    answer the launch guard gives, arrived at earlier.)
+    A declined rebind **refuses** the mutation node; it does not hand it to an
+    adjudicating guard. The guard looks its retry evidence up under
+    `route["route_id"]`, which is the continuation's own id, while the prior rows
+    were written under the source route's -- so it finds none and raises
+    `route-source-commit-mismatch`. That is precisely what main does today, so
+    declining is never a regression, but the operator is refused rather than
+    adjudicated. Teaching the guard to follow `source_route_id` is a separate
+    change with its own spec question, not something to smuggle in here.
     """
     inherited=source_route.get("source_commit")
     cwd=source_route.get("cwd")
     if not inherited or not cwd:
         return inherited,None,False
-    if (
-        first_runnable_node is not None
-        and _node_mutates_worktree(first_runnable_node)
-        and _prior_registry_attempt(source_route,first_runnable_node.get("id"))
-    ):
+    if _retry_mutation_node(source_route,continuation_nodes) is not None:
         return inherited,None,True
     head=_git_commit(cwd)
     if head == inherited or head == "unversioned" or inherited == "unversioned":
