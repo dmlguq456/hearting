@@ -34,13 +34,15 @@ def seed_cycle_spec(spec_base: Path, artifact: Path):
     transaction would see no pre-image and write no `_internal/versions/vN`
     snapshot -- which is why operators copied the previous version by hand
     (cairn v169/v170, defect K). Seed the whole latest shared/spec revision
-    (every component, D-87) so the pre-image, the version counter and the
-    snapshot all come from the tool. Returns (revision_dir, files) or None."""
+    (every component, D-87) plus the `_internal/versions/v*` history of every
+    earlier revision of that reference, so the pre-image, the version counter
+    and the snapshot all come from the tool. Returns an event dict."""
     if any(p.is_file() for p in spec_base.rglob("*")):
-        return None
+        has_prd=(spec_base/"prd.md").is_file() or any(p.name=="prd.md" and p.parent.parent==spec_base for p in spec_base.rglob("prd.md"))
+        return {"status":"seed-skipped","reason":"spec-base-not-empty","prd_present":has_prd,"spec_base":str(spec_base)}
     revision=CUTOVER.latest_shared_revision(artifact,"spec")
     if revision is None:
-        return None
+        return {"status":"seed-skipped","reason":"no-shared-revision","spec_base":str(spec_base)}
     copied=0
     for src in sorted(revision.rglob("*")):
         if not src.is_file() or src.is_symlink():
@@ -50,7 +52,25 @@ def seed_cycle_spec(spec_base: Path, artifact: Path):
             continue
         dst=spec_base/rel; dst.parent.mkdir(parents=True,exist_ok=True)
         dst.write_bytes(src.read_bytes()); copied+=1
-    return revision,copied
+    history=0
+    revisions_dir=revision.parent
+    if revisions_dir.name=="revisions":
+        for other in sorted(revisions_dir.iterdir()):
+            if other==revision or not other.is_dir():
+                continue
+            for src in sorted(other.rglob("prd.md")):
+                rel=src.relative_to(other)
+                parts=rel.parts
+                # <component?>/_internal/versions/vN/prd.md -- immutable history rows only
+                if len(parts)<4 or parts[-4]!="_internal" or parts[-3]!="versions" or not re.fullmatch(r"v[0-9]+",parts[-2]):
+                    continue
+                dst=spec_base/rel
+                if dst.exists() or src.is_symlink() or not src.is_file():
+                    continue
+                dst.parent.mkdir(parents=True,exist_ok=True); dst.write_bytes(src.read_bytes()); history+=1
+    versions=[p for p in spec_base.rglob("prd.md") if len(p.relative_to(spec_base).parts)>=4 and p.relative_to(spec_base).parts[-4]=="_internal"]
+    return {"status":"seeded","source":str(revision),"files":copied,"history_versions":history,
+            "version_history_present":bool(versions),"spec_base":str(spec_base)}
 
 
 def legacy_spec_state(artifact: Path):
@@ -147,10 +167,6 @@ def main():
     except PRODUCER.ProducerError as exc:
         emit({"status":"blocked","reason":exc.code,"detail":exc.detail,"artifact_root":str(artifact)},args.events); return 65
     spec_base=spec_base.resolve()
-    if spec_layout=="cycle":
-        seeded=seed_cycle_spec(spec_base,artifact)
-        if seeded is not None:
-            emit({"status":"seeded","source":str(seeded[0]),"files":seeded[1],"spec_base":str(spec_base)},args.events)
     spec_root=(Path(args.spec_root).expanduser() if args.spec_root else spec_base)
     # A relative component root is relative to the resolved spec bucket, which
     # is the open cycle's `artifacts/spec` once the cutover is active (W7D fix:
@@ -182,6 +198,14 @@ def main():
                 if time.monotonic()>=deadline:
                     emit({"status":"blocked","reason":"spec-lock-timeout","route_id":route["route_id"]},args.events); return 3
                 time.sleep(max(.01,args.poll))
+        if spec_layout=="cycle":
+            # Seed only once the route contract passed and the spec lock is ours:
+            # a refused run must leave no admittable content behind, and two
+            # transactions on one cycle must not interleave a half copy.
+            seeded=seed_cycle_spec(spec_base,artifact)
+            emit({**seeded,"route_id":route["route_id"]},args.events)
+            if seeded["status"]=="seeded" and not seeded["version_history_present"]:
+                emit({"status":"version-history-absent","route_id":route["route_id"],"detail":"seeded revision carries no _internal/versions history; the counter restarts at 1"},args.events)
         version=next_version(spec_root)
         owner={"route_id":route["route_id"],"node_id":node["id"],"worktree":str(worktree.resolve()),"pid":os.getpid(),"next_version":version}
         lock.seek(0); lock.truncate(); lock.write(json.dumps(owner,sort_keys=True)+"\n"); lock.flush(); os.fsync(lock.fileno())

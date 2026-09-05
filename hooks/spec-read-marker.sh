@@ -16,32 +16,37 @@ Without arguments, reads Claude hook JSON from stdin.
 EOF
 }
 
-# True when the legacy bucket still carries a governing prd.md (root or a
-# one-level component); `_internal/` never counts.
-shared_has_revision() {
-  base=$1
-  [ -d "$base" ] || return 1
-  for ref in "$base"/*/; do
-    [ -d "$ref" ] || continue
-    [ -f "${ref%/}/reference.json" ] || continue
-    for rev in "${ref%/}"/revisions/*/; do
-      [ -d "$rev" ] && [ -f "${rev%/}/prd.md" ] && return 0
+# Governing prd.md candidates for one artifact root -- ONE definition:
+# `utilities/artifact_cutover.py prd_candidates` (latest shared/spec revision
+# first, the legacy `spec/` bucket only while no shared revision exists, the
+# order `artifact_reader.spec_dir` uses). Without python the fallback is the
+# legacy scan, and spec-read-marker.sh carries the identical function and
+# fallback, so the gate and the marker can never disagree about which file
+# governs (defect K: they did, and operators wrote where the gate looked).
+prd_candidates_for() {
+  ar=$1
+  out=""
+  cutover="$AGENT_HOME/utilities/artifact_cutover.py"
+  [ -f "$cutover" ] || cutover="$SCRIPT_DIR/../utilities/artifact_cutover.py"
+  if [ -f "$cutover" ] && command -v python3 >/dev/null 2>&1; then
+    out=$(python3 "$cutover" resolve-legacy --artifact-root "$ar" --prd-candidates 2>/dev/null) || out=""
+  fi
+  if [ -z "$out" ]; then
+    [ -f "$ar/spec/prd.md" ] && out="$ar/spec/prd.md"
+    for d in "$ar"/spec/*/; do
+      [ -d "$d" ] || continue
+      d="${d%/}"
+      [ "$(basename "$d")" = "_internal" ] && continue
+      [ -f "$d/prd.md" ] || continue
+      if [ -z "$out" ]; then
+        out="$d/prd.md"
+      else
+        out="$out
+$d/prd.md"
+      fi
     done
-  done
-  return 1
-}
-
-legacy_has_prd() {
-  legacy=$1
-  [ -d "$legacy" ] || return 1
-  [ -f "$legacy/prd.md" ] && return 0
-  for d in "$legacy"/*/; do
-    [ -d "$d" ] || continue
-    d="${d%/}"
-    [ "$(basename "$d")" = "_internal" ] && continue
-    [ -f "$d/prd.md" ] && return 0
-  done
-  return 1
+  fi
+  printf '%s' "$out"
 }
 
 mark_read() {
@@ -102,27 +107,23 @@ mark_read() {
     file_root=$(dirname "$d3")
   fi
   canonical=$("$ARTIFACT_ROOT_RESOLVER" "$file_root" 2>/dev/null) || return 0
-  if [ -n "$shared_prd" ]; then
-    # A shared/spec revision read is the canonical read whenever a shared
-    # revision exists — the same precedence spec-skill-gate.sh and
-    # artifact_reader.spec_dir apply (defect K: the three surfaces disagreed).
-    canonical_prd="$fp"
-  else
-    # A legacy `spec/` read counts only while no shared/spec revision exists.
-    shared_has_revision "$canonical/shared/spec" && return 0
-    if [ -z "$slug" ]; then
-      canonical_prd="$canonical/spec/prd.md"
-    else
-      canonical_prd="$canonical/spec/$slug/prd.md"
-    fi
-  fi
-  canonical_parent=$(dirname "$canonical_prd")
-  canonical_parent=$(CDPATH= cd -- "$canonical_parent" 2>/dev/null && pwd -P) || return 0
-  canonical_prd="$canonical_parent/$(basename "$canonical_prd")"
   file_parent=$(dirname "$fp")
   file_parent=$(CDPATH= cd -- "$file_parent" 2>/dev/null && pwd -P) || return 0
   fp="$file_parent/$(basename "$fp")"
-  [ "$fp" = "$canonical_prd" ] || return 0
+  # The read counts only when the file IS one of the governing candidates the
+  # gate will name -- the same list, from the same function.
+  match=""
+  candidates=$(prd_candidates_for "$canonical")
+  oldifs=$IFS
+  IFS='
+'
+  for c in $candidates; do
+    c_parent=$(dirname "$c")
+    c_parent=$(CDPATH= cd -- "$c_parent" 2>/dev/null && pwd -P) || continue
+    [ "$c_parent/$(basename "$c")" = "$fp" ] && match=1
+  done
+  IFS=$oldifs
+  [ -n "$match" ] || return 0
 
   root=$(dirname "$canonical")
   key=$(printf '%s' "$root" | sed 's#[/ ]#_#g')

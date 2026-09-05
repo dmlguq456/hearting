@@ -1078,15 +1078,26 @@ class SharedAdmissionTest(ProducerTestBase):
         self.assertEqual(ctx.exception.code, "shared-reference-exists")
         self.assertIn(first["shared_reference_id"], str(ctx.exception))
         self.assertEqual(len(P.list_references(self.root, "spec")), 1)
-        with self.assertRaises(P.ProducerError) as ctx:
-            P.admit_shared(self.root, cycle_id=result["cycle_id"], kind="spec", source="spec")
-        self.assertEqual(ctx.exception.code, "shared-reference-exists")
+        # The documented keyless flow keeps landing on the single canonical reference.
+        keyless = P.admit_shared(self.root, cycle_id=result["cycle_id"], kind="spec", source="spec")
+        self.assertEqual(keyless["shared_reference_id"], first["shared_reference_id"])
         again = P.admit_shared(self.root, cycle_id=result["cycle_id"], kind="spec", source="spec", key="spec")
         self.assertEqual(again["shared_reference_id"], first["shared_reference_id"])
         forced = P.admit_shared(self.root, cycle_id=result["cycle_id"], kind="spec", source="spec",
                                 key="cairn-spec", allow_new_reference=True)
         self.assertNotEqual(forced["shared_reference_id"], first["shared_reference_id"])
         self.assertEqual(len(P.list_references(self.root, "spec")), 2)
+        with self.assertRaises(P.ProducerError) as ctx:
+            P.admit_shared(self.root, cycle_id=result["cycle_id"], kind="spec", source="spec")
+        self.assertEqual(ctx.exception.code, "shared-reference-ambiguous")
+
+    def test_keyless_first_admit_then_keyless_repeat_reuses_the_reference(self):
+        result = self._sealed_cycle()
+        first = P.admit_shared(self.root, cycle_id=result["cycle_id"], kind="spec", source="spec")
+        self.assertIsNone(P.list_references(self.root, "spec")[0].get("key"))
+        second = P.admit_shared(self.root, cycle_id=result["cycle_id"], kind="spec", source="spec")
+        self.assertEqual(second["shared_reference_id"], first["shared_reference_id"])
+        self.assertEqual(len(P.list_references(self.root, "spec")), 1)
 
     def test_admit_spec_creates_immutable_revision(self):
         result = self._sealed_cycle()

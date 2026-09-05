@@ -167,6 +167,39 @@ class CycleLayoutTest(unittest.TestCase):
   self.assertEqual((spec/"pipeline_state.yaml").read_text(),"s\n")                   # whole tree seeded (D-87)
   self.assertTrue(any(r["status"]=="snapshot" and r["version"]==2 for r in rows),rows)
 
+ def test_seed_unions_version_history_across_revisions(self):
+  # Latest revision carries the PRD but no history (cairn's rrev_511a shape);
+  # an earlier revision holds _internal/versions/v3. The counter must continue at 4.
+  self._shared_v1()
+  route,route_file,begun=self._cycle("seed-source-2")
+  spec=Path(begun["cycle_dir"])/"artifacts"/"spec"; spec.mkdir(parents=True)
+  (spec/"prd.md").write_text("v3\n"); (spec/"pipeline_state.yaml").write_text("s\n")
+  self._close(route,route_file); self.P.finalize(self.artifact,cycle_id=begun["cycle_id"])
+  # cairn's rrev_511a shape (3 files, history dropped) predates D-87; model it explicitly.
+  self.P.admit_shared(self.artifact,cycle_id=begun["cycle_id"],kind="spec",source="spec",key="spec",drop_components=["_internal"],drop_reason="fixture: pre-D-87 shape")
+  _r,_f,begun=self._cycle("spec-edit-3"); cycle_dir=Path(begun["cycle_dir"]); events=Path(self._tmp.name)/"ev3.jsonl"
+  code="import os; from pathlib import Path; Path(os.environ['AGENT_SPEC_ROOT'],'prd.md').write_text('v4\\n')"
+  result=self._run(cycle_dir,code,events)
+  self.assertEqual(result.returncode,0,result.stdout+result.stderr)
+  rows=[json.loads(l) for l in events.read_text().splitlines()]
+  seeded=[r for r in rows if r["status"]=="seeded"][0]
+  self.assertEqual(seeded["history_versions"],1); self.assertTrue(seeded["version_history_present"])
+  spec=cycle_dir/"artifacts"/"spec"
+  self.assertEqual((spec/"_internal"/"versions"/"v1"/"prd.md").read_text(),"v0\n")
+  self.assertEqual((spec/"_internal"/"versions"/"v2"/"prd.md").read_text(),"v3\n")
+  self.assertEqual((spec/"prd.md").read_text(),"v4\n")
+  self.assertFalse(any(r["status"]=="version-history-absent" for r in rows))
+
+ def test_refused_route_seeds_nothing(self):
+  self._shared_v1()
+  _r,_f,begun=self._cycle("spec-edit-4"); cycle_dir=Path(begun["cycle_dir"]); events=Path(self._tmp.name)/"ev4.jsonl"
+  env={**os.environ,"AGENT_ARTIFACT_CYCLE_DIR":str(cycle_dir),"AGENT_ARTIFACT_ROOT":str(self.artifact)}
+  cmd=[sys.executable,str(ROOT/"utilities/spec-transaction.py"),"run","--artifact-root",str(self.artifact),"--worktree",str(self.repo),"--route",str(self.spec_route),"--node","no-such-node","--events",str(events),"--",sys.executable,"-c","pass"]
+  result=subprocess.run(cmd,text=True,capture_output=True,env=env)
+  self.assertEqual(result.returncode,65,result.stdout+result.stderr)
+  self.assertEqual([p for p in (cycle_dir/"artifacts"/"spec").rglob("*") if p.is_file()],[])
+  self.assertFalse(any(json.loads(l)["status"]=="seeded" for l in events.read_text().splitlines()))
+
  def test_child_writing_legacy_spec_is_a_typed_failure(self):
   self._shared_v1()
   legacy=self.artifact/"spec"; legacy.mkdir(); (legacy/"prd.md").write_text("stale\n")

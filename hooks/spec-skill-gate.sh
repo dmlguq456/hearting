@@ -18,6 +18,39 @@ Without arguments, reads Claude hook JSON from stdin.
 EOF
 }
 
+# Governing prd.md candidates for one artifact root -- ONE definition:
+# `utilities/artifact_cutover.py prd_candidates` (latest shared/spec revision
+# first, the legacy `spec/` bucket only while no shared revision exists, the
+# order `artifact_reader.spec_dir` uses). Without python the fallback is the
+# legacy scan, and spec-read-marker.sh carries the identical function and
+# fallback, so the gate and the marker can never disagree about which file
+# governs (defect K: they did, and operators wrote where the gate looked).
+prd_candidates_for() {
+  ar=$1
+  out=""
+  cutover="$AGENT_HOME/utilities/artifact_cutover.py"
+  [ -f "$cutover" ] || cutover="$SCRIPT_DIR/../utilities/artifact_cutover.py"
+  if [ -f "$cutover" ] && command -v python3 >/dev/null 2>&1; then
+    out=$(python3 "$cutover" resolve-legacy --artifact-root "$ar" --prd-candidates 2>/dev/null) || out=""
+  fi
+  if [ -z "$out" ]; then
+    [ -f "$ar/spec/prd.md" ] && out="$ar/spec/prd.md"
+    for d in "$ar"/spec/*/; do
+      [ -d "$d" ] || continue
+      d="${d%/}"
+      [ "$(basename "$d")" = "_internal" ] && continue
+      [ -f "$d/prd.md" ] || continue
+      if [ -z "$out" ]; then
+        out="$d/prd.md"
+      else
+        out="$out
+$d/prd.md"
+      fi
+    done
+  fi
+  printf '%s' "$out"
+}
+
 find_prd() {
   dir=$1
   candidates=""
@@ -30,35 +63,7 @@ find_prd() {
   dir=$(CDPATH= cd -- "$dir" && pwd -P)
   artifact_root=$("$ARTIFACT_ROOT_RESOLVER" "$dir" 2>/dev/null) || return 0
 
-  # One read order for every consumer (artifact_reader.spec_dir /
-  # artifact_cutover.prd_candidates): the latest immutable `shared/spec/`
-  # revision governs whenever one exists; the legacy `spec/` bucket only while
-  # none does. Defect K (cairn 2026-09-03) came from this gate being
-  # legacy-first while the reader was shared-first.
-  if [ -d "$artifact_root/shared/spec" ] && command -v python3 >/dev/null 2>&1; then
-    candidates=$(python3 "$SCRIPT_DIR/../utilities/artifact_cutover.py" resolve-legacy \
-      --artifact-root "$artifact_root" --prd-candidates 2>/dev/null)
-  fi
-
-  if [ -z "$candidates" ]; then
-    # Legacy bucket: the root prd.md plus every one-level component prd.md.
-    if [ -f "$artifact_root/spec/prd.md" ]; then
-      candidates="$artifact_root/spec/prd.md"
-    fi
-    for d in "$artifact_root"/spec/*/; do
-      [ -d "$d" ] || continue
-      d="${d%/}"
-      slug=$(basename "$d")
-      [ "$slug" = "_internal" ] && continue
-      [ -f "$d/prd.md" ] || continue
-      if [ -z "$candidates" ]; then
-        candidates="$d/prd.md"
-      else
-        candidates="$candidates
-$d/prd.md"
-      fi
-    done
-  fi
+  candidates=$(prd_candidates_for "$artifact_root")
 
   [ -n "$candidates" ] && root=$(dirname "$artifact_root")
 }

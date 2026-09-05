@@ -2034,12 +2034,20 @@ def admit_shared(
             # canonical `spec` reference and silently minted a second one, after
             # which "the latest spec" flipped on every admit. A second reference
             # of a canonical-singular kind is an explicit act, never a miss.
+            # The documented flow (`admit-shared --kind spec`, no key) keeps
+            # working: with exactly one reference it is the canonical one.
             existing = list_references(root, kind)
-            if existing:
+            listing = ", ".join(f"{r['shared_reference_id']}(key={r.get('key')})" for r in existing)
+            if key is None and len(existing) == 1:
+                reference = existing[0]
+            elif key is None and len(existing) > 1:
+                raise ProducerError("shared-reference-ambiguous",
+                                    f"{kind}: {listing}; pass --reference <id> or --key <key>")
+            elif key is not None and existing:
                 raise ProducerError(
                     "shared-reference-exists",
-                    f"{kind}: " + ", ".join(f"{r['shared_reference_id']}(key={r.get('key')})" for r in existing)
-                    + "; pass --reference <id> or --key <existing key>, or --new-reference to add another",
+                    f"{kind}: {listing}; the key {key!r} matches none of them -- pass --reference <id> "
+                    "(or --key of an existing one), or --new-reference to add another",
                 )
         if reference is None:
             reference_id = alloc.allocate("shared_reference")
