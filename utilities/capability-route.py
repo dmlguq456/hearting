@@ -14,6 +14,7 @@ sys.path.insert(0, str(ROOT/"utilities"))
 import artifact_locator as ARTIFACT_LOCATOR
 import route_identity as ROUTE_IDENTITY
 import review_round_cap as REVIEW_ROUND_CAP
+from worker_bootstrap import WORKER_KIND_TYPES
 from dispatch_continuation_budget import COMPATIBILITY_FLOOR, TERMINAL_RESERVE_DEFAULT
 from dispatch_contract import (
     CANONICAL_PARENT_TRANSPORTS,
@@ -2807,6 +2808,12 @@ def route_status(artifact_root, *, diagnostics=None):
     rows.sort(key=lambda row:(_LOCATION_SORT_PRIORITY.get(row["location"],9),row["route_file"]))
     return rows
 
+# The one definition of "this node's gate belongs to an independent reviewer",
+# read from the worker bootstrap map rather than spelled again here.
+REVIEW_WORKER_KIND=next(
+    kind for kind,worker_type in WORKER_KIND_TYPES.items() if worker_type=="review"
+)
+
 def _marker_attempt_axes(node, attempt_id, attempt_metadata):
     if node.get("kind") == "resource-runner":
         if attempt_id or attempt_metadata:
@@ -2850,6 +2857,28 @@ def _marker_attempt_axes(node, attempt_id, attempt_metadata):
     if dispatch_depth != node.get("dispatch_depth"):
         raise ValueError("completion attempt dispatch_depth does not match route node")
     registered=str(attempt_metadata["registered_worker"]).lower() in {"1","true"}
+    if node.get("kind")==REVIEW_WORKER_KIND and not registered:
+        # SD-94 extension. A review node's gate is the one place the harness
+        # asks somebody other than the owner whether the work is good, and the
+        # explicit-axes path let the owner answer it: publish a marker for
+        # `impl-review` from a file it wrote itself, with zero registry rows,
+        # walking around `_owner_closure_eligibility` entirely -- the review
+        # round budget, the `completed-review-blocking` note, the exact-attempt
+        # FAIL handoff, the `*.owner-closure.md` naming and containment rules.
+        # Reproduced on main before this fix (marker published, current,
+        # readiness=ready, registry rows written: 0).
+        #
+        # A review node's marker must therefore rest on a registered reviewer's
+        # attempt row. Two paths still reach it and both carry one: an ordinary
+        # registered review worker, and SD-94's owner-closure, which completes
+        # against the exact `completed-review-blocking` row and derives these
+        # axes from that row. `owner-chain` returns above and is unaffected --
+        # it aggregates declared sub-session slices that were themselves
+        # registered.
+        raise ValueError(
+            "review-node-requires-registered-reviewer:"
+            f"{node.get('id') or '-'}"
+        )
     return {
         "attempt_id":attempt_id,
         "dispatch_depth":dispatch_depth,

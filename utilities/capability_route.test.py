@@ -4207,4 +4207,119 @@ class InlineStageCompletionRecipeTest(unittest.TestCase):
     )
 
 
+class ReviewNodeRequiresRegisteredReviewerTest(unittest.TestCase):
+ """A review node's gate belongs to somebody other than the owner (SD-94 ext).
+
+ Reproduced on `origin/main` before this fix: the owner published a marker for
+ `plan-check` from a file it wrote itself -- marker current, readiness `ready`,
+ **zero registry rows** -- walking around `_owner_closure_eligibility` in its
+ entirety: the round budget, the `completed-review-blocking` note, the exact
+ attempt FAIL handoff, the `*.owner-closure.md` naming and containment rules.
+ """
+
+ def setUp(self):
+  self.tmp=tempfile.TemporaryDirectory(); self.addCleanup(self.tmp.cleanup)
+  self.base=Path(self.tmp.name)
+  self.jobs=self.base/"state"/"jobs.log"
+  self.jobs.parent.mkdir(parents=True,exist_ok=True); self.jobs.touch()
+  self.previous=os.environ.get("AGENT_DISPATCH_JOBS")
+  os.environ["AGENT_DISPATCH_JOBS"]=str(self.jobs)
+  self.addCleanup(self._restore)
+  self.artifact=self.base/"artifacts"
+  self.route=self._route(self.artifact)
+
+ def _restore(self):
+  if self.previous is None: os.environ.pop("AGENT_DISPATCH_JOBS",None)
+  else: os.environ["AGENT_DISPATCH_JOBS"]=self.previous
+
+ def _route(self,artifact_root):
+  gate={"spec_read":{"satisfied":True,"source":"canonical-prd-sha256"},
+        "drift_verdict":"within-spec","workflow_mode":"tracked",
+        "artifact_guard":{"satisfied":True,"source":"conductor-prechecked"}}
+  evidence={"tuples":[{
+    "parent_harness":"codex","parent_transport":"headless",
+    "parent_sandbox":R.WRAPPER_PARENT_SANDBOXES["codex"][0],
+    "child_harness":"codex","launch_authority":"conductor","status":"supported",
+    "probe_source":"review-authority","probe_time":"2026-09-06T00:00:00Z",
+    "failure_class":"","checked_worktree":str(R.ROOT.resolve()),
+    "failure_scope":"none","codex_command":"ok","retry_on_isolated_worktree":0,
+   }],"native_subagent":[{
+    "harness":"codex","transport":"headless",
+    "execution_surface":"codex-native-subagent","registered_worker":False,
+    "status":"supported","check_source":"review-authority"}]}
+  return R.compile_route(
+   "autopilot-code","dev","strong",R.ROOT,artifact_root,
+   predicates=[],signals=["shared-contract"],transport="headless",
+   tracking="tracked",tracked_gate_evidence=gate,dispatch_evidence=evidence)
+
+ def _review_node(self):
+  return next(n for n in self.route["nodes"] if n.get("kind")=="review-worker")
+
+ def _evidence(self,node_id,body="I reviewed my own work. verdict: PASS\n"):
+  out=self.artifact/"evidence"/f"{node_id}.md"
+  out.parent.mkdir(parents=True,exist_ok=True)
+  out.write_text(body,encoding="utf-8")
+  return out
+
+ def test_the_owner_cannot_certify_a_review_node_from_its_own_file(self):
+  node=self._review_node()
+  with self.assertRaisesRegex(ValueError,"review-node-requires-registered-reviewer"):
+   R.complete_node(
+    self.route,node,node["id"],self._evidence(node["id"]),
+    attempt_id="att-self-review",
+    explicit_attempt_metadata={
+     "attempt_schema_version":2,"dispatch_depth":node["dispatch_depth"],
+     "transport":"headless","execution_surface":"inline",
+     "registered_worker":False,"fallback_hop":"inline"},
+   )
+  marker=R.completion_dir(self.route["route_id"],jobs=self.jobs)/f"{node['id']}.json"
+  self.assertFalse(marker.exists(),"a refused completion must publish nothing")
+
+ def test_the_refusal_is_about_registration_not_about_being_inline(self):
+  # A non-review node may still be completed by the inline owner -- that is the
+  # documented Closed Inline Fallback recipe, and narrowing it would be a
+  # different (and wrong) change.
+  node=next(n for n in self.route["nodes"]
+            if n.get("kind")!="review-worker" and n.get("dispatch_depth")==2)
+  marker,_row=R.complete_node(
+   self.route,node,node["id"],self._evidence(node["id"],"stage output\n"),
+   attempt_id=f"att-inline-{node['id']}",
+   explicit_attempt_metadata={
+    "attempt_schema_version":2,"dispatch_depth":2,"transport":"headless",
+    "execution_surface":"inline","registered_worker":False,
+    "fallback_hop":"inline"},
+  )
+  self.assertEqual(marker["execution_surface"],"inline")
+
+ def test_a_registered_reviewer_still_completes_the_node(self):
+  # The legitimate path: the axes come from a real registered review row.
+  node=self._review_node()
+  marker,_row=R.complete_node(
+   self.route,node,node["id"],self._evidence(node["id"],"findings\n"),
+   attempt_id="att-registered-reviewer",
+   explicit_attempt_metadata={
+    "attempt_schema_version":2,"dispatch_depth":node["dispatch_depth"],
+    "transport":"headless","execution_surface":"registered-headless",
+    "registered_worker":"1","fallback_hop":"same-harness-headless"},
+  )
+  self.assertIs(marker["registered_worker"],True)
+  path=R.completion_dir(self.route["route_id"],jobs=self.jobs)/f"{node['id']}.json"
+  self.assertTrue(D.completion_marker_is_current(self.route,node,path))
+
+ def test_the_review_class_is_read_from_the_worker_kind_map(self):
+  # One definition: the kind whose worker_type is "review", not a second
+  # literal that could drift from the bootstrap map.
+  import worker_bootstrap
+  self.assertEqual(
+   worker_bootstrap.WORKER_KIND_TYPES[R.REVIEW_WORKER_KIND],"review")
+  # The constant is derived, not spelled: renaming the kind in the bootstrap
+  # map moves this guard with it. (Four older literals elsewhere in the module
+  # predate this change and are out of its scope -- the claim here is about the
+  # guard's own definition, not the whole file.)
+  source=(Path(R.ROOT)/"utilities"/"capability-route.py").read_text(encoding="utf-8")
+  definition=source.split("REVIEW_WORKER_KIND=next(",1)[1].split(")",1)[0]
+  self.assertIn("WORKER_KIND_TYPES",definition)
+  self.assertNotIn("review-worker",definition)
+
+
 if __name__=="__main__": unittest.main()

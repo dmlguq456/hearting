@@ -210,16 +210,48 @@ class CompletionMarkerTest(unittest.TestCase):
             "--model-profile", node["model_profile"],
         ]
 
+    def registered_review_row(self, route, node_id, attempt_id):
+        """A real registered reviewer's row for a review-class node.
+
+        A review node's marker must rest on one (SD-94 extension): the
+        unregistered inline path this helper uses for every other node would let
+        the owner certify its own review, so `complete` refuses it there.
+        """
+        node = next(n for n in route["nodes"] if n["id"] == node_id)
+        metadata = ",".join([
+            f"attempt_id={attempt_id}",
+            "attempt_schema_version=2", f"dispatch_depth={node['dispatch_depth']}",
+            "transport=headless", "execution_surface=registered-headless",
+            "registered_worker=1", "fallback_hop=same-harness-headless",
+            "worker_type=review",
+            f"route_id={route['route_id']}", f"route_hash={route['route_hash']}",
+            f"registry_digest={route['registry_digest']}", f"route_node={node_id}",
+            f"completion_gate={node['completion_gate']}",
+        ])
+        self.jobs.parent.mkdir(parents=True, exist_ok=True)
+        with self.jobs.open("a", encoding="utf-8") as handle:
+            handle.write("\t".join([
+                "2026-09-06T00:00:00Z", "open", str(self.repo), str(self.repo),
+                f"{node_id}-reviewer", metadata,
+            ]) + "\n")
+
     def complete(self, route_path, node_id, evidence_path, jobs=None, attempt_id=None, attempt_axes=None):
         if jobs is None and attempt_id is None:
-            attempt_id = f"att-inline-{node_id}-fixture"
-            attempt_axes = {
-                "dispatch_depth": 2,
-                "transport": "interactive",
-                "execution_surface": "inline",
-                "registered_worker": "0",
-                "fallback_hop": "inline",
-            }
+            route = json.loads(Path(route_path).read_text(encoding="utf-8"))
+            node = next((n for n in route["nodes"] if n["id"] == node_id), {})
+            if node.get("kind") == "review-worker":
+                attempt_id = f"att-review-{node_id}-fixture"
+                self.registered_review_row(route, node_id, attempt_id)
+                jobs = self.jobs
+            else:
+                attempt_id = f"att-inline-{node_id}-fixture"
+                attempt_axes = {
+                    "dispatch_depth": 2,
+                    "transport": "interactive",
+                    "execution_surface": "inline",
+                    "registered_worker": "0",
+                    "fallback_hop": "inline",
+                }
         command = [sys.executable, str(ROOT / "utilities/capability-route.py"), "complete",
                    "--route", str(route_path), "--node", node_id, "--evidence", str(evidence_path)]
         if jobs is not None: command += ["--jobs", str(jobs)]
