@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import importlib.util, json, tempfile, unittest, threading
+import importlib.util, json, subprocess, sys, tempfile, unittest, threading
 from pathlib import Path
 from unittest import mock
 
@@ -137,5 +137,41 @@ class DecisionLedgerTest(unittest.TestCase):
             fresh = D.inventory(ctx)
             self.assertEqual(fresh["health"], "incomplete")
             self.assertFalse(fresh["inventory_complete"])
+
+    def test_gap_marker_survives_a_dead_child_process(self):
+        """A crashed child process's in-memory `_UNRECORDED` dies with it -- a
+        durable reader in a *different* process must still see the loss from
+        the gap file alone, not from this interpreter's memory."""
+        with tempfile.TemporaryDirectory() as td:
+            jobs = Path(td) / "jobs"
+            ctx = D.lookup({"route_id": "rt-cross-process", "route_hash": "h"},
+                           {"id": "execute"}, jobs=jobs)
+            module_path = str(Path(__file__).with_name("subdivision_decision.py"))
+            utilities_dir = str(Path(__file__).parent)
+            child_script = (
+                "import importlib.util, json, sys\n"
+                f"sys.path.insert(0, {utilities_dir!r})\n"
+                "from unittest import mock\n"
+                f"spec = importlib.util.spec_from_file_location('subdivision_decision', {module_path!r})\n"
+                "D = importlib.util.module_from_spec(spec); spec.loader.exec_module(D)\n"
+                f"ctx = {ctx!r}\n"
+                "with mock.patch.object(D.os, 'open', side_effect=OSError('denied')):\n"
+                "    result = D.commit(ctx, 'admitted', '', 'm', 2)\n"
+                "print(json.dumps(result))\n"
+            )
+            proc = subprocess.run([sys.executable, "-c", child_script],
+                                   capture_output=True, text=True, timeout=30)
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            result = json.loads(proc.stdout.strip().splitlines()[-1])
+            self.assertEqual(result["warning"], "subdivision-decision-unrecorded")
+            self.assertFalse(result["appended"])
+            gap_file = D._gap_path(Path(ctx["ledger_path"]))
+            self.assertTrue(gap_file.is_file())
+            # the child process, and its _UNRECORDED entry, are gone by now --
+            # only the durable gap file can carry the loss forward
+            fresh = D.inventory(ctx)
+            self.assertEqual(fresh["health"], "incomplete")
+            self.assertFalse(fresh["inventory_complete"])
+            self.assertEqual(fresh["warning"], "subdivision-decision-record-gap")
 
 if __name__ == "__main__": unittest.main()
