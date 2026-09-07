@@ -207,6 +207,90 @@ class SubdivisionContractTest(unittest.TestCase):
                                         "fixed-file-outside-write-scope"):
                 SSC.load_manifest(manifest_path, route=route, node=node)
 
+    # The sealed RC-2 admission plan, embedded so this test does not depend on
+    # `_scratch/exec-subdivision/plan_slices.json` surviving a prune. If that
+    # path still exists, the test below asserts it is byte-identical to this
+    # fixture rather than reading it as the source of truth.
+    _RC2_SEALED_PLAN = {
+        "schema_version": 1,
+        "route_node": "execute",
+        "decision": "slices",
+        "serial_reason": None,
+        "slices": [
+            {
+                "id": "code",
+                "fixed_files": [
+                    "utilities/subdivision_decision.py",
+                    "utilities/subdivision_decision.test.py",
+                    "utilities/stage-dispatch-fallback.py",
+                    "utilities/stage_dispatch_fallback.test.py",
+                    "utilities/subdivision_batch_admission.py",
+                    "utilities/subdivision_batch_admission.test.py",
+                    "utilities/stage-session-chain.py",
+                    "utilities/stage_session_chain.test.py",
+                    "utilities/stage_session_contract.py",
+                    "utilities/stage_session_subdivision.test.py",
+                    "utilities/dispatch_stage_advance.test.py",
+                    "utilities/dispatch_contract.py",
+                    "utilities/dispatch_contract.test.py",
+                ],
+                "brief": (
+                    "결정 원장 leaf, 계획 slice schema 소비, admission 기록·attempt "
+                    "pointer, 공통 wrapper start 연결과 실제 자동 전진 호환 테스트를 구현한다. "
+                    "gate와 기존 receipt enum/bytes는 변경하지 않고 commit하지 않는다. "
+                    "registry pointer 허용목록(ATTEMPT_MUTABLE_METADATA에 "
+                    "subdivision_decision_id 추가)과 미소비 governor token 취소 경로도 이 "
+                    "slice가 소유한다."
+                ),
+                "narrow_verify": (
+                    "PYTHONDONTWRITEBYTECODE=1 python3 utilities/subdivision_decision.test.py "
+                    "&& PYTHONDONTWRITEBYTECODE=1 python3 "
+                    "utilities/subdivision_batch_admission.test.py "
+                    "&& PYTHONDONTWRITEBYTECODE=1 python3 utilities/stage_session_chain.test.py "
+                    "&& PYTHONDONTWRITEBYTECODE=1 python3 "
+                    "utilities/stage_session_subdivision.test.py "
+                    "&& PYTHONDONTWRITEBYTECODE=1 python3 "
+                    "utilities/stage_dispatch_fallback.test.py "
+                    "&& PYTHONDONTWRITEBYTECODE=1 python3 "
+                    "utilities/dispatch_stage_advance.test.py"
+                ),
+                "expected_round_trips": 2,
+            },
+            {
+                "id": "contract",
+                "fixed_files": [
+                    "capabilities/topologies.json",
+                    "capabilities/autopilot-code.md",
+                    "core/OPERATIONS.md",
+                    "skills/autopilot-code/references/dev-pipeline.md",
+                    "skills/code-plan/SKILL.md",
+                    "adapters/claude/skills/autopilot-code/references/dev-pipeline.md",
+                    "adapters/claude/plugin-marketplace/plugins/hearting-claude/skills/"
+                    "autopilot-code/references/dev-pipeline.md",
+                    "adapters/claude/skills/code-plan/SKILL.md",
+                    "adapters/claude/plugin-marketplace/plugins/hearting-claude/skills/"
+                    "code-plan/SKILL.md",
+                    "adapters/codex/skills/autopilot-code/SKILL.md",
+                    "adapters/codex/plugins/hearting-codex/skills/autopilot-code/SKILL.md",
+                ],
+                "brief": (
+                    "포터블 plan_slices.json 생산·소비 계약과 topology를 먼저 고치고, "
+                    "생성기만 사용해 Claude/Codex projection을 갱신한다. 예상 밖 projection "
+                    "delta가 있으면 scope를 넓히지 말고 오너에게 반환하며 commit하지 않는다."
+                ),
+                "narrow_verify": (
+                    "PYTHONDONTWRITEBYTECODE=1 python3 tools/generate.py --check "
+                    "&& PYTHONDONTWRITEBYTECODE=1 python3 tools/sync-entry-skill-layer.py "
+                    "--check "
+                    "&& PYTHONDONTWRITEBYTECODE=1 bash tools/check-adaptation-boundary.sh "
+                    "&& PYTHONDONTWRITEBYTECODE=1 python3 "
+                    "tools/install/check_destructive_calls.py"
+                ),
+                "expected_round_trips": 2,
+            },
+        ],
+    }
+
     def test_rc2_sealed_plan_uses_all_24_repository_files_and_admits_two_slices(self):
         """The RC-2 probe must exercise the sealed plan, not a source fixture.
 
@@ -214,16 +298,21 @@ class SubdivisionContractTest(unittest.TestCase):
         a local resolver replacement reproduces the old literal ``source``
         meaning, while the real resolver admits the exact 24 paths from the
         plan artifact.
+
+        The sealed plan is embedded as ``_RC2_SEALED_PLAN`` so this test does
+        not depend on process-external state that could be pruned; if the
+        live scratch artifact still exists, it must match the fixture.
         """
-        plan_path = (Path(__file__).resolve().parents[1] / ".agent_reports" /
-                     "_scratch" / "exec-subdivision" / "plan_slices.json")
-        if not plan_path.is_file():
-            plan_path = Path("/home/nas/user/Uihyeop/personal/hearting/.agent_reports") / \
-                "_scratch/exec-subdivision/plan_slices.json"
-        raw = json.loads(plan_path.read_text(encoding="utf-8"))
+        live_plan_path = (Path(__file__).resolve().parents[1] / ".agent_reports" /
+                           "_scratch" / "exec-subdivision" / "plan_slices.json")
+        if live_plan_path.is_file():
+            self.assertEqual(
+                json.loads(live_plan_path.read_text(encoding="utf-8")),
+                self._RC2_SEALED_PLAN,
+            )
+        raw = self._RC2_SEALED_PLAN
         fixed = [path for slice_ in raw["slices"] for path in slice_["fixed_files"]]
         self.assertEqual(len(fixed), 24)
-        self.assertEqual(fixed, [path for slice_ in raw["slices"] for path in slice_["fixed_files"]])
 
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
@@ -274,6 +363,8 @@ class SubdivisionContractTest(unittest.TestCase):
 
             # Feed the sealed JSON unchanged; plan_slices() resolves the exact
             # relative paths against the real worktree and mints the manifest.
+            plan_path = root / "plan_slices.json"
+            plan_path.write_text(json.dumps(raw), encoding="utf-8")
             output = root / "chain.json"
             result = CHAIN.plan_slices(route_path=route_path, node_id="execute",
                                        slices_path=plan_path, output_path=output,

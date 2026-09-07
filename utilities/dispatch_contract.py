@@ -4862,6 +4862,18 @@ def _sibling_attempt_gate(
     else:
         lines = registry_lines
     sibling: tuple[str, dict[str, str]] | None = None
+    # A parallel sub-session batch admits 2..4 slices of ONE node at once, so its
+    # peers are concurrent members, not successive attempts at the same node.
+    # The chain id comes from this attempt's own registry row (it registers
+    # before it starts), never from a caller argument that could disagree with
+    # the row this guard is reading.
+    own_chain = ""
+    for line in lines:
+        fields = line.split("\t")
+        if len(fields) == 6 and attempt_id:
+            row = parse_registry_metadata(fields[5])
+            if row.get("attempt_id") == attempt_id and row.get("subsession_mode") == "parallel":
+                own_chain = row.get("session_chain_id", "") or ""
     for line in lines:
         fields = line.split("\t")
         if len(fields) != 6:
@@ -4874,6 +4886,17 @@ def _sibling_attempt_gate(
             continue
         candidate = metadata.get("attempt_id", "")
         if not candidate or candidate == (attempt_id or ""):
+            continue
+        if (
+            own_chain
+            and metadata.get("session_chain_id") == own_chain
+            and metadata.get("subsession_mode") == "parallel"
+        ):
+            # A declared peer slice of this same batch. Its liveness is the
+            # batch working as designed; treating it as a prior attempt made the
+            # second slice unlaunchable and silently serialized every
+            # subdivision (measured: slice 2 refused `prior-attempt-still-live`
+            # while slice 1 was healthy).
             continue
         # A row that never recorded a governed process cannot have leaked one,
         # and judging it `unverifiable` would wedge the node permanently.
