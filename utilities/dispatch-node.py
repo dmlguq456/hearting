@@ -522,18 +522,45 @@ def main():
    print(f"subsession_declared={int(sealed is not None)}")
    print("child_spawned=0")
    raise SystemExit(64)
-  reservation_token = os.environ.get(GOVERNOR_RESERVATION_ENV)
-  if reservation_token:
+  if a.subsession_mode == "parallel":
+   # A parallel slice exists only as a member of one atomic sub-session batch,
+   # so it may start ONLY on the batch token that admitted this exact attempt.
+   # Every failure below is a refusal, never a skipped check: an earlier
+   # version swallowed the governor's answer (and, for one release, a missing
+   # import) which made this binding a silent no-op.
+   def refuse(reason, detail=""):
+    print("check=failed")
+    print(f"reason={reason}")
+    if detail: print(f"detail={detail}")
+    print(f"session_chain_id={a.session_chain_id}")
+    print(f"attempt_id={a.attempt_id}")
+    print("child_spawned=0")
+    raise SystemExit(65)
+   reservation_token = os.environ.get(GOVERNOR_RESERVATION_ENV, "")
+   if not reservation_token:
+    refuse("subsession-reservation-required", "parallel slice start carries no batch token")
    try:
-    checked = subprocess.run([sys.executable, str(ROOT/"utilities"/"model-worker-governor.py"), "--root", str(resolve_model_governor_root(Path(route.get("artifact_root") or os.environ.get("AGENT_ARTIFACT_ROOT", str(ROOT/".agent_reports"))))), "reservation-check", "--token", reservation_token, "--class", "dispatch"], text=True, capture_output=True, check=False)
-    payload = json.loads(checked.stdout)
-    if payload.get("reservation_kind") == "subsession-batch" and (payload.get("batch_attempt_id") != a.attempt_id or payload.get("batch_group") != a.session_chain_id):
-     print("check=failed\nreason=subsession-reservation-binding-mismatch\nchild_spawned=0")
-     raise SystemExit(65)
-   except SystemExit:
-    raise
-   except Exception:
-    pass
+    governor_root = resolve_model_governor_root(
+     Path(route.get("artifact_root") or os.environ.get("AGENT_ARTIFACT_ROOT", str(ROOT/".agent_reports"))))
+   except DispatchContractError as exc:
+    refuse("subsession-reservation-unverifiable", exc.detail)
+   checked = subprocess.run(
+    [sys.executable, str(ROOT/"utilities"/"model-worker-governor.py"), "--root", str(governor_root),
+     "reservation-check", "--token", reservation_token, "--class", "dispatch"],
+    text=True, capture_output=True, check=False)
+   payload = None
+   if checked.returncode == 0:
+    try: payload = json.loads(checked.stdout)
+    except ValueError: payload = None
+   if not isinstance(payload, dict):
+    refuse("subsession-reservation-unverifiable",
+           (checked.stderr or checked.stdout or "no reservation receipt").strip()[:200])
+   expected = {"state": "unclaimed", "reservation_kind": "subsession-batch",
+               "batch_attempt_id": a.attempt_id, "batch_group": a.session_chain_id}
+   mismatched = sorted(key for key, value in expected.items() if payload.get(key) != value)
+   if mismatched:
+    refuse("subsession-reservation-binding-mismatch",
+           ";".join(f"{key}:expected={expected[key]}:actual={payload.get(key)}" for key in mismatched)[:300])
  print("completion_marker="+str(ROUTE.completion_dir(route["route_id"],jobs=registry.path)/(node["id"]+".json")))
  wrapper=ROOT/"adapters"/a.adapter/"bin"/"dispatch-headless.py"
  try:

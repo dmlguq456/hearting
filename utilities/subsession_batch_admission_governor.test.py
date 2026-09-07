@@ -310,6 +310,96 @@ class IssuerFenceStaysClosedTest(SubsessionGovernorFixture):
         self.assertEqual(caught.exception.reason, "governor-capacity-insufficient")
 
 
+class ParallelSliceReservationBindingTest(SubsessionGovernorFixture):
+    """`dispatch-node` must refuse a parallel slice start it cannot bind.
+
+    impl-review round 1 (blocking): the first version swallowed the governor's
+    answer in a bare `except Exception: pass`, so a missing, unreadable or
+    foreign reservation let the slice launch anyway -- the binding check was a
+    no-op on exactly the paths it existed for. These cases drive the real
+    `dispatch-node.py` against the real governor and stop before any wrapper.
+    """
+
+    def setUp(self):
+        super().setUp()
+        sys.path.insert(0, str(ROOT / "utilities"))
+        from stage_session_contract import load_manifest  # noqa: PLC0415
+        import subdivision_batch_admission as ADMISSION  # noqa: PLC0415
+
+        manifest = load_manifest(self.manifest_path, route=self.route, node=self.route["nodes"][0])
+        ADMISSION.persist_chain_manifest(self.jobs, manifest)
+        self.session = manifest["sessions"][0]
+        self.chain_id = manifest["chain_id"]
+
+    def _start(self, token: str | None) -> subprocess.CompletedProcess:
+        env = self._env()
+        if token is None:
+            env.pop("AGENT_MODEL_GOVERNOR_RESERVATION_TOKEN", None)
+        else:
+            env["AGENT_MODEL_GOVERNOR_RESERVATION_TOKEN"] = token
+        session = self.session
+        return subprocess.run(
+            [
+                sys.executable, str(ROOT / "utilities" / "dispatch-node.py"),
+                "--route", str(self.route_path), "--node", "execute",
+                "--adapter", session["adapter"], "--action", "start",
+                "--slug", session["slug"], "--parent", OWNER_SLUG,
+                "--jobs", str(self.jobs), "--prompt-text", "fixture",
+                "--subsession-id", session["subsession_id"],
+                "--subsession-index", str(session["index"]),
+                "--subsession-count", str(session["count"]),
+                "--subsession-mode", "parallel",
+                "--session-chain-id", self.chain_id,
+                "--phase-brief", session["phase_brief"],
+                "--stage-authority", "0",
+                "--narrow-verify", session["narrow_verify"],
+                "--expected-round-trips", str(session["expected_round_trips"]),
+                "--attempt-id", session["attempt_id"],
+                *[flag for file in session["fixed_files"] for flag in ("--fixed-file", file)],
+            ],
+            cwd=str(ROOT), text=True, capture_output=True, env=env, check=False,
+        )
+
+    def _reason(self, result: subprocess.CompletedProcess) -> str:
+        for line in result.stdout.splitlines():
+            if line.startswith("reason="):
+                return line.split("=", 1)[1]
+        return f"(no reason; rc={result.returncode}) {result.stdout[-200:]}"
+
+    def test_parallel_slice_without_a_batch_token_is_refused(self):
+        result = self._start(None)
+        self.assertEqual(self._reason(result), "subsession-reservation-required")
+        self.assertIn("child_spawned=0", result.stdout)
+
+    def test_parallel_slice_with_an_absent_token_is_refused(self):
+        result = self._start("0" * 32)
+        self.assertEqual(self._reason(result), "subsession-reservation-unverifiable")
+        self.assertIn("child_spawned=0", result.stdout)
+
+    def test_parallel_slice_with_a_malformed_token_is_refused(self):
+        result = self._start("not-a-token")
+        self.assertEqual(self._reason(result), "subsession-reservation-unverifiable")
+        self.assertIn("child_spawned=0", result.stdout)
+
+    def test_parallel_slice_with_an_ordinary_non_batch_token_is_refused(self):
+        """A real, live, valid reservation that is simply not this batch's.
+
+        Minted through the real governor and owned by this test process so it
+        survives the reservation sweep for the length of the check.
+        """
+        minted = subprocess.run(
+            [sys.executable, str(GOVERNOR), "--root", str(self.governor_root),
+             "reserve", "--class", "dispatch", "--count", "1", "--pid", str(os.getpid())],
+            text=True, capture_output=True, env=self._env(), check=False,
+        )
+        self.assertEqual(minted.returncode, 0, minted.stderr)
+        token = json.loads(minted.stdout)["tokens"][0]
+        result = self._start(token)
+        self.assertEqual(self._reason(result), "subsession-reservation-binding-mismatch")
+        self.assertIn("reservation_kind", result.stdout)
+        self.assertIn("child_spawned=0", result.stdout)
+
+
 class SubsessionManifestContractTest(unittest.TestCase):
     """The typed contract itself: forged shapes must never reach the governor."""
 
