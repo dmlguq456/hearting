@@ -1814,6 +1814,18 @@ def _run_subdivision_batch_admission(args: argparse.Namespace, route: dict[str, 
         "attempt_ids": [s["attempt_id"] for s in admission.sessions],
         "subdivision_decision": "admitted", "subdivision_decision_id": decision_context.get("event_id") if decision_context else None,
         "subdivision_plan_source": args.subdivision_plan_source,
+        # A slice that registered but did not start is the one failure this
+        # surface used to report as a bare `started=0`. The caller cannot open
+        # the child's stderr afterwards -- nothing else records it -- so the
+        # bounded reason travels with the receipt.
+        "start_failures": [
+            {
+                "subsession_id": row["subsession_id"],
+                "exit_code": row.get("exit_code"),
+                "detail": (str(row.get("stderr") or "") or str(row.get("stdout") or "")).strip()[:512],
+            }
+            for row in results if not row.get("started")
+        ],
         "sessions": results,
     }, separators=(",", ":"), sort_keys=True))
     return 0 if all(row.get("started") for row in results) else 1

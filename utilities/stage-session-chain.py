@@ -237,6 +237,15 @@ def _run_parallel_subdivision(
     print(f"child_spawned={sum(1 for row in envelope.get('sessions', []) if row.get('started'))}")
     print("attempt_id=" + envelope["attempt_ids"][0])
     print("attempt_ids=" + ";".join(envelope["attempt_ids"]))
+    for failure in envelope.get("start_failures") or []:
+        # One line per slice that registered but never started, carrying the
+        # child's own reason. Without it the owner sees `started=0` and has no
+        # record anywhere of why.
+        print(
+            f"start_failure={failure['subsession_id']}"
+            f":exit={failure.get('exit_code')}"
+            f":{' '.join(str(failure.get('detail', '')).split())[:300]}"
+        )
     print("runtime_wait=registered-children")
     return 0 if all(row.get("started") for row in envelope.get("sessions", [])) else 1
 
