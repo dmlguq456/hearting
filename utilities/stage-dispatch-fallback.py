@@ -1425,6 +1425,119 @@ def capacity_retry(
     return "descend", retry_fields, retry_output
 
 
+def _load_stage_session_chain():
+    """The chain surface, loaded from this runtime root (hyphenated filename)."""
+
+    spec = importlib.util.spec_from_file_location(
+        "stage_session_chain_for_fallback", ROOT / "utilities" / "stage-session-chain.py"
+    )
+    if spec is None or spec.loader is None:
+        return None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def plan_slices_candidate(route: dict, explicit: Path | None) -> tuple[Path | None, str]:
+    """The one plan artifact this route's execute stage consumes.
+
+    Candidates are tried in a fixed order and exactly one is selected: the
+    caller's explicit `--plan-slices`, then `plan_slices.json` in the plans
+    bucket of this route's producer cycle -- the canonical durable location a
+    plan stage writes `plan.md` and `plan_slices.json` to -- then the legacy
+    top-level `plans/` bucket of a root that has not cut over. A continuation
+    route inherits its predecessor's cycle, so its source route is tried too.
+    `_scratch` is working space, not a plan contract, and is never searched:
+    consuming it would fire only for routes whose owner happened to stage the
+    plan there.
+    """
+
+    if explicit is not None:
+        return explicit, "explicit"
+    root = route.get("artifact_root")
+    if not isinstance(root, str) or not root:
+        return None, "artifact-root-unavailable"
+    root_path = Path(root)
+    route_ids = [route.get("route_id")]
+    if route.get("source_route_id"):
+        route_ids.append(route.get("source_route_id"))
+    try:
+        sys.path.insert(0, str(ROOT / "utilities"))
+        import artifact_producer as PRODUCER  # noqa: PLC0415 -- only eligible nodes pay for it
+
+        records = list(PRODUCER.list_cycle_records(root_path))
+        for route_id in route_ids:
+            for record in records:
+                if record.get("route_id") != route_id or record.get("state") != "open":
+                    continue
+                directory = PRODUCER.cycle_dir(
+                    root_path, record["campaign_id"], record["cycle_id"], record
+                )
+                candidate = directory / "artifacts" / "plans" / "plan_slices.json"
+                if candidate.is_file():
+                    return candidate, "producer-cycle"
+                # A cycle without the artifact is not the end of the order:
+                # the next candidate -- a continuation's source route, then the
+                # legacy bucket -- still has to be tried (round 1, M1).
+    except (ImportError, OSError, KeyError, ValueError, TypeError):
+        return None, "producer-unavailable"
+    legacy = root_path / "plans" / "plan_slices.json"
+    if legacy.is_file():
+        return legacy, "legacy-plans"
+    return None, "plan-artifact-absent"
+
+
+def _subdivision_entry(route: dict, node: dict, args: argparse.Namespace) -> int | None:
+    """Record this entry's subdivision decision; return an exit code only when
+    the batch surface owned the dispatch, `None` when the caller proceeds as
+    one ordinary session."""
+
+    chain = _load_stage_session_chain()
+    if chain is None:
+        return fail("surface-unreachable", 65, child_spawned="0")
+    admission = chain.SUBDIVISION_ADMISSION
+    context = admission.DECISION.lookup(
+        route, node, jobs=args.jobs, writer="stage-dispatch-fallback", action=args.action
+    )
+
+    def record(decision: str, reason: str, plan_source: str | None = None) -> None:
+        admission.DECISION.commit(context, decision, reason)
+        print(f"subdivision_decision={decision}")
+        print(f"subdivision_decision_id={context['event_id']}")
+        if plan_source:
+            print(f"subdivision_plan_source={plan_source}")
+
+    try:
+        admission.check_permission(route, node)
+    except admission.SubdivisionAdmissionError as exc:
+        record("not-eligible", admission.refusal_reason_for(exc))
+        return None
+    plan_path, plan_source = plan_slices_candidate(route, args.plan_slices)
+    if plan_path is None or not plan_path.is_file():
+        # No machine-readable plan input is a declined decision, not a refusal;
+        # the source says which of "none written" / "unreachable" it was.
+        record("considered-declined", "plan-declared-no-slices", plan_source)
+        return None
+    manifest_path = plan_path.with_name("chain.json")
+    try:
+        planned = chain.plan_slices(route_path=args.route, node_id=args.node,
+                                    slices_path=plan_path, output_path=manifest_path)
+    except chain.StageSessionError as exc:
+        record("refused", admission.refusal_reason_for(exc), plan_source)
+        return None
+    if planned.get("planned") == "serial":
+        record("considered-declined", planned.get("reason", "plan-declared-no-slices"), plan_source)
+        return None
+    # No `key=value` line may precede this call: on refusal the batch surface's
+    # whole stdout IS one typed JSON envelope, and a receipt line in front of it
+    # makes `json.loads(stdout)` fail (round 1, B1). The plan source rides
+    # inside the envelope, or beside the batch's own key=value receipt.
+    return chain._run_parallel_subdivision(
+        route, node, args, jobs=args.jobs, decision_context=context,
+        manifest_path=manifest_path, plan_source=plan_source,
+    )
+
+
 def _dispatch(observation: "LAUNCH_TUPLE.ReportOnlyObservation") -> int:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--route", type=Path, required=True)
@@ -1547,58 +1660,6 @@ def _dispatch(observation: "LAUNCH_TUPLE.ReportOnlyObservation") -> int:
     except DispatchContractError as exc:
         return fail(exc.reason, 73, detail=exc.detail, child_spawned="0")
 
-    # The two execute entry surfaces converge here. Every eligible entry must
-    # leave a decision record, even when the owner did not provide a plan.
-    if args.action in {"register", "start"}:
-        chain_spec = importlib.util.spec_from_file_location("stage_session_chain_for_fallback", ROOT / "utilities" / "stage-session-chain.py")
-        if chain_spec is None or chain_spec.loader is None:
-            return fail("surface-unreachable", 65, child_spawned="0")
-        chain = importlib.util.module_from_spec(chain_spec)
-        chain_spec.loader.exec_module(chain)
-        context = chain.SUBDIVISION_ADMISSION.DECISION.lookup(
-            route, node, jobs=args.jobs, writer="stage-dispatch-fallback", action=args.action
-        )
-        decision_id = context["event_id"]
-        try:
-            chain.SUBDIVISION_ADMISSION.check_permission(route, node)
-        except chain.SUBDIVISION_ADMISSION.SubdivisionAdmissionError as exc:
-            decision, reason = "not-eligible", chain.SUBDIVISION_ADMISSION.refusal_reason_for(exc)
-            chain.SUBDIVISION_ADMISSION.DECISION.commit(context, decision, reason)
-            print(f"subdivision_decision={decision}")
-            print(f"subdivision_decision_id={decision_id}")
-        else:
-            # Select exactly one candidate: explicit input, or the sealed
-            # route slug under the canonical artifact root.
-            plan_path = args.plan_slices
-            if plan_path is None:
-                slug, artifact_root = route.get("slug"), route.get("artifact_root")
-                if slug and isinstance(artifact_root, str) and artifact_root:
-                    plan_path = Path(artifact_root) / "_scratch" / slug / "plan_slices.json"
-            if plan_path is None or not plan_path.is_file():
-                decision, reason = "considered-declined", "plan-declared-no-slices"
-                chain.SUBDIVISION_ADMISSION.DECISION.commit(context, decision, reason)
-                print(f"subdivision_decision={decision}")
-                print(f"subdivision_decision_id={decision_id}")
-            else:
-                manifest_path = plan_path.with_name("chain.json")
-                try:
-                    planned = chain.plan_slices(route_path=args.route, node_id=args.node,
-                                                slices_path=plan_path, output_path=manifest_path)
-                except chain.StageSessionError as exc:
-                    decision, reason = "refused", chain.SUBDIVISION_ADMISSION.refusal_reason_for(exc)
-                    chain.SUBDIVISION_ADMISSION.DECISION.commit(context, decision, reason)
-                    print(f"subdivision_decision={decision}")
-                    print(f"subdivision_decision_id={decision_id}")
-                else:
-                    if planned.get("planned") == "serial":
-                        decision, reason = "considered-declined", planned.get("reason", "plan-declared-no-slices")
-                        chain.SUBDIVISION_ADMISSION.DECISION.commit(context, decision, reason)
-                        print(f"subdivision_decision={decision}")
-                        print(f"subdivision_decision_id={decision_id}")
-                    else:
-                        args.manifest = manifest_path
-                        return chain._run_parallel_subdivision(route, node, args, jobs=args.jobs)
-
     try:
         parent_identity = DISPATCH_NODE.current_parent_identity()
     except DISPATCH_NODE.DispatchNodeError as exc:
@@ -1610,6 +1671,16 @@ def _dispatch(observation: "LAUNCH_TUPLE.ReportOnlyObservation") -> int:
     except DispatchContractError as exc:
         reason = exc.reason
         return fail(reason, 73, child_spawned="0")
+
+    # The two execute entry surfaces converge here. Every eligible entry must
+    # leave a decision record, even when the owner did not provide a plan.
+    # This runs *after* the parent-identity and parent-attempt fences above:
+    # the subdivision branch spawns child rows, so it may not reach a spawn
+    # through a shorter path than the ordinary single-session dispatch does.
+    if args.action in {"register", "start"}:
+        outcome = _subdivision_entry(route, node, args)
+        if outcome is not None:
+            return outcome
 
     # C-14: dispatch-node.py and dispatch-batch.py both cap review rounds, but
     # ordinary standard+ depth-2 work goes through this wrapper, which had no

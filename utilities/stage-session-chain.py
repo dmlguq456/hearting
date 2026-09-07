@@ -151,7 +151,9 @@ LAUNCH_PHASE_BY_ACTION = {
 
 
 def _run_parallel_subdivision(
-    route_record: dict, node: dict, args: argparse.Namespace, *, jobs: Path
+    route_record: dict, node: dict, args: argparse.Namespace, *, jobs: Path,
+    decision_context: dict | None = None, manifest_path: Path | None = None,
+    plan_source: str | None = None,
 ) -> int:
     """SD-119 R4: `mode == "parallel"` routes to the dedicated sub-session batch
     admission surface instead of raising `parallel-subsession-use-dispatch-batch`
@@ -160,21 +162,34 @@ def _run_parallel_subdivision(
     the surface that is actually reachable, not to keep the dead-end typed."""
 
     agent_home = ROOT
+    # The route's sealed artifact root is the authority; the environment is only
+    # a fallback for a manifest run outside a route-bound process. Reading the
+    # governor root from a different source than the route would reserve
+    # capacity in one root and prove it in another.
+    sealed_root = route_record.get("artifact_root")
     artifact_root = Path(
-        os.environ.get("AGENT_ARTIFACT_ROOT", str(agent_home / ".agent_reports"))
+        sealed_root if isinstance(sealed_root, str) and sealed_root
+        else os.environ.get("AGENT_ARTIFACT_ROOT", str(agent_home / ".agent_reports"))
     )
     governor = ROOT / "utilities" / "model-worker-governor.py"
     governor_root = resolve_model_governor_root(artifact_root)
-    decision_context = SUBDIVISION_ADMISSION.DECISION.lookup(
-        route_record, node, jobs=jobs, writer="stage-dispatch-fallback", action=args.action
-    )
+    # One action, one decision identity. A caller that already fixed the event
+    # at its own permission lookup passes it in; minting a second one here
+    # would record this admission under an id no caller ever reported.
+    if decision_context is None:
+        decision_context = SUBDIVISION_ADMISSION.DECISION.lookup(
+            route_record, node, jobs=jobs, writer="stage-dispatch-fallback", action=args.action
+        )
+    # A caller that assembled the manifest itself passes it explicitly rather
+    # than writing it into another surface's parsed arguments.
+    manifest = manifest_path if manifest_path is not None else args.manifest
     try:
         # F-3 narrowed by SD-103: only a non-worktree-base slice is refused
         # here -- see `raise_if_parallel_entry_fail_closed` in
         # subdivision_batch_admission.py.
-        SUBDIVISION_ADMISSION.raise_if_parallel_entry_fail_closed(args.manifest)
+        SUBDIVISION_ADMISSION.raise_if_parallel_entry_fail_closed(manifest)
         admission = SUBDIVISION_ADMISSION.admit_batch(
-            route=route_record, node=node, manifest_path=args.manifest,
+            route=route_record, node=node, manifest_path=manifest,
             governor=governor, governor_root=governor_root,
             reserve=DISPATCH_BATCH.reserve_batch, jobs=jobs,
             decision_context=decision_context,
@@ -191,10 +206,13 @@ def _run_parallel_subdivision(
             "admitted_rows": 0, "admitted_models": 0,
             "subdivision_decision": "refused",
             "subdivision_decision_id": decision_context["event_id"],
+            "subdivision_plan_source": plan_source,
         }, sort_keys=True))
         return 65
     if args.action == "register":
         print(f"chain_id={admission.manifest['chain_id']}")
+        if plan_source:
+            print(f"subdivision_plan_source={plan_source}")
         print(f"registered_sessions={len(admission.sessions)}")
         return 0
     results = SUBDIVISION_ADMISSION.start_admitted_batch(
@@ -213,11 +231,14 @@ def _run_parallel_subdivision(
             "cancelled_rows": sum(int(row.get("cancelled") or 0) for row in results),
             "subdivision_decision": "refused",
             "subdivision_decision_id": decision_context["event_id"],
+            "subdivision_plan_source": plan_source,
         }, sort_keys=True))
         return 65
     print(f"chain_id={admission.manifest['chain_id']}")
     print(f"chain_manifest_sha256={admission.manifest_digest}")
     print(f"subdivision_decision_id={decision_context['event_id']}")
+    if plan_source:
+        print(f"subdivision_plan_source={plan_source}")
     print(f"registered_sessions={len(admission.sessions)}")
     print(f"registered={sum(1 for row in results if row.get('registered'))}")
     print(f"started={sum(1 for row in results if row.get('started'))}")

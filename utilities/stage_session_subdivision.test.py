@@ -172,16 +172,39 @@ class SubdivisionContractTest(unittest.TestCase):
                     SSC.load_manifest(manifest_path, route=route, node=node)
             SSC.importlib.util.spec_from_file_location = original
 
-    def test_g1_tracked_artifact_shadow_is_outside_parallel_scope(self):
+    def test_g1_tracked_artifact_shadow_is_outside_scope_in_every_mode(self):
+        """Git state and the tracked artifact shadows are never a slice's work
+        product. The fence used to live in the parallel branch only, so a
+        serial manifest could hand `.git/...` to a worker (round 1, B2)."""
+        for mode, sessions in (("parallel", 2), ("serial", 1)):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as td:
+                worktree, route, node, manifest_path = self._fixture(td)
+                shadow = worktree / ".agent_reports" / "shadow.json"
+                shadow.parent.mkdir()
+                shadow.write_text("shadow")
+                data = json.loads(manifest_path.read_text())
+                data["mode"] = mode
+                data["sessions"] = data["sessions"][:sessions]
+                data["sessions"][0]["fixed_files"] = [str(shadow)]
+                manifest_path.write_text(json.dumps(data))
+                with self.assertRaisesRegex(SSC.StageSessionError, "fixed-file-outside-write-scope"):
+                    SSC.load_manifest(manifest_path, route=route, node=node)
+
+    def test_g1_serial_fixed_file_outside_the_node_write_scope_is_refused(self):
+        """The write scope is the node's authority, not a property of the mode:
+        a serial chain has no more of it than a parallel batch."""
         with tempfile.TemporaryDirectory() as td:
-            worktree, route, node, manifest_path = self._fixture(td)
-            shadow = worktree / ".agent_reports" / "shadow.json"
-            shadow.parent.mkdir()
-            shadow.write_text("shadow")
+            worktree, route, node, manifest_path = self._fixture(td, exact_scope=True)
+            outside = worktree / "outside" / "not-mine.py"
+            outside.parent.mkdir(parents=True, exist_ok=True)
+            outside.write_text("x")
             data = json.loads(manifest_path.read_text())
-            data["sessions"][0]["fixed_files"] = [str(shadow)]
+            data["mode"] = "serial"
+            data["sessions"] = data["sessions"][:1]
+            data["sessions"][0]["fixed_files"] = [str(outside)]
             manifest_path.write_text(json.dumps(data))
-            with self.assertRaisesRegex(SSC.StageSessionError, "parallel-fixed-file-outside-write-scope"):
+            with self.assertRaisesRegex(SSC.StageSessionError,
+                                        "fixed-file-outside-write-scope"):
                 SSC.load_manifest(manifest_path, route=route, node=node)
 
     def test_rc2_sealed_plan_uses_all_24_repository_files_and_admits_two_slices(self):
@@ -246,7 +269,7 @@ class SubdivisionContractTest(unittest.TestCase):
             }), encoding="utf-8")
             with mock.patch.object(SSC, "_worktree_mutating_scope", lambda scope: False):
                 with self.assertRaisesRegex(SSC.StageSessionError,
-                                             "parallel-fixed-file-outside-write-scope"):
+                                             "fixed-file-outside-write-scope"):
                     SSC.load_manifest(old_manifest, route=route, node=route["nodes"][0])
 
             # Feed the sealed JSON unchanged; plan_slices() resolves the exact

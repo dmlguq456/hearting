@@ -371,10 +371,13 @@ to in-session only under the closed rules above.
 `execute` is the one node that carries a sealed `subdivision` permission
 (`min_intensity: standard`, `max_slices: 4`, `disjointness: exact-fixed-files`). The
 execute start point, `utilities/stage-dispatch-fallback.py`, must query that permission on
-both `--register` and `--start` before candidate or attempt selection. It reads exactly one
-plan: the explicit `--plan-slices <path>` when supplied, otherwise
-`<route.artifact_root>/_scratch/<route.slug>/plan_slices.json`; it does not search other
-locations. A route without `slug` and no explicit path is a typed serial decision. The
+both `--register` and `--start` before candidate or attempt selection, after the
+parent-identity fences the ordinary path already passes. It reads exactly one plan: the
+explicit `--plan-slices <path>` when supplied, otherwise `plan_slices.json` in the plans
+bucket of this route's producer cycle (a continuation also tries its source route), and
+then the legacy top-level `plans/` bucket; it does not search other locations, and
+`_scratch` is never one of them. A route with no readable plan artifact is a typed serial
+decision naming the attempted source in `subdivision_plan_source=`. The
 wrapper records exactly one `subdivision_decision=` and `subdivision_decision_id=` in
 `subdivision/<route_id>.jsonl`, using `not-eligible`, `considered-declined`, `admitted`,
 or `refused`. Missing/serial plans and typed refusals are normal "single session" answers,

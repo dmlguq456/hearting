@@ -17,6 +17,8 @@ ADAPTERS = {"claude", "codex", "opencode"}
 _ID = re.compile(r"^(?:ssc|ss)-[A-Za-z0-9._-]{4,200}$")
 _ATTEMPT = re.compile(r"^att-[A-Za-z0-9._-]{8,240}$")
 
+_SHADOW_ROOTS = {".git", ".agent_reports", ".claude_reports"}
+
 _WORKTREE_SCOPE_RESOLVER = None
 
 
@@ -192,15 +194,44 @@ def _fixed_files(values: object, *, worktree: Path, session_id: str) -> list[str
     for raw in values:
         path = _absolute(raw, base=worktree, field=f"fixed-file:{session_id}")
         try:
-            path.relative_to(worktree)
+            relative = path.relative_to(worktree)
         except ValueError as exc:
             raise StageSessionError(f"fixed-file-outside-worktree:{session_id}:{path}") from exc
+        # Git's own state and the tracked artifact shadows are never a slice's
+        # work product, in any mode. This lived in the parallel branch only, so
+        # a serial manifest could hand `.git/...` to a worker (round 1, B2).
+        if relative.parts and relative.parts[0] in _SHADOW_ROOTS:
+            raise StageSessionError(f"fixed-file-outside-write-scope:{session_id}:{path}")
         if any(char in str(raw) for char in "*?[]"):
             raise StageSessionError(f"fixed-file-must-be-exact:{session_id}:{raw}")
         value = str(path)
         if value not in result:
             result.append(value)
     return sorted(result)
+
+
+def _refuse_outside_write_scope(
+    files: set[str], *, worktree: Path, node: dict[str, Any]
+) -> None:
+    """Fixed files must sit inside the node's sealed write scope, whatever the
+    mode: the scope is the node's authority, and a serial chain has no more of
+    it than a parallel batch (round 1, B2)."""
+
+    sealed_scopes: list[Path] = []
+    for scope in (node.get("write_scope") or []):
+        if not isinstance(scope, str) or not scope:
+            continue
+        if _worktree_mutating_scope(scope):
+            sealed_scopes.append(worktree)
+            continue
+        root = scope[:-3] if scope.endswith("/**") else scope
+        sealed_scopes.append((worktree / root).resolve(strict=False))
+    for file in sorted(files):
+        if not any(
+            file == str(root) or file.startswith(str(root) + "/")
+            for root in sealed_scopes
+        ):
+            raise StageSessionError(f"fixed-file-outside-write-scope:{file}")
 
 
 def load_manifest(
@@ -268,38 +299,16 @@ def load_manifest(
             )
         if not isinstance(permission, dict) or permission.get("disjointness") != "exact-fixed-files":
             raise StageSessionError("parallel-subdivision-not-permitted")
-        union = set()
-        for item in sessions:
-            fixed = _fixed_files(
+    if route is not None and node is not None:
+        union: set[str] = set()
+        for offset, item in enumerate(sessions, 1):
+            if not isinstance(item, dict):
+                continue  # the normalization loop below raises the typed error
+            union |= set(_fixed_files(
                 item.get("fixed_files"), worktree=worktree,
-                session_id=item.get("subsession_id") or f"index-{sessions.index(item) + 1}",
-            )
-            union |= set(fixed)
-        if route is not None and node is not None:
-            sealed_scopes = []
-            for scope in (node.get("write_scope") or []):
-                if not isinstance(scope, str) or not scope:
-                    continue
-                if _worktree_mutating_scope(scope):
-                    sealed_scopes.append(worktree)
-                    continue
-                root = scope[:-3] if scope.endswith("/**") else scope
-                sealed_scopes.append((worktree / root).resolve(strict=False))
-            for file in sorted(union):
-                candidate = Path(file)
-                try:
-                    relative = candidate.relative_to(worktree)
-                except ValueError:
-                    raise StageSessionError(f"parallel-fixed-file-outside-write-scope:{file}")
-                if relative.parts and relative.parts[0] in {".git", ".agent_reports", ".claude_reports"}:
-                    raise StageSessionError(f"parallel-fixed-file-outside-write-scope:{file}")
-                if not any(
-                    file == str(root) or file.startswith(str(root) + "/")
-                    for root in sealed_scopes
-                ):
-                    raise StageSessionError(
-                        f"parallel-fixed-file-outside-write-scope:{file}"
-                    )
+                session_id=item.get("subsession_id") or f"index-{offset}",
+            ))
+        _refuse_outside_write_scope(union, worktree=worktree, node=node)
     normalized: list[dict[str, Any]] = []
     seen_ids: set[str] = set()
     seen_attempts: set[str] = set()

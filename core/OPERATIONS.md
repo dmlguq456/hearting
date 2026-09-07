@@ -345,18 +345,36 @@ A legacy hash collision is diagnostic
      `subdivision-commit-attempted`, and `subdivision-scope-violation`, and the gate
      semantics below, remain unchanged.
 
+     One lookup fixes one `event_id`, and only an exact replay of that record is a
+     duplicate. The same event carrying a different decision, reason, manifest digest
+     or slice count never overwrites the first: it is appended as a later `phase` of
+     that event and reported as a typed conflict, so a disagreement is never returned
+     as a silent duplicate PASS.
+
      Observation failure is fail-open: lock/open/write failures produce a warning and do
      not block admission, start, or the stage gate. Inventory queries report
      `inventory_complete=false` with a health warning when the record is absent,
-     corrupt, or unreadable; clean absence is `no-record-observed`, not proof that no
-     attempt occurred. This distinguishes ledger loss from no attempted decision.
+     corrupt, or unreadable, and when a record was attempted and lost — each failed
+     append leaves a gap marker beside the ledger, so a later query reads `incomplete`
+     rather than a file that happens to parse as complete. Clean absence is
+     `no-record-observed`, not proof that no attempt occurred. This distinguishes ledger
+     loss from no attempted decision.
 
      Plan selection is deterministic: one explicit `--plan-slices` path wins; otherwise
-     the only candidate is `<artifact-root>/_scratch/<route.slug>/plan_slices.json`.
-     No directory search is allowed. If `route.slug` is absent and no explicit path was
-     given, record `considered-declined/plan-declared-no-slices` and continue in one
-     session. Typed refusal and an explicit serial declaration likewise continue in one
-     session, with the one decision record.
+     the only candidate is `plan_slices.json` in the plans bucket of this route's
+     producer cycle — the canonical durable location the plan stage writes `plan.md`
+     and `plan_slices.json` to — falling back to the legacy top-level `plans/` bucket
+     on a root that has not cut over, and to the route's source route for a
+     continuation. No directory search is allowed, and `_scratch` is never a candidate:
+     it is working space, not a plan contract. When no plan artifact is readable,
+     record `considered-declined/plan-declared-no-slices`, report the attempted source
+     as `subdivision_plan_source=`, and continue in one session. Typed refusal and an
+     explicit serial declaration likewise continue in one session, with the one
+     decision record.
+
+     The decision is recorded on the same entry path that spawns children, after the
+     parent-identity and parent-attempt fences: the subdivision branch may not reach a
+     spawn through a shorter path than ordinary single-session dispatch.
 
      The `source/**` write-scope entry has one meaning: it is the abstract marker that
      this node may mutate the worktree; it is not the `<worktree>/source` directory. The
