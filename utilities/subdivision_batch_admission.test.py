@@ -47,6 +47,10 @@ def _execute_node() -> dict:
 
 class AdmissionFixture(unittest.TestCase):
     def setUp(self) -> None:
+        # 부모 신원은 테스트가 소유한다. 실행 세션의 환경값을 빌리지 않는다.
+        self.enterContext(mock.patch.dict(os.environ))
+        os.environ.pop("AGENT_DISPATCH_ATTEMPT_ID", None)
+        self.parent_attempt_id = "att-fixture-parent"
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.base = Path(self.temp.name)
@@ -131,6 +135,7 @@ class AdmissionGateTest(AdmissionFixture):
             self.assertEqual(len(pending), 2)
             self.assertEqual(manifest["kind"], "subsession-batch")
             self.assertEqual(manifest["declared_size"], 2)
+            self.assertEqual(manifest["parent_attempt_id"], self.parent_attempt_id)
             self.assertEqual(SUBSESSION_BATCH.verify_manifest(manifest)[1], manifest_digest)
             self.assertNotEqual(manifest["chain_manifest_sha256"], manifest_digest)
             self.assertEqual(
@@ -139,6 +144,7 @@ class AdmissionGateTest(AdmissionFixture):
             return tokens
 
         result = SUBDIV.admit_batch(
+            parent_attempt_id=self.parent_attempt_id,
             route=self.route, node=self.node, manifest_path=self._manifest(2),
             governor=Path("governor"), governor_root=Path("governor-root"),
             reserve=fake_reserve,
@@ -147,6 +153,35 @@ class AdmissionGateTest(AdmissionFixture):
         self.assertEqual(result.tokens, tokens)
         self.assertEqual(len(result.sessions), 2)
         self.assertEqual(recorded, [("execute", result.manifest_digest)])
+
+    def test_missing_parent_identity_refuses_before_reservation(self):
+        reserve = mock.Mock()
+        baseline = mock.Mock()
+        with self.assertRaises(SUBDIV.SubdivisionAdmissionError) as caught:
+            SUBDIV.admit_batch(
+                route=self.route, node=self.node, manifest_path=self._manifest(2),
+                governor=Path("governor"), governor_root=Path("governor-root"),
+                reserve=reserve, record_baseline=baseline,
+            )
+        self.assertEqual(str(caught.exception), "scope-unproven:parent-attempt-id-missing")
+        reserve.assert_not_called()
+        baseline.assert_not_called()
+
+    def test_parent_identity_argument_precedes_inherited_fallback(self):
+        for explicit in ("", self.parent_attempt_id):
+            with self.subTest(explicit=bool(explicit)):
+                reserve = mock.Mock(return_value=["a" * 32, "b" * 32])
+                with mock.patch.dict(os.environ, {"AGENT_DISPATCH_ATTEMPT_ID": "att-fixture-inherited"}):
+                    SUBDIV.admit_batch(
+                        parent_attempt_id=explicit,
+                        route=self.route, node=self.node, manifest_path=self._manifest(2),
+                        governor=Path("governor"), governor_root=Path("governor-root"),
+                        reserve=reserve, record_baseline=lambda *a, **k: None,
+                    )
+                self.assertEqual(
+                    reserve.call_args.kwargs["manifest"]["parent_attempt_id"],
+                    explicit or "att-fixture-inherited",
+                )
 
     def test_sd_open_53_default_baseline_follows_the_admission_jobs(self):
         """SD-OPEN-53 (v77 review c1): the default `record_baseline` inside
@@ -161,6 +196,7 @@ class AdmissionGateTest(AdmissionFixture):
             path.write_text("", encoding="utf-8")
         with mock.patch.dict(os.environ, {"AGENT_DISPATCH_JOBS": str(inherited)}):
             result = SUBDIV.admit_batch(
+                parent_attempt_id=self.parent_attempt_id,
                 route=self.route, node=self.node, manifest_path=self._manifest(2),
                 governor=Path("governor"), governor_root=Path("governor-root"),
                 reserve=lambda *a, **k: ["a" * 32, "b" * 32], jobs=pinned,
@@ -249,6 +285,7 @@ class GovernorReservationTest(AdmissionFixture):
 
         with self.assertRaises(SUBDIV.SubdivisionAdmissionError) as caught:
             SUBDIV.admit_batch(
+                parent_attempt_id=self.parent_attempt_id,
                 route=self.route, node=self.node, manifest_path=self._manifest(2),
                 governor=Path("governor"), governor_root=Path("governor-root"),
                 reserve=failing_reserve,
@@ -266,6 +303,7 @@ class GovernorReservationTest(AdmissionFixture):
             return tokens
 
         result = SUBDIV.admit_batch(
+            parent_attempt_id=self.parent_attempt_id,
             route=self.route, node=self.node, manifest_path=self._manifest(3),
             governor=Path("governor"), governor_root=Path("governor-root"),
             reserve=fake_reserve,
@@ -285,6 +323,7 @@ class PermissionAndFenceTest(AdmissionFixture):
         route["nodes"] = [node]
         with self.assertRaises(SUBDIV.SubdivisionAdmissionError) as caught:
             SUBDIV.admit_batch(
+                parent_attempt_id=self.parent_attempt_id,
                 route=route, node=node, manifest_path=self._manifest(2),
                 governor=Path("g"), governor_root=Path("gr"),
                 reserve=lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not reserve")),
@@ -296,6 +335,7 @@ class PermissionAndFenceTest(AdmissionFixture):
         route["effective_intensity"] = "standard"
         with self.assertRaises(SUBDIV.SubdivisionAdmissionError) as caught:
             SUBDIV.admit_batch(
+                parent_attempt_id=self.parent_attempt_id,
                 route=route, node=self.node, manifest_path=self._manifest(2),
                 governor=Path("g"), governor_root=Path("gr"),
                 reserve=lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not reserve")),
@@ -309,6 +349,7 @@ class PermissionAndFenceTest(AdmissionFixture):
         manifest_path.write_text(json.dumps(raw), encoding="utf-8")
         with self.assertRaises(SUBDIV.SubdivisionAdmissionError) as caught:
             SUBDIV.admit_batch(
+                parent_attempt_id=self.parent_attempt_id,
                 route=self.route, node=self.node, manifest_path=manifest_path,
                 governor=Path("g"), governor_root=Path("gr"),
                 reserve=lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not reserve")),
@@ -461,6 +502,7 @@ class StartAdmittedBatchPartialFailureTest(AdmissionFixture):
         recorded: list = []
         tokens = [chr(ord("a") + i) * 32 for i in range(count)]
         return SUBDIV.admit_batch(
+            parent_attempt_id=self.parent_attempt_id,
             route=self.route, node=self.node, manifest_path=manifest_path,
             governor=Path("g"), governor_root=Path("gr"),
             reserve=lambda *a, **k: tokens,
