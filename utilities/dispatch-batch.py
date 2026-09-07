@@ -1737,9 +1737,7 @@ def _run_subdivision_batch_admission(args: argparse.Namespace, route: dict[str, 
     parent_attempt = os.environ.get("AGENT_DISPATCH_ATTEMPT_ID", "")
     if not self_slug or args.parent != self_slug or not parent_attempt:
         raise BatchError("parent-identity-mismatch", f"parent={args.parent} self={self_slug or '-'}")
-    artifact_root = Path(
-        os.environ.get("AGENT_ARTIFACT_ROOT", str(agent_home / ".agent_reports"))
-    )
+    artifact_root = Path(route.get("artifact_root") or os.environ.get("AGENT_ARTIFACT_ROOT", str(agent_home / ".agent_reports")))
     governor = ROOT / "utilities" / "model-worker-governor.py"
     governor_root = resolve_model_governor_root(artifact_root)
     try:
@@ -1747,10 +1745,13 @@ def _run_subdivision_batch_admission(args: argparse.Namespace, route: dict[str, 
         # here -- see `raise_if_parallel_entry_fail_closed` in
         # subdivision_batch_admission.py.
         SUBDIVISION_ADMISSION.raise_if_parallel_entry_fail_closed(args.subdivision_manifest)
+        decision_context = None
+        if args.subdivision_decision_identity:
+            decision_context = SUBDIVISION_ADMISSION.DECISION.lookup(route, node, jobs=args.jobs, writer="stage-dispatch-fallback", action=args.action, action_identity=args.subdivision_decision_identity)
         admission = SUBDIVISION_ADMISSION.admit_batch(
             route=route, node=node, manifest_path=args.subdivision_manifest,
             governor=governor, governor_root=governor_root, reserve=reserve_batch,
-            jobs=args.jobs,
+            jobs=args.jobs, parent_attempt_id=parent_attempt, decision_context=decision_context,
         )
     except SUBDIVISION_ADMISSION.SubdivisionAdmissionError as exc:
         print(json.dumps({
@@ -1758,32 +1759,61 @@ def _run_subdivision_batch_admission(args: argparse.Namespace, route: dict[str, 
             "state": "subdivision-batch-refused",
             "action": args.action,
             "parallel_group": args.parallel_group,
-            "reason": exc.reason,
+            "chain_id": None, "reason": exc.reason, "detail": exc.detail,
             "admitted_rows": 0,
             "admitted_models": 0,
+            "subdivision_decision": "refused", "subdivision_decision_id": decision_context.get("event_id") if decision_context else None,
+            "subdivision_plan_source": args.subdivision_plan_source,
         }, separators=(",", ":"), sort_keys=True))
         return 0
-    if args.action == "dry-run":
+    if args.action in {"dry-run", "register"}:
         print(json.dumps({
             "schema_version": 1,
             "state": "subdivision-batch-admitted",
             "action": args.action,
-            "parallel_group": args.parallel_group,
+            "parallel_group": args.parallel_group, "chain_id": admission.manifest["chain_id"],
+            "chain_manifest_sha256": admission.manifest_digest,
             "reservation_identity": admission.reservation_identity,
             "slice_count": len(admission.sessions),
+            "subdivision_decision": "admitted", "subdivision_decision_id": decision_context.get("event_id") if decision_context else None,
+            "subdivision_plan_source": args.subdivision_plan_source,
         }, separators=(",", ":"), sort_keys=True))
         return 0
     results = SUBDIVISION_ADMISSION.start_admitted_batch(
         admission, parent=args.parent, jobs=jobs,
         governor_reservation_env=GOVERNOR_RESERVATION_ENV,
     )
+    if any(row.get("refusal_reason") for row in results):
+        # F-4: an incomplete registration is a batch refusal, not a partial
+        # success with some counters at 0. This moved here with the admission
+        # itself; the delegating caller relays this envelope unchanged.
+        print(json.dumps({
+            "schema_version": 1,
+            "state": "subdivision-batch-refused",
+            "action": args.action,
+            "parallel_group": args.parallel_group,
+            "chain_id": admission.manifest["chain_id"],
+            "reason": SUBDIVISION_ADMISSION.BATCH_REGISTRATION_INCOMPLETE,
+            "detail": "",
+            "admitted_rows": 0,
+            "admitted_models": 0,
+            "cancelled_rows": sum(int(row.get("cancelled") or 0) for row in results),
+            "subdivision_decision": "refused",
+            "subdivision_decision_id": decision_context.get("event_id") if decision_context else None,
+            "subdivision_plan_source": args.subdivision_plan_source,
+        }, separators=(",", ":"), sort_keys=True))
+        return 0
     print(json.dumps({
         "schema_version": 1,
         "state": "subdivision-batch-started",
         "action": args.action,
-        "parallel_group": args.parallel_group,
+        "parallel_group": args.parallel_group, "chain_id": admission.manifest["chain_id"],
+        "chain_manifest_sha256": admission.manifest_digest,
         "reservation_identity": admission.reservation_identity,
         "slice_count": len(admission.sessions),
+        "attempt_ids": [s["attempt_id"] for s in admission.sessions],
+        "subdivision_decision": "admitted", "subdivision_decision_id": decision_context.get("event_id") if decision_context else None,
+        "subdivision_plan_source": args.subdivision_plan_source,
         "sessions": results,
     }, separators=(",", ":"), sort_keys=True))
     return 0 if all(row.get("started") for row in results) else 1
@@ -1794,7 +1824,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--route", type=Path, required=True)
     parser.add_argument("--parallel-group")
     parser.add_argument("--replica-group")
-    parser.add_argument("--action", choices=("dry-run", "start"), default="dry-run")
+    parser.add_argument("--action", choices=("dry-run", "register", "start"), default="dry-run")
     parser.add_argument("--slug-prefix", required=True)
     parser.add_argument("--parent", required=True)
     parser.add_argument("--qa", default="standard")
@@ -1810,6 +1840,8 @@ def main(argv: list[str] | None = None) -> int:
         help="optional SD-103 parallel subdivision manifest; a disjointness "
         "violation falls back to a single session instead of raising",
     )
+    parser.add_argument("--subdivision-decision-identity")
+    parser.add_argument("--subdivision-plan-source")
     parser.add_argument(
         "--continuation",
         type=Path,

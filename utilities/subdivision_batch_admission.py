@@ -15,6 +15,7 @@ child row or model process exists; it does not own the completion marker.
 from __future__ import annotations
 
 import dataclasses
+import hashlib
 import importlib.util
 import json
 import os
@@ -31,6 +32,7 @@ from stage_session_contract import StageSessionError, load_manifest  # noqa: E40
 from dispatch_subsession_advance import chain_manifest_pointer_path  # noqa: E402
 from dispatch_contract import DispatchContractError, close_attempt_row, cancel_governor_reservation, annotate_attempt_row  # noqa: E402
 import subdivision_decision as DECISION  # noqa: E402
+import subsession_batch_contract as SUBSESSION_BATCH  # noqa: E402
 
 # Route-leg cardinality tier order, duplicated from `capability-route.py:41` --
 # importing that module is safe (no cycle back into this one) but the tier map
@@ -213,6 +215,65 @@ def load_batch_manifest(
     return manifest
 
 
+def slice_fixed_files_digest(fixed_files: list[str]) -> str:
+    """Seal one slice's exact file set into the reservation without reading it.
+
+    The governor never opens a worktree file; binding the sorted exact-file list
+    is what lets a token carry the slice boundary the fence already proved.
+    """
+
+    encoded = json.dumps(sorted(fixed_files), separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def build_subsession_batch_manifest(
+    sessions: list[dict[str, Any]],
+    *,
+    route: dict[str, Any],
+    node_id: str,
+    chain_id: str,
+    chain_manifest_sha256: str,
+    parent_attempt_id: str,
+) -> tuple[dict[str, Any], str]:
+    """Project the sealed chain manifest onto the typed sub-session batch contract.
+
+    M-5: the SD-89 full-N primitive is reused, but its *precondition* -- route-leg
+    membership -- is not. This manifest declares slices, not legs: no
+    `parallel_leg_index`, no `perspective`, no independence axis. Forging a
+    replica leg to satisfy the older contract would make the governor prove a
+    membership that does not exist.
+    """
+
+    members = [
+        {
+            "attempt_id": session["attempt_id"],
+            "subsession_id": session["subsession_id"],
+            "subsession_index": int(session["index"]),
+            "route_node": node_id,
+            "harness": session["adapter"],
+            "fixed_files_sha256": slice_fixed_files_digest(session["fixed_files"]),
+            "stage_authority": 0,
+        }
+        for session in sessions
+    ]
+    manifest, digest, _members = SUBSESSION_BATCH.build_manifest(
+        chain_id=chain_id,
+        route_id=str(route.get("route_id") or ""),
+        route_node=node_id,
+        parent_attempt_id=parent_attempt_id,
+        chain_manifest_sha256=chain_manifest_sha256,
+        members=members,
+    )
+    return manifest, digest
+
+
+# Only these governor denials are a capacity shortfall. Everything else is a
+# structural refusal and must not be recorded as "the machine was busy" -- the
+# blanket catch this replaces made two hard contract failures indistinguishable
+# from load for a whole cycle.
+_CAPACITY_MARKERS = ("governor-atomic-admission-shortfall", "governor-capacity-insufficient")
+
+
 def reserve_full_n(
     governor: Path,
     governor_root: Path,
@@ -221,6 +282,8 @@ def reserve_full_n(
     route: dict[str, Any],
     node_id: str,
     manifest_digest: str,
+    chain_id: str,
+    parent_attempt_id: str,
     reserve: Callable[..., list[str]] | None = None,
 ) -> list[str]:
     """Checkpoint (2): full-N atomic governor reservation, route-leg independent.
@@ -232,25 +295,43 @@ def reserve_full_n(
     """
 
     if reserve is None:
-        raise SubdivisionAdmissionError("governor-capacity-insufficient", "no-reserve-callable")
+        raise SubdivisionAdmissionError("scope-unproven", "no-reserve-callable")
     pending = [{"attempt_id": session["attempt_id"]} for session in sessions]
-    batch_manifest = {
-        "batch_manifest_sha256": manifest_digest,
-        "route_id": route.get("route_id"),
-        "route_node": node_id,
-    }
     try:
+        batch_manifest, batch_digest = build_subsession_batch_manifest(
+            sessions, route=route, node_id=node_id, chain_id=chain_id,
+            chain_manifest_sha256=manifest_digest, parent_attempt_id=parent_attempt_id,
+        )
+    except (SUBSESSION_BATCH.SubsessionBatchContractError, KeyError, TypeError, ValueError) as exc:
+        raise SubdivisionAdmissionError(
+            "scope-unproven", f"subsession-batch-manifest-invalid:{exc}"
+        ) from exc
+    try:
+        # `batch_digest` is the CANONICAL subsession-manifest digest the governor
+        # echoes back; `manifest_digest` is the sealed chain FILE digest carried
+        # inside it. Two different digests of two different objects -- passing
+        # one where the other belongs is how this surface failed before.
         tokens = reserve(
             governor,
             governor_root,
             pending,
             manifest=batch_manifest,
-            manifest_digest=manifest_digest,
+            manifest_digest=batch_digest,
         )
     except Exception as exc:  # noqa: BLE001 -- caller's `reserve` raises its own typed error
-        raise SubdivisionAdmissionError("governor-capacity-insufficient", str(exc)) from exc
+        detail = str(exc)
+        reason = getattr(exc, "reason", "")
+        capacity = reason in _CAPACITY_MARKERS or any(
+            marker in detail for marker in _CAPACITY_MARKERS
+        )
+        raise SubdivisionAdmissionError(
+            "governor-capacity-insufficient" if capacity else "scope-unproven",
+            f"{reason}:{detail}" if reason else detail,
+        ) from exc
     if len(tokens) != len(sessions) or len(set(tokens)) != len(tokens):
-        raise SubdivisionAdmissionError("governor-capacity-insufficient", "token-count-mismatch")
+        # Not a shortfall: a full-N reserve either returns N distinct tokens or
+        # raises. A wrong-shaped return is a broken primitive, not load.
+        raise SubdivisionAdmissionError("scope-unproven", "token-count-mismatch")
     return tokens
 
 
@@ -278,6 +359,7 @@ def admit_batch(
     record_baseline: Callable[[dict[str, Any], str, dict[str, Any]], None] | None = None,
     jobs: str | Path | None = None,
     decision_context: dict[str, Any] | None = None,
+    parent_attempt_id: str = "",
 ) -> AdmissionResult:
     """Run all four admission checkpoints in order; any failure is row 0 / model 0.
 
@@ -304,12 +386,17 @@ def admit_batch(
         raise
     manifest_digest = manifest["_manifest_sha256"]
     try:
+        parent_attempt_id = parent_attempt_id or os.environ.get("AGENT_DISPATCH_ATTEMPT_ID", "")
+        if not parent_attempt_id:
+            raise SubdivisionAdmissionError("scope-unproven", "parent-attempt-id-missing")
         tokens = reserve_full_n(
             governor, governor_root, manifest["sessions"],
-            route=route, node_id=node_id, manifest_digest=manifest_digest, reserve=reserve,
+            route=route, node_id=node_id, manifest_digest=manifest_digest,
+            chain_id=str(manifest["chain_id"]), parent_attempt_id=parent_attempt_id,
+            reserve=reserve,
         )
     except SubdivisionAdmissionError as exc:
-        record("refused", "governor-capacity-insufficient", manifest_digest, len(manifest["sessions"]))
+        record("refused", exc.reason, manifest_digest, len(manifest["sessions"]))
         raise
     if record_baseline is None:
         # SD-OPEN-53: the admission-time baseline lands in the state root of

@@ -161,93 +161,84 @@ def _run_parallel_subdivision(
     this manifest was never eligible for (SD-119 (1)); the fix is to route to
     the surface that is actually reachable, not to keep the dead-end typed."""
 
-    agent_home = ROOT
-    # The route's sealed artifact root is the authority; the environment is only
-    # a fallback for a manifest run outside a route-bound process. Reading the
-    # governor root from a different source than the route would reserve
-    # capacity in one root and prove it in another.
-    sealed_root = route_record.get("artifact_root")
-    artifact_root = Path(
-        sealed_root if isinstance(sealed_root, str) and sealed_root
-        else os.environ.get("AGENT_ARTIFACT_ROOT", str(agent_home / ".agent_reports"))
-    )
-    governor = ROOT / "utilities" / "model-worker-governor.py"
-    governor_root = resolve_model_governor_root(artifact_root)
-    # One action, one decision identity. A caller that already fixed the event
-    # at its own permission lookup passes it in; minting a second one here
-    # would record this admission under an id no caller ever reported.
-    if decision_context is None:
-        decision_context = SUBDIVISION_ADMISSION.DECISION.lookup(
-            route_record, node, jobs=jobs, writer="stage-dispatch-fallback", action=args.action
-        )
-    # A caller that assembled the manifest itself passes it explicitly rather
-    # than writing it into another surface's parsed arguments.
-    manifest = manifest_path if manifest_path is not None else args.manifest
-    try:
-        # F-3 narrowed by SD-103: only a non-worktree-base slice is refused
-        # here -- see `raise_if_parallel_entry_fail_closed` in
-        # subdivision_batch_admission.py.
-        SUBDIVISION_ADMISSION.raise_if_parallel_entry_fail_closed(manifest)
-        admission = SUBDIVISION_ADMISSION.admit_batch(
-            route=route_record, node=node, manifest_path=manifest,
-            governor=governor, governor_root=governor_root,
-            reserve=DISPATCH_BATCH.reserve_batch, jobs=jobs,
-            decision_context=decision_context,
-        )
-    except SUBDIVISION_ADMISSION.SubdivisionAdmissionError as exc:
+    manifest = str(manifest_path if manifest_path is not None else args.manifest)
+    action = "dry-run" if args.action == "register" else args.action
+    route_file = route_record.get("_route_file") or getattr(args, "route", None)
+    node_id = node.get("id") or getattr(args, "node", "execute")
+
+    def refuse(reason: str, detail: str = "", chain_id=None, extra=None) -> int:
         # This surface's stdout IS the typed JSON envelope (`OPERATIONS` §5.10):
         # callers `json.loads` the whole stream, so the decision fields ride
-        # INSIDE it. The wrapper's own `key=value` receipt lines are printed by
-        # `stage-dispatch-fallback.py`, never here -- prefixing them onto this
-        # envelope made it unparseable.
+        # INSIDE it and no `key=value` receipt line may precede it.
         print(json.dumps({
             "schema_version": 1, "state": "subdivision-batch-refused",
-            "chain_id": None, "reason": SUBDIVISION_ADMISSION.refusal_reason_for(exc),
+            "chain_id": chain_id, "reason": reason, "detail": detail,
             "admitted_rows": 0, "admitted_models": 0,
             "subdivision_decision": "refused",
-            "subdivision_decision_id": decision_context["event_id"],
+            "subdivision_decision_id": (
+                decision_context.get("event_id") if decision_context else None
+            ),
             "subdivision_plan_source": plan_source,
+            **(extra or {}),
         }, sort_keys=True))
         return 65
-    if args.action == "register":
-        print(f"chain_id={admission.manifest['chain_id']}")
-        if plan_source:
-            print(f"subdivision_plan_source={plan_source}")
-        print(f"registered_sessions={len(admission.sessions)}")
-        return 0
-    results = SUBDIVISION_ADMISSION.start_admitted_batch(
-        admission, parent=args.parent, jobs=jobs,
-        governor_reservation_env=GOVERNOR_RESERVATION_ENV,
-    )
-    if any(row.get("refusal_reason") for row in results):
-        # F-4: an incomplete registration is a batch refusal, not a partial
-        # success with some counters at 0 -- it prints the same typed refusal
-        # envelope the admission-gate failure above prints.
-        print(json.dumps({
-            "schema_version": 1, "state": "subdivision-batch-refused",
-            "chain_id": admission.manifest["chain_id"],
-            "reason": SUBDIVISION_ADMISSION.BATCH_REGISTRATION_INCOMPLETE,
-            "admitted_rows": 0, "admitted_models": 0,
-            "cancelled_rows": sum(int(row.get("cancelled") or 0) for row in results),
-            "subdivision_decision": "refused",
-            "subdivision_decision_id": decision_context["event_id"],
-            "subdivision_plan_source": plan_source,
-        }, sort_keys=True))
-        return 65
-    print(f"chain_id={admission.manifest['chain_id']}")
-    print(f"chain_manifest_sha256={admission.manifest_digest}")
-    print(f"subdivision_decision_id={decision_context['event_id']}")
+
+    # F-3 narrowed by SD-103: a non-worktree-base slice is refused here, before
+    # anything is spawned. Kept in this process deliberately -- it reads the
+    # manifest file and touches no governor state, so paying for a subprocess
+    # to learn the answer would be pure cost.
+    try:
+        SUBDIVISION_ADMISSION.raise_if_parallel_entry_fail_closed(manifest)
+    except SUBDIVISION_ADMISSION.SubdivisionAdmissionError as exc:
+        return refuse(SUBDIVISION_ADMISSION.refusal_reason_for(exc), exc.detail)
+    if not route_file:
+        # Without the route file there is no surface to delegate to; admitting
+        # here instead would be a second, unproven implementation of the gate.
+        return refuse("surface-unreachable", "route-file-unresolved")
+    # SD-119 M-5 / issuer invariant: `model-worker-governor` mints a batch
+    # reservation only for a live parent process whose argv[1] is exactly
+    # `dispatch-batch.py`, and it sweeps any reservation whose owner process has
+    # exited. Importing `dispatch-batch` and calling `reserve_batch` in-process
+    # therefore could never obtain the capability, and reserving from a
+    # short-lived helper would lose the tokens before the slices claim them.
+    # Delegating the whole admit->register->start run to a real `dispatch-batch`
+    # process satisfies both without widening the fence by one identity.
+    command = [sys.executable, str(ROOT / "utilities" / "dispatch-batch.py"), "--route", str(route_file), "--parallel-group", node_id, "--subdivision-manifest", manifest, "--action", action, "--slug-prefix", node_id, "--parent", args.parent, "--jobs", str(jobs)]
+    if decision_context is not None:
+        command += ["--subdivision-decision-identity", str(decision_context["action_identity"])]
     if plan_source:
-        print(f"subdivision_plan_source={plan_source}")
-    print(f"registered_sessions={len(admission.sessions)}")
-    print(f"registered={sum(1 for row in results if row.get('registered'))}")
-    print(f"started={sum(1 for row in results if row.get('started'))}")
-    print(f"child_spawned={sum(1 for row in results if row.get('started'))}")
-    attempt_ids = [session["attempt_id"] for session in admission.sessions]
-    print(f"attempt_id={attempt_ids[0]}")
-    print("attempt_ids=" + ";".join(attempt_ids))
+        command += ["--subdivision-plan-source", plan_source]
+    result = subprocess.run(command, cwd=ROOT, text=True, capture_output=True, env=os.environ.copy(), check=False)
+    try:
+        envelope = json.loads(result.stdout)
+    except (TypeError, ValueError):
+        envelope = None
+    if not isinstance(envelope, dict) or envelope.get("state") not in {"subdivision-batch-refused", "subdivision-batch-admitted", "subdivision-batch-started"}:
+        # The delegated surface itself failed, so it wrote no ledger row: this
+        # is the one path where the caller records the refusal.
+        if decision_context is not None:
+            SUBDIVISION_ADMISSION.DECISION.commit(decision_context, "refused", "scope-unproven")
+        return refuse("scope-unproven", (result.stderr or result.stdout).strip()[:512])
+    if envelope["state"] == "subdivision-batch-refused":
+        print(result.stdout, end="")
+        return 65
+    if envelope["state"] == "subdivision-batch-admitted":
+        print(f"chain_id={envelope['chain_id']}")
+        if plan_source: print(f"subdivision_plan_source={plan_source}")
+        print(f"registered_sessions={envelope['slice_count']}")
+        return 0
+    print(f"chain_id={envelope['chain_id']}")
+    print(f"chain_manifest_sha256={envelope['chain_manifest_sha256']}")
+    if envelope.get("subdivision_decision_id"): print(f"subdivision_decision_id={envelope['subdivision_decision_id']}")
+    if plan_source: print(f"subdivision_plan_source={plan_source}")
+    print(f"registered_sessions={envelope['slice_count']}")
+    print(f"registered={sum(1 for row in envelope.get('sessions', []) if row.get('registered'))}")
+    print(f"started={sum(1 for row in envelope.get('sessions', []) if row.get('started'))}")
+    print(f"child_spawned={sum(1 for row in envelope.get('sessions', []) if row.get('started'))}")
+    print("attempt_id=" + envelope["attempt_ids"][0])
+    print("attempt_ids=" + ";".join(envelope["attempt_ids"]))
     print("runtime_wait=registered-children")
-    return 0 if all(row.get("started") for row in results) else 1
+    return 0 if all(row.get("started") for row in envelope.get("sessions", [])) else 1
 
 
 

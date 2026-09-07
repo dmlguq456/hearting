@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any, Callable, NamedTuple
 
 from replica_batch_contract import ReplicaBatchContractError, verify_manifest
+import subsession_batch_contract as SUBSESSION_BATCH
 
 
 # Per-class concurrency caps. A `standard+` cycle occupies its dispatch-depth-1
@@ -81,6 +82,11 @@ BATCH_RESERVATION_KEYS = (
     "batch_leg_sha256",
     "batch_leg_class",
     "batch_auxiliary_check",
+    "batch_chain_id",
+    "batch_chain_manifest_sha256",
+    "batch_subsession_id",
+    "batch_subsession_index",
+    "batch_fixed_files_sha256",
 )
 _BATCH_ISSUER_SEAL = object()
 
@@ -920,6 +926,12 @@ def _validate_batch_peers(
     return result
 
 
+def _verify_batch_manifest(manifest):
+    if isinstance(manifest, dict) and manifest.get("kind") == SUBSESSION_BATCH.KIND:
+        return (*SUBSESSION_BATCH.verify_manifest(manifest), True)
+    return (*verify_manifest(manifest), False)
+
+
 def reserve(
     root: str | Path,
     worker_class: str,
@@ -954,9 +966,10 @@ def reserve(
             or not {"manifest", "selected_attempt_ids"}.issubset(batch)
         ):
             raise ValueError("invalid parallel batch reservation metadata")
+        is_subsession = isinstance(batch.get("manifest"), dict) and batch["manifest"].get("kind") == SUBSESSION_BATCH.KIND
         try:
-            manifest, manifest_digest, leg_digests = verify_manifest(batch["manifest"])
-        except ReplicaBatchContractError as exc:
+            manifest, manifest_digest, leg_digests, _ = _verify_batch_manifest(batch["manifest"])
+        except (ReplicaBatchContractError, SUBSESSION_BATCH.SubsessionBatchContractError) as exc:
             raise ValueError(str(exc)) from exc
         selected = batch["selected_attempt_ids"]
         if (
@@ -994,7 +1007,14 @@ def reserve(
                 batch["replacement_seal"],
                 batch.get("peers"),
             )
-        if count == int(manifest["declared_size"]):
+        if is_subsession:
+            if batch.get("peers") is not None:
+                raise ValueError("subsession batch reservation has no peer legs")
+            if any(value is not None for value in replacement_values):
+                raise ValueError("subsession batch reservation has no partial continuation")
+            if count != int(manifest["declared_size"]):
+                raise ValueError("subsession batch reservation must reserve the declared size")
+        elif count == int(manifest["declared_size"]):
             if batch.get("peers") is not None:
                 raise ValueError("full parallel batch reservation cannot include peer proof")
         elif count == 1:
@@ -1008,9 +1028,9 @@ def reserve(
             )
         else:
             raise ValueError("parallel batch reservation count must be one or declared size")
-        group = manifest.get("parallel_group") or manifest.get("replica_group")
+        group = manifest.get("parallel_group") or manifest.get("replica_group") or manifest.get("chain_id")
         batch_common = {
-            "reservation_kind": (
+            "reservation_kind": "subsession-batch" if is_subsession else (
                 "parallel-batch" if int(manifest.get("schema_version", 1)) in (2, 3)
                 else "replica-batch"
             ),
@@ -1019,11 +1039,14 @@ def reserve(
             "batch_group": group,
             "batch_route_id": manifest["route_id"],
             "batch_parent_attempt_id": manifest["parent_attempt_id"],
-            "batch_independence": manifest["independence"],
             "batch_manifest": manifest,
             "batch_manifest_sha256": manifest_digest,
             **peer_proof,
         }
+        if not is_subsession:
+            batch_common.update({"batch_independence": manifest["independence"]})
+        if is_subsession:
+            batch_common.update({"batch_chain_id": manifest["chain_id"], "batch_chain_manifest_sha256": manifest["chain_manifest_sha256"]})
 
     def operation(data: dict[str, Any], now: float) -> list[str]:
         if process_starttime(pid) != starttime:
@@ -1044,11 +1067,12 @@ def reserve(
                     "batch_attempt_id": members[index]["attempt_id"],
                     "batch_route_node": members[index]["route_node"],
                     "batch_harness": members[index]["harness"],
-                    "batch_fallback_hop": members[index]["fallback_hop"],
-                    "batch_fallback_ordinal": members[index]["fallback_ordinal"],
-                    "batch_assignment_sha256": members[index]["assignment_sha256"],
                     "batch_leg_sha256": leg_digests[str(members[index]["attempt_id"])],
                 })
+                if is_subsession:
+                    reservation.update({"batch_subsession_id": members[index]["subsession_id"], "batch_subsession_index": members[index]["subsession_index"], "batch_fixed_files_sha256": members[index]["fixed_files_sha256"]})
+                else:
+                    reservation.update({"batch_fallback_hop": members[index]["fallback_hop"], "batch_fallback_ordinal": members[index]["fallback_ordinal"], "batch_assignment_sha256": members[index]["assignment_sha256"]})
                 if int(manifest.get("schema_version", 1)) == 2:
                     reservation.update({
                         "batch_model_profile": members[index]["model_profile"],
@@ -1328,7 +1352,7 @@ def main() -> int:
             "tokens": tokens,
         }
         if batch is not None:
-            receipt["batch_manifest_sha256"] = verify_manifest(batch["manifest"])[1]
+            receipt["batch_manifest_sha256"] = _verify_batch_manifest(batch["manifest"])[1]
         print(json.dumps(receipt, sort_keys=True))
     elif args.command == "reservation-check":
         result = reservation_check(

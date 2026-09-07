@@ -7,6 +7,8 @@ from unittest import mock
 ROOT=Path(__file__).resolve().parents[1]
 S=importlib.util.spec_from_file_location("route",ROOT/"utilities/capability-route.py"); R=importlib.util.module_from_spec(S); S.loader.exec_module(R)
 F_SPEC=importlib.util.spec_from_file_location("fallback",ROOT/"utilities/stage-dispatch-fallback.py"); F=importlib.util.module_from_spec(F_SPEC); F_SPEC.loader.exec_module(F)
+SB_SPEC=importlib.util.spec_from_file_location("dispatch_batch_for_fallback_test",ROOT/"utilities/dispatch-batch.py"); SUBDIVISION_BATCH=importlib.util.module_from_spec(SB_SPEC); SB_SPEC.loader.exec_module(SUBDIVISION_BATCH)
+import subsession_batch_contract as SUBSESSION_BATCH
 
 import contextlib
 
@@ -1720,10 +1722,25 @@ class SubdivisionStartIntegrationTest(unittest.TestCase):
     count=int(command[command.index("--count")+1])
     encoded=command[command.index("--batch-manifest")+1]
     manifest=json.loads(encoded)
+    # SD-119 M-5: the batch handed to the governor is the typed sub-session
+    # manifest, whose canonical digest is what the caller compares the receipt
+    # against -- not a field carried inside the manifest.
+    digest=(manifest.get("batch_manifest_sha256")
+            or SUBSESSION_BATCH.verify_manifest(manifest)[1])
     payload={"class":"dispatch", "count":count, "owner_pid":os.getpid(),
-             "batch_manifest_sha256":manifest["batch_manifest_sha256"],
+             "batch_manifest_sha256":digest,
              "tokens":[f"{index:032x}" for index in range(1, count+1)]}
     return subprocess.CompletedProcess(command, 0, json.dumps(payload), "")
+   if any(str(part).endswith("dispatch-batch.py") for part in command):
+    # Admission now runs inside a real `dispatch-batch` process: that is the
+    # only parent the governor will mint a batch issuer capability for, and it
+    # must outlive the reservation until every slice claims. Here the PROCESS
+    # boundary is the substituted seam -- the same entry point runs in-process
+    # so this test's dispatch-node and governor stand-ins still apply to it.
+    captured=io.StringIO()
+    with contextlib.redirect_stdout(captured):
+     rc=SUBDIVISION_BATCH.main([str(part) for part in command[2:]])
+    return subprocess.CompletedProcess(command, rc, captured.getvalue(), "")
    return real_run(command, *args, **kwargs)
 
   with self.dispatch_env(AGENT_DISPATCH_CURRENT_HARNESS="codex",

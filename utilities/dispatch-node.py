@@ -10,6 +10,7 @@ from dispatch_contract import (
     GOVERNOR_RESERVATION_ENV,
     parse_registry_metadata,
     resolve_global_registry,
+    resolve_model_governor_root,
 )
 from worker_bootstrap import assigned_contract, worker_type_for_kind
 import review_round_cap as REVIEW_ROUND_CAP
@@ -521,6 +522,18 @@ def main():
    print(f"subsession_declared={int(sealed is not None)}")
    print("child_spawned=0")
    raise SystemExit(64)
+  reservation_token = os.environ.get(GOVERNOR_RESERVATION_ENV)
+  if reservation_token:
+   try:
+    checked = subprocess.run([sys.executable, str(ROOT/"utilities"/"model-worker-governor.py"), "--root", str(resolve_model_governor_root(Path(route.get("artifact_root") or os.environ.get("AGENT_ARTIFACT_ROOT", str(ROOT/".agent_reports"))))), "reservation-check", "--token", reservation_token, "--class", "dispatch"], text=True, capture_output=True, check=False)
+    payload = json.loads(checked.stdout)
+    if payload.get("reservation_kind") == "subsession-batch" and (payload.get("batch_attempt_id") != a.attempt_id or payload.get("batch_group") != a.session_chain_id):
+     print("check=failed\nreason=subsession-reservation-binding-mismatch\nchild_spawned=0")
+     raise SystemExit(65)
+   except SystemExit:
+    raise
+   except Exception:
+    pass
  print("completion_marker="+str(ROUTE.completion_dir(route["route_id"],jobs=registry.path)/(node["id"]+".json")))
  wrapper=ROOT/"adapters"/a.adapter/"bin"/"dispatch-headless.py"
  try:

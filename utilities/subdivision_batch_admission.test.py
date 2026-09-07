@@ -16,6 +16,7 @@ import unittest
 from unittest import mock
 
 PATH = Path(__file__).with_name("subdivision_batch_admission.py")
+import subsession_batch_contract as SUBSESSION_BATCH  # noqa: E402
 SPEC = importlib.util.spec_from_file_location("subdivision_batch_admission", PATH)
 SUBDIV = importlib.util.module_from_spec(SPEC)
 assert SPEC.loader is not None
@@ -122,8 +123,19 @@ class AdmissionGateTest(AdmissionFixture):
         tokens = ["a" * 32, "b" * 32]
 
         def fake_reserve(governor, governor_root, pending, *, manifest, manifest_digest):
+            # The governor is handed the typed sub-session batch, not a
+            # three-field placeholder: `manifest_digest` is that manifest's own
+            # canonical digest, while the sealed chain FILE digest rides inside
+            # it as `chain_manifest_sha256`. Conflating the two is what made the
+            # first live 2-slice canary unreachable.
             self.assertEqual(len(pending), 2)
-            self.assertEqual(manifest["batch_manifest_sha256"], manifest_digest)
+            self.assertEqual(manifest["kind"], "subsession-batch")
+            self.assertEqual(manifest["declared_size"], 2)
+            self.assertEqual(SUBSESSION_BATCH.verify_manifest(manifest)[1], manifest_digest)
+            self.assertNotEqual(manifest["chain_manifest_sha256"], manifest_digest)
+            self.assertEqual(
+                [member["stage_authority"] for member in manifest["members"]], [0, 0]
+            )
             return tokens
 
         result = SUBDIV.admit_batch(
@@ -363,23 +375,51 @@ class ParallelEntryFailClosedTest(unittest.TestCase):
             self.assertIsNone(SUBDIV.raise_if_parallel_entry_fail_closed(Path(td) / "missing.json"))
             self.assertIsNone(SUBDIV.raise_if_parallel_entry_fail_closed())
 
-    def test_worktree_base_manifest_reaches_admit_batch(self):
-        """The live parallel branch now reaches admission for worktree slices;
-        admit_batch's own typed verdict is what the caller sees."""
+    def test_worktree_base_manifest_reaches_the_delegated_admission_surface(self):
+        """A worktree-base slice is not refused at the entry fence: it reaches
+        admission, and admission's own typed verdict is what the caller sees.
+
+        Admission now runs inside a real `dispatch-batch.py` process (that is the
+        only process the governor's issuer fence will mint a batch capability
+        for), so "reached admission" is observed at the delegation boundary --
+        the exact command carrying this manifest and route node."""
         with tempfile.TemporaryDirectory() as td:
             jobs = Path(td) / "jobs.registry"
             jobs.touch()
             manifest = self._manifest(td)
-            args = type("Args", (), {"action": "register", "manifest": str(manifest), "parent": "owner"})()
-            reached = []
-            def _admit(**kwargs):
-                reached.append(kwargs["manifest_path"])
-                raise SUBDIV.SubdivisionAdmissionError("disjointness-unproven", "fixture")
-            with mock.patch.object(CHAIN.SUBDIVISION_ADMISSION, "admit_batch", side_effect=_admit):
+            route_file = Path(td) / "route.json"
+            route_file.write_text("{}", encoding="utf-8")
+            args = type("Args", (), {
+                "action": "register", "manifest": str(manifest), "parent": "owner",
+                "route": route_file, "node": "execute",
+            })()
+            commands = []
+
+            def _delegate(command, **kwargs):
+                commands.append(command)
+                return subprocess.CompletedProcess(command, 0, json.dumps({
+                    "schema_version": 1, "state": "subdivision-batch-refused",
+                    "chain_id": None, "reason": "disjointness-unproven",
+                    "admitted_rows": 0, "admitted_models": 0,
+                }), "")
+
+            with mock.patch.object(CHAIN.subprocess, "run", side_effect=_delegate):
                 output = io.StringIO()
                 with contextlib.redirect_stdout(output):
-                    rc = CHAIN._run_parallel_subdivision({}, {}, args, jobs=jobs)
-            self.assertEqual(reached, [str(manifest)])
+                    rc = CHAIN._run_parallel_subdivision(
+                        {}, {"id": "execute"}, args, jobs=jobs,
+                    )
+            self.assertEqual(len(commands), 1)
+            command = commands[0]
+            self.assertEqual(
+                Path(command[1]).name, "dispatch-batch.py",
+                "the governor mints a batch capability only for this exact parent",
+            )
+            self.assertEqual(command[command.index("--subdivision-manifest") + 1], str(manifest))
+            self.assertEqual(command[command.index("--parallel-group") + 1], "execute")
+            # `register` has no dispatch-batch action of its own: it proves
+            # admission without starting a slice.
+            self.assertEqual(command[command.index("--action") + 1], "dry-run")
             self.assertEqual(rc, 65)
             self.assertEqual(json.loads(output.getvalue())["reason"], "disjointness-unproven")
 
