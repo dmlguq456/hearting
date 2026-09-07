@@ -26,6 +26,7 @@ sys.path.insert(0, str(ROOT / "utilities"))
 
 import subsession_batch_contract as CONTRACT  # noqa: E402
 import subdivision_batch_admission as SUBDIV  # noqa: E402
+import dispatch_contract as DISPATCH  # noqa: E402
 
 _BATCH_SPEC = importlib.util.spec_from_file_location(
     "dispatch_batch_for_subsession_test", ROOT / "utilities" / "dispatch-batch.py"
@@ -389,6 +390,115 @@ class SubsessionManifestContractTest(unittest.TestCase):
                     parent_attempt_id="att-parent", chain_manifest_sha256="a" * 64,
                     members=self._members(count),
                 )
+
+
+class ParallelPeerSliceIsNotAPriorAttemptTest(unittest.TestCase):
+    """SD-79's ``_sibling_attempt_gate`` (utilities/dispatch_contract.py) refuses to
+    launch over a previous attempt of the same node that still runs. This cycle
+    added one exception: a still-live row is not a prior attempt when it is a
+    declared parallel peer slice of the same sub-session batch (measured defect:
+    slice 2 of a 2-way subdivision was refused ``prior-attempt-still-live`` by
+    its own healthy sibling, slice 1). This test pins that exception and its
+    control -- a live row that is *not* a declared parallel peer of the same
+    chain must still be refused.
+    """
+
+    def _route(self, base: Path, route_id: str) -> Path:
+        route = {
+            "dispatch_contract_version": 3, "route_id": route_id,
+            "nodes": [{"id": "execute", "depends_on": []}],
+        }
+        path = base / "route.json"
+        path.write_text(json.dumps(route), encoding="utf-8")
+        return path
+
+    def _row(self, status: str, metadata: dict) -> str:
+        pipe = ",".join(f"{key}={value}" for key, value in metadata.items())
+        return f"2026-09-07T00:00:00Z\t{status}\t/repo\t/wt\texecute\t{pipe}"
+
+    def _own_claim_row(self, route_id: str, attempt_id: str, chain_id: str) -> str:
+        # The newcomer's own freshly claimed row: no pid yet, but it does carry
+        # the chain identity `_sibling_attempt_gate` reads to learn its own
+        # `own_chain` before scanning for siblings.
+        return self._row("open", {
+            "route_id": route_id, "route_node": "execute",
+            "attempt_id": attempt_id, "session_chain_id": chain_id,
+            "subsession_mode": "parallel",
+        })
+
+    def test_live_parallel_peer_of_the_same_chain_does_not_block(self):
+        route_id = "rt-peer-guard-same-chain"
+        chain_id = "ssc-peer-guard-0001"
+        newcomer = "att-peer-guard-newcomer"
+        peer = "att-peer-guard-peer"
+        identity = DISPATCH.process_launch_identity(os.getpid())
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            route_path = self._route(base, route_id)
+            lines = [
+                self._own_claim_row(route_id, newcomer, chain_id),
+                self._row("open", {
+                    "route_id": route_id, "route_node": "execute",
+                    "attempt_id": peer, "session_chain_id": chain_id,
+                    "subsession_mode": "parallel", **identity,
+                }),
+            ]
+            # Must not raise: a live declared peer of the same parallel batch is
+            # a concurrent member, not a predecessor attempt.
+            DISPATCH.completion_marker_gate(
+                str(route_path), "execute", "start", base, base / "jobs.log",
+                registry_lines=lines, attempt_id=newcomer,
+            )
+
+    def test_live_row_with_a_different_chain_id_still_blocks(self):
+        route_id = "rt-peer-guard-foreign-chain"
+        chain_id = "ssc-peer-guard-0002"
+        newcomer = "att-peer-guard-newcomer-2"
+        foreign = "att-peer-guard-foreign-chain"
+        identity = DISPATCH.process_launch_identity(os.getpid())
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            route_path = self._route(base, route_id)
+            lines = [
+                self._own_claim_row(route_id, newcomer, chain_id),
+                self._row("open", {
+                    "route_id": route_id, "route_node": "execute",
+                    "attempt_id": foreign, "session_chain_id": "ssc-peer-guard-unrelated",
+                    "subsession_mode": "parallel", **identity,
+                }),
+            ]
+            with self.assertRaises(DISPATCH.DispatchContractError) as caught:
+                DISPATCH.completion_marker_gate(
+                    str(route_path), "execute", "start", base, base / "jobs.log",
+                    registry_lines=lines, attempt_id=newcomer,
+                )
+            self.assertEqual(caught.exception.reason, "prior-attempt-still-live")
+            self.assertIn(foreign, caught.exception.detail)
+
+    def test_live_row_with_the_same_chain_but_not_parallel_mode_still_blocks(self):
+        route_id = "rt-peer-guard-non-parallel"
+        chain_id = "ssc-peer-guard-0003"
+        newcomer = "att-peer-guard-newcomer-3"
+        non_parallel = "att-peer-guard-non-parallel"
+        identity = DISPATCH.process_launch_identity(os.getpid())
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            route_path = self._route(base, route_id)
+            lines = [
+                self._own_claim_row(route_id, newcomer, chain_id),
+                self._row("open", {
+                    "route_id": route_id, "route_node": "execute",
+                    "attempt_id": non_parallel, "session_chain_id": chain_id,
+                    "subsession_mode": "serial", **identity,
+                }),
+            ]
+            with self.assertRaises(DISPATCH.DispatchContractError) as caught:
+                DISPATCH.completion_marker_gate(
+                    str(route_path), "execute", "start", base, base / "jobs.log",
+                    registry_lines=lines, attempt_id=newcomer,
+                )
+            self.assertEqual(caught.exception.reason, "prior-attempt-still-live")
+            self.assertIn(non_parallel, caught.exception.detail)
 
 
 if __name__ == "__main__":

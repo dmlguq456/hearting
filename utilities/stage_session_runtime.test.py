@@ -75,5 +75,50 @@ class StageSessionStateDirTests(unittest.TestCase):
         self.assertTrue(default.state_ledger.startswith(str(self.root / ".runtime" / "stage-sessions")))
 
 
+class StageSessionMetadataTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        base = Path(self.tmp.name)
+        self.root = base / "artifact-root"
+        self.root.mkdir()
+        self.worktree = base / "wt"
+        self.worktree.mkdir()
+        self.fixed = self.worktree / "a.py"
+        self.fixed.write_text("x\n", encoding="utf-8")
+        self.brief = base / "brief.md"
+        self.brief.write_text("brief\n", encoding="utf-8")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_parallel_metadata_carries_batch_group_serial_does_not(self):
+        parallel_args = _args(
+            self.worktree, self.brief, self.fixed,
+            subsession_mode="parallel", session_chain_id="ssc-parallel",
+        )
+        runtime.bind(parallel_args, artifact_root=self.root, action="dry-run")
+        parallel_metadata = runtime.metadata(parallel_args)
+        self.assertIn(",batch_group=ssc-parallel", parallel_metadata)
+
+        serial_args = _args(
+            self.worktree, self.brief, self.fixed,
+            subsession_mode="serial", session_chain_id="ssc-serial",
+        )
+        runtime.bind(serial_args, artifact_root=self.root, action="dry-run")
+        serial_metadata = runtime.metadata(serial_args)
+        self.assertNotIn("batch_group=", serial_metadata)
+
+    def test_metadata_is_identical_across_register_and_start_actions(self):
+        register_args = _args(self.worktree, self.brief, self.fixed)
+        runtime.bind(register_args, artifact_root=self.root, action="register")
+        register_metadata = runtime.metadata(register_args)
+
+        start_args = _args(self.worktree, self.brief, self.fixed)
+        runtime.bind(start_args, artifact_root=self.root, action="start")
+        start_metadata = runtime.metadata(start_args)
+
+        self.assertEqual(register_metadata, start_metadata)
+
+
 if __name__ == "__main__":
     unittest.main()
