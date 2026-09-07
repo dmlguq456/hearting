@@ -180,9 +180,20 @@ def bind(args: argparse.Namespace, *, artifact_root: str | Path, action: str) ->
 def metadata(args: argparse.Namespace) -> str:
     if not getattr(args, "subsession_id", None):
         return ""
+    # A parallel sub-session may only exist as a member of one atomic batch
+    # (`validate_attempt_metadata`: `parallel-subsession-batch-required`), and
+    # for SD-119 subdivision that batch IS the chain: the subdivision-permitted
+    # node structurally has no route-leg `parallel_group` to borrow (SD-119 (1)).
+    # Deriving the group from the chain id keeps the registry row, the governor
+    # reservation's `batch_group` and the sealed manifest naming ONE value
+    # instead of three that have to be kept in agreement.
+    batch_group = (
+        f",batch_group={args.session_chain_id}"
+        if getattr(args, "subsession_mode", "") == "parallel" else ""
+    )
     return (
         f",subsession_id={args.subsession_id},stage_authority=0"
-        f",session_chain_id={args.session_chain_id}"
+        f",session_chain_id={args.session_chain_id}{batch_group}"
         f",subsession_index={args.subsession_index},subsession_count={args.subsession_count}"
         f",subsession_mode={args.subsession_mode},subsession_purpose={args.subsession_purpose}"
         f",phase_brief={args.phase_brief},phase_brief_sha256={args.phase_brief_sha256}"

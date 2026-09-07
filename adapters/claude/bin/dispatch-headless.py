@@ -1415,10 +1415,16 @@ def append_job(jobs: Path, args: argparse.Namespace) -> bool:
         )
     replica_reservation = getattr(args, "replica_batch_reservation", {})
     if replica_reservation:
-        pipe += (
-            f",parallel_group={replica_reservation['batch_group']}"
-            f",replica_group={replica_reservation['batch_group']}"
-        )
+        # Only a ROUTE-LEG batch aliases its group onto the row's
+        # parallel_group/replica_group. A sub-session batch's group is its
+        # chain, and the subdivision node has no leg membership at all
+        # (SD-119 (1)) -- writing the chain id into those fields would make a
+        # slice row answer a route-leg group census it was never part of.
+        if replica_reservation.get("reservation_kind") != "subsession-batch":
+            pipe += (
+                f",parallel_group={replica_reservation['batch_group']}"
+                f",replica_group={replica_reservation['batch_group']}"
+            )
         for key in REPLICA_RESERVATION_ROW_KEYS:
             if key in replica_reservation:
                 pipe += f",{key}={replica_reservation[key]}"
