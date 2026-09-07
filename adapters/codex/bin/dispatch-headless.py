@@ -1624,17 +1624,23 @@ def append_job(jobs: Path, args: argparse.Namespace) -> bool:
             f",fallback_ordinal={args.fallback_ordinal},launch_fence=registry-v1"
         )
     replica_reservation = getattr(args, "replica_batch_reservation", {})
-    if replica_reservation:
-        # Only a ROUTE-LEG batch aliases its group onto the row's
-        # parallel_group/replica_group. A sub-session batch's group is its
-        # chain, and the subdivision node has no leg membership at all
-        # (SD-119 (1)) -- writing the chain id into those fields would make a
-        # slice row answer a route-leg group census it was never part of.
-        if replica_reservation.get("reservation_kind") != "subsession-batch":
-            pipe += (
-                f",parallel_group={replica_reservation['batch_group']}"
-                f",replica_group={replica_reservation['batch_group']}"
-            )
+    # These keys belong to a ROUTE-LEG batch only, and they are deliberately not
+    # written for a sub-session batch. Two reasons, both load-bearing:
+    #  - a slice has no leg membership (SD-119 (1)), so aliasing its chain id
+    #    onto parallel_group/replica_group would make the row answer a route-leg
+    #    group census it was never part of;
+    #  - a slice row is REGISTERED before any reservation exists and STARTED
+    #    after, and `_immutable_attempt_identity` folds these keys into the row's
+    #    identity -- adding them only on the start pass made the two observations
+    #    of one attempt disagree (`attempt-identity-conflict`, measured).
+    # The slice's batch identity is already durable on the row as
+    # `session_chain_id`/`batch_group`, in the sealed chain manifest, and in the
+    # governor's own claim record.
+    if replica_reservation and replica_reservation.get("reservation_kind") != "subsession-batch":
+        pipe += (
+            f",parallel_group={replica_reservation['batch_group']}"
+            f",replica_group={replica_reservation['batch_group']}"
+        )
         for key in REPLICA_RESERVATION_ROW_KEYS:
             if key in replica_reservation:
                 pipe += f",{key}={replica_reservation[key]}"
