@@ -503,6 +503,197 @@ class FallbackTest(unittest.TestCase):
   self.assertEqual(result.returncode,0,result.stdout+result.stderr)
   self.assertRegex(result.stdout,r"selected_hop=(same|cross)-harness-headless")
   self.assertNotIn("skipped-prior-unchanged-failure",result.stdout)
+
+
+class SubdivisionStartIntegrationTest(unittest.TestCase):
+ """G2-b: exercise the real fallback ``_dispatch --start`` seam.
+
+ The only substituted boundary is the external dispatch-node process.  The
+ fallback wrapper, plan consumer, admission, ledger, registry, and receipt
+ code all run as shipped.
+ """
+
+ def setUp(self):
+  self.base=FallbackTest("test_attempt_identity_is_stable_across_actions")
+  self.base.setUp()
+  self.addCleanup(self.base.tearDown)
+
+ def __getattr__(self, name):
+  base=self.__dict__.get("base")
+  if base is not None and hasattr(base, name):
+   return getattr(base, name)
+  raise AttributeError(name)
+
+ def _start_args(self, path, action, *, plan=None):
+  argv=["stage-dispatch-fallback.py", "--route", str(path), "--node", "execute",
+        "--slug", "fallback-execute", "--parent", "owner",
+        "--capability-mode", "dev", "--worker-mode", "dev/backend",
+        "--model-role", "fast implementer", "--jobs", str(self.jobs), "--" + action]
+  if plan is not None:
+   argv += ["--plan-slices", str(plan)]
+  return argv
+
+ def _execute_route_and_plan(self):
+  path=self.route()
+  plan=Path(self.tmp.name)/"plan_slices.json"
+  (self.repo/"source").mkdir()
+  (self.repo/"source"/"slice-a.py").write_text("a\n")
+  (self.repo/"source"/"slice-b.py").write_text("b\n")
+  plan.write_text(json.dumps({
+   "schema_version":1, "decision":"slices", "serial_reason":None,
+   "slices":[
+    {"id":"backend-a", "brief":"a", "narrow_verify":"true",
+     "fixed_files":["source/slice-a.py"], "expected_round_trips":2,
+     "adapter":"codex"},
+    {"id":"backend-b", "brief":"b", "narrow_verify":"true",
+     "fixed_files":["source/slice-b.py"], "expected_round_trips":2,
+     "adapter":"codex"},
+   ]
+  }), encoding="utf-8")
+  return path, plan
+
+ def test_actual_start_mints_decision_before_fake_first_child_and_links_all_rows(self):
+  observed={"calls":0, "ledger_at_first_call":False, "rows_at_first_call":False}
+
+  class FakeDispatchNode:
+   def __init__(self, command, **_kwargs):
+    observed["calls"] += 1
+    if "--action" in command and command[command.index("--action") + 1] == "start":
+     observed["start_calls"] = observed.get("start_calls", 0) + 1
+    self.args=command
+    ledger=self.jobs.parent/"subdivision"/f"{route_id}.jsonl"
+    observed["ledger_at_first_call"] = ledger.is_file() and bool(ledger.read_text().strip())
+    observed["rows_at_first_call"] = all(
+     f"attempt_id=att-" in line for line in self.jobs.read_text().splitlines()
+     if line.strip()
+    )
+    self.returncode=0
+    self.stdout=None
+    self.stderr=None
+    self.attempt_id=command[command.index("--attempt-id")+1]
+    self.adapter=command[command.index("--adapter")+1]
+    if command[command.index("--action") + 1] == "register":
+     jobs=FakeDispatchNode.jobs
+     def value(flag, default=""):
+      return command[command.index(flag) + 1] if flag in command else default
+     metadata={
+      "capability":"autopilot-code", "capability_mode":"dev", "qa":"standard",
+      "intensity":"strong", "attempt_schema_version":"2", "dispatch_depth":"2",
+      "transport":"headless", "execution_surface":"registered-headless",
+      "registered_worker":"1", "fallback_hop":"same-harness-headless",
+      "harness":self.adapter, "route_id":route_id, "route_node":"execute",
+      "parent":"owner", "worker_type":"stage", "unit":"dev/backend",
+      "attempt_id":self.attempt_id, "launch_authority":"conductor",
+      "subsession_id":value("--subsession-id"),
+      "subsession_index":value("--subsession-index"),
+      "subsession_count":value("--subsession-count"),
+      "subsession_mode":value("--subsession-mode"),
+      "subsession_purpose":"planned", "session_chain_id":value("--session-chain-id"),
+      "stage_authority":"0",
+      "phase_brief":value("--phase-brief"),
+      "state_ledger":str(Path(value("--phase-brief")).with_suffix(".ledger.json")),
+      "phase_brief_sha256":"0" * 64, "fixed_files_sha256":"0" * 64,
+      "narrow_verify_sha256":"0" * 64, "expected_round_trips":value("--expected-round-trips"),
+      "parallel_group":"execute", "batch_group":"execute",
+     }
+     pipe=",".join(f"{key}={val}" for key,val in metadata.items() if val != "")
+     with Path(jobs).open("a", encoding="utf-8") as registry:
+      registry.write(f"2026-09-07T00:00:00Z\topen\t{self.jobs.parent}\t{self.jobs.parent}\t{value('--slug')}\t{pipe}\n")
+   def communicate(self, input=None, timeout=None):
+    return ("check=ok\nstatus=start\nadapter=" + self.adapter +
+            "\nattempt_id=" + self.attempt_id +
+            "\nregistered=1\nstarted=1\nchild_spawned=1\nduplicate_attempt=0\n", "")
+   def poll(self): return self.returncode
+   def wait(self, timeout=None): return self.returncode
+   def kill(self): self.returncode=-9
+   def __enter__(self): return self
+   def __exit__(self, *_exc): return False
+
+  real_popen=F.subprocess.Popen
+  real_run=F.subprocess.run
+  def fake_popen(command, *args, **kwargs):
+   if any(str(part).endswith("dispatch-node.py") for part in command):
+    # Bind the fixture state without replacing the repository's verification
+    # subprocesses (capability-route verify still runs for the real start path).
+    FakeDispatchNode.jobs=self.jobs
+    return FakeDispatchNode(command, **kwargs)
+   return real_popen(command, *args, **kwargs)
+  def fake_run(command, *args, **kwargs):
+   if "model-worker-governor.py" in " ".join(map(str, command)) and "reserve" in command:
+    count=int(command[command.index("--count")+1])
+    encoded=command[command.index("--batch-manifest")+1]
+    manifest=json.loads(encoded)
+    payload={"class":"dispatch", "count":count, "owner_pid":os.getpid(),
+             "batch_manifest_sha256":manifest["batch_manifest_sha256"],
+             "tokens":[f"{index:032x}" for index in range(1, count+1)]}
+    return subprocess.CompletedProcess(command, 0, json.dumps(payload), "")
+   return real_run(command, *args, **kwargs)
+
+  with self.dispatch_env(AGENT_DISPATCH_CURRENT_HARNESS="codex",
+                         AGENT_DISPATCH_CURRENT_TRANSPORT="headless",
+                         AGENT_DISPATCH_CURRENT_SANDBOX="workspace-write",
+                         AGENT_MODEL_WORKER_TOTAL="100",
+                         AGENT_MODEL_WORKER_CLASS_LIMIT_DISPATCH="100",
+                         AGENT_MODEL_WORKER_START_BUDGET="100"):
+   path, plan = self._execute_route_and_plan()
+   route=json.loads(path.read_text())
+   route_id=route["route_id"]
+   self.seed_parent()
+   argv=self._start_args(path, "start", plan=plan)
+   with mock.patch.object(sys, "argv", argv), \
+        mock.patch.object(F.subprocess, "Popen", fake_popen), \
+        mock.patch.object(F.subprocess, "run", fake_run):
+    observation=F.LAUNCH_TUPLE.ReportOnlyObservation()
+    code=F._dispatch(observation)
+   output_fields=dict(line.split("=",1) for line in observation.output.splitlines()
+                      if "=" in line) if getattr(observation, "output", "") else {}
+
+  # _dispatch prints its receipt; the durable checks below are the authority.
+  self.assertEqual(code, 0)
+  self.assertEqual(observed["calls"], 4)
+  self.assertEqual(observed["start_calls"], 2)
+  self.assertTrue(observed["ledger_at_first_call"])
+  self.assertTrue(observed["rows_at_first_call"])
+  ledger=self.jobs.parent/"subdivision"/f"{route_id}.jsonl"
+  decisions=[json.loads(line) for line in ledger.read_text().splitlines() if line.strip()]
+  self.assertEqual(len(decisions), 1)
+  self.assertEqual(decisions[0]["decision"], "admitted")
+  self.assertEqual(decisions[0]["reason"], "")
+  decision_id=decisions[0]["event_id"]
+  rows=[]
+  for line in self.jobs.read_text().splitlines():
+   if "attempt_id=att-execute-" in line:
+    rows.append(dict(item.split("=",1) for item in line.split("\t",5)[5].split(",")
+                     if "=" in item))
+  self.assertEqual(len(rows), 2, self.jobs.read_text())
+  self.assertTrue(all(row.get("subdivision_decision_id") == decision_id for row in rows))
+  self.assertEqual(observation.unrecorded, 0)
+
+ def test_start_without_plan_records_declined_decision_before_single_path(self):
+  # Register is the same execute entry surface and avoids launching a model
+  # process; it still consumes the absent-plan branch and its single-session
+  # fallback path.
+  with self.dispatch_env(AGENT_DISPATCH_CURRENT_HARNESS="codex",
+                         AGENT_DISPATCH_CURRENT_TRANSPORT="headless",
+                         AGENT_DISPATCH_CURRENT_SANDBOX="workspace-write"):
+   path, _plan = self._execute_route_and_plan()
+   route=json.loads(path.read_text())
+   route_id=route["route_id"]
+   self.seed_parent()
+   argv=self._start_args(path, "register")
+   fake=mock.Mock(returncode=0, stdout="check=ok\n", stderr="")
+   with mock.patch.object(sys, "argv", argv), mock.patch.object(F.subprocess, "run", return_value=fake):
+    observation=F.LAUNCH_TUPLE.ReportOnlyObservation()
+    code=F._dispatch(observation)
+  self.assertEqual(code, 0)
+  ledger=self.jobs.parent/"subdivision"/f"{route_id}.jsonl"
+  decisions=[json.loads(line) for line in ledger.read_text().splitlines() if line.strip()]
+  self.assertEqual(len(decisions), 1)
+  self.assertEqual((decisions[0]["decision"], decisions[0]["reason"]),
+                   ("considered-declined", "plan-declared-no-slices"))
+class FallbackTest(FallbackTest):
+ """Continue the legacy fallback corpus after the isolated G2-b TestCase."""
+
  def test_invalid_model_role_is_structured_and_preserved(self):
   path=self.route(same_status="supported")
   cross="codex/headless/workspace-write/claude/conductor"

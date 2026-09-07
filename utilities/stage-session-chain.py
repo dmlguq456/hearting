@@ -180,12 +180,17 @@ def _run_parallel_subdivision(
             decision_context=decision_context,
         )
     except SUBDIVISION_ADMISSION.SubdivisionAdmissionError as exc:
-        print("subdivision_decision=refused")
-        print(f"subdivision_decision_id={decision_context['event_id']}")
+        # This surface's stdout IS the typed JSON envelope (`OPERATIONS` §5.10):
+        # callers `json.loads` the whole stream, so the decision fields ride
+        # INSIDE it. The wrapper's own `key=value` receipt lines are printed by
+        # `stage-dispatch-fallback.py`, never here -- prefixing them onto this
+        # envelope made it unparseable.
         print(json.dumps({
             "schema_version": 1, "state": "subdivision-batch-refused",
             "chain_id": None, "reason": SUBDIVISION_ADMISSION.refusal_reason_for(exc),
             "admitted_rows": 0, "admitted_models": 0,
+            "subdivision_decision": "refused",
+            "subdivision_decision_id": decision_context["event_id"],
         }, sort_keys=True))
         return 65
     if args.action == "register":
@@ -206,6 +211,8 @@ def _run_parallel_subdivision(
             "reason": SUBDIVISION_ADMISSION.BATCH_REGISTRATION_INCOMPLETE,
             "admitted_rows": 0, "admitted_models": 0,
             "cancelled_rows": sum(int(row.get("cancelled") or 0) for row in results),
+            "subdivision_decision": "refused",
+            "subdivision_decision_id": decision_context["event_id"],
         }, sort_keys=True))
         return 65
     print(f"chain_id={admission.manifest['chain_id']}")

@@ -37,6 +37,12 @@ _DB_SPEC = importlib.util.spec_from_file_location(
 DB = importlib.util.module_from_spec(_DB_SPEC)
 _DB_SPEC.loader.exec_module(DB)
 
+_CHAIN_SPEC = importlib.util.spec_from_file_location(
+    "stage_session_chain", Path(__file__).with_name("stage-session-chain.py")
+)
+CHAIN = importlib.util.module_from_spec(_CHAIN_SPEC)
+_CHAIN_SPEC.loader.exec_module(CHAIN)
+
 
 class SubdivisionContractTest(unittest.TestCase):
     def _fixture(self, td, *, mode="parallel", overlap=False, outside=False,
@@ -177,6 +183,81 @@ class SubdivisionContractTest(unittest.TestCase):
             manifest_path.write_text(json.dumps(data))
             with self.assertRaisesRegex(SSC.StageSessionError, "parallel-fixed-file-outside-write-scope"):
                 SSC.load_manifest(manifest_path, route=route, node=node)
+
+    def test_rc2_sealed_plan_uses_all_24_repository_files_and_admits_two_slices(self):
+        """The RC-2 probe must exercise the sealed plan, not a source fixture.
+
+        The two old interpretations are deliberately kept in this one test:
+        a local resolver replacement reproduces the old literal ``source``
+        meaning, while the real resolver admits the exact 24 paths from the
+        plan artifact.
+        """
+        plan_path = (Path(__file__).resolve().parents[1] / ".agent_reports" /
+                     "_scratch" / "exec-subdivision" / "plan_slices.json")
+        if not plan_path.is_file():
+            plan_path = Path("/home/nas/user/Uihyeop/personal/hearting/.agent_reports") / \
+                "_scratch/exec-subdivision/plan_slices.json"
+        raw = json.loads(plan_path.read_text(encoding="utf-8"))
+        fixed = [path for slice_ in raw["slices"] for path in slice_["fixed_files"]]
+        self.assertEqual(len(fixed), 24)
+        self.assertEqual(fixed, [path for slice_ in raw["slices"] for path in slice_["fixed_files"]])
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            route = {
+                "route_id": "rt-rc2-real-files",
+                "route_hash": "sha256:" + "a" * 64,
+                "registry_digest": "sha256:" + "b" * 64,
+                "cwd": str(Path(__file__).resolve().parents[1]),
+                "nodes": [{
+                    "id": "execute", "dispatch_depth": 2,
+                    "completion_gate": "code-execute",
+                    "write_scope": ["source/**", "checklist.md", "dev_logs/**", "evidence/**"],
+                    "subdivision": {"min_intensity": "standard", "max_slices": 4,
+                                    "disjointness": "exact-fixed-files"},
+                }],
+            }
+            route_path = root / "route.json"
+            route["_route_file"] = str(route_path)
+            route_path.write_text(json.dumps(route), encoding="utf-8")
+            # The legacy lambda is the exact bug class under test: all real
+            # repository files are rejected unless ``source/**`` is treated as
+            # the node's abstract worktree-mutating scope.
+            old_manifest = root / "old-chain.json"
+            old_manifest.write_text(json.dumps({
+                "schema_version": 1, "kind": "stage-session-chain",
+                "chain_id": "ssc-rc2-old", "mode": "parallel",
+                "worktree": route["cwd"], "route_file": str(route_path),
+                "route_id": route["route_id"], "route_hash": route["route_hash"],
+                "route_node": "execute", "completion_gate": "code-execute",
+                "sessions": [{
+                    "subsession_id": "ss-old-1", "attempt_id": "att-old-1",
+                    "adapter": "codex", "slug": "old-1",
+                    "phase_brief": str(root / "brief.md"),
+                    "fixed_files": [str(Path(route["cwd"]) / fixed[0])],
+                    "narrow_verify": "true", "expected_round_trips": 2,
+                }, {
+                    "subsession_id": "ss-old-2", "attempt_id": "att-old-2",
+                    "adapter": "codex", "slug": "old-2",
+                    "phase_brief": str(root / "brief.md"),
+                    "fixed_files": [str(Path(route["cwd"]) / fixed[13])],
+                    "narrow_verify": "true", "expected_round_trips": 2,
+                }],
+            }), encoding="utf-8")
+            with mock.patch.object(SSC, "_worktree_mutating_scope", lambda scope: False):
+                with self.assertRaisesRegex(SSC.StageSessionError,
+                                             "parallel-fixed-file-outside-write-scope"):
+                    SSC.load_manifest(old_manifest, route=route, node=route["nodes"][0])
+
+            # Feed the sealed JSON unchanged; plan_slices() resolves the exact
+            # relative paths against the real worktree and mints the manifest.
+            output = root / "chain.json"
+            result = CHAIN.plan_slices(route_path=route_path, node_id="execute",
+                                       slices_path=plan_path, output_path=output,
+                                       default_adapter="codex")
+            self.assertEqual(result["planned"], "ok")
+            self.assertEqual(result["sessions"], 2)
+            self.assertEqual(result["fixed_files"], 24)
 
     def _attempt_row(self, *, route, manifest, session, index, count, mode="parallel", timestamp="2026-08-14T00:00:00Z"):
         fake_sha = "a" * 64
