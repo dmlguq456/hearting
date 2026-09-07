@@ -358,11 +358,13 @@
             ],
             "outputs": [
               "plan.md",
-              "checklist.md"
+              "checklist.md",
+              "plan_slices.json"
             ],
             "write_scope": [
               "plan.md",
-              "checklist.md"
+              "checklist.md",
+              "plan_slices.json"
             ],
             "resource_class": "normal",
             "completion_gate": "code-plan",
@@ -423,7 +425,8 @@
             "role": "fast implementer",
             "inputs": [
               "plan.md",
-              "checklist.md"
+              "checklist.md",
+              "plan_slices.json"
             ],
             "outputs": [
               "source-diff",

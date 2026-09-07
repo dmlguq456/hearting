@@ -324,6 +324,50 @@ A legacy hash collision is diagnostic
    - **Sub-session scheduling and mutation:** serial sub-sessions form one declared chain and should be registered/joined as one batch so runtime completion resumes the owner once, after the whole chain. A chain runner starts each exact registered attempt only after its predecessor is terminal and quiescent. Parallel sub-sessions use the existing sealed parallel-group transaction and require provably disjoint fixed-file ownership. Mutating overlap is serial even when analysis or verification can run in parallel. During a declared sub-session chain, first-parent descendant `HEAD` movement is accepted under the same lineage proof as an in-place mutation retry; it neither recompiles the route nor spends retry budget. A native runtime subagent may assist inside one sub-session only within that sub-session's fixed files and stage scope, with serial mutation, summary-only return, and no gate authority; unsupported adapters use the checked registered-headless or inline fallback without claiming native parity.
    - **The parallel-subdivision surface an owner actually calls.** A declared subdivision is passed to the group transaction as a manifest, and both its failure mode and its gate are typed:
 
+     **Subdivision decision record v1.** Every `execute` `--register` or `--start` with a
+     route subdivision permission performs one lookup and one first-decision attempt at
+     `<dispatch state root>/subdivision/<route_id>.jsonl`. The append is atomic (`O_APPEND`
+     under the record lock), and the first decision for an event is immutable. A realized
+     attempt row may carry exactly one `subdivision_decision_id` pointer; it is a pointer,
+     not a second decision record. The required fields are exactly:
+     `schema_version`, `event_id`, `ts`, `route_id`, `route_hash`, `route_node`,
+     `capability`, `requested_intensity`, `effective_intensity`, `permission`, `decision`,
+     `reason`, `manifest_sha256`, `slice_count`, `writer`, and `evidence_digest`.
+     `decision` is one of `not-eligible`, `considered-declined`, `admitted`, or `refused`.
+     The closed `reason` enum is:
+     `subdivision-not-permitted`, `intensity-below-min`, `surface-unreachable`,
+     `owner-declined-not-separable`, `plan-declared-no-slices`, `slice-count-out-of-range`,
+     `disjointness-unproven`, `fixed-file-outside-scope`, `fixed-file-not-exact`,
+     `fixed-file-overlap`, `baseline-unavailable`, `scope-unproven`,
+     `governor-capacity-insufficient`, `artifact-base-invalid`,
+     `artifact-root-unavailable`, and `artifact-scan-cap-exceeded`; an admitted record has
+     an empty reason. Existing refusal vocabulary `subdivision-baseline-missing`,
+     `subdivision-commit-attempted`, and `subdivision-scope-violation`, and the gate
+     semantics below, remain unchanged.
+
+     Observation failure is fail-open: lock/open/write failures produce a warning and do
+     not block admission, start, or the stage gate. Inventory queries report
+     `inventory_complete=false` with a health warning when the record is absent,
+     corrupt, or unreadable; clean absence is `no-record-observed`, not proof that no
+     attempt occurred. This distinguishes ledger loss from no attempted decision.
+
+     Plan selection is deterministic: one explicit `--plan-slices` path wins; otherwise
+     the only candidate is `<artifact-root>/_scratch/<route.slug>/plan_slices.json`.
+     No directory search is allowed. If `route.slug` is absent and no explicit path was
+     given, record `considered-declined/plan-declared-no-slices` and continue in one
+     session. Typed refusal and an explicit serial declaration likewise continue in one
+     session, with the one decision record.
+
+     The `source/**` write-scope entry has one meaning: it is the abstract marker that
+     this node may mutate the worktree; it is not the `<worktree>/source` directory. The
+     canonical predicate is exactly `capability-route.worktree_mutating_scope()` and
+     fixed-file containment must reference that predicate, not duplicate its logic.
+     `.git` and tracked artifact shadows (`.agent_reports`/`.claude_reports`) remain
+     rejected. The before/after reproduction in `evidence/rc2-before-after.md` shows the
+     structural cause of SD-103 not firing: the same `source/**` string was interpreted
+     as a literal directory by the manifest loader, rejecting the 24 real files before;
+     after using the canonical predicate, the identical manifest admitted two sessions.
+
      ```
      python3 utilities/dispatch-batch.py --parallel-group <node> --route <route-file> \
        --parent <owner slug> --slug-prefix <prefix> --subdivision-manifest <chain.json> --action start

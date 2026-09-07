@@ -1452,6 +1452,7 @@ def _dispatch(observation: "LAUNCH_TUPLE.ReportOnlyObservation") -> int:
     p.add_argument("--capacity-effort")
     p.add_argument("--capacity-variant")
     p.add_argument("--failed-tuple", action="append", default=[], help="tuple key already failed without evidence change")
+    p.add_argument("--plan-slices", type=Path, help="sealed plan_slices.json for execute subdivision")
     action = p.add_mutually_exclusive_group(required=True)
     action.add_argument("--dry-run", dest="action", action="store_const", const="dry-run")
     action.add_argument("--register", dest="action", action="store_const", const="register")
@@ -1545,6 +1546,58 @@ def _dispatch(observation: "LAUNCH_TUPLE.ReportOnlyObservation") -> int:
         ).path
     except DispatchContractError as exc:
         return fail(exc.reason, 73, detail=exc.detail, child_spawned="0")
+
+    # The two execute entry surfaces converge here. Every eligible entry must
+    # leave a decision record, even when the owner did not provide a plan.
+    if args.action in {"register", "start"}:
+        chain_spec = importlib.util.spec_from_file_location("stage_session_chain_for_fallback", ROOT / "utilities" / "stage-session-chain.py")
+        if chain_spec is None or chain_spec.loader is None:
+            return fail("surface-unreachable", 65, child_spawned="0")
+        chain = importlib.util.module_from_spec(chain_spec)
+        chain_spec.loader.exec_module(chain)
+        context = chain.SUBDIVISION_ADMISSION.DECISION.lookup(
+            route, node, jobs=args.jobs, writer="stage-dispatch-fallback", action=args.action
+        )
+        decision_id = context["event_id"]
+        try:
+            chain.SUBDIVISION_ADMISSION.check_permission(route, node)
+        except chain.SUBDIVISION_ADMISSION.SubdivisionAdmissionError as exc:
+            decision, reason = "not-eligible", chain.SUBDIVISION_ADMISSION.refusal_reason_for(exc)
+            chain.SUBDIVISION_ADMISSION.DECISION.commit(context, decision, reason)
+            print(f"subdivision_decision={decision}")
+            print(f"subdivision_decision_id={decision_id}")
+        else:
+            # Select exactly one candidate: explicit input, or the sealed
+            # route slug under the canonical artifact root.
+            plan_path = args.plan_slices
+            if plan_path is None:
+                slug, artifact_root = route.get("slug"), route.get("artifact_root")
+                if slug and isinstance(artifact_root, str) and artifact_root:
+                    plan_path = Path(artifact_root) / "_scratch" / slug / "plan_slices.json"
+            if plan_path is None or not plan_path.is_file():
+                decision, reason = "considered-declined", "plan-declared-no-slices"
+                chain.SUBDIVISION_ADMISSION.DECISION.commit(context, decision, reason)
+                print(f"subdivision_decision={decision}")
+                print(f"subdivision_decision_id={decision_id}")
+            else:
+                manifest_path = plan_path.with_name("chain.json")
+                try:
+                    planned = chain.plan_slices(route_path=args.route, node_id=args.node,
+                                                slices_path=plan_path, output_path=manifest_path)
+                except chain.StageSessionError as exc:
+                    decision, reason = "refused", chain.SUBDIVISION_ADMISSION.refusal_reason_for(exc)
+                    chain.SUBDIVISION_ADMISSION.DECISION.commit(context, decision, reason)
+                    print(f"subdivision_decision={decision}")
+                    print(f"subdivision_decision_id={decision_id}")
+                else:
+                    if planned.get("planned") == "serial":
+                        decision, reason = "considered-declined", planned.get("reason", "plan-declared-no-slices")
+                        chain.SUBDIVISION_ADMISSION.DECISION.commit(context, decision, reason)
+                        print(f"subdivision_decision={decision}")
+                        print(f"subdivision_decision_id={decision_id}")
+                    else:
+                        args.manifest = manifest_path
+                        return chain._run_parallel_subdivision(route, node, args, jobs=args.jobs)
 
     try:
         parent_identity = DISPATCH_NODE.current_parent_identity()

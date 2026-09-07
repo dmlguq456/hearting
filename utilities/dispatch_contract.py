@@ -106,6 +106,7 @@ FALLBACK_HOPS = {
     "inline",
 }
 ATTEMPT_MUTABLE_METADATA = {
+    "subdivision_decision_id",
     "launch_claimed",
     "pid",
     "pid_start",

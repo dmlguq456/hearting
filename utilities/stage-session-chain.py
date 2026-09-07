@@ -165,6 +165,9 @@ def _run_parallel_subdivision(
     )
     governor = ROOT / "utilities" / "model-worker-governor.py"
     governor_root = resolve_model_governor_root(artifact_root)
+    decision_context = SUBDIVISION_ADMISSION.DECISION.lookup(
+        route_record, node, jobs=jobs, writer="stage-dispatch-fallback", action=args.action
+    )
     try:
         # F-3 narrowed by SD-103: only a non-worktree-base slice is refused
         # here -- see `raise_if_parallel_entry_fail_closed` in
@@ -174,11 +177,14 @@ def _run_parallel_subdivision(
             route=route_record, node=node, manifest_path=args.manifest,
             governor=governor, governor_root=governor_root,
             reserve=DISPATCH_BATCH.reserve_batch, jobs=jobs,
+            decision_context=decision_context,
         )
     except SUBDIVISION_ADMISSION.SubdivisionAdmissionError as exc:
+        print("subdivision_decision=refused")
+        print(f"subdivision_decision_id={decision_context['event_id']}")
         print(json.dumps({
             "schema_version": 1, "state": "subdivision-batch-refused",
-            "chain_id": None, "reason": exc.reason,
+            "chain_id": None, "reason": SUBDIVISION_ADMISSION.refusal_reason_for(exc),
             "admitted_rows": 0, "admitted_models": 0,
         }, sort_keys=True))
         return 65
@@ -204,10 +210,14 @@ def _run_parallel_subdivision(
         return 65
     print(f"chain_id={admission.manifest['chain_id']}")
     print(f"chain_manifest_sha256={admission.manifest_digest}")
+    print(f"subdivision_decision_id={decision_context['event_id']}")
     print(f"registered_sessions={len(admission.sessions)}")
     print(f"registered={sum(1 for row in results if row.get('registered'))}")
     print(f"started={sum(1 for row in results if row.get('started'))}")
     print(f"child_spawned={sum(1 for row in results if row.get('started'))}")
+    attempt_ids = [session["attempt_id"] for session in admission.sessions]
+    print(f"attempt_id={attempt_ids[0]}")
+    print("attempt_ids=" + ";".join(attempt_ids))
     print("runtime_wait=registered-children")
     return 0 if all(row.get("started") for row in results) else 1
 
@@ -243,8 +253,27 @@ def plan_slices(
     permission = node.get("subdivision")
     if not isinstance(permission, dict) or permission.get("disjointness") != "exact-fixed-files":
         raise StageSessionError("parallel-subdivision-not-permitted")
-    raw = json.loads(Path(slices_path).read_text(encoding="utf-8"))
-    slices = raw.get("slices") if isinstance(raw, dict) else raw
+    try:
+        raw = json.loads(Path(slices_path).read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError) as exc:
+        raise StageSessionError("plan-slices-schema-invalid") from exc
+    # Legacy callers supplied the already-extracted list; retain that narrow
+    # compatibility while the sealed plan contract is consumed when present.
+    if isinstance(raw, list):
+        slices = raw
+    elif isinstance(raw, dict) and raw.get("schema_version") == 1:
+        decision = raw.get("decision")
+        serial_reason = raw.get("serial_reason")
+        if decision == "serial":
+            allowed = {"owner-declined-not-separable", "plan-declared-no-slices", "slice-count-out-of-range"}
+            if serial_reason not in allowed or raw.get("slices") != []:
+                raise StageSessionError("plan-slices-serial-invalid")
+            return {"planned": "serial", "reason": serial_reason, "manifest": None, "sessions": 0}
+        if decision != "slices" or serial_reason is not None:
+            raise StageSessionError("plan-slices-decision-invalid")
+        slices = raw.get("slices")
+    else:
+        raise StageSessionError("plan-slices-schema-invalid")
     if not isinstance(slices, list):
         raise StageSessionError("plan-slices-invalid")
     cap = permission.get("max_slices", 4)

@@ -200,6 +200,18 @@ class CensusTest(unittest.TestCase):
         self.assertEqual(actual_strong, expected_strong_boundaries)
 
 
+class SubdivisionReceiptCompatibilityTest(unittest.TestCase):
+    def test_batch_superset_receipt_exposes_first_slice_attempt(self):
+        receipt = "\n".join([
+            "chain_id=ssc-execute-abcd", "chain_manifest_sha256=sha256:manifest",
+            "registered=2", "started=2", "child_spawned=2",
+            "attempt_id=att-first-slice", "attempt_ids=att-first-slice;att-second-slice",
+        ])
+        fields = SA.FALLBACK.output_fields(receipt)
+        self.assertEqual(fields["child_spawned"], "2")
+        self.assertEqual(fields["attempt_id"], "att-first-slice")
+
+
 class FanInStaggeredTest(unittest.TestCase):
     """A-2: `a -> {b1, b2} -> c` (synthetic; real fan-in successors are all
     terminal or group in this registry, so this predicate needs its own

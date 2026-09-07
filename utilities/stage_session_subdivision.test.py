@@ -155,6 +155,29 @@ class SubdivisionContractTest(unittest.TestCase):
             manifest = SSC.load_manifest(manifest_path, route=route, node=node)
             self.assertEqual(len(manifest["sessions"]), 2)
 
+    def test_g1_scope_predicate_load_failure_is_typed(self):
+        with tempfile.TemporaryDirectory() as td:
+            _worktree, route, node, manifest_path = self._fixture(td)
+            original = SSC.importlib.util.spec_from_file_location
+            with mock.patch.object(SSC.importlib.util, "spec_from_file_location", return_value=None):
+                SSC._WORKTREE_SCOPE_RESOLVER = None
+                SSC.sys.modules.pop("capability_route", None)
+                with self.assertRaisesRegex(SSC.StageSessionError, "scope-predicate-unavailable"):
+                    SSC.load_manifest(manifest_path, route=route, node=node)
+            SSC.importlib.util.spec_from_file_location = original
+
+    def test_g1_tracked_artifact_shadow_is_outside_parallel_scope(self):
+        with tempfile.TemporaryDirectory() as td:
+            worktree, route, node, manifest_path = self._fixture(td)
+            shadow = worktree / ".agent_reports" / "shadow.json"
+            shadow.parent.mkdir()
+            shadow.write_text("shadow")
+            data = json.loads(manifest_path.read_text())
+            data["sessions"][0]["fixed_files"] = [str(shadow)]
+            manifest_path.write_text(json.dumps(data))
+            with self.assertRaisesRegex(SSC.StageSessionError, "parallel-fixed-file-outside-write-scope"):
+                SSC.load_manifest(manifest_path, route=route, node=node)
+
     def _attempt_row(self, *, route, manifest, session, index, count, mode="parallel", timestamp="2026-08-14T00:00:00Z"):
         fake_sha = "a" * 64
         fields = {

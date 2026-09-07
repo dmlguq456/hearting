@@ -94,6 +94,26 @@ class AdmissionFixture(unittest.TestCase):
 
 
 class AdmissionGateTest(AdmissionFixture):
+    def test_refusal_reason_mapper_covers_closed_internal_categories(self):
+        expected = {
+            "subdivision-not-permitted": "subdivision-not-permitted",
+            "intensity-below-min": "intensity-below-min",
+            "surface-unreachable": "surface-unreachable",
+            "parallel-fixed-file-outside-write-scope:x": "fixed-file-outside-scope",
+            "fixed-file-must-be-exact:x": "fixed-file-not-exact",
+            "parallel-fixed-file-overlap:x": "fixed-file-overlap",
+            "baseline-unavailable": "baseline-unavailable",
+            "scope-unproven": "scope-unproven",
+            "governor-capacity-insufficient": "governor-capacity-insufficient",
+            "artifact-base-invalid": "artifact-base-invalid",
+            "artifact-root-unavailable": "artifact-root-unavailable",
+            "artifact-scan-cap-exceeded": "artifact-scan-cap-exceeded",
+        }
+        for raw, reason in expected.items():
+            with self.subTest(raw=raw):
+                self.assertEqual(
+                    SUBDIV.refusal_reason_for(SUBDIV.SubdivisionAdmissionError(raw)), reason
+                )
     """A-1: `execute` admits a manifest with zero `parallel_group` membership."""
 
     def test_execute_node_admits_two_slice_manifest_without_parallel_group(self):

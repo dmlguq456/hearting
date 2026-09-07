@@ -312,6 +312,8 @@ sh "$AGENT_HOME/utilities/dispatch-wait.sh" --parent <cycle-slug>
 
 After the typed receipt (or fallback exit 0), read only plan status and paths. A terminal recovery receipt permits checked exact-attempt diagnosis; raw transcript inspection still requires a terminal/closed row or explicit operator recovery. Direct and the quick one-shot owner keep their declared inline plan; standard+ invokes `code-plan` in-session only after the compiled fallback policy reaches inline under the closed rules above.
 
+For standard+, the plan stage must also write `plan_slices.json` beside `plan.md` and `checklist.md`. It is the closed machine contract consumed by execute: `schema_version=1`, `route_node="execute"`, `decision` (`slices` or `serial`), `serial_reason`, and `slices`. A `slices` decision has 2..`max_slices` exact fixed-file entries; a `serial` decision has no slices and one of the three allowed serial reasons. The human-readable slice prose in `plan.md` is not machine input.
+
 At `strong` the compiled route contains `plan` (`deep`) and `plan-alternative`
 (`balanced-deep`). At `thorough|adversarial` it also contains the light
 `plan-implementation-risk` scout. Every leg reads all direction briefs and writes
@@ -365,33 +367,30 @@ selects `assigned_contract=code-execute` and the portable implementer role. Pass
 `plan.md` path, retain the emitted attempt ID, yield for the typed receipt, and publish exact completion. Fallback
 to in-session only under the closed rules above.
 
-**Subdivision check (SD-103) — perform it explicitly before the single-session dispatch.**
+**Subdivision check (SD-103) — automatic at execute start.**
 `execute` is the one node that carries a sealed `subdivision` permission
-(`min_intensity: standard`, `max_slices: 4`, `disjointness: exact-fixed-files` — `standard`
-since SD-103's routing-flex correction: the permission sat at `strong` while 100/100 execute
-rows ran at `standard`, so it never fired). The firing condition is the owner's judgment,
-not a rule: when `plan.md` partitions the work into 2–4 packages whose file ownership is
-exactly disjoint and that can finish independently, do not default to one long serial
-session. Transcribe the plan's `slice` blocks into one JSON list
-(`[{"id","fixed_files":[…],"brief","narrow_verify","expected_round_trips"}]`) and run
-`python3 utilities/stage-session-chain.py plan-slices --route <route-file> --node execute
---worktree <cwd> --slices <slices.json> --output <chain.json>`: it mints the chain and slice
-ids, writes one phase brief per slice beside the manifest, and proves exact files, worktree
-and write-scope containment and pairwise disjointness with the same `load_manifest` the
-admission re-proves. Then admit the slices with one `dispatch-batch.py --parallel-group
-execute --route <route-file> --parent <owner slug> --slug-prefix <prefix>
---subdivision-manifest <chain.json> --action start` call, and close the single stage gate
-with `capability-route.py complete --route <route-file> --node execute --evidence <stage
-evidence> --jobs <registry> --subsession-manifest <chain.json>`. Slices are no-commit
-workers; close the gate first, commit after. A typed refusal from `plan-slices`
-(`planned: refused`, exit 65) or a `single-session-required` receipt means "run this stage
-as one ordinary session" — proceed single-session and record the reason; it is not a
-failure. A slice that declares a non-worktree `base` is still refused (`scope-unproven`,
-SD-119 R5 unlanded). When the plan's packages share files, subdivision is unavailable by
-contract — a declared serial sub-session split under the same route node is then the
-sanctioned way to bound session length. Record which of the
-three shapes (parallel slices / serial split / single session) was chosen and why in the
-dev log. `core/OPERATIONS.md §5.10` owns the manifest, baseline, and refusal vocabulary.
+(`min_intensity: standard`, `max_slices: 4`, `disjointness: exact-fixed-files`). The
+execute start point, `utilities/stage-dispatch-fallback.py`, must query that permission on
+both `--register` and `--start` before candidate or attempt selection. It reads exactly one
+plan: the explicit `--plan-slices <path>` when supplied, otherwise
+`<route.artifact_root>/_scratch/<route.slug>/plan_slices.json`; it does not search other
+locations. A route without `slug` and no explicit path is a typed serial decision. The
+wrapper records exactly one `subdivision_decision=` and `subdivision_decision_id=` in
+`subdivision/<route_id>.jsonl`, using `not-eligible`, `considered-declined`, `admitted`,
+or `refused`. Missing/serial plans and typed refusals are normal "single session" answers,
+but they are never silent. A successful batch preserves the existing receipt keys and
+emits `attempt_id=` for the representative slice plus `attempt_ids=` for the batch.
+
+For an admitted `slices` plan, the wrapper mints the chain and slice ids, writes one phase
+brief per slice, proves exact files/worktree/write-scope containment and disjointness, then
+uses the existing `dispatch-batch.py --parallel-group execute --subdivision-manifest
+<chain.json> --action register|start` transaction. Close the single stage gate with
+`capability-route.py complete --subsession-manifest <chain.json>`. Slices are no-commit
+workers; close the gate first, commit after. A typed refusal or serial declaration means
+ordinary single-session execution and must be recorded in the dev log. A slice with a
+non-worktree `base` remains refused (`scope-unproven`). `core/OPERATIONS.md §5.10` owns
+the manifest, baseline, and refusal vocabulary; there is no remaining manual transcription
+step.
 
 Read plan frontmatter after harvest:
 

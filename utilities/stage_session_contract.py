@@ -4,7 +4,9 @@
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import json
+import sys
 from pathlib import Path
 import re
 from typing import Any
@@ -14,6 +16,34 @@ MODES = {"serial", "parallel"}
 ADAPTERS = {"claude", "codex", "opencode"}
 _ID = re.compile(r"^(?:ssc|ss)-[A-Za-z0-9._-]{4,200}$")
 _ATTEMPT = re.compile(r"^att-[A-Za-z0-9._-]{8,240}$")
+
+_WORKTREE_SCOPE_RESOLVER = None
+
+
+def _worktree_mutating_scope(scope: str) -> bool:
+    """Resolve the canonical scope predicate only when manifest loading runs."""
+    global _WORKTREE_SCOPE_RESOLVER
+    module = sys.modules.get("capability_route")
+    if module is None:
+        module = sys.modules.get("capability-route")
+    if module is None:
+        path = Path(__file__).with_name("capability-route.py")
+        spec = importlib.util.spec_from_file_location("capability_route", path)
+        if spec is None or spec.loader is None:
+            raise StageSessionError("scope-predicate-unavailable")
+        module = importlib.util.module_from_spec(spec)
+        try:
+            spec.loader.exec_module(module)
+        except Exception as exc:
+            raise StageSessionError("scope-predicate-unavailable") from exc
+        sys.modules.setdefault("capability_route", module)
+    _WORKTREE_SCOPE_RESOLVER = getattr(module, "worktree_mutating_scope", None)
+    if _WORKTREE_SCOPE_RESOLVER is None:
+        raise StageSessionError("scope-predicate-unavailable")
+    try:
+        return bool(_WORKTREE_SCOPE_RESOLVER(scope))
+    except Exception as exc:
+        raise StageSessionError("scope-predicate-unavailable") from exc
 
 
 class StageSessionError(ValueError):
@@ -250,9 +280,19 @@ def load_manifest(
             for scope in (node.get("write_scope") or []):
                 if not isinstance(scope, str) or not scope:
                     continue
+                if _worktree_mutating_scope(scope):
+                    sealed_scopes.append(worktree)
+                    continue
                 root = scope[:-3] if scope.endswith("/**") else scope
                 sealed_scopes.append((worktree / root).resolve(strict=False))
             for file in sorted(union):
+                candidate = Path(file)
+                try:
+                    relative = candidate.relative_to(worktree)
+                except ValueError:
+                    raise StageSessionError(f"parallel-fixed-file-outside-write-scope:{file}")
+                if relative.parts and relative.parts[0] in {".git", ".agent_reports", ".claude_reports"}:
+                    raise StageSessionError(f"parallel-fixed-file-outside-write-scope:{file}")
                 if not any(
                     file == str(root) or file.startswith(str(root) + "/")
                     for root in sealed_scopes

@@ -29,7 +29,8 @@ sys.path.insert(0, str(ROOT / "utilities"))
 
 from stage_session_contract import StageSessionError, load_manifest  # noqa: E402
 from dispatch_subsession_advance import chain_manifest_pointer_path  # noqa: E402
-from dispatch_contract import DispatchContractError, close_attempt_row  # noqa: E402
+from dispatch_contract import DispatchContractError, close_attempt_row, cancel_governor_reservation, annotate_attempt_row  # noqa: E402
+import subdivision_decision as DECISION  # noqa: E402
 
 # Route-leg cardinality tier order, duplicated from `capability-route.py:41` --
 # importing that module is safe (no cycle back into this one) but the tier map
@@ -56,6 +57,43 @@ class SubdivisionAdmissionError(RuntimeError):
         super().__init__(f"{reason}:{detail}" if detail else reason)
         self.reason = reason
         self.detail = detail
+
+
+# One closed normalization table for every admission failure.  Details from
+# the manifest loader are deliberately reduced to the canonical refusal enum;
+# callers may retain the original detail for diagnostics.
+REFUSAL_REASON_MAP = {
+    "subdivision-not-permitted": "subdivision-not-permitted",
+    "intensity-below-min": "intensity-below-min",
+    "surface-unreachable": "surface-unreachable",
+    "owner-declined-not-separable": "owner-declined-not-separable",
+    "plan-declared-no-slices": "plan-declared-no-slices",
+    "slice-count-out-of-range": "slice-count-out-of-range",
+    "fixed-file-outside-scope": "fixed-file-outside-scope",
+    "parallel-fixed-file-outside-write-scope": "fixed-file-outside-scope",
+    "fixed-file-must-be-exact": "fixed-file-not-exact",
+    "fixed-files-missing": "fixed-file-not-exact",
+    "parallel-fixed-file-overlap": "fixed-file-overlap",
+    "baseline-unavailable": "baseline-unavailable",
+    "scope-unproven": "scope-unproven",
+    "governor-capacity-insufficient": "governor-capacity-insufficient",
+    "artifact-base-invalid": "artifact-base-invalid",
+    "artifact-root-unavailable": "artifact-root-unavailable",
+    "artifact-scan-cap-exceeded": "artifact-scan-cap-exceeded",
+}
+
+
+def refusal_reason_for(exc: BaseException) -> str:
+    """Map an internal admission exception to the closed ledger vocabulary."""
+    raw = getattr(exc, "reason", "") or str(exc)
+    for key, reason in REFUSAL_REASON_MAP.items():
+        if raw == key or raw.startswith(key + ":"):
+            return reason
+    detail = getattr(exc, "detail", "") or str(exc)
+    for key, reason in REFUSAL_REASON_MAP.items():
+        if detail == key or detail.startswith(key + ":"):
+            return reason
+    return "disjointness-unproven"
 
 
 # SD-119 impl-review round 1 (F-3) narrowed by SD-103 (routing-flex,
@@ -222,6 +260,9 @@ class AdmissionResult:
     sessions: list[dict[str, Any]]
     node_id: str
     reservation_identity: str  # shared by every admitted slice (A-2)
+    governor: Path = Path(".")
+    governor_root: Path = Path(".")
+    decision_context: dict[str, Any] | None = None
 
 
 def admit_batch(
@@ -234,6 +275,7 @@ def admit_batch(
     reserve: Callable[..., list[str]] | None = None,
     record_baseline: Callable[[dict[str, Any], str, dict[str, Any]], None] | None = None,
     jobs: str | Path | None = None,
+    decision_context: dict[str, Any] | None = None,
 ) -> AdmissionResult:
     """Run all four admission checkpoints in order; any failure is row 0 / model 0.
 
@@ -246,21 +288,41 @@ def admit_batch(
     reservation in the first place.
     """
 
-    permission = check_permission(route, node)
-    node_id = str(node["id"])
-    manifest = load_batch_manifest(manifest_path, route=route, node=node, permission=permission)
+    def record(decision, reason, digest=None, count=0):
+        if decision_context is not None:
+            return DECISION.commit(decision_context, decision, reason, digest, count)
+        return None
+    try:
+        permission = check_permission(route, node)
+        node_id = str(node["id"])
+        manifest = load_batch_manifest(manifest_path, route=route, node=node, permission=permission)
+    except SubdivisionAdmissionError as exc:
+        reason = refusal_reason_for(exc)
+        record("refused", reason)
+        raise
     manifest_digest = manifest["_manifest_sha256"]
-    tokens = reserve_full_n(
-        governor, governor_root, manifest["sessions"],
-        route=route, node_id=node_id, manifest_digest=manifest_digest, reserve=reserve,
-    )
+    try:
+        tokens = reserve_full_n(
+            governor, governor_root, manifest["sessions"],
+            route=route, node_id=node_id, manifest_digest=manifest_digest, reserve=reserve,
+        )
+    except SubdivisionAdmissionError as exc:
+        record("refused", "governor-capacity-insufficient", manifest_digest, len(manifest["sessions"]))
+        raise
     if record_baseline is None:
         # SD-OPEN-53: the admission-time baseline lands in the state root of
         # the registry the caller holds (`jobs`), the same root the audit
         # later reads it back from -- never the inherited/default root.
         def record_baseline(route, node_id, manifest):
             return ROUTE_MODULE.record_subdivision_baseline(route, node_id, manifest, jobs=jobs)
-    record_baseline(route, node_id, manifest)
+    try:
+        record_baseline(route, node_id, manifest)
+    except Exception as exc:
+        for token in tokens:
+            cancel_governor_reservation(governor, governor_root, token)
+        record("refused", "baseline-unavailable", manifest_digest, len(manifest["sessions"]))
+        raise SubdivisionAdmissionError("baseline-unavailable", str(exc)) from exc
+    record("admitted", "", manifest_digest, len(manifest["sessions"]))
     return AdmissionResult(
         tokens=tokens,
         manifest=manifest,
@@ -268,6 +330,8 @@ def admit_batch(
         sessions=manifest["sessions"],
         node_id=node_id,
         reservation_identity=manifest_digest,
+        governor=Path(governor), governor_root=Path(governor_root),
+        decision_context=decision_context,
     )
 
 
@@ -389,11 +453,17 @@ def start_admitted_batch(
                 "refusal_reason": BATCH_REGISTRATION_INCOMPLETE,
                 "stdout": "", "stderr": "", "exit_code": None,
             })
+        for token in admission.tokens:
+            cancel_governor_reservation(admission.governor, admission.governor_root, token)
         return results
 
     # Every slice registered: seal the manifest once, before the first start
     # (F3 precondition; see `persist_chain_manifest`).
     persist_chain_manifest(Path(jobs), admission.manifest)
+    if admission.decision_context is not None:
+        event_id = admission.decision_context.get("event_id")
+        for session in admission.sessions:
+            annotate_attempt_row(Path(jobs), session["attempt_id"], {"subdivision_decision_id": event_id})
     results = []
     for session, token in zip(admission.sessions, admission.tokens):
         env = os.environ.copy()
