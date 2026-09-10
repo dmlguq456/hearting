@@ -2780,7 +2780,16 @@ def _scan_jobs_log(path, seen_slugs, seen_keys=None, registry_priority=0,
             or job.registered_worker is not True
         ):
             violations.append("quick-surface")
-        if job.fallback_hop != "same-harness-headless":
+        # N4: display must mirror the registration contract, not a stale copy of
+        # it. Quick's same-harness pin applies to the WORK node (`one-shot`)
+        # only; its two frame legs are an advisory pair whose one mandatory
+        # independence axis IS cross-harness. Without this exception Fleet
+        # paints a healthy cross-harness frame leg as broken, and an operator
+        # cancels a working round trip.
+        if job.fallback_hop != "same-harness-headless" and not (
+            job.worker_type == "frame"
+            and job.route_node in ("frame", "frame-alternative")
+        ):
             violations.append("quick-fallback")
         if violations:
             job.attempt_contract_status = "invalid:" + ",".join(violations)

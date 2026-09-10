@@ -122,10 +122,16 @@ class CensusFixture(unittest.TestCase):
         # this file and nowhere else.
         self.write_route("rt-a.json", [node("plan", "runtime-eligible")])
         recipe = self.json_census(REAL_TOPOLOGIES)["recipe_axis"]
-        self.assertEqual(recipe["nodes_total"], 53)
-        self.assertEqual(recipe["nodes_with_continuation"], 40)
+        # +9 nodes and +9 runtime-eligible: the frame bootstrap layer added two
+        # depth-1 direction legs to each of the five standard+ recipes, and
+        # autopilot-code already declared one `frame` node. Both legs carry a
+        # continuation, and both are `runtime-eligible`, so those two counts
+        # move by the same nine. Terminal and model-required counts do not
+        # move: a frame leg is neither.
+        self.assertEqual(recipe["nodes_total"], 62)
+        self.assertEqual(recipe["nodes_with_continuation"], 49)
         self.assertEqual(recipe["terminal_nodes"], 13)
-        self.assertEqual(recipe["advance_class"]["runtime-eligible"], 35)
+        self.assertEqual(recipe["advance_class"]["runtime-eligible"], 44)
         self.assertEqual(recipe["advance_class"]["model-required"], 18)
         self.assertEqual(recipe["capabilities_with_staged_nodes"], 12)
         self.assertEqual(recipe["capabilities_total"], 13)

@@ -2339,5 +2339,99 @@ class GateCloseRearmTest(GateCarrierTest):
         self.assertEqual(ledger["state"], "ended")
 
 
+class FrameWorkerTypeArmingTest(unittest.TestCase):
+    """W2 (frame-bootstrap-layer, 2026-09-10): a depth-1 `frame` worker must
+    arm the same wait a depth-1 `owner` worker does, through both arming
+    paths, via the shared `DEPTH1_WORKER_TYPES` constant and the shared
+    `_worker_type_is_depth1` comparison helper both paths call."""
+
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name)
+        self.jobs = self.root / "jobs.log"
+        environment = mock.patch.dict(os.environ, {"AGENT_DISPATCH_JOBS": str(self.jobs)}, clear=False)
+        environment.start()
+        self.addCleanup(environment.stop)
+
+    @staticmethod
+    def row(*, attempt_id="att-frame-1", status="open", parent_sid="session-1",
+             worker_type="frame", age_seconds=0.0, **overrides):
+        stamp = (datetime.now(timezone.utc) - timedelta(seconds=age_seconds)).isoformat().replace("+00:00", "Z")
+        metadata = {"capability": "autopilot-code", "dispatch_depth": "1", "worker_type": worker_type,
+                    "parent_sid": parent_sid, "parent_completion_delivery": "claude-parent-runtime",
+                    "launch_claimed": "1", "launch_started": "1", "attempt_id": attempt_id}
+        metadata.update(overrides)
+        pipe = ",".join(f"{k}={v}" for k, v in metadata.items())
+        return "\t".join([stamp, status, "/repo", "/repo", "slug", pipe]) + "\n"
+
+    def stdout_payload(self, *, worker_type="frame", attempt_id="att-frame-1", session_id="session-1"):
+        output = "\n".join((
+            "check=ok", "status=start", "dispatch_depth=1", f"worker_type={worker_type}",
+            "parent_completion_delivery=claude-parent-runtime",
+            f"parent_session_id={session_id}", f"job_registry={self.jobs}",
+            f"attempt_id={attempt_id}", "registered=1", "started=1",
+        ))
+        return {
+            "hook_event_name": "PostToolUse", "tool_name": "Bash", "session_id": session_id,
+            "tool_input": {"command": "python3 utilities/dispatch-owner.py --start --worker-type frame"},
+            "tool_response": {"stdout": output, "stderr": ""},
+        }
+
+    def test_frame_stdout_start_receipt_arms_through_parse_launch(self) -> None:
+        # Item 1 of W2's required tests: the real stdout fast path (parse_launch,
+        # the module's *only* entry to the "worker_type=frame" stdout receipt)
+        # recognizes and arms a frame launch exactly as it does an owner one.
+        self.jobs.write_text(self.row(), encoding="utf-8")
+        launch = rewake.parse_launch(self.stdout_payload())
+        self.assertIsNotNone(launch)
+        assert launch is not None
+        self.assertEqual((launch.attempt_id, launch.armed), ("att-frame-1", "stdout"))
+
+    def test_frame_registry_row_arms_through_registry_launch(self) -> None:
+        # Item 2: a filtered stdout (no worker_type/status fields survive) still
+        # arms from the registry row alone, through the real registry-path
+        # function `registry_launch` -> `_session_owner_rows`.
+        self.jobs.write_text(self.row(), encoding="utf-8")
+        filtered = self.stdout_payload()
+        filtered["tool_response"]["stdout"] = "check=ok"
+        resolved = rewake.registry_launch(filtered)
+        self.assertIsInstance(resolved, tuple)
+        launch, claim = resolved
+        self.assertEqual((launch.attempt_id, launch.armed), ("att-frame-1", "registry"))
+        self.assertEqual(claim.attempt_id, "att-frame-1")
+
+    def test_registry_consumer_uses_membership_not_equality_against_the_shared_set(self) -> None:
+        # Item 3: the structural regression test. If `worker_type` were ever
+        # folded back into `REGISTRY_DEPTH1_START`'s equality dict (comparing
+        # a scalar with `!=` against `DEPTH1_WORKER_TYPES`, a set), a real
+        # frame row could never match -- `metadata.get(key) != value` is true
+        # for every string against a frozenset -- and `_session_owner_rows`
+        # would silently return nothing for every frame launch. This exercises
+        # the literal consumer function directly.
+        self.jobs.write_text(self.row(worker_type="frame"), encoding="utf-8")
+        rows = rewake._session_owner_rows(self.jobs, "session-1")
+        self.assertEqual([attempt_id for attempt_id, _age in rows], ["att-frame-1"])
+        # The vocabulary itself must be a real collection checked by
+        # membership, and worker_type must not sit inside the equality dict.
+        self.assertIsInstance(rewake.DEPTH1_WORKER_TYPES, frozenset)
+        self.assertEqual(rewake.DEPTH1_WORKER_TYPES, frozenset({"owner", "frame"}))
+        self.assertNotIn("worker_type", rewake.REGISTRY_DEPTH1_START)
+
+    def test_owner_worker_type_still_arms_unchanged(self) -> None:
+        # The pre-existing vocabulary member must keep working after the widening.
+        self.jobs.write_text(self.row(worker_type="owner", attempt_id="att-owner-frame-sibling"), encoding="utf-8")
+        rows = rewake._session_owner_rows(self.jobs, "session-1")
+        self.assertEqual([attempt_id for attempt_id, _age in rows], ["att-owner-frame-sibling"])
+
+    def test_a_worker_type_outside_the_vocabulary_still_never_arms(self) -> None:
+        for worker_type in ("stage", "review", "support"):
+            with self.subTest(worker_type=worker_type):
+                self.jobs.write_text(self.row(worker_type=worker_type), encoding="utf-8")
+                self.assertEqual(rewake._session_owner_rows(self.jobs, "session-1"), [])
+                stdout_launch = rewake.parse_launch(self.stdout_payload(worker_type=worker_type))
+                self.assertIsNone(stdout_launch)
+
+
 if __name__ == "__main__":
     unittest.main()

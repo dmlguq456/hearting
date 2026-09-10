@@ -51,8 +51,18 @@ DEFAULT_INTERVAL_SECONDS = 5  # one readiness probe costs ~0.1s; 20s dominated t
 DEFAULT_MAX_SECONDS = 21_600
 DEFAULT_ARM_WINDOW_SECONDS = 600
 MAXIMUM_CLOCK_SKEW_SECONDS = 60
-REGISTRY_OWNER_START = {
-    "worker_type": "owner",
+# The one worker-type vocabulary both arming paths wait for (2026-09-10, W2 of
+# the frame-bootstrap-layer cycle): a launchable dispatch-depth-1 "owner"
+# worker or the newer "frame" worker type. `worker_type` is deliberately kept
+# out of `REGISTRY_DEPTH1_START` below -- it needs a *membership* test against
+# this set, not the equality test every other key in that dict gets, so it is
+# checked through `_worker_type_is_depth1` instead. The two call sites
+# (`_session_owner_rows`'s registry-row metadata, a scalar-valued dict, and
+# `parse_launch`'s stdout `fields`, a list-valued dict from possibly repeated
+# lines) share this one constant and this one helper; widening or narrowing
+# the vocabulary again only means editing this set.
+DEPTH1_WORKER_TYPES = frozenset({"owner", "frame"})
+REGISTRY_DEPTH1_START = {
     "dispatch_depth": "1",
     "parent_completion_delivery": "claude-parent-runtime",
     "launch_claimed": "1",
@@ -60,6 +70,25 @@ REGISTRY_OWNER_START = {
 }
 SUCCESS_NOTIFICATION = "\x1b]9;Hearting dispatch completed\x07"
 CLAIM_LEASE_SECONDS = 30.0
+
+
+def _worker_type_is_depth1(candidate: object) -> bool:
+    """True when `candidate` names an allowed depth-1 waited worker type.
+
+    `candidate` is either a single string (the registry row's scalar
+    `metadata.get("worker_type")`) or an iterable of strings (the stdout
+    fast path's `fields.get("worker_type", [])`, which can repeat if a
+    filtered command echoed the same key twice) -- both shapes are answered
+    by this one function so a future widening of `DEPTH1_WORKER_TYPES` only
+    has to change one place. The bug this guards against: turning
+    `DEPTH1_WORKER_TYPES` into a collection but leaving a caller compare a
+    scalar to it with `==` would silently never match anything -- every
+    caller here goes through membership (`in`/`isdisjoint`), never equality
+    against the set itself.
+    """
+    if isinstance(candidate, str):
+        return candidate in DEPTH1_WORKER_TYPES
+    return not DEPTH1_WORKER_TYPES.isdisjoint(candidate or ())
 
 
 @dataclass(frozen=True)
@@ -179,8 +208,8 @@ def _bash_call(payload: object) -> tuple[dict[str, Any], str] | None:
 
 
 def parse_launch(payload: object) -> Launch | None:
-    """The receipt fast path: a successful depth-1 owner start whose stdout
-    names the attempt, the registry, and this session as the parent."""
+    """The receipt fast path: a successful depth-1 owner-or-frame start whose
+    stdout names the attempt, the registry, and this session as the parent."""
 
     gate = _bash_call(payload)
     if gate is None:
@@ -191,12 +220,13 @@ def parse_launch(payload: object) -> Launch | None:
         "check": "ok",
         "status": "start",
         "dispatch_depth": "1",
-        "worker_type": "owner",
         "parent_completion_delivery": "claude-parent-runtime",
         "registered": "1",
         "started": "1",
     }
     if any(expected not in fields.get(key, []) for key, expected in required_memberships.items()):
+        return None
+    if not _worker_type_is_depth1(fields.get("worker_type", [])):
         return None
     attempt_id = _single(fields, "attempt_id")
     parent_session = _single(fields, "parent_session_id")
@@ -330,16 +360,18 @@ def _read_registry_lines(jobs: Path) -> list[str] | None:
 def _session_owner_rows(
     jobs: Path, session: str, *, statuses: frozenset[str] = ARM_ROW_STATUSES
 ) -> list[tuple[str, float]]:
-    """Every claimed-and-started depth-1 owner row bound to `session` whose
-    latest status is in `statuses`, as ``(attempt_id, age_seconds)``, oldest
-    first. Empty on any refusal. This is the one identity check both arming
-    paths share (review R1 B1): a receipt on stdout only *names* a candidate;
-    the row proves it -- exists, `parent_sid` is this session, every
-    `REGISTRY_OWNER_START` key matches. A receipt may name a row that already
-    ran to `done` (a short owner finishing before the hook ran). The registry
-    path takes a *new* claim only on an open row; a row that ran to `done`
-    while this session already held its claim is still re-armable, because
-    the wake it owes was never delivered (top review M1)."""
+    """Every claimed-and-started depth-1 owner-or-frame row bound to `session`
+    whose latest status is in `statuses`, as ``(attempt_id, age_seconds)``,
+    oldest first. Empty on any refusal. This is the one identity check both
+    arming paths share (review R1 B1): a receipt on stdout only *names* a
+    candidate; the row proves it -- exists, `parent_sid` is this session,
+    every `REGISTRY_DEPTH1_START` key matches, and `worker_type` is a member
+    of `DEPTH1_WORKER_TYPES` (checked by `_worker_type_is_depth1`, not folded
+    into the equality dict -- see its module-level comment). A receipt may
+    name a row that already ran to `done` (a short owner finishing before the
+    hook ran). The registry path takes a *new* claim only on an open row; a
+    row that ran to `done` while this session already held its claim is still
+    re-armable, because the wake it owes was never delivered (top review M1)."""
 
     lines = _read_registry_lines(jobs)
     if lines is None:
@@ -359,7 +391,9 @@ def _session_owner_rows(
     for attempt_id, (stamp, status, metadata) in latest.items():
         if status not in statuses or metadata.get("parent_sid") != session:
             continue
-        if any(metadata.get(key) != value for key, value in REGISTRY_OWNER_START.items()):
+        if any(metadata.get(key) != value for key, value in REGISTRY_DEPTH1_START.items()):
+            continue
+        if not _worker_type_is_depth1(metadata.get("worker_type")):
             continue
         age = _row_age(stamp, now)
         if age is None or age < -MAXIMUM_CLOCK_SKEW_SECONDS:

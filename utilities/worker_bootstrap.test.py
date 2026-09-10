@@ -49,6 +49,25 @@ class WorkerBootstrapTest(unittest.TestCase):
             "support",
         )
 
+    def test_explicit_frame_beats_depth_one_owner_fallback(self):
+        # frame-universal (2026-09-10): a depth-1 frame node's explicit
+        # worker_type must win over the dispatch_depth==1 "owner" fallback --
+        # the same precedence already pinned for review at depth 1 above, now
+        # pinned for frame too, so a depth-1 frame node is never silently
+        # resolved away from "frame" (here to "owner"; elsewhere, if it ever
+        # reached the unrelated topology-kind fallback, to "support").
+        self.assertEqual(
+            W.resolve_worker_type(explicit="frame", dispatch_depth=1),
+            "frame",
+        )
+        self.assertEqual(
+            W.resolve_worker_type(
+                explicit="frame", dispatch_depth=1, worker_role="map-worker",
+                route_node="frame",
+            ),
+            "frame",
+        )
+
     def test_render_has_one_kernel_one_type_and_exact_handoff(self):
         rendered = W.render_worker_bootstrap(ROOT, "stage")
         self.assertEqual(rendered.count("# Portable Worker Kernel"), 1)

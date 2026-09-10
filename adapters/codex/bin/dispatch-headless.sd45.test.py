@@ -835,6 +835,36 @@ class CodexSD78CompletionDelivery(unittest.TestCase):
         )
         probe.assert_not_called()
 
+    def test_frame_worker_type_takes_the_same_delivery_path_as_owner(self):
+        # W2 (frame-bootstrap-layer, 2026-09-10): resolve_parent_completion_delivery
+        # is verified not to read args.worker_type at all -- only action/
+        # dispatch_depth/execution_surface/registered_worker/parent identity
+        # decide the branch. This proves it by calling the real function with
+        # worker_type=frame and worker_type=owner/review and asserting they
+        # land on the exact same delivery kind and reason.
+        with mock.patch.dict(
+            os.environ,
+            {"CLAUDE_CODE_SESSION_ID": "claude-session"},
+            clear=True,
+        ), mock.patch.object(WH, "probe_managed_codex_parent") as probe:
+            owner_args = self.parent_args(
+                parent_harness="claude", parent_session_id="claude-session", worker_type="owner",
+            )
+            frame_args = self.parent_args(
+                parent_harness="claude", parent_session_id="claude-session", worker_type="frame",
+            )
+            review_args = self.parent_args(
+                parent_harness="claude", parent_session_id="claude-session", worker_type="review",
+            )
+            WH.bind_parent_completion_delivery(owner_args)
+            WH.bind_parent_completion_delivery(frame_args)
+            WH.bind_parent_completion_delivery(review_args)
+        self.assertEqual(frame_args.parent_completion_delivery, owner_args.parent_completion_delivery)
+        self.assertEqual(frame_args.parent_completion_delivery, review_args.parent_completion_delivery)
+        self.assertEqual(frame_args.parent_completion_delivery, "claude-parent-runtime")
+        self.assertEqual(frame_args.parent_completion_reason, owner_args.parent_completion_reason)
+        probe.assert_not_called()
+
     def test_managed_sidecar_is_exact_singleton_and_registry_bounded(self):
         args = self.parent_args()
         args.parent_completion_delivery = WH.MANAGED_PARENT_DELIVERY

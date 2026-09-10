@@ -318,13 +318,13 @@ sessions read the detail they need after approval. If a runtime automatically
 injects a selected Skill body into main, do not duplicate that read; record the
 runtime limitation rather than claiming total-token savings.
 
-**Standard+ two-stage confirmation (SD-123).** For `autopilot-code` at
-`standard+`, the §0.4 gate above is a non-blocking `[실행 통지]` rather than a
-blocking card — the same five fields, in order, plus one closing line "frame
-뒤 방향 확인 예정" — and route compile/bind/producer-begin proceed immediately
-after it (frame never touches source, so the route-participation invariant
-above still holds). A second, blocking `[방향 확인]` card follows the frame
-group join, before `plan` starts:
+**Two-stage confirmation (SD-123).** At `quick+` the direction gate comes
+first and the §0.4 card second, because the frame legs run in the depth-0
+bootstrap layer ahead of the route. Depth-0 launches the pair, joins both
+direction briefs, and puts this blocking `[방향 확인]` card and the interview
+to the user before route compile/bind/producer-begin — frame touches no
+source, so the route-participation invariant above still holds while nothing
+is compiled yet:
 
 ```text
 [방향 확인]
@@ -332,29 +332,33 @@ group join, before `plan` starts:
 방향: <채택한 방향 한 줄>
 대안: <기각한 대안과 이유>
 위험: <frame이 찾은 최대 위험·가정>
-범위 변경: <시작 통지 대비 증감, 없으면 "없음">
-비용: <frame 실소비와 남은 단계·강도>
+범위 변경: <처음 요청 대비 증감, 없으면 "없음">
+비용: <frame 실소비·하네스 구성과 남은 단계·강도>
 
 → 진행(권장) / 수정: <틀린 부분> / 중단
 ```
 
 Deliver this card through a native structured-question surface when one is
 available, the plain-text form otherwise — the same fallback rule as the §0.4
-card. `confirmation.mode` (`profiles/dispatch-defaults.yaml`, default
-`hybrid`) governs the pair: `hybrid` is the shape above, `both` restores a
-blocking start card, `post-frame-only` drops the start notify entirely. A route
-compiled before this cycle keeps `frame.continuation=inline-next` and is never
-retro-fitted onto this gate.
+card. Only once the direction is confirmed does the route start, and the §0.4
+gate then arrives as a non-blocking `[실행 통지]` — the same five fields, in
+order. It announces the route the confirmed direction produced; it does not
+re-ask a direction the user has already settled.
+`confirmation.mode` (`profiles/dispatch-defaults.yaml`, default `hybrid`)
+governs that ordered pair: `hybrid` is the shape above (blocking direction
+gate first, notice after), `both` makes the later notice blocking as well, and
+`post-frame-only` drops the notice entirely. A route compiled before this
+cycle keeps `frame.continuation=inline-next` and is never retro-fitted onto
+this gate.
 
 **The frame interview (SD-129).** The `[방향 확인]` card is not the whole
-gate. The gate record names `shards/frame/interview.json`: the owner's
-one-sentence restatement of what the user wants, a plain-language brief, and
-the few decisions the frame legs could not settle without the user. The
-depth-0 session that receives the gate (asyncRewake wake or the next-prompt
-sweep) does the interview itself, in this order, and never leaves it to a
-helper:
+gate. The gate record names `shards/frame/interview.json`: a one-sentence
+restatement of what the user wants, a plain-language brief, and the few
+decisions the frame legs could not settle without the user. The depth-0
+session builds that record from the joined frame legs and does the interview
+itself, in this order, and never leaves it to a helper:
 
-1. Ask first whether the restatement is right — the owner's sentence, verbatim,
+1. Ask first whether the restatement is right — that sentence, verbatim,
    with 예 / 아니오(고쳐 말하기) — and record a correction in the user's words.
 2. Put the `[방향 확인]` five-field summary as the card above.
 3. Ask each interview question through `AskUserQuestion` (at most four per
@@ -365,18 +369,30 @@ helper:
 4. Write the answers with `frame_interview.py answers-template` as the shape
    and record them on the release: `workflow-supervisor.py release --route
    <route file> --gate frame-review --decision proceed --answers <file>`.
-   `proceed` without answers is refused for an interview gate.
+   `proceed` without answers is refused for an interview gate, and that
+   release is the one machine event that authorizes the owner's launch.
 
-Question counts are bounded by intensity — at most 7 at `standard+`, 3 at
-`quick`, 1 at `direct` — and the validator refuses an interview that breaks
-the plain-language rules before it reaches anyone (the `standard+` cap and
-the wording rules are machine-checked at the raise; steps 1–3 above and the
-`direct`/`quick` caps are obligations on the acting session that nothing
-checks mechanically). `direct`/`quick` have no `frame` node: the acting
-session asks its 0–1 / 1–3 questions of the same kind inline, inside the
-blocking §0.4 card step, and records the answers in the plan or the work log.
-The recorded answers become `shards/frame/intent.md` (owner-rendered), the
-brief `plan` reads first; `plan-author` is told to cite each decision by its
+`OPERATIONS §5.10b` owns the launch that precedes all of this — one Bash call
+per leg, the artifact variables, the missing-harness re-launch, and the
+one-time `top`→`deep` demotion. Both legs
+are always waited for — past the hard limit depth-0 stops and asks, rather
+than proceeding on one — and differing direction verdicts go side by side,
+nothing downstream starting until the user picks one. Step 1 is asked even
+when the interview carries zero questions; `understanding_confirmed` records
+that answer.
+
+Question counts are bounded by intensity, and `QUESTION_CAP` in
+`utilities/frame_interview.py` owns those numbers — do not restate them here.
+The validator refuses an interview that breaks the plain-language rules
+before it reaches anyone; the cap and the wording rules are machine-checked at
+the raise for every route carrying the gate, `quick` included, while steps 1–3
+above stay obligations on the acting session that nothing checks mechanically.
+`direct` has no frame node; `quick` and above run one in the bootstrap layer
+ahead of the route. The `direct` session asks its one question of the same
+kind inline, inside the blocking §0.4 card step, and records the answer in the
+plan or the work log.
+The recorded answers become `shards/frame/intent.md`, rendered by depth-0,
+the brief `plan` reads first; `plan-author` is told to cite each decision by its
 question id and to report one it cannot honor as a blocker — a prompt
 contract, not a gate check. An interview gate may be raised at most twice
 per route (`round` ≤ 2).
@@ -495,7 +511,7 @@ contract exists to prevent, so the declaration is mechanical, not editorial:
 |---|---|
 | `inline-next` | the same checked payload runs the next stage before it returns |
 | `supervised` | a registered continuation supervisor observes child termination and starts the next stage exactly once |
-| `human-gate` | an explicit human gate named in the recipe's `human_gates` blocks the successor — e.g. `autopilot-code`'s `frame` node continues into gate `frame-review`, releasing with `workflow-supervisor.py release --gate frame-review --decision proceed\|revise\|stop` (§0.4, SD-123) |
+| `human-gate` | an explicit human gate named in the recipe's `human_gates` blocks the successor — e.g. each recipe's depth-1 bootstrap frame pair continues into gate `frame-review`, which fences that recipe's first work node and releases with `workflow-supervisor.py release --gate frame-review --decision proceed\|revise\|stop` (§0.4, SD-123) |
 | `monitor` | a checked monitor waits on an external state change and reports a typed condition match |
 
 A detached resource process can never continue itself, so a `resource-runner`
@@ -555,8 +571,8 @@ Autopilot entrypoints choose `intensity`; verification rigor is derived from it 
 | Request shape | Default | Routing |
 |---|---|---|
 | One-off answer, typo, rename, or explicit no-artifact work | `direct` | No plan stage, plan check, or durable plan |
-| Small localized change that misses at least one atomic-direct predicate and has no promotion signal | `quick` | Registered-headless dispatch-depth-1 one-shot conductor with orient-lite, micro-plan, plan-check-lite, focused verification, and concise report; no dispatch depth 2 |
-| Work with a promotion signal or separable durable stages | `standard` | Durable plan/checklist; a `deep` dispatch-depth-1 conductor dispatches capability-defined stages with file-only handoff and realizes only registry-declared parallel groups, normally a two-leg asymmetric framing group |
+| Small localized change that misses at least one atomic-direct predicate and has no promotion signal | `quick` | A depth-0-run bootstrap layer runs first — two frame legs, cross-harness when available, joined and interviewed directly by the depth-0 session, the anchor a tier above the owner's own model profile. Then a registered-headless dispatch-depth-1 one-shot conductor with orient-lite, micro-plan, plan-check-lite, focused verification, and concise report; no dispatch depth 2 |
+| Work with a promotion signal or separable durable stages | `standard` | Same depth-0-run bootstrap frame layer as `quick`, then durable plan/checklist; a `deep` dispatch-depth-1 conductor dispatches capability-defined stages with file-only handoff and realizes only registry-declared parallel groups (plan/implementation-review, not frame) |
 | Important multi-file or risk-bearing work | `strong` | A `deep` owner plus the declared plan/review groups; selected high-value anchors may widen to a third profile/perspective leg while other groups remain width two |
 | Complex cross-domain or cross-harness work | `thorough` | Bounded dispatch-depth-2 perspective and verifier workers |
 | High-stakes, irreversible, security, or external-facing work | `adversarial` | Thorough plus an explicit adversary, failure-mode, or security pass |
@@ -624,14 +640,14 @@ under §0.4, and internal routing is automatic. Portable model roles come from
 | `analyze-project` | One capability analyzing code, paper, or document mode itself |
 | `autopilot-spec` | Planning role for PRD, material role for research import, and setup logic for hosting and CI/CD |
 | `autopilot-design` | Design maker and critic plus material web-image-search |
-| `autopilot-code` | Direct is dispatch-depth-0 inline. Quick is one `balanced-deep` registered-headless dispatch-depth-1 one-shot conductor. Every `standard+` owner is `deep`; at `standard`, it dispatches framing as `balanced-deep + light` cross-harness legs before planning. At `strong+`, framing adds a deep contrarian leg and plan/implementation-review open asymmetric declared groups; `thorough+` adds implementation-risk and failure-mode legs. Planning, implementation, test, report, and task-aware review remain separate file-handoff stages. |
+| `autopilot-code` | Direct is dispatch-depth-0 inline. From `quick`, depth-0 first runs the two-leg frame bootstrap (see above). Quick is one `balanced-deep` registered-headless dispatch-depth-1 one-shot conductor. Every `standard+` owner is `deep`. At `strong+`, plan/implementation-review open asymmetric declared groups; `thorough+` adds implementation-risk and failure-mode legs. Planning, implementation, test, report, and task-aware review remain separate file-handoff stages. |
 | `autopilot-code` in app mode | General code flow plus design critique at plan review and after render, DB migration safety, and automatic deploy after an authorized push |
 | `autopilot-draft` | Material figure/data/reference work, writing implementation, editorial polish, and research fact-check |
 | `autopilot-refine` | Reuse the draft roles plus editorial review |
 | `autopilot-lab` | Setup uses research plan review, implementation scaffold, and QA smoke tests. Evaluation uses functional QA, figure generation, and research survey; at `standard+`, checkpoint evaluation, media generation, report assembly, and independent verification dispatch as stage workers under the eval execution topology in `capabilities/autopilot-lab.md`. The actual long-running training run is asynchronous and human-gated through RUNLOG ⏳ rather than a stage-worker dispatch. |
 | `analyze-user` | Cross-project material collection plus editorial review |
 
-For every durable stage at `standard+`, use an independent headless session under `OPERATIONS §5.10`; the named team roles run inside that session, and the dispatch-depth-1 conductor passes only artifact paths. Direct stays dispatch depth 0 and quick stays one registered-headless dispatch-depth-1 one-shot conductor.
+For every durable stage at `standard+`, use an independent headless session under `OPERATIONS §5.10`; the named team roles run inside that session, and the dispatch-depth-1 conductor passes only artifact paths. Direct stays dispatch depth 0, and a depth-0-run bootstrap layer — two frame legs, cross-harness when available, joined and interviewed directly by the depth-0 session, the anchor a tier above the owner's own model profile — runs ahead of quick, which stays one registered-headless dispatch-depth-1 one-shot conductor.
 
 Each entrypoint is an explicit unit of intent. The §0.4 confirmation is the
 single top-level route handshake. Capability-local review controls such as

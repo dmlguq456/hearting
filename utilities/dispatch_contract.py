@@ -4607,12 +4607,40 @@ def headless_attempt_policy(
         raise DispatchContractError("route-dispatch-depth-mismatch", str(node.get("dispatch_depth")))
 
     if route.get("effective_intensity") == "quick":
-        if dispatch_depth != 1 or parent_slug or route_node != "one-shot":
+        # Quick is a THREE-node route now (`frame`, `frame-alternative`,
+        # `one-shot`), so the shape check is a per-node-id table rather than a
+        # pin to a single id. Depth 1 and "no parent slug" still hold for all
+        # three; what differs is the tuple each id must carry.
+        expected_tuple = {
+            "one-shot": ("owner", "_kernel/owner"),
+            "frame": ("frame", "plan/frame"),
+            "frame-alternative": ("frame", "plan/frame"),
+        }.get(str(route_node))
+        if dispatch_depth != 1 or parent_slug or expected_tuple is None:
+            raise DispatchContractError("quick-route-shape-invalid", str(route_node))
+        if (node.get("worker_type"), node.get("unit")) != expected_tuple:
             raise DispatchContractError("quick-route-shape-invalid", str(route_node))
         if node.get("execution_surface") != "registered-headless" or node.get("registered_worker") is not True:
             raise DispatchContractError("quick-route-surface-invalid", str(node.get("execution_surface")))
-        if effective_hop != "same-harness-headless":
+        # The same-harness pin exists to keep quick's WORK pinned to one
+        # harness, so its (nonexistent) fallback budget and artifact lineage do
+        # not fragment. That reason applies to `one-shot` alone; the frame legs
+        # are an advisory pair ahead of the work, and cross-harness is the one
+        # MANDATORY independence axis for this bootstrap layer -- keeping the
+        # restriction system-wide would force both legs onto one harness and
+        # break the cycle's own acceptance criterion.
+        if route_node == "one-shot" and effective_hop != "same-harness-headless":
             raise DispatchContractError("quick-fallback-forbidden", effective_hop)
+        if route_node != "one-shot" and effective_hop not in (
+            "same-harness-headless", "cross-harness-headless"
+        ):
+            raise DispatchContractError("quick-fallback-forbidden", effective_hop)
+        # Unchanged below on purpose: candidate filtering and
+        # `terminal_attempt_limit` are per-(route_id, route_node) serial-attempt
+        # budgets, so three nodes each get their own budget from the same
+        # candidate list -- exactly right without modification. The early
+        # `return` keeps quick out of the `fallback_hops`-required check, which
+        # no depth-1 node can ever satisfy.
         candidates = [
             row
             for row in route.get("registered_headless_candidates") or []
@@ -4629,6 +4657,43 @@ def headless_attempt_policy(
             replacement_attempt_limit=1,
             replacement_notes=frozenset({"dead-protocol", "dead-permission-reject"}),
         )
+        return policy
+
+    # N1: a standard+ frame leg is depth 1 and carries NO `fallback_hops`, by
+    # construction -- the compiler attaches a checked chain only to
+    # dispatch_depth == 2 nodes. Without this early return every standard+
+    # frame registration dies at `route-fallback-hops-missing` while compile and
+    # route-verify both pass: precisely the late-failure class this cycle
+    # exists to remove.
+    #
+    # Why an early return instead of teaching the compiler to attach a chain to
+    # depth-1 nodes: `_fallback_chain` matching keys on `launch_authority`, and
+    # LAUNCH_AUTHORITIES holds only {"conductor", "ancestor-broker"}. A depth-1
+    # frame leg is launched under `launch_authority: "depth-0"`, a DIFFERENT
+    # axis; making a chain match it would mean adding a new enum value that
+    # batch, chain and manifest code all read. That is a far wider and riskier
+    # change than one guarded return, and it was rejected deliberately.
+    if (
+        int(node.get("dispatch_depth", -1)) == 1
+        and node.get("worker_type") == "frame"
+        and node.get("unit") == "plan/frame"
+    ):
+        if execution_surface != "registered-headless" or registered_worker is not True:
+            raise DispatchContractError("frame-route-surface-invalid", str(execution_surface))
+        if effective_hop not in {"same-harness-headless", "cross-harness-headless"}:
+            raise DispatchContractError("frame-route-surface-invalid", effective_hop)
+        # Standard+ HAS checked dispatch evidence (quick does not), so the
+        # requested harness is checked against it rather than taken on trust.
+        supported = [
+            row
+            for row in ((route.get("dispatch_evidence") or {}).get("tuples") or [])
+            if isinstance(row, dict)
+            and row.get("status") == "supported"
+            and row.get("child_harness") == harness
+        ]
+        if not supported:
+            raise DispatchContractError("frame-harness-unsupported", str(harness))
+        policy.update(fallback_hop=effective_hop)
         return policy
 
     chain = node.get("fallback_hops")
@@ -5418,7 +5483,7 @@ def validate_nested_eligibility(
 
 # The human gates whose owner contract implements raise + await (SD-129
 # §13.41.2-5). See `_human_gate_entry_fence`.
-FENCED_HUMAN_GATES = frozenset({"frame-review"})
+FENCED_HUMAN_GATES = frozenset({"frame-review", "preview-disposition"})
 
 
 def _human_gate_entry_fence(
@@ -5446,16 +5511,28 @@ def _human_gate_entry_fence(
     #   1. some node of THIS route raises the gate -- the SD-123 mechanism is
     #      `predecessor.continuation = {kind: human-gate, gate}` ->
     #      BLOCKED_HUMAN_GATE -> release; a binding with no raising continuation
-    #      (`intent-confirmation`) is satisfied by the §0.4 card;
+    #      is satisfied by the §0.4 card;
     #   2. the gate is in FENCED_HUMAN_GATES -- the gates whose owner contract
-    #      actually implements the raise and the wait. The topology declares
-    #      raising continuations for five more gates (`direction-confirmation`,
-    #      `preview-disposition`, `explicit-handback`, `full-run-authorization`,
-    #      `deploy-authorization`) that no capability document, skill or owner
-    #      reference tells an owner to raise; fencing those would turn a
-    #      declaration into a mandatory step nobody documented (round 2, B1).
+    #      actually implements the raise and the wait. The topology still
+    #      declares raising continuations for three more gates
+    #      (`explicit-handback`, `full-run-authorization`, `deploy-authorization`)
+    #      that no capability document, skill or owner reference tells an owner
+    #      to raise; fencing those would turn a declaration into a mandatory
+    #      step nobody documented (round 2, B1).
     # A gate joins the set in the same change that teaches its owner to raise
     # it; `dispatch_contract.test.py` pins the set against the real topology.
+    # The three direction gates the other autopilot recipes used to declare
+    # (`direction-confirmation`, `user-refine-disposition`, `intent-confirmation`)
+    # were absorbed into the one universal `frame-review` once
+    # `capabilities/autopilot-{design,draft,spec}.md` documented the raise.
+    # `preview-disposition` was NOT absorbed (user decision, 2026-09-10): it is
+    # an approval before refine's transaction applies an edit, not a direction,
+    # and it joins this set in the same change that documents its raise in
+    # `capabilities/autopilot-refine.md`. Before that change it was declared but
+    # never fenced, so no refine route ever actually waited on it.
+    # Routes compiled before that absorption are never retro-fitted: this fence
+    # reads only the route object it was handed, so an old-generation route
+    # keeps its own generation's node shape, gate names and bindings.
     raised_gates = {
         str((n.get("continuation") or {}).get("gate"))
         for n in (route.get("nodes") or [])

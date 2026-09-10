@@ -1,4 +1,5 @@
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -7,6 +8,11 @@ from unittest import mock
 
 import dispatch_terminal_commit as T
 import owner_route_binding
+
+# The one already-loaded handle on capability-route.py; the quick-branch tests
+# below compile a real quick route rather than hand-rolling one, so the route
+# they verify against is the route the compiler actually emits.
+ROUTE = owner_route_binding.ROUTE
 
 
 def seal_fixture_route(route, route_file, root, jobs, owner):
@@ -456,6 +462,115 @@ class ProducerBindingMatrixTest(_TerminalCommitFixture):
         self.assertEqual(T._proof_failure("owner-route-mismatch").reason, "route-identity-unverified")
         self.assertEqual(T._proof_failure("binding-cycle-not-open").reason, "producer-binding-mismatch")
         self.assertEqual(T._proof_failure("producer-binding-mismatch").reason, "producer-binding-mismatch")
+
+
+class QuickWorkerTypeAxesTest(unittest.TestCase):
+    """`validate_owner_route`'s quick branch admits `frame` as well as `owner`.
+
+    Quick is a three-node route and both worker types terminate through here.
+    Assuming `one-shot` made every frame leg's termination fail as
+    `route-identity-unverified: quick-owner-tuple` -- the row named `frame`,
+    the derived tuple named `one-shot`, and the two could never agree.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.base = Path(self.tmp.name)
+        (self.base / "core").mkdir(parents=True, exist_ok=True)
+        (self.base / "core" / "CORE.md").write_text("fixture\n", encoding="utf-8")
+        self._previous = {key: os.environ.get(key)
+                          for key in ("AGENT_HOME", "AGENT_DISPATCH_JOBS", "XDG_STATE_HOME")}
+        os.environ["AGENT_HOME"] = str(self.base)
+        os.environ["XDG_STATE_HOME"] = str(self.base / "state")
+        state_jobs = self.base / "state" / "jobs.log"
+        state_jobs.parent.mkdir(parents=True, exist_ok=True)
+        state_jobs.write_text("", encoding="utf-8")
+        os.environ["AGENT_DISPATCH_JOBS"] = str(state_jobs)
+        self.addCleanup(self._restore)
+        self.route_file = self.base / "quick-route.json"
+        self.route = ROUTE.compile_route(
+            "autopilot-code", "dev", "quick", ROUTE.ROOT, ROUTE.ROOT,
+            predicates=[], transport=None, tracking="tracked",
+            tracked_gate_evidence={
+                "spec_read": {"satisfied": True, "source": "canonical-prd-sha256"},
+                "drift_verdict": "within-spec", "workflow_mode": "tracked",
+                "artifact_guard": {"satisfied": True, "source": "conductor-prechecked"}},
+            registered_headless_evidence={"candidates": [
+                {"harness": harness, "transport": "headless",
+                 "surface": "registered-headless", "status": "supported",
+                 "probe_source": "fixture-probe", "probe_time": "2026-07-20T00:00:00Z"}
+                for harness in ("codex", "claude")]})
+        self.route_file.write_text(json.dumps(self.route), encoding="utf-8")
+        self.jobs = self.base / "jobs.log"
+
+    def _restore(self):
+        for key, value in self._previous.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+    def registered_row(self, node_id, worker_type, attempt):
+        """One registered quick worker row, sealing the node's complete tuple.
+
+        No `owner_route_*` fields: a quick worker seals its identity in the
+        `route_*` fields instead, which is exactly the path that reaches the
+        quick branch of `validate_owner_route`.
+        """
+        node = next(n for n in self.route["nodes"] if n["id"] == node_id)
+        scope = node["write_scope"]
+        meta = ",".join([
+            f"attempt_id={attempt}", f"worker_type={worker_type}", "dispatch_depth=1",
+            "registered_worker=1", "harness=codex", "capability=autopilot-code",
+            "capability_mode=dev", "intensity=quick",
+            f"route_file={self.route_file}", f"route_id={self.route['route_id']}",
+            f"route_hash={self.route['route_hash']}", f"route_node={node_id}",
+            f"registry_digest={self.route['registry_digest']}",
+            "write_scope=" + (";".join(scope) if isinstance(scope, list) else str(scope)),
+            f"completion_gate={node['completion_gate']}",
+        ])
+        self.jobs.write_text("\t".join([
+            "2026-09-10T00:00:00Z", "open", str(ROUTE.ROOT), str(ROUTE.ROOT),
+            f"quick-{node_id}", meta]) + "\n", encoding="utf-8")
+        return attempt
+
+    def test_a_frame_leg_row_derives_its_own_tuple_and_the_owner_row_is_unchanged(self):
+        for node_id, worker_type in (("one-shot", "owner"), ("frame", "frame"),
+                                     ("frame-alternative", "frame")):
+            with self.subTest(node_id=node_id):
+                attempt = self.registered_row(node_id, worker_type, f"att-quick-{node_id}")
+                owner = T.validate_owner_route(jobs=self.jobs, route_file=self.route_file,
+                                               owner_attempt_id=attempt)
+                self.assertEqual(owner.route_id, self.route["route_id"])
+                self.assertEqual(owner.route_hash, self.route["route_hash"])
+                self.assertEqual(owner.route_file, str(self.route_file.resolve()))
+
+    def test_a_worker_type_outside_the_widened_pair_is_still_refused(self):
+        """Widened to `{owner, frame}`, not opened. A `review` or `stage` row
+        holding the same otherwise-valid tuple must still fail closed."""
+        for worker_type in ("review", "stage", ""):
+            with self.subTest(worker_type=worker_type):
+                attempt = self.registered_row("frame", worker_type, "att-quick-other")
+                with self.assertRaises(T.TerminalCommitError) as caught:
+                    T.validate_owner_route(jobs=self.jobs, route_file=self.route_file,
+                                           owner_attempt_id=attempt)
+                self.assertEqual((caught.exception.code, caught.exception.detail),
+                                 ("route-identity-unverified", "quick-owner-axes"))
+
+    def test_a_frame_row_naming_the_wrong_node_is_a_tuple_refusal(self):
+        """The row's `route_node` is what the tuple is derived from, so a frame
+        row whose sealed gate/scope belong to another node cannot pass."""
+        node = next(n for n in self.route["nodes"] if n["id"] == "frame")
+        attempt = self.registered_row("frame", "frame", "att-quick-crossed")
+        crossed = self.jobs.read_text(encoding="utf-8").replace(
+            f"completion_gate={node['completion_gate']}", "completion_gate=quick-complete")
+        self.jobs.write_text(crossed, encoding="utf-8")
+        with self.assertRaises(T.TerminalCommitError) as caught:
+            T.validate_owner_route(jobs=self.jobs, route_file=self.route_file,
+                                   owner_attempt_id=attempt)
+        self.assertEqual((caught.exception.code, caught.exception.detail),
+                         ("route-identity-unverified", "quick-owner-tuple"))
 
 
 if __name__ == "__main__":

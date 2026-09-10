@@ -2475,5 +2475,126 @@ class TestGateSubjectNotCaller(WorkflowFixture):
         self.assertFalse(str(sidecar).startswith(str(canonical)))
 
 
+class TestGateRecipientIsNeverAFrameLeg(WorkflowFixture):
+    """N3: dispatch depth 1 stopped being a synonym for "the owner".
+
+    A route's two frame legs register at depth 1 as well, so the depth-1 walk in
+    `_owner_row` -- which returns the most RECENTLY registered match -- would hand
+    the direction-confirmation gate to a frame leg: a headless worker that cannot
+    answer it. The gate then reaches nobody. These tests pin the recipient by
+    ROLE, and pin it under two opposite registration orders so ordering can never
+    silently decide it again.
+    """
+
+    # (attempt_id, worker_type, parent_sid, route-id key)
+    # The wrapper writes `route_id=` for a node-bound row and `owner_route_id=`
+    # for the capability owner (`adapters/claude/bin/dispatch-headless.py`
+    # 1566-1574), and `_owner_row` matches either -- so the frame rows are
+    # written the way a real frame leg is written, not the way the owner is.
+    # The parent sessions are deliberately distinct: a frame leg's registered
+    # parent is whatever launched it, which is exactly the thing a gate must not
+    # be delivered to, so a shared value would make the assertion vacuous.
+    ROWS = {
+        "frame": ("att-fixtureframe0001", "frame", "sess-frame-leg-parent", "route_id"),
+        "frame-alternative": ("att-fixtureframealt", "frame", "sess-frame-alt-parent", "route_id"),
+        "one-shot": ("att-fixtureowner0001", "owner", "sess-fixture-depth0", "owner_route_id"),
+    }
+
+    def quick_registry(self, order, route_id="rt-fixture0000000", route_key=None):
+        """A jobs registry holding one depth-1 row per named node, in `order`."""
+        state_root = self.base / "dispatch"
+        state_root.mkdir(parents=True, exist_ok=True)
+        jobs = state_root / "jobs.log"
+        lines = []
+        for index, node in enumerate(order):
+            attempt, worker_type, session, default_key = self.ROWS[node]
+            key = default_key if worker_type == "owner" else (route_key or default_key)
+            metadata = ",".join([
+                f"attempt_id={attempt}", f"parent_sid={session}",
+                "parent_completion_delivery=claude-parent-runtime", "dispatch_depth=1",
+                f"worker_type={worker_type}", f"route_node={node}",
+                f"{key}={route_id}", "harness=claude",
+                "registered_worker=1", "execution_surface=registered-headless",
+            ])
+            lines.append("\t".join([f"2026-09-08T00:00:0{index}Z", "open", str(self.base),
+                                    str(self.base), f"quick-{node}", metadata]))
+        jobs.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        return jobs
+
+    def assert_owner_is_the_one_shot_row(self, jobs, route):
+        row = SUP._owner_row(SUP._registry_rows(jobs), "rt-fixture0000000")
+        self.assertIsNotNone(row, "no owner row resolved for a route that has one")
+        self.assertEqual(row["meta"]["route_node"], "one-shot")
+        self.assertEqual(row["meta"]["worker_type"], "owner")
+        self.assertEqual(row["meta"]["attempt_id"], self.ROWS["one-shot"][0])
+        recipient_key, kind, attempt_id, harness = SUP.gate_recipient(route, jobs)
+        self.assertEqual(recipient_key, self.ROWS["one-shot"][2])
+        self.assertEqual(attempt_id, self.ROWS["one-shot"][0])
+        self.assertEqual((kind, harness), ("claude-parent-runtime", "claude"))
+
+    def test_frame_legs_registered_before_the_owner_do_not_take_the_gate(self):
+        route, _path = self.two_stage_route(human_gate="frame-review")
+        for route_key in ("route_id", "owner_route_id"):
+            with self.subTest(route_key=route_key):
+                jobs = self.quick_registry(["frame", "frame-alternative", "one-shot"],
+                                           route_key=route_key)
+                self.assert_owner_is_the_one_shot_row(jobs, route)
+
+    def test_frame_legs_registered_after_the_owner_do_not_take_the_gate(self):
+        """The same three rows, reordered. `_owner_row` walks newest-first, so
+        this is the order in which the unguarded walk actually loses: the last
+        frame leg to register is the first depth-1 row the walk sees. Whichever
+        order the runtime happens to produce, the recipient is the same row."""
+        route, _path = self.two_stage_route(human_gate="frame-review")
+        for order in (["one-shot", "frame", "frame-alternative"],
+                      ["frame", "one-shot", "frame-alternative"]):
+            with self.subTest(order=",".join(order)):
+                jobs = self.quick_registry(order)
+                self.assert_owner_is_the_one_shot_row(jobs, route)
+
+    def test_a_registry_of_only_frame_legs_resolves_no_owner_at_all(self):
+        """The guard, stated positively: a frame leg is not merely outranked by an
+        owner row, it is not selectable at all. Without the skip this registry
+        hands the gate to `frame-alternative`; with it, the gate fails loudly
+        instead of being delivered somewhere that cannot answer it."""
+        route, _path = self.two_stage_route(human_gate="frame-review")
+        jobs = self.quick_registry(["frame", "frame-alternative"])
+        rows = SUP._registry_rows(jobs)
+        self.assertEqual([row["meta"]["route_node"] for row in rows],
+                         ["frame", "frame-alternative"])
+        self.assertIsNone(SUP._owner_row(rows, "rt-fixture0000000"))
+        with self.assertRaises(SUP.SupervisorError) as caught:
+            SUP.gate_recipient(route, jobs)
+        self.assertIn("gate-recipient-unresolved", str(caught.exception))
+
+    def test_a_frame_leg_asking_who_owns_the_gate_is_not_told_itself(self):
+        """`_owner_row` has a SECOND door: an `AGENT_DISPATCH_ATTEMPT_ID`
+        shortcut that returns the caller's own row before the depth walk runs.
+        Guarding only the walk left the same wrong answer reachable through it --
+        a frame leg asking who owns the gate would be handed itself, which is the
+        exact delivery failure N3 exists to remove. The frame leg falls through
+        to the walk instead, and gets the real owner.
+        """
+        route, _path = self.two_stage_route(human_gate="frame-review")
+        jobs = self.quick_registry(["one-shot", "frame", "frame-alternative"])
+        for node in ("frame", "frame-alternative"):
+            with self.subTest(caller=node):
+                with mock.patch.dict(
+                    os.environ,
+                    {"AGENT_DISPATCH_ATTEMPT_ID": self.ROWS[node][0]},
+                ):
+                    self.assert_owner_is_the_one_shot_row(jobs, route)
+
+    def test_the_owner_shortcut_still_returns_the_owner_row(self):
+        """The shortcut itself is unchanged for a non-frame caller: an owner
+        asking about its own route still short-circuits to its own row."""
+        route, _path = self.two_stage_route(human_gate="frame-review")
+        jobs = self.quick_registry(["one-shot", "frame", "frame-alternative"])
+        with mock.patch.dict(
+            os.environ, {"AGENT_DISPATCH_ATTEMPT_ID": self.ROWS["one-shot"][0]}
+        ):
+            self.assert_owner_is_the_one_shot_row(jobs, route)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=1)

@@ -60,7 +60,21 @@ _CAPTURED = _REQUIRED | {"--unit", "--review-output"}
 # in the registry as `worker_type=owner`, which is exactly the self-declaration
 # SD-OPEN-41(b)'s marker gate has to reject -- the degraded path was the only
 # reachable one because no normal path existed.
-_LAUNCHABLE_WORKER_TYPES = {"owner", "review"}
+#
+# `frame` (frame-universal, 2026-09-10) is a third depth-1 tuple: a bounded
+# direction-setting leg dispatched as its OWN depth-1 node rather than as a
+# depth-2 stage under an owner. It may accept `--route-evidence` (below) in a
+# way `review` never can, because no other launch path ever competes for it:
+# a depth-1 GROUPED launch is refused everywhere (`dispatch-batch.py:356-357`,
+# `dispatch-node.py:464-475`, `stage-dispatch-fallback.py:1538-1545` all
+# reject depth-1 group nodes), so a depth-1 frame node has exactly one
+# reachable launch path -- this selector -- and can never be double-claimed by
+# both this route-evidence path and a stage-dispatch path. `review`, by
+# contrast, IS launched by the stage dispatcher too (a route node's bound
+# reviewer), which is exactly why `review-worker-route-evidence-unsupported`
+# exists for review below; frame carries no such double-claim risk and is
+# exempt from that restriction.
+_LAUNCHABLE_WORKER_TYPES = {"owner", "review", "frame"}
 _UNIT_REF = re.compile(r"^[a-z-]+/[a-z-]+$")
 _RESERVED_UNITS = {"_kernel/owner", "_kernel/resource"}
 
@@ -96,13 +110,16 @@ _HINTS = {
     "no-eligible-candidate": "no configured owner harness is usable: usage-limited, gated, or no positive capacity score "
                              "(see eligibility.* and capacity_headroom.* above; utilities/usage-check.sh --harness all)",
     "exactly-one-action-required": "pass exactly one of --dry-run | --register | --start",
-    "owner-tuple-required": "the launchable tuple is --dispatch-depth 1 --worker-type owner|review",
+    "owner-tuple-required": "the launchable tuple is --dispatch-depth 1 --worker-type owner|review|frame",
     "invalid-model-profile": "--model-profile deep|balanced-deep|balanced|light (top only from a route that seals it)",
     "profile-top-route-required": "drop --model-profile top: the top exception profile is sealed by a route "
                                   "(compose/compile --profile-demands '{\"__owner__\": …}' --explicit-profiles "
                                   "'{\"__owner__\": \"top\"}') and reaches the owner through --route-evidence only",
     "review-worker-unit-required": "--worker-type review needs --unit <catalog persona from roles/units/>",
     "review-worker-route-evidence-unsupported": "a route node's reviewer is launched by stage dispatch; drop --route-evidence for an ad-hoc review worker",
+    "review-output-frame-forbidden": "a frame worker returns its advisory verdict through the ordinary dispatch handoff; drop --review-output",
+    "route-node-unknown": "--route-node must name an id present in the sealed route's nodes list",
+    "route-node-worker-type-forbidden": "--route-node selects a frame node's own model_profile; only --worker-type frame may use it",
     "forbidden-flag": "model, reasoning, effort, variant and completion-delivery are sealed by the profile and route; remove the flag",
     "explicit-jobs-outside-parent-registry": "drop --jobs: an interactive Claude parent's completion hook trusts only the inherited "
                                              "AGENT_DISPATCH_JOBS (or the installed canonical registry), so an owner started into another "
@@ -128,7 +145,28 @@ class OwnerError(ValueError):
     pass
 
 
-def _route_defaults(path):
+def _node_model_profile(route, route_node):
+    """The one route-node-derived field a `--route-node` launch needs.
+
+    `_ROUTE_FIELDS` stays the one owner-only table (`--model-profile` there
+    maps to the OWNER's sealed `owner_model_profile`); a frame node selected
+    by `--route-node` instead reads its OWN `model_profile` from the route's
+    node list. The owner and the route node it dispatches are not the same
+    profile decision, and the owner-only table must not grow a second,
+    node-keyed column to answer both -- this helper is that one exception.
+    """
+    nodes = route.get("nodes")
+    node = next(
+        (row for row in nodes if isinstance(row, dict) and row.get("id") == route_node),
+        None,
+    ) if isinstance(nodes, list) else None
+    if node is None:
+        raise OwnerError("route-node-unknown")
+    value = node.get("model_profile")
+    return str(value) if value not in (None, "") else None
+
+
+def _route_defaults(path, route_node=None):
     """Owner-tuple values a sealed route states; None for fields it lacks."""
     try:
         route = json.loads(Path(path).read_text(encoding="utf-8"))
@@ -144,6 +182,8 @@ def _route_defaults(path):
         "--dispatch-depth": "1", "--worker-type": "owner",
         "--owner": capability, "--assigned-contract": capability,
     })
+    if route_node is not None:
+        values["--model-profile"] = _node_model_profile(route, route_node)
     return {flag: (str(value) if value not in (None, "") else None) for flag, value in values.items()}
 
 
@@ -276,6 +316,7 @@ def _parse(argv):
     forwarded = []
     explicit = None
     route_evidence = None
+    route_node = None
     values = {}
     actions = []
     i = 0
@@ -301,6 +342,20 @@ def _parse(argv):
             continue
         if arg.startswith("--route-evidence="):
             route_evidence = arg.split("=", 1)[1]
+            i += 1
+            continue
+        # Selector-only, like --adapter/--route-evidence: a frame launch bound
+        # to a route node names which node's own model_profile to derive (see
+        # _node_model_profile below). The wrapper never sees this flag; it does
+        # not need plumbing past this selector's own gap-fill concern.
+        if arg == "--route-node":
+            if i + 1 >= len(argv):
+                raise OwnerError("route-node-missing")
+            route_node = argv[i + 1]
+            i += 2
+            continue
+        if arg.startswith("--route-node="):
+            route_node = arg.split("=", 1)[1]
             i += 1
             continue
         name, equal, value = arg.partition("=")
@@ -347,8 +402,8 @@ def _parse(argv):
     # Only a gap opens the route: a caller that spells out the whole tuple is
     # parsed exactly as before and validated by the binding checks downstream.
     gaps = [flag for flag in _REQUIRED if not values.get(flag)]
-    if route_evidence and gaps and values.get("--worker-type", "owner") == "owner":
-        for flag, sealed in _route_defaults(route_evidence).items():
+    if route_evidence and gaps and values.get("--worker-type", "owner") in {"owner", "frame"}:
+        for flag, sealed in _route_defaults(route_evidence, route_node).items():
             if values.get(flag):
                 if flag in _ROUTE_SEALED and sealed is not None and not _same_value(flag, values[flag], sealed):
                     raise OwnerError(f"route-evidence-arg-mismatch:{flag}")
@@ -369,6 +424,8 @@ def _parse(argv):
     worker_type = values["--worker-type"]
     if values["--dispatch-depth"] != "1" or worker_type not in _LAUNCHABLE_WORKER_TYPES:
         raise OwnerError("owner-tuple-required")
+    if route_node and worker_type != "frame":
+        raise OwnerError("route-node-worker-type-forbidden")
     unit = (values.get("--unit") or "").strip()
     if worker_type == "owner":
         # Unchanged: the owner tuple pins its own unit downstream
@@ -377,8 +434,10 @@ def _parse(argv):
         if unit and unit != "_kernel/owner":
             raise OwnerError("invalid-owner-unit")
     else:
-        # A review worker is a *unit*, not a kernel role: it must name the
-        # catalog persona it reviews as, and it can never borrow the owner's.
+        # A review or frame worker is a *unit*, not a kernel role: it must
+        # name the catalog persona it runs as, and it can never borrow the
+        # owner's. This reuses the same check for both -- SD-OPEN-40's review
+        # gate widened, not duplicated, for frame-universal.
         if not unit:
             raise OwnerError("review-worker-unit-required")
         if unit in _RESERVED_UNITS:
@@ -389,11 +448,19 @@ def _parse(argv):
         # than a shape that `foo/bar` also satisfies.
         if not (ROOT / "roles" / "units" / f"{unit}.md").is_file():
             raise OwnerError("unknown-review-worker-unit")
-        if route_evidence:
+        if worker_type == "review" and route_evidence:
             # A route node's review worker is launched by the stage dispatcher
             # with its node binding, not by this selector. Accepting route
             # evidence here would let one node be claimed by two launch paths.
+            # `frame` is exempt (see _LAUNCHABLE_WORKER_TYPES above): a depth-1
+            # frame node has no competing stage-dispatch launch path, so its
+            # route evidence can never be claimed twice.
             raise OwnerError("review-worker-route-evidence-unsupported")
+        if worker_type == "frame" and values.get("--review-output"):
+            # A frame worker returns an advisory verdict through the ordinary
+            # dispatch handoff (roles/worker-types/frame.md), never a durable
+            # review report -- --review-output has nothing to bind to here.
+            raise OwnerError("review-output-frame-forbidden")
         # A report is an explicit opt-in capability.  It is forwarded as a
         # value, never inferred from caller environment or route metadata.
         if values.get("--review-output") and not Path(values["--review-output"]).is_absolute():
@@ -410,6 +477,14 @@ def _parse(argv):
     # Equal-form required options are forwarded unchanged; split-form options
     # were appended above.  Selector-only --adapter/--route-evidence never
     # cross the boundary.
+    # W3: carry the selector-only `--route-node` to the quick-binding call site
+    # through `values` rather than by widening this return tuple -- every
+    # existing caller unpacks five values, and a sixth would break them all.
+    # It is never forwarded to the wrapper (the parser above `continue`s past
+    # it); the quick binding re-emits its own `--route-node` from the node it
+    # actually resolved.
+    if route_node:
+        values["--route-node"] = route_node
     return explicit, values, forwarded, route_evidence, derived
 
 
@@ -754,10 +829,14 @@ def main(argv):
         if route_evidence:
             route_data = json.loads(Path(route_evidence).read_text(encoding="utf-8"))
             if route_data.get("effective_intensity") == "quick":
+                # W3: quick is a three-node route, so the caller's own
+                # `--route-node` selects which node this launch binds to. The
+                # default keeps every existing quick OWNER launch identical.
                 binding = derive_quick_owner_binding(
                     route_evidence, worktree=values["--worktree"],
                     capability=values["--capability"], capability_mode=values["--capability-mode"],
                     intensity=values["--intensity"], harness=selected,
+                    route_node=values.get("--route-node") or "one-shot",
                 )
                 forwarded += ["--route-file", binding.route_file, "--route-id", binding.route_id,
                               "--route-hash", binding.route_hash, "--route-node", binding.route_node,

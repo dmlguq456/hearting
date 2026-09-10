@@ -130,7 +130,10 @@ class ValidateTest(unittest.TestCase):
         self.assertTrue(any("note" in e and "> 500" in e for e in FI.validate_answers(interview, answers)))
         answers = good_answers(interview)
         answers["answers"]["q-scope"]["note"] = "y" * 400
-        answers["extra"] = "z" * 9000
+        # The ceiling is derived from the per-field caps, so inflate past it
+        # rather than past a fixed number (the guarantee is "bounded as a
+        # whole", not "bounded at 8 KiB").
+        answers["extra"] = "z" * (FI.MAX_ANSWERS_BYTES + 1)
         self.assertTrue(any("bytes >" in e for e in FI.validate_answers(interview, answers)))
         answers = good_answers(interview, understanding_confirmed=False, correction="c" * 501)
         self.assertTrue(any("correction" in e and "> 500" in e for e in FI.validate_answers(interview, answers)))
@@ -356,6 +359,115 @@ class CliTest(unittest.TestCase):
         self.assertEqual(code, 65)
         self.assertIn("understanding_confirmed", err)
         self.assertFalse((self.base / "intent.md").exists())
+
+
+LANDING_SCOPE = {
+    "id": "landing-scope", "topic": "이번에 어디까지", "kind": "choice",
+    "question": "이번에는 코드 작업에만 적용하고, 문서나 화면 만드는 일은 다음에 옮길까요?",
+    "options": [
+        {"label": "코드부터 먼저",
+         "means": "코드 작업에서 먼저 검증하고, 나머지 종류는 다음 일로 넘깁니다."},
+        {"label": "한 번에 전부",
+         "means": "모든 종류에 동시에 적용합니다. 이번 일이 훨씬 커지고 위험도 커집니다."},
+    ],
+    "recommended": 0,
+    "why": "한 번에 끝내는 것과 안전하게 나눠 가는 것 중 어느 쪽이 급하신지는 사용자 일정에 달렸습니다.",
+}
+# The user's actual words on 2026-09-10, shortened to the substance the ledger
+# lost. Neither printed option was the answer.
+LANDING_SCOPE_NOTE = (
+    "선택지 둘 다 아님. 사용자가 고른 범위는 '문서·화면·요구사항까지' — 방향 게이트가 이미 "
+    "선언된 다섯 종류(code·draft·refine·design·spec)만 이번에 옮긴다. 선언만 있던 게이트 "
+    "4개를 실제로 동작하게 만드는 일이 범위에 포함된다. 게이트가 없는 조사·분석2·감사·"
+    "실험(eval)은 이번 범위 밖. 승인류 3개는 손대지 않는다. quick 하한·direct 제외는 그대로."
+)
+
+
+class OffMenuAnswerTest(unittest.TestCase):
+    """2026-09-10 regression: this cycle's own `landing-scope` answer was
+    off-menu, the schema had no way to say so, and `intent.md` recorded
+    `**한 번에 전부** (user's own choice)` -- a decision the user never made."""
+
+    def interview(self):
+        return good_interview(questions=[LANDING_SCOPE])
+
+    def answers(self, choice=FI.NONE_SENTINEL, note=LANDING_SCOPE_NOTE):
+        interview = self.interview()
+        answers = FI.answers_template(interview)
+        answers["understanding_confirmed"] = True
+        answers["answers"]["landing-scope"] = {"choice": choice, "note": note}
+        return interview, answers
+
+    def test_the_false_record_cannot_happen_again(self):
+        interview, answers = self.answers()
+        self.assertEqual(FI.validate_answers(interview, answers), [])
+        text = FI.render_intent(interview, answers, now="2026-09-10")
+        self.assertNotIn("한 번에 전부", text)
+        self.assertNotIn("user's own choice", text)
+        self.assertNotIn("(recommended)", text.split("## Decisions", 1)[1])
+        self.assertIn("**제시된 선택지 없음** (off-menu)", text)
+        self.assertIn("선택지 둘 다 아님", text)
+
+    def test_an_off_menu_answer_needs_its_note(self):
+        interview, answers = self.answers(note="   ")
+        errors = FI.validate_answers(interview, answers)
+        self.assertEqual(
+            errors, ["answers.landing-scope.note: required when no printed option applies"])
+
+    def test_the_off_menu_note_is_roomier_but_still_capped(self):
+        interview, answers = self.answers(note="가" * FI.MAX_OFFMENU_NOTE_CHARS)
+        self.assertEqual(FI.validate_answers(interview, answers), [])
+        self.assertGreater(FI.MAX_OFFMENU_NOTE_CHARS, FI.MAX_NOTE_CHARS)
+        interview, answers = self.answers(note="가" * (FI.MAX_OFFMENU_NOTE_CHARS + 1))
+        self.assertTrue(any(f"> {FI.MAX_OFFMENU_NOTE_CHARS}" in e
+                            for e in FI.validate_answers(interview, answers)))
+        # The ordinary cap is untouched for an on-menu answer.
+        interview, answers = self.answers(choice=0, note="가" * (FI.MAX_NOTE_CHARS + 1))
+        self.assertTrue(any(f"> {FI.MAX_NOTE_CHARS}" in e
+                            for e in FI.validate_answers(interview, answers)))
+
+    def test_a_none_label_wins_and_the_sentinel_is_refused(self):
+        """One value never means two things: where `none` is a real label,
+        index-conversion wins and the sentinel reading is a typed error."""
+        question = copy.deepcopy(LANDING_SCOPE)
+        question["options"][1]["label"] = "none"
+        interview = good_interview(questions=[question])
+        answers = FI.answers_template(interview)
+        answers["understanding_confirmed"] = True
+        answers["answers"]["landing-scope"] = {"choice": "none", "note": ""}
+        errors = FI.validate_answers(interview, answers)
+        self.assertEqual(
+            errors, ["answers.landing-scope.choice: option label collides with the none sentinel"])
+        self.assertEqual(answers["answers"]["landing-scope"]["choice"], 1)
+
+    def test_unanswered_and_off_menu_stay_two_different_values(self):
+        interview, answers = self.answers(choice=None)
+        errors = FI.validate_answers(interview, answers)
+        self.assertTrue(any("must index" in e for e in errors), errors)
+        text = FI.render_intent(interview, answers, now="2026-09-10")
+        self.assertIn("Decision: unanswered", text)
+        self.assertNotIn("off-menu", text)
+        # ... and the template's default is still the unanswered one.
+        self.assertIsNone(FI.answers_template(self.interview())["answers"]["landing-scope"]["choice"])
+
+    def test_answers_within_every_field_cap_always_fit_the_payload_cap(self):
+        """The payload ceiling is derived from the per-field caps, so answering
+        every field within its own cap can never be refused as a whole. It used
+        to be a free-standing 8 KiB beside caps counted in characters: in
+        Korean (3 bytes a character) three maximal off-menu answers broke it."""
+        questions = [dict(copy.deepcopy(LANDING_SCOPE), id=f"q-{i}", topic=f"주제 {i}")
+                     for i in range(FI.QUESTION_CAP["standard"])]
+        interview = good_interview(questions=questions)
+        answers = FI.answers_template(interview)
+        answers["understanding_confirmed"] = True
+        for qid in answers["answers"]:
+            answers["answers"][qid] = {"choice": FI.NONE_SENTINEL,
+                                       "note": "가" * FI.MAX_OFFMENU_NOTE_CHARS}
+        answers["correction"] = "가" * FI.MAX_CORRECTION_CHARS
+        size = len(json.dumps(answers, ensure_ascii=False).encode("utf-8"))
+        self.assertLessEqual(size, FI.MAX_ANSWERS_BYTES)
+        self.assertFalse(any("bytes >" in e
+                             for e in FI.validate_answers(interview, answers)))
 
 
 if __name__ == "__main__":

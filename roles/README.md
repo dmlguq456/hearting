@@ -29,7 +29,7 @@ through adapter-owned wrappers or native agent surfaces.
 | `material` | `material/figure-gen` | `deep maker` | `stage` | `low` | `roles/units/material/figure-gen.md` |
 | `material` | `material/pdf-extract` | `fast tool worker` | `support` | `near-zero` | `roles/units/material/pdf-extract.md` |
 | `material` | `material/web-image-search` | `fast tool worker` | `support` | `near-zero` | `roles/units/material/web-image-search.md` |
-| `plan` | `plan/frame` | `deep maker` | `stage` | `highest` | `roles/units/plan/frame.md` |
+| `plan` | `plan/frame` | `deep maker` | `frame` | `highest` | `roles/units/plan/frame.md` |
 | `plan` | `plan/plan-author` | `deep maker` | `stage` | `highest` | `roles/units/plan/plan-author.md` |
 | `qa` | `qa/assumption-check` | `fast reviewer` | `review` | `moderate` | `roles/units/qa/assumption-check.md` |
 | `qa` | `qa/code-review` | `fast reviewer` | `review` | `moderate` | `roles/units/qa/code-review.md` |

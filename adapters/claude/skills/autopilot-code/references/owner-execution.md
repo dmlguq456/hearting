@@ -36,8 +36,8 @@ Defaults:
 |---|---|---|---|
 | `direct` | intake → produce → sanity/report | None | No independent QA |
 | `quick` | intake → orient-lite → micro-plan → plan-check-lite → produce → verify-lite → report | None by default | Inline check with 3-4 questions |
-| `standard` | (`frame` + `frame-alternative`) → code-plan → plan-check → code-execute → impl-review → code-test → code-report | Required | Run the route-declared 2-way framing exploration with `balanced-deep` + `light` profiles and distinct perspectives |
-| `strong` | 3-way frame → 2-way plan → plan-check arbitration → execute → 2-way implementation review → test → report | Required | Spend cheap asymmetric breadth early, then converge through the declared arbiters; every group remains cross-harness-first. `execute` carries the SD-103 subdivision permission from `standard` up (routing-flex correction) — check it before dispatching a single long session (dev-pipeline Step 3) |
+| `standard` | frame (2 legs, depth-0-launched before this route starts) → code-plan → plan-check → code-execute → impl-review → code-test → code-report | Required | Two frame legs already ran and joined at depth-0 (`core/WORKFLOW.md` frame procedure); the owner only consumes the resulting `intent.md` |
+| `strong` | frame (2 legs, as above; not widened at strong+) → 2-way plan → plan-check arbitration → execute → 2-way implementation review → test → report | Required | Spend cheap asymmetric breadth early, then converge through the declared arbiters; every group remains cross-harness-first. `execute` carries the SD-103 subdivision permission from `standard` up (routing-flex correction) — check it before dispatching a single long session (dev-pipeline Step 3) |
 | `thorough`/`adversarial` | strong graph + 3-way plan and 3-way implementation review + deeper rigor | Required | Use the registry-declared third implementation-risk/failure-mode legs; never invent or widen a group outside the sealed route |
 
 **`standard+` dispatch**: Run every durable compiled node as dispatch depth 2. Start each sealed `parallel_group` of 2–4 legs with one `dispatch-batch --parallel-group` transaction, never member-by-member. The dispatch-depth-1 conductor passes artifact paths, reads only verdict/status, and yields while the adapter supervisor joins the exact child batch. Cross-harness means at least two harness families across the group; model-profile and perspective asymmetry are independently sealed and reported. Use `dispatch-wait` only for an explicit `poll-fallback`. Only `direct` and `quick` keep micro-stages inline. The owner never sets `AGENT_DISPATCH_ALLOW_NAMESPACED_SPAWN` or any other `AGENT_DISPATCH_*` lifecycle override, and never reads harness utility sources looking for one — the launcher evidence-binds that assertion to the launcher's own observed scope, and a registered headless owner inside a tool sandbox cannot make it. If the runtime hands a foreground `dispatch-batch` call to the background, that call has not failed: poll `dispatch-current --route <id>` or wait at the runtime join. Do not switch lifecycle.
@@ -61,89 +61,39 @@ Before merge/commit: (1) run `python3 tools/generate.py`, (2) record new `utilit
 
 > Treat the [Reference Index](#reference-index) as the single source for reference files, load points, and contents.
 
-## Post-Frame Direction Gate (SD-123)
+## Pre-Route Direction Gate (SD-123)
 
-`standard+` routes compiled after this cycle seal `human_gates: ["frame-review"]`
-and the `frame` node's continuation as `{"kind": "human-gate", "gate":
-"frame-review"}` — a route sealed before this cycle keeps `inline-next` and is
-never retro-fitted; do not attempt to apply this gate to an already-open route.
+The direction gate is finished before you are launched. The frame legs run in
+the depth-0 bootstrap layer ahead of the route; depth-0 joins them, builds
+`shards/frame/frame-summary.json` and the interview `shards/frame/interview.json`
+(schema `frame_interview_v1`, SD-129), asks the user, releases `frame-review`,
+and renders `shards/frame/intent.md`. A route sealed before this cycle keeps
+`frame.continuation=inline-next` and is never retro-fitted; do not attempt to
+apply this gate to an already-open route.
 
-1. After `frame` (and, at `standard`, `frame-alternative`) completes, before
-   dispatching `plan`: build `shards/frame/frame-summary.json` from
-   `shards/frame/direction-brief.md` — exactly the five fields 방향 (direction),
-   대안 (alternatives), 위험 (risk), 범위 변경 (scope change), 비용 (cost), total
-   size ≤1KB. Reference it by **path** when raising attention; never embed the
-   summary, a `required_action`, or a gate field inside a stage-advance receipt
-   body (seam 3 — `utilities/dispatch_completion_join.py`'s v2/v3 receipt
-   negotiation returns its body by identity when no advanced record exists).
-   Then build the **interview** `shards/frame/interview.json` (schema
-   `frame_interview_v1`, SD-129) from the briefs: `understanding` (one plain
-   sentence restating what the user wants, which the user confirms or
-   corrects), `brief` (problem / outcome / affected / constraints / open, each a
-   few plain lines), and `questions` — only the decisions the briefs leave to
-   the user. Rules, all checked by `utilities/frame_interview.py validate
-   --intensity <intensity>` and refused by `gate --block` when broken: no
-   harness words (route, owner, gate, node, shard, worker, …); one topic per
-   question; at most two short sentences (≤160 chars); 2–4 options, each with
-   a one-line "what choosing it means"; exactly one `recommended` option so the
-   user can answer "yes" and move on; a `why` naming why only the user can
-   decide it — a fact you can establish by reading code or running a tool is
-   never a question, investigate it instead; at most 7 questions at
-   `standard+` (3 at `quick`, 1 at `direct`), and nothing whose answer is
-   already obvious. A tired reader must be able to answer every question
-   without opening the plan. Questions the frame legs listed under "Questions
-   only the user can answer" are the first candidates.
-2. Raise the existing typed attention path (SD-78/108) with
-   `required_action=human-gate:frame-review`, naming
-   `shards/frame/interview.json` as the reviewable artifact
-   (`workflow-supervisor.py gate --route <route file> --gate frame-review
-   --block --artifact <absolute interview path>`); the interview references
-   `frame-summary.json` by path. The depth-0 session puts the summary card and
-   the questions to the user and records the answers on the release.
-3. Wait for the release on the one checked surface (SD-129), in bounded
-   foreground calls, doing nothing else in between:
-   `python3 <agent-home>/utilities/workflow-supervisor.py await-release --route
-   <route file> --gate frame-review --max 110` — exit 2 means still blocked:
-   call it again; exit 0 (`status=proceed`) means a person released the gate,
-   and the payload carries `released_by`, `artifact`, and any interview
-   `answers`; exit 3 (`revise`) returns to `frame` under the `code-refine`
-   retry boundary and the gate is raised again afterwards; exit 4 (`stop`)
-   cancels the route with `abandon_reason=operator-decision`. Never release
-   your own gate (`release`/`gate --release`) to move on: the frame gate is
-   sealed `release_authority=depth-0` at the raise, so a registered owner's
-   release is refused typed (`gate-release-authority-refused`) and would
-   otherwise unblock a plan nobody confirmed. Write the interview in the
-   `frame_interview_v1` shape only: an artifact that calls itself an
-   interview under another schema is refused at the raise
-   (`interview-schema-unsupported`). Never sleep, never write an ad-hoc polling
-   loop, and never spawn `plan` while `await-release` has not returned 0 —
-   every launch surface refuses a `plan` start whose entry gate is not
-   released (`human-gate-unreleased` / `human-gate-not-raised`, defect M).
-   The person records the answer from the depth-0 session with
-   `workflow-supervisor.py release --route <route file> --gate frame-review
-   --decision proceed|revise|stop --answers <answers file>`; `proceed` claims
-   the `plan` successor atomically (never spawn `plan` a second time on retry).
-   Pass `--answers-out shards/frame/interview-answers.json` to `await-release`
-   so the recorded answers land in your cycle directory.
-4. On `proceed`, render the agreed intent before anything else:
-   `python3 <agent-home>/utilities/frame_interview.py render-intent --interview
-   shards/frame/interview.json --answers shards/frame/interview-answers.json
-   --out shards/frame/intent.md`. `intent.md` is the brief `plan` reads first
-   (pass its absolute path in the plan prompt as `Intent:`); a plan that
+1. **You receive `intent.md`'s path as an input.** Read it first. Do not raise
+   `frame-review`, do not call `await-release` for it, and do not render the
+   intent yourself — that work is already done, and a registered owner's
+   release is refused typed anyway (`gate-release-authority-refused`, the gate
+   is sealed `release_authority=depth-0` at the raise).
+2. `intent.md` is the brief `plan` reads first: pass its absolute path in the
+   plan prompt as `Intent:`. Its sections are Problem / Proposed Outcome /
+   Affected / Constraints / Decisions / Open Questions, and a plan that
    contradicts a recorded decision is a plan-check blocker. When the user
-   corrected your understanding (`status: agreed-with-correction`), fold the
-   correction into the plan prompt verbatim. If the answers open a genuinely
-   new decision, you may raise the gate once more with a round-2 interview
-   (`round: 2`, same caps). A third interview raise is refused by the
-   validator (`round` ≤ 2); remaining doubts go to the plan's risk section,
-   and a third raise, if a route ever needs one, carries the frame summary
-   alone.
-5. `confirmation.mode` (`profiles/dispatch-defaults.yaml` /
-   `utilities/dispatch-defaults.py`, default `hybrid`) governs whether this
-   post-frame gate is the sole confirmation point (`post-frame-only`), layers
-   onto the existing pre-plan notify (`hybrid`), or both are always explicit
-   (`both`) — read it via `query_confirmation_mode`, never hardcode `hybrid`.
-   `core/WORKFLOW.md` §0.4 owns the user-facing card text.
+   corrected the restatement (`status: agreed-with-correction`), fold that
+   correction into the plan prompt verbatim.
+3. Your first work node is fenced by the released gate: every launch surface
+   refuses to start it while the entry gate is unreleased
+   (`human-gate-unreleased` / `human-gate-not-raised`, defect M). If your route
+   arrives with no `intent.md`, stop and report it rather than proceeding — an
+   owner that plans without the agreed intent is exactly the silent path this
+   gate exists to close. A `revise` or `stop` decision is spent before the
+   route starts, so neither consumes your `code-refine` retry budget.
+4. `confirmation.mode` (`profiles/dispatch-defaults.yaml` /
+   `utilities/dispatch-defaults.py`, default `hybrid`) governs the ordered
+   pair — blocking direction gate first, route notice after — read it via
+   `query_confirmation_mode`, never hardcode `hybrid`. `core/WORKFLOW.md` §0.4
+   owns the user-facing card text.
 
 ## Artifact Producer Lifecycle (W7C)
 

@@ -173,7 +173,12 @@ class RouteDemand(unittest.TestCase):
         demands={"execute":demand("important")}
         route=self.compile(profile_demands=demands)
         R.verify_route(route,R.ROOT)
-        graph=",".join(n["id"] for n in R.TOPO.resolve_recipe(R.TOPO.load_registry(),"autopilot-code","dev")["standard_plus"]["nodes"])
+        # Both frame legs raise `frame-review`, and compose emits one binding
+        # per raising node, so a graph naming both is refused as a gate bound
+        # twice. This test is about the resolver, not the graph, so it composes
+        # the widest graph compose can currently express.
+        graph=",".join(n["id"] for n in R.TOPO.resolve_recipe(R.TOPO.load_registry(),"autopilot-code","dev")["standard_plus"]["nodes"]
+                       if n["id"]!="frame-alternative")
         composed=R.compose_route(capability="autopilot-code",capability_mode="dev",shape="staged",graph=graph,
             slug="sd88",cwd=R.ROOT,artifact_root=R.ROOT, spec_read="fixture",profile_demands=demands,
             dispatch_evidence=self.dispatch(self.nested()))
@@ -346,10 +351,26 @@ class TopExceptionRoute(unittest.TestCase):
     def test_staged_route_seals_top_on_the_owner_only_and_verifies(self):
         route = self.staged(profile_demands=self.owner_demand("important"), explicit_profiles=self.TOP)
         self.assert_top_owner(route)
-        self.assertNotIn("top", {n["model_profile"] for n in route["nodes"]})
+        # The invariant is that a `top` OWNER does not spread `top` onto the
+        # recipe's stage nodes. The frame anchor is the one deliberate
+        # exception and is not an instance of that spreading at all: it is
+        # raised by the frame tier ladder, which keys on the owner's resolved
+        # profile rather than copying it. Everything else must still be off
+        # `top`.
+        self.assertNotIn("top", {n["model_profile"] for n in route["nodes"]
+                                 if n["id"] != "frame"})
         plain = self.staged()
         self.assertEqual(plain["owner_model_profile"], "deep")
         R.verify_route(plain, R.ROOT)
+        # Proof the anchor's `top` comes from the ladder and not from the
+        # owner: a plain staged route asked for no `top` anywhere, its owner is
+        # `deep`, and the anchor is `top` regardless -- while the alternative
+        # leg stays at the owner's own working tier.
+        by_id = {n["id"]: n for n in plain["nodes"]}
+        self.assertEqual(by_id["frame"]["model_profile"], "top")
+        self.assertEqual(by_id["frame-alternative"]["model_profile"], "deep")
+        self.assertNotIn("top", {n["model_profile"] for n in plain["nodes"]
+                                 if n["id"] != "frame"})
 
     def test_a_recipe_with_depth_one_stage_nodes_keeps_them_off_top(self):
         # Review R2 B1: autopilot-spec's `prd-transaction` (and refine's

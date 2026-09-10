@@ -31,7 +31,12 @@ unit: qa/code-review          # id = <family>/<name>; unique across the catalog
 family: qa                    # grouping LABEL (the former "team" name-space); never a runtime agent
 role: fast reviewer           # PORTABLE role name only — concrete model resolves via the
                               # per-adapter models.conf; a model literal here is a guard violation
-worker_type: review           # owner | stage | review | support → dispatch lifecycle overlay
+worker_type: review           # owner | stage | review | support | frame → dispatch lifecycle overlay
+                              # Changing this vocabulary means walking every location listed in
+                              # this unit's fence (see the W1 dev log under
+                              # .agent_reports/campaigns/2026-09-10_frame-bootstrap-layer/) in one
+                              # shot — a partial landing accepts a tuple in one place and refuses
+                              # it in another, which is worse than not starting.
 floor: moderate               # near-zero | low | moderate | high | highest — persona-minimization
                               # floor; graded per UNIT (never per family, never per (role,kind))
 read_only: true               # the unit's NATURE; the concrete write_scope stays NODE-owned

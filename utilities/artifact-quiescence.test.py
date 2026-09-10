@@ -28,9 +28,13 @@ class QuiescenceTest(unittest.TestCase):
     def sealed_route(self, root: Path, node: str = "test") -> tuple[dict, Path]:
         quick = node == "one-shot"
         cwd = str(root.parent)
-        candidate = {"harness": "codex", "surface": "registered-headless",
-                     "transport": "headless", "status": "supported",
-                     "probe_source": "hermetic-fixture", "probe_time": "2026-09-07T00:00:00Z"}
+        # Two supported harnesses: a quick route now compiles a cross-harness
+        # frame pair and refuses a single-harness candidate list at compile.
+        candidates = [{"harness": harness, "surface": "registered-headless",
+                       "transport": "headless", "status": "supported",
+                       "probe_source": "hermetic-fixture",
+                       "probe_time": "2026-09-07T00:00:00Z"}
+                      for harness in ("codex", "claude")]
         evidence = {"tuples": [{"parent_harness": "codex", "parent_transport": "headless",
             "parent_sandbox": "workspace-write", "child_harness": "codex",
             "launch_authority": "conductor", "status": "supported", "failure_class": "",
@@ -53,7 +57,7 @@ class QuiescenceTest(unittest.TestCase):
                 intensity="quick" if quick else "standard", cwd=cwd, artifact_root=str(root),
                 spec_read="hermetic-fixture", drift_verdict="hermetic-fixture",
                 dispatch_evidence=None if quick else evidence,
-                registered_headless_evidence={"candidates": [candidate]} if quick else None)
+                registered_headless_evidence={"candidates": candidates} if quick else None)
         Q.ROUTES.verify_route(route, allow_stale_registry=True)
         path = root / ".runtime" / "routes" / f"{route['route_id']}.json"
         path.write_text(json.dumps(route), encoding="utf-8")
@@ -87,6 +91,88 @@ class QuiescenceTest(unittest.TestCase):
             route, path = self.sealed_route(root, "one-shot")
             Path(config["dispatch_jobs"]).write_text(self.dispatch_row(
                 slug="quick", attempt="att-quick", metadata={
+                    "dispatch_depth": "1", "worker_type": "owner", "unit": "_kernel/owner",
+                    "artifact_root": root, "route_file": path, "route_id": route["route_id"],
+                    "route_hash": route["route_hash"], "route_node": "one-shot"}))
+            value = Q.collect(config)
+            self.assertTrue(value["observation_valid"], value.get("source_diagnostics"))
+            self.assertEqual(value["open_dispatch_attempts"], 1)
+
+    def test_review_frame_leg_route_tuple_is_attributable_standard(self):
+        # N2 site :212/:303 -- a depth-1 frame leg (worker_type=frame,
+        # unit=plan/frame) on a standard+ route binds `frame-route`.
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory); config = self.fixture(base)
+            root = Path(config["artifact_root"])
+            route, path = self.sealed_route(root, "frame,plan")
+            Path(config["dispatch_jobs"]).write_text(self.dispatch_row(
+                slug="frame-leg", attempt="att-frame-leg", metadata={
+                    "dispatch_depth": "1", "worker_type": "frame", "unit": "plan/frame",
+                    "artifact_root": root, "route_file": path, "route_id": route["route_id"],
+                    "route_hash": route["route_hash"], "route_node": "frame"}))
+            value = Q.collect(config)
+            self.assertTrue(value["observation_valid"], value.get("source_diagnostics"))
+            self.assertEqual(value["open_dispatch_attempts"], 1)
+
+    def test_review_frame_leg_route_tuple_is_attributable_quick(self):
+        # Same axis on the quick three-node route (frame, frame-alternative,
+        # one-shot) -- both frame legs bind, not just the owner node.
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory); config = self.fixture(base)
+            root = Path(config["artifact_root"])
+            route, path = self.sealed_route(root, "one-shot")
+            for slug, node in (("frame-primary", "frame"), ("frame-alt", "frame-alternative")):
+                with self.subTest(node=node):
+                    Path(config["dispatch_jobs"]).write_text(self.dispatch_row(
+                        slug=slug, attempt=f"att-{slug}", metadata={
+                            "dispatch_depth": "1", "worker_type": "frame", "unit": "plan/frame",
+                            "artifact_root": root, "route_file": path, "route_id": route["route_id"],
+                            "route_hash": route["route_hash"], "route_node": node}))
+                    value = Q.collect(config)
+                    self.assertTrue(value["observation_valid"], value.get("source_diagnostics"))
+                    self.assertEqual(value["open_dispatch_attempts"], 1)
+
+    def test_review_malformed_frame_leg_route_tuple_is_refused(self):
+        # A frame row that fails either half of the N2 axis is refused with a
+        # typed reason, never silently accepted as an ordinary stage row.
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory); config = self.fixture(base)
+            root = Path(config["artifact_root"])
+            quick_route, quick_path = self.sealed_route(root, "one-shot")
+            with self.subTest("unit-mismatch"):
+                Path(config["dispatch_jobs"]).write_text(self.dispatch_row(
+                    slug="wrong-unit", attempt="att-wrong-unit", metadata={
+                        "dispatch_depth": "1", "worker_type": "frame", "unit": "dev/backend",
+                        "artifact_root": root, "route_file": quick_path,
+                        "route_id": quick_route["route_id"], "route_hash": quick_route["route_hash"],
+                        "route_node": "frame"}))
+                value = Q.collect(config)
+                self.assertFalse(value["observation_valid"])
+                self.assertIn("stage-route-binding-axis-invalid", json.dumps(value["source_diagnostics"]))
+            standard_route, standard_path = self.sealed_route(root, "frame,plan")
+            with self.subTest("depth-2-target"):
+                Path(config["dispatch_jobs"]).write_text(self.dispatch_row(
+                    slug="depth2-target", attempt="att-depth2-target", metadata={
+                        "dispatch_depth": "1", "worker_type": "frame", "unit": "plan/frame",
+                        "artifact_root": root, "route_file": standard_path,
+                        "route_id": standard_route["route_id"], "route_hash": standard_route["route_hash"],
+                        "route_node": "plan"}))
+                value = Q.collect(config)
+                self.assertFalse(value["observation_valid"])
+                self.assertIn("frame-route-axis-invalid", json.dumps(value["source_diagnostics"]))
+
+    def test_review_quick_owner_route_binds_regardless_of_node_count(self):
+        # N2: the quick-owner-route binding asserts the `one-shot` node's own
+        # identity, never the route's node count -- a three-node quick route
+        # (two frame legs plus one-shot) still binds. No `len(nodes) == 1`
+        # assumption survives.
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory); config = self.fixture(base)
+            root = Path(config["artifact_root"])
+            route, path = self.sealed_route(root, "one-shot")
+            self.assertEqual(len(route["nodes"]), 3)
+            Path(config["dispatch_jobs"]).write_text(self.dispatch_row(
+                slug="owner-oneshot", attempt="att-owner-oneshot", metadata={
                     "dispatch_depth": "1", "worker_type": "owner", "unit": "_kernel/owner",
                     "artifact_root": root, "route_file": path, "route_id": route["route_id"],
                     "route_hash": route["route_hash"], "route_node": "one-shot"}))

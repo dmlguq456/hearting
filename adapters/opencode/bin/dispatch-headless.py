@@ -241,7 +241,7 @@ def parser() -> argparse.ArgumentParser:
         default=os.environ.get("AGENT_DISPATCH_PARENT_CWD") or None,
     )
     p.add_argument("--worker-role", help="legacy compatibility metadata; not bootstrap identity")
-    p.add_argument("--worker-type", choices=("owner", "stage", "review", "support"))
+    p.add_argument("--worker-type", choices=("owner", "stage", "review", "support", "frame"))
     p.add_argument("--review-output", help="exact durable report path for a route-free review worker")
     p.add_argument("--unit", default="", help="catalog unit ref for the assigned route node (roles/units/<unit>.md)")
     p.add_argument("--assigned-contract")
@@ -410,6 +410,12 @@ def resolve_model_settings(args: argparse.Namespace) -> dict[str, str]:
         require_top_route(
             getattr(args, "route_file", None) or getattr(binding, "route_file", None),
             profile=args.model_profile or "",
+            # Pass the launching node so a frame anchor leg is checked against
+            # ITS OWN sealed profile, not the owner's. Without this the route
+            # compiles `top` onto the anchor and this wrapper refuses it --
+            # and because each harness has its own copy of this call, omitting
+            # it in one place breaks that one harness only.
+            node=getattr(args, "route_node", None),
         )
     except ModelProfileError as exc:
         raise ModelSelectionError(exc.reason, str(exc)) from exc
@@ -758,6 +764,18 @@ def resolve_parent_completion_delivery(args: argparse.Namespace) -> str:
     (adapters/codex/bin/dispatch-headless.py), minus the Codex-only managed
     single-ingress gateway branch -- an OpenCode parent is never a managed
     Codex gateway target, so that probe never applies here.
+
+    Not keyed on `worker_type` (2026-09-10, W2 of frame-bootstrap-layer): only
+    action/dispatch_depth/launch_lifecycle/execution_surface/
+    registered_worker/parent identity decide the branch below, so a depth-1
+    `frame` worker takes exactly the same delivery path a depth-1
+    `owner`/`review`/`stage`/`support` worker does -- for OpenCode that is
+    `poll-fallback` under any non-Claude parent, the same as every other
+    worker type. Do not re-derive this by re-reading the branches; see
+    `OpenCodeParentCompletionDelivery.test_frame_worker_type_under_non_claude_parent_yields_bounded_wait`
+    in dispatch-headless.sd45.test.py, which proves it by calling this exact
+    function with `worker_type="frame"` and following the result through the
+    real `parent_next` receipt contract.
     """
     direct_registered = (
         getattr(args, "action", "") in {"register", "start"}

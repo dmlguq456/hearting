@@ -741,12 +741,27 @@ def _owner_row(rows, route_id):
             meta = row["meta"]
             if meta.get("attempt_id") != attempt_id:
                 continue
+            # N3, second door: this shortcut identifies the CALLER, and a frame
+            # leg can be the caller. Excluding frame legs only from the depth
+            # walk below would leave the same wrong answer reachable here --
+            # a frame leg asking who owns the gate would be told "you do".
+            # A frame leg is never the gate recipient, by either route in.
+            if meta.get("worker_type") == "frame":
+                break
             if route_id in (meta.get("owner_route_id"), meta.get("route_id")):
                 return row
             break
     for row in reversed(rows):
         meta = row["meta"]
         if meta.get("dispatch_depth") != "1":
+            continue
+        # N3: depth 1 is no longer a synonym for "the owner". A route's frame
+        # legs register at depth 1 too, and this walk returns the most RECENTLY
+        # registered match -- so without this skip the direction-confirmation
+        # gate is handed to a frame leg (a headless worker that cannot answer
+        # it) instead of the session that opened the route, and the gate never
+        # reaches the user. Registration ORDER must not decide the recipient.
+        if meta.get("worker_type") == "frame":
             continue
         if route_id in (meta.get("owner_route_id"), meta.get("route_id")):
             return row

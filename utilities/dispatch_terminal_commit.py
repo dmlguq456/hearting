@@ -421,7 +421,13 @@ def validate_owner_route(*, jobs: Path, route_file: Path, owner_attempt_id: str)
             # launch/attachment fields. Verify that existing contract exactly.
             fields, meta = owner_route_binding._owner_snapshot(Path(jobs), owner_attempt_id)
             route = json.loads(Path(route_file).read_text())
-            if (route.get("effective_intensity") != "quick" or meta.get("worker_type") != "owner"
+            # Quick is a three-node route: `one-shot` plus two depth-1 frame
+            # legs. Both worker types terminate through here, and the derived
+            # tuple must come from the node the row actually names -- assuming
+            # `one-shot` made every frame leg's termination fail as
+            # `route-identity-unverified: quick-owner-tuple`.
+            if (route.get("effective_intensity") != "quick"
+                    or meta.get("worker_type") not in {"owner", "frame"}
                     or meta.get("dispatch_depth") != "1" or meta.get("registered_worker") != "1"
                     or fields[1] not in {"open", "running", "done"}
                     or (fields[1] == "done" and meta.get("failure_class") != "pass")):
@@ -429,7 +435,8 @@ def validate_owner_route(*, jobs: Path, route_file: Path, owner_attempt_id: str)
             quick = owner_route_binding.derive_quick_owner_binding(route_file,
                 worktree=fields[3], capability=meta.get("capability", ""),
                 capability_mode=meta.get("capability_mode", ""),
-                intensity=meta.get("intensity", ""), harness=meta.get("harness", ""))
+                intensity=meta.get("intensity", ""), harness=meta.get("harness", ""),
+                route_node=meta.get("route_node") or "one-shot")
             for key in ("route_id", "route_hash", "route_node", "registry_digest", "completion_gate"):
                 if meta.get(key) != getattr(quick, key):
                     raise TerminalCommitError("route-identity-unverified", "quick-owner-tuple")

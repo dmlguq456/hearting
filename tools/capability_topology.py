@@ -395,7 +395,7 @@ def _unit_frontmatter(unit):
         raise TopologyError(f"unit {unit}: frontmatter unit id mismatch ({fields['unit']!r})")
     if not fields["role"]:
         raise TopologyError(f"unit {unit}: frontmatter role required")
-    if fields["worker_type"] not in ("owner", "stage", "review", "support"):
+    if fields["worker_type"] not in ("owner", "stage", "review", "support", "frame"):
         raise TopologyError(f"unit {unit}: invalid worker_type {fields['worker_type']!r}")
     if fields["read_only"] not in ("true", "false"):
         raise TopologyError(f"unit {unit}: read_only must be true or false")

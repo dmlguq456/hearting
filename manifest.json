@@ -3,7 +3,7 @@
   "canonical_manifest": "harness-manifest.json",
   "topology_registry": {
     "source": "capabilities/topologies.json",
-    "digest": "sha256:79385004292a8bded24ba5a532310b0a61bb47256b081f6a45e8c7082be602a5",
+    "digest": "sha256:895839a198599f70dbf8580d4c0e4291e8d1cdae99b5e8b8ee19bc518b3cbd09",
     "capabilities": 12,
     "recipes": 27
   },
@@ -479,7 +479,7 @@
     "plan/frame": {
       "family": "plan",
       "role": "deep maker",
-      "worker_type": "stage",
+      "worker_type": "frame",
       "floor": "highest"
     },
     "plan/plan-author": {

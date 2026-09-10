@@ -327,15 +327,41 @@
             ],
             "resource_class": "normal",
             "completion_gate": "code-frame",
-            "dispatch_depth": 2,
-            "fallback_hops": [
-              "same-harness-headless",
-              "cross-harness-headless",
-              "native-subagent",
-              "inline"
-            ],
+            "dispatch_depth": 1,
+            "launch_authority": "depth-0",
+            "worker_type": "frame",
             "unit": "plan/frame",
             "model_profile": "balanced-deep",
+            "continuation": {
+              "kind": "human-gate",
+              "gate": "frame-review"
+            },
+            "advance_class": "runtime-eligible",
+            "commit_expected": false
+          },
+          {
+            "id": "frame-alternative",
+            "kind": "map-worker",
+            "depends_on": [],
+            "role": "deep maker",
+            "inputs": [
+              "task",
+              "spec",
+              "source"
+            ],
+            "outputs": [
+              "shards/frame-alternative/direction-brief.md"
+            ],
+            "write_scope": [
+              "shards/frame-alternative/**"
+            ],
+            "resource_class": "normal",
+            "completion_gate": "code-frame",
+            "dispatch_depth": 1,
+            "launch_authority": "depth-0",
+            "worker_type": "frame",
+            "unit": "plan/frame",
+            "model_profile": "light",
             "continuation": {
               "kind": "human-gate",
               "gate": "frame-review"
@@ -347,14 +373,16 @@
             "id": "plan",
             "kind": "pipeline-stage",
             "depends_on": [
-              "frame"
+              "frame",
+              "frame-alternative"
             ],
             "role": "deep maker",
             "inputs": [
               "task",
               "spec",
               "source",
-              "shards/frame/direction-brief.md"
+              "shards/frame/direction-brief.md",
+              "shards/frame-alternative/direction-brief.md"
             ],
             "outputs": [
               "plan.md",
@@ -600,44 +628,6 @@
         "max_dispatch_depth": 2,
         "parallel_groups": [
           {
-            "id": "frame",
-            "node": "frame",
-            "kind": "explore",
-            "min_intensity": "standard",
-            "width_by_intensity": {
-              "standard": 2,
-              "strong": 3,
-              "thorough": 3,
-              "adversarial": 3
-            },
-            "join_policy": "all",
-            "independence_axes": [
-              "cross-harness",
-              "model-profile",
-              "perspective"
-            ],
-            "legs": [
-              {
-                "suffix": "anchor",
-                "perspective": "primary-framing",
-                "model_profile": "balanced-deep",
-                "leg_class": "peer"
-              },
-              {
-                "suffix": "alternative",
-                "perspective": "cross-harness-alternative",
-                "model_profile": "light",
-                "leg_class": "peer"
-              },
-              {
-                "suffix": "contrarian",
-                "perspective": "contrarian-framing",
-                "model_profile": "deep",
-                "leg_class": "peer"
-              }
-            ]
-          },
-          {
             "id": "plan",
             "node": "plan",
             "kind": "explore",
@@ -789,6 +779,7 @@
       ],
       "resume_retry_boundaries": [
         "frame",
+        "frame-alternative",
         "plan",
         "plan-check",
         "execute",
@@ -847,13 +838,78 @@
         "topology": "staged",
         "nodes": [
           {
-            "id": "refs",
+            "id": "frame",
             "kind": "map-worker",
             "depends_on": [],
-            "role": "fast tool worker",
+            "role": "deep maker",
             "inputs": [
               "design-task",
               "references"
+            ],
+            "outputs": [
+              "designs/<cycle>/01_refs/frame/direction-brief.md"
+            ],
+            "write_scope": [
+              "designs/<cycle>/01_refs/frame/**",
+              "spec/design/01_refs/frame/**"
+            ],
+            "resource_class": "normal",
+            "completion_gate": "design-frame",
+            "dispatch_depth": 1,
+            "launch_authority": "depth-0",
+            "worker_type": "frame",
+            "unit": "plan/frame",
+            "model_profile": "deep",
+            "continuation": {
+              "kind": "human-gate",
+              "gate": "frame-review"
+            },
+            "advance_class": "runtime-eligible",
+            "commit_expected": false
+          },
+          {
+            "id": "frame-alternative",
+            "kind": "map-worker",
+            "depends_on": [],
+            "role": "deep maker",
+            "inputs": [
+              "design-task",
+              "references"
+            ],
+            "outputs": [
+              "designs/<cycle>/01_refs/frame-alternative/direction-brief.md"
+            ],
+            "write_scope": [
+              "designs/<cycle>/01_refs/frame-alternative/**",
+              "spec/design/01_refs/frame-alternative/**"
+            ],
+            "resource_class": "normal",
+            "completion_gate": "design-frame",
+            "dispatch_depth": 1,
+            "launch_authority": "depth-0",
+            "worker_type": "frame",
+            "unit": "plan/frame",
+            "model_profile": "balanced-deep",
+            "continuation": {
+              "kind": "human-gate",
+              "gate": "frame-review"
+            },
+            "advance_class": "runtime-eligible",
+            "commit_expected": false
+          },
+          {
+            "id": "refs",
+            "kind": "map-worker",
+            "depends_on": [
+              "frame",
+              "frame-alternative"
+            ],
+            "role": "fast tool worker",
+            "inputs": [
+              "design-task",
+              "references",
+              "designs/<cycle>/01_refs/frame/direction-brief.md",
+              "designs/<cycle>/01_refs/frame-alternative/direction-brief.md"
             ],
             "outputs": [
               "designs/<cycle>/01_refs/reference-brief.json"
@@ -874,8 +930,7 @@
             "unit": "material/web-image-search",
             "model_profile": "light",
             "continuation": {
-              "kind": "human-gate",
-              "gate": "direction-confirmation"
+              "kind": "inline-next"
             },
             "advance_class": "runtime-eligible",
             "commit_expected": false
@@ -1128,6 +1183,7 @@
         ]
       },
       "completion_gates": [
+        "design-frame",
         "design-refs",
         "design-build",
         "design-verify",
@@ -1135,16 +1191,18 @@
         "design-handoff"
       ],
       "human_gates": [
-        "direction-confirmation"
+        "frame-review"
       ],
       "human_gate_bindings": [
         {
-          "gate": "direction-confirmation",
-          "node": "build",
+          "gate": "frame-review",
+          "node": "refs",
           "position": "entry"
         }
       ],
       "resume_retry_boundaries": [
+        "frame",
+        "frame-alternative",
         "refs",
         "build",
         "visual-verify",
@@ -1198,13 +1256,76 @@
         "topology": "staged",
         "nodes": [
           {
-            "id": "material-strategy",
-            "kind": "pipeline-stage",
+            "id": "frame",
+            "kind": "map-worker",
             "depends_on": [],
             "role": "deep maker",
             "inputs": [
               "task",
               "normalized-material"
+            ],
+            "outputs": [
+              "shards/frame/direction-brief.md"
+            ],
+            "write_scope": [
+              "shards/frame/**"
+            ],
+            "resource_class": "normal",
+            "completion_gate": "draft-frame",
+            "dispatch_depth": 1,
+            "launch_authority": "depth-0",
+            "worker_type": "frame",
+            "unit": "plan/frame",
+            "model_profile": "deep",
+            "continuation": {
+              "kind": "human-gate",
+              "gate": "frame-review"
+            },
+            "advance_class": "runtime-eligible",
+            "commit_expected": false
+          },
+          {
+            "id": "frame-alternative",
+            "kind": "map-worker",
+            "depends_on": [],
+            "role": "deep maker",
+            "inputs": [
+              "task",
+              "normalized-material"
+            ],
+            "outputs": [
+              "shards/frame-alternative/direction-brief.md"
+            ],
+            "write_scope": [
+              "shards/frame-alternative/**"
+            ],
+            "resource_class": "normal",
+            "completion_gate": "draft-frame",
+            "dispatch_depth": 1,
+            "launch_authority": "depth-0",
+            "worker_type": "frame",
+            "unit": "plan/frame",
+            "model_profile": "balanced-deep",
+            "continuation": {
+              "kind": "human-gate",
+              "gate": "frame-review"
+            },
+            "advance_class": "runtime-eligible",
+            "commit_expected": false
+          },
+          {
+            "id": "material-strategy",
+            "kind": "pipeline-stage",
+            "depends_on": [
+              "frame",
+              "frame-alternative"
+            ],
+            "role": "deep maker",
+            "inputs": [
+              "task",
+              "normalized-material",
+              "shards/frame/direction-brief.md",
+              "shards/frame-alternative/direction-brief.md"
             ],
             "outputs": [
               "evidence-map",
@@ -1559,6 +1680,7 @@
         }
       ],
       "completion_gates": [
+        "draft-frame",
         "draft-strategy",
         "draft-strategy-review",
         "draft-production",
@@ -1567,16 +1689,18 @@
         "draft-finalize"
       ],
       "human_gates": [
-        "user-refine-disposition"
+        "frame-review"
       ],
       "human_gate_bindings": [
         {
-          "gate": "user-refine-disposition",
-          "node": "finalize",
-          "position": "terminal"
+          "gate": "frame-review",
+          "node": "material-strategy",
+          "position": "entry"
         }
       ],
       "resume_retry_boundaries": [
+        "frame",
+        "frame-alternative",
         "material-strategy",
         "strategy-review",
         "draft-production",
@@ -1588,7 +1712,8 @@
         "cycle_anchors": [
           "documents/<cycle>"
         ],
-        "review_anchor": "reviews"
+        "review_anchor": "reviews",
+        "map_anchor": "shards"
       }
     },
     {
@@ -2313,13 +2438,76 @@
         "topology": "transactional-owner",
         "nodes": [
           {
-            "id": "review",
-            "kind": "review-worker",
+            "id": "frame",
+            "kind": "map-worker",
             "depends_on": [],
-            "role": "fast reviewer",
+            "role": "deep maker",
             "inputs": [
               "target-artifact",
               "source-evidence"
+            ],
+            "outputs": [
+              "shards/frame/direction-brief.md"
+            ],
+            "write_scope": [
+              "shards/frame/**"
+            ],
+            "resource_class": "normal",
+            "completion_gate": "refine-frame",
+            "dispatch_depth": 1,
+            "launch_authority": "depth-0",
+            "worker_type": "frame",
+            "unit": "plan/frame",
+            "model_profile": "deep",
+            "continuation": {
+              "kind": "human-gate",
+              "gate": "frame-review"
+            },
+            "advance_class": "runtime-eligible",
+            "commit_expected": false
+          },
+          {
+            "id": "frame-alternative",
+            "kind": "map-worker",
+            "depends_on": [],
+            "role": "deep maker",
+            "inputs": [
+              "target-artifact",
+              "source-evidence"
+            ],
+            "outputs": [
+              "shards/frame-alternative/direction-brief.md"
+            ],
+            "write_scope": [
+              "shards/frame-alternative/**"
+            ],
+            "resource_class": "normal",
+            "completion_gate": "refine-frame",
+            "dispatch_depth": 1,
+            "launch_authority": "depth-0",
+            "worker_type": "frame",
+            "unit": "plan/frame",
+            "model_profile": "balanced-deep",
+            "continuation": {
+              "kind": "human-gate",
+              "gate": "frame-review"
+            },
+            "advance_class": "runtime-eligible",
+            "commit_expected": false
+          },
+          {
+            "id": "review",
+            "kind": "review-worker",
+            "depends_on": [
+              "frame",
+              "frame-alternative"
+            ],
+            "role": "fast reviewer",
+            "inputs": [
+              "target-artifact",
+              "source-evidence",
+              "shards/frame/direction-brief.md",
+              "shards/frame-alternative/direction-brief.md"
             ],
             "outputs": [
               "reviews/refine-verdict.json"
@@ -2443,13 +2631,20 @@
         }
       ],
       "completion_gates": [
+        "refine-frame",
         "refine-review",
         "refine-transaction"
       ],
       "human_gates": [
+        "frame-review",
         "preview-disposition"
       ],
       "human_gate_bindings": [
+        {
+          "gate": "frame-review",
+          "node": "review",
+          "position": "entry"
+        },
         {
           "gate": "preview-disposition",
           "node": "transaction",
@@ -2457,6 +2652,8 @@
         }
       ],
       "resume_retry_boundaries": [
+        "frame",
+        "frame-alternative",
         "review",
         "transaction"
       ],
@@ -2465,7 +2662,8 @@
           "target-artifact"
         ],
         "target_relative": true,
-        "review_anchor": "reviews"
+        "review_anchor": "reviews",
+        "map_anchor": "shards"
       }
     },
     {
@@ -3124,13 +3322,78 @@
         "topology": "transactional-owner",
         "nodes": [
           {
-            "id": "research",
+            "id": "frame",
             "kind": "map-worker",
             "depends_on": [],
             "role": "deep maker",
             "inputs": [
               "intent",
               "prior-evidence"
+            ],
+            "outputs": [
+              "spec/_internal/research/frame/direction-brief.md"
+            ],
+            "write_scope": [
+              "spec/_internal/research/frame/**",
+              "spec/<component>/_internal/research/frame/**"
+            ],
+            "resource_class": "normal",
+            "completion_gate": "spec-frame",
+            "dispatch_depth": 1,
+            "launch_authority": "depth-0",
+            "worker_type": "frame",
+            "unit": "plan/frame",
+            "model_profile": "deep",
+            "continuation": {
+              "kind": "human-gate",
+              "gate": "frame-review"
+            },
+            "advance_class": "runtime-eligible",
+            "commit_expected": false
+          },
+          {
+            "id": "frame-alternative",
+            "kind": "map-worker",
+            "depends_on": [],
+            "role": "deep maker",
+            "inputs": [
+              "intent",
+              "prior-evidence"
+            ],
+            "outputs": [
+              "spec/_internal/research/frame-alternative/direction-brief.md"
+            ],
+            "write_scope": [
+              "spec/_internal/research/frame-alternative/**",
+              "spec/<component>/_internal/research/frame-alternative/**"
+            ],
+            "resource_class": "normal",
+            "completion_gate": "spec-frame",
+            "dispatch_depth": 1,
+            "launch_authority": "depth-0",
+            "worker_type": "frame",
+            "unit": "plan/frame",
+            "model_profile": "balanced-deep",
+            "continuation": {
+              "kind": "human-gate",
+              "gate": "frame-review"
+            },
+            "advance_class": "runtime-eligible",
+            "commit_expected": false
+          },
+          {
+            "id": "research",
+            "kind": "map-worker",
+            "depends_on": [
+              "frame",
+              "frame-alternative"
+            ],
+            "role": "deep maker",
+            "inputs": [
+              "intent",
+              "prior-evidence",
+              "spec/_internal/research/frame/direction-brief.md",
+              "spec/_internal/research/frame-alternative/direction-brief.md"
             ],
             "outputs": [
               "spec/_internal/research/**",
@@ -3327,21 +3590,24 @@
         ]
       },
       "completion_gates": [
+        "spec-frame",
         "spec-research",
         "spec-review",
         "spec-atomic-transaction"
       ],
       "human_gates": [
-        "intent-confirmation"
+        "frame-review"
       ],
       "human_gate_bindings": [
         {
-          "gate": "intent-confirmation",
+          "gate": "frame-review",
           "node": "research",
           "position": "entry"
         }
       ],
       "resume_retry_boundaries": [
+        "frame",
+        "frame-alternative",
         "research",
         "review",
         "prd-transaction"
@@ -3755,7 +4021,8 @@
     "map-worker": [
       "support",
       "stage",
-      "review"
+      "review",
+      "frame"
     ]
   },
   "completion_gate_contracts": {
@@ -3980,6 +4247,22 @@
     "audit-report": {
       "kind": "capability-doc",
       "contract": "capabilities/audit.md"
+    },
+    "design-frame": {
+      "kind": "unit-io",
+      "unit": "plan/frame"
+    },
+    "draft-frame": {
+      "kind": "unit-io",
+      "unit": "plan/frame"
+    },
+    "refine-frame": {
+      "kind": "unit-io",
+      "unit": "plan/frame"
+    },
+    "spec-frame": {
+      "kind": "unit-io",
+      "unit": "plan/frame"
     }
   },
   "model_profiles": {

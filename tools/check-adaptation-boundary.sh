@@ -3847,15 +3847,17 @@ check_worker_bootstrap_contract() {
     fail_msg "roles/worker-bootstrap.md must own the exact portable three-line handoff"
   fi
 
-  for worker_type in owner stage review support; do
+  for worker_type in owner stage review support frame; do
     fragment="roles/worker-types/$worker_type.md"
     if [ ! -f "$fragment" ] || ! grep -Fq '# Worker Type:' "$fragment"; then
       fail_msg "missing portable worker-type fragment: $fragment"
     fi
     if ! grep -Fq "worker_type: $worker_type" profiles/*.yaml 2>/dev/null; then
       # Not every type needs a current profile, but each declared profile must be typed;
-      # owner/review currently route through generated prompts rather than a profile.
-      [ "$worker_type" = owner ] || [ "$worker_type" = review ] || \
+      # owner/review currently route through generated prompts rather than a profile, and
+      # frame (frame-universal, 2026-09-10) deliberately has no profiles/*.yaml of its own
+      # either -- it is launched via dispatch-owner.py's route-evidence tuple, not a profile.
+      [ "$worker_type" = owner ] || [ "$worker_type" = review ] || [ "$worker_type" = frame ] || \
         fail_msg "profile declarations must expose their worker type"
     fi
   done

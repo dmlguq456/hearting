@@ -2021,6 +2021,83 @@ def _owner_node(node, effective):
             and node.get("dispatch_depth") == 1 and node.get("unit") == "_kernel/owner")
 
 
+def _frame_node(node):
+    """Whether `node` is a frame bootstrap leg: the depth-1 direction-setting
+    pair that the depth-0 session launches itself, ahead of any owner. Mirrors
+    `_owner_node`'s style so both the compiler and every verify check read one
+    predicate. This is the SECOND node class allowed the `top` exception
+    profile -- a frame leg is the one place where spending the main-session
+    model buys the whole route its framing, and it is bounded to one leg by
+    `replica_batch_contract`'s per-group top cap."""
+
+    return (node.get("unit") == "plan/frame"
+            and node.get("dispatch_depth") == 1
+            and node.get("worker_type") == "frame")
+
+
+def _quick_frame_diversity(candidates):
+    """ONE definition of a quick frame pair's harness diversity, shared by the
+    compiler and `verify_route` (they used to count supported harnesses
+    separately, and a policy change on one side alone would have made every
+    sealed single-harness route unverifiable).
+
+    Zero supported harnesses cannot frame at all. One is a recorded
+    degradation, not a refusal (user decision, 2026-09-10): both legs run on
+    that harness with their two perspectives and the route says so."""
+
+    harnesses = sorted({
+        row.get("harness") for row in candidates or []
+        if row.get("status") == "supported" and row.get("harness")
+    })
+    if not harnesses:
+        raise ValueError("quick-frame-harness-unavailable")
+    return ("cross-harness" if len(harnesses) >= 2
+            else "single-harness:" + harnesses[0])
+
+
+def _stamp_frame_profiles(nodes, owner_profile, owner_demand):
+    """Stamp every frame leg's `model_profile` from the one tier ladder.
+
+    ONE function called by BOTH the compiler and `verify_route`'s expected-node
+    recomputation. It has to be shared: the verifier rebuilds the node list
+    from the recipe and compares field by field, so a ladder applied on only
+    one side reports every standard+ route as
+    `node-profile-declaration-mismatch:frame` -- which is exactly what happened
+    the first time this was written inline in the compiler.
+
+    Runs BEFORE `_seal_profile_demands` on both sides, because that is what
+    turns the stamped profile into the node's sealed selection."""
+
+    rungs = PROFILE.frame_profile_for_owner(owner_profile)
+    for node in nodes:
+        if not _frame_node(node):
+            continue
+        # `frame` is the anchor leg (the one raised a tier); every other leg of
+        # the pair -- today only `frame-alternative` -- stays at the owner's
+        # working tier so the pair keeps two genuinely different voices.
+        profile = rungs["anchor" if node.get("id") == "frame" else "others"]
+        node["model_profile"] = profile
+        if profile == PROFILE.TOP_PROFILE:
+            # `top` is not a portable profile, so it cannot be sealed through
+            # the legacy "explicit profile, no demand" path -- the resolver
+            # refuses that with `profile-demand-required`. Give the anchor a
+            # real explicit selection instead: the owner's own demand when the
+            # caller supplied one (same judgment, same evidence, one
+            # decision), otherwise the frame shape's intrinsic demand, whose
+            # reasons say in as many words that the shape is speaking rather
+            # than task-specific evidence somebody gathered.
+            node["profile_explicit"] = True
+            node["profile_demand"] = json.loads(json.dumps(
+                owner_demand or PROFILE.FRAME_ANCHOR_SHAPE_DEMAND))
+    return nodes
+
+
+def _quick_gate_bindings():
+    """Quick's single human gate binding: the frame pair fences `one-shot`."""
+
+    return [{"gate": "frame-review", "node": "one-shot", "position": "entry"}]
+
+
 def _seal_profile_demands(nodes, profile_demands=None, explicit_profiles=None, *, legacy=False):
     demands = profile_demands or {}
     explicit_profiles = explicit_profiles or {}
@@ -2057,12 +2134,16 @@ def _profile_input_maps(nodes, demands, explicit):
             raise ValueError("profile-input-unknown-node:" + label)
     for key, value in (demands or {}).items():
         normalized[key] = PROFILE.normalize_profile_demand(value)
+    frame_ids = {n["id"] for n in nodes if _frame_node(n)}
     for key, value in (explicit or {}).items():
         if key not in normalized or value not in PROFILE.KNOWN_PROFILES:
             raise ValueError("profile-explicit-input-invalid:" + key)
-        if value == PROFILE.TOP_PROFILE and key != "__owner__":
+        if value == PROFILE.TOP_PROFILE and key != "__owner__" and key not in frame_ids:
             # The top exception profile is a dispatch-depth-1 decision: a
-            # stage node or parallel leg never spends the main-session model.
+            # depth-2 stage node or parallel leg never spends the main-session
+            # model. A depth-1 frame leg is the one added exception -- it is an
+            # anchor for the whole route's direction, launched by the depth-0
+            # session itself.
             raise ValueError("profile-explicit-top-owner-only:" + key)
     return normalized, dict(explicit or {})
 
@@ -2344,19 +2425,31 @@ def compose_subgraph_recipe(registry, base_recipe, graph_spec):
         terminal["model_required_reason"] = "terminal-report"
     # Human gates: a base node whose continuation was `human-gate G` keeps G
     # only when a graph node follows it; G is rebound to that node's entry.
+    # One binding per DISTINCT gate, not one per raiser. Sibling nodes can raise
+    # the same gate -- the frame pair both continue on `frame-review` -- and a
+    # second binding for the same gate is refused by
+    # `capability_topology.py:734-737` ("every declared human gate must bind to
+    # exactly one node"), which made a compose graph naming both frame legs
+    # impossible at any capability. The anchor is the node following the LAST
+    # raiser, so the gate opens only after every raiser has run.
     bindings, gates = [], []
+    gate_anchor: dict[str, str] = {}
     for index, node in enumerate(nodes[:-1]):
         base = base_nodes[node["id"]]
         continuation = base.get("continuation") or {}
         if continuation.get("kind") == "human-gate":
             gate = continuation["gate"]
-            bindings.append({"gate": gate, "node": nodes[index + 1]["id"], "position": "entry"})
-            gates.append(gate)
+            if gate not in gate_anchor:
+                gates.append(gate)
+            gate_anchor[gate] = nodes[index + 1]["id"]
             node["continuation"] = {"kind": "human-gate", "gate": gate}
         elif node.get("kind") == "resource-runner":
             node["continuation"] = {"kind": "supervised"}
         else:
             node["continuation"] = {"kind": "inline-next"}
+    bindings.extend(
+        {"gate": gate, "node": gate_anchor[gate], "position": "entry"} for gate in gates
+    )
     # A gate declared on the entry of a base SOURCE node (no predecessor raises
     # it, e.g. autopilot-spec `intent-confirmation` on `research`) is kept
     # verbatim when that node is kept: it is parent-owned, not a continuation.
@@ -2625,16 +2718,48 @@ def _compile_from_recipe(registry, recipe, capability, capability_mode, requeste
         registered_headless_candidates=_validate_registered_headless_evidence(
             registered_headless_evidence
         )
+        # Quick's cross-harness guarantee is carried entirely by this candidate
+        # list -- `owner_route_binding._supported_owner_harnesses` reads it, and
+        # `dispatch-owner.py` refuses an `--adapter` outside it. How many
+        # harnesses it supports decides the pair's diversity, sealed on both
+        # frame nodes by `_quick_frame_diversity` (shared with `verify_route`).
+        #
+        # Deliberately NOT touched: `EVIDENCE_CONSUMER_DISPATCH_DEPTH` and the
+        # depth-2 evidence-consumer path. Quick has no depth-2 node, so making
+        # that depth configurable would mean redefining five call sites plus
+        # fallback-chain attachment for no gain here.
+        _frame_diversity=_quick_frame_diversity(registered_headless_candidates)
         transport="headless"
         owner_model_profile=registry["owner_profile_by_intensity"]["quick"]
-        nodes=[{"id":"one-shot","kind":recipe["quick"]["worker_kind"],"dispatch_depth":1,"role":"orchestrator",
-                "unit":"_kernel/owner",
+        # What quick's frame legs LOSE compared to standard+: no
+        # `dispatch_evidence.tuples` per-field sealing of
+        # parent_transport/parent_sandbox/child_harness, and no `fallback_hops`
+        # chain at all. Recovery from a dead quick frame leg is an explicit
+        # depth-0 re-launch, never a machine fallback hop. Do not read quick's
+        # frame pair as carrying the standard+ guarantee.
+        _quick_frame=lambda node_id,profile:{
+                "id":node_id,"kind":"map-worker","depends_on":[],"role":"deep maker",
+                "unit":"plan/frame","worker_type":"frame","dispatch_depth":1,
+                "launch_authority":"depth-0","model_profile":profile,
+                "inputs":["task"],
+                "outputs":[f"shards/{node_id}/direction-brief.md"],
+                "write_scope":[f"shards/{node_id}/**"],"resource_class":"normal",
+                "execution_surface":"registered-headless","registered_worker":True,
+                "completion_gate":"quick-frame",
+                "harness_diversity":_frame_diversity,
+                "continuation":{"kind":"human-gate","gate":"frame-review"},
+                "advance_class":"runtime-eligible","commit_expected":False}
+        nodes=[_quick_frame("frame","balanced-deep"),
+               _quick_frame("frame-alternative","light"),
+               {"id":"one-shot","kind":recipe["quick"]["worker_kind"],"dispatch_depth":1,"role":"orchestrator",
+                "depends_on":["frame","frame-alternative"],
+                "unit":"_kernel/owner","worker_type":"owner",
                 "model_profile":owner_model_profile,
                 "write_scope":recipe["quick"]["write_scope"],"resource_class":"normal",
                 "execution_surface":"registered-headless","registered_worker":True,
                 "completion_gate":"quick-complete",
                 "terminal":True,"terminal_gate":"quick-complete"}]
-        gates=["quick-complete"]
+        gates=["quick-frame","quick-complete"]
         selection_basis=[{"axis":"direct-predicate-gap","signal":p,"source":"compiler"} for p in sorted(known_pred-set(predicates))]
     else:
         if transport not in (None, "headless"):
@@ -2699,6 +2824,16 @@ def _compile_from_recipe(registry, recipe, capability, capability_mode, requeste
                 node["model_profile"] = PROFILE.TOP_PROFILE
                 node["profile_explicit"] = True
                 node["profile_demand"] = owner_demand
+    # The frame bootstrap tier ladder, applied for BOTH shapes at once, after
+    # `resolved_owner_profile` and before `_seal_profile_demands`. Quick's
+    # frame pair is built literally above by `_quick_frame`, and the five
+    # standard+ recipes declare theirs in `topologies.json` -- both carry a
+    # static `model_profile` that CANNOT be right, because the correct value
+    # depends on the owner profile this route just resolved, which no static
+    # recipe field can see. Stamping unconditionally is exactly what demotes
+    # those static values to placeholders instead of letting one decision live
+    # in two homes. The one home is `model_profile.FRAME_PROFILE_LADDER`.
+    _stamp_frame_profiles(nodes, resolved_owner_profile, owner_demand)
     legacy_nodes = not composed or _versioned_subgraph(registry, recipe)
     _seal_profile_demands(nodes, profile_demands, explicit_profiles, legacy=legacy_nodes)
     dispatch_defaults_digest,dispatch_allocation,owner_harness_policy=_seal_dispatch_defaults(
@@ -2751,12 +2886,23 @@ def _compile_from_recipe(registry, recipe, capability, capability_mode, requeste
       "continuation_budget":continuation_budget,
       "nodes":nodes,"parallel_groups":_realized_parallel_groups(nodes),
       "conditional_extensions":_realize_conditional_extensions(recipe, effective),
-      "completion_gates":gates,"human_gates":recipe["human_gates"],
+      "completion_gates":gates,
+      # `frame-review` is intrinsic to the quick SHAPE, not drawn from the
+      # recipe: quick's nodes are compiler-owned, and every capability's quick
+      # route carries the same frame pair whether or not that recipe declares a
+      # standard+ frame node.
+      "human_gates":(sorted(set(recipe["human_gates"])|{"frame-review"})
+                     if effective=="quick" else recipe["human_gates"]),
+      # Quick binds the frame gate at `one-shot`'s entry: that is quick's only
+      # fence point, and without it quick runs with no check at all. Only
+      # `direct` (which has no owner and no worker) still binds nothing.
       "human_gate_bindings":json.loads(json.dumps(
-          recipe["human_gate_bindings"] if effective not in ("direct","quick") else [])),
+          _quick_gate_bindings() if effective=="quick"
+          else recipe["human_gate_bindings"] if effective!="direct" else [])),
       "workflow_contract":_workflow_contract(
           registry, nodes,
-          recipe["human_gate_bindings"] if effective not in ("direct","quick") else []),
+          _quick_gate_bindings() if effective=="quick"
+          else recipe["human_gate_bindings"] if effective!="direct" else []),
       "resume_retry_boundaries":recipe["resume_retry_boundaries"],
       "dispatch_evidence":checked_dispatch,
       "dispatch_contract_version":DISPATCH_CONTRACT_VERSION,
@@ -2944,6 +3090,9 @@ def verify_route(route, expected_cwd=None, *, allow_stale_registry=False):
             route.get("effective_intensity"), route.get("capability"),
             auxiliary_check_units=registry.get("auxiliary_check_units"))
         if route.get("profile_selection_contract_version") == 1:
+            # Same ladder, same order as the compiler: stamp, then seal.
+            _stamp_frame_profiles(expected_nodes, route.get("owner_model_profile"),
+                                  route.get("owner_profile_demand"))
             _seal_profile_demands(expected_nodes, route.get("profile_demands"),
                                   route.get("explicit_profiles"),
                                   legacy=_versioned_subgraph(registry, composed_recipe))
@@ -2962,6 +3111,9 @@ def verify_route(route, expected_cwd=None, *, allow_stale_registry=False):
                 route.get("effective_intensity"), route.get("capability"),
                 auxiliary_check_units=registry.get("auxiliary_check_units"))
             if route.get("profile_selection_contract_version") == 1:
+                # Same ladder, same order as the compiler: stamp, then seal.
+                _stamp_frame_profiles(expected_nodes, route.get("owner_model_profile"),
+                                      route.get("owner_profile_demand"))
                 _seal_profile_demands(expected_nodes, route.get("profile_demands"),
                                       route.get("explicit_profiles"), legacy=True)
                 by_id = {n["id"]: n for n in expected_nodes}
@@ -2985,9 +3137,13 @@ def verify_route(route, expected_cwd=None, *, allow_stale_registry=False):
     route_node_ids={node.get("id") for node in route.get("nodes", [])}
     if any(not set(row["after"]) <= route_node_ids for row in expected_extensions):
         raise ValueError("route conditional extension anchor is not realized")
+    # Mirror of the compiler: quick binds its own frame gate, only `direct`
+    # binds nothing. Verifier and compiler must move together or a quick route
+    # compiles and then refuses to verify.
     expected_bindings=json.loads(json.dumps(
-        route_recipe["human_gate_bindings"]
-        if route.get("effective_intensity") not in ("direct","quick") else []))
+        _quick_gate_bindings() if route.get("effective_intensity")=="quick"
+        else route_recipe["human_gate_bindings"]
+        if route.get("effective_intensity")!="direct" else []))
     if route.get("human_gate_bindings") != expected_bindings:
         raise ValueError("route human gate bindings differ from the sealed recipe")
     if route.get("workflow_contract") != _workflow_contract(
@@ -3103,7 +3259,12 @@ def verify_route(route, expected_cwd=None, *, allow_stale_registry=False):
         if node.get("dispatch_depth") in {1, 2}:
             profile = node.get("model_profile")
             row = registry["model_profiles"].get(profile)
-            top_owner_node = profile == PROFILE.TOP_PROFILE and _owner_node(node, effective)
+            # The `top` exception profile is unregistered on purpose, so only
+            # the two node classes allowed to hold it skip the registered check:
+            # the owner, and a depth-1 frame anchor leg.
+            top_owner_node = profile == PROFILE.TOP_PROFILE and (
+                _owner_node(node, effective) or _frame_node(node)
+            )
             if not top_owner_node and (
                 not isinstance(row, dict) or row.get("registered_topology") is not True
             ):
@@ -3195,8 +3356,11 @@ def verify_route(route, expected_cwd=None, *, allow_stale_registry=False):
             or route.get("max_dispatch_depth") != 1
             or selection.get("transport") != "headless"
             or selection.get("inline_reason") is not None
+            # `serial-attempt` is a per-(route_id, route_node) attempt budget,
+            # so it stays true unchanged with three nodes. `max_dispatch_depth`
+            # stays 1 because the frame legs are depth 1 as well.
             or route.get("registered_headless_policy") != "serial-attempt"
-            or len(route.get("nodes",[])) != 1
+            or len(route.get("nodes",[])) != 3
         ):
             raise ValueError("quick route shape mismatch")
         candidates=_validate_registered_headless_evidence({
@@ -3204,17 +3368,34 @@ def verify_route(route, expected_cwd=None, *, allow_stale_registry=False):
         })
         if candidates != route.get("registered_headless_candidates"):
             raise ValueError("quick registered-headless evidence is not canonical")
-        node=route["nodes"][0]
+        diversity=_quick_frame_diversity(candidates)
+        if any(n.get("harness_diversity") != diversity
+               for n in route.get("nodes",[]) if _frame_node(n)):
+            raise ValueError("quick route frame harness diversity mismatch")
+        node=next((n for n in route["nodes"] if n.get("id")=="one-shot"), None)
+        if node is None:
+            raise ValueError("quick route shape mismatch")
         if (
-            node.get("id") != "one-shot"
-            or node.get("dispatch_depth") != 1
+            node.get("dispatch_depth") != 1
             or node.get("unit") != "_kernel/owner"
             or node.get("model_profile") != owner_profile
             or node.get("execution_surface") != "registered-headless"
             or node.get("registered_worker") is not True
             or node.get("fallback_hops")
+            or sorted(node.get("depends_on") or []) != ["frame","frame-alternative"]
         ):
             raise ValueError("quick node axes mismatch")
+        frame_legs=[n for n in route["nodes"] if _frame_node(n)]
+        if sorted(n.get("id") for n in frame_legs) != ["frame","frame-alternative"]:
+            raise ValueError("quick route frame pair mismatch")
+        for leg in frame_legs:
+            if (
+                leg.get("execution_surface") != "registered-headless"
+                or leg.get("registered_worker") is not True
+                or leg.get("fallback_hops")
+                or leg.get("launch_authority") != "depth-0"
+            ):
+                raise ValueError("quick frame leg axes mismatch")
     dd_digest=route.get("dispatch_defaults_digest")
     if dd_digest is not None and (not isinstance(dd_digest, str) or not dd_digest.startswith("sha256:")):
         raise ValueError("invalid dispatch_defaults_digest format")

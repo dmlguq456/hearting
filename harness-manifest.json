@@ -686,7 +686,7 @@
   "plan/frame": {
    "family": "plan",
    "role": "deep maker",
-   "worker_type": "stage",
+   "worker_type": "frame",
    "floor": "highest"
   },
   "plan/plan-author": {

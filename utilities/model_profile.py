@@ -22,11 +22,23 @@ PORTABLE_PROFILES = ("deep", "balanced-deep", "balanced", "light", "mini")
 TOP_PROFILE = "top"
 EXCEPTION_PROFILES = (TOP_PROFILE,)
 KNOWN_PROFILES = PORTABLE_PROFILES + EXCEPTION_PROFILES
-# Only an owner can carry `top`: it is the one worker a route seals a profile
-# for. A review worker has no route (a route node's reviewer is a depth-2
-# stage worker, where `top` is refused), so it cannot carry the judgment
-# record the exception requires (top review B1).
-TOP_WORKER_TYPES = frozenset({"owner"})
+# The two worker types a route may seal `top` for.
+#
+# `owner` is the original: the one worker a route seals a profile for.
+#
+# `frame` is the second, added by the frame bootstrap layer. Note that the
+# older rationale here -- "a review worker has no route, so it cannot carry the
+# judgment record the exception requires" -- is NOT why frame qualifies: a
+# depth-1 frame leg is a registered node of a compiled route and carries route
+# evidence exactly like an owner does, so that argument neither admits nor
+# excludes it. The real reason is semantic: the frame pair is the one non-owner
+# node class whose *direction* genuinely benefits from the strongest available
+# reasoning. It runs once, before any owner exists, and every later node of the
+# route inherits the framing it produces -- a bad frame is not a bad stage, it
+# is a route pointed at the wrong problem. Bounded on both sides: only the
+# anchor leg of the pair reaches `top` (`frame_profile_for_owner`), and
+# `replica_batch_contract.MAX_TOP_LEGS` caps a group at one `top` leg.
+TOP_WORKER_TYPES = frozenset({"owner", "frame"})
 RESOLVER_VERSION = "profile-demand/v1"
 DEMAND_SCHEMA_VERSION = 1
 DEMAND_JUDGMENTS = ("predetermined", "important", "difficult-uncertain")
@@ -321,12 +333,27 @@ def validate_registered_profile(
         )
 
 
-def require_top_route(route_file, *, profile: str) -> None:
+def require_top_route(route_file, *, profile: str, node: str | None = None) -> None:
     """The exception profile is a route's decision: a wrapper resolving `top`
-    must hold the route that sealed it (`owner_model_profile == "top"`).
-    Refuses typed when there is no route or the route sealed something else
-    (top review B1: without this, `--model-profile top` on a route-less
-    depth-1 owner resolved the top model with no demand recorded anywhere)."""
+    must hold the route that sealed it. Refuses typed when there is no route or
+    the route sealed something else (top review B1: without this,
+    `--model-profile top` on a route-less depth-1 owner resolved the top model
+    with no demand recorded anywhere).
+
+    Which seal is checked depends on WHO is launching, and that is the whole
+    point of the `node` parameter:
+
+    - `node is None` -- the caller is the route's owner, so the owner's seal
+      (`owner_model_profile`) is the one that authorizes it. Exactly today's
+      behavior, unchanged.
+    - `node` given -- the caller is a specific node of the route, so THAT
+      node's own `model_profile` is checked instead. A frame anchor leg reaches
+      `top` while its owner sits at `deep` (see `frame_profile_for_owner`), so
+      checking the owner's seal for it would refuse a correctly compiled route.
+
+    Deliberately ONE function rather than two: the two cases differ only in
+    which field holds the seal, and a second function is how the two drift
+    until one of them forgets to check something."""
 
     if profile != TOP_PROFILE:
         return
@@ -337,9 +364,82 @@ def require_top_route(route_file, *, profile: str) -> None:
         route = json.loads(Path(route_file).read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
         raise ModelProfileError(f"top route unreadable: {exc}", "profile-top-route-required") from exc
-    if not isinstance(route, dict) or route.get("owner_model_profile") != TOP_PROFILE:
+    if not isinstance(route, dict):
         raise ModelProfileError(
             "the route did not seal the top exception profile for its owner", "profile-top-route-mismatch")
+    if node is None:
+        sealed = route.get("owner_model_profile")
+    else:
+        entry = next((n for n in route.get("nodes", [])
+                      if isinstance(n, dict) and n.get("id") == node), None)
+        if entry is None:
+            # Loud and distinct: a launch naming a node the route does not
+            # declare is a wiring bug, not a policy refusal, and reporting it
+            # as a profile mismatch would send the reader to the wrong file.
+            raise ModelProfileError(
+                f"the route declares no node {node!r} to seal a profile for",
+                "profile-top-route-node-unknown")
+        sealed = entry.get("model_profile")
+    if sealed != TOP_PROFILE:
+        raise ModelProfileError(
+            "the route did not seal the top exception profile for its owner", "profile-top-route-mismatch")
+
+
+# The frame bootstrap tier ladder -- ONE function, ONE home.
+#
+# The frame pair runs one tier ABOVE the owner it frames, because framing is
+# the decision the rest of the route cannot revisit. The anchor leg takes that
+# raise; the alternative leg stays at the owner's own working tier so the pair
+# stays genuinely two-voiced rather than two copies of the same tier.
+#
+# Do not restate this table anywhere else -- not in `topologies.json`, not in
+# `dispatch-defaults.yaml`. `capability-route.py` stamps every frame node's
+# `model_profile` from this function at compile time, which is what makes any
+# static value in the recipe a placeholder rather than a second home.
+FRAME_PROFILE_LADDER = {
+    "top": {"anchor": "top", "others": "deep"},
+    "deep": {"anchor": "top", "others": "deep"},
+    "balanced-deep": {"anchor": "deep", "others": "deep"},
+    "balanced": {"anchor": "balanced-deep", "others": "balanced-deep"},
+    "light": {"anchor": "balanced", "others": "balanced"},
+}
+# `top` is not portable, so a frame anchor that lands on it cannot be sealed
+# through the legacy "explicit portable profile, no demand" path -- the
+# resolver requires a full demand for it. The demand below is a property of the
+# frame SHAPE, not of any one task: a framing step is difficult-uncertain by
+# construction (it exists precisely because the right direction is not yet
+# known) and short-local in execution (its output is one direction brief).
+# The compiler uses the owner's own demand when the caller supplied one, and
+# falls back to this shape demand otherwise; the reasons say plainly that this
+# is the shape speaking, so nothing here reads as task-specific evidence that
+# was never gathered.
+FRAME_ANCHOR_SHAPE_DEMAND = {
+    "schema_version": DEMAND_SCHEMA_VERSION,
+    "judgment_requirement": "difficult-uncertain",
+    "execution_scope": "short-local",
+    "judgment_reason": (
+        "framing is the route's one irreversible judgment: every later node "
+        "inherits the direction this leg picks, and no later stage is scoped "
+        "to re-open it"
+    ),
+    "execution_reason": (
+        "one direction brief, written once, with no multi-step execution of "
+        "its own"
+    ),
+    "evidence_refs": ["roles/units/plan/frame.md"],
+}
+
+
+def frame_profile_for_owner(owner_profile: str) -> dict:
+    """Map an owner's resolved profile to its frame pair's two profiles.
+
+    Returns `{"anchor": <profile>, "others": <profile>}`. Unknown or absent
+    owner profiles fall back to the `light` rung rather than raising: this runs
+    inside route compilation for every recipe, and a route that framed nothing
+    is worse than a route framed conservatively."""
+
+    return dict(FRAME_PROFILE_LADDER.get(owner_profile or "light",
+                                         FRAME_PROFILE_LADDER["light"]))
 
 
 def selection_receipt(args):

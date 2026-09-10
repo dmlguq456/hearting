@@ -64,8 +64,14 @@ def gate_evidence():
 
 
 def registered_headless():
+    # Quick compiles a cross-harness frame pair, so its candidate evidence must
+    # name two supported harnesses. One candidate is no longer a valid quick
+    # route at all, and this canary asserts the shipped shape.
     return {"candidates": [{
         "harness": "codex", "transport": "headless", "surface": "registered-headless",
+        "status": "supported", "probe_source": "canary-probe", "probe_time": "2026-08-25T00:00:00Z",
+    }, {
+        "harness": "claude", "transport": "headless", "surface": "registered-headless",
         "status": "supported", "probe_source": "canary-probe", "probe_time": "2026-08-25T00:00:00Z",
     }]}
 

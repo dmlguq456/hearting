@@ -166,7 +166,15 @@ class CensusTest(unittest.TestCase):
         self.assertEqual(
             (standard["base"], standard["eligible"], standard["non_terminal"],
              standard["commit_expected_excluded"], standard["runtime_advanced"]),
-            (40, 23, 14, 13, 12),
+            # base 40 -> 49: the frame bootstrap layer added two depth-1 legs
+            # to each of the five standard+ recipes, and autopilot-code already
+            # declared one `frame` node, so the recipe node population grew by
+            # nine.
+            # eligible stays 23: refine's `review -> transaction` keeps its
+            # `preview-disposition` human-gate continuation (an approval before
+            # the edit applies, not a direction gate), so the frame layer adds
+            # no eligible boundary.
+            (49, 23, 14, 13, 12),
         )
         expected_standard_boundaries = [
             ("autopilot-apply", "apply", "verify"),
@@ -189,7 +197,7 @@ class CensusTest(unittest.TestCase):
         self.assertEqual(
             (strong["base"], strong["eligible"], strong["non_terminal"],
              strong["commit_expected_excluded"], strong["runtime_advanced"]),
-            (40, 9, 3, 3, 3),
+            (49, 9, 3, 3, 3),
         )
         expected_strong_boundaries = [
             ("autopilot-lab", "metrics", "media"),

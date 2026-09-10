@@ -2470,7 +2470,7 @@ def _dispatch_role_suffix(j, max_width=None):
     # qa is data-only now (kept in --json): the retired qa axis left the display entirely
     # (user 2026-07-16 — rigor derives from intensity, CONVENTIONS §1.1).
     worker_type = getattr(j, "worker_type", None)
-    raw_role = worker_type if worker_type in {"owner", "stage", "review", "support"} else getattr(j, "worker_role", None)
+    raw_role = worker_type if worker_type in {"owner", "stage", "review", "support", "frame"} else getattr(j, "worker_role", None)
     if getattr(j, "key", None) in _LOOPS_KEYS and raw_role == getattr(j, "slug", None):
         raw_role = None
     # A capability name is not a role (user 2026-07-20: "code가 표시가 되어있는데 굳이

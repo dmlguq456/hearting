@@ -62,7 +62,7 @@ MODEL_PATTERNS = [
 
 REQUIRED_KEYS = ("unit", "family", "role", "worker_type", "floor", "read_only", "io")
 FORBIDDEN_KEYS = ("write_scope",)
-WORKER_TYPES = {"owner", "stage", "review", "support"}
+WORKER_TYPES = {"owner", "stage", "review", "support", "frame"}
 FLOORS = {"near-zero", "low", "moderate", "high", "highest"}
 BOOLS = {"true", "false"}
 

@@ -194,7 +194,7 @@ def normalize_dispatch_modes(
             # Compatibility for a route-less historical invocation. Current route
             # writers always provide the unit explicitly.
             unit = worker_mode
-        elif worker_type in {"stage", "review"}:
+        elif worker_type in {"stage", "review", "frame"}:
             raise _error("missing-dispatch-worker-mode", worker_type=worker_type)
 
     # Structural contradictions take precedence over a missing capability mode.

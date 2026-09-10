@@ -29,7 +29,7 @@ except ImportError:
     sys.exit(1)
 
 VALID_HARNESSES = {"claude", "codex", "opencode"}
-VALID_WORKER_TYPES = {"owner", "stage", "review", "support"}
+VALID_WORKER_TYPES = {"owner", "stage", "review", "support", "frame"}
 BOOTSTRAP_FILENAME = {"claude": "CLAUDE.md", "codex": "AGENTS.md"}
 
 

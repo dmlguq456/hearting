@@ -92,7 +92,7 @@ Minimum role mapping:
 - review: QA/reviewer role for plan, code, and test review;
 - app UI changes: design role as critic or handoff verifier when design artifacts exist.
 
-Pipeline intensity is the primary ceremony selector. `direct` is inline and `quick` is one `balanced-deep` registered one-shot conductor. Every `standard+` owner uses `deep`; `standard` opens framing as two asymmetric cross-harness legs (`balanced-deep` anchor plus `light` alternative). `strong` adds a deep contrarian framing leg and opens width-two plan (`deep + balanced-deep`) and implementation-review (`balanced-deep + light`) groups. `thorough|adversarial` add the declared light implementation-risk plan leg and deep failure-mode review leg. All legs are dispatch-depth-2 siblings with disjoint artifacts, exact all-join, and route-sealed role/profile/perspective; other stages remain sequential. The same intensity determines plan-check, selected reviews, and code-test rigor without a separate user-facing QA axis. Concrete models remain adapter-specific.
+Pipeline intensity is the primary ceremony selector. `direct` is inline and `quick` is one `balanced-deep` registered one-shot conductor; both `quick` and `standard+` open with a fixed two-leg frame bootstrap that depth-0 launches itself before the owner starts, anchor profile one tier above the owner via `model_profile.frame_profile_for_owner` — there is no third frame leg at any intensity. Every `standard+` owner uses `deep`. `strong` opens width-two plan (`deep + balanced-deep`) and implementation-review (`balanced-deep + light`) groups. `thorough|adversarial` add the declared light implementation-risk plan leg and deep failure-mode review leg. Those groups are dispatch-depth-2 siblings with disjoint artifacts, exact all-join, and route-sealed role/profile/perspective; other stages remain sequential. The same intensity determines plan-check, selected reviews, and code-test rigor without a separate user-facing QA axis. Concrete models remain adapter-specific.
 
 ## Stage Mapping
 
@@ -111,39 +111,38 @@ Stage-local gates must not become full independent QA loops after every sub-stag
 
 **Corrections are batched, never atomic.** A failed review gate (`plan-check`, `impl-review`, `test`) is followed by exactly one correction pass that closes every 🔴 finding of that round together, plus the follow-on gaps the review named; the owner never redispatches the full `plan` or `execute` node to fix a single finding. The plan correction runs through the `code-refine` boundary and the code correction re-enters the `execute` boundary as a bounded fix under the same node. The re-review that follows is a **closure check** under the review unit's Round Protocol — the owner's assignment names the round number and the prior review artifact and asks whether the prior 🔴 items are closed and the delta is clean; it never asks for a fresh independent re-audit of the whole artifact. Each correction consumes one unit of the `core/CONVENTIONS.md §1.1` retry budget; when the budget is spent, remaining concerns go to the plan's risk/unresolved section and the owner reports them instead of opening another round. A review round that records blocking findings ends `completed-review-blocking`, not as a dead worker; when the budget is spent on such rounds, the owner writes `round_{N}.owner-closure.md` beside the review artifacts (frontmatter `verdict: closed-by-owner`, `node`, `gate`; body naming every blocking attempt and its disposition) and completes the review node with that record as evidence — `core/OPERATIONS.md §5.10` owns the gate's evidence checks.
 
-**Post-frame direction gate (SD-123).** A `standard+` route compiled after this
-cycle seals `human_gates: ["frame-review"]` and the `frame` node's continuation
-as a human gate; a route sealed before this cycle keeps `inline-next` and is
-never retro-fitted. After `frame` completes and before `plan` starts, the owner
-builds `shards/frame/frame-summary.json` (five fields — 방향/대안/위험/범위
-변경/비용, ≤1KB) from `shards/frame/direction-brief.md` and the **frame
-interview** `shards/frame/interview.json` (SD-129: a one-sentence restatement
-the user confirms, a plain-language brief, and at most 7 short questions —
-one topic each, 2–4 options, one recommended, no harness vocabulary, only
-decisions the user alone can make; `utilities/frame_interview.py validate`
-is the bar and `gate --block` refuses what fails it), raises the existing
-typed attention path with `required_action=human-gate:frame-review` referencing
-the interview **by path** (never embedded in a stage-advance receipt body), and
-waits on the bounded checked surface `workflow-supervisor.py await-release
---gate frame-review` (SD-129) until a person records `workflow-supervisor.py
-release --gate frame-review --decision proceed|revise|stop` from the depth-0
-session. `proceed` carries the user's answers (`--answers`, required when the
-artifact is an interview), which the owner renders into `shards/frame/intent.md`
-(`frame_interview.py render-intent`) — the agreed intent `plan` reads first
-(Problem / Proposed Outcome / Affected / Constraints / Decisions / Open
-Questions), so a plan that contradicts a recorded decision is a plan-check
-blocker. `proceed` claims and starts `plan` exactly once; `revise` returns to
-`frame` under the `code-refine` retry boundary; `stop` cancels the route. A
-`plan` start whose entry gate is not released is refused by every launch
-surface (`human-gate-unreleased`), and an owner never releases its own gate to
-move on. `direct`/`quick` have no gate: the depth-0 session asks the same kind
-of question inline inside the §0.4 card step (at most 1 / 3 — a documented
-obligation on the acting session, not a machine-checked cap, since those
-routes carry no gate binding).
+**Pre-route direction gate (SD-123).** The direction gate runs in the depth-0
+bootstrap layer *ahead of* the route, not inside it. A route sealed before this
+cycle keeps `frame.continuation=inline-next` and is never retro-fitted. Depth-0
+launches the frame pair, joins both direction briefs, and builds
+`shards/frame/frame-summary.json` (five fields — 방향/대안/위험/범위 변경/비용,
+≤1KB) plus the **frame interview** `shards/frame/interview.json` (SD-129: a
+one-sentence restatement the user confirms, a plain-language brief, and at most
+`frame_interview.py`'s `QUESTION_CAP` short questions — one topic each, 2–4
+options, one recommended, no harness vocabulary, only decisions the user alone
+can make; `utilities/frame_interview.py validate` is the bar and `gate --block`
+refuses what fails it). Depth-0 puts those questions to the user, records the
+answers with `workflow-supervisor.py release --gate frame-review --decision
+proceed|revise|stop --answers <file>`, and renders `shards/frame/intent.md`
+with `frame_interview.py render-intent`.
 
-The declared `confirmation.mode` (default `hybrid`) governs whether this
-is the sole confirmation point, layers onto the pre-plan notify, or both apply;
-`core/WORKFLOW.md` §0.4 owns the user-facing card.
+The owner **receives** `intent.md`'s path as an input. It raises no gate, waits
+on no release, and renders no intent of its own — all of that is finished before
+it is launched. `intent.md` is the agreed intent `plan` reads first (Problem /
+Proposed Outcome / Affected / Constraints / Decisions / Open Questions), so a
+plan that contradicts a recorded decision is a plan-check blocker; pass its
+absolute path in the plan prompt as `Intent:`. `revise` re-runs the frame pair
+before the route starts and `stop` cancels before anything is compiled, so
+neither consumes the owner's `code-refine` retry budget. A first-work-node
+start whose entry gate is not released is refused by every launch surface
+(`human-gate-unreleased`). `direct` has no gate: the depth-0 session asks its
+one question of the same kind inline inside the §0.4 card step — a documented
+obligation on the acting session, not a machine-checked cap, since a `direct`
+route carries no gate binding.
+
+The declared `confirmation.mode` (default `hybrid`) governs the ordered pair —
+blocking direction gate first, route notice after; `core/WORKFLOW.md` §0.4 owns
+the user-facing card.
 
 A declared `plan-check` parallel group is a 2-way read-only review: two plan-check verdicts merge under the existing review-anchor merge contract (stricter-wins plus the union of blocking findings). When the two legs nominate different plan legs as winner, `plan.md` materialization is blocked unless the owner writes a bounded merge-arbitration memo, which is the only path into the existing bounded `code-refine` flow. `plan-check` itself never mutates the plan.
 

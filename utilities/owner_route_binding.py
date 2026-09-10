@@ -1005,12 +1005,33 @@ class QuickOwnerRouteBinding:
     registry_digest: str
     write_scope: str
     completion_gate: str
+    worker_type: str = "owner"
+    unit: str = "_kernel/owner"
+    dispatch_depth: int = 1
+
+
+# The tuple each quick node id must carry. A caller that names a node binds to
+# THAT node's axes; binding to the wrong node is the bug this parameter exists
+# to close, so the expected axis is asserted rather than assumed.
+_QUICK_NODE_AXES = {
+    "one-shot": ("owner", "_kernel/owner", 1),
+    "frame": ("frame", "plan/frame", 1),
+    "frame-alternative": ("frame", "plan/frame", 1),
+}
 
 
 def derive_quick_owner_binding(route_file: str | Path, *, worktree: str | Path,
                                capability: str, capability_mode: str,
-                               intensity: str, harness: str) -> QuickOwnerRouteBinding:
-    """Derive the complete node tuple for the quick one-shot owner."""
+                               intensity: str, harness: str,
+                               route_node: str = "one-shot") -> QuickOwnerRouteBinding:
+    """Derive the complete node tuple for one quick route node.
+
+    `route_node` defaults to `one-shot`, so every existing quick owner caller
+    keeps today's behavior exactly. Quick is a three-node route now, and a
+    frame leg's own tuple (`plan/frame`, not `_kernel/owner`) has to come from
+    the node it names -- returning the owner's hardcoded values for a frame leg
+    would move the mis-binding bug rather than fix it.
+    """
     path = Path(route_file).resolve()
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
@@ -1022,9 +1043,14 @@ def derive_quick_owner_binding(route_file: str | Path, *, worktree: str | Path,
     validate_owner_route_binding(path, worktree=worktree, capability=capability,
                                  capability_mode=capability_mode, intensity=intensity,
                                  harness=harness)
-    node = next((n for n in route.get("nodes", []) if n.get("id") == "one-shot"), None)
+    expected = _QUICK_NODE_AXES.get(str(route_node))
+    if expected is None:
+        raise OwnerRouteBindingError("quick-node-tuple-invalid")
+    node = next((n for n in route.get("nodes", []) if n.get("id") == route_node), None)
     if not isinstance(node, dict):
         raise OwnerRouteBindingError("quick-owner-node-missing")
+    if (node.get("worker_type"), node.get("unit"), node.get("dispatch_depth")) != expected:
+        raise OwnerRouteBindingError("quick-node-tuple-invalid")
     scope = node.get("write_scope")
     if isinstance(scope, list):
         scope = ";".join(str(x) for x in scope)
@@ -1032,7 +1058,9 @@ def derive_quick_owner_binding(route_file: str | Path, *, worktree: str | Path,
               scope, node.get("completion_gate"))
     if not all(isinstance(x, str) and x for x in fields):
         raise OwnerRouteBindingError("quick-owner-binding-incomplete")
-    return QuickOwnerRouteBinding(str(path), fields[0], fields[1], "one-shot", fields[2], fields[3], fields[4])
+    return QuickOwnerRouteBinding(str(path), fields[0], fields[1], str(route_node),
+                                  fields[2], fields[3], fields[4],
+                                  expected[0], expected[1], expected[2])
 
 
 def _supported_owner_harnesses(route: dict) -> set[str]:
