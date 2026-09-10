@@ -29,6 +29,8 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "utilities"))
 from dispatch_contract import (  # noqa: E402
     SUBSESSION_NOTE,
+    SUBSESSION_TERMINAL_CLASSIFIER,
+    SUBSESSION_CHAIN_REFUSAL_CLASSIFIER,
     _marker_bound_prepare_marker_proof,
     SUCCESS_NOTES,
     DispatchContractError,
@@ -44,6 +46,7 @@ from dispatch_contract import (  # noqa: E402
     row_is_subsession,
 )
 import dispatch_pending_delivery as pending_delivery  # noqa: E402
+import dispatch_subsession_advance as subsession_advance  # noqa: E402
 from codex_dispatch_terminal import (  # noqa: E402
     REVIEW_BLOCKING_NOTE,
     review_blocking_handoff,
@@ -645,6 +648,7 @@ class CurrentDeliveryState:
     owned_children: int
     advanced: bool
     supervisor_terminal: bool = False
+    subsession_terminal: bool = False
 
 
 def delivery_classification(state: CurrentDeliveryState) -> str:
@@ -656,6 +660,7 @@ def delivery_classification(state: CurrentDeliveryState) -> str:
             (
                 (state.marker is not None and bool(state.marker_digest))
                 or state.supervisor_terminal
+                or state.subsession_terminal
             )
             and state.status == "done"
             and state.verdict == "PASS"
@@ -873,6 +878,46 @@ def unstarted_child_attempts(rows: list[ChildRow]) -> set[str]:
         for row in rows
         if row.metadata.get("launch_started") != "1"
     }
+
+
+@dataclass(frozen=True)
+class RuntimeWaitPartition:
+    joinable: frozenset[str]
+    chain_pending: frozenset[str]
+    unstarted: frozenset[str]
+    refusal_settled: frozenset[str]
+    frontiers: tuple
+
+
+def partition_runtime_wait_children(
+    jobs: Path, parent_attempt_id: str, rows: list[ChildRow], candidates: set[str]
+) -> RuntimeWaitPartition:
+    frontiers = subsession_advance.serial_chain_frontiers(jobs, parent_attempt_id, rows, candidates)
+    chain_pending = frozenset(
+        attempt_id for frontier in frontiers for attempt_id in frontier.pending_attempt_ids
+    )
+    refusal_settled = frozenset(
+        row.attempt_id for row in rows
+        if row.attempt_id in candidates - chain_pending
+        and row.status in {"done", "killed", "cancelled"}
+        and row.metadata.get("classifier_source") == SUBSESSION_CHAIN_REFUSAL_CLASSIFIER
+        and row.metadata.get("launch_outcome") == "never-launched"
+        and row.metadata.get("launch_claimed") == "0"
+        and not row.metadata.get("pid")
+        and row.metadata.get("launch_started") != "1"
+    )
+    rest = [row for row in rows if row.attempt_id in candidates - chain_pending - refusal_settled]
+    never_launched_terminal = {
+        row.attempt_id for row in rest
+        if row.status == "done"
+        and row.metadata.get("launch_outcome") in {"never-launched", "reaped-before-publish"}
+    }
+    unstarted = frozenset(unstarted_child_attempts(rest) - never_launched_terminal)
+    joinable = frozenset(candidates - chain_pending - refusal_settled - unstarted)
+    if chain_pending and not joinable:
+        unstarted = frozenset(set(unstarted) | set(chain_pending))
+        chain_pending = frozenset()
+    return RuntimeWaitPartition(joinable, chain_pending, unstarted, refusal_settled, tuple(frontiers))
 
 
 def start_retry_prompt(attempts: set[str] | None = None) -> str:
@@ -2617,6 +2662,7 @@ def current_delivery_state(
         owned_children=result.owned_children,
         advanced=result.advanced,
         supervisor_terminal=result.supervisor_terminal,
+        subsession_terminal=result.subsession_terminal,
     )
 
 

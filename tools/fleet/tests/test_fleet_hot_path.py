@@ -242,12 +242,27 @@ class ProcessTableScanScopeTest(unittest.TestCase):
                 with D.process_table_scan_scope():                 # nested: same walk
                     nested = D.attempt_tagged_descendants(identity)
         self.assertEqual(counter.calls, 1)
+
+        def comparable(members):
+            """Membership, with the volatile scheduler letter collapsed.
+
+            A member is `(pid, start_ticks, state)` and that third field is the
+            live scheduler state -- a process moves between R and S between two
+            probes taken microseconds apart, which made this case flake in CI
+            on ('...', 'S') vs ('...', 'R') while proving nothing about the
+            batched walk (2026-09-10). What the callers actually distinguish is
+            reaped from not reaped (`state != "Z"`), so that is what is
+            compared; the identity pair stays exact.
+            """
+            return tuple((pid, start, "Z" if state == "Z" else "live")
+                         for pid, start, state in members)
+
         for obs in batched + [nested]:
-            self.assertEqual((obs.state, obs.members, obs.reason),
-                             (single.state, single.members, single.reason))
+            self.assertEqual((obs.state, comparable(obs.members), obs.reason),
+                             (single.state, comparable(single.members), single.reason))
         for obs in groups:
-            self.assertEqual((obs.state, obs.members, obs.reason),
-                             (group_single.state, group_single.members, group_single.reason))
+            self.assertEqual((obs.state, comparable(obs.members), obs.reason),
+                             (group_single.state, comparable(group_single.members), group_single.reason))
         self.assertEqual(invalid.reason, "invalid-pgid")
         self.assertEqual(other.state, D.attempt_tagged_descendants(
             dict(identity, attempt_id="att-nobody")).state)

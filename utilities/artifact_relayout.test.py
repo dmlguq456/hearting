@@ -92,6 +92,9 @@ class RelayoutFixture(PT.ProducerTestBase):
     def cycle(self, *, slug="w7i-test", title=None, files=("plans/cycle/plan.md",), seal=True,
               close_route=True, campaign_key=None, goal=None, intensity="direct"):
         route, route_file = self.route(intensity, slug=slug) if slug else self.slugless_route()
+        # These fixtures represent distinct pre-cutover campaigns, not the
+        # new keyless degraded container. Preserve their historical grouping.
+        campaign_key = campaign_key or f"fixture:{route['route_id']}"
         result = P.begin(self.root, route_file=route_file, capability="autopilot-code", intensity=intensity,
                          title=title, campaign_key=campaign_key, goal=goal)
         for idx, rel in enumerate(files):

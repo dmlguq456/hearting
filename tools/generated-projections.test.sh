@@ -11,6 +11,10 @@ export PYTHONDONTWRITEBYTECODE=1
 unset AGENT_ARTIFACT_ROOT AGENT_ROUTE_FILE AGENT_ROUTE_ID AGENT_ROUTE_NODE
 
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+# Shared with every other suite that reads or writes this checkout; see
+# tools/worktree-lock.sh for why it is anchored at the git dir.
+. "$ROOT/tools/worktree-lock.sh"
+worktree_lock_acquire "$ROOT" 900 || exit 70
 TMP=$(mktemp -d)
 MANIFEST="$ROOT/harness-manifest.json"
 TARGET="$ROOT/adapters/codex/skills/post-it/SKILL.md"

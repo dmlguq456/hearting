@@ -879,6 +879,12 @@ def _route_naming(
     return slug, display_title, "derived-legacy-route", truncated
 
 
+def _campaign_degradation(campaign: Mapping[str, Any]) -> Dict[str, Any]:
+    if campaign.get("degraded") is True:
+        return {"degraded": True, "degraded_reason": campaign.get("degraded_reason", "campaign-unassigned")}
+    return {}
+
+
 def begin(
     root: Path,
     *,
@@ -906,6 +912,16 @@ def begin(
         raise ProducerError("intensity-unknown", intensity)
     resolved_route_file = resolve_route_argument(root, Path(route_file))
     route = load_route(root, resolved_route_file)
+    # A sealed proposal survives dispatch; CLI may confirm, never override it.
+    for field, supplied in (("campaign_key", campaign_key), ("parent_cycle_id", parent_cycle_id)):
+        if field in route and supplied is not None and supplied != route[field]:
+            raise ProducerError("route-campaign-selection-conflict", field)
+    campaign_key = route.get("campaign_key", campaign_key)
+    parent_cycle_id = route.get("parent_cycle_id", parent_cycle_id)
+    if campaign_key is not None and (not isinstance(campaign_key, str) or not _KEY_RE.fullmatch(campaign_key)):
+        raise ProducerError("campaign-key-invalid", str(campaign_key))
+    if parent_cycle_id is not None and not artifact_identity.is_well_formed(parent_cycle_id, "cycle"):
+        raise ProducerError("parent-cycle-invalid", str(parent_cycle_id))
     route_capability = route["capability"]
     if capability in ENTRY_CAPABILITIES and route_capability != capability:
         raise ProducerError("route-capability-mismatch", f"{route_capability}!={capability}")
@@ -983,11 +999,41 @@ def begin(
         if resplit_lock.exists() or resplit_lock.is_symlink():
             detail = _read_json(resplit_lock)
             raise ProducerError("resplit-in-progress", json.dumps(detail or {}, sort_keys=True))
+        campaign: Optional[Dict[str, Any]] = None
+        parent = None
+        if campaign_id:
+            campaign = read_campaign(root, campaign_id)
+            if campaign is None:
+                raise ProducerError("campaign-unknown", campaign_id)
+        elif campaign_key:
+            campaign = find_campaign_by_key(root, campaign_key)
+        if parent_cycle_id:
+            parent = read_cycle_record(root, parent_cycle_id)
+            if parent is None or parent.get("state") not in {"open", "sealed"}:
+                raise ProducerError("parent-cycle-not-joinable", parent_cycle_id)
+            if campaign is not None and parent.get("campaign_id") != campaign["campaign_id"]:
+                raise ProducerError("parent-cycle-campaign-mismatch", parent_cycle_id)
+            if campaign is None:
+                campaign = read_campaign(root, parent["campaign_id"])
+                if campaign is None:
+                    raise ProducerError("campaign-unknown", parent["campaign_id"])
+        if campaign is not None:
+            if campaign.get("state") != "active":
+                raise ProducerError("campaign-not-active", campaign["campaign_id"])
+            if campaign_key is not None and campaign.get("key") != campaign_key:
+                raise ProducerError("campaign-key-mismatch", campaign_key)
         # Idempotent per route: one open cycle per route.
         for record in list_cycle_records(root):
             if record.get("route_id") == route["route_id"] and record.get("state") == "open":
                 if record.get("route_hash") != route["route_hash"]:
                     raise ProducerError("route-hash-drift", record["cycle_id"])
+                bound_campaign = read_campaign(root, record["campaign_id"])
+                if bound_campaign is None or bound_campaign.get("state") != "active":
+                    raise ProducerError("campaign-not-active", record["campaign_id"])
+                if ((campaign is not None and campaign["campaign_id"] != record["campaign_id"])
+                        or (campaign_key is not None and campaign_key != bound_campaign.get("key"))
+                        or (parent_cycle_id is not None and parent_cycle_id != record.get("parent_cycle_id"))):
+                    raise ProducerError("cycle-campaign-selection-conflict", record["cycle_id"])
                 if binding_jobs is not None and binding_owner:
                     try:
                         dispatch_terminal_commit.publish_producer_binding(
@@ -1001,27 +1047,11 @@ def begin(
                     "cycle_id": record["cycle_id"], "producer_id": record["producer_id"],
                     "cycle_dir": str(cycle_dir(root, record["campaign_id"], record["cycle_id"], record)),
                     "env": _env_for(root, record),
+                    **_campaign_degradation(bound_campaign),
                 }
         index = artifact_admission.load_index(root)
-        campaign: Optional[Dict[str, Any]] = None
-        if campaign_id:
-            campaign = read_campaign(root, campaign_id)
-            if campaign is None:
-                raise ProducerError("campaign-unknown", campaign_id)
-            if campaign.get("state") != "active":
-                raise ProducerError("campaign-not-active", campaign_id)
-        elif campaign_key:
-            if not _KEY_RE.match(campaign_key):
-                raise ProducerError("campaign-key-invalid", campaign_key)
-            campaign = find_campaign_by_key(root, campaign_key)
-        if parent_cycle_id:
-            parent = read_cycle_record(root, parent_cycle_id)
-            if parent is None or parent.get("state") != "sealed":
-                raise ProducerError("parent-cycle-not-sealed", parent_cycle_id)
-            if campaign is not None and parent.get("campaign_id") != campaign["campaign_id"]:
-                raise ProducerError("parent-cycle-campaign-mismatch", parent_cycle_id)
-            if campaign is None:
-                campaign = read_campaign(root, parent["campaign_id"])
+        if campaign is None and campaign_key is None:
+            campaign = find_campaign_by_key(root, "_unassigned")
         campaign_created = False
         slug, display_title, slug_source, slug_truncated = _route_naming(
             route, campaign, title=title, goal=goal, root=root)
@@ -1031,19 +1061,20 @@ def begin(
             while new_campaign_id in index.stable_ids:
                 new_campaign_id = alloc.allocate("campaign")
             locator, locator_suffix = artifact_locator.allocate_locator(
-                root / "campaigns", started_on, slug)
+                root / "campaigns", started_on, slug if campaign_key else "unassigned")
             campaign = {
                 "schema_version": 1,
                 "contract": CONTRACT,
                 "campaign_id": new_campaign_id,
-                "key": campaign_key or f"{route_capability}:{route['route_id']}",
-                "slug": slug,
-                "title": display_title,
+                "key": campaign_key or "_unassigned",
+                **({"degraded": True, "degraded_reason": "campaign-unassigned"} if campaign_key is None else {}),
+                "slug": slug if campaign_key else "unassigned",
+                "title": display_title if campaign_key else "_unassigned",
                 "slug_source": slug_source,
                 "slug_truncated": slug_truncated,
                 "locator": locator,
                 "locator_suffix": locator_suffix,
-                "goal": goal or f"{route_capability} cycle output",
+                "goal": (goal or f"{route_capability} cycle output") if campaign_key else "Work stream not proposed",
                 "completion_criterion": {"statement": "every cycle sealed with a manifest"},
                 "state": "active",
                 "created_on": started_on,
@@ -1080,6 +1111,7 @@ def begin(
             "campaign_id": campaign["campaign_id"],
             "producer_id": producer_id,
             "parent_cycle_id": parent_cycle_id,
+            **({"parent_cycle_state_at_begin": parent["state"]} if parent is not None else {}),
             "capability": capability,
             "route_capability": route_capability,
             "intensity": intensity,
@@ -1124,6 +1156,7 @@ def begin(
             "status": "begun", "layout": "cycle", "campaign_id": campaign["campaign_id"],
             "cycle_id": new_cycle_id, "producer_id": producer_id, "cycle_dir": str(target),
             "campaign_created": campaign_created, "env": _env_for(root, record),
+            **_campaign_degradation(campaign),
         }
     finally:
         artifact_admission._release_lock(root, lock_fd)
@@ -2247,6 +2280,14 @@ def finalize(
                 record["abandon_reason"] = abandon_reason
             _write_cycle_record(root, record, exclusive=False)
             return {"status": "no-lineage", "cycle_id": cycle_id, "lineage_committed": False}
+        # An open predecessor may be linked at begin; the existing manifest
+        # index still requires that predecessor to be admitted before its child.
+        # Refuse before staging a manifest so the owner can seal the parent and
+        # retry without a dangling-parent recovery journal.
+        if record.get("parent_cycle_id"):
+            parent = read_cycle_record(root, record["parent_cycle_id"])
+            if parent is None or parent.get("state") != "sealed":
+                raise ProducerError("parent-cycle-not-sealed", record["parent_cycle_id"])
         document = build_manifest(
             root, record, route, rows, state=state, primary=primary,
             allow_open_route=allow_open_route, allocator=alloc, now=now,
@@ -3241,11 +3282,17 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     p.add_argument("--node", default=None)
     p.add_argument("--capability", required=True)
     p.add_argument("--intensity", required=True)
-    p.add_argument("--campaign")
-    p.add_argument("--campaign-key")
+    p.add_argument("--campaign", help="existing campaign id to add this cycle to")
+    p.add_argument("--campaign-key",
+                   help="the work stream this cycle belongs to; reuses the active "
+                        "campaign holding that key. Defaults to the sealed route's key. "
+                        "With no campaign/key/parent selection, uses the root's "
+                        "_unassigned campaign and reports degraded=true")
     p.add_argument("--title")
     p.add_argument("--goal")
-    p.add_argument("--parent-cycle")
+    p.add_argument("--parent-cycle",
+                   help="open or sealed predecessor; inherits its campaign and records "
+                        "causality, never input or completion approval")
     p.add_argument("--require-cycle", action="store_true")
     p.add_argument("--shared-reference", action="append", default=[],
                    help="<kind>:<ref>:<rrev>[:<content_digest>], repeatable")

@@ -197,16 +197,55 @@ class DispatchV44ProjectionTest(unittest.TestCase):
             observed = _strings(path)
             self.assertTrue(expected <= observed, (name, expected - observed))
 
+    def test_a_source_route_without_its_capability_refuses_typed(self):
+        # The validator read `recipe["capability"]` directly, and
+        # `build_continuation_route`'s caller wraps only TopologyError -- so a
+        # route missing that field crashed with a bare KeyError instead of the
+        # typed refusal every other continuation problem produces
+        # (CI 2026-09-10). The fixture below was itself missing the field,
+        # which is how the crash reached CI rather than a reviewer.
+        with tempfile.TemporaryDirectory() as tmp:
+            source = {
+                "route_id": "rt-source-nocap",
+                "route_hash": "sha256:" + "5" * 64,
+                "cwd": str(ROOT),
+                "artifact_root": str(Path(tmp) / "artifacts"),
+                "nodes": [{
+                    "id": "test", "depends_on": [], "completion_gate": "code-tests-pass",
+                    "terminal": True, "terminal_gate": "code-tests-pass",
+                    "write_scope": ["utilities/**"],
+                }],
+                "runtime_lineage": {
+                    "runtime": "codex", "thread_id": "thread-nocap", "node_turn_ids": {},
+                },
+            }
+            with self.assertRaises(ValueError) as refused:
+                CAPABILITY_ROUTE.build_continuation_route(
+                    source,
+                    resume_from_node="test",
+                    requested_boundary="test",
+                    reason="projection-fixture",
+                    artifact_root=source["artifact_root"],
+                )
+            self.assertIn("continuation-human-gate-unrepresentable", str(refused.exception))
+            self.assertIn("capability", str(refused.exception))
+
     def test_continuation_partial_group_and_recovery_fields_are_one_contract(self):
         with tempfile.TemporaryDirectory() as tmp:
             source = {
+                # every compiled route carries its capability; the fixture
+                # omitted it, which is what surfaced the untyped crash above
+                "capability": "autopilot-code",
                 "route_id": "rt-source-v44",
                 "route_hash": "sha256:" + "4" * 64,
                 "cwd": str(ROOT),
                 "artifact_root": str(Path(tmp) / "artifacts"),
                 "nodes": [{
                     "id": "test", "depends_on": [], "completion_gate": "code-tests-pass",
-                    "terminal": True, "write_scope": ["utilities/**"],
+                    # a terminal node declares the gate it closes on, and the
+                    # continuation validator holds it to the completion gate
+                    "terminal": True, "terminal_gate": "code-tests-pass",
+                    "write_scope": ["utilities/**"],
                 }],
                 "runtime_lineage": {
                     "runtime": "codex", "thread_id": "thread-v44", "node_turn_ids": {},

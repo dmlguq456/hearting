@@ -64,6 +64,20 @@ def sha256_file(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def sealed_pointer_bytes(manifest: dict[str, Any]) -> bytes:
+    """Return the exact bytes used by the canonical chain pointer writer."""
+
+    return (json.dumps(manifest, sort_keys=True, default=str) + "\n").encode("utf-8")
+
+
+def slice_text_sha256(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def slice_files_sha256(values: list[str]) -> str:
+    return slice_text_sha256("\0".join(sorted(values)))
+
+
 GAP_RETRY_PURPOSE = "gap-retry"
 
 

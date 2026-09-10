@@ -8,6 +8,11 @@
 set -u
 cd "$(dirname "$0")/.."
 export PYTHONDONTWRITEBYTECODE=1
+# These checkers read the live tree, and two peer suites rewrite files in it
+# (the adaptation exemptions TSV among them -- a boundary check run mid-rewrite
+# reports `field 4='-'`, which is how this suite went red in CI 2026-09-10).
+. "$PWD/tools/worktree-lock.sh"
+worktree_lock_acquire "$PWD" 900 || exit 70
 seeded=()
 cleanup() {
   for d in "${seeded[@]:-}"; do

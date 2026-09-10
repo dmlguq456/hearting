@@ -8,6 +8,7 @@ result.  It never starts a provider and never writes harness state.
 from __future__ import annotations
 
 import contextlib
+import contextvars
 import glob
 import hashlib
 import json
@@ -38,6 +39,8 @@ OWNER_ROUTE_CONFLICT = "owner-route-conflict"
 MULTIPLE_ARTIFACT_PLAN_DIRS = "multiple-artifact-plan-dirs"
 MULTIPLE_SPEC_MARKERS = "multiple-spec-markers"
 MARKER_ARTIFACT_TIE = "marker-artifact-mtime-tie"
+
+_ROUND_SCOPE = contextvars.ContextVar("fleet_round_scope", default=None)
 
 
 def _realpath(value):
@@ -172,7 +175,8 @@ def _record_view(record, route_id, jobs, node_evidence=None, now=None, degradati
     return route._record_view(record, route_id, jobs, node_evidence or {},
                               time.time() if now is None else now,
                               gate_marks_for_route=marks,
-                              degradations_for_route=(degradations or {}).get(route_id, ()))
+                              degradations_for_route=(degradations or {}).get(route_id, ()),
+                              round_scope=_ROUND_SCOPE.get())
 
 
 def _record_nodes(record, route_id, jobs, node_evidence=None, now=None, degradations=None):
@@ -344,100 +348,90 @@ def _owner_lineage_projection(entity, jobs, route_records, node_evidence, now, d
     ):
         return None, True
 
-    owner_attempt = _field(entity, "attempt_id")
-    owner_worktree = _field(entity, "worktree") or _field(entity, "cwd")
-    owner_capability = (
-        _field(entity, "capability") or _field(entity, "capability_owner")
-        or (_field(entity, "key") if str(_field(entity, "key") or "").startswith("autopilot-") else None)
-    )
-    owner_mode = _field(entity, "capability_mode")
-    owner_artifact_root = _field(entity, "artifact_root")
-    if not all((owner_attempt, owner_worktree, owner_capability, owner_mode)):
+    from . import route
+
+    # The route module owns all hop validation.  Candidates are augmented only
+    # with records already loaded for this tick; this set is never expanded by
+    # a filesystem scan.
+    records = dict(route_records or {})
+    records.update(candidates)
+    lineages = {}
+    for rid, record in candidates.items():
+        lineage = route.continuation_lineage(record, records, node_evidence, jobs)
+        lineages[rid] = lineage
+        if lineage.get("status") == "unverified":
+            return None, True
+    if not any(lineage.get("status") == "verified" for lineage in lineages.values()):
+        return None, False
+
+    live_child_ids = {_field(child, "route_id") for child in _owner_children(entity, jobs)}
+    if _field(entity, "attempt_id") is None:
+        # Evidence-only completed routes are history, not current Session work.
+        # Remove them before terminal selection so a finished predecessor cannot
+        # compete with a live successor.
+        for rid in list(candidates):
+            if rid in live_child_ids:
+                continue
+            evidence = (node_evidence or {}).get(rid, {})
+            view = route._record_view(
+                candidates[rid], rid,
+                [j for j in jobs if _field(j, "route_id") == rid], evidence, now,
+                degradations_for_route=(degradations or {}).get(rid, ()),
+            )
+            if view.get("nodes") and all(
+                    node.get("state") in {"done", "failed"} for node in view["nodes"]):
+                candidates.pop(rid, None)
+                lineages.pop(rid, None)
+    if not candidates:
+        return None, False
+    terminals = []
+    for rid in candidates:
+        if not any(rid in lineage.get("chain", []) for lineage in lineages.values()):
+            terminals.append(rid)
+    if len(terminals) != 1:
         return None, True
-    for record in candidates.values():
+    terminal = terminals[0]
+    terminal_lineage = lineages[terminal]
+    if terminal_lineage.get("status") != "verified":
+        return None, True
+    if any(rid not in terminal_lineage.get("chain", []) and rid != terminal for rid in candidates):
+        return None, True
+    record = candidates[terminal]
+    owner_attempt = _field(entity, "attempt_id")
+    if owner_attempt:
         if record.get("owner_attempt_id") != owner_attempt:
             return None, True
-        if owner_worktree and os.path.realpath(record.get("cwd") or "") != os.path.realpath(owner_worktree):
+        owner_worktree = _field(entity, "worktree") or _field(entity, "cwd")
+        owner_capability = (
+            _field(entity, "capability") or _field(entity, "capability_owner")
+            or (_field(entity, "key") if str(_field(entity, "key") or "").startswith("autopilot-") else None)
+        )
+        owner_mode = _field(entity, "capability_mode")
+        owner_artifact_root = _field(entity, "artifact_root")
+        if (owner_worktree and os.path.realpath(record.get("cwd") or "")
+                != os.path.realpath(owner_worktree)):
             return None, True
         if owner_capability and record.get("capability") != owner_capability:
             return None, True
         if owner_mode and record.get("capability_mode") != owner_mode:
             return None, True
-        if (owner_artifact_root
-                and os.path.realpath(record.get("artifact_root") or "")
+        if (owner_artifact_root and os.path.realpath(record.get("artifact_root") or "")
                 != os.path.realpath(owner_artifact_root)):
             return None, True
-
-    outgoing = {}
-    incoming = {}
-    for rid, record in candidates.items():
-        edge = record.get("source_route_supersession")
-        if not edge:
-            continue
-        source_id, source_hash = edge.get("from_route_id"), edge.get("from_route_hash")
-        target_id = record.get("route_id")
-        source = candidates.get(source_id)
-        if source is None or source.get("route_hash") != source_hash:
-            return None, True
-        if (record.get("source_route_id"), record.get("source_route_hash")) != (
-                source_id, source_hash):
-            return None, True
-        if (
-                edge.get("edge_version") != 1
-                or edge.get("operation") != "continuation"
-                or edge.get("source_verdict_preserved") is not True
-                or edge.get("to_continuation_id") != record.get("continuation_id")):
-            return None, True
-        edges = record.get("supersession_edges") or []
-        source_edges = source.get("supersession_edges") or []
-        if edges != [*source_edges, edge]:
-            return None, True
-        if (
-                not source.get("route_family_key")
-                or source.get("route_family_key") != record.get("route_family_key")):
-            return None, True
-        reused = record.get("reused_nodes")
-        if not isinstance(reused, list):
-            return None, True
-        evidence_digest = "sha256:" + hashlib.sha256(json.dumps(
-            reused, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
-        ).encode()).hexdigest()
-        if record.get("source_evidence_digest") != evidence_digest:
-            return None, True
-        try:
-            monotonic = int(record.get("advance_generation")) == int(
-                source.get("advance_generation")) + 1
-        except (TypeError, ValueError):
-            monotonic = False
-        if not monotonic:
-            return None, True
-        if source_id in outgoing and outgoing[source_id] != target_id:
-            return None, True
-        outgoing[source_id] = target_id
-        incoming.setdefault(target_id, set()).add(source_id)
-
-    if not outgoing:
-        # Preserve the ordinary single-route/F-88 path when no lineage fact is
-        # present; this helper owns only explicit supersession collapse.
-        return None, False
-
-    # Every candidate with a valid edge must be part of one chain.  A loop is
-    # a typed ambiguity, as are competing terminal successors.
-    terminals = [rid for rid in candidates if rid not in outgoing]
-    if len(terminals) != 1:
-        return None, True
-    terminal = terminals[0]
-    seen = set()
-    current = terminal
-    while current in incoming:
-        predecessors = incoming[current]
-        if len(predecessors) != 1 or current in seen:
-            return None, True
-        seen.add(current)
-        current = next(iter(predecessors))
-    if len(seen) != len(candidates) - 1:
-        return None, True
-    record = candidates[terminal]
+    else:
+        terminal_owner = record.get("owner_attempt_id")
+        if terminal_owner not in (None, "", "-"):
+            exact_child = any(
+                _field(child, "attempt_id") == terminal_owner
+                and _field(child, "depth") == 1
+                and _field(child, "worker_type") == "owner"
+                for child in _owner_children(entity, jobs)
+            )
+            bound = route.owner_bound_attempts(
+                terminal, record.get("route_hash"), node_evidence, jobs,
+            )
+            if not exact_child and terminal_owner not in bound:
+                return None, True
     same_jobs = [j for j in jobs if _field(j, "route_id") == terminal]
     return _projection_from_record(
         entity, record, terminal, same_jobs,
@@ -1511,15 +1505,23 @@ def attach_projections(sessions: Iterable[Session], jobs: Iterable[DispatchJob],
     # 23.6 s per tick). The memo dies with this block, so the next tick scans records again.
     reader = _artifact_reader()
     read_scope = getattr(reader, "read_scope", None) if reader is not None else None
-    with (read_scope() if read_scope is not None else contextlib.nullcontext()):
-        for entity in all_entities:
-            entity.work_projection = resolve_work_projection(
-                entity, jobs=jobs, route_records=route_records,
-                node_evidence=node_evidence, artifact_root=artifact_root, now=now,
-                spec_markers=spec_markers,
-                cap_grounding=(entity.cap_grounding if isinstance(entity, Session) else None),
-                degradations=degradations)
-            entity.stage = entity.work_projection.stage_label if isinstance(entity, DispatchJob) else getattr(entity, "stage", None)
+    from . import route
+    round_token = _ROUND_SCOPE.set(
+        route.RoundScope(route_records, node_evidence or {}, tuple(jobs))
+    )
+    try:
+        with (read_scope() if read_scope is not None else contextlib.nullcontext()):
+            for entity in all_entities:
+                entity.work_projection = resolve_work_projection(
+                    entity, jobs=jobs, route_records=route_records,
+                    node_evidence=node_evidence, artifact_root=artifact_root, now=now,
+                    spec_markers=spec_markers,
+                    cap_grounding=(entity.cap_grounding if isinstance(entity, Session) else None),
+                    degradations=degradations)
+                entity.stage = (entity.work_projection.stage_label
+                                if isinstance(entity, DispatchJob) else getattr(entity, "stage", None))
+    finally:
+        _ROUND_SCOPE.reset(round_token)
     return sessions, jobs
 
 
@@ -1550,7 +1552,7 @@ def route_summary_from_projections(entities):
         ambiguity = projection.ambiguity
         if ambiguity is not None and not isinstance(ambiguity, list):
             ambiguity = [ambiguity]
-        out.append({
+        item = {
             "route_id": projection.route_id,
             "route_hash": projection.route_hash or record.get("route_hash"),
             # Preserve the legacy route.summary values from the attached
@@ -1565,5 +1567,8 @@ def route_summary_from_projections(entities):
             "progress": legacy_view.get("progress", projection.progress.to_dict() if projection.progress else None),
             "ambiguity": ambiguity,
             "nodes": nodes,
-        })
+        }
+        if legacy_view.get("lineage") is not None:
+            item["lineage"] = legacy_view["lineage"]
+        out.append(item)
     return out

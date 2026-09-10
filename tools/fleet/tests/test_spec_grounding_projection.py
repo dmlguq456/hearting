@@ -325,7 +325,9 @@ class SpecGroundingRenderTest(unittest.TestCase):
         entity.liveness = "working"
         entity.work_projection = projection.WorkProjection(
             source="artifact-inferred", stage_label="spec topic-a ·dev")
-        self.assertEqual(render._projection_stage_detail_rows(entity), [])
+        visible = "\n".join("".join(part for part, _ in row) for row in
+            render._build_lines([entity], [], "fleet", False, 0, term_width=120) if row)
+        self.assertNotIn("←{", visible)
 
     def test_code_label_no_longer_renders_a_detail_track(self):
         # 2026-07-24: an INFERRED inline code stage carries no dedicated `plan › exec › test`
@@ -335,7 +337,9 @@ class SpecGroundingRenderTest(unittest.TestCase):
         entity.liveness = "working"
         entity.work_projection = projection.WorkProjection(
             source="artifact-inferred", stage_label="exec")
-        self.assertEqual(render._projection_stage_detail_rows(entity), [])
+        visible = "\n".join("".join(part for part, _ in row) for row in
+            render._build_lines([entity], [], "fleet", False, 0, term_width=120) if row)
+        self.assertNotIn("←{", visible)
 
     def test_long_topic_label_clips_safely_within_available_width(self):
         entity = _session(sid="sid-a", cwd="/tmp/whatever")

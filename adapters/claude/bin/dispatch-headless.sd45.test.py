@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import argparse,importlib.util,json,os,subprocess,sys,tempfile,unittest
+import argparse,importlib.util,json,os,shutil,subprocess,sys,tempfile,unittest
 from pathlib import Path
 from unittest import mock
 ROOT=Path(__file__).resolve().parents[3]
@@ -117,7 +117,15 @@ class ClaudeSD45InternalProbe(unittest.TestCase):
         run.assert_not_called()
 
 
+# Same reason as utilities/dispatch_owner.test.py: the selector refuses
+# (`claude-session-resume-indeterminate`, exit 69) when `claude` is absent
+# rather than guess, and CI has no such binary.
+CLAUDE_CLI = shutil.which("claude")
+NEEDS_CLAUDE_CLI = "no claude binary: the selector's session-resume probe cannot be proven here"
+
+
 class ClaudeSD45(unittest.TestCase):
+ @unittest.skipUnless(CLAUDE_CLI, NEEDS_CLAUDE_CLI)
  def test_route_consumer_and_missing_evidence_refusal(self):
   with tempfile.TemporaryDirectory() as td:
    base=Path(td); repo=base/"repo"; repo.mkdir(); subprocess.run(["git","init","-q",str(repo)],check=True); subprocess.run(["git","-C",str(repo),"config","user.email","fixture@example.com"],check=True); subprocess.run(["git","-C",str(repo),"config","user.name","Fixture"],check=True); (repo/"x").write_text("x"); subprocess.run(["git","-C",str(repo),"add","x"],check=True); subprocess.run(["git","-C",str(repo),"commit","-qm","init"],check=True)

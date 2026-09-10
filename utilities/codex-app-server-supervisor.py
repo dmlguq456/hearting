@@ -28,6 +28,7 @@ from dispatch_completion_join import (
     log_delivery_refusal,
     materialize_after_terminal_close,
     prepare_supervisor_outbox,
+    partition_runtime_wait_children,
     refresh_supervisor_outbox_actions,
     reconcile_finished_children,
     read_supervisor_phase_state,
@@ -1316,10 +1317,20 @@ def main(argv: list[str] | None = None) -> int:
                     continue
                 completed_delivery = True
             new_attempts = set(current).difference(delivered)
-            unstarted = unstarted_child_attempts(
-                [current[attempt] for attempt in new_attempts]
+            partition = partition_runtime_wait_children(
+                Path(args.jobs), args.parent_attempt_id,
+                [current[attempt] for attempt in new_attempts], new_attempts,
             )
-            if completed_delivery and new_attempts and not unstarted:
+            unstarted = set(partition.unstarted)
+            # Only joinable rows may be parked; serial tails and refusal-
+            # settled rows stay out of the outbox.
+            park_attempts = set(partition.joinable)
+            for frontier in partition.frontiers:
+                emit({"type": "dispatch.supervisor.chain-pending", "parent_attempt_id": args.parent_attempt_id,
+                      "chain_id": frontier.chain_id, "frontier_index": frontier.frontier_index,
+                      "frontier_attempt_id": frontier.frontier_attempt_id,
+                      "pending_count": len(frontier.pending_attempt_ids)})
+            if completed_delivery and park_attempts and not unstarted:
                 delivery_timing = advance_delivery_timing(
                     delivery_timing, "next_stage_start_ns"
                 )
@@ -1341,6 +1352,12 @@ def main(argv: list[str] | None = None) -> int:
                 unstarted = unstarted_child_attempts(
                     [current[attempt] for attempt in new_attempts]
                 )
+                partition = partition_runtime_wait_children(
+                    Path(args.jobs), args.parent_attempt_id,
+                    [current[attempt] for attempt in new_attempts], new_attempts,
+                )
+                unstarted = set(partition.unstarted)
+                park_attempts = set(partition.joinable)
                 if settled:
                     emit(
                         {
@@ -1349,7 +1366,16 @@ def main(argv: list[str] | None = None) -> int:
                             "attempt_count": len(new_attempts),
                         }
                     )
-            empty_wait = not new_attempts and wait_requested
+            empty_wait = (not new_attempts and wait_requested) or (
+                wait_requested and not partition.joinable and not partition.chain_pending
+                and bool(partition.refusal_settled)
+            )
+            # Refusal-settled rows are already terminal and never enter the
+            # join. Without a wait request they are folded into this aggregate
+            # bookkeeping; with one, the existing empty-wait correction stays
+            # fail-closed.
+            if not wait_requested and not park_attempts:
+                delivered.update(partition.refusal_settled)
             if unstarted or empty_wait:
                 signature = tuple(sorted(unstarted))
                 if signature in launch_remediated:
@@ -1377,7 +1403,7 @@ def main(argv: list[str] | None = None) -> int:
                 next_prompt = _apply_notice(start_retry_prompt(unstarted), notice)
                 continuations += 1
                 continue
-            if new_attempts:
+            if park_attempts:
                 # Cheap, non-mutating fail-fast: this round's real admission
                 # (and its single budget spend) is committed once, at the R2
                 # sealed site below, once the post-join purpose is knowable.
@@ -1394,7 +1420,7 @@ def main(argv: list[str] | None = None) -> int:
                     {
                         "type": "dispatch.supervisor.parked",
                         "parent_attempt_id": args.parent_attempt_id,
-                        "attempt_count": len(new_attempts),
+                        "attempt_count": len(park_attempts),
                     }
                 )
                 write_supervisor_state(
@@ -1408,23 +1434,23 @@ def main(argv: list[str] | None = None) -> int:
                 # receipt. See the matching comment in claude-session-supervisor.py.
                 reparks = 0
                 while True:
-                    receipt = run_join(args, new_attempts)
+                    receipt = run_join(args, park_attempts)
                     if receipt["state"] != "timeout":
                         break
                     reparks += 1
                     if reparks > args.max_join_reparks:
                         raise SupervisorError("join-timeout-repark-exceeded")
-                    runtime_receiptless_cancel(args, set(new_attempts))
+                    runtime_receiptless_cancel(args, set(park_attempts))
                     emit(
                         {
                             "type": "dispatch.supervisor.reparked",
                             "parent_attempt_id": args.parent_attempt_id,
-                            "attempt_count": len(new_attempts),
+                            "attempt_count": len(park_attempts),
                             "repark_ordinal": reparks,
                         }
                     )
                 joined_rows = current_children(
-                    Path(args.jobs), args.parent_attempt_id, new_attempts
+                    Path(args.jobs), args.parent_attempt_id, park_attempts
                 )
                 joined = {row.attempt_id: row for row in joined_rows}
                 # SD-119: an unfinished serial sub-session chain advances
@@ -1435,32 +1461,29 @@ def main(argv: list[str] | None = None) -> int:
                 # Claude-only realized behavior confirmed by measurement
                 # (SD-OPEN-15): this Codex binding mirrors that surface but
                 # claims no cross-harness parity.
-                joined_before_chain_advance = joined
-                last_advanced_attempt_id = None
-                while True:
-                    next_id = subsession_advance.coordinate_chain_advance_from_joined_rows(
-                        Path(args.jobs), args.parent_attempt_id, joined,
+                try:
+                    drive = subsession_advance.drive_serial_chain(
+                        jobs=Path(args.jobs), parent_attempt_id=args.parent_attempt_id,
+                        attempts=set(park_attempts), receipt=receipt,
+                        refresh=lambda attempts: current_children(Path(args.jobs), args.parent_attempt_id, attempts),
+                        join=lambda attempts: run_join(args, attempts),
+                        reconcile=lambda rows, attempts: runtime_reconcile(args, rows, attempts),
+                        max_reparks=args.max_join_reparks,
+                        on_timeout=lambda attempts: runtime_receiptless_cancel(args, attempts),
+                        emit=emit,
                     )
-                    if next_id is None:
-                        break
-                    last_advanced_attempt_id = next_id
-                    new_attempts = {next_id}
-                    receipt = run_join(args, new_attempts)
-                    while receipt["state"] == "timeout":
-                        reparks += 1
-                        if reparks > args.max_join_reparks:
-                            raise SupervisorError("join-timeout-repark-exceeded")
-                        runtime_receiptless_cancel(args, set(new_attempts))
-                        receipt = run_join(args, new_attempts)
-                    joined_rows = current_children(
-                        Path(args.jobs), args.parent_attempt_id, new_attempts
-                    )
-                    joined = {row.attempt_id: row for row in joined_rows}
-                # A-4 (F-2): same single aggregate-delivery recording site as
-                # claude-session-supervisor.py's symmetric call.
-                subsession_advance.record_owner_resume_if_chain(
-                    Path(args.jobs), joined_before_chain_advance, last_advanced_attempt_id,
-                )
+                except subsession_advance.ChainDriveError as exc:
+                    # Keep Codex's terminal reason/classification identical to
+                    # the Claude supervisor for bounded repark exhaustion.
+                    raise SupervisorError(exc.reason) from exc
+                receipt, joined_rows, new_attempts = drive.receipt, list(drive.joined_rows), set(drive.attempts)
+                joined = {row.attempt_id: row for row in joined_rows}
+                joined_before_chain_advance = drive.joined_before
+                last_advanced_attempt_id = drive.last_advanced_attempt_id
+                delivered.update(drive.traversed)
+                delivered.update(drive.closed)
+                delivered.update(partition.refusal_settled)
+                chain_notice = subsession_advance.chain_delivery_notice(drive, joined_rows)
                 if runtime_reconcile(args, joined, set(new_attempts)):
                     receipt = run_join(args, new_attempts)
                     joined_rows = current_children(
@@ -1515,6 +1538,9 @@ def main(argv: list[str] | None = None) -> int:
                     # refusal here already tried purpose="terminal-handoff"
                     # whenever the reserve boundary was reached.
                     raise SupervisorError("continuation-limit-exceeded")
+                subsession_advance.record_owner_resume_if_chain(
+                    Path(args.jobs), joined_before_chain_advance, last_advanced_attempt_id,
+                )
                 prepared = prepare_supervisor_outbox(
                     state_path,
                     args.parent_attempt_id,
@@ -1526,10 +1552,10 @@ def main(argv: list[str] | None = None) -> int:
                 )
                 delivered = set(prepared.delivered_attempt_ids)
                 active_outbox = prepared.outbox
-                pending_notice = notice
+                pending_notice = _apply_notice(chain_notice, notice) if chain_notice else notice
                 next_prompt = completion_prompt(
                     active_outbox.receipt or {}, active_outbox, jobs=args.jobs,
-                    notice=notice,
+                    notice=pending_notice,
                 )
                 continuations += 1
                 continue

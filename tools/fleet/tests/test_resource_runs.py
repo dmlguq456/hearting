@@ -3,6 +3,7 @@ import json
 import os
 import sys
 import tempfile
+import dataclasses
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -110,6 +111,34 @@ class ResourceRunFleetTest(unittest.TestCase):
         self.assertEqual([row.run_id for row in rows], ["gpu-0", "gpu-1"])
         self.assertTrue(all(row.project == "project" for row in rows))
         self.assertTrue(all(row.liveness == "working" for row in rows))
+
+    def test_every_field_the_scanner_emits_is_a_field_the_row_accepts(self):
+        """Producer and consumer key sets, pinned together.
+
+        The collector projects each scanned run into `ResourceJob` inside a
+        per-row `try`, so one unexpected keyword drops that row into
+        diagnostics nobody reads -- and since the extra field is present on
+        *every* run, Fleet showed no resource runs at all. Five producer
+        fields had accumulated that way (artifact_root, route_file,
+        route_hash, route_id, route_node) before anyone noticed, because the
+        only symptom was an empty section (2026-09-10). A new field must fail
+        here, loudly, instead.
+        """
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            index = root / "index.json"
+            reg = root / "resource-runs.json"
+            identity = resource_run_registry.proc_identity(os.getpid())
+            reg.write_text(json.dumps({
+                "schema_version": 1,
+                "runs": {"gpu-0": {**identity, "cwd": "/work/project", "status": "running"}},
+            }))
+            resource_run_registry.register_registry(reg, index)
+            emitted, _ = resource_run_registry.scan(index_path=str(index))
+        self.assertTrue(emitted, "the scanner produced no run to compare against")
+        accepted = {field.name for field in dataclasses.fields(ResourceJob)}
+        unaccepted = sorted(set(emitted[0]) - accepted)
+        self.assertEqual(unaccepted, [], f"ResourceJob rejects scanner field(s): {unaccepted}")
 
 
 if __name__ == "__main__":

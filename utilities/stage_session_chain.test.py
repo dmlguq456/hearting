@@ -3,6 +3,7 @@
 import importlib.util
 import io
 import json
+import os
 from pathlib import Path
 import sys
 import tempfile
@@ -76,6 +77,7 @@ class StageSessionChainStartTest(unittest.TestCase):
         ]
         return {
             "route_file": str(base / "route.json"), "route_node": "execute",
+            "route_id": "rt-fixture", "route_hash": "sha256:" + "1" * 64,
             "worktree": str(base), "chain_id": "chain-fixture", "mode": "serial",
             "sessions": sessions, "_manifest_path": str(base / "chain.json"),
             "_manifest_sha256": "deadbeef",
@@ -92,12 +94,19 @@ class StageSessionChainStartTest(unittest.TestCase):
         def launch(command):
             started.append(command[command.index("--action") + 1] + ":" +
                             command[command.index("--attempt-id") + 1])
-            return mock.Mock(returncode=0, stdout="", stderr="")
+            attempt_id = command[command.index("--attempt-id") + 1]
+            stdout = (
+                f"check=ok\nattempt_id={attempt_id}\nregistered=1\nstarted=1\n"
+                "duplicate_attempt=0\nchild_spawned=1\n"
+            ) if command[command.index("--action") + 1] == "start" else ""
+            return mock.Mock(returncode=0, stdout=stdout, stderr="")
 
         with mock.patch.object(CHAIN, "load_manifest", return_value=manifest), \
                 mock.patch.object(CHAIN.subprocess, "run", return_value=mock.Mock(returncode=0)), \
                 mock.patch.object(CHAIN, "resolve_global_registry") as registry, \
+                mock.patch.object(CHAIN, "probe_owner_supervision", return_value=mock.Mock(state="held", reason="")), \
                 mock.patch.object(CHAIN, "run_checked", side_effect=launch), \
+                mock.patch.dict(os.environ, {"AGENT_DISPATCH_ATTEMPT_ID": "att-owner"}), \
                 mock.patch.object(sys, "argv", [
                     "stage-session-chain.py", "start",
                     "--manifest", str(envelope), "--parent", "owner",
@@ -156,6 +165,97 @@ class StageSessionChainStartTest(unittest.TestCase):
             ]), self.assertRaises(SystemExit) as ctx:
                 CHAIN.main()
             self.assertNotEqual(ctx.exception.code, 0)
+
+    def _main_probe(self, base: Path, probe_state: str, *, initial_receipt=None, unclosed=False):
+        base.mkdir(parents=True, exist_ok=True)
+        manifest = self._manifest(base)
+        envelope = base / "chain.json"
+        envelope.write_text(json.dumps({
+            "route_file": manifest["route_file"], "route_node": "execute",
+        }))
+        (base / "route.json").write_text(json.dumps({"nodes": [{"id": "execute"}]}))
+        jobs = base / "jobs.log"
+        jobs.touch()
+        receipt = initial_receipt or (
+            "check=ok\nattempt_id=att-stage-session-1\nregistered=1\nstarted=1\n"
+            "duplicate_attempt=0\nchild_spawned=1\n"
+        )
+        closed = mock.Mock(
+            cancelled=("att-stage-session-2",), already_closed=(),
+            unclosed=("att-stage-session-1",) if unclosed else (),
+            unclosed_delivery=("poll-fallback",) if unclosed else (),
+        )
+
+        def launch(command):
+            action = command[command.index("--action") + 1]
+            attempt_id = command[command.index("--attempt-id") + 1]
+            if action == "register":
+                stdout = (
+                    f"check=ok\nattempt_id={attempt_id}\nregistered=1\nstarted=0\n"
+                    "duplicate_attempt=0\nchild_spawned=0\n"
+                )
+            else:
+                stdout = receipt
+            return mock.Mock(returncode=0, stdout=stdout, stderr="")
+
+        env = {key: value for key, value in os.environ.items() if key != "AGENT_DISPATCH_ATTEMPT_ID"}
+        if probe_state != "unsupervised":
+            env["AGENT_DISPATCH_ATTEMPT_ID"] = "att-owner"
+        with mock.patch.dict(os.environ, env, clear=True), \
+             mock.patch.object(CHAIN, "load_manifest", return_value=manifest), \
+             mock.patch.object(CHAIN.subprocess, "run", return_value=mock.Mock(returncode=0)), \
+             mock.patch.object(CHAIN, "resolve_global_registry", return_value=mock.Mock(path=jobs)), \
+             mock.patch.object(CHAIN, "probe_owner_supervision", return_value=mock.Mock(state=probe_state, reason="fixture-probe")), \
+             mock.patch.object(CHAIN, "run_checked", side_effect=launch), \
+             mock.patch.object(CHAIN, "close_refused_chain_rows", return_value=closed), \
+             mock.patch.object(sys, "argv", [
+                 "stage-session-chain.py", "start", "--manifest", str(envelope),
+                 "--parent", "owner", "--jobs", str(jobs),
+             ]), \
+             mock.patch("sys.stdout", new_callable=io.StringIO) as out:
+            result = CHAIN.main()
+        return result, out.getvalue()
+
+    def test_unsupervised_and_supervision_unproven_are_strict_main_refusals(self):
+        with tempfile.TemporaryDirectory() as td:
+            for state, reason in (
+                ("unsupervised", "subsession-chain-advance-unsupervised"),
+                ("unproven", "subsession-chain-advance-supervision-unproven"),
+            ):
+                with self.subTest(state=state):
+                    result, printed = self._main_probe(Path(td) / state, state)
+                    self.assertEqual(result, 65)
+                    self.assertIn(f"reason={reason}", printed)
+                    self.assertIn("fallback=single-session-required", printed)
+                    self.assertIn("registered=0", printed)
+
+    def test_invalid_initial_start_receipt_and_unclosed_rows_emit_parent_next(self):
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            base.mkdir(exist_ok=True)
+            result, printed = self._main_probe(
+                base, "held",
+                initial_receipt=(
+                    "check=ok\nattempt_id=att-stage-session-1\nregistered=1\nstarted=1\n"
+                    "duplicate_attempt=0\nchild_spawned=0\n"
+                ),
+                unclosed=True,
+            )
+            self.assertEqual(result, 65)
+            self.assertIn("reason=subsession-chain-initial-start-refused", printed)
+            self.assertIn("start_verdict=not-spawned", printed)
+            self.assertIn("unclosed_rows=1", printed)
+            self.assertIn("parent_next=bounded-wait", printed)
+            self.assertIn("parent_next_reason=explicit-poll-fallback", printed)
+            self.assertIn("parent_next_command=", printed)
+
+            invalid_result, invalid_printed = self._main_probe(
+                base / "invalid",
+                "held",
+                initial_receipt="check=ok\nattempt_id=wrong\n",
+            )
+            self.assertEqual(invalid_result, 65)
+            self.assertIn("start_verdict=receipt-field-missing:registered", invalid_printed)
 
 
 class PlanSlicesTest(unittest.TestCase):
@@ -331,14 +431,12 @@ class RuntimeJoinsCensusTest(unittest.TestCase):
             self.assertEqual(CHAIN.chain_census(jobs, self.CHAIN_ID)["runtime_joins"], 1)
 
     def test_check_projection_never_declares_runtime_joins(self):
-        # The pre-v48 defect was `runtime_joins` being a constant printed
-        # beside this baseline. `check` is a dry run, so it emits the
-        # baseline only; the measured value has exactly one producer.
+        # ``check`` is a dry run, so it exposes only its baseline. The
+        # measured runtime value is exercised by the census tests above, and
+        # this structural guard keeps the producer unique.
         metrics = CHAIN.continuation_metrics(3)
         self.assertEqual(metrics["baseline_runtime_joins"], 3)
         self.assertNotIn("runtime_joins", metrics)
-        # Structural: the only place this module assigns a `runtime_joins`
-        # value is `chain_census`, and it assigns it from the census call.
         source = (ROOT / "utilities" / "stage-session-chain.py").read_text(encoding="utf-8")
         start = source.index("def chain_census(")
         end = source.index("\ndef ", start + 1)

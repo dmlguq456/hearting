@@ -36,11 +36,37 @@ class HookCheckerFixture(unittest.TestCase):
             cwd=self.root, capture_output=True, text=True,
         )
 
-    def test_default_battery_succeeds_without_prd(self):
+    def materialize_shipped_anchors(self):
+        """Create, in the fixture root, exactly the files the shipped TSV cites.
+
+        The fixture used to hand-write `core/HOOKS.md` because that is where
+        SD-111's anchor pointed when this test was written. The anchor moved to
+        `core/ADAPTATION.md#7.4` when the completion-delivery carriers were
+        relocated there (2026-09-09), and the fixture went on creating the old
+        file -- so the checker could not resolve the anchor and both cases went
+        red for a reason that had nothing to do with the checker. Reading the
+        anchors instead of naming them means the next move cannot rot this.
+        """
         source_tsv = (SOURCE.parent / "sd-procedure-hooks.tsv").read_text(encoding="utf-8")
         (self.root / "tools/sd-procedure-hooks.tsv").write_text(source_tsv, encoding="utf-8")
-        (self.root / "core").mkdir()
-        (self.root / "core/HOOKS.md").write_text("## Invariant Catalog\nSD-111\n", encoding="utf-8")
+        for line in source_tsv.splitlines()[1:]:
+            columns = line.split("\t")
+            if len(columns) != 4:
+                continue
+            sd, kind, anchor, status = columns
+            if status == "baseline" or kind != "procedure-step" or "#" not in anchor:
+                continue
+            relative, heading = anchor.split("#", 1)
+            path = self.root / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            body = f"## {heading}\n{sd}\n"
+            if path.exists():
+                path.write_text(path.read_text(encoding="utf-8") + body, encoding="utf-8")
+            else:
+                path.write_text(body, encoding="utf-8")
+
+    def test_default_battery_succeeds_without_prd(self):
+        self.materialize_shipped_anchors()
         result = self.run_checker("--check")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("check=ok", result.stdout)
@@ -122,11 +148,8 @@ class HookCheckerFixture(unittest.TestCase):
         self.assertNotEqual(self.run_checker("--check").returncode, 0)
 
     def test_write_mode_does_not_change_tsv(self):
-        (self.root / "core").mkdir()
-        (self.root / "core/HOOKS.md").write_text("## Invariant Catalog\nSD-111\n", encoding="utf-8")
-        source_tsv = (SOURCE.parent / "sd-procedure-hooks.tsv").read_text(encoding="utf-8")
+        self.materialize_shipped_anchors()
         path = self.root / "tools/sd-procedure-hooks.tsv"
-        path.write_text(source_tsv, encoding="utf-8")
         before = (path.stat().st_mtime_ns, path.read_bytes())
         result = self.run_checker()
         self.assertEqual(result.returncode, 0, result.stderr)

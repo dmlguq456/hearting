@@ -320,7 +320,8 @@ class WorkerCapacityContractTest(unittest.TestCase):
                     command[command.index("--action") + 1],
                     command[command.index("--attempt-id") + 1],
                 ))
-                return subprocess.CompletedProcess(command, 0, "", "")
+                output = "check=ok\nattempt_id=" + command[command.index("--attempt-id") + 1] + "\nregistered=1\nstarted=1\nduplicate_attempt=0\nchild_spawned=1\n"
+                return subprocess.CompletedProcess(command, 0, output, "")
 
             self.assertFalse(hasattr(CHAIN, "supervise"))
             self.assertFalse(hasattr(CHAIN, "readiness"))
@@ -337,7 +338,9 @@ class WorkerCapacityContractTest(unittest.TestCase):
                         CHAIN, "resolve_global_registry",
                         return_value=SimpleNamespace(path=jobs),
                     ), \
-                    mock.patch.object(CHAIN, "run_checked", side_effect=launch):
+                    mock.patch.object(CHAIN, "run_checked", side_effect=launch), \
+                    mock.patch.object(CHAIN, "probe_owner_supervision", return_value=SimpleNamespace(state="held", reason="")), \
+                    mock.patch.dict(os.environ, {"AGENT_DISPATCH_ATTEMPT_ID": "att-owner"}):
                 result = CHAIN.main()
             self.assertEqual(result, 0)
             self.assertEqual(

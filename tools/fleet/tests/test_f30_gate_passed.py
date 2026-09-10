@@ -725,16 +725,10 @@ class ReconciliationRenderTest(unittest.TestCase):
         text, key, mark = render._route_node_text(self._node())
         self.assertEqual((text, key, mark), ("frame …gate 3m", "lvl_y", ""))
 
-    def test_breadcrumb_and_detail_use_yellow_ellipsis(self):
+    def test_breadcrumb_uses_yellow_ellipsis(self):
         breadcrumb = render._route_stage_segs([("frame", "reconciling"),
                                                 ("plan", "pending")], True, 80)
         self.assertIn(("frame …", "lvl_y"), breadcrumb)
-        for width in (168, 120, 100, 60):
-            with self.subTest(width=width):
-                detail = render._stage_detail_rows([self._node()], term_width=width)
-                self.assertIn(("frame …", "lvl_y"), detail[0])
-                self.assertTrue(all(render._dw("".join(t for t, _k in row)) <= width
-                                    for row in detail))
 
     def test_parallel_group_precedence_preserves_failure_and_reconciliation(self):
         def legs(a, b):

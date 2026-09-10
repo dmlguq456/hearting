@@ -700,7 +700,13 @@ def _validate_continuations(recipe, registry, nodes, by_id):
     registry validation and therefore at route compile, because a graph repaired at
     runtime has already lost the run.
     """
-    capability = recipe["capability"]
+    # A route reaching here without its capability used to raise a bare
+    # KeyError. `build_continuation_route`'s caller only wraps TopologyError,
+    # so that crash escaped as an untyped exception instead of the typed
+    # refusal every other continuation problem produces (CI 2026-09-10).
+    capability = recipe.get("capability")
+    if not isinstance(capability, str) or not capability:
+        raise TopologyError("continuation validation requires the route's capability")
     kinds = registry["continuation_kinds"]
     ids = [node["id"] for node in nodes]
     dependents = {node_id: [] for node_id in ids}

@@ -39,6 +39,13 @@ import dispatch_contract as DC  # noqa: E402
 from dispatch_contract import DispatchContractError  # noqa: E402
 import dispatch_subsession_handoff as HANDOFF  # noqa: E402
 import dispatch_subsession_resume_record as RESUME_RECORD  # noqa: E402
+from stage_session_contract import (
+    ADAPTERS,
+    load_manifest,
+    sealed_pointer_bytes,
+    slice_files_sha256,
+    slice_text_sha256,
+)
 
 SUBSESSION_ADVANCE_RECORD_SCHEMA_VERSION = 1
 
@@ -84,6 +91,9 @@ class SubsessionAdvanceRequest:
     parent_attempt_id: str
     artifact_root: str = ""
     advance_generation: int = 0
+    parent_slug: str = ""
+    registered_parent_sid: str = ""
+    registered_parent_cwd: str = ""
 
 
 @dataclass(frozen=True)
@@ -106,6 +116,59 @@ class SubsessionAdvanceResult:
     started: bool
     child_spawned: bool
     record_path: Path | None
+
+
+@dataclass(frozen=True)
+class ChainProofRefusal:
+    reason: str
+
+
+@dataclass(frozen=True)
+class ProvenSerialChain:
+    chain_id: str
+    manifest: dict
+    recomputed_sha256: str
+    pointer_sha256: str
+    parent_slug: str
+    rows_by_index: dict[int, dict]
+
+
+@dataclass(frozen=True)
+class ChainFrontier:
+    chain_id: str
+    frontier_index: int
+    frontier_attempt_id: str
+    pending_attempt_ids: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class ChainAdvanceStep:
+    outcome: str
+    chain_id: str = ""
+    predecessor_index: int | None = None
+    successor_index: int | None = None
+    attempt_id: str | None = None
+    reason: str = ""
+    subsession_advance_id: str = ""
+
+
+class ChainDriveError(RuntimeError):
+    def __init__(self, reason: str):
+        super().__init__(reason)
+        self.reason = reason
+
+
+@dataclass(frozen=True)
+class ChainDriveResult:
+    receipt: dict
+    joined_rows: tuple
+    attempts: frozenset[str]
+    joined_before: dict
+    traversed: frozenset[str]
+    last_advanced_attempt_id: str | None
+    refusal: ChainAdvanceStep | None
+    closed: tuple[str, ...]
+    unclosed: tuple[str, ...]
 
 
 class SubsessionAdvanceServices(Protocol):
@@ -241,8 +304,38 @@ def _registry_rows_for_chain(jobs: Path, chain_id: str) -> list[dict]:
         metadata = dict(part.split("=", 1) for part in fields[5].split(",") if "=" in part)
         if metadata.get("session_chain_id") != chain_id:
             continue
-        out.append({"status": fields[1], "metadata": metadata, "timestamp": fields[0]})
+        out.append({
+            "status": fields[1], "metadata": metadata, "timestamp": fields[0],
+            "slug": fields[4], "fields": fields, "raw": line,
+        })
     return out
+
+
+def _locked_registry_snapshot(jobs: Path) -> list[str] | None:
+    """Read one append-log snapshot while holding the canonical registry lock."""
+
+    try:
+        with Path(f"{jobs}.lock").open("a", encoding="utf-8") as lock:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+            return jobs.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return None
+
+
+def _rows_from_snapshot(lines: list[str], chain_id: str) -> list[dict]:
+    rows = []
+    for line in lines:
+        fields = line.split("\t")
+        if len(fields) != 6:
+            continue
+        metadata = DC.parse_registry_metadata(fields[5])
+        if metadata.get("session_chain_id") != chain_id:
+            continue
+        rows.append({
+            "status": fields[1], "metadata": metadata, "timestamp": fields[0],
+            "slug": fields[4], "fields": fields, "raw": line,
+        })
+    return rows
 
 
 def resume_index(jobs: Path, manifest: dict) -> int:
@@ -286,6 +379,161 @@ def load_chain_manifest(jobs: Path, chain_id: str) -> dict | None:
         return None
 
 
+def _proof_refusal(reason: str) -> ChainProofRefusal:
+    return ChainProofRefusal(reason)
+
+
+def prove_serial_chain(
+    jobs: Path, chain_id: str, *, parent_attempt_id: str
+) -> ProvenSerialChain | ChainProofRefusal:
+    """Prove the sealed pointer and the complete exact-parent row bijection."""
+
+    pointer_path = chain_manifest_pointer_path(jobs, chain_id)
+    try:
+        pointer_bytes = pointer_path.read_bytes()
+        pointer = json.loads(pointer_bytes.decode("utf-8"))
+    except (OSError, UnicodeDecodeError, ValueError, TypeError):
+        return _proof_refusal("serial-chain-pointer-unreadable")
+    if not isinstance(pointer, dict) or pointer.get("chain_id") != chain_id:
+        return _proof_refusal("serial-chain-pointer-invalid")
+    try:
+        source_path = Path(str(pointer["_manifest_path"])).resolve()
+        route_path = Path(str(pointer["route_file"])).resolve()
+        route = json.loads(route_path.read_text(encoding="utf-8"))
+        route["_route_file"] = str(route_path)
+        node = next(
+            item for item in route.get("nodes", [])
+            if isinstance(item, dict) and item.get("id") == pointer.get("route_node")
+        )
+        manifest = load_manifest(source_path, route=route, node=node)
+    except Exception as exc:
+        return _proof_refusal(f"serial-chain-manifest-invalid:{type(exc).__name__}")
+    if pointer.get("_manifest_sha256") != manifest.get("_manifest_sha256"):
+        return _proof_refusal("serial-chain-original-digest-mismatch")
+    if sealed_pointer_bytes(manifest) != pointer_bytes:
+        return _proof_refusal("serial-chain-pointer-digest-mismatch")
+    # Chain rows and the exact owner row must come from the same lock-held
+    # append-log snapshot. Two unlocked reads can straddle a concurrent append
+    # or a torn final line and turn a valid frontier into a destructive refusal.
+    all_lines = _locked_registry_snapshot(jobs)
+    if all_lines is None:
+        return _proof_refusal("serial-chain-registry-unreadable")
+    rows = _rows_from_snapshot(all_lines, chain_id)
+    owner_rows = []
+    for line in all_lines:
+        fields = line.split("\t")
+        if len(fields) == 6:
+            meta = DC.parse_registry_metadata(fields[5])
+            if meta.get("attempt_id") == parent_attempt_id:
+                owner_rows.append((fields, meta))
+    if len(owner_rows) != 1 or owner_rows[0][0][1] not in {"open", "running"}:
+        return _proof_refusal("serial-chain-owner-not-open")
+    parent_slug = owner_rows[0][0][4]
+    expected_sessions = {item["index"]: item for item in manifest["sessions"]}
+    if len(rows) != len(expected_sessions):
+        return _proof_refusal("serial-chain-row-count-mismatch")
+    by_index: dict[int, dict] = {}
+    required = {
+        "route_id": manifest.get("route_id", ""),
+        "route_hash": manifest.get("route_hash", ""),
+        "route_node": manifest.get("route_node", ""),
+        "route_file": str(Path(manifest.get("route_file", "")).resolve()),
+        "subsession_mode": "serial",
+        "stage_authority": "0",
+        "session_chain_id": chain_id,
+    }
+    for row in rows:
+        meta = row["metadata"]
+        try:
+            index = int(meta.get("subsession_index", ""))
+        except ValueError:
+            return _proof_refusal("serial-chain-index-invalid")
+        session = expected_sessions.get(index)
+        if session is None or index in by_index:
+            return _proof_refusal("serial-chain-row-bijection-mismatch")
+        if row["slug"] != session["slug"]:
+            return _proof_refusal("serial-chain-row-slug-mismatch")
+        if meta.get("parent_attempt_id") != parent_attempt_id or meta.get("parent") != parent_slug:
+            return _proof_refusal("serial-chain-parent-mismatch")
+        if any(meta.get(key) != value for key, value in required.items()):
+            return _proof_refusal("serial-chain-row-identity-mismatch")
+        expected = {
+            "attempt_id": session["attempt_id"],
+            "subsession_id": session["subsession_id"],
+            "subsession_count": str(len(expected_sessions)),
+            "phase_brief": session["phase_brief"],
+            "fixed_files_sha256": slice_files_sha256(session["fixed_files"]),
+            "narrow_verify_sha256": slice_text_sha256(session["narrow_verify"]),
+            "expected_round_trips": str(session["expected_round_trips"]),
+            "harness": session["adapter"],
+            "subsession_purpose": session.get("subsession_purpose", "planned"),
+        }
+        if any(meta.get(key) != value for key, value in expected.items()):
+            return _proof_refusal("serial-chain-row-metadata-mismatch")
+        by_index[index] = row
+    return ProvenSerialChain(
+        chain_id=chain_id,
+        manifest=manifest,
+        recomputed_sha256=manifest.get("_manifest_sha256", ""),
+        pointer_sha256=hashlib.sha256(pointer_bytes).hexdigest(),
+        parent_slug=parent_slug,
+        rows_by_index=by_index,
+    )
+
+
+def row_is_registered_only(status: str, metadata: dict[str, str]) -> bool:
+    return (
+        status == "open" and metadata.get("launch_claimed") == "0"
+        and metadata.get("launch_started") != "1"
+        and not metadata.get("pid") and not metadata.get("launch_outcome")
+    )
+
+
+def serial_chain_frontiers(
+    jobs: Path, parent_attempt_id: str, rows, candidates: set[str]
+) -> tuple[ChainFrontier, ...]:
+    chain_ids = []
+    for row in rows:
+        metadata = getattr(row, "metadata", None)
+        if metadata is None:
+            metadata = row.get("metadata", {})
+        if metadata.get("session_chain_id") and metadata.get("subsession_mode") == "serial":
+            if metadata["session_chain_id"] not in chain_ids:
+                chain_ids.append(metadata["session_chain_id"])
+    result = []
+    for chain_id in chain_ids:
+        proof = prove_serial_chain(jobs, chain_id, parent_attempt_id=parent_attempt_id)
+        if isinstance(proof, ChainProofRefusal):
+            continue
+        started = []
+        pending = []
+        for index, row in sorted(proof.rows_by_index.items()):
+            if row_is_registered_only(row["status"], row["metadata"]):
+                pending.append(index)
+            elif row["metadata"].get("launch_started") == "1":
+                started.append(index)
+            else:
+                pending = []
+                break
+        if not started or started != list(range(1, len(started) + 1)):
+            continue
+        frontier = len(started)
+        if pending != list(range(frontier + 1, len(proof.rows_by_index) + 1)):
+            continue
+        nonterminal = [i for i in started if proof.rows_by_index[i]["status"] not in TERMINAL_STATUSES]
+        if len(nonterminal) > 1 or (nonterminal and nonterminal != [frontier]):
+            continue
+        frontier_id = proof.rows_by_index[frontier]["metadata"].get("attempt_id", "")
+        if frontier_id not in candidates:
+            continue
+        pending_ids = tuple(
+            proof.rows_by_index[i]["metadata"]["attempt_id"]
+            for i in pending if proof.rows_by_index[i]["metadata"].get("attempt_id") in candidates
+        )
+        result.append(ChainFrontier(chain_id, frontier, frontier_id, pending_ids))
+    return tuple(result)
+
+
 def _resolve_artifact_root() -> str:
     """The one canonical writable artifact root (CLAUDE.md `Runtime Router`),
     resolved the same way every other harness surface resolves it -- never a
@@ -327,9 +575,16 @@ def coordinate_chain_advance_from_joined_rows(
         return None
 
     chain_id = metadata["session_chain_id"]
-    manifest = load_chain_manifest(jobs, chain_id)
-    if manifest is None:
-        return None
+    proof = prove_serial_chain(jobs, chain_id, parent_attempt_id=parent_attempt_id)
+    if isinstance(proof, ChainProofRefusal):
+        legacy = load_chain_manifest(jobs, chain_id)
+        if not legacy or legacy.get("route_id") or legacy.get("route_hash"):
+            return None
+        manifest = legacy
+        parent_slug = metadata.get("parent", "")
+    else:
+        manifest = proof.manifest
+        parent_slug = proof.parent_slug
     artifact_root = _resolve_artifact_root()
     # F-1 (impl-review round 2): THE production connection between a
     # predecessor's committed terminal registry row and its chain-scoped
@@ -363,6 +618,11 @@ def coordinate_chain_advance_from_joined_rows(
     )
     if successor_session is None:
         return None
+    successor_metadata = {}
+    for candidate in _registry_rows_for_chain(jobs, chain_id):
+        if candidate["metadata"].get("attempt_id") == successor_session["attempt_id"]:
+            successor_metadata = candidate["metadata"]
+            break
 
     request = SubsessionAdvanceRequest(
         jobs=jobs,
@@ -377,12 +637,236 @@ def coordinate_chain_advance_from_joined_rows(
         successor_session=successor_session,
         parent_attempt_id=parent_attempt_id,
         artifact_root=artifact_root,
+        parent_slug=parent_slug,
+        registered_parent_sid=successor_metadata.get("parent_sid", ""),
+        registered_parent_cwd=successor_metadata.get("parent_cwd", ""),
     )
     services = RealSubsessionAdvanceServices(manifest)
     result = coordinate_subsession_advance(request, services)
     if result.outcome == "advanced" and result.successor_attempt_id:
         return result.successor_attempt_id
     return None
+
+
+def advance_chain_step(jobs: Path, parent_attempt_id: str, joined: dict) -> ChainAdvanceStep:
+    """Classify one joined predecessor without hiding a sealed refusal."""
+
+    predecessor = next(
+        (row for row in joined.values()
+         if (getattr(row, "metadata", {}) or {}).get("session_chain_id")
+         and (getattr(row, "metadata", {}) or {}).get("subsession_mode") == "serial"),
+        None,
+    )
+    if predecessor is None:
+        return ChainAdvanceStep("not-chain")
+    metadata = predecessor.metadata
+    chain_id = metadata.get("session_chain_id", "")
+    try:
+        predecessor_index = int(metadata.get("subsession_index", "0"))
+    except ValueError:
+        return ChainAdvanceStep("unavailable", chain_id=chain_id, reason="subsession-index-invalid")
+    if predecessor.status not in TERMINAL_STATUSES:
+        return ChainAdvanceStep("unavailable", chain_id=chain_id, predecessor_index=predecessor_index)
+    proof = prove_serial_chain(jobs, chain_id, parent_attempt_id=parent_attempt_id)
+    if isinstance(proof, ChainProofRefusal):
+        return ChainAdvanceStep("refused", chain_id=chain_id, predecessor_index=predecessor_index,
+                                reason="subsession-chain-proof-failed:" + proof.reason)
+    successor_index = resume_index(jobs, proof.manifest)
+    if successor_index > len(proof.manifest["sessions"]):
+        return ChainAdvanceStep("complete", chain_id=chain_id, predecessor_index=predecessor_index,
+                                successor_index=successor_index)
+    if successor_index <= predecessor_index:
+        return ChainAdvanceStep("unavailable", chain_id=chain_id, predecessor_index=predecessor_index,
+                                successor_index=successor_index)
+    successor = next((s for s in proof.manifest["sessions"] if s["index"] == successor_index), None)
+    if successor is None:
+        return ChainAdvanceStep("unavailable", chain_id=chain_id, predecessor_index=predecessor_index,
+                                successor_index=successor_index)
+    result = coordinate_chain_advance_from_joined_rows(jobs, parent_attempt_id, joined)
+    if result:
+        return ChainAdvanceStep("advanced", chain_id=chain_id, predecessor_index=predecessor_index,
+                                successor_index=successor_index, attempt_id=result)
+    advance_id = canonical_subsession_advance_id(
+        route_id=metadata.get("route_id", ""), route_hash=metadata.get("route_hash", ""),
+        route_node=metadata.get("route_node", ""), chain_id=chain_id,
+        manifest_sha256=proof.recomputed_sha256,
+        predecessor_subsession_id=metadata.get("subsession_id", ""),
+        predecessor_terminal_attempt_id=predecessor.attempt_id,
+        successor_subsession_index=successor_index,
+    )
+    try:
+        record = json.loads(subsession_advance_record_path(jobs, advance_id).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        record = None
+    reason = (record or {}).get("reason", "")
+    if reason:
+        return ChainAdvanceStep("refused", chain_id=chain_id, predecessor_index=predecessor_index,
+                                successor_index=successor_index, reason=reason,
+                                subsession_advance_id=advance_id)
+    return ChainAdvanceStep("unavailable", chain_id=chain_id, predecessor_index=predecessor_index,
+                            successor_index=successor_index)
+
+
+def close_refused_chain_successors(
+    jobs: Path, parent_attempt_id: str, chain_id: str, after_index: int, reason: str
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    ids = []
+    for row in _registry_rows_for_chain(jobs, chain_id):
+        metadata = row["metadata"]
+        try:
+            index = int(metadata.get("subsession_index", "0"))
+        except ValueError:
+            continue
+        if (
+            index > after_index
+            and metadata.get("parent_attempt_id") == parent_attempt_id
+            and row["status"] in {"open", "running"}
+        ):
+            ids.append(metadata.get("attempt_id", ""))
+    closed = DC.close_refused_chain_rows(
+        jobs, ids, note="subsession-chain-advance-refused", reconcile_reason=reason,
+    )
+    return closed.cancelled, closed.unclosed
+
+
+def drive_serial_chain(
+    *, jobs: Path, parent_attempt_id: str, attempts: set[str], receipt: dict,
+    refresh: Callable[[set[str]], list], join: Callable[[set[str]], dict],
+    reconcile: Callable[[dict, set[str]], bool], max_reparks: int,
+    on_timeout: Callable[[set[str]], None] | None = None,
+    on_advance: Callable[[str, frozenset[str]], None] | None = None,
+    emit: Callable[[dict], None] | None = None,
+) -> ChainDriveResult:
+    """Run every serial successor at one non-model supervisor checkpoint."""
+
+    initial_attempts = set(attempts)
+    initial_receipt = dict(receipt)
+    joined_rows = refresh(set(attempts))
+    joined = {row.attempt_id: row for row in joined_rows}
+    chain_rows = [
+        row for row in joined.values()
+        if row.metadata.get("session_chain_id") and row.metadata.get("subsession_mode") == "serial"
+    ]
+    if not chain_rows:
+        return ChainDriveResult(receipt, tuple(joined_rows), frozenset(attempts), {}, frozenset(), None, None, (), ())
+    chain_id = chain_rows[0].metadata["session_chain_id"]
+    chain_attempts = {
+        row.attempt_id for row in chain_rows
+        if row.metadata.get("session_chain_id") == chain_id
+    }
+    sibling_attempts = initial_attempts - chain_attempts
+    traversed = {row.attempt_id for row in chain_rows}
+    joined_before = dict(joined)
+    last = None
+    refusal = None
+    closed: tuple[str, ...] = ()
+    unclosed: tuple[str, ...] = ()
+    while True:
+        open_chain = {
+            row.attempt_id for row in joined.values()
+            if row.metadata.get("session_chain_id") == chain_id and row.status in {"open", "running"}
+        }
+        if open_chain and reconcile(joined, open_chain):
+            receipt = join(set(attempts))
+            joined_rows = refresh(set(attempts))
+            joined = {row.attempt_id: row for row in joined_rows}
+        step = advance_chain_step(jobs, parent_attempt_id, joined)
+        if step.outcome != "advanced":
+            refusal = step if step.outcome == "refused" else None
+            if refusal is not None:
+                closed, unclosed = close_refused_chain_successors(
+                    jobs, parent_attempt_id, chain_id, refusal.predecessor_index or 0, refusal.reason,
+                )
+                if emit:
+                    emit({"type": "dispatch.supervisor.chain-advance-refused", "chain_id": chain_id,
+                          "reason": refusal.reason, "closed": list(closed), "unclosed": list(unclosed)})
+            break
+        if on_advance:
+            # A mixed park is still one terminal delivery.  Tell the caller
+            # which non-chain rows are carried through the aggregate so a
+            # terminal-handoff re-claim covers exactly the rows that will be
+            # delivered, not only the newly-started successor.
+            on_advance(step.attempt_id or "", frozenset(sibling_attempts))
+        if emit:
+            emit({"type": "dispatch.supervisor.chain-advanced", "chain_id": chain_id,
+                  "predecessor_index": step.predecessor_index, "successor_index": step.successor_index,
+                  "attempt_id": step.attempt_id})
+        attempts = {step.attempt_id}  # type: ignore[arg-type]
+        traversed.add(step.attempt_id or "")
+        last = step.attempt_id
+        reparks = 0
+        receipt = join(set(attempts))
+        while receipt.get("state") == "timeout":
+            reparks += 1
+            if reparks > max_reparks:
+                raise ChainDriveError("join-timeout-repark-exceeded")
+            if on_timeout:
+                on_timeout(set(attempts))
+            receipt = join(set(attempts))
+        joined_rows = refresh(set(attempts))
+        joined = {row.attempt_id: row for row in joined_rows}
+    if sibling_attempts:
+        # A mixed park is one owner delivery: siblings joined with the first
+        # frontier are carried into the aggregate instead of resurfacing as a
+        # second continuation after the serial chain advances.
+        present = {row.attempt_id for row in joined_rows if row.attempt_id in attempts}
+        sibling_rows = [
+            row for row in joined_before.values()
+            if row.attempt_id in sibling_attempts and row.attempt_id not in present
+        ]
+        joined_rows = [
+            *[row for row in joined_rows if row.attempt_id in attempts],
+            *sibling_rows,
+        ]
+        child_rows = [
+            child for child in initial_receipt.get("children", [])
+            if isinstance(child, dict) and child.get("attempt_id") in sibling_attempts
+        ]
+        if child_rows:
+            merged = dict(receipt)
+            have = {
+                child.get("attempt_id")
+                for child in receipt.get("children", [])
+                if isinstance(child, dict)
+            }
+            missing = [child for child in child_rows if child.get("attempt_id") not in have]
+            if missing:
+                merged["children"] = [*receipt.get("children", []), *missing]
+            receipt = merged
+        attempts.update(sibling_attempts)
+    return ChainDriveResult(
+        receipt, tuple(joined_rows), frozenset(attempts), joined_before,
+        frozenset(traversed) - frozenset(attempts), last, refusal, closed, unclosed,
+    )
+
+
+def chain_delivery_notice(result: ChainDriveResult, rows) -> str:
+    chain_id = result.refusal.chain_id if result.refusal else ""
+    members = []
+    for row in rows:
+        metadata = getattr(row, "metadata", {}) or {}
+        chain_id = chain_id or metadata.get("session_chain_id", "")
+        if metadata.get("session_chain_id") == chain_id:
+            members.append(row)
+    success_notes = set(getattr(DC, "SUCCESS_NOTES", ("completed-subsession", "completed-supervisor", "completed-marker")))
+    failed = [
+        f"{row.attempt_id}={((getattr(row, 'metadata', {}) or {}).get('note') or 'unknown')}"
+        for row in members
+        if (getattr(row, "metadata", {}) or {}).get("note") not in success_notes
+        or (getattr(row, "metadata", {}) or {}).get("failure_class") != "pass"
+    ][:16]
+    if result.refusal is None and not failed:
+        return ""
+    if result.refusal is not None:
+        closed = ",".join(result.closed) or "none"
+        unclosed = ",".join(result.unclosed) or "none"
+        return (
+            f"Serial chain {chain_id}: advance stopped before index "
+            f"{result.refusal.successor_index or '?'} ({result.refusal.reason}); "
+            f"never-started slices closed: {closed}; not closed: {unclosed}."
+            + (f" Slices that did not pass: {','.join(failed)}." if failed else "")
+        )
+    return f"Serial chain {chain_id}: slices that did not pass: {','.join(failed)}."
 
 
 def _load_ledger_module():
@@ -749,6 +1233,14 @@ def coordinate_subsession_advance(
             record["phases"]["registered"] = {
                 "committed_at_ns": time.time_ns(), "result": register_result,
             }
+            if register_result.get("returncode", 1) != 0 or register_result.get("check") == "failed":
+                record["outcome"] = "refused"
+                record["reason"] = "subsession-advance-successor-register-failed:" + str(
+                    register_result.get("reason") or "unknown"
+                )
+                _atomic_json(record_path, record)
+                return _refused(record["reason"], subsession_advance_id=subsession_advance_id,
+                                 record_path=record_path)
             _atomic_json(record_path, record)
 
         if "started" not in record["phases"]:
@@ -760,7 +1252,9 @@ def coordinate_subsession_advance(
             record["outcome"] = "advanced" if start_result.get("child_spawned") else "refused"
             record["reason"] = (
                 "" if start_result.get("child_spawned")
-                else "subsession-advance-successor-start-failed"
+                else "subsession-advance-successor-start-failed:" + str(
+                    start_result.get("reason") or "unknown"
+                )
             )
             _atomic_json(record_path, record)
             cp("after-start")
@@ -850,20 +1344,107 @@ class RealSubsessionAdvanceServices:
         )
 
     def register_successor(self, request: SubsessionAdvanceRequest, *, claim) -> dict:
-        command = self._chain.dispatch_command(
-            self._manifest, request.successor_session, "register",
-            request.parent_attempt_id, request.jobs,
-        )
-        result = self._chain.run_checked(command)
-        return {"returncode": result.returncode}
+        return self._run(request, "register")
 
     def start_successor(self, request: SubsessionAdvanceRequest, *, claim) -> dict:
+        return self._run(request, "start")
+
+    def _run(self, request: SubsessionAdvanceRequest, action: str) -> dict:
+        if not request.parent_slug or os.environ.get("AGENT_DISPATCH_ATTEMPT_ID") != request.parent_attempt_id:
+            return {
+                "returncode": None, "check": "failed", "attempt_id": "",
+                "registered": False, "started": False, "duplicate_attempt": False,
+                "child_spawned": False, "reason": "subsession-advance-parent-binding-invalid",
+                "verdict": "parent-binding-invalid",
+            }
+        adapter = request.successor_session.get("adapter")
+        if adapter not in ADAPTERS:
+            return {
+                "returncode": None, "check": "failed", "attempt_id": "",
+                "registered": False, "started": False, "duplicate_attempt": False,
+                "child_spawned": False, "reason": "subsession-advance-adapter-invalid",
+                "verdict": "adapter-invalid",
+            }
         command = self._chain.dispatch_command(
-            self._manifest, request.successor_session, "start",
-            request.parent_attempt_id, request.jobs,
+            self._manifest, request.successor_session, action,
+            request.parent_slug, request.jobs,
         )
-        result = self._chain.run_checked(command)
-        return {"child_spawned": result.returncode == 0, "returncode": result.returncode}
+        result = self._chain.run_checked(command, env=self._dispatch_env(request))
+        if action == "start":
+            receipt = self._chain.parse_start_receipt(
+                result.returncode, result.stdout, request.successor_session["attempt_id"]
+            )
+            fields = receipt["fields"]
+            return {
+                "returncode": result.returncode,
+                "check": "ok" if receipt["ok"] else "failed",
+                "attempt_id": fields.get("attempt_id", ""),
+                "registered": fields.get("registered") == "1",
+                "started": fields.get("started") == "1",
+                "duplicate_attempt": fields.get("duplicate_attempt") == "1",
+                "child_spawned": receipt["ok"],
+                "reason": fields.get("reason", receipt["wrapper_reason"]),
+                "verdict": receipt["verdict"],
+            }
+        fields = self._stdout_fields(result.stdout)
+        failed = result.returncode != 0 or fields.get("check") == "failed"
+        return {
+            "returncode": result.returncode, "check": "failed" if failed else "ok",
+            "attempt_id": fields.get("attempt_id", ""),
+            "registered": fields.get("registered") == "1",
+            "started": fields.get("started") == "1",
+            "duplicate_attempt": fields.get("duplicate_attempt") == "1",
+            "child_spawned": fields.get("child_spawned") == "1",
+            "reason": self._stdout_reason(result.stdout),
+            "verdict": "register-ok" if not failed else "register-failed",
+        }
+
+    def _parent_row(self, request):
+        for row in _registry_rows_for_chain(request.jobs, request.chain_id):
+            if row["metadata"].get("attempt_id") == request.successor_session.get("attempt_id"):
+                return row
+        return {}
+
+    def _parent_slug(self, request):
+        try:
+            lines = request.jobs.read_text(encoding="utf-8", errors="replace").splitlines()
+            for line in lines:
+                fields = line.split("\t")
+                if len(fields) == 6 and DC.parse_registry_metadata(fields[5]).get("attempt_id") == request.parent_attempt_id:
+                    return fields[4]
+        except OSError:
+            pass
+        return request.parent_attempt_id
+
+    def _dispatch_env(self, request):
+        env = dict(os.environ)
+        env["AGENT_DISPATCH_ATTEMPT_ID"] = request.parent_attempt_id
+        env["AGENT_DISPATCH_PARENT_SESSION_ID"] = request.registered_parent_sid
+        if request.registered_parent_cwd:
+            env["AGENT_DISPATCH_PARENT_CWD"] = request.registered_parent_cwd
+        else:
+            env.pop("AGENT_DISPATCH_PARENT_CWD", None)
+        if not request.registered_parent_sid:
+            for key in ("CLAUDE_CODE_SESSION_ID", "CODEX_THREAD_ID", "CODEX_SESSION_ID"):
+                env.pop(key, None)
+        return env
+
+    @staticmethod
+    def _stdout_fields(stdout: str) -> dict[str, str]:
+        fields = {}
+        for line in stdout.splitlines():
+            if "=" in line:
+                key, value = line.split("=", 1)
+                if key in {"check", "attempt_id", "registered", "started", "duplicate_attempt", "child_spawned", "reason"}:
+                    fields[key] = value
+        return fields
+
+    @staticmethod
+    def _stdout_reason(stdout: str) -> str:
+        for line in reversed(stdout.splitlines()):
+            if line.startswith("reason="):
+                return line.split("=", 1)[1]
+        return ""
 
 
 if __name__ == "__main__":

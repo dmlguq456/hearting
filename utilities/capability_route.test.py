@@ -2057,7 +2057,7 @@ class TestContinuation(unittest.TestCase):
    "execution_surface":"codex-native-subagent","registered_worker":False,
    "status":"supported","check_source":"continuation-fixture",
   }]}
- def _source(self,artifact_root,cwd=None,slug=None):
+ def _source(self,artifact_root,cwd=None,slug=None,**selection):
   gate={
    "spec_read":{"satisfied":True,"source":"canonical-prd-sha256"},
    "drift_verdict":"within-spec","workflow_mode":"tracked",
@@ -2068,7 +2068,7 @@ class TestContinuation(unittest.TestCase):
    predicates=[],signals=["shared-contract"],transport="headless",
    tracking="tracked",tracked_gate_evidence=gate,
    dispatch_evidence=self._dispatch(cwd),
-   slug=slug,
+   slug=slug, **selection,
   )
   route["runtime_lineage"]={
    "runtime":"codex","thread_id":"thread-source",
@@ -2284,6 +2284,15 @@ class TestContinuation(unittest.TestCase):
    continuation=self._build(source)
    self.assertEqual(continuation["slug"],"cycle-a")
    self.assertFalse(continuation["slug_truncated"])
+   R.verify_route(continuation,R.ROOT)
+ def test_campaign_selection_survives_continuation(self):
+  with tempfile.TemporaryDirectory() as tmp:
+   source=self._source(Path(tmp)/"artifacts",slug="Cycle A",
+                       campaign_key="tts-v6-release",parent_cycle_id="cyc_"+"a"*32)
+   self._complete_prefix(source,"test",Path(tmp)/"evidence")
+   continuation=self._build(source)
+   self.assertEqual(continuation["campaign_key"],source["campaign_key"])
+   self.assertEqual(continuation["parent_cycle_id"],source["parent_cycle_id"])
    R.verify_route(continuation,R.ROOT)
  def test_at1_reuses_exact_prefix_and_publishes_suffix_only(self):
   from unittest import mock
@@ -5161,6 +5170,20 @@ class ComposeRouteTest(TestRoute):
  def compose(self,**kw):
   d=dict(capability="autopilot-code",capability_mode="dev",shape="staged",graph="execute,test,report",slug="compose-fixture",cwd=R.ROOT,artifact_root=R.ROOT,dispatch_evidence=self.evidence())
   d.update(kw); return R.compose_route(**d)
+ def test_campaign_selection_is_optional_validated_and_sealed(self):
+  old=self.compose()
+  self.assertNotIn("campaign_key",old); self.assertNotIn("parent_cycle_id",old)
+  R.verify_route(old,R.ROOT)
+  selected=self.compose(campaign_key="tts-v6-release",parent_cycle_id="cyc_"+"a"*32)
+  self.assertEqual(selected["campaign_key"],"tts-v6-release")
+  self.assertEqual(selected["parent_cycle_id"],"cyc_"+"a"*32)
+  self.assertNotEqual(old["route_hash"],selected["route_hash"])
+  R.verify_route(selected,R.ROOT)
+  selected["campaign_key"]="stream-b"
+  with self.assertRaisesRegex(ValueError,"modified route hash"): R.verify_route(selected,R.ROOT)
+  for values in ({"campaign_key":""},{"campaign_key":"_unassigned"},{"campaign_key":"a/b"},
+                 {"campaign_key":"a"*129},{"parent_cycle_id":"cyc_invalid"}):
+   with self.assertRaises(ValueError): self.compose(**values)
  def test_graph_spec_parsing(self):
   self.assertEqual(R.parse_graph_spec("execute,test:qa/test , report"),[("execute",None),("test","qa/test"),("report",None)])
   for bad in ("", " , ", "execute,execute", "Bad!"):

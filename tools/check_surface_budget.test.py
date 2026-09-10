@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import importlib.util
 import io
+import fcntl
 import json
 import shutil
 import subprocess
@@ -21,6 +22,48 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 TOOL = ROOT / "tools" / "check-surface-budget.py"
 BOUNDARY = ROOT / "tools" / "check-adaptation-boundary.sh"
+
+# `tools/adaptation-guard.test.sh` rewrites `adapters/claude/CLAUDE.md` -- one
+# of the budgeted surfaces -- and the boundary script's neighbours while it
+# proves the guard reddens. Measuring bytes or reading that script mid-rewrite
+# gives an answer about a file that was briefly not the repository's. Hold the
+# shared worktree lock for the suite; tools/worktree-lock.sh owns the path.
+def _worktree_lock_path() -> Path:
+    try:
+        common = subprocess.run(
+            ["git", "-C", str(ROOT), "rev-parse", "--git-common-dir"],
+            capture_output=True, text=True, timeout=30,
+        ).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        common = ""
+    if not common:
+        return Path("/tmp/hearting-worktree-mutation.lock")
+    directory = Path(common)
+    if not directory.is_absolute():
+        directory = ROOT / directory
+    return directory / "hearting-worktree-mutation.lock"
+
+
+def setUpModule() -> None:  # noqa: N802 - unittest hook
+    global _LOCK_HANDLE
+    try:
+        _LOCK_HANDLE = open(_worktree_lock_path(), "a+", encoding="utf-8")
+        fcntl.flock(_LOCK_HANDLE, fcntl.LOCK_EX)
+    except OSError:
+        _LOCK_HANDLE = None
+
+
+def tearDownModule() -> None:  # noqa: N802 - unittest hook
+    global _LOCK_HANDLE
+    if _LOCK_HANDLE is not None:
+        try:
+            fcntl.flock(_LOCK_HANDLE, fcntl.LOCK_UN)
+        finally:
+            _LOCK_HANDLE.close()
+            _LOCK_HANDLE = None
+
+
+_LOCK_HANDLE = None
 
 spec = importlib.util.spec_from_file_location("check_surface_budget", TOOL)
 csb = importlib.util.module_from_spec(spec)

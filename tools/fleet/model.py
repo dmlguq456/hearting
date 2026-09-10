@@ -602,6 +602,16 @@ class ResourceJob:
     parent_attempt_id: Optional[str] = None
     sentinel: Optional[str] = None
     state_evidence: Optional[dict] = None
+    # The registry scanner emits these; a field it produces and this class does
+    # not accept raises TypeError inside the collector's per-row try, so the row
+    # is dropped into diagnostics nobody reads and Fleet shows *no* resource
+    # runs at all. Five such fields had accumulated (2026-09-10).
+    # `resource_runs.test.py` now pins the two key sets together.
+    artifact_root: Optional[str] = None
+    route_file: Optional[str] = None
+    route_hash: Optional[str] = None
+    route_id: Optional[str] = None
+    route_node: Optional[str] = None
 
     def to_dict(self):
         return _public_value(self)

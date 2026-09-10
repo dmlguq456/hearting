@@ -339,112 +339,35 @@ class ContextDetailTruthTableTest(unittest.TestCase):
                     # An INFERRED inline stage carries NO dedicated detail row (2026-07-24): a
                     # main session must not show the `plan › exec › test` breadcrumb line.
                     self.assertNotIn("exec ● ←{plan}", visible)
-                    self.assertEqual(
-                        render._projection_stage_detail_rows(session, term_width=width), [])
 
-    def test_composed_pipeline_keeps_parallel_and_fanin_at_all_widths(self):
-        rid = route.load(COMPOSED)["route_id"]
-        owner = Session(harness="claude", pid=210, proc_start="root", cwd="/root",
-                        session_id="sid-composed", slug="root", liveness="working")
-        jobs = [
-            DispatchJob(key="claim", slug="claim-b", parent_sid="sid-composed", depth=2,
-                        route_id=rid, route_file=COMPOSED, route_node="claim-b",
-                        liveness="working"),
-            DispatchJob(key="claim", slug="claim-a", parent_sid="sid-composed", depth=2,
-                        route_id=rid, route_file=COMPOSED, route_node="claim-a",
-                        liveness="working"),
-        ]
-        projection.attach_projections([owner], jobs, now=100.0)
-        view = owner.work_projection._route_view["view"]
-        for width in (168, 120, 100, 60):
-            stage_rows = render._stage_detail_rows(view["nodes"], term_width=width)
-            rendered = text(stage_rows)
-            with self.subTest(width=width):
-                self.assertTrue(all(render._dw(text([row])) <= width for row in stage_rows))
-                for node_id in ("survey", "claim-a", "claim-b", "synth"):
-                    self.assertEqual(
-                        len(re.findall(r"\b%s [✓●…○✕]" % re.escape(node_id), rendered)), 1)
-                self.assertIn("claim-a ● ←{survey}", rendered)
-                self.assertIn("claim-b ● ←{survey}", rendered)
-                self.assertIn("synth ○ ←{claim-a,claim-b}", rendered)
-                self.assertIn("| claim-b", rendered)
-
-    def test_arbitrary_dag_keeps_multiple_roots_partial_join_and_exact_edges(self):
-        nodes = [
-            {"id": "root-a", "state": "done", "level": 0, "depends_on": []},
-            {"id": "root-b", "state": "done", "level": 0, "depends_on": []},
-            {"id": "a1", "state": "active", "level": 1, "depends_on": ["root-a"]},
-            {"id": "a2", "state": "pending", "level": 2, "depends_on": ["a1"]},
-            {"id": "partial", "state": "pending", "level": 2,
-             "depends_on": ["a1", "root-b"]},
-            {"id": "final", "state": "pending", "level": 3,
-             "depends_on": ["a2", "partial"]},
-        ]
-        for width in (168, 120, 100, 60):
-            rows = render._stage_detail_rows(nodes, term_width=width)
-            rendered = text(rows)
-            with self.subTest(width=width):
-                self.assertTrue(all(render._dw(text([row])) <= width for row in rows))
-                for node in nodes:
-                    primary = r"\b%s [✓●…○✕]" % re.escape(node["id"])
-                    self.assertEqual(len(re.findall(primary, rendered)), 1)
-                for relation in ("a1 ● ←{root-a}", "a2 ○ ←{a1}",
-                                 "partial ○ ←{a1,root-b}",
-                                 "final ○ ←{a2,partial}"):
-                    self.assertIn(relation, rendered)
-                self.assertIn("| root-b", rendered)
-                self.assertIn("| partial", rendered)
-
-    def test_terminal_route_suppresses_legacy_session_detail_row(self):
-        # 2026-07-24 (user "stage 설명 여전히 뜨는데 이거 없앴다매?"): a fully-done route draws
-        # no stage detail row on the owning session — a finished (often dead-conductor) pipeline's
-        # whole DAG lingering under the live dispatcher session is noise. Failed is terminal
-        # too; history belongs to process view rather than this retired session-stage surface.
-        def _session(nodes):
-            return Session(harness="claude", pid=1, proc_start="p", cwd="/x",
-                           session_id="sid-x", slug="root", liveness="working",
-                           work_projection=WorkProjection(
-                               source="route-exact", route_id="rt-done",
-                               _route_view={"view": {"nodes": nodes}}))
-        done_nodes = [
-            {"id": "plan", "state": "done", "level": 0, "depends_on": []},
-            {"id": "execute", "state": "done", "level": 1, "depends_on": ["plan"]},
-        ]
-        for width in (168, 120, 100, 60):
-            with self.subTest(width=width):
-                self.assertEqual(
-                    render._projection_stage_detail_rows(_session(done_nodes), term_width=width),
-                    [])
-                failed_nodes = [dict(done_nodes[0]), dict(done_nodes[1], state="failed")]
-                self.assertEqual(
-                    render._projection_stage_detail_rows(_session(failed_nodes), term_width=width),
-                    [])
-        live_nodes = [
-            {"id": "plan", "state": "done", "level": 0, "depends_on": []},
-            {"id": "execute", "state": "active", "level": 1, "depends_on": ["plan"]},
-        ]
-        rows = render._projection_stage_detail_rows(_session(live_nodes), term_width=168)
-        self.assertTrue(rows)
-        self.assertIn("execute", text(rows))
-
-    def test_replica_completed_route_collapses_and_suppresses(self):
-        # The replica legs collapse to `impl-review(2-way)`; when the whole (collapsed) route
-        # is done, still no detail row.
-        nodes = [
-            {"id": "execute", "state": "done", "level": 0, "depends_on": []},
-            {"id": "impl-review", "state": "done", "level": 1, "depends_on": ["execute"],
-             "replica_group": "impl-review"},
-            {"id": "impl-review-replica", "state": "done", "level": 1,
-             "depends_on": ["execute"], "replica_group": "impl-review"},
-            {"id": "test", "state": "done", "level": 2,
-             "depends_on": ["impl-review", "impl-review-replica"]},
-        ]
-        session = Session(harness="claude", pid=2, proc_start="p", cwd="/y",
-                          session_id="sid-y", slug="root", liveness="working",
-                          work_projection=WorkProjection(
-                              source="route-exact", route_id="rt-rep-done",
-                              _route_view={"view": {"nodes": nodes}}))
-        self.assertEqual(render._projection_stage_detail_rows(session, term_width=168), [])
+    def test_session_never_revives_retired_stage_rows_without_owner(self):
+        # Live regression: an idle Codex session retained an open route after
+        # its owner card disappeared. Pending nodes resurrected the old strip.
+        for harness in ("claude", "codex", "opencode"):
+            for state in ("pending", "active", "reconciling", "failed", "done"):
+                nodes = [
+                    {"id": "execute", "state": "done", "level": 0, "depends_on": []},
+                    {"id": "impl-review", "state": state, "level": 1,
+                     "depends_on": ["execute"], "parallel_group": "impl-review"},
+                    {"id": "impl-review-alt", "state": state, "level": 1,
+                     "depends_on": ["execute"], "parallel_group": "impl-review"},
+                    {"id": "test", "state": state, "level": 2,
+                     "depends_on": ["impl-review", "impl-review-alt"]},
+                ]
+                session = Session(harness=harness, pid=1, proc_start="p", cwd="/x",
+                    session_id="sid-retired", slug="root", title="Session retained",
+                    liveness="idle", work_projection=WorkProjection(
+                        source="route-exact", route_id="rt-retired",
+                        _route_view={"view": {"nodes": nodes}}))
+                for width in (168, 120, 100, 60):
+                    with self.subTest(harness=harness, state=state, width=width):
+                        visible = text(render._build_lines(
+                            [session], [], "fleet", False, 0,
+                            layout=render._layout_mode(width), term_width=width))
+                        self.assertIn("Session retained", visible)
+                        self.assertNotRegex(visible, r"(?m)^.*\bstage execute")
+                        self.assertNotIn("←{", visible)
+                        self.assertNotIn("impl-review", visible)
 
 
 class ClaudeStreamSessionTest(unittest.TestCase):

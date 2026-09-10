@@ -56,3 +56,18 @@ Capability-route verification of the generated sealed record:
 ```bash
 python3 utilities/capability-route.py verify --route /tmp/synth_composed_survey.json --cwd "$PWD"
 ```
+
+# continuation_round fixture
+
+`continuation_round/` is a sanitized, resealed two-generation copy of the real
+continuation records `rt-38a493e894b5202a` and `rt-bf652786c0a99795` captured on
+2026-09-10. It replaces paths with `/fixture/...`, uses `att-fixture-*` attempt
+ids, and keeps only the route/registry fields needed for semantic-round and
+owner-lineage checks. `registry.tsv` uses `{FIXTURE_DIR}` so tests can materialize
+the paths in a temporary directory.
+
+Regenerate hashes after changing a payload with:
+
+```sh
+python3 -c 'import json,sys;sys.path.insert(0,"tools");from fleet import route; d=json.load(open(sys.argv[1])); h=route.route_hash(d); print(h, "rt-"+h.split(":",1)[1][:16])' gen0.json
+```

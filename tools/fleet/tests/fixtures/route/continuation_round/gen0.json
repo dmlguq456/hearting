@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "capability": "autopilot-code",
+  "capability_mode": "debug",
+  "cwd": "/fixture/wt/lineage",
+  "artifact_root": "/fixture/.agent_reports",
+  "owner_attempt_id": "-",
+  "route_family_key": "family-fixture",
+  "advance_generation": 0,
+  "reused_nodes": [],
+  "nodes": [
+    {"id": "plan", "depends_on": [], "parallel_group": "plan"},
+    {"id": "plan-alternative", "depends_on": [], "parallel_group": "plan"},
+    {"id": "plan-check", "depends_on": ["plan"]},
+    {"id": "execute", "depends_on": ["plan-check"]}
+  ],
+  "route_hash": "sha256:d57ed9b8b7000ce8bfbf762feeb204bbede227a58e2a0e40feae373ee32dd45e",
+  "route_id": "rt-d57ed9b8b7000ce8"
+}

@@ -212,6 +212,66 @@ def close_witness(handle: WitnessHandle) -> None:
         pass
 
 
+def prove_witness_unheld(root: str | Path, binding: dict[str, Any]) -> IdentityObservation:
+    """Kernel proof that *no* process holds this lease's claimant description.
+
+    `observe_witness` answers "is it held?" and reports an unlocked witness as
+    ``unknown``, because an unlocked file says nothing about *why* the holder
+    is gone. For returning capacity, why does not matter -- only whether
+    anybody still holds it. A witness is created with ``LOCK_EX`` and the lock
+    lives on the open file description, so it survives ``fork`` and is released
+    by the kernel only when the last descriptor referring to it is closed.
+    Taking ``LOCK_EX`` on the exact recorded file therefore proves that the
+    claimant and every descendant that inherited its descriptor are gone --
+    in any PID namespace, immune to PID reuse, without reading /proc.
+
+    Returns ``unheld``/``exclusive-lock-acquired`` on proof. Every other
+    outcome keeps the lease occupied and names why: a replaced, mismatched,
+    non-regular or unreadable witness is not evidence of anything, and a
+    still-held lock means a live claimant or a live descendant.
+    """
+
+    root = Path(root).resolve()
+    observed = observe_witness(root, binding)
+    if observed.state == "live":
+        return observed
+    if observed.reason != "witness-unlocked":
+        return observed
+    try:
+        relative = Path(str(binding["relative_path"]))
+        if relative.is_absolute() or ".." in relative.parts:
+            raise ValueError("path-outside-root")
+        path = root / relative
+        path.relative_to(root)
+        before = path.lstat()
+        if not stat.S_ISREG(before.st_mode):
+            return IdentityObservation("unknown", "witness-not-regular", binding)
+        fd = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
+        try:
+            after = os.fstat(fd)
+            if (after.st_dev, after.st_ino) != (before.st_dev, before.st_ino):
+                return IdentityObservation("unknown", "witness-replaced", binding)
+            if after.st_dev != binding.get("device") or after.st_ino != binding.get("inode"):
+                return IdentityObservation("unknown", "witness-binding-mismatch", binding)
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                return IdentityObservation("live", "exact-witness-lock-held", binding)
+            # Re-check identity while the exclusive lock is ours: a file
+            # swapped between the open and the lock would make the proof
+            # describe a different file.
+            latest = path.lstat()
+            if (latest.st_dev, latest.st_ino) != (after.st_dev, after.st_ino):
+                return IdentityObservation("unknown", "witness-replaced", binding)
+            return IdentityObservation("unheld", "exclusive-lock-acquired", binding)
+        finally:
+            os.close(fd)
+    except (OSError, KeyError, TypeError, ValueError) as exc:
+        return IdentityObservation(
+            "unknown", f"witness-unverifiable:{getattr(exc, 'errno', None) or type(exc).__name__}", binding
+        )
+
+
 def observe_witness(root: str | Path, binding: dict[str, Any]) -> IdentityObservation:
     root = Path(root).resolve()
     try:

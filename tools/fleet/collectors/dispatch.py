@@ -2232,6 +2232,9 @@ def _scan_registry_evidence(paths):
                 "registered_worker": attempt_contract["registered_worker"],
                 "fallback_hop": attempt_contract["fallback_hop"],
                 "contract_status": attempt_contract["attempt_contract_status"],
+                "parent_attempt_id": meta.get("parent_attempt_id"),
+                "note": meta.get("note"),
+                "registry_order": registry_order,
             })
             # route_file/route_hash/parent name WHERE the sealed record lives and who the
             # conductor is — raw registry fields, independent of whether this particular

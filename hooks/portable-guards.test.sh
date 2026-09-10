@@ -46,14 +46,23 @@ fi
 # This suite writes scratch files at fixed /tmp paths, so two concurrent runs
 # read each other's output. Measured 2026-09-10: a reviewer's run and mine
 # overlapped and both reported failures neither tree had. Refuse instead.
+# Both locks are anchored at the git dir, never $TMPDIR -- the runner gives
+# each suite its own TMPDIR, which made the first version of this a no-op.
+. "$ROOT/tools/worktree-lock.sh"
+_pg_own_lock="$(worktree_lock_path "$ROOT" | sed 's/worktree-mutation/portable-guards/')"
 if command -v flock >/dev/null 2>&1; then
-  exec 9>"${TMPDIR:-/tmp}/portable-guards.lock"
-  if ! flock -n 9; then
+  exec 8>"$_pg_own_lock"
+  if ! flock -n 8; then
     printf 'portable-guards: another run holds %s; refusing to share fixed /tmp scratch paths\n' \
-      "${TMPDIR:-/tmp}/portable-guards.lock" >&2
+      "$_pg_own_lock" >&2
     exit 75
   fi
 fi
+# Second, distinct lock: this suite reads live files that
+# tools/adaptation-guard.test.sh rewrites (adapters/codex/bin/preflight.sh,
+# adapters/claude/CLAUDE.md). Blocking, and always taken after the own-run
+# lock above so the two can never deadlock.
+worktree_lock_acquire "$ROOT" 900 || exit 70
 
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT

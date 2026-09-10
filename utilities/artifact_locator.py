@@ -61,6 +61,27 @@ def date_part(timestamp: str) -> str:
     return match.group(0)
 
 
+def strip_leading_date(slug: str) -> str:
+    """Drop a date a freshly named slug carries, since the locator adds one.
+
+    Measured on BC_ResNet 2026-09-10: six campaign locators read
+    ``2026-09-10_2026-09-10-r5-streaming-window-sim``, and one read
+    ``2026-09-09_2026-09-10-r4-...`` where the two dates disagreed, so the
+    name said one day while the sort order said another.
+
+    Only route compilation calls this -- the one place a new slug is named.
+    A migration locator legitimately
+    carries two dates -- the locator date is when the content moved and the
+    slug date is when the content was made (``core/CORE.md`` W7H relocation
+    table, e.g. ``2026-09-05_2026-08-24-artifact-knowledge-index-w7/``) --
+    so ``locator_base`` stays neutral and relayout/residue/resplit keep both.
+    A slug that is nothing but a date keeps its own text.
+    """
+
+    remainder = _DATE_PREFIX.sub("", str(slug), count=1).lstrip("-_ ")
+    return remainder or str(slug)
+
+
 def locator_base(timestamp: str, slug: str) -> str:
     normalized, _truncated = slugify(slug)
     return f"{date_part(timestamp)}_{normalized}"

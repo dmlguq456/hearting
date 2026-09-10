@@ -29,6 +29,7 @@ from dispatch_completion_join import (
     log_delivery_refusal,
     materialize_after_terminal_close,
     prepare_supervisor_outbox,
+    partition_runtime_wait_children,
     refresh_supervisor_outbox_actions,
     reconcile_finished_children,
     read_supervisor_phase_state,
@@ -41,7 +42,6 @@ from dispatch_completion_join import (
     supervisor_guarded_attempt_ids,
     supervisor_outbox_delivery_identity,
     supervisor_receipt_satisfiable,
-    unstarted_child_attempts,
     validate_delivery_timing,
     write_supervisor_state,
 )
@@ -1729,10 +1729,20 @@ def main(argv: list[str] | None = None) -> int:
                     continue
                 completed_delivery = True
             new_attempts = set(current).difference(delivered)
-            unstarted = unstarted_child_attempts(
-                [current[attempt] for attempt in new_attempts]
+            partition = partition_runtime_wait_children(
+                Path(args.jobs), args.parent_attempt_id,
+                [current[attempt] for attempt in new_attempts], new_attempts,
             )
-            if completed_delivery and new_attempts and not unstarted:
+            unstarted = set(partition.unstarted)
+            # Only joinable rows may be parked; serial tails and refusal-
+            # settled rows stay out of the outbox.
+            park_attempts = set(partition.joinable)
+            for frontier in partition.frontiers:
+                emit({"type": "dispatch.supervisor.chain-pending", "parent_attempt_id": args.parent_attempt_id,
+                      "chain_id": frontier.chain_id, "frontier_index": frontier.frontier_index,
+                      "frontier_attempt_id": frontier.frontier_attempt_id,
+                      "pending_count": len(frontier.pending_attempt_ids)})
+            if completed_delivery and park_attempts and not unstarted:
                 delivery_timing = advance_delivery_timing(
                     delivery_timing, "next_stage_start_ns"
                 )
@@ -1746,10 +1756,16 @@ def main(argv: list[str] | None = None) -> int:
                     "ordinal": 1,
                     **delivery_timing,
                 })
-            empty_wait = (
-                not current
-                and runtime_wait_requested(result.get("result"))
+            empty_wait = (not current and runtime_wait_requested(result.get("result"))) or (
+                runtime_wait_requested(result.get("result")) and not partition.joinable
+                and not partition.chain_pending and bool(partition.refusal_settled)
             )
+            # A refusal-settled-only round has nothing to park. Fold those
+            # exact rows into the current aggregate bookkeeping when the owner
+            # did not request another wait; a requested wait still follows the
+            # existing empty-wait correction path.
+            if not runtime_wait_requested(result.get("result")) and not park_attempts:
+                delivered.update(partition.refusal_settled)
             if unstarted or empty_wait:
                 signature = tuple(sorted(unstarted))
                 if signature in launch_remediated:
@@ -1778,7 +1794,7 @@ def main(argv: list[str] | None = None) -> int:
                 continuations += 1
                 resume = True
                 continue
-            if new_attempts:
+            if park_attempts:
                 terminal_commit_mode = terminal_commit_enabled(args)
                 if terminal_commit_mode:
                     # Claim is zero-delta and deliberately precedes the reserve precheck.
@@ -1786,7 +1802,7 @@ def main(argv: list[str] | None = None) -> int:
                         budget_state_root,
                         owner_attempt_id=args.parent_attempt_id,
                         route_hash=args.route_hash,
-                        child_attempt_ids=sorted(new_attempts),
+                        child_attempt_ids=sorted(park_attempts),
                     )
                 # Cheap, non-mutating fail-fast: this round's real admission
                 # (and its single budget spend) is committed once, at the R2
@@ -1807,7 +1823,7 @@ def main(argv: list[str] | None = None) -> int:
                     {
                         "type": "dispatch.supervisor.parked",
                         "parent_attempt_id": args.parent_attempt_id,
-                        "attempt_count": len(new_attempts),
+                        "attempt_count": len(park_attempts),
                     }
                 )
                 write_supervisor_state(
@@ -1826,7 +1842,7 @@ def main(argv: list[str] | None = None) -> int:
                 # trips.
                 reparks = 0
                 while True:
-                    receipt = run_join(args, new_attempts)
+                    receipt = run_join(args, park_attempts)
                     if receipt["state"] != "timeout":
                         break
                     reparks += 1
@@ -1836,12 +1852,12 @@ def main(argv: list[str] | None = None) -> int:
                         {
                             "type": "dispatch.supervisor.reparked",
                             "parent_attempt_id": args.parent_attempt_id,
-                            "attempt_count": len(new_attempts),
+                            "attempt_count": len(park_attempts),
                             "repark_ordinal": reparks,
                         }
                     )
                 joined_rows = current_children(
-                    Path(args.jobs), args.parent_attempt_id, new_attempts
+                    Path(args.jobs), args.parent_attempt_id, park_attempts
                 )
                 joined = {row.attempt_id: row for row in joined_rows}
                 # SD-119: an unfinished serial sub-session chain advances
@@ -1849,34 +1865,35 @@ def main(argv: list[str] | None = None) -> int:
                 # continuation spend -- until it completes (falls through
                 # below using the LAST child's joined_rows/receipt) or this
                 # round's join carries no chain metadata (no-op, byte-identical).
-                joined_before_chain_advance = joined
-                last_advanced_attempt_id = None
-                while True:
-                    next_id = subsession_advance.coordinate_chain_advance_from_joined_rows(
-                        Path(args.jobs), args.parent_attempt_id, joined,
-                    )
-                    if next_id is None:
-                        break
-                    last_advanced_attempt_id = next_id
+                def _advance_claim(attempt_id, carried_siblings=frozenset()):
+                    nonlocal handoff_claim
                     if terminal_commit_mode:
                         handoff_claim = budget_record.claim_terminal_handoff(
-                            budget_state_root,
-                            owner_attempt_id=args.parent_attempt_id,
+                            budget_state_root, owner_attempt_id=args.parent_attempt_id,
                             route_hash=args.route_hash,
-                            child_attempt_ids=[next_id],
+                            child_attempt_ids=sorted({attempt_id, *carried_siblings}),
                             predecessor_claim_id=handoff_claim["claim_id"],
                         )
-                    new_attempts = {next_id}
-                    receipt = run_join(args, new_attempts)
-                    while receipt["state"] == "timeout":
-                        reparks += 1
-                        if reparks > args.max_join_reparks:
-                            raise SupervisorError("join-timeout-repark-exceeded")
-                        receipt = run_join(args, new_attempts)
-                    joined_rows = current_children(
-                        Path(args.jobs), args.parent_attempt_id, new_attempts
+                try:
+                    drive = subsession_advance.drive_serial_chain(
+                        jobs=Path(args.jobs), parent_attempt_id=args.parent_attempt_id,
+                        attempts=set(park_attempts), receipt=receipt,
+                        refresh=lambda attempts: current_children(Path(args.jobs), args.parent_attempt_id, attempts),
+                        join=lambda attempts: run_join(args, attempts),
+                        reconcile=lambda rows, attempts: runtime_reconcile(args, rows, attempts),
+                        max_reparks=args.max_join_reparks, on_advance=_advance_claim,
+                        emit=emit,
                     )
-                    joined = {row.attempt_id: row for row in joined_rows}
+                except subsession_advance.ChainDriveError as exc:
+                    raise SupervisorError(exc.reason)
+                receipt, joined_rows, new_attempts = drive.receipt, list(drive.joined_rows), set(drive.attempts)
+                joined = {row.attempt_id: row for row in joined_rows}
+                joined_before_chain_advance = drive.joined_before
+                last_advanced_attempt_id = drive.last_advanced_attempt_id
+                delivered.update(drive.traversed)
+                delivered.update(drive.closed)
+                delivered.update(partition.refusal_settled)
+                chain_notice = subsession_advance.chain_delivery_notice(drive, joined_rows)
                 # A-4 (F-2): the aggregate owner-resume delivery this round is
                 # about to receive, recorded exactly once regardless of how
                 # many internal advances the loop above just performed.
@@ -2038,10 +2055,10 @@ def main(argv: list[str] | None = None) -> int:
                 )
                 delivered = set(prepared.delivered_attempt_ids)
                 active_outbox = prepared.outbox
-                pending_notice = notice
+                pending_notice = _apply_notice(chain_notice, notice) if chain_notice else notice
                 next_prompt = completion_prompt(
                     active_outbox.receipt or {}, active_outbox, jobs=args.jobs,
-                    notice=notice,
+                    notice=pending_notice,
                 )
                 continuations += 1
                 resume = True

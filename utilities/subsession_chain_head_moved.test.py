@@ -19,6 +19,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from types import SimpleNamespace
 from pathlib import Path
 from unittest import mock
 
@@ -257,6 +258,7 @@ class ChainSerialRegisterAtomicityTest(unittest.TestCase):
         ]
         return {
             "route_file": str(base / "route.json"), "route_node": "execute",
+            "route_id": "rt-fixture", "route_hash": "sha256:" + "1" * 64,
             "worktree": str(base), "chain_id": "chain-fixture", "mode": "serial",
             "sessions": sessions, "_manifest_path": str(base / "chain.json"),
             "_manifest_sha256": "deadbeef",
@@ -271,7 +273,9 @@ class ChainSerialRegisterAtomicityTest(unittest.TestCase):
         with mock.patch.object(CHAIN, "load_manifest", return_value=manifest), \
                 mock.patch.object(CHAIN.subprocess, "run", return_value=mock.Mock(returncode=0)), \
                 mock.patch.object(CHAIN, "resolve_global_registry") as registry, \
+                mock.patch.object(CHAIN, "probe_owner_supervision", return_value=mock.Mock(state="held", reason="")), \
                 mock.patch.object(CHAIN, "run_checked", side_effect=run_checked_side_effect), \
+                mock.patch.dict(os.environ, {"AGENT_DISPATCH_ATTEMPT_ID": "att-owner"}), \
                 mock.patch.object(sys, "argv", [
                     "stage-session-chain.py", action,
                     "--manifest", str(envelope), "--parent", "owner",
@@ -291,7 +295,15 @@ class ChainSerialRegisterAtomicityTest(unittest.TestCase):
 
             def launch(command):
                 started.append(command[command.index("--action") + 1])
-                return mock.Mock(returncode=0, stdout="", stderr="")
+                action = command[command.index("--action") + 1]
+                attempt_id = command[command.index("--attempt-id") + 1]
+                stdout = ""
+                if action == "start":
+                    stdout = (
+                        f"check=ok\nattempt_id={attempt_id}\nregistered=1\nstarted=1\n"
+                        "duplicate_attempt=0\nchild_spawned=1\n"
+                    )
+                return mock.Mock(returncode=0, stdout=stdout, stderr="")
 
             result, printed = self._run(base, manifest, "start", run_checked_side_effect=launch)
             self.assertEqual(result, 0)
@@ -322,11 +334,14 @@ class ChainSerialRegisterAtomicityTest(unittest.TestCase):
                     return mock.Mock(returncode=65, stdout="", stderr="register-failed\n")
                 return mock.Mock(returncode=0, stdout="", stderr="")
 
-            def fake_close(jobs, attempt_id, note):
-                cancelled_ids.append(attempt_id)
-                return True
+            def fake_close(jobs, attempt_ids, *, note, reconcile_reason):
+                cancelled_ids.extend(attempt_ids)
+                return SimpleNamespace(
+                    cancelled=tuple(attempt_ids), already_closed=(),
+                    unclosed=(), unclosed_delivery=(),
+                )
 
-            with mock.patch.object(CHAIN, "close_attempt_row", side_effect=fake_close):
+            with mock.patch.object(CHAIN, "close_refused_chain_rows", side_effect=fake_close):
                 result, printed = self._run(base, manifest, "register", run_checked_side_effect=launch)
             self.assertEqual(result, 65)
             self.assertEqual(cancelled_ids, ["att-stage-session-1", "att-stage-session-2"])
@@ -347,7 +362,12 @@ class ChainSerialRegisterAtomicityTest(unittest.TestCase):
             manifest = self._manifest(base)
 
             def launch(command):
-                return mock.Mock(returncode=0, stdout="", stderr="")
+                attempt_id = command[command.index("--attempt-id") + 1]
+                stdout = (
+                    f"check=ok\nattempt_id={attempt_id}\nregistered=1\nstarted=1\n"
+                    "duplicate_attempt=0\nchild_spawned=1\n"
+                ) if command[command.index("--action") + 1] == "start" else ""
+                return mock.Mock(returncode=0, stdout=stdout, stderr="")
 
             result, printed = self._run(base, manifest, "start", run_checked_side_effect=launch)
             self.assertEqual(result, 0)

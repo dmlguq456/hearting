@@ -79,11 +79,12 @@ def dispatch_evidence():
 
 
 def compile_for(intensity, root, capability="autopilot-code", mode="dev", *,
-                slug="w7i-test", gate_source="fixture"):
+                slug="w7i-test", gate_source="fixture", campaign_key=None, parent_cycle_id=None):
     gate = gate_evidence()
     gate["spec_read"]["source"] = gate_source
     common = dict(cwd=R.ROOT, artifact_root=root, tracking="tracked",
-                  tracked_gate_evidence=gate, slug=slug)
+                  tracked_gate_evidence=gate, slug=slug,
+                  campaign_key=campaign_key, parent_cycle_id=parent_cycle_id)
     if intensity == "direct":
         return R.compile_route(capability, mode, "direct", predicates=ALL, transport=None,
                                inline_reason="atomic-direct", **common)
@@ -200,7 +201,7 @@ class ActivateAndBeginTest(ProducerTestBase):
 
     def test_begin_issues_ids_before_first_write(self):
         self.activate()
-        route, route_file, result = self.begin()
+        route, route_file, result = self.begin(campaign_key="w7i-naming")
         self.assertEqual(result["status"], "begun")
         self.assertTrue(idm.is_well_formed(result["campaign_id"], "campaign"))
         self.assertTrue(idm.is_well_formed(result["cycle_id"], "cycle"))
@@ -510,10 +511,104 @@ class ActivateAndBeginTest(ProducerTestBase):
         self.assertEqual(second["campaign_id"], first["campaign_id"])
         self.assertFalse(second["campaign_created"])
         self.assertEqual(P.read_cycle_record(self.root, second["cycle_id"])["parent_cycle_id"], first["cycle_id"])
+        parent_before = P.read_cycle_record(self.root, second["cycle_id"])
+        third = P.begin(self.root, route_file=self.route("direct", mode="debug")[1], capability="autopilot-code",
+                        intensity="direct", parent_cycle_id=second["cycle_id"])
+        self.assertEqual(third["campaign_id"], second["campaign_id"])
+        self.assertEqual(P.read_cycle_record(self.root, third["cycle_id"])["parent_cycle_state_at_begin"], "open")
+        self.assertEqual(P.read_cycle_record(self.root, second["cycle_id"]), parent_before)
+        self.assertEqual(P.read_cycle_record(self.root, second["cycle_id"])["parent_cycle_state_at_begin"], "sealed")
+
+    def test_keyless_routes_share_degraded_container_and_resume_reports_it(self):
+        self.activate()
+        _, first_file, first = self.begin()
+        second_file = self.route(slug="another-task")[1]
+        second = P.begin(self.root, route_file=second_file, capability="autopilot-code", intensity="direct")
+        resumed = P.begin(self.root, route_file=first_file, capability="autopilot-code", intensity="direct")
+        self.assertEqual(first["campaign_id"], second["campaign_id"])
+        self.assertNotEqual(first["cycle_id"], second["cycle_id"])
+        for result in (first, second, resumed):
+            self.assertTrue(result["degraded"])
+            self.assertEqual(result["degraded_reason"], "campaign-unassigned")
+        self.assertEqual(P.read_campaign(self.root, first["campaign_id"])["key"], "_unassigned")
+        self.assertEqual(P.read_campaign(self.root, first["campaign_id"])["title"], "_unassigned")
+
+    def test_open_parent_child_seals_only_after_parent_admission(self):
+        self.activate()
+        parent_route, parent_file, parent = self.begin(campaign_key="causal-stream")
+        child_route, child_file = self.route(slug="followup", parent_cycle_id=parent["cycle_id"])
+        child = P.begin(self.root, route_file=child_file, capability="autopilot-code", intensity="direct")
+        self.write_output(parent)
+        self.write_output(child)
+        self.close(child_route, child_file)
         with self.assertRaises(P.ProducerError) as ctx:
-            P.begin(self.root, route_file=self.route("direct", mode="debug")[1], capability="autopilot-code",
-                    intensity="direct", parent_cycle_id=second["cycle_id"])
+            P.finalize(self.root, cycle_id=child["cycle_id"])
         self.assertEqual(ctx.exception.code, "parent-cycle-not-sealed")
+        self.assertFalse((Path(child["cycle_dir"]) / "manifest.json").exists())
+        self.assertEqual(P.read_cycle_record(self.root, child["cycle_id"])["state"], "open")
+        self.close(parent_route, parent_file)
+        self.assertEqual(P.finalize(self.root, cycle_id=parent["cycle_id"])["status"], "sealed")
+        self.assertEqual(P.finalize(self.root, cycle_id=child["cycle_id"])["status"], "sealed")
+
+    def test_route_delivers_key_and_open_parent_across_capabilities(self):
+        self.activate()
+        _, first_file = self.route(campaign_key="tts-v6-release")
+        first = P.begin(self.root, route_file=first_file, capability="autopilot-code", intensity="direct")
+        route, second_file = self.route(capability="autopilot-spec", mode="update", slug="endpoint-finding",
+                                       campaign_key="tts-v6-release", parent_cycle_id=first["cycle_id"])
+        before = P.read_cycle_record(self.root, first["cycle_id"])
+        second = P.begin(self.root, route_file=second_file, capability="autopilot-spec", intensity="direct")
+        self.assertEqual(second["campaign_id"], first["campaign_id"])
+        child = P.read_cycle_record(self.root, second["cycle_id"])
+        self.assertEqual(child["parent_cycle_id"], first["cycle_id"])
+        self.assertEqual(child["parent_cycle_state_at_begin"], "open")
+        self.assertEqual(P.read_cycle_record(self.root, first["cycle_id"]), before)
+        self.assertNotIn("degraded", second)
+        route["campaign_key"] = "tampered"
+        with self.assertRaisesRegex(ValueError, "modified route hash"):
+            R.verify_route(route)
+
+    def test_campaign_choices_cannot_be_silently_overridden_or_rebound(self):
+        self.activate()
+        _, route_file = self.route(campaign_key="stream-a")
+        first = P.begin(self.root, route_file=route_file, capability="autopilot-code", intensity="direct")
+        for key in ("stream-b", ""):
+            with self.assertRaises(P.ProducerError) as ctx:
+                P.begin(self.root, route_file=route_file, capability="autopilot-code", intensity="direct", campaign_key=key)
+            self.assertEqual(ctx.exception.code, "route-campaign-selection-conflict")
+        _, old_file = self.route(slug="old-route")
+        P.begin(self.root, route_file=old_file, capability="autopilot-code", intensity="direct", campaign_key="stream-a")
+        with self.assertRaises(P.ProducerError) as ctx:
+            P.begin(self.root, route_file=old_file, capability="autopilot-code", intensity="direct", campaign_key="new-stream")
+        self.assertEqual(ctx.exception.code, "cycle-campaign-selection-conflict")
+        with self.assertRaises(P.ProducerError) as ctx:
+            P.begin(self.root, route_file=self.route(slug="child")[1], capability="autopilot-code", intensity="direct",
+                    campaign_key="nonexistent-new-key", parent_cycle_id=first["cycle_id"])
+        self.assertEqual(ctx.exception.code, "campaign-key-mismatch")
+        with self.assertRaises(P.ProducerError) as ctx:
+            P.begin(self.root, route_file=self.route(slug="id-key-conflict")[1], capability="autopilot-code", intensity="direct",
+                    campaign_id=first["campaign_id"], campaign_key="nonexistent-new-key")
+        self.assertEqual(ctx.exception.code, "campaign-key-mismatch")
+
+    def test_parent_and_campaign_lifecycle_rejections(self):
+        self.activate()
+        _, _, first = self.begin(campaign_key="stream-a")
+        parent = P.read_cycle_record(self.root, first["cycle_id"])
+        route_file = self.route(slug="lifecycle-child")[1]
+        for state in ("cancelled", "superseded"):
+            parent["state"] = state
+            P._write_cycle_record(self.root, parent, exclusive=False)
+            with self.assertRaises(P.ProducerError) as ctx:
+                P.begin(self.root, route_file=route_file, capability="autopilot-code", intensity="direct", parent_cycle_id=first["cycle_id"])
+            self.assertEqual(ctx.exception.code, "parent-cycle-not-joinable")
+        parent["state"] = "open"
+        P._write_cycle_record(self.root, parent, exclusive=False)
+        campaign = P.read_campaign(self.root, first["campaign_id"])
+        campaign["state"] = "superseded"
+        P._write_campaign(self.root, campaign, exclusive=False)
+        with self.assertRaises(P.ProducerError) as ctx:
+            P.begin(self.root, route_file=route_file, capability="autopilot-code", intensity="direct", parent_cycle_id=first["cycle_id"])
+        self.assertEqual(ctx.exception.code, "campaign-not-active")
 
 
 class BootstrapTest(ProducerTestBase):
@@ -2658,6 +2753,66 @@ class TerminalTransactionIntegrationTest(ProducerTestBase):
             self.assertEqual(before,{str(path):path.read_bytes() for path in directory.rglob("*.json")})
             self.assertEqual(registry_before,jobs.read_bytes())
             self.assertEqual(terminal.settle_terminal_commit(request).result,"completed")
+
+
+class LocatorDateDuplicationTest(ProducerTestBase):
+    """One date in a new work locator, two in a migration locator.
+
+    BC_ResNet 2026-09-10 carried six campaign directories named
+    ``<date>_<same date>-<slug>`` and one whose two dates disagreed, so the
+    directory sorted under one day and read as another.
+    """
+
+    def test_a_route_slug_that_already_carries_a_date_does_not_get_a_second_one(self):
+        self.activate()
+        route = compile_for("direct", self.root, slug="2026-09-10-r5-streaming-window-sim")
+        route_file = Path(L.admit_runtime_route(self.root, route).route_file)
+        result = P.begin(self.root, route_file=route_file, capability="autopilot-code",
+                         intensity="direct", campaign_key="streaming-release")
+        campaign = P.read_campaign(self.root, result["campaign_id"])
+        locator = campaign["locator"]
+        self.assertEqual(len(P.artifact_locator._DATE_PREFIX.findall(locator)), 1, locator)
+        self.assertTrue(locator.endswith("_r5-streaming-window-sim"), locator)
+        self.assertEqual(campaign["slug"], "r5-streaming-window-sim")
+        self.assertEqual(campaign["slug_source"], "route")
+        # The route sealed the normalised slug, so the cycle locator under it
+        # carries one date too.
+        self.assertEqual(route["slug"], "r5-streaming-window-sim")
+        cycle_locator = Path(result["cycle_dir"]).name
+        self.assertEqual(len(P.artifact_locator._DATE_PREFIX.findall(cycle_locator)), 1,
+                         cycle_locator)
+        self.assertIsNotNone(P.read_cycle_record(self.root, result["cycle_id"]))
+
+    def test_strip_leading_date_leaves_every_other_slug_intact(self):
+        cases = {
+            "2026-09-10-r5-window": "r5-window",
+            "2026-09-10_r5-window": "r5-window",
+            # A date that disagrees with the cycle's date is still dropped: the
+            # locator's own date is the authoritative one for new work.
+            "2026-09-09-r4-explicit": "r4-explicit",
+            "r6-endpoint-options": "r6-endpoint-options",
+            # A trailing number is part of the name, never a date.
+            "wwd-2026-04": "wwd-2026-04",
+            # A slug that is only a date keeps its own text rather than emptying.
+            "2026-09-10": "2026-09-10",
+        }
+        for slug, expected in cases.items():
+            with self.subTest(slug=slug):
+                self.assertEqual(P.artifact_locator.strip_leading_date(slug), expected)
+
+    def test_locator_base_keeps_both_dates_so_migration_provenance_survives(self):
+        """A migration locator dates the move, its slug dates the content.
+
+        `core/CORE.md`'s W7H relocation table records exactly this shape
+        (``2026-09-05_2026-08-24-artifact-knowledge-index-w7/``), and
+        relayout/residue/resplit all name through `locator_base`. Normalising
+        there would erase when the content was originally made.
+        """
+
+        self.assertEqual(
+            P.artifact_locator.locator_base("2026-09-05T00:00:00Z",
+                                            "2026-08-24-artifact-knowledge-index-w7"),
+            "2026-09-05_2026-08-24-artifact-knowledge-index-w7")
 
 
 if __name__ == "__main__":

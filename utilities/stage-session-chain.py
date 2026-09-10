@@ -15,16 +15,20 @@ import sys
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "utilities"))
-from stage_session_contract import StageSessionError, load_manifest  # noqa: E402
+from stage_session_contract import StageSessionError, load_manifest, sealed_pointer_bytes  # noqa: E402
 from dispatch_contract import (  # noqa: E402
     DispatchContractError,
     GOVERNOR_RESERVATION_ENV,
     close_attempt_row,
+    close_refused_chain_rows,
+    probe_owner_supervision,
+    SupervisionProbe,
     resolve_global_registry,
     resolve_model_governor_root,
 )
 import subdivision_batch_admission as SUBDIVISION_ADMISSION  # noqa: E402
 import dispatch_subsession_resume_record as RESUME_RECORD  # noqa: E402
+import parent_next_directive  # noqa: E402
 
 _BATCH_SPEC = importlib.util.spec_from_file_location(
     "dispatch_batch_for_stage_session_chain", ROOT / "utilities" / "dispatch-batch.py"
@@ -122,8 +126,86 @@ def dispatch_command(
     return command
 
 
-def run_checked(command: list[str]) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(command, cwd=ROOT, text=True, capture_output=True, check=False)
+def run_checked(command: list[str], env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(command, cwd=ROOT, env=env, text=True, capture_output=True, check=False)
+
+
+def parse_start_receipt(returncode: int, stdout: str, attempt_id: str) -> dict:
+    """Accept a start only when the complete typed receipt proves spawning."""
+
+    values: dict[str, str] = {}
+    conflicts: set[str] = set()
+    keys = {"check", "attempt_id", "registered", "started", "duplicate_attempt", "child_spawned", "reason"}
+    for line in stdout.splitlines():
+        if "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        if key not in keys:
+            continue
+        if key in values and values[key] != value:
+            conflicts.add(key)
+        values[key] = value
+    wrapper_reason = values.get("reason", "")
+    if not re.fullmatch(r"[a-z0-9][a-z0-9:._-]{0,127}", wrapper_reason):
+        wrapper_reason = "invalid-wrapper-receipt"
+    if returncode != 0:
+        verdict = "returncode-nonzero"
+    elif conflicts:
+        verdict = "receipt-field-conflict:" + sorted(conflicts)[0]
+    else:
+        for key in ("check", "attempt_id", "registered", "started", "duplicate_attempt", "child_spawned"):
+            if key not in values:
+                verdict = "receipt-field-missing:" + key
+                break
+        else:
+            checks = (
+                (values["check"] == "ok", "check-not-ok"),
+                (values["attempt_id"] == attempt_id, "attempt-mismatch"),
+                (values["duplicate_attempt"] == "0", "duplicate-attempt"),
+                (values["registered"] == "1", "not-registered"),
+                (values["started"] == "1", "not-started"),
+                (values["child_spawned"] == "1", "not-spawned"),
+            )
+            verdict = next((reason for ok, reason in checks if not ok), "ok")
+    return {
+        "ok": verdict == "ok", "verdict": verdict, "wrapper_reason": wrapper_reason,
+        "returncode": returncode, "fields": values,
+    }
+
+
+def _supervision_refusal_reason(state: str) -> str:
+    return (
+        "subsession-chain-advance-unsupervised"
+        if state == "unsupervised"
+        else "subsession-chain-advance-supervision-unproven"
+    )
+
+
+def _print_refusal_tail(closed, *, include_fallback: bool = True, include_counts: bool = True) -> None:
+    """Print the common refusal tail, including the exact parent directive."""
+
+    if include_fallback:
+        print(f"fallback={'single-session-after-delivery' if closed.unclosed else 'single-session-required'}")
+    if include_counts:
+        print(f"cancelled_rows={len(closed.cancelled)}")
+        print(f"already_closed_rows={len(closed.already_closed)}")
+        print(f"unclosed_rows={len(closed.unclosed)}")
+        print(f"unclosed_attempt_ids={','.join(closed.unclosed) or 'none'}")
+    if not closed.unclosed:
+        return
+    selected = 0
+    for index, attempt_id in enumerate(closed.unclosed):
+        delivery = closed.unclosed_delivery[index] if index < len(closed.unclosed_delivery) else ""
+        next_action, _, _ = parent_next_directive.parent_next(
+            delivery, attempt_id, agent_home=ROOT
+        )
+        if next_action != parent_next_directive.NEXT_END_TURN:
+            selected = index
+            break
+    attempt_id = closed.unclosed[selected]
+    delivery = closed.unclosed_delivery[selected] if selected < len(closed.unclosed_delivery) else ""
+    for line in parent_next_directive.receipt_lines(delivery, attempt_id, agent_home=ROOT):
+        print(line)
 
 
 def chain_manifest_pointer_path(jobs: Path, chain_id: str) -> Path:
@@ -139,7 +221,7 @@ def chain_manifest_pointer_path(jobs: Path, chain_id: str) -> Path:
 def persist_chain_manifest(jobs: Path, manifest: dict) -> None:
     path = chain_manifest_pointer_path(jobs, manifest["chain_id"])
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(manifest, sort_keys=True, default=str) + "\n", encoding="utf-8")
+    path.write_bytes(sealed_pointer_bytes(manifest))
 
 
 LAUNCH_PHASE_BY_ACTION = {
@@ -411,6 +493,23 @@ def main() -> int:
         args.jobs = resolve_global_registry(ROOT, args.jobs, 2, args.action).path
         if manifest["mode"] != "serial":
             return _run_parallel_subdivision(route_record, node, args, jobs=Path(args.jobs))
+        guarded_serial = manifest["mode"] == "serial" and len(manifest["sessions"]) >= 2
+        owner_attempt_id = os.environ.get("AGENT_DISPATCH_ATTEMPT_ID", "")
+        if guarded_serial and args.action in {"register", "start"}:
+            probe = (
+                probe_owner_supervision(Path(args.jobs), owner_attempt_id)
+                if owner_attempt_id
+                else SupervisionProbe("unsupervised", "owner-attempt-missing")
+            )
+            if probe.state != "held":
+                print("check=failed")
+                print(f"reason={_supervision_refusal_reason(probe.state)}")
+                print(f"probe_reason={probe.reason or probe.state}")
+                print("fallback=single-session-required")
+                print("registered=0")
+                print("started=0")
+                print("child_spawned=0")
+                return 65
         # SD-119 A-5 strengthening (plan WP5): the serial register loop must
         # be all-or-nothing like the parallel path already is
         # (`_run_parallel_subdivision` above) -- a mid-loop register failure
@@ -425,15 +524,19 @@ def main() -> int:
             )
             if result.returncode:
                 cancelled = 0
-                for attempt_id in registered_attempt_ids:
-                    try:
-                        if close_attempt_row(
-                            Path(args.jobs), attempt_id,
-                            SUBDIVISION_ADMISSION.BATCH_REGISTRATION_INCOMPLETE,
-                        ):
-                            cancelled += 1
-                    except (DispatchContractError, OSError):
-                        pass
+                if guarded_serial:
+                    cancelled = len(close_refused_chain_rows(
+                        Path(args.jobs), registered_attempt_ids,
+                        note=SUBDIVISION_ADMISSION.BATCH_REGISTRATION_INCOMPLETE,
+                        reconcile_reason=SUBDIVISION_ADMISSION.BATCH_REGISTRATION_INCOMPLETE,
+                    ).cancelled)
+                else:
+                    for attempt_id in registered_attempt_ids:
+                        try:
+                            if close_attempt_row(Path(args.jobs), attempt_id, SUBDIVISION_ADMISSION.BATCH_REGISTRATION_INCOMPLETE):
+                                cancelled += 1
+                        except (DispatchContractError, OSError):
+                            pass
                 print(json.dumps({
                     "schema_version": 1, "state": "subdivision-batch-refused",
                     "chain_id": manifest["chain_id"],
@@ -455,9 +558,50 @@ def main() -> int:
         # (dispatch_subsession_advance.py), never by this process waiting in
         # the foreground.
         first_session = manifest["sessions"][0]
+        if guarded_serial:
+            probe = probe_owner_supervision(Path(args.jobs), owner_attempt_id)
+            if probe.state != "held":
+                closed = close_refused_chain_rows(
+                    Path(args.jobs), [s["attempt_id"] for s in manifest["sessions"]],
+                    note=_supervision_refusal_reason(probe.state),
+                    reconcile_reason=probe.reason or probe.state,
+                )
+                print("check=failed")
+                print(f"reason={_supervision_refusal_reason(probe.state)}")
+                print(f"probe_reason={probe.reason or probe.state}")
+                print("registered=0")
+                print("started=0")
+                print("child_spawned=0")
+                _print_refusal_tail(closed)
+                return 65
         start_result = run_checked(
             dispatch_command(manifest, first_session, "start", args.parent, args.jobs)
         )
+        if guarded_serial:
+            parsed = parse_start_receipt(start_result.returncode, start_result.stdout, first_session["attempt_id"])
+            if not parsed["ok"]:
+                print(start_result.stdout, file=sys.stderr, end="")
+                print(start_result.stderr, file=sys.stderr, end="")
+                closed = close_refused_chain_rows(
+                    Path(args.jobs), [s["attempt_id"] for s in manifest["sessions"]],
+                    note="subsession-chain-advance-refused",
+                    reconcile_reason="subsession-chain-initial-start-refused",
+                )
+                print("check=failed")
+                print("reason=subsession-chain-initial-start-refused")
+                print(f"start_verdict={parsed['verdict']}")
+                print(f"wrapper_returncode={parsed['returncode']}")
+                print(f"wrapper_reason={parsed['wrapper_reason']}")
+                print(f"fallback={'single-session-after-delivery' if closed.unclosed else 'single-session-required'}")
+                print("registered=0")
+                print("started=0")
+                print("child_spawned=0")
+                print(f"cancelled_rows={len(closed.cancelled)}")
+                print(f"already_closed_rows={len(closed.already_closed)}")
+                print(f"unclosed_rows={len(closed.unclosed)}")
+                print(f"unclosed_attempt_ids={','.join(closed.unclosed) or 'none'}")
+                _print_refusal_tail(closed, include_fallback=False, include_counts=False)
+                return 65
         if start_result.returncode:
             print(start_result.stdout, end="")
             print(start_result.stderr, end="", file=sys.stderr)

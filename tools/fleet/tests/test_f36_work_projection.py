@@ -27,6 +27,7 @@ class WorkProjectionTest(unittest.TestCase):
             "schema_version": 1,
             "nodes": nodes,
             "cwd": cwd,
+            "artifact_root": os.path.join(cwd, ".agent_reports"),
             "capability": "autopilot-code",
             "capability_mode": "debug",
             "owner_attempt_id": attempt,

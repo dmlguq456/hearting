@@ -731,6 +731,7 @@ class MarkerBoundDeliveryResult:
     owned_children: int
     advanced: bool
     supervisor_terminal: bool = False
+    subsession_terminal: bool = False
 
 
 @dataclass(frozen=True)
@@ -6683,6 +6684,8 @@ def marker_bound_process_identity(
 # eligibility, `capability-route.py`) grants a privilege a sub-session must never
 # have.
 SUBSESSION_NOTE = "completed-subsession"
+SUBSESSION_TERMINAL_CLASSIFIER = "completion-join-subsession-terminal-v1"
+SUBSESSION_CHAIN_REFUSAL_CLASSIFIER = "subsession-chain-refusal-v1"
 
 # The one definition of "this row's note says it succeeded". It lives in this
 # module because `dispatch_completion_join` imports this one, never the reverse.
@@ -6984,6 +6987,13 @@ def marker_bound_delivery_transaction(
             supervisor_terminal=(
                 refreshed_metadata.get("note") == "completed-supervisor"
                 and refreshed_metadata.get("failure_class") == "pass"
+            ),
+            subsession_terminal=(
+                refreshed_fields[1] == "done"
+                and refreshed_metadata.get("note") == SUBSESSION_NOTE
+                and refreshed_metadata.get("failure_class") == "pass"
+                and refreshed_metadata.get("classifier_source") == SUBSESSION_TERMINAL_CLASSIFIER
+                and row_is_subsession(refreshed_metadata)
             ),
         )
 
@@ -7779,6 +7789,139 @@ def close_attempt_row_if(
             _atomic_registry_replace(jobs, lines)
             return True
     return False
+
+
+@dataclass(frozen=True)
+class RefusedChainClose:
+    cancelled: tuple[str, ...]
+    already_closed: tuple[str, ...]
+    unclosed: tuple[str, ...]
+    unclosed_delivery: tuple[str, ...]
+
+
+def attempt_row_never_started(fields: list[str]) -> bool:
+    """Prove that a row has never crossed the durable launch fence."""
+
+    if len(fields) != 6:
+        return False
+    metadata = parse_registry_metadata(fields[5])
+    # A claimed row, a row carrying a PID, and a reaped-before-publish row all
+    # remain supervisor-reconciliation evidence. Only an untouched open row or
+    # an explicitly adapter-closed never-launched row with no claim/identity
+    # can be proven never started here.
+    return (
+        metadata.get("launch_started") != "1"
+        and metadata.get("launch_claimed") == "0"
+        and not metadata.get("pid")
+        and metadata.get("launch_outcome", "") in {"", "never-launched"}
+    )
+
+
+def close_refused_chain_rows(
+    jobs: Path,
+    attempt_ids: list[str] | tuple[str, ...],
+    *,
+    note: str,
+    reconcile_reason: str,
+) -> RefusedChainClose:
+    """Close only exact rows whose lock-time state proves never-started."""
+
+    cancelled: list[str] = []
+    already_closed: list[str] = []
+    unclosed: list[str] = []
+    deliveries: list[str] = []
+    evidence = {
+        "failure_class": "cancelled",
+        "classifier_source": SUBSESSION_CHAIN_REFUSAL_CLASSIFIER,
+        "reconcile_reason": reconcile_reason,
+        "launch_outcome": "never-launched",
+    }
+    try:
+        ensure_global_registry_writable(jobs)
+        with Path(f"{jobs}.lock").open("a", encoding="utf-8") as lock:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+            lines = jobs.read_text(encoding="utf-8", errors="replace").splitlines()
+            for attempt_id in attempt_ids:
+                try:
+                    found = None
+                    for index, line in enumerate(lines):
+                        fields = line.split("\t")
+                        if len(fields) == 6 and parse_registry_metadata(fields[5]).get("attempt_id") == attempt_id:
+                            found = (index, fields)
+                            break
+                    if found is None:
+                        unclosed.append(attempt_id)
+                        deliveries.append("")
+                        continue
+                    index, fields = found
+                    metadata = parse_registry_metadata(fields[5])
+                    if fields[1] in {"done", "killed", "cancelled"}:
+                        already_closed.append(attempt_id)
+                        continue
+                    if fields[1] not in {"open", "running"} or not attempt_row_never_started(fields):
+                        unclosed.append(attempt_id)
+                        deliveries.append(metadata.get("parent_completion_delivery", ""))
+                        continue
+                    values = {"note": note, **evidence}
+                    values.update(_delivery_intent_values(fields, {**metadata, **values}))
+                    fields[1] = "done"
+                    # Keep this new lock-held close out of the W-site static
+                    # bucket; its delivery intent was merged immediately
+                    # above, but it is not one of the four ordinary edges.
+                    terminal_edge = True
+                    fields[5] = _updated_attempt_metadata(fields[5], values, terminal=terminal_edge)
+                    lines[index] = "\t".join(fields)
+                    _atomic_registry_replace(jobs, lines)
+                    cancelled.append(attempt_id)
+                except (DispatchContractError, OSError):
+                    unclosed.append(attempt_id)
+                    deliveries.append("")
+    except (DispatchContractError, OSError):
+        # Preserve the exact input order and fail closed when the registry
+        # cannot be observed under its canonical lock.
+        for attempt_id in attempt_ids:
+            if attempt_id not in cancelled and attempt_id not in already_closed and attempt_id not in unclosed:
+                unclosed.append(attempt_id)
+                deliveries.append("")
+    return RefusedChainClose(tuple(cancelled), tuple(already_closed), tuple(unclosed), tuple(deliveries))
+
+
+@dataclass(frozen=True)
+class SupervisionProbe:
+    state: str
+    reason: str = ""
+
+
+def probe_owner_supervision(jobs: Path, attempt_id: str) -> SupervisionProbe:
+    """Read-only proof that the exact Claude/Codex owner lease is held."""
+
+    try:
+        metadata = _declared_supervisor_lease_metadata(Path(jobs), attempt_id)
+        path = _validated_supervisor_lease_path(jobs, attempt_id, metadata["supervisor_lease_file"])
+        fd = os.open(
+            path,
+            os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0),
+        )
+        try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                return SupervisionProbe("unproven", "lease-not-regular")
+            if not _supervisor_lease_payload_matches(fd, metadata):
+                return SupervisionProbe("unproven", "lease-payload-mismatch")
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                return SupervisionProbe("held", "")
+            except OSError as exc:
+                return SupervisionProbe("unproven", f"lease-lock-error:{type(exc).__name__}")
+            else:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+                return SupervisionProbe("unsupervised", "lease-unlocked")
+        finally:
+            os.close(fd)
+    except DispatchContractError as exc:
+        return SupervisionProbe("unsupervised", exc.reason)
+    except OSError as exc:
+        return SupervisionProbe("unproven", f"lease-open-error:{type(exc).__name__}")
 
 
 def annotate_attempt_row(jobs: Path, attempt_id: str, values: dict[str, str]) -> bool:

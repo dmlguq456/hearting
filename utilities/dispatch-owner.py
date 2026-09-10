@@ -75,6 +75,14 @@ _CAPTURED = _REQUIRED | {"--unit", "--review-output"}
 # exists for review below; frame carries no such double-claim risk and is
 # exempt from that restriction.
 _LAUNCHABLE_WORKER_TYPES = {"owner", "review", "frame"}
+# The four variables that decide where a frame leg's direction brief lands. A
+# subset lets the brief fall into an unrelated, possibly closed campaign/cycle
+# directory (the batch path's known child-launch defect drops three of four),
+# so a frame launch checks all four instead of a sentence asking depth-0 to.
+_FRAME_ARTIFACT_ENV = (
+    "AGENT_ARTIFACT_ROOT", "AGENT_ARTIFACT_CAMPAIGN_ID",
+    "AGENT_ARTIFACT_CYCLE_ID", "AGENT_ARTIFACT_CYCLE_DIR",
+)
 _UNIT_REF = re.compile(r"^[a-z-]+/[a-z-]+$")
 _RESERVED_UNITS = {"_kernel/owner", "_kernel/resource"}
 
@@ -118,6 +126,8 @@ _HINTS = {
     "review-worker-unit-required": "--worker-type review needs --unit <catalog persona from roles/units/>",
     "review-worker-route-evidence-unsupported": "a route node's reviewer is launched by stage dispatch; drop --route-evidence for an ad-hoc review worker",
     "review-output-frame-forbidden": "a frame worker returns its advisory verdict through the ordinary dispatch handoff; drop --review-output",
+    "frame-artifact-scope-missing": "export all four of AGENT_ARTIFACT_ROOT, AGENT_ARTIFACT_CAMPAIGN_ID, AGENT_ARTIFACT_CYCLE_ID "
+                                    "and AGENT_ARTIFACT_CYCLE_DIR in the same Bash call as the launch (OPERATIONS §5.10b)",
     "route-node-unknown": "--route-node must name an id present in the sealed route's nodes list",
     "route-node-worker-type-forbidden": "--route-node selects a frame node's own model_profile; only --worker-type frame may use it",
     "forbidden-flag": "model, reasoning, effort, variant and completion-delivery are sealed by the profile and route; remove the flag",
@@ -461,6 +471,10 @@ def _parse(argv):
             # dispatch handoff (roles/worker-types/frame.md), never a durable
             # review report -- --review-output has nothing to bind to here.
             raise OwnerError("review-output-frame-forbidden")
+        if worker_type == "frame":
+            absent = [name for name in _FRAME_ARTIFACT_ENV if not os.environ.get(name)]
+            if absent:
+                raise OwnerError("frame-artifact-scope-missing:" + ",".join(absent))
         # A report is an explicit opt-in capability.  It is forwarded as a
         # value, never inferred from caller environment or route metadata.
         if values.get("--review-output") and not Path(values["--review-output"]).is_absolute():

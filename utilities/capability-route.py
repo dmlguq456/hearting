@@ -1062,6 +1062,7 @@ def build_continuation_route(
     }
     inherited_keys=(
         "schema_version","capability","capability_mode","slug","slug_truncated",
+        "campaign_key","parent_cycle_id",
         "requested_intensity",
         "effective_intensity","owner_model_profile","execution_topology",
         "owner_dispatch_depth","max_dispatch_depth","tracking",
@@ -2292,7 +2293,7 @@ def compile_route(capability, capability_mode, requested_intensity, cwd, artifac
                   tracking="tracked", tracked_gate_evidence=None, dispatch_evidence=None,
                   registered_headless_evidence=None, slug=None,
                          route_origin="preset", shape=None, profile_demands=None,
-                         explicit_profiles=None):
+                         explicit_profiles=None, campaign_key=None, parent_cycle_id=None):
     registry=TOPO.load_registry(); TOPO.validate_registry(registry)
     recipe=TOPO.resolve_recipe(registry, capability, capability_mode)
     return _compile_from_recipe(
@@ -2302,6 +2303,7 @@ def compile_route(capability, capability_mode, requested_intensity, cwd, artifac
         tracking=tracking, tracked_gate_evidence=tracked_gate_evidence,
         dispatch_evidence=dispatch_evidence,
         registered_headless_evidence=registered_headless_evidence, slug=slug,
+        campaign_key=campaign_key, parent_cycle_id=parent_cycle_id,
         route_origin=route_origin, shape=shape, profile_demands=profile_demands,
         explicit_profiles=explicit_profiles)
 
@@ -2559,7 +2561,8 @@ def compose_route(*, capability, capability_mode, shape, graph, slug, cwd, artif
                   intensity=None, signals=(), spec_read=None, drift_verdict=None,
                   tracking=None, artifact_guard=None, children=None, parent_harness="claude",
                   dispatch_evidence=None, registered_headless_evidence=None,
-                  transport_evidence="compose-default", jobs=None, profile_demands=None, explicit_profiles=None):
+                  transport_evidence="compose-default", jobs=None, profile_demands=None, explicit_profiles=None,
+                  campaign_key=None, parent_cycle_id=None):
     """Resolve every default, then compile through the ordinary sealer."""
     if shape not in COMPOSE_SHAPES:
         raise ValueError(f"compose-shape-invalid:{shape}")
@@ -2610,6 +2613,7 @@ def compose_route(*, capability, capability_mode, shape, graph, slug, cwd, artif
     common = dict(
         signals=signals, transport=None, transport_evidence=transport_evidence,
         tracking=tracking, tracked_gate_evidence=gate, slug=slug,
+        campaign_key=campaign_key, parent_cycle_id=parent_cycle_id,
         dispatch_evidence=dispatch_evidence,
         registered_headless_evidence=registered_headless_evidence,
         route_origin="compose", shape=shape,
@@ -2665,14 +2669,20 @@ def _compile_from_recipe(registry, recipe, capability, capability_mode, requeste
                          tracking="tracked", tracked_gate_evidence=None, dispatch_evidence=None,
                          registered_headless_evidence=None, slug=None, composed=False,
                   route_origin="preset", shape=None, profile_demands=None,
-                  explicit_profiles=None):
+                  explicit_profiles=None, campaign_key=None, parent_cycle_id=None):
     dispatch_terminal_commit.require_current_cleanup("route-compile")
     if route_origin not in ROUTE_ORIGINS: raise ValueError("invalid route origin")
     cwd=Path(cwd).resolve(strict=True); artifact=Path(artifact_root).resolve()
     if not cwd.is_absolute() or not artifact.is_absolute(): raise ValueError("cwd and artifact root must be absolute")
     slug_fields={}
     if slug is not None:
-        canonical_slug,slug_truncated=ARTIFACT_LOCATOR.slugify(slug)
+        # A caller-typed leading date is dropped once, here at the origin: every
+        # locator built from this slug prefixes the record's own date, so BC_ResNet
+        # 2026-09-10 accumulated names like `2026-09-10_2026-09-10-r5-...` and one
+        # `2026-09-09_2026-09-10-r4-...` whose two dates disagreed. Migration
+        # naming does not pass through here and keeps both dates by design.
+        canonical_slug,slug_truncated=ARTIFACT_LOCATOR.slugify(
+            ARTIFACT_LOCATOR.strip_leading_date(slug))
         slug_fields={"slug":canonical_slug,"slug_truncated":slug_truncated}
     known_pred=set(recipe["direct_predicates"]); predicates=sorted(set(predicates))
     unknown=set(predicates)-known_pred
@@ -2920,6 +2930,10 @@ def _compile_from_recipe(registry, recipe, capability, capability_mode, requeste
                          "terminal_handoff_contract":RUNTIME_SUPPORT.TERMINAL_HANDOFF_CONTRACT,
                          "producer_binding_contract":RUNTIME_SUPPORT.PRODUCER_BINDING_CONTRACT}}
     payload.update(slug_fields)
+    for key, value in (("campaign_key", campaign_key), ("parent_cycle_id", parent_cycle_id)):
+        if value is not None:
+            _validate_campaign_selection(key, value)
+            payload[key] = value
     if checked_dispatch is not None:
         payload["dispatch_evidence_scope_version"]=DISPATCH_EVIDENCE_SCOPE_VERSION
     if composed:
@@ -3013,6 +3027,12 @@ def classify_validation_basis(route, *, registry_digest_now, units_digest_now,
         "verdict": verdict, "message": message, "basis_present": basis is not None,
     }
 
+def _validate_campaign_selection(key, value):
+    pattern = r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}" if key == "campaign_key" else r"cyc_[a-f0-9]{32}"
+    if not isinstance(value, str) or re.fullmatch(pattern, value) is None:
+        raise ValueError(f"route-{key.replace('_', '-')}-invalid")
+
+
 def verify_route(route, expected_cwd=None, *, allow_stale_registry=False):
     """Verify a route for mutating/resume use.
 
@@ -3029,6 +3049,9 @@ def verify_route(route, expected_cwd=None, *, allow_stale_registry=False):
         raise ValueError(
             f"legacy route schema_version={route.get('schema_version')!r} rejected for mutating/resume use"
         )
+    for key in ("campaign_key", "parent_cycle_id"):
+        if key in route:
+            _validate_campaign_selection(key, route[key])
     if "slug" in route:
         if not isinstance(route["slug"],str) or not isinstance(route.get("slug_truncated"),bool):
             raise ValueError("invalid route slug metadata")
@@ -5843,6 +5866,8 @@ def main():
     p=argparse.ArgumentParser(); sub=p.add_subparsers(dest="command",required=True)
     c=sub.add_parser("compile"); c.add_argument("--capability",required=True); c.add_argument("--capability-mode",default="default")
     c.add_argument("--slug",required=True)
+    c.add_argument("--campaign-key",help="explicit work stream passed to the producer owner")
+    c.add_argument("--parent-cycle",help="open or sealed predecessor cycle; causal link, not input approval")
     c.add_argument("--profile-demands", help="JSON file mapping node ids and __owner__ to full SD-88 demands")
     c.add_argument("--explicit-profiles", help="JSON file mapping demanded node ids to explicit profiles")
     c.add_argument("--intensity",default="auto"); c.add_argument("--cwd",required=True); c.add_argument("--artifact-root",required=True)
@@ -5857,6 +5882,8 @@ def main():
     c.add_argument("--output")
     cp=sub.add_parser("compose",help="preset-free work route: name the shape (and stage subgraph), defaults fill the rest")
     cp.add_argument("--slug",required=True)
+    cp.add_argument("--campaign-key",help="explicit work stream passed to the producer owner")
+    cp.add_argument("--parent-cycle",help="open or sealed predecessor cycle; causal link, not input approval")
     cp.add_argument("--profile-demands", help="JSON file mapping node ids and __owner__ to full SD-88 demands")
     cp.add_argument("--explicit-profiles", help="JSON file mapping demanded node ids to explicit profiles")
     cp.add_argument("--shape",choices=COMPOSE_SHAPES,default=None,help="direct (inline) | solo (one registered depth-1 owner) | staged (owner + your stage subgraph); default staged when --graph is given, else direct")
@@ -5933,6 +5960,7 @@ def main():
         route=compose_route(
             capability=a.capability,capability_mode=a.capability_mode,shape=shape,graph=a.graph,
             slug=a.slug,cwd=cwd,artifact_root=artifact_root,intensity=a.intensity,signals=a.signal,
+            campaign_key=a.campaign_key,parent_cycle_id=a.parent_cycle,
             spec_read=a.spec_read,drift_verdict=a.drift_verdict,tracking=a.tracking,
             artifact_guard=a.artifact_guard,
             children=[c.strip() for c in a.children.split(",") if c.strip()] if a.children else None,
@@ -5978,7 +6006,7 @@ def main():
                 tracking=a.tracking,tracked_gate_evidence=gate,
                 dispatch_evidence=dispatch_evidence,
                 registered_headless_evidence=registered_headless_evidence,
-                slug=a.slug,
+                slug=a.slug, campaign_key=a.campaign_key, parent_cycle_id=a.parent_cycle,
                 profile_demands=json.loads(Path(a.profile_demands).read_text()) if a.profile_demands else None,
                 explicit_profiles=json.loads(Path(a.explicit_profiles).read_text()) if a.explicit_profiles else None,
             )
@@ -5987,7 +6015,7 @@ def main():
                 a.capability,a.capability_mode,a.intensity,a.cwd,a.artifact_root,
                 a.predicate,a.signal,a.transport,a.transport_evidence,a.inline_reason,
                 a.tracking,gate,dispatch_evidence,registered_headless_evidence,
-                slug=a.slug,
+                slug=a.slug, campaign_key=a.campaign_key, parent_cycle_id=a.parent_cycle,
                 profile_demands=json.loads(Path(a.profile_demands).read_text()) if a.profile_demands else None,
                 explicit_profiles=json.loads(Path(a.explicit_profiles).read_text()) if a.explicit_profiles else None,
             )

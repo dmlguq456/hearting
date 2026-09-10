@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any, Callable, NamedTuple
 
 from replica_batch_contract import ReplicaBatchContractError, verify_manifest
-from governor_identity import capture_local_identity, create_witness, close_witness, observe_witness, IdentityCaptureError, retained_witness_is_held
+from governor_identity import capture_local_identity, create_witness, close_witness, observe_witness, prove_witness_unheld, IdentityCaptureError, retained_witness_is_held
 
 
 # Only a handle issued in this process authorizes a new lease's local return.
@@ -386,6 +386,39 @@ def _state_change(root: str | Path, fn: Callable[[dict[str, Any], float], Any]) 
         return result
 
 
+CAP_RECOVERY_HINT = (
+    "; if the holders are gone this is recoverable: `model-worker-governor.py status` reports "
+    "`reclaimable_leases` and `reclaim` returns the ones whose claimant is provably absent "
+    "(witness lock free) -- never by editing state.json or raising the cap"
+)
+# The hint is a fixed string on purpose. It first computed `reclaimable(...)`,
+# which opens every lease's witness and attempts a lock -- inside the state
+# lock, on the refusal path. A diagnostic that takes locks is not a
+# diagnostic: it perturbed the governor's own suite (two tests that had
+# passed 4/4 began failing about half the time, one of them because a
+# release silently stopped proving and the capacity it should have freed
+# never came back). Reclaimability is reported by `status`, which is an
+# explicit operator call, and proven by `reclaim`. Admission calls reclaim
+# only after a capacity refusal has unwound the state lock.
+
+
+class _CapacityReached(ValueError):
+    """A concurrency cap refused admission (not validation or start budget)."""
+
+
+def _admit_with_reclaim(root: str | Path, operation: Callable) -> Any:
+    try:
+        return _state_change(root, operation)
+    except _CapacityReached:
+        # Never nest this in _assert_available or a _state_change callback:
+        # reclaim owns its own state transaction and exact witness proof.
+        if reclaim(root)["reclaimed_count"] == 0:
+            raise
+    # One retry, including identity, kill-switch, caps and rolling budget.
+    # Another contender may have consumed the returned capacity meanwhile.
+    return _state_change(root, operation)
+
+
 def _assert_available(
     root: str | Path,
     data: dict[str, Any],
@@ -405,9 +438,9 @@ def _assert_available(
     reservations = data["reservations"]
     occupied = [*leases.values(), *reservations.values()]
     if len(occupied) + count > total:
-        raise ValueError("global model-worker cap reached")
+        raise _CapacityReached("global model-worker cap reached" + CAP_RECOVERY_HINT)
     if sum(item.get("class") == worker_class for item in occupied) + count > class_limit(worker_class):
-        raise ValueError(f"{worker_class} class cap reached")
+        raise _CapacityReached(f"{worker_class} class cap reached" + CAP_RECOVERY_HINT)
     # Unclaimed reservations hold rolling-budget capacity. Claiming one moves
     # that capacity from ``reservations`` to ``starts`` in the same lock.
     if len(data["starts"]) + len(reservations) + count > budget:
@@ -454,7 +487,7 @@ def acquire(
         return token
 
     try:
-        token = _state_change(root, operation)
+        token = _admit_with_reclaim(root, operation)
     except BaseException:
         if handle is not None:
             close_witness(handle)
@@ -1157,7 +1190,7 @@ def reserve(
             tokens.append(token)
         return tokens
 
-    return _state_change(root, operation)
+    return _admit_with_reclaim(root, operation)
 
 
 def reservation_check(
@@ -1309,6 +1342,91 @@ def release(root: str | Path, token: str) -> dict[str, Any]:
     return result
 
 
+def reclaim(root: str | Path, *, token: str | None = None) -> dict[str, Any]:
+    """Return capacity held by leases whose claimant is provably gone.
+
+    Why this exists: `release` requires `_local_return_proof`, which requires
+    the witness handle issued *in this process* -- so only the original,
+    still-running claimant can return its own lease. That is the right rule
+    for a normal return, but it left no path at all for a claimant that died
+    without releasing: the slot stayed occupied forever and twelve such deaths
+    lock the governor out entirely. Measured 2026-09-10: 12/12 leases held, 10
+    of them by processes that no longer exist, blocking an approved route.
+
+    This is not the PID-absence reclamation `_state_change` refuses. It rests
+    on `prove_witness_unheld`: the witness is created with `LOCK_EX`, that lock
+    lives on the open file description and is released by the kernel only when
+    the last inherited descriptor closes, so taking `LOCK_EX` on the exact
+    recorded file proves the claimant *and every descendant holding its
+    descriptor* are gone -- in any namespace, without reading /proc. Anything
+    less than that proof leaves the lease exactly where it is, with a reason.
+
+    The claim receipt records `release_proven: false` and
+    `reclaimed_by: witness-proof`, so an audit can tell a reclaimed slot from
+    one its claimant handed back.
+    """
+
+    if token is not None:
+        _validate_reservation_token(token)
+
+    def operation(data: dict[str, Any], now: float) -> dict[str, Any]:
+        reclaimed: list[dict[str, Any]] = []
+        retained: list[dict[str, Any]] = []
+        for candidate, lease in sorted(data["leases"].items()):
+            if token is not None and candidate != token:
+                continue
+            if not isinstance(lease, dict):
+                raise ValueError("invalid governor state: malformed lease")
+            binding = lease.get("claimant_witness")
+            row = {"token": candidate, "class": lease.get("class"),
+                   "claimant_pid": lease.get("pid"),
+                   "pid_namespace": (lease.get("claimant_identity") or {}).get("pid_namespace")}
+            if not isinstance(binding, dict):
+                # A legacy lease carries no witness, so nothing can be proven
+                # about it here. It stays occupied rather than being guessed at.
+                retained.append({**row, "state": "unknown", "reason": "no-identity-witness"})
+                continue
+            proof = prove_witness_unheld(root, binding)
+            if proof.state != "unheld":
+                retained.append({**row, "state": proof.state, "reason": proof.reason})
+                continue
+            del data["leases"][candidate]
+            if candidate in data["claims"]:
+                data["claims"][candidate].update(
+                    released_at=now, release_proven=False, reclaimed_by="witness-proof",
+                    reclaim_reason=proof.reason,
+                )
+            reclaimed.append({**row, "state": proof.state, "reason": proof.reason})
+        leases = data["leases"]
+        return {
+            "status": "reclaimed" if reclaimed else "none",
+            "reclaimed_count": len(reclaimed),
+            "reclaimed": reclaimed,
+            "retained_count": len(retained),
+            "retained": retained,
+            "occupied_after": len(leases) + len(data["reservations"]),
+            "total_limit": _limits(None, None)[0],
+        }
+
+    result = _state_change(root, operation)
+    for row in result["reclaimed"]:
+        handle = _LEASE_WITNESSES.pop(_witness_key(root, row["token"]), None)
+        if handle is not None:
+            close_witness(handle)
+    return result
+
+
+def reclaimable(root: str | Path, data: dict[str, Any]) -> int:
+    """How many held leases a `reclaim` would return, for a refusal hint."""
+
+    total = 0
+    for lease in data.get("leases", {}).values():
+        binding = lease.get("claimant_witness") if isinstance(lease, dict) else None
+        if isinstance(binding, dict) and prove_witness_unheld(root, binding).state == "unheld":
+            total += 1
+    return total
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--root", default=str(default_root()))
@@ -1345,6 +1463,8 @@ def main() -> int:
     run_parser.add_argument("--class", dest="worker_class", required=True)
     run_parser.add_argument("command_argv", nargs=argparse.REMAINDER)
     commands.add_parser("status")
+    reclaim_parser = commands.add_parser("reclaim")
+    reclaim_parser.add_argument("--token", help="reclaim only this lease; default is every provable one")
     args = parser.parse_args()
 
     if args.command == "acquire":
@@ -1458,12 +1578,18 @@ def main() -> int:
         print(json.dumps(result, sort_keys=True))
         if result["status"] == "blocked":
             return 75
+    elif args.command == "reclaim":
+        result = reclaim(args.root, token=args.token)
+        print(json.dumps(result, sort_keys=True))
     elif args.command == "status":
         data = _state_change(args.root, lambda data, now: data)
         diagnostics = [_identity_diagnostic(args.root, row) for row in
                        [*data["reservations"].values(), *data["leases"].values()][:8]
                        if isinstance(row, dict)]
-        print(json.dumps({**data, "identity_diagnostics": diagnostics}, sort_keys=True))
+        # An operator reading a full governor needs to know whether the
+        # occupancy is live work or dead claimants, without diffing /proc.
+        print(json.dumps({**data, "identity_diagnostics": diagnostics,
+                          "reclaimable_leases": reclaimable(args.root, data)}, sort_keys=True))
     else:
         command = args.command_argv[1:] if args.command_argv[:1] == ["--"] else args.command_argv
         if not command:

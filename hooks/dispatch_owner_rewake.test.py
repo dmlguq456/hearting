@@ -66,7 +66,17 @@ class DispatchOwnerRewakeTest(unittest.TestCase):
         self.root = Path(self.temporary.name)
         self.jobs = self.root / "jobs.log"
         self.jobs.write_text(self.row(), encoding="utf-8")
-        environment = mock.patch.dict(os.environ, {"AGENT_DISPATCH_JOBS": str(self.jobs)}, clear=False)
+        # `main()` checks `agent_home()/utilities/dispatch-attempt-ready.py`
+        # before it ever waits: without a home that has the helper it takes the
+        # `readiness-helper-missing` lapse path and returns 0, so every wake
+        # assertion below silently stopped testing the wake. The runner strips
+        # AGENT_HOME on purpose, which is why this must be set here rather than
+        # inherited (CI 2026-09-10; the peer classes already do this).
+        environment = mock.patch.dict(
+            os.environ,
+            {"AGENT_DISPATCH_JOBS": str(self.jobs), "AGENT_HOME": str(MODULE_PATH.parents[1])},
+            clear=False,
+        )
         environment.start()
         self.addCleanup(environment.stop)
 
@@ -894,16 +904,41 @@ class RegistryConfirmArmTest(unittest.TestCase):
     def test_eight_processes_racing_for_one_attempt_produce_one_claim(self) -> None:
         # The flock is what makes arming exactly-once under parallel tool
         # calls; a sequential second claim cannot prove that (review R1 minor).
-        script = (
-            "import importlib.util, sys, pathlib;"
-            f"spec = importlib.util.spec_from_file_location('h', {str(MODULE_PATH)!r});"
-            "m = importlib.util.module_from_spec(spec); sys.modules['h'] = m; spec.loader.exec_module(m);"
-            f"r = m.claim_arm(pathlib.Path({str(self.jobs)!r}), 'att-owner-1', 'session-1', fresh=True);"
-            "print('won' if isinstance(r, m.ArmClaim) else r.reason)"
+        # Every racer must still be *alive* while the others try, or this
+        # asserts something the contract does not promise: a claim whose holder
+        # has exited is legitimately re-takable, so short-lived children give
+        # two honest winners whenever the first finishes before the last
+        # starts. That is what made this case flaky under load rather than a
+        # real mutual-exclusion failure (CI 2026-09-10: `['held-live', 'won',
+        # ..., 'won', 'held-live']`). Each child reports its verdict and then
+        # waits for the parent's release file, so all eight attempts land
+        # inside the winner's lifetime; the child's own deadline keeps a lost
+        # release from hanging the suite. A real file, not `-c`: the wait needs
+        # a `while` statement, which a semicolon-joined one-liner cannot hold.
+        release = self.root / "race-release"
+        racer = self.root / "racer.py"
+        racer.write_text(
+            "import importlib.util, sys, pathlib, time\n"
+            f"spec = importlib.util.spec_from_file_location('h', {str(MODULE_PATH)!r})\n"
+            "m = importlib.util.module_from_spec(spec)\n"
+            "sys.modules['h'] = m\n"
+            "spec.loader.exec_module(m)\n"
+            f"r = m.claim_arm(pathlib.Path({str(self.jobs)!r}), 'att-owner-1', 'session-1', fresh=True)\n"
+            "print('won' if isinstance(r, m.ArmClaim) else r.reason, flush=True)\n"
+            f"gate = pathlib.Path({str(release)!r})\n"
+            "deadline = time.monotonic() + 60\n"
+            "while not gate.exists() and time.monotonic() < deadline:\n"
+            "    time.sleep(0.02)\n",
+            encoding="utf-8",
         )
-        procs = [subprocess.Popen([sys.executable, "-c", script], stdout=subprocess.PIPE,
+        procs = [subprocess.Popen([sys.executable, str(racer)], stdout=subprocess.PIPE,
                                   stderr=subprocess.STDOUT, text=True) for _ in range(8)]
-        results = [p.communicate()[0].strip() for p in procs]
+        try:
+            results = [(proc.stdout.readline() or "").strip() for proc in procs]
+        finally:
+            release.write_text("go", encoding="utf-8")
+            for proc in procs:
+                proc.communicate()
         self.assertEqual(results.count("won"), 1, results)
         self.assertEqual(set(results) - {"won"}, {"held-live"}, results)
 

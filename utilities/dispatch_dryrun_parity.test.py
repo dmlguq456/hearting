@@ -16,6 +16,7 @@ import json
 import os
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -344,7 +345,18 @@ class CodexCliDryRunParity(_IsolatedCliFixture):
             )
 
 
+# The owner/headless selector proves Claude's session-resume support by
+# probing `claude --help`, and refuses (`claude-session-resume-indeterminate`,
+# exit 69) rather than guess when the binary is absent. That refusal is
+# correct; asserting a successful selection in an environment without the CLI
+# is not. CI has no `claude`, so these cases reported a missing runtime as a
+# product failure (2026-09-10). Skip instead -- the way the guard suite
+# already skips its codex runtime discovery.
+CLAUDE_CLI = shutil.which("claude")
+NEEDS_CLAUDE_CLI = "no claude binary: the selector's session-resume probe cannot be proven here"
+
 class ClaudeCliDryRunParity(_IsolatedCliFixture):
+    @unittest.skipUnless(CLAUDE_CLI, NEEDS_CLAUDE_CLI)
     def test_prompt_log_command_match_across_dry_run_and_register(self):
         with tempfile.TemporaryDirectory() as td:
             base = Path(td)
@@ -364,6 +376,7 @@ class ClaudeCliDryRunParity(_IsolatedCliFixture):
             self.assertEqual(dry_fields["log_file"], register_fields["log_file"])
             self.assertIn(ATTEMPT, dry_fields["prompt_file"])
 
+    @unittest.skipUnless(CLAUDE_CLI, NEEDS_CLAUDE_CLI)
     def test_dry_run_makes_no_files_or_registry_rows(self):
         with tempfile.TemporaryDirectory() as td:
             base = Path(td)

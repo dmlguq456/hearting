@@ -64,7 +64,7 @@ class OwnerFallbackTest(unittest.TestCase):
             layout="wide", term_width=term_width,
         ))
 
-    def test_exact_parent_sid_recovers_ownership_and_suppresses_only_duplicate_detail(self):
+    def test_exact_parent_sid_recovers_ownership_without_legacy_detail(self):
         work = self._route_projection()
         parent = self._session("sid-parent", "parent", work)
         unrelated = self._session("sid-unrelated", "unrelated", work)
@@ -79,10 +79,10 @@ class OwnerFallbackTest(unittest.TestCase):
         self.assertIn("stage summary", rendered)
         self.assertIn("Sonnet", rendered)
         self.assertIn("parent now", rendered)
-        self.assertEqual(rendered.count("stage plan ✓"), 1)
+        self.assertEqual(rendered.count("stage plan ✓"), 0)
         self.assertIn("unrelated", rendered)
         self.assertNotIn("CX/", rendered)
-        self.assertIn("stage plan ✓", rendered)
+        self.assertNotIn("stage plan ✓", rendered)
 
     def test_unmatched_parent_stays_orphaned(self):
         work = self._route_projection("rt-unmatched")

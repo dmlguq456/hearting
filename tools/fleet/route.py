@@ -21,6 +21,9 @@ Contract:
                                                      resolve_records); build_views stays PURE.
   route_hash(record)                             -> "sha256:..." (utilities/capability-route.py
                                                      :21-26 reproduced verbatim, P1).
+  continuation_lineage(record, records, node_evidence=None, jobs=())
+                                                 -> typed, all-or-nothing in-memory lineage.
+  round_history(record, scope)                   -> semantic and route-local retry evidence.
   node_order(record)                             -> [[node_id, ...], ...] Kahn levels.
   resolve_records(jobs, node_evidence=None)      -> {route_id: record} — the ONE impure entry
                                                      point (calls load() per distinct route_file
@@ -44,7 +47,7 @@ import json
 import os
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 _CACHE = {}          # {abspath: (mtime, size, record|None)}
@@ -53,6 +56,30 @@ _CACHE = {}          # {abspath: (mtime, size, record|None)}
 # nodes carry the compact marker; every other opaque route node keeps its sealed
 # identifier verbatim.
 _ROUND_NODE_IDS = frozenset(("plan", "plan-check", "execute", "review", "impl-review"))
+_LINEAGE_MAX_HOPS = 8
+_REVISION_REVIEWS = {"plan": ("plan-check",), "execute": ("impl-review", "review")}
+_NO_OWNER = frozenset(("", "-", None))
+
+
+def _started_attempt_ids(node_id, evidence):
+    """Return exact current-contract attempts that have actually started."""
+    if node_id not in _ROUND_NODE_IDS or not isinstance(evidence, dict):
+        return set()
+    history = evidence.get("attempt_history")
+    if not isinstance(history, list):
+        return set()
+    ids = set()
+    for item in history:
+        if (not isinstance(item, dict)
+                or item.get("contract_status") != "current"
+                or not isinstance(item.get("attempt_id"), str)
+                or not item.get("attempt_id", "").strip()):
+            continue
+        pid = item.get("pid")
+        if (item.get("status") in ("running", "done")
+                or (isinstance(pid, int) and not isinstance(pid, bool) and pid > 0)):
+            ids.add(item["attempt_id"].strip())
+    return ids
 
 
 def _verified_attempt_round(node_id, evidence):
@@ -63,26 +90,320 @@ def _verified_attempt_round(node_id, evidence):
     current, cannot establish a round. Repeated status rows for one attempt
     therefore count once.
     """
-    if node_id not in _ROUND_NODE_IDS or not isinstance(evidence, dict):
-        return None
-    history = evidence.get("attempt_history")
-    if not isinstance(history, list):
-        return None
-    attempt_ids = set()
-    for item in history:
-        if (not isinstance(item, dict)
-                or item.get("contract_status") != "current"
-                or not isinstance(item.get("attempt_id"), str)
-                or not item.get("attempt_id").strip()):
+    return len(_started_attempt_ids(node_id, evidence)) or None
+
+
+def _completed_attempt_ids(evidence):
+    """Return current attempts whose final registry history row completed cleanly."""
+    if not isinstance(evidence, dict) or not isinstance(evidence.get("attempt_history"), list):
+        return set()
+    latest = {}
+    for item in evidence["attempt_history"]:
+        if isinstance(item, dict) and isinstance(item.get("attempt_id"), str):
+            attempt_id = item["attempt_id"].strip()
+            if attempt_id:
+                latest[attempt_id] = item
+    return {
+        attempt_id for attempt_id, item in latest.items()
+        if item.get("contract_status") == "current"
+        and item.get("status") == "done"
+        and not str(item.get("note") or "").startswith(("dead-", "fleet-kill"))
+    }
+
+
+def owner_bound_attempts(route_id, route_hash, node_evidence, jobs=()):
+    """Return owner attempts exactly corroborated by predecessor evidence."""
+    bound = set()
+    evidence = (node_evidence or {}).get(route_id, node_evidence or {})
+    for item in evidence.values() if isinstance(evidence, dict) else ():
+        if not isinstance(item, dict):
             continue
-        pid = item.get("pid")
-        started = (
-            item.get("status") in ("running", "done")
-            or (isinstance(pid, int) and not isinstance(pid, bool) and pid > 0)
+        parent = item.get("parent_attempt_id")
+        if isinstance(parent, str) and parent.strip():
+            bound.add(parent.strip())
+        for history in item.get("attempt_history") or ():
+            if isinstance(history, dict):
+                parent = history.get("parent_attempt_id")
+                if isinstance(parent, str) and parent.strip():
+                    bound.add(parent.strip())
+    for job in jobs or ():
+        if (getattr(job, "owner_route_id", None) == route_id
+                and getattr(job, "owner_route_hash", None) == route_hash):
+            attempt = getattr(job, "attempt_id", None)
+            if isinstance(attempt, str) and attempt.strip():
+                bound.add(attempt.strip())
+    return bound
+
+
+def _real_owner(value):
+    return isinstance(value, str) and value.strip() not in _NO_OWNER
+
+
+def _identity_tuple(record):
+    """Return the sealed continuation identity, or ``None`` if incomplete."""
+    keys = ("capability", "capability_mode", "cwd", "artifact_root")
+    values = tuple(record.get(key) for key in keys)
+    if any(not isinstance(value, str) or not value.strip() for value in values):
+        return None
+    return values
+
+
+def _edge_shape(successor):
+    edge = successor.get("source_route_supersession")
+    if not isinstance(edge, dict):
+        return None
+    if (edge.get("edge_version") != 1
+            or edge.get("operation") != "continuation"
+            or edge.get("source_verdict_preserved") is not True
+            or not isinstance(edge.get("from_route_id"), str)
+            or not isinstance(edge.get("from_route_hash"), str)
+            or not isinstance(edge.get("to_continuation_id"), str)):
+        return None
+    return edge
+
+
+def continuation_hop_reason(successor, predecessor, bound_attempts=()):
+    """Return a typed reason when one sealed continuation hop cannot be trusted."""
+    if not isinstance(successor, dict) or not isinstance(predecessor, dict):
+        return "edge-malformed"
+    source_id = successor.get("source_route_id")
+    source_hash = successor.get("source_route_hash")
+    if not isinstance(source_id, str) or not isinstance(source_hash, str):
+        return "edge-malformed"
+    if predecessor.get("route_id") != source_id:
+        return "predecessor-record-unavailable"
+    if predecessor.get("route_hash") != source_hash:
+        return "predecessor-hash-mismatch"
+    edge = _edge_shape(successor)
+    if edge is None:
+        return "edge-malformed"
+    if (edge.get("from_route_id"), edge.get("from_route_hash")) != (source_id, source_hash):
+        return "edge-malformed"
+    if edge.get("to_continuation_id") != successor.get("continuation_id"):
+        return "edge-malformed"
+    expected_edges = list(predecessor.get("supersession_edges") or []) + [edge]
+    if successor.get("supersession_edges") != expected_edges:
+        return "edge-history-mismatch"
+    try:
+        monotonic = int(successor.get("advance_generation")) == int(
+            predecessor.get("advance_generation")) + 1
+    except (TypeError, ValueError):
+        monotonic = False
+    if not monotonic:
+        return "generation-not-monotonic"
+    reused = successor.get("reused_nodes")
+    if not isinstance(reused, list):
+        return "evidence-digest-mismatch"
+    digest = "sha256:" + hashlib.sha256(_canonical(reused)).hexdigest()
+    if successor.get("source_evidence_digest") != digest:
+        return "evidence-digest-mismatch"
+    successor_identity = _identity_tuple(successor)
+    predecessor_identity = _identity_tuple(predecessor)
+    if successor_identity is None or predecessor_identity is None:
+        return "identity-missing"
+    if successor_identity[:2] != predecessor_identity[:2]:
+        return "identity-mismatch"
+    if (os.path.realpath(successor_identity[2]) != os.path.realpath(predecessor_identity[2])
+            or os.path.realpath(successor_identity[3])
+            != os.path.realpath(predecessor_identity[3])):
+        return "identity-mismatch"
+    successor_owner = successor.get("owner_attempt_id")
+    predecessor_owner = predecessor.get("owner_attempt_id")
+    if _real_owner(successor_owner) and _real_owner(predecessor_owner):
+        if (successor_owner != predecessor_owner
+                or successor.get("route_family_key") != predecessor.get("route_family_key")):
+            return "foreign-owner"
+    elif _real_owner(successor_owner) and not _real_owner(predecessor_owner):
+        if successor_owner not in set(bound_attempts or ()):
+            return "owner-unproven"
+    return None
+
+
+def _record_nodes(record):
+    node_ids = {
+        node.get("id") for node in (record.get("nodes") or ())
+        if isinstance(node, dict) and isinstance(node.get("id"), str)
+    }
+    node_ids.update(
+        node.get("node_id") for node in (record.get("new_nodes") or ())
+        if isinstance(node, dict) and isinstance(node.get("node_id"), str)
+    )
+    return node_ids
+
+
+def continuation_lineage(record, records, node_evidence=None, jobs=(), max_hops=_LINEAGE_MAX_HOPS):
+    """Verify an entire in-memory continuation chain without doing any I/O."""
+    if not isinstance(record, dict):
+        return {"status": "unverified", "reason": "record-malformed", "generation": None,
+                "chain": [], "continuation_reason": None}
+    if not record.get("source_route_id") and not record.get("source_route_supersession"):
+        return {"status": "none", "reason": None, "generation": None, "chain": [],
+                "continuation_reason": None}
+    records = records or {}
+    current = record
+    chain = []
+    seen = {record.get("route_id")}
+    for _hop in range(max_hops + 1):
+        source_id = current.get("source_route_id")
+        source_hash = current.get("source_route_hash")
+        if not source_id or not source_hash:
+            reason = "edge-malformed"
+            return {"status": "unverified", "reason": reason,
+                    "generation": record.get("advance_generation"),
+                    "chain": list(reversed(chain)),
+                    "continuation_reason": (record.get("reason") or
+                                             record.get("source_route_supersession", {}).get("reason"))}
+        if len(chain) >= max_hops:
+            return {"status": "unverified", "reason": "lineage-hop-limit",
+                    "generation": record.get("advance_generation"),
+                    "chain": list(reversed(chain)),
+                    "continuation_reason": record.get("reason")}
+        predecessor = records.get(source_id)
+        if predecessor is None:
+            predecessor = next((candidate for candidate in records.values()
+                                if isinstance(candidate, dict)
+                                and candidate.get("route_id") == source_id), None)
+        if predecessor is None:
+            reason = "predecessor-record-unavailable"
+            return {"status": "unverified", "reason": reason,
+                    "generation": record.get("advance_generation"),
+                    "chain": list(reversed(chain)),
+                    "continuation_reason": record.get("reason")}
+        if predecessor.get("route_hash") != source_hash:
+            reason = "predecessor-hash-mismatch"
+            return {"status": "unverified", "reason": reason,
+                    "generation": record.get("advance_generation"),
+                    "chain": list(reversed(chain)),
+                    "continuation_reason": record.get("reason")}
+        if predecessor.get("route_id") in seen:
+            return {"status": "unverified", "reason": "lineage-cycle",
+                    "generation": record.get("advance_generation"),
+                    "chain": list(reversed(chain)),
+                    "continuation_reason": record.get("reason")}
+        siblings = []
+        for candidate in records.values():
+            if not isinstance(candidate, dict) or candidate is current:
+                continue
+            if (candidate.get("source_route_id") == source_id
+                    and candidate.get("source_route_hash") == source_hash
+                    and _edge_shape(candidate) is not None):
+                siblings.append(candidate)
+        if len(siblings) > 1 or (siblings and siblings[0].get("route_id") != current.get("route_id")):
+            return {"status": "unverified", "reason": "lineage-branching",
+                    "generation": record.get("advance_generation"),
+                    "chain": list(reversed(chain)),
+                    "continuation_reason": record.get("reason")}
+        bound = owner_bound_attempts(
+            predecessor.get("route_id"), predecessor.get("route_hash"), node_evidence, jobs,
         )
-        if started:
-            attempt_ids.add(item["attempt_id"].strip())
-    return len(attempt_ids) or None
+        reason = continuation_hop_reason(current, predecessor, bound)
+        if reason:
+            return {"status": "unverified", "reason": reason,
+                    "generation": record.get("advance_generation"),
+                    "chain": list(reversed(chain)),
+                    "continuation_reason": record.get("reason")}
+        chain.append(predecessor.get("route_id"))
+        seen.add(predecessor.get("route_id"))
+        current = predecessor
+        if not current.get("source_route_id") and not current.get("source_route_supersession"):
+            return {"status": "verified", "reason": None,
+                    "generation": record.get("advance_generation"),
+                    "chain": list(reversed(chain)),
+                    "continuation_reason": record.get("reason")}
+    return {"status": "unverified", "reason": "lineage-hop-limit",
+            "generation": record.get("advance_generation"), "chain": list(reversed(chain)),
+            "continuation_reason": record.get("reason")}
+
+
+@dataclass
+class RoundScope:
+    records: dict
+    node_evidence: dict
+    jobs: tuple = ()
+    _memo: dict = field(default_factory=dict)
+
+
+def round_history(record, scope):
+    """Compute semantic and route-local retry evidence for one record."""
+    key = (record.get("route_id"), record.get("route_hash"))
+    if key in scope._memo:
+        return scope._memo[key]
+    lineage = continuation_lineage(record, scope.records, scope.node_evidence, scope.jobs)
+    route_local = {}
+    for node_id in _ROUND_NODE_IDS:
+        route_local[node_id] = _verified_attempt_round(
+            node_id, (scope.node_evidence.get(record.get("route_id"), {}) or {}).get(node_id),
+        )
+    result = {"lineage": lineage, "nodes": {}}
+    chain_records = []
+    if lineage.get("status") == "verified":
+        chain_records = [scope.records[rid] for rid in lineage.get("chain", [])
+                         if rid in scope.records] + [record]
+    for node_id in _ROUND_NODE_IDS:
+        local = route_local[node_id]
+        semantic = local
+        mapped = bool(chain_records)
+        started_current = bool(_started_attempt_ids(
+            node_id, (scope.node_evidence.get(record.get("route_id"), {}) or {}).get(node_id),
+        ))
+        if mapped:
+            ids = set()
+            for candidate in chain_records:
+                candidate_nodes = _record_nodes(candidate)
+                reused = {item.get("node_id") for item in (candidate.get("reused_nodes") or ())
+                          if isinstance(item, dict)}
+                if node_id not in candidate_nodes and node_id not in reused:
+                    mapped = False
+                    break
+                evidence = (scope.node_evidence.get(candidate.get("route_id"), {}) or {}).get(node_id)
+                ids.update(_started_attempt_ids(node_id, evidence))
+            if mapped and (started_current or node_id in {
+                    item.get("node_id") for item in (record.get("reused_nodes") or ())
+                    if isinstance(item, dict)}):
+                semantic = len(ids) or None
+            else:
+                semantic = local
+        prior = None
+        if mapped and isinstance(semantic, int) and semantic > 0:
+            prior = max(0, semantic - (local or 0))
+        revision = None
+        reviews = _REVISION_REVIEWS.get(node_id)
+        if (mapped and started_current and isinstance(semantic, int) and semantic >= 2
+                and reviews):
+            total = 0
+            label = next((review for review in reviews if review in _record_nodes(record)), None)
+            for predecessor_id in lineage.get("chain", []):
+                predecessor = scope.records.get(predecessor_id)
+                if not predecessor:
+                    continue
+                present = [review for review in reviews if review in _record_nodes(predecessor)]
+                if present:
+                    total += max(
+                        len(_completed_attempt_ids(
+                            (scope.node_evidence.get(predecessor_id, {}) or {}).get(review),
+                        )) for review in present
+                    )
+            if total >= 1 and label:
+                revision = {"node": label, "round": total}
+        result["nodes"][node_id] = {
+            "attempt_round": semantic,
+            "route_attempt_round": local,
+            "prior_attempt_rounds": prior,
+            "revision_of": revision,
+        }
+    scope._memo[key] = result
+    return result
+
+
+def revision_evidence_text(node):
+    revision = node.get("revision_of") if isinstance(node, dict) else None
+    attempt_round = node.get("attempt_round") if isinstance(node, dict) else None
+    if (not isinstance(revision, dict) or not isinstance(revision.get("round"), int)
+            or revision.get("round", 0) < 1 or not isinstance(attempt_round, int)
+            or attempt_round < 2):
+        return None
+    node_id = node.get("round_node_id", node.get("id"))
+    return "%s R%d → %s R%d" % (revision.get("node"), revision.get("round"), node_id, attempt_round)
 
 
 def node_display_label(node):
@@ -862,13 +1183,14 @@ def _heuristic_view(route_id, route_jobs):
 
 
 def _record_view(record, route_id, route_jobs, ev_by_node, now, gate_marks_for_route=None,
-                 degradations_for_route=None):
+                 degradations_for_route=None, round_scope=None):
     levels = node_order(record)
     node_by_id = {n["id"]: n for n in (record.get("nodes") or [])
                   if isinstance(n, dict) and isinstance(n.get("id"), str)}
     marks = gate_marks_for_route or {}
     nodes = []
     done = 0
+    history = round_history(record, round_scope) if round_scope is not None else None
     for level_i, level in enumerate(levels):
         for nid in level:
             rn = node_by_id.get(nid, {})
@@ -894,6 +1216,9 @@ def _record_view(record, route_id, route_jobs, ev_by_node, now, gate_marks_for_r
                 done += 1
             parallel_group = rn.get("parallel_group") or rn.get("replica_group")
             replica_group = rn.get("replica_group")
+            round_values = ((history or {}).get("nodes") or {}).get(nid, {})
+            route_attempt_round = (_verified_attempt_round(nid, ev_by_node.get(nid))
+                                   if history is None else round_values.get("route_attempt_round"))
             nodes.append({
                 "id": nid, "depends_on": list(rn.get("depends_on") or []), "level": level_i,
                 "unit": unit, "unit_choices": unit_choices,
@@ -912,15 +1237,24 @@ def _record_view(record, route_id, route_jobs, ev_by_node, now, gate_marks_for_r
                 "elapsed_min": st["elapsed_min"], "model": st["model"], "harness": st["harness"],
                 "effort": st["effort"], "pid": st["pid"], "job": st["job"],
                 "degradation": degradation if st["state"] == "degraded" else None,
-                "attempt_round": _verified_attempt_round(nid, ev_by_node.get(nid)),
+                "attempt_round": (_verified_attempt_round(nid, ev_by_node.get(nid))
+                                   if history is None else round_values.get("attempt_round")),
+                "route_attempt_round": route_attempt_round,
+                "prior_attempt_rounds": (None if history is None
+                                          else round_values.get("prior_attempt_rounds")),
+                "revision_of": (None if history is None
+                                 else round_values.get("revision_of")),
             })
-    return {"route_id": route_id, "route_hash": record.get("route_hash"), "source": "record",
+    result = {"route_id": route_id, "route_hash": record.get("route_hash"), "source": "record",
             "capability": record.get("capability"), "capability_mode": record.get("capability_mode"),
             "execution_topology": record.get("execution_topology"),
             "unit_catalog_digest": record.get("unit_catalog_digest"),
             "composed": bool(record.get("composed")),
             "effective_intensity": record.get("effective_intensity"),
             "progress": {"done": done, "total": len(nodes)}, "nodes": nodes, "key": route_id}
+    if history is not None and history.get("lineage", {}).get("status") != "none":
+        result["lineage"] = history["lineage"]
+    return result
 
 
 def build_views(jobs, node_evidence, records, now, gate_marks=None, degradations=None):
@@ -957,6 +1291,7 @@ def build_views(jobs, node_evidence, records, now, gate_marks=None, degradations
             by_route[rid] = []
             order.append(rid)
     views = []
+    scope = RoundScope(records, node_evidence, tuple(jobs))
     for rid in order:
         route_jobs = by_route[rid]
         record = (records or {}).get(rid)
@@ -964,7 +1299,7 @@ def build_views(jobs, node_evidence, records, now, gate_marks=None, degradations
             views.append(_heuristic_view(rid, route_jobs))
         else:
             views.append(_record_view(record, rid, route_jobs, node_evidence.get(rid) or {}, now,
-                                      gate_marks.get(rid), (degradations or {}).get(rid)))
+                                      gate_marks.get(rid), (degradations or {}).get(rid), scope))
     return views
 
 
@@ -1055,6 +1390,10 @@ def summary(views):
                 node["degradation"] = source.get("degradation")
             if source.get("attempt_round") is not None:
                 node["attempt_round"] = source.get("attempt_round")
+            for key in ("route_attempt_round", "prior_attempt_rounds", "revision_of"):
+                if source.get(key) is not None:
+                    node[key] = source.get(key)
+        lineage = v.get("lineage")
         out.append({"route_id": v.get("route_id"), "route_hash": v.get("route_hash"),
                     "source": v.get("source"), "capability": v.get("capability"),
                     "capability_mode": v.get("capability_mode"),
@@ -1062,5 +1401,6 @@ def summary(views):
                     "unit_catalog_digest": v.get("unit_catalog_digest"),
                     "composed": bool(v.get("composed")),
                     "effective_intensity": v.get("effective_intensity"),
-                    "progress": v.get("progress"), "ambiguity": v.get("ambiguity"), "nodes": nodes})
+                    "progress": v.get("progress"), "ambiguity": v.get("ambiguity"),
+                    "nodes": nodes, **({"lineage": lineage} if lineage is not None else {})})
     return out

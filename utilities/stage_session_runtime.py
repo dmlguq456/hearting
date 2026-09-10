@@ -10,6 +10,7 @@ import subprocess
 import sys
 
 import artifact_producer
+from stage_session_contract import slice_files_sha256, slice_text_sha256
 from dispatch_contract import DispatchContractError, validate_attempt_metadata
 
 STATE_BUCKET = (".runtime", "stage-sessions")
@@ -49,12 +50,8 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--state-dir")
 
 
-def _sha_text(value: str) -> str:
-    return hashlib.sha256(value.encode("utf-8")).hexdigest()
-
-
-def _sha_files(values: list[str]) -> str:
-    return _sha_text("\0".join(sorted(values)))
+_sha_text = slice_text_sha256
+_sha_files = slice_files_sha256
 
 
 def bind(args: argparse.Namespace, *, artifact_root: str | Path, action: str) -> None:
