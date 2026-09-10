@@ -62,6 +62,7 @@ from dispatch_contract import (  # noqa: E402
     sealed_launch_home,
     resolve_live_parent_attempt,
     resolve_model_governor_root,
+    review_governed_lease_is_held,
     replica_batch_expectation,
     reserve_governor_token,
     runtime_ancestry_binding,
@@ -79,11 +80,15 @@ from artifact_producer import (  # noqa: E402
 )
 from dispatch_completion_join import materialize_after_terminal_close  # noqa: E402
 from dispatch_lifecycle import (  # noqa: E402
+    acquire_foreground_review_admission,
+    acquire_review_admission,
+    begin_finite_watchdog,
     DETACHED,
     FOREGROUND_SCOPED,
     LIFECYCLES,
     deterministic_post_exit_outcome,
     reconcile_launch_lifecycle,
+    launch_review_watchdog,
     wait_foreground,
 )
 from dispatch_continuation_budget import positive_continuation_limit  # noqa: E402
@@ -1466,12 +1471,35 @@ def acquire_review_lease_after_claim(
     if not args.review_output:
         return {}
     binding = args.review_output_binding
-    result = review_lease_acquire(
-        Path(args.artifact_root), cycle_id=binding["cycle_id"],
-        attempt_id=args.attempt_id, review_output=binding["output_path"],
-        binding=binding, governed_identity=identity, jobs=jobs,
+    budget = getattr(args, "watchdog_budget", None)
+    if budget is None:
+        raise ProducerError("review-watchdog-budget-missing")
+    witness_metadata = {
+        "attempt_id": args.attempt_id,
+        "review_cycle_id": binding["cycle_id"],
+        "review_governed_lease": "summary-flock-v1",
+        "review_governed_lease_nonce": args.review_governed_lease_nonce,
+    }
+    witness_unlocked = lambda: not review_governed_lease_is_held(
+        Path(args.artifact_root), witness_metadata
     )
-    return dict(result.get("registry_metadata") or {})
+    if args.launch_lifecycle == DETACHED:
+        handle = getattr(args, "review_watchdog_handle", None)
+        if handle is None:
+            raise ProducerError("review-watchdog-handle-missing")
+        return acquire_review_admission(
+            handle=handle, budget=budget, identity=identity,
+            root=Path(args.artifact_root), cycle_id=binding["cycle_id"],
+            attempt_id=args.attempt_id, review_output=binding["output_path"],
+            binding=binding, jobs=jobs, nonce=args.review_governed_lease_nonce,
+            lease_acquire=review_lease_acquire, witness_probe=witness_unlocked,
+        )
+    return acquire_foreground_review_admission(
+        budget=budget, identity=identity, root=Path(args.artifact_root),
+        cycle_id=binding["cycle_id"], attempt_id=args.attempt_id,
+        review_output=binding["output_path"], binding=binding, jobs=jobs,
+        lease_acquire=review_lease_acquire, witness_probe=witness_unlocked,
+    )
 
 
 def attach_summary_owner(args, log_path: Path, prompt_path: Path, identity):
@@ -2562,6 +2590,7 @@ def main(argv: list[str]) -> int:
                 child_spawned="0",
             )
         fence_failure_read_fd, fence_failure_write_fd = os.pipe()
+        args.watchdog_budget = begin_finite_watchdog(args.foreground_timeout)
         def spawn_worker(gate_fd: int) -> subprocess.Popen:
             fence_command = [
                 sys.executable, str(ROOT / "utilities" / "launch-fence.py"),
@@ -2586,6 +2615,24 @@ def main(argv: list[str]) -> int:
                     "run", "--class", "dispatch", "--", "sh", "-c", command,
                 ]
             )
+            if args.review_output and args.launch_lifecycle == DETACHED:
+                try:
+                    args.review_watchdog_handle = launch_review_watchdog(
+                        fence_command, gate_fd=gate_fd, budget=args.watchdog_budget,
+                        attempt_id=args.attempt_id,
+                        failure_fd=fence_failure_write_fd, env=env,
+                        lease_release_spec={
+                            "root": args.artifact_root,
+                            "cycle_id": args.review_output_binding["cycle_id"],
+                            "attempt_id": args.attempt_id,
+                        }, jobs=jobs,
+                    )
+                finally:
+                    try:
+                        os.close(fence_failure_write_fd)
+                    except OSError:
+                        pass
+                return args.review_watchdog_handle.process
             try:
                 return subprocess.Popen(
                     fence_command,
@@ -2811,6 +2858,7 @@ def main(argv: list[str]) -> int:
                     if binding
                     else None
                 ),
+                watchdog_budget=args.watchdog_budget,
             )
             annotate_attempt_row(
                 jobs,

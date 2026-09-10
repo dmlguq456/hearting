@@ -7,10 +7,12 @@ import base64
 from contextlib import contextmanager
 import contextvars
 from dataclasses import dataclass
+from datetime import datetime
 import errno
 import fcntl
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -620,6 +622,80 @@ class DispatchContractError(ValueError):
         self.detail = detail or reason
 
 
+@dataclass(frozen=True)
+class ReviewHolderDisposition:
+    """Closed report-lease liveness result.
+
+    Timestamp expiry is deliberately absent from this decision.  It is only a
+    stale/unobservable ceiling; exact process evidence or the namespace-safe
+    governed witness is the authority for a live holder.
+    """
+
+    state: str
+    reason: str
+
+
+@dataclass(frozen=True)
+class ReviewAdmissionCleanup:
+    """Closed proof returned by watchdog admission cleanup."""
+
+    watchdog_group: str
+    fenced_child_group: str
+    readiness: str
+    review_lease: str
+    governed_witness: str
+    payload_marker: str
+    status: str
+
+
+class PostClaimAdmission:
+    """Compatible post-claim transaction object for review admission.
+
+    The common transaction owns registry mutation.  The callbacks own only
+    external resources and are intentionally idempotent, so an abort never
+    acquires or mutates the jobs lock.
+    """
+
+    __slots__ = (
+        "metadata", "_abort_callback", "_commit_callback", "_abort_result",
+        "_committed", "_aborted", "_commit_started",
+    )
+
+    def __init__(self, metadata: Mapping[str, str], *, abort: Callable[[str], ReviewAdmissionCleanup], commit: Callable[[], None]):
+        self.metadata = dict(metadata)
+        self._abort_callback = abort
+        self._commit_callback = commit
+        self._abort_result: ReviewAdmissionCleanup | None = None
+        self._committed = False
+        self._aborted = False
+        self._commit_started = False
+
+    def abort(self, reason: str) -> ReviewAdmissionCleanup:
+        if self._committed:
+            raise DispatchContractError("review-admission-abort-after-commit")
+        if self._abort_result is None:
+            self._aborted = True
+            try:
+                self._abort_result = self._abort_callback(reason)
+            except BaseException:
+                self._abort_result = ReviewAdmissionCleanup(
+                    watchdog_group="unverified", fenced_child_group="unverified",
+                    readiness="unverified", review_lease="unverified",
+                    governed_witness="unverified", payload_marker="unverified",
+                    status="unverified",
+                )
+        return self._abort_result
+
+    def commit(self) -> None:
+        if self._committed:
+            return
+        if self._aborted:
+            raise DispatchContractError("review-admission-commit-after-abort")
+        self._commit_started = True
+        self._commit_callback()
+        self._committed = True
+
+
 # SD-113 A47-2: the vocabulary `_delivery_intent_values()` recognizes as a
 # record-creating `parent_completion_delivery` stamp must equal
 # `dispatch_pending_delivery.RECIPIENT_KINDS` exactly -- documented here so a
@@ -1081,6 +1157,15 @@ REVIEW_POST_CLAIM_METADATA_KEYS = frozenset({
     "review_lease_acquired_at",
     "review_lease_deadline",
     "review_lease_record_digest",
+    "review_admission",
+    "review_watchdog_budget_digest",
+    "review_readiness_digest",
+    "review_fence_pid",
+    "review_fence_pid_start",
+    "review_fence_pgid",
+    "review_fence_pid_ns",
+    "review_fence_pid_observer_ns",
+    "review_governed_lease_nonce",
 })
 
 
@@ -1202,6 +1287,125 @@ def review_lease_record_digest(record: Mapping[str, object]) -> str:
         dict(record), ensure_ascii=False, sort_keys=True, separators=(",", ":")
     ).encode("utf-8")
     return "sha256:" + hashlib.sha256(encoded).hexdigest()
+
+
+def _review_epoch(value: str) -> float:
+    try:
+        return time.mktime(time.strptime(value, "%Y-%m-%dT%H:%M:%SZ")) - time.timezone
+    except ValueError:
+        return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
+
+
+def review_holder_disposition(
+    lease_record: Mapping[str, object] | None,
+    registry_metadata: Mapping[str, object] | None,
+    artifact_root: str | Path,
+    *,
+    now: float | None = None,
+) -> ReviewHolderDisposition:
+    """Classify one exact v2 holder without treating its timestamp as death.
+
+    Process evidence wins over the flock fallback.  The fallback is admitted
+    only for the namespace-unverifiable case required by SD-90, so a released,
+    reused, zombie, or positively dead process can never be revived by a held
+    file descriptor.
+    """
+
+    if not isinstance(lease_record, Mapping) or lease_record.get("schema_version") != 2:
+        return ReviewHolderDisposition("malformed", "lease-record-schema")
+    if not isinstance(registry_metadata, Mapping):
+        return ReviewHolderDisposition("malformed", "registry-metadata-missing")
+    if lease_record.get("released_at") is not None or lease_record.get("expired") is True:
+        return ReviewHolderDisposition("dead", "released-or-expired")
+    acquired_at = lease_record.get("acquired_at")
+    deadline = lease_record.get("deadline")
+    if not isinstance(acquired_at, str) or not isinstance(deadline, str):
+        return ReviewHolderDisposition("malformed", "lease-time-missing")
+    try:
+        acquired_epoch = _review_epoch(acquired_at)
+        deadline_epoch = _review_epoch(deadline)
+    except (TypeError, ValueError, OverflowError):
+        return ReviewHolderDisposition("malformed", "lease-time-invalid")
+    observed_now = time.time() if now is None else now
+    if acquired_epoch > observed_now:
+        return ReviewHolderDisposition("malformed", "lease-acquired-in-future")
+    if deadline_epoch <= acquired_epoch:
+        return ReviewHolderDisposition("malformed", "lease-deadline-invalid")
+    required = ("attempt_id", "pid", "pid_start", "pgid", "pid_ns", "pid_observer_ns")
+    identity_complete = not any(not str(registry_metadata.get(key, "")) for key in required)
+    if identity_complete and (
+        not str(registry_metadata.get("pid", "")).isdigit()
+        or not str(registry_metadata.get("pgid", "")).isdigit()
+    ):
+        return ReviewHolderDisposition("malformed", "holder-identity-invalid")
+    nonce = str(registry_metadata.get("review_governed_lease_nonce", ""))
+    witness_bound = (
+        registry_metadata.get("review_governed_lease") == REVIEW_GOVERNED_LEASE_KIND
+        and REVIEW_GOVERNED_LEASE_NONCE_RE.fullmatch(nonce) is not None
+    )
+    if not identity_complete and not witness_bound:
+        return ReviewHolderDisposition("malformed", "holder-identity-incomplete")
+    budget_fields = (
+        "watchdog_timeout_seconds", "watchdog_origin_monotonic_ns",
+        "watchdog_deadline_monotonic_ns", "watchdog_origin_epoch",
+        "watchdog_deadline_epoch", "watchdog_budget_digest",
+    )
+    budget_present = [key in lease_record for key in budget_fields]
+    if any(budget_present) and not all(budget_present):
+        return ReviewHolderDisposition("malformed", "watchdog-budget-incomplete")
+    if all(budget_present):
+        try:
+            timeout = float(lease_record["watchdog_timeout_seconds"])
+            origin_ns = int(lease_record["watchdog_origin_monotonic_ns"])
+            deadline_ns = int(lease_record["watchdog_deadline_monotonic_ns"])
+            origin_epoch = float(lease_record["watchdog_origin_epoch"])
+            deadline_epoch_exact = float(lease_record["watchdog_deadline_epoch"])
+            budget_payload = {
+                "timeout_seconds": timeout,
+                "origin_monotonic_ns": origin_ns,
+                "deadline_monotonic_ns": deadline_ns,
+                "origin_epoch": origin_epoch,
+            }
+            expected_budget_digest = "sha256:" + hashlib.sha256(
+                json.dumps(budget_payload, sort_keys=True, separators=(",", ":")).encode()
+            ).hexdigest()
+            if (
+                not math.isfinite(timeout) or timeout <= 0
+                or origin_ns < 0
+                or deadline_ns != origin_ns + int(timeout * 1_000_000_000)
+                or not math.isfinite(origin_epoch)
+                or not math.isfinite(deadline_epoch_exact)
+                or deadline_epoch_exact != origin_epoch + timeout
+                or expected_budget_digest != str(lease_record["watchdog_budget_digest"])
+                or abs(deadline_epoch - deadline_epoch_exact) > 1.0
+            ):
+                return ReviewHolderDisposition("malformed", "watchdog-budget-contradictory")
+        except (TypeError, ValueError, OverflowError):
+            return ReviewHolderDisposition("malformed", "watchdog-budget-invalid")
+    for key in _PROCESS_IDENTITY_METADATA_KEYS | {"review_governed_lease", "review_governed_lease_nonce"}:
+        if key in lease_record and str(lease_record.get(key, "")) != str(registry_metadata.get(key, "")):
+            return ReviewHolderDisposition("malformed", f"holder-binding-mismatch:{key}")
+    record_digest = lease_record.get("review_lease_record_digest")
+    metadata_digest = registry_metadata.get("review_lease_record_digest")
+    if metadata_digest is None:
+        return ReviewHolderDisposition("malformed", "lease-record-digest-missing")
+    if record_digest is not None and metadata_digest is not None:
+        unsigned = {key: value for key, value in lease_record.items() if key != "review_lease_record_digest"}
+        if review_lease_record_digest(unsigned) != metadata_digest:
+            return ReviewHolderDisposition("malformed", "lease-record-digest-mismatch")
+    if identity_complete:
+        process = attempt_governed_process_quiescence({str(k): str(v) for k, v in registry_metadata.items()})
+        if process.state == "live":
+            return ReviewHolderDisposition("live", process.reason)
+        if process.state == "quiescent":
+            return ReviewHolderDisposition("dead", process.reason)
+        if process.reason in {"process-identity-invalid", "process-identity-missing"}:
+            return ReviewHolderDisposition("malformed", process.reason)
+        if process.reason != "process-namespace-unverifiable" or not witness_bound:
+            return ReviewHolderDisposition("unobservable", process.reason)
+    if witness_bound and review_governed_lease_is_held(artifact_root, registry_metadata):
+        return ReviewHolderDisposition("live", "governed-witness-held")
+    return ReviewHolderDisposition("unobservable", "process-namespace-unverifiable")
 
 
 def validate_review_output_binding(
@@ -1384,12 +1588,11 @@ def review_output_write_authorized(
         if not isinstance(acquired_at, str) or not isinstance(deadline, str):
             return False
         try:
-            acquired_epoch = time.mktime(time.strptime(acquired_at, "%Y-%m-%dT%H:%M:%SZ")) - time.timezone
-            deadline_epoch = time.mktime(time.strptime(deadline, "%Y-%m-%dT%H:%M:%SZ")) - time.timezone
+            acquired_epoch = _review_epoch(acquired_at)
+            deadline_epoch = _review_epoch(deadline)
         except (TypeError, ValueError, OverflowError):
             return False
-        now = time.time()
-        if acquired_epoch > now or deadline_epoch < now or deadline_epoch <= acquired_epoch:
+        if deadline_epoch <= acquired_epoch:
             return False
         metadata = binding.get("_registry_metadata")
         if not isinstance(metadata, Mapping):
@@ -1417,7 +1620,10 @@ def review_output_write_authorized(
         record_digest = review_lease_record_digest(record_for_digest)
         if record_digest != metadata.get("review_lease_record_digest"):
             return False
-        return review_governed_lease_is_held(binding["artifact_root"], metadata)
+        disposition = review_holder_disposition(
+            lease_record, metadata, binding["artifact_root"]
+        )
+        return disposition.state == "live"
     except (DispatchContractError, OSError, TypeError, ValueError):
         return False
 
@@ -3765,16 +3971,116 @@ def _abort_fenced_launch(
             else "identity-unverifiable"
         )
         if status != "signalled":
-            try:
-                proc.kill()
-            except (OSError, ProcessLookupError):
-                pass
+            # A failed exact signal is not permission to fall back to a
+            # process-only kill: the group/namespace proof is the safety
+            # boundary.  The caller records cleanup as unverified.
+            pass
         try:
             proc.wait(timeout=0.75)
         except (OSError, subprocess.TimeoutExpired):
             pass
     group = process_group_observation(proc.pid)
     return proc.poll() is not None and group.state == "empty"
+
+
+def _review_admission_cleanup_token(cleanup: ReviewAdmissionCleanup | None) -> str:
+    if cleanup is None:
+        return "unverified"
+    if cleanup.status == "verified-post-release-reaped":
+        return "verified-post-release-reaped-v1"
+    if cleanup.status == "verified-never-launched" and cleanup.review_lease == "released":
+        return "verified-lease-released-v1"
+    if cleanup.status == "verified-never-launched" and cleanup.review_lease == "never-acquired":
+        return "verified-lease-never-acquired-v1"
+    return "unverified"
+
+
+def _unverified_review_admission_cleanup() -> ReviewAdmissionCleanup:
+    return ReviewAdmissionCleanup(
+        watchdog_group="unverified",
+        fenced_child_group="unverified",
+        readiness="unverified",
+        review_lease="unverified",
+        governed_witness="unverified",
+        payload_marker="unverified",
+        status="unverified",
+    )
+
+
+def _merge_review_cleanup_group_proof(
+    cleanup: ReviewAdmissionCleanup | None, registered_group_empty: bool,
+) -> ReviewAdmissionCleanup | None:
+    """Fold the transaction's exact registered-group proof into callback proof."""
+
+    if cleanup is None:
+        return None
+    watchdog_group = "empty" if registered_group_empty else "unverified"
+    verified = (
+        watchdog_group == "empty"
+        and cleanup.fenced_child_group == "empty"
+        and cleanup.readiness == "closed-removed"
+        and cleanup.review_lease in {"released", "never-acquired"}
+        and cleanup.governed_witness == "unlocked"
+    )
+    status = (
+        "verified-post-release-reaped"
+        if cleanup.status == "verified-post-release-reaped"
+        else "verified-never-launched"
+    ) if verified else "unverified"
+    return ReviewAdmissionCleanup(
+        watchdog_group=watchdog_group,
+        fenced_child_group=cleanup.fenced_child_group,
+        readiness=cleanup.readiness,
+        review_lease=cleanup.review_lease,
+        governed_witness=cleanup.governed_witness,
+        payload_marker=(
+            "may-have-started" if status == "verified-post-release-reaped"
+            else "absent"
+        ) if verified else "unverified",
+        status=status,
+    )
+
+
+def _record_review_admission_failure(
+    jobs: Path, attempt_id: str, cleanup: ReviewAdmissionCleanup | None,
+    *, post_release: bool = False,
+) -> bool:
+    """Annotate a claimed row using one lock acquisition, never from abort()."""
+
+    token = _review_admission_cleanup_token(cleanup)
+    if post_release and token.startswith("verified-"):
+        token = "verified-post-release-reaped-v1"
+    try:
+        with Path(f"{jobs}.lock").open("a", encoding="utf-8") as lock:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+            lines = Path(jobs).read_text(encoding="utf-8", errors="replace").splitlines()
+            matches: list[tuple[int, list[str], dict[str, str]]] = []
+            for index, line in enumerate(lines):
+                fields = line.split("\t")
+                if len(fields) != 6:
+                    continue
+                metadata = parse_registry_metadata(fields[5])
+                if metadata.get("attempt_id") == attempt_id:
+                    matches.append((index, fields, metadata))
+            if len(matches) != 1 or matches[0][2].get("launch_claimed") != "1":
+                return False
+            index, fields, metadata = matches[0]
+            updates = {
+                "launch_outcome": "post-release-failed" if post_release else "never-launched",
+                "review_admission": "aborted" if not post_release else "commit-failed",
+                "review_admission_cleanup": token,
+            }
+            parts = [
+                part for part in fields[5].split(",")
+                if part.split("=", 1)[0] not in updates
+            ]
+            parts.extend(f"{key}={value}" for key, value in sorted(updates.items()))
+            fields[5] = ",".join(parts)
+            lines[index] = "\t".join(fields)
+            _atomic_registry_replace(Path(jobs), lines)
+            return token != "unverified"
+    except (OSError, DispatchContractError):
+        return False
 
 
 def _parent_liveness_evidence(
@@ -3938,7 +4244,7 @@ def spawn_claimed_attempt(
     launch_metadata: dict[str, str] | None = None,
     preclaim: Callable[[list[str]], None] | None = None,
     pre_release: Callable[[dict[str, str]], dict[str, str] | None] | None = None,
-    post_claim: Callable[[dict[str, str]], dict[str, str] | None] | None = None,
+    post_claim: Callable[[dict[str, str]], dict[str, str] | PostClaimAdmission | None] | None = None,
 ) -> tuple[subprocess.Popen, dict[str, str]]:
     """Claim one registered attempt while publishing its fenced process.
 
@@ -4144,20 +4450,88 @@ def spawn_claimed_attempt(
                 ),
                 parent_binding.attempt_id,
             )
+        admission: PostClaimAdmission | None = None
+        admission_cleanup: ReviewAdmissionCleanup | None = None
+
+        def abort_admission(reason: str) -> ReviewAdmissionCleanup | None:
+            nonlocal admission_cleanup
+            if admission is None:
+                return None
+            try:
+                admission_cleanup = admission.abort(reason)
+            except BaseException:
+                admission_cleanup = _unverified_review_admission_cleanup()
+            if admission_cleanup is None:
+                admission_cleanup = _unverified_review_admission_cleanup()
+            return admission_cleanup
+
+        def record_admission_failure(*, post_release: bool = False) -> bool:
+            if admission is None and admission_cleanup is None:
+                return True
+            # The external annotator intentionally opens the same lock path
+            # independently.  Drop this fd first so fault injection cannot
+            # turn cleanup into a self-deadlock, then resume the caller's
+            # critical section for the surrounding context manager.
+            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+            try:
+                return _record_review_admission_failure(
+                    jobs, attempt_id, admission_cleanup, post_release=post_release
+                )
+            finally:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+
+        def finalize_admission_failure(
+            reason: str, *, post_release: bool = False
+        ) -> bool:
+            """Run every external cleanup effect before deriving the verdict."""
+
+            nonlocal admission_cleanup
+            registered_group_empty = _abort_fenced_launch(
+                proc,
+                -1 if post_release else gate_write,
+                identity["pid_start"],
+            )
+            returned_cleanup = abort_admission(reason)
+            if returned_cleanup is not None:
+                admission_cleanup = returned_cleanup
+            admission_cleanup = _merge_review_cleanup_group_proof(
+                admission_cleanup, registered_group_empty
+            )
+            annotation_verified = record_admission_failure(post_release=post_release)
+            cleanup_proof_verified = (
+                admission_cleanup is None
+                or _review_admission_cleanup_token(admission_cleanup) != "unverified"
+            )
+            return (
+                bool(registered_group_empty)
+                and bool(cleanup_proof_verified)
+                and bool(annotation_verified)
+            )
+
         if post_claim is not None:
             # Drop the jobs lock only for launches that actually need producer
             # admission. Ordinary launches retain their historical lock/fence
             # boundary unchanged.
             fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
             try:
+                raw_post = post_claim(dict(identity))
+                if isinstance(raw_post, PostClaimAdmission):
+                    admission = raw_post
+                    raw_post = raw_post.metadata
+                if raw_post is not None and not isinstance(raw_post, Mapping):
+                    raise DispatchContractError(
+                        "attempt-post-claim-result-invalid", type(raw_post).__name__
+                    )
                 post_metadata = {
                     key: str(value)
-                    for key, value in (post_claim(dict(identity)) or {}).items()
+                    for key, value in (raw_post or {}).items()
                     if value not in (None, "")
                 }
             except BaseException as exc:
-                cleanup_verified = _abort_fenced_launch(
-                    proc, gate_write, identity["pid_start"]
+                if isinstance(getattr(exc, "cleanup", None), ReviewAdmissionCleanup):
+                    admission_cleanup = exc.cleanup
+                cleanup_verified = finalize_admission_failure(
+                    "post-claim-callback-failed"
                 )
                 raise DispatchContractError(
                     "attempt-post-claim-callback-failed"
@@ -4172,8 +4546,8 @@ def spawn_claimed_attempt(
                 if any(char in value for char in ",\t\r\n")
             )
             if invalid_keys or invalid_values:
-                cleanup_verified = _abort_fenced_launch(
-                    proc, gate_write, identity["pid_start"]
+                cleanup_verified = finalize_admission_failure(
+                    "post-claim-metadata-invalid"
                 )
                 raise DispatchContractError(
                     "attempt-post-claim-metadata-invalid"
@@ -4251,8 +4625,11 @@ def spawn_claimed_attempt(
                 _atomic_registry_replace(jobs, fresh_lines)
                 identity.update(post_metadata)
             except (DispatchContractError, OSError) as exc:
-                cleanup_verified = _abort_fenced_launch(
-                    proc, gate_write, identity["pid_start"]
+                # Abort owns only external resources; this row annotation is
+                # deliberately performed here after cleanup and under one
+                # fresh lock acquisition to avoid the jobs-lock cycle.
+                cleanup_verified = finalize_admission_failure(
+                    "post-claim-record-failed"
                 )
                 if isinstance(exc, DispatchContractError):
                     reason, detail = exc.reason, exc.detail
@@ -4265,9 +4642,7 @@ def spawn_claimed_attempt(
         try:
             os.write(gate_write, b"1")
         except OSError as exc:
-            cleanup_verified = _abort_fenced_launch(
-                proc, gate_write, identity["pid_start"]
-            )
+            cleanup_verified = finalize_admission_failure("gate-write-failed")
             raise DispatchContractError(
                 (
                     "attempt-launch-fence-release-failed"
@@ -4278,6 +4653,18 @@ def spawn_claimed_attempt(
             ) from exc
         else:
             os.close(gate_write)
+        if admission is not None:
+            try:
+                admission.commit()
+            except BaseException as exc:
+                cleanup_verified = finalize_admission_failure(
+                    "post-release-commit-failed", post_release=True
+                )
+                raise DispatchContractError(
+                    "attempt-post-claim-commit-failed"
+                    if cleanup_verified else "attempt-launch-cleanup-unverified",
+                    str(exc),
+                ) from exc
         return proc, identity
 
 

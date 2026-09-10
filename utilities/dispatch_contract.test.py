@@ -3247,6 +3247,158 @@ class DispatchContractTest(unittest.TestCase):
   self.assertEqual(D.attempt_process_quiescence(identity),
                    D._attempt_process_quiescence_impl(identity))
 
+ def test_post_claim_admission_is_idempotent_and_rejects_commit_after_abort(self):
+  calls=[]
+  cleanup=D.ReviewAdmissionCleanup(
+   watchdog_group="empty", fenced_child_group="empty", readiness="closed-removed",
+   review_lease="never-acquired", governed_witness="unlocked",
+   payload_marker="absent", status="verified-never-launched")
+  admission=D.PostClaimAdmission(
+   {"review_admission":"prepared"},
+   abort=lambda reason: (calls.append(("abort",reason)) or cleanup),
+   commit=lambda: calls.append(("commit", "ok")),
+  )
+  first=admission.abort("fault")
+  self.assertIs(first, cleanup)
+  self.assertIs(admission.abort("duplicate"), cleanup)
+  with self.assertRaises(D.DispatchContractError) as caught:
+   admission.commit()
+  self.assertEqual(caught.exception.reason,"review-admission-commit-after-abort")
+  self.assertEqual(calls,[("abort","fault")])
+
+ def _cleanup_fault_row(self, base, attempt):
+  jobs=Path(base)/"jobs.log"
+  row=(f"2026-07-23T00:00:01Z\topen\t/repo\t/wt\tchild\t{CURRENT},"
+       f"attempt_id={attempt}")
+  self.assertTrue(D.claim_attempt_row(jobs,attempt,row,launch=False))
+  return jobs
+
+ @staticmethod
+ def _cleanup_fault_spawn(gate_fd):
+  return subprocess.Popen(
+   [sys.executable,str(Path(__file__).with_name("launch-fence.py")),
+    "--parent-pid",str(os.getpid()),"--gate-fd",str(gate_fd),"--",
+    "sleep","60"], pass_fds=(gate_fd,), start_new_session=True)
+
+ @staticmethod
+ def _cleanup_record(status="verified-never-launched", lease="released"):
+  return D.ReviewAdmissionCleanup(
+   watchdog_group="empty", fenced_child_group="empty",
+   readiness="closed-removed", review_lease=lease,
+   governed_witness="unlocked",
+   payload_marker=("may-have-started" if status == "verified-post-release-reaped" else "absent"),
+   status=status)
+
+ def test_post_claim_abort_runs_when_registered_group_proof_fails_and_annotates_unverified(self):
+  with tempfile.TemporaryDirectory() as td:
+   jobs=self._cleanup_fault_row(td,"att-cleanup-group-fault")
+   child=[];abort_calls=[]
+   cleanup=self._cleanup_record()
+   def spawn(gate_fd):
+    proc=self._cleanup_fault_spawn(gate_fd);child.append(proc);return proc
+   admission=D.PostClaimAdmission(
+    {"review_admission":"prepared","invalid":"metadata"},
+    abort=lambda reason: (abort_calls.append(reason) or cleanup),
+    commit=lambda: None)
+   with mock.patch.object(D,"_abort_fenced_launch",return_value=False):
+    with self.assertRaises(D.DispatchContractError) as caught:
+     D.spawn_claimed_attempt(jobs,"att-cleanup-group-fault",parent_binding=None,spawn=spawn,
+                             post_claim=lambda _identity: admission)
+   self.assertEqual(caught.exception.reason,"attempt-launch-cleanup-unverified")
+   self.assertEqual(abort_calls,["post-claim-metadata-invalid"])
+   meta=D.parse_registry_metadata(jobs.read_text().strip().split("\t",5)[5])
+   self.assertEqual(meta["review_admission"],"aborted")
+   self.assertEqual(meta["review_admission_cleanup"],"unverified")
+   self.assertEqual(meta["launch_claimed"],"1")
+   for proc in child:
+    if proc.poll() is None:proc.kill()
+    proc.wait()
+
+ def test_post_claim_abort_merges_returned_cleanup_after_registered_group_proof(self):
+  with tempfile.TemporaryDirectory() as td:
+   jobs=self._cleanup_fault_row(td,"att-cleanup-merge")
+   child=[];abort_calls=[]
+   cleanup=self._cleanup_record()
+   def spawn(gate_fd):
+    proc=self._cleanup_fault_spawn(gate_fd);child.append(proc);return proc
+   def mutate(_identity):
+    fields=jobs.read_text().strip().split("\t")
+    fields[1]="done"
+    jobs.write_text("\t".join(fields)+"\n")
+    return D.PostClaimAdmission(
+     {"review_admission":"prepared"},
+     abort=lambda reason: (abort_calls.append(reason) or cleanup),
+     commit=lambda: None)
+   with mock.patch.object(D,"_abort_fenced_launch",return_value=True):
+    with self.assertRaises(D.DispatchContractError) as caught:
+     D.spawn_claimed_attempt(jobs,"att-cleanup-merge",parent_binding=None,spawn=spawn,
+                             post_claim=mutate)
+   self.assertEqual(caught.exception.reason,"attempt-post-claim-identity-changed")
+   self.assertEqual(abort_calls,["post-claim-record-failed"])
+   meta=D.parse_registry_metadata(jobs.read_text().strip().split("\t",5)[5])
+   self.assertEqual(meta["review_admission"],"aborted")
+   self.assertEqual(meta["review_admission_cleanup"],"verified-lease-released-v1")
+   for proc in child:
+    if proc.poll() is None:proc.kill()
+    proc.wait()
+
+ def test_post_release_commit_failure_merges_cleanup_and_records_terminal_failure(self):
+  with tempfile.TemporaryDirectory() as td:
+   jobs=self._cleanup_fault_row(td,"att-cleanup-commit")
+   child=[];abort_calls=[]
+   cleanup=self._cleanup_record("verified-post-release-reaped")
+   def spawn(gate_fd):
+    proc=self._cleanup_fault_spawn(gate_fd);child.append(proc);return proc
+   admission=D.PostClaimAdmission(
+    {"review_admission":"prepared"},
+    abort=lambda reason: (abort_calls.append(reason) or cleanup),
+    commit=lambda: (_ for _ in ()).throw(RuntimeError("commit-close-fault")))
+   with mock.patch.object(D,"_abort_fenced_launch",return_value=True):
+    with self.assertRaises(D.DispatchContractError) as caught:
+     D.spawn_claimed_attempt(jobs,"att-cleanup-commit",parent_binding=None,spawn=spawn,
+                             post_claim=lambda _identity: admission)
+   self.assertEqual(caught.exception.reason,"attempt-post-claim-commit-failed")
+   self.assertEqual(abort_calls,["post-release-commit-failed"])
+   meta=D.parse_registry_metadata(jobs.read_text().strip().split("\t",5)[5])
+   self.assertEqual(meta["review_admission"],"commit-failed")
+   self.assertEqual(meta["review_admission_cleanup"],"verified-post-release-reaped-v1")
+   self.assertEqual(meta["launch_outcome"],"post-release-failed")
+   for proc in child:
+    if proc.poll() is None:proc.kill()
+    proc.wait()
+
+ def test_review_holder_uses_live_process_past_deadline_and_rejects_future_timestamp(self):
+  identity=D.process_launch_identity(os.getpid())
+  nonce="f"*64
+  metadata=dict(identity,attempt_id="att-holder",review_governed_lease=D.REVIEW_GOVERNED_LEASE_KIND,
+               review_governed_lease_nonce=nonce)
+  record={"schema_version":2,"attempt_id":"att-holder","cycle_id":"cyc-holder",
+          "acquired_at":"2020-01-01T00:00:00Z","deadline":"2020-01-01T00:01:00Z",
+          "released_at":None,"expired":False}
+  metadata["review_lease_record_digest"]=D.review_lease_record_digest(record)
+  self.assertEqual(D.review_holder_disposition(record,metadata,Path("/tmp"),now=2_000_000_000).state,"live")
+  future=dict(record,acquired_at="2099-01-01T00:00:00Z",deadline="2099-01-01T00:01:00Z")
+  self.assertEqual(D.review_holder_disposition(future,metadata,Path("/tmp"),now=2_000_000_000).reason,
+                   "lease-acquired-in-future")
+
+ def test_review_holder_uses_flock_only_for_namespace_unverifiable(self):
+  nonce="0"*64
+  metadata={"attempt_id":"att-witness","pid":"1","pid_start":"1","pgid":"1",
+            "pid_ns":"n","pid_observer_ns":"o","review_governed_lease":D.REVIEW_GOVERNED_LEASE_KIND,
+            "review_governed_lease_nonce":nonce}
+  record={"schema_version":2,"attempt_id":"att-witness","cycle_id":"cyc-witness",
+          "acquired_at":"2020-01-01T00:00:00Z","deadline":"2099-01-01T00:01:00Z",
+          "released_at":None,"expired":False}
+  metadata["review_lease_record_digest"]=D.review_lease_record_digest(record)
+  with mock.patch.object(D,"attempt_governed_process_quiescence",
+                         return_value=D.ProcessQuiescence("unverifiable","process-namespace-unverifiable")), \
+       mock.patch.object(D,"review_governed_lease_is_held",return_value=True):
+   self.assertEqual(D.review_holder_disposition(record,metadata,Path("/tmp")).state,"live")
+  with mock.patch.object(D,"attempt_governed_process_quiescence",
+                         return_value=D.ProcessQuiescence("quiescent","process-pid-gone")), \
+       mock.patch.object(D,"review_governed_lease_is_held",return_value=True):
+   self.assertEqual(D.review_holder_disposition(record,metadata,Path("/tmp")).state,"dead")
+
 def extinct_metadata(attempt="att-extinct-fixture"):
  # CURRENT (used by attempt_row()) already carries registered_worker=1.
  return cancellation_metadata(attempt)

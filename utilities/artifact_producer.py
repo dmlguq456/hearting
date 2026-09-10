@@ -33,6 +33,7 @@ with an explicit promotion (D-3).
 from __future__ import annotations
 
 import argparse
+from datetime import datetime, timezone
 import hashlib
 import json
 import os
@@ -57,6 +58,8 @@ import dispatch_lock_order  # noqa: E402
 import dispatch_terminal_commit  # noqa: E402
 from dispatch_contract import (  # noqa: E402
     _PROCESS_IDENTITY_METADATA_KEYS,
+    REVIEW_GOVERNED_LEASE_KIND,
+    REVIEW_GOVERNED_LEASE_NONCE_RE,
     encode_review_output_locator,
     review_governed_lease_is_held,
     review_lease_record_digest,
@@ -66,6 +69,12 @@ from dispatch_contract import (  # noqa: E402
     review_output_binding_digest,
     review_output_write_authorized,
     validate_review_output_binding,
+    review_holder_disposition,
+)
+from dispatch_lifecycle import (
+    FiniteWatchdogBudget,
+    begin_finite_watchdog,
+    remaining_watchdog_seconds,
 )
 
 PRODUCER_REL = ".runtime/artifact-producer/v1"
@@ -162,6 +171,11 @@ class ProducerError(Exception):
 def _rfc3339(now: Optional[float] = None) -> str:
     t = time.time() if now is None else now
     return time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(t)) + "Z"
+
+
+def _rfc3339_precise(now: Optional[float] = None) -> str:
+    t = time.time() if now is None else float(now)
+    return datetime.fromtimestamp(t, tz=timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
 
 
 def _canonical(payload: Any) -> bytes:
@@ -1500,7 +1514,10 @@ def _review_lease_path(root: Path, cycle_id: str, attempt_id: str) -> Path:
 
 
 def _rfc3339_to_epoch(value: str) -> float:
-    return time.mktime(time.strptime(value, "%Y-%m-%dT%H:%M:%SZ")) - time.timezone
+    try:
+        return time.mktime(time.strptime(value, "%Y-%m-%dT%H:%M:%SZ")) - time.timezone
+    except ValueError:
+        return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
 
 
 def _lease_record_is_live(
@@ -1525,8 +1542,6 @@ def _lease_record_is_live(
     except (ValueError, OverflowError):
         return True
     when = time.time() if now is None else now
-    if when > deadline_ts:
-        return False
     if _is_v2_review_lease(record):
         if record.get("expired") is not False:
             return True
@@ -1538,22 +1553,26 @@ def _lease_record_is_live(
             )
         except (ValueError, OverflowError):
             return True
-        nonce = record.get("review_governed_lease_nonce")
-        if (
-            root is None or acquired_ts is None or acquired_ts > when
-            or deadline_ts <= acquired_ts
-            or not isinstance(record.get("attempt_id"), str)
-            or not isinstance(record.get("cycle_id"), str)
-            or record.get("review_governed_lease") is None
-            or not isinstance(nonce, str)
-        ):
+        if root is None or acquired_ts is None or acquired_ts > when or deadline_ts <= acquired_ts:
             return True
-        return review_governed_lease_is_held(root, {
-            "attempt_id": record["attempt_id"],
-            "review_cycle_id": record["cycle_id"],
-            "review_governed_lease": record["review_governed_lease"],
-            "review_governed_lease_nonce": nonce,
-        })
+        metadata = dict(record)
+        metadata["review_cycle_id"] = record.get("cycle_id", "")
+        # The record stores the sealed fields while the jobs row mirrors the
+        # digest.  Reconstruct that mirror for the closed disposition so a
+        # dead exact holder can unblock abandon instead of being treated as
+        # malformed forever.
+        metadata["review_lease_record_digest"] = review_lease_record_digest(record)
+        disposition = review_holder_disposition(record, metadata, root, now=when)
+        if disposition.state in {"live", "malformed"}:
+            return True
+        if disposition.state == "dead":
+            return False
+        # Valid but unobservable holders remain conservative until the finite
+        # stale ceiling, after which time permits recovery but never grants a
+        # write.
+        return when <= deadline_ts
+    if when > deadline_ts:
+        return False
     pid = record.get("pid")
     pid_start = record.get("pid_start")
     pgid = record.get("pgid")
@@ -1778,6 +1797,7 @@ def review_lease_acquire(
     binding: Optional[Mapping[str, Any]] = None,
     governed_identity: Optional[Mapping[str, Any]] = None,
     jobs: Optional[str | Path] = None,
+    watchdog_budget: Optional[FiniteWatchdogBudget] = None,
 ) -> Dict[str, Any]:
     root = Path(root).resolve()
     lock_fd = artifact_admission._acquire_lock(root, artifact_admission.LOCK_TIMEOUT_DEFAULT, now=now)
@@ -1791,6 +1811,17 @@ def review_lease_acquire(
         existing = _read_json(path)
         when = time.time() if now is None else now
         v2_requested = review_output is not None or binding is not None
+        if v2_requested and watchdog_budget is None:
+            watchdog_budget = begin_finite_watchdog(
+                deadline_seconds, origin_epoch=when
+            )
+        if v2_requested and not isinstance(watchdog_budget, FiniteWatchdogBudget):
+            raise ProducerError("review-lease-budget-invalid", attempt_id)
+        if v2_requested and watchdog_budget is not None:
+            if remaining_watchdog_seconds(watchdog_budget) <= 0:
+                raise ProducerError("review-lease-budget-exhausted", attempt_id)
+            if when < watchdog_budget.origin_epoch:
+                raise ProducerError("review-lease-budget-contradictory", attempt_id)
         # E47-9: the same (cycle, attempt) re-acquiring its own still-live
         # lease is an idempotent no-op -- zero state change.
         existing_live = existing is not None and _lease_record_is_live(
@@ -1856,10 +1887,16 @@ def review_lease_acquire(
                 for key in _PROCESS_IDENTITY_METADATA_KEYS
             ):
                 raise ProducerError("review-lease-identity-mismatch", attempt_id)
+            nonce = identity.get("review_governed_lease_nonce", registry_metadata.get("review_governed_lease_nonce"))
+            if not isinstance(nonce, str) or REVIEW_GOVERNED_LEASE_NONCE_RE.fullmatch(nonce) is None:
+                raise ProducerError("review-governed-lease-nonce-invalid", attempt_id)
+            if (
+                registry_metadata.get("review_governed_lease") != REVIEW_GOVERNED_LEASE_KIND
+                or registry_metadata.get("review_governed_lease_nonce") != nonce
+            ):
+                raise ProducerError("review-governed-lease-nonce-mismatch", attempt_id)
             if not review_governed_lease_is_held(root, registry_metadata):
                 raise ProducerError("review-governed-lease-not-held", attempt_id)
-            if not isinstance(deadline_seconds, (int, float)) or not 1.0 <= float(deadline_seconds) <= 900.0:
-                raise ProducerError("review-lease-deadline-invalid", str(deadline_seconds))
             schema_version = 2
             binding_digest = str(canonical_binding["digest"])
         else:
@@ -1900,11 +1937,24 @@ def review_lease_acquire(
         pid = int(identity.get("pid", os.getpid()))
         pid_start = str(identity.get("pid_start", process_start_ticks(pid) or ""))
         pgid = int(identity.get("pgid", os.getpgid(pid)))
+        lease_seconds = (
+            watchdog_budget.timeout_seconds
+            if schema_version == 2 and watchdog_budget is not None
+            else max(1.0, deadline_seconds)
+        )
         record = {
             "schema_version": schema_version, "cycle_id": cycle_id, "attempt_id": attempt_id,
             "pid": pid, "pid_start": pid_start,
             "pgid": pgid, "acquired_at": _rfc3339(when),
-            "deadline": _rfc3339(when + max(1.0, deadline_seconds)),
+            # The audit wall deadline belongs to the one launch-origin clock,
+            # not to the later lease-acquisition moment.  ``acquired_at``
+            # remains the real acquisition observation for future-timestamp
+            # rejection and audit coherence.
+            "deadline": (_rfc3339_precise(
+                watchdog_budget.origin_epoch + watchdog_budget.timeout_seconds
+                if schema_version == 2 and watchdog_budget is not None
+                else when + lease_seconds
+            ) if schema_version == 2 else _rfc3339(when + lease_seconds)),
             "released_at": None, "expired": False,
         }
         if schema_version == 2:
@@ -1918,6 +1968,12 @@ def review_lease_acquire(
                 "producer_id": canonical_binding["producer_id"],
                 "review_governed_lease": registry_metadata.get("review_governed_lease"),
                 "review_governed_lease_nonce": registry_metadata.get("review_governed_lease_nonce"),
+                "watchdog_timeout_seconds": watchdog_budget.timeout_seconds,
+                "watchdog_origin_monotonic_ns": watchdog_budget.origin_monotonic_ns,
+                "watchdog_deadline_monotonic_ns": watchdog_budget.deadline_monotonic_ns,
+                "watchdog_origin_epoch": watchdog_budget.origin_epoch,
+                "watchdog_deadline_epoch": watchdog_budget.origin_epoch + watchdog_budget.timeout_seconds,
+                "watchdog_budget_digest": watchdog_budget.digest,
             })
             for key in _PROCESS_IDENTITY_METADATA_KEYS:
                 if key in identity:

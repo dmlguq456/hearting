@@ -4,16 +4,21 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import hashlib
+import json
 import math
 import os
 from pathlib import Path
 import signal
 import subprocess
 import time
-from typing import Callable, Mapping
+from typing import Any, Callable, Mapping, Sequence
 
 from dispatch_contract import (
+    DispatchContractError,
     GROUP_REAP_PROOF,
+    PostClaimAdmission,
+    ReviewAdmissionCleanup,
     process_group_observation,
     process_identity_is_live,
     process_start_ticks,
@@ -26,6 +31,479 @@ LIFECYCLES = (DETACHED, FOREGROUND_SCOPED)
 
 FOREGROUND_TIMEOUT_DEFAULT = 3600.0  # 1h: what a non-positive/non-finite request clamps to
 FOREGROUND_TIMEOUT_MAX = 86400.0  # 24h hard ceiling: no finite request may be effectively infinite
+_REVIEW_WITNESS_UNLOCK_TIMEOUT = 1.0
+_REVIEW_WITNESS_POLL_INTERVAL = 0.02
+
+
+@dataclass(frozen=True)
+class FiniteWatchdogBudget:
+    """One immutable launch-origin budget shared by every lifecycle consumer.
+
+    ``deadline_monotonic_ns`` is the only enforcement clock.  The epoch value
+    is retained solely as an audit/cross-process representation; consumers must
+    not derive a second deadline from it.
+    """
+
+    timeout_seconds: float
+    origin_monotonic_ns: int
+    deadline_monotonic_ns: int
+    origin_epoch: float
+
+    def __post_init__(self) -> None:
+        if (
+            isinstance(self.timeout_seconds, bool)
+            or not isinstance(self.timeout_seconds, (int, float))
+            or not math.isfinite(self.timeout_seconds)
+            or self.timeout_seconds <= 0
+            or self.timeout_seconds > FOREGROUND_TIMEOUT_MAX
+            or isinstance(self.origin_monotonic_ns, bool)
+            or not isinstance(self.origin_monotonic_ns, int)
+            or isinstance(self.deadline_monotonic_ns, bool)
+            or not isinstance(self.deadline_monotonic_ns, int)
+            or self.origin_monotonic_ns < 0
+            or self.deadline_monotonic_ns != self.origin_monotonic_ns + int(self.timeout_seconds * 1_000_000_000)
+            or isinstance(self.origin_epoch, bool)
+            or not isinstance(self.origin_epoch, (int, float))
+            or not math.isfinite(self.origin_epoch)
+        ):
+            raise ValueError("invalid-finite-watchdog-budget")
+
+    @property
+    def digest(self) -> str:
+        payload = {
+            "timeout_seconds": self.timeout_seconds,
+            "origin_monotonic_ns": self.origin_monotonic_ns,
+            "deadline_monotonic_ns": self.deadline_monotonic_ns,
+            "origin_epoch": self.origin_epoch,
+        }
+        encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+        return "sha256:" + hashlib.sha256(encoded).hexdigest()
+
+
+def begin_finite_watchdog(
+    raw_timeout: object = None, *, origin_monotonic_ns: int | None = None,
+    origin_epoch: float | None = None,
+) -> FiniteWatchdogBudget:
+    """Normalize once and start the authoritative launch-origin clock."""
+
+    try:
+        requested = float(raw_timeout) if raw_timeout is not None else float("nan")
+    except (TypeError, ValueError, OverflowError):
+        requested = float("nan")
+    if not math.isfinite(requested) or requested <= 0:
+        requested = FOREGROUND_TIMEOUT_DEFAULT
+    else:
+        requested = min(requested, FOREGROUND_TIMEOUT_MAX)
+    origin_ns = time.monotonic_ns() if origin_monotonic_ns is None else origin_monotonic_ns
+    if isinstance(origin_ns, bool) or not isinstance(origin_ns, int) or origin_ns < 0:
+        raise ValueError("invalid-watchdog-origin-monotonic")
+    epoch = time.time() if origin_epoch is None else origin_epoch
+    if isinstance(epoch, bool) or not isinstance(epoch, (int, float)) or not math.isfinite(float(epoch)):
+        raise ValueError("invalid-watchdog-origin-epoch")
+    return FiniteWatchdogBudget(
+        timeout_seconds=requested,
+        origin_monotonic_ns=origin_ns,
+        deadline_monotonic_ns=origin_ns + int(requested * 1_000_000_000),
+        origin_epoch=float(epoch),
+    )
+
+
+def remaining_watchdog_seconds(
+    budget: FiniteWatchdogBudget, *, now_monotonic_ns: int | None = None
+) -> float:
+    """Return remaining time from an existing budget without starting a clock."""
+
+    if not isinstance(budget, FiniteWatchdogBudget):
+        raise TypeError("watchdog-budget-required")
+    now = time.monotonic_ns() if now_monotonic_ns is None else now_monotonic_ns
+    return max(0.0, (budget.deadline_monotonic_ns - now) / 1_000_000_000)
+
+
+def launch_review_watchdog(*args, **kwargs):
+    """Common launcher seam kept here for adapter callers.
+
+    The import is intentionally lazy: ``dispatch_contract`` is a dependency of
+    this module, while the watchdog implementation uses this budget module.
+    """
+
+    from review_watchdog import launch_review_watchdog as _launch
+
+    return _launch(*args, **kwargs)
+
+
+class ReviewAdmissionError(DispatchContractError):
+    """A typed, already-cleaned failure while joining watchdog admission."""
+
+    def __init__(self, reason: str, detail: str, cleanup: ReviewAdmissionCleanup):
+        super().__init__(reason, detail)
+        self.cleanup = cleanup
+
+
+def _review_cleanup(
+    handle: Any,
+    *,
+    child: Mapping[str, object] | None,
+    lease_acquired: bool,
+    lease_release: Callable[[], Any] | None,
+    witness_probe: Callable[[], bool] | None,
+    payload_marker: str = "absent",
+) -> ReviewAdmissionCleanup:
+    """Close external admission resources without touching the jobs lock."""
+
+    control_ok = True
+    committing = bool(getattr(handle, "_committing", False))
+    if not committing:
+        try:
+            if getattr(handle, "control_fd", -1) >= 0 and not getattr(handle, "_control_closed", False):
+                handle.abort()
+        except BaseException:
+            control_ok = False
+            try:
+                handle.close_control()
+            except BaseException:
+                pass
+    else:
+        # A commit write may have reached the watchdog before its close fault.
+        # Never send ABORT after that point; post-release cleanup is governed by
+        # the sealed watchdog identity and the same absolute budget.
+        try:
+            handle.close_control()
+        except BaseException:
+            control_ok = False
+    process = getattr(handle, "process", None)
+    watchdog_ok = False
+    if process is not None:
+        receipt = getattr(handle, "receipt", None)
+        expected = receipt.get("watchdog") if isinstance(receipt, Mapping) else None
+        expected_identity = (
+            expected if isinstance(expected, Mapping)
+            and str(expected.get("pid", "")) == str(getattr(process, "pid", ""))
+            and all(str(expected.get(key, "")) for key in (
+                "pid_start", "pgid", "pid_ns", "pid_observer_ns"
+            )) else None
+        )
+        try:
+            process.wait(timeout=1.0)
+        except (OSError, subprocess.TimeoutExpired):
+            # The current /proc start value is never a cleanup target.  If the
+            # sealed readiness identity is absent, no signal is safe.
+            if expected_identity is not None:
+                try:
+                    signal_exact_process_group(
+                        int(expected_identity["pid"]),
+                        str(expected_identity["pid_start"]), signal.SIGKILL,
+                    )
+                    process.wait(timeout=1.0)
+                except (BaseException, subprocess.TimeoutExpired):
+                    pass
+        try:
+            watchdog_ok = (
+                expected_identity is not None
+                and process.poll() is not None
+                and process_group_observation(int(expected_identity["pgid"])).state == "empty"
+            )
+        except (OSError, TypeError, ValueError):
+            watchdog_ok = False
+    child_ok = child is None
+    if child is not None:
+        try:
+            child_pgid = int(str(child.get("pgid", "")))
+            child_ok = (
+                all(str(child.get(key, "")) for key in (
+                    "pid_start", "pid_ns", "pid_observer_ns"
+                ))
+                and process_group_observation(child_pgid).state == "empty"
+            )
+        except (OSError, TypeError, ValueError):
+            child_ok = False
+    lease_state = "never-acquired"
+    if lease_acquired:
+        lease_state = "released"
+        if lease_release is None:
+            lease_state = "unverified"
+        else:
+            try:
+                release_result = lease_release()
+                if release_result is False:
+                    lease_state = "unverified"
+            except BaseException:
+                lease_state = "unverified"
+    witness_state = "unlocked"
+    if lease_acquired and witness_probe is None:
+        witness_state = "unverified"
+    elif witness_probe is not None:
+        # This proof is intentionally after the exact watchdog wait/death and
+        # is bounded by an absolute monotonic deadline.  A single probe can
+        # race the watchdog's finally block; an unbounded wait would leak the
+        # launch transaction.
+        deadline = time.monotonic() + _REVIEW_WITNESS_UNLOCK_TIMEOUT
+        witness_state = "unverified"
+        while True:
+            try:
+                if bool(witness_probe()):
+                    witness_state = "unlocked"
+                    break
+            except BaseException:
+                break
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            time.sleep(min(_REVIEW_WITNESS_POLL_INTERVAL, remaining))
+    readiness_fd = getattr(handle, "readiness_fd", -1)
+    if readiness_fd >= 0:
+        _close(readiness_fd)
+        handle.readiness_fd = -1
+    readiness_state = "closed-removed" if getattr(handle, "readiness_fd", -1) < 0 else "unverified"
+    verified = (
+        control_ok and watchdog_ok and child_ok
+        and readiness_state == "closed-removed"
+        and lease_state in {"released", "never-acquired"}
+        and witness_state == "unlocked"
+    )
+    post_release = committing
+    return ReviewAdmissionCleanup(
+        watchdog_group="empty" if watchdog_ok else "unverified",
+        fenced_child_group="empty" if child_ok else "unverified",
+        readiness=readiness_state,
+        review_lease=lease_state,
+        governed_witness=witness_state,
+        payload_marker=("may-have-started" if post_release else payload_marker) if verified else "unverified",
+        status=("verified-post-release-reaped" if post_release else "verified-never-launched") if verified else "unverified",
+    )
+
+
+def acquire_review_admission(
+    *,
+    handle: Any,
+    budget: FiniteWatchdogBudget,
+    identity: Mapping[str, str],
+    root: str | Path,
+    cycle_id: str,
+    attempt_id: str,
+    review_output: str | Path,
+    binding: Mapping[str, object],
+    jobs: str | Path,
+    nonce: str,
+    lease_acquire: Callable[..., Mapping[str, object]] | None = None,
+    lease_release: Callable[[], Any] | None = None,
+    witness_probe: Callable[[], bool] | None = None,
+    readiness_timeout: float | None = None,
+) -> PostClaimAdmission:
+    """Join a watchdog and lease as one closed, adapter-neutral transaction.
+
+    The callback parameters are deliberate dependency-injection seams.  The
+    default lease import is lazy so the three adapters can call this helper
+    without creating an import cycle or changing their public callback shape.
+    """
+
+    if not isinstance(budget, FiniteWatchdogBudget):
+        raise DispatchContractError("review-admission-budget-invalid")
+    if not isinstance(nonce, str) or len(nonce) != 64 or any(
+        char not in "0123456789abcdef" for char in nonce
+    ):
+        raise DispatchContractError("review-admission-nonce-invalid")
+    supplied_identity_nonce = identity.get("review_governed_lease_nonce")
+    if supplied_identity_nonce not in (None, nonce):
+        raise DispatchContractError("review-admission-nonce-mismatch")
+    receipt: Mapping[str, object] | None = None
+    lease_acquired = False
+    if lease_acquire is None:
+        from artifact_producer import review_lease_acquire as lease_acquire
+    if lease_release is None:
+        from artifact_producer import review_lease_release
+        lease_release = lambda: review_lease_release(
+            Path(root), cycle_id=cycle_id, attempt_id=attempt_id
+        )
+    try:
+        receipt = handle.read_ready(timeout=readiness_timeout)
+        watchdog = receipt.get("watchdog")
+        child = receipt.get("child")
+        if not isinstance(watchdog, Mapping) or not isinstance(child, Mapping):
+            raise DispatchContractError("review-admission-readiness-invalid")
+        for key in ("pid", "pid_start", "pgid", "pid_ns", "pid_observer_ns"):
+            if str(watchdog.get(key, "")) != str(identity.get(key, "")):
+                raise DispatchContractError("review-admission-watchdog-identity-mismatch", key)
+            if not str(child.get(key, "")):
+                raise DispatchContractError("review-admission-child-identity-incomplete", key)
+        if receipt.get("budget_digest") != budget.digest:
+            raise DispatchContractError("review-admission-budget-digest-mismatch")
+        if receipt.get("deadline_monotonic_ns") != budget.deadline_monotonic_ns:
+            raise DispatchContractError("review-admission-deadline-mismatch")
+        if receipt.get("nonce") != nonce:
+            raise DispatchContractError("review-admission-nonce-mismatch")
+        governed_identity = dict(identity)
+        governed_identity["review_governed_lease"] = "summary-flock-v1"
+        governed_identity["review_governed_lease_nonce"] = nonce
+        result = lease_acquire(
+            Path(root), cycle_id=cycle_id, attempt_id=attempt_id,
+            review_output=review_output, binding=binding,
+            deadline_seconds=budget.timeout_seconds,
+            governed_identity=governed_identity, jobs=jobs, watchdog_budget=budget,
+        )
+        if not isinstance(result, Mapping) or result.get("status") not in {"acquired", "already-held"}:
+            raise DispatchContractError("review-admission-lease-not-acquired")
+        lease_acquired = True
+        registry_metadata = result.get("registry_metadata")
+        if not isinstance(registry_metadata, Mapping):
+            raise DispatchContractError("review-admission-lease-metadata-missing")
+        child_fields = {
+            "review_admission": "prepared",
+            "review_watchdog_budget_digest": budget.digest,
+            "review_readiness_digest": str(receipt["receipt_digest"]),
+            "review_fence_pid": str(child["pid"]),
+            "review_fence_pid_start": str(child["pid_start"]),
+            "review_fence_pgid": str(child["pgid"]),
+            "review_fence_pid_ns": str(child["pid_ns"]),
+            "review_fence_pid_observer_ns": str(child["pid_observer_ns"]),
+            "review_governed_lease_nonce": nonce,
+        }
+        metadata = {
+            key: str(value) for key, value in registry_metadata.items()
+            if value not in (None, "")
+        }
+        metadata.update(child_fields)
+        cleanup_result: ReviewAdmissionCleanup | None = None
+
+        def abort(reason: str) -> ReviewAdmissionCleanup:
+            nonlocal cleanup_result
+            if cleanup_result is None:
+                cleanup_result = _review_cleanup(
+                    handle, child=child, lease_acquired=lease_acquired,
+                    lease_release=lease_release, witness_probe=witness_probe,
+                )
+            return cleanup_result
+
+        def commit() -> None:
+            handle.commit()
+
+        return PostClaimAdmission(metadata, abort=abort, commit=commit)
+    except BaseException as exc:
+        child_mapping = receipt.get("child") if isinstance(receipt, Mapping) else None
+        cleanup = _review_cleanup(
+            handle,
+            child=child_mapping if isinstance(child_mapping, Mapping) else None,
+            lease_acquired=lease_acquired,
+            lease_release=lease_release,
+            witness_probe=witness_probe,
+        )
+        if isinstance(exc, ReviewAdmissionError):
+            raise
+        raise ReviewAdmissionError(
+            getattr(exc, "reason", "review-admission-failed"), str(exc), cleanup
+        ) from exc
+
+
+def acquire_foreground_review_admission(
+    *,
+    budget: FiniteWatchdogBudget,
+    identity: Mapping[str, str],
+    root: str | Path,
+    cycle_id: str,
+    attempt_id: str,
+    review_output: str | Path,
+    binding: Mapping[str, object],
+    jobs: str | Path,
+    lease_acquire: Callable[..., Mapping[str, object]] | None = None,
+    lease_release: Callable[[], Any] | None = None,
+    witness_probe: Callable[[], bool] | None = None,
+) -> PostClaimAdmission:
+    """Acquire a foreground review lease without inventing a sidecar identity.
+
+    Foreground launches already have the exact registered process identity and
+    are reaped by ``spawn_claimed_attempt``.  This admission object contributes
+    only the external lease/witness half of rollback; its abort callback proves
+    the direct process group is empty after the transaction closes that group.
+    """
+
+    if not isinstance(budget, FiniteWatchdogBudget):
+        raise DispatchContractError("review-admission-budget-invalid")
+    if lease_acquire is None:
+        from artifact_producer import review_lease_acquire as lease_acquire
+    if lease_release is None:
+        from artifact_producer import review_lease_release
+        lease_release = lambda: review_lease_release(
+            Path(root), cycle_id=cycle_id, attempt_id=attempt_id
+        )
+    governed_identity = dict(identity)
+    result = lease_acquire(
+        Path(root), cycle_id=cycle_id, attempt_id=attempt_id,
+        review_output=review_output, binding=binding,
+        deadline_seconds=budget.timeout_seconds,
+        governed_identity=governed_identity, jobs=jobs, watchdog_budget=budget,
+    )
+    if not isinstance(result, Mapping) or result.get("status") not in {
+        "acquired", "already-held"
+    }:
+        raise DispatchContractError("review-admission-lease-not-acquired")
+    registry_metadata = result.get("registry_metadata")
+    if not isinstance(registry_metadata, Mapping):
+        raise DispatchContractError("review-lease-metadata-missing")
+
+    metadata = {
+        key: str(value) for key, value in registry_metadata.items()
+        if value not in (None, "")
+    }
+    metadata["review_admission"] = "prepared"
+    nonce = governed_identity.get("review_governed_lease_nonce")
+    if nonce:
+        metadata["review_governed_lease_nonce"] = str(nonce)
+    cleanup_result: ReviewAdmissionCleanup | None = None
+
+    def abort(_reason: str) -> ReviewAdmissionCleanup:
+        nonlocal cleanup_result
+        if cleanup_result is not None:
+            return cleanup_result
+        lease_state = "released"
+        try:
+            release_result = lease_release()
+            if release_result is False:
+                lease_state = "unverified"
+            elif isinstance(release_result, Mapping) and release_result.get("status") not in {
+                "released", "already-released"
+            }:
+                lease_state = "unverified"
+        except BaseException:
+            lease_state = "unverified"
+        witness_state = "unlocked"
+        if witness_probe is not None:
+            witness_deadline = time.monotonic() + _REVIEW_WITNESS_UNLOCK_TIMEOUT
+            witness_state = "unverified"
+            while True:
+                try:
+                    if bool(witness_probe()):
+                        witness_state = "unlocked"
+                        break
+                except BaseException:
+                    break
+                remaining = witness_deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                time.sleep(min(_REVIEW_WITNESS_POLL_INTERVAL, remaining))
+        try:
+            pgid = int(str(identity.get("pgid", "")))
+            group_empty = process_group_observation(pgid).state == "empty"
+        except (OSError, TypeError, ValueError):
+            group_empty = False
+        verified = (
+            group_empty
+            and lease_state == "released"
+            and witness_state == "unlocked"
+        )
+        cleanup_result = ReviewAdmissionCleanup(
+            watchdog_group="empty",
+            fenced_child_group="empty" if group_empty else "unverified",
+            readiness="closed-removed",
+            review_lease=lease_state,
+            governed_witness=witness_state,
+            payload_marker="absent" if verified else "unverified",
+            status="verified-never-launched" if verified else "unverified",
+        )
+        return cleanup_result
+
+    def commit() -> None:
+        return None
+
+    return PostClaimAdmission(metadata, abort=abort, commit=commit)
 
 
 def pid_namespace_evidence(
@@ -80,9 +558,7 @@ def bounded_foreground_timeout(timeout: float) -> float:
     the planned follow-up; until it lands, a finite window is the floor of safety.)
     """
 
-    if not math.isfinite(timeout) or timeout <= 0:
-        return FOREGROUND_TIMEOUT_DEFAULT
-    return min(timeout, FOREGROUND_TIMEOUT_MAX)
+    return begin_finite_watchdog(timeout).timeout_seconds
 
 
 def pid_namespace_scoped(
@@ -321,6 +797,7 @@ def wait_foreground(
     parent_pid_start: str | None = None,
     parent_is_live: Callable[[], bool] | None = None,
     poll_interval: float = 0.2,
+    watchdog_budget: FiniteWatchdogBudget | None = None,
 ) -> ForegroundResult:
     """Wait in scope, forwarding termination and returning a typed outcome."""
 
@@ -346,8 +823,13 @@ def wait_foreground(
         previous[signum] = signal.getsignal(signum)
         signal.signal(signum, forward)
     try:
-        bounded_timeout = bounded_foreground_timeout(timeout)
-        deadline = time.monotonic() + bounded_timeout
+        if watchdog_budget is None:
+            bounded_timeout = bounded_foreground_timeout(timeout)
+            deadline = time.monotonic() + bounded_timeout
+        else:
+            # The caller supplied the launch-origin budget.  Do not normalize
+            # or restart it here; foreground consumption is the same clock.
+            deadline = watchdog_budget.deadline_monotonic_ns / 1_000_000_000
         while True:
             exit_code = proc.poll()
             group_empty = _group_empty(proc.pid)
