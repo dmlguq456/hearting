@@ -1,6 +1,6 @@
 # 분사 책임 구조 수리 — 검증 기록
 
-상태: 6b7d19a5 실측은 지연 통보·실제 보고서 쓰기 PASS, 정상 완료 알림 FAIL로 종료했다. 47d5e42e·21425b55를 통합했고 전달 계약 교정 09b687ac의 실제 정상 완료를 확인했으며, 후속 운송 지시 범위를 정리했다. frame 사용자의 이해 확인·기록 방식 답변은 대기 중이다. 전체 완료, main 병합·푸시, 릴리즈, 설치를 주장하지 않는다.
+상태: 6b7d19a5 실측은 지연 통보·실제 보고서 쓰기 PASS, 정상 완료 알림 FAIL로 종료했다. 47d5e42e·21425b55를 통합했고 전달 계약 교정 09b687ac의 실제 정상 완료를 확인했으며, 후속 운송 지시 범위를 정리했다. 원래 frame 부모의 정식 질문에서 사용자의 이해 확인·기록 방식 답변을 받았으며, 같은 gate의 release와 owner 입력 읽기를 진행 중이다. 전체 완료, main 병합·푸시, 릴리즈, 설치를 주장하지 않는다.
 
 사용자가 지적한 문제는 개별 어댑터의 기능 부족을 넘어선다. 여러 관측자가 실행 상태를 각각 판정하면서 재시도와 거부 권한을 갖고, 복구가 실패했을 때 누가 작업을 유지하거나 사용자에게 돌려줄지는 빠져 있었다. 과거 2026-09-01 복잡도 진단과 이번 Cairn·직렬 chain·리뷰 실측에서 같은 형태가 반복됐다. 이번에는 기존 수정을 유지하면서 결정 권한과 후속 책임을 공통 코드에 모았다.
 
@@ -54,7 +54,7 @@
 |---|---|---|
 | 21분 이상 d=1 리뷰 쓰기와 부모 통보 | HEAD 56746fb4, att-29dfc6a3a3dc4b88b65fff8e4452e289, 쓰기 1268.92560412초, 부모 01a08e11-2b08-7393-a36d-702aeca9d6bb | 실제 정상 경로 PASS. 리뷰 지적 3건은 be684cf8에서 수정. |
 | frame 두 하네스와 두 자동 wake | HEAD 7db4ce09, route rt-f94885fba268775b, Codex att-a4e566dfb0ab444f9341bc9f14eb69d1 + Claude att-223896abecdf4178a5d10a9e0713b121, 동일 부모 01a08e56-2fec-7ae3-8898-765dae020431 | actual marker 2개·wake 2회 확인. |
-| 승인 전 owner 기동 금지와 실제 질문 | 같은 frame r2, human-gate-not-raised / child_spawned=0, 정식 frame-review raise | 확인. 실제 사용자 답변을 대리하지 않으며 release 이후 부분은 대기. |
+| 승인 전 owner 기동 금지와 실제 질문 | 같은 frame r2, human-gate-not-raised / child_spawned=0, 정식 frame-review raise | 확인. 원 부모의 실제 답변을 수신했으며 release 이후 부분은 진행 중이다. |
 | 지연 관측→통보→같은 attempt 정상 완료 | HEAD 6b7d19a5, 새 private parent 01a08e7f-750c-7291-8e5b-f08ec638e2de (wB:pG), dispatch 호출에만 completion timeout 60초, 실제 자식 150초/finite watchdog 600초 이상 | supervision·실제 쓰기 PASS, 정상 completion FAIL. canonical success가 부모 attention으로 바뀌었다. 가짜 age 또는 운영 row 편집 없음. |
 | frame standard 왕복 및 최종 owner의 intent 읽기 | 별도 실측 필요 | 미합격/미완료. |
 
@@ -72,7 +72,7 @@ frame 증거: `.agent_reports/campaigns/2026-09-10_frame-bootstrap-layer/2026-09
 
 후속 교정 검사: responsibility 14 / contract 223(skip 1) / join 113 / registry 95 / review lifecycle 19 / serial supervisor 30 / managed completion 14 / gateway 45 / sweep 17 / rewake 160 / route consumption 12 / Claude supervisor 71 / Codex supervisor 33 PASS. 생성 projection 20개와 adaptation boundary PASS. 로그: `/tmp/completion-consumer-final/`.
 
-정확한 6b 실측 기록: `.agent_reports/campaigns/2026-09-10_review-lease-watchdog/2026-09-11_supervision-live/artifacts/dev_logs/supervision-live-observation.json`. 새 source·부모·cycle로 동일 60초 join/150초 hold 경로를 재검증하며, 통합 교정의 실제 정상 완료 합격은 아직 주장하지 않는다.
+정확한 6b 실측 기록: `.agent_reports/campaigns/2026-09-10_review-lease-watchdog/2026-09-11_supervision-live/artifacts/dev_logs/supervision-live-observation.json`. 이 실패를 고정한 뒤 새 source·부모·cycle로 동일 60초 join/150초 hold 경로를 재검증했다. 다음 절의 09b 결과는 별도 실제 시도의 성공이며 6b 실패를 덮어쓰지 않는다.
 
 ## 09b 실제 재검증과 후속 책임 경계
 
@@ -95,6 +95,8 @@ frame 증거: `.agent_reports/campaigns/2026-09-10_frame-bootstrap-layer/2026-09
 공통 workflow 계약에 사용자 결정은 시간 경과나 빈 답변으로 확정하지 않는다고 명시했다. 결정 대기와 질문 복구는 gate owner가 유지하며 독립적으로 승인된 작업은 계속한다. Codex gateway는 유효한 질문 요청의 native 대기 정책만 `isBlocking=true`, 구버전 `autoResolutionMs=null`로 투영한다. 질문 ID·내용·선택지·실제 답변과 직접 취소는 그대로 통과시키고 자체 답변이나 별도 승인 주체를 만들지 않는다. gateway의 Fleet 표시가 종료되어도 workflow gate는 별도로 유지된다. 해당 기능을 제어할 수 없는 클라이언트에는 나중에 답할 수 있는 일반 대화 질문을 남긴다.
 
 검증: 실제 socket을 통과하는 최신·구버전·이미 무기한인 요청, ID/내용 보존, 응답 합성 없음, 실제 답변/빈 취소 응답 전달을 포함한 gateway 46건 PASS. managed entry, human gate receipt, generated projection 20개와 adaptation boundary를 함께 검사했다(`/tmp/question-wait-checks/`, `/tmp/question-wait-gateway.log`). 모델 기동이나 실제 TUI 2분 대기는 수행하지 않았다. 이 수정은 소스 동작과 protocol 검증이며, 실행 중인 pF 또는 이 대화 창의 제한을 해제했다고 주장하지 않는다. main/release/install은 계속 보류한다.
+
+사용자는 만료된 질문을 원래 [53] 부모에서 다시 표시하라고 요청했다. [09]가 자기 대화에 복제한 질문은 잘못된 복구였으며 승인 근거에서 제외했다. 원 부모 `01a08e56-2fec-7ae3-8898-765dae020431`의 실제 native `request_user_input` 호출 `call_DL4XuinF6cneXzz7xsZlpMTI`는 05:16:33.080Z에 같은 두 질문을 표시했고, 05:16:40.585Z 실제 tool output에서 `understanding_confirmed=["예 (Recommended)"]`, `record_style=["다시 검사 (Recommended)"]`를 받았다. 원본 rollout과 실제 화면을 읽어 확인했으며 [09]/[33]은 답변을 대신 입력하지 않았다. 같은 route `rt-f94885fba268775b`의 gate만 이어가며 새 route·다른 cycle의 승인을 만들지 않는다. 원 pF 프로세스는 여전히 7db4ce09를 실행하므로 이 재표시를 de4b8601 시간 제한 수정의 실측으로 부르지 않는다.
 
 ## 검증의 오류도 보존
 
